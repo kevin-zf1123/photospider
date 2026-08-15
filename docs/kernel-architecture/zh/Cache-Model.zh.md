@@ -105,10 +105,13 @@ publication、file 或 directory synchronization receipt、retry protocol 或 cr
 
 当前 product compute commit policy 会在精确 revision/generation validation 后、no-throw live
 Graph swap 前，执行符合条件的 changed-HP cache write。Live predicate 通过后，它现在会把
-该 staged save mechanism 提交到 process-owned `ComputeIoExecutor`。Admission 会在 lazy
-codec/task payload construction 或 filesystem 副作用之前，同时计入 task 数与 checked
-planned-byte estimate。I/O task 会保留 prepared Graph transaction，graph-state policy owner
-则等待 typed completion 并应用测得的 I/O time。CPU compute worker 不能执行该等待。因此
+该 staged save mechanism 提交到 process-owned `ComputeIoExecutor`。通过 limit check 后，会在
+lazy codec/task payload construction 或 filesystem 副作用之前，暂时预留 task 数与 checked
+planned-byte estimate。Factory 抛异常、返回空 callback 或 task/queue-entry allocation 失败时，
+reservation 会回滚且不签发 Accepted event。Construction 成功后，Accepted 要么与 queue
+ownership 一起发布，要么在外部 shutdown 已获胜时与其关联的 Cancelled settlement 原子发布，
+且 callback 不会进入。I/O task 会保留 prepared Graph transaction，graph-state policy owner 则
+等待 typed completion 并应用测得的 I/O time。CPU compute worker 不能执行该等待。因此
 rejection、cache codec、filesystem 或 allocation failure 仍可能让该 `ComputeRun` 失败，并保持
 live Graph/RT state 不变。这种顺序是当前行为，不表示 cache 属于 user-output commit。
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)

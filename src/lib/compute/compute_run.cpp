@@ -19,7 +19,9 @@
 #include "compute/compute_task_submission.hpp"
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/execution_lifecycle_telemetry.hpp"
+#include "compute/progressive_compute.hpp"
 #include "compute/resource_demand_estimator.hpp"
+#include "photospider/data/value.hpp"
 
 namespace ps::compute {
 namespace {
@@ -257,9 +259,10 @@ class ComputeRunControl {
    * publish when this cancellation wins the child terminal arbiter.
    * @return True only when cancellation claimed the open arbiter.
    * @throws Callback or synchronization exceptions after terminal publication.
-   * @note The optional latch is released while `mutex` is held, after the
-   * cancellation outcome is fixed and before Terminal becomes observable.
-   * Cleanup then runs outside `mutex`.
+   * @note A bound progressive gate is denied while `mutex` is held and before
+   * the cancellation outcome becomes observable. The optional latch is then
+   * released after that outcome is fixed and before Terminal becomes
+   * observable. Cleanup runs outside `mutex`.
    */
   bool request_cancellation(
       ComputeRunCancellationReason reason,
@@ -271,14 +274,32 @@ class ComputeRunControl {
    * @param request_child_cancellation_won Optional request-level winner latch.
    * @return Acceptance plus the first cleanup callback failure.
    * @throws Synchronization or plan-publication exceptions.
-   * @note Every selected cleanup callback is attempted. This seam lets the
-   * post-lifecycle-linearization caller contain callback code without
-   * misclassifying a synchronization failure as recoverable.
+   * @note A bound progressive gate is denied before terminal publication.
+   * Every selected cleanup callback is then attempted outside `mutex`. This
+   * seam lets the post-lifecycle-linearization caller contain callback code
+   * without misclassifying a synchronization failure as recoverable.
    */
   ComputeRunCancellationDispatchResult
   request_cancellation_containing_callbacks(
       ComputeRunCancellationReason reason,
       std::atomic<bool>* request_child_cancellation_won = nullptr);
+
+  /**
+   * @brief Serializes irreversible service start with terminal arbitration.
+   * @param commit_callback Non-null no-throw physical route commit callback.
+   * @param context Borrowed callback context valid until return.
+   * @param committed_coordinate Output coordinate published only on success.
+   * @return True only after an open Run commits the physical route start.
+   * @throws std::invalid_argument for null callback or output storage.
+   * @throws std::system_error when Run synchronization fails.
+   * @note The coordinate is reserved immediately before callback invocation
+   * while `mutex` excludes cancellation acceptance. A rejected callback
+   * explicitly aborts the staged coordinate; no observer callback runs under
+   * this lock.
+   */
+  bool try_commit_service_start(
+      ComputeRunServiceStartCommitCallback commit_callback, void* context,
+      std::optional<ComputeRunObservationCoordinate>* committed_coordinate);
 
   /**
    * @brief Observes the immutable deadline and current cancellation outcome.
@@ -291,7 +312,8 @@ class ComputeRunControl {
    * @brief Atomically observes deadline and reserves commit terminal ownership.
    * @return True only when phase is CommitPending and the arbiter was open.
    * @throws Clock callback or synchronization exceptions.
-   * @note Deadline cancellation cleanup runs before a false return.
+   * @note Deadline cancellation denies a bound progressive gate before
+   * terminal publication; cleanup then runs before a false return.
    */
   bool try_claim_commit();
 
@@ -304,6 +326,16 @@ class ComputeRunControl {
   bool resolve_commit(ComputeRunTerminalOutcome outcome);
 
   /**
+   * @brief Resolves visible HP success under the sole commit claim.
+   * @param output Exact immutable Value already published to the live Graph.
+   * @return True only while CommitClaimed; false emits no observation.
+   * @throws std::system_error when Run/plan synchronization fails.
+   * @note Current-visible observation precedes terminal observation while one
+   * mutex acquisition proves that neither cancellation nor failure intervened.
+   */
+  bool resolve_visible_commit(Value output);
+
+  /**
    * @brief Installs or immediately invokes a cancellation cleanup slot.
    * @param slot Shared non-null callback slot.
    * @return True when installed for a future cancellation, false when no future
@@ -312,6 +344,29 @@ class ComputeRunControl {
    */
   bool register_cancellation_slot(
       const std::shared_ptr<ComputeRunCancellationSlot>& slot);
+
+  /**
+   * @brief Binds cancellation terminal publication to one progressive gate.
+   * @param gate Non-null request gate shared by progressive child Runs.
+   * @return Nothing.
+   * @throws std::invalid_argument for a null gate.
+   * @throws std::logic_error when a different gate is already bound.
+   * @throws std::system_error when Run synchronization fails.
+   * @note The strong gate owner is one-way and cannot form a Run cycle. An
+   * already-cancelled terminal denies the gate under this Run's mutex.
+   */
+  void bind_progressive_final_gate(
+      const std::shared_ptr<ProgressiveFinalGate>& gate);
+
+  /**
+   * @brief Consumes and observes final permission under terminal arbitration.
+   * @return True only after one open bound Run publishes its trigger event.
+   * @throws Clock, cancellation-callback, or synchronization exceptions.
+   * @note Deadline observation occurs before acquiring the final arbitration
+   * interval. That interval then owns the Open check, gate CAS, coordinate
+   * reservation, and observer delivery as one cancellation-ordered operation.
+   */
+  bool try_publish_progressive_final_trigger();
 
   /**
    * @brief Registers one physical root reservation before ledger admission.
@@ -386,6 +441,13 @@ class ComputeRunControl {
    */
   std::vector<std::weak_ptr<ComputeRunCancellationSlot>> cancellation_slots;
 
+  /**
+   * @brief Optional request gate denied before cancellation becomes terminal.
+   * @note Only atomic `deny()` is called while `mutex` is held; the gate never
+   * calls back into Run state and therefore introduces no reverse lock order.
+   */
+  std::shared_ptr<ProgressiveFinalGate> progressive_final_gate;
+
   /** @brief Optional full HP plan, dependency state, runner, and temp output.
    */
   std::unique_ptr<TaskSubmissionPlan> submission_plan;
@@ -449,7 +511,8 @@ ComputeRunDescriptor::ComputeRunDescriptor(ComputeRunId id,
       intent_(submission.intent),
       quality_(submission.quality),
       qos_(submission.qos),
-      supersession_(std::move(submission.supersession)) {
+      supersession_(std::move(submission.supersession)),
+      observation_sink_(std::move(submission.observation_sink)) {
 }  // NOLINT(whitespace/indent_namespace)
 
 /**
@@ -491,8 +554,18 @@ bool ComputeRunControl::publish_terminal(ComputeRunTerminalOutcome outcome) {
     if (arbiter_state != ComputeRunArbiterState::Open) {
       return false;
     }
+    const ComputeRunTerminalKind terminal_kind = outcome.kind;
+    std::optional<ComputeRunObservationCoordinate> terminal_coordinate;
+    if (descriptor.observation_sink() != nullptr) {
+      terminal_coordinate =
+          descriptor.observation_sink()->reserve_causal_coordinate();
+    }
     terminal_outcome = std::move(outcome);
     arbiter_state = ComputeRunArbiterState::Terminal;
+    if (terminal_coordinate.has_value()) {
+      descriptor.observation_sink()->on_terminal(descriptor, terminal_kind,
+                                                 *terminal_coordinate);
+    }
     plan = submission_plan.get();
   }
   if (plan != nullptr) {
@@ -525,12 +598,29 @@ ComputeRunControl::request_cancellation_containing_callbacks(
     if (arbiter_state != ComputeRunArbiterState::Open) {
       return {};
     }
+    if (progressive_final_gate) {
+      (void)progressive_final_gate->deny();
+    }
+    std::optional<ComputeRunObservationCoordinate> cancellation_coordinate;
+    std::optional<ComputeRunObservationCoordinate> terminal_coordinate;
+    if (descriptor.observation_sink() != nullptr) {
+      cancellation_coordinate =
+          descriptor.observation_sink()->reserve_causal_coordinate();
+      terminal_coordinate =
+          descriptor.observation_sink()->reserve_causal_coordinate();
+    }
     terminal_outcome = ComputeRunTerminalOutcome{
         ComputeRunTerminalKind::Cancelled, nullptr, reason};
     if (request_child_cancellation_won != nullptr) {
       request_child_cancellation_won->store(true, std::memory_order_release);
     }
     arbiter_state = ComputeRunArbiterState::Terminal;
+    if (cancellation_coordinate.has_value()) {
+      descriptor.observation_sink()->on_cancellation(descriptor, reason,
+                                                     *cancellation_coordinate);
+      descriptor.observation_sink()->on_terminal(
+          descriptor, ComputeRunTerminalKind::Cancelled, *terminal_coordinate);
+    }
     plan = submission_plan.get();
   }
   if (plan != nullptr) {
@@ -559,6 +649,35 @@ ComputeRunControl::request_cancellation_containing_callbacks(
     }
   }
   return ComputeRunCancellationDispatchResult{true, first_callback_failure};
+}
+
+/** @copydoc ComputeRunControl::try_commit_service_start */
+bool ComputeRunControl::try_commit_service_start(
+    ComputeRunServiceStartCommitCallback commit_callback, void* context,
+    std::optional<ComputeRunObservationCoordinate>* committed_coordinate) {
+  if (commit_callback == nullptr || committed_coordinate == nullptr) {
+    throw std::invalid_argument(
+        "ComputeRun service start requires callback and coordinate output.");
+  }
+  committed_coordinate->reset();
+  std::lock_guard<std::mutex> lock(mutex);
+  if (arbiter_state != ComputeRunArbiterState::Open) {
+    return false;
+  }
+  std::optional<ComputeRunObservationCoordinate> staged_coordinate;
+  if (descriptor.observation_sink() != nullptr) {
+    staged_coordinate =
+        descriptor.observation_sink()->reserve_causal_coordinate();
+  }
+  if (!commit_callback(context)) {
+    if (staged_coordinate.has_value()) {
+      descriptor.observation_sink()->abort_causal_coordinate(
+          *staged_coordinate);
+    }
+    return false;
+  }
+  *committed_coordinate = staged_coordinate;
+  return true;
 }
 
 /** @copydoc ComputeRunControl::observe_cancellation */
@@ -596,10 +715,29 @@ bool ComputeRunControl::try_claim_commit() {
     }
     if (descriptor.qos().deadline.has_value() &&
         now >= *descriptor.qos().deadline) {
+      if (progressive_final_gate) {
+        (void)progressive_final_gate->deny();
+      }
+      std::optional<ComputeRunObservationCoordinate> cancellation_coordinate;
+      std::optional<ComputeRunObservationCoordinate> terminal_coordinate;
+      if (descriptor.observation_sink() != nullptr) {
+        cancellation_coordinate =
+            descriptor.observation_sink()->reserve_causal_coordinate();
+        terminal_coordinate =
+            descriptor.observation_sink()->reserve_causal_coordinate();
+      }
       terminal_outcome = ComputeRunTerminalOutcome{
           ComputeRunTerminalKind::Cancelled, nullptr,
           ComputeRunCancellationReason::DeadlineExceeded};
       arbiter_state = ComputeRunArbiterState::Terminal;
+      if (cancellation_coordinate.has_value()) {
+        descriptor.observation_sink()->on_cancellation(
+            descriptor, ComputeRunCancellationReason::DeadlineExceeded,
+            *cancellation_coordinate);
+        descriptor.observation_sink()->on_terminal(
+            descriptor, ComputeRunTerminalKind::Cancelled,
+            *terminal_coordinate);
+      }
       plan = submission_plan.get();
       deadline_cancelled = true;
     } else if (phase != ComputeRunPhase::CommitPending) {
@@ -640,8 +778,53 @@ bool ComputeRunControl::resolve_commit(ComputeRunTerminalOutcome outcome) {
     if (arbiter_state != ComputeRunArbiterState::CommitClaimed) {
       return false;
     }
+    const ComputeRunTerminalKind terminal_kind = outcome.kind;
+    std::optional<ComputeRunObservationCoordinate> terminal_coordinate;
+    if (descriptor.observation_sink() != nullptr) {
+      terminal_coordinate =
+          descriptor.observation_sink()->reserve_causal_coordinate();
+    }
     terminal_outcome = std::move(outcome);
     arbiter_state = ComputeRunArbiterState::Terminal;
+    if (terminal_coordinate.has_value()) {
+      descriptor.observation_sink()->on_terminal(descriptor, terminal_kind,
+                                                 *terminal_coordinate);
+    }
+    plan = submission_plan.get();
+  }
+  if (plan != nullptr) {
+    plan->close_publication();
+  }
+  return true;
+}
+
+/** @copydoc ComputeRunControl::resolve_visible_commit */
+bool ComputeRunControl::resolve_visible_commit(Value output) {
+  TaskSubmissionPlan* plan = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (arbiter_state != ComputeRunArbiterState::CommitClaimed) {
+      return false;
+    }
+    std::optional<ComputeRunObservationCoordinate> visible_coordinate;
+    std::optional<ComputeRunObservationCoordinate> terminal_coordinate;
+    if (descriptor.observation_sink() != nullptr) {
+      visible_coordinate =
+          descriptor.observation_sink()->reserve_causal_coordinate();
+      terminal_coordinate =
+          descriptor.observation_sink()->reserve_causal_coordinate();
+    }
+    if (visible_coordinate.has_value()) {
+      descriptor.observation_sink()->on_current_visible(
+          descriptor, std::move(output), *visible_coordinate);
+    }
+    terminal_outcome = ComputeRunTerminalOutcome{
+        ComputeRunTerminalKind::Succeeded, nullptr, std::nullopt};
+    arbiter_state = ComputeRunArbiterState::Terminal;
+    if (terminal_coordinate.has_value()) {
+      descriptor.observation_sink()->on_terminal(
+          descriptor, ComputeRunTerminalKind::Succeeded, *terminal_coordinate);
+    }
     plan = submission_plan.get();
   }
   if (plan != nullptr) {
@@ -676,6 +859,44 @@ bool ComputeRunControl::register_cancellation_slot(
     slot->invoke(*immediate_reason);
   }
   return false;
+}
+
+/** @copydoc ComputeRunControl::bind_progressive_final_gate */
+void ComputeRunControl::bind_progressive_final_gate(
+    const std::shared_ptr<ProgressiveFinalGate>& gate) {
+  if (!gate) {
+    throw std::invalid_argument(
+        "ComputeRun progressive final gate binding requires a gate.");
+  }
+  std::lock_guard<std::mutex> lock(mutex);
+  if (progressive_final_gate && progressive_final_gate != gate) {
+    throw std::logic_error(
+        "ComputeRun is already bound to another progressive final gate.");
+  }
+  progressive_final_gate = gate;
+  if (terminal_outcome.has_value() &&
+      terminal_outcome->kind == ComputeRunTerminalKind::Cancelled) {
+    (void)progressive_final_gate->deny();
+  }
+}
+
+/** @copydoc ComputeRunControl::try_publish_progressive_final_trigger */
+bool ComputeRunControl::try_publish_progressive_final_trigger() {
+  if (observe_cancellation().has_value()) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex);
+  if (arbiter_state != ComputeRunArbiterState::Open ||
+      !progressive_final_gate || !progressive_final_gate->try_trigger()) {
+    return false;
+  }
+  if (descriptor.observation_sink() != nullptr) {
+    const ComputeRunObservationCoordinate coordinate =
+        descriptor.observation_sink()->reserve_causal_coordinate();
+    descriptor.observation_sink()->on_progressive_final_triggered(descriptor,
+                                                                  coordinate);
+  }
+  return true;
 }
 
 /** @copydoc ComputeRunControl::begin_resource_settlement_observation */
@@ -966,6 +1187,39 @@ void ComputeRunSettlementObserver::wait_for_resource_settlement() const {
   });
 }
 
+/** @copydoc
+ * ComputeRunSettlementObserver::reserve_lifecycle_observation_coordinate */
+std::optional<ComputeRunObservationCoordinate>
+ComputeRunSettlementObserver::reserve_lifecycle_observation_coordinate()
+    const noexcept {
+  if (!control_ || control_->descriptor.observation_sink() == nullptr) {
+    return std::nullopt;
+  }
+  return control_->descriptor.observation_sink()->reserve_causal_coordinate();
+}
+
+/** @copydoc ComputeRunSettlementObserver::observe_run_quiescent */
+void ComputeRunSettlementObserver::observe_run_quiescent(
+    std::optional<ComputeRunObservationCoordinate> coordinate) const noexcept {
+  if (!control_ || !coordinate.has_value() ||
+      control_->descriptor.observation_sink() == nullptr) {
+    return;
+  }
+  control_->descriptor.observation_sink()->on_run_quiescent(
+      control_->descriptor, *coordinate);
+}
+
+/** @copydoc ComputeRunSettlementObserver::observe_run_resource_settled */
+void ComputeRunSettlementObserver::observe_run_resource_settled(
+    std::optional<ComputeRunObservationCoordinate> coordinate) const noexcept {
+  if (!control_ || !coordinate.has_value() ||
+      control_->descriptor.observation_sink() == nullptr) {
+    return;
+  }
+  control_->descriptor.observation_sink()->on_run_resource_settled(
+      control_->descriptor, *coordinate);
+}
+
 /** @copydoc ComputeRequestCancellationSource::accepted_reason */
 std::optional<ComputeRunCancellationReason>
 ComputeRequestCancellationSource::accepted_reason() const {
@@ -1050,6 +1304,18 @@ bool ComputeRunCommitContender::publish_succeeded() {
   }
   const bool published = control_->resolve_commit(ComputeRunTerminalOutcome{
       ComputeRunTerminalKind::Succeeded, nullptr, std::nullopt});
+  if (published) {
+    control_.reset();
+  }
+  return published;
+}
+
+/** @copydoc ComputeRunCommitContender::publish_visible_succeeded */
+bool ComputeRunCommitContender::publish_visible_succeeded(Value output) {
+  if (control_ == nullptr) {
+    return false;
+  }
+  const bool published = control_->resolve_visible_commit(std::move(output));
   if (published) {
     control_.reset();
   }
@@ -1545,6 +1811,15 @@ bool ComputeRunLease::accepts_task_identity(
          control_->submission_plan->contains_task_identity(identity);
 }
 
+/** @copydoc ComputeRunLease::try_commit_service_start */
+bool ComputeRunLease::try_commit_service_start(
+    ComputeRunServiceStartCommitCallback commit_callback, void* context,
+    std::optional<ComputeRunObservationCoordinate>* committed_coordinate)
+    const {
+  return control_->try_commit_service_start(commit_callback, context,
+                                            committed_coordinate);
+}
+
 /**
  * @brief Publishes one matching task failure through the Run terminal arbiter.
  *
@@ -1674,6 +1949,17 @@ ComputeRunLease::register_cancellation_notification(
     return ComputeRunCancellationRegistration();
   }
   return ComputeRunCancellationRegistration(std::move(slot));
+}
+
+/** @copydoc ComputeRunLease::bind_progressive_final_gate */
+void ComputeRunLease::bind_progressive_final_gate(
+    const std::shared_ptr<ProgressiveFinalGate>& gate) const {
+  control_->bind_progressive_final_gate(gate);
+}
+
+/** @copydoc ComputeRunLease::try_publish_progressive_final_trigger */
+bool ComputeRunLease::try_publish_progressive_final_trigger() const {
+  return control_->try_publish_progressive_final_trigger();
 }
 
 /** @copydoc ComputeRunLease::try_claim_commit */

@@ -797,10 +797,13 @@ Json encode_compute_event_batch(const IpcSessionId& session_id,
  *         allocated.
  * @throws std::length_error if the event count exceeds the version 2 bound.
  * @throws std::invalid_argument if ids, sequences, enums, page metadata, or
- *         requested-limit invariants are malformed.
+ *         requested-limit invariants are malformed, or a present task
+ *         identity has a zero revision/Run scalar.
  * @note The encoder accepts nonnegative node/worker ids and preserves `-1` as
  *       the no-specific-node/worker sentinel. Values below -1 are rejected,
- *       and Host trace state is never mutated.
+ *       a non-task runtime event encodes an explicit null task identity, and
+ *       Host trace state is never mutated. The router separately verifies the
+ *       page's private Host session before supplying the opaque daemon id.
  */
 Json encode_execution_trace_page(const IpcSessionId& session_id,
                                  uint64_t after_sequence,

@@ -1,9 +1,14 @@
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
+#if defined(__APPLE__)
+#include <stdio.h>
+#include <stdlib.h>
+#endif
 
 #include "photospider/policy/policy_plugin_api.h"
 #include "policy_fixture_control.h"  // NOLINT(build/include_subdir)
+#include "policy_fixture_state.h"    // NOLINT(build/include_subdir)
 
 /**
  * @file policy_fixture.c
@@ -12,13 +17,29 @@
  * The default fixture publishes one `fixture_policy` type supporting both
  * classes and selects the last candidate. Test-only control exports select
  * malformed/status/lifecycle/blocking behavior without changing the production
- * policy ABI. Compile definitions can still expose an ABI mismatch or omit the
- * API-table export so version-first symbol ordering remains independently
- * testable.
+ * policy ABI. Compile definitions can expose an ABI mismatch, omit the API
+ * table, or select a distinct valid type/behavior identity so exact-object
+ * native-library lease tests can keep two sealed DSOs live simultaneously.
  */
 
 #ifndef PHOTOSPIDER_POLICY_FIXTURE_ABI_VERSION
 #define PHOTOSPIDER_POLICY_FIXTURE_ABI_VERSION PS_POLICY_PLUGIN_ABI_VERSION
+#endif
+
+/** @brief Compile-selected canonical identity for the first policy row. */
+#ifndef PHOTOSPIDER_POLICY_FIXTURE_TYPE_NAME
+#define PHOTOSPIDER_POLICY_FIXTURE_TYPE_NAME "fixture_policy"
+#endif
+
+/** @brief Compile-selected reader description for exact-identity tests. */
+#ifndef PHOTOSPIDER_POLICY_FIXTURE_DESCRIPTION
+#define PHOTOSPIDER_POLICY_FIXTURE_DESCRIPTION \
+  "Deterministic policy test fixture."
+#endif
+
+/** @brief Compile-selected implementation version for exact-identity tests. */
+#ifndef PHOTOSPIDER_POLICY_FIXTURE_VERSION
+#define PHOTOSPIDER_POLICY_FIXTURE_VERSION "test-v1"
 #endif
 
 /** @brief Suppresses helper warnings in the intentional missing-API fixture. */
@@ -28,38 +49,40 @@
 #define PS_POLICY_FIXTURE_MAYBE_UNUSED
 #endif
 
-/** @brief Current API-table behavior. */
-static _Atomic(uint32_t) g_api_mode = PS_POLICY_FIXTURE_API_VALID;
+#if defined(__APPLE__)
+/**
+ * @brief Emits the Darwin native-mapping sentinel selected by the test.
+ * @return Nothing after a best-effort write, or immediately without a path.
+ * @throws Nothing; C environment and stdio failures are intentionally ignored.
+ * @note The environment value is observation-only and grants no trust or
+ * loading authority. Production authorization must prevent this function from
+ * running on Darwin.
+ */
+static void fixture_emit_native_mapping_sentinel(void) {
+  const char* path = getenv("PS_TEST_POLICY_PLUGIN_INITIALIZER_SENTINEL");
+  if (path == NULL || *path == '\0') {
+    return;
+  }
+  FILE* sentinel = fopen(path, "wb");
+  if (sentinel == NULL) {
+    return;
+  }
+  static const char kMessage[] = "policy fixture mapped\n";
+  (void)fwrite(kMessage, 1U, sizeof(kMessage) - 1U, sentinel);
+  (void)fclose(sentinel);
+}
 
-/** @brief Current metadata behavior. */
-static _Atomic(uint32_t) g_metadata_mode = PS_POLICY_FIXTURE_METADATA_VALID;
-
-/** @brief Current context-create behavior. */
-static _Atomic(uint32_t) g_create_mode = PS_POLICY_FIXTURE_CREATE_SUCCESS_NULL;
-
-/** @brief Current candidate-selection behavior. */
-static _Atomic(uint32_t) g_select_mode = PS_POLICY_FIXTURE_SELECT_LAST;
-
-/** @brief Current context-destroy behavior. */
-static _Atomic(uint32_t) g_destroy_mode = PS_POLICY_FIXTURE_DESTROY_OK;
-
-/** @brief Number of create callback entries since reset. */
-static _Atomic(uint32_t) g_create_count = 0U;
-
-/** @brief Number of select callback entries since reset. */
-static _Atomic(uint32_t) g_select_count = 0U;
-
-/** @brief Number of destroy callback entries since reset. */
-static _Atomic(uint32_t) g_destroy_count = 0U;
-
-/** @brief Optional test-owned callback installed before controlled entry. */
-static ps_policy_fixture_hook_v1 g_hook = NULL;
-
-/** @brief Opaque context passed unchanged to the installed hook. */
-static void* g_hook_context = NULL;
-
-/** @brief Stable nonnull logical context used by controlled create modes. */
-static uint32_t g_nonnull_context = UINT32_C(0x75);
+/**
+ * @brief Records Darwin native policy mapping before loader return.
+ * @return Nothing.
+ * @throws Nothing; the delegated best-effort probe contains every failure.
+ * @note A fail-closed `PolicyRegistry::load` must reject authorization before
+ * dyld can invoke this initializer or any policy ABI callback.
+ */
+__attribute__((constructor)) static void fixture_native_initializer(void) {
+  fixture_emit_native_mapping_sentinel();
+}
+#endif
 
 /**
  * @brief Builds a borrowed string view over immutable fixture storage.
@@ -83,9 +106,9 @@ fixture_string_view(const char* data, uint64_t size) {
  */
 static PS_POLICY_FIXTURE_MAYBE_UNUSED void fixture_invoke_hook(
     ps_policy_fixture_hook_event event) {
-  ps_policy_fixture_hook_v1 hook = g_hook;
+  ps_policy_fixture_hook_v1 hook = g_policy_fixture_hook;
   if (hook != NULL) {
-    (void)hook(g_hook_context, event);
+    (void)hook(g_policy_fixture_hook_context, event);
   }
 }
 
@@ -122,16 +145,16 @@ fixture_setup_status(uint32_t mode) {
 static PS_POLICY_FIXTURE_MAYBE_UNUSED ps_policy_status_v1 PS_POLICY_CALL
 fixture_get_metadata(uint32_t type_index,
                      ps_policy_type_metadata_v1* out_metadata) {
-  static const char kName[] = "fixture_policy";
+  static const char kName[] = PHOTOSPIDER_POLICY_FIXTURE_TYPE_NAME;
   static const char kSecondName[] = "fixture_policy_two";
   static const char kNoncanonicalName[] = "FixturePolicy";
   static const char kReservedName[] = "interactive";
-  static const char kDescription[] = "Deterministic policy test fixture.";
-  static const char kVersion[] = "test-v1";
+  static const char kDescription[] = PHOTOSPIDER_POLICY_FIXTURE_DESCRIPTION;
+  static const char kVersion[] = PHOTOSPIDER_POLICY_FIXTURE_VERSION;
   static const char kInvalidUtf8[] = {(char)0xC0, (char)0xAF};
   static const char kOversizedDescription[4097] = {'x'};
-  const uint32_t mode =
-      atomic_load_explicit(&g_metadata_mode, memory_order_acquire);
+  const uint32_t mode = atomic_load_explicit(&g_policy_fixture_metadata_mode,
+                                             memory_order_acquire);
   const ps_policy_status_v1 controlled_status = fixture_setup_status(mode);
   if (controlled_status != PS_POLICY_STATUS_OK) {
     return controlled_status;
@@ -217,8 +240,9 @@ static PS_POLICY_FIXTURE_MAYBE_UNUSED ps_policy_status_v1 PS_POLICY_CALL
 fixture_create(uint32_t type_index, const ps_policy_create_args_v1* args,
                void** out_context) {
   const uint32_t mode =
-      atomic_load_explicit(&g_create_mode, memory_order_acquire);
-  (void)atomic_fetch_add_explicit(&g_create_count, 1U, memory_order_relaxed);
+      atomic_load_explicit(&g_policy_fixture_create_mode, memory_order_acquire);
+  (void)atomic_fetch_add_explicit(&g_policy_fixture_create_count, 1U,
+                                  memory_order_relaxed);
   if (type_index != 0U || args == NULL || out_context == NULL ||
       args->struct_size != sizeof(*args) ||
       args->struct_kind != PS_POLICY_STRUCT_CREATE_ARGS ||
@@ -233,12 +257,12 @@ fixture_create(uint32_t type_index, const ps_policy_create_args_v1* args,
   }
   switch (mode) {
     case PS_POLICY_FIXTURE_CREATE_SUCCESS_NONNULL:
-      *out_context = &g_nonnull_context;
+      *out_context = &g_policy_fixture_nonnull_context;
       return PS_POLICY_STATUS_OK;
     case PS_POLICY_FIXTURE_CREATE_STATUS_INVALID_NULL:
       return PS_POLICY_STATUS_INVALID_ARGUMENT;
     case PS_POLICY_FIXTURE_CREATE_STATUS_INVALID_NONNULL:
-      *out_context = &g_nonnull_context;
+      *out_context = &g_policy_fixture_nonnull_context;
       return PS_POLICY_STATUS_INVALID_ARGUMENT;
     case PS_POLICY_FIXTURE_CREATE_STATUS_UNSUPPORTED:
       return PS_POLICY_STATUS_UNSUPPORTED;
@@ -267,9 +291,10 @@ static PS_POLICY_FIXTURE_MAYBE_UNUSED ps_policy_status_v1 PS_POLICY_CALL
 fixture_select(void* context, const ps_policy_selection_snapshot_v1* snapshot,
                ps_policy_decision_v1* out_decision) {
   const uint32_t mode =
-      atomic_load_explicit(&g_select_mode, memory_order_acquire);
+      atomic_load_explicit(&g_policy_fixture_select_mode, memory_order_acquire);
   (void)context;
-  (void)atomic_fetch_add_explicit(&g_select_count, 1U, memory_order_relaxed);
+  (void)atomic_fetch_add_explicit(&g_policy_fixture_select_count, 1U,
+                                  memory_order_relaxed);
   if (snapshot == NULL || out_decision == NULL ||
       snapshot->struct_size != sizeof(*snapshot) ||
       snapshot->struct_kind != PS_POLICY_STRUCT_SELECTION_SNAPSHOT ||
@@ -304,6 +329,12 @@ fixture_select(void* context, const ps_policy_selection_snapshot_v1* snapshot,
   out_decision->snapshot_generation = snapshot->snapshot_generation;
   out_decision->candidate_id =
       snapshot->candidates[snapshot->candidate_count - 1U].candidate_id;
+
+#if defined(PHOTOSPIDER_POLICY_FIXTURE_SELECTS_FIRST_BY_DEFAULT)
+  if (mode == PS_POLICY_FIXTURE_SELECT_LAST) {
+    out_decision->candidate_id = snapshot->candidates[0].candidate_id;
+  }
+#endif
 
   switch (mode) {
     case PS_POLICY_FIXTURE_SELECT_FIRST:
@@ -361,10 +392,11 @@ fixture_select(void* context, const ps_policy_selection_snapshot_v1* snapshot,
  */
 static PS_POLICY_FIXTURE_MAYBE_UNUSED ps_policy_status_v1 PS_POLICY_CALL
 fixture_destroy(void* context) {
-  const uint32_t mode =
-      atomic_load_explicit(&g_destroy_mode, memory_order_acquire);
+  const uint32_t mode = atomic_load_explicit(&g_policy_fixture_destroy_mode,
+                                             memory_order_acquire);
   (void)context;
-  (void)atomic_fetch_add_explicit(&g_destroy_count, 1U, memory_order_relaxed);
+  (void)atomic_fetch_add_explicit(&g_policy_fixture_destroy_count, 1U,
+                                  memory_order_relaxed);
   if (mode == PS_POLICY_FIXTURE_DESTROY_HOOK) {
     fixture_invoke_hook(PS_POLICY_FIXTURE_HOOK_DESTROY);
   }
@@ -375,76 +407,87 @@ fixture_destroy(void* context) {
 
 /** @copydoc ps_policy_fixture_reset */
 PS_POLICY_PLUGIN_EXPORT void PS_POLICY_CALL ps_policy_fixture_reset(void) {
-  atomic_store_explicit(&g_api_mode, PS_POLICY_FIXTURE_API_VALID,
+  atomic_store_explicit(&g_policy_fixture_api_mode, PS_POLICY_FIXTURE_API_VALID,
                         memory_order_release);
-  atomic_store_explicit(&g_metadata_mode, PS_POLICY_FIXTURE_METADATA_VALID,
+  atomic_store_explicit(&g_policy_fixture_metadata_mode,
+                        PS_POLICY_FIXTURE_METADATA_VALID, memory_order_release);
+  atomic_store_explicit(&g_policy_fixture_create_mode,
+                        PS_POLICY_FIXTURE_CREATE_SUCCESS_NULL,
                         memory_order_release);
-  atomic_store_explicit(&g_create_mode, PS_POLICY_FIXTURE_CREATE_SUCCESS_NULL,
-                        memory_order_release);
-  atomic_store_explicit(&g_select_mode, PS_POLICY_FIXTURE_SELECT_LAST,
-                        memory_order_release);
-  atomic_store_explicit(&g_destroy_mode, PS_POLICY_FIXTURE_DESTROY_OK,
-                        memory_order_release);
-  atomic_store_explicit(&g_create_count, 0U, memory_order_relaxed);
-  atomic_store_explicit(&g_select_count, 0U, memory_order_relaxed);
-  atomic_store_explicit(&g_destroy_count, 0U, memory_order_relaxed);
-  g_hook = NULL;
-  g_hook_context = NULL;
+  atomic_store_explicit(&g_policy_fixture_select_mode,
+                        PS_POLICY_FIXTURE_SELECT_LAST, memory_order_release);
+  atomic_store_explicit(&g_policy_fixture_destroy_mode,
+                        PS_POLICY_FIXTURE_DESTROY_OK, memory_order_release);
+  atomic_store_explicit(&g_policy_fixture_create_count, 0U,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_policy_fixture_select_count, 0U,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_policy_fixture_destroy_count, 0U,
+                        memory_order_relaxed);
+  g_policy_fixture_hook = NULL;
+  g_policy_fixture_hook_context = NULL;
 }
 
 /** @copydoc ps_policy_fixture_set_api_mode */
 PS_POLICY_PLUGIN_EXPORT void PS_POLICY_CALL
 ps_policy_fixture_set_api_mode(ps_policy_fixture_api_mode mode) {
-  atomic_store_explicit(&g_api_mode, mode, memory_order_release);
+  atomic_store_explicit(&g_policy_fixture_api_mode, mode, memory_order_release);
 }
 
 /** @copydoc ps_policy_fixture_set_metadata_mode */
 PS_POLICY_PLUGIN_EXPORT void PS_POLICY_CALL
 ps_policy_fixture_set_metadata_mode(ps_policy_fixture_metadata_mode mode) {
-  atomic_store_explicit(&g_metadata_mode, mode, memory_order_release);
+  atomic_store_explicit(&g_policy_fixture_metadata_mode, mode,
+                        memory_order_release);
 }
 
 /** @copydoc ps_policy_fixture_set_create_mode */
 PS_POLICY_PLUGIN_EXPORT void PS_POLICY_CALL
 ps_policy_fixture_set_create_mode(ps_policy_fixture_create_mode mode) {
-  atomic_store_explicit(&g_create_mode, mode, memory_order_release);
+  atomic_store_explicit(&g_policy_fixture_create_mode, mode,
+                        memory_order_release);
 }
 
 /** @copydoc ps_policy_fixture_set_select_mode */
 PS_POLICY_PLUGIN_EXPORT void PS_POLICY_CALL
 ps_policy_fixture_set_select_mode(ps_policy_fixture_select_mode mode) {
-  atomic_store_explicit(&g_select_mode, mode, memory_order_release);
+  atomic_store_explicit(&g_policy_fixture_select_mode, mode,
+                        memory_order_release);
 }
 
 /** @copydoc ps_policy_fixture_set_destroy_mode */
 PS_POLICY_PLUGIN_EXPORT void PS_POLICY_CALL
 ps_policy_fixture_set_destroy_mode(ps_policy_fixture_destroy_mode mode) {
-  atomic_store_explicit(&g_destroy_mode, mode, memory_order_release);
+  atomic_store_explicit(&g_policy_fixture_destroy_mode, mode,
+                        memory_order_release);
 }
 
 /** @copydoc ps_policy_fixture_set_hook */
 PS_POLICY_PLUGIN_EXPORT void PS_POLICY_CALL
 ps_policy_fixture_set_hook(ps_policy_fixture_hook_v1 hook, void* context) {
-  g_hook_context = context;
-  g_hook = hook;
+  g_policy_fixture_hook_context = context;
+  g_policy_fixture_hook = hook;
 }
 
 /** @copydoc ps_policy_fixture_create_count */
 PS_POLICY_PLUGIN_EXPORT uint32_t PS_POLICY_CALL
 ps_policy_fixture_create_count(void) {
-  return atomic_load_explicit(&g_create_count, memory_order_relaxed);
+  return atomic_load_explicit(&g_policy_fixture_create_count,
+                              memory_order_relaxed);
 }
 
 /** @copydoc ps_policy_fixture_select_count */
 PS_POLICY_PLUGIN_EXPORT uint32_t PS_POLICY_CALL
 ps_policy_fixture_select_count(void) {
-  return atomic_load_explicit(&g_select_count, memory_order_relaxed);
+  return atomic_load_explicit(&g_policy_fixture_select_count,
+                              memory_order_relaxed);
 }
 
 /** @copydoc ps_policy_fixture_destroy_count */
 PS_POLICY_PLUGIN_EXPORT uint32_t PS_POLICY_CALL
 ps_policy_fixture_destroy_count(void) {
-  return atomic_load_explicit(&g_destroy_count, memory_order_relaxed);
+  return atomic_load_explicit(&g_policy_fixture_destroy_count,
+                              memory_order_relaxed);
 }
 
 /** @copydoc ps_policy_plugin_get_abi_version */
@@ -457,7 +500,8 @@ ps_policy_plugin_get_abi_version(void) {
 /** @copydoc ps_policy_plugin_get_api_v1 */
 PS_POLICY_PLUGIN_EXPORT ps_policy_status_v1 PS_POLICY_CALL
 ps_policy_plugin_get_api_v1(ps_policy_plugin_api_v1* out_api) {
-  const uint32_t mode = atomic_load_explicit(&g_api_mode, memory_order_acquire);
+  const uint32_t mode =
+      atomic_load_explicit(&g_policy_fixture_api_mode, memory_order_acquire);
   const ps_policy_status_v1 controlled_status = fixture_setup_status(mode);
   if (controlled_status != PS_POLICY_STATUS_OK) {
     return controlled_status;

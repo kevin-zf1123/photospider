@@ -245,10 +245,13 @@ class RealtimeProxyWriteBuffer {
    * @param proxy_graph Committed proxy graph used to seed existing RT state.
    * @param seed_existing_outputs Whether staged entries should seed from the
    * committed proxy graph. Force-recache requests pass false.
+   * @param seal_image_values_on_commit Whether commit normalizes staged legacy
+   * image descriptors into immutable Value identity before proxy publication.
    * @throws Nothing.
    */
   explicit RealtimeProxyWriteBuffer(RealtimeProxyGraph& proxy_graph,
-                                    bool seed_existing_outputs = true);
+                                    bool seed_existing_outputs = true,
+                                    bool seal_image_values_on_commit = false);
 
   /**
    * @brief Returns staged RT proxy output for one node when available.
@@ -361,6 +364,10 @@ class RealtimeProxyWriteBuffer {
 
   /** @brief Whether entries seed output pixels from committed proxy state. */
   bool seed_existing_outputs_ = true;
+
+  /** @brief Whether commit seals staged images into immutable Value identity.
+   */
+  bool seal_image_values_on_commit_ = false;
 
   /** @brief Mutex protecting staged entry creation and metadata updates. */
   mutable std::mutex mutex_;

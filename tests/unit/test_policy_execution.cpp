@@ -8,6 +8,7 @@
 #include <exception>
 #include <future>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -59,7 +60,8 @@ ComputeRunSubmission make_submission(
       ComputeRunQos{service_class, std::nullopt, 1U, 2U},
       SupersessionIdentity{
           SupersessionKey(target_node_id, ComputeIntent::GlobalHighPrecision),
-          SupersessionGeneration(1U)}};
+          SupersessionGeneration(1U)},
+      nullptr};
 }
 
 /**
@@ -71,8 +73,11 @@ ComputeRunSubmission make_submission(
 class TestHostContext final : public ExecutionHostContext {
  public:
   /** @copydoc ExecutionHostContext::set_task_context */
-  void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
+  void set_task_context(int worker_id, std::uint64_t epoch,
+                        std::optional<ExecutionTaskAuditIdentity>
+                            task_identity) noexcept override {
     (void)epoch;
+    (void)task_identity;
     const int active =
         active_contexts_.fetch_add(1, std::memory_order_acq_rel) + 1;
     int observed = maximum_contexts_.load(std::memory_order_relaxed);
@@ -95,8 +100,8 @@ class TestHostContext final : public ExecutionHostContext {
   }
 
   /** @copydoc ExecutionHostContext::log_event */
-  void log_event(ExecutionTraceAction, int, int,
-                 std::uint64_t) noexcept override {}
+  void log_event(ExecutionTraceAction, int, int, std::uint64_t,
+                 std::optional<ExecutionTaskAuditIdentity>) noexcept override {}
 
   /**
    * @brief Copies all worker ids observed at callback entry.
@@ -155,6 +160,140 @@ class TestHostContext final : public ExecutionHostContext {
 };
 
 /**
+ * @brief Records one Run's committed service-start evidence without blocking.
+ *
+ * @throws Nothing for construction, callbacks, or scalar inspection.
+ * @note Tests attach this sink only to single-task Runs. Release/acquire
+ * publication makes the three observation fields visible before the count.
+ */
+class ServiceStartObservationSink final : public ComputeRunObservationSink {
+ public:
+  /** @copydoc ComputeRunObservationSink::reserve_causal_coordinate */
+  ComputeRunObservationCoordinate reserve_causal_coordinate() noexcept
+      override {
+    return ComputeRunObservationCoordinate{
+        std::chrono::steady_clock::now(),
+        next_sequence_.fetch_add(1U, std::memory_order_relaxed)};
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_current_generation */
+  void on_current_generation(
+      const SupersessionIdentity& identity,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)identity;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_service_start */
+  void on_service_start(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunTaskIdentity task_identity, std::uint64_t service_charge,
+      const ComputeRunServiceStartObservation& observation,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)task_identity;
+    (void)service_charge;
+    (void)coordinate;
+    interactive_startable_.store(observation.interactive_candidate_startable,
+                                 std::memory_order_relaxed);
+    throughput_startable_.store(observation.throughput_candidate_startable,
+                                std::memory_order_relaxed);
+    execution_grant_committed_.store(observation.execution_grant_committed,
+                                     std::memory_order_relaxed);
+    service_start_count_.fetch_add(1U, std::memory_order_release);
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_cancellation */
+  void on_cancellation(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunCancellationReason reason,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)reason;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_terminal */
+  void on_terminal(
+      const ComputeRunDescriptor& descriptor, ComputeRunTerminalKind kind,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)kind;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_current_visible */
+  void on_current_visible(
+      const ComputeRunDescriptor& descriptor, Value output,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)output;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_run_quiescent */
+  void on_run_quiescent(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_run_resource_settled */
+  void on_run_resource_settled(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_host_settled */
+  void on_host_settled(
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)coordinate;
+  }
+
+  /**
+   * @brief Returns the number of committed service starts observed so far.
+   * @return Exact callback count published with acquire ordering.
+   * @throws Nothing.
+   */
+  std::uint32_t service_start_count() const noexcept {
+    return service_start_count_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Copies the latest committed service-start applicability facts.
+   * @return Immutable three-field observation.
+   * @throws Nothing.
+   * @note Callers first verify `service_start_count()` is nonzero so its
+   * acquire pairs with callback publication.
+   */
+  ComputeRunServiceStartObservation service_start_observation() const noexcept {
+    return ComputeRunServiceStartObservation{
+        interactive_startable_.load(std::memory_order_relaxed),
+        throughput_startable_.load(std::memory_order_relaxed),
+        execution_grant_committed_.load(std::memory_order_relaxed)};
+  }
+
+ private:
+  /** @brief Nonzero observer-local causal sequence source. */
+  std::atomic_uint64_t next_sequence_{1U};
+
+  /** @brief Latest Interactive evidence-startable fact. */
+  std::atomic_bool interactive_startable_{false};
+
+  /** @brief Latest Throughput evidence-startable fact. */
+  std::atomic_bool throughput_startable_{false};
+
+  /** @brief Latest selected-start grant-commit fact. */
+  std::atomic_bool execution_grant_committed_{false};
+
+  /** @brief Release-published number of service-start callbacks. */
+  std::atomic_uint32_t service_start_count_{0U};
+};
+
+/**
  * @brief Builds one ready submission whose callback owns completion release.
  * @param lease Strong matching Run lease transferred into the submission.
  * @param local_task_id Dense Run-local task id.
@@ -197,6 +336,36 @@ bool wait_for_select_count(const PolicyFixtureController& control,
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   return control.select_count() >= minimum_count;
+}
+
+/**
+ * @brief Waits for one exact class-partitioned ready-store state.
+ * @param service Execution domain exposing source-private diagnostics.
+ * @param interactive_entries Expected Interactive entry count.
+ * @param throughput_entries Expected Throughput entry count.
+ * @return True when both counts and their total match before timeout.
+ * @throws std::system_error when service synchronization fails.
+ * @note The helper polls only immutable diagnostics while the deliberately
+ * blocked GPU callback prevents either queued candidate from starting.
+ */
+bool wait_for_ready_entries(ExecutionService& service,
+                            std::uint64_t interactive_entries,
+                            std::uint64_t throughput_entries) {
+  const auto deadline = std::chrono::steady_clock::now() + kTestTimeout;
+  do {
+    const ExecutionReadyClassSnapshot snapshot = service.ready_class_snapshot();
+    if (snapshot.valid && snapshot.interactive_entries == interactive_entries &&
+        snapshot.throughput_entries == throughput_entries &&
+        snapshot.total_entries == interactive_entries + throughput_entries) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  } while (std::chrono::steady_clock::now() < deadline);
+  const ExecutionReadyClassSnapshot snapshot = service.ready_class_snapshot();
+  return snapshot.valid &&
+         snapshot.interactive_entries == interactive_entries &&
+         snapshot.throughput_entries == throughput_entries &&
+         snapshot.total_entries == interactive_entries + throughput_entries;
 }
 
 /**
@@ -615,6 +784,8 @@ TEST(ExecutionServiceShutdown,
  * the Run completes and telemetry remains Accepting until control-thread
  * shutdown.
  */
+#if defined(__linux__)
+// These cases exercise a signed native policy callback; Darwin is fail-closed.
 TEST_F(PolicyExecutionFixture,
        SameServicePolicyCallbackRejectsShutdownBeforeMutation) {
   ExecutionService service(1U);
@@ -670,6 +841,7 @@ TEST_F(PolicyExecutionFixture,
   control_.set_hook(nullptr, nullptr);
   callback_owner.shutdown();
 }
+#endif
 
 /**
  * @brief Verifies route-aware device discovery has deterministic fallback.
@@ -732,7 +904,7 @@ TEST(PhysicalExecutionIntegration,
           .has_value();
 
   EXPECT_EQ(has_metal_account, has_metal_executor);
-#if !defined(__APPLE__)
+#if defined(__linux__)
   EXPECT_FALSE(has_metal_executor);
   EXPECT_FALSE(has_metal_account);
 #endif
@@ -951,6 +1123,8 @@ TEST(PhysicalExecutionIntegration, SerialDebugIsWorkerZeroSingleFlight) {
 /**
  * @brief Verifies invalid decisions fault one generation until replacement.
  */
+#if defined(__linux__)
+// These cases exercise a signed native policy callback; Darwin is fail-closed.
 TEST_F(PolicyExecutionFixture,
        InvalidDecisionFaultIsStickyAndSameTypeReplacementRecovers) {
   ExecutionService service(1U);
@@ -1096,6 +1270,291 @@ TEST_F(PolicyExecutionFixture,
   EXPECT_EQ(control_.select_count(), 2U);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
+#endif
+
+/**
+ * @brief Verifies evidence startability excludes an exhausted child grant.
+ *
+ * A dedicated Metal callback first holds the physical worker. While it is
+ * blocked, a Throughput Run holds its sole execution grant in a CPU callback,
+ * publishes a Metal dependent, and an independent Interactive Metal Run also
+ * queues. Releasing the worker selects Interactive before any grant-block mark
+ * can hide Throughput; the committed observation must therefore report the
+ * real Throughput candidate as not evidence-startable solely from capacity.
+ *
+ * @throws Service admission, synchronization, or callback failures unchanged.
+ * @note The blocked Throughput entry remains ready and later executes exactly
+ * once; the evidence fact therefore cannot be explained by queue absence.
+ */
+TEST(ExecutionServiceStartObservation,
+     ChildGrantExhaustionMakesRealCandidateNotEvidenceStartable) {
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           ::ps::testing::make_fake_metal_executor_registry());
+  service.configure_worker_count(1U);
+
+  TestHostContext blocker_host;
+  ComputeRun blocker_run(make_submission("evidence-capacity-blocker", 64U, 1,
+                                         ComputeRunQosClass::Interactive));
+  std::atomic_int blocker_entries{0};
+  std::promise<void> blocker_entered_promise;
+  std::future<void> blocker_entered = blocker_entered_promise.get_future();
+  std::promise<void> release_blocker_promise;
+  const std::shared_future<void> release_blocker =
+      release_blocker_promise.get_future().share();
+  std::vector<ReadyTaskSubmission> blocker_ready;
+  blocker_ready.push_back(make_ready(
+      blocker_run.acquire_lease(), 0U, 1,
+      [&blocker_entries, &blocker_entered_promise, release_blocker](
+          ComputeRunLease&, const ComputeRunTaskIdentity&,
+          ExecutionTaskRuntime& runtime) {
+        blocker_entries.fetch_add(1, std::memory_order_relaxed);
+        blocker_entered_promise.set_value();
+        release_blocker.wait();
+        runtime.dec_tasks_to_complete();
+      },
+      Device::GPU_METAL));
+
+  TestHostContext throughput_host;
+  ComputeRun throughput_run(
+      make_submission("evidence-capacity-blocked", 65U, 1));
+  std::atomic_int throughput_cpu_entries{0};
+  std::atomic_int throughput_gpu_entries{0};
+  std::promise<void> throughput_cpu_entered_promise;
+  std::future<void> throughput_cpu_entered =
+      throughput_cpu_entered_promise.get_future();
+  std::promise<void> throughput_gpu_entered_promise;
+  std::future<void> throughput_gpu_entered =
+      throughput_gpu_entered_promise.get_future();
+  std::promise<void> release_throughput_cpu_promise;
+  const std::shared_future<void> release_throughput_cpu =
+      release_throughput_cpu_promise.get_future().share();
+  std::vector<ReadyTaskSubmission> throughput_ready;
+  throughput_ready.push_back(make_ready(
+      throughput_run.acquire_lease(), 0U, 1,
+      [&throughput_cpu_entries, &throughput_gpu_entries,
+       &throughput_cpu_entered_promise, &throughput_gpu_entered_promise,
+       release_throughput_cpu](ComputeRunLease& lease,
+                               const ComputeRunTaskIdentity&,
+                               ExecutionTaskRuntime& runtime) {
+        auto* ready_runtime =
+            dynamic_cast<ReadyTaskSubmissionRuntime*>(&runtime);
+        if (ready_runtime == nullptr) {
+          throw std::logic_error(
+              "Evidence-capacity regression requires ready runtime.");
+        }
+        ready_runtime->submit_ready_submission(make_ready(
+            lease, 1U, 2,
+            [&throughput_gpu_entries, &throughput_gpu_entered_promise](
+                ComputeRunLease&, const ComputeRunTaskIdentity&,
+                ExecutionTaskRuntime& gpu_runtime) {
+              throughput_gpu_entries.fetch_add(1, std::memory_order_relaxed);
+              throughput_gpu_entered_promise.set_value();
+              gpu_runtime.dec_tasks_to_complete();
+            },
+            Device::GPU_METAL, ExecutionTaskPriority::High, false));
+        throughput_cpu_entries.fetch_add(1, std::memory_order_relaxed);
+        throughput_cpu_entered_promise.set_value();
+        release_throughput_cpu.wait();
+        runtime.dec_tasks_to_complete();
+      }));
+
+  std::future<void> blocker_completion = std::async(
+      std::launch::async,
+      [&service, &blocker_host, ready = std::move(blocker_ready)]() mutable {
+        service.execute_run(blocker_host, "gpu_pipeline", std::move(ready), 1);
+      });
+  std::future<void> throughput_completion;
+  std::future<void> interactive_completion;
+  ScopedPromiseRelease release_throughput_guard(release_throughput_cpu_promise);
+  ScopedPromiseRelease release_blocker_guard(release_blocker_promise);
+  ASSERT_EQ(blocker_entered.wait_for(kTestTimeout), std::future_status::ready);
+
+  throughput_completion = std::async(
+      std::launch::async, [&service, &throughput_host,
+                           ready = std::move(throughput_ready)]() mutable {
+        service.execute_run(throughput_host, "gpu_pipeline", std::move(ready),
+                            2);
+      });
+  ASSERT_EQ(throughput_cpu_entered.wait_for(kTestTimeout),
+            std::future_status::ready);
+
+  auto observation_sink = std::make_shared<ServiceStartObservationSink>();
+  ComputeRunSubmission interactive_submission =
+      make_submission("evidence-independent-interactive", 66U, 1,
+                      ComputeRunQosClass::Interactive);
+  interactive_submission.observation_sink = observation_sink;
+  ComputeRun interactive_run(std::move(interactive_submission));
+  TestHostContext interactive_host;
+  std::atomic_int interactive_entries{0};
+  std::vector<ReadyTaskSubmission> interactive_ready;
+  interactive_ready.push_back(make_ready(
+      interactive_run.acquire_lease(), 0U, 1,
+      [&interactive_entries](ComputeRunLease&, const ComputeRunTaskIdentity&,
+                             ExecutionTaskRuntime& runtime) {
+        interactive_entries.fetch_add(1, std::memory_order_relaxed);
+        runtime.dec_tasks_to_complete();
+      },
+      Device::GPU_METAL));
+  interactive_completion = std::async(
+      std::launch::async, [&service, &interactive_host,
+                           ready = std::move(interactive_ready)]() mutable {
+        service.execute_run(interactive_host, "gpu_pipeline", std::move(ready),
+                            1);
+      });
+  ASSERT_TRUE(wait_for_ready_entries(service, 1U, 1U));
+  release_blocker_guard.release();
+
+  ASSERT_EQ(interactive_completion.wait_for(kTestTimeout),
+            std::future_status::ready);
+  ASSERT_EQ(blocker_completion.wait_for(kTestTimeout),
+            std::future_status::ready);
+  EXPECT_NO_THROW(interactive_completion.get());
+  EXPECT_NO_THROW(blocker_completion.get());
+  ASSERT_EQ(observation_sink->service_start_count(), 1U);
+  const ComputeRunServiceStartObservation observation =
+      observation_sink->service_start_observation();
+  EXPECT_TRUE(observation.interactive_candidate_startable);
+  EXPECT_FALSE(observation.throughput_candidate_startable);
+  EXPECT_TRUE(observation.execution_grant_committed);
+  EXPECT_EQ(interactive_entries.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(throughput_gpu_entered.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  EXPECT_EQ(service.ready_class_snapshot().throughput_entries, 1U);
+
+  release_throughput_guard.release();
+  ASSERT_EQ(throughput_gpu_entered.wait_for(kTestTimeout),
+            std::future_status::ready);
+  ASSERT_EQ(throughput_completion.wait_for(kTestTimeout),
+            std::future_status::ready);
+  EXPECT_NO_THROW(throughput_completion.get());
+  EXPECT_EQ(throughput_cpu_entries.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(throughput_gpu_entries.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(blocker_entries.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(blocker_host.exits(), 1);
+  EXPECT_EQ(throughput_host.exits(), 2);
+  EXPECT_EQ(interactive_host.exits(), 1);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies evidence startability includes both capacity-ready classes.
+ *
+ * A dedicated Metal callback holds the physical worker while one Throughput
+ * and one Interactive Run publish independent Metal candidates. Once released,
+ * class arbitration selects Interactive and its committed observation samples
+ * both live child reservations as capacity-ready.
+ *
+ * @throws Service admission, synchronization, or callback failures unchanged.
+ * @note The physical blocker owns a separate Run, so neither observed class
+ * candidate consumes its own reservation before the applicability cut.
+ */
+TEST(ExecutionServiceStartObservation,
+     CapacityReadyCandidatesAreBothEvidenceStartable) {
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           ::ps::testing::make_fake_metal_executor_registry());
+  service.configure_worker_count(1U);
+
+  TestHostContext blocker_host;
+  ComputeRun blocker_run(make_submission("evidence-gpu-blocker", 66U, 1,
+                                         ComputeRunQosClass::Interactive));
+  std::atomic_int blocker_entries{0};
+  std::promise<void> blocker_entered_promise;
+  std::future<void> blocker_entered = blocker_entered_promise.get_future();
+  std::promise<void> release_blocker_promise;
+  const std::shared_future<void> release_blocker =
+      release_blocker_promise.get_future().share();
+  std::vector<ReadyTaskSubmission> blocker_ready;
+  blocker_ready.push_back(make_ready(
+      blocker_run.acquire_lease(), 0U, 1,
+      [&blocker_entries, &blocker_entered_promise, release_blocker](
+          ComputeRunLease&, const ComputeRunTaskIdentity&,
+          ExecutionTaskRuntime& runtime) {
+        blocker_entries.fetch_add(1, std::memory_order_relaxed);
+        blocker_entered_promise.set_value();
+        release_blocker.wait();
+        runtime.dec_tasks_to_complete();
+      },
+      Device::GPU_METAL));
+
+  TestHostContext throughput_host;
+  ComputeRun throughput_run(
+      make_submission("evidence-throughput-ready", 67U, 1));
+  std::atomic_int throughput_entries{0};
+  std::vector<ReadyTaskSubmission> throughput_ready;
+  throughput_ready.push_back(make_ready(
+      throughput_run.acquire_lease(), 0U, 1,
+      [&throughput_entries](ComputeRunLease&, const ComputeRunTaskIdentity&,
+                            ExecutionTaskRuntime& runtime) {
+        throughput_entries.fetch_add(1, std::memory_order_relaxed);
+        runtime.dec_tasks_to_complete();
+      },
+      Device::GPU_METAL));
+
+  auto observation_sink = std::make_shared<ServiceStartObservationSink>();
+  ComputeRunSubmission interactive_submission = make_submission(
+      "evidence-interactive-ready", 68U, 1, ComputeRunQosClass::Interactive);
+  interactive_submission.observation_sink = observation_sink;
+  ComputeRun interactive_run(std::move(interactive_submission));
+  TestHostContext interactive_host;
+  std::atomic_int interactive_entries{0};
+  std::vector<ReadyTaskSubmission> interactive_ready;
+  interactive_ready.push_back(make_ready(
+      interactive_run.acquire_lease(), 0U, 1,
+      [&interactive_entries](ComputeRunLease&, const ComputeRunTaskIdentity&,
+                             ExecutionTaskRuntime& runtime) {
+        interactive_entries.fetch_add(1, std::memory_order_relaxed);
+        runtime.dec_tasks_to_complete();
+      },
+      Device::GPU_METAL));
+
+  std::future<void> blocker_completion = std::async(
+      std::launch::async,
+      [&service, &blocker_host, ready = std::move(blocker_ready)]() mutable {
+        service.execute_run(blocker_host, "gpu_pipeline", std::move(ready), 1);
+      });
+  std::future<void> throughput_completion;
+  std::future<void> interactive_completion;
+  ScopedPromiseRelease release_guard(release_blocker_promise);
+  ASSERT_EQ(blocker_entered.wait_for(kTestTimeout), std::future_status::ready);
+
+  throughput_completion = std::async(
+      std::launch::async, [&service, &throughput_host,
+                           ready = std::move(throughput_ready)]() mutable {
+        service.execute_run(throughput_host, "gpu_pipeline", std::move(ready),
+                            1);
+      });
+  interactive_completion = std::async(
+      std::launch::async, [&service, &interactive_host,
+                           ready = std::move(interactive_ready)]() mutable {
+        service.execute_run(interactive_host, "gpu_pipeline", std::move(ready),
+                            1);
+      });
+  ASSERT_TRUE(wait_for_ready_entries(service, 1U, 1U));
+
+  release_guard.release();
+  ASSERT_EQ(interactive_completion.wait_for(kTestTimeout),
+            std::future_status::ready);
+  ASSERT_EQ(throughput_completion.wait_for(kTestTimeout),
+            std::future_status::ready);
+  ASSERT_EQ(blocker_completion.wait_for(kTestTimeout),
+            std::future_status::ready);
+  EXPECT_NO_THROW(interactive_completion.get());
+  EXPECT_NO_THROW(throughput_completion.get());
+  EXPECT_NO_THROW(blocker_completion.get());
+  ASSERT_EQ(observation_sink->service_start_count(), 1U);
+  const ComputeRunServiceStartObservation observation =
+      observation_sink->service_start_observation();
+  EXPECT_TRUE(observation.interactive_candidate_startable);
+  EXPECT_TRUE(observation.throughput_candidate_startable);
+  EXPECT_TRUE(observation.execution_grant_committed);
+  EXPECT_EQ(blocker_entries.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(interactive_entries.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(throughput_entries.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(blocker_host.exits(), 1);
+  EXPECT_EQ(interactive_host.exits(), 1);
+  EXPECT_EQ(throughput_host.exits(), 1);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
 
 /**
  * @brief Verifies a grant-blocked high-priority Run cannot starve another Run.
@@ -1105,6 +1564,8 @@ TEST_F(PolicyExecutionFixture,
  * entry without charging dispatch, then select lower-priority independent Run
  * B. Releasing A must subsequently execute its retained dependent exactly once.
  */
+#if defined(__linux__)
+// These cases exercise a signed native policy callback on the Linux profile.
 TEST_F(PolicyExecutionFixture,
        GrantBlockedGpuCandidateDoesNotStarveIndependentRun) {
   ExecutionService service(ExecutionService::default_resource_limits(),
@@ -1316,6 +1777,7 @@ TEST_F(PolicyExecutionFixture,
       });
   EXPECT_NE(failure, page.records.end());
 }
+#endif
 
 /**
  * @brief Verifies child-grant rollback leaves the exact entry safely retryable.

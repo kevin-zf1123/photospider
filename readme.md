@@ -17,14 +17,14 @@ See the [architecture overview](docs/kernel-architecture/Overview.md).
 ### Quick start
 
 The default profile needs CMake 3.16+, a C++17 compiler, OpenCV (`core`,
-`imgproc`, `imgcodecs`, and `videoio`), yaml-cpp, Threads, FTXUI, and
-nlohmann/json when IPC is enabled. The commands below disable test targets for
-a smaller user build.
+`imgproc`, `imgcodecs`, and `videoio`), yaml-cpp, Threads, FTXUI, OpenSSL Crypto,
+and nlohmann/json when IPC is enabled. OpenSSL is required in every profile;
+the commands below disable test targets only for a smaller user build.
 
 On macOS:
 
 ```bash
-brew install cmake pkg-config opencv yaml-cpp nlohmann-json
+brew install cmake pkg-config opencv utf8proc yaml-cpp nlohmann-json openssl@3
 ```
 
 On Ubuntu or Debian:
@@ -32,7 +32,7 @@ On Ubuntu or Debian:
 ```bash
 sudo apt-get update
 sudo apt-get install build-essential cmake pkg-config libopencv-dev \
-  libyaml-cpp-dev nlohmann-json3-dev
+  libutf8proc-dev libyaml-cpp-dev nlohmann-json3-dev libssl-dev
 ```
 
 Then initialize FTXUI, configure the project, build the CLI, and start the
@@ -168,8 +168,8 @@ The default Photospider profile builds on [OpenCV](https://opencv.org/),
 [nlohmann/json](https://github.com/nlohmann/json). OpenCV and yaml-cpp are
 build-time capabilities and may be disabled for the embedded Host product.
 
-CURL and OpenSSL are optional, and GoogleTest supports the maintained test
-suite.
+CURL is optional. OpenSSL Crypto is required for plugin trust verification, and
+GoogleTest supports the maintained test suite.
 
 The vendored FTXUI submodule retains its own
 [MIT license](extern/ftxui/LICENSE).

@@ -1899,7 +1899,10 @@ Json encode_execution_trace_page(const IpcSessionId& session_id,
     if (event.sequence == 0 ||
         event.sequence == kObservationSequenceExhausted ||
         event.sequence <= previous_sequence || event.node.value < -1 ||
-        event.worker_id < -1 || !encode_enum(event.action, &action)) {
+        event.worker_id < -1 || !encode_enum(event.action, &action) ||
+        (event.task_identity.has_value() &&
+         (event.task_identity->graph_revision == 0U ||
+          event.task_identity->run_id == 0U))) {
       throw std::invalid_argument(
           "execution-trace page contains an invalid event");
     }
@@ -1934,12 +1937,20 @@ Json encode_execution_trace_page(const IpcSessionId& session_id,
       throw std::invalid_argument(
           "execution-trace page contains an unknown action");
     }
+    Json task_identity = nullptr;
+    if (event.task_identity.has_value()) {
+      task_identity =
+          Json{{"graph_revision", event.task_identity->graph_revision},
+               {"run_id", event.task_identity->run_id},
+               {"run_local_task_id", event.task_identity->run_local_task_id}};
+    }
     events.push_back(Json{{"sequence", event.sequence},
                           {"epoch", event.epoch},
                           {"node_id", event.node.value},
                           {"worker_id", event.worker_id},
                           {"action", std::move(action)},
-                          {"timestamp_us", event.timestamp_us}});
+                          {"timestamp_us", event.timestamp_us},
+                          {"task_identity", std::move(task_identity)}});
   }
   return Json{{"session_id", session_id.value},
               {"events", std::move(events)},

@@ -1,11 +1,13 @@
 # 插件 ABI
 
 Photospider 支持操作插件、数据定义 provider 和策略插件。操作插件通过 Host 提供的 registrar
-扩展进程拥有的 `OpRegistry`，它仍是临时 C++ ABI。数据定义 provider 通过纯 C ABI v3
-发布不可变 Schema/Facet/Layout bundle 和受界限约束的语义回调；它不获得 access、conversion、
-execution、device、registry mutation 或 graph 能力。策略插件通过纯 C ABI v1 对 Host 已准入的
-不可变候选项排序；它不拥有工作线程、队列、设备、资源、Run 或 Graph 能力。可安装的开发契约
-只位于 `include/photospider/plugin/` 和
+扩展进程拥有的 `OpRegistry`，当前安装的边界仍是临时 C++ ABI v2。
+[ADR 0012](../../adr/zh/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md)
+接受独立 pure-C operation-plugin ABI v1 作为替代目标；其 header、loader、SDK 与已迁移 plugin
+尚不存在。数据定义 provider 通过纯 C ABI v3 发布不可变 Schema/Facet/Layout bundle 和受界限
+约束的语义回调；它不获得 access、conversion、execution、device、registry mutation 或 graph
+能力。策略插件通过纯 C ABI v1 对 Host 已准入的不可变候选项排序；它不拥有工作线程、队列、
+设备、资源、Run 或 Graph 能力。当前可安装的开发契约只位于 `include/photospider/plugin/` 和
 `include/photospider/policy/policy_plugin_api.h`。
 
 ## 操作插件 ABI
@@ -157,11 +159,53 @@ forward ROI propagator。Registry 仍提供 identity compatibility fallback，�
 | `io:save` | HP monolithic 副作用 sink | 显式 pass-through planning metadata；执行阶段重写完整文件。 |
 | `image_generator:perlin_noise_metal` | HP monolithic Metal generator | 显式 generator-local pass-through ROI metadata；未启用 tiled Metal 执行。 |
 
+## 本地插件信任准入
+
+当前 operation-v2 与 policy-v1 DSO 的每次加载，都以一份共享、进程内不可变的 trust policy
+开始。第一次授权时，进程读取 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`、
+`PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE` 与
+`PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY` 指定的三个文件，三者缺一不可。严格 LF 结尾的
+canonical manifest 通过 OpenSSL EVP 使用 Ed25519 验证，并把每个已排序条目的封闭
+`operation`、`policy` 或 `isolated-runtime` kind、非零 128-bit package id、正 generation 与
+SHA-256 内容摘要绑定起来。重复 `(kind, package id, generation)` 身份与重复 `(kind, digest)`
+内容角色映射都会被拒绝，因此字节与角色只会选择一个 package generation。首次成功策略或默认拒绝的配置结果会在进程生命周期内保留；之后的
+environment 变化或 IPC value 都不能铸造或替换 trust authority。
+
+在支持 exact-object 的 profile 上，授权会在不跟随最后 symlink 的条件下打开普通文件，从候选
+hash 有界 byte 并检查前后 metadata 稳定，但绝不把该 mutable inode 作为权限返回。Linux 会把获批
+byte 复制到 anonymous `memfd`，
+应用 write/grow/shrink/seal 四种 seal，并在通过 `/proc/self/fd/N` mapping operation/policy 前于
+sealed descriptor 上确认 SHA-256。因此在 Linux 上，rename、symlink、pathname replacement、
+hard link 或 preopened writer 都不能替换后续 byte。Darwin 没有经过证明、能够抵抗同 UID 预开写
+descriptor 的无特权不可变 exact-object primitive，因此会对 operation、policy 与 isolated-runtime
+授权都在候选 path 访问前返回 `ExactObjectUnsupported`。当前 Windows 及其他所有不支持的 native
+profile 使用同样的默认拒绝边界，不回退 pathname。
+
+描述符 `N` 关闭后，`/proc/self/fd/N` 这一拼写不再是对象身份：第一份 DSO 仍保持映射时，
+后续授权可能复用同一个编号。因而，每次 operation 或 policy 映射成功后，都会把它的精确
+`AuthorizedPluginFile` capability 移入与 `dlopen` handle 相同的共享 native-library lease。
+Callback、事务记录、policy type record 和活动 binding 都会保留这份组合 lease。最终释放会先
+销毁插件拥有的 callback/context state，再调用 `dlclose`，最后才关闭 sealed snapshot
+descriptor。Mapping、ABI、symbol、staging、publication、replacement 或 allocation 失败同样
+保持“handle 先于 capability 退役”的顺序；Host 既不会在首次 mapping 后立即关闭 descriptor，
+也不会把它永久保留在全局 cache 中。
+
+每个 `PluginTrustError`（包括 trust 配置缺失/不可读、候选无法打开、未签名、kind 错误或
+内容已变更）都会由 operation load report 或 policy Host surface 公开映射为
+`GraphErrc::InvalidParameter`。成功 trust authorization 后发生的 native `dlopen` failure 仍映射
+为 `GraphErrc::Io`；缺少 ABI symbol 或 ABI 内容畸形仍为 `GraphErrc::InvalidParameter`。这样会把
+授权失败与“已经授权的本地对象无法映射”区分开来。
+
+批准并不会 sandbox 进程内 DSO。获批 operation/policy library 仍是 operator-trusted native
+code，照常可以阻塞、在 Host accounting 之外分配、发起 syscall 或破坏 Host process。下文独立的
+isolated-runtime trust/resource control 不会给这两个进程内 ABI 追加 containment。
+
 ## 操作插件加载事务
 
 加载单个 operation plugin 是覆盖 loader 全部可观察状态的强事务。在调用
-`register_photospider_ops_v2` 之前，loader 会为目标 `OpRegistry`、operation-source map、
-结构化 load result 和 retained-handle map 创建 staged copy。Host 提供的 registrar 指向 staged registry，
+`register_photospider_ops_v2` 或执行 native mapping 之前，loader 会先把精确已打开候选授权为
+签名 `operation` artifact。随后它会为目标 `OpRegistry`、operation-source map、结构化 load
+result 和 retained-handle map 创建 staged copy。Host 提供的 registrar 指向 staged registry，
 因此 plugin callback 在注册期间绝不会修改 active registry。Registration capture、previous-source
 计算、restoration snapshot、result 聚合和 handle 插入也都只修改 staged state。
 
@@ -252,20 +296,21 @@ active resize slot，通过 public `ImageBuffer` value 在不使用 OpenCV 的�
 
 一次成功加载会记录插件绝对路径、通过 host-provided registrar 注册或替换的 operation key、该 plugin
 实际拥有的精确 per-slot revision、裁剪后的先前 registry/source state、预分配的空 callback-retirement
-slot、RAII dynamic-library handle，以及单调递增的成功加载序号。生产低层 loader
+slot、把 native handle 与精确授权 capability 组合起来的 RAII lease，以及单调递增的成功加载序号。生产低层 loader
 要求不可伪造的 process-owner token，因此 caller 无法用第二套 source/handle/restoration map 向全局
 registry 发布 callback。`PluginManager` 是唯一生产加载入口；不存在接收 caller source map 或在加载事务
 提交后复制 manager state 的 legacy wrapper。
 
-每个 registrar callback 都由共享 dynamic-library lease 包装。因而，已解析 callback snapshot 在显式
-全局 unload 移除 registry entry 后仍可安全调用。Monolithic callback 的 public value 转成 host-private
-`NodeOutput` 后也会附着同一个 lease。该 lease 是第一个声明、最后销毁的 member；copy construction
+每个 registrar callback 都由共享的组合 native-library lease 包装。因而，已解析 callback snapshot 在显式
+全局 unload 移除 registry entry 后仍可安全调用，同时 mapping 及其 sealed exact-object descriptor 都保持
+存活。Monolithic callback 的 public value 转成 host-private `NodeOutput` 后也会附着同一个 lease。该 lease 是第一个声明、最后销毁的 member；copy construction
 会先保留 lease，再复制 payload
 state；move construction 会通过 no-throw swap 转移完整 state。Copy/move assignment 会先暂存完整
 replacement，再 swap 到位，并由 temporary 在释放旧 lease 前依次销毁旧
 image/ParameterValue/spatial/debug state；copy 失败时 destination 保持不变。因此，即使在显式全局 unload 后
 复制、移动或覆盖 cached output，plugin 定义的 image/context deleter 执行时仍保持 library mapped。
-这些 lease 不反向引用 manager 或 registry，因此不会形成 ownership cycle。
+这些 lease 不反向引用 manager 或 registry，因此不会形成 ownership cycle。当最后一个
+callback/value/generation owner 退役时，会先执行 native unload，再由匹配的 capability 关闭 sealed descriptor。
 
 卸载只消费预先分配的 key、ownership token、snapshot 与 retirement slot。对于每个 scalar 或 device
 element，它会比较 active revision 与 plugin publication token。匹配的 slot 从裁剪后的 predecessor
@@ -301,6 +346,220 @@ predecessor，也适用于原本不存在的 key；每个 retired plugin callbac
 
 内置 callback 注册同样归进程 owner 管理。它最多执行一次，并且发生在 process-owner plugin 发布之前；
 后续 Host seed 调用只对齐 source label，不能把内置实现重播到 active plugin replacement 之上。
+
+## 已接受的 Operation Plugin ABI v1 目标
+
+Issue #101 冻结替代 contract，但不实现它。目标是独立 operation-plugin ABI v1，不是
+provider-v3 suite 或 policy-v1 extension。其未来 self-contained C11/C++17 header 为
+`photospider/plugin/operation_plugin_api.h`，discovery 只能使用：
+
+```c
+#if defined(__cplusplus)
+extern "C" {
+#endif
+
+PS_OPERATION_PLUGIN_EXPORT uint32_t PS_OPERATION_CALL
+ps_operation_plugin_get_abi_version(void) PS_OPERATION_NOEXCEPT;
+
+PS_OPERATION_PLUGIN_EXPORT ps_operation_status_v1 PS_OPERATION_CALL
+ps_operation_plugin_get_api_v1(
+    ps_operation_plugin_api_v1 *api_out) PS_OPERATION_NOEXCEPT;
+
+#if defined(__cplusplus)
+}
+#endif
+```
+
+Host 只在 numeric handshake 后请求 root API。`PS_OPERATION_PLUGIN_EXPORT` 是只用于
+这两个具名 declaration 的平台 export/default-visibility annotation。
+`PS_OPERATION_CALL` 是 platform C convention，Windows 为 `__cdecl`；
+`PS_OPERATION_NOEXCEPT` 在 C++17 中为 `noexcept`，在 C11 中为空。两个
+resolved entrypoint typedef 与每个 callback 都携带后两个 macro。V1 profile 冻结
+8-bit byte、4/8-byte `uint32_t`/`uint64_t`、8-byte data 与每个具名
+function-pointer type、natural 8-byte data/function-pointer 与 `uint64_t` alignment、
+Host-process endianness 与匹配 convention。Packed、over-aligned、32-bit、foreign-endian
+或 foreign-convention record 不兼容。Object pointer、function pointer 与 integer slot
+保持为不同 C type。
+
+只有 Diagnostic 至 Tile 这 20 个 versioned semantic record 以精确 `struct_size`、
+`struct_kind`、`struct_version`、`flags` 开头。Plain fixed identity/handle、byte-view、
+digest、array-reference、configuration-value、axis-range helper 不携带 record header；
+root/suite table 使用各自 prefix。每个 suite 以 `struct_size`、`suite_id`、
+`suite_version`、`flags` 这四个 `uint32_t` 字段开头。V1 拒绝 unknown kind
+或 suite ID、version/flag、非零 reserved、short/long record、unknown tail、wrong stride/
+alignment 与 arithmetic/range overflow。新增字段需要新 owning-suite version 或 operation
+ABI v2；v1 不解释 minimum-size prefix。
+
+Root API 精确为 96/8 byte/alignment，以 `struct_size`、`abi_version`、`flags`、
+`reserved0` 开头，随后包含 permanent 128-bit plugin identity、bounded implementation-
+version view、opaque plugin context、`query_suite`、
+typed `destroy_plugin` 与精确的 `uint64_t reserved[3]`。`query_suite` 同样是 typed
+field。每个 v1 suite table 精确为 64/8：
+
+| ID | Suite | 要求 | Callback |
+| ---: | --- | --- | --- |
+| 1 | Definition | 始终 | operation count/get；implementation count/get |
+| 2 | Configuration | 始终 | validate；create context；destroy context |
+| 3 | Inference | 始终 | infer complete output plan |
+| 4 | Region | 始终 | backward dirty；forward active-edge propagation |
+| 5 | Dependency | 任一 implementation 声明 data dependence 时 | build dependency record |
+| 6 | Execution | 始终 | synchronous monolithic；synchronous tiled |
+
+每次 query 前，Host 把具体 64-byte suite 的每个 field 初始化为其 C semantic
+zero value——integer field 为零、pointer field 为 null——并把其 nonnull
+`ps_operation_suite_header_v1` 设置为 size 64、requested suite ID、requested version
+与 zero flag。这不假定 byte-zero 就是 null pointer。Plugin 保留这四个 prefix
+字段。Unknown ID 或 version 返回 `UNSUPPORTED`。
+返回 `OK` 后，returned size/ID/version/flag mismatch 是 `INVALID_DESCRIPTOR`，并且
+在读取 callback slot 前拒绝。缺失、malformed 或不完整的 required/declared
+suite 会在 callback、source 或 handle 可见前拒绝整个 candidate。Table 不公开 allocator、
+registry、Host service、Graph、Run、scheduler、cache、executor、device service、resource
+token、filesystem、artifact、credential、thread 或 symbol lookup。
+
+`get_api_v1` 前，Host 把具体 96-byte root 的每个 field 初始化为其 C semantic
+zero value，并设置 size 96、ABI version 1、zero flag 与 zero `reserved0`；plugin
+保留该 prefix。Host-prepared semantic record 与
+suite 使用完整精确的 size/kind/version/flag 或 size/ID/version/flag prefix。
+Plugin-authored sink record 携带 complete semantic-record prefix。Receiver 在读取任何
+后续 field 前验证适用 prefix。
+
+全部 suite/record version 都是 1。Suite ID 精确为 1 Definition、2 Configuration、
+3 Inference、4 Region、5 Dependency、6 Execution。其他封闭 numeric set 包括：
+ADR catalogue 中 Diagnostic 到 Tile 的 record kind 1 至 20、configuration kind 1 Null 至
+8 Object、direction 1 Input/
+2 Output、intent bit 1 HP/2 RT、shape bit 1 Monolithic/2 Tiled、device 1 CPU、access bit
+1 Read/2 Write、behavior bit 1 SideEffect/2 DataDependent、Region outcome 1 Exact 至
+4 Unknown、Region atom 1 Whole 至 4 TensorSlice、sink channel 1 Diagnostic 至
+4 DependencyRecord。Unknown value/bit 与 invalid zero 以 `INVALID_DESCRIPTOR` 失败；
+boolean 为 0 或 1。ValueView flag bit 1 是 PayloadAvailable；其他 semantic-record flag
+与所有 root/suite flag 在 v1 中均为零。
+
+ADR 0012 冻结了完整 normative C typedef prototype，而不只是 callback order。
+Resolved entrypoint 是 `ps_operation_plugin_get_abi_version_fn_v1` 与
+`ps_operation_plugin_get_api_fn_v1`；root 使用
+`ps_operation_query_suite_fn_v1` 与 `ps_operation_destroy_plugin_fn_v1`；sink 使用
+`ps_operation_emit_fn_v1`；Definition、Configuration、Inference、Region、Dependency 与
+Execution 按 table 顺序精确使用 4/3/1/2/1/2 个具名 typed callback。除 numeric
+entrypoint（`uint32_t`）与仅可为 null 的 reserved callback（`void`）外，每个 callback
+都返回 `ps_operation_status_v1`。Sink prototype 精确包含 `void *host_context`、
+`uint32_t channel`、`const void *records`、`uint32_t count`、`uint32_t stride`。
+所有 identity/view/record/helper input 与 sink 都是 `const` pointer，Host output 是 writable
+pointer，index/count/channel/stride 是 `uint32_t`，opaque context 是 `void *`，array
+input 是 `const ps_operation_array_ref_v1 *`。即使 context 为 null，Configuration destroy
+仍接收 operation/implementation identity。不公开 cancellation callback；
+Host 在 entry 前、sink call 时、return 后检查，可以 normalize 为 `CANCELLED` 并丢弃 late
+result。
+
+Plugin、operation、implementation、port、Schema、Facet、Layout identity 是 permanent
+publisher-assigned definition identity。Value、edge、allocation、binding、site、Region
+identity 是 Host-minted process-local runtime identity，分别限定于 logical value、Graph
+revision、allocation、binding/write grant 或 invocation snapshot。Host 另行以不同 helper
+type 生成 nonzero、unpredictable 128-bit generation/invocation handle。这些 handle 只是
+process-local correlation handle，不是 semantic identity、pointer、lookup API、capability、
+durable identity、resource token 或 wire value。Invocation-scoped callback 携带两者；
+definition/configuration-lifetime/root/destroy callback 依赖精确 DSO generation lease 与显式
+identity/context。Plugin/configured-operation context 是
+plugin-owned opaque `void *` round-trip value。成功 null context 有效，仍得到精确一次 matching
+destroy attempt；create 失败不转移 destroy obligation。
+
+Sink `host_context` 是 Host-owned callback-local round-trip token。Plugin code 只能把它传回
+`emit`，不得 dereference、free、retain 或解释为 semantic identity。
+
+未来 header 冻结以下 natural record size/alignment class；详细 ordered field group 在
+ADR 0012 与 active OpenSpec design 中具有规范性：
+
+| Layout category | Size/alignment |
+| --- | --- |
+| record header / suite header | 16/4 与 16/4 |
+| identity、generation/invocation handle、immutable/mutable byte view、exact-stride array reference、configuration value、axis range | 16/8 |
+| SHA-256 digest | 32/8 |
+| diagnostic、output sink、configuration view、Region-set view | 48/8 |
+| configuration node、facet view、tile | 64/8 |
+| buffer view、input binding、Region binding | 80/8 |
+| output plan、mutable output binding、invocation、Region atom、dependency record | 96/8 |
+| port descriptor | 112/8 |
+| operation descriptor 与 value view | 128/8 |
+| value descriptor | 192/8 |
+| implementation descriptor | 192/8 |
+| root API 与每个 suite v1 table | 96/8 与 64/8 |
+
+Active OpenSpec design 冻结每个 C field type 与 byte offset、每个精确 type/typedef
+spelling，以及它显式给出的每个 field name。
+29 个 fixed-layout payload type 精确由九个 plain helper 与 20 个 semantic record 组成；
+record/suite header、root 与 suite table 是单独的 prefix/table type。128-byte operation
+descriptor 能够成立，是因为 offset 96/112 分别为两个 16-byte input/output port
+`{pointer,count,stride}` helper，不重复存储 count。Root 的 exact prefix 位于 0，plugin
+identity 位于 16，version view 位于 32，context/query/destroy 位于 48/56/64，三个
+`uint64_t` reserved word 从 72 开始。六个 suite table 从 offset 16 使用冻结的具名
+typed callback slot，并以为 null 的 `ps_operation_reserved_callback_fn_v1` slot 补足
+byte 63；不使用 object pointer 或 integer slot 代替 function pointer。
+
+全部 pointer/count/stride view 只在一次同步 call 或 sink emission 中借用。Null 精确对应
+zero count，stride 等于 exact element size；任一侧都在 dereference 前检查 alignment、
+multiplication、base/offset、subrange、aggregate bound、output overlap。Host 在 return 前
+deep-copy accepted descriptor/emitted result。
+
+Operation/port descriptor 冻结 permanent identity、canonical name、borrowed exact-stride
+port array、direction、configuration schema 与 Schema/Facet/Layout identity。Type/subtype
+是不含 NUL 或 `:` 的 nonempty UTF-8，并组成唯一 `type:subtype` key。Port/implementation
+name 是不含 NUL 的 nonempty UTF-8；display/exclusive key 可为空，非空时是不含 NUL 的
+UTF-8。Name 不 normalize、case-fold 或截断。Implementation descriptor 冻结 HP/RT intent、
+monolithic/tiled shape、CPU device profile、tile/access/side-effect/data-dependence fact、
+reentrancy、maximum parallelism、retained/scratch byte、relative cost 与 exclusive key。
+Callback、copied metadata、implementation identity、source generation 与 revision 作为一个
+slot 一起发布和恢复。
+
+Configuration 是 Host-owned immutable exact-stride tree，节点为 null、boolean、signed
+64-bit integer、binary64、UTF-8 string、bytes、array、object，不是 YAML、`ParameterMap`
+或 C++ variant。Value record 区分 Schema/Facet/Layout identity/version、logical revision、
+allocation/binding identity 与 descriptor/content/layout digest。Inference、Region、
+dependency call 只接收 payload pointer 已清空的 descriptor-only view。只有 execution
+接收 payload，只有 Host mutable-output grant 允许写入。
+
+Inference 在 allocation 前生成每个 immutable output plan。Region v1 明确提供 backward
+dirty 与 forward active-edge propagation，outcome 为 Exact、Whole、Empty、Unknown，atom
+为 Whole、Empty、ImageRect、TensorSlice。Data-dependent implementation 必须提供
+Dependency v1；copied record 在 cache 前把 output port/site/region fact 绑定到 input
+edge/region fact。
+
+Execution v1 同步且只支持 CPU-addressable buffer。它不公开 native device handle、device-
+resident buffer、fence、deferred completion、retained invocation owner 或 delayed sink。
+Plugin 只有在 return 前复制到 Host CPU output 时才能私下使用 device。仓库 Metal 示例
+必须使用 synchronous CPU staging，或在 v2 删除前移到 Host-private adapter 后面。Native/
+async 工作需要未来独立 suite 或 ABI。
+
+V1 没有 allocator callback。Definition string 在 return 前复制，execution 写 Host-owned
+buffer，planning/diagnostic record 使用一个 callback-local 48-byte Host output sink。其
+closed channel 按需接受 diagnostic、output-plan、Region-binding 或 dependency record。即使
+plugin 忽略并返回 success，第一次 sink failure 仍 sticky。Host memory 由 Host destroy；
+plugin memory 与成功 context 在精确 DSO lease 下得到一次 plugin destroy attempt。
+
+`ps_operation_status_v1` 的精确 `uint32_t` 值 0 至 8 分别为 `OK`、
+`INVALID_ARGUMENT`、`OUT_OF_MEMORY`、`UNSUPPORTED`、`INVALID_DESCRIPTOR`、
+`TOO_COMPLEX`、`CANCELLED`、`FAILED_PRECONDITION`、`INTERNAL_ERROR`。Unknown status
+作为 ABI fault 失败。一个 non-OK callback 可 emit 一条最多 4 KiB、被复制的 UTF-8
+diagnostic。Exception/foreign unwind 不跨 DSO；C++ wrapper 在 plugin 内映射
+`std::bad_alloc`、invalid input 与其他可捕获 failure。
+
+实现必须在移除 C++ boundary 的同时保留当前 strong shadow transaction。它验证并复制
+完整 root、suite、descriptor、callback、identity、bound，分配一个 Host generation，再原子
+发布 immutable per-slot callback/metadata/identity/source/revision value。每个 callback/context
+保留精确 generation 与 DSO。Retirement 先移除 publication，等待 lease，reverse destroy，
+最后 unmap。Middle-generation unload 只 splice owned predecessor。Plugin code 执行期间不
+持有 Host registry、publication、scheduler 或 execution lock。
+
+进程内 callback 永不返回时，可能永久保留 invocation、write grant、context、generation 与
+DSO。因此 operation ABI v1 只是 operator-trusted compatibility/validation boundary，绝非
+sandbox。Tenant-untrusted pointer-free wire record、runtime supervision、trust/resource
+enforcement 是分别版本化的独立边界，由 Issues #102、#103、#104 交付。Issue #104 现在保护
+当前 operation-v2/policy-v1 native admission 与私有 isolated runtime 组合；它不实现本目标 ABI、
+不选择最终用户 operation，也不增加通用 syscall/network sandbox。
+
+后续 migration 先新增 v1，并迁移每个仓库 operation 与 installed consumer，然后在同一
+release 删除 v2。不保留 wrapper、alias、dual loader、forwarding header、v2-to-v1 adapter、
+missing-tail interpretation 或 runtime fallback。在这些实现与测试门禁通过前，本节只是目标，
+前述 v2 章节仍描述当前事实。
+
 ## 数据定义 Provider ABI v3
 
 数据定义 provider 精确导出由自包含 C11/C++17 头文件声明的两个函数：
@@ -516,19 +775,22 @@ scheduler SDK target、`IScheduler` 基类、scheduler factory、工作线程数
 DSO 时按以下顺序执行：
 
 1. 拒绝空路径、含 NUL 的路径以及策略回调同线程发起的修改；
-2. 归一化绝对路径，并以 eager/local 方式打开；
-3. 只解析并调用 `ps_policy_plugin_get_abi_version`；
-4. 要求 ABI 精确相等，然后解析并调用
+2. 归一化绝对路径，把精确已打开对象授权为签名 `policy` artifact，并保留该 capability；
+3. 通过已授权 descriptor path 以 eager/local 方式打开，然后把 capability 移入由此得到的
+   共享 native-library lease；
+4. 只解析并调用 `ps_policy_plugin_get_abi_version`；
+5. 要求 ABI 精确相等，然后解析并调用
    `ps_policy_plugin_get_api_v1`；
-5. 校验完整且大小精确的 API 表；
-6. 将每条元数据复制并校验到私有 map；
-7. 在注册表锁内拒绝所有可见名称冲突，暂存完整的下一版类型/路径容器，并通过
+6. 校验完整且大小精确的 API 表；
+7. 将每条元数据复制并校验到私有 map；
+8. 在注册表锁内拒绝所有可见名称冲突，暂存完整的下一版类型/路径容器，并通过
    swap 同时发布两者。
 
 缺少符号、ABI 不匹配、API 字节格式错误、无效 UTF-8、无效边界/掩码、保留的
 内建名称、重复条目或可见名称冲突，都不会为该 DSO 发布任何类型或路径。检查
-回调和借用元数据时，以及销毁暂存记录时，候选 DSO 租约始终存活。最终只有
-完整复制到 Host 所有权的元数据可被观察。
+回调和借用元数据时，以及销毁暂存记录时，候选的组合 handle 与精确 capability 租约始终存活。
+最终只有完整复制到 Host 所有权的元数据可被观察。Native open 后发生任何拒绝时，都会先关闭
+handle，再释放 capability。
 
 注册表不会在持有 mutex 时调用 DSO 回调。版本、API、元数据、create、select
 和 destroy 边界都标记为策略回调区间。回调可以重入只读注册表观察；同线程的
@@ -541,8 +803,8 @@ load、scan、unload、binding creation 或服务级策略修改，会在等待�
 
 ## 策略绑定与库生命周期
 
-可见类型记录拥有复制的元数据、已校验 API 表、从零开始的条目索引以及共享 DSO
-租约。绑定准备阶段在注册表锁内复制该记录，释放锁后调用 `create`，并在服务
+可见类型记录拥有复制的元数据、已校验 API 表、从零开始的条目索引，以及把 native handle 与
+精确授权 capability 组合起来的共享 DSO 租约。绑定准备阶段在注册表锁内复制该记录，释放锁后调用 `create`，并在服务
 发布前构造一个不可变的类别/代次/上下文所有者。内建策略使用同一套绑定、代次、
 首故障和决策校验接口，但不调用 DSO。
 
@@ -562,6 +824,7 @@ Interactive 与 Throughput 绑定是不同上下文，各有独立非零代次�
 绑定继续保留其类型记录、回调表、上下文和 DSO 租约，因此在最后一次调用和最后
 一个绑定所有者退役前一直有效。该卸载原语只用于测试和进程清理，不是公共 Host
 生命周期命令。进程注册表本身有意具有进程生命周期。
+最终 lease 释放会先 unmap DSO，再关闭精确 sealed descriptor。
 
 诚实但永不返回的进程内回调可以无限期保留绑定和 DSO 租约。Host 不承诺跨该
 边界提供超时、强制展开、销毁或卸载进度。进程隔离的插件监管属于单独的架构
@@ -569,11 +832,12 @@ Interactive 与 Throughput 绑定是不同上下文，各有独立非零代次�
 
 ## 边界与原理
 
-当前三个扩展边界刻意采用不同的兼容与权限 profile：
+当前三个扩展边界与已接受替代目标刻意采用不同的兼容与权限 profile：
 
 | 边界 | 数据 ABI | 权限 |
 | --- | --- | --- |
 | 操作插件 v2 | 临时 C++ registrar 与回调值 | 在 Host 校验下执行操作计算并返回值 |
+| 操作插件 v1 目标 | exact-size pure C、独立版本化 suite、Host sink、同步 CPU grant | 未来在 Host 校验下执行 operation definition/planning/execution；尚未安装 |
 | 数据定义 provider v3 | 冻结 64 位 profile 下、大小精确的纯 C definition-suite 记录 | 只执行 Schema/Facet/Layout 校验和受界限约束的语义观察 |
 | 策略插件 v1 | 冻结 64 位 profile 下的精确大小纯 C 记录 | 只排序；不具备资源或执行能力 |
 
@@ -638,7 +902,8 @@ PImpl 放进 v2 callback record。V-14 在不改变另外两个边界的前提�
 在每个仓库自有 operation 与 installed consumer 完成 migration 前，
 operation ABI v2 仍是当前 operation contract。完成边界随后会删除 v2、其 entry point、SDK、
 fixture 与 package surface，不保留永久 dual loader、wrapper、alias、forwarding header 或
-v2-to-v3 shim。Policy ABI v1 继续独立版本化，不会被改名为 v3。
+v2-to-v1 shim。替代项是 ADR 0012 接受的独立版本化 operation-plugin ABI v1，不是
+provider-v3 suite。Policy ABI v1 继续独立版本化。
 
 操作插件的 C linkage 入口名称只是身份/代次 gate，并不是稳定 C data ABI。
 二进制兼容性仍依赖匹配的 SDK、编译器、标准库、C++ ABI、分配器/runtime、
@@ -647,11 +912,128 @@ v2-to-v3 shim。Policy ABI v1 继续独立版本化，不会被改名为 v3。
 策略边界只使用固定宽度标量、不透明 `void *` 上下文、借用的不可变数组以及
 C 函数指针。精确布局断言和校验明确规定受支持 profile，但不能沙箱化恶意 DSO。
 插件仍在 Host 进程内执行受信任的原生代码，可能阻塞、破坏内存、在计账外分配
-或创建未申报线程；它只是无法通过 ABI 合法获得执行能力。
+或创建未申报线程。签名 immutable-snapshot admission 会限制哪些 byte 及 role 可以进入进程，但不会
+改变这些能力；插件只是无法通过 ABI 合法获得执行能力。
 
-影子发布阻止操作注册表或策略类型 map 局部可见。DSO 租约让回调状态和插件拥有
-的值或上下文保持在其定义库的生命周期内。匹配的操作恢复 token 和策略绑定代次
-可防止已移除或替换的插件静默夺回当前所有权。
+Issue #93 不会改变上述三条 ABI 的 inventory 或 record layout。其 `I1Host`、
+`ComputeRunObservationSink`、accepted-boundary collector、inner-row evaluator 与精确 runner
+均是 source-private benchmark/Host mechanism。它们不会进入 installed Host request、operation
+registrar record、data-provider v3 record、policy-plugin v1 record、SDK target、IPC 或 CLI。
+Observer 只接收 copied fact 与 immutable final Value；它不是第四条 extension boundary，也不向
+DSO 暴露 callback。
+
+Issue #94 同样不会改变 installed ABI inventory、layout、symbol 或 package component。
+`ProgressiveComputeOptions`、`ProgressiveFinalGate`、I2 Host/profile/evidence type 及其
+observation callback 都保留在 `src/lib` 下；installed Host request、IPC 或 CLI grammar、
+operation registrar、data-provider v3 table 与 policy-plugin v1 table 都不会新增 field。精确
+preview primitive 是内部 CPU helper。Rank-three HWC Metal upload 是既有进程自有 executor 的
+内部泛化，并通过未改变的 `Value`、`AccessPlan`、residency 与 ledger contract 发布；它既不
+export native handle，也不新增 provider callback。手工 runner 与 deterministic test 只是这些
+私有 seam 的 consumer，不是 SDK 或 extension surface。
+
+已安装的 `compute_content_digest(Value)` 现在除既有 provider-defined traversal 外，也会通过
+Host/runtime canonical-v1 实现处理内建 DenseTensor value。内建路径使用保留的
+Schema/ImageFacet identity、descriptor metadata 与 logical payload byte；它不会调用或新增
+data-provider callback。Provider-defined value 继续使用未改变的 v3 mandatory `visit_content`
+callback。因此 data-provider API table 仍为 160 byte，冻结的 v2/v3/v1 record 与 symbol
+inventory 均保持不变，也不会引入新的 compatibility generation。
+
+执行画像证据不会加强这条信任边界。有效的 `execution-profile-slo-v1` 行会冻结并
+hash 精确的进程内 operation/provider 与 policy generation，拒绝未申报的 worker
+pool 或 resource authority，并把当前 ledger/device authority 之外的 allocation
+作为 diagnostic，而不是静默算入 memory。其 latency、throughput、fairness、
+determinism、waste 与 memory 判定不声明 sandbox 或 hostile-code containment。
+[ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
+定义这项证据边界；process supervision 与 isolated invocation 仍属于独立的
+server/plugin-isolation 目标。
+
+[ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
+冻结了该目标边界。Server control plane 与 WorkerManager 不加载任何 DSO。凡是加载到 Host
+进程内的 DSO 都仍是 operator-trusted native code，其中也包括纯 C policy 与
+data-definition record。Tenant-supplied CPU operation code 改为跨越单独版本化、绑定 attempt
+的进程协议，该协议只传递有界 descriptor 与 shared-memory/FD capability；可信 Host 代码会
+重新校验每个返回 descriptor 与 ownership 声明。纯 C 是 record compatibility 选择，不是
+sandbox。
+
+当前 Issue #102 切片通过源码私有的 Darwin/Linux protocol v1 实现其中的 transport 部分。
+它只接受 Ready、Host-visible、未量化的 NativeScalar Strided DenseTensor value、scalar
+parameter 与经检查的 dense-tensor output plan。全新的 one-call runtime 不接收 ABI pointer
+record、Host callback、allocator、Graph/Run owner 或 resource token；其 process-local
+callback seam 不会调用或迁移 operation ABI v2，也不会调用或迁移仍为目标态的 operation ABI
+v1。直接使用仍保持 non-supervised，不提供 authentication、deadline、heartbeat、restart 或
+有界 hang recovery。Issue #104 现在为该直接入口增加签名 package admission、Host resource
+admission 与 exec 前 OS limit，但不提供通用 syscall/network sandbox。
+
+Issue #103 现在通过源码私有的 `PluginRuntimeSupervisor` 与
+`PluginInvocationExecutor` 实现受监督部分。专用 Unix datagram socket 上的定长 lifecycle
+protocol 会把 OS 随机 128-bit nonce、完整 invocation identity、worker/plugin generation、
+Host 选择的 heartbeat interval 与严格递增 event sequence 绑定到精确 exec PID。Startup、
+invocation、heartbeat-gap、response、TERM、KILL 与 reap bound 都使用绝对单调 deadline。完整
+request transfer 会获得一个独立、完整的 invocation-duration window；只有在全部 byte 与
+descriptor right 已发送、Host `SHUT_WR` 成功，并且再次观察同一绝对 transfer deadline 后，
+该传输才结束。通过该观察的精确单调时钟样本就是 `accepted_at`；callback invocation deadline
+与初始 heartbeat-gap deadline 都直接从它派生。迟到但成功的 shutdown 是 invocation-deadline
+fault，且不得启用全新 callback 或 heartbeat budget；shutdown 失败仍是 channel 事实。验收后
+的调度停顿会消耗这些 budget，后续 caller 重新读取时钟不得再赠送一个窗口。构造阶段会在取得
+child ownership 前，验证每个配置 duration 为正、未超过包含式 24 小时上限、可由 steady
+clock 精确表示，并满足 heartbeat 字段顺序；它不会也无法验证未来的 base 求和。每次实际派生
+deadline 都会在加法前以同一个已捕获 base 检查
+`base <= time_point::max() - duration`。精确贴合上界会被接受。取得 ownership 前超出一个
+tick 会通过受控异常 fail closed；取得 ownership 后，在 cleanup 前发生的 lifecycle 或短暂
+精确 status-observation 溢出会映射为当前按阶段类型化的 fault 并执行精确 cleanup，而
+派生 termination/reap-cleanup 或 restart-backoff deadline 时发生的算术失败会保留已经建立的
+primary fault。如果这些 cleanup deadline 可以表示，但精确 PID 在最终 bound 时仍不可观察，
+则唯一 ownership 会转移给 deferred reaper，`ReapPending` 会有意优先于更早的 phase fact。
+Supervisor 绝不回绕、饱和、截断，也不会重新采样 base 来制造另一个窗口。如果没有更强的
+process 或 deadline 事实，真实 channel/status-observation syscall failure 仍为 `Channel`。
+Nonce 只证明私有 launch/session binding 与 liveness；由于 child 会知道它，该 protocol 不会
+attest plugin truth，也不会让返回 byte 自动受信任。
+
+Supervisor 会保留类型化可观测的 deadline、protocol、channel、bad-output、natural-exit、
+signal 与 escalation 事实。它不会根据 wait status 推断 OOM：`SIGKILL` 只表示
+memory-pressure-compatible。Fault 会关闭两条 channel，必要时升级精确 PID termination，保留
+reap ownership，并且绝不回退到进程内执行。后续调用会等待有界 restart backoff，再启动另一
+个全新进程。链接产品的真实 exec 测试会覆盖该 lifecycle。如果在认证 completion 仍排队时
+精确 child status 已被回收，monitor 会先排空 lifecycle 队列，再把该 status 分类为未完成便
+退出，随后继续保留 status 以执行强制的 response/EOF/decode/publication 检查。只有零退出绝不
+授权成功。测试还会把 executor 组合进 `ExecutionService` ready callback；request boundary
+只把 owning Run 发布为 Failed，固定 worker 随后会执行无关 Run。
+
+Issue #104 现在会围绕两个长期维护的 isolated entry 组合 package trust 与 Host resource
+authority。在 shared-memory、descriptor、socket、mapping 或 process 副作用前，无副作用 preflight
+会导出五维 `PluginResourceVector`：runtime process、CPU slot、address-space byte、shared-memory
+byte 与 descriptor count。Attempt-local `ResourceLedger` 会原子铸造 move-only token；该 token
+绑定完整 invocation identity 的 domain-separated digest 与精确 vector。针对相同事实消费后会
+生成一份 RAII lease；replay tombstone 在结算后仍保留到 ledger 生命周期结束，而未消费 token 或
+已消费 invocation 的每条 success/failure path 都只归还一次精确 capacity。Invocation wire 不会
+携带 token、trust root、manifest、signature 或 digest override。
+
+已准入 vector 会在 native exec 前驱动 `RLIMIT_AS`、正 `RLIMIT_CPU`、经过检查的
+`RLIMIT_NOFILE` 与零 `RLIMIT_CORE`。Child 仍只获得空 environment、`/dev/null` 标准流、固定
+data/status/lifecycle descriptor、一个固定 executable descriptor 以及已声明 invocation
+capability；该封闭集合以上的 descriptor 会被移除。Linux 使用 `fexecve` 执行复制后校验的
+sealed descriptor。Darwin 对任何 native role 都没有受支持的无特权不可变 exact-object 边界，
+因此 direct/supervised executor 构造期间会在候选访问、token 发放、capability materialization、
+socket 创建或 fork 前报告 `ExactObjectUnsupported`；不会存在 runtime pathname snapshot。不支持
+的平台（包括当前 Windows runtime profile）同样默认拒绝，不会回退到未经校验的 path。
+这些控制施加 package identity 与 resource ceiling；它们不是通用 syscall/network sandbox，
+观察到 `SIGKILL` 仍只表示 memory-pressure-compatible，不证明 OOM。
+
+Adapter、endpoint、supervisor 与 executor 都会编入 installable product archive，但当前没有
+operation loader 或 product composition root 会为最终用户 Graph operation 构造 isolated
+request。具体而言，`ExecutionService`、`WorkerManager`、embedded Host/CLI 与
+`photospider-worker` 均不存在 selection caller。Operation ABI v2 与仍为目标态的 v1 都不会
+进入该 wire。Atomic operation-ABI migration、最终用户 selection 与更强 platform sandbox
+profile 仍属于分别拥有的后续工作。Issue #106 现在会在既有 codec boundary 提供范围收窄的长期
+evidence：一个手工 opt-in 的 Clang/libFuzzer target 会调用生产 isolated request/response
+decoder 与 descriptor validator，而已注册的确定性测试负责 canonical roundtrip 和代表性的
+malformed descriptor 行为。该证据不会打开 mapping、descriptor、callback 或 plugin process，
+也不构成最终用户 route 或通用 sandbox 声明。
+
+影子发布阻止操作注册表或策略类型 map 局部可见。组合 DSO 租约让回调状态和插件拥有
+的值或上下文保持在其定义库的生命周期内，同时在 mapping 保持 resident 的整个期间保留精确授权
+capability。最终释放会先 unmap DSO，再关闭 sealed descriptor。匹配的操作恢复 token 和策略绑定
+代次可防止已移除或替换的插件静默夺回当前所有权。
 
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)记录
 进程级执行方向。[ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
@@ -682,8 +1064,9 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
   的前缀/保留字段，并且只返回已声明的状态/枚举值。
 - 策略回调不保留快照内存，并把每个候选项 ID 当作不透明值。它们绝不创建工作
   线程，也不声称选择结果已经启动工作。
-- 系统不存在 operation v1 兼容路径、scheduler SDK、scheduler ABI、
-  `IScheduler` adapter 或执行路由插件 ABI。
+- 当前不存在 installed operation-v1 header、loader、SDK 或 dual-compatibility path。
+  已接受 v1 目标只在完整 migration gate 后替代并删除 v2；scheduler SDK/ABI、
+  `IScheduler` adapter 与执行路由插件 ABI 继续不存在。
 
 ## 实现与验证入口
 
@@ -701,12 +1084,20 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 - `include/photospider/plugin/op_contract.hpp`
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/core/value.cpp`
+- `src/lib/core/dense_tensor_content_digest.*`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/plugin/operation_host_adapter.*`
 - `src/lib/execution/device_completion.*`
+- `src/lib/execution/isolated_cpu_invocation.*`
+- `src/lib/execution/plugin_runtime_supervisor.hpp`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
+- `src/lib/compute/progressive_compute.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
 - `src/lib/plugin/data_definition_registry.cpp`
@@ -726,5 +1117,9 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 - `tests/unit/test_device_residency.cpp`
 - `tests/fixtures/value_identity_dso.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
+- `tests/unit/test_dense_tensor_content_digest.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
+- `tests/integration/test_i2_product_path.cpp`
+- `tests/integration/test_plugin_runtime_supervisor.cpp`
+- `tests/unit/test_progressive_compute.cpp`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

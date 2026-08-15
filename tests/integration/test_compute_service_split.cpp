@@ -4046,6 +4046,7 @@ TEST(ComputeServiceSequentialAdmission,
       compute::SupersessionIdentity{
           compute::SupersessionKey{1, ComputeIntent::GlobalHighPrecision},
           compute::SupersessionGeneration{1U}},
+      nullptr,
   });
   EXPECT_THROW((void)short_authority.acquire_operation_execution(
                    short_run.acquire_lease(), constraints, demand),
@@ -4077,6 +4078,7 @@ TEST(ComputeServiceSequentialAdmission,
       compute::SupersessionIdentity{
           compute::SupersessionKey{1, ComputeIntent::GlobalHighPrecision},
           compute::SupersessionGeneration{1U}},
+      nullptr,
   });
   EXPECT_THROW((void)overflow_authority.acquire_operation_execution(
                    overflow_run.acquire_lease(), constraints, overflow_demand),

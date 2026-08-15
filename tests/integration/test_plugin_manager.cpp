@@ -23,7 +23,9 @@
 #include "graph/graph_model.hpp"
 #include "graph/roi_propagation_service.hpp"
 #include "plugin/plugin_manager.hpp"
+#include "policy/policy_registry.hpp"
 #include "providers/configured_operation_providers.hpp"
+#include "support/scoped_descriptor_pressure.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "core/op_registry_test_access.hpp"
 #include "plugin/plugin_loader_test_access.hpp"
@@ -163,6 +165,15 @@ constexpr const char* kV1OnlyMarkerEnvironment =
 
 #ifndef PS_TEST_OP_PLUGIN_DIR
 #define PS_TEST_OP_PLUGIN_DIR "build/test_plugins"
+#endif
+
+#ifndef PS_TEST_POLICY_PLUGIN_PATH
+#error "PS_TEST_POLICY_PLUGIN_PATH must identify the compatible policy fixture"
+#endif
+
+#ifndef PS_TEST_ALTERNATE_POLICY_PLUGIN_PATH
+#error \
+    "PS_TEST_ALTERNATE_POLICY_PLUGIN_PATH must identify the alternate fixture"
 #endif
 
 /**
@@ -3706,6 +3717,85 @@ TEST_F(PluginManagerLifecycleTest, RepeatedLoadUnloadPreservesLifecycleState) {
     EXPECT_FALSE(lifecycle_key_is_registered());
   }
 }
+
+#if defined(__linux__)
+/**
+ * @brief Keeps adjacent operation and policy sealed DSOs identity-consistent.
+ *
+ * @throws Standard allocation, descriptor, trust, loader, callback, or
+ * synchronization exceptions from the two real production consumers.
+ * @note Historical code closed each authorization descriptor immediately after
+ * `dlopen`, so descriptor pressure made the next different artifact reuse the
+ * same `/proc/self/fd/N` spelling while the prior mapping stayed live. This
+ * signed cross-role sequence retains four different DSOs at once and verifies
+ * both operation callbacks and policy decisions remain implementation-specific.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       RetainsDistinctSealedIdentitiesAcrossOperationAndPolicyLoads) {
+  constexpr std::size_t kPressureDescriptorCount = 64U;
+  ps::test::ScopedDescriptorPressure descriptor_pressure(
+      kPressureDescriptorCount);
+  ASSERT_EQ(descriptor_pressure.size(), kPressureDescriptorCount);
+
+  const auto original_operation = lifecycle_plugin_path();
+  const auto alternate_operation = override_lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(original_operation));
+  ASSERT_TRUE(std::filesystem::exists(alternate_operation));
+  ASSERT_TRUE(std::filesystem::exists(PS_TEST_POLICY_PLUGIN_PATH));
+  ASSERT_TRUE(std::filesystem::exists(PS_TEST_ALTERNATE_POLICY_PLUGIN_PATH));
+
+  auto& manager = PluginManager::process_instance();
+  const PluginLoadResult original_operation_result =
+      manager.load_from_dirs_report(
+          {original_operation.parent_path().string()});
+  ASSERT_EQ(original_operation_result.loaded, 1)
+      << describe_errors(original_operation_result.errors);
+  EXPECT_EQ(current_lifecycle_compute_device(), "PLUGIN_LIFECYCLE_TEST");
+
+  policy::PolicyRegistry policies;
+  policies.load(PS_TEST_POLICY_PLUGIN_PATH);
+  const std::shared_ptr<policy::PolicyBinding> original_policy =
+      policies.create_binding("fixture_policy", PolicyClass::Throughput, 81U);
+
+  const PluginLoadResult alternate_operation_result =
+      manager.load_from_dirs_report(
+          {alternate_operation.parent_path().string()});
+  ASSERT_EQ(alternate_operation_result.loaded, 1)
+      << describe_errors(alternate_operation_result.errors);
+  EXPECT_EQ(current_lifecycle_compute_device(), "PLUGIN_OVERRIDE_TEST");
+
+  policies.load(PS_TEST_ALTERNATE_POLICY_PLUGIN_PATH);
+  const std::shared_ptr<policy::PolicyBinding> alternate_policy =
+      policies.create_binding("fixture_policy_alternate",
+                              PolicyClass::Throughput, 82U);
+
+  ps_policy_candidate_v1 first{};
+  first.struct_size = sizeof(first);
+  first.struct_kind = PS_POLICY_STRUCT_CANDIDATE;
+  first.candidate_id = 101U;
+  first.graph_id = 1U;
+  first.run_id = 1U;
+  first.deadline_ns = PS_POLICY_NO_DEADLINE_NS;
+  first.weight = 1U;
+  first.work_units = 1U;
+  first.ready_bytes = 1U;
+  first.enqueue_sequence = 1U;
+  ps_policy_candidate_v1 second = first;
+  second.candidate_id = 202U;
+  second.enqueue_sequence = 2U;
+  const std::vector<ps_policy_candidate_v1> candidates{first, second};
+
+  EXPECT_EQ(manager.loaded_plugin_count(), 2U);
+  EXPECT_EQ(policies.loaded_plugins().size(), 2U);
+  EXPECT_EQ(original_policy->select(candidates, 1U, 1U).candidate_id, 202U);
+  EXPECT_EQ(alternate_policy->select(candidates, 2U, 2U).candidate_id, 101U);
+
+  EXPECT_EQ(manager.unload_all_plugins(), 2U);
+  EXPECT_EQ(policies.unload_all_plugins(), 2U);
+  EXPECT_EQ(original_policy->select(candidates, 3U, 3U).candidate_id, 202U);
+  EXPECT_EQ(alternate_policy->select(candidates, 4U, 4U).candidate_id, 101U);
+}
+#endif
 
 /**
  * @brief Proves unloading a shadowed middle plugin splices its real

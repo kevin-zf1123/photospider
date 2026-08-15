@@ -214,6 +214,7 @@ compute::DirtyUpdateRequest make_dirty_update_request(
                                      request.telemetry.benchmark_events,
                                      request.dirty_roi.value(),
                                      suppress_graph_downsample,
+                                     request.progressive_options.has_value(),
                                      std::move(sibling_commit_gate),
                                      std::move(stabilized_parameters),
                                      std::move(node_synchronization)};
@@ -468,8 +469,12 @@ compute::ComputeRunSubmission make_run_submission(
       intent == ComputeIntent::RealTimeUpdate
           ? compute::ComputeRunQuality::Interactive
           : compute::ComputeRunQuality::Full,
-      request.qos,
-      supersession};
+      intent == ComputeIntent::GlobalHighPrecision &&
+              request.progressive_options.has_value()
+          ? request.progressive_options->final_qos
+          : request.qos,
+      supersession,
+      request.observation_sink};
 }
 
 /**
@@ -806,6 +811,8 @@ struct PreparedIntentUpdateState final {
   std::optional<compute::ComputeRunLease> rt_lease;
   /** @brief Shared RT-first commit gate for realtime groups. */
   std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate;
+  /** @brief Optional preview-success/cancellation/final linearization gate. */
+  std::shared_ptr<compute::ProgressiveFinalGate> progressive_final_gate;
   /** @brief Route-selected HP execution type. */
   std::string hp_execution_type = "cpu";
   /** @brief Route-selected RT execution type. */
@@ -826,7 +833,8 @@ struct PreparedIntentUpdateState final {
   compute::PreparedHighPrecisionDirtyRun hp_prepared;
   /** @brief Complete unpublished RT dirty domain for realtime. */
   compute::PreparedRealTimeDirtyRun rt_prepared;
-  /** @brief RT-to-HP cancellation/gate propagation registration. */
+  /** @brief RT-to-HP commit denial and cancellation propagation registration.
+   */
   compute::ComputeRunCancellationRegistration rt_cancellation_registration;
   /** @brief Fully allocated coordinator callbacks bound before installation. */
   compute::IntentUpdateCallbacks callbacks;
@@ -1235,6 +1243,12 @@ ComputeService::prepare_intent_update(
   }
   const ComputeIntent intent = *request.intent;
   compute::IntentUpdateCoordinator::validate(intent, request.dirty_roi);
+  if (request.progressive_options.has_value() &&
+      intent != ComputeIntent::RealTimeUpdate) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "Progressive compute options require RealTimeUpdate intent.");
+  }
   if (intent == ComputeIntent::GlobalHighPrecision &&
       (hp_run == nullptr || hp_run_lease == nullptr || rt_run != nullptr ||
        rt_run_lease != nullptr || !request.dirty_roi.has_value())) {
@@ -1254,6 +1268,12 @@ ComputeService::prepare_intent_update(
   auto state = std::make_unique<PreparedIntentUpdateState>(
       graph, strategy, request, *hp_run, rt_run, *hp_run_lease, rt_run_lease,
       std::move(sibling_commit_gate));
+  if (request.progressive_options.has_value()) {
+    state->progressive_final_gate =
+        std::make_shared<compute::ProgressiveFinalGate>();
+    state->rt_lease->bind_progressive_final_gate(state->progressive_final_gate);
+    state->hp_lease.bind_progressive_final_gate(state->progressive_final_gate);
+  }
   bool uses_process_service = false;
   if (strategy.use_parallel_executor) {
     if (strategy.runtime == nullptr || !execution_service_.is_configured()) {
@@ -1270,6 +1290,7 @@ ComputeService::prepare_intent_update(
           strategy.runtime->execution_route(ComputeIntent::RealTimeUpdate)
               .execution_type;
       state->can_submit_concurrently =
+          !request.progressive_options.has_value() &&
           state->hp_execution_type != "serial_debug" &&
           state->rt_execution_type != "serial_debug";
     }
@@ -1317,6 +1338,7 @@ ComputeService::prepare_intent_update(
               (void)hp_cancellation.request_cancellation(reason);
             });
     (void)state->rt_lease->observe_cancellation();
+    (void)state->hp_lease.observe_cancellation();
   }
 
   PreparedIntentUpdateState* state_ptr = state.get();
@@ -1327,6 +1349,11 @@ ComputeService::prepare_intent_update(
     return executor.execute_prepared(std::move(state_ptr->hp_prepared));
   };
   state->callbacks.run_high_precision_update = [this, state_ptr]() {
+    if (state_ptr->progressive_final_gate) {
+      if (!state_ptr->hp_lease.try_publish_progressive_final_trigger()) {
+        return;
+      }
+    }
     (void)execute_realtime_child_run(
         *state_ptr->hp_run, state_ptr->hp_lease,
         [this, state_ptr]() -> NodeOutput& {
@@ -1352,6 +1379,9 @@ ComputeService::prepare_intent_update(
                                         state_ptr->request);
         });
     state_ptr->sibling_commit_gate->mark_rt_committed();
+    if (state_ptr->progressive_final_gate) {
+      (void)state_ptr->progressive_final_gate->arm();
+    }
     return output;
   };
   state->callbacks.real_time_output = [state_ptr]() -> NodeOutput& {

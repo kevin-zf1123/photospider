@@ -21,11 +21,13 @@
 #include <utility>
 #include <vector>
 
+#include "compute/i2_metal_acquisition_deadline.hpp"
 #include "compute/resource_demand_estimator.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
 #include "compute/execution_service_test_probe.hpp"
 #endif
 #include "execution/compute_io_executor.hpp"
+#include "execution/device_execution_context.hpp"
 #include "execution/device_executor_registry.hpp"
 #include "execution/physical_execution_routes.hpp"
 #include "photospider/core/graph_error.hpp"
@@ -174,15 +176,13 @@ class ShutdownWorkerJoinGuard final {
   /**
    * @brief Binds local workers to their exact shutdown telemetry generation.
    * @param workers Local worker owners transferred from PoolState.
-   * @param telemetry Stable process execution telemetry.
    * @param registry Stable lifecycle counter/generation authority.
    * @throws Nothing.
-   * @note workers, telemetry, and registry must outlive this stack guard.
+   * @note workers and registry must outlive this stack guard.
    */
   ShutdownWorkerJoinGuard(std::vector<std::thread>& workers,
-                          ExecutionLifecycleTelemetry& telemetry,
                           RunLifecycleRegistry& registry) noexcept
-      : workers_(workers), telemetry_(telemetry), registry_(registry) {}
+      : workers_(workers), registry_(registry) {}
 
   /**
    * @brief Joins and publishes every not-yet-accounted local worker.
@@ -200,10 +200,9 @@ class ShutdownWorkerJoinGuard final {
         complete_shutdown_action_or_terminate([&worker]() { worker.join(); });
       }
       complete_shutdown_action_or_terminate([this]() {
-        telemetry_.publish(ExecutionLifecycleEventKind::WorkerJoined,
-                           ExecutionLifecycleCategory::None, 0U, 0U, 0U,
-                           registry_.shutdown_generation(),
-                           registry_.counters());
+        registry_.publish_physical_retirement(
+            ExecutionLifecycleEventKind::WorkerJoined,
+            ExecutionLifecycleCategory::None, registry_.shutdown_generation());
       });
       ++next_worker_;
     }
@@ -234,8 +233,6 @@ class ShutdownWorkerJoinGuard final {
  private:
   /** @brief Local worker vector that outlives this guard. */
   std::vector<std::thread>& workers_;
-  /** @brief Stable physical lifecycle telemetry owner. */
-  ExecutionLifecycleTelemetry& telemetry_;
   /** @brief Stable shutdown generation and logical counter authority. */
   RunLifecycleRegistry& registry_;
   /** @brief First worker whose join event is not yet complete. */
@@ -298,6 +295,97 @@ class ReadySubmissionDeviceInvocation final
   /** @brief Service-owned ledger borrowed through synchronous executor entry.
    */
   ResourceLedger& resource_ledger_;
+};
+
+/**
+ * @brief Adapts one explicit Host-to-Metal Value upload to executor entry.
+ *
+ * @throws Native publication and allocation failures unchanged from `run()`.
+ * @note The invocation is stack-bounded, borrows the service ledger, and
+ * retains the source/seed only through synchronous executor callback return.
+ * Native completion ownership moves into the published pending Value.
+ */
+class HostToMetalValueInvocation final
+    : public execution::DeviceExecutorInvocation {
+ public:
+  /**
+   * @brief Captures one exact upload request and its output destination.
+   * @param source Ready source Value retained by copy.
+   * @param width Positive logical image width.
+   * @param height Positive logical image height.
+   * @param seed Exact current request/Run lineage.
+   * @param capture_deadline Exclusive absolute I2 capture deadline.
+   * @param resource_ledger Process ResourceLedger borrowed through entry.
+   * @throws Nothing beyond Value copying.
+   */
+  HostToMetalValueInvocation(
+      Value source, std::uint32_t width, std::uint32_t height,
+      execution::DeviceCompletionSeed seed,
+      std::chrono::steady_clock::time_point capture_deadline,
+      ResourceLedger& resource_ledger) noexcept
+      : source_(std::move(source)),
+        width_(width),
+        height_(height),
+        seed_(std::move(seed)),
+        capture_deadline_(capture_deadline),
+        resource_ledger_(resource_ledger) {}
+
+  /** @copydoc execution::DeviceExecutorInvocation::run */
+  void run() override {
+    execution::MetalExecutionContext& context =
+        execution::require_current_metal_execution_context();
+    context.publish_float32_host_to_texture(source_, width_, height_);
+    published_value_ = context.take_published_value();
+    if (!published_value_.valid()) {
+      throw std::logic_error(
+          "Metal upload returned without a pending resident Value.");
+    }
+  }
+
+  /** @copydoc execution::DeviceExecutorInvocation::resource_ledger */
+  ResourceLedger& resource_ledger() noexcept override {
+    return resource_ledger_;
+  }
+
+  /** @copydoc execution::DeviceExecutorInvocation::completion_seed */
+  std::optional<execution::DeviceCompletionSeed> completion_seed()
+      const override {
+    return seed_;
+  }
+
+  /** @copydoc execution::DeviceExecutorInvocation::execution_deadline */
+  std::optional<std::chrono::steady_clock::time_point> execution_deadline()
+      const noexcept override {
+    return capture_deadline_;
+  }
+
+  /**
+   * @brief Takes the pending device Value published by `run()`.
+   * @return Published Value, or invalid sentinel before/after the sole take.
+   * @throws Nothing.
+   */
+  Value take_published_value() noexcept {
+    Value result;
+    std::swap(result, published_value_);
+    return result;
+  }
+
+ private:
+  /** @brief Ready host-visible source retained through executor return. */
+  Value source_;
+  /** @brief Logical image width forwarded to Metal translation. */
+  std::uint32_t width_ = 0U;
+  /** @brief Logical image height forwarded to Metal translation. */
+  std::uint32_t height_ = 0U;
+  /** @brief Exact native-completion request and Run lineage. */
+  execution::DeviceCompletionSeed seed_;
+  /** @brief Unchanged exclusive absolute deadline for every Metal checkpoint.
+   */
+  std::chrono::steady_clock::time_point capture_deadline_;
+  /** @brief Process resource authority borrowed through this invocation. */
+  ResourceLedger& resource_ledger_;
+  /** @brief Pending device Value taken after synchronous executor return. */
+  Value published_value_;
 };
 
 /**
@@ -584,6 +672,20 @@ struct ExecutionService::QueueEntry final {
 
   /** @brief Whether reserved start acquired operation-gate ownership. */
   bool operation_gate_started = false;
+
+  /**
+   * @brief Real evidence-startability/grant facts bound to the physical start.
+   * @note The worker publishes this immutable observation only after releasing
+   * the pool, Run-state, and terminal-arbiter mutexes.
+   */
+  std::optional<ComputeRunServiceStartObservation> service_start_observation;
+
+  /**
+   * @brief Coordinate committed with the physical route start, when observed.
+   * @note The worker publishes this immutable fact only after releasing the
+   * service pool, service Run-state, and Run terminal-arbiter mutexes.
+   */
+  std::optional<ComputeRunObservationCoordinate> service_start_coordinate;
 
   /** @brief Checked work plus ready-byte quanta used only for ordering. */
   const std::uint64_t policy_service_cost;
@@ -1022,6 +1124,32 @@ struct ReservedStartProbeState final {
 };
 
 /**
+ * @brief Process-local post-coordinate route-commit failure test state.
+ * @throws Nothing for atomic initialization and access.
+ * @note The state is compiled only into the internal test product and owns no
+ * service, Run, route, reservation, or callback authority.
+ */
+struct RouteCommitFailureProbeState final {
+  /** @brief True while one route-commit rejection remains armed. */
+  std::atomic_bool armed{false};
+  /** @brief True after the armed rejection has been consumed. */
+  std::atomic_bool triggered{false};
+};
+
+/**
+ * @brief Process-local start-arbitration observer state for test products.
+ * @throws Nothing for atomic initialization and access.
+ * @note The callback may coordinate a bounded fixture but owns no service,
+ * Run, route, gate, grant, or cancellation authority.
+ */
+struct ServiceStartArbitrationProbeState final {
+  /** @brief Borrowed opaque fixture context. */
+  std::atomic<void*> context{nullptr};
+  /** @brief Optional allocation-free checkpoint callback. */
+  std::atomic<testing::ServiceStartArbitrationObserver> observer{nullptr};
+};
+
+/**
  * @brief Process-local operation-admission observer state for test products.
  * @throws Nothing for atomic initialization and access.
  * @note The callback publishes fixture state only. It never owns service,
@@ -1054,6 +1182,27 @@ struct RetainedOperationStringChargeProbeState final {
  */
 ReservedStartProbeState& reserved_start_probe_state() noexcept {
   static ReservedStartProbeState state;
+  return state;
+}
+
+/**
+ * @brief Returns the unique test-product route-commit failure state.
+ * @return Process-lifetime allocation-free storage.
+ * @throws Nothing.
+ */
+RouteCommitFailureProbeState& route_commit_failure_probe_state() noexcept {
+  static RouteCommitFailureProbeState state;
+  return state;
+}
+
+/**
+ * @brief Returns the unique test-product start-arbitration observer state.
+ * @return Process-lifetime allocation-free observer storage.
+ * @throws Nothing.
+ */
+ServiceStartArbitrationProbeState&
+service_start_arbitration_probe_state() noexcept {
+  static ServiceStartArbitrationProbeState state;
   return state;
 }
 
@@ -1134,6 +1283,41 @@ bool record_reserved_start_attempt_for_testing(
     attempt.ready_bytes.store(resources.ready_bytes, std::memory_order_release);
   }
   return index == 0U;
+}
+
+/**
+ * @brief Consumes one armed rejection after coordinate reservation.
+ * @return True exactly once between arm and disarm operations.
+ * @throws Nothing.
+ * @note The caller holds the Run terminal arbiter and pool/RunState locks; this
+ * helper performs only finite lock-free atomic operations.
+ */
+bool consume_route_commit_failure_for_testing() noexcept {
+  RouteCommitFailureProbeState& state = route_commit_failure_probe_state();
+  if (!state.armed.exchange(false, std::memory_order_acq_rel)) {
+    return false;
+  }
+  state.triggered.store(true, std::memory_order_release);
+  return true;
+}
+
+/**
+ * @brief Notifies one deterministic start-arbitration checkpoint.
+ * @param point Exact checkpoint reached by the service worker.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note The callback is test-product-only and must not re-enter service code
+ * while the documented production locks remain held.
+ */
+void notify_service_start_arbitration_for_testing(
+    testing::ServiceStartArbitrationPoint point) noexcept {
+  ServiceStartArbitrationProbeState& state =
+      service_start_arbitration_probe_state();
+  const testing::ServiceStartArbitrationObserver observer =
+      state.observer.load(std::memory_order_acquire);
+  if (observer != nullptr) {
+    observer(state.context.load(std::memory_order_relaxed), point);
+  }
 }
 
 }  // namespace
@@ -1384,7 +1568,8 @@ class ExecutionService::BoundedReadyStore final {
    * commit revalidates exact identity and store ownership under the lock.
    */
   struct SelectionPin final {
-    /** @brief Exact selected object, or null when no candidate is startable. */
+    /** @brief Exact selected object, or null when no candidate is selectable.
+     */
     std::shared_ptr<QueueEntry> entry;
 
     /** @brief Selected class after current Host arbitration. */
@@ -1687,10 +1872,25 @@ class ExecutionService::BoundedReadyStore final {
    * @return Started, obsolete, unavailable grant, or identity exhaustion.
    * @throws std::bad_alloc, std::logic_error, or std::overflow_error while
    * staging operation-gate ownership.
-   * @throws std::system_error while staging the reservation child grant.
+   * @throws std::system_error while staging the reservation child grant or
+   * entering the Run-owned terminal arbiter.
    * @note Exceptional exits precede every ready/fairness/in-flight mutation.
-   * @note Caller holds the service/store mutex. This method locks the Run and
-   * then its reservation through `try_grant`, preserving the frozen order.
+   * After grant/gate staging, the Run terminal arbiter reserves an observation
+   * coordinate and performs the irreversible route commit under one critical
+   * section shared with cancellation acceptance. A rejected route explicitly
+   * aborts the staged observation coordinate, publishes no callback, and rolls
+   * back every staged owner.
+   * Immediately before staging, scheduler-selectable Throughput competition
+   * is recomputed from real ready entries, Run lifecycle, operation-gate, and
+   * physical-route eligibility without treating transient child-grant
+   * exhaustion as a policy filter. The separate evidence-startable class
+   * facts add available child-grant capacity and are published only if this
+   * exact selected start subsequently commits every owner and counter.
+   * @note Caller holds `PoolState::mutex`; this method locks each probed
+   * `RunState` separately and later holds the selected Run while staging its
+   * child grant. `try_grant` acquires and releases the reservation mutex before
+   * this method enters the Run terminal arbiter; no path holds reservation and
+   * terminal-arbiter mutexes together.
    */
   StartResult commit_start(SelectionPin& pin, int worker_id,
                            execution::PhysicalExecutionLane lane,
@@ -1698,8 +1898,12 @@ class ExecutionService::BoundedReadyStore final {
     if (!pin.entry || !pin.entry->run) {
       return StartResult::Obsolete;
     }
-    const bool throughput_ready =
-        has_startable(ComputeRunQosClass::Throughput, worker_id, lane, routes);
+    const bool throughput_selectable = has_scheduler_selectable(
+        ComputeRunQosClass::Throughput, worker_id, lane, routes);
+    const bool interactive_evidence_startable = has_evidence_startable(
+        ComputeRunQosClass::Interactive, worker_id, lane, routes);
+    const bool throughput_evidence_startable = has_evidence_startable(
+        ComputeRunQosClass::Throughput, worker_id, lane, routes);
     const auto run_found = run_states_.find(pin.entry->run->id.value());
     if (run_found == run_states_.end()) {
       return StartResult::Obsolete;
@@ -1718,7 +1922,7 @@ class ExecutionService::BoundedReadyStore final {
             std::numeric_limits<std::uint64_t>::max() ||
         run.committed_starts == std::numeric_limits<std::uint64_t>::max() ||
         (pin.service_class == ComputeRunQosClass::Interactive &&
-         throughput_ready &&
+         throughput_selectable &&
          consecutive_interactive_ ==
              std::numeric_limits<std::uint64_t>::max())) {
       return class_dispatch_count(pin.service_class) ==
@@ -1729,13 +1933,7 @@ class ExecutionService::BoundedReadyStore final {
                  : StartResult::Obsolete;
     }
 
-    const ResourceVector execution_resources{
-        1U,
-        run.execution_retained_bytes_per_task,
-        run.resource_demand.scratch_bytes,
-        0U,
-        0U,
-    };
+    const ResourceVector execution_resources = task_execution_resources(run);
     if (!run.reservation.has_value()) {
       std::terminate();
     }
@@ -1756,7 +1954,50 @@ class ExecutionService::BoundedReadyStore final {
       return StartResult::Obsolete;
     }
     const Device device = pin.entry->submission.metadata().device();
-    if (!routes.commit_start(run.route, device)) {
+    /**
+     * @brief Carries borrowed operands through synchronous Run arbitration.
+     * @throws Nothing for aggregate initialization.
+     * @note Every pointer remains valid until the local callback returns.
+     */
+    struct RouteCommitContext final {
+      /** @brief Borrowed route inventory serialized by the service mutex. */
+      execution::PhysicalExecutionRoutes* routes = nullptr;
+      /** @brief Borrowed immutable route name retained by RunState. */
+      const std::string* route = nullptr;
+      /** @brief Immutable selected device for this callback. */
+      Device device = Device::CPU;
+    } route_context{&routes, &run.route, device};
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    notify_service_start_arbitration_for_testing(
+        testing::ServiceStartArbitrationPoint::BeforeRunArbitration);
+#endif
+    /**
+     * @brief Commits one already-validated physical route irreversibly.
+     * @param opaque_context Borrowed `RouteCommitContext` pointer.
+     * @return True only when the route inventory accepts the start.
+     * @throws Nothing; route commitment and the test checkpoint are no-throw.
+     * @note The matching Run terminal arbiter is held for the complete call.
+     */
+    const auto commit_route = [](void* opaque_context) noexcept {
+      auto* context = static_cast<RouteCommitContext*>(opaque_context);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+      notify_service_start_arbitration_for_testing(
+          testing::ServiceStartArbitrationPoint::BeforeRouteCommit);
+      if (consume_route_commit_failure_for_testing()) {
+        return false;
+      }
+#endif
+      return context->routes->commit_start(*context->route, context->device);
+    };
+    bool route_committed = false;
+    try {
+      route_committed = pin.entry->submission.lease_.try_commit_service_start(
+          commit_route, &route_context, &pin.entry->service_start_coordinate);
+    } catch (...) {
+      operation_gate_.finish(pin.entry->submission.operation_constraints());
+      throw;
+    }
+    if (!route_committed) {
       operation_gate_.finish(pin.entry->submission.operation_constraints());
       return StartResult::Obsolete;
     }
@@ -1770,8 +2011,10 @@ class ExecutionService::BoundedReadyStore final {
     ++class_dispatch_count(pin.service_class);
     ++run.committed_starts;
     ++run.in_flight;
+    pin.entry->service_start_observation = ComputeRunServiceStartObservation{
+        interactive_evidence_startable, throughput_evidence_startable, true};
     if (pin.service_class == ComputeRunQosClass::Interactive &&
-        throughput_ready) {
+        throughput_selectable) {
       ++consecutive_interactive_;
     } else {
       consecutive_interactive_ = 0U;
@@ -1780,14 +2023,15 @@ class ExecutionService::BoundedReadyStore final {
   }
 
   /**
-   * @brief Tests whether one worker has any currently startable route.
+   * @brief Tests whether one worker has scheduler-selectable work.
    * @param worker_id Worker attempting selection.
    * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
-   * @return True when class arbitration can choose at least one entry.
+   * @return True when class arbitration can choose at least one entry without
+   * considering transient execution child-grant capacity.
    * @throws Nothing.
    */
-  bool has_startable_work(
+  bool has_scheduler_selectable_work(
       int worker_id, execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) noexcept {
     return choose_class(worker_id, lane, routes).has_value();
@@ -1970,6 +2214,35 @@ class ExecutionService::BoundedReadyStore final {
    * @throws Nothing.
    */
   std::uint64_t byte_count() const noexcept { return byte_count_; }
+
+  /**
+   * @brief Counts every physical ready entry by immutable Run QoS class.
+   * @return One complete store-local diagnostic cut.
+   * @throws Nothing; caller holds `PoolState::mutex`.
+   * @note Unknown class values make the snapshot invalid while preserving its
+   * total count; they are never silently assigned to either known class.
+   */
+  ExecutionReadyClassSnapshot class_snapshot() const noexcept {
+    ExecutionReadyClassSnapshot snapshot;
+    for (const std::shared_ptr<QueueEntry>& entry : entries_) {
+      ++snapshot.total_entries;
+      switch (entry->run->policy_qos.service_class) {
+        case ComputeRunQosClass::Interactive:
+          ++snapshot.interactive_entries;
+          break;
+        case ComputeRunQosClass::Throughput:
+          ++snapshot.throughput_entries;
+          break;
+        default:
+          snapshot.valid = false;
+          break;
+      }
+    }
+    if (snapshot.total_entries != entry_count_) {
+      std::terminate();
+    }
+    return snapshot;
+  }
 
  private:
   /**
@@ -2364,15 +2637,46 @@ class ExecutionService::BoundedReadyStore final {
   }
 
   /**
-   * @brief Tests whether one class currently contains startable ready work.
+   * @brief Builds the exact child-grant vector for one physical task start.
+   * @param run Run whose immutable demand and retained bytes are authoritative.
+   * @return Complete per-task Host resource demand.
+   * @throws Nothing.
+   */
+  static ResourceVector task_execution_resources(const RunState& run) noexcept {
+    return ResourceVector{1U, run.execution_retained_bytes_per_task,
+                          run.resource_demand.scratch_bytes, 0U, 0U};
+  }
+
+  /**
+   * @brief Tests whether a Run can mint its next exact execution child grant.
+   * @param run Run whose mutex is held by the caller.
+   * @return True only when live reservation capacity covers every dimension.
+   * @throws Nothing; a reservation-state locking failure terminates because
+   * this helper is a no-throw evidence probe.
+   * @note This copies authority-free capacity and never mints or consumes a
+   * grant. A later `try_grant()` remains the sole commit linearization point.
+   */
+  static bool has_execution_capacity(const RunState& run) noexcept {
+    return run.reservation.has_value() &&
+           resources_fit(task_execution_resources(run),
+                         run.reservation->available());
+  }
+
+  /**
+   * @brief Tests whether one class contains scheduler-selectable ready work.
    * @param service_class Class already independent from intent and route.
    * @param worker_id Worker attempting a start.
    * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
-   * @return True when at least one live Run exposes one lane head.
+   * @return True when at least one live Run exposes one route-, operation-,
+   * and lifecycle-eligible lane head for policy selection.
    * @throws Nothing.
+   * @note Execution child-grant capacity is deliberately excluded. A selected
+   * but grant-exhausted entry reaches `commit_start()`, receives a
+   * worker-local grant-block mark, and leaves the same selection cycle free to
+   * search other candidates without advancing dispatch or fairness state.
    */
-  bool has_startable(
+  bool has_scheduler_selectable(
       ComputeRunQosClass service_class, int worker_id,
       execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) noexcept {
@@ -2390,25 +2694,58 @@ class ExecutionService::BoundedReadyStore final {
   }
 
   /**
+   * @brief Tests whether one class has evidence-startable ready work.
+   * @param service_class Class already independent from intent and route.
+   * @param worker_id Worker whose lane-local candidate visibility is sampled.
+   * @param lane Fixed physical lane owned by the worker.
+   * @param routes Host-owned route state used only for eligibility checks.
+   * @return True when one scheduler-selectable lane head can also mint its
+   * exact execution child grant from live reservation capacity.
+   * @throws Nothing.
+   * @note This observation-only probe never filters the policy frontier and
+   * never mints authority. `try_grant()` remains the sole commit linearization
+   * point, and a failed commit publishes no service-start observation.
+   */
+  bool has_evidence_startable(
+      ComputeRunQosClass service_class, int worker_id,
+      execution::PhysicalExecutionLane lane,
+      const execution::PhysicalExecutionRoutes& routes) noexcept {
+    for (auto& row : run_states_) {
+      PolicyRunState& state = row.second;
+      if (state.run->policy_qos.service_class != service_class) {
+        continue;
+      }
+      std::lock_guard<std::mutex> run_lock(state.run->mutex);
+      if (candidate_entry_for_lane(state, worker_id, lane, routes) != nullptr &&
+          has_execution_capacity(*state.run)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * @brief Applies the fixed three-to-one inter-class arbitration rule.
    * @param worker_id Worker attempting a start.
    * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
-   * @return Selected class, or null when this worker has no startable route.
+   * @return Selected class, or null when this worker has no selectable route.
    * @throws Nothing.
+   * @note Class competition is intentionally independent of transient child-
+   * grant capacity. Grant exhaustion is handled only after policy selection.
    */
   std::optional<ComputeRunQosClass> choose_class(
       int worker_id, execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) noexcept {
-    const bool interactive_ready =
-        has_startable(ComputeRunQosClass::Interactive, worker_id, lane, routes);
-    const bool throughput_ready =
-        has_startable(ComputeRunQosClass::Throughput, worker_id, lane, routes);
-    if (!interactive_ready && !throughput_ready) {
+    const bool interactive_selectable = has_scheduler_selectable(
+        ComputeRunQosClass::Interactive, worker_id, lane, routes);
+    const bool throughput_selectable = has_scheduler_selectable(
+        ComputeRunQosClass::Throughput, worker_id, lane, routes);
+    if (!interactive_selectable && !throughput_selectable) {
       return std::nullopt;
     }
-    if (interactive_ready &&
-        (!throughput_ready ||
+    if (interactive_selectable &&
+        (!throughput_selectable ||
          consecutive_interactive_ < kInteractiveBurstLimit)) {
       return ComputeRunQosClass::Interactive;
     }
@@ -3316,13 +3653,13 @@ class ThroughputReservationAccount final
   }
 
   /**
-   * @brief Copies current Throughput-owned root commitments for tests.
-   * @return Exact class-owned vector; no authority is minted.
+   * @brief Copies fixed capacity and current Throughput-owned commitments.
+   * @return Immutable policy-only diagnostic; no authority is minted.
    * @throws std::system_error when transaction locking fails.
    */
-  ResourceVector snapshot() const {
+  ExecutionThroughputReservationSnapshot snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return reserved_;
+    return ExecutionThroughputReservationSnapshot{capacity_, reserved_};
   }
 
  private:
@@ -3790,6 +4127,43 @@ void disarm_reserved_start_rollback_probe_for_testing() noexcept {
   reserved_start_probe_state().armed.store(false, std::memory_order_release);
 }
 
+/** @copydoc arm_route_commit_failure_probe_for_testing */
+void arm_route_commit_failure_probe_for_testing() noexcept {
+  RouteCommitFailureProbeState& state = route_commit_failure_probe_state();
+  state.armed.store(false, std::memory_order_release);
+  state.triggered.store(false, std::memory_order_relaxed);
+  state.armed.store(true, std::memory_order_release);
+}
+
+/** @copydoc route_commit_failure_probe_triggered_for_testing */
+bool route_commit_failure_probe_triggered_for_testing() noexcept {
+  return route_commit_failure_probe_state().triggered.load(
+      std::memory_order_acquire);
+}
+
+/** @copydoc disarm_route_commit_failure_probe_for_testing */
+void disarm_route_commit_failure_probe_for_testing() noexcept {
+  route_commit_failure_probe_state().armed.store(false,
+                                                 std::memory_order_release);
+}
+
+/** @copydoc set_service_start_arbitration_observer_for_testing */
+void set_service_start_arbitration_observer_for_testing(
+    ServiceStartArbitrationObserver observer, void* context) noexcept {
+  ServiceStartArbitrationProbeState& state =
+      service_start_arbitration_probe_state();
+  state.context.store(context, std::memory_order_relaxed);
+  state.observer.store(observer, std::memory_order_release);
+}
+
+/** @copydoc clear_service_start_arbitration_observer_for_testing */
+void clear_service_start_arbitration_observer_for_testing() noexcept {
+  ServiceStartArbitrationProbeState& state =
+      service_start_arbitration_probe_state();
+  state.observer.store(nullptr, std::memory_order_release);
+  state.context.store(nullptr, std::memory_order_relaxed);
+}
+
 /** @copydoc estimate_direct_operation_resources_for_testing */
 ResourceVector estimate_direct_operation_resources_for_testing(
     const OperationExecutionConstraints& constraints,
@@ -3992,11 +4366,11 @@ void ExecutionService::observe_policy_binding_retired(
   service->lifecycle_telemetry_->decrement_physical_counter(
       ExecutionLifecyclePhysicalCounter::LivePolicyBinding);
   try {
-    service->lifecycle_telemetry_->publish(
+    service->lifecycle_registry_->publish_physical_retirement(
         ExecutionLifecycleEventKind::BindingRetired,
         destroy_failed ? ExecutionLifecycleCategory::FailureOther
                        : ExecutionLifecycleCategory::None,
-        0U, 0U, 0U, generation, service->lifecycle_registry_->counters());
+        generation);
   } catch (...) {
     std::terminate();
   }
@@ -4249,6 +4623,18 @@ ResourceLedger::Snapshot ExecutionService::resource_snapshot() const {
   return pool_->ledger.snapshot();
 }
 
+/** @copydoc ExecutionService::throughput_reservation_snapshot */
+ExecutionThroughputReservationSnapshot
+ExecutionService::throughput_reservation_snapshot() const {
+  return pool_->throughput_reservations->snapshot();
+}
+
+/** @copydoc ExecutionService::ready_class_snapshot */
+ExecutionReadyClassSnapshot ExecutionService::ready_class_snapshot() const {
+  std::lock_guard<std::mutex> lock(pool_->mutex);
+  return pool_->ready_store.class_snapshot();
+}
+
 /** @copydoc ExecutionService::compute_io_executor */
 execution::ComputeIoExecutor& ExecutionService::compute_io_executor() noexcept {
   return pool_->compute_io_executor;
@@ -4264,6 +4650,12 @@ const execution::ComputeIoExecutor& ExecutionService::compute_io_executor()
 std::optional<ResourceLedger::DeviceSnapshot>
 ExecutionService::device_resource_snapshot(DeviceId device) const {
   return pool_->ledger.device_snapshot(device);
+}
+
+/** @copydoc ExecutionService::device_resource_snapshots */
+std::vector<ResourceLedger::DeviceSnapshot>
+ExecutionService::device_resource_snapshots() const {
+  return pool_->ledger.device_snapshots();
 }
 
 /** @copydoc ExecutionService::register_graph_lifecycle */
@@ -4407,8 +4799,7 @@ void ExecutionService::shutdown() {
     std::vector<std::thread> workers;
     std::shared_ptr<policy::PolicyBinding> interactive_binding;
     std::shared_ptr<policy::PolicyBinding> throughput_binding;
-    ShutdownWorkerJoinGuard worker_join_guard(workers, *lifecycle_telemetry_,
-                                              *lifecycle_registry_);
+    ShutdownWorkerJoinGuard worker_join_guard(workers, *lifecycle_registry_);
     {
       std::lock_guard<std::mutex> lock(pool_->mutex);
       pool_->stopping = true;
@@ -4473,12 +4864,6 @@ void ExecutionService::shutdown() {
 ExecutionLifecyclePage ExecutionService::lifecycle_snapshot(
     std::uint64_t after_cursor, std::uint32_t limit) const {
   return lifecycle_telemetry_->snapshot(after_cursor, limit);
-}
-
-/** @copydoc ExecutionService::throughput_reservation_snapshot_for_testing */
-ResourceVector ExecutionService::throughput_reservation_snapshot_for_testing()
-    const {
-  return pool_->throughput_reservations->snapshot();
 }
 
 /** @copydoc ExecutionService::estimate_cpu_run_resources */
@@ -5196,6 +5581,113 @@ ExecutionService::device_executor_diagnostics(Device device) const {
   return pool_->device_executors.diagnostics(device);
 }
 
+/** @copydoc ExecutionService::acquire_metal_resident_value */
+DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
+    Value source, std::uint32_t width, std::uint32_t height,
+    const execution::DeviceCompletionSeed& completion_seed,
+    std::chrono::steady_clock::time_point capture_deadline) {
+  if (!source.valid() || width == 0U || height == 0U) {
+    throw std::invalid_argument(
+        "Metal residency acquisition requires a valid Value and positive "
+        "dimensions.");
+  }
+  if (!pool_->device_executors.contains(Device::GPU_METAL)) {
+    throw std::invalid_argument(
+        "Metal residency acquisition requires a registered executor.");
+  }
+  if (std::chrono::steady_clock::now() >= capture_deadline) {
+    throw std::runtime_error(
+        "I2 Metal acquisition deadline expired before residency lookup.");
+  }
+  const ReadyFenceSnapshot source_state = source.ready_fence().poll();
+  if (!source_state.ready()) {
+    throw ReadyFenceAccessError(source_state);
+  }
+
+  const std::shared_ptr<execution::ResidencyManager> residency =
+      pool_->device_executors.residency_manager();
+  if (!residency) {
+    throw std::logic_error(
+        "Metal executor registry has no process residency manager.");
+  }
+  const DeviceId metal_device(DeviceBackend::Metal);
+  std::optional<Value> resident = residency->find_published_value_acquisition(
+      completion_seed, source, metal_device, MemoryDomain::DeviceLocal);
+  if (resident.has_value()) {
+    const std::optional<ReadyFenceSnapshot> resident_state =
+        poll_i2_metal_resident_reuse(resident->ready_fence(), capture_deadline);
+    if (!resident_state.has_value()) {
+      throw std::runtime_error(
+          "I2 Metal acquisition deadline expired before resident reuse.");
+    }
+    if (!resident_state->ready()) {
+      throw ReadyFenceAccessError(*resident_state);
+    }
+    return DeviceResidentValueAcquisition{std::move(*resident), false};
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(pool_->mutex);
+    if (pool_->stopping || pool_->shutdown_in_progress ||
+        pool_->shutdown_complete) {
+      throw std::runtime_error(
+          "ExecutionService cannot acquire Metal residency during shutdown.");
+    }
+  }
+  if (std::chrono::steady_clock::now() >= capture_deadline) {
+    throw std::runtime_error(
+        "I2 Metal acquisition deadline expired before native submission.");
+  }
+  HostToMetalValueInvocation invocation(source, width, height, completion_seed,
+                                        capture_deadline, pool_->ledger);
+  pool_->device_executors.execute(Device::GPU_METAL, invocation);
+  Value pending = invocation.take_published_value();
+  if (!pending.valid()) {
+    throw std::logic_error(
+        "Metal executor completed without a published resident Value.");
+  }
+
+  const std::optional<ReadyFenceSnapshot> terminal =
+      wait_for_i2_metal_completion_until(pending.ready_fence(),
+                                         capture_deadline);
+  if (!terminal.has_value()) {
+    const execution::DeviceCompletionIdentity identity(completion_seed, source,
+                                                       pending);
+    (void)contain_i2_timed_out_transfer(*residency, identity, pending);
+    throw std::runtime_error(
+        "I2 Metal residency acquisition reached the absolute capture "
+        "deadline.");
+  }
+  if (!terminal->ready()) {
+    throw ReadyFenceAccessError(*terminal);
+  }
+  resident = residency->find_published_value_acquisition(
+      completion_seed, source, metal_device, MemoryDomain::DeviceLocal);
+  if (!resident.has_value() ||
+      resident->storage_binding() != pending.storage_binding()) {
+    throw std::logic_error(
+        "Metal completion did not publish the exact resident binding.");
+  }
+  return DeviceResidentValueAcquisition{std::move(*resident), true};
+}
+
+/** @copydoc ExecutionService::release_metal_resident_value */
+bool ExecutionService::release_metal_resident_value(
+    ValueRevisionId revision, const StorageBinding& binding,
+    ProducerIdentity producer) {
+  if (binding.device != DeviceId(DeviceBackend::Metal) ||
+      binding.memory_domain != MemoryDomain::DeviceLocal) {
+    return false;
+  }
+  const std::shared_ptr<execution::ResidencyManager> residency =
+      pool_->device_executors.residency_manager();
+  if (!residency) {
+    throw std::logic_error(
+        "Metal resident release requires the process residency manager.");
+  }
+  return residency->release_resident(revision, binding, producer);
+}
+
 /** @copydoc ExecutionService::submit_initial_task_handles */
 void ExecutionService::submit_initial_task_handles(
     std::vector<ExecutionTaskHandle>&& handles, int total_task_count,
@@ -5287,7 +5779,17 @@ void ExecutionService::dec_tasks_to_complete() {
 /** @copydoc ExecutionService::log_event */
 void ExecutionService::log_event(ExecutionTraceAction action, int node_id) {
   RunState& run = current_worker_run();
-  run.host->log_event(action, node_id, tls_worker_id_, run.id.value());
+  if (tls_queue_entry_ == nullptr) {
+    throw std::logic_error(
+        "ExecutionService trace requires one active ready submission.");
+  }
+  const ReadyTaskSubmission& submission = tls_queue_entry_->submission;
+  const ComputeRunTaskIdentity identity = submission.identity();
+  const ExecutionTaskAuditIdentity audit_identity{
+      submission.metadata().revision().value(), identity.run_id().value(),
+      identity.local_task_id().value()};
+  run.host->log_event(action, node_id, tls_worker_id_, run.id.value(),
+                      audit_identity);
 }
 
 /** @copydoc ExecutionService::fail_run */
@@ -5411,7 +5913,7 @@ void ExecutionService::worker_loop(
       std::shared_ptr<policy::PolicyBinding> binding;
       {
         std::unique_lock<std::mutex> lock(pool_->mutex);
-        if (grant_blocked && !pool_->ready_store.has_startable_work(
+        if (grant_blocked && !pool_->ready_store.has_scheduler_selectable_work(
                                  worker_id, lane, pool_->physical_routes)) {
           const std::uint64_t observed_epoch = grant_blocked_epoch;
           if (!pool_->stopping &&
@@ -5434,8 +5936,8 @@ void ExecutionService::worker_loop(
         }
         pool_->ready_cv.wait(lock, [this, worker_id, lane]() {
           return pool_->stopping ||
-                 pool_->ready_store.has_startable_work(worker_id, lane,
-                                                       pool_->physical_routes);
+                 pool_->ready_store.has_scheduler_selectable_work(
+                     worker_id, lane, pool_->physical_routes);
         });
         if (pool_->stopping) {
           return;
@@ -5639,6 +6141,22 @@ void ExecutionService::worker_loop(
     }
 
     const std::shared_ptr<RunState> run = entry->run;
+    const std::shared_ptr<ComputeRunObservationSink>& observation_sink =
+        entry->submission.lease_.descriptor().observation_sink();
+    if (entry->service_start_coordinate.has_value()) {
+      if (observation_sink == nullptr ||
+          !entry->service_start_observation.has_value()) {
+        std::terminate();
+      }
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+      notify_service_start_arbitration_for_testing(
+          testing::ServiceStartArbitrationPoint::BeforeServiceStartCallback);
+#endif
+      observation_sink->on_service_start(
+          entry->submission.lease_.descriptor(), entry->submission.identity(),
+          entry->policy_service_cost, *entry->service_start_observation,
+          *entry->service_start_coordinate);
+    }
     try {
       const std::optional<ComputeRunCancellationReason> cancellation =
           entry->submission.lease_.observe_cancellation();
@@ -5665,7 +6183,11 @@ void ExecutionService::worker_loop(
     tls_queue_entry_ = entry.get();
     tls_fence_continuation_gate_.reset();
     tls_worker_id_ = worker_id;
-    run->host->set_task_context(worker_id, run->id.value());
+    const ComputeRunTaskIdentity task_identity = entry->submission.identity();
+    const ExecutionTaskAuditIdentity audit_identity{
+        entry->submission.metadata().revision().value(),
+        task_identity.run_id().value(), task_identity.local_task_id().value()};
+    run->host->set_task_context(worker_id, run->id.value(), audit_identity);
     lifecycle_telemetry_->increment_physical_counter(
         ExecutionLifecyclePhysicalCounter::EnteredCallback);
     try {

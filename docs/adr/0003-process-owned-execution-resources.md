@@ -45,6 +45,16 @@ completion, settles cancellation and shutdown exactly once, and rejects
 synchronous completion waits from CPU compute workers. The first migrated
 vertical is staged HP cache save: graph-state policy still chooses the cache
 operation and waits before the existing visible publication point.
+Issue #106 adds a fixed observation-only task identity to this process-owned
+execution path. A task-backed trace copies the validated nonzero Graph revision
+and Run id plus the Run-local task id; runtime-wide events keep that identity
+absent, and the Host binds the resolved session once on each returned page.
+These scalars cannot acquire a Run lease, select a live task, cancel work,
+reserve resources, publish cache or artifact state, or alter retry policy.
+Issue #106 also maintains two opt-in manual Clang/libFuzzer targets around the
+production worker-assignment and isolated-CPU invocation decoders. They remain
+outside default builds, CTest, CI, install, and export ownership and establish
+no process, plugin, filesystem, network, quota, or artifact authority.
 Public Host/CLI/IPC cancellation controls remain future behavior. ADR 0007 supersedes this ADR only
 as the detailed
 ownership and lifecycle contract; the high-level process ownership decision
@@ -139,14 +149,16 @@ the exact command-completion owner. Perlin publishes a pending native Value,
 encodes texture-to-buffer readback, and returns without a command-buffer wait.
 Completion freshness, applicable producer Ready publication, destination Ready
 publication, and resident insertion are one manager-locked transaction.
-Kernel first pretracks the lineage without advancing it before fallible
-coordinator submission. An accepted current publication then performs a
-no-allocation manager advance while the coordinator still excludes currentness
-observation; rejected and born-stale candidates do not. This prevents a late
-older Run start from regressing the manager generation. Because a prepared
-candidate owns compute-request-lane admission before the fallible pretrack,
-Graph close joins that lane before retiring the exact Graph's generation rows;
-no permanent closed-identity tombstone is required.
+Kernel first pretracks the lineage without assigning a managed current identity
+before fallible coordinator submission. An accepted current publication then
+assigns the exact generation without allocation while the coordinator still
+excludes currentness observation; accepted-coordinate order may authorize a
+numerically lower generation. Rejected and born-stale candidates assign
+nothing, and a later stale Run observation cannot replace the exact managed
+identity. Standalone lineages separately retain numeric-maximum ordering.
+Because a prepared candidate owns compute-request-lane admission before the
+fallible pretrack, Graph close joins that lane before retiring the exact
+Graph's generation rows; no permanent closed-identity tombstone is required.
 Pending-Value continuation reuses the existing Run and ready store. This adds
 no public device-executor API, no Graph/cache authority, and no second
 device-capacity ledger. The service-owned `ResourceLedger` remains the sole

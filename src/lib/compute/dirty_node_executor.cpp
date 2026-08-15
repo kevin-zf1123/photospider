@@ -352,7 +352,9 @@ RealTimeDirtyNodeExecutor::RealTimeDirtyNodeExecutor(
       rt_write_buffer_(rt_write_buffer),
       node_synchronization_(context.node_synchronization),
       run_lease_(context.run_lease),
-      direct_execution_service_(context.direct_execution_service) {}  // NOLINT
+      direct_execution_service_(context.direct_execution_service),
+      exact_factor_four_preview_(context.exact_factor_four_preview) {
+}  // NOLINT
 
 /** @copydoc RealTimeDirtyNodeExecutor::execute */
 void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
@@ -401,7 +403,8 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
     } else {
       ImageBuffer& rt_buffer =
           ensure_rt_buffer(node, entry, resolved_inputs.image_inputs);
-      copy_monolithic_image_roi(result, entry, rt_buffer);
+      copy_monolithic_image_roi(result, entry, rt_buffer,
+                                exact_factor_four_preview_ && dirty_source);
       rt_write_buffer_.ensure_output(node.id).data = std::move(result.data);
     }
   } else {
@@ -528,14 +531,14 @@ void RealTimeDirtyNodeExecutor::execute_monolithic(
     rt_write_buffer_.ensure_output(node.id) = std::move(result);
     return;
   }
-  copy_monolithic_image_roi(result, entry, rt_buffer);
+  copy_monolithic_image_roi(result, entry, rt_buffer, false);
   rt_write_buffer_.ensure_output(node.id).data = std::move(result.data);
 }
 
 /** @copydoc RealTimeDirtyNodeExecutor::copy_monolithic_image_roi */
 void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
-    const NodeOutput& result, const RtPlanEntry& entry,
-    ImageBuffer& rt_buffer) const {
+    const NodeOutput& result, const RtPlanEntry& entry, ImageBuffer& rt_buffer,
+    bool exact_factor_four_source) const {
   if (result.image_buffer.width <= 0 || result.image_buffer.height <= 0) {
     return;
   }
@@ -552,6 +555,12 @@ void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
     rt_buffer = make_aligned_cpu_image_buffer(
         entry.rt_size.width, entry.rt_size.height, result.image_buffer.channels,
         result.image_buffer.type);
+  }
+
+  if (exact_factor_four_source) {
+    image_processing::exact_box_average_factor_four_region(
+        result.image_buffer, rt_buffer, entry.roi_rt);
+    return;
   }
 
   const ImageBuffer* normalized_result = &result.image_buffer;

@@ -341,8 +341,14 @@ Issue #70、#71 与 #86 交付的 service 与 ledger 会核算：
 以下维度仍是后续目标行为；当前 ledger 不会猜测、预留，也不会用虚构的非零值表示它们：
 
 - 每 device 的 queue-depth 与 in-flight-command 容量；
-- compute-I/O operation 与 byte；以及
-- plugin-process、invocation、IPC/shared-memory 与隔离容量。
+- compute-I/O operation 与 byte。
+
+Issue #104 已经在同一个 `ResourceLedger` root 中增加独立 plugin 子账本，核算 runtime-process
+slot、CPU slot、address-space byte、shared-memory byte 与 descriptor count。只有可信 Host code
+可以铸造一个 move-only、一次性 token，该 token 绑定完整 invocation identity 与精确五维 vector；
+消费会把结算权转移给 RAII lease，replay tombstone 则在 ledger 生命周期内保持 spent。该私有权限
+只由长期维护的 direct/supervised isolated runtime 组合使用。当前没有最终用户 Graph operation、
+embedded Host/CLI、IPC request、worker route、policy 或 plugin 能铸造 token 或选择该组合。
 
 Admission 会事务性验证一个 checked resource vector，只返回完整 Run reservation 或什么也不
 返回。可信 service code 会在该 reservation 内部分配 ready-entry/byte 与 CPU/memory/scratch

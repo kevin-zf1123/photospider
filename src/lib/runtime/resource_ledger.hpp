@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -108,6 +109,130 @@ struct DeviceResourceVector final {
 
   /** @brief Native bytes used by invocation or transfer workspace. */
   std::uint64_t device_scratch_bytes = 0U;
+};
+
+/**
+ * @brief Exact Host-accounted resources for one isolated plugin invocation.
+ *
+ * Every field is an independent capacity dimension. The vector is copied into
+ * the Host-issued token and later compared exactly at consumption, so child or
+ * wire declarations can neither enlarge nor retarget admitted authority.
+ *
+ * @throws Nothing for aggregate value operations.
+ * @note This value carries no reservation, execution, or release authority.
+ */
+struct PluginResourceVector final {
+  /** @brief Concurrent freshly execed runtime-process slots. */
+  std::uint64_t runtime_processes = 0U;
+
+  /** @brief Concurrent isolated CPU callback slots. */
+  std::uint64_t cpu_slots = 0U;
+
+  /** @brief Aggregate admitted per-process address-space ceilings in bytes. */
+  std::uint64_t address_space_bytes = 0U;
+
+  /** @brief Invocation-owned shared-memory bytes. */
+  std::uint64_t shared_memory_bytes = 0U;
+
+  /** @brief Invocation capability and control descriptor count. */
+  std::uint64_t descriptor_count = 0U;
+};
+
+/**
+ * @brief Fixed domain-separated digest of one complete invocation identity.
+ * @note The executor derives this from tenant, Job, attempt, worker lease,
+ * package generation, and invocation identity before asking the ledger to
+ * mint authority. The digest itself never crosses the plugin wire.
+ */
+using PluginInvocationIdentityDigest = std::array<std::uint8_t, 32U>;
+
+/**
+ * @brief Compares every plugin resource dimension for exact equality.
+ * @param lhs First complete vector.
+ * @param rhs Second complete vector.
+ * @return True only when every dimension is equal.
+ * @throws Nothing.
+ */
+bool operator==(const PluginResourceVector& lhs,
+                const PluginResourceVector& rhs) noexcept;
+
+/**
+ * @brief Reports any differing plugin resource dimension.
+ * @param lhs First complete vector.
+ * @param rhs Second complete vector.
+ * @return True when at least one dimension differs.
+ * @throws Nothing.
+ */
+bool operator!=(const PluginResourceVector& lhs,
+                const PluginResourceVector& rhs) noexcept;
+
+/**
+ * @brief Adds complete plugin resource vectors without wraparound.
+ * @param lhs First vector.
+ * @param rhs Second vector.
+ * @return Exact sum, or no value if any dimension overflows.
+ * @throws Nothing.
+ */
+std::optional<PluginResourceVector> checked_add_plugin_resources(
+    const PluginResourceVector& lhs, const PluginResourceVector& rhs) noexcept;
+
+/**
+ * @brief Tests component-wise plugin resource capacity.
+ * @param requested Vector requiring capacity.
+ * @param available Vector supplying capacity.
+ * @return True only when every requested dimension fits.
+ * @throws Nothing.
+ */
+bool plugin_resources_fit(const PluginResourceVector& requested,
+                          const PluginResourceVector& available) noexcept;
+
+/**
+ * @brief Stable reason one Host plugin-resource authority operation failed.
+ */
+enum class PluginResourceAdmissionErrorCode : std::uint8_t {
+  /** @brief One or more requested dimensions exceed remaining capacity. */
+  QuotaExceeded = 0U,
+
+  /** @brief The complete invocation identity was already issued once. */
+  Replay = 1U,
+
+  /** @brief Token consumption supplied a different identity digest. */
+  IdentityMismatch = 2U,
+
+  /** @brief Token consumption supplied a different resource vector. */
+  ResourceMismatch = 3U,
+
+  /** @brief Consumption was attempted through an inactive token. */
+  InactiveToken = 4U,
+};
+
+/**
+ * @brief Typed fail-closed plugin resource admission or consumption failure.
+ *
+ * @throws std::bad_alloc when retaining the diagnostic fails.
+ * @note The exception carries observation only and never carries capacity.
+ */
+class PluginResourceAdmissionError final : public std::runtime_error {
+ public:
+  /**
+   * @brief Creates one stable typed resource-authority failure.
+   * @param code Closed failure reason.
+   * @param message Host-owned human-readable diagnostic.
+   * @throws std::bad_alloc when diagnostic storage cannot allocate.
+   */
+  PluginResourceAdmissionError(PluginResourceAdmissionErrorCode code,
+                               std::string message);
+
+  /**
+   * @brief Returns the closed failure reason.
+   * @return Code supplied at construction.
+   * @throws Nothing.
+   */
+  PluginResourceAdmissionErrorCode code() const noexcept { return code_; }
+
+ private:
+  /** @brief Stable failure category. */
+  PluginResourceAdmissionErrorCode code_;
 };
 
 /**
@@ -396,6 +521,215 @@ class ResourceLedger final {
 
   /** @brief Move-only exact child authority minted by one reservation. */
   class Grant;
+
+  /** @brief Move-only consumed isolated-plugin resource authority. */
+  class PluginResourceLease;
+
+  /**
+   * @brief Host-issued one-use plugin invocation resource token.
+   *
+   * Issuance reserves the exact vector and permanently spends the identity for
+   * this ledger lifetime. Exact consumption transfers release ownership to a
+   * lease; destruction before consumption rolls reservation back once while
+   * preserving the replay tombstone.
+   */
+  class PluginResourceToken final {
+   public:
+    /**
+     * @brief Transfers one unconsumed token and its rollback obligation.
+     * @param other Token made inactive by the transfer.
+     * @throws Nothing.
+     */
+    PluginResourceToken(PluginResourceToken&& other) noexcept;
+
+    /**
+     * @brief Replaces this token after returning any prior reservation.
+     * @param other Token made inactive by the transfer.
+     * @return Reference to this token.
+     * @throws Nothing; invariant or synchronization failure terminates.
+     */
+    PluginResourceToken& operator=(PluginResourceToken&& other) noexcept;
+
+    /**
+     * @brief Returns an unconsumed exact reservation once.
+     * @throws Nothing; invariant or synchronization failure terminates.
+     */
+    ~PluginResourceToken() noexcept;
+
+    /**
+     * @brief Prevents copying Host-minted authority.
+     * @param other Source token that cannot be copied.
+     * @throws Nothing because this overload is deleted.
+     */
+    PluginResourceToken(const PluginResourceToken& other) = delete;
+
+    /**
+     * @brief Prevents copy-assigning Host-minted authority.
+     * @param other Source token that cannot be copied.
+     * @return No value because this overload is deleted.
+     * @throws Nothing because this overload is deleted.
+     */
+    PluginResourceToken& operator=(const PluginResourceToken& other) = delete;
+
+    /**
+     * @brief Reports whether this owner retains an unconsumed reservation.
+     * @return True before movement, consumption, or destruction.
+     * @throws Nothing.
+     */
+    bool active() const noexcept;
+
+    /**
+     * @brief Copies the bound invocation identity digest.
+     * @return Exact digest, or zero after movement/consumption.
+     * @throws Nothing.
+     */
+    PluginInvocationIdentityDigest identity_digest() const noexcept;
+
+    /**
+     * @brief Copies the exact admitted resource vector.
+     * @return Bound vector, or zero after movement/consumption.
+     * @throws Nothing.
+     */
+    PluginResourceVector resources() const noexcept;
+
+    /**
+     * @brief Consumes this token against equal identity and resource facts.
+     * @param identity Exact complete invocation identity digest.
+     * @param resources Exact resource vector used for issuance.
+     * @return Move-only lease retaining the reservation through all effects.
+     * @throws PluginResourceAdmissionError for inactive or mismatched facts.
+     * @note Mismatch leaves this token active and performs no accounting
+     * mutation. Success can occur only once and transfers exact settlement.
+     */
+    PluginResourceLease consume(const PluginInvocationIdentityDigest& identity,
+                                const PluginResourceVector& resources) &&;
+
+   private:
+    friend class ResourceLedger;
+
+    /**
+     * @brief Wraps one already committed Host reservation.
+     * @param root Matching shared ledger state.
+     * @param identity Exact replay-spent identity digest.
+     * @param resources Exact committed vector.
+     * @throws Nothing.
+     */
+    PluginResourceToken(std::shared_ptr<ResourceLedgerRootState> root,
+                        PluginInvocationIdentityDigest identity,
+                        PluginResourceVector resources) noexcept;
+
+    /**
+     * @brief Returns this unconsumed reservation exactly once.
+     * @return Nothing.
+     * @throws Nothing; invariant or synchronization failure terminates.
+     */
+    void reset() noexcept;
+
+    /** @brief Shared ledger authority retained until transfer or rollback. */
+    std::shared_ptr<ResourceLedgerRootState> root_;
+
+    /** @brief Complete replay-spent identity bound at issuance. */
+    PluginInvocationIdentityDigest identity_{};
+
+    /** @brief Exact vector returned or transferred once. */
+    PluginResourceVector resources_;
+  };
+
+  /**
+   * @brief Move-only consumed plugin resource lease.
+   *
+   * The lease spans materialization, spawn, exec, callback, validation, and
+   * publication. Destruction releases its exact vector once while the ledger's
+   * replay tombstone remains immutable.
+   *
+   * @note Move and destruction must not race on the same lease object. Ledger
+   * settlement is internally serialized across independent leases.
+   */
+  class PluginResourceLease final {
+   public:
+    /**
+     * @brief Transfers one consumed reservation and settlement obligation.
+     * @param other Lease made inactive by the transfer.
+     * @throws Nothing.
+     * @note No ledger accounting changes; only unique local ownership moves.
+     */
+    PluginResourceLease(PluginResourceLease&& other) noexcept;
+
+    /**
+     * @brief Replaces this lease after exactly settling prior ownership.
+     * @param other Lease made inactive by the transfer.
+     * @return Reference to this lease after transfer.
+     * @throws Nothing; invariant or synchronization failure terminates.
+     * @note Self-move is a no-op. Otherwise this lease settles its old vector
+     * before taking the source lease's unique settlement obligation.
+     */
+    PluginResourceLease& operator=(PluginResourceLease&& other) noexcept;
+
+    /**
+     * @brief Settles the exact consumed vector once.
+     * @throws Nothing; invariant or synchronization failure terminates.
+     * @note The replay tombstone is retained by the ledger after settlement.
+     */
+    ~PluginResourceLease() noexcept;
+
+    /**
+     * @brief Prevents copying consumed authority.
+     * @param other Source lease that cannot be copied.
+     * @throws Nothing because this overload is deleted.
+     */
+    PluginResourceLease(const PluginResourceLease& other) = delete;
+
+    /**
+     * @brief Prevents copy-assigning consumed authority.
+     * @param other Source lease that cannot be copied.
+     * @return No value because this overload is deleted.
+     * @throws Nothing because this overload is deleted.
+     */
+    PluginResourceLease& operator=(const PluginResourceLease& other) = delete;
+
+    /**
+     * @brief Reports whether this lease owns unsettled resources.
+     * @return True before movement or destruction.
+     * @throws Nothing.
+     */
+    bool active() const noexcept;
+
+    /**
+     * @brief Copies the exact consumed vector.
+     * @return Bound vector, or zero when inactive.
+     * @throws Nothing.
+     */
+    PluginResourceVector resources() const noexcept;
+
+   private:
+    friend class PluginResourceToken;
+
+    /**
+     * @brief Creates an active lease by ownership transfer from one token.
+     * @param root Shared root containing the committed plugin subledger.
+     * @param resources Exact consumed vector to settle once.
+     * @throws Nothing.
+     * @note The caller has already spent the identity tombstone and detached
+     * token ownership; construction performs no admission or accounting.
+     */
+    PluginResourceLease(std::shared_ptr<ResourceLedgerRootState> root,
+                        PluginResourceVector resources) noexcept;
+
+    /**
+     * @brief Settles this exact vector and makes the lease inactive.
+     * @return Nothing.
+     * @throws Nothing; invariant or synchronization failure terminates.
+     * @note Moves root ownership out before taking the internal ledger lock,
+     * so re-entry or repeated destruction cannot settle the vector twice.
+     */
+    void reset() noexcept;
+
+    /** @brief Shared ledger root retaining settlement authority. */
+    std::shared_ptr<ResourceLedgerRootState> root_;
+
+    /** @brief Exact vector returned once. */
+    PluginResourceVector resources_;
+  };
 
   /** @brief Move-only committed authority for one device resource component. */
   class DeviceLease;
@@ -837,6 +1171,29 @@ class ResourceLedger final {
 
     /** @brief Current complete root commitments. */
     ResourceVector reserved;
+
+    /**
+     * @brief Component-wise lifetime maximum of complete root commitments.
+     * @note Values advance only in the same transaction that successfully
+     * commits `reserved`; release never lowers them and they mint no capacity.
+     */
+    ResourceVector high_water;
+  };
+
+  /**
+   * @brief Immutable plugin quota, commitment, and high-water snapshot.
+   * @throws Nothing for value copying.
+   * @note Replay tombstones are intentionally not exposed or mutable here.
+   */
+  struct PluginSnapshot final {
+    /** @brief Immutable configured isolated-plugin limits. */
+    PluginResourceVector limits;
+
+    /** @brief Current issued or consumed exact commitments. */
+    PluginResourceVector reserved;
+
+    /** @brief Component-wise lifetime maximum of successful commitments. */
+    PluginResourceVector high_water;
   };
 
   /**
@@ -852,6 +1209,13 @@ class ResourceLedger final {
 
     /** @brief Current planned or committed byte ownership. */
     DeviceResourceVector reserved;
+
+    /**
+     * @brief Component-wise lifetime maximum device byte ownership.
+     * @note Values advance only on successful device reservation and grant no
+     * allocation authority.
+     */
+    DeviceResourceVector high_water;
 
     /** @brief Checked component-wise limit minus reservation. */
     DeviceResourceVector available;
@@ -870,12 +1234,14 @@ class ResourceLedger final {
    * @brief Creates one independent ledger with immutable composition limits.
    * @param limits Maximum committed Host vector.
    * @param device_limits Immutable non-CPU per-device byte limits.
+   * @param plugin_limits Immutable isolated-plugin aggregate limits.
    * @throws std::invalid_argument for CPU or duplicate device limits.
    * @throws std::bad_alloc when root state allocation fails.
    * @note Zero limits are valid and reject only positive requests.
    */
   explicit ResourceLedger(ResourceVector limits,
-                          std::vector<DeviceResourceLimit> device_limits = {});
+                          std::vector<DeviceResourceLimit> device_limits = {},
+                          PluginResourceVector plugin_limits = {});
 
   /**
    * @brief Releases root state after every outstanding owner is gone.
@@ -961,14 +1327,37 @@ class ResourceLedger final {
       DeviceId device, const DeviceResourceVector& planned);
 
   /**
-   * @brief Copies limits and current root commitments for diagnostics/tests.
+   * @brief Atomically spends one identity and reserves its complete vector.
+   * @param identity Domain-separated complete invocation identity digest.
+   * @param requested Exact Host-derived plugin resource demand.
+   * @return Move-only one-use token owning the committed vector.
+   * @throws PluginResourceAdmissionError for replay or quota exhaustion.
+   * @throws std::bad_alloc when replay state cannot grow.
+   * @throws std::system_error when root synchronization fails.
+   * @note Replay lookup, quota checks, tombstone insertion, reservation, and
+   * high-water update occur under one root lock. Quota failure inserts no
+   * tombstone and no failure partially commits capacity.
+   */
+  PluginResourceToken issue_plugin_invocation(
+      const PluginInvocationIdentityDigest& identity,
+      const PluginResourceVector& requested);
+
+  /**
+   * @brief Copies limits, current commitments, and lifetime high-water values.
    * @return Non-authoritative immutable snapshot.
    * @throws std::system_error when internal mutex locking fails.
    */
   Snapshot snapshot() const;
 
   /**
-   * @brief Copies one exact configured device account.
+   * @brief Copies isolated-plugin limits, commitments, and high-water values.
+   * @return Non-authoritative immutable snapshot.
+   * @throws std::system_error when root synchronization fails.
+   */
+  PluginSnapshot plugin_snapshot() const;
+
+  /**
+   * @brief Copies one configured device account and its lifetime high-water.
    * @param device Device identity to inspect.
    * @return Immutable snapshot, or `std::nullopt` when unconfigured.
    * @throws std::system_error when root synchronization fails.

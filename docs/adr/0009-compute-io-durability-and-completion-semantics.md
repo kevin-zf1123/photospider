@@ -17,6 +17,15 @@ move cache failure behind Run publication, or turn the current private IPC
 post-publication cache outcomes, durable output commit, Graph-document
 transactions, and legacy output-side-effect migration.
 
+Issue #95 now implements a deliberately narrow source-private B1 manual/release
+output owner. `B1OutputStore` composes the Issue #88 executor with a rooted
+fresh-occurrence, manifest-last/no-replace transaction, typed crash-durable
+receipt with private minting, a retained opaque root-descriptor capability, and
+leaf-to-root barriers for the exact immutable B1 artifact. It does
+not replace the private IPC delivery store, add an installed output API, or
+complete the general recovery, post-publication cache, Graph-document, and
+legacy output-side-effect targets in this ADR.
+
 Late review of Issue #118 at Primary head
 `c99c94b56065aee6d456337af8ee0aa45c12e0a1` found two deadlocks in that reused
 Issue #88 executor dependency: same-worker submission followed by completion
@@ -217,10 +226,80 @@ The authority performs this protocol:
 9. on recovery, recognize committed manifests, reconstruct the commit index,
    and conservatively remove or quarantine incomplete stages and orphans.
 
+A concrete transaction retains an opened descriptor for the selected canonical
+root and for each fresh private slot; the selected root pathname is evidence,
+not continuing mutation authority. Creation, file access, publication,
+barriers, revalidation, and cleanup remain descriptor-relative and verify the
+expected filesystem identities. A root-path replacement or symlink
+substitution therefore fails the final binding instead of redirecting writes.
+For retained evidence, only the store can duplicate that root descriptor into
+an opaque copyable capability. Copies share the open-file description and lock
+lifetime, so they can extend exclusive-root ownership beyond the store object.
+
+The source-private B1 realization acquires a nonblocking advisory exclusive
+lock on the selected root for the store lifetime and creates a mode-`0700`
+same-root staging anchor and private child slot. Its namespace contract covers
+one cooperating store owner: every cooperating process/thread honors that lock
+and reserves `.b1-staging-*` and `occurrence-*` names to that owner. The lock is
+not a security boundary against an arbitrary non-cooperating same-UID actor.
+For each `mkdirat` → `openat` handoff the store first records the no-follow
+named directory identity, performs no child mutation, then requires the opened
+descriptor to have that exact identity. If the anchor handoff fails before the
+transaction guard exists, the ambiguous current anchor name is retained and
+the failure propagates without a retryability claim. A slot handoff failure
+after guard activation fail-stops if replacement residue prevents exact guarded
+cleanup. Payload and manifest tasks mutate only the verified private slot.
+After both accepted charges settle, the complete directory is published to its
+immutable occurrence name by one atomic no-replace directory rename
+(`RENAME_EXCL` on Darwin or `RENAME_NOREPLACE` on Linux), followed by source-
+anchor and destination-root barriers and final descriptor/name revalidation.
+No mkdir-created public occurrence is reopened for later writes.
+
+An allocation-free transaction guard records the exact identity of the anchor,
+slot, payload, private manifest, and published manifest as each becomes owned.
+Before public rename, factory, observation, wait, publication, or receipt work
+failure first cancels and waits for every accepted Compute I/O task, proves its
+exact charge retired, and rolls back only the private occurrence. Cleanup is
+strict rather than best effort: each present name must have its recorded type
+and identity at two descriptor-relative checks, every `unlinkat`/`rmdir` result
+and following absence is checked, and parent directories are synchronized.
+POSIX does not make the final identity check and following name-based removal
+one atomic identity-selected operation. Under the cooperating exclusive-owner
+precondition, no actor mutates a reserved name in that interval; a replacement
+detected by either check is preserved and causes fail-stop before removal. A
+mutation by a non-cooperating same-UID actor after the final check is outside
+this contract, and the design does not claim it can never remove such a
+replacement. An extra leaf, type/identity drift, `EIO`/`EROFS`, nonempty
+directory, or unprovable absence terminates fail-stop. Only checked private
+removal and observed absence within that precondition leave the original commit
+identity retryable from an empty namespace.
+
+The successful no-replace rename is an irreversible lifecycle transition from
+private rollback to public pending reconciliation. From that instruction
+onward, source-anchor barrier, destination-root barrier, final revalidation, or
+receipt-construction failure preserves both the immutable public occurrence and
+its empty same-root staging anchor; the guard has no public deletion authority.
+A retry with the same commit id opens the occurrence and optional pending anchor
+relative to the retained root descriptor, requires exactly the payload and
+manifest leaves, rechecks their expected candidate bytes, lengths, digests, and
+filesystem identities, completes the possibly missing source/root barriers,
+then repeats final root/name/leaf revalidation. Only then does it reconstruct
+the same stable receipt and remove the now-unneeded empty anchor. Reconciliation
+submits no new output task and never rewrites public bytes. Its receipt therefore
+contains empty `io_observations`; those empty observations cannot fabricate a
+current transaction FSM, so a B1 evaluator must receive the retained earlier
+new-work stream or fail closed. A non-directory, empty real directory, or real
+directory containing only unknown markers has no transaction-looking leaf and
+returns typed `SlotExists` untouched. Once payload, manifest, or private-
+manifest residue is present, an incomplete/extra entry set or payload/manifest
+drift fails closed as `RevalidationFailed` and is neither repaired nor deleted.
+
 The receipt identifies commit, descriptor/content, namespace, version, and
-achieved durability. It is not a mutable cache or staging path. The default
-policy never overwrites a committed output; replacement uses an explicit new
-version/commit identity.
+achieved durability. It has no public aggregate or field-based construction
+path and only the store mints its immutable typed fields after complete
+revalidation. It is not a mutable cache or staging path. The default policy
+never overwrites a committed output; replacement uses an explicit new version/
+commit identity.
 
 The achieved durability is typed. An explicitly requested atomic-visible
 transaction can return only an atomic-visibility receipt after the no-replace
@@ -290,13 +369,34 @@ durable commit.
 ### ComputeIoExecutor owns bounded mechanism, not policy
 
 Issue #88 adds one process-owned `ComputeIoExecutor` mechanism for bounded
-cache, asset, and codec subwork. Admission atomically covers task count and
-estimated retained bytes before lazy payload construction or side effects.
-Each accepted task retains its Run/transaction lifetime token and returns a
-typed `Succeeded`, `Failed`, or `Cancelled` completion. Cancellation,
-callback failure, late return, and graceful shutdown release that token and
-both accounts exactly once. CPU compute workers cannot synchronously wait on
-the completion.
+cache, asset, and codec subwork. A passing limit decision provisionally reserves
+task count and estimated retained bytes before lazy payload construction or
+side effects. The reservation occupies the constructing phase but does not yet
+publish an Accepted identity. Factory throw, empty callback, or queue-entry
+construction failure rolls that reservation back exactly and mints no Accepted
+event. Successful callback construction reaches one binary final decision. If
+admission remains open, queue ownership and Accepted publish together and bind
+the sequence. If external shutdown won after construction, Accepted instead
+publishes atomically with its exactly linked Cancelled settlement, and the
+callback never enters. Each accepted task retains its Run/transaction lifetime
+token and returns a typed `Succeeded`, `Failed`, or `Cancelled` completion.
+Cancellation, callback failure, late return, and graceful shutdown release that
+token and both accounts exactly once. CPU compute workers cannot synchronously
+wait on the completion.
+
+The executor also authors the attribution proof. Under the same mutex as every
+terminal rejection decision or successful Accepted publication it mints an
+immutable event containing a monotonic nonzero sequence, exact task/byte charge
+delta, typed decision, and the resulting process-global snapshot. Under the
+same mutex as settlement release it mints a second immutable event linked to
+that admission and carrying the exact released delta plus resulting snapshot.
+A rejected offer has zero delta; a provisional factory failure has no event at
+all because no admission identity became externally observable. The snapshot
+may include unrelated concurrent work and is useful for limit/high-water
+validation, but it is not a substitute for the task's own charge or release
+event. Every active task occupies exactly one of constructing, queued, or
+running in each snapshot. Event sequences may contain numeric gaps when
+consumers observe only a subset of process work.
 
 The sole I/O worker cannot admit another task to its owning executor: while
 admission remains open, that call returns inactive `InvalidRequest` before
@@ -330,6 +430,13 @@ owners. Those owners can submit bounded byte-transfer or codec subwork, but the
 executor never chooses paths, retry, overwrite, idempotency, retention, commit,
 or durability policy.
 
+When a domain owner elects to re-offer after capacity rejection, that policy
+must declare a finite deterministic attempt bound and a typed terminal result.
+It must preserve the logical task identity and charge across rejected offers,
+must not derive termination from elapsed time or polling cadence, and must
+release private staging authority when the bound is exhausted. The executor
+continues to expose only typed admission; it does not decide that policy.
+
 One generic pool for every filesystem and socket operation is rejected because
 it would combine unrelated lifecycles and make a worker mechanism an accidental
 transaction owner.
@@ -337,10 +444,11 @@ transaction owner.
 ### Security and durability capability are explicit
 
 Persistence owners resolve normalized paths below caller-authorized roots,
-prevent symlink escape, create private same-directory stages without following
-links, verify filesystem identity, and account for in-flight and retained
-quota. Untrusted plugins/codecs receive stage access only, never publication
-authority.
+open and retain those root/slot directory authorities without following links,
+prevent symlink escape, create and mutate private same-directory stages through
+descriptor-relative operations, verify filesystem identity and the final
+path-to-descriptor binding, and account for in-flight and retained quota.
+Untrusted plugins/codecs receive stage access only, never publication authority.
 
 Receipts distinguish at least:
 

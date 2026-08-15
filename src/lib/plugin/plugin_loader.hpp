@@ -45,10 +45,11 @@ class ProcessPluginOwnerToken final {
 /**
  * @brief Retained lifetime information for one loaded operation plugin.
  *
- * The dynamic library handle is held by `library` and is closed by its custom
- * deleter when the last owner releases it. `registered_keys` records the
- * operation keys touched by the plugin registration entry point, including
- * replacements of existing keys.
+ * The dynamic library handle and its exact-object authorization capability are
+ * held by `library`. Final release closes the native handle before closing the
+ * sealed snapshot descriptor. `registered_keys` records the operation keys
+ * touched by the plugin registration entry point, including replacements of
+ * existing keys.
  *
  * @note The operation registry stores callable objects that may refer to code
  * inside the plugin library. The process `PluginManager` removes or restores
@@ -57,7 +58,7 @@ class ProcessPluginOwnerToken final {
  */
 struct LoadedOpPlugin {
   /**
-   * @brief Shared dynamic library lifetime retained while callbacks exist.
+   * @brief Shared native handle and exact-object capability lifetime.
    *
    * @note This member is declared first and therefore destroyed last, after
    *       callback-bearing predecessor snapshots and keys/source strings.
@@ -120,8 +121,9 @@ struct LoadedOpPlugin {
  * @brief Absolute plugin path to retained operation plugin handle.
  *
  * The key is the absolute shared-library path used by `PluginManager` when it
- * later unloads a plugin. The value keeps the library mapped for as long as
- * registered operation callbacks can be invoked.
+ * later unloads a plugin. The value keeps both the library mapping and its
+ * authorized snapshot descriptor live for as long as registered operation
+ * callbacks can be invoked.
  */
 using LoadedOpPluginMap = std::map<std::string, LoadedOpPlugin>;
 
@@ -130,22 +132,26 @@ using LoadedOpPluginMap = std::map<std::string, LoadedOpPlugin>;
  *
  * This internal boundary scans platform shared libraries, invokes the versioned
  * host-provided registrar, and stores every successful source, restoration
- * snapshot, and retained handle in maps owned by the unique process
- * `PluginManager`. Its capability token prevents production callers from
- * creating a second source/handle/restoration owner around the process-global
- * `OpRegistry`.
+ * snapshot, and retained handle/capability lease in maps owned by the unique
+ * process `PluginManager`. Its capability token prevents production callers
+ * from creating a second source/handle/restoration owner around the
+ * process-global `OpRegistry`.
  *
  * @param owner_token Capability constructible only by `PluginManager`.
  * @param plugin_dir_paths Directories or suffix patterns to scan.
  * @param op_sources Map updated with registered or replaced operation sources.
- * @param loaded_plugins Absolute plugin path to retained handle map owned by
- * the process manager. Already-loaded paths in this map are skipped.
+ * @param loaded_plugins Absolute plugin path to retained lease map owned by the
+ * process manager. Already-loaded paths in this map are skipped.
  * @return Structured load result for the scan.
  * @throws std::bad_alloc unchanged if candidate staging cannot allocate. The
  * failing candidate leaves registry, sources, result, and handles unchanged.
  * @throws std::overflow_error if successful-load sequence space is exhausted.
  * @throws std::filesystem::filesystem_error when directory iteration fails for
  * an existing plugin directory.
+ * @throws std::invalid_argument for an internal mapped-handle/capability
+ * pairing invariant violation.
+ * @throws Any non-`PluginTrustError` exception cached by process trust-policy
+ * initialization unchanged.
  * @note `PluginManager` serializes this complete call with process mutation and
  * registry publication. The BUILD_TESTING-only single-candidate seam remains
  * separate so failure tests cannot become a production ownership path.

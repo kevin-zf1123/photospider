@@ -75,12 +75,44 @@ synchronization 后通过 no-replace rename 发布。其 index 位于内存，re
 进程内 job registry 在 queued/running work 失败，或完成 Host compute 以及 image result 的
 `OutputStore` publication 后到达的状态。它不是 durable acknowledgement，并会随进程丢失。
 
-**耐久输出提交（Durable output commit，仅为已接受目标）**
-未来 user-output transaction：由稳定 `OutputCommitId` 标识，只有在完整 payload/metadata
-校验与文件同步、canonical manifest 暂存/校验/文件同步、原子 no-replace manifest-last
-publication，以及请求的从叶目录到 durability root 的目录屏障完成后才完成。它的 typed
-receipt 区分达到 atomic-visible 与 crash-durable，以幂等方式恢复有歧义的 retry，并支持
-at-least-once delivery；不声称 exactly-once delivery。参见
+**源码私有单租户耐久图像 Job 纵向路径（当前 Issue #99/#100 子集）**
+当前 `src/lib/server/` 纵切把一个紧密 CPU 图像绑定到稳定的 `ArtifactId` 与
+`OutputCommitId` identity，以 manifest-last 方式发布 canonical manifest，并且只有在精确
+校验 payload/manifest 且完成从 artifact directory 到 root 的完整屏障链后，才返回
+crash-durable receipt。Manifest publication 会让两个 alias 都可在内部识别；但 barrier
+尚未确认的 alias 不能返回 artifact 或 crash-durable receipt：`ArtifactId` lookup、
+`OutputCommitId` lookup、same-commit retry 与 Job reconciliation 都必须先重新校验精确
+occurrence 并重放完整 barrier chain。一个源码私有 WorkerManager 还会为每个 attempt 独占一个
+全新 exec 的 worker process、精确 assignment lease、bounded private protocol、heartbeat/
+runtime deadline、cancellation escalation 与精确 reaping。参见
+[单租户 Job 纵切](Single-Tenant-Job-Vertical.zh.md)。
+
+这是一个狭窄的源码私有、本地单租户图像输出与 trusted-worker-process 子集。它不是 daemon
+`OutputStore`，不是通用 `Value`/checkpoint `OutputStore` 或 bulk data plane，不是多租户
+授权，也不是独立部署的 WorkerManager、syscall/device isolation 或 untrusted-plugin
+security domain。
+
+产品 WorkerManager 构造要求 `SIGCHLD` 保持可等待语义，并拒绝 `SIG_IGN` 或
+`SA_NOCLDWAIT`。它会在 `fork` 前立即重新校验该策略；之后的自动回收、竞争 reaper，或精确
+`waitpid` 的任何非 `EINTR` 错误（包括 `ECHILD`），都会在发布 completion 或删除 ownership
+record 前 fail-stop。Forced cancellation 表示精确 `WIFSIGNALED` 状态匹配 owner 已成功发送的
+`SIGTERM`/`SIGKILL`；对零退出 zombie 成功调用 `kill()` 并不是 signal-death 证据。
+
+精确回收也不是 manager ownership 的终点：必需的 typed terminal fact 还必须到达控制面
+callback。每个实际首次 `Report`、`Failure` 与 `ForcedCancellation` fact 都在局部 no-throw
+边界内构造，该边界覆盖 fault injection 与 identity、message、report 的保留。如果构造抛出
+异常（包括 `std::bad_alloc`），WorkerManager 不能通过外层 catch 重新分类；它会在 callback、
+completed-record 标记或普通 record 删除之前写出固定的 allocation-free fail-stop 诊断并
+abort。Callback 异常会进入同一 fail-stop，且绝不重试，也不会被替换成伪造的普通
+completion。因此，这次 fail-stop 之后的 durable Job 与 quota truth 只能通过重启
+reconciliation 收敛。
+
+**通用耐久输出提交（超出 Issue #99/#100 子集的已接受目标）**
+更广泛的未来 user-output transaction 由稳定 `OutputCommitId` 标识，只有在完整
+payload/metadata 校验与文件同步、canonical manifest 暂存/校验/文件同步、原子
+no-replace manifest-last publication，以及请求的从叶目录到 durability root 的目录屏障
+完成后才完成。它的 typed receipt 区分达到 atomic-visible 与 crash-durable，以幂等方式
+恢复有歧义的 retry，并支持 at-least-once delivery；不声称 exactly-once delivery。参见
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)。
 
 **每图独占访问（Per-graph exclusive access）**
@@ -98,15 +130,18 @@ lane 会串行化同一 Graph 的 compute 与 execution-route access。
 structural、document、cache、dirty 与 lifecycle mutation 会推进该值；compute snapshot 与成功的
 compute publication 会保留该值。当前 commit compatibility 规则要求 identity 与 revision 精确
 相等。Topology generation 仍是独立的 planning cache key。
-产品 compute 还要求 Run 捕获的 supersession key 与 generation 精确保持 current。
+产品 compute 还要求 Run 捕获的完整 supersession identity 精确保持 current。
 
-**`SupersessionKey` / `SupersessionGeneration`**
+**`SupersessionKey` / `SupersessionGeneration` / `SupersessionIdentity`**
 一个 live Graph 内部的私有 latest-wins identity。Key 由 target node 与 canonical request intent
 组成：缺失 intent 与显式 HP 属于同一 lineage，realtime 则保持独立。Checked nonzero graph-wide
-allocator 为每个 prepared candidate 分配严格递增且永不 wrap/reuse 的 generation。Allocation 只是
-准备；graph-state publication 才是 current-generation linearization point。每个 admitted key
-至多拥有一个 reserved compute-lane ticket、一个 active/draining candidate 与一个 latest pending
-mailbox value。
+allocator 为每个 prepared candidate 分配严格递增且永不 wrap/reuse 的 generation。完整 identity
+由该 key、generation 与可选的源码私有 `AcceptedBoundaryCoordinate` 组成。Allocation 只负责
+preparation；graph-state publication 会指派完整 current identity。两个 identity 都绑定 coordinate
+时，由 accepted coordinate 排列 replacement，并可授权数值更低的 generation；mixed 与 unbound
+identity 继续按 generation 排序。Exact currentness 要求 generation 与可选 coordinate 都相等，
+而不是选择数值最大的 generation。每个 admitted key 至多拥有一个 reserved compute-lane ticket、
+一个 active/draining candidate 与一个 latest pending mailbox value。
 
 **`GraphLifetimeAnchor` / Graph lifetime lease**
 仅在完整 `GraphRuntime` 可发布后注册的稳定逐 Graph lifetime root。Candidate 会从第一次
@@ -272,8 +307,13 @@ singleton；service construction 只为 frozen registry 中匹配的 executor �
 提供非破坏性的 1..4,096 条 atomic-cut page、显式 cursor gap 与饱和 drop total。六种可信 physical
 counter selector 覆盖 ready entry、已进入 operation callback、live root reservation、live child
 grant、policy invocation 与 current/displaced binding；registry-derived counter 只来自
-`RunLifecycleRegistry`。Record 只含复制的 scalar identity，不授予 lifecycle、queue、callback、
-plugin、Graph 或 Run authority。Host、CLI 与 IPC 都不暴露该 store。
+`RunLifecycleRegistry`。M1 lifecycle replay 把九个 registry-derived counter 视为 Graph、
+candidate、bundle、Run、group 与 generation identity 状态机的精确投影。六个 physical counter
+仍是独立 sample，只检查 capacity 与 ownership 可达性，而不把它们解释为 event-kind delta；
+physical retirement 会在 registry lifecycle fence 内发布其精确 registry cut。
+`ServiceStopped` 是最终 record，全部 15 个 field 都为零。Record 只含复制的 scalar identity，
+不授予 lifecycle、queue、callback、plugin、Graph 或 Run authority。Host、CLI 与 IPC 都不暴露
+该 store。
 
 **有界 ready store**
 由 `ExecutionService` 拥有的 policy-aware store，其聚合 entry 与 accounted-byte 计数不得超过
@@ -285,6 +325,19 @@ class；在已选 class 内，ready entry 会在八次成功 dispatch 后先于�
 且 aging 绝不会改变已选 class。Initial 与 dependency-released submission 会跨越同一边界，Run
 row 也会跨越临时为空的阶段继续存在。从 store 移除 entry 时，只会在取得 execution authority 或
 清除该 entry 后释放其 ready grant。
+
+**Scheduler-selectable candidate**
+对某个 worker 而言，通过 current Run lifecycle、cancellation、operation-gate、physical-route
+以及 cycle-local grant-block 可见性检查的 ready lane 头。它参与 class choice、policy frontier
+与三比一 Interactive burst state。剩余 execution child-grant capacity 刻意不作为 selector
+predicate：只有 reserved start 才会把耗尽分类出来，并只为该 worker 标记精确 entry，不 charge
+dispatch 或 fairness state。
+
+**Evidence-startable class fact**
+为一次 service start 按 class 采样的只读 Boolean，来自 scheduler 可见的 ready/lifecycle/
+operation/route predicate，并额外要求足够的 live child-grant capacity。它只随成功提交的 start
+发布，只控制 M1 applicability，不参与 candidate selection 或 burst accounting。它不会签发
+grant，也不能替代 `try_grant()`。
 
 **Resource reservation 与 grant**
 Reservation 是一个原子准入 root vector 的 move-only RAII owner；grant 是在该 vector 内签发的
@@ -390,6 +443,8 @@ cache、policy 或物理 execution 语义的所有者。
 - Run success 不是 cache persistence、Graph 文档保存、durable output commit、daemon terminal
   state 或 result delivery。
 - 当前 `OutputStore` publication 不是 crash-durable output commit。
+- 当前 Issue #99/#100 耐久图像子集不是未来通用 `OutputStore`/bulk data plane、network
+  control plane 或 untrusted-plugin security domain。
 - Daemon job terminal state 或 acknowledgement 不是 durable receipt。
 - `RegionSet` 不是 `PixelRect`；后者是 checked image-edge projection，绝不是 TensorSlice
   authority。

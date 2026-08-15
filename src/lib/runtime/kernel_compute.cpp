@@ -200,7 +200,8 @@ class CandidateCompletion<void> final {
 std::exception_ptr make_superseded_exception() noexcept {
   try {
     throw GraphError(GraphErrc::ComputeError,
-                     "Compute request was superseded by a newer generation.");
+                     "Compute request was superseded by an updated accepted "
+                     "request.");
   } catch (...) {
     return std::current_exception();
   }
@@ -228,6 +229,9 @@ struct PreparedProductCompute {
  * @throws std::invalid_argument for invalid target/intent normalization.
  * @throws std::overflow_error for exhausted generation space.
  * @throws std::bad_alloc or executor synchronization/admission exceptions.
+ * @note An optional source-private accepted coordinate is bound into the
+ * prepared identity before publication; it never uses Host return time or the
+ * observation sink's causal sequence.
  */
 PreparedProductCompute prepare_product_compute(GraphRuntime& runtime,
                                                Kernel::ComputeRequest request) {
@@ -238,7 +242,7 @@ PreparedProductCompute prepare_product_compute(GraphRuntime& runtime,
           ? request.cancellation_source
           : std::make_shared<compute::ComputeRequestCancellationSource>();
   compute::ComputeRequestCoordinator::PreparedCandidate prepared =
-      runtime.prepare_compute_request(key);
+      runtime.prepare_compute_request(key, request.accepted_coordinate);
   request.cancellation_source = cancellation;
   request.supersession = prepared.identity();
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
@@ -279,6 +283,50 @@ compute::ComputeRunQos make_default_compute_run_qos(
 }
 
 /**
+ * @brief Selects an explicit private QoS or the established product default.
+ * @param request Complete internal Kernel compute request.
+ * @return Exact private QoS when present, otherwise Throughput/default values.
+ * @throws std::invalid_argument when default public parallelism is zero.
+ * @note Semantic QoS validation remains owned by ComputeRun construction. The
+ * selector adds no profile inference and does not mutate caller input.
+ */
+compute::ComputeRunQos select_compute_run_qos(
+    const Kernel::ComputeRequest& request) {
+  if (request.run_qos.has_value()) {
+    return *request.run_qos;
+  }
+  return make_default_compute_run_qos(request.execution.parallel,
+                                      request.execution.maximum_parallelism);
+}
+
+/**
+ * @brief Publishes one current generation to product freshness and evidence.
+ * @param execution_service Process execution/residency owner.
+ * @param graph_instance_id Exact live Graph identity.
+ * @param observation_sink Optional observation-only request sink.
+ * @param identity Product-assigned generation becoming current.
+ * @return Nothing.
+ * @throws Nothing; product observation is already a no-throw correctness
+ * boundary and the optional sink shares that contract.
+ * @note The coordinator invokes this while holding its publication mutex.
+ * Neither observer may allocate, wait, or re-enter Graph/coordinator state.
+ */
+void observe_current_product_generation(
+    compute::ExecutionService& execution_service,
+    GraphInstanceId graph_instance_id,
+    const std::shared_ptr<compute::ComputeRunObservationSink>& observation_sink,
+    const compute::SupersessionIdentity& identity) noexcept {
+  std::optional<compute::ComputeRunObservationCoordinate> coordinate;
+  if (observation_sink != nullptr) {
+    coordinate = observation_sink->reserve_causal_coordinate();
+  }
+  execution_service.observe_current_supersession(graph_instance_id, identity);
+  if (coordinate.has_value()) {
+    observation_sink->on_current_generation(identity, *coordinate);
+  }
+}
+
+/**
  * @brief Converts a Kernel request into the narrower ComputeService request.
  *
  * @param request Internal Kernel compute request produced by the embedded Host
@@ -306,13 +354,14 @@ ComputeService::Request make_service_compute_request(
                                        request.telemetry.benchmark_events},
       request.intent,
       request.dirty_roi,
+      request.progressive_options,
       request.name,
-      make_default_compute_run_qos(request.execution.parallel,
-                                   request.execution.maximum_parallelism),
+      select_compute_run_qos(request),
       std::move(commit_policy),
       staged_proxy,
       request.cancellation_source,
-      request.supersession};
+      request.supersession,
+      request.observation_sink};
 }
 
 /**
@@ -360,7 +409,8 @@ class KernelGraphRevisionCommitPolicy final
         staged_proxy_(staged_proxy),
         graph_label_(request.name),
         cache_precision_(request.cache.precision),
-        save_cache_(!request.cache.nosave) {}
+        save_cache_(!request.cache.nosave),
+        observe_realtime_value_(request.progressive_options.has_value()) {}
 
   /** @copydoc compute::ComputeCommitPolicy::commit_high_precision */
   void commit_high_precision(
@@ -374,6 +424,8 @@ class KernelGraphRevisionCommitPolicy final
       throw GraphError(GraphErrc::ComputeError,
                        "HP staged commit has no validated target output.");
     }
+    const Value current_output =
+        target->cached_output_high_precision->image_value;
 
     std::shared_ptr<GraphModel> graph_publication(
         staged_graph.clone_for_compute());
@@ -392,7 +444,7 @@ class KernelGraphRevisionCommitPolicy final
     compute::ComputeRunLease commit_lease = run_lease;
     runtime_.graph_state()
         .submit([this, instance_id, revision,
-                 commit_lease = std::move(commit_lease),
+                 commit_lease = std::move(commit_lease), current_output,
                  graph_publication = std::move(graph_publication),
                  proxy_publication = std::move(proxy_publication)](
                     GraphModel& live_graph) mutable {
@@ -419,7 +471,8 @@ class KernelGraphRevisionCommitPolicy final
               runtime_.realtime_proxy_graph().publish_compute_snapshot(
                   *proxy_publication);
             }
-            if (!contender->publish_succeeded()) {
+            if (!contender->publish_visible_succeeded(
+                    std::move(current_output))) {
               throw std::logic_error(
                   "HP commit contender failed to resolve success.");
             }
@@ -449,7 +502,17 @@ class KernelGraphRevisionCommitPolicy final
                         compute::RealtimeProxyGraph& staged_proxy) override {
     validate_staged_run(run_lease, ComputeIntent::RealTimeUpdate, staged_graph,
                         &staged_proxy, true);
-    (void)staged_proxy.require_output(run_lease.descriptor().target_node_id());
+    const NodeOutput& target_output =
+        staged_proxy.require_output(run_lease.descriptor().target_node_id());
+    Value current_output;
+    if (observe_realtime_value_) {
+      current_output = target_output.image_value;
+      if (!current_output.valid()) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            "Progressive RT commit requires a sealed target Value.");
+      }
+    }
     std::unique_ptr<compute::RealtimeProxyGraph> proxy_publication =
         staged_proxy.clone_for_compute();
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
@@ -463,6 +526,7 @@ class KernelGraphRevisionCommitPolicy final
     runtime_.graph_state()
         .submit([this, instance_id, revision,
                  commit_lease = std::move(commit_lease),
+                 current_output = std::move(current_output),
                  proxy_publication = std::move(proxy_publication)](
                     GraphModel& live_graph) mutable {
           std::optional<compute::ComputeRunCommitContender> contender =
@@ -485,7 +549,11 @@ class KernelGraphRevisionCommitPolicy final
             testing::notify_kernel_compute_commit_test_hook(
                 testing::KernelComputeCommitTestEvent::RealTimePublished);
 #endif
-            if (!contender->publish_succeeded()) {
+            const bool published = observe_realtime_value_
+                                       ? contender->publish_visible_succeeded(
+                                             std::move(current_output))
+                                       : contender->publish_succeeded();
+            if (!published) {
               throw std::logic_error(
                   "RT commit contender failed to resolve success.");
             }
@@ -554,10 +622,11 @@ class KernelGraphRevisionCommitPolicy final
   }
 
   /**
-   * @brief Enforces latest-wins currency inside graph-state commit ordering.
+   * @brief Enforces exact current identity inside graph-state commit ordering.
    * @param run_lease Commit contender carrying the request lineage snapshot.
-   * @return Nothing when this exact generation is still current.
-   * @throws GraphError when a newer generation was published first.
+   * @return Nothing when this exact supersession identity is still current.
+   * @throws GraphError when the Run's exact supersession identity is no longer
+   * current.
    * @throws std::system_error when coordinator synchronization fails.
    * @note This publication predicate runs after contender claim but before
    * revision validation, persistence, or visible state mutation. Cooperative
@@ -569,7 +638,7 @@ class KernelGraphRevisionCommitPolicy final
             run_lease.descriptor().supersession())) {
       throw GraphError(
           GraphErrc::ComputeError,
-          "ComputeRun supersession generation is stale; staged output "
+          "ComputeRun supersession identity is non-current; staged output "
           "discarded.");
     }
   }
@@ -648,6 +717,9 @@ class KernelGraphRevisionCommitPolicy final
 
   /** @brief Whether request policy permits deferred disk-cache writes. */
   bool save_cache_ = false;
+
+  /** @brief Whether RT publication retains and observes its immutable Value. */
+  bool observe_realtime_value_ = false;
 };
 
 }  // namespace
@@ -748,7 +820,8 @@ bool Kernel::compute(const ComputeRequest& request) {
  *       serialization. Snapshot capture and commit use graph-state, while
  *       operation work does not hold that lane. Before publication, the
  *       native-completion lineage is pretracked; accepted current publication
- *       advances its process freshness before execution. Other compute
+ *       assigns its exact managed current generation before execution,
+ *       including coordinate-authorized numeric decreases. Other compute
  *       exceptions map to false and LastError.
  */
 bool Kernel::compute_request(const ComputeRequest& request) {
@@ -762,6 +835,8 @@ bool Kernel::compute_request(const ComputeRequest& request) {
     auto completion = std::make_shared<CandidateCompletion<void>>();
     std::future<void> settled = completion->take_future();
     ComputeRequest candidate_request = std::move(product.request);
+    const std::shared_ptr<compute::ComputeRunObservationSink> observation_sink =
+        candidate_request.observation_sink;
     const GraphInstanceId graph_instance_id = runtime->model().instance_id();
     execution_service_->prepare_supersession_lineage(
         graph_instance_id, product.prepared.identity());
@@ -781,10 +856,12 @@ bool Kernel::compute_request(const ComputeRequest& request) {
         [completion](std::exception_ptr failure) {
           completion->set_exception(std::move(failure));
         },
-        [execution_service = execution_service_, graph_instance_id](
+        [execution_service = execution_service_, graph_instance_id,
+         observation_sink](
             const compute::SupersessionIdentity& identity) noexcept {
-          execution_service->observe_current_supersession(graph_instance_id,
-                                                          identity);
+          observe_current_product_generation(*execution_service,
+                                             graph_instance_id,
+                                             observation_sink, identity);
         });
     settled.get();
 
@@ -833,8 +910,9 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image(
  * following committed output copy. Other compute, selected image-processing,
  * and clone exceptions become nullopt; successful empty output clears stale
  * LastError state. Native-completion lineage pretracking precedes publication,
- * and accepted current publication advances process freshness before physical
- * execution.
+ * and accepted current publication assigns the exact managed current
+ * generation before physical execution, including coordinate-authorized
+ * numeric decreases.
  */
 std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
     const ComputeRequest& request) {
@@ -848,6 +926,8 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
     auto completion = std::make_shared<CandidateCompletion<NodeOutput>>();
     std::future<NodeOutput> settled = completion->take_future();
     ComputeRequest candidate_request = std::move(product.request);
+    const std::shared_ptr<compute::ComputeRunObservationSink> observation_sink =
+        candidate_request.observation_sink;
     const GraphInstanceId graph_instance_id = runtime->model().instance_id();
     execution_service_->prepare_supersession_lineage(
         graph_instance_id, product.prepared.identity());
@@ -869,10 +949,12 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
         [completion](std::exception_ptr failure) {
           completion->set_exception(std::move(failure));
         },
-        [execution_service = execution_service_, graph_instance_id](
+        [execution_service = execution_service_, graph_instance_id,
+         observation_sink](
             const compute::SupersessionIdentity& identity) noexcept {
-          execution_service->observe_current_supersession(graph_instance_id,
-                                                          identity);
+          observe_current_product_generation(*execution_service,
+                                             graph_instance_id,
+                                             observation_sink, identity);
         });
     NodeOutput output = settled.get();
 
@@ -932,7 +1014,8 @@ std::optional<std::future<Kernel::AsyncComputeResult>> Kernel::compute_async(
  * publication. Recoverable exceptions are captured in the exact result and
  * mirrored into LastError; future get() rethrows std::bad_alloc. Fallible
  * native-lineage pretracking precedes coordinator publication, whose accepted
- * current callback advances process freshness before physical execution.
+ * current callback assigns the exact managed current generation before
+ * physical execution, including coordinate-authorized numeric decreases.
  */
 std::optional<std::future<Kernel::AsyncComputeResult>>
 Kernel::compute_async_request(ComputeRequest request) {
@@ -946,6 +1029,8 @@ Kernel::compute_async_request(ComputeRequest request) {
   auto completion = std::make_shared<CandidateCompletion<AsyncComputeResult>>();
   std::future<AsyncComputeResult> settled = completion->take_future();
   ComputeRequest candidate_request = std::move(product.request);
+  const std::shared_ptr<compute::ComputeRunObservationSink> observation_sink =
+      candidate_request.observation_sink;
   const GraphInstanceId graph_instance_id = runtime->model().instance_id();
   execution_service_->prepare_supersession_lineage(graph_instance_id,
                                                    product.prepared.identity());
@@ -991,7 +1076,8 @@ Kernel::compute_async_request(ComputeRequest request) {
           LastError error{
               GraphErrc::ComputeError,
               std::string(
-                  "Compute request was superseded by a newer generation.")};
+                  "Compute request was superseded by an updated accepted "
+                  "request.")};
           runtime->store_last_error(error);
           completion->set_value(AsyncComputeResult{false, std::move(error)});
         } catch (...) {
@@ -1001,10 +1087,11 @@ Kernel::compute_async_request(ComputeRequest request) {
       [completion](std::exception_ptr failure) {
         completion->set_exception(std::move(failure));
       },
-      [execution_service = execution_service_, graph_instance_id](
+      [execution_service = execution_service_, graph_instance_id,
+       observation_sink](
           const compute::SupersessionIdentity& identity) noexcept {
-        execution_service->observe_current_supersession(graph_instance_id,
-                                                        identity);
+        observe_current_product_generation(
+            *execution_service, graph_instance_id, observation_sink, identity);
       });
   return std::optional<std::future<AsyncComputeResult>>{std::move(settled)};
 }

@@ -21,6 +21,58 @@ It is not a background system service, multi-user or multi-tenant service,
 remote endpoint, or TCP server. Those profiles require a separate transport,
 identity, authentication/authorization, isolation, and lifecycle design.
 
+[ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
+now fixes that future design as a separate network control plane, worker
+manager, one constrained worker per Job attempt, artifact data plane, and
+isolated untrusted CPU-plugin runtime. It does not extend this protocol or turn
+its same-UID path protection, session names, opaque ids, process-global plugin
+methods, or private `OutputStore` into server authentication, tenant authority,
+durable Job identity, or durable artifact authority.
+
+Issues #99, #100, and #105 now provide a separate source-private
+[single-tenant Job vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md)
+for canonical JobSpec, tenant quota, durable Job/artifact recovery, explicit
+retry/checkpoint identity, one fresh process per attempt, and separated worker
+control/data transport. It is linked only through an internal CMake target,
+has no daemon route or installed codec, and is not composed into
+`photospiderd`. Its private worker protocol v2 is distinct from this local IPC
+v2: a 128-KiB control socket carries only attempt/Job/receipt/reference/
+descriptor/digest metadata, while checkpoint and candidate image bytes use
+manager-created direction-reduced `AF_UNIX SOCK_STREAM` lanes through inherited
+descriptors. The manager endpoints are nonblocking; the worker may block only
+while its exact PID remains subject to absolute lifecycle deadlines and
+TERM/KILL/reap ownership. Checkpoint digest verification happens in the worker,
+and output hydration starts from metadata-first descriptor/exact-size/digest.
+For the unreaped current PID, the manager creates one exact lazy anonymous final
+owner and directly receives at most one 64-KiB slice between absolute lifecycle
+checks; it performs no cumulative accumulator growth or whole-payload copy.
+Only valid Heartbeat frames renew liveness, never continuous or prebuffered
+output. The worker keeps genuine heartbeats active during streaming, closes its
+output lane after exact bytes, and remains alive until the manager returns one
+identity-only `CompletionReady` after EOF, complete join, and O(1) final-owner
+transfer. That acknowledgement grants no service or artifact authority.
+Post-reap supervision never reads the bulk lane and performs no filesystem I/O
+or bulk transfer. This is local executable separation, not an
+authenticated network protocol or standalone artifact service. Its `TenantId`, `JobId`, `JobAttemptId`,
+`WorkerInstanceId`, `ArtifactId`, quota reservation, checkpoint, and commit
+receipt are independent source-private types; protocol-v2 compute ids,
+`OutputArtifactId`, delivery ids, session names, and output leases neither
+serialize nor authorize them. The exact 60-method inventory below is therefore
+unchanged.
+
+That private worker codec treats poll budget and semantic acceptance as
+different bounds. Pending bulk permits one due-budget nonblocking control
+probe, while every complete control frame remains valid only strictly before
+the applicable absolute lifecycle deadline. Timeouts retain partial bytes or a
+transport-complete frame. The decoder exposes that complete frame for semantic
+interpretation, takes a fresh strict-before sample, and only then moves/resets
+it while returning the exact acceptance time. A tie or later sample keeps the
+frame for a bounded semantic retry and grants no lifecycle mutation. Writes
+recheck before and after positive send progress; because a late send may already
+have delivered bytes, the owner treats the write as failed and never retries
+the frame. A cancellation owner may retain the channel only for bounded
+receive-side report/EOF/exit drainage.
+
 The public client headers are `photospider/ipc/protocol.hpp`,
 `photospider/ipc/client.hpp`, and `photospider/ipc/host.hpp`. They expose typed
 owned values plus the complete Host factory and no JSON type, socket descriptor,
@@ -690,7 +742,12 @@ the router invokes `Host::execution_trace` exactly once and returns:
       "node_id": -1,
       "worker_id": -1,
       "action": "rethrow_exception",
-      "timestamp_us": 1234
+      "timestamp_us": 1234,
+      "task_identity": {
+        "graph_revision": 7,
+        "run_id": 3,
+        "run_local_task_id": 0
+      }
     }
   ],
   "next_sequence": 9,
@@ -714,6 +771,20 @@ specific node or worker applies. `-1` is the sole sentinel for no specific
 node or worker; any value below `-1` is malformed Host output. The router
 rejects the complete response as daemon `internal_error` after that one Host
 call and never retries the observation.
+
+Every event has a required `task_identity` member. A submitted task uses an
+exact three-field object containing nonzero unsigned `graph_revision`, nonzero
+unsigned `run_id`, and unsigned `run_local_task_id`, where zero is valid. A
+runtime-wide event with no task source uses explicit JSON `null`; the daemon
+and client never infer a tuple from epoch, node, worker, or page session. The
+embedded Host binds its private `GraphSessionId` once on the page. Before
+encoding, the router verifies that this value matches the session admitted by
+the registry, then exposes only the caller's opaque daemon `session_id`. The
+client verifies that outer echo and rejects an omitted, partial, extra,
+mistyped, zero revision/Run, or otherwise malformed identity with no fallback
+to the former identity-free schema and no retry through another route. The page
+session and event tuple are copied observation keys only; they grant no Graph,
+Run, task, cancellation, retry, process, quota, artifact, or commit authority.
 
 There is no `max_entries` field in either method. Unknown fields remain
 forward-compatible but cannot replace a missing or invalid known `limit`.

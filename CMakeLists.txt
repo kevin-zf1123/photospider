@@ -25,6 +25,9 @@ endif()
 option(USE_ASAN "Enable AddressSanitizer" OFF)
 option(USE_TSAN "Enable ThreadSanitizer" OFF)
 option(BUILD_TESTING "Build tests" ON)
+option(PHOTOSPIDER_BUILD_FUZZERS
+    "Build manual Clang libFuzzer codec robustness targets"
+    OFF)
 option(PHOTOSPIDER_ENABLE_OPENCV
     "Enable OpenCV-backed image processing, codecs, and public adapters" ON)
 option(PHOTOSPIDER_ENABLE_YAML
@@ -93,6 +96,22 @@ option(PHOTOSPIDER_BUILD_IPC
 if(PHOTOSPIDER_BUILD_IPC AND NOT PHOTOSPIDER_IPC_PLATFORM_SUPPORTED)
     message(FATAL_ERROR
         "PHOTOSPIDER_BUILD_IPC requires CMAKE_SYSTEM_NAME Darwin or Linux")
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR
+   CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(PHOTOSPIDER_SINGLE_TENANT_JOB_PLATFORM_SUPPORTED ON)
+    set(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB_DEFAULT ON)
+else()
+    set(PHOTOSPIDER_SINGLE_TENANT_JOB_PLATFORM_SUPPORTED OFF)
+    set(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB_DEFAULT OFF)
+endif()
+option(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB
+    "Build the POSIX durable single-tenant Job authority and maintained tests"
+    ${PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB_DEFAULT})
+if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB AND
+   NOT PHOTOSPIDER_SINGLE_TENANT_JOB_PLATFORM_SUPPORTED)
+    message(FATAL_ERROR
+        "PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB requires CMAKE_SYSTEM_NAME Darwin or Linux")
 endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -266,6 +285,7 @@ set(PHOTOSPIDER_INSTALL_CMAKEDIR
 # embedded product dependency. DataDefinitionRegistry is an injected object;
 # this shared runtime owns its one implementation but creates no singleton.
 add_library(photospider_operation_runtime SHARED
+    src/lib/core/dense_tensor_content_digest.cpp
     src/lib/core/extension.cpp
     src/lib/core/image_buffer.cpp
     src/lib/core/ready_fence.cpp
@@ -336,6 +356,8 @@ if(APPLE)
 endif()
 
 find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(UTF8PROC REQUIRED IMPORTED_TARGET libutf8proc)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 endif()
@@ -350,7 +372,10 @@ if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
     endif()
 endif()
 find_package(CURL) 
-find_package(OpenSSL)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+if(BUILD_TESTING)
+    find_program(PHOTOSPIDER_OPENSSL_EXECUTABLE NAMES openssl REQUIRED)
+endif()
 if(PHOTOSPIDER_BUILD_IPC OR BUILD_TESTING)
     find_package(nlohmann_json 3.9 REQUIRED)
 endif()
@@ -491,6 +516,7 @@ endif()
 # Module: dependency-neutral private core values, display formatting, and the
 # build-selected image-processing/image-artifact implementations.
 set(PHOTOSPIDER_CORE_INTERNAL_SOURCES
+    src/lib/core/exact_box_downsample.cpp
     src/lib/core/ps_types.cpp
     src/lib/core/parameter_value_text.cpp
 )
@@ -605,6 +631,18 @@ if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
     endif()
 endif()
 
+# Module: shared process-native trust admission. This target remains private;
+# the complete installed archive compiles the same single source directly.
+set(PHOTOSPIDER_PLUGIN_TRUST_SOURCES
+    src/lib/plugin/plugin_trust.cpp)
+add_library(photospider_plugin_trust_internal STATIC
+    ${PHOTOSPIDER_PLUGIN_TRUST_SOURCES})
+target_compile_features(photospider_plugin_trust_internal PRIVATE cxx_std_17)
+target_include_directories(photospider_plugin_trust_internal PRIVATE
+    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
+target_link_libraries(photospider_plugin_trust_internal PRIVATE
+    OpenSSL::Crypto)
+
 # Module: host-side operation plugin loading and lifetime ownership.
 set(PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES
     src/lib/plugin/plugin_manager.cpp
@@ -620,6 +658,7 @@ target_include_directories(photospider_plugin_host_internal PRIVATE
 target_link_libraries(photospider_plugin_host_internal PRIVATE
     photospider_core_internal
     photospider_graph_internal
+    photospider_plugin_trust_internal
     Photospider::operation_sdk
     ${CMAKE_DL_LIBS})
 if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
@@ -637,6 +676,7 @@ add_library(photospider_policy_internal STATIC
 target_include_directories(photospider_policy_internal PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(photospider_policy_internal PRIVATE
+    photospider_plugin_trust_internal
     Photospider::policy_sdk
     ${CMAKE_DL_LIBS})
 
@@ -653,6 +693,24 @@ set(PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
 )
 set(PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES)
 set(PHOTOSPIDER_HAS_METAL_EXECUTOR OFF)
+set(PHOTOSPIDER_HAS_ISOLATED_CPU_INVOCATION OFF)
+if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(PHOTOSPIDER_HAS_ISOLATED_CPU_INVOCATION ON)
+    list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
+        src/lib/execution/isolated_cpu_invocation_protocol.cpp
+        src/lib/execution/isolated_cpu_invocation.cpp)
+    if(APPLE)
+        find_library(PHOTOSPIDER_PROC_LIBRARY NAMES proc)
+        if(NOT PHOTOSPIDER_PROC_LIBRARY)
+            message(FATAL_ERROR
+                "Photospider isolated CPU invocation requires libproc")
+        endif()
+        list(APPEND PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES
+            ${PHOTOSPIDER_PROC_LIBRARY})
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        list(APPEND PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES rt)
+    endif()
+endif()
 if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
     enable_language(OBJCXX)
     find_library(METAL_FRAMEWORK NAMES Metal)
@@ -681,7 +739,9 @@ target_include_directories(photospider_execution_internal PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(photospider_execution_internal PRIVATE
     photospider_core_internal
+    photospider_plugin_trust_internal
     Photospider::operation_runtime
+    OpenSSL::Crypto
     Threads::Threads
     ${PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES})
 target_link_libraries(photospider_graph_internal PRIVATE
@@ -689,6 +749,19 @@ target_link_libraries(photospider_graph_internal PRIVATE
 
 # Module: compute, dirty execution, GraphRuntime, and interaction ownership.
 set(KERNEL_FACADE_SOURCES
+    src/lib/benchmark/b1_environment.cpp
+    src/lib/benchmark/b1_evidence.cpp
+    src/lib/benchmark/b1_output_store.cpp
+    src/lib/benchmark/b1_profile.cpp
+    src/lib/benchmark/evidence_envelope.cpp
+    src/lib/benchmark/i1_evidence.cpp
+    src/lib/benchmark/i1_profile.cpp
+    src/lib/benchmark/i2_evidence.cpp
+    src/lib/benchmark/i2_profile.cpp
+    src/lib/benchmark/m1_canonical.cpp
+    src/lib/benchmark/m1_evidence.cpp
+    src/lib/benchmark/m1_profile.cpp
+    src/lib/benchmark/observation_fanout.cpp
     src/lib/host/embedded_host.cpp
     src/lib/runtime/kernel.cpp
     src/lib/runtime/kernel_compute.cpp
@@ -712,6 +785,7 @@ set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
     src/lib/compute/compute_task_submission.cpp
     src/lib/compute/execution_lifecycle_telemetry.cpp
     src/lib/compute/execution_service.cpp
+    src/lib/compute/progressive_compute.cpp
     src/lib/compute/run_lifecycle_registry.cpp
     src/lib/compute/task_graph_planning.cpp
     src/lib/compute/task_population_strategy.cpp
@@ -765,7 +839,8 @@ target_link_libraries(photospider_host_internal PRIVATE
     photospider_policy_internal
     photospider_execution_internal
     photospider_compute_internal
-    Photospider::operation_sdk)
+    Photospider::operation_sdk
+    PkgConfig::UTF8PROC)
 if(PHOTOSPIDER_ENABLE_YAML)
     target_compile_definitions(photospider_host_internal PRIVATE
         PHOTOSPIDER_HAS_YAML)
@@ -803,6 +878,7 @@ set(PHOTOSPIDER_PRODUCT_SOURCES
     ${PHOTOSPIDER_IMAGE_PROCESSING_SOURCES}
     ${PHOTOSPIDER_GRAPH_INTERNAL_SOURCES}
     ${PHOTOSPIDER_CONFIGURED_PERSISTENCE_SOURCES}
+    ${PHOTOSPIDER_PLUGIN_TRUST_SOURCES}
     ${PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES}
     ${PHOTOSPIDER_POLICY_INTERNAL_SOURCES}
     ${PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES}
@@ -815,12 +891,12 @@ if(PHOTOSPIDER_ENABLE_YAML)
         ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
 endif()
 
-# These eight translation units own the Issue #72, Issue #75, Issue #76, and
-# Issue #82 deterministic observation seams. The installable archive always
-# receives their production objects; focused tests receive a non-installed
-# variant while reusing every common object. Keeping the split at
-# translation-unit granularity avoids compiling a second copy of the complete
-# embedded product.
+# These nine translation units own the Issue #72, Issue #75, Issue #76,
+# Issue #82, Issue #93, and Issue #125 deterministic observation/failure seams.
+# The installable archive always receives their production objects; focused tests
+# receive a non-installed variant while reusing every common object. Keeping
+# the split at translation-unit granularity avoids compiling a second copy of
+# the complete embedded product.
 set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
     src/lib/compute/compute_task_submission.cpp
     src/lib/compute/dirty_update_executor.cpp
@@ -828,6 +904,7 @@ set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
     src/lib/compute/resource_demand_estimator.cpp
     src/lib/graph/graph_cache_service.cpp
     src/lib/graph/graph_state_executor.cpp
+    src/lib/host/embedded_host.cpp
     src/lib/runtime/kernel.cpp
     src/lib/runtime/kernel_compute.cpp)
 foreach(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCE
@@ -844,7 +921,7 @@ list(REMOVE_ITEM PHOTOSPIDER_PRODUCT_COMMON_SOURCES
 
 # Apply the private compile environment shared by production and test-only
 # product object variants. Test-seam definitions are intentionally added by
-# the caller only to the eight-source test object target.
+# the caller only to the nine-source test object target.
 function(configure_photospider_product_objects TARGET_NAME)
     target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_STATIC)
     target_compile_features(${TARGET_NAME} PRIVATE cxx_std_17)
@@ -854,6 +931,8 @@ function(configure_photospider_product_objects TARGET_NAME)
         Photospider::operation_sdk
         Photospider::operation_runtime
         Photospider::policy_sdk
+        OpenSSL::Crypto
+        PkgConfig::UTF8PROC
         Threads::Threads
         ${CMAKE_DL_LIBS})
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
@@ -886,8 +965,10 @@ function(configure_photospider_product_archive TARGET_NAME)
         Photospider::operation_sdk
         Photospider::operation_runtime
         Photospider::policy_sdk
+        OpenSSL::Crypto
         Threads::Threads
-        ${CMAKE_DL_LIBS})
+        ${CMAKE_DL_LIBS}
+        ${PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES})
     if(PHOTOSPIDER_ENABLE_OPENCV)
         target_link_libraries(${TARGET_NAME} PRIVATE
             Photospider::operation_opencv
@@ -927,11 +1008,262 @@ add_library(photospider STATIC
     $<TARGET_OBJECTS:photospider_product_seam_objects>)
 configure_photospider_product_archive(photospider)
 
+if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
+    # Source-private Issue #99/#100 delivery slice. Its durable filesystem and
+    # freshly execed worker lifecycle require the closed Darwin/Linux POSIX
+    # capability profile above. It remains outside the installed Embedded Host
+    # ABI and protocol-v2 sidecar composition.
+    add_library(photospider_single_tenant_job_internal STATIC
+        src/lib/server/job_contract.cpp
+        src/lib/server/tenant_quota.cpp
+        src/lib/server/durable_server_state.cpp
+        src/lib/server/single_tenant_job_service.cpp
+        src/lib/server/embedded_job_worker.cpp
+        src/lib/server/worker_artifact_data_plane.cpp
+        src/lib/server/worker_protocol.cpp
+        src/lib/server/worker_manager.cpp)
+    target_compile_features(photospider_single_tenant_job_internal PRIVATE
+        cxx_std_17)
+    target_include_directories(photospider_single_tenant_job_internal PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib")
+    target_link_libraries(photospider_single_tenant_job_internal PRIVATE
+        photospider
+        Threads::Threads)
+
+    add_executable(photospider-worker
+        apps/photospider_worker/main.cpp)
+    set_target_properties(photospider-worker PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    target_compile_features(photospider-worker PRIVATE cxx_std_17)
+    target_include_directories(photospider-worker PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib")
+    target_link_libraries(photospider-worker PRIVATE
+        photospider_single_tenant_job_internal
+        Threads::Threads)
+endif()
+
+# Manual Issue #106 robustness harnesses. These targets deliberately remain
+# outside ALL, CTest, install/export, and CI ownership. The selected private
+# product libraries are instrumented only in an explicit fuzz configuration;
+# default builds retain their ordinary compile and link closure.
+if(PHOTOSPIDER_BUILD_FUZZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS requires a Clang-family compiler with libFuzzer")
+    endif()
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND
+       NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS requires the Darwin or Linux protocol profile")
+    endif()
+    if(USE_ASAN OR USE_TSAN)
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS cannot be combined with USE_ASAN or USE_TSAN")
+    endif()
+    if(NOT PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB OR
+       NOT PHOTOSPIDER_HAS_ISOLATED_CPU_INVOCATION)
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS requires worker and isolated CPU protocol products")
+    endif()
+
+    if(CMAKE_CROSSCOMPILING)
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS requires a native compiler/runtime probe")
+    endif()
+
+    set(PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS
+        -fno-omit-frame-pointer
+        -fsanitize=fuzzer-no-link,address,undefined)
+    set(PHOTOSPIDER_FUZZ_RUNTIME_LINK_OPTIONS
+        -fsanitize=address,undefined)
+    set(PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTIONS
+        -fno-omit-frame-pointer
+        -fsanitize=fuzzer,address,undefined)
+
+    set(PHOTOSPIDER_FUZZ_PROBE_ROOT
+        "${CMAKE_BINARY_DIR}/CMakeFiles/photospider_fuzz_probe")
+    set(PHOTOSPIDER_FUZZ_PROBE_SOURCE
+        "${PHOTOSPIDER_FUZZ_PROBE_ROOT}/probe.cpp")
+    set(PHOTOSPIDER_FUZZ_PROBE_EXECUTABLE
+        "${PHOTOSPIDER_FUZZ_PROBE_ROOT}/probe")
+    file(MAKE_DIRECTORY "${PHOTOSPIDER_FUZZ_PROBE_ROOT}")
+    file(WRITE "${PHOTOSPIDER_FUZZ_PROBE_SOURCE}" [=[
+#include <cstddef>
+#include <cstdint>
+
+extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t*, std::size_t) {
+  return 0;
+}
+]=])
+    unset(PHOTOSPIDER_HAS_WORKING_LIBFUZZER CACHE)
+    try_compile(PHOTOSPIDER_HAS_WORKING_LIBFUZZER
+        "${PHOTOSPIDER_FUZZ_PROBE_ROOT}/build"
+        "${PHOTOSPIDER_FUZZ_PROBE_SOURCE}"
+        COMPILE_DEFINITIONS
+            ${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS}
+        LINK_OPTIONS
+            ${PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTIONS}
+        COPY_FILE "${PHOTOSPIDER_FUZZ_PROBE_EXECUTABLE}"
+        OUTPUT_VARIABLE PHOTOSPIDER_FUZZ_PROBE_BUILD_OUTPUT
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    if(NOT PHOTOSPIDER_HAS_WORKING_LIBFUZZER)
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS requires working Clang libFuzzer, AddressSanitizer, and UndefinedBehaviorSanitizer compile/link support")
+    endif()
+    execute_process(
+        COMMAND "${PHOTOSPIDER_FUZZ_PROBE_EXECUTABLE}" -runs=1
+        TIMEOUT 10
+        RESULT_VARIABLE PHOTOSPIDER_FUZZ_PROBE_RUN_RESULT
+        OUTPUT_QUIET
+        ERROR_VARIABLE PHOTOSPIDER_FUZZ_PROBE_RUN_OUTPUT)
+    if(NOT "${PHOTOSPIDER_FUZZ_PROBE_RUN_RESULT}" STREQUAL "0")
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS requires a runnable Clang libFuzzer/ASan/UBSan runtime")
+    endif()
+
+    function(photospider_instrument_fuzz_codec TARGET_NAME)
+        target_compile_options(${TARGET_NAME} PRIVATE
+            ${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS})
+        # A static archive cannot link its own sanitizer runtime. Publish only
+        # the ASan/UBSan link closure required by every final consumer of its
+        # instrumented objects; libFuzzer main remains executable-owned.
+        target_link_options(${TARGET_NAME} INTERFACE
+            ${PHOTOSPIDER_FUZZ_RUNTIME_LINK_OPTIONS})
+        set_target_properties(${TARGET_NAME} PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION OFF)
+    endfunction()
+
+    function(photospider_assert_fuzz_codec_contract TARGET_NAME)
+        get_target_property(PHOTOSPIDER_FUZZ_CODEC_TYPE
+            ${TARGET_NAME} TYPE)
+        if(NOT PHOTOSPIDER_FUZZ_CODEC_TYPE STREQUAL "STATIC_LIBRARY")
+            message(FATAL_ERROR
+                "Instrumented fuzz codec ${TARGET_NAME} must remain a static library")
+        endif()
+        get_target_property(PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS_ACTUAL
+            ${TARGET_NAME} COMPILE_OPTIONS)
+        foreach(PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTION
+                IN LISTS PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS)
+            if(NOT "${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTION}" IN_LIST
+                    PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS_ACTUAL)
+                message(FATAL_ERROR
+                    "Instrumented fuzz codec ${TARGET_NAME} is missing compile option ${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTION}")
+            endif()
+        endforeach()
+        get_target_property(PHOTOSPIDER_FUZZ_CODEC_LINK_OPTIONS_ACTUAL
+            ${TARGET_NAME} INTERFACE_LINK_OPTIONS)
+        foreach(PHOTOSPIDER_FUZZ_RUNTIME_LINK_OPTION
+                IN LISTS PHOTOSPIDER_FUZZ_RUNTIME_LINK_OPTIONS)
+            if(NOT "${PHOTOSPIDER_FUZZ_RUNTIME_LINK_OPTION}" IN_LIST
+                    PHOTOSPIDER_FUZZ_CODEC_LINK_OPTIONS_ACTUAL)
+                message(FATAL_ERROR
+                    "Instrumented fuzz codec ${TARGET_NAME} is missing runtime link closure ${PHOTOSPIDER_FUZZ_RUNTIME_LINK_OPTION}")
+            endif()
+        endforeach()
+        foreach(PHOTOSPIDER_FUZZ_CODEC_LINK_OPTION
+                IN LISTS PHOTOSPIDER_FUZZ_CODEC_LINK_OPTIONS_ACTUAL)
+            if(PHOTOSPIDER_FUZZ_CODEC_LINK_OPTION MATCHES "fuzzer")
+                message(FATAL_ERROR
+                    "Instrumented fuzz codec ${TARGET_NAME} leaks libFuzzer through its link interface")
+            endif()
+        endforeach()
+    endfunction()
+
+    function(photospider_assert_fuzz_executable_contract TARGET_NAME)
+        get_target_property(PHOTOSPIDER_FUZZ_EXECUTABLE_TYPE
+            ${TARGET_NAME} TYPE)
+        get_target_property(PHOTOSPIDER_FUZZ_EXECUTABLE_EXCLUDED
+            ${TARGET_NAME} EXCLUDE_FROM_ALL)
+        if(NOT PHOTOSPIDER_FUZZ_EXECUTABLE_TYPE STREQUAL "EXECUTABLE" OR
+           NOT PHOTOSPIDER_FUZZ_EXECUTABLE_EXCLUDED)
+            message(FATAL_ERROR
+                "Manual fuzz target ${TARGET_NAME} must remain an EXCLUDE_FROM_ALL executable")
+        endif()
+        get_target_property(PHOTOSPIDER_FUZZ_EXECUTABLE_COMPILE_OPTIONS_ACTUAL
+            ${TARGET_NAME} COMPILE_OPTIONS)
+        foreach(PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTION
+                IN LISTS PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS)
+            if(NOT "${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTION}" IN_LIST
+                    PHOTOSPIDER_FUZZ_EXECUTABLE_COMPILE_OPTIONS_ACTUAL)
+                message(FATAL_ERROR
+                    "Manual fuzz target ${TARGET_NAME} is missing compile option ${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTION}")
+            endif()
+        endforeach()
+        get_target_property(PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTIONS_ACTUAL
+            ${TARGET_NAME} LINK_OPTIONS)
+        foreach(PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTION
+                IN LISTS PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTIONS)
+            if(NOT "${PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTION}" IN_LIST
+                    PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTIONS_ACTUAL)
+                message(FATAL_ERROR
+                    "Manual fuzz target ${TARGET_NAME} is missing link option ${PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTION}")
+            endif()
+        endforeach()
+    endfunction()
+
+    set(PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGETS
+        photospider_execution_internal
+        photospider_single_tenant_job_internal)
+    foreach(PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGET
+            IN LISTS PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGETS)
+        photospider_instrument_fuzz_codec(
+            ${PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGET})
+    endforeach()
+
+    add_executable(fuzz_worker_protocol_codec EXCLUDE_FROM_ALL
+        tests/fuzz/fuzz_worker_protocol_codec.cpp)
+    target_compile_features(fuzz_worker_protocol_codec PRIVATE cxx_std_17)
+    target_include_directories(fuzz_worker_protocol_codec PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib")
+    target_link_libraries(fuzz_worker_protocol_codec PRIVATE
+        photospider_single_tenant_job_internal)
+
+    add_executable(fuzz_isolated_cpu_invocation_codec EXCLUDE_FROM_ALL
+        tests/fuzz/fuzz_isolated_cpu_invocation_codec.cpp)
+    target_compile_features(
+        fuzz_isolated_cpu_invocation_codec PRIVATE cxx_std_17)
+    target_include_directories(
+        fuzz_isolated_cpu_invocation_codec PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib")
+    target_link_libraries(fuzz_isolated_cpu_invocation_codec PRIVATE
+        photospider_execution_internal)
+
+    set(PHOTOSPIDER_FUZZ_TARGETS
+        fuzz_worker_protocol_codec
+        fuzz_isolated_cpu_invocation_codec)
+    foreach(PHOTOSPIDER_FUZZ_TARGET IN LISTS PHOTOSPIDER_FUZZ_TARGETS)
+        target_compile_options(${PHOTOSPIDER_FUZZ_TARGET} PRIVATE
+            ${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS})
+        target_link_options(${PHOTOSPIDER_FUZZ_TARGET} PRIVATE
+            ${PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTIONS})
+        set_target_properties(${PHOTOSPIDER_FUZZ_TARGET} PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION OFF
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/fuzzers")
+    endforeach()
+    foreach(PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGET
+            IN LISTS PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGETS)
+        photospider_assert_fuzz_codec_contract(
+            ${PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGET})
+    endforeach()
+    foreach(PHOTOSPIDER_FUZZ_TARGET IN LISTS PHOTOSPIDER_FUZZ_TARGETS)
+        photospider_assert_fuzz_executable_contract(
+            ${PHOTOSPIDER_FUZZ_TARGET})
+    endforeach()
+endif()
+
 set(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS
     PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING
     PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
+    PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING
+    PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING
     PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING
     PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
 if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
@@ -945,6 +1277,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         target_compile_definitions(
             photospider_internal_test_product_seam_objects PRIVATE
+            PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
+            PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
             PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
     endif()
 
@@ -956,8 +1290,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
 endif()
 
 # Fail configuration if a future refactor accidentally restores an Issue #72,
-# Issue #75, Issue #76, or Issue #82 test definition on any production product
-# target.
+# Issue #75, Issue #76, Issue #82, Issue #93, or Issue #125 test definition on
+# any production product target.
 function(assert_target_omits_internal_product_test_definitions TARGET_NAME)
     get_target_property(PHOTOSPIDER_TARGET_DEFINITIONS
         ${TARGET_NAME} COMPILE_DEFINITIONS)
@@ -1231,8 +1565,11 @@ if(PHOTOSPIDER_BUILD_GRAPH_CLI)
     target_compile_definitions(photospider_cli_common PRIVATE
         PHOTOSPIDER_GRAPH_CLI_HELP_DIR=\"${PROJECT_SOURCE_DIR}/apps/graph_cli/resources/help\")
 
+    # Keep reusable frontend logic independent of the embedded product
+    # variant. Final executables and tests select exactly one production or
+    # internal-test archive, which prevents test-seam consumers from also
+    # inheriting the installable product through this helper.
     target_link_libraries(photospider_cli_common PUBLIC
-        photospider
         ${FTXUI_TARGETS}
     )
     target_link_libraries(photospider_cli_common PRIVATE
@@ -1253,7 +1590,9 @@ if(PHOTOSPIDER_BUILD_GRAPH_CLI)
         "${PROJECT_SOURCE_DIR}/src/lib"
         ${OpenCV_INCLUDE_DIRS}
     )
-    target_link_libraries(graph_cli PRIVATE photospider_cli_common)
+    target_link_libraries(graph_cli PRIVATE
+        photospider_cli_common
+        photospider)
 
     if(UNIX AND NOT APPLE)
         target_link_libraries(graph_cli PRIVATE dl pthread)
@@ -1324,8 +1663,51 @@ endforeach()
 if(BUILD_TESTING)
     set(TEST_POLICY_PLUGIN_DIR ${CMAKE_BINARY_DIR}/test_policies)
     set(TEST_OP_PLUGIN_DIR ${CMAKE_BINARY_DIR}/test_plugins)
+    set(TEST_POLICY_FIXTURE_STATE_DIR
+        "${CMAKE_BINARY_DIR}/test_policy_fixture_support")
+    if(WIN32)
+        # Windows resolves dependent DLLs from the executable directory rather
+        # than a BUILD_RPATH. Keep the support DLL beside test executables and
+        # copy it beside product executables that host the policy fixture.
+        get_property(PHOTOSPIDER_IS_MULTI_CONFIG GLOBAL
+            PROPERTY GENERATOR_IS_MULTI_CONFIG)
+        if(PHOTOSPIDER_IS_MULTI_CONFIG)
+            set(TEST_POLICY_FIXTURE_STATE_DIR
+                "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
+            set(TEST_POLICY_FIXTURE_STATE_PRODUCT_DIR
+                "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>")
+        else()
+            set(TEST_POLICY_FIXTURE_STATE_DIR "${CMAKE_BINARY_DIR}/tests")
+            set(TEST_POLICY_FIXTURE_STATE_PRODUCT_DIR
+                "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+        endif()
+    endif()
     file(MAKE_DIRECTORY ${TEST_POLICY_PLUGIN_DIR})
     file(MAKE_DIRECTORY ${TEST_OP_PLUGIN_DIR})
+
+    add_library(test_policy_fixture_state SHARED
+        tests/fixtures/policy_plugins/policy_fixture_state.c)
+    set_target_properties(test_policy_fixture_state PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED YES
+        WINDOWS_EXPORT_ALL_SYMBOLS ON
+        LIBRARY_OUTPUT_DIRECTORY "${TEST_POLICY_FIXTURE_STATE_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_POLICY_FIXTURE_STATE_DIR}")
+    if(APPLE)
+        set_target_properties(test_policy_fixture_state PROPERTIES
+            MACOSX_RPATH ON)
+    endif()
+    target_link_libraries(test_policy_fixture_state PRIVATE
+        Photospider::policy_sdk)
+    if(WIN32)
+        add_custom_command(TARGET test_policy_fixture_state POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "${TEST_POLICY_FIXTURE_STATE_PRODUCT_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:test_policy_fixture_state>"
+                "${TEST_POLICY_FIXTURE_STATE_PRODUCT_DIR}/$<TARGET_FILE_NAME:test_policy_fixture_state>"
+            VERBATIM)
+    endif()
 
     function(add_policy_fixture TARGET_NAME OUTPUT_DIRECTORY)
         add_library(${TARGET_NAME} SHARED
@@ -1336,14 +1718,23 @@ if(BUILD_TESTING)
             C_STANDARD 11
             C_STANDARD_REQUIRED YES
             LIBRARY_OUTPUT_DIRECTORY "${OUTPUT_DIRECTORY}"
-            RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIRECTORY}")
+            RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIRECTORY}"
+            BUILD_RPATH "${TEST_POLICY_FIXTURE_STATE_DIR}")
         if(APPLE)
             set_target_properties(${TARGET_NAME} PROPERTIES MACOSX_RPATH ON)
         endif()
-        target_link_libraries(${TARGET_NAME} PRIVATE Photospider::policy_sdk)
+        target_link_libraries(${TARGET_NAME} PRIVATE
+            Photospider::policy_sdk
+            test_policy_fixture_state)
     endfunction()
 
     add_policy_fixture(test_policy_plugin "${TEST_POLICY_PLUGIN_DIR}")
+    add_policy_fixture(alternate_policy_plugin
+        "${TEST_POLICY_PLUGIN_DIR}/alternate"
+        PHOTOSPIDER_POLICY_FIXTURE_TYPE_NAME="fixture_policy_alternate"
+        PHOTOSPIDER_POLICY_FIXTURE_DESCRIPTION="Alternate deterministic policy fixture."
+        PHOTOSPIDER_POLICY_FIXTURE_VERSION="test-v2"
+        PHOTOSPIDER_POLICY_FIXTURE_SELECTS_FIRST_BY_DEFAULT)
     add_policy_fixture(missing_api_policy_plugin
         "${TEST_POLICY_PLUGIN_DIR}/missing"
         PHOTOSPIDER_POLICY_FIXTURE_OMIT_API)
@@ -1362,6 +1753,15 @@ if(BUILD_TESTING)
         BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
         INSTALL_RPATH "$ORIGIN/../../lib"
     )
+
+    add_library(untrusted_initializer_plugin SHARED
+        tests/fixtures/ops/untrusted_initializer_plugin.cpp)
+    target_compile_features(untrusted_initializer_plugin PRIVATE cxx_std_17)
+    set_target_properties(untrusted_initializer_plugin PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY
+            "${TEST_OP_PLUGIN_DIR}/untrusted_initializer"
+        RUNTIME_OUTPUT_DIRECTORY
+            "${TEST_OP_PLUGIN_DIR}/untrusted_initializer")
     if(APPLE)
         set_target_properties(lifecycle_op_plugin PROPERTIES
             MACOSX_RPATH ON
@@ -1517,6 +1917,39 @@ if(BUILD_TESTING)
     find_package(GTest REQUIRED)
     set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
     file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_DIR
+        "${CMAKE_BINARY_DIR}/generated/plugin_trust")
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_MANIFEST
+        "${PHOTOSPIDER_TEST_PLUGIN_TRUST_DIR}/manifest.txt")
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_SIGNATURE
+        "${PHOTOSPIDER_TEST_PLUGIN_TRUST_DIR}/signature.hex")
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_BAD_SIGNATURE
+        "${PHOTOSPIDER_TEST_PLUGIN_TRUST_DIR}/bad-signature.hex")
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_ENVIRONMENT
+        "PHOTOSPIDER_PLUGIN_TRUST_MANIFEST=${PHOTOSPIDER_TEST_PLUGIN_TRUST_MANIFEST}"
+        "PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE=${PHOTOSPIDER_TEST_PLUGIN_TRUST_SIGNATURE}"
+        "PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY=${PROJECT_SOURCE_DIR}/tests/fixtures/trust/test_ed25519_public_key.pem")
+
+    # GoogleTest's PROPERTIES list cannot portably carry a semicolon-delimited
+    # ENVIRONMENT property through both discovery parsing stages. Launch the
+    # selected test executables through `cmake -E env` instead so discovery and
+    # the registered test command receive the same complete trust tuple.
+    function(photospider_enable_plugin_trust_test_environment target_name)
+        set(plugin_trust_test_launcher
+            "${CMAKE_COMMAND}"
+            -E
+            env
+            ${PHOTOSPIDER_TEST_PLUGIN_TRUST_ENVIRONMENT})
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.29)
+            set_property(TARGET ${target_name} PROPERTY TEST_LAUNCHER
+                ${plugin_trust_test_launcher})
+        else()
+            # GoogleTest used CROSSCOMPILING_EMULATOR as its portable launcher
+            # hook before TEST_LAUNCHER was introduced in CMake 3.29.
+            set_property(TARGET ${target_name} PROPERTY CROSSCOMPILING_EMULATOR
+                ${plugin_trust_test_launcher})
+        endif()
+    endfunction()
 
     # This production-chain integration target is dependency-neutral and must
     # remain buildable when both optional image/document capabilities are off.
@@ -1734,6 +2167,17 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
             LABELS execution
             TIMEOUT 30)
 
+    if(PHOTOSPIDER_HAS_ISOLATED_CPU_INVOCATION)
+        add_ps_test(test_isolated_cpu_invocation_protocol
+            tests/unit/test_isolated_cpu_invocation_protocol.cpp
+            photospider_execution_internal)
+        gtest_discover_tests(test_isolated_cpu_invocation_protocol
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS execution
+                TIMEOUT 20)
+    endif()
+
     add_ps_test(test_disk_cache_diagnostic_concurrency
         tests/integration/test_disk_cache_diagnostic_concurrency.cpp)
     gtest_discover_tests(test_disk_cache_diagnostic_concurrency
@@ -1768,12 +2212,170 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     endif()
     add_dependencies(test_optional_opencv_operation_provider
         resize_replacement_op_plugin)
-    gtest_discover_tests(test_optional_opencv_operation_provider
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-        PROPERTIES TIMEOUT 30)
+    photospider_enable_plugin_trust_test_environment(
+        test_optional_opencv_operation_provider)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        gtest_discover_tests(test_optional_opencv_operation_provider
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES TIMEOUT 30)
+    endif()
+
+    if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
+        add_ps_test(test_single_tenant_job_service
+            tests/unit/test_single_tenant_job_service.cpp
+            photospider_single_tenant_job_internal)
+        gtest_discover_tests(test_single_tenant_job_service
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES TIMEOUT 30)
+        add_ps_test(test_worker_protocol
+            tests/unit/test_worker_protocol.cpp
+            photospider_single_tenant_job_internal)
+        gtest_discover_tests(test_worker_protocol
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES TIMEOUT 20)
+    endif()
 endif()
 
 if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
+    if(PHOTOSPIDER_HAS_ISOLATED_CPU_INVOCATION)
+        add_executable(test_isolated_cpu_plugin_fixture
+            tests/support/isolated_cpu_plugin_fixture.cpp)
+        set_target_properties(test_isolated_cpu_plugin_fixture PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(test_isolated_cpu_plugin_fixture PRIVATE
+            cxx_std_17)
+        target_include_directories(test_isolated_cpu_plugin_fixture PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib")
+        # Exercise the source-private #102 transport and #103 supervised
+        # endpoint from the installable product archive without creating a
+        # public composition or SDK surface.
+        target_link_libraries(test_isolated_cpu_plugin_fixture PRIVATE
+            photospider
+            Threads::Threads)
+
+        # Compile deterministic startup-fault variants from the same real
+        # product-linked endpoint; no test replacement implements supervision.
+        add_executable(test_plugin_runtime_silent_fixture
+            tests/support/isolated_cpu_plugin_fixture.cpp)
+        set_target_properties(test_plugin_runtime_silent_fixture PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(test_plugin_runtime_silent_fixture PRIVATE
+            cxx_std_17)
+        target_include_directories(test_plugin_runtime_silent_fixture PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib")
+        target_compile_definitions(test_plugin_runtime_silent_fixture PRIVATE
+            PS_TEST_PLUGIN_RUNTIME_SUPPRESS_STARTED)
+        target_link_libraries(test_plugin_runtime_silent_fixture PRIVATE
+            photospider
+            Threads::Threads)
+
+        add_executable(test_plugin_runtime_corrupt_fixture
+            tests/support/isolated_cpu_plugin_fixture.cpp)
+        set_target_properties(test_plugin_runtime_corrupt_fixture PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(test_plugin_runtime_corrupt_fixture PRIVATE
+            cxx_std_17)
+        target_include_directories(test_plugin_runtime_corrupt_fixture PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib")
+        target_compile_definitions(test_plugin_runtime_corrupt_fixture PRIVATE
+            PS_TEST_PLUGIN_RUNTIME_CORRUPT_STARTED_NONCE)
+        target_link_libraries(test_plugin_runtime_corrupt_fixture PRIVATE
+            photospider
+            Threads::Threads)
+
+        add_ps_test(test_isolated_cpu_invocation
+            tests/integration/test_isolated_cpu_invocation.cpp)
+        target_compile_definitions(test_isolated_cpu_invocation PRIVATE
+            PS_TEST_ISOLATED_CPU_FIXTURE_PATH="$<TARGET_FILE:test_isolated_cpu_plugin_fixture>")
+        add_dependencies(test_isolated_cpu_invocation
+            test_isolated_cpu_plugin_fixture)
+        photospider_enable_plugin_trust_test_environment(
+            test_isolated_cpu_invocation)
+        if(APPLE)
+            add_test(
+                NAME test_isolated_cpu_invocation_darwin_fail_closed
+                COMMAND ${CMAKE_COMMAND} -E env
+                    ${PHOTOSPIDER_TEST_PLUGIN_TRUST_ENVIRONMENT}
+                    $<TARGET_FILE:test_isolated_cpu_invocation>
+                    --gtest_filter=IsolatedCpuInvocation.DarwinRuntimeConstructionFailsBeforeSideEffects)
+            set_tests_properties(
+                test_isolated_cpu_invocation_darwin_fail_closed
+                PROPERTIES
+                    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                    LABELS execution
+                    TIMEOUT 30)
+        else()
+            gtest_discover_tests(test_isolated_cpu_invocation
+                WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                PROPERTIES
+                    LABELS execution
+                    TIMEOUT 30)
+        endif()
+
+        add_ps_test(test_plugin_runtime_supervisor
+            tests/integration/test_plugin_runtime_supervisor.cpp)
+        target_compile_definitions(test_plugin_runtime_supervisor PRIVATE
+            PS_TEST_ISOLATED_CPU_FIXTURE_PATH="$<TARGET_FILE:test_isolated_cpu_plugin_fixture>"
+            PS_TEST_PLUGIN_RUNTIME_SILENT_FIXTURE_PATH="$<TARGET_FILE:test_plugin_runtime_silent_fixture>"
+            PS_TEST_PLUGIN_RUNTIME_CORRUPT_FIXTURE_PATH="$<TARGET_FILE:test_plugin_runtime_corrupt_fixture>")
+        add_dependencies(test_plugin_runtime_supervisor
+            test_isolated_cpu_plugin_fixture
+            test_plugin_runtime_silent_fixture
+            test_plugin_runtime_corrupt_fixture)
+        photospider_enable_plugin_trust_test_environment(
+            test_plugin_runtime_supervisor)
+        if(APPLE)
+            add_test(
+                NAME test_plugin_runtime_supervisor_darwin_fail_closed
+                COMMAND ${CMAKE_COMMAND} -E env
+                    ${PHOTOSPIDER_TEST_PLUGIN_TRUST_ENVIRONMENT}
+                    $<TARGET_FILE:test_plugin_runtime_supervisor>
+                    --gtest_filter=PluginRuntimeSupervisor.DarwinRuntimeConstructionFailsBeforeSideEffects)
+            set_tests_properties(
+                test_plugin_runtime_supervisor_darwin_fail_closed
+                PROPERTIES
+                    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                    LABELS execution
+                    TIMEOUT 30)
+        else()
+            gtest_discover_tests(test_plugin_runtime_supervisor
+                WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                PROPERTIES
+                    LABELS execution
+                    TIMEOUT 30)
+        endif()
+    endif()
+
+    if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
+        add_executable(test_worker_process_fixture
+            tests/support/photospider_worker_fixture.cpp)
+        set_target_properties(test_worker_process_fixture PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
+        target_compile_features(test_worker_process_fixture PRIVATE cxx_std_17)
+        target_include_directories(test_worker_process_fixture PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib")
+        target_link_libraries(test_worker_process_fixture PRIVATE
+            photospider_single_tenant_job_internal
+            Threads::Threads)
+
+        add_ps_test(test_worker_supervisor
+            tests/integration/test_worker_supervisor.cpp
+            photospider_single_tenant_job_internal)
+        target_compile_definitions(test_worker_supervisor PRIVATE
+            PS_TEST_WORKER_FIXTURE_PATH="$<TARGET_FILE:test_worker_process_fixture>")
+        add_dependencies(test_worker_supervisor test_worker_process_fixture)
+        gtest_discover_tests(test_worker_supervisor
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES TIMEOUT 30)
+    endif()
+
     if(PHOTOSPIDER_BUILD_IPC)
         add_executable(test_ipc_protocol tests/unit/test_ipc_protocol.cpp)
         set_target_properties(test_ipc_protocol PROPERTIES
@@ -1962,6 +2564,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>"
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
         PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
+        PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING
         PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
         PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING
     )
@@ -1978,6 +2581,39 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_compile_definitions(test_resource_admission PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        add_ps_test(test_i1_product_path
+            tests/integration/test_i1_product_path.cpp
+            photospider_internal_test_product)
+        target_compile_definitions(test_i1_product_path PRIVATE
+            PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING
+            PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
+        add_ps_test(test_i2_product_path
+            tests/integration/test_i2_product_path.cpp
+            photospider_internal_test_product)
+        target_compile_definitions(test_i2_product_path PRIVATE
+            PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING
+            PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
+        add_ps_test(test_b1_product_path
+            tests/integration/test_b1_product_path.cpp
+            photospider_internal_test_product)
+        target_link_libraries(test_b1_product_path PRIVATE
+            PkgConfig::UTF8PROC)
+        if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
+            add_ps_test(test_single_tenant_job_product_path
+                tests/integration/test_single_tenant_job_product_path.cpp
+                photospider_single_tenant_job_internal)
+            target_compile_definitions(test_single_tenant_job_product_path PRIVATE
+                PS_PHOTOSPIDER_WORKER_PATH="$<TARGET_FILE:photospider-worker>")
+            add_dependencies(test_single_tenant_job_product_path
+                photospider-worker)
+        endif()
+        add_ps_test(test_m1_product_path
+            tests/integration/test_m1_product_path.cpp
+            photospider_internal_test_product)
+        target_compile_definitions(test_m1_product_path PRIVATE
+            PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
+        target_link_libraries(test_m1_product_path PRIVATE
+            PkgConfig::UTF8PROC)
         add_ps_test(test_opencv_operation_concurrency
             tests/integration/test_opencv_operation_concurrency.cpp)
         target_compile_definitions(test_opencv_operation_concurrency PRIVATE
@@ -2003,10 +2639,144 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
         target_link_libraries(opencv_operation_concurrency_benchmark PRIVATE
             photospider_cli_common
+            photospider
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
+        add_executable(i1_edit_storm_benchmark EXCLUDE_FROM_ALL
+            tests/verification/i1_edit_storm_benchmark.cpp
+            tests/verification/i1_evidence_json.cpp
+            tests/verification/i1_evidence_workflow.cpp)
+        set_target_properties(i1_edit_storm_benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(i1_edit_storm_benchmark PRIVATE cxx_std_17)
+        target_include_directories(i1_edit_storm_benchmark PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(i1_edit_storm_benchmark PRIVATE
+            PHOTOSPIDER_I1_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        target_link_libraries(i1_edit_storm_benchmark PRIVATE
+            photospider
+            nlohmann_json::nlohmann_json
+            PkgConfig::UTF8PROC
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
+        add_executable(i2_progressive_benchmark EXCLUDE_FROM_ALL
+            tests/verification/i2_progressive_benchmark.cpp
+            tests/verification/i2_evidence_json.cpp
+            tests/verification/i2_evidence_workflow.cpp)
+        set_target_properties(i2_progressive_benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(i2_progressive_benchmark PRIVATE cxx_std_17)
+        target_include_directories(i2_progressive_benchmark PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(i2_progressive_benchmark PRIVATE
+            PHOTOSPIDER_I2_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        target_link_libraries(i2_progressive_benchmark PRIVATE
+            photospider
+            nlohmann_json::nlohmann_json
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
+        add_executable(b1_immutable_benchmark EXCLUDE_FROM_ALL
+            tests/verification/b1_immutable_benchmark.cpp
+            tests/verification/b1_evidence_json.cpp)
+        set_target_properties(b1_immutable_benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(b1_immutable_benchmark PRIVATE cxx_std_17)
+        target_include_directories(b1_immutable_benchmark PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(b1_immutable_benchmark PRIVATE
+            PHOTOSPIDER_B1_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        target_link_libraries(b1_immutable_benchmark PRIVATE
+            photospider
+            nlohmann_json::nlohmann_json
+            PkgConfig::UTF8PROC
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
+        add_executable(m1_shared_benchmark EXCLUDE_FROM_ALL
+            tests/verification/m1_shared_benchmark.cpp
+            tests/verification/i1_evidence_json.cpp
+            tests/verification/b1_evidence_json.cpp)
+        set_target_properties(m1_shared_benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(m1_shared_benchmark PRIVATE cxx_std_17)
+        target_include_directories(m1_shared_benchmark PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(m1_shared_benchmark PRIVATE
+            PHOTOSPIDER_M1_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        target_link_libraries(m1_shared_benchmark PRIVATE
+            photospider
+            nlohmann_json::nlohmann_json
+            PkgConfig::UTF8PROC
             yaml-cpp::yaml-cpp
             ${OpenCV_LIBS})
     endif()
     add_ps_test(test_resource_ledger tests/unit/test_resource_ledger.cpp)
+    add_ps_test(test_plugin_resource_token
+        tests/unit/test_plugin_resource_token.cpp
+        photospider_execution_internal)
+    add_ps_test(test_plugin_trust
+        tests/unit/test_plugin_trust.cpp)
+    target_compile_definitions(test_plugin_trust PRIVATE
+        PS_TEST_PLUGIN_TRUST_MANIFEST="${CMAKE_BINARY_DIR}/generated/plugin_trust/manifest.txt"
+        PS_TEST_PLUGIN_TRUST_SIGNATURE="${CMAKE_BINARY_DIR}/generated/plugin_trust/signature.hex"
+        PS_TEST_PLUGIN_TRUST_BAD_SIGNATURE="${CMAKE_BINARY_DIR}/generated/plugin_trust/bad-signature.hex"
+        PS_TEST_PLUGIN_TRUST_PUBLIC_KEY="${PROJECT_SOURCE_DIR}/tests/fixtures/trust/test_ed25519_public_key.pem"
+        PS_TEST_PLUGIN_TRUST_PRIVATE_KEY="${PROJECT_SOURCE_DIR}/tests/fixtures/trust/test_ed25519_private_key.pem"
+        PS_TEST_SIGNED_OPERATION_PLUGIN="$<TARGET_FILE:lifecycle_op_plugin>"
+        PS_TEST_SIGNED_POLICY_PLUGIN="$<TARGET_FILE:test_policy_plugin>"
+        PS_TEST_WRONG_KIND_PLUGIN="$<TARGET_FILE:v1_only_op_plugin>"
+        PS_TEST_SIGNED_RUNTIME_PLUGIN="$<TARGET_FILE:test_isolated_cpu_plugin_fixture>"
+        PS_TEST_UNTRUSTED_INITIALIZER_PLUGIN="$<TARGET_FILE:untrusted_initializer_plugin>")
+    target_link_libraries(test_plugin_trust PRIVATE OpenSSL::Crypto)
+    add_ps_test(test_i1_evidence tests/unit/test_i1_evidence.cpp)
+    target_sources(test_i1_evidence PRIVATE
+        tests/verification/i1_evidence_json.cpp
+        tests/verification/i1_evidence_workflow.cpp)
+    target_link_libraries(test_i1_evidence PRIVATE
+        nlohmann_json::nlohmann_json
+        PkgConfig::UTF8PROC)
+    add_ps_test(test_i1_profile tests/unit/test_i1_profile.cpp)
+    add_ps_test(test_i2_evidence tests/unit/test_i2_evidence.cpp)
+    target_sources(test_i2_evidence PRIVATE
+        tests/verification/i2_evidence_json.cpp
+        tests/verification/i2_evidence_workflow.cpp)
+    target_link_libraries(test_i2_evidence PRIVATE
+        nlohmann_json::nlohmann_json)
+    add_ps_test(test_i2_profile tests/unit/test_i2_profile.cpp)
+    add_ps_test(test_b1_profile tests/unit/test_b1_profile.cpp)
+    add_ps_test(test_b1_environment tests/unit/test_b1_environment.cpp)
+    target_link_libraries(test_b1_environment PRIVATE PkgConfig::UTF8PROC)
+    add_ps_test(test_b1_evidence tests/unit/test_b1_evidence.cpp)
+    target_sources(test_b1_evidence PRIVATE
+        tests/verification/b1_evidence_json.cpp)
+    target_link_libraries(test_b1_evidence PRIVATE
+        nlohmann_json::nlohmann_json
+        PkgConfig::UTF8PROC)
+    add_ps_test(test_b1_output_store tests/unit/test_b1_output_store.cpp)
+    add_ps_test(test_m1_profile tests/unit/test_m1_profile.cpp)
+    target_link_libraries(test_m1_profile PRIVATE PkgConfig::UTF8PROC)
+    add_ps_test(test_evidence_envelope
+        tests/unit/test_evidence_envelope.cpp)
+    target_link_libraries(test_evidence_envelope PRIVATE PkgConfig::UTF8PROC)
+    add_ps_test(test_progressive_compute
+        tests/unit/test_progressive_compute.cpp)
+    add_ps_test(test_dense_tensor_content_digest
+        tests/unit/test_dense_tensor_content_digest.cpp)
     add_ps_test(test_physical_execution_routes
         tests/unit/test_physical_execution_routes.cpp
         photospider_execution_internal)
@@ -2020,10 +2790,12 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         photospider_policy_internal)
     target_compile_definitions(test_policy_registry PRIVATE
         PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>"
+        PS_TEST_ALTERNATE_POLICY_PLUGIN_PATH="$<TARGET_FILE:alternate_policy_plugin>"
         PS_TEST_MISSING_API_POLICY_PLUGIN_PATH="$<TARGET_FILE:missing_api_policy_plugin>"
         PS_TEST_MISMATCHED_ABI_POLICY_PLUGIN_PATH="$<TARGET_FILE:mismatched_abi_policy_plugin>")
     target_link_libraries(test_policy_registry PRIVATE ${CMAKE_DL_LIBS})
     add_dependencies(test_policy_registry test_policy_plugin
+        alternate_policy_plugin
         missing_api_policy_plugin mismatched_abi_policy_plugin)
     add_ps_test(test_policy_execution tests/unit/test_policy_execution.cpp
         photospider_internal_test_product)
@@ -2043,7 +2815,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     add_ps_test(test_compute_supersession
         tests/unit/test_compute_supersession.cpp)
     add_ps_test(test_bad_alloc_boundaries
-        tests/integration/test_bad_alloc_boundaries.cpp)
+        tests/integration/test_bad_alloc_boundaries.cpp
+        photospider_internal_test_product)
     target_sources(test_bad_alloc_boundaries PRIVATE
         plugins/ops/threshold_op.cpp)
     target_include_directories(test_bad_alloc_boundaries PRIVATE
@@ -2102,10 +2875,13 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_compile_definitions(test_plugin_manager PRIVATE
         PS_STANDARD_OP_PLUGIN_DIR="${PLUGIN_OUTPUT_DIR}"
         PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
+        PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>"
+        PS_TEST_ALTERNATE_POLICY_PLUGIN_PATH="$<TARGET_FILE:alternate_policy_plugin>"
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
     )
     add_dependencies(test_plugin_manager lifecycle_op_plugin
-        override_lifecycle_op_plugin v1_only_op_plugin ${OP_PLUGIN_TARGETS})
+        override_lifecycle_op_plugin v1_only_op_plugin test_policy_plugin
+        alternate_policy_plugin ${OP_PLUGIN_TARGETS})
 
     set(PHOTOSPIDER_PUBLIC_HEADER_ROOT
         "${PROJECT_SOURCE_DIR}/include/photospider")
@@ -2207,6 +2983,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 --build "${CMAKE_BINARY_DIR}"
                 --work "${CMAKE_BINARY_DIR}/tests/static_product_consumer_smoke"
                 --cmake-executable "${CMAKE_COMMAND}"
+                --openssl-executable "${PHOTOSPIDER_OPENSSL_EXECUTABLE}"
                 --config $<CONFIG>
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
         set_tests_properties(StaticProductConsumerSmoke PROPERTIES
@@ -2289,16 +3066,21 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             --out "${CMAKE_BINARY_DIR}/tests/graph_cli_option_bad_alloc"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(GraphCliOptionBadAlloc PROPERTIES RUN_SERIAL TRUE)
-    add_test(NAME GraphCliPluginComputeSmoke
-        COMMAND ${Python3_EXECUTABLE}
-            "${PROJECT_SOURCE_DIR}/tests/integration/graph_cli_plugin_compute_smoke.py"
-            --binary "$<TARGET_FILE:graph_cli>"
-            --operation-plugin-dir "$<TARGET_FILE_DIR:lifecycle_op_plugin>"
-            --policy-plugin "$<TARGET_FILE:test_policy_plugin>"
-            --work "${CMAKE_BINARY_DIR}/tests/graph_cli_plugin_compute_smoke"
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    set_tests_properties(GraphCliPluginComputeSmoke PROPERTIES
-        RUN_SERIAL TRUE TIMEOUT 60)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_test(NAME GraphCliPluginComputeSmoke
+            COMMAND ${Python3_EXECUTABLE}
+                "${PROJECT_SOURCE_DIR}/tests/integration/graph_cli_plugin_compute_smoke.py"
+                --binary "$<TARGET_FILE:graph_cli>"
+                --operation-plugin-dir "$<TARGET_FILE_DIR:lifecycle_op_plugin>"
+                --policy-plugin "$<TARGET_FILE:test_policy_plugin>"
+                --work
+                    "${CMAKE_BINARY_DIR}/tests/graph_cli_plugin_compute_smoke"
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+        set_tests_properties(GraphCliPluginComputeSmoke PROPERTIES
+            ENVIRONMENT "${PHOTOSPIDER_TEST_PLUGIN_TRUST_ENVIRONMENT}"
+            RUN_SERIAL TRUE
+            TIMEOUT 60)
+    endif()
     add_test(NAME PublicHeaderSelfContainment
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
             --target public_header_self_containment --config $<CONFIG>
@@ -2309,6 +3091,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         TIMEOUT 300)
 
     if(PHOTOSPIDER_BUILD_IPC)
+        photospider_enable_plugin_trust_test_environment(test_ipc_protocol)
         gtest_discover_tests(test_ipc_protocol
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
@@ -2324,12 +3107,17 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         gtest_discover_tests(test_output_store
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
+        photospider_enable_plugin_trust_test_environment(test_ipc_daemon)
         gtest_discover_tests(test_ipc_daemon
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 60)
     endif()
     gtest_discover_tests(test_op_registry_m31 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_plugin_manager WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    photospider_enable_plugin_trust_test_environment(test_plugin_manager)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        gtest_discover_tests(test_plugin_manager
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    endif()
     # test_propagation is intentionally a scriptable REPL/tool target rather
     # than a GTest binary. Keep it buildable for CI scripts, but do not run
     # gtest discovery on it.
@@ -2353,7 +3141,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_cli_policy_execution_config
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_host_adapter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    photospider_enable_plugin_trust_test_environment(test_host_adapter)
+    gtest_discover_tests(test_host_adapter
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_graph_document_errors
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
@@ -2374,6 +3164,80 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_resource_ledger
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_plugin_resource_token
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS security
+            TIMEOUT 30)
+    photospider_enable_plugin_trust_test_environment(test_plugin_trust)
+    gtest_discover_tests(test_plugin_trust
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS security
+            TIMEOUT 30)
+    gtest_discover_tests(test_i1_evidence
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_i1_profile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_i2_evidence
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_i2_profile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_b1_profile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_b1_environment
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_b1_evidence
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_b1_output_store
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_m1_profile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_evidence_envelope
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_progressive_compute
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_dense_tensor_content_digest
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        gtest_discover_tests(test_i1_product_path
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS kernel-concurrency
+                TIMEOUT 30)
+        gtest_discover_tests(test_i2_product_path
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS kernel-concurrency
+                TIMEOUT 30)
+        gtest_discover_tests(test_b1_product_path
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS kernel-concurrency
+                TIMEOUT 30)
+        if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
+            gtest_discover_tests(test_single_tenant_job_product_path
+                WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                PROPERTIES TIMEOUT 30)
+        endif()
+        gtest_discover_tests(test_m1_product_path
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS kernel-concurrency
+                TIMEOUT 30)
+    endif()
     gtest_discover_tests(test_device_executor_registry
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
@@ -2384,9 +3248,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PROPERTIES
             LABELS execution
             TIMEOUT 30)
+    photospider_enable_plugin_trust_test_environment(test_policy_registry)
     gtest_discover_tests(test_policy_registry
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+    photospider_enable_plugin_trust_test_environment(test_policy_execution)
     gtest_discover_tests(test_policy_execution
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
@@ -2419,6 +3285,121 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 60)
     gtest_discover_tests(test_node_editor_layout WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+endif()
+
+# Every configured trust consumer receives a real signed bundle produced from
+# the fixture targets available in that build profile. The private key is
+# repository test data and is never installed or selected by production code.
+if(BUILD_TESTING)
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_ENTRY_ARGUMENTS "")
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_TARGETS "")
+    set(PHOTOSPIDER_TEST_OPERATION_GENERATION 1)
+    foreach(PHOTOSPIDER_TEST_OPERATION_TARGET
+            ${OP_PLUGIN_TARGETS}
+            lifecycle_op_plugin
+            override_lifecycle_op_plugin
+            resize_replacement_op_plugin
+            v1_only_op_plugin)
+        if(TARGET ${PHOTOSPIDER_TEST_OPERATION_TARGET})
+            list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_ENTRY_ARGUMENTS
+                --entry operation 11111111111111111111111111111111
+                ${PHOTOSPIDER_TEST_OPERATION_GENERATION}
+                "$<TARGET_FILE:${PHOTOSPIDER_TEST_OPERATION_TARGET}>")
+            list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_TARGETS
+                ${PHOTOSPIDER_TEST_OPERATION_TARGET})
+            math(EXPR PHOTOSPIDER_TEST_OPERATION_GENERATION
+                "${PHOTOSPIDER_TEST_OPERATION_GENERATION} + 1")
+        endif()
+    endforeach()
+    # Darwin signs the initializer fixture so its production rejection proves
+    # the platform exact-object boundary, rather than only a missing manifest
+    # entry, still runs before native mapping and initializer execution.
+    if(APPLE AND TARGET untrusted_initializer_plugin)
+        list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_ENTRY_ARGUMENTS
+            --entry operation 11111111111111111111111111111111
+            ${PHOTOSPIDER_TEST_OPERATION_GENERATION}
+            "$<TARGET_FILE:untrusted_initializer_plugin>")
+        list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_TARGETS
+            untrusted_initializer_plugin)
+        math(EXPR PHOTOSPIDER_TEST_OPERATION_GENERATION
+            "${PHOTOSPIDER_TEST_OPERATION_GENERATION} + 1")
+    endif()
+    set(PHOTOSPIDER_TEST_POLICY_GENERATION 1)
+    foreach(PHOTOSPIDER_TEST_POLICY_TARGET
+            ${POLICY_PLUGIN_TARGETS}
+            test_policy_plugin
+            alternate_policy_plugin
+            missing_api_policy_plugin
+            mismatched_abi_policy_plugin)
+        if(TARGET ${PHOTOSPIDER_TEST_POLICY_TARGET})
+            list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_ENTRY_ARGUMENTS
+                --entry policy 22222222222222222222222222222222
+                ${PHOTOSPIDER_TEST_POLICY_GENERATION}
+                "$<TARGET_FILE:${PHOTOSPIDER_TEST_POLICY_TARGET}>")
+            list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_TARGETS
+                ${PHOTOSPIDER_TEST_POLICY_TARGET})
+            math(EXPR PHOTOSPIDER_TEST_POLICY_GENERATION
+                "${PHOTOSPIDER_TEST_POLICY_GENERATION} + 1")
+        endif()
+    endforeach()
+    set(PHOTOSPIDER_TEST_ISOLATED_GENERATION 5)
+    foreach(PHOTOSPIDER_TEST_ISOLATED_TARGET
+            test_isolated_cpu_plugin_fixture
+            test_plugin_runtime_silent_fixture
+            test_plugin_runtime_corrupt_fixture)
+        if(TARGET ${PHOTOSPIDER_TEST_ISOLATED_TARGET})
+            list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_ENTRY_ARGUMENTS
+                --entry isolated-runtime
+                4142434445464748494a4b4c4d4e4f50
+                ${PHOTOSPIDER_TEST_ISOLATED_GENERATION}
+                "$<TARGET_FILE:${PHOTOSPIDER_TEST_ISOLATED_TARGET}>")
+            list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_TARGETS
+                ${PHOTOSPIDER_TEST_ISOLATED_TARGET})
+            math(EXPR PHOTOSPIDER_TEST_ISOLATED_GENERATION
+                "${PHOTOSPIDER_TEST_ISOLATED_GENERATION} + 1")
+        endif()
+    endforeach()
+    add_custom_target(test_plugin_trust_bundle
+        COMMAND ${Python3_EXECUTABLE} -B
+            "${PROJECT_SOURCE_DIR}/tests/support/generate_plugin_trust_bundle.py"
+            --openssl "${PHOTOSPIDER_OPENSSL_EXECUTABLE}"
+            --private-key
+                "${PROJECT_SOURCE_DIR}/tests/fixtures/trust/test_ed25519_private_key.pem"
+            --manifest "${PHOTOSPIDER_TEST_PLUGIN_TRUST_MANIFEST}"
+            --signature "${PHOTOSPIDER_TEST_PLUGIN_TRUST_SIGNATURE}"
+            --bad-signature
+                "${PHOTOSPIDER_TEST_PLUGIN_TRUST_BAD_SIGNATURE}"
+            --trust-root photospider-maintained-test-root
+            ${PHOTOSPIDER_TEST_PLUGIN_TRUST_ENTRY_ARGUMENTS}
+        BYPRODUCTS
+            "${PHOTOSPIDER_TEST_PLUGIN_TRUST_MANIFEST}"
+            "${PHOTOSPIDER_TEST_PLUGIN_TRUST_SIGNATURE}"
+            "${PHOTOSPIDER_TEST_PLUGIN_TRUST_BAD_SIGNATURE}"
+        DEPENDS
+            "${PROJECT_SOURCE_DIR}/tests/support/generate_plugin_trust_bundle.py"
+            "${PROJECT_SOURCE_DIR}/tests/fixtures/trust/test_ed25519_private_key.pem"
+            ${PHOTOSPIDER_TEST_PLUGIN_TRUST_TARGETS}
+        VERBATIM)
+    foreach(PHOTOSPIDER_TEST_PLUGIN_TRUST_CONSUMER
+            graph_cli
+            test_isolated_cpu_invocation
+            test_plugin_runtime_supervisor
+            test_optional_opencv_operation_provider
+            test_plugin_manager
+            test_ipc_protocol
+            test_ipc_daemon
+            test_host_adapter
+            test_policy_registry
+            test_policy_execution
+            test_plugin_trust)
+        if(TARGET ${PHOTOSPIDER_TEST_PLUGIN_TRUST_CONSUMER})
+            add_dependencies(${PHOTOSPIDER_TEST_PLUGIN_TRUST_CONSUMER}
+                test_plugin_trust_bundle)
+        endif()
+    endforeach()
+    if(TARGET test_plugin_trust AND TARGET untrusted_initializer_plugin)
+        add_dependencies(test_plugin_trust untrusted_initializer_plugin)
+    endif()
 endif()
 
 # GoogleTest.cmake records each gtest_discover_tests registration in the
@@ -2467,6 +3448,53 @@ if(BUILD_TESTING)
         PHOTOSPIDER_REGISTERED_GTEST_TARGETS)
 endif()
 
+# The POSIX durable Job vertical has an independent closed target inventory.
+# This configure-time invariant prevents unsupported/default-off platforms from
+# compiling its POSIX sources indirectly and keeps its maintained tests aligned
+# with the product capability gate.
+if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
+    if(NOT TARGET photospider_single_tenant_job_internal)
+        message(FATAL_ERROR
+            "Enabled single-tenant Job profile is missing its internal target")
+    endif()
+    if(NOT TARGET photospider-worker)
+        message(FATAL_ERROR
+            "Enabled single-tenant Job profile is missing its worker executable")
+    endif()
+    if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS AND
+       (NOT TARGET test_single_tenant_job_service OR
+        NOT TARGET test_worker_protocol))
+        message(FATAL_ERROR
+            "Enabled single-tenant Job profile is missing its unit targets")
+    endif()
+    if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE AND
+       PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER AND
+       NOT TARGET test_single_tenant_job_product_path)
+        message(FATAL_ERROR
+            "Enabled single-tenant Job profile is missing its product-path target")
+    endif()
+    if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE AND
+       (NOT TARGET test_worker_process_fixture OR
+        NOT TARGET test_worker_supervisor))
+        message(FATAL_ERROR
+            "Enabled single-tenant Job profile is missing process supervision tests")
+    endif()
+else()
+    foreach(PHOTOSPIDER_DISABLED_SINGLE_TENANT_JOB_TARGET
+            photospider_single_tenant_job_internal
+            photospider-worker
+            test_single_tenant_job_service
+            test_worker_protocol
+            test_worker_process_fixture
+            test_worker_supervisor
+            test_single_tenant_job_product_path)
+        if(TARGET ${PHOTOSPIDER_DISABLED_SINGLE_TENANT_JOB_TARGET})
+            message(FATAL_ERROR
+                "Disabled single-tenant Job profile unexpectedly defines ${PHOTOSPIDER_DISABLED_SINGLE_TENANT_JOB_TARGET}")
+        endif()
+    endforeach()
+endif()
+
 # The test-only product must have a closed direct-consumer set, and no target
 # may combine it with the installable archive. This assertion runs after all
 # root targets have been declared so later CMake edits cannot silently widen
@@ -2491,7 +3519,12 @@ if(TARGET photospider_internal_test_product)
     set(PHOTOSPIDER_ALLOWED_INTERNAL_TEST_PRODUCT_CONSUMERS
         test_compute_run
         test_compute_service_split
+        test_bad_alloc_boundaries
         test_host_adapter
+        test_i1_product_path
+        test_i2_product_path
+        test_b1_product_path
+        test_m1_product_path
         test_kernel_contracts
         test_policy_execution)
     set(PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS "")
@@ -2525,6 +3558,7 @@ message(STATUS "  Output Lib        : ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 message(STATUS "  Output Plugins    : ${PLUGIN_OUTPUT_DIR}")
 message(STATUS "  Policy Plugins    : ${POLICY_PLUGIN_DIR}")
 message(STATUS "  OpenCV Op Provider: ${PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER}")
+message(STATUS "  Single-Tenant Job: ${PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB}")
 message(STATUS "  Focused Tests     : ${PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS}")
 message(STATUS "  Full Test Suite   : ${PHOTOSPIDER_BUILD_FULL_TEST_SUITE}")
 if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)

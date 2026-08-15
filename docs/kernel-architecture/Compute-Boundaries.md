@@ -23,6 +23,11 @@ helpers, and operation ABI v2 use checked derived `PixelRect`/`PixelSize`.
 OpenCV geometry exists only inside a provider or algorithm implementation at
 the library call that consumes it.
 
+[ADR 0012](../adr/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md)
+also freezes the accepted operation-plugin ABI v1 target. Target paragraphs in
+this document are explicitly labeled and do not override the current v2 facts
+above or imply an installed v1 loader.
+
 ## Ownership Map
 
 ```mermaid
@@ -82,6 +87,36 @@ enters graph-state only for generation publication, snapshot capture, or the
 final exact revision/generation transaction; no per-Graph background runner or
 per-generation thread is created.
 
+An optional source-private accepted-boundary coordinate may accompany an I1
+request through Host and Kernel into this coordinator. The coordinator stores
+the complete current `SupersessionIdentity`. A coordinate-bound candidate may
+replace another coordinate-bound current identity exactly when its accepted
+coordinate advances strictly; equal admission timestamps use the row-local
+accepted sequence as the tie-breaker. Generation remains a unique preparation
+identity and Run join key, so it may move numerically backward at a bound
+current publication and cannot veto the newer coordinate. An older coordinate
+cannot replace current even with a higher generation. Legacy callers without
+either binding retain generation-only ordering. Mixed bound/unbound identities
+also retain generation ordering so this private evidence seam does not alter
+public or non-I1 behavior. The process residency registry stores the exact
+coordinator-managed current generation instead of applying a numeric maximum,
+so late native work from a numerically higher stale generation cannot restore
+itself after coordinate-authorized replacement.
+
+Public and I1 asynchronous requests also share one embedded-Host admission
+transaction. Before entering Kernel, Host constructs every fallible caller-side
+resource: the caller promise/future, the successful `Result` envelope, the
+backend-delivery bridge, the joined status worker, and close-visible tracking.
+This ordering is required because coordinator publication may make the product
+identity current concurrently before the Kernel call returns. Once Kernel may
+have published that identity, the accepted Host tail contains only no-throw
+future sharing, single-producer bridge delivery, and movement of the prebuilt
+result. Preparation failure, including the deterministic source-private test
+injection, therefore occurs before Kernel entry and cannot create a current
+identity, accepted product binding, or visible output. Violating the structural
+one-delivery/one-settlement invariant is fail-stop rather than a recoverable
+post-publication rejection.
+
 `close_and_drain()` is concurrent-call and repeat-call idempotent. It stops
 admission, wakes full-queue producers with `std::runtime_error`, drains prior
 work FIFO, and joins the worker before returning. Each caller waits for the
@@ -99,10 +134,10 @@ reserved-start transaction.
 
 | Module | Current responsibility | Does not own |
 | --- | --- | --- |
-| `ComputeRequestCoordinator` | Per-live-Graph checked generation allocation, graph-state publication, one latest mailbox and reserved ticket per admitted key, active-source supersession notification, exact pending settlement, and one logical active-runner slot | Run plans, staging, execution workers, Graph lifetime leases, lifecycle registry, telemetry, or public ABI |
+| `ComputeRequestCoordinator` | Per-live-Graph checked generation allocation, complete current-identity graph-state publication, optional source-private accepted-coordinate ordering, one latest mailbox and reserved ticket per admitted key, active-source supersession notification, exact pending settlement, and one logical active-runner slot | Run plans, staging, execution workers, Graph lifetime leases, lifecycle registry, telemetry, or public ABI |
 | `ComputeService` | Request validation, intent coordination, creation/settlement of one HP Run or one realtime `RunGroup` with separate HP/RT children, staged commit-policy invocation, collaborator construction, and final result selection | Frontend values, worker threads, graph documents, live Graph revision/generation authority, or public cancellation policy |
 | `RunGroup` | One realtime request identity, distinct HP/RT child Runs and observation leases, request-wide cancellation fan-out, RT-first gate, and deterministic aggregate outcome | Child plans/dispatchers, Graph state, workers, resource reservations, lifecycle registry, or public controls |
-| `ComputeRun` | Immutable single-domain HP/RT descriptor with exact Graph identity/revision and request supersession identity, monotonic phase, a private weak-lifetime cancellation source, read-only lease observation, one terminal/commit arbiter, shared-control ownership of full-plan/temporary or dirty-HP staging storage, stable leases, and composite task identity | Paired realtime grouping, Graph state, workers, revision/generation mint or publication authority, public cancellation control, or resource admission |
+| `ComputeRun` | Immutable single-domain HP/RT descriptor with exact Graph identity/revision and request supersession identity, monotonic phase, a private weak-lifetime cancellation source, read-only lease observation, one terminal/commit arbiter that also owns progressive HP trigger permission plus observation, shared-control ownership of full-plan/temporary or dirty-HP staging storage, stable leases, and composite task identity | Paired realtime grouping, Graph state, workers, revision/generation mint or publication authority, public cancellation control, or resource admission |
 | `ComputeCommitPolicy` | Product-only validation of exact Run/staged/live provenance and current supersession generation, a retained read-only Run lease, in-transaction cancellation observation and Run-owned commit-contender resolution, deferred HP cache persistence, and serialized visible publication before Run success | Planning, execution workers, a cancellation source or arbitrary cancellation authority, final lifecycle registry, or public ABI |
 | `ComputeCachePolicy` | HP cache eligibility and cache-path decisions | Disk I/O ownership or operation execution |
 | `NodeInputResolver` | Runtime parameters and ready image inputs | Graph traversal or output commit |
@@ -118,8 +153,8 @@ reserved-start transaction.
 | `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, one fixed `DeviceExecutorRegistry` with process-owned native resources and shared exact `ResidencyManager`, private `serial_debug` and `gpu_pipeline` routes, one Host/device-authoritative `ResourceLedger`, one process-domain operation gate, one private lifecycle-admission registry, policy-aware bounded ready storage, Run-scoped ReadyFence continuation routing, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, visible commit, access-plan selection, residency eviction, or resource ordering/fairness |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Execution-trace ownership |
-| `PolicyRegistry` and policy bindings | Validate built-in/DSO policy types, own process-scoped contexts and DSO leases, and rank immutable Host-authored candidate snapshots | Workers, queues, resource grants, Runs, Graphs, completion, or start authority |
-| `ResourceLedger` | Atomically reserve checked Host vectors and isolated per-`DeviceId` memory/scratch plans; reconcile native actual bytes; mint bounded Host grants and split device leases; release exact authority after its true owner ends; copy deterministic diagnostics | Worker creation, ordering policy, task dependencies, queue/in-flight/I/O/plugin guesses, residency eviction, or lifecycle admission |
+| `PolicyRegistry` and policy bindings | Validate built-in/DSO policy types, own process-scoped contexts and combined native-handle/exact-capability leases, and rank immutable Host-authored candidate snapshots | Workers, queues, resource grants, Runs, Graphs, completion, or start authority |
+| `ResourceLedger` | Atomically reserve checked Host vectors, isolated per-`DeviceId` memory/scratch plans, and explicit plugin process/CPU/address-space/shared-memory/descriptor vectors; reconcile native actual bytes; mint bounded Host grants, split device leases, and one-use identity-bound plugin tokens; retain replay tombstones and release exact authority after its true owner ends; copy deterministic diagnostics | Worker creation, ordering policy, task dependencies, queue/in-flight/I/O guesses, residency eviction, or lifecycle admission |
 | `GraphRuntime::ExecutionRouteBinding` | Store one copied private route id and nonzero generation per intent | Physical route ownership, policy context, workers, queues, or reservations |
 
 Compute collaborators live under `src/lib/compute/`; the ledger and Graph route
@@ -220,16 +255,28 @@ The registry's shared `ResidencyManager` admits complete Graph/target/intent/
 generation/Run/task/producer/revision/binding identity before native commit.
 Before coordinator publication is submitted, Kernel fallibly pretracks the
 request lineage with an internal zero-generation placeholder. Only an accepted
-current publication invokes the manager's no-allocation generation advance
+current publication assigns the manager's exact generation without allocation
 while the coordinator mutex still excludes `is_current()`; rejected and
-born-stale candidates do not advance it. Consequently, if N+1 becomes current
-before generation N starts its physical Run, N's later observation cannot move
-the manager backwards and its transfer admission is stale.
+born-stale candidates do not change it. Consequently, if a newer accepted
+request becomes current before an older accepted request starts its physical
+Run, the older Run's later observation cannot overwrite the manager's current
+identity, regardless of either generation's numeric magnitude, and its
+transfer admission is stale.
 Current-generation validation, producer Ready transitions, and resident
-insertion form one manager-locked linearization interval. A newer generation
-therefore either precedes an old callback and gives its destination a typed
-failure before Ready, or follows a completion already published as current.
+insertion form one manager-locked linearization interval. For a coordinator-
+managed lineage, a current-identity update therefore either precedes an old
+callback and gives its destination a typed failure before Ready, or follows a
+completion already published against the then-current exact generation.
+Standalone lineages separately retain numeric-maximum generation order.
 Duplicate and proper-subset identities cannot consume another admission. The
+published-Value acquisition path additionally stores the complete successful
+`DeviceCompletionIdentity` beside each resident. Its exact lookup holds the
+manager mutex while checking live managed lineage, completion use and seed,
+the source Ready identity, saved publication identity, and resident Ready
+identity. Lineage retirement that wins before lookup rejects even if ordinary
+broad revision/device residency still exists; a lookup that wins first returns
+a legal immutable `Value` copy. The ordinary broad lookup, retention,
+replacement, capacity, and eviction paths are unchanged. The
 Perlin provider encodes an explicit texture-to-buffer blit and calls neither
 `waitUntilCompleted` nor `getBytes`; CPU-to-Metal uses the inverse explicit
 blit. `GraphRuntime` still owns no native Metal state, #74 remains the final
@@ -336,13 +383,221 @@ installed replacement. Composition limits use the private source-tree
 `ExecutionResourceLimits`; third-party policy selection uses the independent
 pure-C policy ABI v1 and receives no execution resource.
 
+### Accepted operation-plugin v1 compute adapter target
+
+The future operation-v1 loader still publishes immutable implementations into
+the process-owned registry; the plugin receives no `ComputeService`,
+`ExecutionService`, `OpRegistry`, scheduler, cache, Graph, Run, ledger, device
+owner, or commit callback. One Host adapter converts private compute snapshots
+into borrowed exact-size C records and converts copied sink output back into
+private plans, Regions, dependencies, and temporary results. That adapter is
+the only place where the public ABI and private compute model meet.
+
+Each invocation-scoped callback is bound to Host-minted generation and
+invocation handles, permanently identified operation/implementation,
+configured plugin context, intent, and accepted descriptors. Definition,
+configuration-lifetime, root-query, and destroy callbacks instead bind to the
+exact leased DSO generation and their explicit identities/contexts; they have
+no fabricated invocation handle. Those opaque 128-bit handles are correlation
+facts, never pointers, lookup APIs, resource grants, durable identities, or
+wire values. Configuration and descriptor views are immutable and callback-
+local; no payload pointer is present during inference, Region propagation, or
+dependency construction.
+
+The call sequence is fixed:
+
+1. configuration validation and context creation happen before the configured
+   operation becomes invocable;
+2. inference returns every immutable output descriptor, extent, buffer size,
+   and access requirement before allocation;
+3. backward dirty and forward active-edge Region callbacks derive checked
+   planning facts;
+4. a declared data-dependent implementation produces copied, validated
+   dependency records before cache use; and
+5. monolithic or tiled execution receives immutable inputs and only the exact
+   Host-owned mutable CPU ranges derived from the accepted inference plan.
+
+Operation ABI v1 is synchronous and CPU-addressable. Callback return ends all
+borrowed descriptors and write grants. It carries no native device handle,
+device-resident buffer, fence, completion owner, delayed sink, or asynchronous
+lease. Private device work must stage into the Host CPU binding before return;
+otherwise it belongs behind a Host-private adapter or a future separately
+versioned native/async suite.
+
+The Host owns output allocation and exposes no allocator callback. Planning
+and diagnostics flow through a callback-local Host sink whose first failure is
+sticky. The Host validates and deep-copies emitted records before return and
+rejects missing, duplicate, stale, malformed, out-of-plan, out-of-range, or
+overlapping writes before any cache or Run-visible commit.
+
+Future v1 publication preserves the current strong transaction and per-slot
+revision/predecessor rules. Every callback and configured context retains its
+exact DSO generation through validation, status normalization, and exactly one
+destroy attempt. Retirement removes visibility before waiting, destroys in
+reverse order, and unmaps last. No registry, scheduler, execution, or
+publication lock is held while plugin code runs.
+
+An in-process callback can still ignore cancellation forever. The Host may
+make its result ineligible, but cannot fabricate return, reclaim its write
+grant, destroy its context, or unload its DSO safely. Operation v1 is therefore
+an operator-trusted compatibility boundary. Issue #102 now implements a
+source-private, pointer-free Darwin/Linux protocol-v1 invocation slice over a
+framed Unix stream, ordered `SCM_RIGHTS` descriptors, and unlinked POSIX shared
+memory. Issue #103 now implements the source-private bounded supervision
+composition around that transport. Issue #104 now adds signed immutable-
+snapshot admission and enforceable Host resource policy to the maintained
+direct and supervised entries. Linux supports those runtime entries through a
+sealed descriptor; Darwin rejects their construction before invocation
+effects. ABI pointer records and Host-minted resource tokens are never their
+wire protocol. A general syscall/network sandbox remains outside this slice.
+
+`NonSupervisedIsolatedCpuInvocationExecutor` validates the invocation identity,
+generation/operation binding, scalar parameters, resource declarations,
+readiness/ownership, descriptor geometry, access direction, ranges, and
+canonical descriptor/content digest before spawning. The one-call runtime
+performs the same independent checks before mapping a callback-local view. The
+Host waits for normal zero exit, then revalidates every FD, capability header,
+response, descriptor, and output range, snapshots output into a fresh Host
+allocation, and validates the binding over the actual copied bytes before
+sealing the `Value`. RAII owners close mappings, descriptors, channels, and
+reap the exact child on success or failure. Direct use deliberately has no
+supervisor, authentication, deadline, heartbeat, restart, or bounded hang
+recovery. It does receive #104 package trust, Host resource admission, and
+process rlimits, which do not turn that raw transport sub-role into supervised
+execution or a general sandbox.
+
+Issue #103 adds `PluginRuntimeSupervisor` and `PluginInvocationExecutor` to the
+same source-private product module without changing the #102 request/response
+wire. Every supervised call uses a fresh execed child and a dedicated Unix
+datagram lifecycle channel on fixed descriptor 5. The Host sends a fixed hello
+containing an OS-random 128-bit nonce, the complete six-part invocation identity
+plus worker/plugin generations, and the selected heartbeat interval. The child
+must echo those facts in strictly sequenced `RuntimeStarted`, `Heartbeat`, and
+`InvocationCompleted` events. This binds liveness to the exact private launch;
+because the child learns the nonce, it is session authentication rather than
+plugin attestation or output truth.
+
+The supervisor applies absolute monotonic startup, invocation, heartbeat-gap,
+response, graceful-termination, kill, and reap bounds. Complete request
+transfer receives one independent full invocation-duration window. It finishes
+only after every byte and descriptor right is sent, Host `SHUT_WR` succeeds,
+and the same absolute transfer deadline is observed again. The precise
+monotonic sample that passes that observation is `accepted_at`; both the
+callback invocation deadline and initial heartbeat-gap deadline derive
+directly from it. A late successful shutdown is an invocation-deadline fault
+and cannot arm fresh callback or heartbeat budgets; a failed shutdown remains
+a channel fact. Scheduling after acceptance consumes those two budgets, and a
+later caller clock sample cannot grant another window. A large bounded send
+still cannot consume the callback-liveness budget;
+the absolute invocation deadline still ends a callback that continues to emit
+heartbeats. Construction validates every configured duration for positivity,
+the inclusive 24-hour cap, exact steady-clock representation, and heartbeat
+ordering before child ownership; that validation cannot prove any future
+time-point sum. Every actual startup, transfer, callback, heartbeat, response,
+termination, reap, observation, or restart-backoff derivation therefore checks
+the same captured base against `time_point::max() - duration` before adding. An
+exact fit is valid. Before ownership, one tick beyond it fails closed through a
+controlled exception. After ownership, a pre-cleanup lifecycle or short exact-
+status-observation overflow maps to the current phase-typed fault and exact
+cleanup; arithmetic failure while deriving a termination/reap-cleanup or
+restart-backoff deadline instead preserves an already established primary
+fault. That arithmetic rule does not weaken ownership priority: when the
+cleanup deadlines are representable but the exact PID is still not waitable at
+the final bound, sole ownership moves to the deferred reaper and the resulting
+`ReapPending` fault outranks the earlier phase fact. No path wraps, saturates,
+clamps, or samples a replacement clock. A real channel/status-observation
+syscall failure remains `Channel` when no stronger process or deadline fact is
+available. Faults expose exact observable
+deadline, lifecycle-protocol, channel, bad-output, natural exit, signal, and
+termination-stage facts. A matching `SIGKILL` is only marked
+memory-pressure-compatible; it does not prove an OOM cause. Failure closes both
+channels, escalates `SIGTERM` to `SIGKILL` when necessary, and retains exact PID
+ownership through reap or the quarantined deferred-reaper integrity path.
+An already reaped child does not prove its lifecycle datagram queue is empty:
+before classifying retained status as exit without callback completion, the
+monitor drains queued in-sequence events. An authenticated completion advances
+to the unchanged response/EOF/decode/publication checks while the retained wait
+status remains available; a zero exit without that completion and a valid
+response remains bad output.
+
+`PluginInvocationExecutor` never falls back to an in-process or non-supervised
+call. After bounded restart backoff, the next invocation receives a fresh PID,
+nonce, lifecycle channel, and data channel. Product-linked real-exec tests prove
+success, startup authentication, each deadline class, queued completion before
+normal-exit classification, natural exit and signal classification, malformed
+output, exact descriptor/PID retirement, no fallback, and later healthy
+recovery. One test invokes the executor inside a production
+`ExecutionService` ready callback: the original `PluginRuntimeFault` reaches the
+request boundary, that boundary publishes only the owning Run as Failed, and
+the fixed service worker executes a later unrelated Run.
+
+Issue #104 performs side-effect-free preflight before either maintained Host
+entry materializes an invocation. It derives exact shared-memory and descriptor
+demand and combines them with one runtime process, one CPU slot, and configured
+address-space policy. The attempt-local `ResourceLedger` atomically reserves
+that `PluginResourceVector` and mints a move-only token bound to a domain-
+separated SHA-256 digest of the complete tenant/Job/attempt/worker-lease/package-
+generation/invocation identity. The executor consumes the token against equal
+identity and resource facts before shared-memory, FD, mapping, socket, fork, or
+exec effects and retains the resulting RAII lease through response validation
+and publication. A token or lease returns its vector exactly once; the replay
+tombstone remains spent until the ledger is destroyed.
+
+The same process trust policy gates operation and policy DSOs before native
+mapping. Linux alone currently supplies the required irreversible sealed-memfd
+exact-object boundary. A successful in-process mapping retains that exact
+capability in the same shared lease as the native handle through the final
+operation callback/generation or policy record/binding owner; final release
+unmaps the DSO before closing the sealed descriptor, so reuse of a
+`/proc/self/fd/N` number cannot change the resident object's authorized
+identity. Darwin, current Windows, and every other unsupported native profile
+reject operation, policy, and isolated-runtime roles with
+`ExactObjectUnsupported` before candidate path access; no initializer, ABI
+callback, token, or OS invocation effect can follow that rejection.
+
+Isolated executable construction also uses the process-immutable signed
+Ed25519 manifest configured by `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`,
+`PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE`, and
+`PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY`. The approved entry binds
+`isolated-runtime`, package id, generation, and SHA-256 bytes. Linux copies the
+approved candidate into an anonymous `memfd`, applies the complete immutable
+seal set, confirms the digest after sealing, and executes that descriptor
+through `fexecve`. Darwin reports `ExactObjectUnsupported` during executor
+construction before candidate access, token issuance, capability
+materialization, socket creation, or fork and creates no runtime pathname
+snapshot.
+
+Before native exec, the child applies admitted `RLIMIT_AS`, positive
+`RLIMIT_CPU`, checked `RLIMIT_NOFILE`, and zero `RLIMIT_CORE`; setup failure is
+reported before plugin code runs. The environment remains empty, stdio is
+`/dev/null`, and only fixed private channels plus admitted invocation
+capabilities survive. Aggregate ledger admission and per-process rlimits are
+independent Host checks. They neither establish a syscall/network sandbox nor
+turn `SIGKILL` into proof of OOM.
+
+The adapter, runtime endpoint, supervisor, and executor are compiled into the
+installable product archive, but this remains an internal composition proof,
+not an end-user route. No current `ExecutionService`, `WorkerManager`, embedded
+Host/CLI, `photospider-worker`, or operation loader constructs an isolated
+request from a Graph operation. Current operation ABI v2 cannot cross this
+wire, target-only operation ABI v1 is neither implemented nor shimmed here, and
+atomic operation-ABI migration, end-user selection, and stronger platform
+sandbox profiles remain separate work. Issue #106 now owns narrow long-lived
+codec evidence through two manual opt-in production-decoder harnesses and owns
+the execution observation join `(page session, GraphRevision, RunId,
+RunLocalTaskId)`. The tuple is optional per event, fixed-size, copied from a
+validated ready submission, and never participates in scheduling, cache reuse,
+cancellation, retry choice, settlement, quota, artifact, or commit authority.
+
 ## Request Behavior
 
 1. `Kernel` resolves the session, normalizes missing intent to HP, forms
    `(target, canonical request intent)`, allocates a checked graph-wide
    generation, and adopts the key's reserved compute-lane ticket outside
    graph-state. A graph-state work item then publishes that generation as
-   current, coalesces one pending value, and wakes the ticket.
+   current, coalesces one pending value, and wakes the ticket. For the private
+   I1 path, Kernel also carries the pre-call accepted-boundary coordinate into
+   the immutable supersession identity before that publication.
 2. `ComputeService` validates target, intent, dirty ROI, cache flags, and the
    selected execution strategy.
 3. One reserved-ticket turn captures request-owned Graph/proxy snapshots in a
@@ -521,6 +776,267 @@ exchanges that grant for CPU/memory/scratch execution authority. Completion,
 failure, and exceptional paths release the exact vector once. Independent Runs
 remain isolated.
 
+### Current benchmark boundary
+
+The current `BenchmarkResult` is a diagnostic aggregate, not an SLO record. It
+retains total wall duration, a trimmed typical duration from selected operation
+events, mean I/O duration, raw operation execution durations, image dimensions,
+and the resolved Run cap. `BenchmarkService` has no warmup ownership,
+nearest-rank percentile contract, current-generation visibility timestamp,
+completed service window, discarded-work accounting, authoritative high-water
+sampling, stable result/artifact/trace digest, reference digest, or independent
+dimension verdict.
+
+The maintained manual OpenCV concurrency tool adds warmups and raw wall samples
+for one fixed synthetic graph. Long-lived tests additionally prove exact
+callback overlap at Run caps 1/2/4/8 and bitwise output equality for one cap-1/
+cap-8 fixture. Those observations demonstrate mechanism reachability and one
+machine's scaling; they do not establish an Interactive, batch, or mixed-load
+SLO.
+
+[ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
+freezes the target workloads, six metric formulas, invalidation rules, and
+downstream evidence ownership. Issues #93 through #96 now add their assigned
+source-private collectors at the actual admission, visibility,
+cancellation/quiescence, artifact, trace, completed-service, and
+resource-lifetime boundaries. #96 additionally supplies the exact manual M1
+protocol implementation and the existing canonical outer-envelope
+materializer/resolver. This is implementation availability, not a claim that a
+timed machine corpus or its external authority graph passed. No placeholder
+zero value is a substitute for a missing observation source.
+
+Those profile collectors have precise boundary obligations. Edit ordinals
+`1..12` map to `edit_index=0..11`; nominal monotonic admission starts and their
+bounded lateness are distinct timestamps. I2 records preview admission/visible,
+final trigger/admission/visible, and generation-current checks using the legal
+RT-preview/HP-final child descriptors. Logical equality is a typed available
+`ContentDigest`. B1 records every `ComputeIoExecutor` task charge, accepted
+admission/settlement event with its executor-authored exact delta/linkage/
+sequence and same-lock process snapshot, planned-byte high-water, ADR 0009
+requested and achieved durability, complete output receipt, raw payload/
+manifest hashes, and the separate canonical semantic trace. Its raw ready
+observation retains the callback's adapter-owned byte declaration independently
+from logical ROI bytes mapped into the canonical resource vector, so declaration
+drift cannot be hidden by recomputation. Every active Compute I/O snapshot task
+occupies exactly one constructing/queued/running phase. Retained global event
+sequences may contain numeric gaps for omitted unrelated work, while every
+required task-local transition remains mandatory. Applicable B1/M1
+environment evidence also retains exactly one
+`execution-profile-b1-storage-raw-proof-v1` document: six fields in the shared
+manifest grammar carry the backend and all 21 raw field observations, native
+mount evidence, both 37-component performance cuts, transaction/receipt events,
+and root/destination ownership. It retains no derived proof boolean. Each
+compatibility side strictly parses those bytes and independently replays every
+adapter, normalizer, mapper, binding, and containment predicate before exact-
+matching eligibility. M1 records two same-ordinal isolated pair references in
+addition to candidate/reference comparison provenance.
+
+The source-private #96 M1 implementation checked-derives `C^M1`, `W^M1`,
+`B^M1`, and `U^M1`; retains the exact 1/7/40 I1 origin grid, fixed A252 and
+B253/A254/B255 offers, final-warmup current hold, carryover/FIFO snapshot,
+independent Graph producer cycles, U cutoff, and final-zero settlement; and
+evaluates non-substitutable latency, progress, fairness, waste, and memory
+axes. Fairness includes the nearest-rank p05 over exactly 30 paired Throughput
+windows, Graph A/B completed-service Jain p05, at most three applicable
+Interactive starts, and complete classification of all 480 measured I1
+admissions. Environment pairing delegates unchanged to the base-only I1 and
+full eligible B1-cap-eight relations.
+
+First measured admission and final-warmup current hold are source-derived, not
+runner-minted. One shared producer/reader projection exact-joins the retained
+final-warmup and measured-zero Issue #93 inputs, derives the accepted coordinate,
+Host success, product-bound current/visible replacement, boundary-only
+cancellation, and old settlement facts, and closes those facts before protocol
+evaluation can return early. Direct, canonical, and fully rehashed outer replay
+therefore reject the same raw-source contradiction and recompute the same six
+verdicts.
+
+Equal-time displacement uses that same source authority. If measured current
+is observed at `(B,n)`, cancellation of the displaced warmup Run at `(B,n+1)`
+follows current in the replicate-wide observer domain, preserves current hold,
+and is not boundary-only. Cancellation strictly before B, or at `(B,m)` with
+`m<=n`, fails closed. This observer sequence is never compared with the
+independent accepted-row sequence. M1 source closure also does not make a Run
+with both visible success and accepted cancellation valid under Issue #93.
+
+Applicability at each service start is a product-authored evidence cut, not a
+reconstruction from nominal I1/B1 intervals and not the scheduler-selection
+cut. `ExecutionService` first treats a ready lane head as scheduler-selectable
+when its Run lifecycle, operation gate, and physical route permit selection;
+transient child-grant capacity does not filter that policy frontier. A selected
+entry whose child grant is unavailable reaches reserved start, receives only a
+worker-cycle grant-block mark, and leaves policy/fairness counters unchanged
+while that worker searches the remaining candidates.
+
+Immediately before a physical start commits, the separate evidence-startable
+probe adds remaining child-grant capacity for both classes. The observation is
+published only after the selected operation gate, route, ready removal,
+counters, and execution grant commit. The M1 collector retains both capacity-
+aware class facts and the committed-grant bit in its existing preallocated,
+allocation-free callback store. The scheduler's
+three-to-one `consecutive_interactive_` accounting continues to use scheduler-
+selectable Throughput competition, not these narrower evidence facts. Nominal
+intervals remain useful only for Graph-demand diagnostics and cannot reset or
+excuse either rule.
+
+One preallocated `M1FairnessObservationCollector` gives tagged I1/B1 Runs one
+bounded observer-causal domain. `ComputeRunObservationFanout` forwards the
+same authority-owned product coordinate to that collector and the reused I1 or
+B1 collector; it does not merge that observer clock with I1's independent
+accepted-row sequence. Every fanout product callback publishes to the reused
+source collector first and enters the M1 sequence authority last. The authority
+callback return is the reservation-completion edge, so a stable M1 cut cannot
+precede publication of the source-history record carrying the same coordinate;
+coordinate reservation and explicit abort remain authority-only. Overflow,
+sequence exhaustion, or tag/QoS disagreement is sticky fail-closed evidence.
+Coordinate allocation samples steady time and assigns the next sequence in one
+exception-free serialized atomic section, so increasing causal sequence
+guarantees nondecreasing `observed_at` under concurrency. A contender retries
+until the constant-work owner releases that gate; contention never becomes
+`sequence_exhausted`, which is reserved for the true nonzero `uint64_t` numeric
+boundary. Local task identity is zero-based:
+task zero is valid for start and terminal events, while only non-task event kinds
+use zero as their scalar sentinel. The source-private `M1Host` adds no compute
+route: it joins Host/device ledger, Compute I/O, class-partitioned ready,
+lifecycle, and immutable Throughput capacity/reserved snapshots from the same
+service. Its only mutation is an idempotent evidence-finalization seam that is
+legal after every Graph and Host operation has closed. That seam shuts down the
+same execution service so the runner can retain the terminal `ServiceStopped`
+cut; it is not a general compute, phase, or lifecycle control surface.
+
+The collector's boundary snapshot closes both coordinate reservation lifetime
+and slot publication. A bounded reservation-entry frontier advances before
+route commit; the matching completion advances only after callback delivery or
+explicit abort when commit rejects. Claimed and contiguous release-
+published frontiers track event slots. A cut is stable only when all four
+frontiers reconcile and remain unchanged before and after copying; equal copied-
+vector sizes cannot hide a pause after reserve, after commit, or after claim.
+
+M1 Compute I/O high-water is likewise event-derived. Every protocol B1 offer
+must resolve to exactly one complete Issue #95 job stream containing Initial,
+each executor-authored admission, each matching settlement, and Final, with
+task identity, immutable charge, status, phase counters, same-lock snapshots,
+and globally unique accounting sequences. Missing, duplicate, reordered,
+unknown, over-limit, or arithmetically contradictory transitions are
+structural `Invalid`. Sparse `M1Host` cuts retain only current-state diagnostics
+and cannot increase or repair high-water; the final process cut must still be
+zero. Consequently a short I/O task that starts and settles between two sparse
+cuts remains visible in the event-derived maximum.
+
+The Host ledger and every stable configured-device identity also retain a
+componentwise lifetime envelope. Every temporal cut must satisfy
+`reserved <= lifetime_high_water <= limit`, and lifetime high-water must be
+nondecreasing for the same authority. Reserved above high-water or a declining
+high-water is structural `Invalid` evidence; high-water above limit remains an
+independent memory failure.
+
+Lifecycle evidence is replayed with the same fail-closed discipline. Each
+temporal snapshot retains its capture ordinal and requested `after_cursor`.
+Validation starts at cursor zero and requires the exact page chain, contiguous
+lossless event sequence, stable service/epoch identity, producer cursor/state
+semantics, and the complete service/Graph/admission/terminal/quiescence/
+resource/close effects required by nonempty M1 work. The replay maintains
+Graph, candidate, bundle, Run, group, and generation identity, including
+registration rollback, candidate rollback, group admission order, each child
+terminal-to-quiescent-to-resource-settled-to-unregistered chain, whole-bundle
+detachment, Graph close, shutdown cancellation, and final service stop. Because
+`BundleAdmitted` does not carry a candidate id, candidate commit is assigned
+existentially to one still-pending candidate of the same Graph; no evidence
+field is invented.
+
+At every event and retained page cut, the replay recomputes and exact-checks all
+nine registry-derived counters. The six physical counters remain independent
+producer samples: validation checks configured ready capacity, ready-plus-
+entered child-grant reachability, child-to-root ownership, policy-invocation-to-
+binding reachability, and that physical owners belong either to an admitted
+child or to a pending prepublication candidate. It does not infer exact physical
+deltas from event kinds. Worker joins and policy-binding retirement publish the
+registry counter cut under the registry lifecycle fence while sampling those
+six physical values independently. The runner closes every Graph before using
+the terminal M1 seam; `ServiceStopped` must be last and all 15 counters must be
+zero. Missing, duplicated, reordered, identity-spliced, counter-inconsistent,
+cursor-inconsistent, or post-stop records make memory `Invalid`.
+
+The manual `m1_shared_benchmark` target is `EXCLUDE_FROM_ALL` and absent from
+CTest/CI. It runs all three Graphs through one `EmbeddedHost`, emits a closed M1
+inner row, and materializes six retained sections plus the existing canonical
+15-field row and five-field bundle. Exact-one/DAG validation, pair direction,
+and actual environment authority remain mandatory. The inner row retains all
+30 raw progress/Jain windows, all 480 raw admission outcomes, committed
+service-start facts, complete temporal/lifecycle records, event-aligned B1 I/O,
+and the complete reused Issue #93/#95 source rows through their existing closed
+verification encoders. The Issue #93 and #95 manual producers now each
+materialize one closed source-private denominator-only pair-object pack. I1
+retains its schema/version and exactly 200 latency samples; B1 retains schema
+version one, exactly one cold, three warmup, and thirty measured unique job
+occurrences, and thirty ordered outcomes. Their output/verdict sections
+explicitly claim no portable output or conformance authority beyond the I1 p99
+or B1 rate denominator. Process-private actual storage authority is
+intentionally excluded.
+
+The nested v2 manifest has exactly 20 ordered fields. Its
+`interactive_sources` field retains exactly 48 complete post-freeze
+`I1EpisodeEvidenceInput` values and binds each one by phase, phase-local
+ordinal, and origin. Its `batch_sources` field retains exactly one source per
+protocol offer: immutable offer identity/cuts, the complete physical Run
+trace, output status, an authority-free copy of receipt observations when
+present, golden values, semantic trace bytes plus digest, and complete Compute
+I/O observations. Replay derives each I1 latency/service/four-verdict projection
+and each B1 verified-endpoint/waste projection. One shared checked runner/reader
+rule then source-derives and exact-matches all thirty progress windows, all
+thirty Graph A/B service/demand windows, all 480 measured headroom outcomes,
+and their attempted/classified/failure aggregate. Cardinality, identity,
+endpoint, ordering, or checked-arithmetic failure keeps source closure false.
+Source closure is mandatory independently of the six final verdicts, so a
+source mismatch cannot be materialized merely because another protocol fact
+already made the row `Invalid`. Copied receipt fields
+never reconstruct the store-private receipt capability or current storage
+authority.
+
+Before deriving its timed boundary, the M1 runner requires both pack paths plus
+their exact row/bundle addresses. POSIX validates and reads through one
+`O_NOFOLLOW` descriptor; Windows uses one `CreateFileW` handle opened with
+`FILE_FLAG_OPEN_REPARSE_POINT`. Type/reparse status, bounded size, exact bytes,
+growth check, and close are all evaluated on that same opened object. The
+runner rematerializes every denominator source, checks the same-role/
+ordinal/cap/fixture and base-only-I1/full-B1 environment relations, and
+recomputes I1 nearest-rank p99 plus the B1 successful-operation/interval tuple.
+Digest text alone is rejected and no caller-provided p99 or throughput scalar
+is accepted. The loaded pair rows, bundles, and sections are inserted exactly
+once into the local corpus before M1 sealing, and the recomputed values must
+equal both M1 claims. Missing, ambiguous, omitted, substituted, tampered, or
+mismatched pair evidence fails before timing or is `Invalid` on replay.
+Incomplete portable storage authority remains an independent canonical
+`Invalid`; the existence or successful build of this runner is not a timed
+machine-conformance result.
+
+Required-storage actual authority is an opaque copyable capability, not the
+serialized root, receipt, or probe fields. `B1OutputStore` alone duplicates the
+held root descriptor and mints immutable typed receipts; a trusted adapter owns
+the live complete-probe source. Each compatibility check re-observes all three
+sources. Copying `B1InnerRowInput` or `B1InnerRow` shares that capability and may
+extend the root descriptor, advisory lock, and adapter lifetime. JSON receives
+only construction-time diagnostics and a probe digest, so it cannot mint or
+rehydrate validation authority.
+
+These remain profile harness/evidence semantics. Exact per-job planned-byte
+charges and executor-authored admission/settlement deltas are mandatory,
+authoritative evidence for Compute I/O admission, planned-byte high-water, and
+that task's settlement. A same-lock process snapshot may include unrelated work
+and may be nonzero at one job's final observation; row teardown still returns to
+its required baseline. A provisional lazy-factory reservation that throws or
+returns empty, or whose task/queue-entry allocation fails, rolls back before
+Accepted publication and therefore contributes no orphan admission identity.
+Successful construction publishes Accepted either with queue ownership or,
+when external shutdown won, atomically with the exactly linked Cancelled
+settlement before callback entry. A reconciled output receipt contains empty
+`io_observations` because it ran no new task; it cannot synthesize the current
+two-task FSM, so the earlier new-work stream must be retained or the evaluator
+fails closed. These facts do not add fields to the current
+`BenchmarkResult`, change `ComputeRun`, prove physical memory ownership, replace
+diagnostic RSS or ledger/device ownership evidence, or promote the current IPC
+delivery store to durable output authority.
+
 The ready store charges each dispatch
 `work_units + ceil(complete_ready_grant_bytes / 4096)`. Each Graph accrues raw
 cost in a separate accumulator for the selected service class; each Run has one
@@ -553,9 +1069,11 @@ same ledger/reserved-start boundary to all of them. Route replacement validates
 and publishes a fresh generation without constructing a per-Graph executor or
 reservation. Service composition validates candidate device limits and creates
 native memory/scratch accounts only for devices represented by the frozen
-executor registry. It invents no unregistered-device, I/O, or plugin
-utilization dimension, and keeps I/O/plugin dimensions outside ledger
-authority.
+executor registry. It invents no unregistered-device or I/O utilization
+dimension and keeps I/O outside ledger authority. Plugin dimensions enter the
+same ledger only through the explicit isolated-executor
+`PluginResourceVector`; they are never inferred from ready-store or ordinary
+operation utilization.
 
 The canonical inventory is route and registry aware: `cpu` and `serial_debug`
 expose CPU only; `gpu_pipeline` exposes Metal then CPU when a Metal executor is
@@ -576,7 +1094,16 @@ identity plus `reentrant`, `maximum_parallelism`, and `exclusive_key`.
 Candidate startability checks the implementation counter and nonempty key in
 the process execution domain. Reserved start commits those gates with the
 resource child grant, physical route, ready removal, fairness charge, and
-in-flight ownership. Worker retirement releases the resource grant and both
+in-flight ownership. Before route commitment, the service holds
+`pool -> RunState`; the resource-reservation mutex used to stage the grant is
+released before entering the Run-owned terminal arbiter. That arbiter performs
+the irreversible route commit under the same authority as cancellation
+acceptance. Cancellation first prevents route commitment and rolls back the
+staged grant and operation gate; route commitment first fixes the lower causal
+coordinate. Cancellation cleanup enters the service pool only after releasing
+the terminal arbiter, so neither direction inverts the lock order. The worker
+delivers service-start observation after releasing the pool, Run-state, and
+terminal-arbiter locks. Worker retirement releases the resource grant and both
 operation gates after provider exit or callback skip, then wakes blocked work.
 Provider entry that does not run inside a physical-service worker still uses
 the same authority. Sequential compute, nonparallel dirty HP/RT, and
@@ -694,6 +1221,16 @@ older commit right. The installed Host, CLI, and IPC protocol version 2
 surfaces expose no cancellation entry; IPC jobs continue to report
 `cancellable: false`.
 
+For progressive requests, the HP callback does not manipulate the gate or
+observer separately. It invokes one `ComputeRunLease` operation that first
+observes deadline cancellation, then holds the HP Run terminal-arbiter mutex
+across the Open check, shared-gate consume, causal-coordinate reservation, and
+final-trigger observer callback. Matching HP cancellation therefore either
+wins first and suppresses the trigger or waits until the trigger observation is
+complete. `ComputeService` starts HP work only after that operation returns
+success. The shared gate remains the cross-child atomic decision, and sibling
+cleanup callbacks remain outside both Run mutexes.
+
 ### Current compute-I/O completion limits
 
 The current HP product transaction performs eligible configured disk-cache
@@ -738,16 +1275,26 @@ particular:
 - an image daemon job becomes terminal after Host compute and protected
   artifact publication, but that artifact is process-scoped and lease/TTL
   retained rather than crash durable; and
+- the source-private Issue #99/#105 Job becomes `Succeeded` only after its
+  fresh Embedded Host closes, its metadata-only worker Report and separate
+  attempt-local output stage are revalidated after exact reap, the durable
+  artifact authority returns a fully bound crash-durable receipt, retained
+  quota is settled, and durable Job truth is published; this receipt is neither
+  daemon delivery nor cache persistence; and
 - Graph-document save is a different graph-state operation and never a Run
   phase.
 
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
 accepts a target in which optional cache persistence and durable output commit
-have independent outcomes after Run publication. That behavior, stable output
-commit receipts, and durable commit remain future work. The bounded executor
-and its first staged HP cache-save vertical are current code; synchronous cache
-administration/load and the other persistence owners listed above are
-unchanged.
+have independent outcomes after Run publication. The source-private Issue #99
+Job vertical now implements one narrow restart-persistent image-output path:
+stable artifact/commit identity, manifest-last filesystem publication,
+idempotent reconciliation, retained quota, durable Job records, and restart
+recovery. This does not turn cache save, daemon delivery, Graph-document save,
+or arbitrary runtime Values into that artifact authority. The bounded executor,
+its first staged HP cache-save vertical, and the source-private Job vertical are
+current code; synchronous cache administration/load and the other persistence
+owners listed above are unchanged.
 
 ## Failure and Lifetime Semantics
 
@@ -824,6 +1371,76 @@ unchanged.
   transition failure is fail-stop. Repeated external shutdown joins the one
   monotonic generation.
 
+[ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
+adds a higher-level target without changing these Kernel execution owners. The
+current [single-tenant Job vertical](Single-Tenant-Job-Vertical.md) implements
+the Issue #99 durable Job/quota/artifact/retry authority and the Issue #100
+source-private WorkerManager in the same authority process. Every product
+attempt runs in one fresh, never-reused `photospider-worker` process that owns
+one attempt-local instance of the process execution domain described here.
+WorkerManager owns its private bounded protocol, heartbeat/runtime deadlines,
+exact lease/PID fencing, cooperative cancellation, TERM/KILL escalation, and
+exact nonblocking `waitpid` reaping. Issue #105 makes that private protocol v2
+metadata-only under a 128-KiB control bound: checkpoint and candidate bytes use
+separate manager-created direction-reduced stream descriptors. Their manager
+endpoints are nonblocking, and a worker endpoint may block only while its exact
+PID remains under lifecycle deadlines and TERM/KILL/reap ownership. Checkpoint
+size/EOF/SHA-256 validation occurs inside that worker. The worker sends exact
+output metadata first and retains its source with genuine heartbeats active.
+While the current PID is unreaped, the manager creates one exact lazy anonymous
+final owner and receives at most one 64-KiB slice directly into it per lifecycle
+arbitration; it performs no cumulative reallocation or whole-payload
+reconstruction copy. Only a valid Heartbeat frame renews heartbeat, never
+continuous or prebuffered output. The manager accepts no output until stream
+EOF, clean reap, and exact reference, slot, descriptor, size, resource, and
+SHA-256 validation. The worker closes its output lane only after exact bytes and
+remains alive and terminable until the manager completes validation and O(1)
+owner transfer, then returns one
+identity-only `CompletionReady` that grants no service or artifact authority.
+Post-reap processing never reads the bulk lane and performs no filesystem I/O,
+blocking bulk transfer, bulk allocation, or content hash. The worker receives no
+artifact root, stable output transaction, quota, retry, or publication
+authority. Partial or complete protocol headers and payloads are retained
+across short poll deadlines. Poll budget is separate from strict semantic
+lifecycle acceptance: pending bulk permits one due-budget nonblocking control
+probe, but buffered or newly completed Assignment, `AssignmentAccepted`,
+Heartbeat, Report, Cancel, or `CompletionReady` is visible only before its
+applicable absolute deadline. Control writes recheck before and after positive
+send progress; a late possibly delivered frame is treated as a failed write and
+is never retried. A cancellation owner may retain the channel only for bounded
+receive-side report/EOF/exit drainage, so cancellation-send failure is drained
+to the worker report/EOF/exit deadline rather than treated as forced
+cancellation.
+Product construction rejects `SIGCHLD=SIG_IGN` and `SA_NOCLDWAIT` before the
+durable root is opened, and WorkerManager revalidates that waitable policy
+immediately before every `fork`. A later process-global policy mutation, a
+competing reaper, or any non-`EINTR` exact-`waitpid` error including `ECHILD`
+fail-stops the authority before a completion callback, completed-record mark,
+or record deletion. After exact reaping, the manager still retains its record
+until one typed terminal fact is constructed and its control-plane callback
+returns. The actual first external/in-process `Report`, `Failure`, and
+`ForcedCancellation` constructors each include fault injection plus all
+identity/message/report retention in a local no-throw boundary. A
+`std::bad_alloc` or any other exception in that boundary or callback delivery
+takes a fixed allocation-free fail-stop path before record completion/deletion;
+construction failure cannot escape to generic reclassification and invokes no
+callback, callback failure is not retried, and neither path fabricates an
+ordinary completion or releases ownership. Successful `kill()` delivery alone
+does not prove that a zombie died from that signal: forced cancellation
+requires an exact `WIFSIGNALED` status matching the delivered `SIGTERM` or
+`SIGKILL`, while a normal zero exit remains report/channel/exit truth.
+If exact reaping remains unobservable after the final kill/reap deadline, the
+authority process fails stop instead of entering an unbounded wait or returning
+with live ownership.
+
+The accepted CPU and host-memory envelope bounds Embedded Host parallelism and
+the supported POSIX address space; configured-device bytes remain server
+admission accounting rather than an OS/device sandbox. The control plane still
+owns durable Job truth, the artifact service owns durable bytes and receipts,
+and this slice does not add a network endpoint, multi-tenant authorization,
+standalone artifact service/remote data plane, syscall/device sandbox, or untrusted-plugin
+profile planned by Issues #101-#106.
+
 ## Boundary Rationale
 
 Separating planning, ready detection, physical execution, and commit provides
@@ -838,6 +1455,7 @@ four independent correctness points:
 [ADR 0003](../adr/0003-process-owned-execution-resources.md),
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md),
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md),
+[ADR 0012](../adr/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md),
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted direction and detailed ownership contract. This document
@@ -873,6 +1491,24 @@ bounds staged HP cache-save mechanism by task count and estimated retained
 bytes; graph-state policy waits for its typed completion, while CPU workers
 cannot.
 
+Issue #94 composes these existing authorities through optional source-private
+request state only. The accepted coordinate remains the product supersession
+identity; RT preview and HP final are distinct child Runs with exact descriptors
+and Interactive QoS; the graph-state/currentness gate remains the only visible-
+commit authority. `ProgressiveFinalGate` adds a request-scoped atomic decision
+between current-preview publication and final submission, while one HP Run-
+owned operation keeps successful consumption and trigger observation inside
+terminal arbitration. Cancellation and supersession continue through the
+existing Run and generation authorities. Observation callbacks copy facts and
+freeze immutable Values but provide no control capability. Successful I2
+visible-output capture is one-way and sticky; failed cleanup preserves any
+captured prefix and explicit missing facts while releasing the Value without
+retry. I2 Host/conditional-Metal acquisition uses the existing AccessPlan,
+process residency manager, device registry, and resource ledger, with exact
+published-identity lookup separate from ordinary broad residency access.
+None of these private seams adds an installed Host field, IPC message, CLI
+command, plugin callback, scheduler route, or second resource/residency owner.
+
 ## Implementation and Validation Entry Points
 
 - `include/photospider/data/value.hpp`
@@ -882,12 +1518,16 @@ cannot.
 - `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/progressive_compute.*`
 - `src/lib/compute/compute_commit_policy.hpp`
 - `src/lib/compute/compute_supersession.*`
 - `src/lib/compute/compute_request_coordinator.*`
 - `src/lib/compute/compute_run.*`
 - `src/lib/compute/run_group.*`
 - `src/lib/compute/execution_service.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`
 - `src/lib/execution/compute_io_executor.*`
@@ -903,6 +1543,7 @@ cannot.
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
+- `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/ipc/output_store.*`
 - `plugins/ops/save_op.cpp`
@@ -911,6 +1552,8 @@ cannot.
 - `src/lib/execution/residency_manager.*`
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/isolated_cpu_invocation.*`
+- `src/lib/execution/plugin_runtime_supervisor.hpp`
 - `src/lib/policy/policy_registry.*`
 - `src/lib/providers/configured_operation_providers.*`
 - `src/lib/providers/opencv/*`
@@ -935,3 +1578,8 @@ cannot.
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
 - `tests/unit/test_region_contracts.cpp`
+- `tests/unit/test_progressive_compute.cpp`
+- `tests/unit/test_i2_profile.cpp`
+- `tests/unit/test_i2_evidence.cpp`
+- `tests/integration/test_i2_product_path.cpp`
+- `tests/integration/test_plugin_runtime_supervisor.cpp`

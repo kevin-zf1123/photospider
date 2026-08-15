@@ -18,9 +18,15 @@ from pathlib import Path, PurePosixPath
 from textwrap import dedent
 from typing import Any, Callable
 
+# Keep this standalone CTest driver able to reuse repository-owned test support
+# without relying on a caller-provided PYTHONPATH.
+TEST_SUPPORT_DIR = Path(__file__).resolve().parents[1] / "support"
+sys.path.insert(0, str(TEST_SUPPORT_DIR))
+
 from cmake_build_smoke_support import (
     producer_osx_architecture_arguments,
 )
+from generate_plugin_trust_bundle import write_plugin_trust_bundle
 
 
 STATIC_PRODUCT_ARCHIVE_NAMES = {
@@ -34,6 +40,7 @@ INTERNAL_PRODUCT_TEST_DEFINITIONS = (
     "PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING",
     "PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING",
     "PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING",
+    "PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING",
     "PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING",
     "PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING",
 )
@@ -46,6 +53,15 @@ FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS = (
     "arm_reserved_start_rollback_probe_for_testing",
     "reserved_start_rollback_probe_snapshot_for_testing",
     "disarm_reserved_start_rollback_probe_for_testing",
+    "route_commit_failure_probe_state",
+    "consume_route_commit_failure_for_testing",
+    "arm_route_commit_failure_probe_for_testing",
+    "route_commit_failure_probe_triggered_for_testing",
+    "disarm_route_commit_failure_probe_for_testing",
+    "service_start_arbitration_probe_state",
+    "notify_service_start_arbitration_for_testing",
+    "set_service_start_arbitration_observer_for_testing",
+    "clear_service_start_arbitration_observer_for_testing",
     "operation_admission_wait_probe_state",
     "notify_operation_admission_wait_for_testing",
     "set_operation_admission_wait_observer_for_testing",
@@ -73,6 +89,9 @@ FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS = (
     "g_kernel_compute_commit_test_hook",
     "set_kernel_compute_commit_test_hook",
     "notify_kernel_compute_commit_test_hook",
+    "g_embedded_i2_acquisition_test_hook",
+    "set_embedded_i2_acquisition_test_hook",
+    "notify_i2_acquisition_test_hook",
 )
 REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS = (
     "TaskSubmissionPlan21retained_memory_bytes",
@@ -596,6 +615,8 @@ def run_installed_policy_contract_probe(plugin: Path) -> int:
     @throws None Load and symbol failures are converted to status 127.
     @note The DSO contains no backend dependency. Its private probe exercises
       the same exact metadata/create/select/destroy table exported to the Host.
+      This is an SDK ABI probe that deliberately maps its input directly; it is
+      not a Host trust-admission or native-execution route.
     """
 
     try:
@@ -1135,13 +1156,33 @@ def write_consumer_projects(
                 "    return 1;",
                 "  }",
                 "  const auto policy_load = host->policy_load(argv[1]);",
+                "#if !defined(__linux__)",
+                "  if (policy_load.status.ok ||",
+                "      ps::checked_graph_error_code(policy_load.status) !=",
+                "          ps::GraphErrc::InvalidParameter) {",
+                "    return 2;",
+                "  }",
+                "#else",
                 "  if (!policy_load.status.ok) {",
                 "    std::cerr << policy_load.status.message << '\\n';",
                 "    return 2;",
                 "  }",
+                "#endif",
                 "  const std::filesystem::path operation_plugin(argv[2]);",
                 "  const auto operation_load = host->plugins_load_report(",
                 "      {operation_plugin.parent_path().string()});",
+                "#if !defined(__linux__)",
+                "  if (!operation_load.status.ok ||",
+                "      operation_load.value.attempted != 1 ||",
+                "      operation_load.value.loaded != 0 ||",
+                "      operation_load.value.errors.size() != 1 ||",
+                "      operation_load.value.errors.front().code !=",
+                "          ps::GraphErrc::InvalidParameter ||",
+                "      !operation_load.value.new_op_keys.empty()) {",
+                "    return 3;",
+                "  }",
+                "  return 0;",
+                "#else",
                 "  if (!operation_load.status.ok || operation_load.value.loaded != 1 ||",
                 "      !operation_load.value.errors.empty() ||",
                 "      std::find(operation_load.value.new_op_keys.begin(),",
@@ -1226,6 +1267,7 @@ def write_consumer_projects(
                 "    return 12;",
                 "  }",
                 "  return 0;",
+                "#endif",
                 "}",
                 "",
             ]
@@ -3371,6 +3413,7 @@ def main() -> int:
         help="CMake generator used for both producer and consumer configure",
     )
     parser.add_argument("--cmake-executable", default="cmake")
+    parser.add_argument("--openssl-executable", default="openssl")
     parser.add_argument("--configure-fresh-producer", action="store_true")
     parser.add_argument(
         "--producer-build-testing", choices=("ON", "OFF"), default="OFF"
@@ -3764,6 +3807,50 @@ def main() -> int:
         and operation_plugin is not None
         and operation_plugin.is_file()
     ):
+        trust_manifest = work / "installed-consumer-trust" / "manifest.txt"
+        trust_signature = work / "installed-consumer-trust" / "signature.hex"
+        write_plugin_trust_bundle(
+            openssl=args.openssl_executable,
+            private_key=(
+                repo
+                / "tests"
+                / "fixtures"
+                / "trust"
+                / "test_ed25519_private_key.pem"
+            ),
+            manifest=trust_manifest,
+            signature=trust_signature,
+            bad_signature=None,
+            trust_root="photospider-install-consumer-test-root",
+            entries=(
+                (
+                    "operation",
+                    "11111111111111111111111111111111",
+                    "1",
+                    str(operation_plugin),
+                ),
+                (
+                    "policy",
+                    "22222222222222222222222222222222",
+                    "1",
+                    str(cpp_policy_plugin),
+                ),
+            ),
+        )
+        trust_environment = os.environ.copy()
+        trust_environment.update(
+            {
+                "PHOTOSPIDER_PLUGIN_TRUST_MANIFEST": str(trust_manifest),
+                "PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE": str(trust_signature),
+                "PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY": str(
+                    repo
+                    / "tests"
+                    / "fixtures"
+                    / "trust"
+                    / "test_ed25519_public_key.pem"
+                ),
+            }
+        )
         run_code = run_command(
             [
                 str(executable),
@@ -3773,6 +3860,7 @@ def main() -> int:
                 str(extension_graph),
             ],
             repo,
+            env=trust_environment,
         )
     else:
         print(

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -850,6 +851,70 @@ class ReadyTaskSubmissionRuntime : public ExecutionTaskRuntime {
 };
 
 /**
+ * @brief Result of one source-private process residency acquisition.
+ *
+ * @throws Nothing for destruction; Value copying retains immutable state.
+ * @note `executor_submitted` distinguishes an initial explicit transfer from a
+ * process-resident lookup. The value owns no executor, ledger token, native
+ * handle, Run lease, or currentness authority.
+ */
+struct DeviceResidentValueAcquisition final {
+  /** @brief Ready revision-preserving device-local Value. */
+  Value value;
+
+  /** @brief True only when this call entered the concrete device executor. */
+  bool executor_submitted = false;
+};
+
+/**
+ * @brief Immutable policy-only Throughput reservation diagnostics.
+ *
+ * The snapshot copies the fixed general-capacity ceiling and the exact active
+ * Throughput root-reservation total under one account lock. Interactive root
+ * reservations remain visible only in the authoritative ResourceLedger
+ * snapshot and never enter `reserved`.
+ *
+ * @throws Nothing for value construction and copying.
+ * @note This value grants no ledger token, reservation, child grant, queue
+ * entry, Run lease, cancellation, release, or policy-mutation authority.
+ */
+struct ExecutionThroughputReservationSnapshot final {
+  /** @brief Immutable resource ceiling after Interactive headroom subtraction.
+   */
+  ResourceVector capacity;
+
+  /** @brief Exact active built-in Throughput root-reservation total. */
+  ResourceVector reserved;
+};
+
+/**
+ * @brief Immutable class-partitioned physical ready-store diagnostics.
+ *
+ * The snapshot is copied while the process ready store is protected by its
+ * owning service mutex. Counts include every published store-owned entry and
+ * therefore describe real queued product work, not reserved capacity or a
+ * harness prediction.
+ *
+ * @throws Nothing for value construction and copying.
+ * @note This value grants no queue handle, candidate identity, Run lease,
+ * scheduling decision, resource grant, cancellation, or mutation authority.
+ */
+struct ExecutionReadyClassSnapshot final {
+  /** @brief Published Interactive ready entries. */
+  std::uint64_t interactive_entries = 0U;
+
+  /** @brief Published Throughput ready entries. */
+  std::uint64_t throughput_entries = 0U;
+
+  /** @brief Total published entries observed in the same locked cut. */
+  std::uint64_t total_entries = 0U;
+
+  /** @brief False only when a stored Run carries an unknown closed QoS value.
+   */
+  bool valid = true;
+};
+
+/**
  * @brief Owns one fixed Host execution domain for concurrent Runs.
  *
  * The service owns a fixed CPU worker pool, one private Metal worker lane, one
@@ -1112,6 +1177,27 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   ResourceLedger::Snapshot resource_snapshot() const;
 
   /**
+   * @brief Copies the built-in Throughput policy reservation account.
+   * @return Fixed general capacity and exact active Throughput root total.
+   * @throws std::system_error when private accounting locking fails.
+   * @note This source-private diagnostic contains no physical resource or
+   * policy authority. Compare it with `resource_snapshot()` to distinguish
+   * Throughput accounting from the authoritative all-class ledger total.
+   */
+  ExecutionThroughputReservationSnapshot throughput_reservation_snapshot()
+      const;
+
+  /**
+   * @brief Copies class-partitioned real ready-store entry counts.
+   * @return One service-mutex cut of Interactive, Throughput, and total ready
+   * entries.
+   * @throws std::system_error when service-mutex acquisition fails.
+   * @note This source-private diagnostic is observation-only and exposes no
+   * ready value, policy candidate, queue position, or scheduling authority.
+   */
+  ExecutionReadyClassSnapshot ready_class_snapshot() const;
+
+  /**
    * @brief Returns the process-domain bounded compute-I/O executor.
    * @return Stable service-owned executor reference.
    * @throws Nothing.
@@ -1142,6 +1228,16 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       DeviceId device) const;
 
   /**
+   * @brief Copies every configured concrete-device resource account.
+   * @return Deterministically ordered immutable device snapshots.
+   * @throws std::bad_alloc when result storage cannot allocate.
+   * @throws std::system_error from ledger snapshot locking.
+   * @note Snapshots contain current and lifetime high-water accounting but no
+   * native handle, reservation, grant, or release authority.
+   */
+  std::vector<ResourceLedger::DeviceSnapshot> device_resource_snapshots() const;
+
+  /**
    * @brief Tests whether the fixed process registry owns one device executor.
    * @param device Device label to inspect.
    * @return True only for a registered non-CPU executor.
@@ -1165,6 +1261,69 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       Device device) const;
 
   /**
+   * @brief Acquires or explicitly uploads one Ready Value to process Metal.
+   * @param source Ready host-visible rank-two FP32 or tightly strided HWC FP32
+   * Value.
+   * @param width Positive logical image width.
+   * @param height Positive logical image height.
+   * @param completion_seed Exact Graph/request/Run lineage and explicit
+   * published-Value acquisition semantics attached to a real native transfer.
+   * @param capture_deadline Exclusive absolute I2 capture deadline. Lookup,
+   * serialized executor admission, interruptible upload preparation/copy, the
+   * final native pre-commit check, completion observation, and timeout
+   * containment all use this unchanged value.
+   * @return Ready resident Value plus whether executor submission occurred.
+   * @throws std::invalid_argument for missing Metal, invalid source geometry,
+   * or malformed lineage.
+   * @throws ReadyFenceAccessError when native completion settles
+   * unsuccessfully.
+   * @throws std::runtime_error when service shutdown starts or the absolute
+   * capture deadline expires or ties the current monotonic sample.
+   * @throws Native executor, resource, allocation, and synchronization failures
+   * unchanged.
+   * @note The method first uses the process-owned ResidencyManager's atomic
+   * published-acquisition lookup. A genuine absence enters exactly one
+   * registered Metal executor invocation using the service ResourceLedger; an
+   * exact hit performs one fence poll bracketed by fresh samples from the same
+   * process monotonic clock, and returns only when the post-poll sample remains
+   * strictly before the unchanged capture deadline. A late resident hit
+   * performs no executor submission, timeout containment, allocation,
+   * transfer, or resident release.
+   * Admission or upload preparation that reaches the deadline unwinds before
+   * native commit and leaves no pending Value, manager admission, resident, or
+   * ledger lease. A timed-out committed miss removes its exact pending manager
+   * admission; a completion that won the Ready race has only its exact resident
+   * released. A completion
+   * that already consumed a rejected/stale admission remains the sole fence
+   * and ledger owner until safe terminal settlement.
+   * Historical source generation is allowed only while its managed lineage is
+   * live and the calling seed plus source/resident revision, binding, producer,
+   * Ready fence, and saved first-publication identity all match exactly. This
+   * source-private verification seam exposes no native handle or registry
+   * mutation and performs no device-to-Host readback.
+   */
+  DeviceResidentValueAcquisition acquire_metal_resident_value(
+      Value source, std::uint32_t width, std::uint32_t height,
+      const execution::DeviceCompletionSeed& completion_seed,
+      std::chrono::steady_clock::time_point capture_deadline);
+
+  /**
+   * @brief Releases one exact process-resident Metal Value after I2 capture.
+   * @param revision Exact logical revision copied from the acquired Value.
+   * @param binding Complete acquired Metal binding, including allocation.
+   * @param producer Exact producer copied from the acquired Value.
+   * @return True only when the complete identity removed one resident.
+   * @throws std::logic_error when the process registry lacks its manager.
+   * @throws std::system_error when residency synchronization fails.
+   * @note This source-private verification cleanup delegates to exact manager
+   * identity matching. Wrong facts are a no-op, and ordinary lookup,
+   * publication, replacement, and capacity behavior never invoke it.
+   */
+  bool release_metal_resident_value(ValueRevisionId revision,
+                                    const StorageBinding& binding,
+                                    ProducerIdentity producer);
+
+  /**
    * @brief Preallocates native freshness state before Graph publication.
    * @param graph_instance_id Exact live Graph identity.
    * @param identity Prepared canonical request lineage; its generation is not
@@ -1180,15 +1339,17 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
                                     const SupersessionIdentity& identity);
 
   /**
-   * @brief Invalidates tracked older native completions before current publish.
+   * @brief Publishes exact managed native freshness before current publish.
    * @param graph_instance_id Exact live Graph identity.
-   * @param identity Newly accepted canonical request lineage and generation.
+   * @param identity Newly accepted canonical request lineage and exact
+   * generation.
    * @return Nothing.
    * @throws Nothing; synchronization or invariant failure terminates because
    * Graph and residency currentness must not split.
    * @note Kernel invokes this from the request coordinator's locked
-   * current-publication callback. The path performs no allocation and must not
-   * re-enter Graph/coordinator state.
+   * current-publication callback. The exact generation can move numerically
+   * backward when accepted-coordinate order authorizes replacement. The path
+   * performs no allocation and must not re-enter Graph/coordinator state.
    */
   void observe_current_supersession(
       GraphInstanceId graph_instance_id,
@@ -1624,11 +1785,14 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   void dec_tasks_to_complete() override;
 
   /**
-   * @brief Publishes one current-worker Run trace.
+   * @brief Publishes one current-worker Run/task trace.
    * @param action Stable trace action.
    * @param node_id Planned Graph node id.
    * @return Nothing.
    * @throws std::logic_error outside a service worker callback.
+   * @note The Host receives the exact revision, Run, and dense Run-local task
+   * identity copied from the active validated QueueEntry. The observation does
+   * not replace the matching lease or registered task plan.
    */
   void log_event(ExecutionTraceAction action, int node_id) override;
 
@@ -2006,17 +2170,6 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   static void observe_policy_binding_retired(void* context,
                                              std::uint64_t generation,
                                              bool destroy_failed) noexcept;
-
-  /**
-   * @brief Copies the built-in Throughput admission charge for repository
-   * tests.
-   * @return Exact active Throughput root vectors, excluding Interactive
-   * reservations.
-   * @throws std::system_error when private accounting locking fails.
-   * @note This private diagnostic mints no authority and is exposed only
-   * through `ExecutionServiceTestAccess`, never an installed API.
-   */
-  ResourceVector throughput_reservation_snapshot_for_testing() const;
 
   /**
    * @brief Returns the Run currently executing on this service worker.

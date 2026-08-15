@@ -1,3 +1,4 @@
+#include <fenv.h>  // NOLINT(build/c++11)
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -6,6 +7,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -15,11 +17,13 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "benchmark/benchmark_service.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/node.hpp"     // NOLINT(build/include_subdir)
+#include "photospider/core/image_buffer.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
 #include "support/ipc_host_spy.hpp"
@@ -101,6 +105,59 @@ class ScopedBenchmarkTempDir final {
  private:
   /** @brief Process-unique root removed by this owner. */
   std::filesystem::path root_;
+};
+
+/**
+ * @brief Restores the calling test thread's complete floating-point state.
+ *
+ * @throws std::runtime_error when the initial environment cannot be captured.
+ * @note Destruction restores rounding, sticky exception flags, and all other
+ * environment controls. Restoration failure terminates because contaminating
+ * a later test would make the suite result order-dependent.
+ */
+class ScopedTestFloatingPointEnvironment final {
+ public:
+  /**
+   * @brief Captures the complete environment of the current test thread.
+   * @throws std::runtime_error when `fegetenv` cannot capture that state.
+   */
+  ScopedTestFloatingPointEnvironment() {
+    if (fegetenv(&initial_environment_) != 0) {
+      throw std::runtime_error(
+          "cannot capture the test thread floating-point environment");
+    }
+  }
+
+  /**
+   * @brief Restores the complete environment captured at construction.
+   * @throws Nothing; restoration failure terminates the process.
+   */
+  ~ScopedTestFloatingPointEnvironment() noexcept {
+    if (fesetenv(&initial_environment_) != 0) {
+      std::terminate();
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate ownership of test-thread restoration.
+   * @param other Guard retaining restoration responsibility.
+   * @throws Nothing because copying is unavailable.
+   */
+  ScopedTestFloatingPointEnvironment(
+      const ScopedTestFloatingPointEnvironment& other) = delete;
+
+  /**
+   * @brief Prevents replacing test-thread restoration ownership.
+   * @param other Guard that remains responsible for its captured environment.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedTestFloatingPointEnvironment& operator=(
+      const ScopedTestFloatingPointEnvironment& other) = delete;
+
+ private:
+  /** @brief Complete calling-thread environment restored after the test. */
+  fenv_t initial_environment_{};
 };
 
 /**
@@ -990,6 +1047,67 @@ TEST(OpenCvOperationConcurrency,
 
   const VoidResult closed = host->close_graph(load.session);
   EXPECT_TRUE(closed.status.ok) << closed.status.message;
+}
+
+/**
+ * @brief Proves the real curve provider restores the complete calling-thread
+ * floating-point environment.
+ *
+ * @throws Provider, registry, allocation, or floating-point setup failures
+ * unchanged to GoogleTest.
+ * @note The callback runs synchronously on this thread after a non-default
+ * rounding mode and two sticky exceptions are installed. The test snapshots
+ * rounding and every `FE_ALL_EXCEPT` flag immediately after provider return,
+ * while `ScopedTestFloatingPointEnvironment` restores the thread's original
+ * environment on every later exit.
+ */
+TEST(OpenCvOperationConcurrency,
+     BuiltinCurveRestoresCompleteCallingThreadEnvironment) {
+  ScopedTestFloatingPointEnvironment restore_initial_environment;
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const VoidResult seeded = host->seed_builtin_ops();
+  ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
+
+  const auto resolved = OpRegistry::instance().resolve_for_intent(
+      "image_process", "curve_transform", ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(resolved.has_value());
+  ASSERT_TRUE(std::holds_alternative<TileOpFunc>(*resolved));
+  const TileOpFunc curve_callback = std::get<TileOpFunc>(*resolved);
+
+  Node node;
+  node.id = 1;
+  node.type = "image_process";
+  node.subtype = "curve_transform";
+  node.runtime_parameters["k"] = 1.75;
+
+  ImageBuffer input = make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+  ImageBuffer output =
+      make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+  auto* const input_row = static_cast<float*>(input.data.get());
+  input_row[0] = 0.25F;
+  input_row[1] = 0.5F;
+  const PixelRect tile_roi{0, 0, 2, 1};
+  const OutputTile output_tile{&output, tile_roi};
+  const std::vector<InputTile> input_tiles{{&input, tile_roi, nullptr}};
+
+  ASSERT_EQ(fesetenv(FE_DFL_ENV), 0);
+  ASSERT_EQ(fesetround(FE_DOWNWARD), 0);
+  ASSERT_EQ(feclearexcept(FE_ALL_EXCEPT), 0);
+  constexpr int kPresetExceptions = FE_INVALID | FE_DIVBYZERO;
+  ASSERT_EQ(feraiseexcept(kPresetExceptions), 0);
+  ASSERT_EQ(fegetround(), FE_DOWNWARD);
+  ASSERT_EQ(fetestexcept(FE_ALL_EXCEPT), kPresetExceptions);
+
+  curve_callback(node, output_tile, input_tiles);
+  const int restored_rounding = fegetround();
+  const int restored_exceptions = fetestexcept(FE_ALL_EXCEPT);
+
+  EXPECT_EQ(restored_rounding, FE_DOWNWARD);
+  EXPECT_EQ(restored_exceptions, kPresetExceptions);
+  const auto* const output_row = static_cast<const float*>(output.data.get());
+  EXPECT_GT(output_row[0], 0.0F);
+  EXPECT_GT(output_row[1], 0.0F);
 }
 
 /**

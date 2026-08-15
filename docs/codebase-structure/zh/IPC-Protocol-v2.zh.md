@@ -18,6 +18,46 @@ socket，其 process shell 恰好创建一个由 server/router 借用的 embedde
 system service、多用户或 multi-tenant service、远程 endpoint 或 TCP server。这些画像需要独立的
 transport、identity、authentication/authorization、isolation 与 lifecycle 设计。
 
+[ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
+现已把该未来设计裁定为相互独立的 network control plane、worker manager、每个 Job attempt
+独占的受限 worker、artifact data plane，以及隔离的非可信 CPU-plugin runtime。该决策不会扩展
+本协议，也不会把同 UID 路径保护、session name、opaque id、process-global plugin method 或私有
+`OutputStore` 解释成 server authentication、tenant authority、durable Job identity 或
+durable artifact authority。
+
+Issues #99、#100 与 #105 现在通过独立的源码私有
+[单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)
+实现 canonical JobSpec、tenant quota、durable Job/artifact recovery、显式 retry/checkpoint
+identity、每 attempt 一个全新 process，以及分离的 worker control/data transport。它只通过
+internal CMake target 链接，没有 daemon route 或 installed codec，也不组合进
+`photospiderd`。其 private worker protocol v2 与本 local IPC v2 不同：128-KiB control socket
+只传 attempt/Job/receipt/reference/descriptor/digest metadata，而 checkpoint 与 candidate image
+byte 通过 inherited descriptor 使用 manager-created direction-reduced
+`AF_UNIX SOCK_STREAM` lane。Manager endpoint 是 nonblocking；只有在精确 PID 仍受 absolute
+lifecycle deadline 与 TERM/KILL/reap ownership 约束时，worker 才可能阻塞。Checkpoint digest
+在 worker 内校验；output hydration 从 metadata-first descriptor/exact-size/digest 开始。对尚未
+reap 的当前 PID，manager 创建一份精确、惰性的匿名最终 owner，并在绝对 lifecycle 检查之间
+最多把一个 64-KiB slice 直接接收到该 owner；不存在累计 accumulator 扩容或 whole-payload
+copy。只有合法 Heartbeat frame 能续期 liveness，连续或预缓冲 output 绝不能。worker 在 stream
+期间保持真实 heartbeat 活跃，在精确 bytes 后关闭 output lane，并保持存活，直到 manager 在
+EOF、完整关联与 O(1) final-owner transfer 后返回一次只含 identity 的 `CompletionReady`。该确认
+不授予 service 或 artifact authority。Post-reap supervision 绝不
+读取 bulk lane，也不执行 filesystem I/O 或 bulk transfer。这是本地可执行分离，不是 authenticated
+network protocol 或 standalone artifact
+service。其 `TenantId`、`JobId`、`JobAttemptId`、
+`WorkerInstanceId`、`ArtifactId`、quota reservation、checkpoint 与 commit receipt 都是
+独立的源码私有类型；protocol-v2 compute id、`OutputArtifactId`、delivery id、session name
+与 output lease 既不序列化也不授权这些身份。因此下文精确的 60-method inventory 保持不变。
+
+该 private worker codec 会把 poll budget 与 semantic acceptance 视为不同 bound。Pending bulk
+允许一次使用到期 budget 的 nonblocking control probe，而每个完整 control frame 仍只能在严格
+早于适用 absolute lifecycle deadline 时有效。Timeout 会保留 partial byte 或 transport-complete
+frame。Decoder 会暴露该完整 frame 供 semantic interpretation，取得 fresh strict-before sample，
+随后才 move/reset frame 并返回精确 acceptance time。sample 等于或晚于 deadline 时会保留 frame
+供有界 semantic retry 使用，并且不授予 lifecycle mutation。Write 会在正向 send progress 前后
+复查；由于 late send 可能已经交付 byte，owner 必须将该 write 视为失败，并且绝不重试 frame。
+Cancellation owner 只能为有界 receive-side report/EOF/exit 排空继续保留 channel。
+
 Public client header 是 `photospider/ipc/protocol.hpp`、`photospider/ipc/client.hpp` 与
 `photospider/ipc/host.hpp`。它们只暴露 typed owned value 和完整 Host factory，不暴露 JSON
 type、socket descriptor、`sockaddr_un`、backend model、runtime service 或 mutable backend ownership。
@@ -603,7 +643,12 @@ integer `limit`。Zero 从 oldest retained trace 开始；router 会恰好调用
       "node_id": -1,
       "worker_id": -1,
       "action": "rethrow_exception",
-      "timestamp_us": 1234
+      "timestamp_us": 1234,
+      "task_identity": {
+        "graph_revision": 7,
+        "run_id": 3,
+        "run_local_task_id": 0
+      }
     }
   ],
   "next_sequence": 9,
@@ -623,6 +668,17 @@ retained page；通过 `next_sequence` 前进不会丢失或重复 retained even
 非负值。`-1` 是表示没有具体 node 或 worker 的唯一 sentinel；任何小于 `-1` 的值都是 malformed
 Host output。Router 会在这一次 Host call 后把整个 response 拒绝为 daemon `internal_error`，且
 绝不重试该 observation。
+
+每个 event 都有一个必需的 `task_identity` member。Submitted task 使用精确的 three-field
+object，其中包含非零 unsigned `graph_revision`、非零 unsigned `run_id` 与 unsigned
+`run_local_task_id`，后者允许为零。没有 task source 的 runtime-wide event 使用显式 JSON
+`null`；daemon 与 client 绝不会根据 epoch、node、worker 或 page session 推导 tuple。Embedded
+Host 会在 page 上只绑定一次私有 `GraphSessionId`。编码前，router 会验证该值匹配 registry 已
+准入的 session，随后只暴露 caller 的 opaque daemon `session_id`。Client 会验证这份 outer echo，
+并拒绝 omitted、partial、extra、mistyped、revision/Run 为零或其他 malformed identity；它不会
+回退到旧的 identity-free schema，也不会通过另一条 route 重试。Page session 与 event tuple 只是
+复制的 observation key，不授予 Graph、Run、task、cancellation、retry、process、quota、artifact
+或 commit authority。
 
 这两个 method 都没有 `max_entries` field。Unknown field 保持 forward-compatible，但不能替代
 缺失或非法的 known `limit`。两个 route 都直接使用 Host 的 bounded observation API，绝不 reserve

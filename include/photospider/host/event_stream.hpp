@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -172,12 +173,55 @@ enum class HostExecutionTraceAction {
 };
 
 /**
+ * @brief Copied process-local identity for one traced compute task.
+ *
+ * @throws Nothing for aggregate construction, copy, move, comparison, and
+ * scalar access.
+ * @note `graph_revision` and `run_id` are nonzero. Run-local task zero is
+ * valid. The tuple is observation data only; it is not a session handle, Run
+ * lease, task capability, cancellation token, resource grant, or commit key.
+ */
+struct ExecutionTraceTaskIdentity final {
+  /** @brief Authoritative Graph revision captured by the submitted Run. */
+  uint64_t graph_revision = 0U;
+
+  /** @brief Process-local nonzero Run identity. */
+  uint64_t run_id = 0U;
+
+  /** @brief Dense task number whose namespace is `run_id`. */
+  uint64_t run_local_task_id = 0U;
+
+  /**
+   * @brief Compares every canonical task-correlation component.
+   * @param other Candidate copied identity.
+   * @return True only when all three scalars match.
+   * @throws Nothing.
+   */
+  bool operator==(const ExecutionTraceTaskIdentity& other) const noexcept {
+    return graph_revision == other.graph_revision && run_id == other.run_id &&
+           run_local_task_id == other.run_local_task_id;
+  }
+
+  /**
+   * @brief Tests whether any canonical task-correlation component differs.
+   * @param other Candidate copied identity.
+   * @return Negation of `operator==`.
+   * @throws Nothing.
+   */
+  bool operator!=(const ExecutionTraceTaskIdentity& other) const noexcept {
+    return !(*this == other);
+  }
+};
+
+/**
  * @brief Copied execution trace event for frontend inspection.
  *
  * @throws Nothing for value operations.
  * @note `timestamp_us` is the backend clock timestamp serialized as
  *       microseconds since that clock's epoch. It is useful for ordering within
- *       one run, not for wall-clock display.
+ *       one run, not for wall-clock display. `task_identity` is present only
+ *       when the event came from one validated submitted task; epoch, node,
+ *       worker, and page session never synthesize a missing task identity.
  */
 struct ExecutionTraceEventSnapshot {
   /** @brief Per-session publication sequence; never the exhausted sentinel. */
@@ -208,6 +252,9 @@ struct ExecutionTraceEventSnapshot {
 
   /** @brief Backend high-resolution clock timestamp in microseconds. */
   uint64_t timestamp_us = 0;
+
+  /** @brief Exact task audit tuple, or absent for a runtime-wide event. */
+  std::optional<ExecutionTraceTaskIdentity> task_identity;
 };
 
 /**
@@ -221,6 +268,14 @@ struct ExecutionTraceEventSnapshot {
  *       cursor, using saturating arithmetic.
  */
 struct ExecutionTracePage {
+  /**
+   * @brief Exact session resolved for this page.
+   * @note Embedded Host returns its GraphSessionId; IPC Host returns the opaque
+   * daemon SessionId requested by its caller. The value is bound once per page
+   * rather than copied into each event.
+   */
+  GraphSessionId session;
+
   /** @brief Retained trace events selected at one locked observation point. */
   std::vector<ExecutionTraceEventSnapshot> events;
 

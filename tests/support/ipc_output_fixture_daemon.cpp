@@ -11,6 +11,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -566,9 +567,10 @@ void configure_observations(ps::testing::IpcHostSpy* host) {
   trace.events = {
       ps::ExecutionTraceEventSnapshot{
           1, 11, ps::NodeId{-1}, -1,
-          ps::HostExecutionTraceAction::AssignInitial, 101},
+          ps::HostExecutionTraceAction::AssignInitial, 101, std::nullopt},
       ps::ExecutionTraceEventSnapshot{
-          2, 12, ps::NodeId{2}, 3, ps::HostExecutionTraceAction::Execute, 102}};
+          2, 12, ps::NodeId{2}, 3, ps::HostExecutionTraceAction::Execute, 102,
+          ps::ExecutionTraceTaskIdentity{7U, 12U, 0U}}};
   trace.next_sequence = 2;
   host->set_execution_trace_page(std::move(trace));
 }

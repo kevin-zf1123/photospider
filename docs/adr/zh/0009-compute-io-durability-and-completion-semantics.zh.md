@@ -14,6 +14,13 @@ Issue #87 以决策与文档变更的形式接受本 ADR。Issue #88 现在只�
 `OutputStore` 变成 crash-durable store。后续专项变更必须实现 Run publication
 之后的 cache outcome、durable 输出提交、Graph 文档事务和旧输出副作用迁移。
 
+Issue #95 现在实现了一条有意收窄的 source-private B1 手工/release 输出所有者。
+`B1OutputStore` 把 Issue #88 executor 与面向精确不可变 B1 artifact 的 rooted fresh-
+occurrence、manifest-last/no-replace 事务、类型化 crash-durable receipt 及 leaf-to-root
+barrier 组合起来；receipt 只能私有签发，并且 store 可以保留不透明 root-descriptor
+capability。它不替代私有 IPC delivery store，不新增已安装输出 API，也不完成
+本 ADR 中通用 recovery、post-publication cache、Graph 文档与旧输出副作用目标。
+
 在 Primary head `c99c94b56065aee6d456337af8ee0aa45c12e0a1` 上对 Issue #118
 进行的后期审核，在其复用的 Issue #88 executor 依赖中发现两条死锁：同一 worker
 提交后等待 completion，以及已准入 lazy factory 对同一 executor 发起 shutdown。
@@ -178,9 +185,63 @@ output intent/value；只有 `OutputStore` 编排能在 Run 结果已知后发�
 9. 恢复时识别已提交 manifest，重建 commit index，并保守删除或隔离未完成
    stage 和 orphan。
 
-回执标识 commit、descriptor/content、namespace、version 与达到的 durability。
-它不是可变 cache 或 staging path。默认策略绝不覆盖已提交输出；替换使用显式
-新 version/commit identity。
+具体 transaction 会保留已打开的所选 canonical root descriptor 与每个全新 private
+slot descriptor；所选 root pathname 是 evidence，不是持续 mutation authority。
+Creation、file access、publication、barrier、revalidation 与 cleanup 始终采用
+descriptor-relative 操作，并验证预期 filesystem identity。因此 root path replacement
+或 symlink substitution 会使最终 binding 失败，而不会重定向写入。
+对于 retained evidence，只有 store 能把该 root descriptor 复制为不透明、可复制的
+capability。副本共享 open-file description 与 lock 生命周期，因此可以让 exclusive-root
+ownership 延续到 store object 生命周期之后。
+
+源码私有的 B1 实现会在 store 生命周期内取得所选 root 的 nonblocking advisory
+exclusive lock，并创建 mode-`0700` 的同 root staging anchor 与一个 private child slot。
+其 namespace contract 只覆盖一个协作式 store owner：所有协作进程/线程都必须遵守该
+lock，并把 `.b1-staging-*` 与 `occurrence-*` name 保留给这个 owner。该 lock 不是防御
+任意不协作 same-UID actor 的安全边界。对每次 `mkdirat` → `openat` handoff，它会先记录
+no-follow named directory identity，在此之前不修改 child 内容，然后要求打开的 descriptor
+具有完全相同的 identity。如果 anchor handoff 在 transaction guard 建立前失败，实现会保留
+含义不确定的当前 anchor name，传播失败，且不声称可重试。如果 slot handoff 在 guard 激活后
+失败，而 replacement residue 阻止精确 guarded cleanup，则会 fail-stop。Payload 与 manifest
+task 只修改已验证的 private slot。两个 accepted charge 均结算后，完整 directory 会通过一次
+atomic no-replace directory rename 发布到不可变 occurrence name（Darwin 使用
+`RENAME_EXCL`，Linux 使用 `RENAME_NOREPLACE`），随后完成 source anchor 与 destination
+root barrier，并最终重验 descriptor/name binding。实现不会先创建 public occurrence，再重新
+打开它进行写入。
+
+Allocation-free transaction guard 会在 anchor、slot、payload、private manifest 与
+published manifest 逐一归属事务时记录其精确 identity。在 public rename 之前，若 factory、
+observation、wait、publication 或 receipt 工作失败，guard 会先 cancel 并等待每个 accepted
+Compute I/O task，证明其精确 charge 已退休，并且只回滚 private occurrence。Cleanup 是严格
+操作而非 best effort：每个存在的 name 都必须通过两次 descriptor-relative 的已记录
+type/identity 检查；每次 `unlinkat`/`rmdir` 结果、随后 absence 与 parent-directory sync 都必须
+成功。POSIX 不会把最终 identity 检查与后续按 name 删除合并成一个原子的 identity-selected
+操作。在协作式 exclusive-owner 前提下，不会有 actor 在这段间隔修改 reserved name；任一次
+检查检测到 replacement 都会在删除前保留它并 fail-stop。最终检查之后由不协作 same-UID actor
+发起的 mutation 不在本 contract 内，设计也不声称永远不会删除这种 replacement。Extra leaf、
+type/identity 漂移、`EIO`/`EROFS`、非空 directory 或无法证明 absence 都会 fail-stop。只有在该
+前提内完成 checked private removal 并观察到 absence 后，原 commit identity 才能从空 namespace
+重试。
+
+成功的 no-replace rename 是从 private rollback 到 public pending reconciliation 的不可逆
+lifecycle transition。从该指令起，source-anchor barrier、destination-root barrier、最终
+revalidation 或 receipt construction 失败都会保留 immutable public occurrence 及其同 root 的
+空 staging anchor；guard 不再拥有 public deletion authority。使用相同 commit id 的重试会相对
+retained root descriptor 打开 occurrence 与可选 pending anchor，要求其中精确只有 payload 和
+manifest 两个 leaf，重新检查其 expected candidate byte、length、digest 与 filesystem identity，
+完成可能缺失的 source/root barrier，再执行最终 root/name/leaf revalidation。只有此后才能重建
+同一 stable receipt，并删除已经不需要的空 anchor。Reconciliation 不会提交新 output task，也
+绝不重写 public byte。因此它的 receipt 包含空 `io_observations`；这些空 observation 不能伪造
+当前 transaction FSM，B1 evaluator 必须取得早先保留的 new-work stream，否则 fail closed。
+非 directory、空 real directory，或仅含未知 marker 的 real directory 都没有 transaction-looking
+leaf，会保持原状并返回类型化 `SlotExists`。一旦出现 payload、manifest 或 private-manifest
+residue，不完整/额外 entry set 或 payload/manifest 漂移就会以 `RevalidationFailed` fail closed，
+既不修复也不删除。
+
+回执标识 commit、descriptor/content、namespace、version 与达到的 durability。它没有 public
+aggregate 或 field-based construction path；只有 store 能在完整 revalidation 后签发其不可变
+typed field。它不是可变 cache 或 staging path。默认策略绝不覆盖已提交输出；替换使用显式新
+version/commit identity。
 
 实际达到的 durability 是类型化的。显式请求 atomic-visible 的事务只有在
 no-replace manifest 发布和 identity 校验后，才能返回仅声明原子可见性的回执。
@@ -236,11 +297,26 @@ Issue #87 不修改协议 v2。后续版本化协议可以在远端调用方需�
 ### ComputeIoExecutor 拥有有界机制，不拥有策略
 
 Issue #88 新增唯一 process-owned `ComputeIoExecutor` mechanism，用于有界 cache、
-asset 与 codec 子工作。准入会在 lazy payload construction 或副作用之前，同时
-原子覆盖 task 数与 estimated retained bytes。每项已接受任务都会保留
-Run/transaction lifetime token，并返回 `Succeeded`、`Failed` 或 `Cancelled`
-typed completion。Cancellation、callback failure、late return 与 graceful shutdown
-都会恰好一次释放该 token 与两项账本。CPU compute worker 不能同步等待 completion。
+asset 与 codec 子工作。通过 limit decision 后，会在 lazy payload construction 或副作用之前
+暂时预留 task 数与 estimated retained bytes。该 reservation 位于 constructing phase，但尚未
+发布 Accepted identity。Factory 抛异常、返回空 callback 或 queue-entry construction 失败时，
+reservation 会被精确回滚，且不会签发 Accepted event。Callback construction 成功后只会进入
+二选一的最终 decision：若准入仍开放，则 queue ownership 与 Accepted 一起发布并绑定 sequence；
+若外部 shutdown 在 construction 后获胜，则 Accepted 与其精确关联的 Cancelled settlement 原子
+发布，且 callback 不会进入。每项已接受任务都会保留 Run/transaction lifetime token，并返回
+`Succeeded`、`Failed` 或 `Cancelled` typed completion。Cancellation、callback failure、late
+return 与 graceful shutdown 都会恰好
+一次释放该 token 与两项账本。CPU compute worker 不能同步等待 completion。
+
+executor 还负责签发归属 proof。它在与每次 terminal rejection decision 或成功 Accepted
+publication 相同的 mutex 下签发不可变 event，其中包含单调非零 sequence、精确 task/byte
+charge delta、类型化 decision 与结果 process-global snapshot；又在与 settlement release
+相同的 mutex 下签发第二个不可变 event，关联该 admission，并携带精确 released delta 与结果
+snapshot。Rejected offer 的 delta 为零；provisional factory failure 完全没有 event，因为没有
+admission identity 变成 externally observable。Snapshot 可以包含无关并发工作，可用于 limit/
+high-water 验证，但不能替代该 task 自己的 charge/release event。每个 active task 在每份
+snapshot 中必须精确属于 constructing、queued 或 running 之一。当 consumer 只观察部分 process
+work 时，event sequence 允许存在数值 gap。
 
 唯一 I/O worker 不能向自身 owning executor 准入另一个任务：准入仍开放时，该调用
 会在改变任一 budget 或 lazy factory 前返回 inactive `InvalidRequest`。Owning worker
@@ -266,15 +342,22 @@ Graph 文档事务、daemon socket/polling 与 `OutputStore` 校验、提交、�
 和恢复仍属于各自领域 owner。这些 owner 可以提交有界字节传输或 codec 子工作，
 但执行器绝不选择路径、重试、覆盖、幂等、保留、提交或 durability 策略。
 
+当 domain owner 选择在 capacity rejection 后重新 offer 时，该 policy 必须声明有限
+且确定性的 attempt bound 与类型化 terminal result。它必须在遭拒 offer 之间保持
+logical task identity 与 charge，不能从 elapsed time 或 polling cadence 派生终止条件，
+并且在耗尽 bound 时释放 private staging authority。Executor 仍然只暴露类型化
+admission，不决定该 policy。
+
 拒绝让每种文件系统与 socket 操作都进入一个通用 pool，因为这会组合无关生命
 周期，并让 worker 机制成为意外的事务所有者。
 
 ### 安全与 durability 能力是显式的
 
-持久化 owner 在调用方授权 root 下解析归一化路径，防止 symlink escape，以
-no-follow 方式创建私有同目录 stage，校验文件系统 identity，并统计 in-flight
-与 retained quota。不受信任的 plugin/codec 只能取得 stage access，绝不取得
-发布权威。
+持久化 owner 在调用方授权 root 下解析归一化路径，以 no-follow 方式打开并保留这些
+root/slot directory authority，防止 symlink escape，通过 descriptor-relative
+operation 创建和修改私有同目录 stage，校验文件系统 identity 与最终 path-to-
+descriptor binding，并统计 in-flight 与 retained quota。不受信任的 plugin/codec
+只能取得 stage access，绝不取得发布权威。
 
 回执至少区分：
 

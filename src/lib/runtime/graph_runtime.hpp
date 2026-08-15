@@ -199,6 +199,12 @@ class GraphRuntime : public ExecutionHostContext {
 
     /** @brief Backend high-resolution observation time. */
     std::chrono::time_point<std::chrono::high_resolution_clock> timestamp;
+
+    /**
+     * @brief Exact fixed-size task join, absent for runtime-wide observations.
+     * @note This value is observation-only and never reconstructs authority.
+     */
+    std::optional<ExecutionTaskAuditIdentity> task_identity;
   };
 
   /**
@@ -404,14 +410,19 @@ class GraphRuntime : public ExecutionHostContext {
   /**
    * @brief Prepares one canonical compute candidate and reserves key capacity.
    * @param key Target/request-intent supersession lineage.
+   * @param accepted_coordinate Optional source-private pre-call ordering
+   * coordinate bound into the prepared product identity.
    * @return Move-only identity and provisional ticket adoption.
    * @throws The allocation, admission, and synchronization errors documented
    * by compute::ComputeRequestCoordinator::prepare.
    * @note This is private Kernel infrastructure, not public Host ABI.
    */
   compute::ComputeRequestCoordinator::PreparedCandidate prepare_compute_request(
-      const compute::SupersessionKey& key) {
-    return compute_request_coordinator_.prepare(key);
+      const compute::SupersessionKey& key,
+      std::optional<compute::AcceptedBoundaryCoordinate> accepted_coordinate =
+          std::nullopt) {
+    return compute_request_coordinator_.prepare(key,
+                                                std::move(accepted_coordinate));
   }
 
   /**
@@ -445,7 +456,7 @@ class GraphRuntime : public ExecutionHostContext {
 
   /**
    * @brief Tests exact request currency inside product commit arbitration.
-   * @param identity Run-captured canonical key/generation.
+   * @param identity Run-captured canonical key/generation/accepted binding.
    * @return True only for the latest graph-state-published generation.
    * @throws std::system_error for synchronization failure.
    */
@@ -526,18 +537,21 @@ class GraphRuntime : public ExecutionHostContext {
   void log_event(ExecutionEvent::Action action, int node_id);
 
   /**
-   * @brief Publishes an execution trace with explicit worker and epoch values.
+   * @brief Publishes an execution trace with explicit worker and audit values.
    * @param action Execution action to record.
    * @param node_id Backend node id.
    * @param worker_id Worker id, or -1 when unavailable.
    * @param epoch Execution task epoch.
+   * @param task_identity Exact submitted task tuple, or absent for a
+   * runtime-wide observation.
    * @return Nothing.
    * @throws Nothing.
    * @note Full-ring eviction and terminal exhaustion increment drop accounting
    *       with saturating arithmetic.
    */
-  void log_event(ExecutionEvent::Action action, int node_id, int worker_id,
-                 uint64_t epoch);
+  void log_event(
+      ExecutionEvent::Action action, int node_id, int worker_id, uint64_t epoch,
+      std::optional<ExecutionTaskAuditIdentity> task_identity = std::nullopt);
 
   /**
    * @brief Copies one bounded execution-trace page without removing entries.
@@ -567,10 +581,13 @@ class GraphRuntime : public ExecutionHostContext {
    * @brief Publishes execution worker identity into thread-local state.
    * @param worker_id Execution worker id, or -1 when unavailable.
    * @param epoch Active task epoch.
+   * @param task_identity Exact submitted task tuple, or absent.
    * @return Nothing.
    * @throws Nothing.
    */
-  void set_task_context(int worker_id, uint64_t epoch) noexcept override;
+  void set_task_context(int worker_id, uint64_t epoch,
+                        std::optional<ExecutionTaskAuditIdentity>
+                            task_identity) noexcept override;
 
   /**
    * @brief Clears execution worker identity from thread-local state.
@@ -585,13 +602,17 @@ class GraphRuntime : public ExecutionHostContext {
    * @param node_id Backend node id, or -1 when unavailable.
    * @param worker_id Execution worker id, or -1 when unavailable.
    * @param epoch Active task epoch.
+   * @param task_identity Exact submitted task tuple, or absent for a
+   * runtime-wide event.
    * @return Nothing.
    * @throws Nothing; observation failures are dropped so task exceptions keep
    *         their original identity.
    * @note This is the only adapter-to-runtime execution-action mapping.
    */
   void log_event(ExecutionTraceAction action, int node_id, int worker_id,
-                 uint64_t epoch) noexcept override;
+                 uint64_t epoch,
+                 std::optional<ExecutionTaskAuditIdentity>
+                     task_identity) noexcept override;
 
   /**
    * @brief Returns execution worker identity for the calling thread.
@@ -611,14 +632,16 @@ class GraphRuntime : public ExecutionHostContext {
    * @brief Sets Host-observed execution identity on the calling thread.
    * @param worker_id Execution worker id, or -1.
    * @param epoch Execution task epoch.
+   * @param task_identity Exact submitted task tuple, or absent.
    * @return Nothing.
    * @throws Nothing.
    * @note Private execution callbacks balance this helper through
    *       `ExecutionHostContext`; direct internal use must call
    *       `clear_execution_trace_context`.
    */
-  static void set_execution_trace_context(int worker_id,
-                                          uint64_t epoch) noexcept;
+  static void set_execution_trace_context(
+      int worker_id, uint64_t epoch,
+      std::optional<ExecutionTaskAuditIdentity> task_identity) noexcept;
 
   /**
    * @brief Clears Host-observed execution identity on the calling thread.
@@ -724,6 +747,10 @@ class GraphRuntime : public ExecutionHostContext {
   static thread_local int tls_execution_context_worker_id_;
   /** @brief Host-observed execution epoch for the calling thread. */
   static thread_local uint64_t tls_execution_context_epoch_;
+  /** @brief Host-observed fixed-size task audit tuple for the calling thread.
+   */
+  static thread_local std::optional<ExecutionTaskAuditIdentity>
+      tls_execution_task_identity_;
 
   /** @brief Serializes execution-trace publication and page observation. */
   mutable std::mutex log_mutex_;

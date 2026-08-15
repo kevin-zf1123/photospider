@@ -141,24 +141,33 @@ class MetalExecutionContext {
 
   /**
    * @brief Submits an explicit host-to-R32Float-texture transfer.
-   * @param source Ready host-visible rank-two FLOAT32 Value to copy.
-   * @param width Positive texture width matching the source descriptor.
-   * @param height Positive texture height matching the source descriptor.
+   * @param source Ready host-visible rank-two FLOAT32 or tightly strided
+   * rank-three HWC FLOAT32 Value to copy.
+   * @param width Positive logical image width matching the source descriptor.
+   * For HWC input, the native R32Float texture row flattens width and channels.
+   * @param height Positive image height matching the source descriptor.
    * @return Nothing after a distinct pending Metal Value, exact completion
    * identity, buffer-to-texture blit, native callback, and commit are
    * installed.
-   * @throws std::invalid_argument for invalid shape, encoding, layout, or
-   * dimensions.
+   * @throws std::invalid_argument for invalid shape, image facet, encoding,
+   * layout, storage envelope, or dimensions.
    * @throws ReadyFenceAccessError when the source producer is not Ready.
    * @throws BufferAccessError when the source binding is not host-readable.
    * @throws std::logic_error without ComputeRun completion lineage or after a
    * prior output publication in the same operation callback.
    * @throws std::overflow_error for byte arithmetic or identity exhaustion.
    * @throws std::runtime_error for native allocation/encoder failures.
+   * @throws std::runtime_error when an invocation's exclusive absolute deadline
+   * is observed during preparation, bounded copy, or immediately before native
+   * commit.
    * @throws std::bad_alloc for retained publication/completion ownership.
    * @note The method performs only explicitly requested source access and
-   * never waits for Metal. The pending device-local destination preserves the
-   * source logical revision and settles from the command-buffer callback.
+   * never waits for Metal. Host bytes are copied in bounded chunks with the
+   * invocation's unchanged deadline checked between chunks. Rank-three
+   * publication retains the source
+   * descriptor, ImageFacet, layout, exact storage envelope, and logical
+   * revision; only the private native R32Float row is flattened. The pending
+   * device-local destination settles from the command-buffer callback.
    */
   virtual void publish_float32_host_to_texture(Value source,
                                                std::uint32_t width,

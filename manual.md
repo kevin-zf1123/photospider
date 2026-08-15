@@ -6,9 +6,9 @@ Photospider. For architecture internals, see
 
 ## 1. Build And Setup
 
-Install the required C++ toolchain, OpenCV, yaml-cpp, and test dependencies for
-the default CLI and GoogleTest profile. Initialize submodules when using the
-vendored FTXUI source:
+Install the required C++ toolchain, OpenCV, utf8proc, yaml-cpp, and test
+dependencies for the default CLI and GoogleTest profile. Initialize submodules
+when using the vendored FTXUI source:
 
 ```bash
 git submodule update --init --recursive
@@ -543,3 +543,53 @@ Run a specific test executable:
 cmake --build build --target test_policy_registry -j
 ./build/tests/test_policy_registry
 ```
+
+Build and inspect the source-private B1 exact-workload runner:
+
+```bash
+cmake --build build --target b1_immutable_benchmark -j
+./build/tests/b1_immutable_benchmark --help
+```
+
+One invocation executes one exact cap-one or cap-eight B1 inner row. It requires
+three canonical environment manifests, a closed canonical raw-storage proof,
+and an existing empty absolute output directory outside the checkout. These
+four files are expected claims only; reading mutually consistent files does not
+create observation authority. The proof must have header
+`execution-profile-b1-storage-raw-proof-v1`, use the same field/frame grammar as
+the manifests, contain the exact six backend/field/mount/performance/
+transaction/containment sections, and bind its selected and resolved root plus
+every runner destination to `--output-dir`. JSON proof flags and derived
+booleans are not accepted:
+
+```bash
+./build/tests/b1_immutable_benchmark \
+  --output-dir /absolute/fresh/b1-output \
+  --base-manifest /absolute/evidence/base.manifest \
+  --storage-manifest /absolute/evidence/storage.manifest \
+  --environment-class-manifest /absolute/evidence/environment-class.manifest \
+  --storage-proof /absolute/evidence/storage-proof.manifest \
+  --run-cap 1 \
+  --replicate-ordinal 1
+```
+
+The runner acquires a nonblocking advisory exclusive lock on the output root,
+re-observes its held descriptor before and after the row, and binds actual typed
+output receipts separately from retained input. Each required-storage
+compatibility side also needs a complete trusted in-process probe whose
+canonical encoding equals the retained proof. Durable JSON contains diagnostic
+actual-observation metadata and a probe digest only; it cannot be replayed as
+authority. The current portable Darwin/Linux path cannot independently verify
+all effective mount, performance, hardware write-cache, power-loss-protection,
+and transaction-event declarations, so it records the unverified fields and
+emits an Invalid row rather than a machine-conformance result. Supplying more
+self-consistent files does not change that outcome; a future trusted probe
+adapter is required.
+
+A complete isolated B1 collection uses fresh processes and fresh output roots
+for the six cap/replicate combinations. Each invocation writes more than
+2.2 GiB of payload data. Cooperating processes and threads must honor the root
+lock and leave reserved `.b1-staging-*` and `occurrence-*` names to the one
+store owner. The runner is `EXCLUDE_FROM_ALL`, is not registered with CTest,
+and emits no canonical outer-row, bundle, reference, or machine-conformance
+claim.

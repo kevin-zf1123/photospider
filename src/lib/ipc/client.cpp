@@ -933,8 +933,9 @@ bool decode_execution_trace_result(const internal::Json& value,
   decoded.events.reserve(value["events"].size());
   std::uint64_t previous_sequence = after_sequence;
   for (const internal::Json& item : value["events"]) {
-    static constexpr std::array<const char*, 6> kFields = {
-        "sequence", "epoch", "node_id", "worker_id", "action", "timestamp_us"};
+    static constexpr std::array<const char*, 7> kFields = {
+        "sequence", "epoch",        "node_id",      "worker_id",
+        "action",   "timestamp_us", "task_identity"};
     if (!item.is_object() ||
         std::any_of(kFields.begin(), kFields.end(), [&item](const char* field) {
           return !item.contains(field);
@@ -956,6 +957,30 @@ bool decode_execution_trace_result(const internal::Json& value,
         !internal::decode_integer(item["timestamp_us"], &event.timestamp_us)) {
       *message = "execution-trace row contains an invalid typed value";
       return false;
+    }
+    const internal::Json& task_identity = item["task_identity"];
+    if (!task_identity.is_null()) {
+      static constexpr std::array<const char*, 3> kIdentityFields = {
+          "graph_revision", "run_id", "run_local_task_id"};
+      ExecutionTraceTaskIdentity decoded_identity;
+      if (!task_identity.is_object() ||
+          task_identity.size() != kIdentityFields.size() ||
+          std::any_of(kIdentityFields.begin(), kIdentityFields.end(),
+                      [&task_identity](const char* field) {
+                        return !task_identity.contains(field);
+                      }) ||
+          !internal::decode_integer(task_identity["graph_revision"],
+                                    &decoded_identity.graph_revision) ||
+          decoded_identity.graph_revision == 0U ||
+          !internal::decode_integer(task_identity["run_id"],
+                                    &decoded_identity.run_id) ||
+          decoded_identity.run_id == 0U ||
+          !internal::decode_integer(task_identity["run_local_task_id"],
+                                    &decoded_identity.run_local_task_id)) {
+        *message = "execution-trace row has an invalid task identity";
+        return false;
+      }
+      event.task_identity = decoded_identity;
     }
     previous_sequence = event.sequence;
     decoded.events.push_back(event);
@@ -982,6 +1007,7 @@ bool decode_execution_trace_result(const internal::Json& value,
     *message = "execution-trace page metadata is inconsistent";
     return false;
   }
+  decoded.session = GraphSessionId{expected_session.value};
   *page = std::move(decoded);
   return true;
 }

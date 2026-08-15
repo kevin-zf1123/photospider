@@ -145,10 +145,14 @@ observations of the latest attempt, not durable audit records.
 The current product compute commit policy performs eligible changed-HP cache
 writes after exact revision/generation validation but before the no-throw live
 Graph swap. It now submits that staged save mechanism to the process-owned
-`ComputeIoExecutor` after the live predicates succeed. Admission charges both
-task count and a checked planned-byte estimate before lazy codec/task payload
-construction or filesystem side effects. The I/O task retains the prepared
-Graph transaction, while the graph-state policy owner waits for typed
+`ComputeIoExecutor` after the live predicates succeed. A passing limit check
+provisionally reserves task count and a checked planned-byte estimate before
+lazy codec/task payload construction or filesystem side effects. Factory throw,
+empty callback, or task/queue-entry allocation failure rolls back without an
+Accepted event. Successful construction publishes Accepted either with queue
+ownership or, when external shutdown has already won, atomically with its
+linked Cancelled settlement before callback entry. The I/O task retains the
+prepared Graph transaction, while the graph-state policy owner waits for typed
 completion and applies measured I/O time. CPU compute workers cannot perform
 that wait. A rejection, cache codec, filesystem, or allocation failure can
 therefore still fail that `ComputeRun` and leave live Graph/RT state unchanged.

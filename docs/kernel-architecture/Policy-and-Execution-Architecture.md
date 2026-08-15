@@ -122,14 +122,17 @@ forced recovery guarantee; process isolation is a separate future boundary.
 ## Host-Authored Frontier
 
 The Host chooses the service class before invoking a policy. When both classes
-have startable work, it permits at most three consecutive Interactive starts
-before one Throughput start. Within the chosen class it exposes at most one lane
-head per live Run.
+have scheduler-selectable work, it permits at most three consecutive
+Interactive starts before one Throughput start. Scheduler-selectable means a
+current ready lane head passes Run lifecycle, cancellation, operation-gate,
+and physical-route eligibility for that worker; it deliberately excludes
+transient execution child-grant capacity. Within the chosen class the Host
+exposes at most one lane head per live Run.
 
 Before a plugin sees candidates, the Host reduces them through these rules:
 
-1. only current, startable, cancellation-safe, route-compatible lane heads are
-   considered;
+1. only current, scheduler-selectable, cancellation-safe, route-compatible
+   lane heads are considered;
 2. after eight same-class starts, only the maximum-age frontier remains;
 3. otherwise Interactive work with the earliest finite deadline remains;
 4. candidates outside the minimum projected Graph-service quantum are removed;
@@ -192,6 +195,14 @@ dependency release, and Run settlement also release their owned state exactly
 once. A started callback retains its operation gate until provider exit or
 callback skip, even if cancellation or failure purges its queued siblings.
 
+An observation sink may reserve the service-start causal coordinate under the
+Run terminal arbiter immediately before the route commit. That coordinate is a
+staged observation, not proof of a committed start: a false commit
+invokes the sink's explicit abort and publishes no callback, while successful
+commit keeps it open until callback delivery completes. M1 reservation
+entry/completion frontiers therefore fence reserve → commit → callback/abort,
+including the two gaps in which a copied record count is still unchanged.
+
 Temporary execution-grant exhaustion after revalidation is not a plugin fault
 or obsolete-decision retry. The ready store marks the exact candidate/version
 only for that worker's current cycle and recomputes class/frontier selection
@@ -204,8 +215,17 @@ replacement, and shutdown. Spurious wakes do not retry; a 50 ms low-frequency
 fallback covers an otherwise unobservable external child-grant release, after
 which cycle marks are cleared and current Host state is revalidated.
 
+Only a successfully committed service start publishes evidence-startable
+class facts. That observation cut rechecks the same ready/lifecycle/operation/
+route predicates and additionally requires enough live child-grant capacity
+for at least one candidate in each class. These capacity-aware evidence facts
+drive M1 applicability only; they neither filter policy snapshots nor update
+the three-to-one `consecutive_interactive_` state. A failed `try_grant()`
+publishes no start observation.
+
 An implementation cap or occupied exclusive key removes that candidate from
-the startable frontier without exposing operation metadata to policy plugins.
+the scheduler-selectable frontier without exposing operation metadata to
+policy plugins.
 Worker retirement advances the same notification epoch when it releases the
 gate. Direct sequential callers wait cancellation-aware without holding a
 resource reservation, then acquire the same gate and one CPU/byte/scratch root
@@ -337,8 +357,16 @@ second ready store, Graph authority, persistence path, or device-memory
 capacity authority. Settled replicas may remain reusable after Run release,
 but the manager's 64-entry default bounds strong native/provider retention by
 releasing the lowest-revision entry under publication pressure; generation
-advance alone does not bulk-clear them. This entry count neither measures nor
-admits bytes.
+assignment alone does not bulk-clear them. This entry count neither measures
+nor admits bytes.
+
+The source-private I2 verification path additionally has an exact resident
+release operation. Under the manager mutex it validates one nonzero revision,
+the complete `StorageBinding`, and the producer identity, then extracts only
+the matching map node; destruction of the retained Value/native owner occurs
+after unlocking. A wrong identity is a no-op. This narrow operation does not
+broad-clear residency, use capacity pressure as cleanup, or alter normal
+lookup, publication, replacement, capacity, and eviction behavior.
 
 V-9 places authoritative device-memory and scratch admission in the existing
 service `ResourceLedger`, not in policy or residency. Each configured
@@ -350,23 +378,41 @@ Policy sees no native handle or token, does not rank byte owners, and gains no
 second waiting/fairness queue.
 
 Freshness publication uses two phases. Kernel first asks `ExecutionService` to
-pretrack the lineage without changing its current generation; this fallible
-allocation completes before coordinator submission. When the candidate is
-accepted as current, the coordinator invokes a no-throw, no-allocation service
-callback while holding its mutex and before publishing its own current row.
-That callback advances the manager under the manager mutex. Failed,
-close-rejected, and born-stale candidates never invoke it, and an older Run
-that starts afterward cannot regress the monotonic manager generation.
+pretrack the lineage without assigning a managed current identity; this
+fallible allocation completes before coordinator submission. When the
+candidate is accepted as current, the coordinator invokes a no-throw,
+no-allocation service callback while holding its mutex and before publishing
+its own current row. That callback assigns the manager's exact accepted
+generation under the manager mutex, including a coordinate-authorized numeric
+decrease. Failed, close-rejected, and born-stale candidates never invoke it. A
+stale Run that starts afterward cannot replace this coordinator-published exact
+identity.
+Standalone manager lineages, which do not use this callback, separately retain
+numeric-maximum generation order.
 
 ## Compute I/O Execution Boundary
 
 `ExecutionService::PoolState` owns one source-private `ComputeIoExecutor` with
-one independent worker. Under one mutex, admission charges both the task count
-and a positive estimated-retained-byte amount before lazy payload construction,
-queue publication, filesystem mutation, or codec entry. Each accepted task
-retains an explicit transaction lifetime token and returns a typed completion.
-Success, failure, queued cancellation, running late cancellation, construction
-rollback, and graceful shutdown converge on exactly-once account release.
+one independent worker. Under one mutex, a passing limit check provisionally
+reserves both the task count and a positive estimated-retained-byte amount
+before lazy payload construction, queue publication, filesystem mutation, or
+codec entry. Factory throw, empty callback, or task/queue-entry allocation
+failure rolls that reservation back without an Accepted event. Successful
+nonempty construction reaches one binary final decision: queue ownership and
+Accepted publish together while admission remains open, or external shutdown
+publishes Accepted atomically with its exactly linked Cancelled settlement
+without callback entry. Each accepted task retains an explicit transaction
+lifetime token and returns a typed completion. Success, failure, queued
+cancellation, running late cancellation, construction rollback, and graceful
+shutdown converge on exactly-once account release.
+
+The executor authors immutable attribution events at those same accounting
+linearization points. Admission records a monotonic nonzero sequence, typed
+decision, exact charged task/byte delta, and same-lock process snapshot;
+settlement links back to that admission and records the exact released delta
+plus its same-lock snapshot. Rejection has zero delta. Process snapshots can
+include unrelated concurrent users and sequence gaps are valid for a consumer
+that observes only a subset; neither fact weakens the exact per-task proof.
 
 The worker and completion boundaries prevent identity-specific self-blocking.
 While admission remains open, the owning I/O worker's nested submission returns
@@ -491,6 +537,381 @@ transition failure is fail-stop because that gate cannot reopen. General-data
 heterogeneous execution belongs to Issue #77;
 process-isolated plugin supervision belongs to Issue #91.
 
+Registry mutations and the registry-derived portion of `WorkerJoined` and
+`BindingRetired` records are serialized by the same lifecycle fence. Those
+physical-retirement records therefore carry one exact nine-counter registry
+cut, while ready, entered-callback, root, child, policy-invocation, and binding
+ownership are sampled independently. The M1 evidence replay reconstructs
+Graph/candidate/bundle/Run/generation causality and exact-checks the nine
+registry counters at every event and page cut. It validates only capacity and
+ownership reachability for the six physical samples, including resources held
+by a pending candidate before bundle publication; it never fabricates exact
+physical deltas from an event kind. Final M1 evidence must terminate with
+`ServiceStopped` and all 15 counters zero.
+
+## Current Execution-Profile Evidence and Limitations
+
+Built-in policy behavior by itself is not an execution-profile SLO. The paths
+have deterministic weighted ordering, eight-dispatch aging, a three-to-one
+class-start bound, and Interactive headroom. Maintained tests prove those
+mechanisms and exact resource release. ADR 0010 separately defines latency,
+throughput, fairness, determinism, waste, and memory as independent verdicts
+over four immutable workloads.
+
+Issue #93 now implements the isolated `I1-edit-storm-v1` mechanism and inner
+evidence path. A source-private `I1Host` submits the exact HP request through
+the ordinary embedded asynchronous Host, InteractionService, Kernel,
+supersession, and `ExecutionService` path while supplying explicit Interactive
+QoS, weight one, cap eight, and the immutable per-edit deadline. A read-only
+`ComputeRunObservationSink` records current generation, physically committed
+service start with `(RunId, RunLocalTaskId)` and charge, accepted cancellation,
+current-visible output, terminal outcome, Run quiescence, exact root-resource
+return, and caller-visible future plus Host-tracking settlement. Each product
+transition reserves a coordinate from the same request-scoped causal sequence
+at its linearization point. In particular, logical service-start commit and
+cancellation acceptance are ordered before either callback delivery. The sink
+grants no scheduling, cancellation, ledger, graph, or commit authority and is
+not an installed Host, IPC, CLI, policy-plugin, or operation-plugin contract.
+After the live HP Graph swap, the sole commit contender emits current-visible
+output and the succeeding terminal-success observation in one Run-arbiter
+resolution; a rejected or already-resolved contender emits neither event.
+
+Before the final I1 Host call, the collector reserves the typed accepted-row
+coordinate `(A_i, event_sequence_i)` and carries it through the source-private
+Host/Kernel request seam. Kernel binds that exact coordinate into
+`SupersessionIdentity`, and `ComputeRequestCoordinator` publishes and observes
+the complete current identity rather than reconstructing it from a later
+callback. For coordinate-bound I1 lineage, replacement requires only a
+strictly newer accepted coordinate; equal timestamps are ordered by the
+row-local accepted sequence. Generation remains nonzero and unique but records
+preparation arrival, so a coordinate-authorized publication may carry a lower
+generation. Mixed or unbound traffic remains generation-ordered. The native
+freshness manager adopts the exact coordinator-published generation and does
+not let a stale numerically higher Run observation restore itself. The
+observation sink's causal sequence is a separate allocator and ordering domain
+that also starts at one. Current-generation evidence copies the product-bound
+accepted coordinate, and the evaluator requires an exact row-to-product
+binding, unique nonzero generations, and strict product-coordinate order. A
+failed Host call may retain the proposed coordinate for diagnostics, but it
+cannot create an accepted row, current observation, or product binding.
+
+The ordinary public request and the source-private I1 request use the same
+embedded-Host preparation transaction. Caller promise/future ownership, the
+successful result envelope, a one-delivery backend bridge, the status worker,
+and close-visible tracking are all established before `InteractionService`
+enters Kernel. Kernel may publish current concurrently before returning, so the
+accepted Host tail is deliberately no-fail: it only shares the backend future,
+delivers it through the prebuilt bridge, and moves the prebuilt result. A
+deterministic source-private test seam fails at the last pre-Kernel point and
+proves that Host resource failure exposes no current generation or product
+output; it does not alter installed Host, IPC, CLI, or plugin contracts.
+
+I1's curve arithmetic is frozen rather than delegated to an OpenCV bulk
+reciprocal approximation. Each coefficient is rounded once to binary32 RNE,
+and every sample uses `RNE32(1/RNE32(1+RNE32(input*k32)))`. The provider saves,
+installs, and restores the worker floating-point environment around those
+explicit scalar cuts. An independent oracle versioned
+`i1-coordinate-pattern-curve-chain-fp32-v1` reconstructs the source and four
+stages without Host/Kernel/cache/scheduler/YAML/provider dependencies. For the
+HWC `[2048,2048,4]` NativeScalar32 tensor and frozen ImageFacet, its exact
+`Sha256CanonicalV1` digest is
+`17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`.
+
+The frozen I1 graph, twelve coefficients/Regions, success-only accepted
+coordinate collector and product binding, continuous cold/warmup/measured
+221-slot grid, tie and guard rules, canonical DenseTensor output digest,
+resource snapshots, and
+fail-closed episode/replicate evaluator are current. `ResourceLedger` Host and
+device snapshots now retain lifetime high-water values for successful
+reservations as well as current/limit values. At `Q_end`, I1 first captures the
+first-excluded causal coordinate; required terminal/quiescence/resource/Host
+settlement belongs only when its timestamp is no later than the boundary and
+its sequence precedes the cut. A later resource/lifecycle snapshot proves
+eventual exact return but cannot backdate settlement into that history. The
+closed `execution-profile-i1-inner-row-v1` evidence independently evaluates latency,
+waste, memory settlement, and output correctness. It does not claim the ADR
+0010 canonical 15-field outer row, section, bundle, reference comparison, or
+the profiles assigned to Issues #94 through #96.
+
+The expected digest is installed before candidate execution and must equal
+that immutable oracle; absence or substitution is Invalid, while a complete
+candidate mismatch is Fail. Each visible `Value` is traversed once before
+`Q_end`, its typed result is frozen, and the handle is released. Evaluation and
+JSON therefore cannot rehash the payload. One owned Value-free evaluator may
+overlap next-baseline preparation but must complete before admission; JSON,
+dump, and durable ordered flush wait for `T^I1` or an abort that revokes later
+submission. The live evidence set is bounded by one evaluator and 221
+Value-free rows, with exceptions returned through the sole future.
+
+The manual `i1_edit_storm_benchmark` is excluded from the default build and
+CTest. It executes the exact 221-slot workload and writes raw inner rows plus a
+replicate summary to an explicit disposable directory outside the checkout.
+Building the harness or running deterministic tests is not a machine
+conformance result: an I1 claim requires a complete valid exact-cadence run and
+retained evidence, and this document makes no Interactive, batch/render/
+testbench, or mixed-profile conformance claim. `BenchmarkService` and
+`opencv_operation_concurrency_benchmark` retain their narrower legacy metrics
+and are not canonical execution-profile evidence.
+
+The target contract deliberately reuses legal current descriptor values rather
+than inventing an execution-profile enum. I1 is
+`GlobalHighPrecision`/`Full`; I2's realtime request lineage carries an
+`Interactive`-quality `RealTimeUpdate` preview child and a `Full`-quality
+`GlobalHighPrecision` final child, each with explicit Interactive QoS. The
+current #94 implementation carries optional source-private progressive options
+through embedded Host, Kernel, and ComputeService. A successful current RT
+preview publication arms one cancellation-ordered gate, emits the observation-
+only final-trigger coordinate, and submits the HP child immediately afterward;
+supersession or cancellation can deny that gate, and ordinary realtime requests
+retain the previous concurrent behavior when the option is absent. This state
+machine is not a public Host, IPC, CLI, or plugin API. Required logical equality
+uses
+`compute_content_digest(Value)` and the typed
+`Sha256CanonicalV1` `ContentDigest`, not raw storage bytes.
+
+The source-private I2 profile and evidence evaluator implement the frozen
+111-slot grid, twelve-edit admissions, child descriptors, publication ordering,
+Host acquisition, conditional real-Metal residency, lifecycle/resource
+settlement, and four independent inner verdicts. Evaluation requires the sole
+accepted current-generation observation to precede every matching child event;
+each Cancelled terminal must have exactly one descriptor-identical earlier
+cancellation, while every non-Cancelled terminal must have none. Missing,
+duplicate, late, extra, or drifted evidence invalidates all four verdicts. The
+Host settlement for each edit must in turn have a sequence strictly greater
+than every materialized child resource settlement and a steady timestamp no
+earlier than any of them. Its status is successful exactly when at least one
+child materialized and every materialized child Succeeded: preview-only and
+preview-plus-successful-final succeed, while preview-plus-cancelled-final and
+no-child fail. A sequence, time, or status contradiction makes all four axes
+Invalid without inventing a child outcome. After copying second-Metal-reuse,
+diagnostic, resource, and no-I/O facts, the Host performs the exact row-scoped
+resident release before its final snapshot; every configured device's complete
+memory-and-scratch `reserved` vector must equal the pre-row baseline. The
+output axis independently requires the caller-supplied expected preview and
+final digests to equal `i2_frozen_preview_content_digest()` and
+`i1_frozen_final_content_digest()` before candidate comparison. Expected
+evidence corruption is Invalid even when candidate evidence mirrors it; a
+candidate-only mismatch with intact expected oracles is Fail. At replicate
+level, memory and output consume all 111 rows. Latency and waste consume samples,
+service, and complete verdicts only from measured slots `11..110`; cold and
+warmup propagate Invalid only, so their Pass or Fail values cannot pollute the
+100-row steady-state aggregate.
+
+Issue #125 closes the I2 capture and manual-runner finalization boundary without
+changing that grid or any verdict threshold. Each episode derives one exclusive
+absolute capture deadline 100 ms before its immutable 1.5-second end. The
+collector passes that same time point unchanged through `I2Host` and embedded
+Host into `ExecutionService`; `now >= deadline` loses before a new digest,
+direct Host acquisition, residency lookup/reuse, or Metal submission. Each Host
+ReadLease closes before a fresh sample, and the second record remains local until
+that sample is strictly earlier. The Host samples again after the final Host-only
+I/O snapshot or after conditional Metal evidence and exact resident cleanup. The
+collector likewise holds the complete Host return locally until an immediate
+post-call sample passes; a tie or later sample commits no acquisition, releases
+no Pending Value, and creates no replacement deadline. On a
+miss, the source-private invocation carries that same absolute point through
+serialized executor admission, upload planning/allocation/encoding, host-copy
+chunks no larger than 64 KiB, and the last semantic check immediately before
+native command-buffer commit. An exact tie fails closed. Pre-commit expiry
+performs no native commit and RAII retirement leaves no published Value,
+transfer admission, resident, live pending-fence owner, or ledger lease. A
+committed Metal miss waits only inside that original deadline, never under a new
+relative timeout. The wait samples the same monotonic clock immediately before
+and after every `ReadyFence::poll()`. A returned Ready, Failed, or
+ProducerCancelled snapshot is accepted only when the fresh post-poll sample is
+strictly earlier than the deadline; an exact or later sample follows timeout
+containment. On later expiry, the caller first tries to remove the exact
+`DeviceCompletionIdentity` admission. If native completion already won Ready
+publication, only its exact resident is released. If completion already
+consumed a rejected/stale admission, the sole native callback remains
+responsible for terminal fence publication and its retained resource leases.
+This containment does not claim synchronous cancellation of a committed native
+command, and a late callback cannot regain discarded residency-publication
+authority.
+
+After payload capture, all accepted settlements, Value release, history cut,
+and the final execution snapshot close one complete Value-free input. Exactly
+one recoverable `std::launch::async` evaluator may then overlap preparation of
+the next baseline. Its input cannot be consumed until a valid sole future is
+installed; launch failure evaluates the still-recoverable input synchronously
+and propagates the launch error. The runner collects that future before the
+next fixed pre-admission handoff and never shifts or backfills an origin. It
+retains at most one evaluator and 111 complete rows in pre-reserved storage.
+JSON construction, NDJSON writes and flushes, progress logging, replicate
+evaluation, summary persistence, and row compaction occur only at the fixed
+terminal boundary on success. An abort joins the sole evaluator when present
+and flushes only complete rows in exact slot order; a cursor advances only
+after encode, write, flush, and stream checking succeed, and raw rows are never
+compacted before serialization.
+
+A failed or invalid admission claims a monotonic no-allocation persistence gate
+before diagnostic construction. Its sole finalizer closes the Graph, captures
+the history cut, consumes every valid accepted settlement, releases unfrozen
+Values without digest/acquisition traversal, captures closed state, evaluates
+one source-faithful all-Invalid fixed-width row, flushes every earlier row plus
+that row, and only then attempts the additive outer failure artifact. Untouched
+suffix edits remain explicit and no later slot is submitted. Generic inner or
+outer failure handling is suppressed after the claim, so neither artifact is
+retried through a compatibility fallback.
+
+The manual
+`i2_progressive_benchmark` target is `EXCLUDE_FROM_ALL`, is absent from CTest,
+and writes `execution-profile-i2-inner-row-v1` evidence only to a caller-selected
+directory. That inner record is not the canonical ADR 0010 15-field outer row,
+bundle, or reference comparison. Building it or passing deterministic tests is
+therefore not an I2 machine-conformance claim; the exact 111-slot workload must
+be invoked explicitly and retained before any such claim.
+
+Issue #95 now supplies the source-private B1 composition without changing an
+installed surface. `B1Host::compute_b1_image` carries exact Throughput QoS,
+weight one, the selected cap, and an observation-only sink through the same
+embedded Host, Kernel, provider, ledger, and `ExecutionService` path used by
+ordinary synchronous compute. The same private view exposes the one real
+process `ComputeIoExecutor` and authority-free execution snapshots; it creates
+no second scheduler, worker pool, ledger, Graph authority, or public request.
+
+`B1OutputStore` is the B1 manual/release output owner, not the still-target
+general product `OutputStore` from ADR 0009. Under one preselected canonical
+root it retains a no-follow root descriptor, holds a nonblocking advisory
+exclusive lock for its lifetime, and creates a mode-`0700` private staging
+anchor/slot. Cooperating processes and threads must honor that lock and reserve
+the B1 staging/occurrence names to this single owner. It records the named
+directory identity before `openat` and requires the held descriptor to match
+before any artifact write, then submits the exact 67,108,864-byte payload charge
+and exact manifest charge as two ordered tasks to the process executor. After
+both settle, the store atomically renames the complete private slot to the
+immutable public occurrence with platform no-replace semantics and synchronizes
+both namespaces. Every artifact mutation, barrier, and revalidation remains
+descriptor-relative, so pathname or real-directory slot replacement cannot
+redirect writes. Before public rename, the guard settles accepted work before
+private cleanup, checks recorded leaf/directory identities twice, checks each
+name-removal result and following absence, synchronizes parents, and fail-stops
+on detected unowned residue or cleanup failure. POSIX does not atomically bind
+the final identity check to `unlinkat`/`rmdir`; this guarantee therefore relies
+on the cooperating exclusive-owner precondition and makes no claim about
+arbitrary non-cooperating same-UID mutation in that interval. A pre-guard anchor
+handoff failure preserves ambiguous residue without a retryability claim. Only
+checked private removal and observed absence inside the precondition keep the
+commit identity retryable from an empty namespace. Atomic public rename changes
+the guard to public-pending and revokes deletion authority. Later barrier,
+final-validation, or receipt failure preserves the occurrence and empty anchor;
+same-commit retry descriptor-relatively verifies exact payload/manifest bytes
+and identities, finishes missing barriers, and returns the same receipt without
+new output work or rewriting. A non-directory or real directory with no
+transaction-looking leaf (empty or containing only unknown markers) is plainly
+foreign and returns `SlotExists` untouched. Once payload, manifest, or private-
+manifest residue is present, an incomplete/extra entry set or byte/identity
+drift returns `RevalidationFailed` untouched. A reconciled receipt carries an
+empty `io_observations` sequence because no new tasks ran; it cannot fabricate
+the current B1 FSM, so evaluation requires the retained earlier new-work stream
+and fails closed when that stream is unavailable. The store writes tight
+little-endian RGBA binary32 bytes,
+syncs and revalidates the payload and manifest, publishes once, completes
+leaf-to-root directory barriers, and only then returns a typed crash-durable
+receipt. That receipt has no public field-based constructor: only the store can
+mint its immutable typed fields after revalidation. The store can also retain
+an opaque root-authority capability backed by a duplicated descriptor that
+shares the same open-file description and advisory-lock lifetime. Copies held
+by evaluated inner rows therefore keep the descriptor and exclusive ownership
+alive even after the originating store is destroyed. Every offer and
+settlement retains the complete occurrence/task identity and executor-authored
+exact delta plus same-lock I/O snapshot; capacity retry keeps attempt zero and
+the same charge. A passing limit check is only a provisional constructing
+reservation: factory throw/empty or task/queue-entry allocation failure mints no
+Accepted event. Successful construction publishes Accepted either with queue
+ownership or, if external shutdown won, atomically with its exactly linked
+Cancelled settlement. Every active snapshot task
+occupies exactly one constructing/queued/running phase; retained global event
+sequences may have numeric gaps for omitted unrelated work, but task-local
+transitions may not be missing. Planned bytes and per-task events are
+authoritative only for
+Compute I/O admission, high-water, and exact task settlement, not physical
+memory ownership, durability, RSS, or ledger/device evidence.
+
+The source-private B1 profile, environment validator, and evidence evaluator
+also implement the immutable 34-seed logical/raw golden table, canonical
+semantic trace, exact 21/24/4-field environment schemas, raw backend/mount/
+performance proof mappings, eligibility/root-containment/compatibility, and
+four independent inner verdicts. Applicable evidence and JSON retain the raw
+storage proof as the one closed canonical six-field expected document,
+including all 21 raw field observations, mount inputs, two performance cuts,
+transaction/receipt events, and root/destination observations. No derived
+proof boolean is retained. Every compatibility side reparses those bytes,
+reruns all mappings, and recomputes eligibility from its own canonical storage
+bytes before exact-matching the retained claim. It then independently binds
+that expected claim to an opaque source-private actual capability. Only a live
+held-root descriptor capability, immutable store-minted typed receipts, and a
+trusted live probe adapter can mint its inputs; public aggregates, copied
+values, and retained proof bytes cannot. Every validation call obtains a fresh
+root/receipt/probe snapshot from that live observer. The complete raw probe is
+an observation result rather than minting authority, and copies inside
+`B1InnerRowInput`/`B1InnerRow` share the observer and extend its source lifetime.
+JSON adds a readable decoding and diagnostic initial-snapshot digest but no
+alternate proof grammar and no reusable authority. Missing
+trusted observation for any external storage declaration makes that side
+machine-ineligible; copying the retained proof into the actual-observation path
+is forbidden.
+`b1_immutable_benchmark` is
+`EXCLUDE_FROM_ALL`, absent from CTest, and executes one exact 34-job inner row
+below a caller-selected root. Its four environment files are expected input,
+not observation authority. The current portable Darwin/Linux path observes the
+held root and real receipts but cannot independently verify all mount,
+performance, hardware-cache, power-loss-protection, and transaction-event
+facts, so it emits an Invalid row rather than a machine-conformance claim until
+a trusted complete probe is available. Building it, showing its help, or
+passing deterministic tests is not a B1 machine-conformance result; this
+target by itself claims neither an exact three-replicate machine run nor the
+#96 outer row/bundle/reference composition.
+
+The source-private M1 profile composes the exact shared I1/B1 cadence and five
+independent inner axes, but does not add installed policy or lifecycle control
+surfaces. Its canonical nested record is the closed and reversible
+`execution-profile-m1-inner-row-v2`; the workload and outer 15-field row/
+five-field bundle stay version one. The v2 manifest has exactly 20 ordered
+fields: `interactive_sources` retains the complete post-freeze Issue #93 input
+for each of the 48 phase/ordinal/origin occurrences, while `batch_sources`
+retains exactly one Issue #95 physical/output/golden/semantic/I/O observation
+source for each protocol offer. Receipt fields are copied as observations only;
+parsing never mints a `B1OutputCommitReceipt` or live storage capability. Every
+one of the thirty retained progress durations must equal exactly one second.
+An independent corpus reader exact-joins source identity and order, replays the
+I1 latency/service/four-verdict and B1 verified-endpoint/waste projections, and
+uses the runner's same checked rule to source-derive and exact-match first
+measured admission/current-hold, all thirty progress windows, all thirty Graph
+A/B service/demand windows, all 480 measured headroom outcomes, and their
+attempted/classified/failure aggregate. The source gate runs before protocol
+early return. It then
+exact-checks the remaining mixed observations, reuses the production protocol/
+fairness/waste/memory/B1-I/O evaluators, recomputes all five axes plus overall,
+exact-matches the six retained verdicts, and requires byte-identical
+rematerialization. Source closure is a separate materialization gate even when
+the row is already `Invalid`. Unknown, duplicate, missing, reordered,
+truncated, noncanonical, tampered, source/projection-mismatched, or stale-
+verdict nested evidence therefore fails closed even after outer rehashing. The
+v2 record omits redundant complete I1/B1 diagnostic JSON; neither it nor the
+denominator-only pair packs mint portable output receipts, live storage
+authority, or machine conformance. `m1_shared_benchmark` remains a manual
+`EXCLUDE_FROM_ALL` target outside CTest/CI, and this document does not claim an
+exact timed three-replicate M1 corpus.
+
+For current-hold replay, the same M1 observer coordinate spans measured-current
+publication and displaced-warmup cancellation. Current `(B,n)` followed by
+cancellation `(B,n+1)` is ordinary product supersession and is not a boundary-
+only cancellation; cancellation before B, or at B with sequence no later than
+`n`, fails closed. The accepted-row sequence remains a separate domain. This
+projection result is also independent from Issue #93 Run validity, which still
+rejects a successful visible publication paired with accepted cancellation.
+
+The mixed observer samples steady time and allocates its next causal sequence
+inside one bounded lock-free atomic gate, so sequence order implies
+nondecreasing time. It accepts zero-based task zero for task-semantic start and
+terminal records. M1 memory replay independently requires every Host component
+and stable device identity to satisfy
+`reserved <= lifetime_high_water <= limit`, with nondecreasing lifetime
+high-water across temporal cuts. The nested observation snapshot remains ten
+fields and the v2 manifest remains exactly twenty fields; these are semantic
+corrections, not a schema-version expansion.
+
 ## Implementation and Validation Entry Points
 
 - `include/photospider/plugin/op_contract.hpp`
@@ -502,6 +923,24 @@ process-isolated plugin supervision belongs to Issue #91.
 - `src/lib/compute/execution_service.hpp` and `.cpp`
 - `src/lib/compute/run_lifecycle_registry.hpp` and `.cpp`
 - `src/lib/compute/execution_lifecycle_telemetry.hpp` and `.cpp`
+- `src/lib/benchmark/i1_host.hpp`
+- `src/lib/benchmark/i1_profile.*`
+- `src/lib/benchmark/i1_evidence.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
+- `src/lib/benchmark/b1_host.hpp`
+- `src/lib/benchmark/b1_profile.*`
+- `src/lib/benchmark/b1_environment.*`
+- `src/lib/benchmark/b1_output_store.*`
+- `src/lib/benchmark/b1_evidence.*`
+- `src/lib/benchmark/m1_profile.*`
+- `src/lib/benchmark/m1_evidence.*`
+- `src/lib/benchmark/m1_canonical.*`
+- `src/lib/benchmark/evidence_envelope.*`
+- `src/lib/compute/progressive_compute.*`
+- `src/lib/core/exact_box_downsample.cpp`
+- `src/lib/runtime/resource_ledger.*`
 - `src/lib/execution/compute_io_executor.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
 - `src/lib/execution/execution_task_runtime.hpp`
@@ -520,6 +959,21 @@ process-isolated plugin supervision belongs to Issue #91.
 - `tests/unit/test_compute_io_executor.cpp`
 - `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_progressive_compute.cpp`
+- `tests/unit/test_i2_profile.cpp`
+- `tests/unit/test_i2_evidence.cpp`
+- `tests/integration/test_i2_product_path.cpp`
+- `tests/verification/i2_progressive_benchmark.cpp`
+- `tests/unit/test_i1_profile.cpp`
+- `tests/unit/test_i1_evidence.cpp`
+- `tests/integration/test_i1_product_path.cpp`
+- `tests/verification/i1_edit_storm_benchmark.cpp`
+- `tests/unit/test_b1_profile.cpp`
+- `tests/unit/test_b1_environment.cpp`
+- `tests/unit/test_b1_output_store.cpp`
+- `tests/unit/test_b1_evidence.cpp`
+- `tests/integration/test_b1_product_path.cpp`
+- `tests/verification/b1_immutable_benchmark.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_metal_device_executor.cpp`
 - `tests/integration/test_ipc_daemon.cpp`

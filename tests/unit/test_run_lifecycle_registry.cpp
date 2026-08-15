@@ -173,7 +173,8 @@ ComputeRunSubmission make_standalone_submission(
                     std::nullopt},
       SupersessionIdentity{
           SupersessionKey(target_node_id, ComputeIntent::GlobalHighPrecision),
-          SupersessionGeneration(1U)}};
+          SupersessionGeneration(1U)},
+      nullptr};
 }
 
 /**
@@ -200,7 +201,8 @@ ComputeRunSubmission make_group_submission(GraphInstanceId graph_instance_id,
                               quality,
                               ComputeRunQos{ComputeRunQosClass::Throughput,
                                             std::nullopt, 1U, std::nullopt},
-                              identity};
+                              identity,
+                              nullptr};
 }
 
 /**
@@ -819,6 +821,69 @@ TEST(RunLifecycleRegistry,
   anchor->mark_retired();
   registry.wait_until_empty();
   EXPECT_NE(registry.mark_service_stopped({}), 0U);
+}
+
+/**
+ * @brief Proves physical retirements publish at one fence-held registry cut.
+ * @throws GoogleTest assertion control and registry/telemetry exceptions.
+ */
+TEST(RunLifecycleRegistry, PhysicalRetirementUsesExactRegistryCut) {
+  ExecutionLifecycleTelemetry telemetry;
+  RunLifecycleRegistry registry(telemetry);
+  auto anchor = register_graph(registry, GraphInstanceId{490U});
+
+  EXPECT_THROW(registry.publish_physical_retirement(
+                   ExecutionLifecycleEventKind::WorkerJoined,
+                   ExecutionLifecycleCategory::None, 1U),
+               std::logic_error);
+  EXPECT_THROW(registry.publish_physical_retirement(
+                   ExecutionLifecycleEventKind::GraphRegistered,
+                   ExecutionLifecycleCategory::None, 1U),
+               std::invalid_argument);
+  EXPECT_THROW(registry.publish_physical_retirement(
+                   ExecutionLifecycleEventKind::BindingRetired,
+                   ExecutionLifecycleCategory::GraphClose, 1U),
+               std::invalid_argument);
+  EXPECT_THROW(registry.publish_physical_retirement(
+                   ExecutionLifecycleEventKind::BindingRetired,
+                   ExecutionLifecycleCategory::None, 0U),
+               std::invalid_argument);
+
+  registry.publish_physical_retirement(
+      ExecutionLifecycleEventKind::BindingRetired,
+      ExecutionLifecycleCategory::None, 7U);
+  const std::uint64_t shutdown_generation = registry.begin_service_shutdown();
+  registry.publish_physical_retirement(
+      ExecutionLifecycleEventKind::WorkerJoined,
+      ExecutionLifecycleCategory::None, shutdown_generation);
+
+  const ExecutionLifecyclePage page = telemetry.snapshot(0U, 64U);
+  const auto binding = std::find_if(
+      page.records.begin(), page.records.end(),
+      [](const ExecutionLifecycleEvent& event) {
+        return event.kind == ExecutionLifecycleEventKind::BindingRetired;
+      });
+  ASSERT_NE(binding, page.records.end());
+  EXPECT_EQ(binding->counters.registered_graph_count, 1U);
+  EXPECT_EQ(binding->counters.open_graph_count, 1U);
+  const auto worker = std::find_if(
+      page.records.begin(), page.records.end(),
+      [](const ExecutionLifecycleEvent& event) {
+        return event.kind == ExecutionLifecycleEventKind::WorkerJoined;
+      });
+  ASSERT_NE(worker, page.records.end());
+  EXPECT_EQ(worker->generation, shutdown_generation);
+  EXPECT_EQ(worker->counters.registered_graph_count, 1U);
+  EXPECT_EQ(worker->counters.closing_graph_count, 1U);
+
+  registry.finish_graph_close(anchor->graph_instance_id());
+  anchor->mark_retired();
+  registry.wait_until_empty();
+  EXPECT_NE(registry.mark_service_stopped({}), 0U);
+  EXPECT_THROW(registry.publish_physical_retirement(
+                   ExecutionLifecycleEventKind::BindingRetired,
+                   ExecutionLifecycleCategory::None, 7U),
+               std::logic_error);
 }
 
 TEST(RunLifecycleRegistry, ProcessShutdownIsIdempotentAndStopsAfterEmptyRows) {

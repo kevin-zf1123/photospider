@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "photospider/core/graph_error.hpp"
+#include "plugin/plugin_trust.hpp"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -28,7 +29,8 @@ namespace ps::policy {
  *
  * @throws Nothing for scalar access; copied metadata/lease construction may
  * throw before publication.
- * @note The callback table is dereferenced only while `library_lease` is live.
+ * @note The callback table is dereferenced only while `library_lease` is live;
+ * that lease retains both the native handle and its exact-object capability.
  */
 struct PolicyTypeRecord final {
   /** @brief Host-owned metadata. */
@@ -43,7 +45,7 @@ struct PolicyTypeRecord final {
   /** @brief Validated copied callback table; zero for built-ins. */
   ps_policy_plugin_api_v1 api{};
 
-  /** @brief Native DSO owner retained through every callback and context. */
+  /** @brief Native DSO/capability owner retained through every callback. */
   std::shared_ptr<void> library_lease;
 };
 
@@ -333,24 +335,46 @@ using DestroyFunctionSignature = ps_policy_status_v1 PS_POLICY_CALL(void*);
 using DestroyFunction = DestroyFunctionSignature*;
 
 /**
- * @brief Opens one DSO eagerly and locally under a shared native lease.
- * @param path Normalized candidate path.
- * @return Shared native owner suitable for type/binding/invocation retention.
- * @throws GraphError with `Io` when the native loader rejects the candidate.
+ * @brief Closes one policy plugin native handle.
+ * @param handle Nonnull `LoadLibrary` or `dlopen` result.
+ * @return Nothing after the platform close attempt.
+ * @throws Nothing; close failures are intentionally ignored during retirement.
+ * @note `make_authorized_native_library_lease()` invokes this before releasing
+ * the matching exact-object capability.
  */
-std::shared_ptr<void> open_library(const std::string& path) {
+void close_policy_library(void* handle) noexcept {
+#if defined(_WIN32)
+  (void)FreeLibrary(reinterpret_cast<HMODULE>(handle));
+#else
+  (void)dlclose(handle);
+#endif
+}
+
+/**
+ * @brief Opens one DSO under a shared handle-and-capability native lease.
+ * @param authorized Retained exact candidate signed for policy use; success
+ * transfers it into the returned lease.
+ * @return Shared native owner suitable for type/binding/invocation retention;
+ * `get()` remains the platform handle used for symbol lookup.
+ * @throws GraphError with `Io` when the native loader rejects the candidate.
+ * @throws std::bad_alloc when path or combined shared ownership cannot
+ * allocate.
+ * @throws std::invalid_argument only for an internal inactive capability or
+ * null successful-loader handle invariant violation.
+ * @note Every failure after native open closes the handle before capability
+ * destruction. Final shared release preserves that same order.
+ */
+std::shared_ptr<void> open_library(AuthorizedPluginFile authorized) {
+  const std::string path = authorized.native_load_path();
 #if defined(_WIN32)
   HMODULE handle = LoadLibraryA(path.c_str());
   if (handle == nullptr) {
     throw GraphError(GraphErrc::Io,
                      "Failed to open policy library '" + path + "'.");
   }
-  return std::shared_ptr<void>(
-      reinterpret_cast<void*>(handle), [](void* raw) noexcept {
-        if (raw != nullptr) {
-          (void)FreeLibrary(reinterpret_cast<HMODULE>(raw));
-        }
-      });
+  return make_authorized_native_library_lease(reinterpret_cast<void*>(handle),
+                                              std::move(authorized),
+                                              close_policy_library);
 #else
   void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (handle == nullptr) {
@@ -359,17 +383,14 @@ std::shared_ptr<void> open_library(const std::string& path) {
                      "Failed to open policy library '" + path + "': " +
                          (detail != nullptr ? detail : "unknown loader error"));
   }
-  return std::shared_ptr<void>(handle, [](void* raw) noexcept {
-    if (raw != nullptr) {
-      (void)dlclose(raw);
-    }
-  });
+  return make_authorized_native_library_lease(handle, std::move(authorized),
+                                              close_policy_library);
 #endif
 }
 
 /**
  * @brief Resolves one required native symbol from a live candidate lease.
- * @param library Live native DSO owner.
+ * @param library Live native DSO handle/capability owner.
  * @param name Exact C symbol name.
  * @return Untyped native function address.
  * @throws GraphError with `InvalidParameter` when missing.
@@ -813,7 +834,16 @@ void PolicyRegistry::load(const std::string& path) {
                          std::string(error.what()));
   }
 
-  std::shared_ptr<void> library = open_library(normalized_path);
+  std::optional<AuthorizedPluginFile> authorized;
+  try {
+    authorized.emplace(
+        authorize_process_plugin(normalized_path, PluginArtifactKind::Policy));
+  } catch (const PluginTrustError& error) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     std::string("Policy trust admission rejected '") +
+                         normalized_path + "': " + error.what());
+  }
+  std::shared_ptr<void> library = open_library(std::move(*authorized));
   const auto version = reinterpret_cast<PolicyVersionFunction>(
       required_symbol(library, "ps_policy_plugin_get_abi_version"));
   std::uint32_t abi_version = 0U;

@@ -101,12 +101,16 @@ class CpuProgressHost final : public ExecutionHostContext {
    * @brief Accepts worker attribution without retaining it.
    * @param worker_id Fixed service worker id.
    * @param epoch Active Run epoch.
+   * @param task_identity Exact observation-only task tuple.
    * @return Nothing.
    * @throws Nothing.
    */
-  void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
+  void set_task_context(int worker_id, std::uint64_t epoch,
+                        std::optional<ExecutionTaskAuditIdentity>
+                            task_identity) noexcept override {
     (void)worker_id;
     (void)epoch;
+    (void)task_identity;
   }
 
   /**
@@ -122,15 +126,19 @@ class CpuProgressHost final : public ExecutionHostContext {
    * @param node_id Planned node id.
    * @param worker_id Fixed worker id.
    * @param epoch Active Run epoch.
+   * @param task_identity Exact observation-only task tuple.
    * @return Nothing.
    * @throws Nothing.
    */
   void log_event(ExecutionTraceAction action, int node_id, int worker_id,
-                 std::uint64_t epoch) noexcept override {
+                 std::uint64_t epoch,
+                 std::optional<ExecutionTaskAuditIdentity>
+                     task_identity) noexcept override {
     (void)action;
     (void)node_id;
     (void)worker_id;
     (void)epoch;
+    (void)task_identity;
   }
 };
 
@@ -153,7 +161,8 @@ compute::ComputeRunSubmission make_kernel_shutdown_submission(
                              std::nullopt, 1U, std::nullopt},
       compute::SupersessionIdentity{
           compute::SupersessionKey(1, ComputeIntent::GlobalHighPrecision),
-          compute::SupersessionGeneration(1U)}};
+          compute::SupersessionGeneration(1U)},
+      nullptr};
 }
 
 /**

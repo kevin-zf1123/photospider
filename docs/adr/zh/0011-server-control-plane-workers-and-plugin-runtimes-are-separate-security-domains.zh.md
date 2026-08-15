@@ -1,0 +1,592 @@
+# ADR 0011：Server Control Plane、Worker 与 Plugin Runtime 属于不同安全域
+
+## 状态
+
+本决策作为 Issue #97 的目标契约被接受。它冻结 Issues #98 至 #106 所使用的
+tenant、Job、authentication、quota、artifact、worker 与 plugin 边界。它不表示完整的
+server、worker-manager、独立 artifact data plane、sandbox 或 isolated-plugin 目标已是当前软件行为。
+实时交付状态仍由所链接的 Issue 与 Project 维护。
+
+当前 `photospiderd` 与 plugin loader 均保持不变。Issues #99、#100 和 #105 现在实现了源码私有的
+本地 JobSpec 纵向路径，其中包含 complete-envelope tenant quota accounting、durable
+Job/image artifact recovery、显式 retry/checkpoint identity，以及每个 attempt 一个全新 exec
+的 Embedded Host worker process。一个同进程 `WorkerManager` object 拥有 private socket、
+PID、heartbeat、cancellation escalation、精确 reaping 与 supervision handle；control-plane
+Job service 仍是唯一 durable/quota/artifact/retry authority。Host memory 以 POSIX
+`RLIMIT_AS` 执行；configured device capacity 仍仅用于 admission。Private closed protocol 与
+精确 lease fencing 会把 startup、exit、signal、channel、protocol、heartbeat、runtime 与
+forced-cancellation failure 隔离到拥有它的 attempt。
+Private worker protocol v2 把 control frame 限制为 128 KiB 的 attempt/Job/artifact-reference
+metadata。Checkpoint 与 candidate image bytes 改用 manager 创建且方向被裁剪的本地 Unix
+stream descriptor。注册 supervisor 只会在 record/thread ownership 建立后、service mutex 外创建
+它们；manager endpoint 为 nonblocking，而阻塞 transfer 保留在可杀 worker 内。Manager 只有在
+clean-reap completion handoff 前完成 reference、descriptor、stream EOF/size、resource 与
+SHA-256 精确复核后才接受 candidate。worker 先发送精确且只含 metadata 的 Report，在 stream
+期间保持已认证 heartbeat 活跃，并且只在精确 bytes 后关闭 output lane。manager 为尚未 reap 的
+当前 PID 创建一份精确、惰性的匿名最终 owner，在 lifecycle 检查之间直接接收一个不超过
+64-KiB 的 slice，且绝不把 output progress 当作 heartbeat。worker 会保持存活且可被终止，直到
+manager 完成该关联并返回一次只含 identity 的
+`CompletionReady`；该确认不授予 Job、quota、artifact、commit 或 publication authority。
+reap 后绝不再读取 bulk lane，也不执行 data-plane filesystem I/O。
+
+该本地切片保留本决策的身份与权威顺序，并提供真实的 quota admission、crash durability、
+process-crash containment 与 bounded cancellation/shutdown。它保留共享的
+128-configured-device admission/recovery 上限，以及 Job journal 对 not published、published
+but durability unconfirmed 与 confirmed committed 的显式区分。Published barrier failure 会
+保留 visible truth 并进入单调 control-plane fail-stop，而不尝试回滚。该 profile 只在 Darwin
+与 Linux 默认启用；unsupported system 不存在 Job/worker target inventory。该切片不能证明
+multi-tenant authorization、独立部署的 WorkerManager、authenticated network transport、
+standalone artifact data plane、syscall/device isolation 或 untrusted-plugin isolation。当前行为由
+[单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)定义。
+
+Issue #102 也提供源码私有的 Darwin/Linux CPU invocation transport。
+`NonSupervisedIsolatedCpuInvocationExecutor` 使用独立版本化、无指针的 request/response
+protocol、framed Unix stream、有序 `SCM_RIGHTS` descriptor 与已 unlink 的 POSIX shared
+memory。每次直接调用都会启动一个全新且 environment 为空的 runtime process；只有在进程正常
+以零状态退出，并且 descriptor/header 重新验证通过、结果被复制到全新 Host allocation，且该
+snapshot 的 content binding 在 seal 前验证通过后，Host 才会暴露 output。这个刻意如此命名的
+adapter 仍是无时间边界的 #102 transport seam，且绝不作为 fallback。
+
+Issue #103 现在通过源码私有的 `PluginInvocationExecutor` 与
+`PluginRuntimeSupervisor` 组合该 transport。每次 invocation 都获得一个全新 exec child、
+精确 PID ownership、专用 Unix datagram lifecycle channel、绑定完整 invocation identity 的
+OS 随机 128-bit nonce、严格 lifecycle sequence、Host 选择的 heartbeat interval，以及绝对
+单调的 startup、invocation、heartbeat-gap、response、termination 与 reap bound。完整 request
+transfer 会获得一个独立、完整的 invocation-duration window；只有在它结束后才启用 callback
+invocation 与 heartbeat-gap deadline。Fault 会
+保留可观测的 deadline、protocol、channel、bad-output、natural exit、signal 与 escalation
+事实；`SIGKILL` 只标记为 memory-pressure-compatible，绝不声称它证明 OOM。Failure 会撤销
+channel，必要时从 `SIGTERM` 升级到 `SIGKILL`，精确 reap 或把唯一精确 reaper 移入
+quarantine，并且只在有界 backoff 后于新进程中启动后续 invocation。链接产品的 integration
+会把 executor 组合进既有 `ExecutionService` callback/request boundary，并证明失败 Run 不会
+终止其固定 worker 或后续无关 Run。
+
+上述 #103 boundary 是经过认证的私有 session supervision，不是 hostile-child attestation、
+package trust、sandboxing、resource enforcement 或已选择的最终用户 operation route。Issue #104
+现在会用签名 package admission、一次性 Host resource admission 与 process rlimit 包裹长期维护的
+直接/受监督入口。当前没有 `ExecutionService`、`WorkerManager`、embedded Host/CLI、
+`photospider-worker` 或 operation loader 会为最终用户 Graph operation 构造该路径；完整
+operation-ABI migration 仍负责最终选择，通用 syscall/network sandbox 仍是独立工作。
+
+## 背景
+
+仓库已经具有稳固的本地/进程基线，但它并不是 network service security model：
+
+- `photospiderd` 是 foreground、同用户 Unix-domain sidecar。受保护 directory、socket、
+  lock 与 output file 构成同 UID 本地访问边界。Protocol v2 不包含 tenant identity、
+  end-user authentication 或 remote transport trust model。
+- Daemon 的 session、compute-request、cursor、output、delivery 与 server-instance id 都是
+  process/local-transport identity。其私有 `OutputStore` 是受保护的 lease/TTL delivery
+  store，不是 durable artifact authority。
+- `ExecutionService`、`RunLifecycleRegistry` 与 `ResourceLedger` 拥有一个注入 Host
+  进程的 physical execution、Run lifecycle 与已 admission 的 Host/device resource。
+  `ComputeRun` 及其 Graph/Run/task identity 均为 process-local；它们不拥有 durable Job
+  state 或 tenant quota。
+- Operation、data-definition 与 policy DSO 在 Host address space 内执行 native code。
+  ABI check、shadow transaction、callback fence 与 DSO lease 保护 compatibility、
+  publication、exception 与 lifetime invariant。它们无法阻止 memory corruption、
+  syscall、未申报 thread、unbounded allocation、crash 或永不返回的 callback。
+- `ValueRevisionId`、`AllocationIdentity`、`StorageBinding` 与 `BufferHandle` 是 runtime
+  observation/capability，不是 durable artifact 或 cross-process identity。
+
+Project #5 引入 remote client、multiple tenant、受限 Job worker、durable artifact 与
+tenant-supplied operation code。因此 threat model 包含恶意或已被攻陷的 tenant principal、
+malformed JobSpec/artifact/protocol message、replayed/stale worker report、worker
+crash/hang/OOM、恶意 plugin code/output，以及跨 tenant、Job、artifact、quota 与 process
+boundary 的 confused-deputy 尝试。
+
+Trusted computing base 包含 operating system、配置的 network identity/credential root、
+network control plane、worker manager、artifact authority、authenticated local channel，
+以及可信 worker executable 与 operator-approved built-in。受限 general worker 是较低信任
+execution domain；tenant operation-plugin process 是非可信域。
+
+本决策扩展 ADR 0003 与 ADR 0007 的 process ownership，而非取代它们。它还保留
+ADR 0008 对 runtime/persistent identity 的分离，以及 ADR 0009 对独立 output-commit
+authority 的要求。
+
+## 决策
+
+### 进程与安全域
+
+目标 server profile 包含五个不同安全域：
+
+| 安全域 | 权威 | 明确不拥有 |
+| --- | --- | --- |
+| Network control-plane process | Network authentication、principal-to-tenant mapping、authorization、immutable `JobSpec`、`JobId` 与 Job state、cancellation intent、retry policy、tenant/Job quota reservation、artifact reference | Graph/Run execution、native plugin loading、worker OS lifecycle、bulk artifact byte |
+| Worker-manager process | Worker spawn/reap、`WorkerInstanceId`、assignment lease、authenticated local channel、OS resource envelope、heartbeat 与 cancellation/termination escalation | End-user authentication、JobSpec mutation、final Job/retry decision、Graph/Run commit、artifact byte/commit |
+| 每个 active `JobAttemptId` 独占一个受限 `photospider-worker` | 一个 immutable attempt、Embedded Host/Kernel、Graph/Run lifecycle、一个 attempt-local `ExecutionService`/`ResourceLedger`、已验证 attempt report | Network listener、user credential、另一个 Job/tenant assignment、server quota mint、artifact root、final Job/retry state |
+| Artifact-store/data-plane service | Immutable payload/manifest、`ArtifactId`、content/descriptor binding、idempotent commit、typed durability receipt、retention/recovery、artifact/output quota | Job/Run state、Graph execution、plugin execution、所提供 authorization context 以外的 tenant policy |
+| 隔离的 CPU operation-plugin runtime | 一次有界 invocation 的 tenant code 与 invocation-local private state | Network、任意 filesystem root、user credential、tenant/Job/Graph/Run state、server/Host token、artifact publication、native GPU authority |
+
+Network control plane 与 worker manager 是不同 OS process。Artifact data plane 是独立的
+service/process boundary。每个 `photospider-worker` 都为一个 JobAttempt 全新创建，不接受
+第二次 assignment，并在正常 settlement 或 manager termination 后退出。Plugin runtime 只有在
+同一 JobAttempt 和 approved plugin generation 内才可服务多次 invocation；attempt 结束、lease
+revocation、protocol fault 或 supervisor retirement 都会销毁它。
+
+```mermaid
+flowchart LR
+  CLIENT["Authenticated client"] --> CP["Network control plane"]
+  CP -->|"Job metadata + quota reservation"| WM["WorkerManager"]
+  CP -->|"ArtifactId / receipt metadata"| AS["Artifact store / data plane"]
+  WM -->|"One attempt lease"| W["photospider-worker"]
+  AS -->|"Scoped read/stage capabilities"| W
+  W --> EXEC["Attempt-local Host / ExecutionService"]
+  EXEC --> PIE["PluginInvocationExecutor"]
+  PIE --> PRS["PluginRuntimeSupervisor"]
+  PRS -->|"Validated descriptors + invocation handles"| P["Untrusted CPU plugin process"]
+  P -->|"Untrusted result descriptors"| PRS
+  W -->|"Typed attempt facts + receipts"| WM
+  WM -->|"Authenticated current-attempt report"| CP
+```
+
+Control plane 与 WorkerManager 不加载 plugin DSO，也不执行 Graph operation。General worker
+不暴露 network listener，且不能拥有或创建另一个 general worker。隔离 plugin process 不获得
+Job、Graph、Run、artifact、credential、quota 或 Host resource authority。
+
+### 本地 Sidecar 不是 Server Protocol
+
+`photospiderd` 与 protocol v2 继续作为同用户本地 workstation sidecar。`0700`/`0600`
+mode 与同 UID path identity 是其本地访问边界；它们不是 remote authentication、tenant
+isolation 或 peer attestation。
+
+未来 network service 使用新的带版本 protocol 与 composition root。它不会原样暴露或 tunnel
+local router，不把 session name 重新解释为 tenant，不提升 process-global plugin mutation
+method，也不把 local opaque id 转换成 server authority。在 `photospiderd` 前加 TLS 不构成
+符合本决策的 server profile。
+
+### Authentication 与 Tenant Authority
+
+Control plane 通过配置的 identity root 认证每个 request，并把 immutable `PrincipalId`
+映射到唯一 authoritative `TenantId` 与 permission set。它会在访问或披露受保护对象前，
+授权精确的 `{principal, tenant, action, resource}` tuple。Caller-provided tenant label、
+object id、local daemon id、trace id 与 identifier secrecy 都不授予 authority。
+
+End-user bearer credential 与 identity-provider secret 止于 control plane。Cross-process
+operation 使用 authenticated、audience-bound、expiry/revocation-aware capability，并精确
+限制 tenant、Job、attempt、action、resource 与 budget。Delegation 只能缩小，不能扩大 authority。
+Receiver 除 message field 外还会校验 channel/process identity。Credential encoding、TLS
+implementation 与 identity-provider product 留给后续选择，但上述 authority property 不变。
+
+### Identity Domain
+
+目标 identity chain 如下：
+
+```text
+PrincipalId -> TenantId -> JobId + JobSpecDigest
+                         -> JobAttemptId + WorkerInstanceId
+                                         + WorkerLeaseGeneration
+                         -> process-local GraphInstanceId / RunId
+                                                   / RunLocalTaskId
+                         -> PluginInvocationId
+                         -> ArtifactId + OutputCommitReceipt
+```
+
+- `TenantId` 限定每个 Job、quota、artifact、plugin policy、audit 与 idempotency key。
+- `JobId` 标识一个 immutable accepted `JobSpec`。Retry 保留 JobId 与 `JobSpecDigest`，
+  并生成新的、不可复用的 `JobAttemptId`。
+- `WorkerInstanceId` 标识一个 OS process。`WorkerLeaseGeneration` 绑定其精确 assignment
+  与 revocation epoch。
+- Graph/Run/task identity 仍只属于一个 worker attempt。它们可以复制用于 trace correlation，
+  但不授予 server authority。
+- `PluginInvocationId` 标识一个精确 attempt、approved plugin generation 与 invocation。
+  它不授予 Graph 或 artifact authority。
+- `ArtifactId` 标识 immutable persisted manifest/version。它不是 path、process pointer、
+  Run id、content digest、`OutputArtifactId`、`ValueRevisionId`、`AllocationIdentity` 或
+  `BufferHandle`。
+
+每个 message 都携带并校验把它关联到 retained current state 所需的 identity。一个 domain
+中的相等不能替代另一个 domain。即使 JobId 与 content 相同，旧 attempt/lease report 仍为 stale。
+
+### Immutable JobSpec 与 Job Truth
+
+Control plane 在接收前校验并冻结 canonical `JobSpec` byte，并记录 `JobSpecDigest`。Spec
+通过 authorized immutable identity 引用 graph/configuration、input、plugin 与 checkpoint
+material，并声明 output slot、execution profile、requested resource policy、durability 与
+retention。它不包含 unrestricted Host path、file descriptor、pointer、native/runtime handle、
+mutable store location、local session id 或 bearer credential。
+
+Worker 会在 Graph construction 或 provider entry 前再次验证完整 spec 和 resolved artifact
+descriptor。它报告 attempt fact：start、process-local Run outcome、quiescence、resource
+settlement、artifact receipt 与 typed failure。它不拥有 overall Job state。
+
+只有 control plane 拥有 current attempt selection、cancellation intent、retry 与 terminal Job
+outcome。Job success 要求 current attempt 成功，并具有 JobSpec 所承诺的全部 artifact receipt。
+Run success、artifact commit、Job terminal、cancellation 与 response observation 仍是独立事实。
+Retry 会创建新 attempt；绝不重新打开旧 worker lease，也不修改旧 Run。
+
+### 不引入第二个 ResourceLedger 的分层 Quota
+
+唯一 server quota authority 拥有 concurrency、CPU、Host memory、已配置 GPU/device
+capacity、output/staging byte、artifact retention 与后续 licensed resource 的 tenant/Job limit。
+Job admission 要么原子保留完整 envelope，要么不产生任何局部 authority 并拒绝请求。
+
+WorkerManager 从该 reservation 派生一个 attempt-scoped OS/process budget 与 assignment
+capability。在 `photospider-worker` 内，现有 process-owned `ResourceLedger` 继续作为当前
+Host/device execution dimension 的唯一 mint，且配置不得大于 attempt envelope。它可以细分
+Run 与 device work，但不能 mint tenant concurrency、server GPU ownership、output 或 artifact
+capacity。Artifact authority 在 stage 与 commit 时执行其委托的 output/staging/retention quota。
+
+Usage 与 release 会依据可信 assignment 和 process-lifecycle state 向上恰好对账一次。
+Worker report、JobSpec value、policy、plugin 与 plugin runtime 可以声明 demand，但不能构造、
+复制、放大或直接释放 server quota 或 Host ledger token。
+
+这是一组不同 scope 的 hierarchy，不是两个相互竞争的 resource mint：server quota 授权
+attempt envelope；WorkerManager/OS 执行它；attempt-local ledger 只细分其当前 execution
+dimension。
+
+### Worker Lifecycle 与有界终止
+
+WorkerManager 独占 spawn、process identity、assignment、heartbeat、cancellation delivery、
+revocation、termination escalation、exit classification 与 reaping。它只针对 current
+`{WorkerInstanceId, WorkerLeaseGeneration}` 操作，绝不针对未经限定的 PID。Control plane
+不直接 kill 或复用 worker process。
+
+潜在阻塞的 graph resolution 不属于 PID 出现前的 supervisor。产品 composition 会在 service
+ownership 前完成它，并且只保留 immutable prepared catalog。WorkerManager 先登记精确 exec 后
+child PID，再执行不可覆写的内存 handoff；filesystem open 与 graph load 发生在该 owned process
+内。因此 blocked trusted read 可以被取消、signal 并精确 reap，而不会无限占住 manager handle
+reaper。
+
+Cancellation 由四个 owner 依次处理：
+
+1. control plane 为 current JobAttempt 记录 monotonic cancellation intent；
+2. WorkerManager 把 cooperative cancellation 路由到精确 worker lease；
+3. worker 把它映射到现有 Run/Graph shutdown 并报告 quiescence；
+4. 超过配置时限后，WorkerManager 撤销 capability，并终止/reap 该精确 process。
+
+Normal completion 要求 Run/Graph settlement、attempt-local resource release、所需 artifact
+receipt、authenticated report acceptance、capability closure 与 process exit。Crash、hang、
+OOM、signal death、malformed protocol 或 channel loss 只使 current JobAttempt 失败。
+WorkerManager 不依赖最终 worker report 便可 revoke 并 reconcile assignment；只有 control
+plane 应用 retry policy。
+
+在 Issue #105 之前，Issue #100 基线在本地 single-tenant authority 内实例化这一 lifecycle，
+而不是目标中的独立 WorkerManager process。它使用一个 private socket pair、固定 bounded
+protocol、全新 `fork`/`exec`、`RLIMIT_AS`、cooperative cancel 后的
+`SIGTERM`/`SIGKILL`，以及精确
+`waitpid`。Report 只有在 clean exit 与 reap 后才具备资格。这也包括 deadline-side 竞态：第二次
+精确观察在 channel 撤销前 reap 了自然退出时，manager 会为一次有界的 post-reap Report/EOF
+drain 保留 parent socket 与 stateful decoder，而不是虚构 channel loss 或 forced cancellation。
+这为可信 Embedded worker composition 提供 process crash isolation；它不是 network peer
+authentication、syscall sandbox、device isolation，也不是 Issues #101-#104 分配的 isolated
+tenant-plugin runtime。
+
+Issue #105 以 private protocol v2 取代了上述历史 bulk-control transport。每份完整 Report
+都限制为不超过 128 KiB 的 identity、outcome、diagnostic、image descriptor、reference、size
+与 digest metadata，并且不包含 tight image bytes。Checkpoint 与 candidate bytes 只经 manager
+创建且方向被裁剪的本地 Unix stream 传输。manager endpoint 为 nonblocking，并在 attempt
+绝对 lifecycle deadline 下按有界 slice 推进；阻塞 receive/send 保留在受精确拥有的 worker 内。超过
+accepted output/staging/retention envelope 的 candidate 会变成一个有界、保留 identity 且没有
+image 的 `Failed/Compute` Report；若有限 hard `RLIMIT_FSIZE` 低于 accepted output-stage
+maximum，则所属 attempt 会在 `fork` 前以 `WorkerStartup` 失败，而不是静默缩窄该 envelope。
+不存在 64-MiB compatibility 或 transport-size fallback。worker 会发送一份只含 metadata 的
+Report，在 stream 期间保留 source 与真实 heartbeat loop，只在精确 bytes 后关闭 output lane，
+并在同一精确 process lifecycle 下等待匹配的、只含 identity 的
+`CompletionReady`。WorkerManager 只有在 EOF、size/hash/reference/descriptor/resource 校验与独立
+image owner 的精确匿名最终形态 O(1) 转移完成后才发送该确认。manager 每次 receive 都是一个
+不超过 64-KiB 的直接 slice，随后执行绝对 runtime/heartbeat/cancel/shutdown 仲裁；连续或预缓冲
+output 都不会续期或复活 heartbeat。若已经失败的 cancellation channel 使回复不可能，一份已经完整
+关联的 Report 可以保留其普通分类，但精确 reap 会终止所有 bulk-lane 访问。在已经尝试
+cancellation delivery 后发生
+socket-system error 时，同样会让错误留在有界 monitor 内：decode 停止，但精确 process
+ownership 与 reap deadline 继续，因此 signal/nonzero wait status 或已经 decode 的 Report
+优先于较弱 channel fact。当 cooperative cancellation deadline 仍然有效时，普通 EOF/post-
+report deadline 必须服从它，不能先通过 generic channel path 终止并 reap worker。因此，精确
+exit status 或 manager-owned escalation 会先完成裁决，之后才允许剩余 `WorkerChannel` fact。
+该规则也覆盖 worker 仍然存活时收到完整、有效 candidate Report 的情形：它的普通 post-report
+close/exit deadline 不能在有效 cooperative deadline 之前终止或 reap worker。在该 deadline
+之前观察到的 worker-owned signal 或 nonzero exit 仍是权威 wait-status fact；只有在
+cooperative deadline 到达时仍然存活的 worker 才会进入 cancellation state machine 所有的
+`SIGTERM`/`SIGKILL` escalation，并且才可能产生 forced cancellation。
+
+Control decoder 会区分 readiness-wait budget 与 semantic lifecycle acceptance。Output
+pending 时可以使用已经到期的 budget，在一个 bulk slice 前做一次 nonblocking control probe；
+但完整 buffered byte 或 poll/read/decode progress 不能授权在 absolute lifecycle deadline 到达或
+之后的 frame。Timeout 会保留 partial byte，也会让 transport-complete frame 在 caller-specific
+identity/report 解释期间继续保留。只有相对于同一 semantic deadline 的 fresh monotonic sample
+严格更早时，才会 move 并 reset 该 frame；同一个 sample 也是精确 lifecycle acceptance time。
+因此 tie 或更晚的 sample 不授予 cancellation、liveness、report 或 completion authority，并让
+完整 frame 可供下一个有界 slice 使用。Assignment、`AssignmentAccepted`、Heartbeat、Report、
+Cancel 与 `CompletionReady` 只能在 monotonic time 严格早于其适用 bound 时被接受。Control write
+会在每次正向 send 前后复查；late result 可能已经
+交付 prefix 或 final byte，因此 owner 必须将该 write 视为失败，并且绝不重试该 lifecycle
+frame。Cancellation owner 只能为有界 receive-side report/EOF/exit 排空继续保留 channel。
+
+Exec bootstrap 还会在 control descriptor 之外携带必填的精确 startup 与 worker-write
+deadline。worker 不使用本地默认值或更短 cap，而是直接采用 manager value，因此即使第一帧
+assignment 尚不可用，两端也执行同一 configured lifecycle policy。
+parent 会把该 startup policy 作为同一个 absolute exec-bootstrap deadline 应用于
+close-on-exec status fd 4，并让它贯穿 poll、partial native-`int` read 与
+`EINTR`/`EAGAIN`。读取完整 child `errno` 或干净 EOF 后，必须用 fresh monotonic
+observation 再次满足 `now < deadline`，才能暴露任一结果。等值或更晚仍是
+`WorkerStartup` deadline，并触发既有精确 TERM→KILL→`waitpid` 清理；它不能变成 child-
+error 分类，也不能被后续 Assignment startup window 复活为 exec success。Partial-record
+EOF 仍是 truncated setup failure。
+全部九个 manager duration 使用同一个包含式 `4,294,967,295 ms` 封闭域；heartbeat interval
+止于 `4,294,967,294 ms`，从而能够保持严格小于 heartbeat timeout。产品构造会在取得 durable-
+root ownership 前拒绝每个字段的超界值。随后 manager 与 worker 使用精确可表示的 monotonic
+duration，并针对同一个已捕获 base 执行 checked addition 来构造 deadline，因此 duration
+conversion 与 time-point addition 都不会溢出或回绕。
+
+### Artifact Store 与 Data Plane
+
+Artifact authority 拥有 immutable payload、canonical manifest、descriptor/content binding、
+稳定且 tenant-scoped 的 `ArtifactId`、commit idempotency、typed achieved-durability receipt、
+retention、recovery 与 artifact/output quota。Durable output 遵守 ADR 0009 的 manifest-last、
+no-replace、identity-revalidated、capability-aware transaction。
+
+Control plane 只保留 authorized artifact reference 与 verified receipt fact，不保留 bulk byte。
+目标 control message 只携带有界 authentication、tenant、Job、quota、ArtifactId、receipt 与
+capability metadata。Bulk input、output 与 checkpoint byte 通过 data plane 传输。
+
+当前 #105 可执行证据只在源码私有的同机 WorkerManager/worker boundary 上落实该分离。其 control
+reference 是绑定完整 current attempt/worker/lease 以及精确 checkpoint 或 output slot 的不授权
+join key；带方向的继承 stream descriptor 才提供 byte-transfer access。Worker 不获得 path、
+artifact root、稳定 ArtifactId/OutputCommitId mint、quota release 或 publication capability。
+不完整 stream state 会在 descriptor closure 时消失，只有既有 `DurableServerState`
+manifest-last transaction 才能发布
+crash-durable artifact truth。这不是目标 standalone artifact service、remote transport、bearer
+capability、authentication 或 multi-tenant authorization。
+
+Worker 获得 exact input 的 immutable-read capability，以及 exact output slot 的私有
+stage/commit capability。它不获得 artifact root、unrestricted namespace listing、其他 tenant
+id 或 mutable published path。Plugin runtime 只获得 invocation buffer，绝不获得 artifact
+capability。每个 data-plane capability 都会校验 audience、tenant、resource、action/direction、
+byte/range limit、content/descriptor binding 与 expiry/revocation。
+
+加载 artifact 会创建新的 process-local Value、binding、allocation 与 fence state。当前
+`OutputArtifactId`、delivery lease、cache path、content digest 与 runtime identity 都不能替代
+`ArtifactId` 或 receipt。
+
+### Plugin Trust 与 Isolation
+
+Operation v2、data-definition-provider v3 与 policy v1 DSO 只要加载到 Host process，就属于
+trusted native code。Pure-C record 与最小化合法 authority 并不能 sandbox native code。
+Server control plane 与 WorkerManager 不加载任何 DSO。当前 operation/policy 候选必须在 native
+mapping 前通过进程不可变的 Ed25519 签名 kind/package/generation/content 决定；获批 DSO 在进程内
+仍完全受信任。#104 不改变 data-definition loading。Tenant-supplied CPU operation code 只有在另行
+拥有的最终用户 selection route 存在后，才应进入 isolated path。
+
+私有 isolated 组合使用 `PluginInvocationExecutor`。可信 `PluginRuntimeSupervisor`、executor 与
+attempt-local `ResourceLedger` 一起拥有 plugin-process creation、authenticated protocol、
+heartbeat、invocation deadline、termination/restart backoff、签名 package admission、resource
+limit 与 shared-memory/FD transport。它们不提供通用 syscall/network sandbox。
+
+每次 invocation 都包含精确 tenant/Job/attempt/worker-lease binding、`PluginInvocationId`、
+approved plugin package/generation、operation identity、immutable scalar parameter、bounded
+versioned descriptor、access direction 与 checked byte range。它不携带 C++ object graph、Host
+callback、raw pointer、allocator owner、Graph/Run owner、native GPU handle、artifact capability、
+credential 或 resource token。
+
+可信 Host 代码会在 transfer 前验证所有 input，并在 Run 使用前验证所有 output。Validation
+包括 version/kind、count、rank/extent、layout/stride、checked range arithmetic、overlap/write
+permission、byte size、descriptor/content binding、readiness、ownership、plugin/generation/
+invocation identity、current worker lease 与 declared resource bound。返回的 descriptor、handle、
+offset、digest、status 与 diagnostic 均为 untrusted data，绝不 mint authority。
+
+当前 Issue #102 切片已经实现首个 CPU shared-memory/FD record，但不迁移 operation ABI
+v2，也不实现仍为目标态的 operation ABI v1。其 callback seam 是 process-local runtime
+code；两个 ABI family 的 pointer-bearing record 都不会被序列化。该实现把 canonical request
+与每个已声明的 physical tensor range 绑定到 invocation identity，只授予声明方向的
+capability，并对 malformed 或已变更的 request、response、descriptor、header、FD 或 content
+state 进行 fail-closed 处理。One-shot process 与 RAII owner 在正常/错误路径提供精确
+transport retirement。直接使用准确命名的 non-supervised adapter 时，永不返回的 callback
+仍没有时间边界。
+
+这些 source-private Issue #102 object 会编入 installable product archive，并由真实 exec
+fixture 从该 archive 加以验证。Issue #103 增加 product-archive 中的
+`PluginInvocationExecutor`/`PluginRuntimeSupervisor` 组合，以及一条不会改变 #102 data
+frame 的独立 authenticated lifecycle channel。Supervisor 绑定 OS 随机 nonce、完整
+invocation identity 与严格递增 event sequence；强制 startup、invocation、heartbeat-gap、
+response、TERM、KILL 与 reap bound；保留类型化可观测 failure fact；并为每个后续 invocation
+启动全新 process，而不是回退到进程内执行。
+
+长期 integration 还会从真实 `ExecutionService` ready callback 调用该 executor。原始
+`PluginRuntimeFault` 会到达 request boundary，该 boundary 把 owning Run 发布为 Failed，固定
+service worker 随后会执行无关 Run。这是链接产品的 Run-failure composition proof，不是最终
+用户路径：当前没有 `ExecutionService`、`WorkerManager`、embedded Host/CLI、
+`photospider-worker` 或 operation loader 会从 Graph operation 构造 isolated request。接入当前
+ABI v2，或实现、shim 仍为目标态的 ABI v1，均不属于 #102 或 #103。
+
+Issue #104 现在通过 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`、
+`PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE` 与
+`PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY` 配置一份进程不可变 trust policy。Canonical Ed25519 签名
+manifest 会绑定每个封闭 operation/policy/isolated-runtime role、package id、generation 与 SHA-256
+内容摘要。重复 `(kind, digest)` 映射会被拒绝，因此内容与角色只会选择一个 package
+generation。Linux 会把获批候选复制到具有四种 seal 的 anonymous `memfd`，并通过
+`/proc/self/fd/N` mapping operation/policy DSO。由于该 descriptor 编号拼写可能被复用，每次
+mapping 成功后，都会把精确授权 capability 与 native handle 组合进一份共享 lease，并由 operation
+callback/generation 或 policy record/binding 保留。最后一个 owner 会先 unmap DSO，再关闭 sealed
+descriptor；native open 后的所有失败路径保持相同顺序，且不会引入永久的全局 capability cache。
+Darwin 无法证明一个能够抵抗同 UID 预开写 descriptor 的无特权不可变 exact-object 边界，因此 operation、policy 与 isolated-runtime 授权都
+会在候选 path 访问或 native 副作用前以 `ExactObjectUnsupported` 失败。当前 Windows 与其他所有
+不支持的 native profile 使用相同的默认拒绝边界。
+Trust rejection 会在当前 Host-facing plugin load result 中映射为 `GraphErrc::InvalidParameter`；
+成功 authorization 后发生的 native loader failure 仍为 `GraphErrc::Io`。
+
+两个长期维护的 isolated Host entry 都会先通过无副作用 preflight 导出显式 runtime-process/CPU/
+address-space/shared-memory/descriptor vector。Attempt-local `ResourceLedger` 会原子铸造绑定完整
+invocation identity 与精确 vector 的 move-only token。在 shared-memory、FD、mapping、socket、
+fork 或 exec 副作用前，必须针对相同事实消费 token；lease 在每条路径只结算一次，replay
+tombstone 则保留到 ledger 生命周期结束。Trust material 与 token 都不会进入 IPC。
+
+Linux 使用 `fexecve` 执行复制后校验的 sealed runtime descriptor。Darwin 会在候选访问前拒绝每个
+native role，因此 direct/supervised runtime 构造会在 token 发放、capability materialization、
+socket 创建或 fork 前失败，也不会保留 runtime pathname snapshot。Linux native exec 前，child
+会应用已经准入的 `RLIMIT_AS`、正值 `RLIMIT_CPU`、经过检查的 `RLIMIT_NOFILE` 与零
+`RLIMIT_CORE`，同时保持空 environment 和封闭的 capability-only descriptor set。
+
+Issue #101 拥有 pure-C operation ABI 决策，Issue #102 拥有首个 invocation record，Issue #103
+拥有 authenticated private-session supervision，Issue #104 拥有当前签名 admission 与 resource-
+token 组合。Session authentication 证明私有 launch 的 binding/liveness；签名 content approval
+建立 package admission；二者都不证明 returned output truth。本 ADR 冻结这些 authority/process
+boundary。Atomic operation-ABI migration 与最终用户 selection、通用 syscall/network sandbox、
+cross-process GPU handle/fence、长期 fuzz/audit evidence 都留给后续决策。
+
+### Failure、Revocation 与 Replay
+
+Capability 必须 non-forgeable，限制 audience/action/resource，按需绑定 tenant/Job/attempt，
+受 expiry 或 monotonic revocation generation 限制，且 delegation 绝不扩大 authority。
+Cancellation、assignment replacement、worker exit、plugin retirement 与 artifact commit 都是
+monotonic transition。
+
+Duplicate、reordered、replayed、stale、over-limit、unknown-generation 或 identity-mismatched
+message 都会 fail closed。Revocation 后的 late message 可以执行 idempotent private cleanup，
+但不能恢复 admission，不能发布 Job 或 Run/plugin output，不能 attach artifact、mint/release
+quota，亦不能披露其他 tenant state。
+
+- Plugin crash、hang、deadline、OOM、sandbox denial、protocol fault 或 bad output 只会使
+  exact invocation 失败，并按 operation semantics 使其所属 Run/attempt 失败。Supervisor
+  只 revoke 并终止该 attempt-scoped plugin process。
+- Worker crash、hang、OOM、protocol fault 或 channel loss 只会使 exact JobAttempt 失败。
+  其他 worker、tenant、control plane 与 committed artifact 继续可用。
+- Committed artifact receipt 在 worker/plugin/Job cancellation 后仍具权威。Private
+  uncommitted stage 仍由 artifact authority 清理。
+- Restart 只从 durable control fact 与 artifact fact 重建。Process-local session、output、
+  Graph、Run、task、Value 或 buffer id 都不是 recovery authority。
+
+### Audit Correlation 只用于观察
+
+成功经过 boundary 的操作会发出有界 fact，用于关联 `PrincipalId`、`TenantId`、`JobId`、
+`JobSpecDigest`、`JobAttemptId`、`WorkerInstanceId`、`WorkerLeaseGeneration`、存在时的
+process-local Graph/Run/task identity、plugin package/generation、`PluginInvocationId`、
+`ArtifactId`/receipt、decision 与 typed failure。Record 不包含 bearer credential、private key、
+raw capability secret 或 unrestricted payload data。
+
+Audit id、trace id、log text 与 caller correlation field 不授予 authority，也不能替代
+identity/lease validation、current-attempt selection 或 quota。Issue #106 拥有长期 fuzz、audit
+与 cross-layer trace 实现。
+
+### 交付边界
+
+后续 delivery ownership 固定如下：
+
+| Issue | 交付边界 |
+| --- | --- |
+| #98 | Immutable JobSpec、single-tenant control-plane-to-worker submit/query/cancel/completion，以及 artifact-identity closure |
+| #99 | Tenant quota、durable artifact、retry/checkpoint 与 recovery semantics |
+| #100 | WorkerManager/`photospider-worker` supervision、worker-crash containment、bounded cancellation/shutdown |
+| #101 | 独立的 pure-C operation-plugin ABI 决策 |
+| #102 | 通过 shared memory/FD 的隔离 CPU invocation，以及精确 descriptor/stride/size/ownership validation |
+| #103 | `PluginRuntimeSupervisor` heartbeat、deadline、crash/hang/OOM/bad-output containment |
+| #104 | 已实现签名 operation/policy/runtime admission、一次性 isolated-resource token 与 exec 前 rlimit；不包含最终用户 route 或通用 sandbox |
+| #105 | 已实现源码私有 worker boundary 的本地 metadata-control/bulk-data 分离；standalone network/artifact-service 交付仍属后续 |
+| #106 | 长期 codec/descriptor fuzzing、security audit，以及 Session/Revision/Run/Task cross-layer trace |
+
+较早切片只能声明其实际实现的较窄 profile。Single-tenant Job vertical 不是 multi-tenant server。
+没有 process isolation 的 pure-C ABI 不能安全承载 hostile native code。在 authentication/
+authorization、tenant Job state、quota、one-attempt worker、durable artifact、replay-safe
+capability、bounded cancellation/shutdown 与长期 isolation test 成为当前行为前，不得声明
+network multi-tenant profile。在 isolated invocation、精确 descriptor/ownership validation、
+supervisor fault handling、plugin trust/resource policy 与 crash/hang/OOM/bad-output/fuzz test
+成为当前行为前，不得声明 untrusted-plugin profile。
+
+## 后果
+
+- Network parsing、worker lifecycle、Job execution、durable byte 与 tenant native code 不再
+  共享同一 failure 或 authority domain。
+- Fresh one-attempt worker 简化 tenant isolation 与 stale-state proof，但增加 process startup
+  与 memory overhead。Worker reuse 需要新 ADR，并证明 process-global/native-state 完整清理。
+- Authentication、Job truth、quota、artifact commit、Run commit 与 plugin invocation 获得
+  明确且独立的 owner。Caller 必须保留更多 typed state，但 failure/recovery 不再依赖模糊的
+  “complete”。
+- Server quota 与 attempt-local `ResourceLedger` 保持 hierarchy，而非相互竞争。Plugin 不能
+  mint 任一 authority。
+- CPU plugin isolation 增加 protocol、validation、copy/mapping、supervision 与 platform-sandbox
+  成本。Pure C 改善 record compatibility，但本身不提供 security。
+- 各平台 OS sandbox capability 不同。产品必须发布封闭的 supported capability profile，并在
+  不支持 isolation 时显式失败；不得静默在进程内运行 tenant code。
+- Trusted policy 与 data-definition DSO 仍可攻陷 worker。在另行决定 isolation 前，只允许
+  operator-approved generation。
+
+## 被拒绝的替代方案
+
+### 在 `photospiderd` 周围增加 Network Listener 或 TLS Proxy
+
+拒绝，因为 local filesystem ownership 与 protocol-v2 opaque id 不提供 tenant identity、
+Job truth、quota delegation、worker isolation、durable artifact 或 plugin containment。
+
+### 在一个进程内运行 Control Plane、Manager、Worker、Artifact Store 与 Plugin
+
+拒绝，因为 network parser、malformed artifact、worker fault 或 native plugin 会获得所有
+tenant、Job、resource 与 persistence authority。
+
+### 在 Tenant 或 Job Attempt 之间复用 General Worker
+
+第一代拒绝该方案，因为 process-global registry、native runtime、DSO state、thread、mapping
+与 allocator state 尚无已批准的完整 scrub boundary。
+
+### 把 ComputeRun 或 Daemon Compute Request 当作 Job Identity
+
+拒绝，因为 Run/request identity 是 process-local，且 ADR 0009 要求 Run success、durable
+output、daemon result 与 response observation 相互分离。
+
+### 把 ValueRevisionId、BufferHandle 或 OutputArtifactId 序列化为 ArtifactId
+
+拒绝，因为这些值标识 runtime publication、allocation/range 或 process-scoped delivery，
+而不是 durable manifest/version 与 receipt。
+
+### 让一个 Global ResourceLedger 同时拥有 Server 与 Worker Authority
+
+拒绝，因为 worker-local ledger 无法观察其他 process 或 durable artifact retention，而独立且
+不受限的 worker mint 会重复计账 capacity。被接受的 hierarchy 为每个 scope 指定唯一 owner。
+
+### 把 Pure-C Plugin ABI 当作 Hostile-Code Containment
+
+拒绝，因为 fixed record 无法约束任意 native memory、thread、syscall、allocation、crash 或
+hang。非可信代码需要 process、sandbox、scoped transport capability 与 supervisor。
+
+### 只依赖 Cooperative Cancellation
+
+拒绝，因为 native code 可能永不返回。Worker 与 plugin process boundary 能提供 capability
+revocation 与 bounded termination，同时保留 attempt/Run cleanup semantics。
+
+### 通过 Network Control Plane 传输 Bulk Value
+
+拒绝，因为这会把 authentication/Job-state availability 与 unbounded payload parsing、storage
+bandwidth、artifact authority 合并。Data plane 拥有 payload transfer，control plane 拥有
+identity/metadata。
+
+## 与当前事实及其他决策的关系
+
+- [ADR 0003](0003-process-owned-execution-resources.zh.md)继续作为 process-owned
+  execution resource 的权威。在 server profile 中，每个 `photospider-worker` 都是一个显式
+  composition root；server quota 约束而不替代其 execution domain。
+- [ADR 0006](0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md)
+  要求本 ADR 的 accepted target、当前 local fact 与 Issue delivery status 保持分离。
+- [ADR 0007](0007-compute-runs-and-process-execution-have-separate-owners.zh.md)继续作为
+  worker-local Run identity、lifecycle、ledger、Graph close 与 process execution shutdown 的
+  权威。本 ADR 拥有更高层 Job/attempt/worker authority。
+- [ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
+  继续作为 runtime/persistent identity separation 与 provider generation 的权威。
+- [ADR 0009](0009-compute-io-durability-and-completion-semantics.zh.md)继续作为
+  Artifact/OutputStore commit、receipt、failure ordering 与 durability 的权威。本 ADR 把该
+  authority 放入独立 artifact data plane。
+- [ADR 0010](0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
+  继续作为 execution-profile evidence contract；其 row 不能证明 sandbox 或 tenant isolation。
+- 当前事实继续由 [IPC Protocol v2](../../codebase-structure/zh/IPC-Protocol-v2.zh.md)、
+  [Plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
+  [Compute Boundaries](../../kernel-architecture/zh/Compute-Boundaries.zh.md)权威记录。
+- [Server 与 plugin isolation 路线图](../../roadmap/zh/Kernel-Evolution.zh.md#服务器与插件隔离)
+  把本决策记录为目标，并记录 Issue #98 至 #106 的交付顺序。

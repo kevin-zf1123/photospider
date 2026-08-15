@@ -342,8 +342,11 @@ class PolicyBinding final {
  * Loading validates one complete DSO outside visible state, then publishes its
  * copied rows all-or-none. The registry owns type visibility only; bindings
  * retain independent record/context/DSO leases through concurrent selection
- * and retirement. Read-only observations are reentrant from policy callbacks;
- * same-thread load, unload, or binding creation is rejected before waiting.
+ * and retirement. Each DSO lease couples the native handle to its authorized
+ * exact-object capability and closes the handle before the snapshot descriptor
+ * at final release. Read-only observations are reentrant from policy
+ * callbacks; same-thread load, unload, or binding creation is rejected before
+ * waiting.
  *
  * @throws std::bad_alloc from explicit copied state construction.
  * @note This owner is process-scoped, but every `ExecutionService` owns its own
@@ -427,7 +430,13 @@ class PolicyRegistry final {
    * @throws GraphError with `Io`, `InvalidParameter`, or `ComputeError` using
    * the frozen loader/status mapping.
    * @throws std::bad_alloc for Host or plugin synchronous OOM.
-   * @note Only the version symbol is resolved/called before ABI equality.
+   * @throws std::invalid_argument if the internal mapped-handle/capability
+   * pairing invariant is violated after a successful native open.
+   * @throws Any non-`PluginTrustError` exception cached by process trust-policy
+   * initialization unchanged.
+   * @note Only the version symbol is resolved/called before ABI equality. Every
+   * published record shares the combined handle/capability lease created from
+   * the exact authorized object.
    */
   void load(const std::string& path);
 

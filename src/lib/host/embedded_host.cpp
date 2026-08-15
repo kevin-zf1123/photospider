@@ -6,6 +6,7 @@
 #include <exception>
 #include <filesystem>
 #include <future>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -13,12 +14,18 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "benchmark/b1_host.hpp"
+#include "benchmark/i1_host.hpp"
+#include "benchmark/i2_host.hpp"
+#include "benchmark/m1_host.hpp"
 #include "compute/dirty_region_snapshot.hpp"
 #include "compute/execution_service.hpp"
 #include "core/parameter_value_text.hpp"
+#include "execution/device_completion.hpp"
 #include "host/embedded_host_dependencies.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
@@ -27,6 +34,39 @@
 #include "runtime/kernel.hpp"
 
 namespace ps {
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING)
+namespace {
+
+/**
+ * @brief Enables one deterministic failure after async Host preparation.
+ *
+ * @throws Nothing for atomic initialization and access.
+ * @note The source-private switch exists only in the non-installed test
+ * product. Tests serialize mutation and restore `false` before product
+ * teardown.
+ */
+std::atomic<bool> g_embedded_async_admission_failure_enabled{false};
+
+/**
+ * @brief Throws the deterministic prepared-admission failure when enabled.
+ * @return Nothing when injection is disabled.
+ * @throws std::system_error when the test switch is enabled.
+ * @note The checkpoint runs only after caller publication, backend delivery,
+ * status-worker, and close-tracking ownership are fully prepared, but before
+ * any InteractionService or Kernel call can publish product identity.
+ */
+void inject_embedded_async_admission_failure() {
+  if (g_embedded_async_admission_failure_enabled.load(
+          std::memory_order_acquire)) {
+    throw std::system_error(
+        std::make_error_code(std::errc::resource_unavailable_try_again),
+        "injected embedded Host async admission preparation failure");
+  }
+}
+
+}  // namespace
+#endif
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 /**
@@ -193,7 +233,119 @@ void notify_embedded_operation_test_hook(EmbeddedOperationTestEvent event,
 }
 #endif
 
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+/**
+ * @brief Source-private checkpoints in one explicit I2 Value acquisition.
+ * @throws Nothing for value construction and comparison.
+ * @note Production builds do not compile this private test contract.
+ */
+enum class EmbeddedI2AcquisitionTestEvent {
+  /** @brief The second direct Host ReadLease has been closed. */
+  SecondHostAccessCompleted,
+  /** @brief The Host-only `io_after` snapshot has been copied. */
+  HostOnlyIoSnapshotCompleted,
+};
+
+/**
+ * @brief Injects a deterministic clock and Host-only path into I2 acquisition.
+ * @throws Nothing for aggregate construction.
+ * @note The hook borrows `context`; serialized tests keep the context and hook
+ * alive until all synchronous callbacks finish and the hook is removed.
+ */
+struct EmbeddedI2AcquisitionTestHook {
+  /** @brief Borrowed test context passed to every callback. */
+  void* context = nullptr;
+
+  /**
+   * @brief Samples the test-owned monotonic clock.
+   * @param context Borrowed context supplied by the installing test.
+   * @return Time in the same steady-clock domain as the capture deadline.
+   * @throws Nothing; throwing terminates the process.
+   */
+  std::chrono::steady_clock::time_point (*now)(void* context) noexcept =
+      nullptr;
+
+  /**
+   * @brief Publishes one completed acquisition checkpoint.
+   * @param context Borrowed context supplied by the installing test.
+   * @param event Exact checkpoint that has just completed.
+   * @return Nothing.
+   * @throws Nothing; throwing terminates the process.
+   */
+  void (*notify)(void* context,
+                 EmbeddedI2AcquisitionTestEvent event) noexcept = nullptr;
+
+  /** @brief Whether this call must ignore any process Metal executor. */
+  bool force_metal_unavailable = false;
+};
+
+/** @brief Borrowed I2-acquisition hook pointer published atomically. */
+using EmbeddedI2AcquisitionHookPtr = const EmbeddedI2AcquisitionTestHook*;
+
+/**
+ * @brief Process-local hook used only by serialized product-path tests.
+ * @throws Nothing for atomic initialization and pointer publication.
+ * @note Publication transfers no callback or context ownership.
+ */
+std::atomic<EmbeddedI2AcquisitionHookPtr> g_embedded_i2_acquisition_test_hook{
+    nullptr};  // NOLINT(whitespace/indent_namespace)
+#endif
+
 namespace {
+
+/**
+ * @brief Samples the sole monotonic clock for I2 acquisition acceptance.
+ * @return Current point in the capture deadline's steady-clock domain.
+ * @throws Nothing.
+ * @note Production always samples `steady_clock::now`; only the non-installed
+ * test product may replace the sample through a borrowed serialized hook.
+ */
+std::chrono::steady_clock::time_point sample_i2_acquisition_time() noexcept {
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+  const EmbeddedI2AcquisitionTestHook* hook =
+      g_embedded_i2_acquisition_test_hook.load(std::memory_order_acquire);
+  if (hook != nullptr && hook->now != nullptr) {
+    return hook->now(hook->context);
+  }
+#endif
+  return std::chrono::steady_clock::now();
+}
+
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+/**
+ * @brief Reports one completed source-private I2 acquisition checkpoint.
+ * @param event Exact completed phase.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Production builds contain neither hook lookup nor callback authority.
+ */
+void notify_i2_acquisition_test_hook(
+    EmbeddedI2AcquisitionTestEvent event) noexcept {
+  const EmbeddedI2AcquisitionTestHook* hook =
+      g_embedded_i2_acquisition_test_hook.load(std::memory_order_acquire);
+  if (hook != nullptr && hook->notify != nullptr) {
+    hook->notify(hook->context, event);
+  }
+}
+#endif
+
+/**
+ * @brief Applies the source-private forced-unavailable Metal test choice.
+ * @param process_available Whether the real process executor exists.
+ * @return False only when the process lacks Metal or the test forces N/A.
+ * @throws Nothing.
+ * @note Production returns `process_available` unchanged.
+ */
+bool i2_metal_available_for_acquisition(bool process_available) noexcept {
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+  const EmbeddedI2AcquisitionTestHook* hook =
+      g_embedded_i2_acquisition_test_hook.load(std::memory_order_acquire);
+  if (hook != nullptr && hook->force_metal_unavailable) {
+    return false;
+  }
+#endif
+  return process_available;
+}
 
 /**
  * @brief Owns the backend objects used by one embedded Host adapter.
@@ -209,8 +361,10 @@ struct EmbeddedHostState {
    * @brief Tracked async compute submitted through the Host adapter.
    *
    * @throws Nothing for destruction.
-   * @note The shared future is copied into this table so graph close can wait
-   *       for backend work before releasing the graph runtime.
+   * @note The joined status worker receives backend ownership through a
+   *       preallocated delivery bridge. Graph close waits that worker before
+   *       releasing the graph runtime, so no second shared-future copy is
+   *       required in this table.
    */
   struct TrackedAsyncCompute {
     /** @brief Adapter-local tracking id. */
@@ -218,16 +372,6 @@ struct EmbeddedHostState {
 
     /** @brief Session whose runtime is used by the async compute. */
     GraphSessionId session;
-
-    /**
-     * @brief Shared backend completion future for the compute request.
-     *
-     * @note The entry stays in outstanding_async_ until the Host wrapper has
-     *       converted the backend-owned exact result into OperationStatus. A
-     *       ready backend future alone is not enough to close the session
-     *       because status publication is part of the accepted operation.
-     */
-    std::shared_future<Kernel::AsyncComputeResult> future;
 
     /**
      * @brief Joined worker that publishes the public OperationStatus future.
@@ -425,24 +569,6 @@ struct EmbeddedHostState {
 
     /** @brief Registered admission id, or zero for an empty token. */
     uint64_t id_ = 0;
-  };
-
-  /**
-   * @brief Result of scheduling backend async compute under Host tracking lock.
-   *
-   * @throws Nothing for destruction.
-   * @note `scheduled=false` means no backend task was queued, either because
-   *       the backend rejected the request or because the session is closing.
-   */
-  struct AsyncComputeRegistration {
-    /** @brief True when backend work was scheduled and tracked atomically. */
-    bool scheduled = false;
-
-    /** @brief Adapter-local tracking id for the scheduled backend future. */
-    uint64_t tracking_id = 0;
-
-    /** @brief Shared exact backend result consumed by the Host wrapper. */
-    std::shared_future<Kernel::AsyncComputeResult> future;
   };
 
   /**
@@ -656,135 +782,73 @@ struct EmbeddedHostState {
 #endif
 
   /**
-   * @brief Pre-registers and schedules backend async compute for close safety.
+   * @brief Reserves close-visible ownership before preparing async admission.
    *
-   * @tparam Submitter Callable returning an optional future with the exact
-   *         backend async result.
-   * @param session Session whose runtime will be captured by backend work.
-   * @param submitter Backend submission callable executed without the Host
-   *        lifecycle mutex.
-   * @return Registration containing a tracked shared future, or
-   * `scheduled=false`.
-   * @throws std::bad_alloc if placeholder, task, or future-state allocation
-   *         fails.
-   * @throws std::system_error if Host or graph-state synchronization fails.
-   * @throws Any non-close backend submission exception unchanged after the
-   *         placeholder is removed. A lane `std::runtime_error` caused by this
-   *         session's published close marker becomes `scheduled=false`.
-   * @note Phase one reserves a placeholder under `lifecycle_mutex_`; phase two
-   *       releases that mutex before entering the bounded graph-state lane.
-   *       Close therefore observes every in-flight submitter, can publish its
-   *       marker, and can stop lane admission to wake a full-queue producer.
-   *       The placeholder remains incomplete until scheduling either publishes
-   *       the shared future or removes the entry. No post-submit Host
-   * allocation is required to establish runtime ownership.
+   * @param session Session whose runtime may later be captured by backend work.
+   * @return Adapter-local tracking id, or nullopt when close already owns the
+   *         session edge.
+   * @throws std::bad_alloc if session or table ownership cannot allocate.
+   * @throws std::system_error if lifecycle synchronization fails.
+   * @note The placeholder is installed before caller-promise, worker, or Kernel
+   *       publication can race with close. The caller must either attach its
+   *       fully prepared worker or roll the id back without entering Kernel.
    */
-  template <typename Submitter>
-  AsyncComputeRegistration schedule_and_track_async_compute(
-      const GraphSessionId& session, Submitter&& submitter) {
-    static_assert(
-        noexcept(
-            std::declval<std::future<Kernel::AsyncComputeResult>&>().share()),
-        "future::share must not allocate after backend scheduling");
-
+  std::optional<uint64_t> reserve_async_compute_tracking(
+      const GraphSessionId& session) {
     reap_published_async_compute();
     const uint64_t id = next_async_id_.fetch_add(1, std::memory_order_relaxed);
-    {
-      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-      if (session_close_in_progress_locked(session)) {
-        return AsyncComputeRegistration{};
-      }
-      TrackedAsyncCompute placeholder;
-      placeholder.id = id;
-      placeholder.session = session;
-      outstanding_async_.push_back(std::move(placeholder));
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (session_close_in_progress_locked(session)) {
+      return std::nullopt;
     }
+    TrackedAsyncCompute placeholder;
+    placeholder.id = id;
+    placeholder.session = session;
+    outstanding_async_.push_back(std::move(placeholder));
+    return id;
+  }
 
-    std::shared_future<Kernel::AsyncComputeResult> shared_future;
-    try {
-      auto future = submitter();
-      if (!future) {
-        remove_async_compute_tracking(id);
-        return AsyncComputeRegistration{};
-      }
-      shared_future = future->share();
-    } catch (const std::system_error&) {
-      remove_async_compute_tracking(id);
-      throw;
-    } catch (const std::runtime_error&) {
-      bool close_in_progress = false;
-      {
-        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-        close_in_progress = session_close_in_progress_locked(session);
-        outstanding_async_.erase(
-            std::remove_if(outstanding_async_.begin(), outstanding_async_.end(),
-                           [id](const TrackedAsyncCompute& tracked) {
-                             return tracked.id == id;
-                           }),
-            outstanding_async_.end());
-      }
-      lifecycle_cv_.notify_all();
-      if (close_in_progress) {
-        return AsyncComputeRegistration{};
-      }
-      throw;
-    } catch (...) {
-      remove_async_compute_tracking(id);
-      throw;
-    }
-
-    {
-      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-      auto tracked = std::find_if(
-          outstanding_async_.begin(), outstanding_async_.end(),
-          [id](const TrackedAsyncCompute& entry) { return entry.id == id; });
-      if (tracked != outstanding_async_.end()) {
-        tracked->future = shared_future;
-      }
-    }
-    lifecycle_cv_.notify_all();
-
-    AsyncComputeRegistration registration;
-    registration.scheduled = true;
-    registration.tracking_id = id;
-    registration.future = std::move(shared_future);
-    return registration;
+  /**
+   * @brief Tests whether close claimed a session after async pre-registration.
+   * @param session Session whose Kernel lane rejected asynchronous submission.
+   * @return True only when this Host has published the matching close marker.
+   * @throws std::system_error if lifecycle synchronization fails.
+   * @note This method is consulted only while translating a backend
+   *       `std::runtime_error`; unrelated runtime errors remain unchanged.
+   */
+  bool async_compute_close_in_progress(const GraphSessionId& session) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return session_close_in_progress_locked(session);
   }
 
   /**
    * @brief Attaches the joined public-status worker to a tracked compute.
    *
-   * @param id Tracking id returned by schedule_and_track_async_compute().
+   * @param id Tracking id returned by reserve_async_compute_tracking().
    * @param worker Joinable worker that owns the status promise.
    * @return Nothing.
    * @throws Nothing.
-   * @note Attachment uses the preallocated placeholder and cannot allocate.
-   * Close treats an unattached worker as unfinished, covering the interval
-   * between backend acceptance and wrapper-worker publication.
+   * @note Attachment uses the preallocated placeholder and cannot allocate. A
+   * missing id or synchronization failure is a fatal structural invariant:
+   * waiting an unowned worker here could deadlock on its undelivered bridge.
    */
   void attach_async_status_worker(uint64_t id,
                                   std::future<void> worker) noexcept {
-    bool attached = false;
-    {
+    try {
       std::lock_guard<std::mutex> lock(lifecycle_mutex_);
       const auto tracked = std::find_if(
           outstanding_async_.begin(), outstanding_async_.end(),
           [id](const TrackedAsyncCompute& entry) { return entry.id == id; });
-      if (tracked != outstanding_async_.end()) {
-        tracked->status_worker = std::move(worker);
-        tracked->status_worker_attached = true;
-        attached = true;
+      if (tracked == outstanding_async_.end() ||
+          tracked->status_worker_attached) {
+        std::terminate();
       }
+      tracked->status_worker = std::move(worker);
+      tracked->status_worker_attached = true;
+    } catch (...) {
+      std::terminate();
     }
     lifecycle_cv_.notify_all();
-    if (!attached) {
-      try {
-        if (worker.valid()) {
-          worker.wait();
-        }
-      } catch (...) {
-      }
-    }
   }
 
   /**
@@ -810,27 +874,38 @@ struct EmbeddedHostState {
   }
 
   /**
-   * @brief Removes one async placeholder or completed tracking entry.
+   * @brief Rolls back one prepared but backend-unaccepted async admission.
    *
-   * @param id Tracking id whose backend/runtime ownership is no longer pending.
+   * @param id Tracking id whose delivery bridge has already received rejection.
    * @return Nothing.
    * @throws Nothing.
-   * @note Before backend acceptance this rolls back the pre-registration. After
-   *       acceptance, callers must first wait the backend future so removal
-   *       cannot let close destroy a runtime still captured by untracked work.
-   *       Every removal notifies close waiters.
+   * @note The worker future is moved out before erasing its entry, then joined
+   *       without `lifecycle_mutex_`. The delivery sentinel must be published
+   *       first so an attached worker cannot block this rollback indefinitely.
+   *       Calling this method after backend acceptance is a contract violation.
    */
-  void remove_async_compute_tracking(uint64_t id) noexcept {
-    {
+  void rollback_prepared_async_compute(uint64_t id) noexcept {
+    std::future<void> worker;
+    try {
       std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-      outstanding_async_.erase(
-          std::remove_if(outstanding_async_.begin(), outstanding_async_.end(),
-                         [id](const TrackedAsyncCompute& tracked) {
-                           return tracked.id == id;
-                         }),
-          outstanding_async_.end());
+      const auto tracked = std::find_if(
+          outstanding_async_.begin(), outstanding_async_.end(),
+          [id](const TrackedAsyncCompute& entry) { return entry.id == id; });
+      if (tracked == outstanding_async_.end()) {
+        std::terminate();
+      }
+      worker = std::move(tracked->status_worker);
+      outstanding_async_.erase(tracked);
+    } catch (...) {
+      std::terminate();
     }
     lifecycle_cv_.notify_all();
+    try {
+      if (worker.valid()) {
+        worker.wait();
+      }
+    } catch (...) {
+    }
   }
 
   /**
@@ -1019,6 +1094,25 @@ struct EmbeddedHostState {
       } catch (...) {
       }
       lock.lock();
+    }
+  }
+
+  /**
+   * @brief Verifies the adapter edge is empty before terminal M1 shutdown.
+   * @return Nothing when no Graph record, admitted Host call, or async compute
+   * remains owned by this adapter.
+   * @throws std::logic_error while any such ownership remains.
+   * @throws std::system_error when lifecycle synchronization fails.
+   * @note The source-private M1 runner is the sole caller and must exclude new
+   * public Host calls after this check; this method itself changes no state.
+   */
+  void require_m1_execution_shutdown_ready() {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (!session_close_records_.empty() || !active_admissions_.empty() ||
+        !outstanding_async_.empty()) {
+      throw std::logic_error(
+          "M1 execution shutdown requires every Host Graph and operation "
+          "to settle first.");
     }
   }
 
@@ -1373,6 +1467,37 @@ OperationStatus await_async_compute_status(
   } catch (...) {
     return status_from_unknown_exception("compute_async",
                                          GraphErrc::ComputeError);
+  }
+}
+
+/** @brief Optional backend ownership delivered to one prepared status worker.
+ */
+// NOLINTBEGIN(whitespace/indent_namespace)
+using AsyncBackendDelivery =
+    std::optional<std::shared_future<Kernel::AsyncComputeResult>>;
+// NOLINTEND
+
+/**
+ * @brief Satisfies one preallocated backend-delivery bridge without failure.
+ *
+ * @param publication Sole producer for the worker's bridge shared state.
+ * @param delivery Accepted shared backend future, or nullopt for rollback.
+ * @return Nothing.
+ * @throws Nothing; a broken single-producer/one-settlement invariant
+ * terminates.
+ * @note Every potentially allocating bridge operation, including construction
+ * and `get_future()`, occurs before Kernel entry. `set_value()` can then fail
+ * only for invalid/already-satisfied shared state or a throwing payload move;
+ * both are excluded here and checked as structural invariants.
+ */
+void publish_async_backend_delivery(
+    std::promise<AsyncBackendDelivery>& publication,
+    AsyncBackendDelivery delivery) noexcept {
+  static_assert(std::is_nothrow_move_constructible_v<AsyncBackendDelivery>);
+  try {
+    publication.set_value(std::move(delivery));
+  } catch (...) {
+    std::terminate();
   }
 }
 
@@ -1950,15 +2075,20 @@ HostExecutionTraceAction to_public_execution_action(
 /**
  * @brief Converts one bounded backend execution page into public snapshots.
  *
+ * @param session Exact Graph session resolved for this page.
  * @param backend_page Backend execution events and locked metadata.
- * @return Public execution-trace page preserving sequence metadata.
+ * @return Public session-bound execution-trace page preserving task identity
+ * and sequence metadata.
  * @throws std::bad_alloc if vector allocation fails.
  * @note The conversion is non-destructive and cannot exceed the already
- *       validated backend page bound.
+ *       validated backend page bound. Scalar task identities mint no backend
+ *       Run, task, lease, or commit authority.
  */
 ExecutionTracePage to_public_execution_trace_page(
+    const GraphSessionId& session,
     const GraphRuntime::ExecutionEventPage& backend_page) {
   ExecutionTracePage page;
+  page.session = session;
   page.events.reserve(backend_page.events.size());
   for (const auto& event : backend_page.events) {
     ExecutionTraceEventSnapshot snapshot;
@@ -1971,6 +2101,11 @@ ExecutionTracePage to_public_execution_trace_page(
         std::chrono::duration_cast<std::chrono::microseconds>(
             event.timestamp.time_since_epoch())
             .count());
+    if (event.task_identity.has_value()) {
+      snapshot.task_identity = ExecutionTraceTaskIdentity{
+          event.task_identity->graph_revision, event.task_identity->run_id,
+          event.task_identity->run_local_task_id};
+    }
     page.events.push_back(snapshot);
   }
   page.next_sequence = backend_page.next_sequence;
@@ -2274,6 +2409,199 @@ bool valid_compute_execution_options(
 }
 
 /**
+ * @brief Tests the frozen I1/I2 private Interactive child QoS shape.
+ * @param qos Complete child scheduling value to inspect.
+ * @return True for Interactive, a present deadline, weight one, and cap eight.
+ * @throws Nothing.
+ * @note The helper validates only the common child shape. I2 deadline anchors
+ * are checked separately against the accepted pre-Host coordinate.
+ */
+bool valid_private_interactive_qos(const compute::ComputeRunQos& qos) noexcept {
+  return qos.service_class == compute::ComputeRunQosClass::Interactive &&
+         qos.deadline.has_value() && qos.weight == 1U &&
+         qos.maximum_parallelism == std::optional<std::uint32_t>{8U};
+}
+
+/**
+ * @brief Tests the exact private B1 Throughput QoS shape and public cap bind.
+ * @param qos Complete private scheduling value.
+ * @param execution Ordinary request execution controls.
+ * @return True for Throughput, no deadline, weight one, cap one/eight, and an
+ * identical ordinary request cap.
+ * @throws Nothing.
+ * @note This validates evidence inputs only and does not change process lanes.
+ */
+bool valid_private_b1_qos(
+    const compute::ComputeRunQos& qos,
+    const HostComputeExecutionOptions& execution) noexcept {
+  return qos.service_class == compute::ComputeRunQosClass::Throughput &&
+         !qos.deadline.has_value() && qos.weight == 1U &&
+         (qos.maximum_parallelism == std::optional<std::uint32_t>{1U} ||
+          qos.maximum_parallelism == std::optional<std::uint32_t>{8U}) &&
+         qos.maximum_parallelism == execution.maximum_parallelism;
+}
+
+/**
+ * @brief Derives checked logical image dimensions from one I2 output Value.
+ * @param value Ready CPU RGBA FP32 Value published by a progressive child.
+ * @return Width then height as the native Metal upload contract requires.
+ * @throws std::invalid_argument for invalid, non-dense, non-RGBA-FP32, or
+ * malformed image metadata.
+ * @throws std::overflow_error when an image extent exceeds uint32_t.
+ * @note The operation inspects immutable metadata only and grants no payload,
+ * mapping, native-resource, residency, or execution authority.
+ */
+std::pair<std::uint32_t, std::uint32_t> i2_value_image_dimensions(
+    const Value& value) {
+  if (!value.valid() ||
+      value.representation_kind() != ValueRepresentationKind::DenseTensor ||
+      value.storage_layout_kind() != StorageLayoutKind::Strided) {
+    throw std::invalid_argument(
+        "I2 acquisition requires a valid strided DenseTensor Value.");
+  }
+  const DenseTensorDescriptor& descriptor = value.dense_tensor_descriptor();
+  const std::optional<ImageFacet>& facet = value.image_facet();
+  if (descriptor.shape.size() != 3U || !facet.has_value() ||
+      facet->x_axis >= descriptor.shape.size() ||
+      facet->y_axis >= descriptor.shape.size() ||
+      !facet->channel_axis.has_value() ||
+      *facet->channel_axis >= descriptor.shape.size() ||
+      descriptor.shape[*facet->channel_axis] != 4U ||
+      descriptor.element_semantics != ElementSemantics::FloatingPoint ||
+      !(descriptor.storage_encoding == StorageEncoding{32U}) ||
+      descriptor.quantization.has_value()) {
+    throw std::invalid_argument(
+        "I2 acquisition requires rank-three RGBA FP32 image metadata.");
+  }
+  const std::size_t width = descriptor.shape[facet->x_axis];
+  const std::size_t height = descriptor.shape[facet->y_axis];
+  if (width == 0U || height == 0U ||
+      width > std::numeric_limits<std::uint32_t>::max() ||
+      height > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::overflow_error(
+        "I2 image dimensions exceed the native upload domain.");
+  }
+  return {static_cast<std::uint32_t>(width),
+          static_cast<std::uint32_t>(height)};
+}
+
+/**
+ * @brief Executes and records one explicit direct Host read acquisition.
+ * @param value Ready host-visible I2 child Value to acquire.
+ * @return Closed plan, revision, binding, allocation, and byte evidence.
+ * @throws std::invalid_argument or std::logic_error for invalid/non-direct
+ * access facts.
+ * @throws ReadyFenceAccessError or BufferAccessError when payload visibility
+ * is not ready and host-readable.
+ * @note The local ReadLease is destroyed before return. The record retains no
+ * pointer, payload owner, lease, transfer task, or execution authority.
+ */
+benchmark::I2ValueAccessEvidence observe_i2_host_access(const Value& value) {
+  const AccessPlan plan = value.plan_access(AccessTarget{
+      DeviceId(DeviceBackend::CPU), MemoryDomain::Host, true, false});
+  if (plan.kind() != AccessPlanKind::Direct || plan.transfer_bytes() != 0U ||
+      plan.source_revision() != value.revision_id().value() ||
+      plan.source_binding() != value.storage_binding()) {
+    throw std::logic_error(
+        "I2 Host acquisition did not classify as exact direct reuse.");
+  }
+  const StorageBinding binding = value.storage_binding();
+  const ReadLease read = value.buffer_handle().acquire_read();
+  if (!read.valid() || read.size() != binding.byte_size ||
+      read.allocation_identity() != binding.allocation) {
+    throw std::logic_error(
+        "I2 Host ReadLease does not match the Value binding.");
+  }
+  return benchmark::I2ValueAccessEvidence{plan,        value.revision_id(),
+                                          binding,     binding.allocation,
+                                          read.size(), false};
+}
+
+/**
+ * @brief Guarantees row-scoped cleanup of one exact I2 Metal resident.
+ *
+ * The guard records only immutable replica identity after the first successful
+ * acquisition. The normal path calls `release()` after second-reuse evidence
+ * is copied and treats a mismatch as an invariant failure. Stack unwinding
+ * retries best-effort cleanup without replacing the primary exception.
+ *
+ * @throws Nothing for construction and destruction.
+ * @note The guard owns no Value, native allocation, ledger lease, executor,
+ * Graph, or cache authority. Ordinary product paths never construct it.
+ */
+class I2MetalResidentReleaseGuard final {
+ public:
+  /**
+   * @brief Captures the exact acquired resident identity.
+   * @param service Process execution service owning residency.
+   * @param revision Exact logical revision.
+   * @param binding Complete Metal binding including allocation identity.
+   * @param producer Exact resident producer identity.
+   * @throws Nothing.
+   */
+  I2MetalResidentReleaseGuard(compute::ExecutionService& service,
+                              ValueRevisionId revision, StorageBinding binding,
+                              ProducerIdentity producer) noexcept
+      : service_(&service),
+        revision_(revision),
+        binding_(binding),
+        producer_(producer) {}
+
+  /**
+   * @brief Performs best-effort exact cleanup during exceptional unwinding.
+   * @throws Nothing; synchronization failures leave the primary exception
+   * authoritative.
+   */
+  ~I2MetalResidentReleaseGuard() noexcept {
+    if (!active_) {
+      return;
+    }
+    try {
+      (void)service_->release_metal_resident_value(revision_, binding_,
+                                                   producer_);
+    } catch (...) {
+    }
+  }
+
+  /** @brief Prevents duplicating exact cleanup authority. */
+  I2MetalResidentReleaseGuard(const I2MetalResidentReleaseGuard&) = delete;
+  /** @brief Prevents replacing exact cleanup authority. */
+  I2MetalResidentReleaseGuard& operator=(const I2MetalResidentReleaseGuard&) =
+      delete;
+  /** @brief Prevents moving exact cleanup across lexical row scope. */
+  I2MetalResidentReleaseGuard(I2MetalResidentReleaseGuard&&) = delete;
+  /** @brief Prevents move-assigning exact cleanup authority. */
+  I2MetalResidentReleaseGuard& operator=(I2MetalResidentReleaseGuard&&) =
+      delete;
+
+  /**
+   * @brief Releases the exact resident on the normal evidence path.
+   * @return True only when the recorded resident was removed.
+   * @throws ExecutionService registry or synchronization failures unchanged.
+   * @note The guard becomes inactive after a non-throwing attempt, including
+   * an identity mismatch; the caller must fail closed on false.
+   */
+  bool release() {
+    const bool released =
+        service_->release_metal_resident_value(revision_, binding_, producer_);
+    active_ = false;
+    return released;
+  }
+
+ private:
+  /** @brief Borrowed process service that outlives this stack guard. */
+  compute::ExecutionService* service_ = nullptr;
+  /** @brief Exact logical revision copied from the first acquisition. */
+  ValueRevisionId revision_;
+  /** @brief Complete device binding copied from the first acquisition. */
+  StorageBinding binding_;
+  /** @brief Exact producer copied from the first acquisition. */
+  ProducerIdentity producer_;
+  /** @brief Whether exceptional cleanup remains armed. */
+  bool active_ = true;
+};
+
+/**
  * @brief Converts backend plugin load report into a public report.
  *
  * @param report Backend plugin load report.
@@ -2305,7 +2633,11 @@ HostPluginLoadReport to_public_plugin_report(const PluginLoadResult& report) {
  *       unit. Per-adapter graph state is independent, while operation plugin
  *       state comes from the one process owner shared by every adapter.
  */
-class EmbeddedHost final : public Host {
+class EmbeddedHost final : public Host,
+                           public benchmark::B1Host,
+                           public benchmark::I1Host,
+                           public benchmark::I2Host,
+                           public benchmark::M1Host {
  public:
   /**
    * @brief Creates a Host with a fresh explicitly composed backend state.
@@ -2634,74 +2966,305 @@ class EmbeddedHost final : public Host {
    */
   Result<std::future<OperationStatus>> compute_async(
       HostComputeRequest request) override {
-    return guarded_result<std::future<OperationStatus>>(
-        "compute_async", GraphErrc::ComputeError, [&] {
-          if (!valid_compute_execution_options(request.execution)) {
-            return failure_result<std::future<OperationStatus>>(
-                GraphErrc::InvalidParameter,
-                "compute maximum_parallelism must be positive when present");
-          }
-          auto kernel_request = to_kernel_compute_request(request);
-          GraphSessionId session = request.session;
-          auto state = state_;
-          auto registration = state->schedule_and_track_async_compute(
-              request.session,
-              [state, kernel_request = std::move(kernel_request)]() mutable {
-                return state->interaction.cmd_compute_async(
-                    std::move(kernel_request));
-              });
-          if (!registration.scheduled) {
-            return failure_result<std::future<OperationStatus>>(
-                GraphErrc::NotFound,
-                "failed to schedule compute for graph session: " +
-                    request.session.value);
-          }
+    return compute_async_internal(std::move(request), std::nullopt, nullptr,
+                                  std::nullopt, std::nullopt);
+  }
 
-          std::shared_future<Kernel::AsyncComputeResult> shared_future =
-              std::move(registration.future);
-          const uint64_t tracking_id = registration.tracking_id;
-          std::future<OperationStatus> wrapped;
-          try {
-            // After backend acceptance, every allocating setup stage is covered
-            // by the catch path until the joined worker is attached.
-            std::optional<std::promise<OperationStatus>> publication(
-                std::in_place);
-            wrapped = publication->get_future();
-            EmbeddedHostState* const state_ptr = state.get();
-            std::future<void> status_worker = std::async(
-                std::launch::async,
-                [state_ptr, session, tracking_id, shared_future,
-                 publication = std::move(publication)]() mutable {
-                  // set_value/set_exception (or reset as the defensive
-                  // fallback) makes the caller-visible future ready before
-                  // close is notified.
-                  try {
-                    publication->set_value(
-                        await_async_compute_status(shared_future, session));
-                  } catch (...) {
-                    const std::exception_ptr failure = std::current_exception();
-                    try {
-                      publication->set_exception(failure);
-                    } catch (...) {
-                      publication.reset();
-                    }
-                  }
-                  state_ptr->mark_async_status_published(tracking_id);
-                });
-            state->attach_async_status_worker(tracking_id,
-                                              std::move(status_worker));
-          } catch (...) {
-            try {
-              if (shared_future.valid()) {
-                shared_future.wait();
-              }
-            } catch (...) {
-            }
-            state->remove_async_compute_tracking(tracking_id);
-            throw;
+  /** @copydoc benchmark::I1Host::compute_i1_async */
+  Result<std::future<OperationStatus>> compute_i1_async(
+      benchmark::I1HostComputeRequest request) override {
+    return compute_async_internal(std::move(request.request), request.qos,
+                                  std::move(request.observation_sink),
+                                  request.accepted_coordinate, std::nullopt);
+  }
+
+  /** @copydoc benchmark::I2Host::compute_i2_async */
+  Result<std::future<OperationStatus>> compute_i2_async(
+      benchmark::I2HostComputeRequest request) override {
+    return compute_async_internal(
+        std::move(request.request), request.preview_qos,
+        std::move(request.observation_sink), request.accepted_coordinate,
+        compute::ProgressiveComputeOptions{request.final_qos});
+  }
+
+  /** @copydoc benchmark::I1Host::i1_execution_snapshot */
+  benchmark::I1ExecutionSnapshot i1_execution_snapshot(
+      std::uint64_t after_cursor, std::size_t limit) const override {
+    if (limit > compute::kExecutionLifecycleTelemetryMaxPageSize) {
+      throw std::invalid_argument(
+          "I1 lifecycle snapshot limit exceeds the maintained maximum.");
+    }
+    return benchmark::I1ExecutionSnapshot{
+        state_->execution_service->resource_snapshot(),
+        state_->execution_service->device_resource_snapshots(),
+        state_->execution_service->lifecycle_snapshot(
+            after_cursor, static_cast<std::uint32_t>(limit))};
+  }
+
+  /** @copydoc benchmark::I2Host::i2_execution_snapshot */
+  benchmark::I1ExecutionSnapshot i2_execution_snapshot(
+      std::uint64_t after_cursor, std::size_t limit) const override {
+    if (limit > compute::kExecutionLifecycleTelemetryMaxPageSize) {
+      throw std::invalid_argument(
+          "I2 lifecycle snapshot limit exceeds the maintained maximum.");
+    }
+    return benchmark::I1ExecutionSnapshot{
+        state_->execution_service->resource_snapshot(),
+        state_->execution_service->device_resource_snapshots(),
+        state_->execution_service->lifecycle_snapshot(
+            after_cursor, static_cast<std::uint32_t>(limit))};
+  }
+
+  /** @copydoc benchmark::B1Host::compute_b1_image */
+  Result<ImageBuffer> compute_b1_image(
+      benchmark::B1HostComputeRequest request) override {
+    return guarded_result<ImageBuffer>(
+        "compute_b1_image", GraphErrc::ComputeError, [&] {
+          if (!valid_compute_execution_options(request.request.execution) ||
+              !valid_private_b1_qos(request.qos, request.request.execution) ||
+              request.observation_sink == nullptr) {
+            return failure_result<ImageBuffer>(
+                GraphErrc::InvalidParameter,
+                "B1 compute requires matching Throughput QoS, cap, and sink");
           }
-          return success_result(std::move(wrapped));
+          auto admission =
+              state_->try_admit_session_operation(request.request.session);
+          if (!admission) {
+            return failure_result<ImageBuffer>(
+                GraphErrc::NotFound,
+                "graph session is closing: " + request.request.session.value);
+          }
+          if (!session_exists(*state_, request.request.session)) {
+            return failure_result<ImageBuffer>(
+                GraphErrc::NotFound,
+                "graph session not found: " + request.request.session.value);
+          }
+          auto kernel_request = to_kernel_compute_request(request.request);
+          kernel_request.run_qos = request.qos;
+          kernel_request.observation_sink = std::move(request.observation_sink);
+          auto image =
+              state_->interaction.cmd_compute_and_get_image(kernel_request);
+          if (!image) {
+            const auto error = state_->interaction.cmd_last_error(
+                request.request.session.value);
+            if (!error) {
+              return success_result(ImageBuffer{});
+            }
+            Result<ImageBuffer> result;
+            result.status = failure_status(error->code, error->message);
+            return result;
+          }
+          return success_result(std::move(*image));
         });
+  }
+
+  /** @copydoc benchmark::B1Host::b1_compute_io_executor */
+  execution::ComputeIoExecutor& b1_compute_io_executor() noexcept override {
+    return state_->execution_service->compute_io_executor();
+  }
+
+  /** @copydoc benchmark::B1Host::b1_execution_snapshot */
+  benchmark::B1ExecutionSnapshot b1_execution_snapshot(
+      std::uint64_t after_cursor, std::size_t limit) const override {
+    if (limit > compute::kExecutionLifecycleTelemetryMaxPageSize) {
+      throw std::invalid_argument(
+          "B1 lifecycle snapshot limit exceeds the maintained maximum.");
+    }
+    return benchmark::B1ExecutionSnapshot{
+        state_->execution_service->resource_snapshot(),
+        state_->execution_service->device_resource_snapshots(),
+        state_->execution_service->lifecycle_snapshot(
+            after_cursor, static_cast<std::uint32_t>(limit)),
+        state_->execution_service->compute_io_executor().snapshot()};
+  }
+
+  /** @copydoc benchmark::M1Host::m1_execution_snapshot */
+  benchmark::M1ExecutionSnapshot m1_execution_snapshot(
+      std::uint64_t after_cursor, std::size_t limit) const override {
+    if (limit > compute::kExecutionLifecycleTelemetryMaxPageSize) {
+      throw std::invalid_argument(
+          "M1 lifecycle snapshot limit exceeds the maintained maximum.");
+    }
+    return benchmark::M1ExecutionSnapshot{
+        state_->execution_service->resource_snapshot(),
+        state_->execution_service->device_resource_snapshots(),
+        state_->execution_service->compute_io_executor().snapshot(),
+        state_->execution_service->throughput_reservation_snapshot(),
+        state_->execution_service->ready_class_snapshot(),
+        state_->execution_service->lifecycle_snapshot(
+            after_cursor, static_cast<std::uint32_t>(limit)),
+        after_cursor,
+        std::numeric_limits<std::size_t>::max()};
+  }
+
+  /** @copydoc benchmark::M1Host::m1_shutdown_execution */
+  void m1_shutdown_execution() override {
+    state_->require_m1_execution_shutdown_ready();
+    state_->execution_service->shutdown();
+  }
+
+  /** @copydoc benchmark::I2Host::acquire_i2_value */
+  benchmark::I2ValueAcquisitionEvidence acquire_i2_value(
+      Value value, const benchmark::I2ValueLineage& lineage,
+      std::chrono::steady_clock::time_point capture_deadline) override {
+    if (!value.valid()) {
+      throw std::invalid_argument(
+          "I2 acquisition requires a valid visible Value.");
+    }
+    if (lineage.graph_instance_id == 0U || lineage.target_node_id < 0 ||
+        lineage.request_intent != ComputeIntent::RealTimeUpdate ||
+        lineage.supersession_generation == 0U || lineage.run_id == 0U) {
+      throw std::invalid_argument(
+          "I2 acquisition requires complete realtime child lineage.");
+    }
+    const ReadyFenceSnapshot ready = value.ready_fence().poll();
+    if (!ready.ready()) {
+      throw ReadyFenceAccessError(ready);
+    }
+    const StorageBinding source_binding = value.storage_binding();
+    if (source_binding.device != DeviceId(DeviceBackend::CPU) ||
+        source_binding.memory_domain != MemoryDomain::Host ||
+        !source_binding.host_visible) {
+      throw std::invalid_argument(
+          "I2 acquisition requires a host-visible CPU Value.");
+    }
+    const auto [width, height] = i2_value_image_dimensions(value);
+
+    benchmark::I2ValueAcquisitionEvidence evidence;
+    evidence.io_before =
+        state_->execution_service->compute_io_executor().snapshot();
+    if (sample_i2_acquisition_time() >= capture_deadline) {
+      throw std::runtime_error(
+          "I2 capture deadline expired before direct Host acquisition.");
+    }
+    benchmark::I2ValueAccessEvidence host_first = observe_i2_host_access(value);
+    if (sample_i2_acquisition_time() >= capture_deadline) {
+      throw std::runtime_error(
+          "I2 capture deadline expired after first Host acquisition.");
+    }
+    benchmark::I2ValueAccessEvidence host_second =
+        observe_i2_host_access(value);
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+    notify_i2_acquisition_test_hook(
+        EmbeddedI2AcquisitionTestEvent::SecondHostAccessCompleted);
+#endif
+    if (sample_i2_acquisition_time() >= capture_deadline) {
+      throw std::runtime_error(
+          "I2 capture deadline expired after second Host acquisition.");
+    }
+    evidence.host_first = std::move(host_first);
+    evidence.host_second = std::move(host_second);
+
+    if (!i2_metal_available_for_acquisition(
+            state_->execution_service->has_device_executor(
+                Device::GPU_METAL))) {
+      evidence.metal.available = false;
+      evidence.metal.unavailable_reason =
+          "not-applicable: process Metal executor unavailable";
+      evidence.io_after =
+          state_->execution_service->compute_io_executor().snapshot();
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+      notify_i2_acquisition_test_hook(
+          EmbeddedI2AcquisitionTestEvent::HostOnlyIoSnapshotCompleted);
+#endif
+      if (sample_i2_acquisition_time() >= capture_deadline) {
+        throw std::runtime_error(
+            "I2 capture deadline expired after Host-only evidence snapshot.");
+      }
+      return evidence;
+    }
+
+    evidence.metal.available = true;
+    evidence.metal.before =
+        state_->execution_service->device_executor_diagnostics(
+            Device::GPU_METAL);
+    const DeviceId metal_device(DeviceBackend::Metal);
+    evidence.metal.resources_before =
+        state_->execution_service->device_resource_snapshot(metal_device);
+    if (!evidence.metal.resources_before.has_value()) {
+      throw std::logic_error(
+          "I2 Metal executor has no matching resource account.");
+    }
+
+    const execution::DeviceCompletionSeed completion_seed(
+        lineage.graph_instance_id, lineage.target_node_id,
+        lineage.request_intent, lineage.supersession_generation, lineage.run_id,
+        0U, execution::DeviceCompletionUse::PublishedValueAcquisition);
+    const AccessPlan first_plan = value.plan_access(
+        AccessTarget{metal_device, MemoryDomain::DeviceLocal, false, true});
+    if (first_plan.kind() != AccessPlanKind::Transfer ||
+        first_plan.transfer_bytes() != value.storage_size()) {
+      throw std::logic_error(
+          "I2 first Metal access did not require one exact transfer.");
+    }
+    compute::DeviceResidentValueAcquisition first =
+        state_->execution_service->acquire_metal_resident_value(
+            value, width, height, completion_seed, capture_deadline);
+    const StorageBinding first_binding = first.value.storage_binding();
+    const ProducerIdentity first_producer = first.value.producer_identity();
+    I2MetalResidentReleaseGuard resident_release(*state_->execution_service,
+                                                 first.value.revision_id(),
+                                                 first_binding, first_producer);
+    if (!first.value.valid() ||
+        first.value.revision_id() != value.revision_id() ||
+        first_binding.device != metal_device ||
+        first_binding.memory_domain != MemoryDomain::DeviceLocal ||
+        first_binding == source_binding ||
+        first_binding.byte_size != source_binding.byte_size) {
+      throw std::logic_error(
+          "I2 first Metal acquisition returned inconsistent residency.");
+    }
+    evidence.metal.first =
+        benchmark::I2ValueAccessEvidence{first_plan,
+                                         first.value.revision_id(),
+                                         first_binding,
+                                         first_binding.allocation,
+                                         first_binding.byte_size,
+                                         first.executor_submitted};
+    evidence.metal.after_first =
+        state_->execution_service->device_executor_diagnostics(
+            Device::GPU_METAL);
+    evidence.metal.resources_after_first =
+        state_->execution_service->device_resource_snapshot(metal_device);
+
+    compute::DeviceResidentValueAcquisition second =
+        state_->execution_service->acquire_metal_resident_value(
+            value, width, height, completion_seed, capture_deadline);
+    const StorageBinding second_binding = second.value.storage_binding();
+    const AccessPlan second_plan = second.value.plan_access(
+        AccessTarget{metal_device, MemoryDomain::DeviceLocal, false, false});
+    if (!second.value.valid() ||
+        second.value.revision_id() != value.revision_id() ||
+        second.value.producer_identity() != first_producer ||
+        second_binding != first_binding ||
+        second_plan.kind() != AccessPlanKind::Direct ||
+        second_plan.transfer_bytes() != 0U) {
+      throw std::logic_error(
+          "I2 second Metal acquisition did not reuse exact residency.");
+    }
+    evidence.metal.second =
+        benchmark::I2ValueAccessEvidence{second_plan,
+                                         second.value.revision_id(),
+                                         second_binding,
+                                         second_binding.allocation,
+                                         second_binding.byte_size,
+                                         second.executor_submitted};
+    evidence.metal.after_second =
+        state_->execution_service->device_executor_diagnostics(
+            Device::GPU_METAL);
+    evidence.metal.resources_after_second =
+        state_->execution_service->device_resource_snapshot(metal_device);
+    evidence.io_after =
+        state_->execution_service->compute_io_executor().snapshot();
+    if (!resident_release.release()) {
+      throw std::logic_error(
+          "I2 Metal resident changed before exact row cleanup.");
+    }
+    if (sample_i2_acquisition_time() >= capture_deadline) {
+      throw std::runtime_error(
+          "I2 capture deadline expired after Metal evidence cleanup.");
+    }
+    return evidence;
   }
 
   /**
@@ -3490,7 +4053,7 @@ class EmbeddedHost final : public Host {
                 GraphErrc::NotFound,
                 "execution trace not available for session: " + session.value);
           }
-          return success_result(to_public_execution_trace_page(*page));
+          return success_result(to_public_execution_trace_page(session, *page));
         });
   }
 
@@ -3927,11 +4490,248 @@ class EmbeddedHost final : public Host {
   }
 
  private:
+  /**
+   * @brief Shares asynchronous Host admission/tracking across public, I1, and
+   * I2 callers.
+   *
+   * The method first validates installed execution controls and the optional
+   * all-or-none private QoS/observer/accepted-coordinate tuple and the optional
+   * I2 progressive final-child policy. It then translates the ordinary Host
+   * request, attaches the private fields, and prepares caller publication,
+   * backend delivery, the joined status worker, the success Result envelope,
+   * and close-visible tracking before entering InteractionService. Kernel
+   * acceptance then crosses only a no-fail bridge to the prepared worker,
+   * which publishes the exact outcome before notifying close.
+   *
+   * @param request Ordinary Host request transferred into tracking ownership.
+   * @param run_qos Optional complete private preview/final Run QoS; absence
+   * selects the established public Throughput default.
+   * @param observation_sink Optional observation-only sink paired with
+   * `run_qos`.
+   * @param accepted_coordinate Optional pre-call row-local coordinate paired
+   * with `run_qos` and `observation_sink`.
+   * @param progressive_options Optional I2 final-child QoS and ordered-trigger
+   * selector, legal only with the complete private tuple and RT request.
+   * @return Scheduling status and a future for the exact product outcome.
+   * @throws std::bad_alloc when request, future, worker, result, or tracking
+   * ownership cannot allocate before Kernel entry.
+   * @throws std::system_error from Host/backend synchronization.
+   * @note A successful return is the Host acceptance boundary. The Kernel call
+   * may publish current product identity concurrently before it returns, so no
+   * fallible Host setup remains after that call succeeds: `future::share`, the
+   * single-producer bridge delivery, and the prebuilt Result move are all
+   * no-throw boundaries. Rejection or a pre-publication Kernel exception first
+   * sends the bridge's empty sentinel, joins the worker outside the lifecycle
+   * mutex, and removes tracking. Later compute cancellation or failure is
+   * reported only by the returned future. For an I1/I2 observer, the status
+   * worker reserves Host-settlement evidence only after making that future
+   * ready and publishing the matching tracking state. Private fields never
+   * enter the installed Host request or any IPC value.
+   */
+  Result<std::future<OperationStatus>> compute_async_internal(
+      HostComputeRequest request, std::optional<compute::ComputeRunQos> run_qos,
+      std::shared_ptr<compute::ComputeRunObservationSink> observation_sink,
+      std::optional<compute::AcceptedBoundaryCoordinate> accepted_coordinate,
+      std::optional<compute::ProgressiveComputeOptions> progressive_options) {
+    return guarded_result<std::future<OperationStatus>>(
+        "compute_async", GraphErrc::ComputeError, [&] {
+          if (!valid_compute_execution_options(request.execution)) {
+            return failure_result<std::future<OperationStatus>>(
+                GraphErrc::InvalidParameter,
+                "compute maximum_parallelism must be positive when present");
+          }
+          const bool has_private_qos = run_qos.has_value();
+          const bool has_private_observer = observation_sink != nullptr;
+          const bool has_private_coordinate = accepted_coordinate.has_value();
+          if (has_private_qos != has_private_observer ||
+              has_private_qos != has_private_coordinate) {
+            return failure_result<std::future<OperationStatus>>(
+                GraphErrc::InvalidParameter,
+                "private QoS, observation sink, and accepted coordinate "
+                "must be supplied together");
+          }
+          if (has_private_qos && !valid_private_interactive_qos(*run_qos)) {
+            return failure_result<std::future<OperationStatus>>(
+                GraphErrc::InvalidParameter,
+                "private QoS requires Interactive, deadline, weight one, "
+                "and cap eight");
+          }
+          if (progressive_options.has_value()) {
+            if (!has_private_qos ||
+                !valid_private_interactive_qos(
+                    progressive_options->final_qos) ||
+                request.intent != ComputeIntent::RealTimeUpdate ||
+                !request.dirty_roi.has_value() || !request.execution.parallel ||
+                !request.execution.quiet ||
+                request.execution.maximum_parallelism !=
+                    std::optional<std::uint32_t>{8U} ||
+                request.cache.precision != "fp32" ||
+                !request.cache.force_recache ||
+                !request.cache.disable_disk_cache || !request.cache.nosave) {
+              return failure_result<std::future<OperationStatus>>(
+                  GraphErrc::InvalidParameter,
+                  "private I2 request requires the frozen RT, dirty, fp32, "
+                  "no-I/O, parallel, quiet, and child QoS contract");
+            }
+            const std::chrono::steady_clock::time_point admission =
+                accepted_coordinate->admission_time();
+            if (admission > std::chrono::steady_clock::time_point::max() -
+                                std::chrono::seconds(1) ||
+                run_qos->deadline !=
+                    admission + std::chrono::milliseconds(100) ||
+                progressive_options->final_qos.deadline !=
+                    admission + std::chrono::seconds(1)) {
+              return failure_result<std::future<OperationStatus>>(
+                  GraphErrc::InvalidParameter,
+                  "private I2 child deadlines must remain anchored at the "
+                  "accepted coordinate plus 100 ms and 1,000 ms");
+            }
+          }
+
+          Kernel::ComputeRequest kernel_request =
+              to_kernel_compute_request(request);
+          kernel_request.accepted_coordinate = std::move(accepted_coordinate);
+          kernel_request.run_qos = std::move(run_qos);
+          kernel_request.progressive_options = std::move(progressive_options);
+          std::shared_ptr<compute::ComputeRunObservationSink>
+              status_observation_sink = observation_sink;
+          kernel_request.observation_sink = std::move(observation_sink);
+          GraphSessionId status_session = request.session;
+          std::shared_ptr<EmbeddedHostState> state = state_;
+
+          std::optional<std::promise<OperationStatus>> status_publication(
+              std::in_place);
+          std::future<OperationStatus> caller_future =
+              status_publication->get_future();
+          Result<std::future<OperationStatus>> accepted_result =
+              success_result(std::move(caller_future));
+          std::promise<AsyncBackendDelivery> backend_publication;
+          std::future<AsyncBackendDelivery> backend_delivery =
+              backend_publication.get_future();
+
+          const std::optional<uint64_t> tracking_id =
+              state->reserve_async_compute_tracking(request.session);
+          if (!tracking_id.has_value()) {
+            return failure_result<std::future<OperationStatus>>(
+                GraphErrc::NotFound,
+                "failed to schedule compute for graph session: " +
+                    request.session.value);
+          }
+
+          bool admission_finalized = false;
+          auto rollback_prepared_admission = [&]() noexcept {
+            if (admission_finalized) {
+              return;
+            }
+            publish_async_backend_delivery(backend_publication, std::nullopt);
+            state->rollback_prepared_async_compute(*tracking_id);
+            admission_finalized = true;
+          };
+
+          try {
+            EmbeddedHostState* const state_ptr = state.get();
+            std::future<void> status_worker = std::async(
+                std::launch::async,
+                [state_ptr, session = std::move(status_session),
+                 tracking_id = *tracking_id,
+                 status_observation_sink = std::move(status_observation_sink),
+                 backend_delivery = std::move(backend_delivery),
+                 publication = std::move(status_publication)]() mutable {
+                  bool backend_accepted = false;
+                  try {
+                    AsyncBackendDelivery delivered = backend_delivery.get();
+                    if (delivered.has_value()) {
+                      backend_accepted = true;
+                      publication->set_value(
+                          await_async_compute_status(*delivered, session));
+                    } else {
+                      publication.reset();
+                    }
+                  } catch (...) {
+                    const std::exception_ptr failure = std::current_exception();
+                    try {
+                      if (publication.has_value()) {
+                        publication->set_exception(failure);
+                      }
+                    } catch (...) {
+                      publication.reset();
+                    }
+                  }
+                  state_ptr->mark_async_status_published(tracking_id);
+                  if (backend_accepted && status_observation_sink != nullptr) {
+                    const compute::ComputeRunObservationCoordinate coordinate =
+                        status_observation_sink->reserve_causal_coordinate();
+                    status_observation_sink->on_host_settled(coordinate);
+                  }
+                });
+            state->attach_async_status_worker(*tracking_id,
+                                              std::move(status_worker));
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING)
+            inject_embedded_async_admission_failure();
+#endif
+
+            std::optional<std::future<Kernel::AsyncComputeResult>>
+                backend_future;
+            try {
+              backend_future = state->interaction.cmd_compute_async(
+                  std::move(kernel_request));
+            } catch (const std::system_error&) {
+              throw;
+            } catch (const std::runtime_error&) {
+              if (!state->async_compute_close_in_progress(request.session)) {
+                throw;
+              }
+            }
+            if (!backend_future.has_value()) {
+              rollback_prepared_admission();
+              return failure_result<std::future<OperationStatus>>(
+                  GraphErrc::NotFound,
+                  "failed to schedule compute for graph session: " +
+                      request.session.value);
+            }
+
+            static_assert(
+                noexcept(backend_future->share()),
+                "future::share must not fail after Kernel acceptance");
+            std::shared_future<Kernel::AsyncComputeResult> shared_future =
+                backend_future->share();
+            publish_async_backend_delivery(
+                backend_publication,
+                AsyncBackendDelivery{std::move(shared_future)});
+            admission_finalized = true;
+            static_assert(std::is_nothrow_move_constructible_v<
+                          Result<std::future<OperationStatus>>>);
+            return accepted_result;
+          } catch (...) {
+            rollback_prepared_admission();
+            throw;
+          }
+        });
+  }
+
   /** @brief Shared backend state owned by this Host and its joined workers. */
   std::shared_ptr<EmbeddedHostState> state_;
 };
 
 }  // namespace
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING)
+/**
+ * @brief Enables or clears deterministic prepared async-admission failure.
+ * @param enabled True to fail after complete Host preparation and before
+ * Kernel.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Tests serialize calls and restore false before destroying their Host.
+ * Production builds contain neither this symbol nor its checkpoint.
+ */
+void set_embedded_host_async_admission_failure_for_testing(
+    bool enabled) noexcept {
+  g_embedded_async_admission_failure_enabled.store(enabled,
+                                                   std::memory_order_release);
+}
+#endif
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 /**
@@ -3961,6 +4761,21 @@ void set_embedded_host_lifecycle_test_hook(
 void set_embedded_host_operation_test_hook(
     const EmbeddedOperationTestHook* hook) noexcept {
   g_embedded_operation_test_hook.store(hook, std::memory_order_release);
+}
+#endif
+
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+/**
+ * @brief Installs or clears the deterministic I2-acquisition test hook.
+ * @param hook Hook that outlives every affected synchronous callback, or null.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Tests serialize installation and remove the hook before destroying its
+ * context. Production builds contain neither this symbol nor its checkpoints.
+ */
+void set_embedded_i2_acquisition_test_hook(
+    const EmbeddedI2AcquisitionTestHook* hook) noexcept {
+  g_embedded_i2_acquisition_test_hook.store(hook, std::memory_order_release);
 }
 #endif
 

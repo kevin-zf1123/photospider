@@ -46,7 +46,10 @@ namespace {
 class MetalIntegrationHost final : public ExecutionHostContext {
  public:
   /** @copydoc ExecutionHostContext::set_task_context */
-  void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
+  void set_task_context(int worker_id, std::uint64_t epoch,
+                        std::optional<ExecutionTaskAuditIdentity>
+                            task_identity) noexcept override {
+    (void)task_identity;
     last_worker_id_.store(worker_id, std::memory_order_relaxed);
     last_epoch_.store(epoch, std::memory_order_relaxed);
     entries_.fetch_add(1, std::memory_order_relaxed);
@@ -58,8 +61,8 @@ class MetalIntegrationHost final : public ExecutionHostContext {
   }
 
   /** @copydoc ExecutionHostContext::log_event */
-  void log_event(ExecutionTraceAction, int, int,
-                 std::uint64_t) noexcept override {}
+  void log_event(ExecutionTraceAction, int, int, std::uint64_t,
+                 std::optional<ExecutionTaskAuditIdentity>) noexcept override {}
 
   /**
    * @brief Returns callback context entries.
@@ -123,19 +126,30 @@ class CallbackDeviceExecutorInvocation final
   /** @brief Owned callback entered by `run()`. */
   using Callback = std::function<void()>;
 
+  /** @brief Deterministic monotonic observation for one deadline checkpoint. */
+  using DeadlineClock = std::function<std::chrono::steady_clock::time_point(
+      execution::DeviceExecutorDeadlineCheckpoint)>;
+
   /**
    * @brief Takes ownership of one required callback.
    * @param callback Nonempty callback to enter inside the executor context.
    * @param completion_seed Optional exact native completion lineage.
+   * @param execution_deadline Optional exclusive absolute executor deadline.
+   * @param deadline_clock Optional deterministic checkpoint clock.
    * @throws std::invalid_argument when callback is empty.
    * @throws std::bad_alloc when callback ownership cannot allocate.
    */
   explicit CallbackDeviceExecutorInvocation(
       Callback callback,
       std::optional<execution::DeviceCompletionSeed> completion_seed =
-          std::nullopt)
+          std::nullopt,
+      std::optional<std::chrono::steady_clock::time_point> execution_deadline =
+          std::nullopt,
+      DeadlineClock deadline_clock = {})
       : callback_(std::move(callback)),
         completion_seed_(std::move(completion_seed)),
+        execution_deadline_(execution_deadline),
+        deadline_clock_(std::move(deadline_clock)),
         resource_ledger_(ResourceVector{},
                          std::vector<DeviceResourceLimit>{DeviceResourceLimit{
                              DeviceId(DeviceBackend::Metal),
@@ -162,6 +176,23 @@ class CallbackDeviceExecutorInvocation final
     return completion_seed_;
   }
 
+  /** @copydoc execution::DeviceExecutorInvocation::execution_deadline */
+  std::optional<std::chrono::steady_clock::time_point> execution_deadline()
+      const noexcept override {
+    return execution_deadline_;
+  }
+
+  /** @copydoc execution::DeviceExecutorInvocation::observe_execution_time */
+  std::chrono::steady_clock::time_point observe_execution_time(
+      execution::DeviceExecutorDeadlineCheckpoint checkpoint)
+      const noexcept override {
+    if (deadline_clock_) {
+      return deadline_clock_(checkpoint);
+    }
+    return execution::DeviceExecutorInvocation::observe_execution_time(
+        checkpoint);
+  }
+
   /**
    * @brief Copies this direct invocation's Metal accounting state.
    * @return Configured immutable snapshot, always present in these tests.
@@ -178,6 +209,12 @@ class CallbackDeviceExecutorInvocation final
 
   /** @brief Optional exact lineage copied into the invocation context. */
   std::optional<execution::DeviceCompletionSeed> completion_seed_;
+
+  /** @brief Optional exclusive absolute deadline shared by every checkpoint. */
+  std::optional<std::chrono::steady_clock::time_point> execution_deadline_;
+
+  /** @brief Optional source-private deterministic checkpoint clock. */
+  DeadlineClock deadline_clock_;
 
   /** @brief Isolated device-account authority for one direct native probe. */
   ResourceLedger resource_ledger_;
@@ -683,7 +720,8 @@ ComputeRunSubmission make_metal_run_submission(std::string label,
       ComputeRunQos{ComputeRunQosClass::Throughput, std::nullopt, 1U, 1U},
       SupersessionIdentity{SupersessionKey(static_cast<int>(identity),
                                            ComputeIntent::GlobalHighPrecision),
-                           SupersessionGeneration(1U)}};
+                           SupersessionGeneration(1U)},
+      nullptr};
 }
 
 /**
@@ -993,6 +1031,215 @@ TEST(MetalDeviceExecutorIntegration,
 }
 
 /**
+ * @brief Proves a queued real Metal invocation cannot enter after its absolute
+ * deadline while another callback owns serialized admission.
+ *
+ * @throws Thread, native executor, and diagnostic synchronization failures are
+ * captured and reported after both callers join.
+ * @note The first callback remains admitted until after the second deadline.
+ * A bounded test wait records the old non-timed admission behavior without
+ * leaving either caller detached.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     SerializedAdmissionExpiresBeforeCallbackEntry) {
+  execution::DeviceExecutorRegistry registry =
+      execution::make_default_device_executor_registry();
+  if (!registry.contains(Device::GPU_METAL)) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+
+  ExecutorSerializationProbe probe;
+  std::exception_ptr first_failure;
+  std::exception_ptr second_failure;
+  std::atomic<bool> second_finished{false};
+  std::atomic<bool> second_callback_entered{false};
+  const execution::DeviceExecutorDiagnostics before =
+      registry.diagnostics(Device::GPU_METAL);
+
+  CallbackDeviceExecutorInvocation first_invocation([&probe] {
+    std::unique_lock<std::mutex> lock(probe.mutex);
+    probe.first_entered = true;
+    probe.condition.notify_all();
+    if (!probe.condition.wait_for(lock, kExecutorProbeTimeout,
+                                  [&probe] { return probe.release_first; })) {
+      probe.first_wait_timed_out = true;
+    }
+    probe.first_exited = true;
+    probe.condition.notify_all();
+  });
+
+  std::thread first_thread;
+  std::thread second_thread;
+  ExecutorSerializationThreadGuard thread_guard(probe);
+  thread_guard.track_first(first_thread);
+  thread_guard.track_second(second_thread);
+  first_thread = std::thread([&] {
+    try {
+      registry.execute(Device::GPU_METAL, first_invocation);
+    } catch (...) {
+      first_failure = std::current_exception();
+    }
+  });
+
+  {
+    std::unique_lock<std::mutex> lock(probe.mutex);
+    if (!probe.condition.wait_for(lock, kExecutorProbeTimeout,
+                                  [&probe] { return probe.first_entered; })) {
+      FAIL() << "The first real Metal callback did not enter before timeout";
+    }
+  }
+
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+  CallbackDeviceExecutorInvocation second_invocation(
+      [&second_callback_entered] {
+        second_callback_entered.store(true, std::memory_order_release);
+      },
+      std::nullopt, deadline);
+  second_thread = std::thread([&] {
+    try {
+      registry.execute(Device::GPU_METAL, second_invocation);
+    } catch (...) {
+      second_failure = std::current_exception();
+    }
+    second_finished.store(true, std::memory_order_release);
+  });
+
+  const std::optional<execution::DeviceExecutorDiagnostics> queued =
+      wait_for_submission_count(registry, before.submission_count + 2U);
+  ASSERT_TRUE(queued.has_value());
+  const auto observation_deadline = deadline + std::chrono::seconds(2);
+  while (!second_finished.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < observation_deadline) {
+    std::this_thread::yield();
+  }
+  const bool expired_before_release =
+      second_finished.load(std::memory_order_acquire);
+  const execution::DeviceExecutorDiagnostics after_deadline =
+      registry.diagnostics(Device::GPU_METAL);
+  thread_guard.release_and_join();
+
+  EXPECT_TRUE(expired_before_release);
+  EXPECT_FALSE(first_failure);
+  EXPECT_TRUE(second_failure);
+  EXPECT_FALSE(second_callback_entered.load(std::memory_order_acquire));
+  EXPECT_FALSE(probe.first_wait_timed_out);
+  EXPECT_EQ(queued->invocation_count, before.invocation_count + 1U);
+  EXPECT_EQ(after_deadline.submission_count, before.submission_count + 2U);
+  EXPECT_EQ(after_deadline.invocation_count, before.invocation_count + 1U);
+  const execution::DeviceExecutorDiagnostics after =
+      registry.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(after.submission_count, before.submission_count + 2U);
+  EXPECT_EQ(after.invocation_count, before.invocation_count + 1U);
+  EXPECT_EQ(after.live_allocations, 0U);
+}
+
+/**
+ * @brief Executes one deterministic host-upload expiry checkpoint and proves
+ * pre-commit ownership fully unwinds.
+ * @param checkpoint Upload preparation, copy, or final commit checkpoint that
+ * observes the exact deadline tie.
+ * @param expiry_observation One-based matching-checkpoint observation that
+ * reaches the exact deadline; earlier matching observations remain strictly
+ * before it.
+ * @param seed_scalar Unique standalone lineage scalar for this probe.
+ * @return Nothing; GoogleTest records all semantic and cleanup failures.
+ * @throws Native construction, synchronization, and test allocation failures.
+ * @note If an implementation incorrectly commits, defensive cleanup waits for
+ * completion and releases the exact resident before returning.
+ */
+void expect_host_upload_deadline_unwind(
+    execution::DeviceExecutorDeadlineCheckpoint checkpoint,
+    std::uint64_t expiry_observation, std::uint64_t seed_scalar) {
+  execution::DeviceExecutorRegistry registry =
+      execution::make_default_device_executor_registry();
+  ASSERT_TRUE(registry.contains(Device::GPU_METAL));
+  Value source = make_upload_source(static_cast<float>(seed_scalar));
+  Value destination;
+  const execution::DeviceCompletionSeed seed(
+      seed_scalar, static_cast<int>(seed_scalar),
+      ComputeIntent::GlobalHighPrecision, 1U, seed_scalar, 0U);
+  const auto deadline = std::chrono::steady_clock::time_point(
+      std::chrono::seconds(static_cast<std::int64_t>(seed_scalar)));
+  std::atomic<std::uint64_t> expired_checkpoint_observations{0U};
+  CallbackDeviceExecutorInvocation upload(
+      [&source, &destination] {
+        execution::MetalExecutionContext& context =
+            execution::require_current_metal_execution_context();
+        context.publish_float32_host_to_texture(source, 2U, 2U);
+        destination = context.take_published_value();
+      },
+      seed, deadline,
+      [checkpoint, expiry_observation, deadline,
+       &expired_checkpoint_observations](
+          execution::DeviceExecutorDeadlineCheckpoint observed) noexcept {
+        if (observed == checkpoint) {
+          const std::uint64_t observation =
+              expired_checkpoint_observations.fetch_add(
+                  1U, std::memory_order_relaxed) +
+              1U;
+          if (observation >= expiry_observation) {
+            return deadline;
+          }
+        }
+        return deadline - std::chrono::nanoseconds(1);
+      });
+
+  EXPECT_THROW(registry.execute(Device::GPU_METAL, upload), std::runtime_error);
+  EXPECT_EQ(expired_checkpoint_observations.load(std::memory_order_relaxed),
+            expiry_observation);
+  EXPECT_FALSE(destination.valid());
+
+  if (destination.valid()) {
+    const ReadyFenceSnapshot terminal = wait_for_terminal_value(destination);
+    if (terminal.ready()) {
+      (void)registry.residency_manager()->release_resident(
+          destination.revision_id(), destination.storage_binding(),
+          destination.producer_identity());
+    }
+    destination = Value{};
+  }
+  EXPECT_FALSE(registry.residency_manager()
+                   ->find(source.revision_id(), DeviceId(DeviceBackend::Metal),
+                          MemoryDomain::DeviceLocal)
+                   .has_value());
+  EXPECT_NO_THROW(
+      (void)registry.residency_manager()->retire_graph_lineages(seed_scalar));
+  const auto resources = upload.device_resource_snapshot();
+  ASSERT_TRUE(resources.has_value());
+  EXPECT_EQ(resources->reserved, DeviceResourceVector{});
+  const execution::DeviceExecutorDiagnostics diagnostics =
+      registry.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(diagnostics.submission_count, 1U);
+  EXPECT_EQ(diagnostics.invocation_count, 1U);
+  EXPECT_EQ(diagnostics.live_allocations, 0U);
+}
+
+/**
+ * @brief Proves upload setup, bounded host copy, and the exact final pre-commit
+ * tie all reject without native submission or durable ownership.
+ * @throws Native construction, synchronization, and test allocation failures.
+ * @note Each case uses the real Metal backend and an invocation-local monotonic
+ * checkpoint clock; runtime absence remains an ordinary platform skip.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     UploadPreparationCopyAndPreCommitExpiryLeaveNoResidue) {
+  execution::DeviceExecutorRegistry availability =
+      execution::make_default_device_executor_registry();
+  if (!availability.contains(Device::GPU_METAL)) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+
+  expect_host_upload_deadline_unwind(
+      execution::DeviceExecutorDeadlineCheckpoint::UploadPreparation, 8U,
+      8601U);
+  expect_host_upload_deadline_unwind(
+      execution::DeviceExecutorDeadlineCheckpoint::UploadCopy, 2U, 8602U);
+  expect_host_upload_deadline_unwind(
+      execution::DeviceExecutorDeadlineCheckpoint::NativeCommit, 1U, 8603U);
+}
+
+/**
  * @brief Proves native allocations and TLS retire on exception and that the
  * same real executor accepts a later invocation.
  *
@@ -1199,6 +1446,87 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_EQ(diagnostics.total_allocations, 2U);
   EXPECT_EQ(diagnostics.live_allocations, 0U);
   EXPECT_EQ(diagnostics.pipeline_cache_entries, 0U);
+}
+
+/**
+ * @brief Proves the real upload path flattens only the native texture row while
+ * preserving rank-three HWC logical and physical Value metadata.
+ *
+ * @return Nothing; GoogleTest reports native transfer, identity, metadata, or
+ * resource failures.
+ * @throws Native executor, Value publication, and synchronization exceptions
+ * unchanged.
+ * @note Runtime absence of a usable Metal device reports a platform skip. No
+ * readback is requested; readiness and process residency are the only payload
+ * completion observations.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     HostToTexturePreservesRankThreeHwcValueMetadata) {
+  execution::DeviceExecutorRegistry registry =
+      execution::make_default_device_executor_registry();
+  if (!registry.contains(Device::GPU_METAL)) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+
+  constexpr std::size_t kWidth = 3U;
+  constexpr std::size_t kHeight = 2U;
+  constexpr std::size_t kChannels = 4U;
+  std::array<float, kWidth * kHeight * kChannels> samples{};
+  for (std::size_t index = 0U; index < samples.size(); ++index) {
+    samples[index] = static_cast<float>(index) * 0.03125F;
+  }
+  std::vector<std::byte> bytes(sizeof(samples));
+  std::memcpy(bytes.data(), samples.data(), sizeof(samples));
+  const DenseTensorDescriptor descriptor{
+      {kHeight, kWidth, kChannels},
+      ElementSemantics::FloatingPoint,
+      StorageEncoding{32U},
+  };
+  const std::optional<ImageFacet> image_facet = ImageFacet{1U, 0U, 2U};
+  const StridedLayout layout{
+      {static_cast<std::ptrdiff_t>(kWidth * kChannels * sizeof(float)),
+       static_cast<std::ptrdiff_t>(kChannels * sizeof(float)),
+       static_cast<std::ptrdiff_t>(sizeof(float))},
+      0U};
+  Value source = Value::from_cpu_dense_tensor(descriptor, image_facet, layout,
+                                              std::move(bytes));
+  Value destination;
+  const execution::DeviceCompletionSeed seed(
+      8502U, 8502, ComputeIntent::RealTimeUpdate, 1U, 8502U, 0U);
+  CallbackDeviceExecutorInvocation upload(
+      [&source, &destination] {
+        execution::MetalExecutionContext& context =
+            execution::require_current_metal_execution_context();
+        context.publish_float32_host_to_texture(
+            source, static_cast<std::uint32_t>(kWidth),
+            static_cast<std::uint32_t>(kHeight));
+        destination = context.take_published_value();
+      },
+      seed);
+
+  ASSERT_NO_THROW(registry.execute(Device::GPU_METAL, upload));
+  ASSERT_TRUE(destination.valid());
+  EXPECT_EQ(wait_for_terminal_value(destination).state(),
+            ReadyFenceState::Ready);
+  EXPECT_EQ(destination.revision_id(), source.revision_id());
+  EXPECT_EQ(destination.dense_tensor_descriptor(), descriptor);
+  EXPECT_EQ(destination.image_facet(), image_facet);
+  EXPECT_EQ(destination.strided_layout(), layout);
+  EXPECT_EQ(destination.storage_size(), source.storage_size());
+  EXPECT_EQ(destination.storage_size(), sizeof(samples));
+  EXPECT_NE(destination.allocation_identity(), source.allocation_identity());
+  EXPECT_EQ(destination.storage_binding().device,
+            DeviceId(DeviceBackend::Metal));
+  EXPECT_EQ(destination.storage_binding().memory_domain,
+            MemoryDomain::DeviceLocal);
+  EXPECT_FALSE(destination.storage_binding().host_visible);
+
+  const std::optional<Value> resident = registry.residency_manager()->find(
+      source.revision_id(), DeviceId(DeviceBackend::Metal),
+      MemoryDomain::DeviceLocal);
+  ASSERT_TRUE(resident.has_value());
+  EXPECT_EQ(resident->storage_binding(), destination.storage_binding());
+  EXPECT_EQ(wait_for_scratch_release(upload).reserved.device_scratch_bytes, 0U);
 }
 
 /**

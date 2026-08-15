@@ -86,7 +86,7 @@ The default 32 CPU slots cover admitted Run execution grants. Fixed
 The ledger does not count graph-state or compute-request executors, which each
 have a separate one-worker-per-Graph bound; nor does it claim
 operation-internal threads, daemon/frontend workers, all OS threads, or
-undeclared device/I/O/plugin-process resources. Issue #70 replaces the former
+undeclared device/I/O resources. Issue #70 replaces the former
 worker-only counter completely:
 `ExecutionService` now owns the sole Host-authoritative ledger, admits each
 built-in CPU Run with one checked full-vector reservation before publication,
@@ -178,7 +178,7 @@ cancellation and commit arbitration current, and Issue #74 makes request-level
 grouping plus supersession generation current. Issue #75 makes policy
 generation, reserved start, and private execution routes current. Issue #76
 makes lifecycle registry, close/shutdown, and telemetry current. The diagram
-still includes later device, I/O, and isolated-plugin target slices.
+still includes later device and I/O target slices.
 
 ## Run and Process Execution Domain Contract
 
@@ -414,13 +414,19 @@ owns isolated immutable memory/scratch limits for each configured non-CPU
 `DeviceId`. Native allocation plans commit both dimensions atomically, return
 unused bytes after `allocatedSize` reconciliation, and split actual ownership
 between persistent native Value owners and asynchronous completion scratch.
-Device queue depth/in-flight command limits, compute-I/O operations/bytes, and
-plugin-process/invocation/IPC remain future dimensions and are not represented
-by fake zero-valued authority. Current success, failure, rejection, rollback,
-replacement, worker-exception, stale completion, eviction, cancellation, and
-close/shutdown paths release every authority exactly once. Capacity exhaustion
-and checked overflow fail without partial reservation, overcommit, cross-device
-borrowing, or silent clamping.
+Device queue depth/in-flight command limits and compute-I/O operations/bytes
+remain future dimensions and are not represented by fake zero-valued
+authority. Issue #104 has added an explicit isolated-plugin vector to the same
+ledger: runtime-process slots, CPU slots, address-space bytes, shared-memory
+bytes, and descriptor count. Its one-use token binds the complete invocation
+identity and exact vector, retains a replay tombstone for the ledger lifetime,
+and settles capacity exactly once on every path. This remains a private
+direct/supervised runtime composition with no current end-user route. Current
+success, failure,
+rejection, rollback, replacement, worker-exception, stale completion, eviction,
+cancellation, and close/shutdown paths release every active authority exactly
+once. Capacity exhaustion and checked overflow fail without partial
+reservation, overcommit, cross-device borrowing, or silent clamping.
 
 Each policy binding is a comparison seam, not a physical executor or resource
 authority. The current Interactive and Throughput bindings rank immutable
@@ -737,9 +743,12 @@ The implemented V-2 through V-15 subset is deliberately narrower:
   producer/binding completion identity, publishes readiness, and inserts
   residency, so late, duplicate, or mismatched completions cannot release
   dependency work or regain a stale commit right. Kernel pretracks each
-  lineage before coordinator submission, and only accepted current publication
-  advances that row before currentness becomes observable, preventing a later
-  older Run start from regressing freshness;
+  lineage before coordinator submission without assigning a managed current
+  identity. Accepted current publication assigns the exact generation,
+  including a coordinate-authorized numeric decrease, before currentness
+  becomes observable; later stale Run observations and transfer admission
+  cannot replace that exact identity, while standalone lineages retain
+  numeric-maximum ordering;
 - source-private `DeviceExecutorRegistry` composition owns fixed non-CPU
   executors under `ExecutionService`; in the enabled Apple repository-plugin
   profile, the Metal executor owns one reusable native device/queue and
@@ -905,11 +914,11 @@ OperationOutput -> named Value outputs
 ParameterMap    -> configuration only
 ```
 
-Operation providers migrate from provisional C++ ABI v2 to separately
-versioned pure-C provider ABI v3 only after exact records and owned consumers
-exist. The completion boundary deletes v2 without a permanent wrapper, alias,
-forwarding header, dual loader, or v2-to-v3 shim. Policy ABI v1 remains
-independent.
+Operation plugins migrate from provisional C++ ABI v2 to the separately
+versioned pure-C operation-plugin ABI v1 accepted by ADR 0012 only after exact
+records and owned consumers exist. The completion boundary deletes v2 without
+a permanent wrapper, alias, forwarding header, dual loader, or v2-to-v1 shim.
+Data-definition provider v3 and policy ABI v1 remain independent families.
 
 ### Project 4 implementation dependency contract
 
@@ -971,11 +980,15 @@ CPU workers do not block waiting for GPU completion. A stale device completion
 releases resources but cannot commit to a newer graph revision.
 
 Current V-11 adds one source-private process `ComputeIoExecutor` with an
-independent worker and atomic task/estimated-retained-byte admission before
-lazy payload construction or side effects. Accepted work retains an explicit
-transaction lifetime token and exposes typed completion with exactly-once
-settlement across failure, cancellation, late return, and shutdown. CPU
-compute workers cannot synchronously wait for it.
+independent worker. A passing limit check provisionally reserves task and
+estimated-retained-byte capacity before lazy payload construction or side
+effects. Factory throw, empty callback, or task/queue-entry allocation failure
+rolls back without an Accepted event. Successful construction publishes
+Accepted either with queue ownership or, if external shutdown won, atomically
+with its exactly linked Cancelled settlement before callback entry. Accepted
+work retains an explicit transaction lifetime token and exposes typed
+completion with exactly-once settlement across failure, cancellation, late
+return, and shutdown. CPU compute workers cannot synchronously wait for it.
 
 The first production vertical runs staged HP cache-save codec/filesystem
 mechanism through this executor while graph-state policy keeps eligibility,
@@ -1080,44 +1093,784 @@ above retain identity, ordering, policy, and receipt ownership.
 
 ## Execution Profiles
 
-Interactive and throughput workloads share physical resources but use distinct
-profiles.
+[ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
+freezes the `execution-profile-slo-v1` target. It defines one exact generated
+RGBA FP32 source and four-node `curve_transform` graph family, then four
+immutable workload ids:
 
-Interactive behavior prioritizes bounded p50/p95/p99 response, latest-wins
-supersession, small/adaptive regions, progressive quality, cooperative
-cancellation, device residency, and low-copy local output.
+| Workload | Target role |
+| --- | --- |
+| `I1-edit-storm-v1` | Natural edit ordinals `1..12` map to `edit_index=0..11`; twelve exact parameter/256x256-Region edits use one latest-wins key, Interactive QoS, a monotonic nominal cadence with bounded start lateness, and twelfth-edit (`edit_index=11`) visibility. One continuous 221-slot grid fixes cold/warmup/measured origins and the terminal boundary; each episode's exact `S_11`-anchored 500 ms settlement window ends before the next origin. |
+| `I2-progressive-v1` | One retained steady-clock replicate-grid origin derives a continuous 111-slot cold/warmup/measured grid, with 100 measured episode indices, every origin exactly 1,500,000,000 ns apart, and a terminal quiescence boundary at stride 111; every episode has twelve nominal preview admissions 16,666,667 ns apart with at most 2,000,000 ns lateness. The exact I1 Graph/target/revision, `edit_index` mapping, complete 12-value node-one coefficient/update sequence, and node-one-through-node-four transform order use a separate legal realtime request key with RT-preview and HP-final child contracts. Preview performs the 4x4 source average and one binary32 rounding before that sequence; final uses the original 2048 source and the same I1 full-resolution path. The twelfth edit (`edit_index=11`) publishes preview then final by absolute 100/1,000 ms deadlines anchored to the same actual preview admission, with exact Host/conditional-Metal residency reuse and zero hidden I/O/copy. |
+| `B1-immutable-v1` | Thirty job-indexed immutable full-frame jobs are offered in order across two Graphs, with bounded Compute I/O task/planned-byte admission, canonical raw artifacts/manifests and semantic traces, crash-durable receipts, and logical/raw goldens at Run caps 1 and 8. |
+| `M1-shared-v1` | One exact cold I1 origin/B1 seed-252 second, seven exact warmup I1 origins plus the fixed seed-253/254/255 offer protocol, then forty measured I1 starts and continuously offered cap-8 B1 work sharing one process execution authority for 30 measured seconds. Graph A and Graph B advance independent producer-local cycles without a cross-Graph barrier. The exact warmup-cutoff/measurement-origin boundary preserves offered warmup identity, FIFO position, resource authority, and temporal effects while measured occurrences begin without a pause or drain. |
 
-Batch, render, and testbench behavior prioritizes throughput, deterministic
-execution, resource reservation, large/adaptive partitions, artifact
-durability, retries/checkpoints, traceability, and golden comparison.
+Every workload-bearing row, bundle, job-instance, and row-reference component
+uses the closed, case-sensitive `workload-id-v1` scalar whose domain is exactly
+those four tokens. Generic `identifier` remains lowercase-only for all other
+declared identifier fields. Evidence row and bundle bytes include the corrected
+`14:workload-id-v1` type frame and therefore require independent address
+recomputation; job-instance and row-reference fixed records retain the exact
+16/17/15/12-byte workload payload frames while validating the closed domain.
 
-Neither profile may starve the other. Interactive headroom is reserved at
-admission; batch receives a minimum progress guarantee under continuous
-interactive traffic. Fairness is charged by estimated work, bytes, or bounded
-quanta rather than raw task count.
+Latency, throughput, fairness, determinism, waste, and memory are six
+independent verdicts. Interactive latency has absolute p50/p95/p99 gates;
+batch throughput and B1/I2 memory have immutable same-environment reference
+gates; mixed load additionally has a 0.20 p05 Throughput-progress floor, a
+0.95 p05 two-Graph Jain index, the three-to-one class-start bound, zero
+headroom-caused Interactive admission failures, and isolated-relative latency.
+Exact output/artifact/semantic-trace/golden digests, bounded discarded service,
+absolute resource limits, and exact quiescent settlement cannot be traded for
+speed in another dimension.
+
+For B1 and M1, “same environment” uses ADR 0010's closed manifests: a fixed
+24-field `execution-profile-base-environment-v1`, fixed 21-field
+`execution-profile-storage-environment-v1`, and fixed four-field
+`execution-profile-environment-class-v1`. Their ASCII length-framed canonical
+bytes and independently recomputed SHA-256 values must match exactly; digest
+equality never substitutes for byte equality. The storage schema fixes typed
+state/reason pairs, the only allowed N/A reasons, a seven-key effective-mount
+map, six commit-semantics keys, durability endpoint/anchor identities, and
+closed capability/enum sets. Its fixed 37-component B1 performance record binds
+compression, encryption, checksum/deduplication, block/record/allocation units,
+provisioning/layout geometry, upper write cache, I/O scheduling/queue/
+concurrency, remote network path, backend service tier, and device profile.
+Any effective option that can affect the complete measured storage path is
+mapped or proved irrelevant; opacity fails closed, while instantaneous load
+noise remains raw diagnostic evidence. Remote, RAM-backed, or copy-on-write
+storage is capability-gated rather than accepted or forbidden by class. #95
+implements the fixed probe-to-schema mapping, single encoder, eligibility, and
+B1 checks without changing v1. Retained manifests and the canonical six-field
+raw proof are expected evidence rather than observation authority. Every
+required-storage comparison side must separately bind them to its own held-root
+identity/filesystem observation, actual typed output receipt, and complete
+trusted probe; JSON cannot rehydrate that authority, and any unverified external
+storage declaration makes the side machine-ineligible. #96 reuses those exact
+bytes and actual-authority rule and enforces the same-ordinal full M1/B1 pair;
+the I1-only latency pair compares only the exact base manifest/digest and
+ignores M1's unrelated storage.
+
+The frozen protocol does not claim nanosecond-exact operating-system wakes.
+I1 and M1 fix nominal monotonic starts 16,666,667 ns apart, a 2 ms maximum
+admission-start lateness, exact 750,000,000 ns episode origins, and fail-closed
+miss/drop/gap handling. The one pre-Host-invocation sample `A_i` starts latency,
+checked-adds the absolute I1 Run deadline `D_i=A_i+150,000,000 ns`, and is also
+the normative admission/acceptance timestamp when Host succeeds. The harness
+reserves a unique row-local `event_sequence_i` before that call; success creates
+exact coordinate `(A_i,event_sequence_i)`. The proposed coordinate travels
+through the private Host/Kernel request and is bound into product
+`SupersessionIdentity` before current publication; the current observation
+copies that exact binding. Coordinate-bound replacement requires only the
+accepted coordinate to advance; generation remains a unique preparation
+identity and may move numerically backward at a bound publication. Mixed and
+unbound traffic remains generation-ordered, while coordinator-managed native
+freshness follows the exact published generation. Accepted-row and observer-
+causal sequences remain independent domains. Host return time/status never replace
+the coordinate. Failure creates no accepted event, current observation, or
+product binding, invalidates the replicate, and cannot backfill an alternate
+timestamp. These facts use existing inner manifest/measurement evidence
+without adding an outer field. Public and I1 async calls share one embedded-Host
+preparation transaction: caller promise/future, successful result envelope,
+backend bridge, joined status worker, and close tracking are established before
+Kernel entry. Because current publication may race ahead of Kernel return, the
+accepted tail is no-fail; deterministic Host resource failure is injected only
+at the last pre-Kernel point and produces no current identity, accepted binding,
+or visible output. Nominal `S_i` and
+the quiescence drain never extend that budget, and missed or expired work cannot
+publish. Isolated I1 derives
+cold slot zero, warmup slots `1..20`, measured slots `21..220`, and terminal
+stride 221 from one `G^I1`; phases cannot choose fresh origins or cooling
+delays. Every episode fixes
+`Q_start=S_11=E+183,333,337 ns` and `Q_end=E+683,333,337 ns`.
+At `Q_end`, the runner reserves the first excluded causal coordinate; the
+timestamp boundary is inclusive and the sequence cut exclusive, so later
+evidence cannot be backdated and nonquiescence at the cut is invalid. The latest
+legal deadline leaves exactly 348,000,000 ns to that history cut and then
+66,666,663 ns before the next origin, so the drain can overlap active work
+without overlapping the next episode. Irreversible service-start commit and
+cancellation acceptance share the Run-owned terminal arbiter; every retained
+start lies after generation and before terminal, and the lossless collector
+capacity is derived as `12 * (1 + 4 * 64) = 3,084` starts.
+
+M1 checked-derives `C^M1=B^M1-6,000,000,000 ns` and
+`W^M1=B^M1-5,000,000,000 ns`. Cold has the sole I1 origin `C^M1` and B1 Graph A
+seed 252; its I1 occurrence has settlement endpoint
+`C^M1+683,333,337 ns`, and both that generation plus the B1 terminal/owner/
+output removal must settle before fixed
+`W^M1` without moving the boundary. Warmup establishes exactly seven I1 origins
+`W^M1+k*750,000,000 ns`, `k=0..6`, initially offers B253 then A254, and offers
+B255 synchronously on B253 terminal. B255 must be offered before boundary
+coordinate `(B^M1,b^M1)`. The last warmup origin is
+`B^M1-500,000,000 ns`; its own settlement endpoint is
+`B^M1+183,333,337 ns`, so it is a deterministic warmup carryover. That endpoint
+requires only the old occurrence/generation to settle, not concurrently active
+measured work or the whole service.
+
+At the exact `B^M1=M_0` warmup cutoff and measurement origin, an ordered,
+zero-duration transaction closes warmup offers, snapshots the fixed offered
+prefix's terminal-derived incomplete subset, resets only logical measured
+accumulators, establishes measured I1, and offers measured B1 Graph A job zero
+then Graph B job one behind each retained per-Graph prefix. The first
+measured-I1 Host call is exactly `edit_index=0`; it samples `A_0` and reserves
+`event_sequence_0` before invocation. A successful admission creates exact
+accepted coordinate `(A_0,event_sequence_0)` with
+`B^M1<=A_0<=B^M1+2,000,000 ns`. If `A_0=B^M1`, its sequence orders after both
+offers. The final warmup I1 twelfth-edit publication is still current in the
+boundary snapshot and remains current until that coordinate; only that
+coordinate may make measured I1 current and ordinarily latest-wins supersede
+it. Missing, failed, early, or late admission is invalid, failure creates no
+accepted event, and Host return time/status remain raw evidence. No
+earlier supersession, phase-only cancellation, or snapshot rewrite is allowed.
+The old generation retains its unchanged
+`Q_end=B^M1+183,333,337 ns`, leaving
+`[181,333,337 ns,183,333,337 ns]` of settlement time after acceptance; all
+later old-generation cancellation/terminal/settlement remains warmup-
+attributed, while post-boundary physical effects remain measured-window
+evidence. The boundary does not pause, drain, cancel, restart, rebuild queues,
+or release resources.
+
+Measured Graph A repeats `0,2,...,28` and Graph B repeats `1,3,...,29`. The
+existing `cycle_ordinal` wire component stores each lane's producer-local
+counter: Graph A advances immediately after its job 28 terminal and Graph B
+independently after job 29, so a fast lane may enter local cycle `c+1` while the
+other remains in `c`. A shared barrier is invalid. Occurrence-owned completion/
+service/bytes/latency/receipt/waste remain attributed by immutable phase, while
+measured-window scheduler starts, contention, headroom, Compute I/O, and memory
+observations include every phase's physical effect. Event sequence resolves
+boundary ties; the terminal cutoff stops new offers, retains later settlement
+evidence, and requires exact-zero teardown. The existing inner manifest and
+measurement sections retain all four boundaries, origins/counts/offers,
+terminal-derived prefixes, per-lane counters, carryover, supersession order,
+and attribution; the closed 15/5-field envelope does not change.
+
+I2 separately fixes
+one continuous replicate-grid origin, cold/warmup/measured phase offsets of
+zero/one/eleven strides and a terminal boundary at stride 111 without
+transition delay, exact 1,500,000,000 ns episode spacing, 100 measured episode
+indices, the same twelve nominal edit
+offsets and 2 ms lateness bound, and one
+actual preview-admission anchor for its absolute 100/1,000 ms child deadlines.
+Edits `0..10` do not wait for preview; equal-time next-edit acceptance orders
+before old-preview visibility. Any early/late/missed/order/gap/origin/anchor
+drift is invalid without schedule shift, and the latest final deadline leaves
+an exact minimum 314,666,663 ns non-extending quiescence guard. Existing
+workload-manifest and measurement-evidence sections prove the cadence without
+changing the closed row/bundle fields. Logical results use the typed canonical
+`ContentDigest`; raw little-endian payload, canonical manifest, semantic trace,
+and golden identities remain separate. Every repeated M1 B1 occurrence carries
+a distinct phase/cycle/job identity through charge, admission, output commit,
+receipt, and evidence; producer-local cycle never masquerades as retry attempt.
+M1
+records distinct same-ordinal
+isolated-I1 and isolated-B1-cap-8 pair digests in addition to the ordinary
+candidate/reference baseline digest.
+
+Evidence rows and bundles also have closed ASCII length-framed manifests. Their
+fixed field order/types, explicit known-empty and N/A encodings, section/row/
+bundle SHA-256 domain separators, digest self-exclusion, functionally unique
+canonical row keys with exact item/row/bundle matching, and one exact target-row
+selection per comparison/pair let an independent reader recompute every content
+address. A candidate comparison digest first resolves exactly one retained
+canonical five-field reference bundle, whose digest is independently rehashed,
+whose workload matches, and whose complete functionally unique row list passes
+canonical row resolution. Zero or multiple objects, five-field parse/schema or
+rehash failure, wrong role/workload, or missing, duplicate, or mismatched target
+rows invalidate every related reference-relative verdict. External
+prerequisites, retained sections/provenance, rows, and bundles seal in address-
+dependency topological order; direct or transitive self, enclosing, later-stage,
+comparison, or M1 cycles fail closed. #93 through #96 may add their assigned
+inner collector records but cannot redefine this v1 envelope, identity join, or
+address DAG.
+
+The delivery rows are fixed:
+
+| Issue | Required target evidence |
+| --- | --- |
+| [#93](https://github.com/kevin-zf1123/photospider/issues/93) | Reusable I1 accepted-boundary collector with pre-call `A_i` sampling and row-local sequence reservation; success-only `(A_i,event_sequence_i)` binding into the product supersession identity; exact row-to-current evidence matching; independent accepted-row and observer-causal sequence domains; failure without an accepted event, current observation, or product binding; the continuous 221-slot isolated grid; exact `S_11` drain/tie/guard behavior; latency, waste, memory, and required output correctness. |
+| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, child-resource-before-Host settlement closure, exact row-scoped Host/conditional-Metal residency release and copy waste, memory, and required output correctness on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-next-edit ordering, I1 coefficient/index/update lineage, and full-resolution final path; #94 cannot redefine that cadence or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. |
+| [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, memory, and fixed storage/performance probe-to-schema, encoder, eligibility, and compatibility evidence at caps 1 and 8. |
+| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 exact `C^M1`/`W^M1` input grid, fixed B1 offer protocol, cross-boundary I1 settlement, reuse of #93's collector binding the first measured edit to `edit_index=0`, `A_0`, and its pre-call sequence, the frozen final-warmup current-hold exception through that successful coordinate without redefining it, independent producer-local cycles, phase-boundary/carryover/FIFO/attribution evidence, plus mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
+
+ADR 0010 is the current accepted decision record, not by itself a statement of
+machine conformance. Issues #93 through #96 now provide the assigned
+source-private I1, I2, B1, and M1 product mechanisms, bounded collectors/
+evaluators, correctness tests, and exact-workload manual runners. In
+particular, #94 adds preview-then-
+final coordination, exact preview arithmetic, Host/conditional-Metal
+acquisition evidence, exact
+row-scoped resident release with complete device-reservation closure,
+child-resource-before-Host settlement order and aggregate status, and the
+closed `execution-profile-i2-inner-row-v1` record. #95 adds the immutable B1
+workload/identity/oracle, Throughput/cap path through the ordinary embedded
+Host, process-Compute-I/O-backed crash-durable output owner, closed
+storage/performance environment contract, four-verdict inner evaluator, and
+one-row cap-one/cap-eight runner. The B1 runner holds an advisory exclusive
+output-root lock and obtains live root/receipt facts, but the current portable
+probe cannot independently verify every mount, performance, hardware-cache,
+power-loss-protection, and transaction-event declaration; it therefore emits
+Invalid instead of claiming machine conformance. Its guarded cleanup promise is
+scoped to cooperating actors that honor the lock and reserved B1 namespace
+because POSIX does not atomically bind the final identity check to name removal.
+#96 adds checked M1 phase arithmetic; the exact cold/warmup/measured origin and
+offer cadence; cross-boundary current-hold, carryover/FIFO, immutable
+attribution, independent producer cycles, U cutoff, and final settlement; a
+fail-closed five-axis inner evaluator; unchanged base-only-I1/full-B1
+environment delegation; one fixed-capacity shared causal observer plus
+same-coordinate workload fanout; and immutable `M1Host` snapshots of
+Host/device, Compute I/O, ready-class, lifecycle, and Throughput reservation
+state. `M1Host` also has one source-private, idempotent terminal evidence seam,
+legal only after every Graph and Host operation closes, to capture
+`ServiceStopped`; it is not a general lifecycle control surface. Observer
+boundaries retain reservation entry/completion and slot claim/contiguous-
+publication frontiers from pre-commit coordinate reservation through callback
+completion or explicit abort, so equal event counts cannot conceal work paused
+after reserve, commit, or claim. The exception-free serialized coordinate
+allocator linearizes timestamp sampling with sequence assignment; contention
+retries without claiming numeric exhaustion, and task zero remains a legal
+zero-based semantic identity. Lifecycle snapshots retain request cursors and capture
+ordinals and are replayed as an exact lossless page/event chain plus an
+identity-aware Graph/candidate/bundle/Run/generation state machine. Every event
+and page cut exact-checks all nine registry-derived counters. The six physical
+counters are independently sampled and checked for capacity/ownership
+reachability, including pending prepublication candidates, rather than inferred
+event deltas; physical retirement publishes its registry cut under the
+lifecycle fence. The final event must be `ServiceStopped` with all 15 counters
+zero. It also adds
+the source-private canonical 15-field row/five-field bundle
+materializer and exact-one/DAG validator, and an exact manual
+`m1_shared_benchmark` target. Deterministic product tests exercise real mixed
+backlog and the exact 31-CPU Throughput/32-CPU shared-headroom boundary without
+a wall-time SLO. The completed evidence correction removes caller-supplied M1
+denominator scalars, recomputes them from exact-one canonical isolated rows,
+retains complete reusable I1/B1 source rows plus all 30/480/temporal raw M1
+inputs, records product-authored per-start dual-class evidence-startability
+including child capacity and committed grants without changing scheduler-
+selectable three-to-one accounting, and derives Compute I/O high-water only
+from complete event-aligned job streams. Sparse current snapshots remain
+diagnostic, and final process I/O plus all lifecycle ownership must be zero.
+
+The executable-pair correction now closes the source-object boundary as well.
+The actual Issue #93 I1 and Issue #95 B1 manual producers emit canonical
+denominator-only pair-object packs from their uncompacted evaluator results.
+I1 requires exactly 200 latency samples; B1 requires schema version one and an
+exact unique 1-cold/3-warmup/30-measured job/outcome shape. Output and verdict
+sections explicitly claim no portable authority beyond the denominator.
+Before M1 derives its timed boundary, it requires both packs and their
+row/bundle addresses, strictly reloads and rematerializes every denominator
+source, checks the same-role/ordinal/cap and component identities, and
+recomputes both denominators. POSIX uses one no-follow descriptor and Windows
+one reparse-point-aware `CreateFileW` handle for same-object type/size/read
+validation. Those loaded objects are retained exactly once in the M1 corpus;
+digest-only input no longer yields a sealed denominator claim.
+
+The canonical-replay correction migrates only the nested M1 inner schema to
+`execution-profile-m1-inner-row-v2`; the workload and outer 15-field row/
+five-field bundle remain version one. The v2 manifest has exactly 20 ordered
+fields, including 48 complete post-freeze Issue #93 episode sources and one
+complete Issue #95 physical/output/golden/semantic/I/O observation source per
+B1 offer. Every retained progress duration must be exactly one second. Corpus
+validation exact-joins source identity/order, recomputes each I1 projection and
+the B1 verified-endpoint/waste projection, and uses one shared checked producer/
+reader rule to source-derive and exact-match the thirty progress windows, thirty
+Graph A/B service/demand windows, 480 measured headroom outcomes, and their
+attempted/classified/failure aggregate. The same rule derives first measured
+admission/current hold before protocol early return. It then reuses the production protocol,
+fairness, waste, memory, and B1-I/O evaluators to recompute all five axes plus
+overall, exact-match the six retained verdicts, and reproduce the same canonical
+bytes. Source closure remains mandatory when another defect already
+makes the row `Invalid`. Unknown/duplicate/missing/reordered/truncated/
+noncanonical nested input, source/projection mismatch, raw tampering, duration
+drift, denominator contradiction, or a stale verdict remains Invalid after
+outer rehashing. Redundant complete I1/B1 diagnostic JSON is not part of v2;
+authority-free receipt observations and pair packs remain non-capabilities, so
+no portable output, storage, or machine authority is created.
+
+The current implementation also closes equal-time current-hold ordering without
+changing either schema: measured current `(B,n)` followed in the shared M1
+observer domain by displaced cancellation `(B,n+1)` remains source-closed and
+is not boundary-only; cancellation at B with sequence no later than current
+fails closed. This observer order remains distinct from the accepted-row
+sequence and does not weaken Issue #93's independent visible-success/
+cancellation validity rule.
+
+M1 memory replay also requires each Host component and stable device identity
+to satisfy `reserved <= lifetime_high_water <= limit`, with nondecreasing
+lifetime high-water across temporal cuts. The nested observation snapshot
+remains ten fields and the v2 manifest remains twenty fields; no schema version
+or outer field count changes.
+
+The I1, I2, B1, and M1 runners are `EXCLUDE_FROM_ALL` and absent from CTest;
+none changes the installed ABI or the frozen outer field counts. This
+current-state document claims neither an exact 111-slot I2 machine run, an
+exact three-replicate B1 machine corpus, nor an exact three-replicate M1
+machine corpus. The M1 runner requires external isolated source-object packs
+before timed execution and can then materialize a source-faithful local row and
+bundle. An unresolved comparison object or incomplete live storage authority
+still makes exact-one corpus validation canonical `Invalid` independently.
+Pair-row substitution, raw omission, address ambiguity, claim tampering, and
+source/claim mismatch also fail closed; nominal offer overlap and sparse I/O
+sampling cannot manufacture fairness or memory authority.
+Existing policy-order tests, `BenchmarkService`, lifecycle telemetry, ledger
+snapshots, runner availability, and help smoke do not by themselves establish
+profile conformance. The maintained manual/release protocol and test-ownership
+boundary are documented in
+[Testing and Validation](../development/Testing-and-Validation.md#execution-profile-slo-manualrelease-protocol).
+
+Issue #125 now keeps I2's fixed 111-slot cadence free of deferrable evidence
+finalization. One recoverable Value-free evaluator may overlap only next-
+baseline preparation and must be collected before the fixed pre-admission
+handoff; at most one future and 111 pre-reserved rows exist. JSON/NDJSON,
+progress logs, replicate evaluation, summary persistence, and compaction move
+to the terminal boundary or an abort drain. Failed admission owns a single
+close/release/all-Invalid/inner-before-outer terminal path with no suffix or
+later-slot backfill. The same slice replaces the Metal acquisition's relative
+five-second wait with the episode's unchanged exclusive absolute capture
+deadline. That point now also bounds serialized Metal executor admission,
+64-KiB-maximum upload-copy chunks, setup/encoding, and the final semantic check
+immediately before native commit. Pre-commit expiry leaves no native command
+submission, resident, pending transfer/fence owner, or ledger lease; an earlier
+committed command retains exact pending/Ready race containment and still
+terminates under its sole callback. Every fence poll is bracketed by monotonic
+samples; Ready, Failed, or ProducerCancelled is accepted only when the fresh
+post-poll sample remains strictly before the deadline, while an exact or later
+sample follows the same containment. The resident-hit path brackets its single
+reuse poll with the same samples; a late Direct candidate produces no evidence
+or new executor work and leaves the pre-existing row-owned resident untouched
+for exact cleanup. Direct Host reads and the complete Host snapshot are likewise
+accepted only after fresh samples strictly before the unchanged deadline. The
+collector holds a Host return locally until its own post-call sample passes, so
+a tie or later Host-only result freezes no evidence and leaves the Pending Value
+for explicit unfrozen release. The runner gains no cancellation, device, or
+public API authority.
 
 ## Server and Plugin Isolation
 
-`photospiderd` remains a same-user local workstation sidecar. A network or
-multi-tenant product uses a separate control plane, worker manager, constrained
-`photospider-worker` processes, and durable artifact store.
+[ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
+freezes this target. It is a target contract, not evidence that its full
+multi-process server/isolation runtime exists. `photospiderd` remains the
+same-user local workstation sidecar described by IPC protocol v2. Its
+`0700`/`0600` paths, sessions, opaque ids, process-global plugin controls, and
+private `OutputStore` are not network authentication, tenant authority,
+durable Job state, or durable artifact authority.
 
-The current operation plugin interface remains a provisional C++ ABI. Its
-C-linkage registrar symbol and numeric handshake gate only the expected
-interface generation; matching SDK/toolchain/runtime compatibility is still
-required for the C++ values, callbacks, objects, and vtables that cross the
-DSO. Policy plugins instead use the exact-layout pure-C ABI v1 and receive only
-immutable scalar candidate snapshots, but they remain trusted in-process code.
-A future operation ABI replacement, policy ABI generation, or isolated
-invocation protocol is a separate versioned migration, not a compatibility or
-security promise inferred from the current gates.
+The target separates five security domains:
 
-The `ExecutionService` sees isolated plugin execution through a
-`PluginInvocationExecutor`. A separate `PluginRuntimeSupervisor` owns worker
-processes, protocol, heartbeat, deadlines, restart backoff, sandbox/capability
-policy, shared-memory or file-descriptor transport, quotas, and output
-descriptor validation. The first isolated path targets CPU operation plugins;
-cross-process GPU handles require a later device/fence protocol.
+| Domain | Target authority | Explicit non-authority |
+| --- | --- | --- |
+| Network control plane | Authenticate `PrincipalId`, map and authorize `TenantId`, accept immutable `JobSpec`, own `JobId`, Job state, cancellation/retry policy, tenant/Job quota reservation, artifact-reference metadata | Graph/Run execution, worker process lifecycle, plugin DSO loading, bulk artifact bytes |
+| WorkerManager process | Spawn/reap, `WorkerInstanceId`, assignment lease, authenticated local channel, OS resource envelope, heartbeat, bounded cancellation/termination | End-user authentication, JobSpec mutation, final Job/retry state, artifact commit, Graph/Run commit |
+| One fresh constrained `photospider-worker` per active `JobAttemptId` | One immutable attempt, one embedded Host/Kernel and attempt-local `ExecutionService`/`ResourceLedger`, Graph/Run settlement, typed attempt facts | Network listener, user credentials, second attempt/tenant, server quota mint, artifact root, final Job state |
+| Artifact-store/data-plane service | Immutable bytes/manifests, stable tenant-scoped `ArtifactId`, descriptor/content binding, idempotent commit receipt, durability/recovery/retention, artifact/output quota | Job/Run state, Graph/plugin execution, caller policy outside supplied authorization context |
+| Isolated CPU operation-plugin process | One bounded invocation's tenant code and private invocation state | Network, arbitrary filesystem, credentials, Job/Graph/Run state, Host/server tokens, artifact publication, native GPU authority |
+
+The control plane, WorkerManager, and artifact authority are separate
+process/service boundaries. Each general worker is a fresh OS process for one
+JobAttempt, accepts no second assignment, and exits after settlement or
+manager termination. A plugin runtime is confined to one attempt and approved
+plugin generation; attempt end, lease revocation, protocol fault, or supervisor
+retirement destroys it. Worker reuse and cross-process GPU handles require new
+decisions and cannot be inferred from this first CPU profile.
+
+The authority chain remains typed and lifetime-specific:
+
+```text
+PrincipalId -> TenantId -> JobId + JobSpecDigest
+                         -> JobAttemptId + WorkerInstanceId
+                                         + WorkerLeaseGeneration
+                         -> process-local GraphInstanceId / RunId
+                                                   / RunLocalTaskId
+                         -> PluginInvocationId
+                         -> ArtifactId + OutputCommitReceipt
+```
+
+Retry preserves `JobId` and exact `JobSpecDigest` but mints a new
+`JobAttemptId`, worker identity, and lease generation. Graph/Run/task ids remain
+worker-local correlations. `ArtifactId` and its receipt identify immutable
+durable state; they are not a path, content digest, `OutputArtifactId`,
+`ValueRevisionId`, `AllocationIdentity`, `BufferHandle`, or any runtime handle.
+Every boundary validates the full identity and retained current lease needed
+for its action. Stale, replayed, reordered, revoked, over-limit, or mismatched
+messages fail closed.
+
+The control plane freezes canonical `JobSpec` bytes before acceptance. A spec
+uses authorized immutable artifact identities and declares outputs, execution
+profile, resource policy, durability, and retention. It carries no unrestricted
+Host path, FD, pointer, native/runtime handle, mutable store location, local
+session id, or bearer credential. The worker validates the complete spec and
+resolved descriptors again. It reports attempt facts; only the control plane
+selects the current attempt and owns retry and terminal Job truth. Job success
+requires a successful current attempt plus every promised artifact receipt;
+Run success, artifact commit, Job terminal, cancellation, and response
+observation remain separate facts.
+
+One server quota authority atomically reserves the tenant/Job envelope.
+WorkerManager derives a bounded attempt/OS envelope. The worker's existing
+process-owned `ResourceLedger` remains the sole mint only for its current
+Host/device execution dimensions and cannot exceed that envelope. The artifact
+authority separately enforces delegated stage/commit/retention quota. Workers,
+JobSpec fields, policies, and plugins may declare demand but cannot construct,
+duplicate, enlarge, or directly release server quota or Host ledger tokens.
+
+WorkerManager alone owns spawn, process identity, heartbeat, cancellation
+delivery, capability revocation, termination escalation, exit classification,
+and reaping. Cancellation records control-plane intent, targets the exact
+`{WorkerInstanceId, WorkerLeaseGeneration}` cooperatively, then revokes and
+kills/reaps that exact process after a configured bound. Crash, hang, OOM,
+signal death, malformed protocol, or channel loss fails only that JobAttempt;
+trusted owners reconcile resources without trusting a final worker report, and
+the control plane alone applies retry policy.
+
+Bulk inputs, outputs, and checkpoints use the artifact data plane under exact
+tenant/resource/action/direction/range/expiry-scoped capabilities. Control
+messages carry only bounded authentication, Job, quota, artifact identity,
+receipt, and capability metadata. A worker receives exact immutable-read and
+private output-stage/commit capabilities, never an artifact root. A plugin
+runtime receives invocation buffers only. Committed receipts remain
+authoritative after worker/plugin failure or Job cancellation; uncommitted
+private stages remain artifact-authority cleanup.
+
+Issue #105 now provides the local executable evidence for this split at the
+source-private WorkerManager/worker boundary. Private worker protocol v2 has a
+128-KiB metadata-only control bound and no v1/bulk fallback. After the manager
+record and supervision handle exist, that owner creates direction-reduced
+`AF_UNIX SOCK_STREAM` lanes outside the service mutex. Nonblocking manager
+endpoints carry checkpoint and candidate bytes while the worker endpoints may
+block only under exact PID deadlines and TERM/KILL/reap ownership; references bind the current
+tenant/Job/spec/attempt/worker/lease plus exact checkpoint or output slot but
+grant no authority without the stream capability. The worker cannot choose
+a path, quota, stable ArtifactId, OutputCommitId, or publication result. The
+worker validates checkpoint byte count, EOF, and SHA-256 before execution. The
+worker sends output metadata first and retains its source with real heartbeats
+active. For the unreaped current PID, the manager creates one exact lazy
+anonymous final owner, receives at most one 64-KiB direct slice between absolute
+lifecycle checks, and performs no cumulative growth or whole-payload
+reconstruction copy. Only a valid Heartbeat frame renews liveness, never output
+progress. The candidate is exposed only after stream EOF, clean reap, and exact
+reference, descriptor, size, resource, and SHA-256 validation. The worker
+closes the output lane after exact bytes and remains terminable until the
+manager completes that join and O(1) owner transfer, then returns one
+identity-only `CompletionReady` with no service/artifact authority.
+Post-reap supervision never reads the bulk lane and performs no filesystem I/O,
+blocking bulk transfer, bulk allocation, or content hash; the
+existing service and durable store still own current-attempt selection, retry,
+quota, manifest-last publication, idempotency, cancellation, and recovery.
+This same-host adapter is not the target authenticated network control plane,
+standalone artifact service, remote capability transport, or multi-tenant
+authorization boundary.
+
+The private control codec distinguishes a due nonblocking poll budget from the
+absolute lifecycle acceptance deadline. The due budget may probe control once
+before a bulk slice, but buffered bytes and poll/read/decode progress cannot
+make a late frame visible. Timeout preserves partial bytes and a
+transport-complete frame through identity/report interpretation. The frame is
+moved and reset only after one fresh sample is strictly before the unchanged
+semantic deadline; that sample becomes the exact lifecycle acceptance time.
+A tie or later sample leaves the frame available to the next bounded slice and
+grants no cancellation, liveness, report, or completion authority. Writes
+recheck before and after positive progress; a possibly delivered late frame is
+treated as a failed write and is never retried. A cancellation owner may retain
+the channel only for bounded receive-side report/EOF/exit drainage.
+
+Every DSO loaded into a Host remains operator-trusted native code. The current
+operation C++ ABI, data-definition pure-C ABI, and policy pure-C ABI provide no
+sandbox, timeout, syscall, thread, or memory-corruption boundary. Current
+operation and policy DSO candidates first require process-immutable signed
+content/role admission, but approval does not reduce their in-process powers.
+The control plane and WorkerManager load no DSO.
+
+The private isolated CPU composition uses `PluginInvocationExecutor` and
+trusted `PluginRuntimeSupervisor`. Together with `ResourceLedger`, they own
+signed package admission, one-use Host resource admission, process lifecycle,
+authenticated IPC, heartbeat/deadline, process rlimits, restart backoff, and
+shared-memory/FD transport. An invocation carries bounded, versioned
+descriptors and checked ranges, not C++ objects, Host callbacks, raw pointers,
+native GPU handles, credentials, artifact capabilities, or resource tokens.
+Trusted Host code revalidates all returned descriptors, offsets, ownership,
+sizes, readiness, identities, and declared bounds before use. No current
+composition root selects an end-user Graph operation through this path, and the
+implemented controls are not a general syscall/network sandbox. Pure C
+improves record compatibility; it does not make hostile native code safe
+in-process.
+
+### Issue #101 accepted operation ABI decision
+
+[ADR 0012](../adr/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md)
+accepts an independent operation-plugin ABI v1 target. It is neither a
+data-provider-v3 suite nor policy-v1 evolution. The current installed boundary
+remains operation C++ ABI v2 until one later implementation migrates every
+repository plugin and installed consumer and deletes v2 completely, with no
+wrapper, alias, dual loader, forwarding header, or v2-to-v1 shim.
+
+The future self-contained C11/C++17 contract has a numeric ABI-one handshake,
+one exact 96-byte root API, and separate exact 64-byte v1 Definition,
+Configuration, Inference, Region, Dependency, and Execution suites. Definition,
+Configuration, Inference, Region, and Execution are required; Dependency is
+required when copied implementation metadata declares data dependence. Exactly
+20 semantic record kinds have exact size/kind/version/flags. Plain identities,
+handles, byte views, digests, array references, configuration values, and axis
+ranges have no record header; root and suites use their own prefixes. Reserved
+storage, pointer/count/stride framing, and all exact offsets are checked.
+Unknown tails and partial-prefix compatibility are rejected.
+
+Permanent 128-bit plugin/operation/implementation identities remain distinct
+from Host-minted process-local generation and invocation handles. Opaque plugin
+contexts only round-trip to the defining generation. Inputs are borrowed for
+one synchronous call; metadata and sink output are validated and copied; the
+Host owns output buffers and provides no allocator callback. Successful root
+and configured contexts receive one destroy attempt under the exact DSO lease.
+Statuses 0 through 8 freeze success, caller error, allocation failure,
+unsupported request, invalid descriptor, excessive complexity, cancellation,
+failed precondition, and internal failure. Exceptions never cross the DSO.
+
+V1 execution is deliberately synchronous and CPU-addressable. It carries no
+native device handle, device-resident buffer, fence, completion owner, delayed
+sink, Graph/Run/scheduler/cache/resource authority, or wire representation. A
+private device implementation must stage into Host CPU output before return or
+remain behind a Host-private adapter. Future native/async execution uses a new
+suite/ABI decision.
+
+Publication preserves the current shadow transaction, atomic immutable slot
+visibility, per-slot revision/predecessor restoration, middle-generation
+splice, reverse retirement, and exact callback/context DSO leases. A callback
+that never returns may retain those owners forever; pure C does not add bounded
+termination. Issue #102 now implements its pointer-free shared-memory/FD
+invocation record, Issue #103 implements authenticated private-session
+supervision and factual crash/hang/signal/bad-output containment, and Issue #104
+implements signed admission for current operation/policy DSOs plus package and
+resource admission for the private isolated runtime. These controls neither
+complete the operation-ABI migration nor add a general sandbox. A `SIGKILL`
+observation is only memory-pressure-compatible and does not prove OOM.
+
+Issue #101 is complete as a decision when these bilingual artifacts pass local
+validation, fresh independent diff review, authorized exact-head PR
+Integration, fresh Codex exact-head review with findings adjudicated, zero
+unresolved review threads, and Issue/Project administration. Archiving that
+decision and closing #101 do not wait for the later header/loader/plugin
+migration or v2 deletion; those remain one independent breaking implementation
+change while v2 stays current and v1 target-only.
+
+### Issue #102 current isolated CPU invocation slice
+
+Issue #102 now supplies a source-private Darwin/Linux protocol-v1 CPU
+invocation adapter and one-call runtime endpoint. A bounded framed Unix stream
+carries the canonical request/response; ordered `SCM_RIGHTS` descriptors grant
+unlinked POSIX shared-memory capabilities. The wire includes the exact
+tenant/Job/attempt/worker-lease/plugin-generation/invocation identity tuple,
+operation key, immutable scalar parameters, capability and tensor descriptors,
+resource declarations, response status, and bounded diagnostics. It carries no
+pointer, `BufferHandle`, allocation/revision identity, lease, ABI record, Host
+callback, Graph/Run owner, credential, artifact capability, or resource token.
+
+Both Host and runtime independently enforce protocol/version/kind/count bounds,
+canonical scalar representation, identity and operation binding, Ready
+Host-visible NativeScalar Strided DenseTensor input, checked rank/extent/stride
+and descriptor ranges, directional FD rights, non-overlapping output plans,
+exact shared-memory type/physical size/header, and declared resource ceilings.
+Request content bindings cover canonical descriptors plus every Ready input's
+descriptor-addressable physical byte. After a success response, the Host first
+requires normal zero process exit, then revalidates all descriptors,
+capabilities, and output plans, copies each output through `ValueBuilder` into
+a fresh Host allocation, and validates the binding over those actual snapshot
+bytes before seal. Integration tests exercise success, zero input,
+failure/cancellation/exception responses, abnormal exit, empty environment and
+inherited-FD closure, and repeated exact descriptor/mapping/child retirement.
+
+The adapter and endpoint are compiled into the installable product archive, and
+that real-exec integration test links the product archive on both sides. This is
+the complete #102 product inclusion vertical, not a selected end-user path: no
+`ExecutionService`, `WorkerManager`, embedded Host/CLI,
+`photospider-worker`, or other composition root calls it. The narrower
+`NonSupervisedIsolatedCpuInvocationExecutor` remains a pre-supervisor transport
+sub-role rather than the target private `PluginInvocationExecutor`, whose
+composition through `PluginRuntimeSupervisor` belongs to #103.
+
+Every call uses a fresh native exec with an empty environment and, besides
+stdio, only its fixed control/status/executable descriptors retained. Issue
+#104 requires signed package equality, Host ledger admission, and pre-exec
+address-space/CPU/descriptor/core limits for this direct entry. It still is
+deliberately non-supervised when called directly: there is no deadline,
+heartbeat, restart policy, bounded hang recovery, or general syscall/network
+sandbox, and a callback can hang indefinitely. Issue #103 composes the separate
+supervised path described below; the non-supervised adapter is never its
+fallback. The process-local callback seam neither calls nor migrates current
+operation ABI v2 or target-only operation ABI v1; it adds no compatibility
+wrapper, shim, ABI adapter, or dual loader. Cross-process GPU/native-handle
+support remains later work.
+
+### Issue #103 current plugin runtime supervision slice
+
+Issue #103 now supplies source-private `PluginRuntimeSupervisor` and
+`PluginInvocationExecutor` in the product archive. Each invocation retains the
+#102 data protocol but launches one fresh execed child with exact PID ownership,
+a separate Unix datagram lifecycle socket on fixed descriptor 5, and an empty
+environment. A fixed hello binds an OS-random 128-bit nonce, the complete
+tenant/Job/attempt/worker-lease/plugin-generation/invocation identity, and the
+Host-selected heartbeat interval to the launch. Strictly increasing
+`RuntimeStarted`, `Heartbeat`, and `InvocationCompleted` events must echo those
+facts. This is private-session authentication and liveness, not hostile-child
+attestation, package trust, or output validation.
+
+Absolute monotonic bounds cover exec/startup, complete request transfer,
+invocation, heartbeat gap, exact response/EOF/exit reconciliation, graceful
+termination, kill, and reap. Complete request transfer receives its own full
+invocation-duration window. Its successful same-deadline observation is the
+exact `accepted_at` base for both callback invocation and the initial heartbeat
+gap, so post-acceptance scheduling cannot grant fresh budgets. Construction
+validates configured duration shape, bounds, exact steady-clock representation,
+and relationships before child ownership; every runtime deadline derivation
+then checks its captured base against `time_point::max() - duration`. Exact fit
+is accepted and one-tick overflow fails closed without wrapping, saturation,
+clamping, or resampling. After child ownership, a pre-cleanup lifecycle or
+short exact-status-observation overflow maps through the current Startup/
+RequestTransfer/Invocation/Response phase and exact cleanup instead of
+degrading to `Channel`; a real channel/status-observation syscall failure
+remains `Channel` without a stronger fact. Cleanup/backoff deadline-arithmetic
+failure preserves an established primary fault, while a representable final
+reap bound that expires transfers sole PID ownership and returns
+`ReapPending`. The absolute invocation deadline still prevents a live
+heartbeat thread from masking a hung callback. Observable
+typed faults preserve deadline, lifecycle-protocol, channel, bad-output,
+natural exit, signal, and supervisor escalation facts. `SIGKILL` is marked only
+memory-pressure-compatible; no OOM cause is invented. The supervisor revokes
+both channels, sends `SIGTERM`, escalates to `SIGKILL` when needed, and retains
+exact PID ownership through bounded reap or one quarantined deferred reaper.
+
+There is no in-process or non-supervised fallback. A later call waits bounded
+restart backoff and gets a new PID, nonce, data channel, and lifecycle channel.
+Product-linked real-exec coverage proves startup authentication, each timeout
+class, natural exit and signal reporting, ignored-TERM escalation, malformed
+output rejection, exact FD/PID retirement, later healthy recovery, and a real
+`ExecutionService` callback boundary. At that boundary the original
+`PluginRuntimeFault` reaches the request owner, only the owning Run is published
+Failed, and the fixed service worker executes a later unrelated Run.
+
+This is not yet an end-user selected operation path. No current
+`ExecutionService`, `WorkerManager`, embedded Host/CLI, `photospider-worker`, or
+operation loader constructs the isolated invocation from a Graph operation.
+Operation ABI v2 cannot cross this wire and target-only ABI v1 is not
+implemented or shimmed. Issue #104 now supplies package trust and enforceable
+quota for this private composition; stronger sandbox profiles remain separate.
+Issue #105 owns the network/artifact planes. Issue #106 now maintains two
+manual opt-in production-decoder harnesses for bounded worker metadata and
+isolated invocation packets/descriptors, plus deterministic registered codec
+regressions. It also carries an observation-only
+`(GraphSessionId, GraphRevision, RunId, RunLocalTaskId)` join through the
+execution ring, Host page, and exact daemon IPC schema. These values grant no
+session, Graph, Run, task, process, quota, artifact, retry, or commit authority.
+The I2 runner work tracked separately as Issue #125 is not part of this
+runtime-supervision slice.
+
+### Issue #104 current plugin trust and resource-admission slice
+
+Issue #104 adds one process-immutable Ed25519 policy configured by
+`PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`,
+`PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE`, and
+`PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY`. Its canonical signed rows bind a closed
+operation/policy/isolated-runtime kind, package id, generation, and SHA-256
+content digest. Duplicate `(kind, digest)` mappings are rejected so content and
+role select one package generation. Current operation and policy loaders open
+and hash a non-followed regular candidate on supported exact-object profiles,
+then load only a post-copy verified private snapshot. Linux seals an anonymous
+`memfd` before `/proc/self/fd/N` mapping. Because a closed descriptor number can
+be reused while an earlier DSO remains mapped, operation callbacks/generations
+and policy records/bindings retain one combined lease containing both the
+native handle and its exact authorization capability. The final lease owner
+unmaps the DSO before closing the sealed descriptor, including post-open
+failure paths; this requires neither pathname respelling nor permanent global
+retention. Darwin cannot prove an unprivileged
+immutable exact-object boundary against a same-UID preopened writer, so all
+three native roles fail with `ExactObjectUnsupported` before candidate access.
+Missing, malformed, unsigned, wrong-kind, ambiguous, or changed content is
+default-deny; an IPC caller cannot supply or mutate trust authority.
+
+For either maintained isolated entry, side-effect-free Host preflight derives
+one exact `PluginResourceVector` covering runtime processes, CPU slots,
+address-space bytes, shared-memory bytes, and descriptors. The attempt-local
+`ResourceLedger` atomically mints a move-only token bound to the complete
+invocation identity and exact vector. It is consumed before shared memory,
+descriptor, mapping, socket, fork, or exec effects; the resulting RAII lease
+settles exactly once, while the replay tombstone survives until ledger
+destruction. Token and trust material never enter IPC.
+
+Linux copies the approved runtime into a sealed anonymous `memfd`, confirms its
+digest after sealing, and executes that descriptor through `fexecve`. Darwin
+reports `ExactObjectUnsupported` during direct or supervised executor
+construction before token issuance, capability materialization, socket
+creation, or fork; it creates no runtime pathname snapshot. Current Windows
+and every other unsupported runtime profile also fail closed. On Linux the
+child applies admitted `RLIMIT_AS`, positive `RLIMIT_CPU`, checked
+`RLIMIT_NOFILE`, and zero `RLIMIT_CORE`, receives an empty environment and
+closed inherited-descriptor set, and reports limit setup failure before plugin
+code executes.
+
+This completes package and resource admission for the private Linux runtime
+composition, signed immutable-snapshot admission plus mapping/capability
+lifetime consistency for Linux operation/policy loaders, and typed pre-access
+Darwin rejection for every native role. It does
+not select an end-user Graph operation, implement target operation ABI v1,
+isolate approved in-process DSOs, provide a general syscall/network sandbox,
+or prove OOM from `SIGKILL`.
+
+The current Issue #99/#100/#105 baseline is the source-private
+[Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
+It freezes `jobspec-v2`, atomically accounts complete tenant resource envelopes,
+persists Job records and manifest-last image artifacts under one locked root,
+supports authorized checkpoint identity plus explicit stable-Job/fresh-attempt
+retry, and reconciles interrupted or already-committed work after restart. It
+now runs one freshly execed Embedded Host worker process per attempt, enforces
+reserved CPU parallelism and POSIX `RLIMIT_AS`, and uses a same-process
+WorkerManager with one bounded private protocol, exact assignment/lease/PID
+fencing, heartbeat/runtime deadlines, cancellation escalation, exact reaping,
+and ongoing supervision-handle drainage. A report becomes eligible only after
+clean process exit and reap. Its protocol v2 control socket carries only
+bounded attempt/Job/receipt/reference/descriptor/digest metadata; checkpoint
+and output bytes cross separate attempt-local direction-reduced stream
+descriptors. The manager receives each output slice directly into one
+metadata-sized final owner while the exact worker remains subject to lifecycle
+and heartbeat deadlines, and drains no bulk data after reap. Output never
+renews heartbeat. After its metadata-only Report, the heartbeating worker awaits an identity-only
+`CompletionReady` while still terminable; the manager sends it only after exact
+stream join and image reconstruction. A candidate becomes visible to the
+service only after stream EOF, exact manager revalidation, and clean reap.
+Startup, exit, signal, channel, protocol,
+heartbeat, runtime, and forced-cancellation failures affect only the owning
+attempt. The control plane still orders cancellation against crash-durable
+artifact commit and gates Job success on settlement, retained-quota conversion,
+and one complete receipt. A valid typed worker failure remains
+`Failed` with its exact settlement and failure facts even when cancellation was
+accepted concurrently. After graph load, the worker gives graph settlement
+failure first priority, then preserves an already recorded compute/output
+failure before adjudicating cancellation; cancellation still outranks a
+synthesized missing-output failure when compute was skipped. Deterministic real
+Embedded Host tests cover both sides of that boundary and preserve the exact
+compute diagnostic. Destruction persists cancellation without waiting under the
+Job mutex, then drains concurrent workers through cooperative cancel,
+`SIGTERM`, `SIGKILL`, and reap. Configured device capacity remains admission-
+only, and `RLIMIT_AS` is not RSS, syscall, device, or hostile-plugin isolation.
+The local WorkerManager is not the target separate manager process. This slice
+does not implement network authentication/multi-tenancy, a standalone artifact
+service or remote data plane, or an untrusted-plugin boundary. Later slices
+must not infer those process/security properties from this executable evidence.
+
+Delivery remains allocated rather than absorbed by Issue #97:
+
+| Issue | Required target slice |
+| --- | --- |
+| [#98](https://github.com/kevin-zf1123/photospider/issues/98) | Immutable single-tenant JobSpec and control-plane-to-worker submit/query/cancel/completion with artifact identity |
+| [#99](https://github.com/kevin-zf1123/photospider/issues/99) | Tenant quota, durable artifacts, retry/checkpoint, and recovery semantics |
+| [#100](https://github.com/kevin-zf1123/photospider/issues/100) | WorkerManager/worker supervision, crash isolation, and bounded cancellation/shutdown |
+| [#101](https://github.com/kevin-zf1123/photospider/issues/101) | Accepted separately versioned pure-C operation-plugin ABI v1 decision; implementation remains a later breaking migration |
+| [#102](https://github.com/kevin-zf1123/photospider/issues/102) | Implemented source-private Darwin/Linux isolated CPU shared-memory/FD invocation with exact descriptor/stride/size/ownership/content validation; authenticated supervision remains #103 |
+| [#103](https://github.com/kevin-zf1123/photospider/issues/103) | Implemented source-private `PluginRuntimeSupervisor` heartbeat/deadline, factual crash/hang/signal/bad-output containment, fresh-process restart, and exact reap; no end-user route or OOM attribution |
+| [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Implemented process-immutable signed admission for operation/policy DSOs and private isolated runtime, plus one-use ledger tokens and pre-exec rlimits; no end-user route or general sandbox |
+| [#105](https://github.com/kevin-zf1123/photospider/issues/105) | Implemented local worker metadata-control/bulk-data separation; authenticated network control and standalone artifact-service composition remain downstream |
+| [#106](https://github.com/kevin-zf1123/photospider/issues/106) | Implemented manual opt-in production codec/descriptor harnesses, deterministic regressions, and page/session-bound execution identity trace; no general sandbox or authority expansion |
+
+Each slice advertises only the profile it actually implements. A single-tenant
+Job vertical is not a multi-tenant server; a pure-C ABI without process
+isolation is not an untrusted-plugin profile. Full network/multi-tenant and
+untrusted-plugin claims require their complete authority boundaries plus
+crash/hang/OOM/replay/bad-output/fuzz and bounded-shutdown evidence.
 
 ## Cross-Cutting Invariants
 

@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -10,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "compute/i2_metal_acquisition_deadline.hpp"
 #include "core/pending_value.hpp"
 #include "execution/device_completion.hpp"
 #include "execution/residency_manager.hpp"
@@ -219,6 +222,329 @@ PendingDeviceValuePublication make_pending_host_replica(
 DeviceCompletionSeed make_seed(std::uint64_t generation, std::uint64_t run_id) {
   return DeviceCompletionSeed(7U, 41, ComputeIntent::GlobalHighPrecision,
                               generation, run_id, 3U);
+}
+
+/**
+ * @brief Builds an I2-style seed for one published immutable Value acquisition.
+ * @param generation Historical nonzero request generation carried by Value.
+ * @param run_id Historical nonzero child Run identity.
+ * @return Complete realtime-lineage acquisition seed for target 41.
+ * @throws std::invalid_argument for invalid inputs.
+ * @note The seed grants no current submission or Graph commit authority.
+ */
+DeviceCompletionSeed make_published_value_acquisition_seed(
+    std::uint64_t generation, std::uint64_t run_id) {
+  return DeviceCompletionSeed(7U, 41, ComputeIntent::RealTimeUpdate, generation,
+                              run_id, 0U,
+                              DeviceCompletionUse::PublishedValueAcquisition);
+}
+
+/**
+ * @brief Proves Ready observed strictly before the deadline is accepted.
+ * @return Nothing; GoogleTest reports wait-state or deterministic-clock drift.
+ * @throws ReadyFence construction failures unchanged.
+ * @note The injected sleeper settles the real fence without wall-clock sleep.
+ */
+TEST(I2MetalAcquisitionDeadline, AcceptsReadyStrictlyBeforeDeadline) {
+  PendingReadyFence pending = make_pending_ready_fence();
+  auto now = std::chrono::steady_clock::time_point{};
+  const auto deadline = now + std::chrono::microseconds(100);
+  const auto terminal = compute::wait_for_i2_metal_completion_until(
+      pending.fence, deadline, [&now] { return now; },
+      [&pending, &now](std::chrono::steady_clock::time_point wake) {
+        EXPECT_TRUE(pending.completer.complete_ready());
+        now = wake;
+      });
+
+  ASSERT_TRUE(terminal.has_value());
+  EXPECT_TRUE(terminal->ready());
+  EXPECT_LT(now, deadline);
+}
+
+/**
+ * @brief Proves the exclusive deadline wins an exact Ready observation tie.
+ * @return Nothing; GoogleTest reports tie-policy drift.
+ * @throws ReadyFence construction failures unchanged.
+ */
+TEST(I2MetalAcquisitionDeadline, ExactDeadlineTieFailsClosed) {
+  PendingReadyFence pending = make_pending_ready_fence();
+  auto now = std::chrono::steady_clock::time_point{};
+  const auto deadline = now + std::chrono::microseconds(50);
+  const auto terminal = compute::wait_for_i2_metal_completion_until(
+      pending.fence, deadline, [&now] { return now; },
+      [&pending, &now](std::chrono::steady_clock::time_point wake) {
+        EXPECT_TRUE(pending.completer.complete_ready());
+        now = wake;
+      });
+
+  EXPECT_FALSE(terminal.has_value());
+  EXPECT_EQ(now, deadline);
+  EXPECT_TRUE(pending.fence.poll().ready());
+}
+
+/**
+ * @brief Rejects Ready completed at D between the precheck and fence poll.
+ * @return Nothing; GoogleTest reports post-poll deadline-gate drift.
+ * @throws ReadyFence construction failures unchanged.
+ * @note The source-private hook publishes the real terminal and advances the
+ * injected clock without wall-clock sleep or scheduling probability.
+ */
+TEST(I2MetalAcquisitionDeadline,
+     ReadyCompletedBetweenPrecheckAndPollAtDeadlineTieFailsClosed) {
+  PendingReadyFence pending = make_pending_ready_fence();
+  const auto deadline =
+      std::chrono::steady_clock::time_point{} + std::chrono::microseconds(100);
+  auto now = deadline - std::chrono::microseconds(1);
+  std::size_t hook_calls = 0U;
+  std::size_t clock_calls = 0U;
+  const auto terminal =
+      compute::detail::wait_for_i2_metal_completion_until_with_pre_poll_hook(
+          pending.fence, deadline,
+          [&pending, &now, &hook_calls, deadline] {
+            ++hook_calls;
+            now = deadline;
+            EXPECT_TRUE(pending.completer.complete_ready());
+          },
+          [&now, &clock_calls] {
+            ++clock_calls;
+            return now;
+          },
+          [](std::chrono::steady_clock::time_point) {
+            ADD_FAILURE() << "terminal fence must not sleep";
+          });
+
+  EXPECT_FALSE(terminal.has_value());
+  EXPECT_EQ(hook_calls, 1U);
+  EXPECT_EQ(clock_calls, 2U);
+  EXPECT_EQ(pending.fence.poll().state(), ReadyFenceState::Ready);
+}
+
+/**
+ * @brief Rejects Failed completed after D between the precheck and poll.
+ * @return Nothing; GoogleTest reports post-poll deadline-gate drift.
+ * @throws ReadyFence construction or failure-publication errors unchanged.
+ * @note The source-private hook publishes the real terminal and advances the
+ * injected clock without wall-clock sleep or scheduling probability.
+ */
+TEST(I2MetalAcquisitionDeadline,
+     FailedCompletedBetweenPrecheckAndPollAfterDeadlineFailsClosed) {
+  PendingReadyFence pending = make_pending_ready_fence();
+  const auto deadline =
+      std::chrono::steady_clock::time_point{} + std::chrono::microseconds(100);
+  auto now = deadline - std::chrono::microseconds(1);
+  std::size_t hook_calls = 0U;
+  std::size_t clock_calls = 0U;
+  const auto terminal =
+      compute::detail::wait_for_i2_metal_completion_until_with_pre_poll_hook(
+          pending.fence, deadline,
+          [&pending, &now, &hook_calls, deadline] {
+            ++hook_calls;
+            now = deadline + std::chrono::microseconds(1);
+            EXPECT_TRUE(pending.completer.complete_failed(ReadyFenceFailure(
+                ReadyFenceFailureDomain::Execution, 91,
+                "deterministic failed completion crossing the I2 deadline")));
+          },
+          [&now, &clock_calls] {
+            ++clock_calls;
+            return now;
+          },
+          [](std::chrono::steady_clock::time_point) {
+            ADD_FAILURE() << "terminal fence must not sleep";
+          });
+
+  EXPECT_FALSE(terminal.has_value());
+  EXPECT_EQ(hook_calls, 1U);
+  EXPECT_EQ(clock_calls, 2U);
+  EXPECT_EQ(pending.fence.poll().state(), ReadyFenceState::Failed);
+}
+
+/**
+ * @brief Rejects cancellation completed after D between precheck and poll.
+ * @return Nothing; GoogleTest reports post-poll deadline-gate drift.
+ * @throws ReadyFence construction failures unchanged.
+ * @note The source-private hook publishes the real terminal and advances the
+ * injected clock without wall-clock sleep or scheduling probability.
+ */
+TEST(I2MetalAcquisitionDeadline,
+     ProducerCancelledBetweenPrecheckAndPollAfterDeadlineFailsClosed) {
+  PendingReadyFence pending = make_pending_ready_fence();
+  const auto deadline =
+      std::chrono::steady_clock::time_point{} + std::chrono::microseconds(100);
+  auto now = deadline - std::chrono::microseconds(1);
+  std::size_t hook_calls = 0U;
+  std::size_t clock_calls = 0U;
+  const auto terminal =
+      compute::detail::wait_for_i2_metal_completion_until_with_pre_poll_hook(
+          pending.fence, deadline,
+          [&pending, &now, &hook_calls, deadline] {
+            ++hook_calls;
+            now = deadline + std::chrono::microseconds(1);
+            EXPECT_TRUE(pending.completer.cancel());
+          },
+          [&now, &clock_calls] {
+            ++clock_calls;
+            return now;
+          },
+          [](std::chrono::steady_clock::time_point) {
+            ADD_FAILURE() << "terminal fence must not sleep";
+          });
+
+  EXPECT_FALSE(terminal.has_value());
+  EXPECT_EQ(hook_calls, 1U);
+  EXPECT_EQ(clock_calls, 2U);
+  EXPECT_EQ(pending.fence.poll().state(), ReadyFenceState::ProducerCancelled);
+}
+
+/**
+ * @brief Proves timeout discard denies late publication and releases ownership.
+ * @return Nothing; GoogleTest reports admission, fence, resident, or ledger
+ * drift.
+ * @throws Fake publication, ledger, identity, and manager failures unchanged.
+ */
+TEST(I2MetalAcquisitionDeadline,
+     PendingTimeoutContainmentRejectsLateCompletionExactlyOnce) {
+  constexpr std::uint64_t kAllocationBytes = 4U * sizeof(float);
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{
+          DeviceResourceLimit{metal, {kAllocationBytes, 0U}}});
+  ResidencyManager manager;
+  PendingLeasedUpload upload = make_pending_leased_upload(ledger);
+  const DeviceCompletionIdentity identity(
+      make_published_value_acquisition_seed(1U, 401U), upload.source,
+      upload.destination.value);
+  const DeviceCompletionSeed& seed = identity.seed();
+  manager.track_lineage(seed.graph_instance_id(), seed.target_node_id(),
+                        seed.request_intent());
+  manager.publish_current_generation(
+      seed.graph_instance_id(), seed.target_node_id(), seed.request_intent(),
+      seed.supersession_generation());
+  manager.register_transfer(identity);
+
+  EXPECT_EQ(compute::contain_i2_timed_out_transfer(manager, identity,
+                                                   upload.destination.value),
+            compute::I2TimedOutTransferContainment::PendingAdmissionDiscarded);
+  EXPECT_EQ(manager.publish_ready_transfer(identity, upload.source,
+                                           upload.destination.value, nullptr,
+                                           upload.destination.producer),
+            ResidencyCompletionDisposition::Rejected);
+  EXPECT_TRUE(upload.destination.producer.complete_failed(ReadyFenceFailure(
+      ReadyFenceFailureDomain::Execution, 86,
+      "late I2 completion lost deadline publication authority")));
+  EXPECT_FALSE(upload.destination.producer.complete_failed(ReadyFenceFailure(
+      ReadyFenceFailureDomain::Execution, 86, "duplicate late I2 completion")));
+  EXPECT_FALSE(
+      manager
+          .find(upload.source.revision_id(), metal, MemoryDomain::DeviceLocal)
+          .has_value());
+  upload.destination.value = Value{};
+  EXPECT_TRUE(upload.destination_owner.expired());
+  const auto released = ledger.device_snapshot(metal);
+  ASSERT_TRUE(released.has_value());
+  EXPECT_EQ(released->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves a rejected completion remains the sole pending-fence owner.
+ * @return Nothing; GoogleTest reports authority, fence, or lease drift.
+ * @throws Fake publication, ledger, identity, and manager failures unchanged.
+ * @note The mismatched source makes the simulated completion consume its exact
+ * manager admission before it settles the still-Pending destination fence.
+ */
+TEST(I2MetalAcquisitionDeadline,
+     CompletionOwnerSettlingDeniesResidencyPublication) {
+  constexpr std::uint64_t kAllocationBytes = 4U * sizeof(float);
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{
+          DeviceResourceLimit{metal, {kAllocationBytes, 0U}}});
+  ResidencyManager manager;
+  PendingLeasedUpload upload = make_pending_leased_upload(ledger);
+  const DeviceCompletionIdentity identity(
+      make_published_value_acquisition_seed(1U, 403U), upload.source,
+      upload.destination.value);
+  const DeviceCompletionSeed& seed = identity.seed();
+  manager.track_lineage(seed.graph_instance_id(), seed.target_node_id(),
+                        seed.request_intent());
+  manager.publish_current_generation(
+      seed.graph_instance_id(), seed.target_node_id(), seed.request_intent(),
+      seed.supersession_generation());
+  manager.register_transfer(identity);
+
+  std::vector<std::byte> unrelated_bytes(kAllocationBytes);
+  Value unrelated = Value::from_cpu_dense_tensor(
+      make_descriptor(), std::nullopt,
+      StridedLayout{{static_cast<std::ptrdiff_t>(sizeof(float))}, 0U},
+      std::move(unrelated_bytes));
+  ASSERT_EQ(manager.publish_ready_transfer(identity, unrelated,
+                                           upload.destination.value, nullptr,
+                                           upload.destination.producer),
+            ResidencyCompletionDisposition::Rejected);
+  EXPECT_EQ(compute::contain_i2_timed_out_transfer(manager, identity,
+                                                   upload.destination.value),
+            compute::I2TimedOutTransferContainment::CompletionOwnerSettling);
+  EXPECT_FALSE(
+      manager
+          .find(upload.source.revision_id(), metal, MemoryDomain::DeviceLocal)
+          .has_value());
+
+  EXPECT_TRUE(upload.destination.producer.complete_failed(ReadyFenceFailure(
+      ReadyFenceFailureDomain::Execution, 87,
+      "rejected I2 completion retained sole terminal ownership")));
+  EXPECT_FALSE(upload.destination.producer.complete_failed(
+      ReadyFenceFailure(ReadyFenceFailureDomain::Execution, 87,
+                        "duplicate rejected I2 completion settlement")));
+  upload.destination.value = Value{};
+  EXPECT_TRUE(upload.destination_owner.expired());
+  const auto released = ledger.device_snapshot(metal);
+  ASSERT_TRUE(released.has_value());
+  EXPECT_EQ(released->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves a Ready publication that wins the timeout race is removed.
+ * @return Nothing; GoogleTest reports exact resident cleanup drift.
+ * @throws Fake publication, ledger, identity, and manager failures unchanged.
+ */
+TEST(I2MetalAcquisitionDeadline,
+     TimeoutContainmentRemovesOnlyRacingReadyResident) {
+  constexpr std::uint64_t kAllocationBytes = 4U * sizeof(float);
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{
+          DeviceResourceLimit{metal, {kAllocationBytes, 0U}}});
+  ResidencyManager manager;
+  PendingLeasedUpload upload = make_pending_leased_upload(ledger);
+  const DeviceCompletionIdentity identity(
+      make_published_value_acquisition_seed(1U, 402U), upload.source,
+      upload.destination.value);
+  const DeviceCompletionSeed& seed = identity.seed();
+  manager.track_lineage(seed.graph_instance_id(), seed.target_node_id(),
+                        seed.request_intent());
+  manager.publish_current_generation(
+      seed.graph_instance_id(), seed.target_node_id(), seed.request_intent(),
+      seed.supersession_generation());
+  manager.register_transfer(identity);
+  ASSERT_EQ(manager.publish_ready_transfer(identity, upload.source,
+                                           upload.destination.value, nullptr,
+                                           upload.destination.producer),
+            ResidencyCompletionDisposition::Published);
+
+  EXPECT_EQ(compute::contain_i2_timed_out_transfer(manager, identity,
+                                                   upload.destination.value),
+            compute::I2TimedOutTransferContainment::ReadyResidentReleased);
+  EXPECT_FALSE(
+      manager
+          .find(upload.source.revision_id(), metal, MemoryDomain::DeviceLocal)
+          .has_value());
+  upload.destination.value = Value{};
+  EXPECT_TRUE(upload.destination_owner.expired());
+  const auto released = ledger.device_snapshot(metal);
+  ASSERT_TRUE(released.has_value());
+  EXPECT_EQ(released->reserved, DeviceResourceVector{});
 }
 
 /**
@@ -639,6 +965,293 @@ TEST(DeviceResidency,
 }
 
 /**
+ * @brief Proves exact resident release requires every immutable identity fact.
+ * @return Nothing; GoogleTest reports no-op, lookup, or lease mismatches.
+ * @throws Fake publication, ledger, identity, and manager exceptions.
+ * @note Wrong producer and complete-binding drift preserve the rightful row.
+ * Exact revision/binding/producer removal then releases the manager's sole
+ * remaining strong native-and-lease owner outside its mutex.
+ */
+TEST(DeviceResidency, ExactReleaseRejectsWrongIdentityAndRemovesOnlyMatch) {
+  constexpr std::uint64_t kAllocationBytes = 4U * sizeof(float);
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{
+          DeviceResourceLimit{metal, {kAllocationBytes, 0U}}});
+  ResidencyManager manager;
+  PendingLeasedUpload upload = make_pending_leased_upload(ledger);
+  const DeviceCompletionIdentity identity(make_seed(13U, 131U), upload.source,
+                                          upload.destination.value);
+  const ValueRevisionId revision = upload.destination.value.revision_id();
+  const StorageBinding binding = upload.destination.value.storage_binding();
+  const ProducerIdentity producer =
+      upload.destination.value.producer_identity();
+  const std::weak_ptr<FakeLeasedDeviceAllocation> owner =
+      upload.destination_owner;
+  manager.observe_generation(identity.seed());
+  ASSERT_NO_THROW(manager.register_transfer(identity));
+  ASSERT_EQ(manager.publish_ready_transfer(identity, upload.source,
+                                           upload.destination.value, nullptr,
+                                           upload.destination.producer),
+            ResidencyCompletionDisposition::Published);
+  upload.destination.value = Value();
+
+  StorageBinding wrong_binding = binding;
+  ++wrong_binding.byte_size;
+  EXPECT_FALSE(manager.release_resident(revision, wrong_binding, producer));
+  EXPECT_FALSE(manager.release_resident(revision, binding,
+                                        upload.source.producer_identity()));
+  EXPECT_FALSE(manager.release_resident(ValueRevisionId{}, binding, producer));
+  EXPECT_TRUE(
+      manager.find(revision, metal, MemoryDomain::DeviceLocal).has_value());
+  EXPECT_FALSE(owner.expired());
+
+  EXPECT_TRUE(manager.release_resident(revision, binding, producer));
+  EXPECT_FALSE(manager.release_resident(revision, binding, producer));
+  EXPECT_FALSE(
+      manager.find(revision, metal, MemoryDomain::DeviceLocal).has_value());
+  EXPECT_TRUE(owner.expired());
+  const auto released = ledger.device_snapshot(metal);
+  ASSERT_TRUE(released.has_value());
+  EXPECT_EQ(released->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves a published old-generation Value remains acquirable twice.
+ * @return Nothing; GoogleTest reports identity, reuse, or settlement drift.
+ * @throws Fake publication, ledger, identity, and manager exceptions.
+ * @note Generation one is published before generation two becomes current.
+ * Its immutable Ready source then admits one verification transfer. Exact
+ * lookup reuses the resident twice. A deterministic precheck-to-poll deadline
+ * crossing rejects late reuse without releasing that resident, while a fresh
+ * strict-before sample preserves its exact Direct identity. Wrong seed/source
+ * identities and post-retirement lookup fail closed without broad removal;
+ * exact release finally returns the sole device lease after local Values
+ * unwind.
+ */
+TEST(DeviceResidency,
+     PublishedHistoricalValueAcquisitionSurvivesNewerCurrentGeneration) {
+  constexpr std::uint64_t kAllocationBytes = 4U * sizeof(float);
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{
+          DeviceResourceLimit{metal, {kAllocationBytes, 0U}}});
+  ResidencyManager manager;
+  PendingLeasedUpload historical = make_pending_leased_upload(ledger);
+  const DeviceCompletionIdentity acquisition(
+      make_published_value_acquisition_seed(1U, 301U), historical.source,
+      historical.destination.value);
+  const DeviceCompletionIdentity wrong_run(
+      make_published_value_acquisition_seed(1U, 302U), historical.source,
+      historical.destination.value);
+  const DeviceCompletionSeed& seed = acquisition.seed();
+  manager.track_lineage(seed.graph_instance_id(), seed.target_node_id(),
+                        seed.request_intent());
+  manager.publish_current_generation(
+      seed.graph_instance_id(), seed.target_node_id(), seed.request_intent(),
+      seed.supersession_generation());
+  manager.publish_current_generation(seed.graph_instance_id(),
+                                     seed.target_node_id(),
+                                     seed.request_intent(), 2U);
+
+  ASSERT_NO_THROW(manager.register_transfer(acquisition));
+  EXPECT_EQ(manager.publish_ready_transfer(
+                wrong_run, historical.source, historical.destination.value,
+                nullptr, historical.destination.producer),
+            ResidencyCompletionDisposition::Rejected);
+  ASSERT_EQ(manager.publish_ready_transfer(
+                acquisition, historical.source, historical.destination.value,
+                nullptr, historical.destination.producer),
+            ResidencyCompletionDisposition::Published);
+  const ValueRevisionId revision = historical.destination.value.revision_id();
+  const StorageBinding binding = historical.destination.value.storage_binding();
+  const ProducerIdentity producer =
+      historical.destination.value.producer_identity();
+  const std::weak_ptr<FakeLeasedDeviceAllocation> owner =
+      historical.destination_owner;
+  historical.destination.value = Value();
+
+  {
+    const std::optional<Value> first = manager.find_published_value_acquisition(
+        seed, historical.source, metal, MemoryDomain::DeviceLocal);
+    const std::optional<Value> second =
+        manager.find_published_value_acquisition(seed, historical.source, metal,
+                                                 MemoryDomain::DeviceLocal);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(first->revision_id(), revision);
+    EXPECT_EQ(second->revision_id(), revision);
+    EXPECT_EQ(first->storage_binding(), binding);
+    EXPECT_EQ(second->storage_binding(), binding);
+    EXPECT_EQ(first->producer_identity(), producer);
+    EXPECT_EQ(second->producer_identity(), producer);
+
+    const auto reuse_deadline = std::chrono::steady_clock::time_point{} +
+                                std::chrono::microseconds(100);
+    auto reuse_now = reuse_deadline - std::chrono::microseconds(1);
+    std::size_t reuse_clock_calls = 0U;
+    const std::optional<ReadyFenceSnapshot> late_reuse =
+        compute::detail::poll_i2_metal_resident_reuse_with_pre_poll_hook(
+            second->ready_fence(), reuse_deadline,
+            [&reuse_now, reuse_deadline] { reuse_now = reuse_deadline; },
+            [&reuse_now, &reuse_clock_calls] {
+              ++reuse_clock_calls;
+              return reuse_now;
+            });
+    EXPECT_FALSE(late_reuse.has_value());
+    EXPECT_EQ(reuse_clock_calls, 2U);
+
+    const std::optional<Value> retained_after_timeout =
+        manager.find_published_value_acquisition(seed, historical.source, metal,
+                                                 MemoryDomain::DeviceLocal);
+    ASSERT_TRUE(retained_after_timeout.has_value());
+    EXPECT_EQ(retained_after_timeout->revision_id(), revision);
+    EXPECT_EQ(retained_after_timeout->storage_binding(), binding);
+    EXPECT_EQ(retained_after_timeout->producer_identity(), producer);
+
+    reuse_now = reuse_deadline - std::chrono::microseconds(2);
+    reuse_clock_calls = 0U;
+    const std::optional<ReadyFenceSnapshot> strict_before_reuse =
+        compute::detail::poll_i2_metal_resident_reuse_with_pre_poll_hook(
+            retained_after_timeout->ready_fence(), reuse_deadline,
+            [&reuse_now, reuse_deadline] {
+              reuse_now = reuse_deadline - std::chrono::microseconds(1);
+            },
+            [&reuse_now, &reuse_clock_calls] {
+              ++reuse_clock_calls;
+              return reuse_now;
+            });
+    ASSERT_TRUE(strict_before_reuse.has_value());
+    EXPECT_TRUE(strict_before_reuse->ready());
+    EXPECT_EQ(reuse_clock_calls, 2U);
+    const AccessPlan reuse_plan = retained_after_timeout->plan_access(
+        AccessTarget{metal, MemoryDomain::DeviceLocal, false, false});
+    EXPECT_EQ(reuse_plan.kind(), AccessPlanKind::Direct);
+    EXPECT_EQ(reuse_plan.transfer_bytes(), 0U);
+
+    const std::array<DeviceCompletionSeed, 5U> wrong_seeds{
+        wrong_run.seed(),
+        DeviceCompletionSeed(7U, 41, ComputeIntent::RealTimeUpdate, 1U, 301U,
+                             1U,
+                             DeviceCompletionUse::PublishedValueAcquisition),
+        DeviceCompletionSeed(7U, 41, ComputeIntent::RealTimeUpdate, 2U, 301U,
+                             0U,
+                             DeviceCompletionUse::PublishedValueAcquisition),
+        DeviceCompletionSeed(8U, 41, ComputeIntent::RealTimeUpdate, 1U, 301U,
+                             0U,
+                             DeviceCompletionUse::PublishedValueAcquisition),
+        DeviceCompletionSeed(7U, 41, ComputeIntent::GlobalHighPrecision, 1U,
+                             301U, 0U,
+                             DeviceCompletionUse::PublishedValueAcquisition)};
+    for (const DeviceCompletionSeed& wrong_seed : wrong_seeds) {
+      EXPECT_THROW(
+          (void)manager.find_published_value_acquisition(
+              wrong_seed, historical.source, metal, MemoryDomain::DeviceLocal),
+          std::invalid_argument);
+    }
+    EXPECT_THROW((void)manager.find_published_value_acquisition(
+                     make_seed(1U, 301U), historical.source, metal,
+                     MemoryDomain::DeviceLocal),
+                 std::invalid_argument);
+
+    PendingDeviceValuePublication wrong_source =
+        make_pending_host_replica(historical.source, MemoryDomain::HostPinned);
+    ASSERT_TRUE(wrong_source.producer.complete_ready());
+    EXPECT_THROW(
+        (void)manager.find_published_value_acquisition(
+            seed, wrong_source.value, metal, MemoryDomain::DeviceLocal),
+        std::invalid_argument);
+
+    const Value acquired_before_retirement = *first;
+    EXPECT_EQ(manager.retire_graph_lineages(seed.graph_instance_id()), 1U);
+    EXPECT_TRUE(acquired_before_retirement.valid());
+    EXPECT_EQ(acquired_before_retirement.storage_binding(), binding);
+    EXPECT_THROW((void)manager.find_published_value_acquisition(
+                     seed, historical.source, metal, MemoryDomain::DeviceLocal),
+                 std::invalid_argument);
+    EXPECT_TRUE(
+        manager.find(revision, metal, MemoryDomain::DeviceLocal).has_value());
+
+    StorageBinding wrong_binding = binding;
+    ++wrong_binding.byte_size;
+    EXPECT_FALSE(manager.release_resident(revision, wrong_binding, producer));
+    EXPECT_FALSE(manager.release_resident(
+        revision, binding, historical.source.producer_identity()));
+    EXPECT_TRUE(manager.release_resident(revision, binding, producer));
+    EXPECT_FALSE(manager.release_resident(revision, binding, producer));
+    EXPECT_FALSE(
+        manager.find(revision, metal, MemoryDomain::DeviceLocal).has_value());
+    EXPECT_FALSE(owner.expired());
+  }
+
+  EXPECT_TRUE(owner.expired());
+  const auto released = ledger.device_snapshot(metal);
+  ASSERT_TRUE(released.has_value());
+  EXPECT_EQ(released->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves row-scoped releases avoid low-limit cross-revision buildup.
+ * @return Nothing; GoogleTest reports admission, reuse, or byte drift.
+ * @throws Fake publication, ledger, identity, and manager exceptions.
+ * @note The limit fits exactly one allocation. Each distinct revision is
+ * looked up twice without new ownership, then exactly released before the next
+ * revision is allocated; capacity eviction is never used as cleanup.
+ */
+TEST(DeviceResidency, ExactRowReleasePreventsCrossRevisionReservationBuildup) {
+  constexpr std::uint64_t kAllocationBytes = 4U * sizeof(float);
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{
+          DeviceResourceLimit{metal, {kAllocationBytes, 0U}}});
+  ResidencyManager manager;
+
+  for (std::uint64_t generation = 1U; generation <= 5U; ++generation) {
+    PendingLeasedUpload upload = make_pending_leased_upload(ledger);
+    const DeviceCompletionIdentity identity(
+        make_seed(generation, 200U + generation), upload.source,
+        upload.destination.value);
+    const ValueRevisionId revision = upload.destination.value.revision_id();
+    const StorageBinding binding = upload.destination.value.storage_binding();
+    const ProducerIdentity producer =
+        upload.destination.value.producer_identity();
+    const std::weak_ptr<FakeLeasedDeviceAllocation> owner =
+        upload.destination_owner;
+    manager.observe_generation(identity.seed());
+    ASSERT_NO_THROW(manager.register_transfer(identity));
+    ASSERT_EQ(manager.publish_ready_transfer(identity, upload.source,
+                                             upload.destination.value, nullptr,
+                                             upload.destination.producer),
+              ResidencyCompletionDisposition::Published);
+    upload.destination.value = Value();
+
+    {
+      const std::optional<Value> first =
+          manager.find(revision, metal, MemoryDomain::DeviceLocal);
+      const std::optional<Value> second =
+          manager.find(revision, metal, MemoryDomain::DeviceLocal);
+      ASSERT_TRUE(first.has_value());
+      ASSERT_TRUE(second.has_value());
+      EXPECT_EQ(first->storage_binding(), binding);
+      EXPECT_EQ(second->storage_binding(), binding);
+      const auto retained = ledger.device_snapshot(metal);
+      ASSERT_TRUE(retained.has_value());
+      EXPECT_EQ(retained->reserved,
+                (DeviceResourceVector{kAllocationBytes, 0U}));
+    }
+
+    ASSERT_TRUE(manager.release_resident(revision, binding, producer));
+    EXPECT_TRUE(owner.expired());
+    const auto released = ledger.device_snapshot(metal);
+    ASSERT_TRUE(released.has_value());
+    EXPECT_EQ(released->reserved, DeviceResourceVector{});
+  }
+}
+
+/**
  * @brief Proves stale, rejected, cancelled, and reused identities cannot
  * release or duplicate another fake allocation's unique memory lease.
  * @return Nothing; GoogleTest reports disposition or exact-release mismatch.
@@ -751,10 +1364,10 @@ TEST(DeviceResidency, RejectsZeroResidentCapacity) {
  * @brief Proves a newer generation fails an old destination before Ready.
  * @return Nothing; GoogleTest reports stale acceptance or lookup failures.
  * @throws Fake publication, diagnostic, identity, and manager exceptions.
- * @note The manager learns generation two from pretracked coordinator
- * publication before any generation-two Run starts. Physical source work may
- * settle, but destination failure prevents the stale callback from releasing
- * request-local dependent work.
+ * @note After lineage pretracking, the coordinator assigns generation two as
+ * the exact managed identity before any generation-two Run starts. Physical
+ * source work may settle, but destination failure prevents the stale callback
+ * from releasing request-local dependent work.
  */
 TEST(DeviceResidency, StaleCompletionCannotPublishReadyDestination) {
   ResidencyManager manager;
@@ -784,12 +1397,13 @@ TEST(DeviceResidency, StaleCompletionCannotPublishReadyDestination) {
 }
 
 /**
- * @brief Proves a late older Run cannot regress a pretracked current lineage.
- * @return Nothing; GoogleTest reports stale admission or generation rollback.
+ * @brief Proves a late stale Run cannot replace the exact managed identity.
+ * @return Nothing; GoogleTest reports stale admission or identity replacement.
  * @throws Fake publication, identity, and synchronized manager exceptions.
- * @note Generation two becomes current before generation one's Run observation.
- * The later observation is monotonic, and transfer admission is rejected before
- * native submission or destination readiness.
+ * @note The coordinator assigns generation two as the exact current identity
+ * before generation one's Run observation. The later stale observation cannot
+ * replace it, and transfer admission is rejected before native submission or
+ * destination readiness.
  */
 TEST(DeviceResidency, PretrackedCurrentRejectsLateOlderRunAdmission) {
   ResidencyManager manager;
@@ -809,6 +1423,54 @@ TEST(DeviceResidency, PretrackedCurrentRejectsLateOlderRunAdmission) {
             ReadyFenceState::Pending);
   EXPECT_EQ(pair.destination.value.ready_fence().poll().state(),
             ReadyFenceState::Pending);
+}
+
+/**
+ * @brief Proves coordinator-managed native freshness accepts a numerically
+ * lower exact current generation.
+ * @return Nothing; GoogleTest reports stale admission or currentness drift.
+ * @throws Fake publication, identity, and synchronized manager exceptions.
+ * @note Generation two models the earlier accepted coordinate that publishes
+ * first. Product currentness then selects generation one for a later accepted
+ * coordinate. A late observation from generation two must not restore it.
+ */
+TEST(DeviceResidency,
+     CoordinatorCurrentnessCanAssignLowerGenerationWithoutStaleReplacement) {
+  ResidencyManager manager;
+  PendingReplicaPair stale_pair = make_pending_replica_pair();
+  PendingReplicaPair current_pair = make_pending_replica_pair();
+  const DeviceCompletionIdentity stale_identity(make_seed(2U, 24U),
+                                                stale_pair.source.value,
+                                                stale_pair.destination.value);
+  const DeviceCompletionIdentity current_identity(
+      make_seed(1U, 25U), current_pair.source.value,
+      current_pair.destination.value);
+  const DeviceCompletionSeed& stale_seed = stale_identity.seed();
+
+  manager.track_lineage(stale_seed.graph_instance_id(),
+                        stale_seed.target_node_id(),
+                        stale_seed.request_intent());
+  manager.publish_current_generation(
+      stale_seed.graph_instance_id(), stale_seed.target_node_id(),
+      stale_seed.request_intent(), stale_seed.supersession_generation());
+  manager.observe_generation(stale_seed);
+  manager.publish_current_generation(
+      current_identity.seed().graph_instance_id(),
+      current_identity.seed().target_node_id(),
+      current_identity.seed().request_intent(),
+      current_identity.seed().supersession_generation());
+
+  manager.observe_generation(stale_seed);
+  EXPECT_THROW(manager.register_transfer(stale_identity),
+               std::invalid_argument);
+  manager.observe_generation(current_identity.seed());
+  ASSERT_NO_THROW(manager.register_transfer(current_identity));
+  EXPECT_TRUE(manager.discard_transfer(current_identity));
+
+  EXPECT_TRUE(stale_pair.source.producer.cancel());
+  EXPECT_TRUE(stale_pair.destination.producer.cancel());
+  EXPECT_TRUE(current_pair.source.producer.cancel());
+  EXPECT_TRUE(current_pair.destination.producer.cancel());
 }
 
 /**

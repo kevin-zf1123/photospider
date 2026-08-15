@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "benchmark/m1_profile.hpp"  // NOLINT(build/include_subdir)
 #include "compute/compute_run.hpp"
 #include "compute/compute_task_submission.hpp"
 #include "compute/dirty_execution_common.hpp"
@@ -38,6 +39,7 @@
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "photospider/core/graph_error.hpp"
+#include "photospider/data/value.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
@@ -76,8 +78,438 @@ ComputeRunSubmission make_test_submission(std::string graph_identity,
       ComputeRunQos{ComputeRunQosClass::Throughput, std::nullopt, 3, 2},
       SupersessionIdentity{
           SupersessionKey(target_node_id, ComputeIntent::GlobalHighPrecision),
-          SupersessionGeneration(1)}};
+          SupersessionGeneration(1)},
+      nullptr};
 }
+
+/**
+ * @brief Records the two observations owned by visible commit resolution.
+ * @throws Nothing for construction, callbacks, or scalar inspection.
+ * @note Fixed storage keeps every noexcept callback allocation-free.
+ */
+class VisibleCommitObservationSink final : public ComputeRunObservationSink {
+ public:
+  /** @copydoc ComputeRunObservationSink::reserve_causal_coordinate */
+  ComputeRunObservationCoordinate reserve_causal_coordinate() noexcept
+      override {
+    return ComputeRunObservationCoordinate{std::chrono::steady_clock::now(),
+                                           next_sequence_++};
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_current_generation */
+  void on_current_generation(
+      const SupersessionIdentity& identity,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)identity;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_service_start */
+  void on_service_start(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunTaskIdentity task_identity, std::uint64_t service_charge,
+      const ComputeRunServiceStartObservation& observation,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)task_identity;
+    (void)service_charge;
+    (void)observation;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_cancellation */
+  void on_cancellation(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunCancellationReason reason,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)reason;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_terminal */
+  void on_terminal(
+      const ComputeRunDescriptor& descriptor, ComputeRunTerminalKind kind,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)coordinate;
+    terminal_kind_ = kind;
+    ++terminal_count_;
+    record(2);
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_current_visible */
+  void on_current_visible(
+      const ComputeRunDescriptor& descriptor, Value output,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)output;
+    (void)coordinate;
+    ++visible_count_;
+    record(1);
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_run_quiescent */
+  void on_run_quiescent(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_run_resource_settled */
+  void on_run_resource_settled(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_host_settled */
+  void on_host_settled(
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)coordinate;
+  }
+
+  /**
+   * @brief Returns the number of current-visible callbacks.
+   * @return Exact callback count.
+   * @throws Nothing.
+   */
+  std::size_t visible_count() const noexcept { return visible_count_; }
+
+  /**
+   * @brief Returns the number of terminal callbacks.
+   * @return Exact callback count.
+   * @throws Nothing.
+   */
+  std::size_t terminal_count() const noexcept { return terminal_count_; }
+
+  /**
+   * @brief Returns the retained terminal kind.
+   * @return Latest terminal category, if observed.
+   * @throws Nothing.
+   */
+  std::optional<ComputeRunTerminalKind> terminal_kind() const noexcept {
+    return terminal_kind_;
+  }
+
+  /**
+   * @brief Returns one fixed observation-order marker.
+   * @param index Zero-based position below observation_count().
+   * @return One for visible and two for terminal.
+   * @throws Nothing; callers validate the index before access.
+   */
+  int observation_at(std::size_t index) const noexcept {
+    return observation_order_[index];
+  }
+
+  /**
+   * @brief Returns the number of retained observation-order markers.
+   * @return Count in `[0,2]`.
+   * @throws Nothing.
+   */
+  std::size_t observation_count() const noexcept { return observation_count_; }
+
+ private:
+  /**
+   * @brief Appends one marker when fixed observation storage has capacity.
+   * @param marker One for visible or two for terminal.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void record(int marker) noexcept {
+    if (observation_count_ < observation_order_.size()) {
+      observation_order_[observation_count_++] = marker;
+    }
+  }
+
+  /** @brief Fixed callback order without allocation. */
+  std::array<int, 2U> observation_order_{};
+  /** @brief Number of initialized order entries. */
+  std::size_t observation_count_ = 0U;
+  /** @brief Exact current-visible callback count. */
+  std::size_t visible_count_ = 0U;
+  /** @brief Exact terminal callback count. */
+  std::size_t terminal_count_ = 0U;
+  /** @brief Terminal category retained for assertion. */
+  std::optional<ComputeRunTerminalKind> terminal_kind_;
+  /** @brief Next deterministic single-threaded callback coordinate sequence. */
+  std::uint64_t next_sequence_ = 1U;
+};
+
+/**
+ * @brief Records causal order for concurrently arbitrated start/cancellation.
+ *
+ * The sink reserves coordinates with one atomic authority and release-publishes
+ * start/cancellation callback facts for deterministic barrier assertions.
+ * Every callback remains allocation-free and exception-free.
+ *
+ * @throws Nothing for construction, callbacks, and scalar inspection.
+ * @note Product callback scheduling may differ from coordinate order; tests
+ * therefore assert the coordinates reserved at the shared Run arbiter.
+ */
+class StartCancellationOrderObservationSink final
+    : public ComputeRunObservationSink {
+ public:
+  /** @copydoc ComputeRunObservationSink::reserve_causal_coordinate */
+  ComputeRunObservationCoordinate reserve_causal_coordinate() noexcept
+      override {
+    return ComputeRunObservationCoordinate{
+        std::chrono::steady_clock::now(),
+        next_sequence_.fetch_add(1U, std::memory_order_relaxed)};
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_current_generation */
+  void on_current_generation(
+      const SupersessionIdentity& identity,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)identity;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_service_start */
+  void on_service_start(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunTaskIdentity task_identity, std::uint64_t service_charge,
+      const ComputeRunServiceStartObservation& observation,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)task_identity;
+    (void)service_charge;
+    (void)observation;
+    start_sequence_.store(coordinate.causal_sequence,
+                          std::memory_order_relaxed);
+    start_callback_entered_.store(1, std::memory_order_release);
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_cancellation */
+  void on_cancellation(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunCancellationReason reason,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)reason;
+    cancellation_sequence_.store(coordinate.causal_sequence,
+                                 std::memory_order_relaxed);
+    cancellation_callback_entered_.store(1, std::memory_order_release);
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_terminal */
+  void on_terminal(
+      const ComputeRunDescriptor& descriptor, ComputeRunTerminalKind kind,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)kind;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_current_visible */
+  void on_current_visible(
+      const ComputeRunDescriptor& descriptor, Value output,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)output;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_run_quiescent */
+  void on_run_quiescent(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_run_resource_settled */
+  void on_run_resource_settled(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)coordinate;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_host_settled */
+  void on_host_settled(
+      ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)coordinate;
+  }
+
+  /**
+   * @brief Returns the service-start callback entry flag for bounded polling.
+   * @return Borrowed flag that remains valid with this sink.
+   * @throws Nothing.
+   */
+  const std::atomic_int& start_callback_entered() const noexcept {
+    return start_callback_entered_;
+  }
+
+  /**
+   * @brief Returns the atomic cancellation entry flag for bounded polling.
+   * @return Borrowed flag that remains valid with this sink.
+   * @throws Nothing.
+   */
+  const std::atomic_int& cancellation_callback_entered() const noexcept {
+    return cancellation_callback_entered_;
+  }
+
+  /**
+   * @brief Returns the coordinate reserved at service-start commitment.
+   * @return Zero before start, otherwise its exact nonzero sequence.
+   * @throws Nothing.
+   */
+  std::uint64_t start_sequence() const noexcept {
+    return start_sequence_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Returns the coordinate reserved at cancellation acceptance.
+   * @return Zero before cancellation, otherwise its exact nonzero sequence.
+   * @throws Nothing.
+   */
+  std::uint64_t cancellation_sequence() const noexcept {
+    return cancellation_sequence_.load(std::memory_order_acquire);
+  }
+
+ private:
+  /** @brief Shared strictly increasing callback coordinate authority. */
+  std::atomic<std::uint64_t> next_sequence_{1U};
+  /** @brief Whether the service-start observation callback entered. */
+  std::atomic_int start_callback_entered_{0};
+  /** @brief Whether accepted cancellation callback entered. */
+  std::atomic_int cancellation_callback_entered_{0};
+  /** @brief Committed service-start causal sequence. */
+  std::atomic<std::uint64_t> start_sequence_{0U};
+  /** @brief Cancellation-acceptance causal sequence. */
+  std::atomic<std::uint64_t> cancellation_sequence_{0U};
+};
+
+/**
+ * @brief Blocks one exact test-product start-arbitration checkpoint.
+ * @throws Nothing for construction, observation, and scalar inspection.
+ * @note The gate is used by one isolated service and never re-enters product
+ * code while service locks are held.
+ */
+class ServiceStartArbitrationGate final {
+ public:
+  /**
+   * @brief Selects the one checkpoint that must block.
+   * @param point Before Run arbitration, route commit, or start callback.
+   * @throws Nothing.
+   */
+  explicit ServiceStartArbitrationGate(
+      testing::ServiceStartArbitrationPoint point) noexcept
+      : point_(point) {}
+
+  /**
+   * @brief Waits at the selected checkpoint until the fixture releases it.
+   * @param context Borrowed ServiceStartArbitrationGate pointer.
+   * @param point Checkpoint reached by the service worker.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void observe(void* context,
+                      testing::ServiceStartArbitrationPoint point) noexcept {
+    auto* gate = static_cast<ServiceStartArbitrationGate*>(context);
+    if (point != gate->point_) {
+      return;
+    }
+    gate->entered_.store(1, std::memory_order_release);
+    while (gate->release_.load(std::memory_order_acquire) == 0) {
+      std::this_thread::yield();
+    }
+    gate->exited_.store(1, std::memory_order_release);
+  }
+
+  /** @brief Prevents copying synchronization ownership. */
+  ServiceStartArbitrationGate(const ServiceStartArbitrationGate&) = delete;
+  /** @brief Prevents replacing synchronization ownership. */
+  ServiceStartArbitrationGate& operator=(const ServiceStartArbitrationGate&) =
+      delete;
+
+  /**
+   * @brief Releases the selected checkpoint.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void release() noexcept { release_.store(1, std::memory_order_release); }
+
+  /**
+   * @brief Returns the checkpoint-entry flag for bounded polling.
+   * @return Borrowed flag valid for this gate's lifetime.
+   * @throws Nothing.
+   */
+  const std::atomic_int& entered() const noexcept { return entered_; }
+
+  /**
+   * @brief Waits until an entered checkpoint has returned.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void release_and_wait() noexcept {
+    release();
+    if (entered_.load(std::memory_order_acquire) == 0) {
+      return;
+    }
+    while (exited_.load(std::memory_order_acquire) == 0) {
+      std::this_thread::yield();
+    }
+  }
+
+ private:
+  /** @brief Exact checkpoint selected by the fixture. */
+  testing::ServiceStartArbitrationPoint point_;
+  /** @brief Whether the selected checkpoint entered. */
+  std::atomic_int entered_{0};
+  /** @brief Fixture-owned release gate. */
+  std::atomic_int release_{0};
+  /** @brief Whether the selected checkpoint returned. */
+  std::atomic_int exited_{0};
+};
+
+/**
+ * @brief Owns one installed start-arbitration observer through settlement.
+ * @throws Nothing for construction and destruction.
+ */
+class ScopedServiceStartArbitrationObserver final {
+ public:
+  /**
+   * @brief Installs one isolated service checkpoint gate.
+   * @param service Service whose test-product seam is owned by this scope.
+   * @param gate Gate that outlives this observer.
+   * @throws Nothing.
+   */
+  ScopedServiceStartArbitrationObserver(
+      ExecutionService& service, ServiceStartArbitrationGate& gate) noexcept
+      : service_(service), gate_(gate) {
+    ::ps::testing::ExecutionServiceTestAccess::
+        set_service_start_arbitration_observer(
+            service_, &ServiceStartArbitrationGate::observe, &gate_);
+  }
+
+  /**
+   * @brief Releases a blocked worker and clears the process-local observer.
+   * @throws Nothing.
+   */
+  ~ScopedServiceStartArbitrationObserver() noexcept {
+    gate_.release_and_wait();
+    ::ps::testing::ExecutionServiceTestAccess::
+        clear_service_start_arbitration_observer(service_);
+  }
+
+  /** @brief Prevents duplicate observer ownership. */
+  ScopedServiceStartArbitrationObserver(
+      const ScopedServiceStartArbitrationObserver&) = delete;
+  /** @brief Prevents replacing observer ownership. */
+  ScopedServiceStartArbitrationObserver& operator=(
+      const ScopedServiceStartArbitrationObserver&) = delete;
+
+ private:
+  /** @brief Isolated service carrying the test-product seam. */
+  ExecutionService& service_;
+  /** @brief Gate released before observer removal. */
+  ServiceStartArbitrationGate& gate_;
+};
 
 /**
  * @brief Builds a submission matching one explicitly registered test Graph.
@@ -1378,17 +1810,24 @@ class ExecutionServiceHost final : public ExecutionHostContext {
 
     /** @brief Opaque Run epoch active on that worker. */
     std::uint64_t epoch = 0;
+
+    /** @brief Exact observation-only revision/Run/local-task join. */
+    std::optional<ExecutionTaskAuditIdentity> task_identity;
   };
 
   /**
    * @brief Records one worker-context entry.
    * @param worker_id Fixed private CPU or GPU worker id.
    * @param epoch Active nonzero execution epoch.
+   * @param task_identity Exact task audit tuple active on this callback.
    * @return Nothing.
    * @throws Nothing.
    */
-  void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
+  void set_task_context(int worker_id, std::uint64_t epoch,
+                        std::optional<ExecutionTaskAuditIdentity>
+                            task_identity) noexcept override {
     (void)epoch;
+    (void)task_identity;
     last_worker_id_.store(worker_id, std::memory_order_relaxed);
     context_entries_.fetch_add(1, std::memory_order_relaxed);
   }
@@ -1408,14 +1847,18 @@ class ExecutionServiceHost final : public ExecutionHostContext {
    * @param node_id Planned node id.
    * @param worker_id Active CPU worker id.
    * @param epoch Active execution epoch.
+   * @param task_identity Exact task audit tuple active on this event.
    * @return Nothing.
    * @throws Nothing.
    */
   void log_event(ExecutionTraceAction action, int node_id, int worker_id,
-                 std::uint64_t epoch) noexcept override {
+                 std::uint64_t epoch,
+                 std::optional<ExecutionTaskAuditIdentity>
+                     task_identity) noexcept override {
     try {
       std::lock_guard<std::mutex> lock(trace_mutex_);
-      trace_events_.push_back(TraceEvent{action, node_id, worker_id, epoch});
+      trace_events_.push_back(
+          TraceEvent{action, node_id, worker_id, epoch, task_identity});
     } catch (...) {
       trace_recording_failed_.store(true, std::memory_order_relaxed);
     }
@@ -4088,6 +4531,37 @@ TEST(ComputeRunCommitArbiter, LinearizesCancellationBeforeOrAfterCommitClaim) {
   ASSERT_TRUE(committed.terminal_outcome().has_value());
   EXPECT_EQ(committed.terminal_outcome()->kind,
             ComputeRunTerminalKind::Succeeded);
+}
+
+/**
+ * @brief Proves HP visibility and success terminal resolve as one claim.
+ * @return Nothing; GoogleTest assertions report missing, duplicate, or
+ * reordered observations.
+ * @throws Allocation or synchronization exceptions from Run setup unchanged.
+ * @note Reusing the resolved contender returns false and emits no observation.
+ */
+TEST(ComputeRunCommitArbiter,
+     VisibleSuccessEmitsExactlyOneOrderedObservationPair) {
+  auto sink = std::make_shared<VisibleCommitObservationSink>();
+  ComputeRunSubmission submission =
+      make_test_submission("visible-success", 340U, 440);
+  submission.observation_sink = sink;
+  ComputeRun run(std::move(submission));
+  ComputeRunLease lease = run.acquire_lease();
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::CommitPending));
+  std::optional<ComputeRunCommitContender> contender = lease.try_claim_commit();
+  ASSERT_TRUE(contender.has_value());
+
+  EXPECT_TRUE(contender->publish_visible_succeeded(Value{}));
+  EXPECT_FALSE(contender->publish_visible_succeeded(Value{}));
+  EXPECT_EQ(sink->visible_count(), 1U);
+  EXPECT_EQ(sink->terminal_count(), 1U);
+  ASSERT_EQ(sink->observation_count(), 2U);
+  EXPECT_EQ(sink->observation_at(0U), 1);
+  EXPECT_EQ(sink->observation_at(1U), 2);
+  EXPECT_EQ(sink->terminal_kind(), ComputeRunTerminalKind::Succeeded);
+  ASSERT_TRUE(run.terminal_outcome().has_value());
+  EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Succeeded);
 }
 
 /**
@@ -7375,7 +7849,8 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
             std::future_status::ready);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             ResourceVector{});
 
   throughput = launch_blocking_policy_run(
@@ -7387,7 +7862,8 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
             std::future_status::ready);
   EXPECT_EQ(service.resource_snapshot().reserved, *doubled);
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             required);
 
   EXPECT_TRUE(interactive_release_guard.release());
@@ -7397,7 +7873,8 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_TRUE(wait_for_resource_reservation(service, required));
   EXPECT_EQ(service.resource_snapshot().reserved, required);
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             required);
 
   std::atomic_int rejected_entered{0};
@@ -7418,7 +7895,8 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_EQ(rejected_entered.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             required);
 
   EXPECT_TRUE(throughput_release_guard.release());
@@ -7428,7 +7906,8 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             ResourceVector{});
 
   targets.push_back(launch_ordered_policy_run(
@@ -7441,7 +7920,8 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             ResourceVector{});
 }
 
@@ -7522,7 +8002,8 @@ TEST(ExecutionServicePolicy, SerializesConcurrentThroughputQuotaAdmission) {
   EXPECT_EQ(settled_while_blocked, 1U);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             required);
 
   EXPECT_TRUE(callback_release_guard.release());
@@ -7544,7 +8025,8 @@ TEST(ExecutionServicePolicy, SerializesConcurrentThroughputQuotaAdmission) {
   EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             ResourceVector{});
 }
 
@@ -8033,12 +8515,26 @@ TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
   EXPECT_LT(first_traces.front().worker_id, 2);
   EXPECT_EQ(first_traces.front().epoch, first.descriptor().id().value());
   EXPECT_NE(first_traces.front().epoch, second.descriptor().id().value());
+  ASSERT_TRUE(first_traces.front().task_identity.has_value());
+  EXPECT_EQ(first_traces.front().task_identity->graph_revision,
+            first.descriptor().revision().value());
+  EXPECT_EQ(first_traces.front().task_identity->run_id,
+            first.descriptor().id().value());
+  EXPECT_EQ(first_traces.front().task_identity->run_local_task_id, 0U);
   EXPECT_EQ(second_traces.front().action, ExecutionTraceAction::AssignInitial);
   EXPECT_EQ(second_traces.front().node_id, 64);
   EXPECT_GE(second_traces.front().worker_id, 0);
   EXPECT_LT(second_traces.front().worker_id, 2);
   EXPECT_EQ(second_traces.front().epoch, second.descriptor().id().value());
   EXPECT_NE(second_traces.front().epoch, first.descriptor().id().value());
+  ASSERT_TRUE(second_traces.front().task_identity.has_value());
+  EXPECT_EQ(second_traces.front().task_identity->graph_revision,
+            second.descriptor().revision().value());
+  EXPECT_EQ(second_traces.front().task_identity->run_id,
+            second.descriptor().id().value());
+  EXPECT_EQ(second_traces.front().task_identity->run_local_task_id, 0U);
+  EXPECT_NE(first_traces.front().task_identity->run_id,
+            second_traces.front().task_identity->run_id);
 }
 
 /**
@@ -8285,9 +8781,10 @@ TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
       std::move(failing_lease), failing_identity, 65, true,
       [&failing_entered, failing_release, failure](
           ComputeRunLease&, const ComputeRunTaskIdentity&,
-          ExecutionTaskRuntime&) {
+          ExecutionTaskRuntime& runtime) {
         failing_entered.set_value();
         failing_release.wait();
+        runtime.log_event(ExecutionTraceAction::RethrowException, 65);
         std::rethrow_exception(failure);
       });
 
@@ -8384,6 +8881,18 @@ TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
   }
   EXPECT_EQ(failing_host.context_entries(), failing_host.context_exits());
   EXPECT_EQ(peer_host.context_entries(), peer_host.context_exits());
+  const std::vector<ExecutionServiceHost::TraceEvent> failing_traces =
+      failing_host.trace_events();
+  ASSERT_EQ(failing_traces.size(), 2U);
+  EXPECT_EQ(failing_traces[1].action, ExecutionTraceAction::RethrowException);
+  ASSERT_TRUE(failing_traces[0].task_identity.has_value());
+  ASSERT_TRUE(failing_traces[1].task_identity.has_value());
+  EXPECT_EQ(failing_traces[0].task_identity, failing_traces[1].task_identity);
+  EXPECT_EQ(failing_traces[1].task_identity->graph_revision,
+            failing.descriptor().revision().value());
+  EXPECT_EQ(failing_traces[1].task_identity->run_id,
+            failing.descriptor().id().value());
+  EXPECT_EQ(failing_traces[1].task_identity->run_local_task_id, 0U);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
@@ -9113,6 +9622,279 @@ TEST(ExecutionServiceCancellation,
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(host.context_entries(), 0);
   EXPECT_EQ(host.context_exits(), 0);
+  EXPECT_TRUE(host.trace_events().empty());
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves accepted cancellation defeats a staged but uncommitted start.
+ *
+ * @return Nothing; GoogleTest reports a route/start leak, callback entry,
+ * unreleased gate/grant authority, or cancellation failure.
+ * @throws Allocation, future, service, or synchronization exceptions from
+ * setup and settlement.
+ * @note The worker blocks after gate/grant staging but before acquiring the Run
+ * terminal arbiter. Cancellation publishes under that arbiter first and then
+ * waits for service cleanup, proving the resumed worker cannot commit route.
+ */
+TEST(ExecutionServiceCancellation,
+     AcceptedCancellationPreventsStagedRouteStartCommit) {
+  ExecutionService service(1);
+  ExecutionServiceHost host;
+  auto sink = std::make_shared<StartCancellationOrderObservationSink>();
+  ComputeRunSubmission submission =
+      make_test_submission("cancel-wins-start-arbiter", 611U, 711);
+  submission.observation_sink = sink;
+  ComputeRun run(std::move(submission));
+  const ComputeRunCancellationSource source = run.cancellation_source();
+  std::atomic_int entered{0};
+  const OperationExecutionConstraints constraints{
+      7611U, false, 0U, "cancel-wins-start-arbiter-key"};
+  std::vector<ReadyTaskSubmission> ready;
+  ready.push_back(make_counted_ready_submission(
+      run.acquire_lease(), 0U, 711, entered, ExecutionTaskPriority::Normal,
+      ReadyTaskSubmission::default_resource_demand(), constraints));
+
+  ServiceStartArbitrationGate gate(
+      testing::ServiceStartArbitrationPoint::BeforeRunArbitration);
+  ScopedServiceStartArbitrationObserver observer(service, gate);
+  std::future<void> run_future =
+      std::async(std::launch::async,
+                 [&service, &host, ready = std::move(ready)]() mutable {
+                   service.execute_run(host, "cpu", std::move(ready), 1);
+                 });
+  const bool start_staged = wait_for_atomic_count(gate.entered(), 1);
+  if (!start_staged) {
+    gate.release();
+    EXPECT_TRUE(start_staged);
+    run_future.wait();
+    return;
+  }
+
+  std::future<bool> cancellation = std::async(std::launch::async, [source]() {
+    return source.request_cancellation(
+        ComputeRunCancellationReason::ExplicitRequest);
+  });
+  const bool cancellation_accepted =
+      wait_for_atomic_count(sink->cancellation_callback_entered(), 1);
+  EXPECT_EQ(sink->start_sequence(), 0U);
+
+  gate.release();
+  EXPECT_TRUE(cancellation_accepted);
+  ASSERT_EQ(cancellation.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_TRUE(cancellation.get());
+  ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run_future.get());
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+
+  ComputeRun reuse_run(
+      make_test_submission("cancel-wins-gate-reuse", 612U, 712));
+  std::atomic_int reuse_entered{0};
+  std::vector<ReadyTaskSubmission> reuse_ready;
+  reuse_ready.push_back(make_counted_ready_submission(
+      reuse_run.acquire_lease(), 0U, 712, reuse_entered,
+      ExecutionTaskPriority::Normal,
+      ReadyTaskSubmission::default_resource_demand(), constraints));
+  EXPECT_NO_THROW(service.execute_run(host, "cpu", std::move(reuse_ready), 1));
+  EXPECT_EQ(reuse_entered.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves a route commit holding the Run arbiter orders before cancel.
+ *
+ * @return Nothing; GoogleTest reports coordinate inversion, missing callbacks,
+ * cancellation failure, or resource leakage.
+ * @throws Allocation, future, service, or synchronization exceptions from
+ * setup and settlement.
+ * @note The worker blocks with the Run terminal arbiter held immediately before
+ * irreversible route commit. A concurrent cancellation call cannot publish
+ * until the route commits and the start coordinate is fixed.
+ */
+TEST(ExecutionServiceCancellation,
+     RouteCommitHoldingRunArbiterPrecedesConcurrentCancellation) {
+  ExecutionService service(1);
+  ExecutionServiceHost host;
+  auto sink = std::make_shared<StartCancellationOrderObservationSink>();
+  ComputeRunSubmission submission =
+      make_test_submission("start-wins-run-arbiter", 613U, 713);
+  submission.observation_sink = sink;
+  ComputeRun run(std::move(submission));
+  const ComputeRunCancellationSource source = run.cancellation_source();
+  std::atomic_int entered{0};
+  std::vector<ReadyTaskSubmission> ready;
+  ready.push_back(
+      make_counted_ready_submission(run.acquire_lease(), 0U, 713, entered));
+
+  ServiceStartArbitrationGate gate(
+      testing::ServiceStartArbitrationPoint::BeforeRouteCommit);
+  ScopedServiceStartArbitrationObserver observer(service, gate);
+  std::future<void> run_future =
+      std::async(std::launch::async,
+                 [&service, &host, ready = std::move(ready)]() mutable {
+                   service.execute_run(host, "cpu", std::move(ready), 1);
+                 });
+  const bool route_commit_staged = wait_for_atomic_count(gate.entered(), 1);
+  if (!route_commit_staged) {
+    gate.release();
+    EXPECT_TRUE(route_commit_staged);
+    run_future.wait();
+    return;
+  }
+
+  std::atomic_int cancellation_called{0};
+  std::future<bool> cancellation =
+      std::async(std::launch::async, [source, &cancellation_called]() {
+        cancellation_called.store(1, std::memory_order_release);
+        return source.request_cancellation(
+            ComputeRunCancellationReason::ExplicitRequest);
+      });
+  const bool cancellation_started =
+      wait_for_atomic_count(cancellation_called, 1);
+  gate.release();
+  EXPECT_TRUE(cancellation_started);
+
+  ASSERT_TRUE(wait_for_atomic_count(sink->start_callback_entered(), 1));
+  ASSERT_TRUE(wait_for_atomic_count(sink->cancellation_callback_entered(), 1));
+  EXPECT_NE(sink->start_sequence(), 0U);
+  EXPECT_LT(sink->start_sequence(), sink->cancellation_sequence());
+  ASSERT_EQ(cancellation.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_TRUE(cancellation.get());
+  ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run_future.get());
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves one service-start reservation remains visible until callback.
+ * @param point Post-reservation checkpoint before route commit or callback.
+ * @return Nothing after the worker resumes and every reservation is closed.
+ * @throws Allocation, service, future, and synchronization failures unchanged.
+ * @note The test-product checkpoint blocks only the service worker. The M1
+ * collector snapshot remains lock-free and must reject the in-flight B-cut.
+ */
+void expect_m1_cut_rejects_in_flight_service_start(
+    testing::ServiceStartArbitrationPoint point) {
+  ExecutionService service(1);
+  ExecutionServiceHost host;
+  benchmark::M1FairnessObservationCollector collector(32U);
+  ComputeRunSubmission submission =
+      make_test_submission("m1-reservation-frontier", 614U, 714);
+  submission.observation_sink =
+      collector.make_sink(benchmark::M1ObservedRequestTag::ThroughputGraphA);
+  ComputeRun run(std::move(submission));
+  std::atomic_int entered{0};
+  std::vector<ReadyTaskSubmission> ready;
+  ready.push_back(
+      make_counted_ready_submission(run.acquire_lease(), 0U, 714, entered));
+
+  const benchmark::M1FairnessObservationSnapshot before = collector.snapshot();
+  ASSERT_TRUE(before.stable_publication_cut);
+  ServiceStartArbitrationGate gate(point);
+  ScopedServiceStartArbitrationObserver observer(service, gate);
+  std::future<void> run_future =
+      std::async(std::launch::async,
+                 [&service, &host, ready = std::move(ready)]() mutable {
+                   service.execute_run(host, "cpu", std::move(ready), 1);
+                 });
+  const bool checkpoint_entered = wait_for_atomic_count(gate.entered(), 1);
+  if (!checkpoint_entered) {
+    gate.release();
+    run_future.wait();
+    FAIL() << "service start did not reach the reservation checkpoint";
+    return;
+  }
+
+  const benchmark::M1FairnessObservationSnapshot in_flight =
+      collector.snapshot();
+  EXPECT_FALSE(in_flight.stable_publication_cut);
+  EXPECT_GT(in_flight.reservation_entry_frontier,
+            in_flight.reservation_completion_frontier);
+  EXPECT_FALSE(benchmark::m1_observation_cut_unchanged(before, in_flight));
+
+  gate.release();
+  ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run_future.get());
+  const benchmark::M1FairnessObservationSnapshot after = collector.snapshot();
+  EXPECT_TRUE(after.stable_publication_cut);
+  EXPECT_EQ(after.reservation_entry_frontier,
+            after.reservation_completion_frontier);
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Rejects a B-cut after coordinate reserve and before route commit.
+ * @throws Test helper failures unchanged.
+ */
+TEST(ExecutionServiceObservation,
+     M1CutRejectsReservedButUncommittedServiceStart) {
+  expect_m1_cut_rejects_in_flight_service_start(
+      testing::ServiceStartArbitrationPoint::BeforeRouteCommit);
+}
+
+/**
+ * @brief Rejects a B-cut after route commit and before callback delivery.
+ * @throws Test helper failures unchanged.
+ */
+TEST(ExecutionServiceObservation,
+     M1CutRejectsCommittedButUnpublishedServiceStart) {
+  expect_m1_cut_rejects_in_flight_service_start(
+      testing::ServiceStartArbitrationPoint::BeforeServiceStartCallback);
+}
+
+/**
+ * @brief Proves a rejected post-reservation route commit retires its frontier.
+ *
+ * The internal test product rejects exactly one physical route commit after
+ * `ComputeRunControl` reserves the service-start coordinate.  The ordinary
+ * worker retry then succeeds.  The final M1 snapshot must be stable, contain
+ * only the real service start, and have no abandoned reservation frontier.
+ *
+ * @throws Allocation, service, and test-probe failures unchanged.
+ */
+TEST(ExecutionServiceObservation,
+     FailedRouteCommitAbortsM1CoordinateWithoutFrontierLeak) {
+  ExecutionService service(1);
+  ExecutionServiceHost host;
+  benchmark::M1FairnessObservationCollector collector(32U);
+  ComputeRunSubmission submission =
+      make_test_submission("m1-route-commit-abort", 615U, 715);
+  submission.observation_sink =
+      collector.make_sink(benchmark::M1ObservedRequestTag::ThroughputGraphA);
+  ComputeRun run(std::move(submission));
+  std::atomic_int entered{0};
+  std::vector<ReadyTaskSubmission> ready;
+  ready.push_back(
+      make_counted_ready_submission(run.acquire_lease(), 0U, 715, entered));
+
+  ::ps::testing::ExecutionServiceTestAccess::arm_route_commit_failure_probe(
+      service);
+  EXPECT_NO_THROW(service.execute_run(host, "cpu", std::move(ready), 1));
+  const bool failure_triggered = ::ps::testing::ExecutionServiceTestAccess::
+      route_commit_failure_probe_triggered(service);
+  ::ps::testing::ExecutionServiceTestAccess::disarm_route_commit_failure_probe(
+      service);
+
+  EXPECT_TRUE(failure_triggered);
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  const benchmark::M1FairnessObservationSnapshot snapshot =
+      collector.snapshot();
+  EXPECT_TRUE(snapshot.stable_publication_cut);
+  EXPECT_EQ(snapshot.reservation_entry_frontier,
+            snapshot.reservation_completion_frontier);
+  EXPECT_EQ(std::count_if(snapshot.events.begin(), snapshot.events.end(),
+                          [](const benchmark::M1FairnessObservation& event) {
+                            return event.kind ==
+                                   benchmark::M1ObservationKind::ServiceStart;
+                          }),
+            1);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
@@ -9148,6 +9930,14 @@ TEST(ExecutionServiceCancellation,
   EXPECT_EQ(host.context_entries(), 1);
   EXPECT_EQ(host.context_exits(), 1);
   EXPECT_FALSE(host.trace_recording_failed());
+  const std::vector<ExecutionServiceHost::TraceEvent> cancelled_traces =
+      host.trace_events();
+  ASSERT_EQ(cancelled_traces.size(), 1U);
+  EXPECT_EQ(cancelled_traces.front().action,
+            ExecutionTraceAction::AssignInitial);
+  ASSERT_TRUE(cancelled_traces.front().task_identity.has_value());
+  EXPECT_EQ(cancelled_traces.front().task_identity->run_id,
+            run.descriptor().id().value());
   ASSERT_TRUE(run.terminal_outcome().has_value());
   EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
@@ -9161,6 +9951,15 @@ TEST(ExecutionServiceCancellation,
   EXPECT_NO_THROW(
       service.execute_run(host, "cpu", std::move(recovery_ready), 1));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  const std::vector<ExecutionServiceHost::TraceEvent> retry_traces =
+      host.trace_events();
+  ASSERT_EQ(retry_traces.size(), 2U);
+  ASSERT_TRUE(retry_traces.back().task_identity.has_value());
+  EXPECT_EQ(retry_traces.back().task_identity->run_local_task_id, 0U);
+  EXPECT_EQ(retry_traces.back().task_identity->run_id,
+            recovery.descriptor().id().value());
+  EXPECT_NE(retry_traces.front().task_identity->run_id,
+            retry_traces.back().task_identity->run_id);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 

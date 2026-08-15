@@ -7,8 +7,12 @@
 #if defined(PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
 #include <atomic>
 #endif
+#include <fenv.h>  // NOLINT(build/c++11)
+
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -16,6 +20,7 @@
 #include <opencv2/imgproc.hpp>
 #include <optional>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1191,6 +1196,114 @@ static PixelRect identity_dirty_roi(
 // =============================================================================
 
 /**
+ * @brief Converts one byte numerator divided by 255 to exact IEEE binary32.
+ * @param numerator Unsigned numerator in `[0,255]`.
+ * @return Round-to-nearest-ties-to-even representation of `numerator / 255`.
+ * @throws Nothing.
+ * @note The conversion uses integer normalization, division, and bit copying;
+ * it is independent of the ambient floating-point rounding mode. Every
+ * nonzero fraction is a normal binary32 value, so no subnormal path exists.
+ */
+static float byte_fraction_to_binary32(std::uint8_t numerator) noexcept {
+  if (numerator == 0U) {
+    return 0.0F;
+  }
+  if (numerator == 255U) {
+    std::uint32_t one_bits = 0x3f800000U;
+    float one = 0.0F;
+    std::memcpy(&one, &one_bits, sizeof(one));
+    return one;
+  }
+
+  unsigned int highest_bit = 0U;
+  for (std::uint32_t value = numerator; value > 1U; value >>= 1U) {
+    ++highest_bit;
+  }
+  int exponent = static_cast<int>(highest_bit) - 8;
+  const unsigned int shift = static_cast<unsigned int>(23 - exponent);
+  const std::uint64_t scaled = static_cast<std::uint64_t>(numerator) << shift;
+  std::uint64_t significand = scaled / 255U;
+  const std::uint64_t remainder = scaled % 255U;
+  const std::uint64_t doubled_remainder = remainder * 2U;
+  if (doubled_remainder > 255U ||
+      (doubled_remainder == 255U && (significand & 1U) != 0U)) {
+    ++significand;
+  }
+  if (significand == (std::uint64_t{1U} << 24U)) {
+    significand >>= 1U;
+    ++exponent;
+  }
+  const std::uint32_t biased_exponent =
+      static_cast<std::uint32_t>(exponent + 127);
+  const std::uint32_t mantissa =
+      static_cast<std::uint32_t>(significand - (std::uint64_t{1U} << 23U));
+  const std::uint32_t bits = (biased_exponent << 23U) | mantissa;
+  float result = 0.0F;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
+/**
+ * @brief Generates the frozen coordinate-pattern FP32 image exactly.
+ * @param node Generator node carrying width, height, channels, and byte seed.
+ * @param inputs Unused generator inputs.
+ * @return Owned CPU image whose sample `(x,y,c)` is the exact binary32 value
+ * of `((17*x + 31*y + 47*c + seed) mod 256) / 255`.
+ * @throws GraphError with `GraphErrc::InvalidParameter` for non-positive
+ * dimensions, unsupported channel count, or a seed outside `[0,255]`.
+ * @throws cv::Exception internally for matrix allocation/access failure; the
+ * provider fence translates the exception category.
+ * @throws std::bad_alloc when Host image ownership cannot allocate.
+ * @note Every sample is constructed from integer arithmetic and explicit IEEE
+ * bits, independent of ambient rounding mode. Invocation-local storage makes
+ * the callback reentrant across execution workers.
+ */
+static NodeOutput op_coordinate_pattern(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_generator:coordinate_pattern");
+  static_cast<void>(inputs);
+  const auto& parameters = node.runtime_parameters;
+  const int width = as_int_flexible(parameters, "width", 2048);
+  const int height = as_int_flexible(parameters, "height", 2048);
+  const int channels = as_int_flexible(parameters, "channels", 4);
+  const int seed = as_int_flexible(parameters, "seed", 0);
+  if (width <= 0 || height <= 0) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "coordinate_pattern requires positive width and height");
+  }
+  if (channels <= 0 || channels > 4) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "coordinate_pattern requires one through four channels");
+  }
+  if (seed < 0 || seed > 255) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "coordinate_pattern seed must be in [0,255]");
+  }
+
+  cv::Mat output(height, width, CV_MAKETYPE(CV_32F, channels));
+  for (int y = 0; y < height; ++y) {
+    float* row = output.ptr<float>(y);
+    for (int x = 0; x < width; ++x) {
+      for (int channel = 0; channel < channels; ++channel) {
+        const std::uint64_t numerator =
+            (17U * static_cast<std::uint64_t>(x) +
+             31U * static_cast<std::uint64_t>(y) +
+             47U * static_cast<std::uint64_t>(channel) +
+             static_cast<std::uint64_t>(seed)) &
+            255U;
+        row[static_cast<std::size_t>(x) * static_cast<std::size_t>(channels) +
+            static_cast<std::size_t>(channel)] =
+            byte_fraction_to_binary32(static_cast<std::uint8_t>(numerator));
+      }
+    }
+  }
+
+  NodeOutput result;
+  result.image_buffer = fromCvMat(output);
+  return result;
+}
+
+/**
  * @brief Loads one image file and normalizes scalar storage to float32.
  *
  * @param node Source node carrying a required static `path` parameter.
@@ -1608,17 +1721,115 @@ static NodeOutput op_extract_channel(
 // =============================================================================
 // ==                       类型二: TILED (分块计算) 操作 ==
 // =============================================================================
+
+/**
+ * @brief Owns one thread-local round-to-nearest binary floating-point scope.
+ * @throws std::runtime_error when the platform cannot capture the complete
+ * worker environment, install the required rounding mode, or restore the
+ * captured environment after installation fails.
+ * @note The complete prior environment, including rounding and sticky
+ * exception flags, is restored on every normal or exceptional exit.
+ * Destruction-time restoration failure terminates because leaking changed
+ * floating-point state into a reused execution worker would make later product
+ * arithmetic non-deterministic.
+ */
+class ScopedBinary32RoundToNearest final {
+ public:
+  /**
+   * @brief Captures the complete worker environment and installs RNE.
+   * @throws std::runtime_error when capture or installation fails. After a
+   * successful capture, installation failure first attempts complete
+   * restoration and reports separately if that recovery also fails.
+   */
+  ScopedBinary32RoundToNearest() {
+    if (fegetenv(&previous_environment_) != 0) {
+      throw std::runtime_error(
+          "curve_transform cannot capture worker floating-point environment");
+    }
+    if (fesetround(FE_TONEAREST) != 0) {
+      if (fesetenv(&previous_environment_) != 0) {
+        throw std::runtime_error(
+            "curve_transform cannot install binary32 RNE rounding or restore "
+            "the worker floating-point environment");
+      }
+      throw std::runtime_error(
+          "curve_transform cannot install binary32 RNE rounding");
+    }
+  }
+
+  /**
+   * @brief Restores the worker's complete prior floating-point environment.
+   * @throws Nothing; restoration failure terminates the process.
+   * @note Full restoration removes sticky exceptions raised by curve arithmetic
+   * while preserving every flag and control value present on scope entry.
+   */
+  ~ScopedBinary32RoundToNearest() noexcept {
+    if (fesetenv(&previous_environment_) != 0) {
+      std::terminate();
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate ownership of one worker rounding scope.
+   * @param other Guard retaining restoration responsibility.
+   * @throws Nothing because copying is unavailable.
+   */
+  ScopedBinary32RoundToNearest(const ScopedBinary32RoundToNearest& other) =
+      delete;
+
+  /**
+   * @brief Prevents replacing one worker rounding scope.
+   * @param other Guard retaining restoration responsibility.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedBinary32RoundToNearest& operator=(
+      const ScopedBinary32RoundToNearest& other) = delete;
+
+ private:
+  /**
+   * @brief Complete environment restored before the worker is reused.
+   * @note The value becomes valid only after successful `fegetenv`; a failed
+   * constructor never reaches destruction.
+   */
+  fenv_t previous_environment_{};
+};
+
+/**
+ * @brief Applies one exact three-cut binary32 curve stage.
+ * @param input One source sample.
+ * @param coefficient Binary32 coefficient frozen for the whole tile.
+ * @return `RNE(1 / RNE(1 + RNE(input * coefficient)))`.
+ * @throws Nothing.
+ * @note Volatile intermediates preserve every specified binary32 rounding cut
+ * and prevent contraction into architecture-dependent bulk approximations.
+ * The caller owns an active `ScopedBinary32RoundToNearest`.
+ */
+static float curve_transform_binary32(float input, float coefficient) noexcept {
+  volatile float product = input * coefficient;
+  volatile float denominator = 1.0F + product;
+  volatile float result = 1.0F / denominator;
+  return result;
+}
+
 /**
  * @brief Applies the pointwise curve transform to one independently owned tile.
  * @param node Effective curve coefficient.
  * @param output_tile Writable destination tile owned by the current task.
  * @param input_tiles One immutable normalized input tile.
  * @return Nothing.
- * @throws std::bad_alloc if parameter or temporary matrix allocation fails.
- * @throws GraphError if the required input tile is missing.
- * @throws cv::Exception if OpenCV arithmetic or adapter conversion fails.
- * @note Local `cv::Mat` headers share only task-owned payloads. Multiple
- *       execution workers may execute this callback concurrently.
+ * @throws GraphError if the required input tile is missing or the tile pair is
+ * not shape/type compatible FP32 storage.
+ * @throws std::runtime_error when the complete worker environment cannot be
+ * captured, binary32 RNE cannot be installed, or failed installation cannot
+ * restore the captured environment.
+ * @throws cv::Exception if OpenCV adapter conversion fails.
+ * @note The coefficient conversion and multiply/add/reciprocal cuts all occur
+ * under explicit RNE. Scalar volatile cuts intentionally avoid OpenCV bulk
+ * division paths whose one-ULP result depends on vector width/architecture.
+ * Each task owns disjoint output storage and restores its worker's complete
+ * floating-point environment, so concurrent callbacks remain race-free.
+ * Destruction-time restoration failure is fail-stop.
  */
 static void op_curve_transform_tiled(
     const Node& node, const OutputTile& output_tile,
@@ -1632,13 +1843,29 @@ static void op_curve_transform_tiled(
   cv::Mat input_mat = toCvMat(input_tiles[0]);
   cv::Mat output_mat = toCvMat(output_tile);
 
-  const auto& P = node.runtime_parameters;
-  double k = as_double_flexible(P, "k", 1.0);
+  if (input_mat.depth() != CV_32F || output_mat.depth() != CV_32F ||
+      input_mat.size() != output_mat.size() ||
+      input_mat.channels() != output_mat.channels()) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "curve_transform requires shape-compatible FP32 input/output tiles.");
+  }
 
-  cv::Mat temp;
-  cv::multiply(input_mat, cv::Scalar::all(k), temp);
-  cv::add(cv::Scalar::all(1.0), temp, temp);
-  cv::divide(1.0, temp, output_mat);
+  const auto& P = node.runtime_parameters;
+  const double k = as_double_flexible(P, "k", 1.0);
+  ScopedBinary32RoundToNearest rounding_scope;
+  volatile float rounded_coefficient = static_cast<float>(k);
+  const float coefficient = rounded_coefficient;
+  const std::size_t scalars_per_row =
+      static_cast<std::size_t>(input_mat.cols) *
+      static_cast<std::size_t>(input_mat.channels());
+  for (int row = 0; row < input_mat.rows; ++row) {
+    const float* const input = input_mat.ptr<float>(row);
+    float* const output = output_mat.ptr<float>(row);
+    for (std::size_t index = 0U; index < scalars_per_row; ++index) {
+      output[index] = curve_transform_binary32(input[index], coefficient);
+    }
+  }
 }
 
 /**
@@ -2260,6 +2487,10 @@ void register_provider() {
       fence_monolithic_operation("image_generator:constant",
                                  MonolithicOpFunc(op_constant_image)));
   registry.register_op_hp_monolithic(
+      "image_generator", "coordinate_pattern",
+      fence_monolithic_operation("image_generator:coordinate_pattern",
+                                 MonolithicOpFunc(op_coordinate_pattern)));
+  registry.register_op_hp_monolithic(
       "image_generator", "perlin_noise",
       fence_monolithic_operation("image_generator:perlin_noise",
                                  MonolithicOpFunc(op_perlin_noise)));
@@ -2291,11 +2522,15 @@ void register_provider() {
   registry.register_dirty_propagator("image_source", "path", identity_roi);
   registry.register_dirty_propagator("image_generator", "constant",
                                      identity_roi);
+  registry.register_dirty_propagator("image_generator", "coordinate_pattern",
+                                     identity_roi);
   registry.register_dirty_propagator("image_generator", "perlin_noise",
                                      identity_roi);
   registry.register_forward_propagator("image_source", "path",
                                        identity_forward);
   registry.register_forward_propagator("image_generator", "constant",
+                                       identity_forward);
+  registry.register_forward_propagator("image_generator", "coordinate_pattern",
                                        identity_forward);
   registry.register_forward_propagator("image_generator", "perlin_noise",
                                        identity_forward);
