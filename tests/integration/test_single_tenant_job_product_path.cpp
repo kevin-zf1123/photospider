@@ -21,7 +21,7 @@
 #include <utility>
 #include <vector>
 
-#include "server/embedded_job_worker.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker/embedded_job_worker.hpp"  // NOLINT(build/include_subdir)
 
 #ifndef PS_PHOTOSPIDER_WORKER_PATH
 #error "PS_PHOTOSPIDER_WORKER_PATH must name photospider-worker"

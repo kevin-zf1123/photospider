@@ -16,7 +16,7 @@
 #include <utility>
 
 #include "core/value_image_adapter.hpp"
-#include "execution/compute_io_executor.hpp"
+#include "execution/device/compute_io_executor.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "photospider/core/graph_error.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)

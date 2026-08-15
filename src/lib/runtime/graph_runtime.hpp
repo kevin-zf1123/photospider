@@ -17,7 +17,7 @@
 #include <utility>
 #include <vector>
 
-#include "compute/compute_request_coordinator.hpp"
+#include "compute/request/compute_request_coordinator.hpp"
 #include "execution/execution_task_runtime.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_state_executor.hpp"

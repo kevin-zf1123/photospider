@@ -12,10 +12,10 @@
 #include <utility>
 #include <vector>
 
-#include "compute/i2_metal_acquisition_deadline.hpp"
+#include "compute/execution/i2_metal_acquisition_deadline.hpp"
 #include "core/pending_value.hpp"
-#include "execution/device_completion.hpp"
-#include "execution/residency_manager.hpp"
+#include "execution/device/device_completion.hpp"
+#include "execution/device/residency_manager.hpp"
 #include "photospider/data/value.hpp"
 #include "runtime/resource_ledger.hpp"
 

@@ -13,8 +13,8 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/b1_evidence.hpp"        // NOLINT(build/include_subdir)
-#include "benchmark/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/b1/b1_evidence.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/common/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
 #include "support/b1_test_environment.hpp"
 #include "verification/b1_evidence_json.hpp"
 

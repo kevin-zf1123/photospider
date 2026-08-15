@@ -279,12 +279,27 @@ src/lib/
   core/
   graph/
   compute/
+    dispatch/
+    dirty/
+    execution/
+    request/
   runtime/
   host/
   plugin/
   policy/
   execution/
+    device/
+    isolation/
+    transfer/
   benchmark/
+    b1/
+    i1/
+    i2/
+    m1/
+    common/
+  server/
+    state/
+    worker/
   adapters/
     opencv/
     metal/
@@ -320,7 +335,12 @@ headers without shims or duplicates. Issue #75 removes the worker-owning
 scheduler SDK and adds the one-header `include/photospider/policy/` pure-C
 contract. Policy registry/loading lives under `src/lib/policy/`; private
 route/runtime contracts live under `src/lib/execution/`; the policy-aware store
-and reserved-start logic remain under `src/lib/compute/`; and the sole
+and reserved-start logic live under `src/lib/compute/execution/`; request,
+dispatch, and dirty-update collaborators live under their matching compute
+subdirectories. Device, isolation, and transfer mechanics are separated below
+`src/lib/execution/`; benchmark profiles are grouped by scenario; durable
+server truth and worker supervision are separated below `src/lib/server/`.
+The sole
 Host-and-per-device authoritative ledger implementation remains under
 `src/lib/runtime/`.
 None of those private implementation owners becomes a public Host or IPC type.
@@ -845,13 +865,19 @@ dependency table is in the
      `src/lib/benchmark/`; they remain exclusive to the non-installable CLI
      helper/closure and outside the installable static product.
    - Existing backend implementation/private headers live under role-owned
-     `src/lib/**`; the source-private single-tenant Job control/manager/protocol/
-     artifact slice lives under `src/lib/server/`, and its one-assignment
+     `src/lib/**`; dense compute, benchmark, execution, and server roles use one
+     additional responsibility directory rather than accumulating a flat set
+     of translation units. The source-private single-tenant Job control plane
+     remains at `src/lib/server/`, durable truth lives in `server/state/`,
+     manager/protocol/artifact ownership lives in `server/worker/`, and its one-assignment
      composition root lives under `apps/photospider_worker/`; production
      plugins live under `plugins/**`; maintained tests live under explicit
      unit/integration/fixture/support/verification roles.
-   - Physical movement preserves existing target and test identity. Internal
-     target renames or redesign are not implied.
+   - Physical movement preserves existing target, ABI, and test identity. The
+     former monolithic execution-service and worker-manager implementations are
+     compiled from responsibility-specific translation units with shared
+     source-private state declarations; no forwarding header or duplicate old
+     path remains.
 6. **Completed daemon slice:** `apps/photospiderd/` now owns foreground process,
    self-pipe signal, protected socket, bounded workers, and deterministic
    cleanup behavior.

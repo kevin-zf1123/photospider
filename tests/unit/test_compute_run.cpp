@@ -23,15 +23,15 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/m1_profile.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1/m1_profile.hpp"  // NOLINT(build/include_subdir)
 #include "compute/compute_run.hpp"
-#include "compute/compute_task_submission.hpp"
-#include "compute/dirty_execution_common.hpp"
-#include "compute/dirty_update_executor.hpp"
-#include "compute/dirty_write_buffers.hpp"
-#include "compute/execution_service.hpp"
-#include "compute/resource_demand_estimator.hpp"
-#include "compute/run_group.hpp"
+#include "compute/dirty/dirty_execution_common.hpp"
+#include "compute/dirty/dirty_update_executor.hpp"
+#include "compute/dirty/dirty_write_buffers.hpp"
+#include "compute/dispatch/compute_task_submission.hpp"
+#include "compute/dispatch/run_group.hpp"
+#include "compute/execution/execution_service.hpp"
+#include "compute/execution/resource_demand_estimator.hpp"
 #include "core/image_buffer_processing.hpp"
 #include "core/pending_value.hpp"
 #include "execution/execution_task_runtime.hpp"

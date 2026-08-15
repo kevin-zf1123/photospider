@@ -21,9 +21,9 @@
 #include <utility>
 #include <vector>
 
-#include "server/durable_server_state.hpp"  // NOLINT(build/include_subdir)
-#include "server/job_contract.hpp"          // NOLINT(build/include_subdir)
-#include "server/tenant_quota.hpp"          // NOLINT(build/include_subdir)
+#include "server/state/durable_server_state.hpp"  // NOLINT(build/include_subdir)
+#include "server/state/job_contract.hpp"  // NOLINT(build/include_subdir)
+#include "server/state/tenant_quota.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
 

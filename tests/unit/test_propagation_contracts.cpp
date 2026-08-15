@@ -16,9 +16,9 @@
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "adapters/yaml/parameter_value_yaml.hpp"
-#include "compute/dirty_region_planner.hpp"
+#include "compute/dirty/dirty_region_planner.hpp"
+#include "compute/dispatch/task_graph_planning.hpp"
 #include "compute/image_buffer.hpp"
-#include "compute/task_graph_planning.hpp"
 #include "core/parameter_value_text.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/graph_traversal_service.hpp"

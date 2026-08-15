@@ -30,11 +30,11 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/b1_evidence.hpp"         // NOLINT(build/include_subdir)
-#include "benchmark/evidence_envelope.hpp"   // NOLINT(build/include_subdir)
-#include "benchmark/m1_canonical.hpp"        // NOLINT(build/include_subdir)
-#include "benchmark/m1_evidence.hpp"         // NOLINT(build/include_subdir)
-#include "benchmark/observation_fanout.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/b1/b1_evidence.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/common/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/common/observation_fanout.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1/m1_canonical.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1/m1_evidence.hpp"   // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
 #include "verification/b1_evidence_json.hpp"
 #include "verification/i1_evidence_json.hpp"

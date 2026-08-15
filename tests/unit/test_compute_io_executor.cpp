@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <thread>
 
-#include "execution/compute_io_executor.hpp"
+#include "execution/device/compute_io_executor.hpp"
 
 namespace ps::execution {
 namespace {

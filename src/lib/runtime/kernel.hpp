@@ -25,7 +25,7 @@
 #include <vector>
 
 #include "compute/compute_service.hpp"
-#include "compute/dirty_control_lane.hpp"
+#include "compute/dirty/dirty_control_lane.hpp"
 #include "core/cache_metadata_codec.hpp"
 #include "core/image_artifact_codec.hpp"
 #include "graph/graph_cache_service.hpp"

@@ -19,7 +19,7 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/i1_evidence.hpp"
+#include "benchmark/i1/i1_evidence.hpp"
 
 namespace ps::benchmark {
 

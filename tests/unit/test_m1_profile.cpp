@@ -20,10 +20,10 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/m1_canonical.hpp"        // NOLINT(build/include_subdir)
-#include "benchmark/m1_evidence.hpp"         // NOLINT(build/include_subdir)
-#include "benchmark/m1_profile.hpp"          // NOLINT(build/include_subdir)
-#include "benchmark/observation_fanout.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/common/observation_fanout.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1/m1_canonical.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1/m1_evidence.hpp"   // NOLINT(build/include_subdir)
+#include "benchmark/m1/m1_profile.hpp"    // NOLINT(build/include_subdir)
 #include "photospider/data/value.hpp"
 #include "support/b1_test_environment.hpp"
 #include "support/m1_test_evidence.hpp"

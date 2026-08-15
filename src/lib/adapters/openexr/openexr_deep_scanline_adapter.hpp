@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "adapters/openexr/openexr_deep_contract.hpp"
-#include "execution/compute_io_executor.hpp"
+#include "execution/device/compute_io_executor.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/plugin/data_definition_registry.hpp"
 

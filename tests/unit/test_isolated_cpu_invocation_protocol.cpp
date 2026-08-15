@@ -14,7 +14,7 @@
 #include <utility>
 #include <vector>
 
-#include "execution/isolated_cpu_invocation_protocol.hpp"  // NOLINT(build/include_subdir)
+#include "execution/isolation/isolated_cpu_invocation_protocol.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::execution {
 namespace {

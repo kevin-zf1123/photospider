@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "benchmark/benchmark_types.hpp"
+#include "benchmark/common/benchmark_types.hpp"
 #include "photospider/host/host.hpp"
 
 namespace ps {

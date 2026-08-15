@@ -23,7 +23,7 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/i2_evidence.hpp"
+#include "benchmark/i2/i2_evidence.hpp"
 #include "photospider/host/host.hpp"
 #include "verification/i2_evidence_json.hpp"
 #include "verification/i2_evidence_workflow.hpp"

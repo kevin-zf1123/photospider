@@ -608,15 +608,17 @@ product process configured to auto-reap `SIGCHLD` children.
 
 Long-lived entry points are:
 
-- contracts: `src/lib/server/job_contract.{hpp,cpp}`;
-- quota: `src/lib/server/tenant_quota.{hpp,cpp}`;
-- durable state: `src/lib/server/durable_server_state.{hpp,cpp}`;
+- contracts: `src/lib/server/state/job_contract.{hpp,cpp}`;
+- quota: `src/lib/server/state/tenant_quota.{hpp,cpp}`;
+- durable state: `src/lib/server/state/durable_server_state.{hpp,cpp}`;
 - control plane: `src/lib/server/single_tenant_job_service.{hpp,cpp}`;
-- Embedded adapter: `src/lib/server/embedded_job_worker.{hpp,cpp}`;
+- Embedded adapter: `src/lib/server/worker/embedded_job_worker.{hpp,cpp}`;
 - private worker transport and lifecycle:
-  `src/lib/server/worker_protocol.{hpp,cpp}`,
-  `src/lib/server/worker_artifact_data_plane.{hpp,cpp}`, and
-  `src/lib/server/worker_manager.{hpp,cpp}`;
+  `src/lib/server/worker/worker_protocol.{hpp,cpp}`,
+  `src/lib/server/worker/worker_artifact_data_plane.{hpp,cpp}`, and the
+  `worker_manager.hpp` pimpl boundary with
+  `worker_manager_{lifecycle,process,monitor}.cpp` plus its source-private
+  `worker_manager_{impl,posix,internal}.hpp` state;
 - one-assignment composition root: `apps/photospider_worker/main.cpp`;
 - focused authority/lifecycle tests:
   `tests/unit/test_single_tenant_job_service.cpp` and

@@ -16,8 +16,8 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/m1_canonical.hpp"  // NOLINT(build/include_subdir)
-#include "benchmark/m1_evidence.hpp"   // NOLINT(build/include_subdir)
+#include "benchmark/m1/m1_canonical.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1/m1_evidence.hpp"   // NOLINT(build/include_subdir)
 #include "photospider/data/value.hpp"
 #include "support/b1_test_environment.hpp"
 

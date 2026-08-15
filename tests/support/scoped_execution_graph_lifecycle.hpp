@@ -7,7 +7,7 @@
 #include <exception>
 #include <memory>
 
-#include "compute/execution_service.hpp"
+#include "compute/execution/execution_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::testing {

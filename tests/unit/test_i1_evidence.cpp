@@ -20,8 +20,8 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
-#include "benchmark/i1_evidence.hpp"
+#include "benchmark/common/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/i1/i1_evidence.hpp"
 #include "compute/compute_run.hpp"
 #include "photospider/data/value.hpp"
 #include "support/b1_test_environment.hpp"

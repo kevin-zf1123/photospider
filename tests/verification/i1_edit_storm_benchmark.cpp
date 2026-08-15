@@ -25,8 +25,8 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
-#include "benchmark/i1_evidence.hpp"
+#include "benchmark/common/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/i1/i1_evidence.hpp"
 #include "photospider/host/host.hpp"
 #include "verification/i1_evidence_json.hpp"
 #include "verification/i1_evidence_workflow.hpp"

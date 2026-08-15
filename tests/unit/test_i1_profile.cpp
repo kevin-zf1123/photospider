@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/i1_profile.hpp"
+#include "benchmark/i1/i1_profile.hpp"
 
 namespace ps::benchmark {
 namespace {

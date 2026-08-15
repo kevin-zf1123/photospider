@@ -11,8 +11,8 @@
 #include <string>
 #include <utility>
 
-#include "compute/execution_service.hpp"
-#include "execution/device_executor_registry.hpp"
+#include "compute/execution/execution_service.hpp"
+#include "execution/device/device_executor_registry.hpp"
 #include "runtime/kernel.hpp"
 #include "runtime/kernel_close_test_access.hpp"
 #include "runtime/kernel_compute_test_access.hpp"

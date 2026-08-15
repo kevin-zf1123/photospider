@@ -19,7 +19,7 @@
 #include <variant>
 #include <vector>
 
-#include "compute/task_graph_planning.hpp"
+#include "compute/dispatch/task_graph_planning.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/roi_propagation_service.hpp"
 #include "plugin/plugin_manager.hpp"

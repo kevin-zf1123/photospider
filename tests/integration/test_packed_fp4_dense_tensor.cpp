@@ -12,11 +12,11 @@
 #include <utility>
 #include <vector>
 
-#include "compute/compute_cache_policy.hpp"   // NOLINT(build/include_subdir)
-#include "core/value_image_adapter.hpp"       // NOLINT(build/include_subdir)
-#include "execution/compute_io_executor.hpp"  // NOLINT(build/include_subdir)
-#include "execution/value_transfer_task.hpp"  // NOLINT(build/include_subdir)
-#include "graph/graph_cache_service.hpp"      // NOLINT(build/include_subdir)
+#include "compute/request/compute_cache_policy.hpp"  // NOLINT(build/include_subdir)
+#include "core/value_image_adapter.hpp"  // NOLINT(build/include_subdir)
+#include "execution/device/compute_io_executor.hpp"  // NOLINT(build/include_subdir)
+#include "execution/transfer/value_transfer_task.hpp"  // NOLINT(build/include_subdir)
+#include "graph/graph_cache_service.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/graph_error.hpp"
 #include "photospider/data/packed_dense_tensor_view.hpp"
 #include "support/fake_cache_metadata_codec.hpp"

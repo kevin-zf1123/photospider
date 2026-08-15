@@ -1155,6 +1155,12 @@ owner。
 
 ## 实现与验证入口
 
+物理 compute 布局采用与本文 contract 相同的所有权词汇：request arbitration 位于
+`compute/request/`，task population 与 release 位于 `compute/dispatch/`，dirty-region 工作位于
+`compute/dirty/`，Run admission/execution lifecycle 位于 `compute/execution/`。`compute/` 根目录
+只保留核心 `ComputeService`、`ComputeRun`、geometry 与 image-buffer composition 边界。这只是
+源码所有权拆分，不改变 Host method、Run identity、scheduler contract 或 installed ABI。
+
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/region.hpp`
@@ -1162,26 +1168,26 @@ owner。
 - `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `src/lib/compute/compute_service.*`
-- `src/lib/compute/progressive_compute.*`
-- `src/lib/compute/compute_commit_policy.hpp`
-- `src/lib/compute/compute_supersession.*`
-- `src/lib/compute/compute_request_coordinator.*`
+- `src/lib/compute/execution/progressive_compute.*`
+- `src/lib/compute/request/compute_commit_policy.hpp`
+- `src/lib/compute/request/compute_supersession.*`
+- `src/lib/compute/request/compute_request_coordinator.*`
 - `src/lib/compute/compute_run.*`
-- `src/lib/compute/run_group.*`
-- `src/lib/compute/execution_service.*`
-- `src/lib/benchmark/i2_host.hpp`
-- `src/lib/benchmark/i2_profile.*`
-- `src/lib/benchmark/i2_evidence.*`
-- `src/lib/compute/run_lifecycle_registry.*`
-- `src/lib/compute/execution_lifecycle_telemetry.*`
-- `src/lib/execution/compute_io_executor.*`
-- `src/lib/compute/task_graph_planning.*`
-- `src/lib/compute/compute_dispatch_plan_builder.*`
-- `src/lib/compute/compute_task_submission.*`
-- `src/lib/compute/compute_task_dispatcher.*`
-- `src/lib/compute/dirty_region_planner.*`
-- `src/lib/compute/dirty_update_executor.*`
-- `src/lib/compute/intent_update_coordinator.*`
+- `src/lib/compute/dispatch/run_group.*`
+- `src/lib/compute/execution/execution_service.*`
+- `src/lib/benchmark/i2/i2_host.hpp`
+- `src/lib/benchmark/i2/i2_profile.*`
+- `src/lib/benchmark/i2/i2_evidence.*`
+- `src/lib/compute/execution/run_lifecycle_registry.*`
+- `src/lib/compute/execution/execution_lifecycle_telemetry.*`
+- `src/lib/execution/device/compute_io_executor.*`
+- `src/lib/compute/dispatch/task_graph_planning.*`
+- `src/lib/compute/dispatch/compute_dispatch_plan_builder.*`
+- `src/lib/compute/dispatch/compute_task_submission.*`
+- `src/lib/compute/dispatch/compute_task_dispatcher.*`
+- `src/lib/compute/dirty/dirty_region_planner.*`
+- `src/lib/compute/dirty/dirty_update_executor.*`
+- `src/lib/compute/dirty/intent_update_coordinator.*`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/core/region.*`
@@ -1192,12 +1198,12 @@ owner。
 - `src/lib/ipc/output_store.*`
 - `plugins/ops/save_op.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
-- `src/lib/execution/device_completion.*`
-- `src/lib/execution/residency_manager.*`
-- `src/lib/execution/value_transfer_task.*`
-- `src/lib/execution/value_transfer_task.*`
-- `src/lib/execution/isolated_cpu_invocation.*`
-- `src/lib/execution/plugin_runtime_supervisor.hpp`
+- `src/lib/execution/device/device_completion.*`
+- `src/lib/execution/device/residency_manager.*`
+- `src/lib/execution/transfer/value_transfer_task.*`
+- `src/lib/execution/transfer/value_transfer_task.*`
+- `src/lib/execution/isolation/isolated_cpu_invocation.*`
+- `src/lib/execution/device/plugin_runtime_supervisor.hpp`
 - `src/lib/policy/policy_registry.*`
 - `src/lib/providers/configured_operation_providers.*`
 - `src/lib/providers/opencv/*`

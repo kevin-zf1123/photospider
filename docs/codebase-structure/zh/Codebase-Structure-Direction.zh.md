@@ -240,12 +240,27 @@ src/lib/
   core/
   graph/
   compute/
+    dispatch/
+    dirty/
+    execution/
+    request/
   runtime/
   host/
   plugin/
   policy/
   execution/
+    device/
+    isolation/
+    transfer/
   benchmark/
+    b1/
+    i1/
+    i2/
+    m1/
+    common/
+  server/
+    state/
+    worker/
   adapters/
     opencv/
     metal/
@@ -278,8 +293,11 @@ tests/
 Issue #38 已完成 operation extension contract，并移除八个过渡性 extension header；没有 shim 或
 重复 declaration。Issue #75 删除拥有 worker 的 scheduler SDK，并增加只含一个 header 的
 `include/photospider/policy/` 纯 C contract。Policy registry/loading 位于 `src/lib/policy/`；私有
-route/runtime contract 位于 `src/lib/execution/`；policy-aware store 与 reserved-start logic 保持在
-`src/lib/compute/`；唯一 Host 与逐设备权威 ledger 实现保持在 `src/lib/runtime/`。这些私有
+route/runtime contract 位于 `src/lib/execution/`；policy-aware store 与 reserved-start logic 位于
+`src/lib/compute/execution/`，request、dispatch 与 dirty-update 协作者分别位于对应的 compute
+子目录。设备、隔离与传输机制在 `src/lib/execution/` 下分开；benchmark profile 按场景分组；
+server 持久真相与 worker supervision 在 `src/lib/server/` 下分开。唯一 Host 与逐设备权威 ledger
+实现保持在 `src/lib/runtime/`。这些私有
 implementation owner 都不会成为 public Host 或 IPC type。
 
 命名规则：
@@ -704,11 +722,15 @@ scratch 字节。权威的无环依赖表位于
      与 resource surface 现在位于 `apps/graph_cli/`。完整 target closure 还精确拥有
      `src/lib/benchmark/` 下两个按角色归属的 benchmark service 翻译单元；它们只属于不可安装的
      CLI helper/closure，不会进入可安装静态产品。
-   - 现有 backend 实现/私有头位于按角色归属的 `src/lib/**`；源码私有 single-tenant Job
-     control/manager/protocol/artifact 切片位于 `src/lib/server/`，其单 assignment composition
+   - 现有 backend 实现/私有头位于按角色归属的 `src/lib/**`；密集的 compute、benchmark、
+     execution 与 server 角色再增加一层职责目录，避免翻译单元平铺堆积。源码私有
+     single-tenant Job control plane 保持在 `src/lib/server/` 顶层，持久真相位于 `server/state/`，
+     manager/protocol/artifact 所有权位于 `server/worker/`，其单 assignment composition
      root 位于 `apps/photospider_worker/`；production plugin 位于 `plugins/**`；维护中的测试位于
      明确的 unit/integration/fixture/support/verification 角色。
-   - 物理迁移保持现有 target 与 test 身份，不隐含内部 target rename 或重新设计。
+   - 物理迁移保持现有 target、ABI 与 test 身份。原先单体的 execution-service 与
+     worker-manager 实现现在由按职责划分的翻译单元编译，并共享源码私有状态声明；没有遗留
+     forwarding header 或重复旧路径。
 6. **已完成 daemon slice：** `apps/photospiderd/` 现在拥有 foreground process、self-pipe
    signal、protected socket、bounded worker 与 deterministic cleanup。
 7. **已完成 task 4.4 IPC Host adapter、制品与 package slice：** Installable typed

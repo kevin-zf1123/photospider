@@ -2,7 +2,7 @@
 
 #include <string>
 
-#include "benchmark/benchmark_types.hpp"
+#include "benchmark/common/benchmark_types.hpp"
 
 namespace ps {
 

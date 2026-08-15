@@ -8,7 +8,7 @@
 #include <memory>
 #include <utility>
 
-#include "compute/execution_service.hpp"  // NOLINT(build/include_subdir)
+#include "compute/execution/execution_service.hpp"  // NOLINT(build/include_subdir)
 #include "core/image_artifact_codec.hpp"  // NOLINT(build/include_subdir)
 #include "providers/configured_image_artifact_codec.hpp"  // NOLINT(build/include_subdir)
 #include "runtime/kernel.hpp"  // NOLINT(build/include_subdir)

@@ -8,10 +8,10 @@
 #include <unordered_map>
 #include <vector>
 
-#include "compute/compute_commit_policy.hpp"
 #include "compute/compute_run.hpp"
-#include "compute/compute_supersession.hpp"
-#include "compute/progressive_compute.hpp"
+#include "compute/execution/progressive_compute.hpp"
+#include "compute/request/compute_commit_policy.hpp"
+#include "compute/request/compute_supersession.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {

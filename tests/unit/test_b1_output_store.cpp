@@ -23,7 +23,7 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/b1_output_store.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/b1/b1_output_store.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::benchmark {
 namespace {

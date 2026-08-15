@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "compute/compute_supersession.hpp"
+#include "compute/request/compute_supersession.hpp"
 #include "graph/graph_revision.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/device.hpp"

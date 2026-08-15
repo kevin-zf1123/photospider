@@ -18,7 +18,7 @@
 #include <vector>
 
 #include "compute/compute_run.hpp"
-#include "compute/execution_service.hpp"
+#include "compute/execution/execution_service.hpp"
 #include "execution/execution_task_runtime.hpp"
 #include "photospider/host/host.hpp"
 #include "policy/policy_registry.hpp"

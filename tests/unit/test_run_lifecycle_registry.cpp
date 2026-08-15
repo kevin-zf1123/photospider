@@ -17,8 +17,8 @@
 #include <type_traits>
 #include <utility>
 
-#include "compute/dirty_sibling_commit_gate.hpp"
-#include "compute/run_lifecycle_registry.hpp"
+#include "compute/dirty/dirty_sibling_commit_gate.hpp"
+#include "compute/execution/run_lifecycle_registry.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "support/compute_request_cancellation_source_test_access.hpp"
 #include "support/run_lifecycle_registry_test_access.hpp"

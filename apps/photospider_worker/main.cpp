@@ -22,10 +22,10 @@
 #include <thread>
 #include <utility>
 
-#include "server/embedded_job_worker.hpp"  // NOLINT(build/include_subdir)
-#include "server/worker_artifact_data_plane.hpp"  // NOLINT(build/include_subdir)
-#include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
-#include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
+#include "server/worker/embedded_job_worker.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker/worker_artifact_data_plane.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker/worker_protocol.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
 namespace {

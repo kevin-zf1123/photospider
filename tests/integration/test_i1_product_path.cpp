@@ -17,7 +17,7 @@
 #include <system_error>
 #include <thread>
 
-#include "benchmark/i1_profile.hpp"
+#include "benchmark/i1/i1_profile.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
 #include "runtime/kernel_compute_test_access.hpp"

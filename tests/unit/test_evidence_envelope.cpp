@@ -24,10 +24,10 @@
 #include <windows.h>
 #endif
 
-#include "benchmark/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
-#include "benchmark/m1_canonical.hpp"       // NOLINT(build/include_subdir)
-#include "benchmark/m1_evidence.hpp"        // NOLINT(build/include_subdir)
-#include "benchmark/m1_profile.hpp"         // NOLINT(build/include_subdir)
+#include "benchmark/common/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1/m1_canonical.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1/m1_evidence.hpp"   // NOLINT(build/include_subdir)
+#include "benchmark/m1/m1_profile.hpp"    // NOLINT(build/include_subdir)
 #include "support/b1_test_environment.hpp"
 #include "support/m1_test_evidence.hpp"
 
