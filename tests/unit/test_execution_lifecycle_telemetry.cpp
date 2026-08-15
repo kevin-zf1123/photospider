@@ -12,7 +12,7 @@
 #include <thread>
 #include <vector>
 
-#include "compute/execution_lifecycle_telemetry.hpp"
+#include "compute/execution/execution_lifecycle_telemetry.hpp"
 
 namespace allocation_probe {
 

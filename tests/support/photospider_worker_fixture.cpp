@@ -28,8 +28,8 @@
 #include <thread>
 #include <utility>
 
-#include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
-#include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
+#include "server/worker/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker/worker_protocol.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
 namespace {

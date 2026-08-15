@@ -25,7 +25,7 @@
 #include <utility>
 #include <vector>
 
-#include "compute/execution_service.hpp"
+#include "compute/execution/execution_service.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "photospider/host/host.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)

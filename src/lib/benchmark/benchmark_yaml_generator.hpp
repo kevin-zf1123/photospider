@@ -4,7 +4,7 @@
 
 #include <string>
 
-#include "benchmark/benchmark_types.hpp"  // <--- 关键修改：包含定义而不是重新定义
+#include "benchmark/common/benchmark_types.hpp"  // <--- 关键修改：包含定义而不是重新定义
 
 namespace ps {
 

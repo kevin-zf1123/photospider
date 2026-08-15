@@ -24,11 +24,11 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/b1_host.hpp"     // NOLINT(build/include_subdir)
-#include "benchmark/b1_profile.hpp"  // NOLINT(build/include_subdir)
-#include "benchmark/i1_profile.hpp"  // NOLINT(build/include_subdir)
-#include "benchmark/m1_host.hpp"     // NOLINT(build/include_subdir)
-#include "benchmark/m1_profile.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/b1/b1_host.hpp"     // NOLINT(build/include_subdir)
+#include "benchmark/b1/b1_profile.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/i1/i1_profile.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1/m1_host.hpp"     // NOLINT(build/include_subdir)
+#include "benchmark/m1/m1_profile.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
 

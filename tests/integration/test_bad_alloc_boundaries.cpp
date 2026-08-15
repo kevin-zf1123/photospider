@@ -17,8 +17,8 @@
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "benchmark/benchmark_service.hpp"
-#include "compute/dirty_update_executor.hpp"
-#include "compute/realtime_proxy_graph.hpp"
+#include "compute/dirty/dirty_update_executor.hpp"
+#include "compute/dirty/realtime_proxy_graph.hpp"
 #include "core/param_utils.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"

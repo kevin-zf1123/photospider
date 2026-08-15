@@ -914,40 +914,50 @@ corrections, not a schema-version expansion.
 
 ## Implementation and Validation Entry Points
 
+`ExecutionService` keeps one class/ABI boundary, but its implementation is no
+longer one translation unit. Configuration and policy binding remain in
+`execution_service.cpp`; graph shutdown, admission, submission/fences, device
+residency, and worker execution compile from the matching
+`execution_service_{lifecycle,admission,submission,device,worker}.cpp` files.
+`execution_service_state.cpp` owns retained value lifetimes, while the
+source-private run-state, ready-store, and pool headers share the exact nested
+types without creating a forwarding or installed contract.
+
 - `include/photospider/plugin/op_contract.hpp`
 - `src/lib/core/ps_types.hpp` and `.cpp`
-- `src/lib/compute/task_graph_planning.hpp` and `.cpp`
-- `src/lib/compute/compute_task_submission.hpp` and `.cpp`
+- `src/lib/compute/dispatch/task_graph_planning.hpp` and `.cpp`
+- `src/lib/compute/dispatch/compute_task_submission.hpp` and `.cpp`
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/policy/policy_registry.hpp` and `.cpp`
-- `src/lib/compute/execution_service.hpp` and `.cpp`
-- `src/lib/compute/run_lifecycle_registry.hpp` and `.cpp`
-- `src/lib/compute/execution_lifecycle_telemetry.hpp` and `.cpp`
-- `src/lib/benchmark/i1_host.hpp`
-- `src/lib/benchmark/i1_profile.*`
-- `src/lib/benchmark/i1_evidence.*`
-- `src/lib/benchmark/i2_host.hpp`
-- `src/lib/benchmark/i2_profile.*`
-- `src/lib/benchmark/i2_evidence.*`
-- `src/lib/benchmark/b1_host.hpp`
-- `src/lib/benchmark/b1_profile.*`
-- `src/lib/benchmark/b1_environment.*`
-- `src/lib/benchmark/b1_output_store.*`
-- `src/lib/benchmark/b1_evidence.*`
-- `src/lib/benchmark/m1_profile.*`
-- `src/lib/benchmark/m1_evidence.*`
-- `src/lib/benchmark/m1_canonical.*`
-- `src/lib/benchmark/evidence_envelope.*`
-- `src/lib/compute/progressive_compute.*`
+- `src/lib/compute/execution/execution_service.hpp` and
+  `execution_service*.cpp`
+- `src/lib/compute/execution/run_lifecycle_registry.hpp` and `.cpp`
+- `src/lib/compute/execution/execution_lifecycle_telemetry.hpp` and `.cpp`
+- `src/lib/benchmark/i1/i1_host.hpp`
+- `src/lib/benchmark/i1/i1_profile.*`
+- `src/lib/benchmark/i1/i1_evidence.*`
+- `src/lib/benchmark/i2/i2_host.hpp`
+- `src/lib/benchmark/i2/i2_profile.*`
+- `src/lib/benchmark/i2/i2_evidence.*`
+- `src/lib/benchmark/b1/b1_host.hpp`
+- `src/lib/benchmark/b1/b1_profile.*`
+- `src/lib/benchmark/b1/b1_environment.*`
+- `src/lib/benchmark/b1/b1_output_store.*`
+- `src/lib/benchmark/b1/b1_evidence.*`
+- `src/lib/benchmark/m1/m1_profile.*`
+- `src/lib/benchmark/m1/m1_evidence.*`
+- `src/lib/benchmark/m1/m1_canonical.*`
+- `src/lib/benchmark/common/evidence_envelope.*`
+- `src/lib/compute/execution/progressive_compute.*`
 - `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/runtime/resource_ledger.*`
-- `src/lib/execution/compute_io_executor.*`
+- `src/lib/execution/device/compute_io_executor.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
 - `src/lib/execution/execution_task_runtime.hpp`
-- `src/lib/execution/device_executor_registry.*`
-- `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
+- `src/lib/execution/device/device_executor_registry.*`
+- `src/lib/execution/device/metal_device_executor.{mm,stub.cpp}`
 - `include/photospider/memory/ready_fence.hpp`
-- `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/transfer/value_transfer_task.*`
 - `src/lib/runtime/graph_runtime.hpp` and `.cpp`
 - `src/lib/runtime/kernel_execution_facade.cpp`
 - `src/lib/graph/graph_cache_service.*`

@@ -23,7 +23,7 @@
 #include <utility>
 
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
-#include "server/worker_manager.hpp"             // NOLINT(build/include_subdir)
+#include "server/worker/worker_manager.hpp"      // NOLINT(build/include_subdir)
 
 namespace ps::server {
 

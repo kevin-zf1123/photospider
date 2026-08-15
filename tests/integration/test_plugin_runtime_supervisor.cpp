@@ -29,11 +29,11 @@
 #include <utility>
 #include <vector>
 
-#include "compute/compute_run.hpp"               // NOLINT(build/include_subdir)
-#include "compute/execution_service.hpp"         // NOLINT(build/include_subdir)
+#include "compute/compute_run.hpp"  // NOLINT(build/include_subdir)
+#include "compute/execution/execution_service.hpp"  // NOLINT(build/include_subdir)
+#include "execution/device/plugin_runtime_supervisor.hpp"  // NOLINT(build/include_subdir)
 #include "execution/execution_task_runtime.hpp"  // NOLINT(build/include_subdir)
-#include "execution/isolated_cpu_invocation_test_probe.hpp"  // NOLINT(build/include_subdir)
-#include "execution/plugin_runtime_supervisor.hpp"  // NOLINT(build/include_subdir)
+#include "execution/isolation/isolated_cpu_invocation_test_probe.hpp"  // NOLINT(build/include_subdir)
 
 #ifndef PS_TEST_ISOLATED_CPU_FIXTURE_PATH
 #error "PS_TEST_ISOLATED_CPU_FIXTURE_PATH must name the runtime fixture"

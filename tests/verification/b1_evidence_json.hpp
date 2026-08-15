@@ -6,7 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "benchmark/b1_evidence.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/b1/b1_evidence.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::benchmark {
 

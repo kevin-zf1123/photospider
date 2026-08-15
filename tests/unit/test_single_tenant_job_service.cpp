@@ -30,8 +30,8 @@
 
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
-#include "server/worker_manager_test_access.hpp"  // NOLINT(build/include_subdir)
-#include "server/worker_protocol.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker/worker_manager_test_access.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker/worker_protocol.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
 namespace {

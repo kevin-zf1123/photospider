@@ -293,7 +293,7 @@ add_library(photospider_operation_runtime SHARED
     src/lib/core/value.cpp
     src/lib/core/packed_dense_tensor.cpp
     src/lib/plugin/data_definition_registry.cpp
-    src/lib/execution/device_execution_context.cpp)
+    src/lib/execution/device/device_execution_context.cpp)
 add_library(Photospider::operation_runtime ALIAS
     photospider_operation_runtime)
 set_target_properties(photospider_operation_runtime PROPERTIES
@@ -682,13 +682,13 @@ target_link_libraries(photospider_policy_internal PRIVATE
 
 # Module: private physical execution resources and accounting.
 set(PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
-    src/lib/execution/compute_io_executor.cpp
-    src/lib/execution/device_completion.cpp
-    src/lib/execution/device_executor_registry.cpp
+    src/lib/execution/device/compute_io_executor.cpp
+    src/lib/execution/device/device_completion.cpp
+    src/lib/execution/device/device_executor_registry.cpp
     src/lib/execution/execution_task_runtime.cpp
     src/lib/execution/physical_execution_routes.cpp
-    src/lib/execution/residency_manager.cpp
-    src/lib/execution/value_transfer_task.cpp
+    src/lib/execution/device/residency_manager.cpp
+    src/lib/execution/transfer/value_transfer_task.cpp
     src/lib/runtime/resource_ledger.cpp
 )
 set(PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES)
@@ -697,8 +697,8 @@ set(PHOTOSPIDER_HAS_ISOLATED_CPU_INVOCATION OFF)
 if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(PHOTOSPIDER_HAS_ISOLATED_CPU_INVOCATION ON)
     list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
-        src/lib/execution/isolated_cpu_invocation_protocol.cpp
-        src/lib/execution/isolated_cpu_invocation.cpp)
+        src/lib/execution/isolation/isolated_cpu_invocation_protocol.cpp
+        src/lib/execution/isolation/isolated_cpu_invocation.cpp)
     if(APPLE)
         find_library(PHOTOSPIDER_PROC_LIBRARY NAMES proc)
         if(NOT PHOTOSPIDER_PROC_LIBRARY)
@@ -721,16 +721,16 @@ if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
     endif()
     set(PHOTOSPIDER_HAS_METAL_EXECUTOR ON)
     list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
-        src/lib/execution/metal_device_executor.mm)
+        src/lib/execution/device/metal_device_executor.mm)
     list(APPEND PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES
         ${METAL_FRAMEWORK}
         ${FOUNDATION_FRAMEWORK})
     set_source_files_properties(
-        src/lib/execution/metal_device_executor.mm
+        src/lib/execution/device/metal_device_executor.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 else()
     list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
-        src/lib/execution/metal_device_executor_stub.cpp)
+        src/lib/execution/device/metal_device_executor_stub.cpp)
 endif()
 
 add_library(photospider_execution_internal STATIC
@@ -749,19 +749,19 @@ target_link_libraries(photospider_graph_internal PRIVATE
 
 # Module: compute, dirty execution, GraphRuntime, and interaction ownership.
 set(KERNEL_FACADE_SOURCES
-    src/lib/benchmark/b1_environment.cpp
-    src/lib/benchmark/b1_evidence.cpp
-    src/lib/benchmark/b1_output_store.cpp
-    src/lib/benchmark/b1_profile.cpp
-    src/lib/benchmark/evidence_envelope.cpp
-    src/lib/benchmark/i1_evidence.cpp
-    src/lib/benchmark/i1_profile.cpp
-    src/lib/benchmark/i2_evidence.cpp
-    src/lib/benchmark/i2_profile.cpp
-    src/lib/benchmark/m1_canonical.cpp
-    src/lib/benchmark/m1_evidence.cpp
-    src/lib/benchmark/m1_profile.cpp
-    src/lib/benchmark/observation_fanout.cpp
+    src/lib/benchmark/b1/b1_environment.cpp
+    src/lib/benchmark/b1/b1_evidence.cpp
+    src/lib/benchmark/b1/b1_output_store.cpp
+    src/lib/benchmark/b1/b1_profile.cpp
+    src/lib/benchmark/common/evidence_envelope.cpp
+    src/lib/benchmark/i1/i1_evidence.cpp
+    src/lib/benchmark/i1/i1_profile.cpp
+    src/lib/benchmark/i2/i2_evidence.cpp
+    src/lib/benchmark/i2/i2_profile.cpp
+    src/lib/benchmark/m1/m1_canonical.cpp
+    src/lib/benchmark/m1/m1_evidence.cpp
+    src/lib/benchmark/m1/m1_profile.cpp
+    src/lib/benchmark/common/observation_fanout.cpp
     src/lib/host/embedded_host.cpp
     src/lib/runtime/kernel.cpp
     src/lib/runtime/kernel_compute.cpp
@@ -772,40 +772,46 @@ set(KERNEL_FACADE_SOURCES
 )
 
 set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
-    src/lib/compute/compute_cache_policy.cpp
-    src/lib/compute/compute_dispatch_plan_builder.cpp
+    src/lib/compute/request/compute_cache_policy.cpp
+    src/lib/compute/dispatch/compute_dispatch_plan_builder.cpp
     src/lib/compute/compute_geometry.cpp
-    src/lib/compute/compute_metrics_recorder.cpp
-    src/lib/compute/compute_node_task_runner.cpp
-    src/lib/compute/compute_request_coordinator.cpp
-    src/lib/compute/compute_result_committer.cpp
+    src/lib/compute/request/compute_metrics_recorder.cpp
+    src/lib/compute/dispatch/compute_node_task_runner.cpp
+    src/lib/compute/request/compute_request_coordinator.cpp
+    src/lib/compute/request/compute_result_committer.cpp
     src/lib/compute/compute_run.cpp
-    src/lib/compute/compute_supersession.cpp
-    src/lib/compute/compute_task_dependency_state.cpp
-    src/lib/compute/compute_task_submission.cpp
-    src/lib/compute/execution_lifecycle_telemetry.cpp
-    src/lib/compute/execution_service.cpp
-    src/lib/compute/progressive_compute.cpp
-    src/lib/compute/run_lifecycle_registry.cpp
-    src/lib/compute/task_graph_planning.cpp
-    src/lib/compute/task_population_strategy.cpp
-    src/lib/compute/tiled_input_normalizer.cpp
-    src/lib/compute/dirty_control_lane.cpp
-    src/lib/compute/dirty_execution_common.cpp
-    src/lib/compute/dirty_node_executor.cpp
-    src/lib/compute/dirty_region_planner.cpp
-    src/lib/compute/dirty_region_snapshot_builder.cpp
-    src/lib/compute/dirty_sibling_commit_gate.cpp
-    src/lib/compute/dirty_update_executor.cpp
-    src/lib/compute/dirty_write_buffers.cpp
-    src/lib/compute/downsample_executor.cpp
-    src/lib/compute/intent_update_coordinator.cpp
-    src/lib/compute/node_executor.cpp
-    src/lib/compute/node_input_resolver.cpp
-    src/lib/compute/realtime_proxy_graph.cpp
-    src/lib/compute/resource_demand_estimator.cpp
-    src/lib/compute/run_group.cpp
-    src/lib/compute/compute_task_dispatcher.cpp
+    src/lib/compute/request/compute_supersession.cpp
+    src/lib/compute/dispatch/compute_task_dependency_state.cpp
+    src/lib/compute/dispatch/compute_task_submission.cpp
+    src/lib/compute/execution/execution_lifecycle_telemetry.cpp
+    src/lib/compute/execution/execution_service_admission.cpp
+    src/lib/compute/execution/execution_service_device.cpp
+    src/lib/compute/execution/execution_service_lifecycle.cpp
+    src/lib/compute/execution/execution_service.cpp
+    src/lib/compute/execution/execution_service_state.cpp
+    src/lib/compute/execution/execution_service_submission.cpp
+    src/lib/compute/execution/execution_service_worker.cpp
+    src/lib/compute/execution/progressive_compute.cpp
+    src/lib/compute/execution/run_lifecycle_registry.cpp
+    src/lib/compute/dispatch/task_graph_planning.cpp
+    src/lib/compute/dispatch/task_population_strategy.cpp
+    src/lib/compute/dirty/tiled_input_normalizer.cpp
+    src/lib/compute/dirty/dirty_control_lane.cpp
+    src/lib/compute/dirty/dirty_execution_common.cpp
+    src/lib/compute/dirty/dirty_node_executor.cpp
+    src/lib/compute/dirty/dirty_region_planner.cpp
+    src/lib/compute/dirty/dirty_region_snapshot_builder.cpp
+    src/lib/compute/dirty/dirty_sibling_commit_gate.cpp
+    src/lib/compute/dirty/dirty_update_executor.cpp
+    src/lib/compute/dirty/dirty_write_buffers.cpp
+    src/lib/compute/dirty/downsample_executor.cpp
+    src/lib/compute/dirty/intent_update_coordinator.cpp
+    src/lib/compute/dirty/node_executor.cpp
+    src/lib/compute/dirty/node_input_resolver.cpp
+    src/lib/compute/dirty/realtime_proxy_graph.cpp
+    src/lib/compute/execution/resource_demand_estimator.cpp
+    src/lib/compute/dispatch/run_group.cpp
+    src/lib/compute/dispatch/compute_task_dispatcher.cpp
     src/lib/compute/compute_service.cpp
     src/lib/runtime/graph_event_service.cpp
     src/lib/runtime/interaction.cpp
@@ -891,17 +897,23 @@ if(PHOTOSPIDER_ENABLE_YAML)
         ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
 endif()
 
-# These nine translation units own the Issue #72, Issue #75, Issue #76,
+# These fifteen translation units own the Issue #72, Issue #75, Issue #76,
 # Issue #82, Issue #93, and Issue #125 deterministic observation/failure seams.
 # The installable archive always receives their production objects; focused tests
 # receive a non-installed variant while reusing every common object. Keeping
 # the split at translation-unit granularity avoids compiling a second copy of
 # the complete embedded product.
 set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
-    src/lib/compute/compute_task_submission.cpp
-    src/lib/compute/dirty_update_executor.cpp
-    src/lib/compute/execution_service.cpp
-    src/lib/compute/resource_demand_estimator.cpp
+    src/lib/compute/dispatch/compute_task_submission.cpp
+    src/lib/compute/dirty/dirty_update_executor.cpp
+    src/lib/compute/execution/execution_service_admission.cpp
+    src/lib/compute/execution/execution_service_device.cpp
+    src/lib/compute/execution/execution_service_lifecycle.cpp
+    src/lib/compute/execution/execution_service.cpp
+    src/lib/compute/execution/execution_service_state.cpp
+    src/lib/compute/execution/execution_service_submission.cpp
+    src/lib/compute/execution/execution_service_worker.cpp
+    src/lib/compute/execution/resource_demand_estimator.cpp
     src/lib/graph/graph_cache_service.cpp
     src/lib/graph/graph_state_executor.cpp
     src/lib/host/embedded_host.cpp
@@ -1014,14 +1026,17 @@ if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
     # capability profile above. It remains outside the installed Embedded Host
     # ABI and protocol-v2 sidecar composition.
     add_library(photospider_single_tenant_job_internal STATIC
-        src/lib/server/job_contract.cpp
-        src/lib/server/tenant_quota.cpp
-        src/lib/server/durable_server_state.cpp
+        src/lib/server/state/job_contract.cpp
+        src/lib/server/state/tenant_quota.cpp
+        src/lib/server/state/durable_server_state.cpp
         src/lib/server/single_tenant_job_service.cpp
-        src/lib/server/embedded_job_worker.cpp
-        src/lib/server/worker_artifact_data_plane.cpp
-        src/lib/server/worker_protocol.cpp
-        src/lib/server/worker_manager.cpp)
+        src/lib/server/worker/embedded_job_worker.cpp
+        src/lib/server/worker/worker_artifact_data_plane.cpp
+        src/lib/server/worker/worker_protocol.cpp
+        src/lib/server/worker/worker_manager.cpp
+        src/lib/server/worker/worker_manager_lifecycle.cpp
+        src/lib/server/worker/worker_manager_monitor.cpp
+        src/lib/server/worker/worker_manager_process.cpp)
     target_compile_features(photospider_single_tenant_job_internal PRIVATE
         cxx_std_17)
     target_include_directories(photospider_single_tenant_job_internal PRIVATE

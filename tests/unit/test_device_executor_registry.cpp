@@ -11,8 +11,8 @@
 #include <utility>
 #include <vector>
 
-#include "execution/device_execution_context.hpp"
-#include "execution/device_executor_registry.hpp"
+#include "execution/device/device_execution_context.hpp"
+#include "execution/device/device_executor_registry.hpp"
 
 namespace ps::execution {
 namespace {

@@ -16,8 +16,8 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/i2_profile.hpp"
-#include "compute/i2_metal_acquisition_deadline.hpp"
+#include "benchmark/i2/i2_profile.hpp"
+#include "compute/execution/i2_metal_acquisition_deadline.hpp"
 
 namespace ps::benchmark {
 namespace {

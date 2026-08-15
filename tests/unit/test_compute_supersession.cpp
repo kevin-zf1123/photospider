@@ -18,8 +18,8 @@
 #include <utility>
 #include <vector>
 
-#include "compute/compute_request_coordinator.hpp"
-#include "compute/run_group.hpp"
+#include "compute/dispatch/run_group.hpp"
+#include "compute/request/compute_request_coordinator.hpp"
 #include "graph/graph_model.hpp"           // NOLINT(build/include_subdir)
 #include "graph/graph_state_executor.hpp"  // NOLINT(build/include_subdir)
 #include "runtime/graph_runtime.hpp"       // NOLINT(build/include_subdir)

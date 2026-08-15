@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "compute/task_graph_planning.hpp"
+#include "compute/dispatch/task_graph_planning.hpp"
 #include "core/ps_types.hpp"         // NOLINT(build/include_subdir)
 #include "graph/graph_revision.hpp"  // NOLINT(build/include_subdir)
 #include "graph/node.hpp"            // NOLINT(build/include_subdir)

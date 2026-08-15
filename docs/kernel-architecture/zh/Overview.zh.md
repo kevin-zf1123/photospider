@@ -628,10 +628,10 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `src/lib/runtime/kernel.*`
 - `src/lib/runtime/graph_runtime.*`
 - `src/lib/compute/compute_run.*`
-- `src/lib/execution/compute_io_executor.*`
-- `src/lib/execution/device_completion.*`
-- `src/lib/execution/residency_manager.*`
-- `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/device/compute_io_executor.*`
+- `src/lib/execution/device/device_completion.*`
+- `src/lib/execution/device/residency_manager.*`
+- `src/lib/execution/transfer/value_transfer_task.*`
 - `src/lib/plugin/data_definition_registry.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`

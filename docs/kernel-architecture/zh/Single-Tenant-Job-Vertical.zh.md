@@ -474,15 +474,16 @@ child 的策略。
 
 长期维护入口包括：
 
-- contract：`src/lib/server/job_contract.{hpp,cpp}`；
-- quota：`src/lib/server/tenant_quota.{hpp,cpp}`；
-- durable state：`src/lib/server/durable_server_state.{hpp,cpp}`；
+- contract：`src/lib/server/state/job_contract.{hpp,cpp}`；
+- quota：`src/lib/server/state/tenant_quota.{hpp,cpp}`；
+- durable state：`src/lib/server/state/durable_server_state.{hpp,cpp}`；
 - control plane：`src/lib/server/single_tenant_job_service.{hpp,cpp}`；
-- Embedded adapter：`src/lib/server/embedded_job_worker.{hpp,cpp}`；
+- Embedded adapter：`src/lib/server/worker/embedded_job_worker.{hpp,cpp}`；
 - private worker transport 与 lifecycle：
-  `src/lib/server/worker_protocol.{hpp,cpp}`、
-  `src/lib/server/worker_artifact_data_plane.{hpp,cpp}` 和
-  `src/lib/server/worker_manager.{hpp,cpp}`；
+  `src/lib/server/worker/worker_protocol.{hpp,cpp}`、
+  `src/lib/server/worker/worker_artifact_data_plane.{hpp,cpp}`，以及
+  `worker_manager.hpp` pimpl 边界、`worker_manager_{lifecycle,process,monitor}.cpp` 和其源码私有的
+  `worker_manager_{impl,posix,internal}.hpp` 状态；
 - 单 assignment composition root：`apps/photospider_worker/main.cpp`；
 - focused authority/lifecycle test：
   `tests/unit/test_single_tenant_job_service.cpp` 与

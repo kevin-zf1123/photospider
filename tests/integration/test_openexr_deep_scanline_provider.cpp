@@ -37,7 +37,7 @@
 #endif
 
 #include "adapters/openexr/openexr_deep_scanline_adapter.hpp"
-#include "execution/compute_io_executor.hpp"
+#include "execution/device/compute_io_executor.hpp"
 #include "photospider/data/extension.hpp"
 #include "photospider/data/region.hpp"
 #include "photospider/plugin/data_definition_registry.hpp"

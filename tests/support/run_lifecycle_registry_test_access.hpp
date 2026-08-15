@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "compute/run_lifecycle_registry.hpp"
+#include "compute/execution/run_lifecycle_registry.hpp"
 
 namespace ps::testing {
 

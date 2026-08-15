@@ -46,7 +46,7 @@
 #include <string>
 #include <vector>
 
-#include "benchmark/benchmark_types.hpp"
+#include "benchmark/common/benchmark_types.hpp"
 #include "ftxui/component/component.hpp"
 #include "ftxui/component/screen_interactive.hpp"
 #include "ftxui/dom/elements.hpp"

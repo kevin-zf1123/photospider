@@ -1,0 +1,624 @@
+#include "compute/dirty/dirty_node_executor.hpp"
+
+#include <new>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "compute/compute_geometry.hpp"
+#include "compute/compute_run.hpp"
+#include "compute/dirty/dirty_execution_common.hpp"
+#include "compute/dirty/dirty_update_executor.hpp"
+#include "compute/dirty/node_executor.hpp"
+#include "compute/execution/execution_service.hpp"
+#include "compute/request/compute_cache_policy.hpp"
+#include "core/image_buffer_processing.hpp"
+#include "core/ops.hpp"
+#include "runtime/graph_event_service.hpp"
+#include "runtime/graph_runtime.hpp"
+
+namespace ps::compute {
+namespace {
+
+/**
+ * @brief Infers staged RT output format without copying optional outputs.
+ *
+ * @param preferred Staged RT output already owned by the write buffer.
+ * @param image_inputs Destination-indexed RT inputs, including null slots.
+ * @param fallback Optional committed HP output used as a final shape hint.
+ * @return Channel count and DataType for the staged RT image buffer.
+ * @throws Nothing directly.
+ * @note This mirrors infer_output_spec() while accepting a NodeOutput
+ * reference so RT staging does not need to copy large outputs into an
+ * optional. Disconnected slots are skipped only for format inference.
+ */
+std::pair<int, DataType> infer_staged_rt_output_spec(
+    const NodeOutput& preferred,
+    const std::vector<const NodeOutput*>& image_inputs,
+    const std::optional<NodeOutput>& fallback) {
+  const ImageBuffer& preferred_buffer = preferred.image_buffer;
+  if (preferred_buffer.width > 0 && preferred_buffer.height > 0 &&
+      preferred_buffer.channels > 0) {
+    return {preferred_buffer.channels, preferred_buffer.type};
+  }
+  for (const auto* input : image_inputs) {
+    if (!input) {
+      continue;
+    }
+    const ImageBuffer& buffer = input->image_buffer;
+    if (buffer.width > 0 && buffer.height > 0 && buffer.channels > 0) {
+      return {buffer.channels, buffer.type};
+    }
+  }
+  if (fallback) {
+    const ImageBuffer& buffer = fallback->image_buffer;
+    if (buffer.width > 0 && buffer.height > 0 && buffer.channels > 0) {
+      return {buffer.channels, buffer.type};
+    }
+  }
+  return {1, DataType::FLOAT32};
+}
+
+/**
+ * @brief Checks whether one image descriptor carries a shaped payload.
+ * @param buffer Image descriptor to inspect without accessing its storage.
+ * @return True for positive dimensions backed by CPU data or backend context.
+ * @throws Nothing.
+ * @note This accepts public non-CPU context-only outputs without asking the
+ * OpenCV adapter to interpret their opaque resource type.
+ */
+bool has_image_payload(const ImageBuffer& buffer) noexcept {
+  return buffer.width > 0 && buffer.height > 0 && buffer.channels > 0 &&
+         (buffer.data || buffer.context);
+}
+
+/**
+ * @brief Observes cancellation at a dirty node or tile execution boundary.
+ *
+ * @param run_lease Optional borrowed lifecycle lease.
+ * @return Nothing while cancellation has not claimed this child Run.
+ * @throws GraphError after accepted cancellation to stop further staged work.
+ * @throws std::system_error when Run-state synchronization fails.
+ * @note ComputeRun retains the exact stable reason; the outer service wrapper
+ * performs the public translation and this helper cannot override that outcome.
+ */
+void observe_dirty_node_cancellation(const ComputeRunLease* run_lease) {
+  if (run_lease != nullptr && run_lease->observe_cancellation().has_value()) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "ComputeRun cancelled before dirty node or tile execution.");
+  }
+}
+
+/**
+ * @brief Acquires the exact process gate and resource vector for one direct
+ * dirty provider callback.
+ *
+ * @param service Optional process execution authority. Null selects the
+ * already-admitted physical-worker path and returns an inactive lease.
+ * @param run_lease Borrowed installed Run lease required with service.
+ * @param operation Frozen callback identity, metadata, and resource demand.
+ * @return Move-only lease held by the caller only across provider entry.
+ * @throws std::invalid_argument when service is supplied without a Run lease.
+ * @throws GraphError or standard exceptions from operation gate waiting,
+ * cancellation observation, and resource admission.
+ * @note Input resolution and output-buffer allocation happen before callers
+ * enter this helper. `ExecutionService` first copies the helper-local
+ * constraints into the returned lease state, then waits for gate availability
+ * without a resource reservation and admits the exact vector. The gate borrows
+ * only that state-owned copy, which survives this helper's return. Destruction
+ * releases the vector and gate during both ordinary return and exception
+ * unwinding.
+ */
+OperationExecutionLease acquire_direct_dirty_operation(
+    ExecutionService* service, const ComputeRunLease* run_lease,
+    const DirtyResolvedOperation& operation) {
+  if (service == nullptr) {
+    return OperationExecutionLease{};
+  }
+  if (run_lease == nullptr) {
+    throw std::invalid_argument(
+        "Direct dirty operation execution requires a Run lease.");
+  }
+  const OperationExecutionConstraints constraints{
+      operation.implementation_identity, operation.metadata.reentrant,
+      operation.metadata.maximum_parallelism, operation.metadata.exclusive_key};
+  const ReadyTaskResourceDemand demand{operation.metadata.retained_memory_bytes,
+                                       operation.metadata.scratch_bytes, 0U,
+                                       1U};
+  return service->acquire_operation_execution(*run_lease, constraints, demand);
+}
+
+}  // namespace
+
+/** @copydoc HighPrecisionDirtyNodeExecutor::HighPrecisionDirtyNodeExecutor */
+HighPrecisionDirtyNodeExecutor::HighPrecisionDirtyNodeExecutor(
+    DirtyNodeExecutionContext context,
+    HighPrecisionDirtyWriteBuffer& hp_write_buffer)
+    : graph_(context.graph),
+      runtime_(context.runtime),
+      events_(context.events),
+      snapshot_(context.snapshot),
+      resolved_operations_(context.resolved_operations),
+      dirty_generation_(context.dirty_generation),
+      hp_write_buffer_(hp_write_buffer),
+      node_synchronization_(context.node_synchronization),
+      run_lease_(context.run_lease),
+      direct_execution_service_(context.direct_execution_service) {}  // NOLINT
+
+/** @copydoc HighPrecisionDirtyNodeExecutor::execute */
+void HighPrecisionDirtyNodeExecutor::execute(Node& node,
+                                             const HpPlanEntry& entry) {
+  observe_dirty_node_cancellation(run_lease_);
+  if (entry.region_hp.is_empty()) {
+    return;
+  }
+  const bool dirty_source = is_dirty_source_node(snapshot_, node.id);
+  if (should_skip_node(node, dirty_source)) {
+    return;
+  }
+
+  log_dirty_node_execution(runtime_, node.id, dirty_source);
+  Node node_for_exec;
+  ResolvedNodeInputs resolved_inputs;
+  {
+    std::lock_guard<std::mutex> lock(node_mutex(node.id));
+    node_for_exec = node;
+    resolved_inputs = resolve_inputs(node_for_exec);
+  }
+
+  const auto operation_it = resolved_operations_.find(node.id);
+  if (operation_it == resolved_operations_.end()) {
+    throw GraphError(GraphErrc::NoOperation,
+                     "No suitable HP operator (tiled or monolithic) for " +
+                         node_for_exec.type + ":" + node_for_exec.subtype);
+  }
+  execute_operation(node_for_exec, entry, resolved_inputs.image_inputs,
+                    operation_it->second);
+
+  observe_dirty_node_cancellation(run_lease_);
+  {
+    std::lock_guard<std::mutex> lock(node_mutex(node.id));
+    commit_node(node, entry, dirty_source);
+  }
+}
+
+ResolvedNodeInputs HighPrecisionDirtyNodeExecutor::resolve_inputs(
+    Node& node) const {
+  return NodeInputResolver::resolve(
+      node,
+      [&](int upstream_id) -> const NodeOutput* {
+        if (const NodeOutput* staged =
+                hp_write_buffer_.find_output(upstream_id)) {
+          return staged;
+        }
+        const Node* upstream = graph_.find_node(upstream_id);
+        if (!upstream) {
+          return nullptr;
+        }
+        return ComputeCachePolicy::reusable_output(*upstream);
+      },
+      "HP update");
+}
+
+/**
+ * @brief Executes the planning-time frozen HP implementation for one node.
+ *
+ * @param node Node being computed.
+ * @param entry HP dirty ROI and extent metadata.
+ * @param image_inputs_ready Resolved HP image inputs.
+ * @param operation Planning-time selected monolithic or tiled operation.
+ * @return Nothing.
+ * @throws std::bad_alloc when staging or selected operation execution exhausts
+ * memory.
+ * @throws GraphError when the frozen operation fails or returns no output.
+ * @note Device-aware selection, including tiled preference, completed before
+ * Run admission. Output stays staged until the dirty write buffer commits.
+ */
+void HighPrecisionDirtyNodeExecutor::execute_operation(
+    Node& node, const HpPlanEntry& entry,
+    const std::vector<const NodeOutput*>& image_inputs_ready,
+    const DirtyResolvedOperation& operation) const {
+  if (std::holds_alternative<TileOpFunc>(operation.operation)) {
+    ImageBuffer* hp_buffer = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(node_mutex(node.id));
+      hp_buffer = &ensure_hp_buffer(node, entry, image_inputs_ready);
+    }
+    OperationExecutionLease operation_lease = acquire_direct_dirty_operation(
+        direct_execution_service_, run_lease_, operation);
+    execute_tiled(node, std::get<TileOpFunc>(operation.operation), entry,
+                  operation.metadata, image_inputs_ready, *hp_buffer);
+    return;
+  }
+  execute_monolithic(node, entry,
+                     std::get<MonolithicOpFunc>(operation.operation), operation,
+                     image_inputs_ready);
+}
+
+ImageBuffer& HighPrecisionDirtyNodeExecutor::ensure_hp_buffer(
+    Node& node, const HpPlanEntry& entry,
+    const std::vector<const NodeOutput*>& image_inputs_ready) const {
+  NodeOutput& staged_output = hp_write_buffer_.ensure_output(node);
+  std::optional<NodeOutput> staged_shape;
+  staged_shape = staged_output;
+  auto [channels, dtype] = infer_output_spec(
+      staged_shape, image_inputs_ready, &node.cached_output_high_precision);
+  ImageBuffer& hp_buffer = staged_output.image_buffer;
+  const bool needs_alloc =
+      (hp_buffer.width != entry.hp_size.width) ||
+      (hp_buffer.height != entry.hp_size.height) ||
+      (hp_buffer.channels != channels) || (hp_buffer.type != dtype) ||
+      (hp_buffer.device != Device::CPU) || (!hp_buffer.data);
+  if (needs_alloc) {
+    hp_buffer = make_aligned_cpu_image_buffer(
+        entry.hp_size.width, entry.hp_size.height, channels, dtype);
+  }
+  return hp_buffer;
+}
+
+/** @copydoc HighPrecisionDirtyNodeExecutor::execute_tiled */
+void HighPrecisionDirtyNodeExecutor::execute_tiled(
+    Node& node, const TileOpFunc& tile_fn, const HpPlanEntry& entry,
+    const OpMetadata& metadata,
+    const std::vector<const NodeOutput*>& image_inputs_ready,
+    ImageBuffer& hp_buffer) const {
+  TiledExecutionConfig config;
+  config.tile_size = kHpMicroTileSize;
+  config.output_roi = entry.roi_hp;
+  config.output_size = entry.hp_size;
+  config.forced_halo = entry.halo_hp;
+  config.metadata = metadata;
+  config.on_tile = [this](const PixelRect&) {
+    observe_dirty_node_cancellation(run_lease_);
+  };
+  if (runtime_) {
+    runtime_->log_event(GraphRuntime::ExecutionEvent::EXECUTE_TILE, node.id);
+    runtime_->log_event(
+        GraphRuntime::ExecutionEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE, node.id);
+  }
+  NodeExecutor::execute_tiled_into(graph_, node, tile_fn, image_inputs_ready,
+                                   hp_buffer, config);
+}
+
+void HighPrecisionDirtyNodeExecutor::execute_monolithic(
+    Node& node, const HpPlanEntry& entry, const MonolithicOpFunc& mono_fn,
+    const DirtyResolvedOperation& operation,
+    const std::vector<const NodeOutput*>& image_inputs_ready) const {
+  TiledExecutionConfig config;
+  config.output_region = entry.region_hp;
+  NodeOutput result;
+  {
+    OperationExecutionLease operation_lease = acquire_direct_dirty_operation(
+        direct_execution_service_, run_lease_, operation);
+    result = NodeExecutor::execute(graph_, node, OpRegistry::OpVariant{mono_fn},
+                                   image_inputs_ready, config);
+  }
+  if (!has_image_payload(result.image_buffer) && result.data.empty()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Monolithic HP operator produced no output for " +
+                         node.type + ":" + node.subtype);
+  }
+  std::lock_guard<std::mutex> lock(node_mutex(node.id));
+  if (ops::find_core_region_monolithic_operation(node.type, node.subtype,
+                                                 mono_fn)
+          .has_value()) {
+    hp_write_buffer_.stage_region_output(node, std::move(result),
+                                         entry.region_hp);
+  } else {
+    hp_write_buffer_.ensure_output(node) = std::move(result);
+  }
+}
+
+void HighPrecisionDirtyNodeExecutor::commit_node(Node& node,
+                                                 const HpPlanEntry& entry,
+                                                 bool dirty_source) {
+  hp_write_buffer_.mark_updated(node, entry.region_hp, dirty_source,
+                                dirty_generation_);
+  events_.push(node.id, node.name, "hp_update", 0.0);
+}
+
+bool HighPrecisionDirtyNodeExecutor::should_skip_node(const Node& node,
+                                                      bool dirty_source) const {
+  uint64_t committed_generation = 0;
+  auto generation_it = graph_.dirty_source_hp_commit_generation.find(node.id);
+  if (generation_it != graph_.dirty_source_hp_commit_generation.end()) {
+    committed_generation = generation_it->second;
+  }
+  return dirty_source &&
+         should_skip_stale_dirty_source(runtime_, node.id, committed_generation,
+                                        dirty_generation_);
+}
+
+std::mutex& HighPrecisionDirtyNodeExecutor::node_mutex(int node_id) const {
+  return node_synchronization_.mutex_for(node_id);
+}
+
+/** @copydoc RealTimeDirtyNodeExecutor::RealTimeDirtyNodeExecutor */
+RealTimeDirtyNodeExecutor::RealTimeDirtyNodeExecutor(
+    DirtyNodeExecutionContext context, RealtimeProxyGraph& proxy_graph,
+    RealtimeProxyWriteBuffer& rt_write_buffer)
+    : graph_(context.graph),
+      runtime_(context.runtime),
+      events_(context.events),
+      snapshot_(context.snapshot),
+      resolved_operations_(context.resolved_operations),
+      dirty_generation_(context.dirty_generation),
+      stabilized_parameters_(context.stabilized_parameters),
+      proxy_graph_(proxy_graph),
+      rt_write_buffer_(rt_write_buffer),
+      node_synchronization_(context.node_synchronization),
+      run_lease_(context.run_lease),
+      direct_execution_service_(context.direct_execution_service),
+      exact_factor_four_preview_(context.exact_factor_four_preview) {
+}  // NOLINT
+
+/** @copydoc RealTimeDirtyNodeExecutor::execute */
+void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
+  observe_dirty_node_cancellation(run_lease_);
+  if (is_rect_empty(entry.roi_rt)) {
+    return;
+  }
+  const bool dirty_source = is_dirty_source_node(snapshot_, node.id);
+  if (should_skip_node(node, dirty_source)) {
+    return;
+  }
+
+  log_dirty_node_execution(runtime_, node.id, dirty_source);
+  Node node_for_exec;
+  ResolvedNodeInputs resolved_inputs;
+  {
+    std::lock_guard<std::mutex> lock(node_mutex(node.id));
+    node_for_exec = node;
+    resolved_inputs = resolve_inputs(node_for_exec);
+  }
+  const auto operation_it = resolved_operations_.find(node.id);
+  if (operation_it == resolved_operations_.end()) {
+    throw GraphError(GraphErrc::NoOperation,
+                     "No operator registered for node " + node_for_exec.type +
+                         ":" + node_for_exec.subtype);
+  }
+  const DirtyResolvedOperation& selected_operation = operation_it->second;
+  const OpRegistry::OpVariant& operation = selected_operation.operation;
+  if (std::holds_alternative<MonolithicOpFunc>(operation)) {
+    NodeOutput result;
+    {
+      OperationExecutionLease operation_lease = acquire_direct_dirty_operation(
+          direct_execution_service_, run_lease_, selected_operation);
+      result = std::get<MonolithicOpFunc>(operation)(
+          node_for_exec, resolved_inputs.image_inputs);
+    }
+    if (!has_image_payload(result.image_buffer) && result.data.empty()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Monolithic RT operator produced no output for " +
+                           node_for_exec.type + ":" + node_for_exec.subtype);
+    }
+    std::lock_guard<std::mutex> lock(node_mutex(node.id));
+    if (result.image_buffer.device != Device::CPU &&
+        has_image_payload(result.image_buffer)) {
+      rt_write_buffer_.ensure_output(node.id) = std::move(result);
+    } else {
+      ImageBuffer& rt_buffer =
+          ensure_rt_buffer(node, entry, resolved_inputs.image_inputs);
+      copy_monolithic_image_roi(result, entry, rt_buffer,
+                                exact_factor_four_preview_ && dirty_source);
+      rt_write_buffer_.ensure_output(node.id).data = std::move(result.data);
+    }
+  } else {
+    ImageBuffer* rt_buffer = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(node_mutex(node.id));
+      rt_buffer = &ensure_rt_buffer(node, entry, resolved_inputs.image_inputs);
+    }
+    OperationExecutionLease operation_lease = acquire_direct_dirty_operation(
+        direct_execution_service_, run_lease_, selected_operation);
+    execute_tiled(node_for_exec, std::get<TileOpFunc>(operation), entry,
+                  selected_operation.metadata, resolved_inputs.image_inputs,
+                  *rt_buffer);
+  }
+
+  observe_dirty_node_cancellation(run_lease_);
+  {
+    std::lock_guard<std::mutex> lock(node_mutex(node.id));
+    commit_node(node, entry, dirty_source);
+  }
+}
+
+ResolvedNodeInputs RealTimeDirtyNodeExecutor::resolve_inputs(Node& node) const {
+  const NodeInputResolver::OutputLookup image_lookup =
+      [&](int upstream_id) -> const NodeOutput* {
+    if (const NodeOutput* staged = rt_write_buffer_.find_output(upstream_id)) {
+      return staged;
+    }
+    if (const NodeOutput* proxy_output =
+            proxy_graph_.find_output(upstream_id)) {
+      return proxy_output;
+    }
+    const Node* upstream = graph_.find_node(upstream_id);
+    if (!upstream) {
+      return nullptr;
+    }
+    return ComputeCachePolicy::reusable_output(*upstream);
+  };
+  const NodeInputResolver::OutputLookup parameter_lookup =
+      [&](int upstream_id) -> const NodeOutput* {
+    if (stabilized_parameters_) {
+      if (const NodeOutput* stabilized =
+              stabilized_parameters_->find_parameter_output(upstream_id)) {
+        return stabilized;
+      }
+    }
+    return image_lookup(upstream_id);
+  };
+  return NodeInputResolver::resolve(node, image_lookup, parameter_lookup,
+                                    "RT update");
+}
+
+ImageBuffer& RealTimeDirtyNodeExecutor::ensure_rt_buffer(
+    const Node& node, const RtPlanEntry& entry,
+    const std::vector<const NodeOutput*>& image_inputs_ready) const {
+  NodeOutput& staged_output = rt_write_buffer_.ensure_output(node.id);
+  auto [channels, dtype] = infer_staged_rt_output_spec(
+      staged_output, image_inputs_ready, node.cached_output_high_precision);
+  ImageBuffer& rt_buffer = staged_output.image_buffer;
+  const bool needs_alloc =
+      (rt_buffer.width != entry.rt_size.width) ||
+      (rt_buffer.height != entry.rt_size.height) ||
+      (rt_buffer.channels != channels) || (rt_buffer.type != dtype) ||
+      (rt_buffer.device != Device::CPU) || (!rt_buffer.data);
+  if (needs_alloc) {
+    rt_buffer = make_aligned_cpu_image_buffer(
+        entry.rt_size.width, entry.rt_size.height, channels, dtype);
+  }
+  return rt_buffer;
+}
+
+/**
+ * @brief Executes the selected RT or HP-fallback implementation.
+ *
+ * @param node Node being computed.
+ * @param entry RT dirty ROI and extent metadata.
+ * @param image_inputs_ready Resolved RT image inputs.
+ * @param rt_buffer Staged destination proxy buffer.
+ * @param op_variant Planning-time selected monolithic or tiled operation.
+ * @return Nothing.
+ * @throws std::bad_alloc when operation execution or staging exhausts memory.
+ * @throws GraphError preserving operation errors and wrapping other standard
+ * or selected image-processing failures with node context.
+ * @note Device-aware selection completed before Run admission. Resource
+ * exhaustion retains its type through dirty execution and the public Host
+ * boundary; ordinary failures retain RT diagnostic wrapping.
+ */
+void RealTimeDirtyNodeExecutor::execute_operation(
+    Node& node, const RtPlanEntry& entry,
+    const std::vector<const NodeOutput*>& image_inputs_ready,
+    ImageBuffer& rt_buffer, const DirtyResolvedOperation& operation) const {
+  const OpRegistry::OpVariant& op_variant = operation.operation;
+  try {
+    if (std::holds_alternative<MonolithicOpFunc>(op_variant)) {
+      execute_monolithic(node, entry, image_inputs_ready, rt_buffer,
+                         std::get<MonolithicOpFunc>(op_variant));
+      return;
+    }
+    execute_tiled(node, std::get<TileOpFunc>(op_variant), entry,
+                  operation.metadata, image_inputs_ready, rt_buffer);
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const GraphError&) {
+    throw;
+  } catch (const std::exception& e) {
+    throw GraphError(GraphErrc::ComputeError, "RT compute failed at node " +
+                                                  std::to_string(node.id) +
+                                                  ": " + std::string(e.what()));
+  }
+}
+
+void RealTimeDirtyNodeExecutor::execute_monolithic(
+    Node& node, const RtPlanEntry& entry,
+    const std::vector<const NodeOutput*>& image_inputs_ready,
+    ImageBuffer& rt_buffer, const MonolithicOpFunc& mono_fn) const {
+  NodeOutput result = mono_fn(node, image_inputs_ready);
+  if (!has_image_payload(result.image_buffer) && result.data.empty()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Monolithic RT operator produced no output for " +
+                         node.type + ":" + node.subtype);
+  }
+  if (result.image_buffer.device != Device::CPU &&
+      has_image_payload(result.image_buffer)) {
+    rt_write_buffer_.ensure_output(node.id) = std::move(result);
+    return;
+  }
+  copy_monolithic_image_roi(result, entry, rt_buffer, false);
+  rt_write_buffer_.ensure_output(node.id).data = std::move(result.data);
+}
+
+/** @copydoc RealTimeDirtyNodeExecutor::copy_monolithic_image_roi */
+void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
+    const NodeOutput& result, const RtPlanEntry& entry, ImageBuffer& rt_buffer,
+    bool exact_factor_four_source) const {
+  if (result.image_buffer.width <= 0 || result.image_buffer.height <= 0) {
+    return;
+  }
+  if (result.image_buffer.device != Device::CPU) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Opaque backend monolithic output must replace the full RT result");
+  }
+
+  if (rt_buffer.width != entry.rt_size.width ||
+      rt_buffer.height != entry.rt_size.height ||
+      rt_buffer.channels != result.image_buffer.channels ||
+      rt_buffer.type != result.image_buffer.type || !rt_buffer.data) {
+    rt_buffer = make_aligned_cpu_image_buffer(
+        entry.rt_size.width, entry.rt_size.height, result.image_buffer.channels,
+        result.image_buffer.type);
+  }
+
+  if (exact_factor_four_source) {
+    image_processing::exact_box_average_factor_four_region(
+        result.image_buffer, rt_buffer, entry.roi_rt);
+    return;
+  }
+
+  const ImageBuffer* normalized_result = &result.image_buffer;
+  std::optional<ImageBuffer> resized_result;
+  const bool needs_resize = result.image_buffer.width != entry.rt_size.width ||
+                            result.image_buffer.height != entry.rt_size.height;
+  if (needs_resize) {
+    resized_result = image_processing::resize_cpu_image_buffer(
+        result.image_buffer, entry.rt_size);
+    normalized_result = &*resized_result;
+  }
+  copy_image_buffer_region(InputTileView{normalized_result, entry.roi_rt},
+                           OutputTileView{&rt_buffer, entry.roi_rt});
+}
+
+/** @copydoc RealTimeDirtyNodeExecutor::execute_tiled */
+void RealTimeDirtyNodeExecutor::execute_tiled(
+    Node& node, const TileOpFunc& tile_fn, const RtPlanEntry& entry,
+    const OpMetadata& metadata,
+    const std::vector<const NodeOutput*>& image_inputs_ready,
+    ImageBuffer& rt_buffer) const {
+  TiledExecutionConfig config;
+  config.tile_size = kRtTileSize;
+  config.output_roi = entry.roi_rt;
+  config.output_size = entry.rt_size;
+  config.forced_halo = entry.halo_rt;
+  config.metadata = metadata;
+  config.on_tile = [this](const PixelRect&) {
+    observe_dirty_node_cancellation(run_lease_);
+  };
+  NodeExecutor::execute_tiled_into(graph_, node, tile_fn, image_inputs_ready,
+                                   rt_buffer, config);
+  if (runtime_) {
+    runtime_->log_event(GraphRuntime::ExecutionEvent::EXECUTE_TILE, node.id);
+    runtime_->log_event(
+        GraphRuntime::ExecutionEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE, node.id);
+  }
+}
+
+void RealTimeDirtyNodeExecutor::commit_node(Node& node,
+                                            const RtPlanEntry& entry,
+                                            bool dirty_source) {
+  rt_write_buffer_.mark_updated(node.id, entry.region_hp, dirty_source,
+                                dirty_generation_);
+  events_.push(node.id, node.name, "rt_update", 0.0);
+}
+
+bool RealTimeDirtyNodeExecutor::should_skip_node(const Node& node,
+                                                 bool dirty_source) const {
+  const uint64_t committed_generation =
+      proxy_graph_.dirty_source_generation(node.id);
+  return dirty_source &&
+         should_skip_stale_dirty_source(runtime_, node.id, committed_generation,
+                                        dirty_generation_);
+}
+
+std::mutex& RealTimeDirtyNodeExecutor::node_mutex(int node_id) const {
+  return node_synchronization_.mutex_for(node_id);
+}
+
+}  // namespace ps::compute

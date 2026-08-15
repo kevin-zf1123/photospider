@@ -16,11 +16,11 @@
 #include <utility>
 #include <vector>
 
-#include "compute/compute_task_submission.hpp"
-#include "compute/dirty_write_buffers.hpp"
-#include "compute/execution_lifecycle_telemetry.hpp"
-#include "compute/progressive_compute.hpp"
-#include "compute/resource_demand_estimator.hpp"
+#include "compute/dirty/dirty_write_buffers.hpp"
+#include "compute/dispatch/compute_task_submission.hpp"
+#include "compute/execution/execution_lifecycle_telemetry.hpp"
+#include "compute/execution/progressive_compute.hpp"
+#include "compute/execution/resource_demand_estimator.hpp"
 #include "photospider/data/value.hpp"
 
 namespace ps::compute {

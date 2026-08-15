@@ -9,8 +9,8 @@
 #include <string>
 #include <vector>
 
-#include "compute/compute_metrics_recorder.hpp"
-#include "compute/node_executor.hpp"
+#include "compute/dirty/node_executor.hpp"
+#include "compute/request/compute_metrics_recorder.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/node.hpp"         // NOLINT(build/include_subdir)
 #include "photospider/core/image_buffer.hpp"

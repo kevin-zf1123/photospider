@@ -4,9 +4,9 @@
 #include <cstdint>
 #include <vector>
 
-#include "compute/execution_service.hpp"
+#include "compute/execution/execution_service.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
-#include "compute/execution_service_test_probe.hpp"
+#include "compute/execution/execution_service_test_probe.hpp"
 #endif
 
 namespace ps::testing {

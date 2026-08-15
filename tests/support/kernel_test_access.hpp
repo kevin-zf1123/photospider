@@ -9,7 +9,7 @@
 #include <type_traits>
 #include <utility>
 
-#include "compute/execution_service.hpp"
+#include "compute/execution/execution_service.hpp"
 #include "runtime/kernel.hpp"
 
 namespace ps::testing {

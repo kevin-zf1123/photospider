@@ -21,8 +21,8 @@
 #include <string>
 #include <utility>
 
-#include "compute/execution_service.hpp"
-#include "compute/realtime_proxy_graph.hpp"
+#include "compute/dirty/realtime_proxy_graph.hpp"
+#include "compute/execution/execution_service.hpp"
 #include "core/image_buffer_processing.hpp"
 #include "runtime/kernel.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)

@@ -532,11 +532,11 @@ lifecycle telemetry are intentionally not exposed through Host, CLI, or IPC.
 - `src/lib/graph/graph_revision.hpp`
 - `src/lib/graph/graph_state_executor.cpp`
 - `src/lib/graph/graph_model.cpp`
-- `src/lib/compute/compute_commit_policy.hpp`
+- `src/lib/compute/request/compute_commit_policy.hpp`
 - `src/lib/compute/compute_service.*`
-- `src/lib/compute/run_lifecycle_registry.*`
-- `src/lib/compute/execution_lifecycle_telemetry.*`
-- `src/lib/compute/realtime_proxy_graph.*`
+- `src/lib/compute/execution/run_lifecycle_registry.*`
+- `src/lib/compute/execution/execution_lifecycle_telemetry.*`
+- `src/lib/compute/dirty/realtime_proxy_graph.*`
 - `src/lib/runtime/graph_runtime.*`
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/runtime/kernel_compute.cpp`

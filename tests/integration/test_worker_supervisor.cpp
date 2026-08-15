@@ -34,9 +34,9 @@
 
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
-#include "server/worker_manager_test_access.hpp"  // NOLINT(build/include_subdir)
-#include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
-#include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
+#include "server/worker/worker_manager_test_access.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker/worker_protocol.hpp"  // NOLINT(build/include_subdir)
 
 #ifndef PS_TEST_WORKER_FIXTURE_PATH
 #error "PS_TEST_WORKER_FIXTURE_PATH must name the real-process fixture"
@@ -2015,6 +2015,10 @@ TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
   WorkerManagerOptions options = supervisor_options();
   options.heartbeat_timeout = kBulkHeartbeatEvidenceTimeout;
   options.attempt_runtime_timeout = 5s;
+  // This case moves more than 64 MiB twice and validates the data-plane join,
+  // not the fixture's 150-ms post-Report close boundary. Preserve a bounded
+  // exit while allowing loaded CI workers to schedule the acknowledged child.
+  options.post_report_timeout = 500ms;
   options.io_timeout = 2s;
   options.first_external_heartbeat_observed_for_test = heartbeat_observed;
   options.latest_output_pending_heartbeat_ordinal_for_test =

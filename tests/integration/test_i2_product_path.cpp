@@ -20,7 +20,7 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/i2_profile.hpp"
+#include "benchmark/i2/i2_profile.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
 

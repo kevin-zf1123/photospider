@@ -20,7 +20,7 @@
 #include <thread>
 #include <utility>
 
-#include "compute/progressive_compute.hpp"
+#include "compute/execution/progressive_compute.hpp"
 #include "core/image_buffer_processing.hpp"
 #include "photospider/core/image_buffer.hpp"
 #include "photospider/data/value.hpp"

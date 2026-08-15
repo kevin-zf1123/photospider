@@ -15,7 +15,7 @@
 #include <string_view>
 #include <vector>
 
-#include "execution/device_execution_context.hpp"
+#include "execution/device/device_execution_context.hpp"
 #include "metal/metal_exception_boundary.hpp"
 
 /**

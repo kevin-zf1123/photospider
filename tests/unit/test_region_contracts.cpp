@@ -11,9 +11,9 @@
 #include <variant>
 #include <vector>
 
-#include "compute/dirty_region_planner.hpp"
-#include "compute/resource_demand_estimator.hpp"
-#include "compute/task_population_strategy.hpp"
+#include "compute/dirty/dirty_region_planner.hpp"
+#include "compute/dispatch/task_population_strategy.hpp"
+#include "compute/execution/resource_demand_estimator.hpp"
 #include "core/ops.hpp"                   // NOLINT(build/include_subdir)
 #include "core/region_image_adapter.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"          // NOLINT(build/include_subdir)

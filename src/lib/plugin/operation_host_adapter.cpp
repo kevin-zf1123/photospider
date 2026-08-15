@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "execution/device_execution_context.hpp"
+#include "execution/device/device_execution_context.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/node.hpp"  // NOLINT(build/include_subdir)
 

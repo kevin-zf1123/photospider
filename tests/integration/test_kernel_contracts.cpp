@@ -29,12 +29,12 @@
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_service.hpp"
-#include "compute/execution_service.hpp"
-#include "compute/realtime_proxy_graph.hpp"
+#include "compute/dirty/realtime_proxy_graph.hpp"
+#include "compute/execution/execution_service.hpp"
 #include "core/param_utils.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "core/value_image_adapter.hpp"
-#include "execution/compute_io_executor.hpp"
+#include "execution/device/compute_io_executor.hpp"
 #include "graph/graph_cache_service.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
 #include "graph/graph_cache_service_test_access.hpp"  // NOLINT(build/include_subdir)

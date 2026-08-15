@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "compute/run_lifecycle_registry.hpp"
+#include "compute/execution/run_lifecycle_registry.hpp"
 #include "graph/in_memory_graph_document_adapter.hpp"  // NOLINT(build/include_subdir)
 #include "runtime/kernel.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)

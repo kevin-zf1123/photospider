@@ -18,14 +18,14 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/b1_host.hpp"
-#include "benchmark/i1_host.hpp"
-#include "benchmark/i2_host.hpp"
-#include "benchmark/m1_host.hpp"
-#include "compute/dirty_region_snapshot.hpp"
-#include "compute/execution_service.hpp"
+#include "benchmark/b1/b1_host.hpp"
+#include "benchmark/i1/i1_host.hpp"
+#include "benchmark/i2/i2_host.hpp"
+#include "benchmark/m1/m1_host.hpp"
+#include "compute/dirty/dirty_region_snapshot.hpp"
+#include "compute/execution/execution_service.hpp"
 #include "core/parameter_value_text.hpp"
-#include "execution/device_completion.hpp"
+#include "execution/device/device_completion.hpp"
 #include "host/embedded_host_dependencies.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/configured_image_artifact_codec.hpp"

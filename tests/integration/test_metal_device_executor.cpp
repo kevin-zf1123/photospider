@@ -24,12 +24,12 @@
 #include <vector>
 
 #include "compute/compute_run.hpp"
-#include "compute/execution_service.hpp"
+#include "compute/execution/execution_service.hpp"
 #include "core/value_image_adapter.hpp"
-#include "execution/device_execution_context.hpp"
-#include "execution/device_executor_registry.hpp"
+#include "execution/device/device_execution_context.hpp"
+#include "execution/device/device_executor_registry.hpp"
+#include "execution/device/metal_device_executor.hpp"
 #include "execution/execution_task_runtime.hpp"
-#include "execution/metal_device_executor.hpp"
 #include "metal/perlin_noise_metal.hpp"
 #include "photospider/core/image_buffer.hpp"
 #include "photospider/plugin/op_contract.hpp"

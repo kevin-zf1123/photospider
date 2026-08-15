@@ -18,7 +18,7 @@
 #include <system_error>
 #include <utility>
 
-#include "benchmark/b1_evidence.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/b1/b1_evidence.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
 
 namespace ps::benchmark {

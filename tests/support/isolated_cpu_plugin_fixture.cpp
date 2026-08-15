@@ -20,8 +20,8 @@
 #include <string>
 #include <thread>
 
-#include "execution/isolated_cpu_invocation.hpp"  // NOLINT(build/include_subdir)
-#include "execution/plugin_runtime_supervisor.hpp"  // NOLINT(build/include_subdir)
+#include "execution/device/plugin_runtime_supervisor.hpp"  // NOLINT(build/include_subdir)
+#include "execution/isolation/isolated_cpu_invocation.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::execution {
 namespace {

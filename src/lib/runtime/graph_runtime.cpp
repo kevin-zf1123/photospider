@@ -14,8 +14,8 @@
 #include <utility>
 #include <vector>
 
-#include "compute/realtime_proxy_graph.hpp"
-#include "compute/run_lifecycle_registry.hpp"
+#include "compute/dirty/realtime_proxy_graph.hpp"
+#include "compute/execution/run_lifecycle_registry.hpp"
 #include "photospider/core/graph_error.hpp"
 
 namespace ps {
