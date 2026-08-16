@@ -2937,7 +2937,8 @@ std::optional<IsolatedCpuImageFacet> to_wire_image_facet(
  * @throws IsolatedCpuProtocolError for malformed image metadata, unsupported
  * quantization/encoding, or local integer representation.
  * @throws std::invalid_argument from public scalar-width validation.
- * @throws std::bad_alloc when bounded vector copies cannot allocate.
+ * @throws std::bad_alloc when bounded metadata-validation state or wire vectors
+ *         cannot allocate.
  */
 IsolatedCpuTensorDescriptor to_wire_tensor_descriptor(
     const DenseTensorDescriptor& descriptor,
@@ -3622,7 +3623,8 @@ void validate_host_capabilities_after_exit(
  * @throws ValueBuilder validation/allocation/publication errors unchanged.
  * @throws IsolatedCpuProtocolError for local response/plan or copied-content
  * inconsistency.
- * @throws std::bad_alloc when output or Value storage cannot allocate.
+ * @throws std::bad_alloc when output vectors, complete descriptor/ImageFacet
+ *         copies, or immutable Value publication cannot allocate.
  * @note Binding the fresh copy closes the shared-memory check/use window. The
  * local vector provides all-or-nothing escape: partial Values are destroyed if
  * a later output cannot be constructed or validated.

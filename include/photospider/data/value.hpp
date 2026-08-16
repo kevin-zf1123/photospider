@@ -464,7 +464,8 @@ class ValueBuilder final {
    * offset, and exact storage size.
    *
    * @param descriptor Logical descriptor copied into private builder state.
-   * @param image_facet Optional complete ordinary-image interpretation.
+   * @param image_facet Optional complete ordinary-image interpretation copied
+   *        into private builder state.
    * @param layout Positive producer layout copied into private builder state.
    * @param storage_size Exact positive allocation byte length.
    * @return Move-only exclusive builder ready to issue one WriteLease.
@@ -474,8 +475,11 @@ class ValueBuilder final {
    * @throws std::overflow_error when envelope, non-overlap, or identity
    * arithmetic overflows.
    * @throws std::length_error when bounded image records exceed frozen limits.
-   * @throws std::bad_alloc when state or CPU allocation cannot be created.
-   * @note No caller allocation is retained.
+   * @throws std::bad_alloc when bounded validation, complete
+   *         descriptor/ImageFacet metadata copies, private state, or CPU
+   *         allocation cannot be created.
+   * @note No caller allocation is retained. Descriptor shape/quantization and
+   *       ImageFacet diagnostic/channel/group/sample storage are deep-copied.
    */
   static ValueBuilder allocate_cpu_dense_tensor(
       DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
@@ -524,9 +528,11 @@ class ValueBuilder final {
    * @throws std::logic_error when the builder is moved-from, already sealed, or
    * still has an active WriteLease.
    * @throws std::overflow_error when Value revision identity is exhausted.
-   * @throws std::bad_alloc when immutable publication state cannot allocate.
+   * @throws std::bad_alloc when copying the complete descriptor, ImageFacet, or
+   *         layout into immutable publication state cannot allocate.
    * @note A successful seal is irreversible. All bytes, including padding,
-   * become immutable.
+   *       become immutable. Metadata allocation completes before builder
+   *       authority closes, so allocation failure leaves the builder unsealed.
    */
   Value seal();
 
@@ -594,7 +600,8 @@ class Value final {
    *
    * @param descriptor Concrete logical tensor descriptor copied into isolated
    *        immutable state after validation.
-   * @param image_facet Optional complete ordinary-image interpretation.
+   * @param image_facet Optional complete ordinary-image interpretation copied
+   *        into isolated immutable state.
    * @param layout Physical signed byte strides copied into isolated immutable
    *        state after validation.
    * @param storage Exclusively owned input bytes consumed as the source for an
@@ -606,10 +613,13 @@ class Value final {
    * @throws std::overflow_error when the required address envelope cannot be
    *         represented by std::size_t.
    * @throws std::length_error when bounded image records exceed frozen limits.
-   * @throws std::bad_alloc when immutable state allocation fails.
+   * @throws std::bad_alloc when complete descriptor/ImageFacet metadata,
+   *         layout, payload, builder, or immutable publication allocation
+   *         fails.
    * @note Validation finishes before the immutable PImpl is published. The
-   *       published state deep-copies shape, strides, and payload so pointers
-   *       retained before an lvalue or rvalue call never alias the Value.
+   *       published state deep-copies descriptor shape/quantization, complete
+   *       ImageFacet metadata, strides, and payload so pointers retained before
+   *       an lvalue or rvalue call never alias the Value.
    */
   static Value from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
                                      std::optional<ImageFacet> image_facet,
@@ -625,7 +635,8 @@ class Value final {
    * element lies inside `buffer`.
    *
    * @param descriptor Concrete logical descriptor copied into immutable state.
-   * @param image_facet Optional complete ordinary-image interpretation.
+   * @param image_facet Optional complete ordinary-image interpretation copied
+   *        into isolated immutable state.
    * @param layout Signed byte strides and logical-origin byte offset.
    * @param buffer Sealed immutable range and binding retained by the new Value.
    * @return Valid Value with a fresh revision and buffer allocation identity.
@@ -634,9 +645,12 @@ class Value final {
    * @throws std::out_of_range when the signed layout envelope escapes buffer.
    * @throws std::overflow_error when envelope or revision arithmetic overflows.
    * @throws std::length_error when bounded image records exceed frozen limits.
-   * @throws std::bad_alloc when immutable publication state cannot allocate.
+   * @throws std::bad_alloc when complete descriptor/ImageFacet metadata,
+   *         layout, or immutable publication state cannot allocate.
    * @note Publishing another logical view over the same BufferHandle preserves
-   * allocation identity but creates a distinct ValueRevisionId.
+   *       allocation identity but creates a distinct ValueRevisionId. The
+   *       logical descriptor, rich ImageFacet, and layout are deep-copied while
+   *       the sealed buffer allocation is retained.
    */
   static Value from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
                                      std::optional<ImageFacet> image_facet,

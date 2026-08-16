@@ -1241,8 +1241,9 @@ std::size_t WriteLease::size() const {
 /**
  * @brief Immutable implementation for one validated generic Value.
  *
- * @throws std::bad_alloc when copied descriptor/Layout/buffer storage cannot
- * allocate.
+ * @throws std::bad_alloc when complete descriptor, allocation-owning
+ *         ImageFacet, Layout, provider metadata, or buffer-vector copies cannot
+ *         allocate.
  * @note Instances are published only through shared_ptr<const Impl>. Ordinary
  * synchronous publication uses an already-Ready fence; source-private pending
  * publication closes ordinary builder authority before the Value escapes.
@@ -1286,14 +1287,16 @@ struct Value::Impl final {
    * @brief Stores one completely validated immutable publication.
    *
    * @param descriptor_in Logical descriptor to retain.
-   * @param image_facet_in Optional image facet to retain.
+   * @param image_facet_in Optional complete ordinary-image interpretation to
+   *        retain.
    * @param layout_in Tagged checked layout to retain.
    * @param buffer_in Sealed checked allocation range to retain.
    * @param ready_fence_in Valid producer-completion observer.
    * @param revision_in Fresh nonzero publication revision.
    * @param producer_in Fresh nonzero producer identity.
-   * @throws std::bad_alloc when descriptor or layout vector moves must
-   * allocate.
+   * @throws std::bad_alloc when the by-value complete descriptor/ImageFacet or
+   *         layout copies used to construct this immutable state cannot
+   *         allocate.
    * @note Inputs are already validated. Before the Value escapes, the caller
    *       either retires ordinary builder authority for an already-Ready
    *       publication or transfers the sole mutable path to the matching
@@ -1350,7 +1353,7 @@ struct ValueBuilder::Impl final {
   /** @brief Validated logical descriptor. */
   DenseTensorDescriptor descriptor;
 
-  /** @brief Optional validated explicit image facet. */
+  /** @brief Optional validated complete ordinary-image interpretation. */
   std::optional<ImageFacet> image_facet;
 
   /** @brief Validated exact Strided or Blocked producer layout. */

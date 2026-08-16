@@ -35,7 +35,8 @@ Value snapshot_cpu_image_value(const ImageBuffer& buffer);
  * positive-int-unrepresentable extents, or otherwise unsupported image facts.
  * @throws ReadyFenceAccessError when producer completion is not Ready.
  * @throws BufferAccessError when the retained binding is not host-readable.
- * @throws std::bad_alloc when retaining view state cannot allocate.
+ * @throws std::bad_alloc when retaining a view's complete allocation-owning
+ *         ImageFacet metadata cannot allocate.
  * @note Success establishes Strided layout, absent quantization, explicit
  * ImageFacet, supported whole-byte element encoding, singleton unassigned
  * axes, positive-int-compatible extents, and direct host visibility.
@@ -54,8 +55,8 @@ void validate_image_buffer_compatible_value(const Value& value);
  * unsupported by the current ImageBuffer contract.
  * @throws std::out_of_range when checked view coordinates are invalid.
  * @throws std::overflow_error when image-byte arithmetic is unrepresentable.
- * @throws std::bad_alloc when the output allocation or view coordinates cannot
- * allocate.
+ * @throws std::bad_alloc when complete ImageFacet view metadata, output
+ *         storage, or coordinate vectors cannot allocate.
  * @note Arbitrary validated positive, zero, or negative source strides are read
  * through ImageView; source padding is never copied as active pixels. Because
  * ImageBuffer cannot represent signed origin or richer image interpretation,
@@ -132,7 +133,8 @@ bool node_output_region_is_complete(const NodeOutput& output,
  *         wrong domain/rank, or exceeds the shared descriptor.
  * @throws std::overflow_error when contiguous output arithmetic cannot be
  *         represented.
- * @throws std::bad_alloc when snapshot, coordinate, or output storage cannot
+ * @throws std::bad_alloc when complete descriptor/ImageFacet snapshots,
+ *         coordinate or output storage, or immutable Value publication cannot
  *         allocate.
  * @note This source-private bridge changes neither operation ABI v2 nor the
  *       immutable Value contract. Empty returns `existing`; Whole returns

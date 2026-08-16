@@ -173,7 +173,8 @@ class PendingValuePublisher final {
    * matching FenceCompleter.
    *
    * @param descriptor Logical descriptor copied into immutable publication.
-   * @param image_facet Optional complete validated ordinary-image metadata.
+   * @param image_facet Optional complete validated ordinary-image metadata
+   *        copied into private builder and immutable publication state.
    * @param layout Positive exact producer layout.
    * @param storage_size Exact positive allocation byte length.
    * @param replica_revision Optional existing logical revision preserved by an
@@ -183,8 +184,8 @@ class PendingValuePublisher final {
    *         storage envelope.
    * @throws std::overflow_error for address or identity overflow.
    * @throws std::length_error when bounded image records exceed frozen limits.
-   * @throws std::bad_alloc when allocation or publication state cannot
-   * allocate.
+   * @throws std::bad_alloc when complete descriptor/ImageFacet metadata,
+   *         allocation, builder, or publication state cannot allocate.
    * @note No consumer-readable BufferHandle or pointer is exposed before Ready.
    */
   static PendingValuePublication allocate_cpu_dense_tensor(
@@ -352,7 +353,9 @@ class PendingDeviceValuePublisher final {
    * @brief Publishes a validated pending DenseTensor over external storage.
    *
    * @param descriptor Logical descriptor copied into immutable state.
-   * @param image_facet Optional complete validated ordinary-image metadata.
+   * @param image_facet Optional complete validated ordinary-image metadata
+   *        copied into the by-value publication request and retained by the
+   *        immutable Value.
    * @param layout Signed validated physical layout.
    * @param owner Non-null owner retaining the complete native allocation.
    * @param native_handle Non-null opaque native allocation handle.
@@ -368,7 +371,8 @@ class PendingDeviceValuePublisher final {
    * @throws std::out_of_range when the layout escapes the allocation.
    * @throws std::overflow_error when identity or envelope arithmetic overflows.
    * @throws std::length_error when bounded image records exceed frozen limits.
-   * @throws std::bad_alloc when immutable/control state cannot allocate.
+   * @throws std::bad_alloc when complete descriptor/ImageFacet metadata or
+   *         immutable/control state cannot allocate.
    * @note Publication performs no payload access and submits no native work.
    */
   static PendingDeviceValuePublication publish_dense_tensor(

@@ -13,7 +13,8 @@ namespace ps::ops {
 /**
  * @brief Logical descriptor passed between dense-image inference and execute.
  *
- * @throws std::bad_alloc when copying the tensor shape allocates and fails.
+ * @throws std::bad_alloc when copying the complete DenseTensor descriptor or
+ *         allocation-owning ImageFacet metadata cannot allocate.
  * @note Physical layout, payload bytes, graph state, device routing, and
  *       readiness are deliberately absent from inference.
  */
@@ -21,7 +22,11 @@ struct DenseImageDescriptor {
   /** @brief Complete logical DenseTensor descriptor. */
   DenseTensorDescriptor tensor;
 
-  /** @brief Complete bounded ordinary-image interpretation of the tensor. */
+  /**
+   * @brief Complete bounded ordinary-image interpretation of the tensor.
+   * @note Copies retain all owned diagnostic strings and channel/group/sample
+   *       vectors rather than sharing or projecting rich metadata.
+   */
   ImageFacet image;
 
   /**

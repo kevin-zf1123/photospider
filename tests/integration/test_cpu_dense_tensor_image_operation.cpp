@@ -197,7 +197,8 @@ Value make_rich_unsigned8_value() {
  *
  * @param facet Candidate ImageView metadata copy.
  * @return Nothing.
- * @throws Nothing when the validated fixture satisfies its test assertions.
+ * @throws std::bad_alloc when expected vector or GoogleTest diagnostic storage
+ *         cannot allocate.
  * @note Diagnostic strings are checked explicitly because ImageFacet semantic
  *       equality intentionally ignores their spelling.
  */
@@ -434,14 +435,16 @@ double expected_matrix_element(double seed,
  * @brief Creates one deterministic positive-layout FP32 or FP64 Value.
  *
  * @param shape Nonempty positive logical shape.
- * @param image_facet Optional explicit image-axis mapping.
+ * @param image_facet Optional complete ordinary-image interpretation copied
+ *        into the fixture Value.
  * @param bit_width Floating storage width, exactly 32 or 64.
  * @param padding_elements Element-sized gap between outer logical slabs.
  * @param seed Integral start used by `expected_matrix_element`.
  * @return Ready immutable CPU Value whose padding bytes are `0xA5`.
  * @throws std::invalid_argument for unsupported width or invalid Value facts.
  * @throws std::overflow_error for unrepresentable layout arithmetic.
- * @throws std::bad_alloc when descriptor, layout, or payload allocation fails.
+ * @throws std::bad_alloc when descriptor/ImageFacet metadata, layout, or
+ *         payload allocation fails.
  * @note Active element bytes contain native FP32/FP64 values; comparisons use
  * the same process and do not define persistent byte order.
  */
@@ -594,14 +597,20 @@ void expect_rank_one_padded_storage(const Value& value, double seed) {
 /**
  * @brief Snapshot populated by one admitted generic-Value I/O observation.
  *
- * @throws std::bad_alloc when copied descriptor, layout, or bytes allocate.
+ * @throws std::bad_alloc when the complete DenseTensor descriptor,
+ *         allocation-owning ImageFacet metadata, layout, or byte snapshot
+ *         cannot allocate.
  * @note Test code reads fields only after typed completion establishes worker
  * synchronization.
  */
 struct MatrixIoObservation final {
   /** @brief Exact copied logical descriptor. */
   DenseTensorDescriptor descriptor;
-  /** @brief Exact copied optional Image Facet. */
+  /**
+   * @brief Exact owned copy of the optional complete ImageFacet.
+   * @note Rich diagnostic strings and channel/group/sample vectors are copied
+   *       into observation-owned storage.
+   */
   std::optional<ImageFacet> image_facet;
   /** @brief Exact copied physical layout. */
   StridedLayout layout;
@@ -2461,8 +2470,8 @@ TEST(CpuDenseTensorImageOperation,
 
 /**
  * @brief Proves Value sharing and ImageView copies retain rich image state.
- * @throws Nothing when copy construction, assignment, and lifetime invariants
- *         hold.
+ * @throws std::bad_alloc when fixture or rich ImageFacet copy storage cannot
+ *         allocate.
  * @note The source Value handles and temporary ReadLeases are released before
  *       final view access so each copied view must retain its own Value handle.
  */
@@ -2577,8 +2586,8 @@ TEST(CpuDenseTensorImageOperation,
 
 /**
  * @brief Proves copy-like ImageView moves preserve rich source metadata.
- * @throws Nothing when move construction and assignment retain complete
- *         descriptors, owned metadata, payload addresses, and source validity.
+ * @throws std::bad_alloc when fixture or copy-like rich ImageFacet move storage
+ *         cannot allocate.
  */
 TEST(CpuDenseTensorImageOperation,
      ImageViewMovesPreserveSourceAndReplaceDestination) {

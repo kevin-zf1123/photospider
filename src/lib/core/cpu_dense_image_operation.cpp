@@ -57,7 +57,8 @@ std::size_t checked_add(std::size_t left, std::size_t right,
  *
  * @param view Valid retaining checked image view.
  * @return Complete logical DenseTensor and ImageFacet facts.
- * @throws std::bad_alloc when copying tensor shape allocates and fails.
+ * @throws std::bad_alloc when copying the complete DenseTensor descriptor or
+ *         allocation-owning ImageFacet metadata cannot allocate.
  * @note Physical strides and Value ownership are intentionally omitted.
  */
 DenseImageDescriptor logical_descriptor(const ImageView& view) {
@@ -110,7 +111,8 @@ void validate_logical_image_descriptor(const DenseImageDescriptor& descriptor) {
  * @return NodeOutput retaining the exact Value plus a derived CPU ImageBuffer.
  * @throws std::invalid_argument or std::overflow_error for descriptor, facet,
  *         layout, or current-adapter mismatches.
- * @throws std::bad_alloc when current output allocation fails.
+ * @throws std::bad_alloc when retaining complete descriptor/ImageFacet facts
+ *         or allocating the compatibility output snapshot fails.
  * @note The exact sealed Value is the identity authority. ImageBuffer receives
  * an independent active-element snapshot for current ABI/Host consumers.
  */
@@ -314,7 +316,12 @@ bool dense_coordinate_selected(
  * @return Unchanged complete input logical descriptor.
  * @throws std::invalid_argument for wrong arity, malformed image facts, or an
  *         element type other than unsigned 8-bit.
+ * @throws std::overflow_error or std::length_error for unrepresentable or
+ *         over-limit image metadata.
+ * @throws std::bad_alloc when bounded validation state or the returned complete
+ *         DenseTensor/ImageFacet copy cannot allocate.
  * @note The callback accepts no payload object and performs no IO or mutation.
+ *       Returning by value preserves every rich ImageFacet field.
  */
 DenseImageDescriptor infer_dense_invert(
     const CpuDenseImageConfiguration& configuration,
@@ -343,7 +350,9 @@ DenseImageDescriptor infer_dense_invert(
  * @return Independently owned padded immutable output Value.
  * @throws std::invalid_argument for wrong arity or descriptor disagreement.
  * @throws std::overflow_error for unrepresentable output layout arithmetic.
- * @throws std::bad_alloc when output storage allocation fails.
+ * @throws std::bad_alloc when complete descriptor/ImageFacet copies, layout or
+ *         coordinate storage, output bytes, or immutable Value publication
+ *         cannot allocate.
  * @note Every active x/y/channel element is addressed through ImageView;
  *       selected elements are inverted, unselected elements are copied, and
  *       input padding is never inspected.

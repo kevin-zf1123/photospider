@@ -160,7 +160,8 @@ class MetalExecutionContext {
    * @throws std::runtime_error when an invocation's exclusive absolute deadline
    * is observed during preparation, bounded copy, or immediately before native
    * commit.
-   * @throws std::bad_alloc for retained publication/completion ownership.
+   * @throws std::bad_alloc for complete descriptor/ImageFacet metadata copies
+   *         or retained publication/completion ownership.
    * @note The method performs only explicitly requested source access and
    * never waits for Metal. Host bytes are copied in bounded chunks with the
    * invocation's unchanged deadline checked between chunks. Rank-three

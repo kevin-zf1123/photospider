@@ -42,15 +42,18 @@ class IsolatedCpuInvocationError : public std::runtime_error {
 };
 
 /**
- * @brief Explicit Host plan for one fresh positive-stride CPU output.
- * @throws std::bad_alloc when copied descriptor/layout vectors allocate.
- * @note The plan carries no allocation, producer, readiness, Run, or ledger
- * authority. `ValueBuilder` validates it again after the child returns.
+ * @brief Explicit Host-owned plan for one fresh positive-stride CPU output.
+ * @throws std::bad_alloc when copies of the complete DenseTensor descriptor,
+ *         allocation-owning ImageFacet metadata, or layout cannot allocate.
+ * @note Plan copies preserve every public ImageFacet field, including owned
+ *       diagnostic strings and channel/group/sample vectors. The plan carries
+ *       no allocation, producer, readiness, Run, or ledger authority;
+ *       `ValueBuilder` validates it again after the child returns.
  */
 struct IsolatedCpuDenseTensorOutputPlan final {
   /** @brief Logical whole-byte DenseTensor descriptor. */
   DenseTensorDescriptor descriptor;
-  /** @brief Optional complete public ordinary-image interpretation. */
+  /** @brief Owned optional complete public ordinary-image interpretation. */
   std::optional<ImageFacet> image_facet;
   /** @brief Exact positive-stride producer layout. */
   StridedLayout layout;
@@ -60,7 +63,8 @@ struct IsolatedCpuDenseTensorOutputPlan final {
 
 /**
  * @brief High-level Host request converted into one pointer-free invocation.
- * @throws std::bad_alloc when copied strings or vectors allocate.
+ * @throws std::bad_alloc when copied operation/parameter/output storage,
+ *         including complete output-plan ImageFacet metadata, cannot allocate.
  * @note Inputs remain Host-owned Ready Values. Their BufferHandle and process-
  * local identities never enter the wire.
  */
