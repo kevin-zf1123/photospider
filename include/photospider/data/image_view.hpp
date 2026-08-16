@@ -21,6 +21,11 @@ namespace ps {
  *
  * @throws std::invalid_argument when construction receives an invalid or
  *         non-image Value.
+ * @throws ReadyFenceAccessError when construction receives a Value whose
+ *         producer has not completed successfully.
+ * @throws BufferAccessError when construction receives a Value without a
+ *         host-readable binding.
+ * @throws std::bad_alloc when owned image metadata cannot be copied.
  * @note Logical extents follow the validated tensor and signed data window;
  *       narrower ImageBuffer or provider limits are enforced only by those
  *       explicit adapters. No mutable access or semantic conversion is
@@ -34,6 +39,11 @@ class ImageView final {
    * @param value CPU DenseTensor Value with an explicit valid ImageFacet.
    * @throws std::invalid_argument for a missing facet or non-singleton
    *         unassigned axes.
+   * @throws ReadyFenceAccessError when the Value producer has not completed
+   *         successfully.
+   * @throws BufferAccessError when the Value has no host-readable binding.
+   * @throws std::bad_alloc when copying the complete ImageFacet cannot
+   *         allocate owned metadata storage.
    * @note Descriptor, facet, layout, and byte-envelope validation has already
    *       completed at Value publication.
    */
@@ -43,43 +53,45 @@ class ImageView final {
    * @brief Copies an image view retaining the same immutable Value.
    *
    * @param other Valid image view whose retained Value and image metadata are
-   *        shared or copied.
-   * @throws Nothing.
+   *        shared and copied, respectively.
+   * @throws std::bad_alloc when copying owned image metadata cannot allocate.
    * @note Both views remain complete, valid, and independently assignable.
    */
-  ImageView(const ImageView& other) noexcept = default;
+  ImageView(const ImageView& other) = default;
 
   /**
    * @brief Copy-assigns another image view's retained Value and metadata.
    *
    * @param other Valid image view replacing the current retained state.
    * @return This complete retaining image view.
-   * @throws Nothing.
-   * @note Both views remain complete and valid, including during
-   *       self-assignment.
+   * @throws std::bad_alloc when staging owned image metadata cannot allocate.
+   * @note Allocation completes before retained state changes, so failure
+   *       leaves the target unchanged. Both views remain complete and valid,
+   *       including during self-assignment.
    */
-  ImageView& operator=(const ImageView& other) noexcept = default;
+  ImageView& operator=(const ImageView& other);
 
   /**
    * @brief Move-constructs an image view without invalidating the source.
    *
    * @param other Valid image view whose retained state is shared or copied.
-   * @throws Nothing.
+   * @throws std::bad_alloc when copying owned image metadata cannot allocate.
    * @note Move is intentionally copy-like because ImageView has no public
    *       invalid state. Source and destination both remain fully readable.
    */
-  ImageView(ImageView&& other) noexcept : ImageView(other) {}
+  ImageView(ImageView&& other) : ImageView(other) {}
 
   /**
    * @brief Move-assigns an image view without invalidating the source.
    *
    * @param other Valid image view replacing the current retained state.
    * @return This complete retaining image view.
-   * @throws Nothing.
+   * @throws std::bad_alloc when staging owned image metadata cannot allocate.
    * @note Move assignment intentionally delegates to copy assignment. Source
-   *       and destination both remain fully readable, including for self-move.
+   *       and destination both remain fully readable, including for self-move;
+   *       allocation failure leaves the destination unchanged.
    */
-  ImageView& operator=(ImageView&& other) noexcept { return *this = other; }
+  ImageView& operator=(ImageView&& other) { return *this = other; }
 
   /**
    * @brief Returns the retained immutable Value.
@@ -193,7 +205,11 @@ class ImageView final {
   /** @brief Retaining checked tensor view that owns the Value lifetime. */
   DenseTensorView tensor_;
 
-  /** @brief Complete validated ordinary-image metadata retained by the view. */
+  /**
+   * @brief Owned copy of complete validated ordinary-image metadata.
+   * @note Copy and copy-like move operations may allocate for nested strings
+   *       and vectors.
+   */
   ImageFacet image_facet_;
 
   /** @brief Cached positive x-axis extent. */

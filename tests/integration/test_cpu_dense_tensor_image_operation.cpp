@@ -58,10 +58,14 @@ static_assert(std::is_nothrow_copy_constructible_v<DenseTensorView>);
 static_assert(std::is_nothrow_copy_assignable_v<DenseTensorView>);
 static_assert(std::is_nothrow_move_constructible_v<DenseTensorView>);
 static_assert(std::is_nothrow_move_assignable_v<DenseTensorView>);
-static_assert(std::is_nothrow_copy_constructible_v<ImageView>);
-static_assert(std::is_nothrow_copy_assignable_v<ImageView>);
-static_assert(std::is_nothrow_move_constructible_v<ImageView>);
-static_assert(std::is_nothrow_move_assignable_v<ImageView>);
+static_assert(std::is_copy_constructible_v<ImageView>);
+static_assert(std::is_copy_assignable_v<ImageView>);
+static_assert(std::is_move_constructible_v<ImageView>);
+static_assert(std::is_move_assignable_v<ImageView>);
+static_assert(!std::is_nothrow_copy_constructible_v<ImageView>);
+static_assert(!std::is_nothrow_copy_assignable_v<ImageView>);
+static_assert(!std::is_nothrow_move_constructible_v<ImageView>);
+static_assert(!std::is_nothrow_move_assignable_v<ImageView>);
 static_assert(std::is_nothrow_copy_constructible_v<BufferHandle>);
 static_assert(std::is_nothrow_copy_assignable_v<BufferHandle>);
 static_assert(!std::is_copy_constructible_v<WriteLease>);
@@ -122,6 +126,126 @@ Value make_unsigned8_value(std::size_t width, std::size_t height,
                         static_cast<std::ptrdiff_t>(channels), 1}};
   return Value::from_cpu_dense_tensor(std::move(descriptor), image,
                                       std::move(layout), std::move(storage));
+}
+
+/**
+ * @brief Creates one padded image with allocation-owning interpretation data.
+ *
+ * @return Immutable three-by-two, two-channel Value with nonzero bounds,
+ *         display metadata, long diagnostic names, groups, per-channel sample
+ *         domains, and color interpretation.
+ * @throws std::invalid_argument when fixture metadata violates Value
+ *         validation.
+ * @throws std::bad_alloc when descriptor, metadata, layout, or storage
+ *         construction cannot allocate.
+ * @note Long names exceed common small-string storage so ImageView copy-like
+ *       operations exercise the metadata allocation path deterministically.
+ */
+Value make_rich_unsigned8_value() {
+  DenseTensorDescriptor descriptor{{2U, 3U, 2U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  image.data_window = ImageBounds{-7, 11, -4, 13};
+  image.display_window = ImageBounds{-8, 10, -3, 14};
+
+  ChannelSchema schema;
+  schema.channels = {
+      {ChannelId{11U},
+       "left-channel-diagnostic-name-deliberately-longer-than-small-string-"
+       "storage"},
+      {ChannelId{12U},
+       "right-channel-diagnostic-name-deliberately-longer-than-small-string-"
+       "storage"}};
+  schema.groups = {
+      {ChannelGroupId{20U},
+       "paired-channel-group-diagnostic-name-deliberately-using-owned-"
+       "storage",
+       {ChannelId{11U}, ChannelId{12U}}},
+      {ChannelGroupId{21U},
+       "right-only-group-diagnostic-name-deliberately-using-owned-storage",
+       {ChannelId{12U}}}};
+  image.channel_schema = std::move(schema);
+
+  SampleDomainFacet sample_domain;
+  sample_domain.encoding.kind = SampleEncodingKind::Normalized;
+  sample_domain.default_domain = {SampleDomainKind::Normalized, 0.0, 1.0};
+  sample_domain.per_channel = {
+      {ChannelId{11U}, {SampleDomainKind::Legal, 16.0, 235.0}},
+      {ChannelId{12U}, {SampleDomainKind::CodeValue, 0.0, 255.0}}};
+  image.sample_domain = std::move(sample_domain);
+  image.color =
+      ColorFacet{1U, ChannelGroupId{20U}, ColorTransferFunction::Rec709,
+                 ColorPrimaries::Rec2020};
+
+  StridedLayout layout{{8, 2, 1}};
+  std::vector<std::byte> storage(14U, std::byte{0xA5});
+  std::uint8_t next = 1U;
+  for (std::size_t y = 0U; y < 2U; ++y) {
+    for (std::size_t x = 0U; x < 3U; ++x) {
+      for (std::size_t channel = 0U; channel < 2U; ++channel) {
+        storage[y * 8U + x * 2U + channel] = std::byte{next++};
+      }
+    }
+  }
+  return Value::from_cpu_dense_tensor(std::move(descriptor), std::move(image),
+                                      std::move(layout), std::move(storage));
+}
+
+/**
+ * @brief Verifies every allocation-owning field of the rich image fixture.
+ *
+ * @param facet Candidate ImageView metadata copy.
+ * @return Nothing.
+ * @throws Nothing when the validated fixture satisfies its test assertions.
+ * @note Diagnostic strings are checked explicitly because ImageFacet semantic
+ *       equality intentionally ignores their spelling.
+ */
+void expect_rich_image_facet(const ImageFacet& facet) {
+  EXPECT_EQ(facet.x_axis, 1U);
+  EXPECT_EQ(facet.y_axis, 0U);
+  EXPECT_EQ(facet.channel_axis, 2U);
+  EXPECT_EQ(facet.data_window, (ImageBounds{-7, 11, -4, 13}));
+  EXPECT_EQ(facet.display_window,
+            std::optional<ImageBounds>(ImageBounds{-8, 10, -3, 14}));
+
+  ASSERT_TRUE(facet.channel_schema.has_value());
+  const ChannelSchema& schema = *facet.channel_schema;
+  ASSERT_EQ(schema.channels.size(), 2U);
+  EXPECT_EQ(schema.channels[0].id, (ChannelId{11U}));
+  EXPECT_EQ(schema.channels[0].diagnostic_name,
+            "left-channel-diagnostic-name-deliberately-longer-than-small-"
+            "string-storage");
+  EXPECT_GT(schema.channels[0].diagnostic_name.size(), 64U);
+  EXPECT_EQ(schema.channels[1].id, (ChannelId{12U}));
+  EXPECT_EQ(schema.channels[1].diagnostic_name,
+            "right-channel-diagnostic-name-deliberately-longer-than-small-"
+            "string-storage");
+  ASSERT_EQ(schema.groups.size(), 2U);
+  EXPECT_EQ(schema.groups[0].id, (ChannelGroupId{20U}));
+  EXPECT_EQ(schema.groups[0].diagnostic_name,
+            "paired-channel-group-diagnostic-name-deliberately-using-owned-"
+            "storage");
+  EXPECT_EQ(schema.groups[0].members,
+            (std::vector<ChannelId>{ChannelId{11U}, ChannelId{12U}}));
+  EXPECT_EQ(schema.groups[1].id, (ChannelGroupId{21U}));
+  EXPECT_EQ(schema.groups[1].diagnostic_name,
+            "right-only-group-diagnostic-name-deliberately-using-owned-"
+            "storage");
+  EXPECT_EQ(schema.groups[1].members, (std::vector<ChannelId>{ChannelId{12U}}));
+
+  ASSERT_TRUE(facet.sample_domain.has_value());
+  EXPECT_EQ(facet.sample_domain->encoding.kind, SampleEncodingKind::Normalized);
+  EXPECT_EQ(facet.sample_domain->default_domain,
+            (SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}));
+  EXPECT_EQ(facet.sample_domain->per_channel,
+            (std::vector<ChannelSampleDomain>{
+                {ChannelId{11U}, {SampleDomainKind::Legal, 16.0, 235.0}},
+                {ChannelId{12U}, {SampleDomainKind::CodeValue, 0.0, 255.0}}}));
+  EXPECT_EQ(facet.color,
+            std::optional<ColorFacet>(ColorFacet{1U, ChannelGroupId{20U},
+                                                 ColorTransferFunction::Rec709,
+                                                 ColorPrimaries::Rec2020}));
 }
 
 /**
@@ -2335,30 +2459,55 @@ TEST(CpuDenseTensorImageOperation,
                std::out_of_range);
 }
 
+/**
+ * @brief Proves Value sharing and ImageView copies retain rich image state.
+ * @throws Nothing when copy construction, assignment, and lifetime invariants
+ *         hold.
+ * @note The source Value handles and temporary ReadLeases are released before
+ *       final view access so each copied view must retain its own Value handle.
+ */
 TEST(CpuDenseTensorImageOperation,
      ValueCopiesShareBytesAndViewsRetainLifetime) {
-  Value original = make_unsigned8_value(3U, 2U, 2U, 8U);
+  Value original = make_rich_unsigned8_value();
   Value shared = original;
+  const AllocationIdentity expected_allocation = original.allocation_identity();
+  const ValueRevisionId expected_revision = original.revision_id();
+  const DenseTensorDescriptor expected_descriptor =
+      original.dense_tensor_descriptor();
   EXPECT_EQ(original.allocation_identity(), shared.allocation_identity());
   EXPECT_EQ(original.revision_id(), shared.revision_id());
-  const ReadLease original_read = original.buffer_handle().acquire_read();
-  const ReadLease shared_read = shared.buffer_handle().acquire_read();
-  EXPECT_EQ(original_read.data(), shared_read.data());
+  {
+    const ReadLease original_read = original.buffer_handle().acquire_read();
+    const ReadLease shared_read = shared.buffer_handle().acquire_read();
+    EXPECT_EQ(original_read.data(), shared_read.data());
+  }
   EXPECT_EQ(original.storage_size(), 14U);
 
-  ImageView image = [&original]() {
-    ImageView retaining(original);
-    return retaining;
-  }();
+  ImageView source(original);
+  ImageView image(source);
+  ImageView assigned(make_unsigned8_value(1U, 1U, 1U, 1U));
+  const AllocationIdentity displaced = assigned.value().allocation_identity();
+  assigned = source;
   original = Value{};
   shared = Value{};
 
+  expect_rich_image_facet(source.image_facet());
+  expect_rich_image_facet(image.image_facet());
+  expect_rich_image_facet(assigned.image_facet());
+  EXPECT_EQ(source.descriptor(), expected_descriptor);
+  EXPECT_EQ(image.descriptor(), expected_descriptor);
+  EXPECT_EQ(assigned.descriptor(), expected_descriptor);
+  EXPECT_EQ(source.value().allocation_identity(), expected_allocation);
+  EXPECT_EQ(image.value().revision_id(), expected_revision);
+  EXPECT_EQ(assigned.value().allocation_identity(), expected_allocation);
+  EXPECT_NE(displaced, assigned.value().allocation_identity());
   EXPECT_EQ(image.width(), 3U);
   EXPECT_EQ(image.height(), 2U);
   EXPECT_EQ(image.channels(), 2U);
   EXPECT_EQ(image.row_stride(), 8);
   EXPECT_EQ(std::to_integer<std::uint8_t>(*image.channel_data(2U, 1U, 1U)),
             12U);
+  EXPECT_EQ(source.channel_data(2U, 1U, 1U), assigned.channel_data(2U, 1U, 1U));
   EXPECT_THROW(image.channel_data(3U, 0U, 0U), std::out_of_range);
 }
 
@@ -2426,9 +2575,14 @@ TEST(CpuDenseTensorImageOperation,
             displaced.allocation_identity());
 }
 
+/**
+ * @brief Proves copy-like ImageView moves preserve rich source metadata.
+ * @throws Nothing when move construction and assignment retain complete
+ *         descriptors, owned metadata, payload addresses, and source validity.
+ */
 TEST(CpuDenseTensorImageOperation,
      ImageViewMovesPreserveSourceAndReplaceDestination) {
-  ImageView source(make_unsigned8_value(3U, 2U, 2U, 8U));
+  ImageView source(make_rich_unsigned8_value());
   const Value expected = source.value();
   const ReadLease expected_read = expected.buffer_handle().acquire_read();
   const std::byte* const expected_data =
@@ -2440,6 +2594,7 @@ TEST(CpuDenseTensorImageOperation,
   ASSERT_TRUE(source.value().valid());
   EXPECT_EQ(source.descriptor(), expected.dense_tensor_descriptor());
   EXPECT_EQ(source.image_facet(), *expected.image_facet());
+  expect_rich_image_facet(source.image_facet());
   EXPECT_EQ(source.layout().byte_strides,
             expected.strided_layout().byte_strides);
   EXPECT_EQ(source.value().storage_size(), expected.storage_size());
@@ -2457,6 +2612,7 @@ TEST(CpuDenseTensorImageOperation,
   ASSERT_TRUE(constructed.value().valid());
   EXPECT_EQ(constructed.descriptor(), expected.dense_tensor_descriptor());
   EXPECT_EQ(constructed.image_facet(), *expected.image_facet());
+  expect_rich_image_facet(constructed.image_facet());
   EXPECT_EQ(constructed.layout().byte_strides,
             expected.strided_layout().byte_strides);
   EXPECT_EQ(constructed.value().storage_size(), expected.storage_size());
@@ -2480,6 +2636,7 @@ TEST(CpuDenseTensorImageOperation,
   ASSERT_TRUE(constructed.value().valid());
   EXPECT_EQ(constructed.descriptor(), expected.dense_tensor_descriptor());
   EXPECT_EQ(constructed.image_facet(), *expected.image_facet());
+  expect_rich_image_facet(constructed.image_facet());
   EXPECT_EQ(constructed.layout().byte_strides,
             expected.strided_layout().byte_strides);
   EXPECT_EQ(constructed.value().storage_size(), expected.storage_size());
@@ -2497,6 +2654,7 @@ TEST(CpuDenseTensorImageOperation,
   ASSERT_TRUE(assigned.value().valid());
   EXPECT_EQ(assigned.descriptor(), expected.dense_tensor_descriptor());
   EXPECT_EQ(assigned.image_facet(), *expected.image_facet());
+  expect_rich_image_facet(assigned.image_facet());
   EXPECT_EQ(assigned.layout().byte_strides,
             expected.strided_layout().byte_strides);
   EXPECT_EQ(assigned.value().storage_size(), expected.storage_size());

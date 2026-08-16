@@ -8,6 +8,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -2506,6 +2507,23 @@ ImageView::ImageView(Value value) : tensor_(std::move(value)) {
                   ? tensor_descriptor.shape[*image_facet_.channel_axis]
                   : 1U;
   element_bytes_ = dense_tensor_element_bytes(tensor_descriptor);
+}
+
+/** @copydoc ImageView::operator=(const ImageView&) */
+ImageView& ImageView::operator=(const ImageView& other) {
+  if (this == &other) {
+    return *this;
+  }
+
+  static_assert(std::is_nothrow_move_assignable_v<ImageFacet>);
+  ImageFacet staged_image_facet(other.image_facet_);
+  tensor_ = other.tensor_;
+  image_facet_ = std::move(staged_image_facet);
+  width_ = other.width_;
+  height_ = other.height_;
+  channels_ = other.channels_;
+  element_bytes_ = other.element_bytes_;
+  return *this;
 }
 
 /** @copydoc ImageView::value */
