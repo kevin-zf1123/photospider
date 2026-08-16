@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -330,6 +331,47 @@ TEST(DenseImageMetadataContracts, StorageRepresentabilityIsIndependent) {
 }
 
 /**
+ * @brief Builds the valid Histogram query used by statistics validator tests.
+ *
+ * The helper selects one fixed signed image Region and stable channel, then
+ * supplies version three of a two-bin finite Histogram interval.
+ *
+ * @return Complete query accepted by `validate_image_statistics_query()`.
+ * @throws std::bad_alloc when Region normalization storage cannot allocate.
+ * @note The helper does not access payload, mutate a Value, or consult a
+ *       statistics cache; callers copy it and change one validation fact.
+ */
+ImageStatisticsQuery make_histogram_query() {
+  ImageStatisticsQuery query;
+  query.region =
+      RegionSet::from_image_rect({image_region_domain(), -3, 0, 5, 7});
+  query.selection.channel = ChannelId{11U};
+  query.algorithm = ImageStatisticsAlgorithm::Histogram;
+  query.algorithm_version = 3U;
+  query.histogram = ImageHistogramParameters{0.0, 1.0, 2U};
+  return query;
+}
+
+/**
+ * @brief Builds one valid single-channel Histogram result for validation.
+ *
+ * The result echoes `make_histogram_query()`, reports four finite samples, and
+ * accounts for them with two in-range bins plus one above-range sample.
+ *
+ * @param revision Valid immutable Value revision used by the cache key.
+ * @return Complete result accepted by `validate_image_statistics_result()`.
+ * @throws std::bad_alloc when Region, key, or result storage cannot allocate.
+ * @note The helper constructs detached derived data only; it performs no
+ *       payload scan, cache lookup, IO, or cross-thread publication.
+ */
+ImageStatisticsResult make_histogram_result(ValueRevisionId revision) {
+  return ImageStatisticsResult{
+      ImageStatisticsCacheKey{revision, std::nullopt, make_histogram_query()},
+      {{ChannelId{11U}, 4U, 1U, 0U, 0U, 0.1, 0.9,
+        std::vector<std::uint64_t>{1U, 2U}, 0U, 1U}}};
+}
+
+/**
  * @brief Proves statistics keys and Histogram results obey frozen bounds.
  * @throws std::invalid_argument, std::length_error, or std::overflow_error
  *         from Region, Value, statistics, or digest validation unchanged.
@@ -340,13 +382,7 @@ TEST(DenseImageMetadataContracts, StorageRepresentabilityIsIndependent) {
  */
 TEST(DenseImageMetadataContracts, StatisticsKeysAndHistogramResultsAreBounded) {
   const Value value = publish_test_value(test_facet({-3, 5, 0, 7}));
-  ImageStatisticsQuery query;
-  query.region =
-      RegionSet::from_image_rect({image_region_domain(), -3, 0, 5, 7});
-  query.selection.channel = ChannelId{11U};
-  query.algorithm = ImageStatisticsAlgorithm::Histogram;
-  query.algorithm_version = 3U;
-  query.histogram = ImageHistogramParameters{0.0, 1.0, 2U};
+  const ImageStatisticsQuery query = make_histogram_query();
   ImageStatisticsCacheKey key{value.revision_id(), std::nullopt, query};
   EXPECT_NO_THROW(validate_image_statistics_cache_key(key));
   const ContentDigestResult digest_before = compute_content_digest(value);
@@ -377,10 +413,8 @@ TEST(DenseImageMetadataContracts, StatisticsKeysAndHistogramResultsAreBounded) {
   changed.query.histogram->bin_count = 3U;
   EXPECT_FALSE(changed == key);
 
-  ImageStatisticsResult result;
-  result.key = key;
-  result.channels = {{ChannelId{11U}, 4U, 1U, 0U, 0U, 0.1, 0.9,
-                      std::vector<std::uint64_t>{1U, 2U}, 0U, 1U}};
+  const ImageStatisticsResult result =
+      make_histogram_result(value.revision_id());
   EXPECT_NO_THROW(validate_image_statistics_result(result));
   const ContentDigestResult digest_after = compute_content_digest(value);
   ASSERT_TRUE(digest_before.digest.has_value()) << digest_before.diagnostic;
@@ -396,32 +430,338 @@ TEST(DenseImageMetadataContracts, StatisticsKeysAndHistogramResultsAreBounded) {
   changed.revision = next_revision.revision_id();
   EXPECT_FALSE(changed == key);
 
-  ImageStatisticsQuery ambiguous = query;
-  ambiguous.selection.group = ChannelGroupId{20U};
-  EXPECT_THROW(validate_image_statistics_query(ambiguous),
-               std::invalid_argument);
-  ImageStatisticsQuery unselected = query;
-  unselected.selection.channel.reset();
-  EXPECT_THROW(validate_image_statistics_query(unselected),
-               std::invalid_argument);
-  ImageStatisticsQuery unversioned = query;
-  unversioned.algorithm_version = 0U;
-  EXPECT_THROW(validate_image_statistics_query(unversioned),
-               std::invalid_argument);
-
-  ImageStatisticsQuery excessive_bins = query;
-  excessive_bins.histogram->bin_count = kMaximumImageHistogramBins + 1U;
-  EXPECT_THROW(validate_image_statistics_query(excessive_bins),
-               std::length_error);
-  ImageStatisticsQuery invalid_histogram = query;
-  invalid_histogram.histogram->minimum = invalid_histogram.histogram->maximum;
-  EXPECT_THROW(validate_image_statistics_query(invalid_histogram),
-               std::invalid_argument);
-
   ImageStatisticsResult excessive_channels = result;
   excessive_channels.channels.resize(kMaximumImageStatisticsChannels + 1U);
   EXPECT_THROW(validate_image_statistics_result(excessive_channels),
                std::length_error);
+}
+
+/**
+ * @brief Proves common statistics query identity is nonempty and unambiguous.
+ *
+ * The test copies one valid Histogram query and independently corrupts its
+ * Region, selector, algorithm, or algorithm version before validation.
+ *
+ * @throws std::bad_alloc when Region or copied query storage cannot allocate.
+ * @note Expected `std::invalid_argument` failures are consumed by GoogleTest;
+ *       no payload, cache, IO, or thread state participates.
+ */
+TEST(DenseImageMetadataContracts,
+     StatisticsQueriesRejectInvalidRegionsSelectorsAndAlgorithms) {
+  const ImageStatisticsQuery valid = make_histogram_query();
+  EXPECT_NO_THROW(validate_image_statistics_query(valid));
+
+  ImageStatisticsQuery invalid = valid;
+  invalid.region = RegionSet::empty();
+  EXPECT_THROW(validate_image_statistics_query(invalid), std::invalid_argument);
+
+  invalid = valid;
+  invalid.selection.channel = ChannelId{};
+  EXPECT_THROW(validate_image_statistics_query(invalid), std::invalid_argument);
+
+  invalid = valid;
+  invalid.selection.channel.reset();
+  invalid.selection.group = ChannelGroupId{};
+  EXPECT_THROW(validate_image_statistics_query(invalid), std::invalid_argument);
+
+  invalid = valid;
+  invalid.selection.group = ChannelGroupId{20U};
+  EXPECT_THROW(validate_image_statistics_query(invalid), std::invalid_argument);
+
+  invalid = valid;
+  invalid.selection.channel.reset();
+  EXPECT_THROW(validate_image_statistics_query(invalid), std::invalid_argument);
+
+  invalid = valid;
+  invalid.algorithm = static_cast<ImageStatisticsAlgorithm>(2U);
+  EXPECT_THROW(validate_image_statistics_query(invalid), std::invalid_argument);
+
+  invalid = valid;
+  invalid.algorithm_version = 0U;
+  EXPECT_THROW(validate_image_statistics_query(invalid), std::invalid_argument);
+}
+
+/**
+ * @brief Proves Histogram queries require bounded finite ordered parameters.
+ *
+ * The test covers missing parameters, zero and excessive bin counts, both
+ * nonfinite endpoints, equal endpoints, and reversed endpoints.
+ *
+ * @throws std::bad_alloc when Region or copied query storage cannot allocate.
+ * @note Expected `std::invalid_argument` and `std::length_error` failures are
+ *       consumed by GoogleTest before any scan or cache access.
+ */
+TEST(DenseImageMetadataContracts,
+     HistogramQueriesRejectMissingOrInvalidParameters) {
+  const ImageStatisticsQuery valid = make_histogram_query();
+
+  ImageStatisticsQuery invalid = valid;
+  invalid.histogram.reset();
+  EXPECT_THROW(validate_image_statistics_query(invalid), std::invalid_argument);
+
+  invalid = valid;
+  invalid.histogram->bin_count = 0U;
+  EXPECT_THROW(validate_image_statistics_query(invalid), std::invalid_argument);
+
+  ImageStatisticsQuery maximum_bins = valid;
+  maximum_bins.histogram->bin_count = kMaximumImageHistogramBins;
+  EXPECT_NO_THROW(validate_image_statistics_query(maximum_bins));
+
+  invalid = valid;
+  invalid.histogram->bin_count = kMaximumImageHistogramBins + 1U;
+  EXPECT_THROW(validate_image_statistics_query(invalid), std::length_error);
+
+  const std::array<ImageHistogramParameters, 4U> invalid_bounds = {{
+      {std::numeric_limits<double>::quiet_NaN(), 1.0, 2U},
+      {0.0, std::numeric_limits<double>::infinity(), 2U},
+      {1.0, 1.0, 2U},
+      {2.0, 1.0, 2U},
+  }};
+  for (std::size_t index = 0U; index < invalid_bounds.size(); ++index) {
+    SCOPED_TRACE(index);
+    invalid = valid;
+    invalid.histogram = invalid_bounds[index];
+    EXPECT_THROW(validate_image_statistics_query(invalid),
+                 std::invalid_argument);
+  }
+}
+
+/**
+ * @brief Proves statistics cache keys reject invalid typed identity state.
+ *
+ * The test checks the default invalid revision sentinel and an unsupported
+ * digest enum while accepting arbitrary bytes in the fixed 32-byte digest.
+ *
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         when the valid fixture Value cannot be published.
+ * @throws std::bad_alloc when Value, query, key, or digest storage cannot
+ *         allocate.
+ * @note Expected invalid-key failures are consumed by GoogleTest. Digest byte
+ *       length cannot be malformed because `ContentDigest` owns a fixed array.
+ */
+TEST(DenseImageMetadataContracts,
+     StatisticsCacheKeysRejectInvalidRevisionAndDigestAlgorithm) {
+  const Value value = publish_test_value(test_facet({-3, 5, 0, 7}));
+  const ImageStatisticsCacheKey valid{value.revision_id(), std::nullopt,
+                                      make_histogram_query()};
+  EXPECT_NO_THROW(validate_image_statistics_cache_key(valid));
+
+  ImageStatisticsCacheKey invalid = valid;
+  invalid.revision = ValueRevisionId{};
+  EXPECT_THROW(validate_image_statistics_cache_key(invalid),
+               std::invalid_argument);
+
+  invalid = valid;
+  invalid.content_digest = ContentDigest{};
+  invalid.content_digest->algorithm = static_cast<CanonicalDigestAlgorithm>(0U);
+  EXPECT_THROW(validate_image_statistics_cache_key(invalid),
+               std::invalid_argument);
+
+  ImageStatisticsCacheKey arbitrary_bytes = valid;
+  arbitrary_bytes.content_digest = ContentDigest{};
+  arbitrary_bytes.content_digest->bytes.front() = std::byte{0xa5};
+  arbitrary_bytes.content_digest->bytes.back() = std::byte{0x5a};
+  EXPECT_NO_THROW(validate_image_statistics_cache_key(arbitrary_bytes));
+}
+
+/**
+ * @brief Proves result channel records are nonempty, valid, unique, and sorted.
+ *
+ * The test mutates a valid Histogram result into an empty sequence, an invalid
+ * first channel, duplicate IDs, and descending IDs before validation.
+ *
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         when the valid fixture Value cannot be published.
+ * @throws std::bad_alloc when Value, Region, result, or channel storage cannot
+ *         allocate.
+ * @note Expected malformed-result failures are consumed by GoogleTest; result
+ *       validation remains detached from payload and cache ownership.
+ */
+TEST(DenseImageMetadataContracts,
+     StatisticsResultsRejectMalformedChannelSequences) {
+  const Value value = publish_test_value(test_facet({-3, 5, 0, 7}));
+  const ImageStatisticsResult valid =
+      make_histogram_result(value.revision_id());
+
+  ImageStatisticsResult invalid = valid;
+  invalid.channels.clear();
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  invalid = valid;
+  invalid.channels.front().channel = ChannelId{};
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  invalid = valid;
+  invalid.channels.push_back(invalid.channels.front());
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  invalid = valid;
+  invalid.channels.front().channel = ChannelId{12U};
+  invalid.channels.push_back(invalid.channels.front());
+  invalid.channels.back().channel = ChannelId{11U};
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+}
+
+/**
+ * @brief Proves channel selectors require one exact result channel.
+ *
+ * The test rejects a wrong single ID and an otherwise valid two-channel set
+ * for a channel selector, then proves a group selector accepts the same
+ * strictly increasing two-channel result because no ChannelSchema is in key.
+ *
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         when the valid fixture Value cannot be published.
+ * @throws std::bad_alloc when Value, Region, result, or channel storage cannot
+ *         allocate.
+ * @note Expected selector mismatches are consumed by GoogleTest. Group member
+ *       identity cannot be checked without a schema and is not inferred.
+ */
+TEST(DenseImageMetadataContracts,
+     StatisticsResultsMatchSingleChannelSelectorsExactly) {
+  const Value value = publish_test_value(test_facet({-3, 5, 0, 7}));
+  const ImageStatisticsResult valid =
+      make_histogram_result(value.revision_id());
+
+  ImageStatisticsResult invalid = valid;
+  invalid.channels.front().channel = ChannelId{12U};
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  invalid = valid;
+  invalid.channels.push_back(invalid.channels.front());
+  invalid.channels.back().channel = ChannelId{12U};
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  ImageStatisticsResult group_result = invalid;
+  group_result.key.query.selection.channel.reset();
+  group_result.key.query.selection.group = ChannelGroupId{20U};
+  EXPECT_NO_THROW(validate_image_statistics_result(group_result));
+}
+
+/**
+ * @brief Proves Histogram bins are bounded, exact, complete, and overflow-safe.
+ *
+ * The test rejects absent, excessive, and query-mismatched bin vectors, an
+ * incomplete finite count, and each overflow position across below-range,
+ * above-range, and in-range bin accumulation.
+ *
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         when the valid fixture Value cannot be published.
+ * @throws std::bad_alloc when Value, Region, result, or bin storage cannot
+ *         allocate.
+ * @note Expected validation exceptions are consumed by GoogleTest before any
+ *       result is attached to a Value or entered into a cache.
+ */
+TEST(DenseImageMetadataContracts,
+     HistogramResultsRejectMalformedBinsAndCountOverflow) {
+  const Value value = publish_test_value(test_facet({-3, 5, 0, 7}));
+  const ImageStatisticsResult valid =
+      make_histogram_result(value.revision_id());
+
+  ImageStatisticsResult invalid = valid;
+  invalid.channels.front().histogram_bins.reset();
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  invalid = valid;
+  invalid.channels.front().histogram_bins =
+      std::vector<std::uint64_t>(kMaximumImageHistogramBins + 1U, 0U);
+  EXPECT_THROW(validate_image_statistics_result(invalid), std::length_error);
+
+  invalid = valid;
+  invalid.channels.front().histogram_bins = std::vector<std::uint64_t>{1U};
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  invalid = valid;
+  invalid.channels.front().histogram_bins = std::vector<std::uint64_t>{1U, 1U};
+  invalid.channels.front().above_histogram_count = 0U;
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  const std::uint64_t maximum_count = std::numeric_limits<std::uint64_t>::max();
+  const std::array<std::array<std::uint64_t, 4U>, 3U> overflow_cases = {{
+      {maximum_count, 1U, 0U, 0U},
+      {maximum_count, 0U, 1U, 0U},
+      {0U, 0U, maximum_count, 1U},
+  }};
+  for (std::size_t index = 0U; index < overflow_cases.size(); ++index) {
+    SCOPED_TRACE(index);
+    invalid = valid;
+    invalid.channels.front().finite_sample_count = 1U;
+    invalid.channels.front().below_histogram_count = overflow_cases[index][0];
+    invalid.channels.front().above_histogram_count = overflow_cases[index][1];
+    invalid.channels.front().histogram_bins = std::vector<std::uint64_t>{
+        overflow_cases[index][2], overflow_cases[index][3]};
+    EXPECT_THROW(validate_image_statistics_result(invalid),
+                 std::overflow_error);
+  }
+}
+
+/**
+ * @brief Proves Histogram extrema exactly describe the finite sample set.
+ *
+ * The test accepts an empty finite set without extrema, then rejects one-sided
+ * or absent extrema for nonempty data, extrema on empty data, nonfinite
+ * endpoints, and reversed extrema.
+ *
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         when the valid fixture Value cannot be published.
+ * @throws std::bad_alloc when Value, Region, result, or bin storage cannot
+ *         allocate.
+ * @note Expected malformed-extrema failures are consumed by GoogleTest. This
+ *       complements rather than duplicates the ObservedMinMax-only matrix.
+ */
+TEST(DenseImageMetadataContracts, HistogramResultsEnforceFiniteSetExtrema) {
+  const Value value = publish_test_value(test_facet({-3, 5, 0, 7}));
+  const ImageStatisticsResult valid =
+      make_histogram_result(value.revision_id());
+
+  ImageStatisticsResult empty = valid;
+  empty.channels.front().finite_sample_count = 0U;
+  empty.channels.front().minimum.reset();
+  empty.channels.front().maximum.reset();
+  empty.channels.front().histogram_bins = std::vector<std::uint64_t>{0U, 0U};
+  empty.channels.front().above_histogram_count = 0U;
+  EXPECT_NO_THROW(validate_image_statistics_result(empty));
+
+  ImageStatisticsResult invalid = valid;
+  invalid.channels.front().minimum.reset();
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  invalid = valid;
+  invalid.channels.front().minimum.reset();
+  invalid.channels.front().maximum.reset();
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  invalid = empty;
+  invalid.channels.front().minimum = 0.0;
+  invalid.channels.front().maximum = 1.0;
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  invalid = valid;
+  invalid.channels.front().minimum = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  invalid = valid;
+  invalid.channels.front().maximum = std::numeric_limits<double>::infinity();
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  invalid = valid;
+  invalid.channels.front().minimum = 2.0;
+  invalid.channels.front().maximum = 1.0;
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
 }
 
 /**
@@ -433,6 +773,8 @@ TEST(DenseImageMetadataContracts, StatisticsKeysAndHistogramResultsAreBounded) {
  * @return Result with a fixed nonempty Region, channel selector, version, and
  *         no Histogram-only state.
  * @throws std::bad_alloc when Region, query, or result storage cannot allocate.
+ * @note The helper creates detached validator input only; it performs no
+ *       payload access, cache lookup, IO, or cross-thread publication.
  */
 ImageStatisticsResult make_observed_min_max_result(
     ValueRevisionId revision, std::uint64_t finite_sample_count,
