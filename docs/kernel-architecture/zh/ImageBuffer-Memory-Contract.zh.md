@@ -151,6 +151,30 @@ operation result 映射为 `GraphErrc::ComputeError`；`std::bad_alloc` 原样�
 operation 继续使用 ImageBuffer；私有正式 HP cache 会保留两种表示，并把有效 sealed Value
 作为 allocation/revision identity authority。
 
+## DI-1 普通 DenseImage 坐标与解释契约
+
+Issue #129 不向 `ImageBuffer` 添加字段。普通 image-faceted Value 现在必须具有有符号、
+非空、半开的 `data_window`，可以携带独立 `display_window`，也可以携带有界稳定
+channel/group、声明 sample-domain 与 color 记录。Data-window 跨度与显式 x/y tensor
+axes 精确一致；负原点与非零逻辑原点合法。`ImageView::channel_data()` 仍是零基存储
+索引 API，而 `channel_data_at()` 会校验有符号逻辑坐标并减去 data-window 原点。
+无需 payload readiness 即可检查 bounds 元数据；两种 view constructor 仍要求 Ready、
+host-readable payload。
+
+兼容投影是有意且非对称的：
+
+- `ImageBuffer -> Value` 创建 `[0,width) x [0,height)`，且没有 display、稳定
+  channel/group、sample-domain 或 color 事实，因为 ImageBuffer 不提供它们；
+- `Value -> ImageBuffer` 复制活跃 extent 与 element，但无法保留有符号原点或丰富解释；
+  把该 snapshot 转回时会创建有文档说明的零原点投影；
+- 纯内建 DenseImage descriptor inference 复制完整 ImageFacet，而无法编码现存元数据的
+  有界 edge 会在 allocation 或 callback entry 前拒绝它，不会静默删除字段。
+
+Storage-representable range、quantization、声明 sample domain、color 与观测 statistics
+保持分离。具体而言，没有任何 ImageBuffer type 或 channel 名称可以隐含 normalized range、
+RGB、alpha、transfer function 或 primaries。Provider-defined OpenEXR Deep window 仍位于
+该普通 DenseImage 权威之外。
+
 ## GPU 缓冲区契约
 
 对于 GPU 缓冲区：
@@ -293,7 +317,9 @@ snapshot 验证 binding。Descriptor 可寻址的 padding 参与 content binding
 取整的 POSIX
 shared-memory slack 位于所有 descriptor range 之外，但其精确 physical capability size 仍受
 header 与 resource declaration 绑定。该切片不引入 `ImageBuffer` adaptation，也不扩大公共
-memory contract。
+memory contract。其当前仅支持 axis 的 image record 只接受零原点且没有
+display/channel-schema/sample/color 元数据的普通 ImageFacet；丰富元数据会在 request
+encoding 前失败，而不是被省略。
 
 Issue #86 / V-9 在不修改 `ImageBuffer` 或公共 operation 与 Host 契约的前提下，新增
 source-private device resource accounting。唯一 service ledger 只为 fixed registry 中具有

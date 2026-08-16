@@ -505,6 +505,33 @@ Value publication. Ordinary Value/cache copies preserve it; dirty mutation,
 replacement, and disk reload mint a new one. It is not `GraphRevision`, an
 allocation identity, a persistent digest/artifact id, or a task/cache key.
 
+**`ImageBounds` / data window / display window**
+`ImageBounds` is a signed nonempty half-open ordinary-image coordinate window.
+Every built-in `ImageFacet` has one immutable data window whose x/y spans
+exactly match its explicit tensor axes. An optional display window is separate
+presentation metadata. Neither is a `RegionSet`: Region remains dynamic work
+or validity. Bounds metadata remains readable when payload readiness is
+Pending, Failed, or ProducerCancelled.
+
+**`ChannelSchema` / `ChannelId` / `ChannelGroupId`**
+The bounded stable semantic identities of ordinary image channels and groups.
+Channel vector order matches the channel axis; group membership uses stable
+IDs. Channel and group names are diagnostics only and never select roles or
+enter semantic identity.
+
+**`SampleDomainFacet` / `ColorFacet`**
+Independent versioned ordinary-image interpretations. Sample encoding/domain
+declares normalized, legal, or code-value intervals and optional stable-ID
+per-channel overrides; it does not change storage representability or
+quantization. Color binds one stable channel group to explicit transfer
+function and primaries; scene linearity is a color fact.
+
+**Image statistics query / result / cache key**
+Bounded derived records for observed min/max or histogram requests. Their key
+includes Value revision, optional content digest, RegionSet, stable channel or
+group selection, algorithm, and version. Results never become Value,
+ImageFacet, descriptor/content identity, or formal cache validity.
+
 **`ImageBuffer`**
 The current image payload contract: two-dimensional extent, channel count,
 one scalar type, device, row stride, shared data ownership, and optional

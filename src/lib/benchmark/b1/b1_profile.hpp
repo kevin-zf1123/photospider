@@ -530,7 +530,9 @@ ImageBuffer generate_b1_oracle_image(std::uint64_t job_index);
  * @return Complete expected logical/raw identity.
  * @throws Oracle, Value adaptation, digest, or allocation errors unchanged.
  * @note Runners call this before candidate execution; candidate bytes never
- * initialize or replace the expected result.
+ * initialize or replace the expected result. Logical identity binds
+ * DenseTensor schema/Image facet structural version 2, while raw payload
+ * identity remains independent of descriptor framing.
  */
 B1JobGolden compute_b1_job_golden(std::uint64_t job_index);
 
@@ -541,7 +543,9 @@ B1JobGolden compute_b1_job_golden(std::uint64_t job_index);
  * @throws std::out_of_range outside `0..29,252..255`.
  * @throws std::logic_error if a compiled digest spelling is corrupt.
  * @note Candidate execution never initializes or updates this table. The
- * independent oracle exists only to regenerate and verify fixture constants.
+ * independent oracle exists only to regenerate and verify fixture constants;
+ * its current logical entries bind DenseTensor schema/Image facet structural
+ * version 2 and retain the prior raw-payload entries.
  */
 B1JobGolden b1_frozen_job_golden(std::uint64_t job_index);
 

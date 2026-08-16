@@ -30,6 +30,7 @@ multi-session server runtime.
 | Run and process execution domain | [compute-run-execution-domain](https://github.com/users/kevin-zf1123/projects/3) | [#64](https://github.com/kevin-zf1123/photospider/issues/64) | Request-owned `ComputeRun`, process-owned CPU execution, resource accounting, graph revisions, cancellation, and supersession. |
 | General data and heterogeneous execution | [generic-data-heterogeneous-execution](https://github.com/users/kevin-zf1123/projects/4) | [#77](https://github.com/kevin-zf1123/photospider/issues/77) | `Value`, `DataDescriptor`, `BufferHandle`, `Region`, device queues, fences, transfers, and bounded compute I/O. |
 | Execution profiles and secure services | [execution-profiles-server-isolation](https://github.com/users/kevin-zf1123/projects/5) | [#91](https://github.com/kevin-zf1123/photospider/issues/91) | Interactive and throughput profiles, an independent server control plane, constrained workers, and isolated plugin execution. |
+| Dense image Value migration | [dense-image-value-migration](https://github.com/users/kevin-zf1123/projects/6) | [#128](https://github.com/kevin-zf1123/photospider/issues/128) | Ordinary images use complete `Value` metadata and Host-owned output authority before the transitional `ImageBuffer` and operation ABI v2 boundaries are removed. |
 
 The merge gates for the current refactor remain in
 [codebase-refactor](https://github.com/users/kevin-zf1123/projects/1), aggregated
@@ -651,7 +652,11 @@ digests, artifact-envelope round-trip, and generation-safe replacement/unload.
 V-15 now binds that unchanged generic model to an optional repository OpenEXR
 single-part deep-scanline provider/codec, with explicit channel identities,
 typed shape/error rejection, bounded compute-I/O execution, generation-safe
-lifetime, and a dependency-clean default-OFF package profile. Their exact
+lifetime, and a dependency-clean default-OFF package profile. DI-1 now adds
+signed half-open ordinary-image data/display windows, stable channel and group
+identities, independent sample-domain and color facets, metadata-only bounds
+access, and a separate observed-statistics query/result/cache-key contract.
+Their exact
 behavior is documented in
 [Kernel Data Model](../kernel-architecture/Data-Model.md),
 [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md),
@@ -661,7 +666,7 @@ ownership in
 [Policy and Execution Architecture](../kernel-architecture/Policy-and-Execution-Architecture.md)
 and [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md). The
 complete model below is the accepted target; only the explicit V-2 through
-V-15 subset called out here is a current runtime fact.
+V-15 and DI-1 subsets called out here are current runtime facts.
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 is authoritative for the complete target contract. Its central separation is:
@@ -696,14 +701,17 @@ explicit and never inferred from names. Per-site variable samples use
 `VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
 self-contained and does not contain runtime child Values.
 
-The implemented V-2 through V-15 subset is deliberately narrower:
+The implemented V-2 through V-15 and DI-1 subset is deliberately narrower:
 
 - `DenseTensorDescriptor` contains positive concrete shape, independent
   unsigned/signed integer or floating element semantics, 8/16/32/64-bit native
   scalar storage or the explicit four-bit FP4 E2M1 encoding, and optional V-13
   block-scale quantization with a rank-matched positive block shape and one
   finite positive scale per complete row-major logical block;
-- `ImageFacet` explicitly maps distinct x/y and optional channel axes;
+- `ImageFacet` explicitly maps distinct x/y and optional channel axes, owns a
+  required signed half-open data window and an optional display window, and
+  can bind a bounded stable-ID channel schema, versioned sample domains, and
+  color semantics without deriving roles from diagnostic channel names;
 - public `BufferHandle` is a checked nonempty range over one opaque
   process-local `AllocationIdentity`; subranges retain allocation lifetime.
   CPU allocations may issue host read leases, while source-private native
@@ -961,6 +969,30 @@ OpenEXR headers, links, types, symbols, package discovery, target exports, and
 transitive dependencies from the kernel, public ABI, and dependency-disabled
 product. Explicit component consumption is the only installed package path
 that discovers OpenEXR and imports the provider MODULE.
+
+## Dense Image Value Migration
+
+[ADR 0013](../adr/0013-ordinary-dense-image-coordinates-samples-colors-and-statistics-are-separate-contracts.md)
+governs the ordinary dense-image metadata baseline. Project 6 completes the
+public migration in dependency order; its Issues and Project fields, rather
+than this target document, remain the live status authority.
+
+| Slice | Delivery boundary | Blocking slices |
+| --- | --- | --- |
+| [#129 / DI-1](https://github.com/kevin-zf1123/photospider/issues/129) | Freeze and deliver ordinary-image coordinates, sample/color declarations, stable channel identities, canonical descriptor records, and identity-independent observed statistics | #78, #101, #102, #105 |
+| [#130 / DI-2](https://github.com/kevin-zf1123/photospider/issues/130) | Add Host-owned output authorization and migrate kernel runtime image paths | #129 |
+| [#132 / DI-3](https://github.com/kevin-zf1123/photospider/issues/132) | Implement pure-C operation ABI v1 and migrate plugins and isolated execution | #129, #130 |
+| [#131 / DI-4](https://github.com/kevin-zf1123/photospider/issues/131) | Migrate external product boundaries and remove `ImageBuffer` completely | #129, #130, #132 |
+
+DI-1 is the first dependency slice. It makes the immutable data window,
+optional display window, and dynamic `RegionSet` three separate authorities;
+keeps storage representability, quantization, declared sample domain, color,
+and observed statistics independent; and freezes bounded records needed by
+later output-plan, wire, artifact, and codec work. It deliberately does not
+remove operation ABI v2 or `ImageBuffer`, migrate Host/IPC/worker/durable/CLI
+surfaces, define automatic color conversion, or reuse OpenEXR Deep
+provider-defined windows as ordinary dense-image authority. DI-2, DI-3, and
+DI-4 remain downstream delivery slices.
 
 ## Heterogeneous Executors
 

@@ -13,7 +13,7 @@ class Value;
 namespace ps::internal {
 
 /**
- * @brief Computes canonical-v1 logical content for a built-in DenseTensor.
+ * @brief Computes canonical-v1 stream identity with built-in v2 descriptors.
  * @param value Valid built-in DenseTensor publication.
  * @return Available digest, PayloadUnavailable for a non-Ready/non-readable
  * binding, or InvalidDescriptor for a malformed/unsupported retained value.
@@ -21,8 +21,11 @@ namespace ps::internal {
  * allocate.
  * @note Canonical traversal is row-major logical-axis order. It excludes
  * strides, offsets, padding, allocation identity, device identity, and Value
- * revision. Native whole-byte scalars are emitted little-endian; FP4 values
- * emit one low-nibble code byte per logical element.
+ * revision, diagnostic channel/group names, and observed statistics. The
+ * DenseTensor Schema and Image Facet use structural version 2; Sample Domain
+ * and Color Facets use independent structural version 1 records. Native
+ * whole-byte scalars are emitted little-endian; FP4 values emit one low-nibble
+ * code byte per logical element.
  */
 ContentDigestResult compute_dense_tensor_content_digest(const Value& value);
 

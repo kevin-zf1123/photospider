@@ -68,36 +68,20 @@ DenseImageDescriptor logical_descriptor(const ImageView& view) {
  * @brief Validates a descriptor-only image contract for pure inference.
  *
  * @param descriptor Logical image descriptor to inspect.
- * @throws std::invalid_argument for unsupported element facts, malformed shape
- *         or facet axes, non-singleton unassigned axes, or current-adapter
- *         extent overflow.
+ * @throws std::invalid_argument for unsupported element facts, malformed
+ *         shape/image metadata, non-singleton unassigned axes, or
+ *         current-adapter extent overflow.
+ * @throws std::overflow_error or std::length_error for unrepresentable or
+ *         over-limit image metadata.
+ * @throws std::bad_alloc when bounded validation state cannot allocate.
  * @note The function reads no payload, layout, graph, registry, or device
  *       state.
  */
 void validate_logical_image_descriptor(const DenseImageDescriptor& descriptor) {
+  validate_dense_tensor_image_metadata(descriptor.tensor, descriptor.image);
   (void)dense_tensor_element_bytes(descriptor.tensor);
   const std::vector<std::size_t>& shape = descriptor.tensor.shape;
-  if (shape.empty()) {
-    throw std::invalid_argument(
-        "Dense image descriptor requires positive rank.");
-  }
-  for (const std::size_t extent : shape) {
-    if (extent == 0U) {
-      throw std::invalid_argument(
-          "Dense image descriptor extents must be positive.");
-    }
-  }
   const ImageFacet& image = descriptor.image;
-  if (image.x_axis >= shape.size() || image.y_axis >= shape.size() ||
-      image.x_axis == image.y_axis) {
-    throw std::invalid_argument("Dense image descriptor has invalid x/y axes.");
-  }
-  if (image.channel_axis.has_value() && (*image.channel_axis >= shape.size() ||
-                                         *image.channel_axis == image.x_axis ||
-                                         *image.channel_axis == image.y_axis)) {
-    throw std::invalid_argument(
-        "Dense image descriptor has invalid channel axis.");
-  }
   const std::size_t maximum_extent =
       static_cast<std::size_t>(std::numeric_limits<int>::max());
   for (std::size_t axis = 0U; axis < shape.size(); ++axis) {
@@ -237,7 +221,7 @@ std::size_t dense_storage_size(const DenseTensorDescriptor& descriptor,
  * @param region Canonical logical work selection.
  * @param inferred Exact output tensor and image descriptor.
  * @throws std::invalid_argument for unsupported atom count/domain/kind,
- *         negative image endpoints, out-of-bounds image coordinates, tensor
+ *         out-of-data-window image coordinates, tensor
  *         rank mismatch, or out-of-bounds tensor axes.
  * @note Whole and Empty are always valid. ImageRect constrains only explicit
  *       x/y axes; TensorSlice constrains every logical tensor axis directly.
@@ -257,16 +241,11 @@ void validate_dense_region(const RegionSet& region,
       throw std::invalid_argument(
           "Dense ImageRect uses an unsupported logical domain.");
     }
-    if (image->x_begin < 0 || image->y_begin < 0 ||
-        image->x_end < image->x_begin || image->y_end < image->y_begin) {
-      throw std::invalid_argument("Dense ImageRect endpoints are invalid.");
-    }
-    const std::uint64_t x_end = static_cast<std::uint64_t>(image->x_end);
-    const std::uint64_t y_end = static_cast<std::uint64_t>(image->y_end);
-    if (x_end > inferred.tensor.shape[inferred.image.x_axis] ||
-        y_end > inferred.tensor.shape[inferred.image.y_axis]) {
+    const ImageBounds& bounds = inferred.image.data_window;
+    if (image->x_begin < bounds.x_begin || image->x_end > bounds.x_end ||
+        image->y_begin < bounds.y_begin || image->y_end > bounds.y_end) {
       throw std::invalid_argument(
-          "Dense ImageRect exceeds the inferred image bounds.");
+          "Dense ImageRect exceeds the inferred image data window.");
     }
     return;
   }
@@ -291,7 +270,7 @@ void validate_dense_region(const RegionSet& region,
  * @brief Tests whether one logical coordinate is selected by a valid Region.
  *
  * @param region Region validated by validate_dense_region().
- * @param inferred Exact tensor and image-axis mapping.
+ * @param inferred Exact tensor and complete ordinary-image interpretation.
  * @param coordinates Complete logical tensor coordinates in axis order.
  * @return True when the coordinate belongs to Whole or the exact atom.
  * @throws Nothing under validated rank and bounds.
@@ -307,12 +286,15 @@ bool dense_coordinate_selected(
   }
   const RegionAtom& atom = region.atoms().front();
   if (const auto* image = std::get_if<ImageRect>(&atom)) {
-    const std::size_t x = coordinates[inferred.image.x_axis];
-    const std::size_t y = coordinates[inferred.image.y_axis];
-    return x >= static_cast<std::uint64_t>(image->x_begin) &&
-           x < static_cast<std::uint64_t>(image->x_end) &&
-           y >= static_cast<std::uint64_t>(image->y_begin) &&
-           y < static_cast<std::uint64_t>(image->y_end);
+    const ImageBounds& bounds = inferred.image.data_window;
+    const std::int64_t x =
+        bounds.x_begin +
+        static_cast<std::int64_t>(coordinates[inferred.image.x_axis]);
+    const std::int64_t y =
+        bounds.y_begin +
+        static_cast<std::int64_t>(coordinates[inferred.image.y_axis]);
+    return x >= image->x_begin && x < image->x_end && y >= image->y_begin &&
+           y < image->y_end;
   }
   const TensorSlice& tensor = std::get<TensorSlice>(atom);
   for (std::size_t axis = 0U; axis < coordinates.size(); ++axis) {

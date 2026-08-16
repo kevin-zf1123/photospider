@@ -12,16 +12,18 @@ namespace ps::value_image_adapter {
  *
  * @param buffer Valid current CPU image descriptor and payload to snapshot.
  * @return Value with shape `[height, width, channels]`, explicit y/x/channel
- * axes, the same positive row stride, fresh allocation identity, and fresh
- * Value revision.
+ * axes, an explicit `[0,width) x [0,height)` data window, the same positive
+ * row stride, fresh allocation identity, and fresh Value revision.
  * @throws std::invalid_argument for malformed, empty, non-CPU, or
  * unrepresentable ImageBuffer state.
  * @throws std::overflow_error when envelope arithmetic cannot be represented.
  * @throws std::bad_alloc when snapshot or immutable publication allocation
  * fails.
  * @note Only active row bytes are copied. Inter-row padding inside the exact
- * Value envelope is initialized independently; no ImageBuffer owner, context,
- * deleter, or plugin-library lifetime is retained.
+ * Value envelope is initialized independently. ImageBuffer supplies no stable
+ * channel/group, sample-domain, color, or display-window authority, so those
+ * facts remain absent. No ImageBuffer owner, context, deleter, or
+ * plugin-library lifetime is retained.
  */
 Value snapshot_cpu_image_value(const ImageBuffer& buffer);
 
@@ -29,16 +31,16 @@ Value snapshot_cpu_image_value(const ImageBuffer& buffer);
  * @brief Validates that one Value can enter the current ImageBuffer boundary.
  *
  * @param value Candidate Ready host-readable image Value.
- * @throws std::invalid_argument for invalid, packed, quantized, latent, or
- * otherwise unsupported image facts.
+ * @throws std::invalid_argument for invalid, packed, quantized, latent,
+ * positive-int-unrepresentable extents, or otherwise unsupported image facts.
  * @throws ReadyFenceAccessError when producer completion is not Ready.
  * @throws BufferAccessError when the retained binding is not host-readable.
  * @throws std::bad_alloc when retaining view state cannot allocate.
  * @note Success establishes Strided layout, absent quantization, explicit
  * ImageFacet, supported whole-byte element encoding, singleton unassigned
- * axes, and direct host visibility. Validation reads no payload byte, allocates
- * no ImageBuffer, performs no conversion, and invokes no codec or filesystem
- * mechanism.
+ * axes, positive-int-compatible extents, and direct host visibility.
+ * Validation reads no payload byte, allocates no ImageBuffer, performs no
+ * conversion, and invokes no codec or filesystem mechanism.
  */
 void validate_image_buffer_compatible_value(const Value& value);
 
@@ -55,7 +57,9 @@ void validate_image_buffer_compatible_value(const Value& value);
  * @throws std::bad_alloc when the output allocation or view coordinates cannot
  * allocate.
  * @note Arbitrary validated positive, zero, or negative source strides are read
- * through ImageView; source padding is never copied as active pixels.
+ * through ImageView; source padding is never copied as active pixels. Because
+ * ImageBuffer cannot represent signed origin or richer image interpretation,
+ * the returned compatibility snapshot deliberately projects those facts away.
  */
 ImageBuffer snapshot_cpu_image_buffer(const Value& value);
 
@@ -77,7 +81,8 @@ void normalize_node_output_image_value(NodeOutput* output);
  * @brief Derives exact full-validity Region metadata for one complete output.
  *
  * @param output Complete output about to enter the formal HP cache.
- * @return Full ImageRect for an image Value/current ImageBuffer, full
+ * @return Exact data-window ImageRect for an image Value, zero-origin full
+ *         ImageRect for a current ImageBuffer, full
  *         TensorSlice for a non-image DenseTensor Value, or Whole for a
  *         data-only/opaque output without finite logical dimensions.
  * @throws std::logic_error for an invalid Value accessor.
@@ -85,8 +90,9 @@ void normalize_node_output_image_value(NodeOutput* output);
  *         declared contracts.
  * @throws std::overflow_error when a logical extent exceeds Region bounds.
  * @throws std::bad_alloc when TensorSlice or Region storage cannot allocate.
- * @note This function derives validity metadata only. It preserves the
- *       output's allocation identity, Value revision, bytes, and ownership.
+ * @note This function derives validity metadata only. Display windows never
+ *       authorize payload validity. The function preserves allocation
+ *       identity, Value revision, bytes, and ownership.
  */
 RegionSet full_node_output_region(const NodeOutput& output);
 

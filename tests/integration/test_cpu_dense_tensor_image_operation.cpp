@@ -117,10 +117,7 @@ Value make_unsigned8_value(std::size_t width, std::size_t height,
   DenseTensorDescriptor descriptor{{height, width, channels},
                                    ElementSemantics::UnsignedInteger,
                                    StorageEncoding{8U}};
-  ImageFacet image;
-  image.x_axis = 1U;
-  image.y_axis = 0U;
-  image.channel_axis = 2U;
+  const ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
   StridedLayout layout{{static_cast<std::ptrdiff_t>(row_stride),
                         static_cast<std::ptrdiff_t>(channels), 1}};
   return Value::from_cpu_dense_tensor(std::move(descriptor), image,
@@ -159,10 +156,7 @@ Value make_unsigned8_rank4_value(std::size_t width, std::size_t height,
   DenseTensorDescriptor descriptor{{1U, height, width, channels},
                                    ElementSemantics::UnsignedInteger,
                                    StorageEncoding{8U}};
-  ImageFacet image;
-  image.x_axis = 2U;
-  image.y_axis = 1U;
-  image.channel_axis = 3U;
+  const ImageFacet image = make_zero_origin_image_facet(descriptor, 2U, 1U, 3U);
   StridedLayout layout{{1, static_cast<std::ptrdiff_t>(row_stride),
                         static_cast<std::ptrdiff_t>(channels), 1}};
   return Value::from_cpu_dense_tensor(std::move(descriptor), image,
@@ -2109,10 +2103,7 @@ TEST(CpuDenseTensorImageOperation,
   DenseTensorDescriptor descriptor{{2U, 3U, 2U},
                                    ElementSemantics::UnsignedInteger,
                                    StorageEncoding{8U}};
-  ImageFacet image;
-  image.x_axis = 1U;
-  image.y_axis = 0U;
-  image.channel_axis = 2U;
+  const ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
 
   StridedLayout zero_stride{{8, 2, 0}};
   EXPECT_THROW(
@@ -2193,11 +2184,12 @@ TEST(CpuDenseTensorImageOperation,
 }
 
 /**
- * @brief Proves ImageView rejects huge immutable aliases before int narrowing.
+ * @brief Proves the ImageBuffer adapter rejects huge views before narrowing.
  * @return Nothing; GoogleTest reports missing or displaced adapter validation.
  * @throws Value construction exceptions before the expected snapshot failure.
  * @note The non-singleton x axis deliberately uses zero stride over one byte,
- * so allocation size cannot mask the `INT_MAX + 1` logical image extent.
+ * so allocation size cannot mask the `INT_MAX + 1` logical image extent;
+ * core ImageView itself retains the wider `size_t` domain.
  */
 TEST(CpuDenseTensorImageOperation,
      SnapshotRejectsHugeZeroStrideImageBeforeIntNarrowing) {
@@ -2208,23 +2200,22 @@ TEST(CpuDenseTensorImageOperation,
                             ElementSemantics::UnsignedInteger,
                             StorageEncoding{8U}},
       std::nullopt, StridedLayout{{1}}, {std::byte{7U}});
-  ImageFacet image;
-  image.x_axis = 1U;
-  image.y_axis = 0U;
-  image.channel_axis = 2U;
-  const Value alias = Value::from_cpu_dense_tensor(
-      DenseTensorDescriptor{{1U, huge_extent, 1U},
-                            ElementSemantics::UnsignedInteger,
-                            StorageEncoding{8U}},
-      image, StridedLayout{{0, 0, 0}}, storage.buffer_handle());
+  const DenseTensorDescriptor alias_descriptor{
+      {1U, huge_extent, 1U},
+      ElementSemantics::UnsignedInteger,
+      StorageEncoding{8U}};
+  const ImageFacet image =
+      make_zero_origin_image_facet(alias_descriptor, 1U, 0U, 2U);
+  const Value alias = Value::from_cpu_dense_tensor(alias_descriptor, image,
+                                                   StridedLayout{{0, 0, 0}},
+                                                   storage.buffer_handle());
 
   try {
     (void)value_image_adapter::snapshot_cpu_image_buffer(alias);
     FAIL() << "Huge ImageView extent must fail before int conversion";
   } catch (const std::invalid_argument& error) {
-    EXPECT_STREQ(
-        error.what(),
-        "ImageView extent exceeds the current ImageBuffer adapter domain.");
+    EXPECT_STREQ(error.what(),
+                 "ImageBuffer adaptation requires positive-int image extents.");
   }
 }
 
@@ -2626,6 +2617,7 @@ TEST(CpuDenseTensorImageOperation,
   image_facet.x_axis = 1U;
   image_facet.y_axis = 0U;
   image_facet.channel_axis = 2U;
+  image_facet.data_window = ImageBounds{0, 0, 3, 2};
 
   for (const std::uint32_t bit_width : {32U, 64U}) {
     for (const std::size_t channels : {1U, 3U, 4U, 8U, 16U}) {
@@ -3130,6 +3122,11 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_TRUE(metadata_codec->calls().empty());
 }
 
+/**
+ * @brief Proves pure inference retains all bounded image interpretation facts.
+ * @throws Nothing when complete metadata is copied and diagnostic names do not
+ *         synthesize missing semantic records.
+ */
 TEST(CpuDenseTensorImageOperation,
      DenseInvertInferencePreservesExactLogicalDescriptor) {
   const ops::CpuDenseImageOperation operation =
@@ -3138,14 +3135,39 @@ TEST(CpuDenseTensorImageOperation,
   input.tensor = DenseTensorDescriptor{{4U, 7U, 3U},
                                        ElementSemantics::UnsignedInteger,
                                        StorageEncoding{8U}};
-  input.image.x_axis = 1U;
-  input.image.y_axis = 0U;
-  input.image.channel_axis = 2U;
+  input.image = make_zero_origin_image_facet(input.tensor, 1U, 0U, 2U);
+  input.image.display_window = ImageBounds{-1, -2, 8, 6};
+  input.image.channel_schema = ChannelSchema{
+      {{ChannelId{11U}, "R"}, {ChannelId{12U}, "Y"}, {ChannelId{13U}, "A"}},
+      {{ChannelGroupId{20U},
+        "color",
+        {ChannelId{11U}, ChannelId{12U}, ChannelId{13U}}}}};
+  input.image.sample_domain = SampleDomainFacet{
+      1U,
+      SampleEncoding{1U, SampleEncodingKind::Normalized},
+      SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+      {{ChannelId{13U}, SampleDomain{SampleDomainKind::Legal, 0.0, 1.0}}}};
+  input.image.color =
+      ColorFacet{1U, ChannelGroupId{20U}, ColorTransferFunction::Srgb,
+                 ColorPrimaries::DisplayP3D65};
   ops::CpuDenseImageConfiguration configuration;
 
   const ops::DenseImageDescriptor inferred =
       operation.infer(configuration, {input});
   EXPECT_EQ(inferred, input);
+
+  ops::DenseImageDescriptor diagnostic_only;
+  diagnostic_only.tensor = input.tensor;
+  diagnostic_only.image =
+      make_zero_origin_image_facet(diagnostic_only.tensor, 1U, 0U, 2U);
+  diagnostic_only.image.channel_schema = ChannelSchema{
+      {{ChannelId{21U}, "R"}, {ChannelId{22U}, "Y"}, {ChannelId{23U}, "A"}},
+      {}};
+  const ops::DenseImageDescriptor inferred_diagnostic_only =
+      operation.infer(configuration, {diagnostic_only});
+  EXPECT_EQ(inferred_diagnostic_only, diagnostic_only);
+  EXPECT_FALSE(inferred_diagnostic_only.image.sample_domain.has_value());
+  EXPECT_FALSE(inferred_diagnostic_only.image.color.has_value());
 }
 
 TEST(CpuDenseTensorImageOperation,
@@ -3273,6 +3295,104 @@ TEST(CpuDenseTensorImageOperation,
       }
     }
   }
+}
+
+/**
+ * @brief Proves signed ImageRect execution, rejection, and bridge projection.
+ * @throws Nothing when logical selection maps to exact zero-based payload,
+ *         complete metadata survives inference, out-of-window work rejects,
+ *         and the ImageBuffer edge loses only unsupported interpretation.
+ */
+TEST(CpuDenseTensorImageOperation,
+     ProductExecutorUsesNegativeOriginImageRectCoordinates) {
+  ops::register_core_operations();
+  const auto resolved = OpRegistry::instance().resolve_for_intent(
+      "image_process", "invert_dense", ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(resolved.has_value());
+
+  const Value zero_origin = make_unsigned8_value(5U, 4U, 2U, 16U);
+  ImageFacet signed_facet = *zero_origin.image_facet();
+  signed_facet.data_window = ImageBounds{-2, 5, 3, 9};
+  signed_facet.display_window = ImageBounds{-4, 4, 4, 10};
+  signed_facet.channel_schema = ChannelSchema{
+      {{ChannelId{11U}, "left"}, {ChannelId{12U}, "right"}},
+      {{ChannelGroupId{20U}, "pair", {ChannelId{11U}, ChannelId{12U}}}}};
+  signed_facet.sample_domain = SampleDomainFacet{
+      1U,
+      SampleEncoding{1U, SampleEncodingKind::Normalized},
+      SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+      {{ChannelId{11U}, SampleDomain{SampleDomainKind::Legal, 0.1, 0.9}}}};
+  signed_facet.color =
+      ColorFacet{1U, ChannelGroupId{20U}, ColorTransferFunction::SceneLinear,
+                 ColorPrimaries::Rec709};
+  NodeOutput input;
+  input.image_value = Value::from_cpu_dense_tensor(
+      zero_origin.dense_tensor_descriptor(), signed_facet,
+      zero_origin.strided_layout(), zero_origin.buffer_handle());
+  const ImageView input_view(input.image_value);
+
+  GraphModel graph("");
+  Node node;
+  node.id = 831;
+  node.name = "signed_region_image_invert";
+  node.type = "image_process";
+  node.subtype = "invert_dense";
+  compute::TiledExecutionConfig config;
+  config.output_region =
+      RegionSet::from_image_rect({image_region_domain(), -1, 2, 6, 8});
+
+  const NodeOutput output =
+      compute::NodeExecutor::execute(graph, node, *resolved, {&input}, config);
+  ASSERT_TRUE(output.image_value.image_facet().has_value());
+  EXPECT_EQ(*output.image_value.image_facet(), signed_facet);
+  EXPECT_EQ(value_image_adapter::full_node_output_region(output),
+            RegionSet::from_image_rect({image_region_domain(), -2, 3, 5, 9}));
+  const ImageBuffer projected_buffer =
+      value_image_adapter::snapshot_cpu_image_buffer(output.image_value);
+  const Value projected_value =
+      value_image_adapter::snapshot_cpu_image_value(projected_buffer);
+  ASSERT_TRUE(projected_value.image_facet().has_value());
+  EXPECT_EQ(projected_value.image_bounds(), (ImageBounds{0, 0, 5, 4}));
+  EXPECT_FALSE(projected_value.image_facet()->display_window.has_value());
+  EXPECT_FALSE(projected_value.image_facet()->channel_schema.has_value());
+  EXPECT_FALSE(projected_value.image_facet()->sample_domain.has_value());
+  EXPECT_FALSE(projected_value.image_facet()->color.has_value());
+  const ImageView output_view(output.image_value);
+  const ImageView projected_view(projected_value);
+  for (std::size_t y = 0U; y < input_view.height(); ++y) {
+    for (std::size_t x = 0U; x < input_view.width(); ++x) {
+      for (std::size_t channel = 0U; channel < input_view.channels();
+           ++channel) {
+        const std::uint8_t source = std::to_integer<std::uint8_t>(
+            *input_view.channel_data(x, y, channel));
+        const std::int64_t logical_x = -2 + static_cast<std::int64_t>(x);
+        const std::int64_t logical_y = 5 + static_cast<std::int64_t>(y);
+        const bool selected =
+            logical_x >= -1 && logical_x < 2 && logical_y >= 6 && logical_y < 8;
+        const std::uint8_t expected =
+            selected ? static_cast<std::uint8_t>(255U - source) : source;
+        EXPECT_EQ(std::to_integer<std::uint8_t>(
+                      *output_view.channel_data(x, y, channel)),
+                  expected);
+        EXPECT_EQ(std::to_integer<std::uint8_t>(
+                      *projected_view.channel_data(x, y, channel)),
+                  expected);
+      }
+    }
+  }
+
+  compute::TiledExecutionConfig outside_config;
+  outside_config.output_region =
+      RegionSet::from_image_rect({image_region_domain(), -3, 0, 6, 8});
+  try {
+    (void)compute::NodeExecutor::execute(graph, node, *resolved, {&input},
+                                         outside_config);
+    FAIL() << "out-of-window ImageRect should fail before output publication";
+  } catch (const GraphError& error) {
+    EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+  }
+  EXPECT_EQ(input.image_value.image_facet(),
+            std::optional<ImageFacet>(signed_facet));
 }
 
 TEST(CpuDenseTensorImageOperation,

@@ -306,6 +306,25 @@ facet, persist scales separately, or mint descriptor/content/layout/artifact
 digests. Supporting those behaviors requires a later generic artifact and
 manifest contract; the current `ImageArtifactCodec` ABI is unchanged.
 
+## DI-1 Observed Statistics Cache Boundary
+
+Issue #129 defines bounded observed min/max and histogram query/result/cache-key
+values but installs no cache owner or calculation engine. A complete key
+contains a valid process-local `ValueRevisionId`, an optional `ContentDigest`,
+the exact normalized `RegionSet`, exactly one stable `ChannelId` or
+`ChannelGroupId`, algorithm, positive algorithm version, and bounded algorithm
+parameters. Distinct revisions, content identities, Regions, selections,
+algorithms, versions, or histogram parameters are distinct derived requests.
+
+Statistics are not fields of `Value`, `ImageFacet`, formal HP cache entries,
+descriptor/content identity, disk-cache paths, or artifact manifests. Creating,
+recomputing, or evicting a result cannot modify Value revision, canonical
+digest, HP validity, or persisted representation. A future statistics cache
+must remain a separately owned discardable derived-data cache and use the
+complete key; descriptor digest alone is insufficient. Content digest is
+optional because a valid runtime revision may be observed before content
+traversal is requested.
+
 ### Current bounded mechanism and future persistence relationship
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)

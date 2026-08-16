@@ -2892,15 +2892,25 @@ IsolatedCpuElementSemantics to_wire_element_semantics(
 }
 
 /**
- * @brief Converts one optional public image facet into bounded wire axes.
+ * @brief Projects one optional public image facet into legacy bounded axes.
  * @param facet Optional facet from a public Value or output plan.
  * @return Exact optional wire facet.
- * @throws IsolatedCpuProtocolError when an axis exceeds uint32 representation.
+ * @throws IsolatedCpuProtocolError when an axis exceeds uint32 representation
+ *         or the facet carries any fact the axis-only wire cannot encode.
+ * @note A zero-origin data window is reproducible from tensor extents. Display,
+ *       stable channel/group, sample-domain, and color facts are rejected
+ *       before packet creation rather than silently omitted.
  */
 std::optional<IsolatedCpuImageFacet> to_wire_image_facet(
     const std::optional<ImageFacet>& facet) {
   if (!facet.has_value()) {
     return std::nullopt;
+  }
+  if (facet->data_window.x_begin != 0 || facet->data_window.y_begin != 0 ||
+      facet->display_window.has_value() || facet->channel_schema.has_value() ||
+      facet->sample_domain.has_value() || facet->color.has_value()) {
+    throw IsolatedCpuProtocolError(
+        "isolated CPU axis-only image facet cannot encode rich metadata");
   }
   const auto to_axis = [](std::size_t axis) {
     if (axis > std::numeric_limits<std::uint32_t>::max()) {
@@ -2921,17 +2931,24 @@ std::optional<IsolatedCpuImageFacet> to_wire_image_facet(
 /**
  * @brief Converts one public whole-byte DenseTensor descriptor into wire facts.
  * @param descriptor Public logical descriptor.
- * @param image_facet Optional public image axes.
+ * @param image_facet Optional public complete ordinary-image interpretation.
  * @param layout Public signed whole-byte layout.
  * @return Structural wire descriptor without capability/phase/binding fields.
- * @throws IsolatedCpuProtocolError for unsupported quantization, encoding, or
- * local integer representation.
+ * @throws IsolatedCpuProtocolError for malformed image metadata, unsupported
+ * quantization/encoding, or local integer representation.
  * @throws std::invalid_argument from public scalar-width validation.
  * @throws std::bad_alloc when bounded vector copies cannot allocate.
  */
 IsolatedCpuTensorDescriptor to_wire_tensor_descriptor(
     const DenseTensorDescriptor& descriptor,
     const std::optional<ImageFacet>& image_facet, const StridedLayout& layout) {
+  try {
+    validate_dense_tensor_image_metadata(descriptor, image_facet);
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& error) {
+    throw IsolatedCpuProtocolError(error.what());
+  }
   if (descriptor.quantization.has_value() ||
       descriptor.storage_encoding.kind != StorageEncodingKind::NativeScalar) {
     throw IsolatedCpuProtocolError(

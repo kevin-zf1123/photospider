@@ -22,6 +22,7 @@ GitHub Project 和 Issue 跟踪。
 | Run 与进程执行域 | [compute-run-execution-domain](https://github.com/users/kevin-zf1123/projects/3) | [#64](https://github.com/kevin-zf1123/photospider/issues/64) | Request-owned `ComputeRun`、process-owned CPU execution、资源账本、graph revision、取消和 supersession。 |
 | 通用数据与异构执行 | [generic-data-heterogeneous-execution](https://github.com/users/kevin-zf1123/projects/4) | [#77](https://github.com/kevin-zf1123/photospider/issues/77) | `Value`、`DataDescriptor`、`BufferHandle`、`Region`、device queue、fence、transfer 和有界 compute I/O。 |
 | 执行画像与安全服务 | [execution-profiles-server-isolation](https://github.com/users/kevin-zf1123/projects/5) | [#91](https://github.com/kevin-zf1123/photospider/issues/91) | 交互/吞吐画像、独立 server control plane、受限 worker 和隔离插件执行。 |
+| 普通图像 Value 迁移 | [dense-image-value-migration](https://github.com/users/kevin-zf1123/projects/6) | [#128](https://github.com/kevin-zf1123/photospider/issues/128) | 普通图像先采用完整 `Value` metadata 与 Host-owned output authority，再删除过渡期 `ImageBuffer` 与 operation ABI v2 边界。 |
 
 当前重构的合并门禁继续由
 [codebase-refactor](https://github.com/users/kevin-zf1123/projects/1) 跟踪，并由
@@ -515,14 +516,16 @@ envelope、checked multi-buffer binding、一个注入式 typed registry、纯 C
 artifact-envelope round-trip，以及 generation-safe replacement/unload。V-15 现在会把这套未改变的
 通用模型绑定到一个可选的仓库自有 OpenEXR single-part deep-scanline provider/codec，并提供显式
 channel identity、typed shape/error rejection、有界 compute-I/O execution、generation-safe lifetime，
-以及依赖干净的默认 OFF package profile。精确行为记录在
+以及依赖干净的默认 OFF package profile。DI-1 现在会新增 signed half-open ordinary-image
+data/display window、稳定 channel/group identity、相互独立的 sample-domain 与 color facet、
+metadata-only bounds access，以及独立的 observed-statistics query/result/cache-key contract。精确行为记录在
 [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
 [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)、
 [插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
 [内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)；execution ownership 记录在
 [策略与执行架构](../../kernel-architecture/zh/Policy-and-Execution-Architecture.zh.md)与
 [计算边界](../../kernel-architecture/zh/Compute-Boundaries.zh.md)。下述完整模型是已接受目标；
-只有这里明确指出的 V-2 至 V-15 子集是当前 runtime 事实。
+只有这里明确指出的 V-2 至 V-15 与 DI-1 子集是当前 runtime 事实。
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 是完整目标契约的权威来源。其核心分离关系是：
@@ -553,13 +556,15 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 `VariableSampleField + ImageFacet + DeepSampleFacet`。StructuredValue v1 是自包含的，
 不含 runtime child Value。
 
-已实现的 V-2 至 V-15 子集刻意保持更窄的范围：
+已实现的 V-2 至 V-15 与 DI-1 子集刻意保持更窄的范围：
 
 - `DenseTensorDescriptor` 包含 positive concrete shape、彼此独立的 unsigned/signed integer
   或 floating element semantics、8/16/32/64-bit native scalar storage 或显式 four-bit FP4
   E2M1 encoding，以及可选 V-13 block-scale quantization；后者包含 rank-matched positive block
   shape，以及每个完整 row-major logical block 对应的一项 finite positive scale；
-- `ImageFacet` 显式映射彼此不同的 x/y axis 与可选 channel axis；
+- `ImageFacet` 显式映射彼此不同的 x/y axis 与可选 channel axis，拥有 required signed
+  half-open data window 与 optional display window，并且可以绑定 bounded stable-ID channel
+  schema、versioned sample domain 与 color semantics，绝不从诊断性 channel name 推导角色；
 - public `BufferHandle` 是同一个 opaque process-local `AllocationIdentity` 上受检、非空的
   range；subrange 会保留 allocation lifetime。CPU allocation 可以签发 host read lease，
   source-private native binding 则保留 external owner，并且只暴露经过检查的 binding fact；
@@ -766,6 +771,26 @@ deep-scanline read/write；它跟随 core 与 V-14 proof，而不是替代 V-14�
 public ABI 与 dependency-disabled product 中移除 OpenEXR header、link、type、symbol、package
 discovery、target export 与 transitive dependency。只有显式 component consumption 这条 installed
 package 路径会发现 OpenEXR 并导入 provider MODULE。
+
+## 普通图像 Value 迁移
+
+[ADR 0013](../../adr/zh/0013-ordinary-dense-image-coordinates-samples-colors-and-statistics-are-separate-contracts.zh.md)
+约束普通 dense-image metadata 基线。Project 6 按依赖顺序完成 public migration；实时状态权威
+仍是其 Issue 与 Project field，而不是本文目标文档。
+
+| 切片 | 交付边界 | 阻塞切片 |
+| --- | --- | --- |
+| [#129 / DI-1](https://github.com/kevin-zf1123/photospider/issues/129) | 冻结并交付 ordinary-image coordinate、sample/color declaration、stable channel identity、canonical descriptor record 与不进入 identity 的 observed statistics | #78、#101、#102、#105 |
+| [#130 / DI-2](https://github.com/kevin-zf1123/photospider/issues/130) | 新增 Host-owned output authorization 并迁移 kernel runtime image path | #129 |
+| [#132 / DI-3](https://github.com/kevin-zf1123/photospider/issues/132) | 实现 pure-C operation ABI v1，并迁移 plugin 与 isolated execution | #129、#130 |
+| [#131 / DI-4](https://github.com/kevin-zf1123/photospider/issues/131) | 迁移外部产品边界并彻底删除 `ImageBuffer` | #129、#130、#132 |
+
+DI-1 是第一个依赖切片。它把 immutable data window、optional display window 与 dynamic
+`RegionSet` 保持为三项独立 authority；让 storage representability、quantization、declared
+sample domain、color 与 observed statistics 彼此独立；并冻结后续 output-plan、wire、artifact
+及 codec 工作所需的 bounded record。它刻意不删除 operation ABI v2 或 `ImageBuffer`，不迁移
+Host/IPC/worker/durable/CLI surface，不定义自动 color conversion，也不把 OpenEXR Deep
+provider-defined window 复用为普通 dense-image authority。DI-2、DI-3 与 DI-4 仍是下游交付切片。
 
 ## 异构 Executor
 

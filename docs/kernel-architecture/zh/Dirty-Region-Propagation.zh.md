@@ -290,6 +290,13 @@ Checked derived `PixelRect` 与 `PixelSize` 只保留在 image tile/task、Image
 拒绝 uncertainty、TensorSlice、custom domain、multi-atom clause 与 narrowing overflow。只有
 provider 或 adapter 实现在真实调用处才会创建 OpenCV rectangle 与 size。
 
+对于普通 dense image，`ImageRect` 使用 immutable `ImageFacet::data_window` 的 signed logical
+coordinate domain。full-image region 就是该 half-open window 本身，包括 non-zero 或 negative
+origin。只有在完成 containment 检查之后，才可通过减去 data-window origin 得到 dense storage
+index。可选 display window 不会重定义 dirty coordinate，dynamic `RegionSet` 也不会修改任一
+window。provider-defined OpenEXR Deep window 仍是独立 provider contract，不是 ordinary dense
+image 的 authority。
+
 把 dirty fact、static task shape、ready dispatch 与 staged commit 保持为不同 value，可以防止 ROI
 update 重写 topology，或把 graph ownership 转交 policy snapshot、ready store 或私有 execution
 route。上述明确限制界定了当前 generation 与 epoch check 能够保证的范围。

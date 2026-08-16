@@ -276,7 +276,10 @@ Value make_upload_source(float base) {
           ElementSemantics::FloatingPoint,
           StorageEncoding{32U},
       },
-      ImageFacet{1U, 0U, std::nullopt},
+      ImageFacet{1U, 0U, std::nullopt,
+                 ImageBounds{0, 0, static_cast<std::int64_t>(kWidth),
+                             static_cast<std::int64_t>(kHeight)},
+                 std::nullopt, std::nullopt, std::nullopt, std::nullopt},
       StridedLayout{{static_cast<std::ptrdiff_t>(kWidth * sizeof(float)),
                      static_cast<std::ptrdiff_t>(sizeof(float))},
                     0U},
@@ -1392,7 +1395,10 @@ TEST(MetalDeviceExecutorIntegration,
           ElementSemantics::FloatingPoint,
           StorageEncoding{32U},
       },
-      ImageFacet{1U, 0U, std::nullopt},
+      ImageFacet{1U, 0U, std::nullopt,
+                 ImageBounds{0, 0, static_cast<std::int64_t>(kWidth),
+                             static_cast<std::int64_t>(kHeight)},
+                 std::nullopt, std::nullopt, std::nullopt, std::nullopt},
       StridedLayout{{static_cast<std::ptrdiff_t>(kWidth * sizeof(float)),
                      static_cast<std::ptrdiff_t>(sizeof(float))},
                     0U},
@@ -1482,7 +1488,8 @@ TEST(MetalDeviceExecutorIntegration,
       ElementSemantics::FloatingPoint,
       StorageEncoding{32U},
   };
-  const std::optional<ImageFacet> image_facet = ImageFacet{1U, 0U, 2U};
+  const std::optional<ImageFacet> image_facet =
+      make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
   const StridedLayout layout{
       {static_cast<std::ptrdiff_t>(kWidth * kChannels * sizeof(float)),
        static_cast<std::ptrdiff_t>(kChannels * sizeof(float)),

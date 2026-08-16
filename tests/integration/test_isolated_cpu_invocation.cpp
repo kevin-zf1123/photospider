@@ -891,6 +891,59 @@ TEST(IsolatedCpuInvocation,
   EXPECT_EQ(count_open_descriptors(), descriptors_before);
 }
 
+/**
+ * @brief Proves an axis-only wire never guesses a malformed data-window tail.
+ * @throws Standard test fixture exceptions unchanged.
+ */
+TEST(IsolatedCpuInvocation,
+     RejectsMismatchedImageWindowBeforeAnyHostMaterialization) {
+  IsolatedCpuHostInvocation invocation =
+      integration_invocation("fixture.fill_sequence", 172U);
+  ImageFacet facet = make_zero_origin_image_facet(
+      invocation.outputs[0].descriptor, 1U, 0U, std::nullopt);
+  facet.data_window.x_end -= 1;
+  invocation.outputs[0].image_facet = std::move(facet);
+  const std::size_t descriptors_before = count_open_descriptors();
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  EXPECT_THROW(integration_executor().invoke(invocation),
+               IsolatedCpuProtocolError);
+
+  const IsolatedCpuInvocationTestSnapshot after =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  EXPECT_EQ(after.host_capability_materialization_attempts,
+            before.host_capability_materialization_attempts);
+  EXPECT_EQ(after.spawned_children, before.spawned_children);
+  EXPECT_EQ(count_open_descriptors(), descriptors_before);
+}
+
+/**
+ * @brief Proves the legacy axis-only wire rejects valid richer image facts.
+ * @throws Standard test fixture exceptions unchanged.
+ */
+TEST(IsolatedCpuInvocation, RejectsRichImageFacetBeforeAnyHostMaterialization) {
+  IsolatedCpuHostInvocation invocation =
+      integration_invocation("fixture.fill_sequence", 173U);
+  ImageFacet facet = make_zero_origin_image_facet(
+      invocation.outputs[0].descriptor, 1U, 0U, std::nullopt);
+  facet.display_window = ImageBounds{-1, -1, 4, 3};
+  invocation.outputs[0].image_facet = std::move(facet);
+  const std::size_t descriptors_before = count_open_descriptors();
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  EXPECT_THROW(integration_executor().invoke(invocation),
+               IsolatedCpuProtocolError);
+
+  const IsolatedCpuInvocationTestSnapshot after =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  EXPECT_EQ(after.host_capability_materialization_attempts,
+            before.host_capability_materialization_attempts);
+  EXPECT_EQ(after.spawned_children, before.spawned_children);
+  EXPECT_EQ(count_open_descriptors(), descriptors_before);
+}
+
 TEST(IsolatedCpuInvocation, RejectsAggregatePlanBeforeAnyHostMaterialization) {
   IsolatedCpuHostInvocation invocation =
       integration_invocation("fixture.fill_sequence", 171U);

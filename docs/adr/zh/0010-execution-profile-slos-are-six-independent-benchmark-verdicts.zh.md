@@ -75,11 +75,18 @@ reciprocal 近似，并在复用前恢复先前的浮点环境。
 
 独立 I1 最终 oracle 的版本是 `i1-coordinate-pattern-curve-chain-fp32-v1`。它不经过
 Host、Kernel、cache、scheduler、YAML 或候选 provider，独立重建 source 和四个 stage。
-对 HWC `[2048,2048,4]` FloatingPoint/NativeScalar32 tensor 与 ImageFacet
-`(x=1,y=0,channel=2)`，冻结的 `Sha256CanonicalV1` digest 是
-`17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`。
+对 HWC `[2048,2048,4]` FloatingPoint/NativeScalar32 tensor、ImageFacet
+`(x=1,y=0,channel=2)`、零原点 `[0,2048) x [0,2048)` 数据窗口，以及 DenseTensor
+schema/Image facet 结构版本 2，冻结的 `Sha256CanonicalV1` digest 是
+`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`。
 expected value 在候选执行前固定；product-path test 会交叉校验它，但绝不能用候选结果
 bootstrap 它。
+
+DI-1 改变 canonical descriptor 结构记录，而不改变 `Sha256CanonicalV1` 算法标签、
+workload 算术或 workload identity。I2 preview logical golden 是
+`2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`。
+全部 34 项 B1 logical golden 均在相同结构记录下由独立 oracle 重新生成，而 B1
+raw-payload hash 保持不变。
 
 规范 workload matrix 如下：
 

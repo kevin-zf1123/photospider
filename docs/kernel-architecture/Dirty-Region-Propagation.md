@@ -358,6 +358,15 @@ the image adapter rejects uncertainty, TensorSlice, custom domains,
 multi-atom clauses, and narrowing overflow. OpenCV rectangles and sizes are
 created only inside provider or adapter implementations at actual calls.
 
+For an ordinary dense image, an `ImageRect` is expressed in the signed logical
+coordinate domain of the immutable `ImageFacet::data_window`. A full-image
+region is exactly that half-open window, including a non-zero or negative
+origin. Dense storage indices are obtained only after containment has been
+checked, by subtracting the data-window origin. The optional display window
+does not redefine dirty coordinates, and a dynamic `RegionSet` does not mutate
+either window. Provider-defined OpenEXR Deep windows remain a separate
+provider contract and are not ordinary-dense-image authority.
+
 Keeping dirty facts, static task shape, ready dispatch, and staged commit as
 separate values prevents ROI updates from rewriting topology or transferring
 graph ownership into a policy snapshot, ready store, or private execution

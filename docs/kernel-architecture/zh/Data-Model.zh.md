@@ -260,7 +260,9 @@ physical ownership 与正式 HP cache identity：
 
 - installed `DenseTensorDescriptor` 把 concrete shape、`ElementSemantics`、
   `StorageEncoding` 与可选 quantization 分开；
-- installed `ImageFacet` 显式指定彼此不同的 x/y axis 与可选 channel axis；
+- installed 普通 `ImageFacet` 显式指定彼此不同的 x/y axis 与可选 channel axis，
+  要求有符号半开 data window，并可保留独立 display window、稳定 channel/group
+  schema、声明 sample-domain facet 与 color facet；
 - `BufferHandle` 是同一显式 storage binding 上受检、不可变、非空的 range；它不暴露 raw
   或 native pointer，并创建保留 identity 的 checked subrange；CPU builder 拥有 host byte，
   而 source-private device publication 可以保留 opaque native owner，并独立记录 host
@@ -299,6 +301,23 @@ ImageRect 或 TensorSlice selection；RT 拒绝 TensorSlice，operation ABI v2 �
 一个 compatible atom 变化且 overlap 从其一侧移除区间时，精确 one-clause difference 会保留
 其他所有相等的 constrained-domain atom；会切分 atom 或同时改变多个 domain 的差集仍返回
 类型化 `TooComplex`。
+
+Issue #129 / DI-1 现已把内建普通 DenseImage 元数据具体化。必需的有符号半开
+`ImageBounds` data window 是不可变逻辑像素域；其 x/y 跨度必须与显式 axis 上的
+descriptor shape 精确一致。负原点与非零原点合法。可选 display window 是呈现
+元数据，而动态 dirty/dependency/execution/HP validity 仍属于 `RegionSet`。
+`Value::image_bounds()` 在 Pending、Failed 与 ProducerCancelled 状态下暴露 data-window
+元数据且不削弱只允许 Ready 的载荷 lease；`ImageView` 分别暴露零基存储索引与有符号
+逻辑坐标访问。
+
+可选有界 `ChannelSchema` 使用稳定非零 `ChannelId` 与 `ChannelGroupId`；诊断名称
+不选择角色，也不进入语义相等性/digest。版本 1 `SampleEncoding`/
+`SampleDomainFacet` 声明 normalized、legal 或 code-value 区间及稳定 ID 逐通道覆盖。
+版本 1 `ColorFacet` 把有效 channel group 绑定到显式 transfer function 与 primaries。
+存储可表示范围仍只属于 element semantics 与 storage encoding；quantization、声明
+sample meaning 与 color 保持独立。观测 min/max/histogram query、result 与完整
+revision/content/Region/selector/algorithm cache key 是独立派生值，永远不成为 Value
+或 descriptor/content identity。
 
 V-6 为每个 Value 附加 installed、copyable `ReadyFence` observer。同步 publication 初始即为
 Ready。Source-private pending producer 保留唯一 mutable CPU allocation capability，在发布
@@ -418,11 +437,13 @@ byte 增量送入 SHA-256。两次 invocation 使用独立的 callback-local dia
 三个可选 digest identity，但它不是 graph document、manifest/chunk store、filesystem codec 或
 cache-policy integration。
 
-同一个已安装的 `compute_content_digest(Value)` 入口现在也为内建 DenseTensor value 提供
-冻结的 canonical-v1 逻辑 identity，且不会调用 provider callback。其保留的内建 Schema
-record 会编码 rank、shape、element semantics、storage encoding kind/width，以及可选的
-quantization block shape 和 binary32 scale bit。可选的保留 `ImageFacet` record 会编码 x/y
-axis 与可选 channel axis。Content traversal 按 row-major logical coordinate 执行：whole-byte
+同一个已安装的 `compute_content_digest(Value)` 入口为内建 DenseTensor value 提供冻结的
+canonical-v1 stream identity，且不会调用 provider callback。内建 Schema 结构版本 2
+编码 rank、shape、element semantics、storage encoding kind/width 以及可选 quantization
+block shape 和 binary32 scale bit。Image 结构版本 2 编码 axes、有符号 data/display
+windows、稳定 channel 顺序、group IDs 与成员；独立 Sample Domain 与 Color Facet 使用
+结构版本 1。诊断名称与观测统计均不存在。Content traversal 按 row-major logical
+coordinate 执行：whole-byte
 scalar 以 little-endian 发出，blocked FP4 则为每个 logical element 发出一个 low-nibble code
 byte。Stride、byte/bit offset、padding、block placement、nibble order、allocation/binding
 identity、device identity、readiness metadata 与 Value revision 均不进入 logical content

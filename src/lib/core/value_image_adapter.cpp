@@ -135,9 +135,9 @@ std::optional<Value> dense_value_from_output(const NodeOutput& output) {
  * @brief Validates one merge Region against concrete DenseTensor facts.
  * @param region Exact normalized selection to validate.
  * @param descriptor Shared logical tensor descriptor.
- * @param image_facet Optional explicit image-axis mapping.
+ * @param image_facet Optional complete ordinary-image interpretation.
  * @throws std::invalid_argument for unsupported atom count/domain/kind,
- *         missing image axes, negative or out-of-bounds ImageRect endpoints,
+ *         missing image axes, or out-of-data-window ImageRect endpoints,
  *         or TensorSlice rank/bounds mismatch.
  * @note Whole and Empty require no finite-atom checks.
  */
@@ -158,17 +158,11 @@ void validate_merge_region(const RegionSet& region,
           "ImageRect output merge requires the built-in image domain and "
           "explicit ImageFacet.");
     }
-    if (image->x_begin < 0 || image->y_begin < 0 ||
-        image->x_end < image->x_begin || image->y_end < image->y_begin) {
+    const ImageBounds& bounds = image_facet->data_window;
+    if (image->x_begin < bounds.x_begin || image->x_end > bounds.x_end ||
+        image->y_begin < bounds.y_begin || image->y_end > bounds.y_end) {
       throw std::invalid_argument(
-          "ImageRect output merge endpoints are invalid.");
-    }
-    if (static_cast<std::uint64_t>(image->x_end) >
-            descriptor.shape[image_facet->x_axis] ||
-        static_cast<std::uint64_t>(image->y_end) >
-            descriptor.shape[image_facet->y_axis]) {
-      throw std::invalid_argument(
-          "ImageRect output merge exceeds the dense output bounds.");
+          "ImageRect output merge exceeds the image data window.");
     }
     return;
   }
@@ -190,7 +184,7 @@ void validate_merge_region(const RegionSet& region,
 /**
  * @brief Tests whether one logical coordinate belongs to a validated Region.
  * @param region Region validated by validate_merge_region().
- * @param image_facet Optional explicit image-axis mapping.
+ * @param image_facet Optional complete ordinary-image interpretation.
  * @param coordinates Complete logical tensor coordinate.
  * @return True for Whole or coordinates inside the exact atom.
  * @throws Nothing under validated rank, domain, and bounds preconditions.
@@ -206,12 +200,15 @@ bool merge_coordinate_selected(
   }
   const RegionAtom& atom = region.atoms().front();
   if (const auto* image = std::get_if<ImageRect>(&atom)) {
-    const std::size_t x = coordinates[image_facet->x_axis];
-    const std::size_t y = coordinates[image_facet->y_axis];
-    return x >= static_cast<std::uint64_t>(image->x_begin) &&
-           x < static_cast<std::uint64_t>(image->x_end) &&
-           y >= static_cast<std::uint64_t>(image->y_begin) &&
-           y < static_cast<std::uint64_t>(image->y_end);
+    const ImageBounds& bounds = image_facet->data_window;
+    const std::int64_t x =
+        bounds.x_begin +
+        static_cast<std::int64_t>(coordinates[image_facet->x_axis]);
+    const std::int64_t y =
+        bounds.y_begin +
+        static_cast<std::int64_t>(coordinates[image_facet->y_axis]);
+    return x >= image->x_begin && x < image->x_end && y >= image->y_begin &&
+           y < image->y_end;
   }
   const TensorSlice& tensor = std::get<TensorSlice>(atom);
   for (std::size_t axis = 0U; axis < coordinates.size(); ++axis) {
@@ -290,6 +287,13 @@ void validate_image_buffer_compatible_value(const Value& value) {
         "Strided Value.");
   }
   const ImageView view(value);
+  const std::size_t maximum_extent =
+      static_cast<std::size_t>(std::numeric_limits<int>::max());
+  if (view.width() > maximum_extent || view.height() > maximum_extent ||
+      view.channels() > maximum_extent) {
+    throw std::invalid_argument(
+        "ImageBuffer adaptation requires positive-int image extents.");
+  }
   (void)image_type_from_dense_element(view.descriptor());
 }
 
@@ -334,10 +338,7 @@ Value snapshot_cpu_image_value(const ImageBuffer& buffer) {
                                     static_cast<std::size_t>(buffer.channels)},
                                    semantics,
                                    encoding};
-  ImageFacet image;
-  image.x_axis = 1U;
-  image.y_axis = 0U;
-  image.channel_axis = 2U;
+  const ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
   StridedLayout layout{{static_cast<std::ptrdiff_t>(buffer.step),
                         static_cast<std::ptrdiff_t>(pixel_bytes),
                         static_cast<std::ptrdiff_t>(element_bytes)}};
@@ -393,10 +394,10 @@ void normalize_node_output_image_value(NodeOutput* output) {
 RegionSet full_node_output_region(const NodeOutput& output) {
   if (output.image_value.valid()) {
     if (output.image_value.image_facet().has_value()) {
-      const ImageView view(output.image_value);
-      return RegionSet::from_image_rect(
-          {image_region_domain(), 0, static_cast<std::int64_t>(view.width()), 0,
-           static_cast<std::int64_t>(view.height())});
+      const ImageBounds& bounds = output.image_value.image_bounds();
+      return RegionSet::from_image_rect({image_region_domain(), bounds.x_begin,
+                                         bounds.x_end, bounds.y_begin,
+                                         bounds.y_end});
     }
 
     return full_dense_tensor_region(

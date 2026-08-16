@@ -1024,7 +1024,7 @@ class MetalDeviceExecutor final : public DeviceExecutor {
           StorageEncoding{32U},
       };
       const std::optional<ImageFacet> image_facet =
-          ImageFacet{1U, 0U, std::nullopt};
+          make_zero_origin_image_facet(descriptor, 1U, 0U, std::nullopt);
       const StridedLayout layout{{static_cast<std::ptrdiff_t>(bytes_per_row),
                                   static_cast<std::ptrdiff_t>(sizeof(float))},
                                  0U};
@@ -1113,7 +1113,10 @@ class MetalDeviceExecutor final : public DeviceExecutor {
           descriptor.shape[0] == static_cast<std::size_t>(height) &&
           descriptor.shape[1] == static_cast<std::size_t>(width) &&
           descriptor.shape[2] > 0U && source.image_facet().has_value() &&
-          *source.image_facet() == ImageFacet{1U, 0U, 2U} &&
+          source.image_facet()->x_axis == 1U &&
+          source.image_facet()->y_axis == 0U &&
+          source.image_facet()->channel_axis ==
+              std::optional<std::size_t>{2U} &&
           source_layout.byte_strides.size() == 3U &&
           descriptor.shape[2] <=
               std::numeric_limits<std::uint32_t>::max() / width) {

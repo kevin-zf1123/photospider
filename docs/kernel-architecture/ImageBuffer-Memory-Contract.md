@@ -186,6 +186,36 @@ private. Operation ABI v2 and unconverted operations still use ImageBuffer;
 the private formal HP cache carries both representations and treats a valid
 sealed Value as allocation/revision identity authority.
 
+## DI-1 Ordinary DenseImage Coordinate and Interpretation Contract
+
+Issue #129 adds no field to `ImageBuffer`. An ordinary image-faceted Value now
+requires a signed nonempty half-open `data_window`, may carry an independent
+`display_window`, and may carry bounded stable channel/group, declared
+sample-domain, and color records. The data-window spans exactly match the
+explicit x/y tensor axes; negative and nonzero logical origins are valid.
+`ImageView::channel_data()` remains a zero-based storage-index API, while
+`channel_data_at()` checks signed logical coordinates and subtracts the data
+window origin. Bounds metadata is inspectable without payload readiness; both
+view constructors still require a Ready host-readable payload.
+
+The compatibility projection is deliberate and asymmetric:
+
+- `ImageBuffer -> Value` creates `[0,width) x [0,height)` and no display,
+  stable channel/group, sample-domain, or color facts because ImageBuffer
+  supplies none;
+- `Value -> ImageBuffer` copies active extents and elements but cannot preserve
+  signed origin or richer interpretation; converting that snapshot back creates
+  the documented zero-origin projection; and
+- pure built-in DenseImage descriptor inference copies the complete ImageFacet,
+  while a bounded edge that cannot encode present metadata rejects it before
+  allocation or callback entry rather than silently deleting fields.
+
+Storage-representable range, quantization, declared sample domain, color, and
+observed statistics remain separate. In particular, no ImageBuffer type or
+channel name implies normalized range, RGB, alpha, transfer function, or
+primaries. Provider-defined OpenEXR Deep windows remain outside this ordinary
+DenseImage authority.
+
 ## GPU Buffer Contract
 
 For GPU buffers:
@@ -360,7 +390,9 @@ Darwin's page-rounded POSIX
 shared-memory slack remains outside every descriptor range, while its exact
 physical capability size is still bound by the header and resource
 declaration. No `ImageBuffer` adaptation or public memory-contract widening is
-introduced.
+introduced. Its current axis-only image record accepts only a zero-origin
+ordinary ImageFacet with no display/channel-schema/sample/color metadata;
+richer metadata fails before request encoding instead of being omitted.
 
 Issue #86 / V-9 adds source-private device resource accounting without
 changing `ImageBuffer` or the public operation and Host contracts. The sole

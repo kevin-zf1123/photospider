@@ -33,8 +33,24 @@ constexpr ExtensionIdentity kImageFacetCanonicalIdentity{
     0x70686f746f737069ULL,
     0x6465722d696d6167ULL};  // NOLINT(whitespace/indent_namespace)
 
-/** @brief Exact structural version of both built-in canonical records. */
-constexpr std::uint32_t kDenseCanonicalRecordVersion = 1U;
+/** @brief Permanent built-in canonical facet identity for SampleDomainFacet. */
+constexpr ExtensionIdentity kSampleDomainCanonicalIdentity{
+    0x70686f746f737069ULL,
+    0x6465722d73616d70ULL};  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Permanent built-in canonical facet identity for ColorFacet. */
+constexpr ExtensionIdentity kColorFacetCanonicalIdentity{
+    0x70686f746f737069ULL,
+    0x6465722d636f6c72ULL};  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Exact structural version of the built-in DenseTensor Schema. */
+constexpr std::uint32_t kDenseCanonicalRecordVersion = 2U;
+
+/** @brief Exact structural version of the built-in Image Facet. */
+constexpr std::uint32_t kImageCanonicalRecordVersion = 2U;
+
+/** @brief Exact structural version of Sample Domain and Color Facets. */
+constexpr std::uint32_t kImageInterpretationRecordVersion = 1U;
 
 /**
  * @brief Appends one byte to a bounded canonical record payload.
@@ -73,6 +89,35 @@ void append_u64(std::vector<std::byte>* output, std::uint64_t value) {
     append_u8(output,
               static_cast<std::uint8_t>((value >> (byte * 8U)) & 0xffU));
   }
+}
+
+/**
+ * @brief Appends one signed 64-bit value as two's-complement little endian.
+ * @param output Destination payload.
+ * @param value Exact signed coordinate.
+ * @return Nothing.
+ * @throws std::bad_alloc when vector growth cannot allocate.
+ */
+void append_i64(std::vector<std::byte>* output, std::int64_t value) {
+  append_u64(output, static_cast<std::uint64_t>(value));
+}
+
+/**
+ * @brief Appends one finite binary64 value with canonical signed zero.
+ * @param output Destination payload.
+ * @param value Validated finite metadata value.
+ * @return Nothing.
+ * @throws std::bad_alloc when vector growth cannot allocate.
+ * @note Both signed-zero spellings encode as positive zero. Publication has
+ *       already rejected NaN and infinity.
+ */
+void append_f64(std::vector<std::byte>* output, double value) {
+  const double canonical = value == 0.0 ? 0.0 : value;
+  std::uint64_t bits = 0U;
+  static_assert(sizeof(bits) == sizeof(canonical),
+                "binary64 canonical encoding requires 64-bit double");
+  std::memcpy(&bits, &canonical, sizeof(bits));
+  append_u64(output, bits);
 }
 
 /**
@@ -137,11 +182,12 @@ std::uint64_t logical_element_count(const DenseTensorDescriptor& descriptor) {
 /**
  * @brief Encodes the built-in logical DenseTensor descriptor record.
  * @param descriptor Valid immutable tensor descriptor.
- * @return Version-1 Schema record with exact little-endian payload fields.
+ * @return Version-2 Schema record with exact little-endian payload fields.
  * @throws std::overflow_error when metadata exceeds frozen scalar domains.
  * @throws std::bad_alloc when payload ownership cannot allocate.
- * @note Field order is rank, shapes, element semantics, encoding kind/width,
- * quantization presence, then optional block shapes and binary32 scale bits.
+ * @note Version 2 deliberately advances the structural contract while keeping
+ *       field order rank, shapes, element semantics, encoding kind/width,
+ *       quantization presence, then block shapes and binary32 scale bits.
  */
 ExtensionRecord dense_tensor_schema_record(
     const DenseTensorDescriptor& descriptor) {
@@ -178,30 +224,111 @@ ExtensionRecord dense_tensor_schema_record(
 }
 
 /**
- * @brief Encodes the optional built-in logical ImageFacet record.
- * @param facet Valid explicit image-axis assignment.
- * @return Version-1 Facet record with exact little-endian payload fields.
- * @throws std::overflow_error when an axis exceeds uint64.
+ * @brief Encodes the built-in coordinate and stable-channel Image Facet.
+ * @param facet Valid complete ordinary-image interpretation.
+ * @return Version-2 Facet with axes, windows, and channel/group identities.
+ * @throws std::overflow_error when an axis/count exceeds frozen scalars.
  * @throws std::bad_alloc when payload ownership cannot allocate.
+ * @note Diagnostic channel/group names, sample/color facts, statistics, and
+ *       runtime state are excluded. Sample and color use independent records.
  */
 ExtensionRecord image_facet_record(const ImageFacet& facet) {
   ExtensionRecord record;
   record.kind = ExtensionDefinitionKind::Facet;
   record.identity = kImageFacetCanonicalIdentity;
-  record.structural_version = kDenseCanonicalRecordVersion;
+  record.structural_version = kImageCanonicalRecordVersion;
   append_u64(&record.payload, size_to_u64(facet.x_axis));
   append_u64(&record.payload, size_to_u64(facet.y_axis));
   append_u8(&record.payload, facet.channel_axis.has_value() ? 1U : 0U);
   append_u64(&record.payload, facet.channel_axis.has_value()
                                   ? size_to_u64(*facet.channel_axis)
                                   : 0U);
+  append_i64(&record.payload, facet.data_window.x_begin);
+  append_i64(&record.payload, facet.data_window.y_begin);
+  append_i64(&record.payload, facet.data_window.x_end);
+  append_i64(&record.payload, facet.data_window.y_end);
+  append_u8(&record.payload, facet.display_window.has_value() ? 1U : 0U);
+  if (facet.display_window.has_value()) {
+    append_i64(&record.payload, facet.display_window->x_begin);
+    append_i64(&record.payload, facet.display_window->y_begin);
+    append_i64(&record.payload, facet.display_window->x_end);
+    append_i64(&record.payload, facet.display_window->y_end);
+  }
+  append_u8(&record.payload, facet.channel_schema.has_value() ? 1U : 0U);
+  if (facet.channel_schema.has_value()) {
+    append_u32(&record.payload,
+               size_to_u32(facet.channel_schema->channels.size()));
+    for (const ChannelDescription& channel : facet.channel_schema->channels) {
+      append_u64(&record.payload, channel.id.value);
+    }
+    append_u32(&record.payload,
+               size_to_u32(facet.channel_schema->groups.size()));
+    for (const ChannelGroupDescription& group : facet.channel_schema->groups) {
+      append_u64(&record.payload, group.id.value);
+      append_u32(&record.payload, size_to_u32(group.members.size()));
+      for (const ChannelId member : group.members) {
+        append_u64(&record.payload, member.value);
+      }
+    }
+  }
+  return record;
+}
+
+/**
+ * @brief Encodes one independent declared Sample Domain Facet.
+ * @param facet Valid version-1 sample interpretation.
+ * @return Version-1 Facet with encoding, default, and ordered overrides.
+ * @throws std::overflow_error when an override count exceeds uint32.
+ * @throws std::bad_alloc when payload ownership cannot allocate.
+ * @note Signed zero is canonicalized and diagnostic names are unavailable in
+ *       this orthogonal record.
+ */
+ExtensionRecord sample_domain_facet_record(const SampleDomainFacet& facet) {
+  ExtensionRecord record;
+  record.kind = ExtensionDefinitionKind::Facet;
+  record.identity = kSampleDomainCanonicalIdentity;
+  record.structural_version = kImageInterpretationRecordVersion;
+  append_u32(&record.payload, facet.structural_version);
+  append_u32(&record.payload, facet.encoding.structural_version);
+  append_u32(&record.payload, static_cast<std::uint32_t>(facet.encoding.kind));
+  append_u32(&record.payload,
+             static_cast<std::uint32_t>(facet.default_domain.kind));
+  append_f64(&record.payload, facet.default_domain.minimum);
+  append_f64(&record.payload, facet.default_domain.maximum);
+  append_u32(&record.payload, size_to_u32(facet.per_channel.size()));
+  for (const ChannelSampleDomain& override_domain : facet.per_channel) {
+    append_u64(&record.payload, override_domain.channel.value);
+    append_u32(&record.payload,
+               static_cast<std::uint32_t>(override_domain.domain.kind));
+    append_f64(&record.payload, override_domain.domain.minimum);
+    append_f64(&record.payload, override_domain.domain.maximum);
+  }
+  return record;
+}
+
+/**
+ * @brief Encodes one independent versioned Color Facet.
+ * @param facet Valid stable group binding, transfer, and primary set.
+ * @return Version-1 Facet with exact bounded scalar fields.
+ * @throws std::bad_alloc when payload ownership cannot allocate.
+ */
+ExtensionRecord color_facet_record(const ColorFacet& facet) {
+  ExtensionRecord record;
+  record.kind = ExtensionDefinitionKind::Facet;
+  record.identity = kColorFacetCanonicalIdentity;
+  record.structural_version = kImageInterpretationRecordVersion;
+  append_u32(&record.payload, facet.structural_version);
+  append_u64(&record.payload, facet.channel_group.value);
+  append_u32(&record.payload, static_cast<std::uint32_t>(facet.transfer));
+  append_u32(&record.payload, static_cast<std::uint32_t>(facet.primaries));
   return record;
 }
 
 /**
  * @brief Builds the provider-independent canonical descriptor envelope.
  * @param value Valid DenseTensor value.
- * @return Built-in Schema plus optional ImageFacet record.
+ * @return Built-in Schema plus optional independent image interpretation
+ *         records.
  * @throws Descriptor encoding errors unchanged.
  * @note No physical layout, binding, readiness, or revision enters the value.
  */
@@ -209,7 +336,15 @@ DataDescriptorEnvelope dense_descriptor_envelope(const Value& value) {
   DataDescriptorEnvelope envelope;
   envelope.schema = dense_tensor_schema_record(value.dense_tensor_descriptor());
   if (value.image_facet().has_value()) {
-    envelope.facets.push_back(image_facet_record(*value.image_facet()));
+    const ImageFacet& image = *value.image_facet();
+    envelope.facets.push_back(image_facet_record(image));
+    if (image.sample_domain.has_value()) {
+      envelope.facets.push_back(
+          sample_domain_facet_record(*image.sample_domain));
+    }
+    if (image.color.has_value()) {
+      envelope.facets.push_back(color_facet_record(*image.color));
+    }
   }
   return envelope;
 }

@@ -2001,10 +2001,8 @@ def write_extension_consumer_projects(
                   {2U, 3U, 1U},
                   ps::ElementSemantics::UnsignedInteger,
                   ps::StorageEncoding{8U}};
-              ps::ImageFacet facet;
-              facet.x_axis = 1U;
-              facet.y_axis = 0U;
-              facet.channel_axis = 2U;
+              const ps::ImageFacet facet =
+                  ps::make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
               ps::StridedLayout layout{{3, 1, 1}};
               std::vector<std::byte> storage{
                   std::byte{1}, std::byte{2}, std::byte{3},

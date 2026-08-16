@@ -50,7 +50,7 @@ class IsolatedCpuInvocationError : public std::runtime_error {
 struct IsolatedCpuDenseTensorOutputPlan final {
   /** @brief Logical whole-byte DenseTensor descriptor. */
   DenseTensorDescriptor descriptor;
-  /** @brief Optional explicit image-axis interpretation. */
+  /** @brief Optional complete public ordinary-image interpretation. */
   std::optional<ImageFacet> image_facet;
   /** @brief Exact positive-stride producer layout. */
   StridedLayout layout;

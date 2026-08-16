@@ -87,10 +87,19 @@ The independent I1 final oracle is versioned
 `i1-coordinate-pattern-curve-chain-fp32-v1`. It reconstructs the source and
 four stages without Host, Kernel, cache, scheduler, YAML, or the candidate
 provider. For the HWC `[2048,2048,4]` FloatingPoint/NativeScalar32 tensor with
-ImageFacet `(x=1,y=0,channel=2)`, the frozen `Sha256CanonicalV1` digest is
-`17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`.
+ImageFacet `(x=1,y=0,channel=2)`, zero-origin `[0,2048) x [0,2048)` data
+window, and DenseTensor schema/Image facet structural version 2, the frozen
+`Sha256CanonicalV1` digest is
+`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`.
 The expected value is fixed before candidate execution; a product-path test
 cross-checks it but can never bootstrap it.
+
+DI-1 changes canonical descriptor structural records, not the
+`Sha256CanonicalV1` algorithm tag, workload arithmetic, or workload identity.
+The I2 preview logical golden is
+`2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`.
+All 34 B1 logical goldens are regenerated from the independent oracle under
+the same structural records, while B1 raw-payload hashes remain unchanged.
 
 The canonical workload matrix is:
 

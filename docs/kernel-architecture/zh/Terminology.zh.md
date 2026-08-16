@@ -398,6 +398,28 @@ lease 会阻止 seal；sealed Value 永不签发该 lease。
 新 identity。它不是 `GraphRevision`、allocation identity、持久 digest/artifact id 或
 task/cache key。
 
+**`ImageBounds` / data window / display window**
+`ImageBounds` 是有符号、非空、半开的普通图像坐标窗口。每个内建 `ImageFacet` 都有一个
+不可变 data window，其 x/y 跨度与显式 tensor axes 精确一致。可选 display window 是独立
+呈现元数据。两者都不是 `RegionSet`：Region 仍是动态工作或有效性。载荷 readiness 为
+Pending、Failed 或 ProducerCancelled 时仍可读取 bounds 元数据。
+
+**`ChannelSchema` / `ChannelId` / `ChannelGroupId`**
+普通图像 channel 与 group 的有界稳定语义 identity。Channel vector 顺序匹配 channel axis；
+group membership 使用稳定 ID。Channel 与 group 名称只用于诊断，永不选择角色或进入语义
+identity。
+
+**`SampleDomainFacet` / `ColorFacet`**
+相互独立的版本化普通图像解释。Sample encoding/domain 声明 normalized、legal 或 code-value
+区间及可选稳定 ID 逐通道覆盖；它不改变 storage representability 或 quantization。Color
+把一个稳定 channel group 绑定到显式 transfer function 与 primaries；scene linearity 是
+color 事实。
+
+**图像 statistics query / result / cache key**
+观测 min/max 或 histogram 请求的有界派生记录。其 key 包含 Value revision、可选 content
+digest、RegionSet、稳定 channel/group 选择、算法与版本。Result 永远不成为 Value、
+ImageFacet、descriptor/content identity 或正式 cache validity。
+
 **`ImageBuffer`**
 当前图像 payload 契约：二维 extent、通道数、单一 scalar type、device、row stride、共享数据
 所有权和可选 backend context。在带有效 sealed `image_value` 的正式 CPU image cache entry

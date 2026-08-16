@@ -7,6 +7,8 @@
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <string>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -179,11 +181,270 @@ std::size_t stride_magnitude(std::ptrdiff_t stride) {
 }
 
 /**
+ * @brief Computes one positive signed-coordinate span without signed overflow.
+ * @param begin Inclusive signed endpoint.
+ * @param end Exclusive signed endpoint.
+ * @param axis Diagnostic axis name used in exceptions.
+ * @return Positive span representable by both int64 and size_t.
+ * @throws std::invalid_argument when the interval is empty or reversed.
+ * @throws std::overflow_error when the mathematical span exceeds either
+ *         supported scalar domain.
+ * @note Unsigned modular subtraction is exact after `end > begin` is proven.
+ */
+std::size_t checked_image_bounds_span(std::int64_t begin, std::int64_t end,
+                                      const char* axis) {
+  if (end <= begin) {
+    throw std::invalid_argument(std::string("ImageBounds ") + axis +
+                                " interval must be nonempty and ordered.");
+  }
+  const std::uint64_t span =
+      static_cast<std::uint64_t>(end) - static_cast<std::uint64_t>(begin);
+  if (span > static_cast<std::uint64_t>(
+                 std::numeric_limits<std::int64_t>::max()) ||
+      span > std::numeric_limits<std::size_t>::max()) {
+    throw std::overflow_error(std::string("ImageBounds ") + axis +
+                              " span exceeds the supported signed extent.");
+  }
+  return static_cast<std::size_t>(span);
+}
+
+/**
+ * @brief Validates one closed sample-domain enum value.
+ * @param kind Candidate enum value.
+ * @return Nothing.
+ * @throws std::invalid_argument when the value is outside version 1.
+ */
+void validate_sample_domain_kind(SampleDomainKind kind) {
+  switch (kind) {
+    case SampleDomainKind::Normalized:
+    case SampleDomainKind::Legal:
+    case SampleDomainKind::CodeValue:
+      return;
+  }
+  throw std::invalid_argument("SampleDomain kind is unsupported.");
+}
+
+/**
+ * @brief Validates one finite inclusive declared sample interval.
+ * @param domain Candidate declared domain.
+ * @return Nothing.
+ * @throws std::invalid_argument for nonfinite, reversed, or unknown values.
+ * @note Equal endpoints are a valid single-value inclusive domain.
+ */
+void validate_sample_domain(const SampleDomain& domain) {
+  validate_sample_domain_kind(domain.kind);
+  if (!std::isfinite(domain.minimum) || !std::isfinite(domain.maximum) ||
+      domain.minimum > domain.maximum) {
+    throw std::invalid_argument(
+        "SampleDomain endpoints must form a finite inclusive interval.");
+  }
+}
+
+/**
+ * @brief Validates one closed sample-encoding enum value.
+ * @param kind Candidate enum value.
+ * @return Nothing.
+ * @throws std::invalid_argument when the value is outside version 1.
+ */
+void validate_sample_encoding_kind(SampleEncodingKind kind) {
+  switch (kind) {
+    case SampleEncodingKind::Value:
+    case SampleEncodingKind::Normalized:
+    case SampleEncodingKind::CodeValue:
+      return;
+  }
+  throw std::invalid_argument("SampleEncoding kind is unsupported.");
+}
+
+/**
+ * @brief Validates the closed transfer-function enum.
+ * @param transfer Candidate transfer value.
+ * @return Nothing.
+ * @throws std::invalid_argument when the value is outside version 1.
+ */
+void validate_color_transfer(ColorTransferFunction transfer) {
+  switch (transfer) {
+    case ColorTransferFunction::SceneLinear:
+    case ColorTransferFunction::Srgb:
+    case ColorTransferFunction::Rec709:
+    case ColorTransferFunction::Pq:
+    case ColorTransferFunction::Hlg:
+      return;
+  }
+  throw std::invalid_argument("ColorFacet transfer function is unsupported.");
+}
+
+/**
+ * @brief Validates the closed color-primary enum.
+ * @param primaries Candidate primaries value.
+ * @return Nothing.
+ * @throws std::invalid_argument when the value is outside version 1.
+ */
+void validate_color_primaries(ColorPrimaries primaries) {
+  switch (primaries) {
+    case ColorPrimaries::Rec709:
+    case ColorPrimaries::DisplayP3D65:
+    case ColorPrimaries::Rec2020:
+    case ColorPrimaries::AcesAp0:
+    case ColorPrimaries::AcesAp1:
+      return;
+  }
+  throw std::invalid_argument("ColorFacet primaries are unsupported.");
+}
+
+/**
+ * @brief Validates stable channel records and returns their scalar ID set.
+ * @param schema Candidate channel/group authority.
+ * @param expected_channels Exact channel count derived from tensor axes.
+ * @return Set containing every validated stable channel scalar.
+ * @throws std::invalid_argument for invalid/duplicate IDs, bad ordering,
+ *         missing group members, or diagnostic names over the byte limit.
+ * @throws std::length_error for a frozen record-count violation.
+ * @throws std::bad_alloc when validation set allocation fails.
+ * @note Channel order remains the channel-axis order; only groups and group
+ *       members require scalar ordering for one canonical spelling.
+ */
+std::unordered_set<std::uint64_t> validate_channel_schema(
+    const ChannelSchema& schema, std::size_t expected_channels) {
+  if (schema.channels.size() > kMaximumImageChannels ||
+      schema.groups.size() > kMaximumImageChannelGroups) {
+    throw std::length_error("ChannelSchema exceeds its frozen record bound.");
+  }
+  if (schema.channels.size() != expected_channels) {
+    throw std::invalid_argument(
+        "ChannelSchema cardinality must match the image channel extent.");
+  }
+
+  std::unordered_set<std::uint64_t> channel_ids;
+  channel_ids.reserve(schema.channels.size());
+  for (const ChannelDescription& channel : schema.channels) {
+    if (!channel.id.valid() || !channel_ids.insert(channel.id.value).second) {
+      throw std::invalid_argument(
+          "ChannelSchema channel IDs must be nonzero and unique.");
+    }
+    if (channel.diagnostic_name.size() > kMaximumImageDiagnosticNameBytes) {
+      throw std::invalid_argument(
+          "Channel diagnostic name exceeds its frozen byte bound.");
+    }
+  }
+
+  ChannelGroupId previous_group;
+  std::size_t total_members = 0U;
+  for (const ChannelGroupDescription& group : schema.groups) {
+    if (!group.id.valid() ||
+        (previous_group.valid() && !(previous_group < group.id))) {
+      throw std::invalid_argument(
+          "Channel group IDs must be nonzero, unique, and increasing.");
+    }
+    previous_group = group.id;
+    if (group.diagnostic_name.size() > kMaximumImageDiagnosticNameBytes) {
+      throw std::invalid_argument(
+          "Channel group diagnostic name exceeds its frozen byte bound.");
+    }
+    if (group.members.empty()) {
+      throw std::invalid_argument("Channel groups must contain a channel.");
+    }
+    if (group.members.size() > kMaximumImageChannelGroupMembers) {
+      throw std::length_error("Channel group exceeds its frozen member bound.");
+    }
+    if (group.members.size() >
+        kMaximumImageChannelGroupMemberships - total_members) {
+      throw std::length_error(
+          "ChannelSchema exceeds its frozen total membership bound.");
+    }
+    total_members += group.members.size();
+    ChannelId previous_member;
+    for (const ChannelId member : group.members) {
+      if (!member.valid() || channel_ids.count(member.value) == 0U ||
+          (previous_member.valid() && !(previous_member < member))) {
+        throw std::invalid_argument(
+            "Channel group members must exist, be unique, and increase.");
+      }
+      previous_member = member;
+    }
+  }
+  return channel_ids;
+}
+
+/**
+ * @brief Validates one versioned declared sample-domain facet.
+ * @param facet Candidate sample interpretation.
+ * @param channel_ids Stable channel IDs, or null without a ChannelSchema.
+ * @return Nothing.
+ * @throws std::invalid_argument for version, interval, ordering, or reference
+ *         failures.
+ * @throws std::length_error when override count exceeds its frozen bound.
+ */
+void validate_sample_domain_facet(
+    const SampleDomainFacet& facet,
+    const std::unordered_set<std::uint64_t>* channel_ids) {
+  if (facet.structural_version != 1U ||
+      facet.encoding.structural_version != 1U) {
+    throw std::invalid_argument(
+        "SampleDomainFacet structural version is unsupported.");
+  }
+  validate_sample_encoding_kind(facet.encoding.kind);
+  validate_sample_domain(facet.default_domain);
+  if (facet.per_channel.size() > kMaximumImageChannels) {
+    throw std::length_error(
+        "SampleDomainFacet exceeds its frozen override bound.");
+  }
+  if (!facet.per_channel.empty() && channel_ids == nullptr) {
+    throw std::invalid_argument(
+        "Per-channel sample domains require a ChannelSchema.");
+  }
+  ChannelId previous;
+  for (const ChannelSampleDomain& override_domain : facet.per_channel) {
+    if (!override_domain.channel.valid() ||
+        channel_ids->count(override_domain.channel.value) == 0U ||
+        (previous.valid() && !(previous < override_domain.channel))) {
+      throw std::invalid_argument(
+          "Sample-domain override IDs must exist, be unique, and increase.");
+    }
+    validate_sample_domain(override_domain.domain);
+    previous = override_domain.channel;
+  }
+}
+
+/**
+ * @brief Validates one versioned color facet against stable channel groups.
+ * @param color Candidate color interpretation.
+ * @param schema Channel authority required by the binding.
+ * @return Nothing.
+ * @throws std::invalid_argument for unsupported version/enums or missing group.
+ */
+void validate_color_facet(const ColorFacet& color,
+                          const ChannelSchema* schema) {
+  if (color.structural_version != 1U || !color.channel_group.valid()) {
+    throw std::invalid_argument(
+        "ColorFacet version and channel group must be valid.");
+  }
+  validate_color_transfer(color.transfer);
+  validate_color_primaries(color.primaries);
+  if (schema == nullptr) {
+    throw std::invalid_argument("ColorFacet requires a ChannelSchema.");
+  }
+  const auto group =
+      std::find_if(schema->groups.begin(), schema->groups.end(),
+                   [&color](const ChannelGroupDescription& candidate) {
+                     return candidate.id == color.channel_group;
+                   });
+  if (group == schema->groups.end() || group->members.empty()) {
+    throw std::invalid_argument(
+        "ColorFacet must reference a nonempty ChannelSchema group.");
+  }
+}
+
+/**
  * @brief Validates the common logical DenseTensor descriptor and image facet.
  *
  * @param descriptor Logical descriptor to validate.
- * @param facet Optional explicit image-axis mapping.
- * @throws std::invalid_argument for empty/zero shape or malformed image axes.
+ * @param facet Optional complete ordinary-image interpretation.
+ * @throws std::invalid_argument for empty/zero shape or malformed image
+ *         coordinates, axes, channels, sample domains, or colors.
+ * @throws std::overflow_error when a signed window span cannot be represented.
+ * @throws std::length_error when bounded image metadata exceeds frozen limits.
+ * @throws std::bad_alloc when validation set allocation fails.
  * @note Element encoding, quantization, layout, and allocation ranges are
  * validated separately.
  */
@@ -215,15 +476,48 @@ void validate_shape_and_facet(const DenseTensorDescriptor& descriptor,
     throw std::invalid_argument(
         "ImageFacet channel axis must be distinct and in rank.");
   }
+
+  const std::size_t width = image_bounds_width(facet->data_window);
+  const std::size_t height = image_bounds_height(facet->data_window);
+  if (width != descriptor.shape[facet->x_axis] ||
+      height != descriptor.shape[facet->y_axis]) {
+    throw std::invalid_argument(
+        "ImageFacet data-window spans must match x/y tensor extents.");
+  }
+  if (facet->display_window.has_value()) {
+    (void)image_bounds_width(*facet->display_window);
+    (void)image_bounds_height(*facet->display_window);
+  }
+
+  const std::size_t channel_count = facet->channel_axis.has_value()
+                                        ? descriptor.shape[*facet->channel_axis]
+                                        : 1U;
+  std::optional<std::unordered_set<std::uint64_t>> channel_ids;
+  if (facet->channel_schema.has_value()) {
+    channel_ids =
+        validate_channel_schema(*facet->channel_schema, channel_count);
+  }
+  if (facet->sample_domain.has_value()) {
+    validate_sample_domain_facet(*facet->sample_domain, channel_ids.has_value()
+                                                            ? &*channel_ids
+                                                            : nullptr);
+  }
+  if (facet->color.has_value()) {
+    validate_color_facet(*facet->color, facet->channel_schema.has_value()
+                                            ? &*facet->channel_schema
+                                            : nullptr);
+  }
 }
 
 /**
  * @brief Validates one currently supported whole-byte Strided descriptor.
  * @param descriptor Logical descriptor to validate.
- * @param facet Optional explicit image-axis mapping.
+ * @param facet Optional complete ordinary-image interpretation.
  * @return Positive whole-byte element width.
  * @throws std::invalid_argument for malformed shape/facet, quantization on a
  * Strided V-13 value, or unsupported whole-byte encoding.
+ * @throws std::overflow_error, std::length_error, or std::bad_alloc from
+ * bounded ImageFacet validation.
  * @note Packed FP4 uses the separate Blocked descriptor authority.
  */
 std::size_t validate_descriptor_and_facet(
@@ -550,7 +844,7 @@ void validate_blocked_producer_envelope(const DenseTensorDescriptor& descriptor,
 /**
  * @brief Reports whether one axis is explicitly assigned by an image facet.
  *
- * @param facet Valid explicit image-axis mapping.
+ * @param facet Valid complete ordinary-image interpretation.
  * @param axis Logical axis to inspect.
  * @return True when axis is x, y, or the optional channel axis.
  * @throws Nothing.
@@ -607,6 +901,23 @@ std::size_t resolve_coordinate_offset(const StridedLayout& layout,
 }
 
 }  // namespace
+
+/** @copydoc ps::image_bounds_width */
+std::size_t image_bounds_width(const ImageBounds& bounds) {
+  return checked_image_bounds_span(bounds.x_begin, bounds.x_end, "x");
+}
+
+/** @copydoc ps::image_bounds_height */
+std::size_t image_bounds_height(const ImageBounds& bounds) {
+  return checked_image_bounds_span(bounds.y_begin, bounds.y_end, "y");
+}
+
+/** @copydoc ps::validate_dense_tensor_image_metadata */
+void validate_dense_tensor_image_metadata(
+    const DenseTensorDescriptor& descriptor,
+    const std::optional<ImageFacet>& image_facet) {
+  validate_shape_and_facet(descriptor, image_facet);
+}
 
 /** @copydoc ps::validate_dense_tensor_producer_envelope */
 void validate_dense_tensor_producer_envelope(
@@ -943,7 +1254,7 @@ struct Value::Impl final {
   /** @brief Validated concrete logical descriptor. */
   DenseTensorDescriptor descriptor;
 
-  /** @brief Optional validated explicit image-axis mapping. */
+  /** @brief Optional validated complete ordinary-image interpretation. */
   std::optional<ImageFacet> image_facet;
 
   /** @brief Optional byte-preserved provider-defined logical descriptor. */
@@ -1140,6 +1451,80 @@ std::size_t dense_tensor_element_bytes(
         "DenseTensor element encoding is not whole-byte addressable.");
   }
   return element_bits / 8U;
+}
+
+/** @copydoc ps::storage_representable_range */
+StorageRepresentableRange storage_representable_range(
+    const DenseTensorDescriptor& descriptor) {
+  const std::size_t bits = dense_tensor_element_bits(descriptor);
+  if (descriptor.storage_encoding.kind == StorageEncodingKind::Fp4E2M1) {
+    return StorageRepresentableRange{-6.0, 6.0, false, false, false};
+  }
+  switch (descriptor.element_semantics) {
+    case ElementSemantics::UnsignedInteger: {
+      const std::uint64_t maximum = (std::uint64_t{1U} << bits) - 1U;
+      return StorageRepresentableRange{0.0, static_cast<double>(maximum), false,
+                                       false, false};
+    }
+    case ElementSemantics::SignedInteger: {
+      const std::int64_t maximum = (std::int64_t{1} << (bits - 1U)) - 1;
+      const std::int64_t minimum = -maximum - 1;
+      return StorageRepresentableRange{static_cast<double>(minimum),
+                                       static_cast<double>(maximum), false,
+                                       false, false};
+    }
+    case ElementSemantics::FloatingPoint:
+      if (bits == 32U) {
+        return StorageRepresentableRange{
+            -static_cast<double>(std::numeric_limits<float>::max()),
+            static_cast<double>(std::numeric_limits<float>::max()), true, true,
+            true};
+      }
+      if (bits == 64U) {
+        return StorageRepresentableRange{-std::numeric_limits<double>::max(),
+                                         std::numeric_limits<double>::max(),
+                                         true, true, true};
+      }
+      break;
+  }
+  throw std::invalid_argument(
+      "DenseTensor storage range is unavailable for this encoding.");
+}
+
+/** @copydoc ps::make_zero_origin_image_facet */
+ImageFacet make_zero_origin_image_facet(
+    const DenseTensorDescriptor& descriptor, std::size_t x_axis,
+    std::size_t y_axis, std::optional<std::size_t> channel_axis) {
+  if (descriptor.shape.empty() || x_axis >= descriptor.shape.size() ||
+      y_axis >= descriptor.shape.size() || x_axis == y_axis ||
+      (channel_axis.has_value() &&
+       (*channel_axis >= descriptor.shape.size() || *channel_axis == x_axis ||
+        *channel_axis == y_axis))) {
+    throw std::invalid_argument(
+        "Zero-origin ImageFacet axes must be distinct and in rank.");
+  }
+  for (const std::size_t extent : descriptor.shape) {
+    if (extent == 0U) {
+      throw std::invalid_argument(
+          "Zero-origin ImageFacet requires positive tensor extents.");
+    }
+  }
+  const std::size_t maximum_signed_extent =
+      static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max());
+  if (descriptor.shape[x_axis] > maximum_signed_extent ||
+      descriptor.shape[y_axis] > maximum_signed_extent) {
+    throw std::overflow_error(
+        "Zero-origin ImageFacet extent exceeds signed coordinates.");
+  }
+
+  ImageFacet facet;
+  facet.x_axis = x_axis;
+  facet.y_axis = y_axis;
+  facet.channel_axis = channel_axis;
+  facet.data_window.x_end = static_cast<std::int64_t>(descriptor.shape[x_axis]);
+  facet.data_window.y_end = static_cast<std::int64_t>(descriptor.shape[y_axis]);
+  validate_shape_and_facet(descriptor, facet);
+  return facet;
 }
 
 /** @copydoc ValueBuilder::ValueBuilder */
@@ -1682,6 +2067,15 @@ const std::optional<ImageFacet>& Value::image_facet() const {
   return impl_->image_facet;
 }
 
+/** @copydoc Value::image_bounds */
+const ImageBounds& Value::image_bounds() const {
+  const std::optional<ImageFacet>& facet = image_facet();
+  if (!facet.has_value()) {
+    throw std::logic_error("DenseTensor Value has no image data window.");
+  }
+  return facet->data_window;
+}
+
 /** @copydoc Value::provider_defined_descriptor */
 const DataDescriptorEnvelope& Value::provider_defined_descriptor() const {
   if (!impl_) {
@@ -2111,13 +2505,6 @@ ImageView::ImageView(Value value) : tensor_(std::move(value)) {
   channels_ = image_facet_.channel_axis.has_value()
                   ? tensor_descriptor.shape[*image_facet_.channel_axis]
                   : 1U;
-  const std::size_t maximum_image_extent =
-      static_cast<std::size_t>(std::numeric_limits<int>::max());
-  if (width_ > maximum_image_extent || height_ > maximum_image_extent ||
-      channels_ > maximum_image_extent) {
-    throw std::invalid_argument(
-        "ImageView extent exceeds the current ImageBuffer adapter domain.");
-  }
   element_bytes_ = dense_tensor_element_bytes(tensor_descriptor);
 }
 
@@ -2179,6 +2566,23 @@ const std::byte* ImageView::channel_data(std::size_t x, std::size_t y,
     coordinates[*image_facet_.channel_axis] = channel;
   }
   return tensor_.element_data(coordinates);
+}
+
+/** @copydoc ImageView::channel_data_at */
+const std::byte* ImageView::channel_data_at(std::int64_t x, std::int64_t y,
+                                            std::size_t channel) const {
+  const ImageBounds& bounds = image_facet_.data_window;
+  if (x < bounds.x_begin || x >= bounds.x_end || y < bounds.y_begin ||
+      y >= bounds.y_end || channel >= channels_) {
+    throw std::out_of_range(
+        "ImageView logical coordinate is outside its data window.");
+  }
+  const std::uint64_t x_index = static_cast<std::uint64_t>(x) -
+                                static_cast<std::uint64_t>(bounds.x_begin);
+  const std::uint64_t y_index = static_cast<std::uint64_t>(y) -
+                                static_cast<std::uint64_t>(bounds.y_begin);
+  return channel_data(static_cast<std::size_t>(x_index),
+                      static_cast<std::size_t>(y_index), channel);
 }
 
 }  // namespace ps

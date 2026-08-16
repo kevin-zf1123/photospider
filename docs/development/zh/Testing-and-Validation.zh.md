@@ -176,7 +176,7 @@ dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
 `test_cpu_dense_tensor_image_operation`、`test_packed_fp4_dense_tensor` 与
 `test_variable_sample_field_extensions`、`test_value_identity_across_dsos` binary。安装前，
-它会在该真实 disabled producer 中运行全部 48 个 dense-image case、全部 4 个 packed FP4 case、
+它会在该真实 disabled producer 中运行全部 49 个 dense-image case、全部 4 个 packed FP4 case、
 全部 17 个 provider-defined VariableSampleField case 与一个双 DSO identity case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
@@ -980,8 +980,8 @@ ctest --test-dir build --output-on-failure \
 
 ## CPU DenseTensor、Packed FP4、Provider Extension、Region、ReadyFence 与 Transfer 验证
 
-`test_cpu_dense_tensor_image_operation` 是已实现 V-2 至 V-12 边界的 provider-independent
-integration binary。它的 48 个长期用例验证：
+`test_cpu_dense_tensor_image_operation` 是已实现 V-2 至 V-12 与 DI-1 边界的
+provider-independent integration binary。它的 49 个长期用例验证：
 
 - copyable ReadyFence poll、queued non-inline wait、observer-local waiter cancellation、
   exactly-once Ready/Failed/ProducerCancelled settlement、typed failure retention 与
@@ -1019,7 +1019,8 @@ integration binary。它的 48 个长期用例验证：
   oracle、ImageRect/TensorSlice merge、CPU/external/I-O 边界的精确保留，以及在 Pending
   publication、owner retention 或 provider callback 前拒绝 negative/zero-stride external
   transfer；
-- padded multi-channel full 与 ImageRect execution、rank-four TensorSlice、Empty/Whole
+- padded multi-channel full 与 ImageRect execution、负原点 ImageRect 选择所需的 signed
+  data-window 坐标转换、rank-four TensorSlice、Empty/Whole
   selection、dirty-plan-to-product staging、missing 或 partial intermediate parent
   recomputation、把 selected byte merge 到 existing complete output，以及仅在 Whole commit
   后提升为 reusable authority、callback-free target/upstream Region-route transfer 与
@@ -1105,13 +1106,13 @@ ctest --test-dir build --output-on-failure \
 ```
 
 `DependencyDisabledInstallSmoke` 会在真实禁用 OpenCV/YAML/OpenEXR discovery 的 product 中构建并
-运行全部 48 个 dense 用例、全部 4 个 packed FP4 用例与 17 个 V-14 extension 用例，再证明
+运行全部 49 个 dense 用例、全部 4 个 packed FP4 用例与 17 个 V-14 extension 用例，再证明
 installed consumer；
 `StaticProductConsumerSmoke` 会证明 operation-SDK-only
 installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
 DSO，证明它们从同一个 shared runtime authority mint identity。两个 installed consumer
 都会在没有 optional dependency 时构造并计算 Region，并观察同步 Ready Value fence。下述
-provider-disabled nested build 也会编译并运行全部 48 个 dense case 与该双 DSO case，因此真实
+provider-disabled nested build 也会编译并运行全部 49 个 dense case 与该双 DSO case，因此真实
 core operation、fence/transfer proof 与 identity authority 都不依赖 optional OpenCV operation
 provider 或 native device SDK。
 
@@ -1157,13 +1158,15 @@ Focused build 完成后，driver 会从 executable 不是 regular file 的已注
 dependency），无需硬编码 target 数量或未来 target 名，也不会从 CTest 实际观察到的 sentinel
 反推 expectation。精确 CTest
 inventory 等于该推导集合与以下条目的并集：`DependencyDisabledInstallSmoke`、
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 48 个
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 49 个
 `CpuDenseTensorImageOperation.*` case、
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`、三个
 `DiskCacheDiagnosticConcurrency.*` case，以及两个 `KernelLifecycleConcurrency.*` case。推导出的
 sentinel 不得带 label 或 timeout。
 
-在当前 V-14 checkpoint 中，CMake 在该 profile 下精确注册八个 active GoogleTest target。
+DI-1 把当前 dense-image 子集增加到 49 个用例。下列计数仍是历史 V-14 checkpoint，
+不是当前 inventory 算术。在该 V-14 checkpoint 中，CMake 在该 profile 下精确注册八个
+active GoogleTest target。
 包含六个 target 的 focused build 会具现其中五个已注册 executable；第六个 target
 `test_kernel_contracts` 只参与构建，且特意不被 discover。CTest discover 出 55 个可运行
 focused case；三个动态推导出的 sentinel 精确为
@@ -1451,11 +1454,18 @@ test，不是模拟 I1 collector return。
 | 精确 drain anchor | 每个 episode 要求 `Q_start=S_11=E+183,333,337 ns` 与 `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`，不受 actual admission 或 deadline 变化影响。Window 可以与 active final Run 重叠，但不会取消它或延长 `D_i`。 |
 | Deadline 与 next-origin guard | 在最晚合法 admission 下，要求 `D_11<=E+335,333,337 ns`、从该 deadline 到 `Q_end` 精确 348,000,000 ns，以及从 `Q_end` 到下一 origin 精确 66,666,663 ns。Reset/baseline preparation 必须容纳在该 guard 中；最后一个 measured episode 在 `T^I1` 前使用相同 guard。 |
 | Boundary tie 与 settlement | 在 `Q_start`，nominal marker 先于同 timestamp admission；在 `Q_end`，从 product transition 使用的 observation sink causal allocator（而非 accepted-row sequence allocator）中预留首个被排除的 coordinate。只有 timestamp 不晚于 `Q_end` 且 causal sequence 位于 cut 之前的 event 才属于该 history。任何缺失或更晚的 terminal/quiescence/root-resource/Host settlement 都是 invalid；eventual snapshot 不能回填。 |
-| 独立最终 golden | 不经过 Host、Kernel、cache、scheduler、YAML 或候选 provider code，独立重算 coordinate-pattern source 与四个显式 binary32-RNE curve stage。要求 version 为 `i1-coordinate-pattern-curve-chain-fp32-v1`，精确 `Sha256CanonicalV1` digest 为 `17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`，再交叉校验一个精确 2048 真实产品结果。expected evidence 缺失或被替换属于 Invalid；候选不匹配属于 Fail。 |
+| 独立最终 golden | 不经过 Host、Kernel、cache、scheduler、YAML 或候选 provider code，独立重算 coordinate-pattern source 与四个显式 binary32-RNE curve stage。要求 version 为 `i1-coordinate-pattern-curve-chain-fp32-v1`、数据窗口为零原点 `[0,2048) x [0,2048)`、DenseTensor schema/Image facet 结构版本为 2，且精确 `Sha256CanonicalV1` digest 为 `18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`，再交叉校验一个精确 2048 真实产品结果。expected evidence 缺失或被替换属于 Invalid；候选不匹配属于 Fail。 |
 | Guard-safe evidence finalization | 在 `Q_end` 前对每个 visible output 只计算一次 digest，冻结其类型化 result，并释放其 `Value`。evaluation 与 JSON 不得重新计算 hash。最多允许一个不含 Value 的 evaluator 与下一 baseline preparation 重叠，要求在 admission 前完成，并把有序 JSON/durable I/O 延迟到 `T^I1`，或延迟到撤销 later submission 的 abort。 |
 | 逐 Run causal closure | 每个 materialized edit 必须使用唯一 Run id，且精确具有一条 terminal/quiescence/resource/Host chain；cancellation 与 visible publication 各自至多一次，只有 Cancelled 才有 cancellation，只有 Succeeded 才有 visibility，Host status 必须与 terminal 一致。Current generation 必须早于每个 service start，每个 start 必须早于 terminal，visible 必须先于 successful terminal，随后严格为 terminal、quiescence、resource return、Host settlement。不可逆 service-start commit 与 cancellation acceptance 共用 Run-owned terminal arbiter，service-start observation 在 service/Run lock 外投递。`cancellation < start < terminal` 是结构上有效的证据，但会使 Waste 失败；产品路径必须阻止它。 |
 | 无缺口 service-start capacity | 从冻结 curve node 的 Macro256 切片派生每个 node 64 个 tile，从一个 monolithic source 加四个 curve node 派生每个完整 Run 257 个 start，并派生每个十二次 edit episode 3,084 个 start。确定性证明 pre-route 两个方向的 start/cancel 顺序、cancellation 获胜时 route/executable 零泄漏、route commit 获胜时 start coordinate 更小、暂存权威可回滚/复用、第 3,084 个 start 仍成功，以及第 3,085 个 start fail closed。 |
 | Fail-closed arithmetic/evidence | 拒绝 grid/slot/start/admission/deadline/drain checked overflow、boundary/event evidence 缺失或重复、moved origin、nonquiescence，或同 workload id 下的 manifest rule drift。既有 section/verdict digest 绑定 evidence，不改变 15/5-field envelope。 |
+
+DI-1 改变的是 DenseTensor schema 与 Image facet 结构记录，而不是
+`Sha256CanonicalV1` 算法标签或 workload 算术。因此，冻结的 I2 preview logical
+digest 为
+`2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`。
+全部 34 项已编译 B1 logical golden 都在相同结构版本下由独立 oracle 重新生成；
+其 raw-payload SHA-256 值以及 I1、I2、B1 workload 标识保持不变。
 
 M1 对 `r=0..39` 使用相同逐 episode drain 规则
 `E_r=M_0+r*750,000,000 ns`，共精确启动 40 个 measured episode，并持续提供

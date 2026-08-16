@@ -171,6 +171,8 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     core/image_buffer.hpp
     core/inspection_types.hpp
     core/result_types.hpp
+    data/image_metadata.hpp
+    data/image_statistics.hpp
     data/image_view.hpp
     data/extension.hpp
     data/packed_dense_tensor_view.hpp
@@ -204,7 +206,7 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
         plugin/opencv_adapter.hpp)
 endif()
-set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 29)
+set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 31)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
         "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 1")
@@ -288,6 +290,7 @@ add_library(photospider_operation_runtime SHARED
     src/lib/core/dense_tensor_content_digest.cpp
     src/lib/core/extension.cpp
     src/lib/core/image_buffer.cpp
+    src/lib/core/image_statistics.cpp
     src/lib/core/ready_fence.cpp
     src/lib/core/region.cpp
     src/lib/core/value.cpp
@@ -2792,6 +2795,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         tests/unit/test_progressive_compute.cpp)
     add_ps_test(test_dense_tensor_content_digest
         tests/unit/test_dense_tensor_content_digest.cpp)
+    add_ps_test(test_dense_image_metadata_contracts
+        tests/unit/test_dense_image_metadata_contracts.cpp
+        photospider_operation_runtime)
     add_ps_test(test_physical_execution_routes
         tests/unit/test_physical_execution_routes.cpp
         photospider_execution_internal)
@@ -3224,6 +3230,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_dense_tensor_content_digest
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_dense_image_metadata_contracts
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)

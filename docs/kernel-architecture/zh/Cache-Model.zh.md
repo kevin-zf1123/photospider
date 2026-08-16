@@ -233,6 +233,20 @@ no-op 行为，不会进入这条 validation boundary。
 descriptor/content/layout/artifact digest。支持这些行为需要后续通用 artifact 与 manifest
 contract；当前 `ImageArtifactCodec` ABI 保持不变。
 
+## DI-1 观测 Statistics Cache 边界
+
+Issue #129 定义有界观测 min/max 与 histogram query/result/cache-key value，但不安装
+cache owner 或计算引擎。完整 key 包含有效 process-local `ValueRevisionId`、可选
+`ContentDigest`、精确 normalized `RegionSet`、恰好一个稳定 `ChannelId` 或
+`ChannelGroupId`、算法、正算法版本与有界算法参数。不同 revision、content identity、
+Region、selection、算法、版本或 histogram 参数对应不同派生请求。
+
+Statistics 不是 `Value`、`ImageFacet`、正式 HP cache entry、descriptor/content identity、
+disk-cache path 或 artifact manifest 的字段。创建、重新计算或驱逐 result 不能修改 Value
+revision、canonical digest、HP validity 或持久表示。未来 statistics cache 必须保持为独立
+所有的可丢弃派生数据 cache，并使用完整 key；descriptor digest 本身不充分。Content digest
+是可选的，因为有效 runtime revision 可能在请求 content traversal 前就被观测。
+
 ### 当前有界机制与未来持久化关系
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)

@@ -674,14 +674,14 @@ PixelRect i2_preview_region(std::size_t edit_index) {
 ContentDigest i2_frozen_preview_content_digest() noexcept {
   return ContentDigest{
       CanonicalDigestAlgorithm::Sha256CanonicalV1,
-      {std::byte{0x93}, std::byte{0x1e}, std::byte{0xc5}, std::byte{0x53},
-       std::byte{0x77}, std::byte{0x85}, std::byte{0x78}, std::byte{0x1c},
-       std::byte{0xbe}, std::byte{0xbe}, std::byte{0x8d}, std::byte{0x0f},
-       std::byte{0x30}, std::byte{0xd7}, std::byte{0x14}, std::byte{0x0a},
-       std::byte{0xf3}, std::byte{0x93}, std::byte{0x89}, std::byte{0x77},
-       std::byte{0x2d}, std::byte{0x2b}, std::byte{0xaa}, std::byte{0xb3},
-       std::byte{0x11}, std::byte{0x11}, std::byte{0x23}, std::byte{0x8e},
-       std::byte{0x32}, std::byte{0x00}, std::byte{0x17}, std::byte{0x0e}}};
+      {std::byte{0x2a}, std::byte{0xf5}, std::byte{0xa5}, std::byte{0xb2},
+       std::byte{0xe8}, std::byte{0x86}, std::byte{0x46}, std::byte{0xc5},
+       std::byte{0x41}, std::byte{0xa6}, std::byte{0x0a}, std::byte{0x7b},
+       std::byte{0x43}, std::byte{0x71}, std::byte{0x94}, std::byte{0xf1},
+       std::byte{0x6d}, std::byte{0x1b}, std::byte{0xc2}, std::byte{0xc3},
+       std::byte{0x4f}, std::byte{0xf2}, std::byte{0x0b}, std::byte{0xc5},
+       std::byte{0x71}, std::byte{0xd3}, std::byte{0x7b}, std::byte{0xfd},
+       std::byte{0x3c}, std::byte{0xac}, std::byte{0x3a}, std::byte{0xe2}}};
 }
 
 /** @copydoc make_i2_host_compute_request */

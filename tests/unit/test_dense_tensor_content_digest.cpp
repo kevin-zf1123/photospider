@@ -82,7 +82,7 @@ TEST(DenseTensorContentDigest, LogicalRowMajorBytesIgnorePhysicalPadding) {
             CanonicalDigestAlgorithm::Sha256CanonicalV1);
   EXPECT_EQ(*contiguous_digest.digest, *padded_digest.digest);
   EXPECT_EQ(digest_hex(*contiguous_digest.digest),
-            "f6afc72b6e52e27b991da46eac0013ff50e3966b1bff5b06468fc966986125d3");
+            "37db769775a56d7cb4f121da67c35dda8af49e0d50fe30fea7838053a60163f9");
 }
 
 /**
@@ -94,9 +94,11 @@ TEST(DenseTensorContentDigest, DescriptorAndFacetRemainLogicalIdentity) {
                                      std::byte{4}, std::byte{5}, std::byte{6}};
   const Value two_by_three = make_u8_tensor({2U, 3U}, {3, 1}, bytes);
   const Value three_by_two = make_u8_tensor({3U, 2U}, {2, 1}, bytes);
-  const Value image =
-      make_u8_tensor({2U, 3U}, {3, 1}, bytes,
-                     ImageFacet{1U, 0U, std::optional<std::size_t>{}});
+  ImageFacet image_facet;
+  image_facet.x_axis = 1U;
+  image_facet.y_axis = 0U;
+  image_facet.data_window = ImageBounds{0, 0, 3, 2};
+  const Value image = make_u8_tensor({2U, 3U}, {3, 1}, bytes, image_facet);
 
   const ContentDigestResult plain_digest = compute_content_digest(two_by_three);
   const ContentDigestResult reshaped_digest =
@@ -107,6 +109,93 @@ TEST(DenseTensorContentDigest, DescriptorAndFacetRemainLogicalIdentity) {
   ASSERT_TRUE(image_digest.digest.has_value()) << image_digest.diagnostic;
   EXPECT_FALSE(*plain_digest.digest == *reshaped_digest.digest);
   EXPECT_FALSE(*plain_digest.digest == *image_digest.digest);
+}
+
+/**
+ * @brief Proves canonical v2 is semantic-name insensitive and metadata exact.
+ * @throws Nothing when stable IDs/windows/sample/color drive digest changes.
+ */
+TEST(DenseTensorContentDigest,
+     DenseImageV2UsesStableSemanticsNotDiagnosticNames) {
+  std::vector<std::byte> bytes(12U, std::byte{7U});
+  ImageFacet base;
+  base.x_axis = 1U;
+  base.y_axis = 0U;
+  base.channel_axis = 2U;
+  base.data_window = ImageBounds{-3, 5, 0, 7};
+  base.channel_schema = ChannelSchema{
+      {{ChannelId{11U}, "R"}, {ChannelId{12U}, "G"}},
+      {{ChannelGroupId{20U}, "RGB", {ChannelId{11U}, ChannelId{12U}}}}};
+  base.sample_domain = SampleDomainFacet{
+      1U,
+      SampleEncoding{1U, SampleEncodingKind::Normalized},
+      SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+      {{ChannelId{11U}, SampleDomain{SampleDomainKind::Legal, 0.1, 0.9}}}};
+  base.color =
+      ColorFacet{1U, ChannelGroupId{20U}, ColorTransferFunction::SceneLinear,
+                 ColorPrimaries::Rec709};
+
+  ImageFacet renamed = base;
+  renamed.channel_schema->channels[0].diagnostic_name = "red diagnostic";
+  renamed.channel_schema->groups[0].diagnostic_name = "color diagnostic";
+  ImageFacet moved = base;
+  moved.data_window = ImageBounds{-2, 5, 1, 7};
+  ImageFacet redisplayed = base;
+  redisplayed.display_window = ImageBounds{-4, 4, 1, 8};
+  ImageFacet resampled = base;
+  resampled.sample_domain->default_domain.maximum = 2.0;
+  ImageFacet recolored = base;
+  recolored.color->primaries = ColorPrimaries::Rec2020;
+  ImageFacet reidentified = base;
+  reidentified.channel_schema->channels[0].id = ChannelId{13U};
+  reidentified.channel_schema->groups[0].members = {ChannelId{12U},
+                                                    ChannelId{13U}};
+  reidentified.sample_domain->per_channel[0].channel = ChannelId{13U};
+  ImageFacet regrouped = base;
+  regrouped.channel_schema->groups[0].id = ChannelGroupId{21U};
+  regrouped.color->channel_group = ChannelGroupId{21U};
+  ImageFacet reordered = base;
+  std::swap(reordered.channel_schema->channels[0],
+            reordered.channel_schema->channels[1]);
+
+  const auto digest_for = [&bytes](ImageFacet facet) {
+    const Value value =
+        make_u8_tensor({2U, 3U, 2U}, {6, 2, 1}, bytes, std::move(facet));
+    const ContentDigestResult digest = compute_content_digest(value);
+    EXPECT_EQ(digest.state, ContentDigestState::Available) << digest.diagnostic;
+    EXPECT_TRUE(digest.digest.has_value());
+    return digest.digest;
+  };
+
+  const std::optional<ContentDigest> base_digest = digest_for(base);
+  const std::optional<ContentDigest> renamed_digest = digest_for(renamed);
+  const std::optional<ContentDigest> moved_digest = digest_for(moved);
+  const std::optional<ContentDigest> redisplayed_digest =
+      digest_for(redisplayed);
+  const std::optional<ContentDigest> resampled_digest = digest_for(resampled);
+  const std::optional<ContentDigest> recolored_digest = digest_for(recolored);
+  const std::optional<ContentDigest> reidentified_digest =
+      digest_for(reidentified);
+  const std::optional<ContentDigest> regrouped_digest = digest_for(regrouped);
+  const std::optional<ContentDigest> reordered_digest = digest_for(reordered);
+  ASSERT_TRUE(base_digest.has_value());
+  ASSERT_TRUE(renamed_digest.has_value());
+  ASSERT_TRUE(moved_digest.has_value());
+  ASSERT_TRUE(redisplayed_digest.has_value());
+  ASSERT_TRUE(resampled_digest.has_value());
+  ASSERT_TRUE(recolored_digest.has_value());
+  ASSERT_TRUE(reidentified_digest.has_value());
+  ASSERT_TRUE(regrouped_digest.has_value());
+  ASSERT_TRUE(reordered_digest.has_value());
+  EXPECT_EQ(*base_digest, *renamed_digest);
+  EXPECT_FALSE(*base_digest == *moved_digest);
+  EXPECT_FALSE(*base_digest == *redisplayed_digest);
+  EXPECT_FALSE(*base_digest == *resampled_digest);
+  EXPECT_FALSE(*base_digest == *recolored_digest);
+  EXPECT_FALSE(*base_digest == *reidentified_digest);
+  EXPECT_FALSE(*base_digest == *regrouped_digest);
+  EXPECT_FALSE(*base_digest == *reordered_digest);
+  EXPECT_FALSE(base == reordered);
 }
 
 /**

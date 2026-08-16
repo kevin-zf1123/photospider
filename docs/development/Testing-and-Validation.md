@@ -230,7 +230,7 @@ surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product,
 `test_cpu_dense_tensor_image_operation`, `test_packed_fp4_dense_tensor`,
 `test_variable_sample_field_extensions`, and `test_value_identity_across_dsos`
-binaries. Before installation it runs all 48 dense-image cases, all four packed
+binaries. Before installation it runs all 49 dense-image cases, all four packed
 FP4 cases, all seventeen provider-defined VariableSampleField cases, and the
 dual-DSO identity case in that actual disabled producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
@@ -1243,7 +1243,8 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor, Packed FP4, Provider Extensions, Region, ReadyFence, and Transfer Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
-binary for the implemented V-2 through V-12 boundary. Its 48 durable cases
+binary for the implemented V-2 through V-12 and DI-1 boundaries. Its 49
+durable cases
 verify:
 
 - copyable ReadyFence polling, queued non-inline waits, observer-local waiter
@@ -1288,7 +1289,9 @@ verify:
   ImageRect/TensorSlice merge, exact CPU/external/I-O boundary preservation,
   and negative/zero-stride external rejection before Pending publication,
   owner retention, or provider callback; and
-- padded multi-channel full and ImageRect execution, rank-four TensorSlice,
+- padded multi-channel full and ImageRect execution, signed data-window
+  coordinate translation for negative-origin ImageRect selection, rank-four
+  TensorSlice,
   Empty/Whole selection, dirty-plan-to-product staging, recomputation of
   missing or partial intermediate parents, selected-byte merge into an
   existing complete output, and promotion to reusable authority only after a
@@ -1389,7 +1392,7 @@ ctest --test-dir build --output-on-failure \
   -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor|VariableSampleFieldExtensions)\.'
 ```
 
-`DependencyDisabledInstallSmoke` builds and runs all 48 dense cases plus all
+`DependencyDisabledInstallSmoke` builds and runs all 49 dense cases plus all
 four packed FP4 and seventeen V-14 extension cases in an actual
 OpenCV/YAML/OpenEXR-discovery-disabled
 product before proving the installed consumers.
@@ -1398,7 +1401,7 @@ product before proving the installed consumers.
 Value-using DSOs and proves that they mint from one shared runtime authority.
 Both installed consumers construct and evaluate Region and observe a
 synchronous Ready Value fence without optional dependencies. The
-provider-disabled nested build below also compiles and runs all 48 dense cases
+provider-disabled nested build below also compiles and runs all 49 dense cases
 plus that dual-DSO case, so the real core operation, fence/transfer proof, and
 identity authority do not depend on the optional OpenCV operation provider or
 a native device SDK.
@@ -1460,13 +1463,15 @@ dependencies, without hard-coding a target count or future target name and
 without deriving expectations from CTest's observed sentinels. The exact CTest
 inventory is the union of that derived set and
 `DependencyDisabledInstallSmoke`,
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 48
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 49
 `CpuDenseTensorImageOperation.*` cases,
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two
 `KernelLifecycleConcurrency.*` cases.
 
-At the current V-14 checkpoint, CMake registers exactly eight active GoogleTest
+DI-1 raises the current dense-image subset to 49 cases. The following counts
+remain the historical V-14 checkpoint rather than current inventory arithmetic.
+At that V-14 checkpoint, CMake registers exactly eight active GoogleTest
 targets in this profile. The six-target focused build materializes five of
 those registered executables; its sixth target, `test_kernel_contracts`, is
 build-only and deliberately undiscovered. CTest discovers 55 runnable focused
@@ -1816,11 +1821,19 @@ The mandatory I1 phase/drain scenario oracle is:
 | Exact drain anchor | For every episode require `Q_start=S_11=E+183,333,337 ns` and `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`, independent of actual admission and deadline. The window may overlap an active final Run but does not cancel it or extend `D_i`. |
 | Deadline and next-origin guards | With latest legal admission, require `D_11<=E+335,333,337 ns`, exactly 348,000,000 ns from that deadline to `Q_end`, and exactly 66,666,663 ns from `Q_end` to the next origin. Reset/baseline preparation must fit that guard; the last measured episode uses the same guard before `T^I1`. |
 | Boundary tie and settlement | At `Q_start`, nominal marker precedes equal-time admission. At `Q_end`, reserve the first excluded coordinate from the observation sink's causal allocator used by product transitions, not from the accepted-row sequence allocator. An event belongs only when its timestamp is no later than `Q_end` and its causal sequence precedes the cut. Any missing or later terminal/quiescence/root-resource/Host settlement is invalid; an eventual snapshot cannot backdate it. |
-| Independent final golden | Recompute the coordinate-pattern source and four explicit binary32-RNE curve stages without Host, Kernel, cache, scheduler, YAML, or candidate provider code. Require version `i1-coordinate-pattern-curve-chain-fp32-v1` and exact `Sha256CanonicalV1` digest `17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`, then cross-check one exact 2048 real-product result. Missing or substituted expected evidence is Invalid; a candidate mismatch is Fail. |
+| Independent final golden | Recompute the coordinate-pattern source and four explicit binary32-RNE curve stages without Host, Kernel, cache, scheduler, YAML, or candidate provider code. Require version `i1-coordinate-pattern-curve-chain-fp32-v1`, the zero-origin `[0,2048) x [0,2048)` data window, DenseTensor schema/Image facet structural version 2, and exact `Sha256CanonicalV1` digest `18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`, then cross-check one exact 2048 real-product result. Missing or substituted expected evidence is Invalid; a candidate mismatch is Fail. |
 | Guard-safe evidence finalization | Digest each visible output once before `Q_end`, freeze its typed result, and release its `Value`. Evaluation and JSON must not rehash it. Allow at most one Value-free evaluator to overlap next-baseline preparation, require completion before admission, and delay ordered JSON/durable I/O until `T^I1` or an abort that revokes later submission. |
 | Per-Run causal closure | Require a unique Run id per materialized edit, exactly one terminal/quiescence/resource/Host chain, at most one cancellation and visible publication, cancellation iff Cancelled, visibility iff Succeeded, and Host status agreeing with the terminal. Require current generation before every service start, every start before terminal, visible before successful terminal, and terminal before quiescence before resource return before Host settlement. Irreversible service-start commit and cancellation acceptance share the Run-owned terminal arbiter, and service-start observation is delivered outside service/Run locks. `cancellation < start < terminal` is structurally valid evidence but fails Waste; the product path must prevent it. |
 | Lossless service-start capacity | Derive 64 Macro256 tiles per frozen curve node, 257 starts per complete Run from one monolithic source plus four curve nodes, and 3,084 starts per twelve-edit episode. Deterministically prove both pre-route start/cancel orders, zero route/executable leakage when cancellation wins, lower start coordinate when route commitment wins, rollback/reuse of staged authority, success through start 3,084, and fail-closed overflow at start 3,085. |
 | Fail-closed arithmetic/evidence | Reject checked overflow in grid/slot/start/admission/deadline/drain arithmetic, missing or duplicate boundary/event evidence, a moved origin, nonquiescence, or a workload-manifest rule drift under the same id. Existing section/verdict digests bind the evidence without changing the 15/5-field envelope. |
+
+DI-1 changes the DenseTensor schema and Image facet structural records, not
+the `Sha256CanonicalV1` algorithm tag or workload arithmetic.  The frozen I2
+preview logical digest is consequently
+`2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`.
+All 34 compiled B1 logical goldens are regenerated from the independent
+oracle under the same structural version; their raw-payload SHA-256 values and
+the I1, I2, and B1 workload identifiers remain unchanged.
 
 M1 uses the same per-episode drain rule for
 `E_r=M_0+r*750,000,000 ns`, `r=0..39`, starts exactly 40 measured episodes,

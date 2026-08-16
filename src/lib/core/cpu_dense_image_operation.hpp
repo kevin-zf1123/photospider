@@ -21,11 +21,11 @@ struct DenseImageDescriptor {
   /** @brief Complete logical DenseTensor descriptor. */
   DenseTensorDescriptor tensor;
 
-  /** @brief Explicit image-axis mapping for the logical tensor. */
+  /** @brief Complete bounded ordinary-image interpretation of the tensor. */
   ImageFacet image;
 
   /**
-   * @brief Compares every logical tensor and image-axis fact.
+   * @brief Compares every logical tensor and ordinary-image metadata fact.
    *
    * @param other Descriptor to compare.
    * @return True when tensor descriptor and ImageFacet both match.
