@@ -20,7 +20,13 @@ namespace {
  * @param bytes Exact physical allocation envelope, including padding.
  * @param image_facet Optional explicit logical image-axis interpretation.
  * @return Fresh immutable CPU DenseTensor Value.
- * @throws Value publication and allocation errors unchanged.
+ * @throws std::invalid_argument for malformed descriptor, facet, layout, or
+ *         storage facts.
+ * @throws std::overflow_error when envelope or publication identity arithmetic
+ *         cannot be represented.
+ * @throws std::length_error when bounded image records exceed frozen limits.
+ * @throws std::bad_alloc when descriptor/ImageFacet, layout, payload, builder,
+ *         or immutable publication storage cannot allocate.
  */
 Value make_u8_tensor(std::vector<std::size_t> shape,
                      std::vector<std::ptrdiff_t> strides,
@@ -57,7 +63,10 @@ std::string digest_hex(const ContentDigest& digest) {
 
 /**
  * @brief Proves canonical DenseTensor content ignores physical row padding.
- * @throws Nothing when canonical traversal and typed state remain exact.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         from tensor publication unchanged.
+ * @throws std::bad_alloc when Value, canonical digest, typed diagnostic, or
+ *         hexadecimal result storage cannot allocate.
  */
 TEST(DenseTensorContentDigest, LogicalRowMajorBytesIgnorePhysicalPadding) {
   const Value contiguous =
@@ -87,7 +96,10 @@ TEST(DenseTensorContentDigest, LogicalRowMajorBytesIgnorePhysicalPadding) {
 
 /**
  * @brief Proves logical descriptor and ImageFacet facts enter the identity.
- * @throws Nothing when descriptor/facet distinctions yield distinct digests.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         from tensor/ImageFacet publication unchanged.
+ * @throws std::bad_alloc when Value, ImageFacet, canonical digest, or typed
+ *         diagnostic storage cannot allocate.
  */
 TEST(DenseTensorContentDigest, DescriptorAndFacetRemainLogicalIdentity) {
   const std::vector<std::byte> bytes{std::byte{1}, std::byte{2}, std::byte{3},
@@ -113,7 +125,13 @@ TEST(DenseTensorContentDigest, DescriptorAndFacetRemainLogicalIdentity) {
 
 /**
  * @brief Proves canonical v2 is semantic-name insensitive and metadata exact.
- * @throws Nothing when stable IDs/windows/sample/color drive digest changes.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         from rich tensor/ImageFacet publication unchanged.
+ * @throws std::bad_alloc when diagnostic strings, channel/group/sample
+ *         vectors, Value publication, canonical digest, or typed diagnostic
+ *         storage cannot allocate.
+ * @note Non-allocation canonical failures remain typed ContentDigestResult
+ *       state and are asserted by the test.
  */
 TEST(DenseTensorContentDigest,
      DenseImageV2UsesStableSemanticsNotDiagnosticNames) {
@@ -200,7 +218,8 @@ TEST(DenseTensorContentDigest,
 
 /**
  * @brief Preserves fail-closed typed state for an invalid Value handle.
- * @throws Nothing.
+ * @throws std::bad_alloc when the typed invalid-result diagnostic cannot
+ *         allocate.
  */
 TEST(DenseTensorContentDigest, InvalidValueHasNoDigest) {
   const ContentDigestResult result = compute_content_digest(Value{});

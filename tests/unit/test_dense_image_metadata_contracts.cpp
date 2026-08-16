@@ -39,7 +39,7 @@ StridedLayout test_layout() {
  * @brief Creates a basic image facet for the fixed descriptor and window.
  * @param bounds Exact signed data window whose spans must be three by two.
  * @return HWC ImageFacet with no optional interpretation records.
- * @throws Nothing beyond aggregate copying.
+ * @throws Nothing; all allocation-owning optional metadata remains absent.
  */
 ImageFacet test_facet(ImageBounds bounds = ImageBounds{0, 0, 3, 2}) {
   ImageFacet facet;
@@ -54,7 +54,13 @@ ImageFacet test_facet(ImageBounds bounds = ImageBounds{0, 0, 3, 2}) {
  * @brief Publishes one Ready fixed image with deterministic active bytes.
  * @param facet Candidate complete ordinary-image interpretation.
  * @return Fresh immutable Value when validation succeeds.
- * @throws Value validation, overflow, or allocation failures unchanged.
+ * @throws std::invalid_argument for malformed descriptor, facet, layout, or
+ *         storage facts.
+ * @throws std::overflow_error when window, envelope, or publication identity
+ *         arithmetic cannot be represented.
+ * @throws std::length_error when bounded image records exceed frozen limits.
+ * @throws std::bad_alloc when fixture bytes, complete descriptor/ImageFacet
+ *         metadata, layout, or immutable publication state cannot allocate.
  */
 Value publish_test_value(ImageFacet facet) {
   std::vector<std::byte> storage(12U);
@@ -91,7 +97,13 @@ void add_valid_interpretation(ImageFacet* facet) {
 
 /**
  * @brief Proves signed data-window coordinates map independently to storage.
- * @throws Nothing when publication and checked view invariants hold.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         from Value publication and ImageView validation unchanged.
+ * @throws ReadyFenceAccessError or BufferAccessError when a fixture Value is
+ *         unexpectedly non-Ready or not host-readable.
+ * @throws std::bad_alloc when Value, ImageFacet, ImageView, or coordinate
+ *         storage cannot allocate.
+ * @note Expected out-of-range coordinate failures are consumed by GoogleTest.
  */
 TEST(DenseImageMetadataContracts, SignedBoundsAndLogicalCoordinatesAreExact) {
   const Value value = publish_test_value(test_facet({-7, 11, -4, 13}));
@@ -115,7 +127,13 @@ TEST(DenseImageMetadataContracts, SignedBoundsAndLogicalCoordinatesAreExact) {
 
 /**
  * @brief Proves core image views do not inherit ImageBuffer's int extents.
- * @throws Nothing when a valid zero-stride alias retains its full metadata.
+ * @throws std::invalid_argument, std::out_of_range, std::overflow_error, or
+ *         std::length_error from zero-origin facet construction and Value
+ *         publication unchanged.
+ * @throws ReadyFenceAccessError or BufferAccessError when a fixture Value is
+ *         unexpectedly non-Ready or not host-readable.
+ * @throws std::bad_alloc when descriptor, facet, layout, Value, or ImageView
+ *         storage cannot allocate.
  */
 TEST(DenseImageMetadataContracts, ImageViewKeepsCoreSizeDomain) {
   const Value seed = Value::from_cpu_dense_tensor(
@@ -142,7 +160,10 @@ TEST(DenseImageMetadataContracts, ImageViewKeepsCoreSizeDomain) {
 
 /**
  * @brief Proves reverse, overflow, span, and axis errors fail before publish.
- * @throws Nothing when every malformed descriptor is rejected as typed.
+ * @throws std::bad_alloc when fixture bytes or Value validation state cannot
+ *         allocate.
+ * @note Expected std::invalid_argument and std::overflow_error failures are
+ *       consumed by GoogleTest.
  */
 TEST(DenseImageMetadataContracts, BoundsAndAxesRejectMalformedDescriptors) {
   EXPECT_THROW((void)publish_test_value(test_facet({0, 0, 0, 2})),
@@ -165,7 +186,11 @@ TEST(DenseImageMetadataContracts, BoundsAndAxesRejectMalformedDescriptors) {
 
 /**
  * @brief Proves immutable bounds survive every non-Ready readiness state.
- * @throws Nothing when metadata remains readable and payload access rejects.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         from pending Value publication unchanged.
+ * @throws std::bad_alloc when complete descriptor/ImageFacet, allocation,
+ *         publication, or failure-diagnostic storage cannot allocate.
+ * @note Expected ReadyFenceAccessError failures are consumed by GoogleTest.
  */
 TEST(DenseImageMetadataContracts, NonReadyValuesExposeOnlyMetadataBounds) {
   auto make_pending = [] {
@@ -191,8 +216,12 @@ TEST(DenseImageMetadataContracts, NonReadyValuesExposeOnlyMetadataBounds) {
 
 /**
  * @brief Proves stable IDs and frozen bounds govern image interpretation.
- * @throws Nothing when valid semantics publish and invalid or over-limit
- *         records reject.
+ * @throws std::overflow_error when valid Value publication identity or
+ *         envelope arithmetic cannot be represented.
+ * @throws std::bad_alloc when rich ImageFacet strings/vectors, fixture bytes,
+ *         validation state, or immutable publication state cannot allocate.
+ * @note Expected std::invalid_argument and std::length_error validation
+ *       failures are consumed by GoogleTest.
  */
 TEST(DenseImageMetadataContracts, StableSampleAndColorRecordsValidate) {
   ImageFacet valid = test_facet();
@@ -262,7 +291,10 @@ TEST(DenseImageMetadataContracts, StableSampleAndColorRecordsValidate) {
 
 /**
  * @brief Proves storage capability ignores quantization and declared meaning.
- * @throws Nothing when supported element families yield frozen ranges.
+ * @throws std::invalid_argument if a fixed descriptor no longer names a
+ *         supported storage representation.
+ * @throws std::bad_alloc when descriptor shape or quantization storage cannot
+ *         allocate.
  */
 TEST(DenseImageMetadataContracts, StorageRepresentabilityIsIndependent) {
   DenseTensorDescriptor unsigned16{{1U},
@@ -298,11 +330,15 @@ TEST(DenseImageMetadataContracts, StorageRepresentabilityIsIndependent) {
 }
 
 /**
- * @brief Proves statistics keys cover invalidation facts and frozen bounds.
- * @throws Nothing when valid records pass and ambiguous or over-limit records
- *         reject.
+ * @brief Proves statistics keys and Histogram results obey frozen bounds.
+ * @throws std::invalid_argument, std::length_error, or std::overflow_error
+ *         from Region, Value, statistics, or digest validation unchanged.
+ * @throws std::bad_alloc when Region, Value, result, digest, or diagnostic
+ *         storage cannot allocate.
+ * @note Expected malformed-query/result failures are consumed by GoogleTest;
+ *       non-allocation digest failures remain typed ContentDigestResult state.
  */
-TEST(DenseImageMetadataContracts, StatisticsKeysAndResultsAreBounded) {
+TEST(DenseImageMetadataContracts, StatisticsKeysAndHistogramResultsAreBounded) {
   const Value value = publish_test_value(test_facet({-3, 5, 0, 7}));
   ImageStatisticsQuery query;
   query.region =
@@ -386,6 +422,145 @@ TEST(DenseImageMetadataContracts, StatisticsKeysAndResultsAreBounded) {
   excessive_channels.channels.resize(kMaximumImageStatisticsChannels + 1U);
   EXPECT_THROW(validate_image_statistics_result(excessive_channels),
                std::length_error);
+}
+
+/**
+ * @brief Builds one single-channel ObservedMinMax result for validation.
+ * @param revision Valid immutable Value revision used by the cache key.
+ * @param finite_sample_count Number of finite samples represented by extrema.
+ * @param minimum Optional observed finite minimum.
+ * @param maximum Optional observed finite maximum.
+ * @return Result with a fixed nonempty Region, channel selector, version, and
+ *         no Histogram-only state.
+ * @throws std::bad_alloc when Region, query, or result storage cannot allocate.
+ */
+ImageStatisticsResult make_observed_min_max_result(
+    ValueRevisionId revision, std::uint64_t finite_sample_count,
+    std::optional<double> minimum, std::optional<double> maximum) {
+  ImageStatisticsQuery query;
+  query.region =
+      RegionSet::from_image_rect({image_region_domain(), -3, 0, 5, 7});
+  query.selection.channel = ChannelId{11U};
+  query.algorithm = ImageStatisticsAlgorithm::ObservedMinMax;
+  query.algorithm_version = 3U;
+
+  ImageChannelStatistics channel;
+  channel.channel = ChannelId{11U};
+  channel.finite_sample_count = finite_sample_count;
+  channel.minimum = minimum;
+  channel.maximum = maximum;
+  return ImageStatisticsResult{
+      ImageStatisticsCacheKey{revision, std::nullopt, std::move(query)},
+      {std::move(channel)}};
+}
+
+/**
+ * @brief Proves ObservedMinMax accepts both empty and finite extrema sets.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         from Value publication, Region construction, or statistics
+ *         validation unchanged.
+ * @throws std::bad_alloc when Value, Region, result, or copied optional/vector
+ *         storage cannot allocate.
+ */
+TEST(DenseImageMetadataContracts, ObservedMinMaxAcceptsEmptyAndFiniteExtrema) {
+  const Value value = publish_test_value(test_facet({-3, 5, 0, 7}));
+
+  ImageStatisticsResult empty = make_observed_min_max_result(
+      value.revision_id(), 0U, std::nullopt, std::nullopt);
+  empty.channels.front().nan_count = 2U;
+  empty.channels.front().positive_infinity_count = 3U;
+  empty.channels.front().negative_infinity_count = 4U;
+  EXPECT_NO_THROW(validate_image_statistics_result(empty));
+
+  const ImageStatisticsResult finite =
+      make_observed_min_max_result(value.revision_id(), 3U, -2.5, 7.25);
+  EXPECT_NO_THROW(validate_image_statistics_result(finite));
+  const ImageStatisticsResult constant =
+      make_observed_min_max_result(value.revision_id(), 4U, 4.0, 4.0);
+  EXPECT_NO_THROW(validate_image_statistics_result(constant));
+}
+
+/**
+ * @brief Proves ObservedMinMax rejects every Histogram-only field.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         from Value publication, Region construction, or statistics
+ *         validation unchanged.
+ * @throws std::bad_alloc when Value, Region, result, or copied optional/vector
+ *         storage cannot allocate.
+ * @note Expected invalid ObservedMinMax records are consumed by GoogleTest.
+ */
+TEST(DenseImageMetadataContracts, ObservedMinMaxRejectsHistogramState) {
+  const Value value = publish_test_value(test_facet({-3, 5, 0, 7}));
+  const ImageStatisticsResult finite =
+      make_observed_min_max_result(value.revision_id(), 3U, -2.5, 7.25);
+
+  ImageStatisticsResult invalid = finite;
+  invalid.channels.front().histogram_bins = std::vector<std::uint64_t>{};
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+  invalid = finite;
+  invalid.channels.front().below_histogram_count = 1U;
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+  invalid = finite;
+  invalid.channels.front().above_histogram_count = 1U;
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  invalid = finite;
+  invalid.key.query.histogram = ImageHistogramParameters{0.0, 1.0, 2U};
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+}
+
+/**
+ * @brief Proves ObservedMinMax rejects absent, nonfinite, or reversed extrema.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         from Value publication, Region construction, or statistics
+ *         validation unchanged.
+ * @throws std::bad_alloc when Value, Region, result, or copied optional/vector
+ *         storage cannot allocate.
+ * @note Expected invalid ObservedMinMax records are consumed by GoogleTest.
+ */
+TEST(DenseImageMetadataContracts, ObservedMinMaxRejectsMalformedExtrema) {
+  const Value value = publish_test_value(test_facet({-3, 5, 0, 7}));
+  const ImageStatisticsResult finite =
+      make_observed_min_max_result(value.revision_id(), 3U, -2.5, 7.25);
+  const ImageStatisticsResult empty = make_observed_min_max_result(
+      value.revision_id(), 0U, std::nullopt, std::nullopt);
+
+  ImageStatisticsResult invalid = finite;
+  invalid.channels.front().minimum.reset();
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+  invalid = finite;
+  invalid.channels.front().maximum.reset();
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+  invalid = finite;
+  invalid.channels.front().minimum.reset();
+  invalid.channels.front().maximum.reset();
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+  invalid = empty;
+  invalid.channels.front().minimum = 0.0;
+  invalid.channels.front().maximum = 1.0;
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+
+  invalid = finite;
+  invalid.channels.front().minimum = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+  invalid = finite;
+  invalid.channels.front().maximum = std::numeric_limits<double>::infinity();
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
+  invalid = finite;
+  invalid.channels.front().minimum = 8.0;
+  invalid.channels.front().maximum = 7.0;
+  EXPECT_THROW(validate_image_statistics_result(invalid),
+               std::invalid_argument);
 }
 
 }  // namespace

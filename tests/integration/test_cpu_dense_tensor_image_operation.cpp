@@ -3291,8 +3291,12 @@ TEST(CpuDenseTensorImageOperation,
 
 /**
  * @brief Proves pure inference retains all bounded image interpretation facts.
- * @throws Nothing when complete metadata is copied and diagnostic names do not
- *         synthesize missing semantic records.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         from zero-origin facet construction, rich metadata validation, or
+ *         dense-invert inference unchanged.
+ * @throws std::bad_alloc when std::function, descriptor, diagnostic string,
+ *         channel/group/sample vector, input-list, or inference-result storage
+ *         cannot allocate.
  */
 TEST(CpuDenseTensorImageOperation,
      DenseInvertInferencePreservesExactLogicalDescriptor) {
@@ -3466,9 +3470,17 @@ TEST(CpuDenseTensorImageOperation,
 
 /**
  * @brief Proves signed ImageRect execution, rejection, and bridge projection.
- * @throws Nothing when logical selection maps to exact zero-based payload,
- *         complete metadata survives inference, out-of-window work rejects,
- *         and the ImageBuffer edge loses only unsupported interpretation.
+ * @throws GraphError when registry resolution or an expected-valid execution
+ *         phase fails.
+ * @throws std::invalid_argument, std::out_of_range, std::overflow_error, or
+ *         std::length_error from Region, Value, ImageView, or ImageBuffer
+ *         adapter validation unchanged.
+ * @throws ReadyFenceAccessError or BufferAccessError when a fixture Value is
+ *         unexpectedly non-Ready or not host-readable.
+ * @throws std::bad_alloc when rich ImageFacet strings/vectors, Region, Value,
+ *         execution, projection, or GoogleTest diagnostic storage cannot
+ *         allocate.
+ * @note The expected out-of-window GraphError is consumed by the test.
  */
 TEST(CpuDenseTensorImageOperation,
      ProductExecutorUsesNegativeOriginImageRectCoordinates) {
