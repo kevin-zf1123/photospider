@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <opencv2/imgproc.hpp>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -42,6 +43,7 @@
 #include "compute/request/compute_cache_policy.hpp"
 #include "compute/request/compute_metrics_recorder.hpp"
 #include "core/param_utils.hpp"
+#include "core/pending_value.hpp"
 #include "core/value_image_adapter.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
@@ -363,13 +365,111 @@ Node make_node(int id, std::string type, std::string subtype) {
   return node;
 }
 
+/**
+ * @brief Publishes one deterministic canonical CPU image for split tests.
+ *
+ * @param width Positive image width.
+ * @param height Positive image height.
+ * @param channels Positive interleaved channel count.
+ * @param value Scalar written to every logical channel element.
+ * @return NodeOutput containing one sealed canonical `"image"` Value.
+ * @throws Allocation, OpenCV, Value validation, or publication exceptions
+ * unchanged.
+ * @note Mutable ImageBuffer storage is callback-local and is not retained as
+ * graph, cache, dirty, RT, or test-result authority.
+ */
 NodeOutput make_image_output(int width, int height, int channels = 1,
                              float value = 1.0f) {
-  NodeOutput output;
-  output.image_buffer =
+  ImageBuffer buffer =
       make_aligned_cpu_image_buffer(width, height, channels, DataType::FLOAT32);
-  toCvMat(output.image_buffer).setTo(value);
+  toCvMat(buffer).setTo(value);
+  NodeOutput output;
+  output.publish_image_value(
+      value_image_adapter::snapshot_cpu_image_value(buffer));
   return output;
+}
+
+/**
+ * @brief Projects one canonical split-test image for callback-local access.
+ *
+ * @param output Output containing a Ready host-readable image Value.
+ * @return ImageBuffer projection retaining the same immutable Value bytes.
+ * @throws std::invalid_argument when the canonical image is absent.
+ * @throws ReadyFenceAccessError, BufferAccessError, or metadata conversion
+ * exceptions unchanged.
+ * @note Callers use the projection only for synchronous inspection or source
+ * copying and never store it as output authority.
+ */
+ImageBuffer project_image_output(const NodeOutput& output) {
+  if (!output.has_image_value()) {
+    throw std::invalid_argument(
+        "Split test image projection requires a canonical Value.");
+  }
+  return value_image_adapter::snapshot_cpu_image_buffer(output.image_value());
+}
+
+/**
+ * @brief Copies one canonical split-test image into an owning OpenCV matrix.
+ *
+ * @param output Output containing a Ready host-readable image Value.
+ * @return Independent matrix whose bytes outlive all transient projections.
+ * @throws Image projection, OpenCV allocation, or copy exceptions unchanged.
+ * @note This helper is for test comparison only and cannot become graph,
+ * cache, dirty, RT, or publication authority.
+ */
+cv::Mat project_image_mat(const NodeOutput& output) {
+  const ImageBuffer buffer = project_image_output(output);
+  return toCvMat(buffer).clone();
+}
+
+/**
+ * @brief Publishes a prepared callback-local CPU image into NodeOutput.
+ *
+ * @param buffer Complete CPU image to snapshot.
+ * @return NodeOutput with one fresh sealed canonical image Value.
+ * @throws Value validation, allocation, or publication exceptions unchanged.
+ * @note No mutable pointer or compatibility staging survives return.
+ */
+NodeOutput publish_image_output(const ImageBuffer& buffer) {
+  NodeOutput output;
+  output.publish_image_value(
+      value_image_adapter::snapshot_cpu_image_value(buffer));
+  return output;
+}
+
+/**
+ * @brief Publishes one metadata-complete opaque device image for split tests.
+ *
+ * @param width Positive logical image width.
+ * @param height Positive logical image height.
+ * @param channels Positive interleaved channel count.
+ * @param type Whole-byte scalar encoding retained by the image descriptor.
+ * @param device Provisional backend label converted to a concrete device.
+ * @param owner Non-null fake native allocation owner retained by the Value.
+ * @return Pending non-host-visible Value plus its move-only terminal producer.
+ * @throws Image allocation, Value validation, identity, or publication
+ * exceptions unchanged.
+ * @note The temporary CPU image supplies only checked logical metadata and an
+ * exact byte envelope. Its bytes and allocation are not retained. The result
+ * exposes no host pointer, so tests may inspect binding/descriptor identity but
+ * cannot accidentally use compatibility payload authority.
+ */
+PendingDeviceValuePublication publish_opaque_device_image(
+    int width, int height, int channels, DataType type, Device device,
+    std::shared_ptr<void> owner) {
+  if (!owner) {
+    throw std::invalid_argument(
+        "Opaque device image test publication requires an owner.");
+  }
+  ImageBuffer metadata_source =
+      make_aligned_cpu_image_buffer(width, height, channels, type);
+  const Value template_value =
+      value_image_adapter::snapshot_cpu_image_value(metadata_source);
+  return PendingDeviceValuePublisher::publish_dense_tensor(
+      template_value.dense_tensor_descriptor(), template_value.image_facet(),
+      template_value.strided_layout(), owner, owner.get(), nullptr,
+      template_value.storage_size(), DeviceId(device_backend(device)),
+      MemoryDomain::DeviceLocal);
 }
 
 /**
@@ -1153,23 +1253,23 @@ void run_direct_dirty_cache_selection_case(PlannedCacheState cache_state,
       }));
   registry.register_op_hp_monolithic(
       "issue82_cache_revalidation", target_subtype,
-      MonolithicOpFunc(
-          [target_entries, target_observed_source](
-              const Node& node,
-              const std::vector<const NodeOutput*>& inputs) -> NodeOutput {
-            target_entries->fetch_add(1, std::memory_order_relaxed);
-            if (inputs.empty() || inputs.front() == nullptr) {
-              throw GraphError(GraphErrc::MissingDependency,
-                               "dirty cache target requires source");
-            }
-            target_observed_source->store(
-                static_cast<int>(
-                    toCvMat(inputs.front()->image_buffer).at<float>(0, 0)),
-                std::memory_order_relaxed);
-            return make_image_output(
-                as_int_flexible(node.parameters, "width", 8),
-                as_int_flexible(node.parameters, "height", 8), 1, 17.0f);
-          }));
+      MonolithicOpFunc([target_entries, target_observed_source](
+                           const Node& node,
+                           const std::vector<const NodeOutput*>& inputs)
+                           -> NodeOutput {
+        target_entries->fetch_add(1, std::memory_order_relaxed);
+        if (inputs.empty() || inputs.front() == nullptr) {
+          throw GraphError(GraphErrc::MissingDependency,
+                           "dirty cache target requires source");
+        }
+        target_observed_source->store(
+            static_cast<int>(
+                toCvMat(project_image_output(*inputs.front())).at<float>(0, 0)),
+            std::memory_order_relaxed);
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, 17.0f);
+      }));
 
   compute::ExecutionService authority;
   DirectDirtyComputeHarness harness(authority,
@@ -1217,7 +1317,8 @@ void run_direct_dirty_cache_selection_case(PlannedCacheState cache_state,
   EXPECT_EQ(target_entries->load(std::memory_order_relaxed), 1);
   EXPECT_EQ(target_observed_source->load(std::memory_order_relaxed), 7);
   if (output != nullptr) {
-    EXPECT_FLOAT_EQ(toCvMat(output->image_buffer).at<float>(0, 0), 17.0f);
+    EXPECT_FLOAT_EQ(toCvMat(project_image_output(*output)).at<float>(0, 0),
+                    17.0f);
   }
   expect_direct_authority_settled(authority);
   registry.unregister_key(
@@ -1321,9 +1422,8 @@ NodeOutput execute_partial_cache_producer(
         "partial-cache producer requires one image input: " + node.name);
   }
   g_partial_cache_producer_calls.fetch_add(1, std::memory_order_relaxed);
-  return make_image_output(inputs.front()->image_buffer.width,
-                           inputs.front()->image_buffer.height,
-                           inputs.front()->image_buffer.channels, 5.0f);
+  const ImageBuffer input = project_image_output(*inputs.front());
+  return make_image_output(input.width, input.height, input.channels, 5.0f);
 }
 
 /**
@@ -1347,7 +1447,7 @@ NodeOutput execute_partial_cache_consumer(
         GraphErrc::MissingDependency,
         "partial-cache consumer requires one image input: " + node.name);
   }
-  const ImageBuffer& input = inputs.front()->image_buffer;
+  const ImageBuffer input = project_image_output(*inputs.front());
   const float observed = toCvMat(input).at<float>(0, 0);
   g_partial_cache_consumer_observed_value.store(static_cast<int>(observed),
                                                 std::memory_order_release);
@@ -1747,16 +1847,17 @@ void register_split_ops() {
         "split_plan", "gradient_source",
         MonolithicOpFunc([](const Node& node,
                             const std::vector<const NodeOutput*>&) {
-          NodeOutput output = make_image_output(
+          ImageBuffer output_image = make_aligned_cpu_image_buffer(
               as_int_flexible(node.parameters, "width", 320),
-              as_int_flexible(node.parameters, "height", 64), 1, 0.0f);
-          cv::Mat pixels = toCvMat(output.image_buffer);
+              as_int_flexible(node.parameters, "height", 64), 1,
+              DataType::FLOAT32);
+          cv::Mat pixels = toCvMat(output_image);
           for (int y = 0; y < pixels.rows; ++y) {
             for (int x = 0; x < pixels.cols; ++x) {
               pixels.at<float>(y, x) = ((x / 5 + y / 3) % 2 == 0) ? 0.0f : 1.0f;
             }
           }
-          return output;
+          return publish_image_output(output_image);
         }));
     registry.register_op_hp_monolithic(
         "split_plan", "staged_generation_source",
@@ -1764,14 +1865,16 @@ void register_split_ops() {
                             const std::vector<const NodeOutput*>&) {
           const int generation =
               g_staged_source_generation.load(std::memory_order_acquire);
-          NodeOutput output = make_image_output(320, 64, 1, 0.0f);
-          cv::Mat pixels = toCvMat(output.image_buffer);
+          ImageBuffer output_image =
+              make_aligned_cpu_image_buffer(320, 64, 1, DataType::FLOAT32);
+          cv::Mat pixels = toCvMat(output_image);
           for (int y = 0; y < pixels.rows; ++y) {
             for (int x = 0; x < pixels.cols; ++x) {
               pixels.at<float>(y, x) =
                   static_cast<float>(((x / 5 + y / 3 + generation) % 7) / 6.0);
             }
           }
+          NodeOutput output = publish_image_output(output_image);
           output.data["generation"] = generation;
           return output;
         }));
@@ -1810,8 +1913,8 @@ void register_split_ops() {
             [](const Node&, const std::vector<const NodeOutput*>& inputs) {
               if (inputs.empty())
                 throw GraphError(GraphErrc::MissingDependency, "missing input");
-              return make_image_output(inputs.front()->image_buffer.width,
-                                       inputs.front()->image_buffer.height);
+              const ImageBuffer input = project_image_output(*inputs.front());
+              return make_image_output(input.width, input.height);
             }));
     ps::OpMetadata micro_meta;
     micro_meta.tile_preference = ps::TileSizePreference::MICRO;
@@ -1891,12 +1994,17 @@ void register_split_ops() {
                             const std::vector<const NodeOutput*>& inputs) {
           g_exact_sibling_monolithic_calls.fetch_add(1,
                                                      std::memory_order_relaxed);
-          const int width = inputs.empty() || !inputs.front()
-                                ? as_int_flexible(node.parameters, "width", 1)
-                                : inputs.front()->image_buffer.width;
-          const int height = inputs.empty() || !inputs.front()
-                                 ? as_int_flexible(node.parameters, "height", 1)
-                                 : inputs.front()->image_buffer.height;
+          std::optional<ImageBuffer> input_image;
+          if (!inputs.empty() && inputs.front() != nullptr) {
+            input_image = project_image_output(*inputs.front());
+          }
+          const int width = input_image.has_value()
+                                ? input_image->width
+                                : as_int_flexible(node.parameters, "width", 1);
+          const int height =
+              input_image.has_value()
+                  ? input_image->height
+                  : as_int_flexible(node.parameters, "height", 1);
           return make_image_output(width, height, 1, 17.0f);
         }),
         exact_sibling_monolithic_meta);
@@ -2320,7 +2428,8 @@ TEST(ComputeCachePolicySplit, PreservesHpAuthorityAndRtNonAuthority) {
   node.hp_region = value_image_adapter::full_node_output_region(
       *node.cached_output_high_precision);
   EXPECT_EQ(
-      compute::ComputeCachePolicy::reusable_output(node)->image_buffer.width,
+      project_image_output(*compute::ComputeCachePolicy::reusable_output(node))
+          .width,
       8);
   EXPECT_TRUE(compute::ComputeCachePolicy::can_read_disk_cache(false, false));
   EXPECT_FALSE(compute::ComputeCachePolicy::can_read_disk_cache(true, false));
@@ -2388,16 +2497,17 @@ TEST(NodeExecutorSplit,
   Node mono = make_node(1, "split_exec", "mono");
   OpRegistry::OpVariant mono_op = MonolithicOpFunc(
       [](const Node&, const std::vector<const NodeOutput*>& inputs) {
-        return make_image_output(inputs.front()->image_buffer.width,
-                                 inputs.front()->image_buffer.height);
+        const ImageBuffer input = project_image_output(*inputs.front());
+        return make_image_output(input.width, input.height);
       });
   std::vector<const NodeOutput*> mono_inputs;
   NodeOutput mono_input = make_image_output(5, 3);
   mono_inputs.push_back(&mono_input);
   NodeOutput mono_output =
       compute::NodeExecutor::execute(graph, mono, mono_op, mono_inputs);
-  EXPECT_EQ(mono_output.image_buffer.width, 5);
-  EXPECT_EQ(mono_output.image_buffer.height, 3);
+  const ImageBuffer mono_image = project_image_output(mono_output);
+  EXPECT_EQ(mono_image.width, 5);
+  EXPECT_EQ(mono_image.height, 3);
 
   Node tiled = make_node(2, "image_mixing", "tile");
   bool saw_normalized_second_input = false;
@@ -2445,9 +2555,10 @@ TEST(NodeExecutorSplit,
   EXPECT_TRUE(saw_normalized_second_spatial);
   EXPECT_EQ(tiled_calls, 4);
   ASSERT_EQ(normalized_second_buffers.size(), 1u);
-  EXPECT_NE(*normalized_second_buffers.begin(), &secondary.image_buffer);
-  EXPECT_EQ(tiled_output.image_buffer.width, 8);
-  EXPECT_EQ(tiled_output.image_buffer.channels, 3);
+  EXPECT_NE(*normalized_second_buffers.begin(), nullptr);
+  const ImageBuffer tiled_image = project_image_output(tiled_output);
+  EXPECT_EQ(tiled_image.width, 8);
+  EXPECT_EQ(tiled_image.channels, 3);
 
   auto& registry = OpRegistry::instance();
   registry.register_dirty_propagator(
@@ -2463,8 +2574,9 @@ TEST(NodeExecutorSplit,
   random_config.metadata = OpMetadata{};
   random_config.metadata->access_pattern =
       OpMetadata::InputAccessPattern::RandomAccess;
+  const ImageBuffer base_image = project_image_output(base);
   EXPECT_EQ(compute::NodeExecutor::input_roi_for_tile(
-                graph, random_node, (PixelRect{1, 1, 4, 4}), base.image_buffer,
+                graph, random_node, (PixelRect{1, 1, 4, 4}), base_image,
                 random_config),
             (PixelRect{0, 0, 7, 7}));
 
@@ -2546,8 +2658,9 @@ TEST(NodeExecutorSplit,
   const NodeOutput result = compute::NodeExecutor::execute(
       graph, execution_node, operation, inputs, config);
 
-  EXPECT_EQ(result.image_buffer.width, 40);
-  EXPECT_EQ(result.image_buffer.height, 20);
+  const ImageBuffer result_image = project_image_output(result);
+  EXPECT_EQ(result_image.width, 40);
+  EXPECT_EQ(result_image.height, 20);
   EXPECT_EQ(*exact_context_count, 12)
       << "one random-access mapping per input must see the same complete "
          "same-batch snapshot";
@@ -2596,8 +2709,9 @@ TEST(NodeExecutorSplit,
           plugin::ArrayView<plugin::OperationTileInputView> inputs) {
         tiled_callback_preserved_slots =
             inputs.size() == 2 && inputs[0].tile.buffer == nullptr &&
-            inputs[0].spatial == nullptr &&
-            inputs[1].tile.buffer == &connected.image_buffer &&
+            inputs[0].spatial == nullptr && inputs[1].tile.buffer != nullptr &&
+            inputs[1].tile.buffer->width == 7 &&
+            inputs[1].tile.buffer->height == 5 &&
             inputs[1].spatial != nullptr && output.buffer != nullptr;
       });
   compute::TiledExecutionConfig config;
@@ -2608,8 +2722,9 @@ TEST(NodeExecutorSplit,
   const NodeOutput output = compute::NodeExecutor::execute(
       graph, execution_node, operation, resolved.image_inputs, config);
 
-  EXPECT_EQ(output.image_buffer.width, 7);
-  EXPECT_EQ(output.image_buffer.height, 5);
+  const ImageBuffer output_image = project_image_output(output);
+  EXPECT_EQ(output_image.width, 7);
+  EXPECT_EQ(output_image.height, 5);
   EXPECT_TRUE(roi_context_preserved_index);
   EXPECT_TRUE(tiled_callback_preserved_slots);
 }
@@ -2636,11 +2751,10 @@ TEST(ComputeMetricsRecorderSplit, FinalizesMetadataAndDebugStatistics) {
   };
   for (const auto& [device, expected_label] : backend_devices) {
     NodeOutput backend;
-    backend.image_buffer.width = 3;
-    backend.image_buffer.height = 3;
-    backend.image_buffer.channels = 1;
-    backend.image_buffer.device = device;
-    backend.image_buffer.context = std::make_shared<int>(7);
+    auto owner = std::make_shared<int>(7);
+    PendingDeviceValuePublication publication =
+        publish_opaque_device_image(3, 3, 1, DataType::FLOAT32, device, owner);
+    backend.publish_image_value(publication.value);
     backend.debug.min_val = 12.0;
     backend.debug.max_val = 34.0;
     compute::ComputeMetricsRecorder::finalize_output_metadata(backend, {}, true,
@@ -3352,8 +3466,7 @@ TEST(ComputeServiceDirtyCacheSelection,
   EXPECT_EQ(replacement_entries->load(std::memory_order_relaxed), 0);
   ASSERT_TRUE(harness.graph().node(1).cached_output_high_precision.has_value());
   EXPECT_FLOAT_EQ(
-      toCvMat(
-          harness.graph().node(1).cached_output_high_precision->image_buffer)
+      project_image_mat(*harness.graph().node(1).cached_output_high_precision)
           .at<float>(0, 0),
       1.0f);
   expect_direct_authority_settled(authority);
@@ -3400,7 +3513,8 @@ TEST(TaskGraphPlanningSplit,
   EXPECT_EQ(task.dirty_generation, 9u);
 }
 
-TEST(TaskGraphPlanningSplit, TileDependenciesFollowRoiOverlap) {
+TEST(TaskGraphPlanningSplit,
+     TileDependenciesJoinCompleteProducerBeforeValueObservation) {
   register_split_ops();
   GraphModel graph("cache/split-tile-overlap-dependencies");
   Node source = make_node(1, "split_plan", "tile");
@@ -3428,17 +3542,24 @@ TEST(TaskGraphPlanningSplit, TileDependenciesFollowRoiOverlap) {
   ASSERT_EQ(downstream_tasks.size(), 2u);
   size_t dependency_edges = 0;
   for (const auto* task : downstream_tasks) {
-    ASSERT_EQ(task->dependency_task_ids.size(), 1u);
-    const auto& upstream_task =
-        plan.task_graph.tasks.at(task->dependency_task_ids.front());
-    EXPECT_EQ(upstream_task.node_id, 1);
-    EXPECT_FALSE(compute::is_rect_empty(
-        compute::intersect_rect(upstream_task.output_roi, task->output_roi)));
+    ASSERT_EQ(task->dependency_task_ids.size(), 2u);
+    std::size_t overlapping_dependencies = 0U;
+    for (int dependency_task_id : task->dependency_task_ids) {
+      const auto& upstream_task = plan.task_graph.tasks.at(dependency_task_id);
+      EXPECT_EQ(upstream_task.node_id, 1);
+      overlapping_dependencies +=
+          compute::is_rect_empty(compute::intersect_rect(
+              upstream_task.output_roi, task->output_roi))
+              ? 0U
+              : 1U;
+    }
+    EXPECT_EQ(overlapping_dependencies, 1u)
+        << "ROI mapping still identifies one byte-producing sibling";
     dependency_edges += task->dependency_task_ids.size();
   }
-  EXPECT_EQ(dependency_edges, 2u)
-      << "two upstream tiles feeding two downstream tiles should not form the "
-         "four-edge Cartesian product";
+  EXPECT_EQ(dependency_edges, 4u)
+      << "each consumer waits for the producer node join because its immutable "
+         "Value is published only after both disjoint grants retire";
 }
 
 TEST(TaskGraphPlanningSplit, TileDependenciesUseGaussianHaloInputRoi) {
@@ -3688,7 +3809,9 @@ TEST(TaskGraphPlanningSplit,
       image_dependency_count += dependency_node_id == 1 ? 1u : 0u;
       parameter_dependency_count += dependency_node_id == 3 ? 1u : 0u;
     }
-    EXPECT_EQ(image_dependency_count, 1u);
+    EXPECT_EQ(image_dependency_count, 2u)
+        << "spatial ROI chooses one source tile, while Value observation waits "
+           "for the complete two-tile producer join";
     EXPECT_EQ(parameter_dependency_count, 1u)
         << "the uncached parameter producer remains a scheduling dependency "
            "even though SpatialAligned ROI geometry does not read its value";
@@ -3714,11 +3837,12 @@ TEST(TaskGraphPlanningSplit,
   execution_request.cache.disable_disk_cache = true;
   NodeOutput& output = service.compute(graph, execution_request);
 
-  EXPECT_EQ(output.image_buffer.width, 32);
-  EXPECT_EQ(output.image_buffer.height, 16);
+  const ImageBuffer output_image = project_image_output(output);
+  EXPECT_EQ(output_image.width, 32);
+  EXPECT_EQ(output_image.height, 16);
   double output_min = 0.0;
   double output_max = 0.0;
-  cv::minMaxLoc(toCvMat(output.image_buffer), &output_min, &output_max);
+  cv::minMaxLoc(toCvMat(output_image), &output_min, &output_max);
   EXPECT_DOUBLE_EQ(output_min, 7.0);
   EXPECT_DOUBLE_EQ(output_max, 7.0);
   EXPECT_EQ(g_spatial_generator_hp_calls.load(std::memory_order_relaxed), 1)
@@ -3727,11 +3851,12 @@ TEST(TaskGraphPlanningSplit,
   EXPECT_EQ(g_spatial_parameter_hp_calls.load(std::memory_order_relaxed), 1);
   ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
   const NodeOutput& source_output = *graph.node(1).cached_output_high_precision;
-  EXPECT_EQ(source_output.image_buffer.width, 32);
-  EXPECT_EQ(source_output.image_buffer.height, 16);
+  const ImageBuffer source_image = project_image_output(source_output);
+  EXPECT_EQ(source_image.width, 32);
+  EXPECT_EQ(source_image.height, 16);
   double source_min = 0.0;
   double source_max = 0.0;
-  cv::minMaxLoc(toCvMat(source_output.image_buffer), &source_min, &source_max);
+  cv::minMaxLoc(toCvMat(source_image), &source_min, &source_max);
   EXPECT_DOUBLE_EQ(source_min, 3.0);
   EXPECT_DOUBLE_EQ(source_max, 3.0);
   ASSERT_TRUE(graph.node(3).cached_output_high_precision.has_value());
@@ -4476,11 +4601,11 @@ TEST(ComputeServiceSplit,
     dirty.dirty_roi = (PixelRect{270, 16, 3, 3});
     NodeOutput& output = service.compute(graph, dirty);
     const cv::Mat source =
-        toCvMat(graph.node(1).cached_output_high_precision->image_buffer);
+        project_image_mat(*graph.node(1).cached_output_high_precision);
     cv::Mat expected;
     cv::GaussianBlur(source, expected, cv::Size{kernel_size, kernel_size}, 0, 0,
                      cv::BORDER_REPLICATE);
-    EXPECT_LE(cv::norm(toCvMat(output.image_buffer), expected, cv::NORM_INF),
+    EXPECT_LE(cv::norm(project_image_mat(output), expected, cv::NORM_INF),
               1e-6);
     ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
     EXPECT_EQ(graph.last_compute_plan_summary->topology_generation,
@@ -5301,12 +5426,11 @@ TEST(ComputeServiceSplit,
     EXPECT_EQ(graph.last_compute_plan_summary->active_task_count,
               graph.last_compute_plan_summary->downstream_task_count);
     const cv::Mat staged_source =
-        toCvMat(graph.node(1).cached_output_high_precision->image_buffer);
+        project_image_mat(*graph.node(1).cached_output_high_precision);
     cv::Mat expected;
     cv::GaussianBlur(staged_source, expected, cv::Size{generation, generation},
                      0, 0, cv::BORDER_REPLICATE);
-    EXPECT_LE(cv::norm(toCvMat(output.image_buffer), expected, cv::NORM_INF),
-              1e-6)
+    EXPECT_LE(cv::norm(project_image_mat(output), expected, cv::NORM_INF), 1e-6)
         << "C image and parameter inputs must describe the same staged A";
   };
   verify_generation(21);
@@ -5335,20 +5459,26 @@ TEST(ComputeServiceSplit,
     request.cache.precision = "float32";
     request.cache.disable_disk_cache = true;
     (void)service.compute(graph, request);
-    ASSERT_EQ(graph.node(2).cached_output_high_precision->image_buffer.width,
-              64);
+    ASSERT_EQ(
+        image_bounds_width(graph.node(2)
+                               .cached_output_high_precision->image_value()
+                               .image_bounds()),
+        64u);
 
     g_dynamic_extent_width.store(16, std::memory_order_release);
     request.intent = intent;
     request.dirty_roi = (PixelRect{48, 0, 8, 8});
     NodeOutput& result = service.compute(graph, request);
     ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
-    EXPECT_EQ(graph.node(2).cached_output_high_precision->image_buffer.width,
-              16);
-    EXPECT_EQ(graph.node(2).cached_output_high_precision->image_buffer.height,
-              8);
-    EXPECT_GT(result.image_buffer.width, 0);
-    EXPECT_GT(result.image_buffer.height, 0);
+    const ImageBounds& cached_bounds =
+        graph.node(2)
+            .cached_output_high_precision->image_value()
+            .image_bounds();
+    EXPECT_EQ(image_bounds_width(cached_bounds), 16u);
+    EXPECT_EQ(image_bounds_height(cached_bounds), 8u);
+    ASSERT_TRUE(result.has_image_value());
+    EXPECT_GT(image_bounds_width(result.image_value().image_bounds()), 0u);
+    EXPECT_GT(image_bounds_height(result.image_value().image_bounds()), 0u);
     if (intent == ComputeIntent::RealTimeUpdate) {
       ASSERT_GE(graph.recent_dirty_region_snapshots.size(), 2u);
       const auto end = graph.recent_dirty_region_snapshots.end();
@@ -5436,7 +5566,7 @@ TEST(ComputeServiceSplit, PreflightFailurePublishesNoHpCacheState) {
   const int target_version = graph.node(2).hp_version;
   const int parameter_version = graph.node(3).hp_version;
   const cv::Mat before =
-      toCvMat(graph.node(2).cached_output_high_precision->image_buffer).clone();
+      project_image_mat(*graph.node(2).cached_output_high_precision);
 
   g_dynamic_parameter_fail.store(true, std::memory_order_release);
   request.intent = ComputeIntent::GlobalHighPrecision;
@@ -5446,10 +5576,9 @@ TEST(ComputeServiceSplit, PreflightFailurePublishesNoHpCacheState) {
   EXPECT_EQ(graph.node(2).hp_version, target_version);
   EXPECT_EQ(graph.node(3).hp_version, parameter_version);
   EXPECT_DOUBLE_EQ(
-      cv::norm(
-          before,
-          toCvMat(graph.node(2).cached_output_high_precision->image_buffer),
-          cv::NORM_INF),
+      cv::norm(before,
+               project_image_mat(*graph.node(2).cached_output_high_precision),
+               cv::NORM_INF),
       0.0);
   EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
 
@@ -5519,11 +5648,9 @@ TEST(ComputeServiceSplit,
     ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
     ASSERT_TRUE(graph.node(3).cached_output_high_precision.has_value());
     const cv::Mat source_pixels_before =
-        toCvMat(graph.node(1).cached_output_high_precision->image_buffer)
-            .clone();
+        project_image_mat(*graph.node(1).cached_output_high_precision);
     const cv::Mat target_pixels_before =
-        toCvMat(graph.node(2).cached_output_high_precision->image_buffer)
-            .clone();
+        project_image_mat(*graph.node(2).cached_output_high_precision);
     const int source_value_before =
         static_cast<int>(graph.node(1)
                              .cached_output_high_precision->data.at("injected")
@@ -5553,8 +5680,7 @@ TEST(ComputeServiceSplit,
     const bool proxy_had_output_before = proxy_before_ptr->output.has_value();
     cv::Mat proxy_pixels_before;
     if (proxy_before_ptr->output) {
-      proxy_pixels_before =
-          toCvMat(proxy_before_ptr->output->image_buffer).clone();
+      proxy_pixels_before = project_image_mat(*proxy_before_ptr->output);
     }
 
     const std::size_t dirty_snapshots_before =
@@ -5618,16 +5744,14 @@ TEST(ComputeServiceSplit,
     EXPECT_EQ(graph.node(2).hp_region, target_region_before);
     EXPECT_EQ(graph.node(3).hp_region, parameter_region_before);
     EXPECT_DOUBLE_EQ(
-        cv::norm(
-            source_pixels_before,
-            toCvMat(graph.node(1).cached_output_high_precision->image_buffer),
-            cv::NORM_INF),
+        cv::norm(source_pixels_before,
+                 project_image_mat(*graph.node(1).cached_output_high_precision),
+                 cv::NORM_INF),
         0.0);
     EXPECT_DOUBLE_EQ(
-        cv::norm(
-            target_pixels_before,
-            toCvMat(graph.node(2).cached_output_high_precision->image_buffer),
-            cv::NORM_INF),
+        cv::norm(target_pixels_before,
+                 project_image_mat(*graph.node(2).cached_output_high_precision),
+                 cv::NORM_INF),
         0.0);
     EXPECT_EQ(graph.node(1)
                   .cached_output_high_precision->data.at("injected")
@@ -5648,8 +5772,8 @@ TEST(ComputeServiceSplit,
     EXPECT_EQ(proxy_after->output.has_value(), proxy_had_output_before);
     if (proxy_after->output && proxy_had_output_before) {
       EXPECT_DOUBLE_EQ(
-          cv::norm(proxy_pixels_before,
-                   toCvMat(proxy_after->output->image_buffer), cv::NORM_INF),
+          cv::norm(proxy_pixels_before, project_image_mat(*proxy_after->output),
+                   cv::NORM_INF),
           0.0);
     }
     runtime.stop();
@@ -5779,11 +5903,9 @@ TEST(ComputeServiceCancellation,
     ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
     ASSERT_TRUE(graph.node(3).cached_output_high_precision.has_value());
     const cv::Mat source_pixels_before =
-        toCvMat(graph.node(1).cached_output_high_precision->image_buffer)
-            .clone();
+        project_image_mat(*graph.node(1).cached_output_high_precision);
     const cv::Mat target_pixels_before =
-        toCvMat(graph.node(2).cached_output_high_precision->image_buffer)
-            .clone();
+        project_image_mat(*graph.node(2).cached_output_high_precision);
     const int source_version_before = graph.node(1).hp_version;
     const int target_version_before = graph.node(2).hp_version;
     const int parameter_version_before = graph.node(3).hp_version;
@@ -5854,16 +5976,14 @@ TEST(ComputeServiceCancellation,
     EXPECT_EQ(graph.node(2).hp_region, target_region_before);
     EXPECT_EQ(graph.node(3).hp_region, parameter_region_before);
     EXPECT_DOUBLE_EQ(
-        cv::norm(
-            source_pixels_before,
-            toCvMat(graph.node(1).cached_output_high_precision->image_buffer),
-            cv::NORM_INF),
+        cv::norm(source_pixels_before,
+                 project_image_mat(*graph.node(1).cached_output_high_precision),
+                 cv::NORM_INF),
         0.0);
     EXPECT_DOUBLE_EQ(
-        cv::norm(
-            target_pixels_before,
-            toCvMat(graph.node(2).cached_output_high_precision->image_buffer),
-            cv::NORM_INF),
+        cv::norm(target_pixels_before,
+                 project_image_mat(*graph.node(2).cached_output_high_precision),
+                 cv::NORM_INF),
         0.0);
     EXPECT_EQ(runtime.realtime_proxy_graph().find_state(2), nullptr);
     runtime.stop();
@@ -6043,7 +6163,8 @@ TEST(ComputeServiceSplit,
       << "retry must open a fresh execution batch after prior failure";
   NodeOutput* output = retried.get();
   ASSERT_NE(output, nullptr);
-  EXPECT_GT(output->image_buffer.width, 0);
+  ASSERT_TRUE(output->has_image_value());
+  EXPECT_GT(image_bounds_width(output->image_value().image_bounds()), 0u);
   EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed), 2);
   EXPECT_GT(graph.node(2).hp_version, target_version_before);
   runtime.stop();
@@ -6115,9 +6236,10 @@ TEST(TaskGraphPlanningSplit, RtDependencyPlanningUsesRtMetadata) {
     }
   }
   ASSERT_NE(middle_downstream_task, nullptr);
-  ASSERT_EQ(middle_downstream_task->dependency_task_ids.size(), 3u)
+  ASSERT_EQ(middle_downstream_task->dependency_task_ids.size(), 4u)
       << "RT random-access metadata expands the middle RT micro tile input "
-         "ROI across three upstream RT micro tiles";
+         "ROI across three upstream tiles, and immutable Value observation "
+         "also joins the remaining producer sibling";
   for (int dependency_task_id : middle_downstream_task->dependency_task_ids) {
     const auto& upstream_task = plan.task_graph.tasks.at(dependency_task_id);
     EXPECT_EQ(upstream_task.node_id, 1);
@@ -6188,8 +6310,9 @@ TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
   request.cache.force_recache = true;
   request.cache.disable_disk_cache = true;
   NodeOutput& output = compute.compute_parallel(graph, runtime, request);
-  EXPECT_EQ(output.image_buffer.width, 32);
-  EXPECT_EQ(output.image_buffer.height, 16);
+  const ImageBuffer output_image = project_image_output(output);
+  EXPECT_EQ(output_image.width, 32);
+  EXPECT_EQ(output_image.height, 16);
 
   const auto cached_after = compute::get_or_expand_full_task_graph(
       graph, ComputeIntent::GlobalHighPrecision);
@@ -6199,19 +6322,17 @@ TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
 }
 
 TEST(GraphCacheServiceSplit,
-     SkipsOpaqueBackendImageWhilePersistingNamedOutputMetadata) {
+     RejectsOpaqueBackendImageBeforePersistingAnyArtifacts) {
   const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                                  "photospider-backend-cache-persistence");
   GraphModel graph(root.path());
   Node node = make_node(1, "split_plan", "source");
   node.caches.push_back({"image", "output.png"});
   node.cached_output_high_precision = NodeOutput{};
-  node.cached_output_high_precision->image_buffer.width = 8;
-  node.cached_output_high_precision->image_buffer.height = 8;
-  node.cached_output_high_precision->image_buffer.channels = 1;
-  node.cached_output_high_precision->image_buffer.device = Device::GPU_CUDA;
-  node.cached_output_high_precision->image_buffer.context =
-      std::make_shared<int>(7);
+  auto owner = std::make_shared<int>(7);
+  PendingDeviceValuePublication publication = publish_opaque_device_image(
+      8, 8, 1, DataType::FLOAT32, Device::GPU_CUDA, owner);
+  node.cached_output_high_precision->publish_image_value(publication.value);
   node.cached_output_high_precision->data["marker"] = 9;
   node.hp_region = value_image_adapter::full_node_output_region(
       *node.cached_output_high_precision);
@@ -6219,12 +6340,17 @@ TEST(GraphCacheServiceSplit,
 
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
-  cache.save_cache_if_configured(graph, graph.node(1), "int8");
+  try {
+    cache.save_cache_if_configured(graph, graph.node(1), "int8");
+    FAIL() << "opaque device Values must fail closed before persistence";
+  } catch (const GraphError& error) {
+    EXPECT_EQ(error.code(), GraphErrc::InvalidParameter);
+  }
   const auto image_path = cache.node_cache_dir(graph, 1) / "output.png";
   auto metadata_path = image_path;
   metadata_path.replace_extension(".yml");
   EXPECT_FALSE(std::filesystem::exists(image_path));
-  EXPECT_TRUE(std::filesystem::exists(metadata_path));
+  EXPECT_FALSE(std::filesystem::exists(metadata_path));
 }
 
 TEST(DownsampleExecutorSplit,
@@ -6233,14 +6359,14 @@ TEST(DownsampleExecutorSplit,
   Node node = make_node(1, "split_plan", "opaque_backend");
   auto backend_owner = std::make_shared<int>(42);
   std::shared_ptr<void> expected_owner = backend_owner;
+  PendingDeviceValuePublication publication = publish_opaque_device_image(
+      96, 48, 4, DataType::UINT8, Device::GPU_CUDA, expected_owner);
+  const ValueRevisionId expected_revision = publication.value.revision_id();
+  const AllocationIdentity expected_allocation =
+      publication.value.allocation_identity();
+  const StorageBinding expected_binding = publication.value.storage_binding();
   node.cached_output_high_precision = NodeOutput{};
-  ImageBuffer& hp = node.cached_output_high_precision->image_buffer;
-  hp.width = 96;
-  hp.height = 48;
-  hp.channels = 4;
-  hp.type = DataType::UINT8;
-  hp.device = Device::GPU_CUDA;
-  hp.context = expected_owner;
+  node.cached_output_high_precision->publish_image_value(publication.value);
   node.cached_output_high_precision->data["marker"] = 17;
   node.hp_version = 5;
   graph.add_node(node);
@@ -6256,17 +6382,18 @@ TEST(DownsampleExecutorSplit,
     const auto* state = proxy.find_state(1);
     ASSERT_NE(state, nullptr);
     ASSERT_TRUE(state->output.has_value());
-    const ImageBuffer& output = state->output->image_buffer;
-    EXPECT_EQ(output.width, 96);
-    EXPECT_EQ(output.height, 48);
-    EXPECT_EQ(output.channels, 4);
-    EXPECT_EQ(output.type, DataType::UINT8);
-    EXPECT_EQ(output.device, Device::GPU_CUDA);
-    EXPECT_EQ(output.data, nullptr);
-    ASSERT_NE(output.context, nullptr);
-    EXPECT_EQ(output.context.get(), expected_owner.get());
-    EXPECT_FALSE(output.context.owner_before(expected_owner));
-    EXPECT_FALSE(expected_owner.owner_before(output.context));
+    ASSERT_TRUE(state->output->has_image_value());
+    const Value& output = state->output->image_value();
+    EXPECT_EQ(image_bounds_width(output.image_bounds()), 96u);
+    EXPECT_EQ(image_bounds_height(output.image_bounds()), 48u);
+    EXPECT_EQ(output.dense_tensor_descriptor().shape,
+              (std::vector<std::size_t>{48u, 96u, 4u}));
+    EXPECT_EQ(output.dense_tensor_descriptor().storage_encoding.bit_width, 8u);
+    EXPECT_EQ(output.revision_id(), expected_revision);
+    EXPECT_EQ(output.allocation_identity(), expected_allocation);
+    EXPECT_EQ(output.storage_binding(), expected_binding);
+    EXPECT_EQ(output.storage_binding().device.backend(), DeviceBackend::CUDA);
+    EXPECT_FALSE(output.storage_binding().host_visible);
     EXPECT_EQ(state->output->data.at("marker").as_int64(), 17);
     EXPECT_EQ(state->version, version);
     ASSERT_TRUE(state->region_hp.has_value());
@@ -6345,10 +6472,9 @@ TEST(ComputeTaskRunnerSplit,
   ASSERT_TRUE(graph.node(2).hp_region.has_value());
   EXPECT_EQ(*graph.node(2).hp_region, partial_region);
   EXPECT_FALSE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
-  EXPECT_FLOAT_EQ(
-      toCvMat(graph.node(2).cached_output_high_precision->image_buffer)
-          .at<float>(0, 0),
-      91.0f);
+  EXPECT_FLOAT_EQ(project_image_mat(*graph.node(2).cached_output_high_precision)
+                      .at<float>(0, 0),
+                  91.0f);
 
   g_partial_cache_producer_calls.store(0, std::memory_order_relaxed);
   g_partial_cache_consumer_calls.store(0, std::memory_order_relaxed);
@@ -6374,7 +6500,7 @@ TEST(ComputeTaskRunnerSplit,
   EXPECT_EQ(
       g_partial_cache_consumer_observed_value.load(std::memory_order_acquire),
       5);
-  EXPECT_FLOAT_EQ(toCvMat(output.image_buffer).at<float>(0, 0), 5.0f);
+  EXPECT_FLOAT_EQ(project_image_mat(output).at<float>(0, 0), 5.0f);
   EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
   EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(3)));
   ASSERT_TRUE(graph.node(2).hp_region.has_value());
@@ -6448,10 +6574,11 @@ TEST(ComputeTaskRunnerSplit,
       g_exact_sibling_input_roi_mismatches.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(g_exact_sibling_monolithic_calls.load(std::memory_order_relaxed),
             0);
-  ASSERT_EQ(output.image_buffer.width, 32);
-  ASSERT_EQ(output.image_buffer.height, 16);
-  EXPECT_FLOAT_EQ(toCvMat(output.image_buffer).at<float>(0, 0), 13.0f);
-  EXPECT_FLOAT_EQ(toCvMat(output.image_buffer).at<float>(0, 31), 13.0f);
+  const cv::Mat output_mat = project_image_mat(output);
+  ASSERT_EQ(output_mat.cols, 32);
+  ASSERT_EQ(output_mat.rows, 16);
+  EXPECT_FLOAT_EQ(output_mat.at<float>(0, 0), 13.0f);
+  EXPECT_FLOAT_EQ(output_mat.at<float>(0, 31), 13.0f);
   EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
 
   runtime.stop();
@@ -6519,9 +6646,7 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
   EXPECT_EQ(
       *graph.node(1).hp_region,
       RegionSet::from_image_rect({image_region_domain(), 0, 256, 0, 256}));
-  ASSERT_EQ(output.image_buffer.width, 256);
-  ASSERT_EQ(output.image_buffer.height, 256);
-  const cv::Mat output_mat = toCvMat(output.image_buffer);
+  const cv::Mat output_mat = project_image_mat(output);
   ASSERT_EQ(output_mat.rows, 256);
   ASSERT_EQ(output_mat.cols, 256);
   EXPECT_NEAR(output_mat.at<float>(0, 0), 64.0f / 255.0f, 1.0f / 255.0f);
@@ -6849,14 +6974,14 @@ TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
 
   compute::RealtimeProxyWriteBuffer buffer(proxy_graph);
   NodeOutput& staged = buffer.ensure_output(1);
-  toCvMat(staged.image_buffer).setTo(9.0f);
+  staged = make_image_output(4, 4, 1, 9.0f);
   buffer.mark_updated(
       1, RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}), true,
       42);
 
   ASSERT_NE(proxy_graph.find_output(1), nullptr);
   EXPECT_FLOAT_EQ(
-      toCvMat(proxy_graph.find_output(1)->image_buffer).at<float>(0, 0), 3.0f);
+      project_image_mat(*proxy_graph.find_output(1)).at<float>(0, 0), 3.0f);
   ASSERT_EQ(graph.find_node(1)->cached_output_high_precision, std::nullopt);
 
   buffer.commit_to_proxy_graph();
@@ -6864,8 +6989,8 @@ TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
   const auto* committed_state = proxy_graph.find_state(1);
   ASSERT_NE(committed_state, nullptr);
   ASSERT_TRUE(committed_state->output.has_value());
-  EXPECT_FLOAT_EQ(
-      toCvMat(committed_state->output->image_buffer).at<float>(0, 0), 9.0f);
+  EXPECT_FLOAT_EQ(project_image_mat(*committed_state->output).at<float>(0, 0),
+                  9.0f);
   EXPECT_EQ(committed_state->version, 8);
   EXPECT_EQ(committed_state->region_hp,
             RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}))
@@ -6969,17 +7094,16 @@ TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {
 
   compute::HighPrecisionDirtyWriteBuffer buffer;
   NodeOutput& staged = buffer.ensure_output(graph.node(1));
-  toCvMat(staged.image_buffer).setTo(6.0f);
+  staged = make_image_output(4, 4, 1, 6.0f);
   buffer.mark_updated(
       graph.node(1),
       RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}), true,
       77);
 
   ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
-  EXPECT_FLOAT_EQ(
-      toCvMat(graph.node(1).cached_output_high_precision->image_buffer)
-          .at<float>(0, 0),
-      2.0f);
+  EXPECT_FLOAT_EQ(project_image_mat(*graph.node(1).cached_output_high_precision)
+                      .at<float>(0, 0),
+                  2.0f);
   EXPECT_EQ(graph.node(1).hp_version, 3);
   EXPECT_EQ(graph.node(1).hp_region,
             RegionSet::from_image_rect({image_region_domain(), 0, 1, 0, 1}));
@@ -6988,10 +7112,9 @@ TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {
   buffer.commit_to_graph(graph);
 
   ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
-  EXPECT_FLOAT_EQ(
-      toCvMat(graph.node(1).cached_output_high_precision->image_buffer)
-          .at<float>(0, 0),
-      6.0f);
+  EXPECT_FLOAT_EQ(project_image_mat(*graph.node(1).cached_output_high_precision)
+                      .at<float>(0, 0),
+                  6.0f);
   EXPECT_EQ(graph.node(1).hp_version, 4);
   EXPECT_EQ(graph.node(1).hp_region,
             RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}))
@@ -7029,8 +7152,9 @@ TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {
   request.dirty_roi = (PixelRect{8, 8, 16, 16});
   NodeOutput& output = compute.compute(graph, request);
 
-  EXPECT_EQ(output.image_buffer.width, 64);
-  EXPECT_EQ(output.image_buffer.height, 64);
+  const ImageBounds& output_bounds = output.image_value().image_bounds();
+  EXPECT_EQ(image_bounds_width(output_bounds), 64u);
+  EXPECT_EQ(image_bounds_height(output_bounds), 64u);
   ASSERT_TRUE(graph.last_dirty_region_snapshot.has_value());
   EXPECT_FALSE(graph.last_dirty_region_snapshot->actual_dirty_rois.empty());
   ASSERT_TRUE(graph.last_compute_plan.has_value());
@@ -7092,12 +7216,14 @@ TEST(GlobalHighPrecisionDirtyUpdate, ForceRecacheRecomputesFullHpFrame) {
   full_request.cache.precision = "float32";
   full_request.cache.disable_disk_cache = true;
   NodeOutput& initial_output = compute.compute(graph, full_request);
-  ASSERT_EQ(initial_output.image_buffer.width, 128);
-  ASSERT_EQ(initial_output.image_buffer.height, 128);
+  ASSERT_EQ(image_bounds_width(initial_output.image_value().image_bounds()),
+            128u);
+  ASSERT_EQ(image_bounds_height(initial_output.image_value().image_bounds()),
+            128u);
 
   graph.mutate_node_runtime_state(2, [](GraphModel::NodeRuntimeState& state) {
     ASSERT_TRUE(state.cached_output_high_precision.has_value());
-    toCvMat(state.cached_output_high_precision->image_buffer).setTo(9.0f);
+    state.cached_output_high_precision = make_image_output(128, 128, 1, 9.0f);
   });
 
   ComputeService::Request dirty_request;
@@ -7109,9 +7235,9 @@ TEST(GlobalHighPrecisionDirtyUpdate, ForceRecacheRecomputesFullHpFrame) {
   dirty_request.dirty_roi = (PixelRect{16, 16, 16, 16});
   NodeOutput& forced_output = compute.compute(graph, dirty_request);
 
-  ASSERT_EQ(forced_output.image_buffer.width, 128);
-  ASSERT_EQ(forced_output.image_buffer.height, 128);
-  const cv::Mat forced_mat = toCvMat(forced_output.image_buffer);
+  const cv::Mat forced_mat = project_image_mat(forced_output);
+  ASSERT_EQ(forced_mat.cols, 128);
+  ASSERT_EQ(forced_mat.rows, 128);
   for (int y = 0; y < forced_mat.rows; ++y) {
     for (int x = 0; x < forced_mat.cols; ++x) {
       EXPECT_FLOAT_EQ(forced_mat.at<float>(y, x), 2.0f)
@@ -7155,12 +7281,14 @@ TEST(RealTimeDirtyUpdate, ForceRecacheHpSiblingCommitsCompleteHpOutput) {
   full_request.cache.precision = "float32";
   full_request.cache.disable_disk_cache = true;
   NodeOutput& initial_output = compute.compute(graph, full_request);
-  ASSERT_EQ(initial_output.image_buffer.width, 128);
-  ASSERT_EQ(initial_output.image_buffer.height, 128);
+  ASSERT_EQ(image_bounds_width(initial_output.image_value().image_bounds()),
+            128u);
+  ASSERT_EQ(image_bounds_height(initial_output.image_value().image_bounds()),
+            128u);
 
   graph.mutate_node_runtime_state(2, [](GraphModel::NodeRuntimeState& state) {
     ASSERT_TRUE(state.cached_output_high_precision.has_value());
-    toCvMat(state.cached_output_high_precision->image_buffer).setTo(9.0f);
+    state.cached_output_high_precision = make_image_output(128, 128, 1, 9.0f);
   });
 
   ComputeService::Request rt_request;
@@ -7172,11 +7300,12 @@ TEST(RealTimeDirtyUpdate, ForceRecacheHpSiblingCommitsCompleteHpOutput) {
   rt_request.dirty_roi = (PixelRect{16, 16, 16, 16});
   NodeOutput& rt_output = compute.compute(graph, rt_request);
 
-  EXPECT_GT(rt_output.image_buffer.width, 0);
-  EXPECT_GT(rt_output.image_buffer.height, 0);
+  ASSERT_TRUE(rt_output.has_image_value());
+  EXPECT_GT(image_bounds_width(rt_output.image_value().image_bounds()), 0u);
+  EXPECT_GT(image_bounds_height(rt_output.image_value().image_bounds()), 0u);
   ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
   const cv::Mat hp_mat =
-      toCvMat(graph.node(2).cached_output_high_precision->image_buffer);
+      project_image_mat(*graph.node(2).cached_output_high_precision);
   ASSERT_EQ(hp_mat.cols, 128);
   ASSERT_EQ(hp_mat.rows, 128);
   for (int y = 0; y < hp_mat.rows; ++y) {

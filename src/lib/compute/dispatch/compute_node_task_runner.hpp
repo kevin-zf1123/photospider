@@ -247,19 +247,23 @@ class NodeTaskRunner {
   bool try_satisfy_tile_from_disk_cache(const Node& target_node, int node_idx);
 
   /**
-   * @brief Ensures a tile output buffer exists for the planned node.
+   * @brief Ensures one Host output binding exists for the planned tiled node.
    *
    * @param node_idx Dense planned-node index for output staging state.
    * @param target_node Node whose fallback dimensions may seed allocation.
    * @param image_inputs Ready image inputs used to infer channels and type.
-   * @return Mutable buffer for tile writes, or nullptr when the node became
-   * precomputed before buffer allocation.
-   * @throws std::bad_alloc or OpenCV allocation exceptions when creating a new
-   * aligned image buffer.
+   * @return Borrowed open binding for checked tile grants, or nullptr when the
+   * node became precomputed before allocation.
+   * @throws std::invalid_argument or std::overflow_error for invalid canonical
+   * input facts or output-plan arithmetic.
+   * @throws std::bad_alloc when creating plan, aligned Value allocation, or
+   * binding state fails.
    * @note Callers must treat nullptr as a successful skip, not as a compute
    * error, because another tile task has already provided whole-node output.
+   * The returned pointer remains stable until the last successful sibling
+   * moves and seals the binding.
    */
-  ImageBuffer* ensure_tile_output_buffer(
+  HostOutputBinding* ensure_tile_output_binding(
       int node_idx, const Node& target_node,
       const std::vector<const NodeOutput*>& image_inputs);
 
@@ -383,6 +387,13 @@ class NodeTaskRunner {
 
   /** @brief Mutexes guarding per-node temp output allocation. */
   std::vector<std::unique_ptr<std::mutex>> output_mutexes_;
+
+  /**
+   * @brief Per-node unpublished Host bindings shared by sibling tile tasks.
+   * @note A slot is allocated once under its output mutex and moved only by the
+   * last successfully completed tile before formal temp-result publication.
+   */
+  std::vector<std::unique_ptr<HostOutputBinding>> tile_output_bindings_;
 
   /** @brief Whether in-memory and disk cache should be bypassed. */
   bool force_recache_;

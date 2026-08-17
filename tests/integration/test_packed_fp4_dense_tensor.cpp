@@ -412,15 +412,15 @@ TEST(PackedFp4DenseTensor, MemoryCacheRetainsAndDiskCacheRejectsBeforeEffects) {
   node.id = 17;
   node.caches.push_back({"image", "packed.png"});
   node.cached_output_high_precision = NodeOutput{};
-  node.cached_output_high_precision->image_value = source;
+  node.cached_output_high_precision->publish_image_value(source);
   node.cached_output_high_precision->data["tag"] = std::string("packed");
   node.hp_region = value_image_adapter::full_node_output_region(
       *node.cached_output_high_precision);
   ASSERT_TRUE(compute::ComputeCachePolicy::has_reusable_output(node));
   const NodeOutput* cached = compute::ComputeCachePolicy::reusable_output(node);
   ASSERT_NE(cached, nullptr);
-  EXPECT_EQ(cached->image_value.revision_id(), source.revision_id());
-  EXPECT_EQ(cached->image_value.blocked_layout(), source.blocked_layout());
+  EXPECT_EQ(cached->image_value().revision_id(), source.revision_id());
+  EXPECT_EQ(cached->image_value().blocked_layout(), source.blocked_layout());
 
   const std::filesystem::path root = cache_root("fail-closed");
   std::error_code ignored;

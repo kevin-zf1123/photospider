@@ -33,7 +33,9 @@
 #include "compute/compute_geometry.hpp"  // NOLINT(build/include_subdir)
 #include "core/ops.hpp"
 #include "core/param_utils.hpp"
-#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "core/value_image_adapter.hpp"  // NOLINT(build/include_subdir)
+#include "graph/graph_model.hpp"         // NOLINT(build/include_subdir)
+#include "photospider/data/image_view.hpp"
 
 namespace ps::providers::opencv {
 
@@ -178,6 +180,60 @@ static MonolithicOpFunc fence_monolithic_operation(const char* operation_key,
       throw_translated_opencv_exception(operation_key, error);
     }
   };
+}
+
+/**
+ * @brief Creates one callback-local compatibility image from a canonical input.
+ *
+ * @param output Private runtime output whose permanent `image` Value is read.
+ * @param missing_message Operation-specific missing-input diagnostic.
+ * @return Independently owned CPU projection valid for the current legacy
+ * OpenCV callback only.
+ * @throws GraphError with `GraphErrc::MissingDependency` when the canonical
+ * image output is absent.
+ * @throws std::invalid_argument when the Value cannot be projected through the
+ * current ImageBuffer/OpenCV boundary.
+ * @throws std::overflow_error when image arithmetic is unrepresentable.
+ * @throws std::bad_alloc when projection storage cannot allocate.
+ * @note The returned ImageBuffer is never stored in NodeOutput, formal cache,
+ * dirty state, or RT state and therefore cannot become allocation or revision
+ * authority.
+ */
+static ImageBuffer project_legacy_input_image(const NodeOutput& output,
+                                              const char* missing_message) {
+  if (!output.has_image_value()) {
+    throw GraphError(GraphErrc::MissingDependency, missing_message);
+  }
+  return value_image_adapter::snapshot_cpu_image_buffer(output.image_value());
+}
+
+/**
+ * @brief Imports one legacy OpenCV result through the Host output lifecycle.
+ *
+ * @param output Mutable private result that must not already contain an image.
+ * @param image Callback-owned CPU compatibility descriptor to consume.
+ * @return Nothing after publishing one canonical named Value and clearing the
+ * compatibility owner.
+ * @throws std::invalid_argument for a malformed image or destination.
+ * @throws std::logic_error when output already carries image authority.
+ * @throws std::overflow_error when output-plan arithmetic is unrepresentable.
+ * @throws std::bad_alloc when the frozen plan, aligned Host allocation, or
+ * publication metadata cannot allocate.
+ * @note This is the explicit DI-2 legacy-operation edge. The callback-owned
+ * allocation exists only until the bytes are copied into a Host binding; the
+ * returned NodeOutput contains no compatibility allocation.
+ */
+static void publish_legacy_output_image(NodeOutput* output, ImageBuffer image) {
+  if (output == nullptr) {
+    throw std::invalid_argument(
+        "OpenCV output publication requires a destination");
+  }
+  if (output->has_image_value() || output->has_compatibility_image()) {
+    throw std::logic_error(
+        "OpenCV output publication requires an empty image destination");
+  }
+  output->compatibility_image = std::move(image);
+  value_image_adapter::import_node_output_compatibility_image(output);
 }
 
 /**
@@ -636,12 +692,20 @@ static void apply_channel_mapping(const plugin::ParameterValue::Object* mapping,
  */
 static PixelSize cached_image_size(
     const std::optional<NodeOutput>& output_opt) noexcept {
-  if (!output_opt)
+  if (!output_opt || !output_opt->has_image_value())
     return PixelSize{};
-  const auto& buf = output_opt->image_buffer;
-  if (buf.width <= 0 || buf.height <= 0)
+  try {
+    const ImageView view(output_opt->image_value());
+    const std::size_t maximum =
+        static_cast<std::size_t>(std::numeric_limits<int>::max());
+    if (view.width() > maximum || view.height() > maximum) {
+      return PixelSize{};
+    }
+    return PixelSize{static_cast<int>(view.width()),
+                     static_cast<int>(view.height())};
+  } catch (...) {
     return PixelSize{};
-  return PixelSize{buf.width, buf.height};
+  }
 }
 
 /**
@@ -1299,7 +1363,7 @@ static NodeOutput op_coordinate_pattern(
   }
 
   NodeOutput result;
-  result.image_buffer = fromCvMat(output);
+  publish_legacy_output_image(&result, fromCvMat(output));
   return result;
 }
 
@@ -1329,7 +1393,7 @@ static NodeOutput op_image_source_path(
 
   const auto codec = providers::make_configured_image_artifact_codec();
   NodeOutput result;
-  result.image_buffer = codec->decode(path);
+  publish_legacy_output_image(&result, codec->decode(path));
   return result;
 }
 
@@ -1359,7 +1423,7 @@ static NodeOutput op_constant_image(
   cv::Mat out_mat(height, width, CV_MAKETYPE(CV_32F, channels), fill_value);
 
   NodeOutput result;
-  result.image_buffer = fromCvMat(out_mat);
+  publish_legacy_output_image(&result, fromCvMat(out_mat));
   return result;
 }
 
@@ -1444,7 +1508,7 @@ static NodeOutput op_perlin_noise(
   }
 
   NodeOutput result;
-  result.image_buffer = fromCvMat(noise_image);
+  publish_legacy_output_image(&result, fromCvMat(noise_image));
   return result;
 }
 
@@ -1464,17 +1528,19 @@ static NodeOutput op_convolve(const Node& node,
                               const std::vector<const NodeOutput*>& inputs) {
   PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:convolve");
   // Defensive checks against cold-start/invalid inputs
-  if (inputs.size() < 2 || inputs[0]->image_buffer.width == 0 ||
-      inputs[0]->image_buffer.height == 0 ||
-      inputs[1]->image_buffer.width == 0 ||
-      inputs[1]->image_buffer.height == 0) {
+  if (inputs.size() < 2 || !inputs[0]->has_image_value() ||
+      !inputs[1]->has_image_value()) {
     throw GraphError(
         GraphErrc::MissingDependency,
         "Convolve requires two non-empty input images (src and kernel).");
   }
 
-  cv::Mat src = toCvMat(inputs[0]->image_buffer);
-  cv::Mat kernel = toCvMat(inputs[1]->image_buffer);
+  ImageBuffer source_projection = project_legacy_input_image(
+      *inputs[0], "Convolve requires a non-empty source image.");
+  ImageBuffer kernel_projection = project_legacy_input_image(
+      *inputs[1], "Convolve requires a non-empty kernel image.");
+  cv::Mat src = toCvMat(source_projection);
+  cv::Mat kernel = toCvMat(kernel_projection);
 
   if (src.empty())
     throw GraphError(GraphErrc::MissingDependency,
@@ -1523,7 +1589,7 @@ static NodeOutput op_convolve(const Node& node,
   }
 
   NodeOutput result;
-  result.image_buffer = fromCvMat(out_f32);
+  publish_legacy_output_image(&result, fromCvMat(out_f32));
   return result;
 }
 
@@ -1541,11 +1607,13 @@ static NodeOutput op_convolve(const Node& node,
 static NodeOutput op_resize(const Node& node,
                             const std::vector<const NodeOutput*>& inputs) {
   PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:resize");
-  if (inputs.empty() || inputs[0]->image_buffer.width == 0)
+  if (inputs.empty() || !inputs[0]->has_image_value())
     throw GraphError(GraphErrc::MissingDependency,
                      "Resize requires an input image.");
 
-  cv::Mat input = toCvMat(inputs[0]->image_buffer);
+  ImageBuffer input_projection =
+      project_legacy_input_image(*inputs[0], "Resize requires an input image.");
+  cv::Mat input = toCvMat(input_projection);
 
   const auto& P = node.runtime_parameters;
   int width = as_int_flexible(P, "width", 0),
@@ -1561,11 +1629,11 @@ static NodeOutput op_resize(const Node& node,
   cv::Mat output;
   cv::resize(input, output, cv::Size(width, height), 0, 0, flag);
   NodeOutput result;
-  result.image_buffer = fromCvMat(output);
+  publish_legacy_output_image(&result, fromCvMat(output));
   const auto& in_space = inputs[0]->space;
   result.space = in_space;
-  const int in_w = inputs[0]->image_buffer.width;
-  const int in_h = inputs[0]->image_buffer.height;
+  const int in_w = input_projection.width;
+  const int in_h = input_projection.height;
   double scale_x =
       (in_w > 0) ? static_cast<double>(width) / static_cast<double>(in_w) : 1.0;
   double scale_y = (in_h > 0)
@@ -1605,11 +1673,13 @@ static NodeOutput op_resize(const Node& node,
 static NodeOutput op_crop(const Node& node,
                           const std::vector<const NodeOutput*>& inputs) {
   PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:crop");
-  if (inputs.empty() || inputs[0]->image_buffer.width == 0)
+  if (inputs.empty() || !inputs[0]->has_image_value())
     throw GraphError(GraphErrc::MissingDependency,
                      "Crop requires an input image.");
 
-  cv::Mat src = toCvMat(inputs[0]->image_buffer);
+  ImageBuffer input_projection =
+      project_legacy_input_image(*inputs[0], "Crop requires an input image.");
+  cv::Mat src = toCvMat(input_projection);
 
   const auto& P = node.runtime_parameters;
   int x, y, w, h;
@@ -1643,7 +1713,7 @@ static NodeOutput op_crop(const Node& node,
   if (intersect.width > 0 && intersect.height > 0)
     src(intersect).copyTo(canvas(dst_roi));
   NodeOutput result;
-  result.image_buffer = fromCvMat(canvas);
+  publish_legacy_output_image(&result, fromCvMat(canvas));
   const auto& in_space = inputs[0]->space;
   result.space = in_space;
   auto translation =
@@ -1692,11 +1762,13 @@ static NodeOutput op_crop(const Node& node,
 static NodeOutput op_extract_channel(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
   PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:extract_channel");
-  if (inputs.empty() || inputs[0]->image_buffer.width == 0)
+  if (inputs.empty() || !inputs[0]->has_image_value())
     throw GraphError(GraphErrc::MissingDependency,
                      "Extract channel requires an input image.");
 
-  cv::Mat input = toCvMat(inputs[0]->image_buffer);
+  ImageBuffer input_projection = project_legacy_input_image(
+      *inputs[0], "Extract channel requires an input image.");
+  cv::Mat input = toCvMat(input_projection);
 
   std::string ch_str = as_str(node.runtime_parameters, "channel", "a");
   int ch_idx = -1;
@@ -1714,7 +1786,7 @@ static NodeOutput op_extract_channel(
   std::vector<cv::Mat> channels;
   cv::split(input, channels);
   NodeOutput result;
-  result.image_buffer = fromCvMat(channels[ch_idx]);
+  publish_legacy_output_image(&result, fromCvMat(channels[ch_idx]));
   return result;
 }
 
@@ -1940,8 +2012,9 @@ static NodeOutput op_gaussian_blur_monolithic(
     throw GraphError(GraphErrc::MissingDependency,
                      "gaussian_blur requires one input image.");
   }
-  const auto& in_buf = inputs[0]->image_buffer;
-  cv::Mat input_mat = toCvMat(in_buf);
+  ImageBuffer input_projection = project_legacy_input_image(
+      *inputs[0], "gaussian_blur requires one input image.");
+  cv::Mat input_mat = toCvMat(input_projection);
 
   const auto& P = node.runtime_parameters;
   int k = as_int_flexible(P, "ksize", 3);
@@ -1956,7 +2029,7 @@ static NodeOutput op_gaussian_blur_monolithic(
                    cv::BORDER_REPLICATE);
 
   NodeOutput result;
-  result.image_buffer = fromCvMat(output_mat);
+  publish_legacy_output_image(&result, fromCvMat(output_mat));
   return result;
 }
 
@@ -2286,8 +2359,12 @@ static NodeOutput op_add_weighted_monolithic(
     throw GraphError(GraphErrc::MissingDependency,
                      "add_weighted requires two input images.");
 
-  cv::Mat input_a = toCvMat(inputs[0]->image_buffer);
-  cv::Mat input_b = toCvMat(inputs[1]->image_buffer);
+  ImageBuffer input_a_projection = project_legacy_input_image(
+      *inputs[0], "add_weighted requires a first input image.");
+  ImageBuffer input_b_projection = project_legacy_input_image(
+      *inputs[1], "add_weighted requires a second input image.");
+  cv::Mat input_a = toCvMat(input_a_projection);
+  cv::Mat input_b = toCvMat(input_b_projection);
   if (input_a.empty() || input_b.empty())
     throw GraphError(GraphErrc::MissingDependency,
                      "add_weighted inputs must be non-empty.");
@@ -2370,7 +2447,7 @@ static NodeOutput op_add_weighted_monolithic(
   }
 
   NodeOutput out;
-  out.image_buffer = fromCvMat(output);
+  publish_legacy_output_image(&out, fromCvMat(output));
   return out;
 }
 
@@ -2391,8 +2468,12 @@ static NodeOutput op_abs_diff_monolithic(
   if (inputs.size() < 2)
     throw GraphError(GraphErrc::MissingDependency,
                      "diff requires two input images.");
-  cv::Mat input_a = toCvMat(inputs[0]->image_buffer);
-  cv::Mat input_b = toCvMat(inputs[1]->image_buffer);
+  ImageBuffer input_a_projection = project_legacy_input_image(
+      *inputs[0], "diff requires a first input image.");
+  ImageBuffer input_b_projection = project_legacy_input_image(
+      *inputs[1], "diff requires a second input image.");
+  cv::Mat input_a = toCvMat(input_a_projection);
+  cv::Mat input_b = toCvMat(input_b_projection);
   if (input_a.empty() || input_b.empty())
     throw GraphError(GraphErrc::MissingDependency,
                      "diff inputs must be non-empty.");
@@ -2435,7 +2516,7 @@ static NodeOutput op_abs_diff_monolithic(
     cv::merge(Oo, output);
   }
   NodeOutput out;
-  out.image_buffer = fromCvMat(output);
+  publish_legacy_output_image(&out, fromCvMat(output));
   return out;
 }
 
@@ -2456,8 +2537,12 @@ static NodeOutput op_multiply_monolithic(
   if (inputs.size() < 2)
     throw GraphError(GraphErrc::MissingDependency,
                      "multiply requires two input images.");
-  cv::Mat input_a = toCvMat(inputs[0]->image_buffer);
-  cv::Mat input_b = toCvMat(inputs[1]->image_buffer);
+  ImageBuffer input_a_projection = project_legacy_input_image(
+      *inputs[0], "multiply requires a first input image.");
+  ImageBuffer input_b_projection = project_legacy_input_image(
+      *inputs[1], "multiply requires a second input image.");
+  cv::Mat input_a = toCvMat(input_a_projection);
+  cv::Mat input_b = toCvMat(input_b_projection);
   if (input_a.empty() || input_b.empty())
     throw GraphError(GraphErrc::MissingDependency,
                      "multiply inputs must be non-empty.");
@@ -2469,7 +2554,7 @@ static NodeOutput op_multiply_monolithic(
   cv::Mat output;
   cv::multiply(input_a, input_b, output, scale);
   NodeOutput out;
-  out.image_buffer = fromCvMat(output);
+  publish_legacy_output_image(&out, fromCvMat(output));
   return out;
 }
 

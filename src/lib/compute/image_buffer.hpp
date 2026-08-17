@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 
+#include "core/host_output_authorization.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/geometry.hpp"
 #include "photospider/core/image_buffer.hpp"
 
@@ -49,21 +50,26 @@ struct InputTile {
 };
 
 /**
- * @brief Writable non-owning view over an output image region.
+ * @brief Borrowed checked Host write capability for an output image region.
  *
  * OutputTile is the private compute write representation passed to backend
- * adapters and operation-host callbacks. Its ROI is a backend-neutral value;
- * an OpenCV provider may translate it only when creating a local matrix view.
+ * adapters and operation-host callbacks. Its immutable plan fixes metadata and
+ * ownership while its active grant is the sole mutable authority. The ROI is a
+ * backend-neutral projection of the grant's exact image Region.
  *
  * @throws Nothing for value operations.
- * @note The buffer pointer is mutable because output tiles are the only tile
- *       views that may write pixels or update the destination buffer contents.
+ * @note Neither pointer is owning. Both remain valid only during one trusted
+ * callback. Adapters may create a callback-local ABI v2 ImageBuffer alias, but
+ * no mutable pointer or owner may survive grant retirement.
  */
 struct OutputTile {
-  /** @brief Borrowed destination buffer that receives tile output. */
-  ImageBuffer* buffer = nullptr;
+  /** @brief Borrowed immutable output plan. */
+  const DenseImageOutputPlan* plan = nullptr;
 
-  /** @brief Pixel ROI inside buffer, clipped by the executor before dispatch.
+  /** @brief Borrowed active tile grant providing checked mutable spans. */
+  HostOutputWriteGrant* grant = nullptr;
+
+  /** @brief Pixel ROI matching the grant, clipped before dispatch.
    */
   PixelRect roi;
 };
@@ -71,9 +77,9 @@ struct OutputTile {
 /**
  * @brief Execution-visible unit of tiled node work.
  *
- * TileTask binds one node, one writable output tile, and all read-only input
- * tiles required by the selected operator. The task owns no image memory; all
- * buffer pointers are borrowed for the duration of the tiled operator callback.
+ * TileTask binds one node, one checked output grant, and all read-only input
+ * compatibility tiles required by the selected operator. The task owns no
+ * image memory or authority; all pointers are borrowed for the callback.
  *
  * @throws Nothing for value operations except vector allocation on mutation.
  * @note Input tiles may point to normalized temporary NodeOutput storage owned

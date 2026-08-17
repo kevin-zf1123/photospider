@@ -1,12 +1,15 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "core/cache_metadata_codec.hpp"
 #include "core/image_artifact_codec.hpp"
 #include "graph/graph_model.hpp"
+#include "graph/image_statistics_store.hpp"
 
 namespace ps {
 
@@ -45,13 +48,75 @@ class GraphCacheService {
    * @param image_codec Shared codec used for every image cache read and write.
    * @param metadata_codec Shared codec used for every named-value metadata
    * read and write.
+   * @param maximum_statistics_entries Positive bounded derived statistics
+   * result capacity owned by this cache service.
    * @throws std::invalid_argument when either codec owner is empty.
+   * @throws std::invalid_argument when the statistics bound is zero or exceeds
+   * its source-private frozen maximum.
+   * @throws std::bad_alloc when statistics store ownership cannot allocate.
    * @note Both immutable codec owners are retained for the complete service
    * lifetime and may be shared by independent graph services. They own no graph
    * state, path derivation, timing, diagnostic, or cache policy.
    */
   GraphCacheService(std::shared_ptr<const ImageArtifactCodec> image_codec,
-                    std::shared_ptr<const CacheMetadataCodec> metadata_codec);
+                    std::shared_ptr<const CacheMetadataCodec> metadata_codec,
+                    std::size_t maximum_statistics_entries =
+                        kDefaultImageStatisticsCacheEntries);
+
+  /**
+   * @brief Schedules or reuses one Value-backed derived statistics request.
+   * @param value Exact sealed image Value retained by scheduled scan work.
+   * @param content_digest Optional already-known canonical content identity.
+   * @param query Complete normalized bounded observation request.
+   * @param scheduler Trusted internal one-task ownership receiver.
+   * @return Move-only request providing explicit cancellation and one future.
+   * @throws Validation, scheduling, synchronization, future, or allocation
+   * exceptions from the owned statistics store.
+   * @note No compatibility ImageBuffer, allocation identity, graph revision,
+   * HP/RT generation, descriptor digest, or disk path participates in the key.
+   */
+  ScheduledImageStatistics schedule_image_statistics(
+      Value value, std::optional<ContentDigest> content_digest,
+      ImageStatisticsQuery query,
+      const ImageStatisticsStore::Scheduler& scheduler) const;
+
+  /**
+   * @brief Looks up one complete derived statistics cache identity.
+   * @param key Complete validated Value-backed statistics key.
+   * @return Copied result or nullopt when absent.
+   * @throws Validation, synchronization, or allocation exceptions.
+   * @note Lookup mutates no graph, Value, formal cache, or eviction ordering.
+   */
+  std::optional<ImageStatisticsResult> lookup_image_statistics(
+      const ImageStatisticsCacheKey& key) const;
+
+  /**
+   * @brief Invalidates derived results for one exact Value revision.
+   * @param revision Valid process-local immutable Value revision.
+   * @return Number of removed derived results.
+   * @throws std::invalid_argument for an invalid revision.
+   * @throws std::system_error when cache synchronization fails.
+   * @note Allocation identity, Graph revision, HP/RT generation, Region, and
+   * the referenced Value remain unchanged.
+   */
+  std::size_t invalidate_image_statistics_revision(
+      ValueRevisionId revision) const;
+
+  /**
+   * @brief Evicts every retained derived statistics result.
+   * @return Number of removed entries.
+   * @throws std::system_error when cache synchronization fails.
+   * @note In-flight requests retain their Value and may publish later unless
+   * explicitly cancelled; formal memory and disk cache state is untouched.
+   */
+  std::size_t clear_image_statistics() const;
+
+  /**
+   * @brief Returns the current number of retained derived statistics results.
+   * @return Count within the configured immutable bound.
+   * @throws std::system_error when cache synchronization fails.
+   */
+  std::size_t image_statistics_size() const;
 
   /**
    * @brief Builds the per-node cache directory path under a graph cache root.
@@ -154,14 +219,14 @@ class GraphCacheService {
    * Partial hp_region validity is never serialized; any older configured
    * artifact for that node is removed so a later load cannot relabel stale
    * bytes as complete.
-   * A valid sealed CPU image Value is the serialization authority and is copied
-   * into a temporary codec-compatible ImageBuffer; otherwise the legacy
-   * ImageBuffer is used. Opaque non-CPU images are skipped without unsafe
-   * mapping, while named ParameterValue outputs cross the metadata codec; a
-   * future device adapter may add explicit download. The current Value must be
-   * image-faceted, Strided, unquantized, host-readable, and whole-byte
-   * compatible before the save mechanism proceeds. Runtime allocation and
-   * Value revision identities are never persisted.
+   * A valid sealed CPU image Value is the sole serialization authority and is
+   * copied into a callback-local codec-compatible ImageBuffer. Nonempty
+   * compatibility staging is rejected instead of serving as a fallback.
+   * Named ParameterValue outputs cross the metadata codec; a future device
+   * adapter may add explicit download. The current Value must be image-faceted,
+   * Strided, unquantized, host-readable, and whole-byte compatible before the
+   * save mechanism proceeds. Runtime allocation and Value revision identities
+   * are never persisted.
    */
   void save_cache_if_configured(GraphModel& graph, const Node& node,
                                 const std::string& cache_precision) const;
@@ -207,7 +272,7 @@ class GraphCacheService {
    * loaded; false for partial memory validity, cache miss, skipped load, or
    * read/parse error.
    * @throws std::bad_alloc from diagnostic/output/Value storage. Disk read,
-   * parse, and CPU Value normalization failures are recorded through
+   * parse, and explicit CPU Value import failures are recorded through
    * GraphModel's locked disk-cache diagnostic API and reported as false.
    * @note This preserves the legacy try-load bool contract while making disk
    * errors distinguishable from misses through graph diagnostics. Successful
@@ -226,7 +291,7 @@ class GraphCacheService {
    * @return true on disk cache hit; false on cache miss, skipped load, or
    * read/parse error.
    * @throws std::bad_alloc from diagnostic/output/Value storage. Disk read,
-   * parse, and CPU Value normalization failures are recorded through
+   * parse, and explicit CPU Value import failures are recorded through
    * GraphModel's locked disk-cache diagnostic API and reported as false.
    * @note Used by execution worker paths that stage outputs outside the
    * formal HP cache before committing. Existing complete or partial formal
@@ -252,6 +317,13 @@ class GraphCacheService {
    * diagnostic state.
    */
   std::shared_ptr<const CacheMetadataCodec> metadata_codec_;
+
+  /**
+   * @brief Per-service bounded owner of discardable observed-image results.
+   * @note Accepted tasks retain only its opaque state through settlement; this
+   * member owns no worker, Value, graph, formal cache, or persistence identity.
+   */
+  ImageStatisticsStore image_statistics_store_;
 };
 
 }  // namespace ps

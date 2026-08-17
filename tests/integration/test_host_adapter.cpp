@@ -21,7 +21,8 @@
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "core/param_utils.hpp"
-#include "core/ps_types.hpp"               // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_state_executor.hpp"  // NOLINT(build/include_subdir)
 #include "graph/node.hpp"                  // NOLINT(build/include_subdir)
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
@@ -727,6 +728,57 @@ bool wait_for_host_blocking_source(std::chrono::milliseconds timeout) {
 }
 
 /**
+ * @brief Publishes one deterministic Host-adapter FLOAT32 test image.
+ *
+ * @param width Positive output width.
+ * @param height Positive output height.
+ * @param value Scalar written to every logical sample.
+ * @return NodeOutput containing one canonical sealed image Value.
+ * @throws Allocation, OpenCV, adapter, or Value publication exceptions
+ * unchanged.
+ * @note Mutable ImageBuffer storage exists only inside this helper. The result
+ * carries no compatibility staging and owns a fresh Value revision.
+ */
+NodeOutput make_host_adapter_image_output(int width, int height, float value) {
+  ImageBuffer buffer =
+      make_aligned_cpu_image_buffer(width, height, 1, DataType::FLOAT32);
+  toCvMat(buffer).setTo(value);
+  NodeOutput output;
+  output.publish_image_value(
+      value_image_adapter::snapshot_cpu_image_value(buffer));
+  return output;
+}
+
+/**
+ * @brief Copies one canonical input image into a fresh Host-adapter output.
+ *
+ * @param input Source output containing a Ready host-readable image Value.
+ * @return NodeOutput with identical logical pixels and a fresh allocation and
+ * Value revision.
+ * @throws std::invalid_argument when the input has no canonical image.
+ * @throws Projection, allocation, OpenCV, or Value publication exceptions
+ * unchanged.
+ * @note Both ImageBuffer values are callback-local projections; neither is
+ * retained as formal output authority.
+ */
+NodeOutput copy_host_adapter_image_output(const NodeOutput& input) {
+  if (!input.has_image_value()) {
+    throw std::invalid_argument(
+        "Host adapter image copy requires a canonical image Value.");
+  }
+  const ImageBuffer input_buffer =
+      value_image_adapter::snapshot_cpu_image_buffer(input.image_value());
+  ImageBuffer output_buffer =
+      make_aligned_cpu_image_buffer(input_buffer.width, input_buffer.height,
+                                    input_buffer.channels, input_buffer.type);
+  toCvMat(input_buffer).copyTo(toCvMat(output_buffer));
+  NodeOutput output;
+  output.publish_image_value(
+      value_image_adapter::snapshot_cpu_image_value(output_buffer));
+  return output;
+}
+
+/**
  * @brief Registers deterministic operations used by embedded Host tests.
  *
  * @return Nothing.
@@ -749,11 +801,8 @@ void register_host_adapter_ops() {
                                                    : node.runtime_parameters;
           const int width = as_int_flexible(params, "width", 6);
           const int height = as_int_flexible(params, "height", 4);
-          NodeOutput output;
-          output.image_buffer = make_aligned_cpu_image_buffer(
-              width, height, 1, DataType::FLOAT32);
-          cv::Mat mat = toCvMat(output.image_buffer);
-          mat.setTo(7.0f);
+          NodeOutput output =
+              make_host_adapter_image_output(width, height, 7.0F);
           output.space.absolute_roi = PixelRect{0, 0, width, height};
           output.debug.compute_device = "host-adapter-test";
           return output;
@@ -769,11 +818,8 @@ void register_host_adapter_ops() {
               as_int_flexible(params, "sleep_ms", 50)));
           const int width = as_int_flexible(params, "width", 5);
           const int height = as_int_flexible(params, "height", 3);
-          NodeOutput output;
-          output.image_buffer = make_aligned_cpu_image_buffer(
-              width, height, 1, DataType::FLOAT32);
-          cv::Mat mat = toCvMat(output.image_buffer);
-          mat.setTo(3.0f);
+          NodeOutput output =
+              make_host_adapter_image_output(width, height, 3.0F);
           output.space.absolute_roi = PixelRect{0, 0, width, height};
           output.debug.compute_device = "host-adapter-slow-test";
           return output;
@@ -796,10 +842,8 @@ void register_host_adapter_ops() {
                                                    : node.runtime_parameters;
           const int width = as_int_flexible(params, "width", 5);
           const int height = as_int_flexible(params, "height", 3);
-          NodeOutput output;
-          output.image_buffer = make_aligned_cpu_image_buffer(
-              width, height, 1, DataType::FLOAT32);
-          toCvMat(output.image_buffer).setTo(4.0f);
+          NodeOutput output =
+              make_host_adapter_image_output(width, height, 4.0F);
           output.space.absolute_roi = PixelRect{0, 0, width, height};
           output.debug.compute_device = "host-adapter-blocking-test";
           return output;
@@ -815,11 +859,8 @@ void register_host_adapter_ops() {
           const int height = as_int_flexible(params, "height", 4);
           const int roi_width = as_int_flexible(params, "roi_width", 12);
           const int roi_height = as_int_flexible(params, "roi_height", 9);
-          NodeOutput output;
-          output.image_buffer = make_aligned_cpu_image_buffer(
-              width, height, 1, DataType::FLOAT32);
-          cv::Mat mat = toCvMat(output.image_buffer);
-          mat.setTo(5.0f);
+          NodeOutput output =
+              make_host_adapter_image_output(width, height, 5.0F);
           output.space.absolute_roi = PixelRect{0, 0, roi_width, roi_height};
           output.space.inverse_matrix = {2.0, 0.0, 5.0, 0.0, 3.0,
                                          7.0, 0.0, 0.0, 1.0};
@@ -847,11 +888,7 @@ void register_host_adapter_ops() {
                                  "host adapter identity requires one input");
               }
               const NodeOutput& input = *inputs.front();
-              NodeOutput output;
-              output.image_buffer = make_aligned_cpu_image_buffer(
-                  input.image_buffer.width, input.image_buffer.height,
-                  input.image_buffer.channels, input.image_buffer.type);
-              toCvMat(input.image_buffer).copyTo(toCvMat(output.image_buffer));
+              NodeOutput output = copy_host_adapter_image_output(input);
               output.space.absolute_roi = input.space.absolute_roi;
               output.debug.compute_device = "host-adapter-identity-test";
               (void)node;
@@ -880,11 +917,7 @@ void register_host_adapter_ops() {
                              "host adapter offset_identity requires one input");
           }
           const NodeOutput& input = *inputs.front();
-          NodeOutput output;
-          output.image_buffer = make_aligned_cpu_image_buffer(
-              input.image_buffer.width, input.image_buffer.height,
-              input.image_buffer.channels, input.image_buffer.type);
-          toCvMat(input.image_buffer).copyTo(toCvMat(output.image_buffer));
+          NodeOutput output = copy_host_adapter_image_output(input);
           output.space.absolute_roi = input.space.absolute_roi;
           output.debug.compute_device = "host-adapter-offset-identity-test";
           (void)node;

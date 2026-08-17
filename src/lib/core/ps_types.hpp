@@ -8,11 +8,13 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -133,9 +135,12 @@ struct DebugMeta {
  *
  * Private operation callbacks and compute services exchange this value after
  * the operation host adapter has converted the public `OperationOutput`.
- * Besides the current ImageBuffer compatibility snapshot, an identity-bearing
- * sealed CPU image Value, format-neutral named data, spatial, and debug state,
- * the host may attach a dynamic-library lease so plugin-provided image deleters
+ * The canonical named-Value collection is the only image payload, allocation,
+ * readiness, and revision authority. A current ImageBuffer may exist only as
+ * explicitly named compatibility staging before an inbound legacy edge is
+ * normalized; formal cache publication requires that staging member to be
+ * empty. Format-neutral named data, spatial, and debug state remain separate.
+ * The host may attach a dynamic-library lease so plugin-provided deleters
  * cannot run after their library is unmapped.
  *
  * Copy construction first retains the source lease and then copies payload
@@ -242,15 +247,15 @@ struct NodeOutput {
   void swap(NodeOutput& other) noexcept {
     static_assert(std::is_nothrow_swappable_v<std::shared_ptr<void>> &&
                       std::is_nothrow_swappable_v<ImageBuffer> &&
-                      std::is_nothrow_swappable_v<Value> &&
+                      std::is_nothrow_swappable_v<decltype(named_values)> &&
                       std::is_nothrow_swappable_v<decltype(data)> &&
                       std::is_nothrow_swappable_v<SpatialContext> &&
                       std::is_nothrow_swappable_v<DebugMeta>,
                   "NodeOutput assignment requires no-throw member swaps");
     using std::swap;
     plugin_library_lifetime.swap(other.plugin_library_lifetime);
-    swap(image_buffer, other.image_buffer);
-    swap(image_value, other.image_value);
+    swap(compatibility_image, other.compatibility_image);
+    named_values.swap(other.named_values);
     data.swap(other.data);
     swap(space, other.space);
     swap(debug, other.debug);
@@ -269,23 +274,147 @@ struct NodeOutput {
   std::shared_ptr<void> plugin_library_lifetime;
 
   /**
-   * @brief Optional image result and its storage owners.
+   * @brief Callback-local or inbound legacy ImageBuffer staging only.
    *
-   * @note Plugin-defined `data` or `context` deleters execute before the
-   * result's dynamic-library lease is released.
+   * @note This member is never an allocation, revision, readiness, Region, or
+   * cache authority. Operation ABI v2, codec, Host, and remaining product
+   * adapters must normalize a nonempty value into `named_values` and clear it
+   * before formal commit. Plugin-defined `data` or `context` deleters execute
+   * before the result's dynamic-library lease is released.
    */
-  ps::ImageBuffer image_buffer;
+  ps::ImageBuffer compatibility_image;
 
   /**
-   * @brief Sealed CPU image Value and formal cache memory identity authority.
-   *
-   * @note A valid value is authoritative for allocation/revision identity and
-   * disk-cache image bytes. `image_buffer` remains an independent plugin ABI
-   * v2, tiled-write, codec, Host, and legacy-operation compatibility snapshot.
-   * Dirty staging must clear this member before mutating cloned CPU bytes and
-   * reseal at the HP commit boundary.
+   * @brief Reports whether compatibility staging carries observable state.
+   * @return True when dimensions, stride, owner, context, or non-CPU placement
+   * differs from the default empty sentinel.
+   * @throws Nothing.
+   * @note The element-type default is not evidence because an empty
+   * ImageBuffer necessarily retains that enum value.
    */
-  ps::Value image_value;
+  bool has_compatibility_image() const noexcept {
+    return compatibility_image.width != 0 || compatibility_image.height != 0 ||
+           compatibility_image.channels != 0 ||
+           compatibility_image.step != 0U ||
+           compatibility_image.device != Device::CPU ||
+           compatibility_image.data || compatibility_image.context;
+  }
+
+  /**
+   * @brief Canonically ordered named immutable Value outputs.
+   *
+   * @note Names are exact byte strings and the permanent current graph image
+   * port is `image`. Each valid Value is the sole payload/allocation/readiness/
+   * revision authority for that output. Map ordering is deterministic but is
+   * not a graph, cache, content, or persistence identity.
+   */
+  std::map<std::string, ps::Value, std::less<>> named_values;
+
+  /** @brief Permanent canonical name of the current graph image output. */
+  static constexpr std::string_view kImageOutputName = "image";
+
+  /** @brief Frozen internal bound shared with the DI-3 output-plan mapping. */
+  static constexpr std::size_t kMaximumNamedValueNameBytes = 128U;
+
+  /**
+   * @brief Reports whether the canonical image Value is present.
+   * @return True exactly when the `image` entry exists and is valid.
+   * @throws Nothing.
+   */
+  bool has_image_value() const noexcept {
+    const auto found = named_values.find(kImageOutputName);
+    return found != named_values.end() && found->second.valid();
+  }
+
+  /**
+   * @brief Returns the canonical immutable image Value.
+   * @return Borrowed valid Value stored under `image`.
+   * @throws std::logic_error when the image output is absent or invalid.
+   * @note The borrowed handle remains valid until this NodeOutput is mutated or
+   * destroyed; it is the only formal image identity authority.
+   */
+  const ps::Value& image_value() const {
+    const auto found = named_values.find(kImageOutputName);
+    if (found == named_values.end() || !found->second.valid()) {
+      throw std::logic_error("NodeOutput has no canonical image Value.");
+    }
+    return found->second;
+  }
+
+  /**
+   * @brief Publishes one previously absent named immutable Value.
+   * @param name Exact nonempty output name of at most the frozen byte bound.
+   * @param value Valid immutable Value to retain.
+   * @return Nothing.
+   * @throws std::invalid_argument for an invalid name, embedded NUL, invalid
+   * Value, or duplicate output.
+   * @throws std::bad_alloc when name or map storage cannot allocate.
+   * @note This operation changes only request-local result assembly; graph and
+   * formal cache publication remain separate commit operations.
+   */
+  void publish_named_value(std::string name, ps::Value value) {
+    if (name.empty() || name.size() > kMaximumNamedValueNameBytes ||
+        name.find('\0') != std::string::npos || !value.valid()) {
+      throw std::invalid_argument(
+          "NodeOutput named Value requires a bounded name and valid Value.");
+    }
+    const auto inserted =
+        named_values.emplace(std::move(name), std::move(value));
+    if (!inserted.second) {
+      throw std::invalid_argument(
+          "NodeOutput cannot publish a duplicate named Value.");
+    }
+  }
+
+  /**
+   * @brief Publishes the previously absent canonical image Value.
+   * @param value Valid immutable image Value.
+   * @return Nothing.
+   * @throws The same exceptions as publish_named_value().
+   */
+  void publish_image_value(ps::Value value) {
+    publish_named_value(std::string(kImageOutputName), std::move(value));
+  }
+
+  /**
+   * @brief Replaces one existing canonical image Value during private merge.
+   * @param value Valid replacement Value with a fresh or deliberately retained
+   * revision selected by the caller.
+   * @return Nothing.
+   * @throws std::invalid_argument when value is invalid.
+   * @throws std::logic_error when the canonical image output is absent.
+   * @note Formal cache commit remains responsible for Region/generation
+   * publication; this helper never synthesizes a fallback compatibility image.
+   */
+  void replace_image_value(ps::Value value) {
+    if (!value.valid()) {
+      throw std::invalid_argument(
+          "NodeOutput replacement image Value must be valid.");
+    }
+    const auto found = named_values.find(kImageOutputName);
+    if (found == named_values.end()) {
+      throw std::logic_error(
+          "NodeOutput cannot replace an absent image Value.");
+    }
+    found->second = std::move(value);
+  }
+
+  /**
+   * @brief Removes the canonical image output from request-local staging.
+   * @return True when an entry was removed.
+   * @throws Nothing.
+   * @note Dirty staging may remove immutable authority only before constructing
+   * a fresh Host binding; formal cache state is never mutated through this
+   * helper.
+   */
+  bool clear_image_value() noexcept {
+    const auto found = named_values.find(kImageOutputName);
+    if (found == named_values.end()) {
+      return false;
+    }
+    named_values.erase(found);
+    return true;
+  }
 
   /**
    * @brief Named non-image outputs represented as owned ParameterValue values.

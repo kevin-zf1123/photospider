@@ -139,22 +139,8 @@ const ImageBuffer* tile_buffer(const InputTile& tile) noexcept {
 }
 
 /**
- * @brief Returns the ImageBuffer pointer carried by an output tile.
+ * @brief Converts one read-only tile view to an ROI-scoped cv::Mat.
  *
- * @param tile Writable tile view to inspect.
- * @return Borrowed ImageBuffer pointer.
- * @throws Nothing.
- * @note Used by templated tile adapters so input/output overloads share ROI
- * validation and slicing behavior.
- */
-ImageBuffer* tile_buffer(const OutputTile& tile) noexcept {
-  return tile.buffer;
-}
-
-/**
- * @brief Converts any tile view to an ROI-scoped cv::Mat.
- *
- * @tparam TileView InputTile or OutputTile.
  * @param tile Tile view carrying a buffer pointer and ROI.
  * @param missing_message Error text used when the tile has no buffer.
  * @return cv::Mat view covering tile.roi.
@@ -165,8 +151,8 @@ ImageBuffer* tile_buffer(const OutputTile& tile) noexcept {
  * @note InputTile pixel immutability is a caller contract because OpenCV
  * returns mutable cv::Mat handles even for const source buffers.
  */
-template <typename TileView>
-cv::Mat to_cv_mat_for_tile(const TileView& tile, const char* missing_message) {
+cv::Mat to_cv_mat_for_input_tile(const InputTile& tile,
+                                 const char* missing_message) {
   auto* buffer = tile_buffer(tile);
   if (!buffer) {
     throw std::runtime_error(missing_message);
@@ -186,9 +172,8 @@ cv::Mat to_cv_mat_for_tile(const TileView& tile, const char* missing_message) {
 }
 
 /**
- * @brief Converts any tile view to an ROI-scoped cv::UMat.
+ * @brief Converts one read-only tile view to an ROI-scoped cv::UMat.
  *
- * @tparam TileView InputTile or OutputTile.
  * @param tile Tile view carrying a buffer pointer and ROI.
  * @param missing_message Error text used when the tile has no buffer.
  * @param access OpenCV access intent for upload/backend synchronization.
@@ -200,9 +185,9 @@ cv::Mat to_cv_mat_for_tile(const TileView& tile, const char* missing_message) {
  * @note InputTile pixel immutability is a caller contract because OpenCV UMat
  * views can still be passed to mutating APIs.
  */
-template <typename TileView>
-cv::UMat to_cv_umat_for_tile(const TileView& tile, const char* missing_message,
-                             cv::AccessFlag access) {
+cv::UMat to_cv_umat_for_input_tile(const InputTile& tile,
+                                   const char* missing_message,
+                                   cv::AccessFlag access) {
   auto* buffer = tile_buffer(tile);
   if (!buffer) {
     throw std::runtime_error(missing_message);
@@ -245,14 +230,8 @@ cv::Mat toCvMat(const ImageBuffer& buffer) {
 
 /** @copydoc toCvMat(const InputTile&) */
 cv::Mat toCvMat(const InputTile& tile) {
-  return to_cv_mat_for_tile(tile,
-                            "toCvMat: InputTile has no associated buffer.");
-}
-
-/** @copydoc toCvMat(const OutputTile&) */
-cv::Mat toCvMat(const OutputTile& tile) {
-  return to_cv_mat_for_tile(tile,
-                            "toCvMat: OutputTile has no associated buffer.");
+  return to_cv_mat_for_input_tile(
+      tile, "toCvMat: InputTile has no associated buffer.");
 }
 
 /** @copydoc toCvUMat(const ImageBuffer&) */
@@ -277,14 +256,8 @@ cv::UMat toCvUMat(const ImageBuffer& buffer) {
 
 /** @copydoc toCvUMat(const InputTile&) */
 cv::UMat toCvUMat(const InputTile& tile) {
-  return to_cv_umat_for_tile(
+  return to_cv_umat_for_input_tile(
       tile, "toCvUMat: InputTile has no associated buffer.", cv::ACCESS_READ);
-}
-
-/** @copydoc toCvUMat(const OutputTile&) */
-cv::UMat toCvUMat(const OutputTile& tile) {
-  return to_cv_umat_for_tile(
-      tile, "toCvUMat: OutputTile has no associated buffer.", cv::ACCESS_WRITE);
 }
 
 /**

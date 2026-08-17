@@ -10,18 +10,28 @@ namespace ps::compute {
  * @brief Input collection prepared for tiled node execution.
  *
  * TiledInputContext keeps the original input order while optionally replacing
- * selected entries with normalized temporary NodeOutput objects. It is used by
- * NodeExecutor to infer output format and to build per-tile input views.
+ * selected entries with normalized temporary named-Value outputs. It also
+ * owns exact callback-local ImageBuffer projections for the current tiled ABI
+ * edge. NodeExecutor derives authoritative format/extent facts from Values and
+ * uses the projections only to build per-tile compatibility views.
  *
  * @note Pointers in inputs either reference upstream NodeOutput objects
- * supplied by the caller or elements owned by normalized_storage. The context
- * must stay alive until all TileTask callbacks using those pointers have
- * finished.
+ * supplied by the caller or elements owned by normalized_storage. Entries in
+ * callback_images align with inputs and retain independent use-scoped
+ * snapshots. The context must stay alive until all TileTask callbacks using
+ * those pointers have finished.
  */
 struct TiledInputContext {
   /** @brief Temporary normalized images used by image_mixing secondary inputs.
    */
   std::vector<NodeOutput> normalized_storage;
+
+  /**
+   * @brief Use-scoped ImageBuffer projections aligned with input slots.
+   * @note These values are never cache, revision, Region, extent, or output
+   * allocation authority and are destroyed after the tiled invocation.
+   */
+  std::vector<ImageBuffer> callback_images;
 
   /** @brief Ordered input pointers visible to tiled execution. */
   std::vector<const NodeOutput*> inputs;
@@ -42,7 +52,8 @@ struct TiledInputContext {
  * the returned TiledInputContext and must outlive any tile dispatch that uses
  * the normalized inputs. Normalization replaces only image descriptors;
  * named-data, spatial/debug provenance, and plugin DSO leases remain copied
- * from each upstream NodeOutput.
+ * from each upstream NodeOutput. Every materialized normalized image is
+ * imported through a Host binding and sealed before it enters the context.
  */
 class TiledInputNormalizer {
  public:

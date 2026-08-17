@@ -468,10 +468,13 @@ class ValueBuilder final {
    *        into private builder state.
    * @param layout Positive producer layout copied into private builder state.
    * @param storage_size Exact positive allocation byte length.
+   * @param alignment Requested positive power-of-two base alignment. Values
+   *        smaller than `alignof(std::max_align_t)` are satisfied by the
+   *        stronger default allocation alignment.
    * @return Move-only exclusive builder ready to issue one WriteLease.
    * @throws std::invalid_argument for malformed descriptor, facet, layout,
-   * storage-size mismatch, or a writable layout whose non-overlap cannot be
-   * proven.
+   * storage-size mismatch, invalid alignment, or a writable layout whose
+   * non-overlap cannot be proven.
    * @throws std::overflow_error when envelope, non-overlap, or identity
    * arithmetic overflows.
    * @throws std::length_error when bounded image records exceed frozen limits.
@@ -480,10 +483,13 @@ class ValueBuilder final {
    *         allocation cannot be created.
    * @note No caller allocation is retained. Descriptor shape/quantization and
    *       ImageFacet diagnostic/channel/group/sample storage are deep-copied.
+   *       Alignment affects physical allocation only and is not a logical
+   *       Value identity or persistence fact.
    */
   static ValueBuilder allocate_cpu_dense_tensor(
       DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
-      StridedLayout layout, std::size_t storage_size);
+      StridedLayout layout, std::size_t storage_size,
+      std::size_t alignment = alignof(std::max_align_t));
 
   /**
    * @brief Allocates one exact writable CPU FP4 Blocked DenseTensor producer.

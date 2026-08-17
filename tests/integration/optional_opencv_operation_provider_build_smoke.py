@@ -562,7 +562,7 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
-            "DiskSaveSerializesSealedValueInsteadOfMutableCompatibilitySnapshot"
+            "DiskSaveRejectsCompatibilityStagingBesideSealedValue"
         ),
         (
             "CpuDenseTensorImageOperation."
@@ -630,7 +630,7 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
-            "RunnerRejectsExecuteDescriptorMismatchAsComputeError"
+            "RunnerRejectsExecuteAccessBeyondFrozenGrantAsComputeError"
         ),
     }
     value_runtime_tests = {

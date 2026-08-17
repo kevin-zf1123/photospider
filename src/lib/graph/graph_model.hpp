@@ -706,9 +706,14 @@ plugin::ParameterMap resolve_effective_parameter_snapshot(
  * @param node Node whose image-input topology is inspected.
  * @param graph Graph providing authoritative HP cached image descriptors.
  * @return Extent vector with empty entries for missing/unknown inputs.
+ * @throws GraphError with ComputeError when canonical image dimensions exceed
+ * the current PixelSize representation.
+ * @throws std::invalid_argument or std::overflow_error when retained
+ * ImageFacet bounds violate their immutable Value contract.
  * @throws std::bad_alloc when vector storage grows.
  * @note Graph extent resolution may overwrite unknown entries when it has
- *       stronger request-local knowledge.
+ * stronger request-local knowledge. Only sealed named Value metadata is
+ * consulted; compatibility staging is never an extent authority.
  */
 std::vector<PixelSize> cached_image_input_extents(const Node& node,
                                                   const GraphModel& graph);

@@ -8,7 +8,6 @@
 
 #include "compute/compute_geometry.hpp"
 #include "compute/execution/resource_demand_estimator.hpp"
-#include "core/image_buffer_processing.hpp"
 #include "core/region_image_adapter.hpp"
 #include "core/value_image_adapter.hpp"
 
@@ -16,64 +15,120 @@ namespace ps::compute {
 namespace {
 
 /**
- * @brief Deep-copies an image buffer for staged dirty writes.
- *
- * @param source Source image buffer owned by graph or proxy state.
- * @param label Human-readable buffer domain used in error messages.
- * @return Independent CPU ImageBuffer when CPU pixels are present; otherwise a
- * shared backend descriptor whose immutable owner is safe to replace later.
- * @throws GraphError when neutral CPU-buffer cloning fails; may throw
- * std::bad_alloc while allocating independent storage.
- * @note Empty buffers keep shape metadata but drop ownership. Non-CPU buffers
- * are shallow-copied because the generic host cannot clone opaque resources;
- * tiled execution replaces that descriptor with a CPU staging allocation
- * before writing, while monolithic execution replaces the complete output.
- */
-ImageBuffer clone_image_buffer(const ImageBuffer& source,
-                               const std::string& label) {
-  ImageBuffer cloned = source;
-  cloned.data.reset();
-  cloned.context.reset();
-  if (source.width <= 0 || source.height <= 0 || source.channels <= 0 ||
-      (!source.data && !source.context)) {
-    return cloned;
-  }
-  if (source.device != Device::CPU) {
-    return source;
-  }
-
-  try {
-    cloned = image_processing::clone_cpu_image_buffer(source);
-  } catch (const std::bad_alloc&) {
-    throw;
-  } catch (const std::exception& e) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "Failed to clone " + label +
-                         " staged image buffer: " + std::string(e.what()));
-  }
-  return cloned;
-}
-
-/**
- * @brief Deep-copies a NodeOutput for staged dirty writes.
+ * @brief Copies immutable output state into request-local dirty staging.
  *
  * @param source Source output owned by graph or proxy state.
  * @param label Human-readable buffer domain used in error messages.
- * @return Independent output with cloned image payload, cleared image Value
- * identity, and copied non-image metadata.
+ * @return Independent metadata container retaining the same immutable Values.
  * @throws std::bad_alloc when output or metadata copying exhausts memory.
- * @throws GraphError when image payload cloning otherwise fails.
- * @note Named ParameterValue data, spatial context, and debug metadata are
- * value-copied. Clearing `image_value` prevents mutable staged bytes from
- * retaining the source cache revision; HP commit and progressive RT commit
- * reseal final bytes at their respective publication boundaries.
+ * @throws GraphError when source still carries compatibility staging.
+ * @note Named Values are immutable and safe to retain until a fresh binding is
+ * allocated for an update. No mutable clone, second allocation authority, or
+ * synthetic revision is created by this staging copy.
  */
-NodeOutput clone_node_output(const NodeOutput& source,
-                             const std::string& label) {
-  NodeOutput cloned = source;
-  cloned.image_buffer = clone_image_buffer(source.image_buffer, label);
-  cloned.image_value = Value{};
-  return cloned;
+NodeOutput copy_node_output_for_staging(const NodeOutput& source,
+                                        const std::string& label) {
+  if (source.has_compatibility_image()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     label + " dirty staging rejects compatibility images.");
+  }
+  return source;
+}
+
+/**
+ * @brief Compares every authoritative field of two frozen output plans.
+ * @param left First complete plan.
+ * @param right Second complete plan.
+ * @return True only when name, logical metadata, layout, envelope, and
+ * alignment are identical.
+ * @throws Nothing under contained value equality contracts.
+ * @note Derived dimensions and Region need no separate comparison because
+ * DenseImageOutputPlan::create deterministically validates and derives them
+ * from the compared authoritative fields.
+ */
+bool output_plans_match(const DenseImageOutputPlan& left,
+                        const DenseImageOutputPlan& right) noexcept {
+  return left.output_name() == right.output_name() &&
+         left.descriptor() == right.descriptor() &&
+         left.image_facet() == right.image_facet() &&
+         left.layout() == right.layout() &&
+         left.storage_size() == right.storage_size() &&
+         left.alignment() == right.alignment();
+}
+
+/**
+ * @brief Seeds one new binding when staged output exactly matches its plan.
+ * @param output Immutable staged output selected as the copy-on-write base.
+ * @param binding Fresh open binding.
+ * @return True after all logical elements were copied; false when no exact
+ * canonical image is available.
+ * @throws ReadyFenceAccessError, BufferAccessError, std::out_of_range,
+ * std::overflow_error, std::logic_error, or std::system_error from checked
+ * Value access and grant lifecycle.
+ * @note Metadata mismatch is decided before grant issuance and is not a
+ * binding failure. Once seeding starts, any failure closes the binding.
+ */
+bool seed_tiled_binding(const NodeOutput& output, HostOutputBinding& binding) {
+  if (!output.has_image_value()) {
+    return false;
+  }
+  const Value& value = output.image_value();
+  const DenseImageOutputPlan& plan = binding.plan();
+  if (!(value.dense_tensor_descriptor() == plan.descriptor()) ||
+      !value.image_facet().has_value() ||
+      !(*value.image_facet() == plan.image_facet())) {
+    return false;
+  }
+  binding.seed_from_value(value);
+  return true;
+}
+
+/**
+ * @brief Publishes one sealed binding Value into existing staged metadata.
+ * @param output Mutable request-local output with no compatibility staging.
+ * @param binding Sole drained binding to seal exactly once.
+ * @return Nothing after canonical image replacement or first publication.
+ * @throws std::invalid_argument, std::logic_error, std::overflow_error,
+ * std::bad_alloc, or std::system_error from seal and NodeOutput publication.
+ * @note The helper is called only after all physical tasks drain and before
+ * graph/proxy visibility. It creates one Value revision and no cache revision.
+ */
+void seal_tiled_binding(NodeOutput* output, HostOutputBinding* binding) {
+  if (output == nullptr || binding == nullptr ||
+      output->has_compatibility_image()) {
+    throw std::invalid_argument(
+        "Dirty tiled seal requires canonical staged output and binding.");
+  }
+  Value value = binding->seal();
+  if (output->has_image_value()) {
+    output->replace_image_value(std::move(value));
+  } else {
+    output->publish_image_value(std::move(value));
+  }
+}
+
+/**
+ * @brief Validates one staged output before HP or RT publication.
+ * @param output Request-local result selected for publication.
+ * @return Nothing after every named Value is valid and Ready.
+ * @throws GraphError when compatibility staging, an invalid name/Value, or a
+ * non-Ready producer is observed.
+ * @throws std::logic_error when a retained readiness observer is invalid.
+ * @note Validation polls only immutable state and never imports a fallback,
+ * maps storage, mints a revision, or mutates graph/proxy cache state.
+ */
+void validate_staged_output(const NodeOutput& output) {
+  if (output.has_compatibility_image()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Dirty commit rejects compatibility image staging.");
+  }
+  for (const auto& [name, value] : output.named_values) {
+    if (name.empty() || !value.valid() || !value.ready_fence().poll().ready()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Dirty commit requires valid Ready named Value outputs.");
+    }
+  }
 }
 
 /**
@@ -130,6 +185,65 @@ NodeOutput& HighPrecisionDirtyWriteBuffer::ensure_output(const Node& node) {
   return entry.output;
 }
 
+/** @copydoc HighPrecisionDirtyWriteBuffer::ensure_tiled_output_binding */
+HostOutputBinding& HighPrecisionDirtyWriteBuffer::ensure_tiled_output_binding(
+    const Node& node, DenseImageOutputPlan plan,
+    std::size_t expected_task_count) {
+  if (expected_task_count == 0U) {
+    throw std::invalid_argument(
+        "HP tiled binding requires a positive frozen task count.");
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  Entry& entry = ensure_entry_locked(node);
+  if (entry.tiled_task_count != 0U) {
+    if (entry.tiled_task_count != expected_task_count) {
+      throw std::invalid_argument(
+          "HP tiled tasks for one node require one frozen task count.");
+    }
+    if (!entry.tiled_binding.has_value()) {
+      throw std::logic_error(
+          "HP tiled node binding was already sealed or lost.");
+    }
+    if (!output_plans_match(entry.tiled_binding->plan(), plan)) {
+      throw std::invalid_argument(
+          "HP tiled tasks for one node require one frozen output plan.");
+    }
+    return *entry.tiled_binding;
+  }
+
+  HostOutputBinding binding = HostOutputBinding::allocate(std::move(plan));
+  const bool preserved_existing_bytes =
+      seed_tiled_binding(entry.output, binding);
+  entry.tiled_binding.emplace(std::move(binding));
+  entry.tiled_task_count = expected_task_count;
+  entry.tiled_tasks_remaining = expected_task_count;
+  entry.has_output = true;
+  if (!preserved_existing_bytes) {
+    entry.hp_region.reset();
+  }
+  return *entry.tiled_binding;
+}
+
+/** @copydoc HighPrecisionDirtyWriteBuffer::complete_tiled_task */
+void HighPrecisionDirtyWriteBuffer::complete_tiled_task(const Node& node) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto entry_it = entries_.find(node.id);
+  if (entry_it == entries_.end() ||
+      !entry_it->second.tiled_binding.has_value() ||
+      entry_it->second.tiled_task_count == 0U ||
+      entry_it->second.tiled_tasks_remaining == 0U) {
+    throw std::logic_error(
+        "HP tiled task completion requires one active node binding.");
+  }
+  Entry& entry = entry_it->second;
+  --entry.tiled_tasks_remaining;
+  if (entry.tiled_tasks_remaining == 0U) {
+    seal_tiled_binding(&entry.output, &*entry.tiled_binding);
+    entry.tiled_binding.reset();
+    entry.has_output = true;
+  }
+}
+
 /** @copydoc HighPrecisionDirtyWriteBuffer::stage_region_output */
 void HighPrecisionDirtyWriteBuffer::stage_region_output(
     const Node& node, NodeOutput output, const RegionSet& updated_region) {
@@ -138,9 +252,9 @@ void HighPrecisionDirtyWriteBuffer::stage_region_output(
   bool preserved_existing_validity = false;
   if (entry.has_output && entry.hp_region.has_value()) {
     const NodeOutput* merge_base = &entry.output;
-    if (!entry.output.image_value.valid() &&
+    if (!entry.output.has_image_value() &&
         node.cached_output_high_precision.has_value() &&
-        node.cached_output_high_precision->image_value.valid() &&
+        node.cached_output_high_precision->has_image_value() &&
         entry.hp_version == node.hp_version) {
       merge_base = &*node.cached_output_high_precision;
     }
@@ -182,9 +296,9 @@ int HighPrecisionDirtyWriteBuffer::mark_updated(const Node& node,
   Entry& entry = ensure_entry_locked(node);
   if (!region_hp.is_empty()) {
     const NodeOutput* validity_output = &entry.output;
-    if (!entry.output.image_value.valid() &&
+    if (!entry.output.has_image_value() &&
         node.cached_output_high_precision.has_value() &&
-        node.cached_output_high_precision->image_value.valid() &&
+        node.cached_output_high_precision->has_image_value() &&
         entry.hp_version == node.hp_version) {
       validity_output = &*node.cached_output_high_precision;
     }
@@ -205,13 +319,25 @@ int HighPrecisionDirtyWriteBuffer::mark_updated(const Node& node,
 
 void HighPrecisionDirtyWriteBuffer::commit_to_graph(GraphModel& graph) {
   std::lock_guard<std::mutex> lock(mutex_);
+  for (auto& [node_id, entry] : entries_) {
+    (void)node_id;
+    if (entry.tiled_binding.has_value() || entry.tiled_tasks_remaining != 0U) {
+      throw std::logic_error("HP dirty commit observed undrained tiled node " +
+                             std::to_string(node_id) + " (remaining " +
+                             std::to_string(entry.tiled_tasks_remaining) +
+                             " of " + std::to_string(entry.tiled_task_count) +
+                             ").");
+    }
+    if (entry.has_output) {
+      validate_staged_output(entry.output);
+    }
+  }
   for (auto& item : entries_) {
     const int node_id = item.first;
     Entry& entry = item.second;
     if (!entry.has_output) {
       continue;
     }
-    value_image_adapter::normalize_node_output_image_value(&entry.output);
     graph.mutate_node_runtime_state(
         node_id, [&](GraphModel::NodeRuntimeState& state) {
           state.cached_output_high_precision = std::move(entry.output);
@@ -310,8 +436,8 @@ HighPrecisionDirtyWriteBuffer::ensure_entry_locked(const Node& node) {
     entry.hp_version = node.hp_version;
     if (seed_existing_outputs_ && node.cached_output_high_precision) {
       entry.hp_region = node.hp_region;
-      entry.output =
-          clone_node_output(*node.cached_output_high_precision, "HP");
+      entry.output = copy_node_output_for_staging(
+          *node.cached_output_high_precision, "HP");
       entry.has_output = true;
     }
   }
@@ -319,11 +445,9 @@ HighPrecisionDirtyWriteBuffer::ensure_entry_locked(const Node& node) {
 }
 
 RealtimeProxyWriteBuffer::RealtimeProxyWriteBuffer(
-    RealtimeProxyGraph& proxy_graph, bool seed_existing_outputs,
-    bool seal_image_values_on_commit)
+    RealtimeProxyGraph& proxy_graph, bool seed_existing_outputs)
     : proxy_graph_(proxy_graph),
-      seed_existing_outputs_(seed_existing_outputs),
-      seal_image_values_on_commit_(seal_image_values_on_commit) {}  // NOLINT
+      seed_existing_outputs_(seed_existing_outputs) {}  // NOLINT
 
 const NodeOutput* RealtimeProxyWriteBuffer::find_output(int node_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -348,6 +472,90 @@ NodeOutput& RealtimeProxyWriteBuffer::ensure_output(int node_id) {
   return *entry.state.output;
 }
 
+/** @copydoc RealtimeProxyWriteBuffer::stage_output */
+void RealtimeProxyWriteBuffer::stage_output(int node_id, NodeOutput output,
+                                            bool preserved_existing_bytes) {
+  validate_staged_output(output);
+  std::lock_guard<std::mutex> lock(mutex_);
+  Entry& entry = ensure_entry_locked(node_id);
+  if (entry.tiled_task_count != 0U) {
+    throw std::logic_error(
+        "RT node cannot stage monolithic output while a tiled binding exists.");
+  }
+  entry.state.output = std::move(output);
+  entry.has_output = true;
+  if (!preserved_existing_bytes) {
+    entry.state.region_hp.reset();
+  }
+}
+
+/** @copydoc RealtimeProxyWriteBuffer::ensure_tiled_output_binding */
+HostOutputBinding& RealtimeProxyWriteBuffer::ensure_tiled_output_binding(
+    int node_id, DenseImageOutputPlan plan, std::size_t expected_task_count) {
+  if (expected_task_count == 0U) {
+    throw std::invalid_argument(
+        "RT tiled binding requires a positive frozen task count.");
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  Entry& entry = ensure_entry_locked(node_id);
+  if (entry.tiled_task_count != 0U) {
+    if (entry.tiled_task_count != expected_task_count) {
+      throw std::invalid_argument(
+          "RT tiled tasks for one node require one frozen task count.");
+    }
+    if (!entry.tiled_binding.has_value()) {
+      throw std::logic_error(
+          "RT tiled node binding was already sealed or lost.");
+    }
+    if (!output_plans_match(entry.tiled_binding->plan(), plan)) {
+      throw std::invalid_argument(
+          "RT tiled tasks for one node require one frozen output plan.");
+    }
+    return *entry.tiled_binding;
+  }
+
+  HostOutputBinding binding = HostOutputBinding::allocate(std::move(plan));
+  const NodeOutput empty_output;
+  const NodeOutput& seed_output =
+      entry.state.output.has_value() ? *entry.state.output : empty_output;
+  const bool preserved_existing_bytes =
+      seed_tiled_binding(seed_output, binding);
+  entry.tiled_binding.emplace(std::move(binding));
+  entry.tiled_task_count = expected_task_count;
+  entry.tiled_tasks_remaining = expected_task_count;
+  if (!entry.state.output.has_value()) {
+    entry.state.output.emplace();
+  }
+  entry.has_output = true;
+  if (!preserved_existing_bytes) {
+    entry.state.region_hp.reset();
+  }
+  return *entry.tiled_binding;
+}
+
+/** @copydoc RealtimeProxyWriteBuffer::complete_tiled_task */
+void RealtimeProxyWriteBuffer::complete_tiled_task(int node_id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto entry_it = entries_.find(node_id);
+  if (entry_it == entries_.end() ||
+      !entry_it->second.tiled_binding.has_value() ||
+      entry_it->second.tiled_task_count == 0U ||
+      entry_it->second.tiled_tasks_remaining == 0U) {
+    throw std::logic_error(
+        "RT tiled task completion requires one active node binding.");
+  }
+  Entry& entry = entry_it->second;
+  --entry.tiled_tasks_remaining;
+  if (entry.tiled_tasks_remaining == 0U) {
+    if (!entry.state.output.has_value()) {
+      entry.state.output.emplace();
+    }
+    seal_tiled_binding(&*entry.state.output, &*entry.tiled_binding);
+    entry.tiled_binding.reset();
+    entry.has_output = true;
+  }
+}
+
 /** @copydoc RealtimeProxyWriteBuffer::mark_updated */
 int RealtimeProxyWriteBuffer::mark_updated(int node_id,
                                            const RegionSet& region_hp,
@@ -369,15 +577,24 @@ int RealtimeProxyWriteBuffer::mark_updated(int node_id,
 
 void RealtimeProxyWriteBuffer::commit_to_proxy_graph() {
   std::lock_guard<std::mutex> lock(mutex_);
+  for (auto& [node_id, entry] : entries_) {
+    (void)node_id;
+    if (entry.tiled_binding.has_value() || entry.tiled_tasks_remaining != 0U) {
+      throw std::logic_error("RT dirty commit observed undrained tiled node " +
+                             std::to_string(node_id) + " (remaining " +
+                             std::to_string(entry.tiled_tasks_remaining) +
+                             " of " + std::to_string(entry.tiled_task_count) +
+                             ").");
+    }
+    if (entry.has_output && entry.state.output.has_value()) {
+      validate_staged_output(*entry.state.output);
+    }
+  }
   for (auto& item : entries_) {
     const int node_id = item.first;
     Entry& entry = item.second;
     if (!entry.has_output) {
       continue;
-    }
-    if (seal_image_values_on_commit_ && entry.state.output.has_value()) {
-      value_image_adapter::normalize_node_output_image_value(
-          &*entry.state.output);
     }
     proxy_graph_.commit_node_state(node_id, std::move(entry.state));
   }
@@ -449,7 +666,8 @@ RealtimeProxyWriteBuffer::Entry& RealtimeProxyWriteBuffer::ensure_entry_locked(
       entry.state.dirty_source_generation = state->dirty_source_generation;
       if (seed_existing_outputs_ && state->output) {
         entry.state.region_hp = state->region_hp;
-        entry.state.output = clone_node_output(*state->output, "RT proxy");
+        entry.state.output =
+            copy_node_output_for_staging(*state->output, "RT proxy");
         entry.has_output = true;
       }
     }

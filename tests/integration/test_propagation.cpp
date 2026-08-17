@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -200,9 +201,21 @@ void handle_tiles(ps::Kernel& kernel, ps::InteractionService& svc,
     const auto* out = node.cached_output_high_precision.has_value()
                           ? &*node.cached_output_high_precision
                           : nullptr;
-    if (out && out->image_buffer.width > 0) {
-      width = out->image_buffer.width;
-      height = out->image_buffer.height;
+    if (out && out->has_image_value() &&
+        out->image_value().image_facet().has_value()) {
+      const ps::ImageBounds& bounds = out->image_value().image_bounds();
+      const std::size_t value_width = image_bounds_width(bounds);
+      const std::size_t value_height = image_bounds_height(bounds);
+      if (value_width >
+              static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+          value_height >
+              static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        std::cout << id << " UNKNOWN (image extent exceeds tool bounds) - - - -"
+                  << std::endl;
+        continue;
+      }
+      width = static_cast<int>(value_width);
+      height = static_cast<int>(value_height);
     } else {
       std::cout << id << " UNKNOWN (not computed or no image output) - - - -"
                 << std::endl;

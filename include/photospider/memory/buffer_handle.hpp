@@ -275,12 +275,15 @@ class BufferHandle final {
    * @brief Allocates one private writable CPU range for ValueBuilder.
    *
    * @param size Positive allocation size.
+   * @param alignment Requested positive power-of-two base alignment.
    * @return Complete allocation handle not yet exposed outside the builder.
-   * @throws std::invalid_argument when size is zero.
+   * @throws std::invalid_argument when size is zero or alignment is zero or
+   * not a power of two.
    * @throws std::bad_alloc when allocation fails.
    * @throws std::overflow_error when allocation identity space is exhausted.
    */
-  static BufferHandle allocate_for_builder(std::size_t size);
+  static BufferHandle allocate_for_builder(std::size_t size,
+                                           std::size_t alignment);
 
   /**
    * @brief Retains one source-private native or external host allocation.
@@ -483,6 +486,16 @@ class WriteLease final {
    * @throws std::logic_error when the lease is invalid or revoked.
    */
   std::size_t size() const;
+
+  /**
+   * @brief Returns the retained builder allocation identity.
+   *
+   * @return Nonzero process-local physical allocation identity.
+   * @throws std::logic_error when the lease is invalid or revoked.
+   * @note This is a physical lifetime fact only; it is not a Value revision,
+   * graph revision, cache key, Region, or persistence identity.
+   */
+  AllocationIdentity allocation_identity() const;
 
  private:
   /** @brief Shared producer authority synchronized with ValueBuilder seal. */

@@ -1290,15 +1290,15 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       texture_owner->install_persistent_memory_lease(
           std::move(lease_guard->persistent_memory));
       completion->install_scratch_lease(std::move(lease_guard->scratch));
-      [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
-        completion->settle(completed);
-      }];
       ScopedTransferAdmission admission(executor_.residency_manager_, identity);
       published_value_ = std::move(published_destination);
       check_deadline(
           DeviceExecutorDeadlineCheckpoint::NativeCommit,
           "Metal execution deadline expired before native command-buffer "
           "commit.");
+      [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        completion->settle(completed);
+      }];
       [command_buffer commit];
       admission.release();
     }

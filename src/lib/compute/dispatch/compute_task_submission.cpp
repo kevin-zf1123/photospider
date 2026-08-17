@@ -18,7 +18,6 @@
 #include "compute/execution/execution_service_test_probe.hpp"
 #endif
 #include "compute/execution/resource_demand_estimator.hpp"
-#include "core/value_image_adapter.hpp"
 #include "graph/graph_traversal_service.hpp"
 
 namespace ps::compute {
@@ -562,17 +561,13 @@ bool TaskSubmissionPlan::defer_pending_value(
   }
   std::optional<NodeOutput>& result =
       temp_results_.at(static_cast<std::size_t>(index->second));
-  if (!result.has_value() || !result->image_value.valid()) {
+  if (!result.has_value() || !result->has_image_value()) {
     return false;
   }
 
-  const ReadyFenceSnapshot observed = result->image_value.ready_fence().poll();
+  const ReadyFenceSnapshot observed =
+      result->image_value().ready_fence().poll();
   if (observed.state() == ReadyFenceState::Ready) {
-    if (result->image_buffer.width == 0 && result->image_buffer.height == 0 &&
-        result->image_buffer.channels == 0) {
-      result->image_buffer =
-          value_image_adapter::snapshot_cpu_image_buffer(result->image_value);
-    }
     return false;
   }
   if (observed.state() != ReadyFenceState::Pending) {
@@ -601,8 +596,8 @@ bool TaskSubmissionPlan::defer_pending_value(
     task_runtime.inc_tasks_to_complete(1);
     completion_counted = true;
     ReadyFenceWaitRegistration registration =
-        result->image_value.ready_fence().async_wait(std::move(executor),
-                                                     std::move(callback));
+        result->image_value().ready_fence().async_wait(std::move(executor),
+                                                       std::move(callback));
     deferred_value_waits_.at(static_cast<std::size_t>(task_id))
         .emplace(std::move(registration));
   } catch (...) {
@@ -650,14 +645,9 @@ void TaskSubmissionPlan::complete_deferred_value(
     }
     std::optional<NodeOutput>& result =
         temp_results_.at(static_cast<std::size_t>(index->second));
-    if (!result.has_value() || !result->image_value.valid()) {
+    if (!result.has_value() || !result->has_image_value()) {
       throw GraphError(GraphErrc::ComputeError,
                        "Deferred task lost its pending Value result.");
-    }
-    if (result->image_buffer.width == 0 && result->image_buffer.height == 0 &&
-        result->image_buffer.channels == 0) {
-      result->image_buffer =
-          value_image_adapter::snapshot_cpu_image_buffer(result->image_value);
     }
     (void)lease.observe_cancellation();
     if (!lease.terminal_outcome().has_value()) {

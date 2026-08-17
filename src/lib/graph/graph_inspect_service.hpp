@@ -14,7 +14,8 @@ namespace ps {
  * @throws Nothing for value construction except string allocation when copied.
  * @note This internal summary keeps implementation-owned cache objects out of
  *       frontend-facing inspection snapshots while preserving the output
- *       dimensions needed to describe local pixel space.
+ *       dimensions derived from canonical Value metadata and needed to
+ *       describe local pixel space.
  */
 struct NodeMetadataSummary {
   /** @brief Whether a high-precision cached output was available. */
@@ -154,9 +155,14 @@ class GraphInspectService {
    * @param node Node to inspect during serialized graph access.
    * @param include_metadata Whether formal HP cache metadata is copied.
    * @return Owned node inspection value.
+   * @throws GraphError with ComputeError when canonical image extents exceed
+   * inspection integer bounds.
+   * @throws std::invalid_argument or std::overflow_error for invalid retained
+   * ImageFacet bounds.
    * @throws std::bad_alloc if strings, recursive parameter values, or metadata
    * copy allocates.
-   * @note No Node or NodeOutput reference escapes through the result.
+   * @note No Node or NodeOutput reference escapes through the result;
+   * compatibility ImageBuffer staging is never inspected.
    */
   GraphNodeInspectInfo inspect_node(const Node& node,
                                     bool include_metadata = true) const;
@@ -167,6 +173,10 @@ class GraphInspectService {
    * @param graph Graph to inspect during serialized graph access.
    * @param include_metadata Whether formal HP cache metadata is copied.
    * @return Owned graph inspection snapshot in deterministic node-id order.
+   * @throws GraphError with ComputeError when canonical image extents exceed
+   * inspection integer bounds.
+   * @throws std::invalid_argument or std::overflow_error for invalid retained
+   * ImageFacet bounds.
    * @throws std::bad_alloc if traversal, recursive parameter copying, or result
    * storage exhausts memory.
    * @throws GraphError if a node id disappears during caller-unsafe mutation.
@@ -182,6 +192,10 @@ class GraphInspectService {
    * @param graph Graph whose upstream topology is traversed.
    * @param include_metadata Whether node cache metadata is copied.
    * @return Owned flattened dependency tree.
+   * @throws GraphError with ComputeError when canonical image extents exceed
+   * inspection integer bounds.
+   * @throws std::invalid_argument or std::overflow_error for invalid retained
+   * ImageFacet bounds.
    * @throws std::bad_alloc if traversal path, copied parameters, or result
    * storage grows.
    * @note The caller must serialize graph mutation for the full call.
@@ -197,6 +211,10 @@ class GraphInspectService {
    * @param include_metadata Whether node cache metadata is copied.
    * @return Owned flattened dependency tree, with start_node_found=false when
    * the requested id is absent.
+   * @throws GraphError with ComputeError when canonical image extents exceed
+   * inspection integer bounds.
+   * @throws std::invalid_argument or std::overflow_error for invalid retained
+   * ImageFacet bounds.
    * @throws std::bad_alloc if traversal path, copied parameters, or result
    * storage grows.
    * @note The caller must serialize graph mutation for the full call.

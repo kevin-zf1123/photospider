@@ -30,18 +30,20 @@ cv::Mat toCvMat(const InputTile& tile);
 /**
  * @brief Converts a writable output tile to an OpenCV matrix view.
  *
- * The returned matrix is scoped to tile.roi and shares storage with the
- * destination ImageBuffer. Operators use this overload for tile writes.
+ * The returned matrix covers tile.roi and writes through the active checked
+ * Host grant using the immutable output plan's row stride. Operators use this
+ * overload only during the grant's callback lifetime.
  *
- * @param tile Output tile whose buffer and ROI should be viewed.
+ * @param tile Output tile whose plan, grant, and ROI should be viewed.
  * @return cv::Mat covering tile.roi.
- * @throws std::invalid_argument when the descriptor is malformed or channels
- * are outside OpenCV's supported positive range.
- * @throws std::runtime_error when tile has no buffer or the buffer has no
- * writable data payload.
+ * @throws std::invalid_argument when plan element facts or channels cannot be
+ * represented by OpenCV, or the ROI does not exactly match the grant.
+ * @throws std::runtime_error when tile has no plan or active grant.
+ * @throws std::logic_error when the grant is retired or revoked.
+ * @throws std::overflow_error when validation arithmetic is unrepresentable.
  * @throws cv::Exception when the ROI is invalid.
- * @note The destination buffer lifetime is owned by the compute service;
- * backend synchronization uses `cv::ACCESS_WRITE`.
+ * @note The returned matrix borrows grant spans and must be destroyed before
+ * grant retirement. No compatibility ImageBuffer becomes output authority.
  */
 cv::Mat toCvMat(const OutputTile& tile);
 
@@ -77,14 +79,16 @@ cv::UMat toCvUMat(const InputTile& tile);
 /**
  * @brief Converts a writable output tile to an OpenCV UMat view.
  *
- * @param tile Output tile whose buffer and ROI should be viewed.
+ * @param tile Output tile whose plan, grant, and ROI should be viewed.
  * @return cv::UMat covering tile.roi.
- * @throws std::invalid_argument when the descriptor is malformed or channels
- * are outside OpenCV's supported positive range.
- * @throws std::runtime_error when tile has no buffer or no writable payload.
+ * @throws std::invalid_argument when plan element facts or channels cannot be
+ * represented by OpenCV, or the ROI does not exactly match the grant.
+ * @throws std::runtime_error when tile has no plan or active grant.
+ * @throws std::logic_error when the grant is retired or revoked.
+ * @throws std::overflow_error when validation arithmetic is unrepresentable.
  * @throws cv::Exception when the ROI or upload fails.
- * @note The destination buffer lifetime is owned by the compute service and
- * CPU-backed upload uses `cv::ACCESS_WRITE`.
+ * @note The returned UMat must complete all writes before grant retirement;
+ * CPU-backed mapping uses `cv::ACCESS_WRITE`.
  */
 cv::UMat toCvUMat(const OutputTile& tile);
 

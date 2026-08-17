@@ -13,7 +13,8 @@
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "core/param_utils.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "graph/node.hpp"     // NOLINT(build/include_subdir)
+#include "core/value_image_adapter.hpp"
+#include "graph/node.hpp"  // NOLINT(build/include_subdir)
 #include "graph_cli/command/commands.hpp"
 #include "graph_cli/command/help_utils.hpp"
 #include "graph_cli/dependency_tree_formatter.hpp"
@@ -46,10 +47,12 @@ void register_cli_command_ops() {
                             const std::vector<const NodeOutput*>&) {
           const int width = as_int_flexible(node.parameters, "width", 256);
           const int height = as_int_flexible(node.parameters, "height", 128);
+          ImageBuffer image = make_aligned_cpu_image_buffer(width, height, 1,
+                                                            DataType::FLOAT32);
+          toCvMat(image).setTo(3.0f);
           NodeOutput output;
-          output.image_buffer = make_aligned_cpu_image_buffer(
-              width, height, 1, DataType::FLOAT32);
-          toCvMat(output.image_buffer).setTo(3.0f);
+          output.publish_image_value(
+              value_image_adapter::snapshot_cpu_image_value(image));
           output.space.absolute_roi = PixelRect{0, 0, width, height};
           output.debug.compute_device = "cli-dirty-test-source";
           return output;
@@ -63,11 +66,16 @@ void register_cli_command_ops() {
                                  "cli dirty inspect requires one input");
               }
               const NodeOutput& input = *inputs.front();
+              const ImageBuffer input_image =
+                  value_image_adapter::snapshot_cpu_image_buffer(
+                      input.image_value());
+              ImageBuffer image = make_aligned_cpu_image_buffer(
+                  input_image.width, input_image.height, input_image.channels,
+                  input_image.type);
+              toCvMat(input_image).copyTo(toCvMat(image));
               NodeOutput output;
-              output.image_buffer = make_aligned_cpu_image_buffer(
-                  input.image_buffer.width, input.image_buffer.height,
-                  input.image_buffer.channels, input.image_buffer.type);
-              toCvMat(input.image_buffer).copyTo(toCvMat(output.image_buffer));
+              output.publish_image_value(
+                  value_image_adapter::snapshot_cpu_image_value(image));
               output.space.absolute_roi = input.space.absolute_roi;
               output.debug.compute_device = "cli-dirty-test-offset-identity";
               return output;

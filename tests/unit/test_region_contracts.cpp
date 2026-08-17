@@ -583,8 +583,8 @@ TEST_F(RegionRouteSelection,
   GraphModel graph("");
   Node source = make_region_source(1);
   source.cached_output_high_precision = NodeOutput{};
-  source.cached_output_high_precision->image_value =
-      make_region_rank_four_tensor();
+  source.cached_output_high_precision->publish_image_value(
+      make_region_rank_four_tensor());
   source.hp_region = full_region_rank_four_tensor();
   graph.add_node(std::move(source));
   graph.add_node(make_region_child(2, 1, "invert_dense"));
@@ -728,8 +728,8 @@ TEST(RegionPlanning, ClipsRankGeneralTensorAndRejectsRtProjection) {
   GraphModel graph("");
   Node source = make_region_source(1);
   source.cached_output_high_precision = NodeOutput{};
-  source.cached_output_high_precision->image_value =
-      make_region_rank_four_tensor();
+  source.cached_output_high_precision->publish_image_value(
+      make_region_rank_four_tensor());
   source.hp_region = full_region_rank_four_tensor();
   graph.add_node(std::move(source));
   graph.add_node(make_region_child(2, 1, "invert_dense"));
@@ -791,8 +791,8 @@ TEST(RegionPlanning, RejectsRankMismatchAndMissingTensorContract) {
   GraphModel graph("");
   Node source = make_region_source(1);
   source.cached_output_high_precision = NodeOutput{};
-  source.cached_output_high_precision->image_value =
-      make_region_rank_four_tensor();
+  source.cached_output_high_precision->publish_image_value(
+      make_region_rank_four_tensor());
   source.hp_region = full_region_rank_four_tensor();
   graph.add_node(std::move(source));
   graph.add_node(make_region_child(2, 1, "invert_dense"));
@@ -819,8 +819,8 @@ TEST(RegionLifecycle, RetainsTensorSourceFactsWithoutPixelProjection) {
   GraphModel graph("");
   Node source = make_region_source(1);
   source.cached_output_high_precision = NodeOutput{};
-  source.cached_output_high_precision->image_value =
-      make_region_rank_four_tensor();
+  source.cached_output_high_precision->publish_image_value(
+      make_region_rank_four_tensor());
   source.hp_region = full_region_rank_four_tensor();
   graph.add_node(std::move(source));
   graph.add_node(make_region_child(2, 1, "invert_dense"));

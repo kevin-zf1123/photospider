@@ -31,7 +31,8 @@
 #include "plugin/plugin_loader_test_access.hpp"
 #endif
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "graph/node.hpp"     // NOLINT(build/include_subdir)
+#include "core/value_image_adapter.hpp"
+#include "graph/node.hpp"  // NOLINT(build/include_subdir)
 
 namespace plugin_cleanup_allocation_probe {
 
@@ -3481,7 +3482,10 @@ TEST_F(PluginManagerLifecycleTest,
       manager.load_from_dirs_report({plugin_path.parent_path().string()});
   ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
   NodeOutput plugin_output = invoke_lifecycle_output();
-  ASSERT_TRUE(plugin_output.image_buffer.context);
+  ASSERT_TRUE(plugin_output.has_image_value());
+  EXPECT_FALSE(plugin_output.image_value().storage_binding().host_visible);
+  EXPECT_EQ(plugin_output.image_value().storage_binding().memory_domain,
+            MemoryDomain::Imported);
   EXPECT_EQ(manager.unload_all_plugins(), 1);
   EXPECT_EQ(read_lifecycle_trace(trace_path),
             (std::vector<std::string>{"registrar_return", "callback_destroy"}));
@@ -3499,7 +3503,7 @@ TEST_F(PluginManagerLifecycleTest,
   }
   EXPECT_TRUE(caught_bad_alloc);
   EXPECT_EQ(plugin_output.debug.compute_device, "PLUGIN_LIFECYCLE_TEST");
-  EXPECT_TRUE(plugin_output.image_buffer.context);
+  EXPECT_TRUE(plugin_output.has_image_value());
   EXPECT_EQ(read_lifecycle_trace(trace_path),
             (std::vector<std::string>{"registrar_return", "callback_destroy"}));
 
@@ -3521,16 +3525,17 @@ TEST_F(PluginManagerLifecycleTest,
 }
 
 /**
- * @brief Proves an ImageBuffer copy independently retains plugin deleter code.
+ * @brief Proves a Value copy independently retains plugin deleter code.
  *
  * @throws Nothing when real plugin load, invocation, unload, and trace cleanup
  * complete successfully.
  * @note The enclosing NodeOutput and registry callback lease are retired first;
- * only the copied image context remains. Its final reset must run the
- * plugin-defined payload destructor before the real library-unload event.
+ * only the copied immutable Value remains. Its final reset must run the
+ * plugin-defined external-binding destructor before the real library-unload
+ * event.
  */
 TEST_F(PluginManagerLifecycleTest,
-       ImageBufferCopyRetainsPluginPayloadLeaseAfterOutputRetires) {
+       ValueCopyRetainsPluginPayloadLeaseAfterOutputRetires) {
   const auto plugin_path = lifecycle_plugin_path();
   ASSERT_TRUE(std::filesystem::exists(plugin_path));
   const auto trace_path = lifecycle_trace_path("image-buffer-copy-lease");
@@ -3545,15 +3550,15 @@ TEST_F(PluginManagerLifecycleTest,
       manager.load_from_dirs_report({plugin_path.parent_path().string()});
   ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
   NodeOutput plugin_output = invoke_lifecycle_output();
-  ASSERT_TRUE(plugin_output.image_buffer.context);
-  ImageBuffer retained_buffer = plugin_output.image_buffer;
+  ASSERT_TRUE(plugin_output.has_image_value());
+  Value retained_value = plugin_output.image_value();
 
   EXPECT_EQ(manager.unload_all_plugins(), 1);
   plugin_output = NodeOutput{};
   EXPECT_EQ(read_lifecycle_trace(trace_path),
             (std::vector<std::string>{"registrar_return", "callback_destroy"}));
 
-  retained_buffer = ImageBuffer{};
+  retained_value = Value{};
   EXPECT_EQ(
       read_lifecycle_trace(trace_path),
       (std::vector<std::string>{"registrar_return", "callback_destroy",
@@ -3585,18 +3590,18 @@ TEST_F(PluginManagerLifecycleTest,
       manager.load_from_dirs_report({plugin_path.parent_path().string()});
   ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
   NodeOutput plugin_output = invoke_lifecycle_output();
-  ASSERT_TRUE(plugin_output.image_buffer.context);
+  ASSERT_TRUE(plugin_output.has_image_value());
   EXPECT_EQ(manager.unload_all_plugins(), 1);
   EXPECT_EQ(read_lifecycle_trace(trace_path),
             (std::vector<std::string>{"registrar_return", "callback_destroy"}));
 
   NodeOutput moved(std::move(plugin_output));
   EXPECT_FALSE(plugin_output.plugin_library_lifetime);
-  EXPECT_FALSE(plugin_output.image_buffer.context);
+  EXPECT_FALSE(plugin_output.has_image_value());
   NodeOutput move_assigned;
   move_assigned = std::move(moved);
   EXPECT_FALSE(moved.plugin_library_lifetime);
-  EXPECT_FALSE(moved.image_buffer.context);
+  EXPECT_FALSE(moved.has_image_value());
   EXPECT_EQ(read_lifecycle_trace(trace_path),
             (std::vector<std::string>{"registrar_return", "callback_destroy"}));
 
@@ -3912,8 +3917,10 @@ TEST_F(PluginManagerLifecycleTest,
       "photospider-save-rejection.unsupported_extension";
   save_node.parameters["path"] = rejected_path.string();
   NodeOutput save_input;
-  save_input.image_buffer =
+  const ImageBuffer save_image =
       make_aligned_cpu_image_buffer(1, 1, 1, DataType::FLOAT32);
+  save_input.publish_image_value(
+      value_image_adapter::snapshot_cpu_image_value(save_image));
   const std::vector<const NodeOutput*> save_inputs{&save_input};
   const auto save_operation = OpRegistry::instance().resolve_for_intent(
       "io", "save", ComputeIntent::GlobalHighPrecision);
@@ -3968,8 +3975,10 @@ TEST_F(PluginManagerLifecycleTest,
   graph.validate_topology();
   graph.mutate_node_runtime_state(1, [](auto& state) {
     state.cached_output_high_precision = NodeOutput{};
-    state.cached_output_high_precision->image_buffer =
+    const ImageBuffer image =
         make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+    state.cached_output_high_precision->publish_image_value(
+        value_image_adapter::snapshot_cpu_image_value(image));
     state.hp_version = 1;
   });
 
@@ -4034,8 +4043,10 @@ TEST_F(PluginManagerLifecycleTest,
   graph.validate_topology();
   graph.mutate_node_runtime_state(1, [](auto& state) {
     state.cached_output_high_precision = NodeOutput{};
-    state.cached_output_high_precision->image_buffer =
+    const ImageBuffer image =
         make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+    state.cached_output_high_precision->publish_image_value(
+        value_image_adapter::snapshot_cpu_image_value(image));
     state.hp_version = 1;
   });
 

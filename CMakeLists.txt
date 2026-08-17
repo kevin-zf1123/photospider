@@ -520,6 +520,7 @@ endif()
 # build-selected image-processing/image-artifact implementations.
 set(PHOTOSPIDER_CORE_INTERNAL_SOURCES
     src/lib/core/exact_box_downsample.cpp
+    src/lib/core/host_output_authorization.cpp
     src/lib/core/ps_types.cpp
     src/lib/core/parameter_value_text.cpp
 )
@@ -572,6 +573,7 @@ set(PHOTOSPIDER_GRAPH_INTERNAL_SOURCES
     src/lib/graph/roi_propagation_service.cpp
     src/lib/graph/graph_io_service.cpp
     src/lib/graph/graph_cache_service.cpp
+    src/lib/graph/image_statistics_store.cpp
     src/lib/graph/graph_inspect_service.cpp
 )
 
@@ -608,6 +610,16 @@ endif()
 set(PHOTOSPIDER_CONFIGURED_PERSISTENCE_SOURCES
     src/lib/providers/configured_persistence_adapters.cpp)
 
+# Private Host grant-to-OpenCV projection. The embedded product requires this
+# adapter whenever OpenCV is enabled, including the supported profile where the
+# repository operation provider is disabled. Provider targets reuse the same
+# translation unit without making it part of the public operation_opencv SDK.
+set(PHOTOSPIDER_HOST_OUTPUT_OPENCV_ADAPTER_SOURCES "")
+if(PHOTOSPIDER_ENABLE_OPENCV)
+    list(APPEND PHOTOSPIDER_HOST_OUTPUT_OPENCV_ADAPTER_SOURCES
+        src/lib/adapters/opencv/host_output_adapter_opencv.cpp)
+endif()
+
 # Module: optional repository-owned OpenCV CPU operation provider. The graph
 # registry remains provider-neutral; only this target owns algorithm callbacks,
 # OpenCV process initialization, and OpenCV exception translation.
@@ -616,6 +628,7 @@ if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
     list(APPEND PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES
         src/lib/providers/opencv/opencv_operation_provider.cpp)
     add_library(photospider_opencv_operation_provider_internal STATIC
+        ${PHOTOSPIDER_HOST_OUTPUT_OPENCV_ADAPTER_SOURCES}
         ${PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES})
     target_include_directories(
         photospider_opencv_operation_provider_internal PRIVATE
@@ -890,6 +903,7 @@ set(PHOTOSPIDER_PRODUCT_SOURCES
     ${PHOTOSPIDER_PLUGIN_TRUST_SOURCES}
     ${PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES}
     ${PHOTOSPIDER_POLICY_INTERNAL_SOURCES}
+    ${PHOTOSPIDER_HOST_OUTPUT_OPENCV_ADAPTER_SOURCES}
     ${PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES}
     ${PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES}
     ${PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES}
@@ -2548,6 +2562,10 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         tests/unit/test_graph_document_adapter.cpp)
     add_ps_test(test_image_buffer_contracts
         tests/unit/test_image_buffer_contracts.cpp)
+    add_ps_test(test_host_output_authorization
+        tests/unit/test_host_output_authorization.cpp)
+    add_ps_test(test_image_statistics_store
+        tests/unit/test_image_statistics_store.cpp)
     add_ps_test(test_host_compute_request_contracts
         tests/unit/test_host_compute_request_contracts.cpp)
     add_executable(test_stdlib_image_buffer_processing
@@ -3152,6 +3170,12 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_image_buffer_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_host_output_authorization
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_image_statistics_store
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_host_compute_request_contracts
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_stdlib_image_buffer_processing

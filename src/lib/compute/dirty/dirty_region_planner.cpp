@@ -81,8 +81,8 @@ std::optional<std::vector<std::size_t>> dense_shape_for_node(
       }
     }
     if (current.cached_output_high_precision &&
-        current.cached_output_high_precision->image_value.valid()) {
-      return current.cached_output_high_precision->image_value
+        current.cached_output_high_precision->has_image_value()) {
+      return current.cached_output_high_precision->image_value()
           .dense_tensor_descriptor()
           .shape;
     }
@@ -612,11 +612,12 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
     HpPlanEntry entry;
     entry.region_hp = current_region;
     if (current_node.cached_output_high_precision &&
-        current_node.cached_output_high_precision->image_value.valid() &&
-        current_node.cached_output_high_precision->image_value.image_facet()
+        current_node.cached_output_high_precision->has_image_value() &&
+        current_node.cached_output_high_precision->image_value()
+            .image_facet()
             .has_value()) {
       const ImageView view(
-          current_node.cached_output_high_precision->image_value);
+          current_node.cached_output_high_precision->image_value());
       entry.hp_size = PixelSize{static_cast<int>(view.width()),
                                 static_cast<int>(view.height())};
     }

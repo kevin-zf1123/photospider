@@ -8,6 +8,37 @@
 #include "graph/graph_cache_service.hpp"
 
 namespace ps::compute {
+namespace {
+
+/**
+ * @brief Validates one private output before formal graph-cache publication.
+ * @param output Candidate request-local output.
+ * @return Nothing after every named Value is valid and Ready.
+ * @throws GraphError with ComputeError for compatibility staging, an invalid
+ * named Value, or a non-Ready producer fence.
+ * @throws std::logic_error when a retained fence observer is invalid.
+ * @note Validation performs no wait, allocation, compatibility import, graph
+ * mutation, revision minting, or cache publication.
+ */
+void validate_formal_output(const NodeOutput& output) {
+  if (output.has_compatibility_image()) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Formal commit rejects compatibility ImageBuffer staging.");
+  }
+  for (const auto& [name, value] : output.named_values) {
+    if (name.empty() || !value.valid()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Formal commit received an invalid named Value.");
+    }
+    if (!value.ready_fence().poll().ready()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Formal commit requires every named Value to be Ready.");
+    }
+  }
+}
+
+}  // namespace
 
 ComputeResultCommitter::ComputeResultCommitter(
     GraphCacheService& cache, std::mutex& graph_mutex,
@@ -35,7 +66,7 @@ void ComputeResultCommitter::commit(
   std::vector<std::optional<RegionSet>> full_regions(temp_results.size());
   for (size_t i = 0; i < execution_order.size(); ++i) {
     if (temp_results[i].has_value()) {
-      value_image_adapter::normalize_node_output_image_value(&*temp_results[i]);
+      validate_formal_output(*temp_results[i]);
       full_regions[i] =
           value_image_adapter::full_node_output_region(*temp_results[i]);
     }

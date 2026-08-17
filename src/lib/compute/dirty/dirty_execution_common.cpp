@@ -662,25 +662,74 @@ std::pair<int, DataType> infer_output_spec(
     const std::optional<NodeOutput>& preferred,
     const std::vector<const NodeOutput*>& image_inputs,
     const std::optional<NodeOutput>* fallback) {
+  const auto value_spec =
+      [](const NodeOutput& output) -> std::optional<std::pair<int, DataType>> {
+    if (!output.has_image_value() ||
+        !output.image_value().image_facet().has_value()) {
+      return std::nullopt;
+    }
+    const Value& value = output.image_value();
+    const DenseTensorDescriptor& descriptor = value.dense_tensor_descriptor();
+    const ImageFacet& facet = *value.image_facet();
+    const std::size_t channels = facet.channel_axis.has_value()
+                                     ? descriptor.shape[*facet.channel_axis]
+                                     : 1U;
+    if (channels > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::invalid_argument(
+          "Dirty output channel count exceeds int compatibility.");
+    }
+    const std::uint32_t bits = descriptor.storage_encoding.bit_width;
+    DataType type;
+    switch (descriptor.element_semantics) {
+      case ElementSemantics::UnsignedInteger:
+        if (bits == 8U) {
+          type = DataType::UINT8;
+        } else if (bits == 16U) {
+          type = DataType::UINT16;
+        } else {
+          throw std::invalid_argument(
+              "Dirty output unsigned element width is unsupported.");
+        }
+        break;
+      case ElementSemantics::SignedInteger:
+        if (bits == 8U) {
+          type = DataType::INT8;
+        } else if (bits == 16U) {
+          type = DataType::INT16;
+        } else {
+          throw std::invalid_argument(
+              "Dirty output signed element width is unsupported.");
+        }
+        break;
+      case ElementSemantics::FloatingPoint:
+        if (bits == 32U) {
+          type = DataType::FLOAT32;
+        } else if (bits == 64U) {
+          type = DataType::FLOAT64;
+        } else {
+          throw std::invalid_argument(
+              "Dirty output floating element width is unsupported.");
+        }
+        break;
+    }
+    return std::pair<int, DataType>{static_cast<int>(channels), type};
+  };
   if (preferred) {
-    const auto& buffer = preferred->image_buffer;
-    if (buffer.width > 0 && buffer.height > 0 && buffer.channels > 0) {
-      return {buffer.channels, buffer.type};
+    if (const auto spec = value_spec(*preferred)) {
+      return *spec;
     }
   }
   for (const auto* input : image_inputs) {
     if (!input) {
       continue;
     }
-    const auto& buffer = input->image_buffer;
-    if (buffer.width > 0 && buffer.height > 0 && buffer.channels > 0) {
-      return {buffer.channels, buffer.type};
+    if (const auto spec = value_spec(*input)) {
+      return *spec;
     }
   }
   if (fallback && *fallback) {
-    const auto& buffer = (*fallback)->image_buffer;
-    if (buffer.width > 0 && buffer.height > 0 && buffer.channels > 0) {
-      return {buffer.channels, buffer.type};
+    if (const auto spec = value_spec(**fallback)) {
+      return *spec;
     }
   }
   return {1, DataType::FLOAT32};

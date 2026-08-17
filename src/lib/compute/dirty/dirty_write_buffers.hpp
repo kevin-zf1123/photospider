@@ -8,6 +8,7 @@
 
 #include "compute/dirty/downsample_executor.hpp"
 #include "compute/dirty/realtime_proxy_graph.hpp"
+#include "core/host_output_authorization.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/data/region.hpp"
 
@@ -21,12 +22,10 @@ namespace ps::compute {
  * worker tasks. The owning executor commits the staged data into GraphModel
  * only after the RT sibling commit gate allows original-graph mutation.
  *
- * @note Existing CPU output is deep-copied and its sealed Value identity is
- * cleared before tiled ROI writes, so worker execution never mutates visible
- * GraphModel image storage before commit. Successful commit reseals final CPU
- * bytes with fresh allocation/revision identity. Opaque non-CPU descriptors
- * are shared only until tiled allocation or monolithic whole-output
- * replacement; their payload is never mutated through the generic staging path.
+ * @note Existing sealed Values are retained immutably. Tiled ROI work allocates
+ * a fresh Host binding, optionally seeds it from those bytes, and replaces the
+ * staged Value only after all grants retire and seal succeeds. No mutable
+ * staging ImageBuffer or duplicate revision authority exists.
  */
 class HighPrecisionDirtyWriteBuffer {
  public:
@@ -65,13 +64,54 @@ class HighPrecisionDirtyWriteBuffer {
    *
    * @param node Graph node whose current HP state seeds the staged entry.
    * @return Mutable staged output owned by this buffer.
-   * @throws GraphError when existing image output cannot be cloned; may throw
-   * std::bad_alloc while allocating map entries or image storage.
+   * @throws GraphError when existing output contains forbidden compatibility
+   * staging; may throw std::bad_alloc while allocating map entries/metadata.
    * @note When constructed with seed_existing_outputs=false, the staged output
    * starts empty even if the graph already has HP cache; callers must then
    * execute a full-output HP plan before commit.
    */
   NodeOutput& ensure_output(const Node& node);
+
+  /**
+   * @brief Returns the sole request binding for one HP tiled node.
+   *
+   * @param node Graph node whose immutable output state seeds the binding.
+   * @param plan Complete frozen plan derived before any producer callback.
+   * @param expected_task_count Positive executable tiled-task count frozen by
+   * request plan/entry geometry for this node.
+   * @return Stable open binding shared by every disjoint task for this node.
+   * @throws std::invalid_argument when the count is zero or a later task
+   * supplies a different plan/count.
+   * @throws std::logic_error when the retained binding is no longer available
+   * for task execution.
+   * @throws std::bad_alloc, std::overflow_error, ReadyFenceAccessError,
+   * BufferAccessError, or grant lifecycle exceptions from allocation/seeding.
+   * @note The first caller allocates and optionally seeds exactly one binding
+   * under the write-buffer mutex. Later task callbacks issue disjoint grants
+   * through the same binding. The last executable task seals the binding;
+   * commit_to_graph() rejects any undrained state. Failure/cancellation
+   * destroys it unpublished. The returned reference remains valid until that
+   * commit or buffer destruction, neither of which may race active tasks.
+   */
+  HostOutputBinding& ensure_tiled_output_binding(
+      const Node& node, DenseImageOutputPlan plan,
+      std::size_t expected_task_count);
+
+  /**
+   * @brief Retires one successful HP tiled task and seals at the node join.
+   *
+   * @param node Graph node whose shared binding received this task's grants.
+   * @return Nothing after decrementing the frozen task count; the last task
+   * seals the binding and publishes its one immutable staged image Value.
+   * @throws std::logic_error when no matching binding/count exists, a task is
+   * completed twice, or seal observes an active/missing grant.
+   * @throws std::invalid_argument, std::overflow_error, std::bad_alloc, or
+   * std::system_error from final Value/NodeOutput publication.
+   * @note The call occurs only after every grant issued by this task retired.
+   * Task-graph image consumers depend on the complete upstream node task set,
+   * so none can observe staging before this exact node-level seal point.
+   */
+  void complete_tiled_task(const Node& node);
 
   /**
    * @brief Stages one Region-aware monolithic result with byte preservation.
@@ -141,10 +181,11 @@ class HighPrecisionDirtyWriteBuffer {
    * @param graph Graph receiving HP outputs and metadata.
    * @throws GraphError when a staged node no longer exists.
    * @throws std::invalid_argument, std::overflow_error, or std::bad_alloc when
-   * final CPU image Value normalization fails.
-   * @note The caller must hold graph.graph_mutex_. This method performs no
-   * locking on GraphModel so the commit boundary remains explicit. Each
-   * mutable CPU staging clone is sealed before graph publication.
+   * final named-Value validation fails.
+   * @note The caller must hold graph.graph_mutex_, and every physical task
+   * must already be drained. This method first seals and validates every
+   * retained binding before publishing any graph state, then moves all staged
+   * outputs. It performs no locking on GraphModel.
    */
   void commit_to_graph(GraphModel& graph);
 
@@ -196,12 +237,24 @@ class HighPrecisionDirtyWriteBuffer {
    * `has_output` controls whether commit_to_graph() writes output state.
    */
   struct Entry {
+    /** @brief True after graph output/version metadata has been captured. */
     bool initialized = false;
+    /** @brief True when commit_to_graph() must publish this node. */
     bool has_output = false;
+    /** @brief Immutable named Values and non-payload node output metadata. */
     NodeOutput output;
+    /** @brief Exact HP validity known for the staged output. */
     std::optional<RegionSet> hp_region;
+    /** @brief Version published only after complete request success. */
     int hp_version = 0;
+    /** @brief Dirty-source generation published with successful commit. */
     std::optional<uint64_t> dirty_source_generation;
+    /** @brief Sole open Host allocation authority for all tiled tasks. */
+    std::optional<HostOutputBinding> tiled_binding;
+    /** @brief Frozen number of executable tiled tasks for this node. */
+    std::size_t tiled_task_count = 0U;
+    /** @brief Successful tiled tasks still required before node-level seal. */
+    std::size_t tiled_tasks_remaining = 0U;
   };
 
   /**
@@ -209,7 +262,7 @@ class HighPrecisionDirtyWriteBuffer {
    *
    * @param node Graph node used for initial HP metadata.
    * @return Mutable staged entry.
-   * @throws GraphError when image cloning fails.
+   * @throws GraphError when existing output has compatibility staging.
    * @note The caller must hold mutex_. Existing Region validity is seeded only
    * with an existing output when seed_existing_outputs_ is true; an empty
    * force-recache entry never inherits old validity.
@@ -233,9 +286,8 @@ class HighPrecisionDirtyWriteBuffer {
  * dirty worker tasks execute. After all RT work drains, the owning executor
  * commits staged state into RealtimeProxyGraph, not into GraphModel.
  *
- * @note Existing committed CPU proxy output is deep-copied before ROI writes.
- * Opaque non-CPU descriptors are shared only until replacement and are never
- * mutated through the generic staging path.
+ * @note Existing committed proxy Values are retained immutably. ROI writes use
+ * fresh Host bindings and replace staged state only with sealed Values.
  */
 class RealtimeProxyWriteBuffer {
  public:
@@ -245,13 +297,10 @@ class RealtimeProxyWriteBuffer {
    * @param proxy_graph Committed proxy graph used to seed existing RT state.
    * @param seed_existing_outputs Whether staged entries should seed from the
    * committed proxy graph. Force-recache requests pass false.
-   * @param seal_image_values_on_commit Whether commit normalizes staged legacy
-   * image descriptors into immutable Value identity before proxy publication.
    * @throws Nothing.
    */
   explicit RealtimeProxyWriteBuffer(RealtimeProxyGraph& proxy_graph,
-                                    bool seed_existing_outputs = true,
-                                    bool seal_image_values_on_commit = false);
+                                    bool seed_existing_outputs = true);
 
   /**
    * @brief Returns staged RT proxy output for one node when available.
@@ -277,12 +326,67 @@ class RealtimeProxyWriteBuffer {
    *
    * @param node_id Original GraphModel node id.
    * @return Mutable staged output owned by this buffer.
-   * @throws GraphError when existing proxy image output cannot be cloned; may
-   * throw std::bad_alloc while allocating map entries or image storage.
+   * @throws GraphError when existing proxy output contains forbidden
+   * compatibility staging; may throw std::bad_alloc for map/metadata storage.
    * @note The staged output is seeded from RealtimeProxyGraph only when this
    * buffer was constructed with seed_existing_outputs=true.
    */
   NodeOutput& ensure_output(int node_id);
+
+  /**
+   * @brief Publishes one completed monolithic result into proxy staging.
+   * @param node_id Original graph node id.
+   * @param output Complete result containing only immutable named Values.
+   * @param preserved_existing_bytes Whether the new binding retained every
+   * byte covered by the prior HP-space validity Region.
+   * @return Nothing.
+   * @throws GraphError when output contains compatibility staging.
+   * @throws std::bad_alloc when map or output metadata ownership allocates.
+   * @note Failure to preserve prior bytes clears prior validity before the new
+   * exact update Region is marked. An active tiled binding is rejected so the
+   * node cannot acquire two output authorities; committed proxy state remains
+   * unchanged until commit_to_proxy_graph().
+   */
+  void stage_output(int node_id, NodeOutput output,
+                    bool preserved_existing_bytes);
+
+  /**
+   * @brief Returns the sole request binding for one RT tiled node.
+   *
+   * @param node_id Original graph node id whose proxy state seeds the binding.
+   * @param plan Complete frozen RT output plan.
+   * @param expected_task_count Positive executable tiled-task count frozen by
+   * request plan/entry geometry for this node.
+   * @return Stable open binding shared by every disjoint RT task for the node.
+   * @throws std::invalid_argument when the count is zero or a later task
+   * supplies a different plan/count.
+   * @throws std::logic_error when monolithic output already replaced the node
+   * or the retained binding is no longer open for task execution.
+   * @throws std::bad_alloc, std::overflow_error, ReadyFenceAccessError,
+   * BufferAccessError, or grant lifecycle exceptions from allocation/seeding.
+   * @note Allocation and optional seed happen once under the write-buffer
+   * mutex. Task callbacks only borrow the binding to issue disjoint grants;
+   * the last executable task seals it, and commit_to_proxy_graph() rejects any
+   * undrained state. The reference remains valid until seal, commit, or buffer
+   * destruction, none of which may race active tasks.
+   */
+  HostOutputBinding& ensure_tiled_output_binding(
+      int node_id, DenseImageOutputPlan plan, std::size_t expected_task_count);
+
+  /**
+   * @brief Retires one successful RT tiled task and seals at the node join.
+   *
+   * @param node_id Original graph node whose shared binding was written.
+   * @return Nothing after decrementing the frozen task count; the last task
+   * seals and publishes the staged immutable proxy image Value.
+   * @throws std::logic_error for absent/inconsistent count or binding state,
+   * duplicate completion, or seal with an active/missing grant.
+   * @throws std::invalid_argument, std::overflow_error, std::bad_alloc, or
+   * std::system_error from final Value/NodeOutput publication.
+   * @note Every task grant must already be retired. Task-graph image consumers
+   * wait for the complete upstream node task set, preventing pre-seal reads.
+   */
+  void complete_tiled_task(int node_id);
 
   /**
    * @brief Records RT proxy metadata for one successful dirty update.
@@ -305,7 +409,9 @@ class RealtimeProxyWriteBuffer {
    *
    * @throws GraphError when proxy output validation fails; may throw
    * std::bad_alloc while committing defensive node entries.
-   * @note GraphModel is not read or mutated during this commit.
+   * @note Every physical task must already be drained. All retained bindings
+   * are sealed and validated before any proxy state is published. GraphModel
+   * is not read or mutated during this commit.
    */
   void commit_to_proxy_graph();
 
@@ -343,9 +449,18 @@ class RealtimeProxyWriteBuffer {
    * captured. `has_output` controls whether the entry is committed.
    */
   struct Entry {
+    /** @brief True after committed proxy metadata has been captured. */
     bool initialized = false;
+    /** @brief True when commit_to_proxy_graph() must publish this node. */
     bool has_output = false;
+    /** @brief Complete staged proxy metadata and optional named Values. */
     RealtimeProxyGraph::NodeState state;
+    /** @brief Sole open Host allocation authority for all tiled RT tasks. */
+    std::optional<HostOutputBinding> tiled_binding;
+    /** @brief Frozen number of selected RT tiled tasks for this node. */
+    std::size_t tiled_task_count = 0U;
+    /** @brief Successful RT tiled tasks remaining before node-level seal. */
+    std::size_t tiled_tasks_remaining = 0U;
   };
 
   /**
@@ -353,7 +468,7 @@ class RealtimeProxyWriteBuffer {
    *
    * @param node_id Original GraphModel node id.
    * @return Mutable staged entry.
-   * @throws GraphError when image cloning fails.
+   * @throws GraphError when existing output has compatibility staging.
    * @note The caller must hold mutex_. Existing Region validity is seeded only
    * with an existing proxy output when seed_existing_outputs_ is true.
    */
@@ -364,10 +479,6 @@ class RealtimeProxyWriteBuffer {
 
   /** @brief Whether entries seed output pixels from committed proxy state. */
   bool seed_existing_outputs_ = true;
-
-  /** @brief Whether commit seals staged images into immutable Value identity.
-   */
-  bool seal_image_values_on_commit_ = false;
 
   /** @brief Mutex protecting staged entry creation and metadata updates. */
   mutable std::mutex mutex_;

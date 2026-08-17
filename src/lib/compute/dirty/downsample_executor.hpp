@@ -20,9 +20,9 @@ class ComputeRunLease;
  * DownsampleExecutor owns the HP-to-RT refresh that follows high-precision
  * dirty execution when a GraphRuntime is present. Each request records the HP
  * ROI and HP version committed for a node. Execution skips stale requests,
- * allocates or reuses proxy buffers, copies non-image payloads, and records the
- * same downsample/downsample_passthrough events used before the dirty executor
- * split.
+ * creates a fresh Host binding, copies prior immutable RT bytes when valid,
+ * downsamples through a checked grant, seals a transient Value, and records
+ * the same events used before the dirty executor split.
  *
  * @note Instances borrow GraphModel, RealtimeProxyGraph, GraphRuntime, and
  * GraphEventService for a single call chain. RT output is committed only to the
@@ -143,33 +143,21 @@ class DownsampleExecutor {
                          int hp_version);
 
   /**
-   * @brief Ensures the RT image buffer matches the downscaled HP image shape.
-   *
-   * @param proxy_state Proxy node state whose RT buffer is allocated.
-   * @param hp_buffer Source HP image buffer.
-   * @param rt_size Downscaled RT image extent.
-   * @return Mutable RT image buffer with matching dimensions and format.
-   * @throws GraphError or std::bad_alloc if allocation fails.
-   * @note Existing proxy payload data map is preserved by reusing NodeOutput.
-   */
-  ImageBuffer& ensure_rt_buffer(RealtimeProxyGraph::NodeState& proxy_state,
-                                const ImageBuffer& hp_buffer,
-                                const PixelSize& rt_size);
-
-  /**
-   * @brief Downsamples one HP ROI into the matching RT ROI.
+   * @brief Downsamples one HP ROI through a checked RT output grant.
    *
    * @param hp_buffer Source HP image buffer.
-   * @param rt_buffer Destination RT image buffer.
+   * @param output_binding Fresh Host RT output binding.
    * @param roi_hp HP-space ROI to resize.
    * @param rt_size Full RT image extent.
    * @return RT-space ROI that received the resized pixels.
-   * @throws OpenCV exceptions from Mat conversion, ROI slicing, resize, or
-   * copy.
-   * @note Empty RT ROI is widened to the full RT extent, matching previous
-   * dirty downsample behavior.
+   * @throws OpenCV, validation, allocation, or grant exceptions from scratch
+   * resize and checked row publication.
+   * @note Empty RT ROI is widened to the full RT extent. ImageBuffer is used
+   * only as callback-local algorithm scratch; the binding is the only mutable
+   * output and the caller seals it after successful retirement.
    */
-  PixelRect downsample_roi(const ImageBuffer& hp_buffer, ImageBuffer& rt_buffer,
+  PixelRect downsample_roi(const ImageBuffer& hp_buffer,
+                           HostOutputBinding& output_binding,
                            const PixelRect& roi_hp,
                            const PixelSize& rt_size) const;
 

@@ -65,35 +65,44 @@ void validate_image_buffer_compatible_value(const Value& value);
 ImageBuffer snapshot_cpu_image_buffer(const Value& value);
 
 /**
- * @brief Ensures a formal CPU NodeOutput has sealed Value identity authority.
+ * @brief Imports one inbound compatibility image as the sole Value output.
  *
  * @param output Mutable result about to cross an HP or disk-load publication
  * boundary.
  * @return Nothing.
- * @throws std::invalid_argument, std::overflow_error, or std::bad_alloc from
- * CPU ImageBuffer snapshot and Value publication.
- * @note A valid `image_value` is preserved exactly. An invalid member is
- * populated only for a nonempty owned CPU `image_buffer`; empty or opaque
- * non-CPU results remain unnormalized.
+ * @throws std::invalid_argument for malformed or otherwise unsupported
+ * compatibility staging.
+ * @throws std::logic_error when canonical image authority and compatibility
+ * staging coexist.
+ * @throws std::overflow_error or std::bad_alloc from plan construction,
+ * aligned Host allocation, retained external binding, snapshot, and Value
+ * publication.
+ * @note Empty staging is a no-op. A successful import publishes exactly one
+ * named image Value and clears the ImageBuffer owner before returning. CPU
+ * bytes are snapshotted into Host-owned storage. A non-CPU opaque binding is
+ * retained as an immediately Ready imported allocation with tight rows when
+ * the legacy descriptor omits its stride. This is an explicit ABI/codec
+ * boundary conversion, never a formal-commit fallback.
  */
-void normalize_node_output_image_value(NodeOutput* output);
+void import_node_output_compatibility_image(NodeOutput* output);
 
 /**
  * @brief Derives exact full-validity Region metadata for one complete output.
  *
  * @param output Complete output about to enter the formal HP cache.
- * @return Exact data-window ImageRect for an image Value, zero-origin full
- *         ImageRect for a current ImageBuffer, full
- *         TensorSlice for a non-image DenseTensor Value, or Whole for a
- *         data-only/opaque output without finite logical dimensions.
+ * @return Exact data-window ImageRect for an image Value, full TensorSlice for
+ *         a non-image DenseTensor Value, or Whole for a data-only output
+ *         without finite logical dimensions.
  * @throws std::logic_error for an invalid Value accessor.
  * @throws std::invalid_argument when retained image/tensor facts violate their
  *         declared contracts.
  * @throws std::overflow_error when a logical extent exceeds Region bounds.
  * @throws std::bad_alloc when TensorSlice or Region storage cannot allocate.
- * @note This function derives validity metadata only. Display windows never
- *       authorize payload validity. The function preserves allocation
- *       identity, Value revision, bytes, and ownership.
+ * @note This function derives validity metadata only. It rejects nonempty
+ * compatibility staging because formal Region facts may be derived only from
+ * canonical Values. Display windows never authorize payload validity. The
+ * function preserves allocation identity, Value revision, bytes, and
+ * ownership.
  */
 RegionSet full_node_output_region(const NodeOutput& output);
 

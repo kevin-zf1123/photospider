@@ -340,6 +340,50 @@ std::vector<Device> dirty_task_devices(
 }
 
 /**
+ * @brief Counts executable selected tiled tasks for shared-binding joins.
+ * @tparam IncludeTask Predicate matching the executor's pre-binding skip rule.
+ * @param compute_plan Complete retained task inventory.
+ * @param selection Generation-local active task overlay.
+ * @param include_task Callable returning true exactly when one active Tile task
+ * reaches Host binding allocation and later retires one completion.
+ * @return Positive counts for exactly the selected nodes with executable Tile
+ * work.
+ * @throws GraphError when the overlay contains an invalid task id.
+ * @throws std::overflow_error if a per-node count cannot be represented.
+ * @throws std::bad_alloc when count-map storage cannot grow.
+ * @note The frozen map is created before physical admission. The predicate is
+ * derived only from immutable plan/entry geometry and performs no provider or
+ * payload work. Executors never infer expected completion from callback start
+ * order, and monolithic or pre-binding no-op tasks do not appear.
+ */
+template <typename IncludeTask>
+std::unordered_map<int, std::size_t> selected_tiled_task_counts(
+    const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay& selection,
+    IncludeTask include_task) {
+  std::unordered_map<int, std::size_t> counts;
+  counts.reserve(selection.active_task_ids.size());
+  for (int task_id : selection.active_task_ids) {
+    if (task_id < 0 || static_cast<std::size_t>(task_id) >=
+                           compute_plan.task_graph.tasks.size()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Dirty tiled-task count observed an invalid selected task id.");
+    }
+    const PlannedTask& task =
+        compute_plan.task_graph.tasks.at(static_cast<std::size_t>(task_id));
+    if (task.kind != PlannedTaskKind::Tile || !include_task(task)) {
+      continue;
+    }
+    std::size_t& count = counts[task.node_id];
+    if (count == std::numeric_limits<std::size_t>::max()) {
+      throw std::overflow_error("Dirty tiled-task count exceeds size_t.");
+    }
+    ++count;
+  }
+  return counts;
+}
+
+/**
  * @brief Expands frozen dirty operation constraints to dense task ids.
  *
  * @param compute_plan Plan whose task ids index the returned vector.
@@ -651,9 +695,18 @@ PixelRect hp_planning_roi_for_request(const GraphModel& graph,
   }
   if (const NodeOutput* target_output =
           ComputeCachePolicy::reusable_output(*target)) {
-    const ImageBuffer& buffer = target_output->image_buffer;
-    if (buffer.width > 0 && buffer.height > 0) {
-      return PixelRect{0, 0, buffer.width, buffer.height};
+    if (target_output->has_image_value() &&
+        target_output->image_value().image_facet().has_value()) {
+      const ImageBounds& bounds = target_output->image_value().image_bounds();
+      const std::size_t width = image_bounds_width(bounds);
+      const std::size_t height = image_bounds_height(bounds);
+      const std::size_t maximum =
+          static_cast<std::size_t>(std::numeric_limits<int>::max());
+      if (width > maximum || height > maximum) {
+        throw GraphError(GraphErrc::InvalidParameter,
+                         "Forced HP output extent exceeds PixelRect.");
+      }
+      return PixelRect{0, 0, static_cast<int>(width), static_cast<int>(height)};
     }
   }
 
@@ -671,17 +724,15 @@ PixelRect hp_planning_roi_for_request(const GraphModel& graph,
 }
 
 /**
- * @brief Reports whether an output carries an executable image payload.
+ * @brief Reports whether an output carries a canonical image Value.
  * @param output Output produced by a parameter stabilization operation.
- * @return True when positive image dimensions and storage ownership coexist.
+ * @return True exactly when the permanent named image Value is present.
  * @throws Nothing.
- * @note Metadata-only dimensions are treated as image-carrying conservatively
- * when either data or context retains the payload.
+ * @note Compatibility staging is deliberately ignored and rejected at its
+ * inbound adapter before this planning boundary.
  */
-bool has_image_payload(const NodeOutput& output) noexcept {
-  const ImageBuffer& image = output.image_buffer;
-  return image.width > 0 && image.height > 0 &&
-         (image.data != nullptr || image.context != nullptr);
+bool has_canonical_image_value(const NodeOutput& output) noexcept {
+  return output.has_image_value();
 }
 
 /**
@@ -736,9 +787,9 @@ plugin::ParameterMap stabilized_runtime_parameters(
  * @return Independent graph used only for extent/task/dirty planning.
  * @throws GraphError or std::bad_alloc from node cloning and graph validation.
  * @note Geometry-affected caches are cleared before stabilized outputs are
- * installed. Staged legacy CPU images are normalized to sealed Value identity
- * before becoming shadow HP cache. The shadow has its own FullTaskGraph cache
- * and therefore cannot reuse a stale live-graph task expansion.
+ * installed. Staged outputs must already contain sealed named Values and
+ * compatibility staging is rejected. The shadow has its own FullTaskGraph
+ * cache and therefore cannot reuse a stale live-graph task expansion.
  */
 std::unique_ptr<GraphModel> make_stabilized_planning_graph(
     const GraphModel& graph, const StabilizedDirtyParameters& stabilized,
@@ -767,9 +818,20 @@ std::unique_ptr<GraphModel> make_stabilized_planning_graph(
                                                 std::to_string(node_id) +
                                                 " is missing.");
     }
-    NodeOutput normalized_output = staged.output;
-    value_image_adapter::normalize_node_output_image_value(&normalized_output);
-    node_it->second.cached_output_high_precision = std::move(normalized_output);
+    if (staged.output.has_compatibility_image()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Stabilized planning rejects compatibility image staging.");
+    }
+    for (const auto& [name, value] : staged.output.named_values) {
+      if (name.empty() || !value.valid() ||
+          !value.ready_fence().poll().ready()) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            "Stabilized planning requires valid Ready named Values.");
+      }
+    }
+    node_it->second.cached_output_high_precision = staged.output;
     node_it->second.hp_version = staged.hp_version;
     node_it->second.hp_region = staged.hp_region;
   }
@@ -1234,7 +1296,7 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
                                   resolved.image_inputs, tiled_config);
       }
       observe_dirty_run_or_throw(state_ptr->run, active_lease);
-      if (!has_image_payload(output) && !output.image_value.valid() &&
+      if (!has_canonical_image_value(output) && output.named_values.empty() &&
           output.data.empty()) {
         throw GraphError(
             GraphErrc::ComputeError,
@@ -1390,7 +1452,7 @@ execute_prepared_connected_dirty_parameters(
                            std::to_string(producer_id) +
                            " was not stabilized.");
     }
-    if (has_image_payload(*output)) {
+    if (has_canonical_image_value(*output)) {
       result->rt_required_parameter_node_ids_.insert(producer_id);
     } else {
       result->rt_satisfied_parameter_node_ids_.insert(producer_id);
@@ -1484,6 +1546,8 @@ struct PreparedHighPrecisionDirtyRunState final {
   std::vector<OperationExecutionConstraints> task_constraints;
   /** @brief Uniform maximum operation retained/scratch demand for this Run. */
   ReadyTaskResourceDemand task_operation_resource_demand;
+  /** @brief Frozen executable tile counts sealing each shared HP binding. */
+  std::unordered_map<int, std::size_t> tiled_task_counts;
   /** @brief Complete request-local node synchronization. */
   std::shared_ptr<DirtyNodeSynchronization> node_synchronization;
   /** @brief Copied private route id. */
@@ -1550,8 +1614,7 @@ struct PreparedRealTimeDirtyRunState final {
         node_synchronization(std::move(synchronization)),
         execution_type(std::move(route_type)),
         rt_write_buffer(std::make_unique<RealtimeProxyWriteBuffer>(
-            active_proxy, !dirty_request.force_recache,
-            dirty_request.exact_factor_four_preview)) {}
+            active_proxy, !dirty_request.force_recache)) {}
 
   /** @brief Request-local Graph snapshot. */
   GraphModel* graph = nullptr;
@@ -1577,6 +1640,8 @@ struct PreparedRealTimeDirtyRunState final {
   std::vector<OperationExecutionConstraints> task_constraints;
   /** @brief Uniform maximum operation retained/scratch demand for this Run. */
   ReadyTaskResourceDemand task_operation_resource_demand;
+  /** @brief Frozen executable tile counts sealing each shared RT binding. */
+  std::unordered_map<int, std::size_t> tiled_task_counts;
   /** @brief Complete request-local node synchronization. */
   std::shared_ptr<DirtyNodeSynchronization> node_synchronization;
   /** @brief Copied private route id. */
@@ -1849,6 +1914,14 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
       std::move(task_devices), std::move(node_synchronization), execution_type);
   state->task_constraints = std::move(task_constraints);
   state->task_operation_resource_demand = task_operation_resource_demand;
+  state->tiled_task_counts = selected_tiled_task_counts(
+      state->prepared.compute_plan, state->prepared.selection,
+      [&](const PlannedTask& task) {
+        const auto entry =
+            state->prepared.dirty_plan.entries.find(task.node_id);
+        return entry != state->prepared.dirty_plan.entries.end() &&
+               !entry->second.region_hp.is_empty();
+      });
   HighPrecisionDirtyPlan& prepared_dirty_plan = state->prepared.dirty_plan;
   HighPrecisionDirtyWriteBuffer& hp_write_buffer = *state->hp_write_buffer;
   if (request.stabilized_parameters) {
@@ -1874,7 +1947,8 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
       request.stabilized_parameters.get(),
       state->run_lease.has_value() ? &*state->run_lease : nullptr,
       direct_execution_service,
-      false};
+      false,
+      &state->tiled_task_counts};
   state->node_executor = std::make_unique<HighPrecisionDirtyNodeExecutor>(
       node_context, hp_write_buffer);
 
@@ -2215,6 +2289,14 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
       std::move(task_devices), std::move(node_synchronization), execution_type);
   state->task_constraints = std::move(task_constraints);
   state->task_operation_resource_demand = task_operation_resource_demand;
+  state->tiled_task_counts = selected_tiled_task_counts(
+      state->prepared.compute_plan, state->prepared.selection,
+      [&](const PlannedTask& task) {
+        const auto entry =
+            state->prepared.dirty_plan.entries.find(task.node_id);
+        return entry != state->prepared.dirty_plan.entries.end() &&
+               !is_rect_empty(entry_for_task(entry->second, task).roi_rt);
+      });
   RealTimeDirtyPlan& prepared_dirty_plan = state->prepared.dirty_plan;
   DirtyNodeExecutionContext node_context{
       graph,
@@ -2227,7 +2309,8 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
       request.stabilized_parameters.get(),
       state->run_lease.has_value() ? &*state->run_lease : nullptr,
       direct_execution_service,
-      request.exact_factor_four_preview};
+      request.exact_factor_four_preview,
+      &state->tiled_task_counts};
   state->node_executor = std::make_unique<RealTimeDirtyNodeExecutor>(
       node_context, proxy_graph, *state->rt_write_buffer);
   PreparedRealTimeDirtyRunState* state_ptr = state.get();

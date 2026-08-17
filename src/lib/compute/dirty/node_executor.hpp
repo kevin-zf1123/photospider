@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "compute/dirty/tiled_input_normalizer.hpp"
+#include "core/host_output_authorization.hpp"
 #include "core/ps_types.hpp"      // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/data/region.hpp"
@@ -61,13 +62,14 @@ struct TiledExecutionConfig {
  *
  * NodeExecutor owns node-local execution mechanics: Region-aware core
  * monolithic dispatch, input normalization for
- * tiled image_mixing, output buffer allocation, tile ROI clipping, input ROI
- * mapping, and exception wrapping. Higher-level compute services still own
+ * tiled image_mixing, Host output-plan binding, checked tile grants, tile ROI
+ * clipping, input ROI mapping, and exception wrapping. Higher-level compute
+ * services still own
  * dependency resolution, cache policy, scheduling, and commit decisions.
  *
- * @note Tiled input views are read-only InputTile objects, while output views
- * are writable OutputTile objects. The executor never casts away constness from
- * upstream NodeOutput buffers.
+ * @note Tiled input compatibility views are read-only InputTile objects, while
+ * output views borrow revocable Host grants. The executor never casts away
+ * constness from upstream Values or stores compatibility projections.
  */
 class NodeExecutor {
  public:
@@ -94,26 +96,67 @@ class NodeExecutor {
                             const TiledExecutionConfig& config = {});
 
   /**
-   * @brief Executes a tiled operator into an existing output buffer.
+   * @brief Freezes the sole internal Host plan for one tiled image output.
+   *
+   * @param inputs Canonical named-Value inputs used only for channel/type
+   * inference; disconnected slots may be null.
+   * @param output_size Positive output extent fixed by the task plan.
+   * @return Complete immutable zero-origin, interleaved, 64-byte-aligned plan.
+   * @throws std::invalid_argument for missing/unsupported image facts or
+   * invalid extents.
+   * @throws std::overflow_error when layout or envelope arithmetic is
+   * unrepresentable.
+   * @throws std::bad_alloc when plan metadata storage cannot allocate.
+   * @note This is the unique DI-2 internal output-plan derivation used by
+   * full, dirty HP, and RT tiled execution. It allocates no payload, mints no
+   * identity or revision, and enters no producer callback.
+   */
+  static DenseImageOutputPlan freeze_tiled_output_plan(
+      const std::vector<const NodeOutput*>& inputs,
+      const PixelSize& output_size);
+
+  /**
+   * @brief Allocates the frozen Host binding for one tiled output.
+   *
+   * @param inputs Canonical named-Value inputs used only for channel/type
+   * inference; disconnected slots may be null.
+   * @param output_size Positive output extent fixed by the task plan.
+   * @return Open aligned binding with one immutable interleaved image plan.
+   * @throws std::invalid_argument for missing/unsupported image facts or
+   * invalid extents.
+   * @throws std::overflow_error when plan arithmetic is unrepresentable.
+   * @throws std::bad_alloc when plan or aligned allocation storage fails.
+   * @note No callback is entered and no mutable address is exposed. The caller
+   * must cancel or seal the returned binding exactly once.
+   */
+  static HostOutputBinding allocate_tiled_output_binding(
+      const std::vector<const NodeOutput*>& inputs,
+      const PixelSize& output_size);
+
+  /**
+   * @brief Executes a tiled operator into an existing Host binding.
    *
    * @param graph Graph used for random-access ROI propagation.
    * @param node Node whose tiled operator is being executed.
    * @param tiled_op Selected tiled operator implementation.
    * @param inputs Resolved upstream image outputs in graph input order.
-   * @param output_buffer Destination buffer that receives tiled output.
+   * @param output_binding Open binding whose immutable plan fixes destination
+   * allocation, layout, extent, and identity.
    * @param config Optional tiled execution controls.
    * @return Nothing.
    * @throws std::bad_alloc if normalization, allocation, or tile execution
    *         exhausts memory.
    * @throws GraphError when required inputs are missing or tile execution
    *         otherwise fails.
-   * @note Used by dirty HP/RT paths that already own their destination buffers.
+   * @note Used by task, dirty HP, and RT paths that already own the destination
+   * binding. The method retires each issued tile grant but never seals;
+   * callers seal only at their atomic publication boundary.
    */
-  static void execute_tiled_into(GraphModel& graph, Node& node,
-                                 const TileOpFunc& tiled_op,
-                                 const std::vector<const NodeOutput*>& inputs,
-                                 ImageBuffer& output_buffer,
-                                 const TiledExecutionConfig& config = {});
+  static void execute_tiled_into_binding(
+      GraphModel& graph, Node& node, const TileOpFunc& tiled_op,
+      const std::vector<const NodeOutput*>& inputs,
+      HostOutputBinding& output_binding,
+      const TiledExecutionConfig& config = {});
 
   /**
    * @brief Maps one output tile ROI to the required input ROI.

@@ -762,11 +762,12 @@ void append_node_dependency_tasks(
  * @param graph Optional graph used for execution-accurate tile input ROI.
  * @return Dependency task ids aligned with tasks by dense task id.
  * @throws GraphError, std::out_of_range, or standard allocation exceptions.
- * @note Tiled image edges enumerate upstream tile ranges directly. Whole-node,
- * parameter, non-grid, and parameterized random-access producer dependencies
- * attach the upstream node's task ids without constructing a Cartesian task
- * pair scan. The conservative random-access case is required because its
- * request-effective parameter output does not exist at planning time.
+ * @note Tiled image edges first derive the exact ROI-covered producer set for
+ * planning consistency, then join the complete selected upstream node task
+ * set. DI-2 exposes downstream inputs only after that node's sole shared Host
+ * binding seals; no consumer may read a partially mutable allocation. Whole-
+ * node, parameter, non-grid, and parameterized random-access dependencies use
+ * the same node join without constructing a Cartesian task-pair scan.
  */
 std::vector<std::vector<int>> build_task_dependency_ids(
     const std::vector<PlannedTask>& tasks,
@@ -810,6 +811,7 @@ std::vector<std::vector<int>> build_task_dependency_ids(
             extent_cache);
         append_covering_upstream_tiles(ids, upstream_index, required_roi,
                                        tasks);
+        append_node_dependency_tasks(ids, upstream_index);
         continue;
       }
       append_node_dependency_tasks(ids, upstream_index);
@@ -825,8 +827,10 @@ std::vector<std::vector<int>> build_task_dependency_ids(
  * @param result Plan whose ComputeTaskGraph task dependency metadata is
  * refreshed.
  * @throws std::bad_alloc if node-to-task lookup or ready ids grow.
- * @note Tile-to-tile image edges depend on the downstream input ROI. Whole-node
- * and parameter dependencies attach producer task ids directly.
+ * @note Tile-to-tile image edges retain ROI derivation but join every selected
+ * producer task so the producer's shared Host binding seals before any
+ * downstream Value read. Whole-node and parameter dependencies already use
+ * the same complete producer-node join.
  */
 void populate_task_dependencies(ComputePlan& result, const GraphModel* graph) {
   result.task_graph.initial_task_ids.clear();
@@ -1583,6 +1587,21 @@ DirtyTaskSelectionOverlay DirtySnapshotTaskGraphPruner::select(
     } else {
       selection.downstream_task_ids.push_back(task.task_id);
     }
+  }
+  for (int task_id : selection.active_task_ids) {
+    std::vector<int>& dependencies =
+        selection.dependency_task_ids.at(static_cast<std::size_t>(task_id));
+    dependencies.erase(
+        std::remove_if(
+            dependencies.begin(), dependencies.end(),
+            [&](int dependency_task_id) {
+              return dependency_task_id < 0 ||
+                     static_cast<std::size_t>(dependency_task_id) >=
+                         selection.active_task_flags.size() ||
+                     !selection.active_task_flags.at(
+                         static_cast<std::size_t>(dependency_task_id));
+            }),
+        dependencies.end());
   }
   selection.initial_downstream_task_ids = initial_ready_task_ids_for_view(
       selection.downstream_task_ids, selection.dependency_task_ids);

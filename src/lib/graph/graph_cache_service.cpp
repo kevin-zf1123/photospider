@@ -98,12 +98,17 @@ bool has_image_disk_cache_entry(const Node& node) {
  * creation. Metadata-only outputs with no formal Value remain supported.
  */
 void validate_image_disk_cache_output(const NodeOutput& output) {
-  if (!output.image_value.valid()) {
+  if (output.has_compatibility_image()) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "Image disk cache rejects unnormalized compatibility staging.");
+  }
+  if (!output.has_image_value()) {
     return;
   }
   try {
     value_image_adapter::validate_image_buffer_compatible_value(
-        output.image_value);
+        output.image_value());
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const std::exception& error) {
@@ -223,29 +228,16 @@ void add_parameter_value_planned_bytes(std::uint64_t& total,
 /**
  * @brief Estimates one complete image payload without reading pixel bytes.
  * @param output Formal HP output inspected without copying.
- * @return Value storage or active CPU row-envelope bytes; zero when no
- * serializable CPU image is present.
- * @throws Value, ImageBuffer, or checked arithmetic exceptions.
- * @note Opaque non-CPU compatibility buffers remain intentionally uncounted
- * because the current cache mechanism skips them without mapping.
+ * @return Canonical Value storage bytes, or zero when no image Value exists.
+ * @throws Value accessor exceptions for corrupt canonical output state.
+ * @note Compatibility staging is rejected before this helper is entered and
+ * never contributes a second allocation estimate.
  */
 std::uint64_t image_planned_bytes(const NodeOutput& output) {
-  if (output.image_value.valid()) {
-    return planned_size(output.image_value.storage_size());
+  if (output.has_image_value()) {
+    return planned_size(output.image_value().storage_size());
   }
-
-  const ImageBuffer& image = output.image_buffer;
-  if (image.width <= 0 || image.height <= 0 || image.device != Device::CPU ||
-      !image.data) {
-    return 0U;
-  }
-  const std::uint64_t row_bytes = planned_size(image_buffer_row_bytes(image));
-  const std::uint64_t preceding_rows =
-      static_cast<std::uint64_t>(image.height - 1);
-  std::uint64_t envelope =
-      multiply_planned_bytes(preceding_rows, planned_size(image.step));
-  add_planned_bytes(envelope, row_bytes);
-  return envelope;
+  return 0U;
 }
 
 /**
@@ -490,12 +482,13 @@ DiskCacheReadAttempt read_cache_entry(
 
     DiskCacheReadAttempt attempt;
     if (has_cache_file) {
-      attempt.output.image_buffer = image_codec.decode(cache_file);
+      attempt.output.compatibility_image = image_codec.decode(cache_file);
     }
     if (has_metadata_file) {
       attempt.output.data = metadata_codec.read(metadata_file);
     }
-    value_image_adapter::normalize_node_output_image_value(&attempt.output);
+    value_image_adapter::import_node_output_compatibility_image(
+        &attempt.output);
     attempt.result =
         make_load_result(node.id, &cache_entry, cache_file, metadata_file,
                          DiskCacheLoadStatus::Hit, GraphErrc::Unknown,
@@ -667,16 +660,10 @@ void save_cache_mechanism(const GraphModel& graph, const Node& node,
     fs::create_directories(dir);
 
     const auto start_io = std::chrono::high_resolution_clock::now();
-    std::optional<ImageBuffer> value_snapshot;
-    const ImageBuffer* image = &output->image_buffer;
-    if (output->image_value.valid()) {
-      value_snapshot =
-          value_image_adapter::snapshot_cpu_image_buffer(output->image_value);
-      image = &*value_snapshot;
-    }
-    if (image->width > 0 && image->height > 0 && image->device == Device::CPU &&
-        image->data) {
-      image_codec.encode(final_path, *image,
+    if (output->has_image_value()) {
+      const ImageBuffer image =
+          value_image_adapter::snapshot_cpu_image_buffer(output->image_value());
+      image_codec.encode(final_path, image,
                          artifact_precision(cache_precision));
     }
     if (!output->data.empty()) {
@@ -730,9 +717,11 @@ void notify_graph_cache_service_test_hook(
 /** @copydoc GraphCacheService::GraphCacheService */
 GraphCacheService::GraphCacheService(
     std::shared_ptr<const ImageArtifactCodec> image_codec,
-    std::shared_ptr<const CacheMetadataCodec> metadata_codec)
+    std::shared_ptr<const CacheMetadataCodec> metadata_codec,
+    std::size_t maximum_statistics_entries)
     : image_codec_(std::move(image_codec)),
-      metadata_codec_(std::move(metadata_codec)) {
+      metadata_codec_(std::move(metadata_codec)),
+      image_statistics_store_(maximum_statistics_entries) {
   if (!image_codec_) {
     throw std::invalid_argument(
         "GraphCacheService requires an image artifact codec");
@@ -741,6 +730,37 @@ GraphCacheService::GraphCacheService(
     throw std::invalid_argument(
         "GraphCacheService requires a cache metadata codec");
   }
+}
+
+/** @copydoc GraphCacheService::schedule_image_statistics */
+ScheduledImageStatistics GraphCacheService::schedule_image_statistics(
+    Value value, std::optional<ContentDigest> content_digest,
+    ImageStatisticsQuery query,
+    const ImageStatisticsStore::Scheduler& scheduler) const {
+  return image_statistics_store_.schedule(
+      std::move(value), std::move(content_digest), std::move(query), scheduler);
+}
+
+/** @copydoc GraphCacheService::lookup_image_statistics */
+std::optional<ImageStatisticsResult> GraphCacheService::lookup_image_statistics(
+    const ImageStatisticsCacheKey& key) const {
+  return image_statistics_store_.lookup(key);
+}
+
+/** @copydoc GraphCacheService::invalidate_image_statistics_revision */
+std::size_t GraphCacheService::invalidate_image_statistics_revision(
+    ValueRevisionId revision) const {
+  return image_statistics_store_.invalidate_revision(revision);
+}
+
+/** @copydoc GraphCacheService::clear_image_statistics */
+std::size_t GraphCacheService::clear_image_statistics() const {
+  return image_statistics_store_.clear();
+}
+
+/** @copydoc GraphCacheService::image_statistics_size */
+std::size_t GraphCacheService::image_statistics_size() const {
+  return image_statistics_store_.size();
 }
 
 std::filesystem::path GraphCacheService::node_cache_dir(const GraphModel& graph,

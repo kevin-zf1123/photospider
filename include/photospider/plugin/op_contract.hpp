@@ -195,9 +195,11 @@ struct OperationOutput {
   /**
    * @brief Optional current two-dimensional image payload descriptor.
    * @note The host rewraps non-null payload owners with the originating DSO
-   * lease before publishing the converted result, so later ImageBuffer copies
-   * remain safe independently of the enclosing output lifetime. Generic or
-   * named non-image values belong in `data`, not in this descriptor.
+   * lease before importing the result into one canonical Value. CPU payloads
+   * are copied into Host-owned storage; opaque non-CPU bindings retain the
+   * wrapped payload owner and DSO lease through Value retirement. The host
+   * does not publish this staging descriptor as private cache or revision
+   * authority. Generic or named non-image values belong in `data`, not here.
    */
   ImageBuffer image_buffer;
   /** @brief Named deep-owned non-image outputs. */

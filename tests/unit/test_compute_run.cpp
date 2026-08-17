@@ -34,11 +34,13 @@
 #include "compute/execution/resource_demand_estimator.hpp"
 #include "core/image_buffer_processing.hpp"
 #include "core/pending_value.hpp"
+#include "core/value_image_adapter.hpp"
 #include "execution/execution_task_runtime.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "photospider/core/graph_error.hpp"
+#include "photospider/data/image_view.hpp"
 #include "photospider/data/value.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/graph_event_service.hpp"
@@ -892,8 +894,10 @@ Node make_tiled_constraint_cached_input_node(int id) {
   node.parameters["width"] = 32;
   node.parameters["height"] = 16;
   node.cached_output_high_precision = NodeOutput{};
-  node.cached_output_high_precision->image_buffer =
+  const ImageBuffer buffer =
       make_aligned_cpu_image_buffer(32, 16, 1, DataType::FLOAT32);
+  node.cached_output_high_precision->publish_image_value(
+      value_image_adapter::snapshot_cpu_image_value(buffer));
   node.hp_region =
       RegionSet::from_image_rect({image_region_domain(), 0, 32, 0, 16});
   node.hp_version = 1;
@@ -1303,8 +1307,10 @@ void ensure_legacy_cancellation_operations_registered() {
  */
 NodeOutput make_resource_dirty_output(int value) {
   NodeOutput output;
-  output.image_buffer =
+  const ImageBuffer buffer =
       make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+  output.publish_image_value(
+      value_image_adapter::snapshot_cpu_image_value(buffer));
   output.data["value"] = value;
   return output;
 }
@@ -9126,8 +9132,9 @@ TEST(ExecutionService, RetainedFenceExecutorExtendsRunSettlementLifetime) {
  * exceptions from complete product-path setup and execution.
  * @note A fake CPU provider publishes a pending image Value and returns. The
  * dependent must remain unentered until the test settles the producer fence;
- * then the Run-scoped continuation materializes ImageBuffer, releases the
- * dependency, and settles every logical/dynamic completion unit.
+ * then the Run-scoped continuation releases the canonical Value dependency
+ * without a compatibility allocation and settles every logical/dynamic
+ * completion unit.
  */
 TEST(TaskSubmissionPlan,
      PendingValueDefersDependentUntilRunScopedContinuation) {
@@ -9178,7 +9185,7 @@ TEST(TaskSubmissionPlan,
                               0U},
                 4U * sizeof(float));
         NodeOutput output;
-        output.image_value = publication.value;
+        output.publish_image_value(publication.value);
         {
           std::lock_guard<std::mutex> lock(probe->mutex);
           probe->producer.emplace(std::move(publication.producer));
@@ -9192,11 +9199,15 @@ TEST(TaskSubmissionPlan,
       MonolithicOpFunc(
           [probe](const Node&, const std::vector<const NodeOutput*>& inputs) {
             if (inputs.size() != 1U || inputs.front() == nullptr ||
-                inputs.front()->image_buffer.width != 4 ||
-                inputs.front()->image_buffer.height != 1 ||
-                inputs.front()->image_buffer.channels != 1) {
+                !inputs.front()->has_image_value()) {
               throw std::logic_error(
-                  "Pending Value dependent received no materialized image.");
+                  "Pending Value dependent received no canonical image.");
+            }
+            const ImageView input_view(inputs.front()->image_value());
+            if (input_view.width() != 4U || input_view.height() != 1U ||
+                input_view.channels() != 1U) {
+              throw std::logic_error(
+                  "Pending Value dependent received the wrong image shape.");
             }
             probe->dependent_entries.fetch_add(1, std::memory_order_release);
             NodeOutput output;
@@ -9279,9 +9290,13 @@ TEST(TaskSubmissionPlan,
   const std::size_t source_index =
       static_cast<std::size_t>(plan.id_to_idx().at(kSourceNodeId));
   ASSERT_TRUE(plan.temp_results().at(source_index).has_value());
-  EXPECT_EQ(plan.temp_results().at(source_index)->image_buffer.width, 4);
-  EXPECT_EQ(plan.temp_results().at(source_index)->image_buffer.height, 1);
-  EXPECT_EQ(plan.temp_results().at(source_index)->image_buffer.channels, 1);
+  ASSERT_TRUE(plan.temp_results().at(source_index)->has_image_value());
+  const ImageView source_view(
+      plan.temp_results().at(source_index)->image_value());
+  EXPECT_EQ(source_view.width(), 4U);
+  EXPECT_EQ(source_view.height(), 1U);
+  EXPECT_EQ(source_view.channels(), 1U);
+  EXPECT_FALSE(plan.temp_results().at(source_index)->has_compatibility_image());
   EXPECT_EQ(host.context_entries(), 3);
   EXPECT_EQ(host.context_exits(), 3);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
@@ -9348,7 +9363,7 @@ TEST(TaskSubmissionPlan,
                               0U},
                 4U * sizeof(float));
         NodeOutput output;
-        output.image_value = publication.value;
+        output.publish_image_value(publication.value);
         {
           std::lock_guard<std::mutex> lock(probe->mutex);
           probe->value = publication.value;
@@ -9497,7 +9512,7 @@ TEST(TaskSubmissionPlan, FailedPendingValueFailsMatchingRunAndSettles) {
                               0U},
                 4U * sizeof(float));
         NodeOutput output;
-        output.image_value = publication.value;
+        output.publish_image_value(publication.value);
         {
           std::lock_guard<std::mutex> lock(probe->mutex);
           probe->value = publication.value;

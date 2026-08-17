@@ -10,7 +10,8 @@
 #include <vector>
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "graph/node.hpp"     // NOLINT(build/include_subdir)
+#include "core/value_image_adapter.hpp"
+#include "graph/node.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/graph_error.hpp"
 #include "photospider/core/image_buffer.hpp"
 #include "plugin/plugin_manager.hpp"
@@ -46,8 +47,8 @@ bool registry_contains(const std::string& key) {
  * @throws std::bad_alloc if input, callback snapshot, or output allocation
  *         fails.
  * @throws GraphError or another active-provider exception unchanged.
- * @note A small dependency-neutral ImageBuffer is supplied so the built-in
- *       OpenCV provider and stdlib replacement are both executable.
+ * @note A small canonical Value is supplied so the built-in OpenCV provider
+ *       and stdlib replacement are both executable.
  */
 NodeOutput execute_active_resize() {
   auto resolved = OpRegistry::instance().resolve_for_intent(
@@ -66,17 +67,35 @@ NodeOutput execute_active_resize() {
   node.runtime_parameters["height"] = 3;
   node.runtime_parameters["interpolation"] = "nearest";
 
-  NodeOutput input;
-  input.image_buffer =
+  ImageBuffer input_image =
       make_aligned_cpu_image_buffer(2, 2, 1, DataType::FLOAT32);
-  auto* base = static_cast<std::byte*>(input.image_buffer.data.get());
-  for (int row_index = 0; row_index < input.image_buffer.height; ++row_index) {
+  auto* base = static_cast<std::byte*>(input_image.data.get());
+  for (int row_index = 0; row_index < input_image.height; ++row_index) {
     auto* row = reinterpret_cast<float*>(
-        base + static_cast<std::size_t>(row_index) * input.image_buffer.step);
-    std::fill(row, row + input.image_buffer.width, 0.25F);
+        base + static_cast<std::size_t>(row_index) * input_image.step);
+    std::fill(row, row + input_image.width, 0.25F);
   }
+  NodeOutput input;
+  input.publish_image_value(
+      value_image_adapter::snapshot_cpu_image_value(input_image));
   const std::vector<const NodeOutput*> inputs{&input};
   return std::get<MonolithicOpFunc>(resolved.value())(node, inputs);
+}
+
+/**
+ * @brief Projects one canonical provider output to a callback-compatible CPU
+ * snapshot for exact test inspection.
+ *
+ * @param output Provider result carrying the required image Value.
+ * @return Independent CPU ImageBuffer snapshot.
+ * @throws std::logic_error when the canonical image output is absent.
+ * @throws Adapter validation, overflow, access, and allocation exceptions
+ * unchanged.
+ * @note The snapshot is read-only test observation and never becomes runtime,
+ * revision, allocation, or cache authority.
+ */
+ImageBuffer snapshot_output_image(const NodeOutput& output) {
+  return value_image_adapter::snapshot_cpu_image_buffer(output.image_value());
 }
 
 /**
@@ -191,21 +210,23 @@ TEST(OptionalOpenCvOperationProvider, ReplacementExecutesAndRestores) {
 
   if (kExpectOpenCvProvider) {
     const NodeOutput original = execute_active_resize();
-    EXPECT_EQ(original.image_buffer.width, 4);
-    EXPECT_EQ(original.image_buffer.height, 3);
-    EXPECT_EQ(original.image_buffer.channels, 1);
+    const ImageBuffer original_image = snapshot_output_image(original);
+    EXPECT_EQ(original_image.width, 4);
+    EXPECT_EQ(original_image.height, 3);
+    EXPECT_EQ(original_image.channels, 1);
 
     const NodeOutput pattern = execute_coordinate_pattern();
-    ASSERT_EQ(pattern.image_buffer.width, 2);
-    ASSERT_EQ(pattern.image_buffer.height, 2);
-    ASSERT_EQ(pattern.image_buffer.channels, 4);
-    ASSERT_EQ(pattern.image_buffer.type, DataType::FLOAT32);
-    ASSERT_NE(pattern.image_buffer.data, nullptr);
-    EXPECT_EQ(sample_bits(pattern.image_buffer, 0, 0, 0), 0x00000000U);
-    EXPECT_EQ(sample_bits(pattern.image_buffer, 0, 0, 1), 0x3e3cbcbdU);
-    EXPECT_EQ(sample_bits(pattern.image_buffer, 1, 0, 0), 0x3d888889U);
-    EXPECT_EQ(sample_bits(pattern.image_buffer, 0, 1, 0), 0x3df8f8f9U);
-    EXPECT_EQ(sample_bits(pattern.image_buffer, 1, 1, 1), 0x3ebebebfU);
+    const ImageBuffer pattern_image = snapshot_output_image(pattern);
+    ASSERT_EQ(pattern_image.width, 2);
+    ASSERT_EQ(pattern_image.height, 2);
+    ASSERT_EQ(pattern_image.channels, 4);
+    ASSERT_EQ(pattern_image.type, DataType::FLOAT32);
+    ASSERT_NE(pattern_image.data, nullptr);
+    EXPECT_EQ(sample_bits(pattern_image, 0, 0, 0), 0x00000000U);
+    EXPECT_EQ(sample_bits(pattern_image, 0, 0, 1), 0x3e3cbcbdU);
+    EXPECT_EQ(sample_bits(pattern_image, 1, 0, 0), 0x3d888889U);
+    EXPECT_EQ(sample_bits(pattern_image, 0, 1, 0), 0x3df8f8f9U);
+    EXPECT_EQ(sample_bits(pattern_image, 1, 1, 1), 0x3ebebebfU);
 
     try {
       execute_invalid_opencv_constant();
@@ -228,11 +249,12 @@ TEST(OptionalOpenCvOperationProvider, ReplacementExecutesAndRestores) {
 
   const NodeOutput replacement = execute_active_resize();
   EXPECT_EQ(replacement.debug.compute_device, "STDLIB_RESIZE_REPLACEMENT");
-  ASSERT_EQ(replacement.image_buffer.width, 3);
-  ASSERT_EQ(replacement.image_buffer.height, 2);
-  ASSERT_EQ(replacement.image_buffer.channels, 1);
+  const ImageBuffer replacement_image = snapshot_output_image(replacement);
+  ASSERT_EQ(replacement_image.width, 3);
+  ASSERT_EQ(replacement_image.height, 2);
+  ASSERT_EQ(replacement_image.channels, 1);
   const auto* replacement_pixel =
-      static_cast<const float*>(replacement.image_buffer.data.get());
+      static_cast<const float*>(replacement_image.data.get());
   ASSERT_NE(replacement_pixel, nullptr);
   EXPECT_FLOAT_EQ(*replacement_pixel, 0.625F);
 
@@ -240,8 +262,9 @@ TEST(OptionalOpenCvOperationProvider, ReplacementExecutesAndRestores) {
   if (kExpectOpenCvProvider) {
     ASSERT_EQ(manager.op_sources().at(kResizeKey), "built-in");
     const NodeOutput restored = execute_active_resize();
-    EXPECT_EQ(restored.image_buffer.width, 4);
-    EXPECT_EQ(restored.image_buffer.height, 3);
+    const ImageBuffer restored_image = snapshot_output_image(restored);
+    EXPECT_EQ(restored_image.width, 4);
+    EXPECT_EQ(restored_image.height, 3);
   } else {
     EXPECT_FALSE(registry_contains(kResizeKey));
     EXPECT_EQ(manager.op_sources().count(kResizeKey), 0U);

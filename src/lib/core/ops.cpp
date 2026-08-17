@@ -160,7 +160,7 @@ PixelRect identity_forward_roi(
  * @throws GraphError with `GraphErrc::MissingDependency` for an absent or empty
  *         input.
  * @throws std::bad_alloc if named-output storage allocation fails.
- * @note The callback reads only the dependency-neutral ImageBuffer descriptor.
+ * @note The callback reads only canonical immutable ImageFacet dimensions.
  */
 NodeOutput op_get_dimensions(const Node& node,
                              const std::vector<const NodeOutput*>& inputs) {
@@ -169,15 +169,22 @@ NodeOutput op_get_dimensions(const Node& node,
     throw GraphError(GraphErrc::MissingDependency,
                      "analyzer:get_dimensions requires an image input.");
   }
-  const ImageBuffer& input_buffer = inputs[0]->image_buffer;
-  if (input_buffer.width == 0 || input_buffer.height == 0) {
+  if (!inputs[0]->has_image_value()) {
     throw GraphError(GraphErrc::MissingDependency,
                      "analyzer:get_dimensions input image is empty.");
   }
+  const ImageView input_view(inputs[0]->image_value());
+  if (input_view.width() >
+          static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()) ||
+      input_view.height() >
+          static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "analyzer:get_dimensions dimensions exceed int64.");
+  }
 
   NodeOutput output;
-  output.data["width"] = input_buffer.width;
-  output.data["height"] = input_buffer.height;
+  output.data["width"] = static_cast<std::int64_t>(input_view.width());
+  output.data["height"] = static_cast<std::int64_t>(input_view.height());
   return output;
 }
 
@@ -241,7 +248,7 @@ NodeOutput op_invert_dense(const Node& node,
  * @param node Borrowed operation node snapshot.
  * @param inputs Borrowed destination-indexed inputs.
  * @param region Exact normalized ImageRect, TensorSlice, Whole, or Empty.
- * @return Independently owned sealed dense output and ImageBuffer snapshot.
+ * @return Independently owned sealed named dense output.
  * @throws GraphError or std::bad_alloc from the validated dense runner.
  * @note The static operation definition is immutable and reentrant.
  */

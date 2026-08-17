@@ -20,6 +20,7 @@
 #include "compute/dirty/dirty_update_executor.hpp"
 #include "compute/dirty/realtime_proxy_graph.hpp"
 #include "core/param_utils.hpp"
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "graph/node.hpp"            // NOLINT(build/include_subdir)
@@ -418,16 +419,15 @@ ThresholdRegistrationCapture register_threshold_callbacks() {
 /**
  * @brief Creates a valid threshold input output buffer.
  *
- * @return NodeOutput containing a deterministic 2x2 float image.
+ * @return Callback-local ImageBuffer containing a deterministic 2x2 image.
  * @throws std::bad_alloc or cv::Exception if image storage cannot be created.
- * @note The returned buffer owns its storage and remains valid for the complete
- * registered-callback invocation in each threshold test.
+ * @note This is an explicit provisional operation ABI-v2 input. The returned
+ * buffer owns its storage and remains valid for the complete registered
+ * callback invocation; it is never Graph or formal cache authority.
  */
-NodeOutput make_threshold_input() {
+ImageBuffer make_threshold_input() {
   cv::Mat image(2, 2, CV_32FC1, cv::Scalar(0.75));
-  NodeOutput output;
-  output.image_buffer = fromCvMat(image);
-  return output;
+  return fromCvMat(image);
 }
 
 /**
@@ -590,10 +590,12 @@ void register_bad_alloc_boundary_operations() {
             [](const Node& node, const std::vector<const NodeOutput*>&) {
               const int width = as_int_flexible(node.parameters, "width", 16);
               const int height = as_int_flexible(node.parameters, "height", 16);
-              NodeOutput output;
-              output.image_buffer = make_aligned_cpu_image_buffer(
+              ImageBuffer image = make_aligned_cpu_image_buffer(
                   width, height, 1, DataType::FLOAT32);
-              toCvMat(output.image_buffer).setTo(1.0f);
+              toCvMat(image).setTo(1.0f);
+              NodeOutput output;
+              output.publish_image_value(
+                  value_image_adapter::snapshot_cpu_image_value(image));
               return output;
             }));
     OpMetadata tile_metadata;
@@ -930,9 +932,9 @@ TEST(ThresholdBadAllocBoundary,
   parameters.emplace("type", plugin::ParameterValue("binary"));
   plugin::NodeView node(1, "threshold", "image_process", "threshold",
                         std::move(parameters));
-  NodeOutput input = make_threshold_input();
+  ImageBuffer input = make_threshold_input();
   const std::vector<plugin::OperationInputView> inputs{
-      plugin::OperationInputView{&input.image_buffer, nullptr, nullptr}};
+      plugin::OperationInputView{&input, nullptr, nullptr}};
 
   EXPECT_THROW((void)capture.operation(
                    node, plugin::ArrayView<plugin::OperationInputView>(inputs)),
@@ -958,9 +960,9 @@ TEST(ThresholdBadAllocBoundary,
       "type", plugin::ParameterValue("photospider-test-string-bad-alloc"));
   plugin::NodeView node(1, "threshold", "image_process", "threshold",
                         std::move(parameters));
-  NodeOutput input = make_threshold_input();
+  ImageBuffer input = make_threshold_input();
   const std::vector<plugin::OperationInputView> inputs{
-      plugin::OperationInputView{&input.image_buffer, nullptr, nullptr}};
+      plugin::OperationInputView{&input, nullptr, nullptr}};
 
   EXPECT_THROW((void)capture.operation(
                    node, plugin::ArrayView<plugin::OperationInputView>(inputs)),
@@ -989,9 +991,9 @@ TEST(ThresholdBadAllocBoundary,
   parameters.emplace("type", plugin::ParameterValue("binary"));
   plugin::NodeView node(1, "threshold", "image_process", "threshold",
                         std::move(parameters));
-  NodeOutput input = make_threshold_input();
+  ImageBuffer input = make_threshold_input();
   const std::vector<plugin::OperationInputView> inputs{
-      plugin::OperationInputView{&input.image_buffer, nullptr, nullptr}};
+      plugin::OperationInputView{&input, nullptr, nullptr}};
   const plugin::OperationOutput output = capture.operation(
       node, plugin::ArrayView<plugin::OperationInputView>(inputs));
   EXPECT_EQ(output.image_buffer.width, 2);

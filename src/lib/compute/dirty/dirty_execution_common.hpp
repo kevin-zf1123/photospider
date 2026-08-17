@@ -642,15 +642,17 @@ bool should_skip_stale_dirty_source(GraphRuntime* runtime, int node_id,
                                     uint64_t dirty_generation);
 
 /**
- * @brief Infers image channels and data type for a reused or new output buffer.
+ * @brief Infers image channels and data type for a new output plan.
  *
  * @param preferred Existing output preferred for the target intent.
  * @param image_inputs Ready image inputs for the node.
  * @param fallback Optional secondary output used as a final shape hint.
  * @return Pair of channel count and data type.
- * @throws Nothing directly.
+ * @throws std::invalid_argument when canonical Value element facts or channel
+ * counts cannot cross the current tiled compatibility boundary.
  * @note Defaults to one FLOAT32 channel when neither output nor input carries
- * concrete image metadata, matching the pre-split dirty update behavior.
+ * concrete image metadata, matching the pre-split dirty update behavior. No
+ * compatibility ImageBuffer is inspected or retained.
  */
 std::pair<int, DataType> infer_output_spec(
     const std::optional<NodeOutput>& preferred,

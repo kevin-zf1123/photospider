@@ -105,26 +105,6 @@ PixelSize merge_task_extent(const PixelSize& current,
 }
 
 /**
- * @brief Infers channel count and data type for a tile output buffer.
- *
- * @param image_inputs Ready image inputs for the node.
- * @return Channel count and DataType from the first connected input, or the
- * generator default when every declared slot is disconnected.
- * @throws Nothing.
- * @note Null entries preserve graph input-slot identity and are skipped only
- * for format inference.
- */
-std::pair<int, DataType> infer_tile_channels_and_type(
-    const std::vector<const NodeOutput*>& image_inputs) {
-  for (const NodeOutput* input : image_inputs) {
-    if (input) {
-      return {input->image_buffer.channels, input->image_buffer.type};
-    }
-  }
-  return {1, DataType::FLOAT32};
-}
-
-/**
  * @brief Observes cancellation at one node or tile execution boundary.
  *
  * @param run_lease Optional borrowed request lifecycle lease.
@@ -158,6 +138,8 @@ std::uint64_t NodeTaskRunner::retained_memory_bytes() const {
       static_cast<std::uint64_t>(node_precomputed_.capacity()));
   estimate.add_objects<std::unique_ptr<std::mutex>>(
       static_cast<std::uint64_t>(output_mutexes_.capacity()));
+  estimate.add_objects<std::unique_ptr<HostOutputBinding>>(
+      static_cast<std::uint64_t>(tile_output_bindings_.capacity()));
   for (const std::unique_ptr<std::mutex>& mutex : output_mutexes_) {
     if (mutex) {
       estimate.add_objects<std::mutex>();
@@ -189,6 +171,7 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
   completed_tile_counts_ =
       std::vector<std::atomic<int>>(execution_order_.size());
   node_precomputed_ = std::vector<std::atomic<bool>>(execution_order_.size());
+  tile_output_bindings_.resize(execution_order_.size());
   output_mutexes_.reserve(execution_order_.size());
   for (size_t i = 0; i < execution_order_.size(); ++i) {
     completed_tile_counts_[i].store(0, std::memory_order_relaxed);
@@ -360,9 +343,9 @@ void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
     return;
   }
 
-  ImageBuffer* output_buffer =
-      ensure_tile_output_buffer(node_idx, target_node, inputs_ready);
-  if (!output_buffer) {
+  HostOutputBinding* output_binding =
+      ensure_tile_output_binding(node_idx, target_node, inputs_ready);
+  if (!output_binding) {
     return;
   }
   TiledExecutionConfig tiled_config = tiled_config_for(target_node, *op_opt);
@@ -372,9 +355,9 @@ void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
   tiled_config.output_size = planned_output_sizes_.at(node_idx);
 
   BenchmarkEvent current_event = start_event(target_node);
-  NodeExecutor::execute_tiled_into(graph_, node_for_exec,
-                                   std::get<TileOpFunc>(op_opt->func),
-                                   inputs_ready, *output_buffer, tiled_config);
+  NodeExecutor::execute_tiled_into_binding(
+      graph_, node_for_exec, std::get<TileOpFunc>(op_opt->func), inputs_ready,
+      *output_binding, tiled_config);
   finalize_tiled_node_if_complete(node_idx, target_node, inputs_ready,
                                   current_event);
 }
@@ -389,7 +372,7 @@ bool NodeTaskRunner::try_satisfy_tile_from_disk_cache(const Node& target_node,
   if (node_precomputed_[node_idx].load(std::memory_order_acquire)) {
     return true;
   }
-  if (temp_results_[node_idx].has_value()) {
+  if (tile_output_bindings_[node_idx] || temp_results_[node_idx].has_value()) {
     return false;
   }
 
@@ -401,14 +384,14 @@ bool NodeTaskRunner::try_satisfy_tile_from_disk_cache(const Node& target_node,
   return false;
 }
 
-ImageBuffer* NodeTaskRunner::ensure_tile_output_buffer(
+HostOutputBinding* NodeTaskRunner::ensure_tile_output_binding(
     int node_idx, const Node& target_node,
     const std::vector<const NodeOutput*>& image_inputs) {
   std::lock_guard<std::mutex> lock(*output_mutexes_.at(node_idx));
   if (node_precomputed_[node_idx].load(std::memory_order_acquire)) {
     return nullptr;
   }
-  if (!temp_results_[node_idx].has_value()) {
+  if (!tile_output_bindings_[node_idx]) {
     const PixelSize planned_size = planned_output_sizes_.at(node_idx);
     const PixelSize output_size =
         planned_size.width > 0 && planned_size.height > 0
@@ -417,12 +400,10 @@ ImageBuffer* NodeTaskRunner::ensure_tile_output_buffer(
                   as_int_flexible(target_node.runtime_parameters, "width", 256),
                   as_int_flexible(target_node.runtime_parameters, "height",
                                   256)};
-    auto [channels, dtype] = infer_tile_channels_and_type(image_inputs);
-    temp_results_[node_idx] = NodeOutput{};
-    temp_results_[node_idx]->image_buffer = make_aligned_cpu_image_buffer(
-        output_size.width, output_size.height, channels, dtype);
+    tile_output_bindings_[node_idx] = std::make_unique<HostOutputBinding>(
+        NodeExecutor::allocate_tiled_output_binding(image_inputs, output_size));
   }
-  return &temp_results_[node_idx]->image_buffer;
+  return tile_output_bindings_[node_idx].get();
 }
 
 void NodeTaskRunner::finalize_tiled_node_if_complete(
@@ -438,10 +419,21 @@ void NodeTaskRunner::finalize_tiled_node_if_complete(
   if (previous + 1 != expected_tiles) {
     return;
   }
-  NodeOutput& output = *temp_results_[node_idx];
+  std::unique_ptr<HostOutputBinding> binding;
+  {
+    std::lock_guard<std::mutex> lock(*output_mutexes_.at(node_idx));
+    binding = std::move(tile_output_bindings_[node_idx]);
+  }
+  if (!binding) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Completed tiled node has no Host output binding.");
+  }
+  NodeOutput output;
+  output.publish_image_value(binding->seal());
   const double execution_ms =
       record_computed_output(target_node, current_event);
   finalize_output_metadata(output, image_inputs, enable_timing_, execution_ms);
+  temp_results_[node_idx] = std::move(output);
 }
 
 void NodeTaskRunner::try_load_disk_cache(const Node& target_node,

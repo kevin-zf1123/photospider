@@ -104,17 +104,17 @@ void validate_logical_image_descriptor(const DenseImageDescriptor& descriptor) {
 }
 
 /**
- * @brief Publishes a validated immutable result and compatibility snapshot.
+ * @brief Publishes one validated immutable result as named Value authority.
  *
  * @param value Execute result to validate and publish.
  * @param inferred Exact logical descriptor returned by inference.
- * @return NodeOutput retaining the exact Value plus a derived CPU ImageBuffer.
+ * @return NodeOutput retaining the exact Value under the permanent image name.
  * @throws std::invalid_argument or std::overflow_error for descriptor, facet,
  *         layout, or current-adapter mismatches.
  * @throws std::bad_alloc when retaining complete descriptor/ImageFacet facts
- *         or allocating the compatibility output snapshot fails.
- * @note The exact sealed Value is the identity authority. ImageBuffer receives
- * an independent active-element snapshot for current ABI/Host consumers.
+ * or named-output storage fails.
+ * @note The exact sealed Value is the sole output identity and payload
+ * authority; compatibility consumers project it at their own use boundary.
  */
 NodeOutput publish_image_value(Value value,
                                const DenseImageDescriptor& inferred) {
@@ -125,8 +125,7 @@ NodeOutput publish_image_value(Value value,
   }
 
   NodeOutput output;
-  output.image_buffer = value_image_adapter::snapshot_cpu_image_buffer(value);
-  output.image_value = std::move(value);
+  output.publish_image_value(std::move(value));
   return output;
 }
 
@@ -347,29 +346,39 @@ DenseImageDescriptor infer_dense_invert(
  * @param configuration Unused request-effective parameter snapshot.
  * @param inputs Exactly one checked immutable ImageView.
  * @param inferred Exact logical output descriptor from infer_dense_invert.
- * @return Independently owned padded immutable output Value.
+ * @param output_plan Frozen output descriptor/layout/allocation envelope.
+ * @param output_grant Active whole-output write capability.
+ * @return Nothing; successful return leaves retirement and seal to the Host.
  * @throws std::invalid_argument for wrong arity or descriptor disagreement.
  * @throws std::overflow_error for unrepresentable output layout arithmetic.
  * @throws std::bad_alloc when complete descriptor/ImageFacet copies, layout or
- *         coordinate storage, output bytes, or immutable Value publication
- *         cannot allocate.
+ *         coordinate storage, or grant validation cannot allocate.
  * @note Every active x/y/channel element is addressed through ImageView;
  *       selected elements are inverted, unselected elements are copied, and
  *       input padding is never inspected.
  */
-Value execute_dense_invert(const CpuDenseImageConfiguration& configuration,
-                           const std::vector<ImageView>& inputs,
-                           const DenseImageDescriptor& inferred) {
+void execute_dense_invert(const CpuDenseImageConfiguration& configuration,
+                          const std::vector<ImageView>& inputs,
+                          const DenseImageDescriptor& inferred,
+                          const DenseImageOutputPlan& output_plan,
+                          HostOutputWriteGrant& output_grant) {
   if (inputs.size() != 1U ||
       !(logical_descriptor(inputs.front()) == inferred)) {
     throw std::invalid_argument(
         "image_process:invert_dense input disagrees with inference.");
   }
   validate_dense_region(configuration.region, inferred);
+  if (!(output_plan.descriptor() == inferred.tensor) ||
+      !(output_plan.image_facet() == inferred.image) ||
+      output_grant.span_count() != 1U ||
+      output_grant.span(0U).allocation_offset != 0U ||
+      output_grant.span(0U).byte_size != output_plan.storage_size()) {
+    throw std::invalid_argument(
+        "image_process:invert_dense output grant disagrees with its plan.");
+  }
 
-  StridedLayout layout = make_interleaved_layout(inferred);
-  std::vector<std::byte> storage(dense_storage_size(inferred.tensor, layout),
-                                 std::byte{0});
+  const StridedLayout& layout = output_plan.layout();
+  std::byte* storage = output_grant.data(0U);
   const ImageFacet& image = inferred.image;
   std::vector<std::size_t> coordinates(inferred.tensor.shape.size(), 0U);
   for (std::size_t y = 0U; y < inputs.front().height(); ++y) {
@@ -398,9 +407,6 @@ Value execute_dense_invert(const CpuDenseImageConfiguration& configuration,
       }
     }
   }
-
-  return Value::from_cpu_dense_tensor(inferred.tensor, inferred.image,
-                                      std::move(layout), std::move(storage));
 }
 
 }  // namespace
@@ -439,12 +445,11 @@ NodeOutput execute_cpu_dense_image_operation(
         throw std::invalid_argument(
             "CPU dense image operation input is missing.");
       }
-      if (input->image_value.valid()) {
-        input_views.emplace_back(input->image_value);
-      } else {
-        input_views.emplace_back(
-            value_image_adapter::snapshot_cpu_image_value(input->image_buffer));
+      if (!input->has_image_value()) {
+        throw std::invalid_argument(
+            "CPU dense image operation input has no canonical image Value.");
       }
+      input_views.emplace_back(input->image_value());
       input_descriptors.push_back(logical_descriptor(input_views.back()));
     }
   } catch (const std::bad_alloc&) {
@@ -484,31 +489,56 @@ NodeOutput execute_cpu_dense_image_operation(
                      "CPU dense image inferred descriptor is invalid.");
   }
 
-  Value result;
+  StridedLayout output_layout;
+  std::size_t output_storage_size = 0U;
   try {
-    result = operation.execute(configuration, input_views, inferred);
+    output_layout = make_interleaved_layout(inferred);
+    output_storage_size = dense_storage_size(inferred.tensor, output_layout);
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const std::exception& error) {
     throw GraphError(
         GraphErrc::ComputeError,
+        "CPU dense image output planning failed: " + std::string(error.what()));
+  } catch (...) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "CPU dense image output planning failed.");
+  }
+
+  HostOutputBinding binding =
+      HostOutputBinding::allocate(DenseImageOutputPlan::create(
+          std::string(NodeOutput::kImageOutputName), inferred.tensor,
+          inferred.image, std::move(output_layout), output_storage_size, 64U));
+  HostOutputWriteGrant grant = binding.grant_whole();
+  try {
+    operation.execute(configuration, input_views, inferred, binding.plan(),
+                      grant);
+  } catch (const std::bad_alloc&) {
+    grant.retire_failure("CPU dense image execution exhausted resources.");
+    throw;
+  } catch (const std::exception& error) {
+    grant.retire_failure("CPU dense image execution failed.");
+    throw GraphError(
+        GraphErrc::ComputeError,
         "CPU dense image execution failed: " + std::string(error.what()));
   } catch (...) {
+    grant.retire_failure("CPU dense image execution failed.");
     throw GraphError(GraphErrc::ComputeError,
                      "CPU dense image execution failed.");
   }
 
   try {
-    return publish_image_value(std::move(result), inferred);
+    grant.retire_success();
+    return publish_image_value(binding.seal(), inferred);
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const std::exception& error) {
     throw GraphError(GraphErrc::ComputeError,
-                     "CPU dense image output validation failed: " +
+                     "CPU dense image output publication failed: " +
                          std::string(error.what()));
   } catch (...) {
     throw GraphError(GraphErrc::ComputeError,
-                     "CPU dense image output validation failed.");
+                     "CPU dense image output publication failed.");
   }
 }
 

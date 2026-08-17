@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <new>
 #include <string>
@@ -12,6 +13,7 @@
 #include "compute/compute_geometry.hpp"
 #include "core/ops.hpp"
 #include "core/param_utils.hpp"
+#include "core/value_image_adapter.hpp"
 
 namespace ps::compute {
 namespace {
@@ -21,7 +23,9 @@ namespace {
  * @param inputs Destination-indexed input pointers that may contain nulls.
  * @return First non-null output pointer, or nullptr when all slots are
  * disconnected.
- * @throws Nothing.
+ * @throws std::invalid_argument when a connected input lacks an image-faceted
+ * canonical Value or uses an element type outside the current tiled ABI.
+ * @throws std::overflow_error when image bounds cannot be represented.
  * @note The helper is for format/size fallback only; callback vectors retain
  * every original slot.
  */
@@ -31,6 +35,131 @@ const NodeOutput* first_connected_input(
       std::find_if(inputs.begin(), inputs.end(),
                    [](const NodeOutput* input) { return input != nullptr; });
   return found == inputs.end() ? nullptr : *found;
+}
+
+/**
+ * @brief Multiplies tiled output byte components with overflow checking.
+ * @param left First component.
+ * @param right Second component.
+ * @return Exact product.
+ * @throws std::overflow_error when the product exceeds size_t.
+ */
+std::size_t checked_output_multiply(std::size_t left, std::size_t right) {
+  if (right != 0U && left > std::numeric_limits<std::size_t>::max() / right) {
+    throw std::overflow_error("Tiled output byte multiplication overflowed.");
+  }
+  return left * right;
+}
+
+/**
+ * @brief Adds tiled output byte components with overflow checking.
+ * @param left First component.
+ * @param right Second component.
+ * @return Exact sum.
+ * @throws std::overflow_error when the sum exceeds size_t.
+ */
+std::size_t checked_output_add(std::size_t left, std::size_t right) {
+  if (left > std::numeric_limits<std::size_t>::max() - right) {
+    throw std::overflow_error("Tiled output byte addition overflowed.");
+  }
+  return left + right;
+}
+
+/**
+ * @brief Adds a non-negative tiled coordinate to a signed data-window origin.
+ * @param origin Signed immutable window origin.
+ * @param offset Non-negative pixel offset.
+ * @return Exact translated coordinate.
+ * @throws std::overflow_error when translation exceeds int64.
+ */
+std::int64_t checked_image_coordinate(std::int64_t origin, int offset) {
+  if (offset < 0 || origin > std::numeric_limits<std::int64_t>::max() -
+                                 static_cast<std::int64_t>(offset)) {
+    throw std::overflow_error("Tiled image coordinate overflowed int64.");
+  }
+  return origin + static_cast<std::int64_t>(offset);
+}
+
+/**
+ * @brief Maps one current tiled compatibility type to dense element facts.
+ * @param type Declared current scalar type.
+ * @return Logical semantics and whole-byte storage encoding.
+ * @throws std::invalid_argument for an undeclared enum value.
+ */
+std::pair<ElementSemantics, StorageEncoding> tiled_dense_element(
+    DataType type) {
+  switch (type) {
+    case DataType::UINT8:
+      return {ElementSemantics::UnsignedInteger, StorageEncoding{8U}};
+    case DataType::INT8:
+      return {ElementSemantics::SignedInteger, StorageEncoding{8U}};
+    case DataType::UINT16:
+      return {ElementSemantics::UnsignedInteger, StorageEncoding{16U}};
+    case DataType::INT16:
+      return {ElementSemantics::SignedInteger, StorageEncoding{16U}};
+    case DataType::FLOAT32:
+      return {ElementSemantics::FloatingPoint, StorageEncoding{32U}};
+    case DataType::FLOAT64:
+      return {ElementSemantics::FloatingPoint, StorageEncoding{64U}};
+  }
+  throw std::invalid_argument("Tiled output DataType is undeclared.");
+}
+
+/**
+ * @brief Freezes the current zero-origin interleaved tiled output plan.
+ * @param output_size Positive planned image extent.
+ * @param channels Positive channel count.
+ * @param type Current compatibility scalar type inferred from canonical input
+ * Value facts or the generator default.
+ * @return Complete immutable 64-byte-aligned Host output plan.
+ * @throws std::invalid_argument for invalid extents/type or unrepresentable
+ * signed strides.
+ * @throws std::overflow_error when row/envelope arithmetic overflows.
+ * @throws std::bad_alloc when descriptor, layout, or Region storage allocates.
+ * @note The plan is created before Host allocation or tiled callback entry and
+ * cannot be replaced by callback-returned metadata.
+ */
+DenseImageOutputPlan freeze_tiled_output_plan_impl(const PixelSize& output_size,
+                                                   int channels,
+                                                   DataType type) {
+  if (output_size.width <= 0 || output_size.height <= 0 || channels <= 0) {
+    throw std::invalid_argument(
+        "Tiled output plan requires positive image dimensions.");
+  }
+  const auto [semantics, encoding] = tiled_dense_element(type);
+  const std::size_t element_bytes = image_buffer_bytes_per_channel(type);
+  const std::size_t pixel_bytes = checked_output_multiply(
+      static_cast<std::size_t>(channels), element_bytes);
+  const std::size_t row_bytes = checked_output_multiply(
+      static_cast<std::size_t>(output_size.width), pixel_bytes);
+  constexpr std::size_t kAlignment = 64U;
+  const std::size_t padded = checked_output_add(row_bytes, kAlignment - 1U);
+  const std::size_t row_stride = padded & ~(kAlignment - 1U);
+  if (element_bytes > static_cast<std::size_t>(
+                          std::numeric_limits<std::ptrdiff_t>::max()) ||
+      pixel_bytes > static_cast<std::size_t>(
+                        std::numeric_limits<std::ptrdiff_t>::max()) ||
+      row_stride > static_cast<std::size_t>(
+                       std::numeric_limits<std::ptrdiff_t>::max())) {
+    throw std::invalid_argument("Tiled output plan stride exceeds ptrdiff_t.");
+  }
+  const std::size_t storage_size = checked_output_add(
+      checked_output_multiply(static_cast<std::size_t>(output_size.height - 1),
+                              row_stride),
+      row_bytes);
+  DenseTensorDescriptor descriptor{
+      {static_cast<std::size_t>(output_size.height),
+       static_cast<std::size_t>(output_size.width),
+       static_cast<std::size_t>(channels)},
+      semantics,
+      encoding};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  StridedLayout layout{{static_cast<std::ptrdiff_t>(row_stride),
+                        static_cast<std::ptrdiff_t>(pixel_bytes),
+                        static_cast<std::ptrdiff_t>(element_bytes)}};
+  return DenseImageOutputPlan::create(
+      std::string(NodeOutput::kImageOutputName), std::move(descriptor),
+      std::move(facet), std::move(layout), storage_size, kAlignment);
 }
 
 /**
@@ -46,9 +175,59 @@ const NodeOutput* first_connected_input(
 std::pair<int, DataType> infer_channels_and_type(
     const std::vector<const NodeOutput*>& inputs) {
   const NodeOutput* input = first_connected_input(inputs);
-  return input ? std::pair<int, DataType>{input->image_buffer.channels,
-                                          input->image_buffer.type}
-               : std::pair<int, DataType>{1, DataType::FLOAT32};
+  if (input == nullptr) {
+    return {1, DataType::FLOAT32};
+  }
+  if (!input->has_image_value() ||
+      !input->image_value().image_facet().has_value()) {
+    throw std::invalid_argument(
+        "Tiled format inference requires a canonical image Value.");
+  }
+  const Value& value = input->image_value();
+  const DenseTensorDescriptor& descriptor = value.dense_tensor_descriptor();
+  const ImageFacet& facet = *value.image_facet();
+  const std::size_t channels = facet.channel_axis.has_value()
+                                   ? descriptor.shape[*facet.channel_axis]
+                                   : 1U;
+  if (channels > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument(
+        "Tiled input channel count exceeds ImageBuffer compatibility.");
+  }
+  const std::uint32_t bits = descriptor.storage_encoding.bit_width;
+  DataType type;
+  switch (descriptor.element_semantics) {
+    case ElementSemantics::UnsignedInteger:
+      if (bits == 8U) {
+        type = DataType::UINT8;
+      } else if (bits == 16U) {
+        type = DataType::UINT16;
+      } else {
+        throw std::invalid_argument(
+            "Tiled input unsigned element width is unsupported.");
+      }
+      break;
+    case ElementSemantics::SignedInteger:
+      if (bits == 8U) {
+        type = DataType::INT8;
+      } else if (bits == 16U) {
+        type = DataType::INT16;
+      } else {
+        throw std::invalid_argument(
+            "Tiled input signed element width is unsupported.");
+      }
+      break;
+    case ElementSemantics::FloatingPoint:
+      if (bits == 32U) {
+        type = DataType::FLOAT32;
+      } else if (bits == 64U) {
+        type = DataType::FLOAT64;
+      } else {
+        throw std::invalid_argument(
+            "Tiled input floating element width is unsupported.");
+      }
+      break;
+  }
+  return {static_cast<int>(channels), type};
 }
 
 /**
@@ -59,8 +238,8 @@ std::pair<int, DataType> infer_channels_and_type(
  * @param inputs Normalized tiled inputs in execution order.
  * @param config Optional execution size override.
  * @return Output size for allocation or existing-buffer iteration.
- * @throws Nothing from parameter lookup; invalid width/height kinds fall back
- * to the legacy default extent.
+ * @throws std::invalid_argument when canonical image bounds exceed PixelSize.
+ * @throws std::overflow_error when immutable data-window arithmetic overflows.
  * @note The first connected normalized input remains the size source when no
  * explicit output_size is supplied; null slots remain visible to callbacks.
  */
@@ -70,7 +249,21 @@ PixelSize infer_output_size(const Node& node,
   if (config.output_size)
     return *config.output_size;
   if (const NodeOutput* input = first_connected_input(inputs)) {
-    return PixelSize{input->image_buffer.width, input->image_buffer.height};
+    if (!input->has_image_value() ||
+        !input->image_value().image_facet().has_value()) {
+      throw std::invalid_argument(
+          "Tiled size inference requires a canonical image Value.");
+    }
+    const ImageBounds& bounds = input->image_value().image_bounds();
+    const std::size_t width = image_bounds_width(bounds);
+    const std::size_t height = image_bounds_height(bounds);
+    const std::size_t maximum_extent =
+        static_cast<std::size_t>(std::numeric_limits<int>::max());
+    if (width > maximum_extent || height > maximum_extent) {
+      throw std::invalid_argument(
+          "Tiled input extent exceeds PixelSize compatibility.");
+    }
+    return PixelSize{static_cast<int>(width), static_cast<int>(height)};
   }
   return PixelSize{as_int_flexible(node.runtime_parameters, "width", 256),
                    as_int_flexible(node.runtime_parameters, "height", 256)};
@@ -127,6 +320,8 @@ void require_tiled_inputs(const Node& node,
  * @brief Captures all actual normalized image-input extents once per execution.
  * @param input_context Normalized inputs in destination-index order.
  * @return Extents supplied to every random-access callback in this execution.
+ * @throws std::invalid_argument or std::overflow_error when canonical image
+ * metadata is absent or exceeds PixelSize.
  * @throws std::bad_alloc when vector storage allocation fails.
  * @note Disconnected slots contribute an empty extent. Connected values may
  * come from same-batch temporary results and intentionally do not consult
@@ -137,28 +332,57 @@ std::vector<PixelSize> actual_input_extents(
   std::vector<PixelSize> extents;
   extents.reserve(input_context.inputs.size());
   for (const NodeOutput* input : input_context.inputs) {
+    if (input == nullptr) {
+      extents.emplace_back();
+      continue;
+    }
+    if (!input->has_image_value() ||
+        !input->image_value().image_facet().has_value()) {
+      throw std::invalid_argument(
+          "Tiled input extent requires a canonical image Value.");
+    }
+    const ImageBounds& bounds = input->image_value().image_bounds();
+    const std::size_t width = image_bounds_width(bounds);
+    const std::size_t height = image_bounds_height(bounds);
+    const std::size_t maximum_extent =
+        static_cast<std::size_t>(std::numeric_limits<int>::max());
+    if (width > maximum_extent || height > maximum_extent) {
+      throw std::invalid_argument("Tiled input extent exceeds PixelSize.");
+    }
     extents.push_back(
-        input ? PixelSize{input->image_buffer.width, input->image_buffer.height}
-              : PixelSize{});
+        PixelSize{static_cast<int>(width), static_cast<int>(height)});
   }
   return extents;
 }
 
 /**
- * @brief Resolves the output extent used by an existing tiled destination.
+ * @brief Resolves the output extent fixed by a Host output binding.
  *
- * @param output_buffer Destination buffer passed by the caller.
+ * @param binding Destination binding passed by the caller.
  * @param config Optional output_size override.
  * @return Size used for tile grid iteration.
- * @throws Nothing.
- * @note Dirty HP/RT paths pass output_size so iteration can use planned domain
- * extents even when the destination buffer was just allocated.
+ * @throws std::invalid_argument when plan extents exceed PixelSize or a caller
+ * override disagrees with the frozen plan.
+ * @note Dirty HP/RT paths pass output_size as an assertion of their planned
+ * domain; it can never resize or reinterpret the binding.
  */
-PixelSize output_size_for_buffer(const ImageBuffer& output_buffer,
-                                 const TiledExecutionConfig& config) {
-  return config.output_size
-             ? *config.output_size
-             : PixelSize{output_buffer.width, output_buffer.height};
+PixelSize output_size_for_binding(const HostOutputBinding& binding,
+                                  const TiledExecutionConfig& config) {
+  const DenseImageOutputPlan& plan = binding.plan();
+  const std::size_t maximum_extent =
+      static_cast<std::size_t>(std::numeric_limits<int>::max());
+  if (plan.width() > maximum_extent || plan.height() > maximum_extent) {
+    throw std::invalid_argument("Tiled output plan exceeds PixelSize.");
+  }
+  const PixelSize planned{static_cast<int>(plan.width()),
+                          static_cast<int>(plan.height())};
+  if (config.output_size.has_value() &&
+      (config.output_size->width != planned.width ||
+       config.output_size->height != planned.height)) {
+    throw std::invalid_argument(
+        "Tiled execution size disagrees with frozen output plan.");
+  }
+  return planned;
 }
 
 /**
@@ -241,12 +465,15 @@ void populate_input_tiles(GraphModel& graph, const Node& node,
                           std::vector<InputTile>* input_tiles) {
   input_tiles->clear();
   input_tiles->reserve(input_context.inputs.size());
-  for (const auto* input : input_context.inputs) {
+  for (std::size_t input_index = 0U; input_index < input_context.inputs.size();
+       ++input_index) {
+    const NodeOutput* input = input_context.inputs[input_index];
     if (!input) {
       input_tiles->emplace_back();
       continue;
     }
-    const ImageBuffer& input_buffer = input->image_buffer;
+    const ImageBuffer& input_buffer =
+        input_context.callback_images.at(input_index);
     input_tiles->push_back(InputTile{
         &input_buffer,
         NodeExecutor::input_roi_for_tile(graph, node, output_roi, input_buffer,
@@ -263,19 +490,21 @@ void populate_input_tiles(GraphModel& graph, const Node& node,
  * @param node Node whose tiled operator is executed.
  * @param tiled_op Tiled operator callback.
  * @param input_context Normalized input context that must outlive callbacks.
- * @param output_buffer Destination image buffer.
+ * @param output_binding Destination Host binding whose plan is frozen.
  * @param config Tiled execution controls.
  * @throws GraphError for invalid tile size or propagated operation failures.
- * @note This helper is shared by execute() and execute_tiled_into() so
- * normalization happens once per node invocation.
+ * @note This helper is shared by execute() and
+ * execute_tiled_into_binding() so normalization happens once per node
+ * invocation. Each callback receives one exact tile grant; any exception
+ * fails the shared binding before propagating.
  */
 void execute_tiled_context_into(GraphModel& graph, Node& node,
                                 const TileOpFunc& tiled_op,
                                 const TiledInputContext& input_context,
-                                ImageBuffer& output_buffer,
+                                HostOutputBinding& output_binding,
                                 const TiledExecutionConfig& config) {
   validate_tile_size(config);
-  const PixelSize output_size = output_size_for_buffer(output_buffer, config);
+  const PixelSize output_size = output_size_for_binding(output_binding, config);
   const PixelRect work_roi = clipped_work_roi(output_size, config);
   const std::vector<PixelSize> input_extents =
       actual_input_extents(input_context);
@@ -284,29 +513,60 @@ void execute_tiled_context_into(GraphModel& graph, Node& node,
 
   TileTask task;
   task.node = &node;
-  task.output_tile.buffer = &output_buffer;
+  task.output_tile.plan = &output_binding.plan();
   task.input_tiles.reserve(input_context.inputs.size());
 
-  const std::int64_t work_right =
-      static_cast<std::int64_t>(work_roi.x) + work_roi.width;
-  const std::int64_t work_bottom =
-      static_cast<std::int64_t>(work_roi.y) + work_roi.height;
-  for (std::int64_t y = work_roi.y; y < work_bottom; y += config.tile_size) {
-    for (std::int64_t x = work_roi.x; x < work_right; x += config.tile_size) {
-      task.output_tile.roi =
-          make_output_tile_roi(static_cast<int>(x), static_cast<int>(y),
-                               work_roi, output_size, config.tile_size);
-      if (is_rect_empty(task.output_tile.roi)) {
-        continue;
+  try {
+    const std::int64_t work_right =
+        static_cast<std::int64_t>(work_roi.x) + work_roi.width;
+    const std::int64_t work_bottom =
+        static_cast<std::int64_t>(work_roi.y) + work_roi.height;
+    for (std::int64_t y = work_roi.y; y < work_bottom; y += config.tile_size) {
+      for (std::int64_t x = work_roi.x; x < work_right; x += config.tile_size) {
+        const PixelRect output_roi =
+            make_output_tile_roi(static_cast<int>(x), static_cast<int>(y),
+                                 work_roi, output_size, config.tile_size);
+        if (is_rect_empty(output_roi)) {
+          continue;
+        }
+        populate_input_tiles(graph, node, input_context, output_roi,
+                             roi_mapping_config, input_extents,
+                             &task.input_tiles);
+        if (config.on_tile) {
+          config.on_tile(output_roi);
+        }
+        const ImageBounds& bounds =
+            output_binding.plan().image_facet().data_window;
+        const std::int64_t x_begin =
+            checked_image_coordinate(bounds.x_begin, output_roi.x);
+        const std::int64_t x_end =
+            checked_image_coordinate(x_begin, output_roi.width);
+        const std::int64_t y_begin =
+            checked_image_coordinate(bounds.y_begin, output_roi.y);
+        const std::int64_t y_end =
+            checked_image_coordinate(y_begin, output_roi.height);
+        HostOutputWriteGrant grant = output_binding.grant_tile(
+            ImageRect{image_region_domain(), x_begin, x_end, y_begin, y_end});
+        task.output_tile.grant = &grant;
+        task.output_tile.roi = output_roi;
+        try {
+          NodeExecutor::execute_tile_task(task, tiled_op);
+          grant.retire_success();
+        } catch (...) {
+          if (grant.active()) {
+            grant.retire_failure("Tiled producer callback failed.");
+          }
+          throw;
+        }
       }
-      populate_input_tiles(graph, node, input_context, task.output_tile.roi,
-                           roi_mapping_config, input_extents,
-                           &task.input_tiles);
-      if (config.on_tile) {
-        config.on_tile(task.output_tile.roi);
-      }
-      NodeExecutor::execute_tile_task(task, tiled_op);
     }
+  } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    try {
+      output_binding.cancel("Tiled execution failed or was cancelled.");
+    } catch (...) {
+    }
+    std::rethrow_exception(failure);
   }
 }
 
@@ -352,13 +612,13 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
 
             const PixelSize output_size =
                 infer_output_size(node, input_context.inputs, config);
-            auto [channels, dtype] =
-                infer_channels_and_type(input_context.inputs);
+            HostOutputBinding output_binding = HostOutputBinding::allocate(
+                NodeExecutor::freeze_tiled_output_plan(input_context.inputs,
+                                                       output_size));
             NodeOutput output;
-            output.image_buffer = make_aligned_cpu_image_buffer(
-                output_size.width, output_size.height, channels, dtype);
             execute_tiled_context_into(graph, node, op_func, input_context,
-                                       output.image_buffer, config);
+                                       output_binding, config);
+            output.publish_image_value(output_binding.seal());
             return output;
           }
         },
@@ -376,15 +636,31 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
   }
 }
 
-void NodeExecutor::execute_tiled_into(
+void NodeExecutor::execute_tiled_into_binding(
     GraphModel& graph, Node& node, const TileOpFunc& tiled_op,
-    const std::vector<const NodeOutput*>& inputs, ImageBuffer& output_buffer,
-    const TiledExecutionConfig& config) {
+    const std::vector<const NodeOutput*>& inputs,
+    HostOutputBinding& output_binding, const TiledExecutionConfig& config) {
   TiledInputContext input_context =
       TiledInputNormalizer::normalize(node, inputs);
   require_tiled_inputs(node, input_context);
   execute_tiled_context_into(graph, node, tiled_op, input_context,
-                             output_buffer, config);
+                             output_binding, config);
+}
+
+/** @copydoc NodeExecutor::freeze_tiled_output_plan */
+DenseImageOutputPlan NodeExecutor::freeze_tiled_output_plan(
+    const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size) {
+  auto [channels, type] = infer_channels_and_type(inputs);
+  return freeze_tiled_output_plan_impl(output_size, channels, type);
+}
+
+/** @copydoc NodeExecutor::allocate_tiled_output_binding */
+HostOutputBinding NodeExecutor::allocate_tiled_output_binding(
+    const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size) {
+  return HostOutputBinding::allocate(
+      freeze_tiled_output_plan(inputs, output_size));
 }
 
 /** @copydoc NodeExecutor::input_roi_for_tile */

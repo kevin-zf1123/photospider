@@ -61,9 +61,10 @@ enum class DataType : std::uint32_t {
  *       callers must treat data as read-only unless the producing API
  *       explicitly promises writable storage. When an operation DSO returns a
  *       descriptor, the host wraps each non-null payload owner with the DSO
- *       lease; copies of that returned descriptor therefore keep any
- *       plugin-instantiated deleter mapped until final payload retirement. An
- *       IPC Host image is a shared `PROT_READ|MAP_PRIVATE` mapping with a
+ *       lease before importing the result into its canonical Value. CPU bytes
+ *       are copied into Host-owned storage; an opaque non-CPU Value retains the
+ *       wrapped owners until final Value retirement. An IPC Host image is a
+ *       shared `PROT_READ|MAP_PRIVATE` mapping with a
  *       page-aligned base and tight rows; it does not promise the kernel-owned
  *       64-byte alignment of every row. Plugin outputs must use either the
  *       canonical `ImageBuffer{}` descriptor for data-only results or positive
@@ -77,7 +78,9 @@ enum class DataType : std::uint32_t {
  *       does not expose allocation capacity. Non-CPU backend images may use an
  *       owned context without a CPU pointer. The host rejects invalid enum
  *       values and overflowing descriptor arithmetic before cache publication;
- *       opaque backend allocation capacity is provider responsibility.
+ *       opaque backend allocation capacity is provider responsibility. This
+ *       provisional descriptor is compatibility staging and is never private
+ *       runtime allocation, readiness, revision, or cache authority.
  */
 struct ImageBuffer {
   /** @brief Width in pixels. */

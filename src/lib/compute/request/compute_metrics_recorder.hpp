@@ -25,20 +25,22 @@ class ComputeMetricsRecorder {
    * @param execution_ms Measured execution duration; negative values clamp to
    *        zero before integer-millisecond rounding.
    * @return Nothing.
-   * @throws std::invalid_argument if enabled pixel inspection receives a
-   *         malformed image descriptor.
-   * @throws std::out_of_range if validated row iteration cannot be represented
-   *         by the descriptor.
+   * @throws std::invalid_argument if immutable image bounds cannot enter
+   * SpatialContext or enabled inspection receives unsupported element facts.
+   * @throws std::overflow_error when immutable image-window arithmetic is
+   * unrepresentable.
+   * @throws ReadyFenceAccessError, BufferAccessError, or std::out_of_range if
+   * checked Value inspection cannot access a logical sample.
    * @throws std::bad_alloc if diagnostic device-label storage cannot allocate.
    * @note A default output spatial context inherits from the first live input,
    *       resets its local inverse transform, and completes an empty absolute
    *       ROI from output dimensions. Timestamp, worker id, duration, and
    *       device are recorded regardless of `enable_timing`. Pixel statistics
-   *       are inspected only for CPU buffers with owned data. Inspection uses
-   *       stride-aware kernel row access and excludes padding. An all-NaN
-   *       active payload retains the legacy positive/negative infinity
-   *       empty-range sentinels; opaque non-CPU resources retain
-   *       callback-provided values.
+   *       are inspected only for Ready host-visible named image Values.
+   *       Inspection uses ImageView logical coordinates and excludes padding.
+   *       Compatibility staging is never read. An all-NaN active payload
+   *       retains the legacy positive/negative infinity empty-range sentinels;
+   *       opaque/non-Ready resources retain callback-provided values.
    */
   static void finalize_output_metadata(
       NodeOutput& output, const std::vector<const NodeOutput*>& inputs,

@@ -1,6 +1,7 @@
 #include "graph/graph_inspect_service.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <new>
 #include <string>
 #include <unordered_set>
@@ -113,6 +114,10 @@ void append_dependency_tree_entries(
  *
  * @param node Node whose high-precision cache may be inspected.
  * @return Metadata summary with local output dimensions when a cache exists.
+ * @throws GraphError with ComputeError when canonical image dimensions exceed
+ * the current inspection integer representation.
+ * @throws std::invalid_argument or std::overflow_error when retained
+ * ImageFacet bounds violate their immutable Value contract.
  * @throws std::bad_alloc if source label copying allocates and fails.
  * @note The summary intentionally copies only scalar/value metadata so public
  *       Host inspection can report extents without exposing NodeOutput storage.
@@ -127,8 +132,20 @@ NodeMetadataSummary metadata_summary_for(const Node& node) {
 
   summary.has_cached_output = true;
   summary.source_label = source_label;
-  summary.output_width = cached->image_buffer.width;
-  summary.output_height = cached->image_buffer.height;
+  if (cached->has_image_value() &&
+      cached->image_value().image_facet().has_value()) {
+    const ImageBounds& bounds = cached->image_value().image_bounds();
+    const std::size_t width = image_bounds_width(bounds);
+    const std::size_t height = image_bounds_height(bounds);
+    const std::size_t maximum_extent =
+        static_cast<std::size_t>(std::numeric_limits<int>::max());
+    if (width > maximum_extent || height > maximum_extent) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Cached image extent exceeds inspection metadata.");
+    }
+    summary.output_width = static_cast<int>(width);
+    summary.output_height = static_cast<int>(height);
+  }
   summary.debug = cached->debug;
   summary.space = cached->space;
   return summary;

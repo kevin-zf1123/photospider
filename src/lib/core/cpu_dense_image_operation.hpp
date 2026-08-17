@@ -3,8 +3,9 @@
 #include <functional>
 #include <vector>
 
-#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "graph/node.hpp"     // NOLINT(build/include_subdir)
+#include "core/host_output_authorization.hpp"  // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"                   // NOLINT(build/include_subdir)
+#include "graph/node.hpp"                      // NOLINT(build/include_subdir)
 #include "photospider/data/image_view.hpp"
 #include "photospider/data/region.hpp"
 
@@ -82,16 +83,24 @@ using CpuDenseImageInferFunc = std::function<DenseImageDescriptor(
  * @param configuration Deep-owned request-effective parameter snapshot.
  * @param inputs Retaining checked read-only image views.
  * @param inferred Exact logical output descriptor returned by inference.
- * @return Independently owned immutable output Value.
+ * @param output_plan Frozen complete Host output plan selected before
+ * allocation and producer entry.
+ * @param output_grant Active move-only whole-output capability borrowed for
+ * the callback duration.
+ * @return Nothing; the Host retires the grant and seals the binding only after
+ * the callback returns successfully.
  * @throws Any exception emitted by the operation definition.
- * @note The callback receives no ImageBuffer, registry, graph, provider, or
- *       mutable payload authority.
+ * @note The callback receives no allocator, ImageBuffer owner, registry,
+ * graph, provider, or descriptor replacement authority. It may request
+ * mutable addresses only through the checked active grant and must not retire
+ * or retain them after callback return.
  */
 // NOLINTBEGIN(whitespace/indent_namespace)
-using CpuDenseImageExecuteFunc =
-    std::function<Value(const CpuDenseImageConfiguration& configuration,
-                        const std::vector<ImageView>& inputs,
-                        const DenseImageDescriptor& inferred)>;
+using CpuDenseImageExecuteFunc = std::function<void(
+    const CpuDenseImageConfiguration& configuration,
+    const std::vector<ImageView>& inputs, const DenseImageDescriptor& inferred,
+    const DenseImageOutputPlan& output_plan,
+    HostOutputWriteGrant& output_grant)>;
 // NOLINTEND
 
 /**
@@ -112,11 +121,10 @@ struct CpuDenseImageOperation {
 /**
  * @brief Runs a private dense operation behind the current ImageBuffer edge.
  *
- * The runner reuses each sealed NodeOutput image Value when present and
- * otherwise snapshots its CPU ImageBuffer, invokes descriptor-only inference,
- * executes through checked ImageViews, validates the complete result against
- * inference, and publishes that exact sealed Value plus an independent current
- * NodeOutput ImageBuffer compatibility snapshot.
+ * The runner requires each canonical NodeOutput image Value, invokes
+ * descriptor-only inference, freezes one immutable output plan, allocates one
+ * Host binding, executes through checked ImageViews and one whole grant, then
+ * retires and seals the exact binding into the named image Value.
  *
  * @param node Node whose request-effective parameters are copied into the
  *        configuration passed to both callbacks.
@@ -131,9 +139,10 @@ struct CpuDenseImageOperation {
  *         inferred descriptor, execute failure, mismatched result, or
  *         unadaptable result.
  * @throws std::bad_alloc unchanged for resource exhaustion in any phase.
- * @note Legacy input snapshots share no writable ImageBuffer owner. Sealed
- * Value inputs preserve allocation/revision identity without a second copy.
- * No partially validated output is published.
+ * @note Explicit legacy adapters import compatibility bytes before this
+ * runner. Value inputs preserve allocation/revision identity without a second
+ * copy. Producer exceptions fail the binding closed; no partially validated
+ * output or compatibility snapshot is published.
  */
 NodeOutput execute_cpu_dense_image_operation(
     const Node& node, const std::vector<const NodeOutput*>& inputs,

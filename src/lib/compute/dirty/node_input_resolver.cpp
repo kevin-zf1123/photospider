@@ -1,5 +1,6 @@
 #include "compute/dirty/node_input_resolver.hpp"
 
+#include <limits>
 #include <string>
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
@@ -79,10 +80,22 @@ ResolvedNodeInputs NodeInputResolver::resolve(
 
   node.last_input_size_hp.reset();
   for (const NodeOutput* input : resolved.image_inputs) {
-    if (input && input->image_buffer.width > 0 &&
-        input->image_buffer.height > 0) {
+    if (input != nullptr && input->has_image_value() &&
+        input->image_value().image_facet().has_value()) {
+      const ImageBounds& bounds = input->image_value().image_bounds();
+      const std::size_t width = image_bounds_width(bounds);
+      const std::size_t height = image_bounds_height(bounds);
+      const std::size_t maximum =
+          static_cast<std::size_t>(std::numeric_limits<int>::max());
+      if (width > maximum || height > maximum) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            missing_context +
+                ": image input extent exceeds PixelSize for node " +
+                std::to_string(node.id));
+      }
       node.last_input_size_hp =
-          PixelSize{input->image_buffer.width, input->image_buffer.height};
+          PixelSize{static_cast<int>(width), static_cast<int>(height)};
       break;
     }
   }

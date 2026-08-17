@@ -29,6 +29,7 @@
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_service.hpp"
+#include "compute/dirty/node_executor.hpp"
 #include "compute/dirty/realtime_proxy_graph.hpp"
 #include "compute/execution/execution_service.hpp"
 #include "core/param_utils.hpp"
@@ -72,6 +73,65 @@ static_assert(std::is_same_v<decltype(Node::parameters), plugin::ParameterMap>);
 static_assert(
     std::is_same_v<decltype(Node::runtime_parameters), plugin::ParameterMap>);
 static_assert(std::is_same_v<decltype(NodeOutput::data), plugin::ParameterMap>);
+
+/**
+ * @brief Publishes one deterministic canonical CPU image for Kernel tests.
+ *
+ * @param width Positive image width.
+ * @param height Positive image height.
+ * @param channels Positive interleaved channel count.
+ * @param value Scalar assigned to every logical channel element.
+ * @return NodeOutput containing exactly one sealed `"image"` Value.
+ * @throws Allocation, OpenCV, Value validation, or publication exceptions
+ * unchanged.
+ * @note Mutable ImageBuffer storage is callback-local. The returned output
+ * retains only immutable Value authority and no compatibility staging.
+ */
+NodeOutput make_kernel_contract_image_output(int width, int height,
+                                             int channels, float value) {
+  ImageBuffer buffer =
+      make_aligned_cpu_image_buffer(width, height, channels, DataType::FLOAT32);
+  toCvMat(buffer).setTo(value);
+  NodeOutput output;
+  output.publish_image_value(
+      value_image_adapter::snapshot_cpu_image_value(buffer));
+  return output;
+}
+
+/**
+ * @brief Projects one canonical Kernel-test image for callback-local access.
+ *
+ * @param output Output containing a Ready host-readable image Value.
+ * @return Callback-local ImageBuffer projection retaining the immutable Value.
+ * @throws std::invalid_argument when the canonical image is absent.
+ * @throws ReadyFenceAccessError, BufferAccessError, or metadata conversion
+ * exceptions unchanged.
+ * @note Callers must treat the returned bytes as read-only. The projection is
+ * never stored in graph, cache, proxy, or result authority.
+ */
+ImageBuffer project_kernel_contract_image(const NodeOutput& output) {
+  if (!output.has_image_value()) {
+    throw std::invalid_argument(
+        "Kernel contract image projection requires a canonical Value.");
+  }
+  return value_image_adapter::snapshot_cpu_image_buffer(output.image_value());
+}
+
+/**
+ * @brief Publishes one prepared CPU image into a fresh Kernel-test output.
+ *
+ * @param buffer Complete callback-local CPU image whose bytes are snapshotted.
+ * @return NodeOutput containing one sealed canonical image Value.
+ * @throws Value validation, allocation, or publication exceptions unchanged.
+ * @note This helper creates one Value revision and retains no mutable producer
+ * authority after return.
+ */
+NodeOutput publish_kernel_contract_image(const ImageBuffer& buffer) {
+  NodeOutput output;
+  output.publish_image_value(
+      value_image_adapter::snapshot_cpu_image_value(buffer));
+  return output;
+}
 
 /** @brief Serializes the blocking contract operation's release future. */
 std::mutex g_blocking_source_mutex;
@@ -739,12 +799,7 @@ void register_contract_ops() {
                   as_int_flexible(node.runtime_parameters, "width", 17);
               const int height =
                   as_int_flexible(node.runtime_parameters, "height", 3);
-              NodeOutput output;
-              output.image_buffer = make_aligned_cpu_image_buffer(
-                  width, height, 1, DataType::FLOAT32);
-              cv::Mat mat = toCvMat(output.image_buffer);
-              mat.setTo(1.0f);
-              return output;
+              return make_kernel_contract_image_output(width, height, 1, 1.0F);
             }));
 
     registry.register_op_hp_monolithic(
@@ -758,11 +813,7 @@ void register_contract_ops() {
                     "Kernel shutdown preflight probe is not installed.");
               }
               probe->invoke();
-              NodeOutput output;
-              output.image_buffer =
-                  make_aligned_cpu_image_buffer(1, 1, 1, DataType::FLOAT32);
-              toCvMat(output.image_buffer).setTo(1.0f);
-              return output;
+              return make_kernel_contract_image_output(1, 1, 1, 1.0F);
             }));
 
     registry.register_op_hp_monolithic(
@@ -773,14 +824,14 @@ void register_contract_ops() {
                 throw GraphError(GraphErrc::MissingDependency,
                                  "process requires an input");
               }
-              NodeOutput output;
-              const auto& input = inputs.front()->image_buffer;
-              output.image_buffer = make_aligned_cpu_image_buffer(
+              const ImageBuffer input =
+                  project_kernel_contract_image(*inputs.front());
+              ImageBuffer output = make_aligned_cpu_image_buffer(
                   input.width, input.height, input.channels, input.type);
               cv::Mat src = toCvMat(input);
-              cv::Mat dst = toCvMat(output.image_buffer);
+              cv::Mat dst = toCvMat(output);
               src.copyTo(dst);
-              return output;
+              return publish_kernel_contract_image(output);
             }));
 
     registry.register_op_hp_monolithic(
@@ -801,12 +852,7 @@ void register_contract_ops() {
                   as_int_flexible(node.runtime_parameters, "width", 17);
               const int height =
                   as_int_flexible(node.runtime_parameters, "height", 3);
-              NodeOutput output;
-              output.image_buffer = make_aligned_cpu_image_buffer(
-                  width, height, 1, DataType::FLOAT32);
-              cv::Mat mat = toCvMat(output.image_buffer);
-              mat.setTo(3.0f);
-              return output;
+              return make_kernel_contract_image_output(width, height, 1, 3.0F);
             }));
 
     registry.register_op_hp_monolithic(
@@ -826,12 +872,12 @@ void register_contract_ops() {
               if (release.valid()) {
                 release.wait();
               }
-              NodeOutput output;
-              const ImageBuffer& input = inputs.front()->image_buffer;
-              output.image_buffer = make_aligned_cpu_image_buffer(
+              const ImageBuffer input =
+                  project_kernel_contract_image(*inputs.front());
+              ImageBuffer output = make_aligned_cpu_image_buffer(
                   input.width, input.height, input.channels, input.type);
-              toCvMat(input).copyTo(toCvMat(output.image_buffer));
-              return output;
+              toCvMat(input).copyTo(toCvMat(output));
+              return publish_kernel_contract_image(output);
             }));
 
     registry.register_op_rt_tiled(
@@ -1793,9 +1839,8 @@ class KernelCodecTeardownScenario final {
           graph.mutate_node_runtime_state(
               1, [](GraphModel::NodeRuntimeState& state) {
                 state.caches.push_back({"image", "output.png"});
-                state.cached_output_high_precision = NodeOutput{};
-                state.cached_output_high_precision->image_buffer =
-                    make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+                state.cached_output_high_precision =
+                    make_kernel_contract_image_output(2, 1, 1, 0.0F);
                 state.hp_region = value_image_adapter::full_node_output_region(
                     *state.cached_output_high_precision);
               });
@@ -2158,21 +2203,30 @@ TEST(ImageBufferContract, AlignedCpuRowsAndPaddedStep) {
 }
 
 TEST(ImageBufferContract, OpenCvAndTileAccessRespectPaddedStep) {
-  ImageBuffer buffer =
-      make_aligned_cpu_image_buffer(17, 4, 1, DataType::FLOAT32);
-  cv::Mat mat = toCvMat(buffer);
-  ASSERT_EQ(mat.step, buffer.step);
-  ASSERT_FALSE(mat.isContinuous());
-  mat.setTo(0.0f);
+  NodeOutput initial = make_kernel_contract_image_output(17, 4, 1, 0.0F);
+  const std::vector<const NodeOutput*> plan_inputs{&initial};
+  HostOutputBinding binding =
+      compute::NodeExecutor::allocate_tiled_output_binding(plan_inputs,
+                                                           PixelSize{17, 4});
+  binding.seed_from_value(initial.image_value());
+  HostOutputWriteGrant grant =
+      binding.grant_tile(ImageRect{image_region_domain(), 3, 8, 1, 3});
 
   Node node;
-  OutputTile output_tile{&buffer, PixelRect{3, 1, 5, 2}};
+  OutputTile output_tile{&binding.plan(), &grant, PixelRect{3, 1, 5, 2}};
   TileOpFunc write_tile = [](const Node&, const OutputTile& tile,
                              const std::vector<InputTile>&) {
     cv::Mat tile_mat = toCvMat(tile);
     tile_mat.setTo(7.0f);
   };
   write_tile(node, output_tile, {});
+  grant.retire_success();
+  NodeOutput published;
+  published.publish_image_value(binding.seal());
+  const ImageBuffer buffer = project_kernel_contract_image(published);
+  const cv::Mat mat = toCvMat(buffer);
+  ASSERT_EQ(mat.step, buffer.step);
+  ASSERT_FALSE(mat.isContinuous());
 
   EXPECT_FLOAT_EQ(mat.at<float>(1, 3), 7.0f);
   EXPECT_FLOAT_EQ(mat.at<float>(2, 7), 7.0f);
@@ -2320,10 +2374,10 @@ TEST(ParameterValuePath, DocumentGraphAndOperationsStayFormatNeutral) {
             snapshot["consumer_static_count"] = consumer.parameters.at("count");
             snapshot["dynamic_count"] =
                 source.cached_output_high_precision->data.at("dynamic_count");
-            snapshot["final_width"] =
-                consumer.cached_output_high_precision->image_buffer.width;
-            snapshot["final_height"] =
-                consumer.cached_output_high_precision->image_buffer.height;
+            const ImageBuffer final_image = project_kernel_contract_image(
+                *consumer.cached_output_high_precision);
+            snapshot["final_width"] = final_image.width;
+            snapshot["final_height"] = final_image.height;
             return snapshot;
           })
           .get();
@@ -2420,14 +2474,14 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
   hp_request.intent = ComputeIntent::GlobalHighPrecision;
   NodeOutput& hp = compute.compute(graph, hp_request);
   EXPECT_TRUE(graph.node(2).cached_output_high_precision.has_value());
-  EXPECT_EQ(hp.image_buffer.width,
-            graph.node(2).cached_output_high_precision->image_buffer.width);
+  const ImageBuffer hp_image = project_kernel_contract_image(hp);
+  const ImageBuffer cached_hp_image = project_kernel_contract_image(
+      *graph.node(2).cached_output_high_precision);
+  EXPECT_EQ(hp_image.width, cached_hp_image.width);
 
   // Snapshot HP cache dimensions before RT compute
-  int hp_w_before =
-      graph.node(2).cached_output_high_precision->image_buffer.width;
-  int hp_h_before =
-      graph.node(2).cached_output_high_precision->image_buffer.height;
+  const int hp_w_before = cached_hp_image.width;
+  const int hp_h_before = cached_hp_image.height;
 
   // RT compute returns proxy output; cached_output_high_precision must remain
   // unchanged.
@@ -2438,15 +2492,16 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
 
   // Key contract: RT compute must NOT alter the formal HP cache
   ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
-  EXPECT_EQ(graph.node(2).cached_output_high_precision->image_buffer.width,
-            hp_w_before)
+  const ImageBuffer retained_hp_image = project_kernel_contract_image(
+      *graph.node(2).cached_output_high_precision);
+  EXPECT_EQ(retained_hp_image.width, hp_w_before)
       << "RT compute must not change HP cache width";
-  EXPECT_EQ(graph.node(2).cached_output_high_precision->image_buffer.height,
-            hp_h_before)
+  EXPECT_EQ(retained_hp_image.height, hp_h_before)
       << "RT compute must not change HP cache height";
 
   // RT output should be downscaled relative to HP
-  EXPECT_LE(rt.image_buffer.width, hp_w_before)
+  const ImageBuffer rt_image = project_kernel_contract_image(rt);
+  EXPECT_LE(rt_image.width, hp_w_before)
       << "RT output should be <= HP output width";
 }
 
@@ -2918,9 +2973,8 @@ TEST(CacheSemantics, InjectedCodecLifetimeAndPrecisionFollowCacheService) {
   const auto root = clean_temp_path("photospider-contract-codec-lifetime");
   GraphModel graph(root);
   Node node = make_cached_process_node("output.png");
-  node.cached_output_high_precision = NodeOutput{};
-  node.cached_output_high_precision->image_buffer =
-      make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+  node.cached_output_high_precision =
+      make_kernel_contract_image_output(2, 1, 1, 0.0F);
   node.hp_region = value_image_adapter::full_node_output_region(
       *node.cached_output_high_precision);
   const std::filesystem::path expected_path =
@@ -3005,9 +3059,8 @@ TEST(CacheSemantics, BlockedExecutorCodecLeavesSingleCpuWorkerAvailable) {
         graph.mutate_node_runtime_state(
             1, [](GraphModel::NodeRuntimeState& state) {
               state.caches.push_back({"image", "output.png"});
-              state.cached_output_high_precision = NodeOutput{};
-              state.cached_output_high_precision->image_buffer =
-                  make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+              state.cached_output_high_precision =
+                  make_kernel_contract_image_output(2, 1, 1, 0.0F);
               state.hp_region = value_image_adapter::full_node_output_region(
                   *state.cached_output_high_precision);
             });
@@ -4436,9 +4489,10 @@ TEST(ComputeContracts,
             const auto& output = graph.node(1).cached_output_high_precision;
             const bool has_output = output.has_value();
             return std::pair<bool, float>{
-                has_output, has_output
-                                ? toCvMat(output->image_buffer).at<float>(0, 0)
-                                : -1.0F};
+                has_output,
+                has_output ? toCvMat(project_kernel_contract_image(*output))
+                                 .at<float>(0, 0)
+                           : -1.0F};
           })
           .get();
   EXPECT_TRUE(visible.first);
@@ -4703,8 +4757,9 @@ TEST(ComputeContracts,
                 .require_output(2);
           })
           .get();
-  EXPECT_FLOAT_EQ(toCvMat(old_visible_proxy.image_buffer).at<float>(0, 0),
-                  5.0F);
+  EXPECT_FLOAT_EQ(
+      toCvMat(project_kernel_contract_image(old_visible_proxy)).at<float>(0, 0),
+      5.0F);
 
   Kernel::ComputeRequest latest_request = old_request;
   latest_request.cancellation_source.reset();
@@ -4759,7 +4814,9 @@ TEST(ComputeContracts,
                 .require_output(2);
           })
           .get();
-  EXPECT_FLOAT_EQ(toCvMat(final_proxy.image_buffer).at<float>(0, 0), 5.0F);
+  EXPECT_FLOAT_EQ(
+      toCvMat(project_kernel_contract_image(final_proxy)).at<float>(0, 0),
+      5.0F);
   EXPECT_EQ(testing::KernelTestAccess::runtime(kernel, graph_name)
                 .compute_request_snapshot()
                 .lane_admitted_units,
@@ -4876,7 +4933,9 @@ TEST(ComputeContracts,
                 .require_output(2);
           })
           .get();
-  EXPECT_FLOAT_EQ(toCvMat(proxy_output.image_buffer).at<float>(0, 0), 5.0F);
+  EXPECT_FLOAT_EQ(
+      toCvMat(project_kernel_contract_image(proxy_output)).at<float>(0, 0),
+      5.0F);
   EXPECT_EQ(testing::KernelTestAccess::runtime(kernel, graph_name)
                 .compute_request_snapshot()
                 .lane_admitted_units,
@@ -5243,12 +5302,12 @@ TEST(ComputeContracts, CancellationAfterCommitClaimPreservesPublication) {
       testing::KernelTestAccess::submit_graph_state(
           kernel, graph_name,
           [](GraphModel& graph) {
+            const NodeOutput& output =
+                *graph.node(1).cached_output_high_precision;
             return std::tuple<uint64_t, bool, float>{
                 graph.revision().value(),
                 graph.node(1).cached_output_high_precision.has_value(),
-                toCvMat(
-                    graph.node(1).cached_output_high_precision->image_buffer)
-                    .at<float>(0, 0)};
+                toCvMat(project_kernel_contract_image(output)).at<float>(0, 0)};
           })
           .get();
   EXPECT_EQ(std::get<0>(final_state), initial_revision);
@@ -5347,7 +5406,8 @@ TEST(ComputeContracts,
                 testing::KernelTestAccess::runtime(kernel, graph_name)
                     .realtime_proxy_graph()
                     .require_output(2);
-            return toCvMat(output.image_buffer).at<float>(0, 0);
+            return toCvMat(project_kernel_contract_image(output))
+                .at<float>(0, 0);
           })
           .get();
   EXPECT_FLOAT_EQ(committed_old_rt, 5.0f);
@@ -5377,7 +5437,8 @@ TEST(ComputeContracts,
                 testing::KernelTestAccess::runtime(kernel, graph_name)
                     .realtime_proxy_graph()
                     .require_output(2);
-            return toCvMat(output.image_buffer).at<float>(0, 0);
+            return toCvMat(project_kernel_contract_image(output))
+                .at<float>(0, 0);
           })
           .get();
   EXPECT_FLOAT_EQ(final_rt, 5.0f);
@@ -5497,7 +5558,7 @@ TEST(ComputeContracts, RealtimeCommitSurvivesStaleHighPrecisionSibling) {
             return std::tuple<uint64_t, bool, float>{
                 graph.revision().value(),
                 graph.node(2).cached_output_high_precision.has_value(),
-                toCvMat(output.image_buffer).at<float>(0, 0)};
+                toCvMat(project_kernel_contract_image(output)).at<float>(0, 0)};
           });
   const auto [final_revision, has_hp_output, rt_pixel] = visible_state.get();
   EXPECT_EQ(final_revision, mutated_revision);

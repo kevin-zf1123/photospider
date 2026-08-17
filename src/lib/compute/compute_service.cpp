@@ -868,9 +868,9 @@ struct PreparedIntentUpdateState final {
  * recursive dependency, disk-cache, provider/tile, cache-commit, and return
  * boundaries; a monolithic provider already entered is non-preemptible. The
  * direct operation lease is scoped only around NodeExecutor provider entry:
- * provider exceptions release it during stack unwinding, while result
- * normalization, Graph cache publication, disk persistence, and any failures
- * from those Host stages occur after release.
+ * provider exceptions release it during stack unwinding, while named-Value
+ * validation, Graph cache publication, disk persistence, and any failures from
+ * those Host stages occur after release.
  */
 NodeOutput& ComputeService::compute_internal(
     GraphModel& graph, int node_id, const RecursiveComputeContext& context) {
@@ -955,7 +955,19 @@ NodeOutput& ComputeService::compute_internal(
                                             monolithic_inputs, tiled_config);
     }();
     observe_open_run_or_throw(context.run_lease);
-    value_image_adapter::normalize_node_output_image_value(&computed_output);
+    if (computed_output.has_compatibility_image()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Sequential compute rejects compatibility image staging.");
+    }
+    for (const auto& [name, value] : computed_output.named_values) {
+      if (name.empty() || !value.valid() ||
+          !value.ready_fence().poll().ready()) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            "Sequential compute requires valid Ready named Values.");
+      }
+    }
     RegionSet computed_region =
         value_image_adapter::full_node_output_region(computed_output);
     target_node.cached_output_high_precision = std::move(computed_output);

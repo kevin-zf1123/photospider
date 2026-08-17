@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -953,8 +954,12 @@ struct BufferHandle::ControlBlock final {
   /** @brief Explicit allocation memory domain. */
   MemoryDomain memory_domain = MemoryDomain::Host;
 
-  /** @brief Owned CPU bytes, empty for external/native bindings. */
-  std::vector<std::byte> storage;
+  /**
+   * @brief Shared owner of aligned CPU bytes, null for external bindings.
+   * @note The deleter retains the exact aligned-delete argument and therefore
+   * remains independent from BufferHandle copies and subranges.
+   */
+  std::shared_ptr<void> owned_cpu_storage;
 
   /** @brief Shared external/native allocation owner, or null for CPU storage.
    */
@@ -974,13 +979,25 @@ struct BufferHandle::ControlBlock final {
    *
    * @param identity_in Already minted nonzero allocation identity.
    * @param size Positive allocation size.
+   * @param alignment Valid power-of-two allocation alignment.
    * @throws std::bad_alloc when byte allocation fails.
+   * @throws std::invalid_argument when alignment cannot be represented by the
+   * aligned allocation contract.
    */
-  ControlBlock(AllocationIdentity identity_in, std::size_t size)
-      : identity(identity_in),
-        storage(size, std::byte{0}),
-        host_data(storage.data()),
-        byte_size(size) {}
+  ControlBlock(AllocationIdentity identity_in, std::size_t size,
+               std::size_t alignment)
+      : identity(identity_in), byte_size(size) {
+    const std::size_t effective_alignment =
+        std::max(alignment, alignof(std::max_align_t));
+    void* allocation =
+        ::operator new(size, std::align_val_t(effective_alignment));
+    owned_cpu_storage = std::shared_ptr<void>(
+        allocation, [effective_alignment](void* pointer) noexcept {
+          ::operator delete(pointer, std::align_val_t(effective_alignment));
+        });
+    host_data = static_cast<std::byte*>(allocation);
+    std::memset(host_data, 0, size);
+  }
 
   /**
    * @brief Retains one external/native allocation and optional host pointer.
@@ -1011,14 +1028,20 @@ BufferHandle::BufferHandle(std::shared_ptr<ControlBlock> control,
     : control_(std::move(control)), offset_(offset), length_(length) {}
 
 /** @copydoc BufferHandle::allocate_for_builder */
-BufferHandle BufferHandle::allocate_for_builder(std::size_t size) {
+BufferHandle BufferHandle::allocate_for_builder(std::size_t size,
+                                                std::size_t alignment) {
   if (size == 0U) {
     throw std::invalid_argument(
         "BufferHandle allocation size must be positive.");
   }
+  if (alignment == 0U || (alignment & (alignment - 1U)) != 0U) {
+    throw std::invalid_argument(
+        "BufferHandle allocation alignment must be a power of two.");
+  }
   const AllocationIdentity identity(
       process_identity_authority().mint_allocation_identity());
-  return BufferHandle(std::make_shared<ControlBlock>(identity, size), 0U, size);
+  return BufferHandle(std::make_shared<ControlBlock>(identity, size, alignment),
+                      0U, size);
 }
 
 /** @copydoc BufferHandle::retain_external_binding */
@@ -1236,6 +1259,15 @@ std::size_t WriteLease::size() const {
     throw std::logic_error("WriteLease has no active producer range.");
   }
   return handle_.size();
+}
+
+/** @copydoc WriteLease::allocation_identity */
+AllocationIdentity WriteLease::allocation_identity() const {
+  if (!valid()) {
+    throw std::logic_error(
+        "WriteLease has no active producer allocation identity.");
+  }
+  return handle_.allocation_identity();
 }
 
 /**
@@ -1547,14 +1579,15 @@ ValueBuilder::~ValueBuilder() noexcept = default;
 /** @copydoc ValueBuilder::allocate_cpu_dense_tensor */
 ValueBuilder ValueBuilder::allocate_cpu_dense_tensor(
     DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
-    StridedLayout layout, std::size_t storage_size) {
+    StridedLayout layout, std::size_t storage_size, std::size_t alignment) {
   (void)validate_descriptor_and_facet(descriptor, image_facet);
   validate_dense_tensor_producer_envelope(descriptor, layout, storage_size);
 
   DenseTensorDescriptor isolated_descriptor = descriptor;
   const std::optional<ImageFacet> isolated_image_facet = image_facet;
   StridedLayout isolated_layout = layout;
-  BufferHandle buffer = BufferHandle::allocate_for_builder(storage_size);
+  BufferHandle buffer =
+      BufferHandle::allocate_for_builder(storage_size, alignment);
   auto authority = std::make_shared<WriteLease::Authority>();
   return ValueBuilder(std::make_unique<Impl>(
       std::move(isolated_descriptor), isolated_image_facet,
@@ -1569,7 +1602,8 @@ ValueBuilder ValueBuilder::allocate_cpu_blocked_dense_tensor(
 
   DenseTensorDescriptor isolated_descriptor = descriptor;
   BlockedLayout isolated_layout = layout;
-  BufferHandle buffer = BufferHandle::allocate_for_builder(storage_size);
+  BufferHandle buffer = BufferHandle::allocate_for_builder(
+      storage_size, alignof(std::max_align_t));
   auto authority = std::make_shared<WriteLease::Authority>();
   return ValueBuilder(
       std::make_unique<Impl>(std::move(isolated_descriptor), std::nullopt,

@@ -8,6 +8,7 @@
 
 #include "core/image_buffer_processing.hpp"
 #include "core/param_utils.hpp"
+#include "core/value_image_adapter.hpp"
 #include "graph/node.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/image_buffer.hpp"
 
@@ -80,29 +81,31 @@ bool matches_shape(const ImageBuffer& buffer, const ImageShape& base_shape) {
  * @brief Validates that an image_mixing input exists and has non-zero extent.
  *
  * @param output NodeOutput pointer supplied by dependency resolution.
+ * @param projection Exact callback-local projection of output's image Value.
  * @param node_id Node id used in GraphError messages.
  * @param role Human-readable input role, such as "Base" or "Secondary".
- * @return Reference to the validated ImageBuffer.
+ * @return Reference to the validated compatibility projection.
  * @throws GraphError when the pointer is null or the image dimensions/channel
  * count are not positive.
  * @note Payload/device validation occurs only when normalization needs CPU
  * pixel access. Exact-shape pass-through inputs remain provider-owned.
  */
 const ImageBuffer& require_non_empty_image(const NodeOutput* output,
+                                           const ImageBuffer& projection,
                                            int node_id, const char* role) {
   if (!output) {
     throw GraphError(GraphErrc::MissingDependency,
                      std::string(role) + " image for image_mixing node " +
                          std::to_string(node_id) + " is missing.");
   }
-  const ImageBuffer& buffer = output->image_buffer;
-  if (buffer.width <= 0 || buffer.height <= 0 || buffer.channels <= 0) {
+  if (!output->has_image_value() || projection.width <= 0 ||
+      projection.height <= 0 || projection.channels <= 0) {
     throw GraphError(GraphErrc::InvalidParameter,
                      std::string(role) + " image for image_mixing node " +
                          std::to_string(node_id) +
                          " has invalid dimensions or channels.");
   }
-  return buffer;
+  return projection;
 }
 
 /**
@@ -234,6 +237,7 @@ ImageBuffer normalize_channels(const ImageBuffer& current_buffer,
  * @brief Normalizes one secondary image_mixing input when needed.
  *
  * @param input Secondary NodeOutput supplied by dependency resolution.
+ * @param current_buffer Callback-local projection of input's canonical Value.
  * @param base_shape Base image shape.
  * @param strategy merge_strategy runtime parameter.
  * @param node_id Node id used in GraphError messages.
@@ -250,10 +254,9 @@ ImageBuffer normalize_channels(const ImageBuffer& current_buffer,
  * extent.
  */
 std::optional<NodeOutput> normalize_secondary_input(
-    const NodeOutput* input, const ImageShape& base_shape,
-    const std::string& strategy, int node_id) {
-  const ImageBuffer& current_buffer =
-      require_non_empty_image(input, node_id, "Secondary");
+    const NodeOutput* input, const ImageBuffer& current_buffer,
+    const ImageShape& base_shape, const std::string& strategy, int node_id) {
+  (void)require_non_empty_image(input, current_buffer, node_id, "Secondary");
   if (matches_shape(current_buffer, base_shape)) {
     return std::nullopt;
   }
@@ -268,8 +271,9 @@ std::optional<NodeOutput> normalize_secondary_input(
       normalize_channels(normalized_buffer, base_shape, node_id);
 
   NodeOutput normalized = *input;
-  normalized.image_buffer = std::move(normalized_buffer);
-  normalized.image_value = Value{};
+  normalized.clear_image_value();
+  normalized.compatibility_image = std::move(normalized_buffer);
+  value_image_adapter::import_node_output_compatibility_image(&normalized);
   return normalized;
 }
 
@@ -296,22 +300,34 @@ TiledInputContext TiledInputNormalizer::normalize(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
   TiledInputContext context;
   context.inputs = inputs;
+  context.callback_images.reserve(inputs.size());
+  for (const NodeOutput* input : inputs) {
+    if (input != nullptr && input->has_image_value()) {
+      context.callback_images.push_back(
+          value_image_adapter::snapshot_cpu_image_buffer(input->image_value()));
+    } else {
+      context.callback_images.emplace_back();
+    }
+  }
   if (!should_normalize_mixing_inputs(node, inputs)) {
     return context;
   }
 
-  const ImageBuffer& base_buffer =
-      require_non_empty_image(inputs.front(), node.id, "Base");
+  const ImageBuffer& base_buffer = require_non_empty_image(
+      inputs.front(), context.callback_images.front(), node.id, "Base");
   const ImageShape base_shape = shape_of(base_buffer);
   const std::string strategy =
       as_str(node.runtime_parameters, "merge_strategy", "resize");
   context.normalized_storage.reserve(inputs.size() - 1);
 
   for (size_t i = 1; i < inputs.size(); ++i) {
-    std::optional<NodeOutput> normalized =
-        normalize_secondary_input(inputs[i], base_shape, strategy, node.id);
+    std::optional<NodeOutput> normalized = normalize_secondary_input(
+        inputs[i], context.callback_images[i], base_shape, strategy, node.id);
     if (normalized) {
       replace_input_with_normalized_output(context, i, std::move(*normalized));
+      context.callback_images[i] =
+          value_image_adapter::snapshot_cpu_image_buffer(
+              context.inputs[i]->image_value());
     }
   }
   return context;

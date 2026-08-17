@@ -20,6 +20,7 @@
 #include "compute/dispatch/task_graph_planning.hpp"
 #include "compute/image_buffer.hpp"
 #include "core/parameter_value_text.hpp"
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
@@ -284,8 +285,12 @@ GraphModel make_graph() {
 void seed_hp_extent(GraphModel& graph, int node_id, int width, int height) {
   graph.mutate_node_runtime_state(node_id, [&](auto& state) {
     state.cached_output_high_precision = NodeOutput{};
-    state.cached_output_high_precision->image_buffer =
+    const ImageBuffer buffer =
         make_aligned_cpu_image_buffer(width, height, 1, DataType::FLOAT32);
+    state.cached_output_high_precision->publish_image_value(
+        value_image_adapter::snapshot_cpu_image_value(buffer));
+    state.hp_region = value_image_adapter::full_node_output_region(
+        *state.cached_output_high_precision);
   });
 }
 
@@ -376,11 +381,7 @@ TEST(PropagationContracts, BackwardResizeRequiresHpParentExtent) {
           .has_value())
       << "Missing HP state must not provide propagation extent.";
 
-  graph.mutate_node_runtime_state(1, [](auto& state) {
-    state.cached_output_high_precision = NodeOutput{};
-    state.cached_output_high_precision->image_buffer =
-        make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
-  });
+  seed_hp_extent(graph, 1, 8, 8);
 
   std::optional<PixelRect> propagated =
       propagation.project_roi_backward(graph, 2, (PixelRect{1, 1, 1, 1}), 1);
@@ -733,10 +734,22 @@ TEST(OperationHostAdapter,
             inputs.size() == 1 && inputs[0].spatial == nullptr;
       });
   ImageBuffer image = make_aligned_cpu_image_buffer(2, 2, 1, DataType::FLOAT32);
-  OutputTile output{&image, (PixelRect{0, 0, 1, 1})};
+  const Value planned_value =
+      value_image_adapter::snapshot_cpu_image_value(image);
+  ASSERT_TRUE(planned_value.image_facet().has_value());
+  HostOutputBinding binding =
+      HostOutputBinding::allocate(DenseImageOutputPlan::create(
+          "image", planned_value.dense_tensor_descriptor(),
+          *planned_value.image_facet(), planned_value.strided_layout(),
+          planned_value.storage_size(), 64U));
+  HostOutputWriteGrant grant =
+      binding.grant_tile({image_region_domain(), 0, 1, 0, 1});
+  OutputTile output{&binding.plan(), &grant, (PixelRect{0, 0, 1, 1})};
   const std::vector<InputTile> inputs{
       InputTile{&image, (PixelRect{0, 0, 1, 1}), nullptr}};
   tiled(node, output, inputs);
+  grant.retire_success();
+  (void)binding.seal();
   EXPECT_TRUE(tiled_saw_null_spatial);
 
   GraphModel graph = make_graph();
@@ -826,7 +839,7 @@ TEST(OperationHostAdapter, RejectsInvalidPublicSpatialMetadata) {
 }
 
 TEST(OperationHostAdapter,
-     ValidatesPublicImageDescriptorsAndAcceptsOwnedUmatOutput) {
+     ValidatesPublicImageDescriptorsAndAcceptsOwnedUmatOutputAsSealedValue) {
   Node node;
   node.id = 44;
   node.name = "image_descriptor";
@@ -843,15 +856,19 @@ TEST(OperationHostAdapter,
         return output;
       });
   NodeOutput converted = valid(node, {});
-  EXPECT_TRUE(converted.image_buffer.data);
-  EXPECT_TRUE(converted.image_buffer.context);
-  EXPECT_EQ(converted.image_buffer.width, 5);
-  EXPECT_FLOAT_EQ(toCvMat(converted.image_buffer).at<float>(1, 2), 4.0f);
+  ASSERT_TRUE(converted.has_image_value());
+  EXPECT_FALSE(converted.has_compatibility_image());
+  EXPECT_TRUE(converted.image_value().revision_id().valid());
+  const ImageBuffer converted_image =
+      value_image_adapter::snapshot_cpu_image_buffer(converted.image_value());
+  EXPECT_TRUE(converted_image.data);
+  EXPECT_EQ(converted_image.width, 5);
+  EXPECT_FLOAT_EQ(toCvMat(converted_image).at<float>(1, 2), 4.0f);
 
   auto owned_byte = std::shared_ptr<void>(
       new std::uint8_t[64],
       [](void* pointer) { delete[] static_cast<std::uint8_t*>(pointer); });
-  std::vector<ImageBuffer> invalid(8);
+  std::vector<ImageBuffer> invalid(9);
   invalid[0].width = -1;
   invalid[0].height = 1;
   invalid[0].channels = 1;
@@ -882,6 +899,13 @@ TEST(OperationHostAdapter,
   invalid[5].device = Device::CPU;
   invalid[6].type = DataType::UINT8;
   invalid[7].device = Device::GPU_METAL;
+  invalid[8].width = 2;
+  invalid[8].height = 2;
+  invalid[8].channels = 1;
+  invalid[8].type = DataType::UINT8;
+  invalid[8].device = Device::GPU_METAL;
+  invalid[8].step = 1U;
+  invalid[8].context = std::make_shared<int>(1);
 
   std::size_t selected = 0;
   MonolithicOpFunc rejected = plugin_host::adapt_monolithic_operation(
@@ -894,6 +918,72 @@ TEST(OperationHostAdapter,
   for (selected = 0; selected < invalid.size(); ++selected) {
     EXPECT_THROW((void)rejected(node, {}), std::invalid_argument);
   }
+}
+
+/**
+ * @brief Verifies an imported device Value independently owns its plugin
+ * payload and library lease in the required retirement order.
+ *
+ * @return Nothing; GoogleTest assertions report binding or lifetime defects.
+ * @throws Allocation and adapter exceptions unchanged to the test framework.
+ * @note The synthetic deleters execute in the test binary, while the real DSO
+ * fixture exercises the same shared-owner graph on supported native-loading
+ * platforms. Resetting the enclosing NodeOutput must not retire either owner;
+ * resetting the final Value must retire payload before library.
+ */
+TEST(OperationHostAdapter,
+     ImportedDeviceValueRetainsPayloadAndLibraryAfterOutputRetires) {
+  std::vector<std::string> retirement_trace;
+  auto library_lifetime =
+      std::shared_ptr<void>(new int(1), [&retirement_trace](void* pointer) {
+        delete static_cast<int*>(pointer);
+        retirement_trace.emplace_back("library");
+      });
+  auto payload =
+      std::shared_ptr<void>(new int(2), [&retirement_trace](void* pointer) {
+        delete static_cast<int*>(pointer);
+        retirement_trace.emplace_back("payload");
+      });
+
+  Node node;
+  node.id = 45;
+  node.name = "imported_device_value";
+  node.type = "operation_sdk_test";
+  node.subtype = "imported_device_value";
+  MonolithicOpFunc operation = plugin_host::adapt_monolithic_operation(
+      [payload = std::move(payload)](
+          const plugin::NodeView&,
+          plugin::ArrayView<plugin::OperationInputView>) mutable {
+        plugin::OperationOutput output;
+        output.image_buffer.width = 2;
+        output.image_buffer.height = 3;
+        output.image_buffer.channels = 1;
+        output.image_buffer.type = DataType::UINT8;
+        output.image_buffer.device = Device::GPU_METAL;
+        output.image_buffer.context = std::move(payload);
+        return output;
+      },
+      library_lifetime);
+  library_lifetime.reset();
+
+  NodeOutput converted = operation(node, {});
+  operation = MonolithicOpFunc{};
+  ASSERT_TRUE(converted.has_image_value());
+  EXPECT_FALSE(converted.has_compatibility_image());
+  const StorageBinding binding = converted.image_value().storage_binding();
+  EXPECT_EQ(binding.device, DeviceId(DeviceBackend::Metal));
+  EXPECT_EQ(binding.memory_domain, MemoryDomain::Imported);
+  EXPECT_EQ(binding.byte_size, 6U);
+  EXPECT_FALSE(binding.host_visible);
+  EXPECT_EQ(converted.image_value().ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+
+  Value retained_value = converted.image_value();
+  converted = NodeOutput{};
+  EXPECT_TRUE(retirement_trace.empty());
+
+  retained_value = Value{};
+  EXPECT_EQ(retirement_trace, (std::vector<std::string>{"payload", "library"}));
 }
 
 /**

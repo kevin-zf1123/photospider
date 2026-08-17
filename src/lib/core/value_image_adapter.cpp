@@ -4,10 +4,15 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <numeric>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "core/host_output_authorization.hpp"
+#include "core/pending_value.hpp"
 #include "photospider/core/image_buffer.hpp"
 #include "photospider/data/image_view.hpp"
 
@@ -71,6 +76,33 @@ std::pair<ElementSemantics, StorageEncoding> dense_element_from_image_type(
 }
 
 /**
+ * @brief Retains every owner behind one imported non-CPU ImageBuffer binding.
+ *
+ * @throws Nothing for destruction; construction moves already-retained shared
+ * owners without allocation.
+ * @note The enclosing shared control block becomes the single external Value
+ * owner. Individual data/context deleters, including plugin lease wrappers,
+ * therefore remain alive until the final Value copy retires.
+ */
+struct ImportedImageBindingOwner final {
+  /**
+   * @brief Takes complete ownership of one inbound compatibility payload.
+   * @param retained_data Optional backend data owner.
+   * @param retained_context Optional opaque backend context owner.
+   * @throws Nothing because shared-owner moves are non-throwing.
+   */
+  ImportedImageBindingOwner(std::shared_ptr<void> retained_data,
+                            std::shared_ptr<void> retained_context) noexcept
+      : data(std::move(retained_data)), context(std::move(retained_context)) {}
+
+  /** @brief Optional backend data owner retained through Value retirement. */
+  std::shared_ptr<void> data;
+  /** @brief Optional opaque backend context retained through Value retirement.
+   */
+  std::shared_ptr<void> context;
+};
+
+/**
  * @brief Converts supported DenseTensor element facts to ImageBuffer type.
  *
  * @param descriptor Valid DenseTensor descriptor.
@@ -111,24 +143,62 @@ DataType image_type_from_dense_element(
 }
 
 /**
- * @brief Obtains one immutable dense Value from a current output boundary.
- * @param output Output whose sealed Value or CPU ImageBuffer is inspected.
- * @return Existing Value, a fresh ImageBuffer snapshot, or nullopt when no
- *         dependency-neutral dense payload is available.
- * @throws std::invalid_argument, std::overflow_error, or std::bad_alloc from
- *         CPU image snapshot publication.
- * @note Opaque non-CPU ImageBuffer payloads are never mapped implicitly.
+ * @brief Obtains canonical immutable dense authority from one private output.
+ * @param output Output whose permanent image port is inspected.
+ * @return Existing image Value, or nullopt when the port is absent.
+ * @throws Nothing.
+ * @note Compatibility staging is deliberately ignored; callers must import it
+ * explicitly before entering Value-backed merge or formal-cache paths.
  */
 std::optional<Value> dense_value_from_output(const NodeOutput& output) {
-  if (output.image_value.valid()) {
-    return output.image_value;
-  }
-  const ImageBuffer& buffer = output.image_buffer;
-  if (buffer.device == Device::CPU && buffer.width > 0 && buffer.height > 0 &&
-      buffer.channels > 0 && buffer.data) {
-    return snapshot_cpu_image_value(buffer);
+  if (output.has_image_value()) {
+    return output.image_value();
   }
   return std::nullopt;
+}
+
+/**
+ * @brief Builds the single DI-2 output plan for an inbound ImageBuffer.
+ * @param buffer Valid nonempty owned compatibility image.
+ * @return Immutable exact-layout image output plan named `image`.
+ * @throws std::invalid_argument for malformed or unrepresentable descriptors.
+ * @throws std::overflow_error when byte-envelope arithmetic overflows.
+ * @throws std::bad_alloc when plan metadata cannot allocate.
+ * @note A zero opaque-device stride means tightly packed rows at this legacy
+ * edge. The compatibility allocation is only an import source; the returned
+ * plan creates no allocation or identity and never retains the source owner.
+ */
+DenseImageOutputPlan compatibility_image_plan(const ImageBuffer& buffer) {
+  const std::size_t element_bytes = image_buffer_bytes_per_channel(buffer.type);
+  const std::size_t pixel_bytes = checked_multiply(
+      static_cast<std::size_t>(buffer.channels), element_bytes);
+  const std::size_t row_bytes = image_buffer_row_bytes(buffer);
+  const std::size_t row_stride = buffer.step == 0U ? row_bytes : buffer.step;
+  if (row_stride > static_cast<std::size_t>(
+                       std::numeric_limits<std::ptrdiff_t>::max()) ||
+      pixel_bytes > static_cast<std::size_t>(
+                        std::numeric_limits<std::ptrdiff_t>::max()) ||
+      element_bytes > static_cast<std::size_t>(
+                          std::numeric_limits<std::ptrdiff_t>::max())) {
+    throw std::invalid_argument(
+        "ImageBuffer strides exceed the signed output-plan domain.");
+  }
+  const std::size_t storage_size = checked_add(
+      checked_multiply(static_cast<std::size_t>(buffer.height - 1), row_stride),
+      row_bytes);
+  const auto [semantics, encoding] = dense_element_from_image_type(buffer.type);
+  DenseTensorDescriptor descriptor{{static_cast<std::size_t>(buffer.height),
+                                    static_cast<std::size_t>(buffer.width),
+                                    static_cast<std::size_t>(buffer.channels)},
+                                   semantics,
+                                   encoding};
+  const ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  StridedLayout layout{{static_cast<std::ptrdiff_t>(row_stride),
+                        static_cast<std::ptrdiff_t>(pixel_bytes),
+                        static_cast<std::ptrdiff_t>(element_bytes)}};
+  return DenseImageOutputPlan::create(std::string(NodeOutput::kImageOutputName),
+                                      std::move(descriptor), image,
+                                      std::move(layout), storage_size, 64U);
 }
 
 /**
@@ -247,6 +317,84 @@ std::pair<StridedLayout, std::size_t> contiguous_layout_and_size(
 }
 
 /**
+ * @brief Builds the canonical interleaved layout required by an image plan.
+ * @param descriptor Valid whole-byte DenseTensor descriptor.
+ * @param image_facet Valid ordinary-image interpretation whose unassigned axes
+ * are singleton.
+ * @return Exact positive layout and storage size in y/x/channel order.
+ * @throws std::invalid_argument when an unassigned axis is non-singleton.
+ * @throws std::overflow_error when strides or storage size are unrepresentable.
+ * @throws std::bad_alloc when stride storage cannot allocate.
+ * @note Logical axis order does not control physical image order; channel is
+ * contiguous, followed by x pixels and y rows. Singleton axes receive the
+ * element stride and therefore add no bytes to the exact envelope.
+ */
+std::pair<StridedLayout, std::size_t> interleaved_image_layout_and_size(
+    const DenseTensorDescriptor& descriptor, const ImageFacet& image_facet) {
+  const std::size_t element_bytes = dense_tensor_element_bytes(descriptor);
+  const std::size_t channels = image_facet.channel_axis.has_value()
+                                   ? descriptor.shape[*image_facet.channel_axis]
+                                   : 1U;
+  const std::size_t pixel_bytes = checked_multiply(channels, element_bytes);
+  const std::size_t width = image_bounds_width(image_facet.data_window);
+  const std::size_t height = image_bounds_height(image_facet.data_window);
+  const std::size_t row_bytes = checked_multiply(width, pixel_bytes);
+  const std::size_t storage_size = checked_multiply(height, row_bytes);
+  if (element_bytes > static_cast<std::size_t>(
+                          std::numeric_limits<std::ptrdiff_t>::max()) ||
+      pixel_bytes > static_cast<std::size_t>(
+                        std::numeric_limits<std::ptrdiff_t>::max()) ||
+      row_bytes > static_cast<std::size_t>(
+                      std::numeric_limits<std::ptrdiff_t>::max())) {
+    throw std::overflow_error(
+        "Interleaved image output stride exceeds ptrdiff_t.");
+  }
+
+  StridedLayout layout;
+  layout.byte_strides.assign(descriptor.shape.size(),
+                             static_cast<std::ptrdiff_t>(element_bytes));
+  layout.byte_strides[image_facet.x_axis] =
+      static_cast<std::ptrdiff_t>(pixel_bytes);
+  layout.byte_strides[image_facet.y_axis] =
+      static_cast<std::ptrdiff_t>(row_bytes);
+  if (image_facet.channel_axis.has_value()) {
+    layout.byte_strides[*image_facet.channel_axis] =
+        static_cast<std::ptrdiff_t>(element_bytes);
+  }
+  for (std::size_t axis = 0U; axis < descriptor.shape.size(); ++axis) {
+    const bool assigned = axis == image_facet.x_axis ||
+                          axis == image_facet.y_axis ||
+                          (image_facet.channel_axis.has_value() &&
+                           axis == *image_facet.channel_axis);
+    if (!assigned && descriptor.shape[axis] != 1U) {
+      throw std::invalid_argument(
+          "Interleaved image output requires singleton unassigned axes.");
+    }
+  }
+  return {std::move(layout), storage_size};
+}
+
+/**
+ * @brief Computes one checked producer-layout offset for logical coordinates.
+ * @param coordinates Rank-matched coordinates inside the descriptor.
+ * @param layout Positive producer layout with zero byte offset.
+ * @return Exact allocation-relative byte offset.
+ * @throws std::overflow_error when offset arithmetic is unrepresentable.
+ * @note Descriptor bounds and positive strides are established by the caller.
+ */
+std::size_t producer_coordinate_offset(
+    const std::vector<std::size_t>& coordinates, const StridedLayout& layout) {
+  std::size_t offset = 0U;
+  for (std::size_t axis = 0U; axis < coordinates.size(); ++axis) {
+    offset = checked_add(
+        offset,
+        checked_multiply(coordinates[axis],
+                         static_cast<std::size_t>(layout.byte_strides[axis])));
+  }
+  return offset;
+}
+
+/**
  * @brief Builds the complete TensorSlice for one concrete dense descriptor.
  * @param descriptor Valid DenseTensor descriptor with finite extents.
  * @return Exact rank-general Region covering every logical element.
@@ -305,45 +453,17 @@ Value snapshot_cpu_image_value(const ImageBuffer& buffer) {
     throw std::invalid_argument(
         "Image Value snapshot requires a nonempty owned CPU ImageBuffer.");
   }
-  if (buffer.step >
-      static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
-    throw std::invalid_argument(
-        "ImageBuffer row stride exceeds the signed layout domain.");
-  }
-
-  const std::size_t element_bytes = image_buffer_bytes_per_channel(buffer.type);
-  const std::size_t pixel_bytes = checked_multiply(
-      static_cast<std::size_t>(buffer.channels), element_bytes);
-  if (pixel_bytes > static_cast<std::size_t>(
-                        std::numeric_limits<std::ptrdiff_t>::max()) ||
-      element_bytes > static_cast<std::size_t>(
-                          std::numeric_limits<std::ptrdiff_t>::max())) {
-    throw std::invalid_argument(
-        "ImageBuffer element stride exceeds the signed layout domain.");
-  }
-
+  DenseImageOutputPlan plan = compatibility_image_plan(buffer);
   const std::size_t row_bytes = image_buffer_row_bytes(buffer);
-  const std::size_t preceding_rows = checked_multiply(
-      static_cast<std::size_t>(buffer.height - 1), buffer.step);
-  const std::size_t storage_size = checked_add(preceding_rows, row_bytes);
-  std::vector<std::byte> storage(storage_size, std::byte{0});
+  HostOutputBinding binding = HostOutputBinding::allocate(std::move(plan));
+  HostOutputWriteGrant grant = binding.grant_whole();
+  std::byte* destination = grant.data(0U);
   for (int row = 0; row < buffer.height; ++row) {
-    std::memcpy(storage.data() + static_cast<std::size_t>(row) * buffer.step,
+    std::memcpy(destination + static_cast<std::size_t>(row) * buffer.step,
                 image_buffer_row_data(buffer, row), row_bytes);
   }
-
-  const auto [semantics, encoding] = dense_element_from_image_type(buffer.type);
-  DenseTensorDescriptor descriptor{{static_cast<std::size_t>(buffer.height),
-                                    static_cast<std::size_t>(buffer.width),
-                                    static_cast<std::size_t>(buffer.channels)},
-                                   semantics,
-                                   encoding};
-  const ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
-  StridedLayout layout{{static_cast<std::ptrdiff_t>(buffer.step),
-                        static_cast<std::ptrdiff_t>(pixel_bytes),
-                        static_cast<std::ptrdiff_t>(element_bytes)}};
-  return Value::from_cpu_dense_tensor(std::move(descriptor), image,
-                                      std::move(layout), std::move(storage));
+  grant.retire_success();
+  return binding.seal();
 }
 
 /** @copydoc snapshot_cpu_image_buffer */
@@ -373,41 +493,74 @@ ImageBuffer snapshot_cpu_image_buffer(const Value& value) {
   return output;
 }
 
-/** @copydoc normalize_node_output_image_value */
-void normalize_node_output_image_value(NodeOutput* output) {
+/** @copydoc import_node_output_compatibility_image */
+void import_node_output_compatibility_image(NodeOutput* output) {
   if (output == nullptr) {
     throw std::invalid_argument(
-        "NodeOutput normalization requires a non-null destination.");
+        "NodeOutput compatibility import requires a non-null destination.");
   }
-  if (output->image_value.valid()) {
+  const bool has_staging = output->has_compatibility_image();
+  if (output->has_image_value()) {
+    if (has_staging) {
+      throw std::logic_error(
+          "NodeOutput cannot retain canonical and compatibility image peers.");
+    }
     return;
   }
-  const ImageBuffer& buffer = output->image_buffer;
-  if (buffer.device != Device::CPU || buffer.width <= 0 || buffer.height <= 0 ||
-      buffer.channels <= 0 || !buffer.data) {
+  if (!has_staging) {
     return;
   }
-  output->image_value = snapshot_cpu_image_value(buffer);
+  const ImageBuffer& buffer = output->compatibility_image;
+  validate_image_buffer(buffer);
+  if (buffer.width <= 0 || buffer.height <= 0 || buffer.channels <= 0) {
+    throw std::invalid_argument(
+        "NodeOutput compatibility import requires a nonempty image.");
+  }
+  if (buffer.device == Device::CPU) {
+    if (!buffer.data) {
+      throw std::invalid_argument(
+          "NodeOutput CPU compatibility import requires pixel data.");
+    }
+    Value published = snapshot_cpu_image_value(buffer);
+    output->publish_image_value(std::move(published));
+    output->compatibility_image = ImageBuffer{};
+    return;
+  }
+
+  DenseImageOutputPlan plan = compatibility_image_plan(buffer);
+  void* native_handle =
+      buffer.context ? buffer.context.get() : buffer.data.get();
+  auto owner =
+      std::make_shared<ImportedImageBindingOwner>(buffer.data, buffer.context);
+  PendingDeviceValuePublication publication =
+      PendingDeviceValuePublisher::publish_dense_tensor(
+          plan.descriptor(), plan.image_facet(), plan.layout(),
+          std::move(owner), native_handle, nullptr, plan.storage_size(),
+          DeviceId(device_backend(buffer.device)), MemoryDomain::Imported);
+  if (!publication.producer.complete_ready()) {
+    throw std::logic_error(
+        "ImageBuffer device import lost its pending publication authority.");
+  }
+  output->publish_image_value(std::move(publication.value));
+  output->compatibility_image = ImageBuffer{};
 }
 
 /** @copydoc full_node_output_region */
 RegionSet full_node_output_region(const NodeOutput& output) {
-  if (output.image_value.valid()) {
-    if (output.image_value.image_facet().has_value()) {
-      const ImageBounds& bounds = output.image_value.image_bounds();
+  if (output.has_compatibility_image()) {
+    throw std::logic_error(
+        "Formal output Region cannot derive from compatibility staging.");
+  }
+  if (output.has_image_value()) {
+    const Value& image_value = output.image_value();
+    if (image_value.image_facet().has_value()) {
+      const ImageBounds& bounds = image_value.image_bounds();
       return RegionSet::from_image_rect({image_region_domain(), bounds.x_begin,
                                          bounds.x_end, bounds.y_begin,
                                          bounds.y_end});
     }
 
-    return full_dense_tensor_region(
-        output.image_value.dense_tensor_descriptor());
-  }
-
-  const ImageBuffer& buffer = output.image_buffer;
-  if (buffer.width > 0 && buffer.height > 0) {
-    return RegionSet::from_image_rect(
-        {image_region_domain(), 0, buffer.width, 0, buffer.height});
+    return full_dense_tensor_region(image_value.dense_tensor_descriptor());
   }
   return RegionSet::whole();
 }
@@ -419,11 +572,11 @@ bool node_output_region_is_complete(const NodeOutput& output,
   if (region_contains(region, full) == RegionContainmentStatus::Contains) {
     return true;
   }
-  if (!output.image_value.valid()) {
+  if (!output.has_image_value()) {
     return false;
   }
   const RegionSet dense_full =
-      full_dense_tensor_region(output.image_value.dense_tensor_descriptor());
+      full_dense_tensor_region(output.image_value().dense_tensor_descriptor());
   return region_contains(region, dense_full) ==
          RegionContainmentStatus::Contains;
 }
@@ -459,40 +612,71 @@ std::optional<NodeOutput> merge_node_output_region(
       update_value->dense_tensor_descriptor();
   const std::optional<ImageFacet> image_facet = update_facet;
   validate_merge_region(updated_region, descriptor, image_facet);
-  const auto [layout, storage_size] = contiguous_layout_and_size(descriptor);
+  auto layout_and_size =
+      image_facet.has_value()
+          ? interleaved_image_layout_and_size(descriptor, *image_facet)
+          : contiguous_layout_and_size(descriptor);
+  StridedLayout layout = std::move(layout_and_size.first);
+  const std::size_t storage_size = layout_and_size.second;
   const std::size_t element_bytes = dense_tensor_element_bytes(descriptor);
-  std::vector<std::byte> storage(storage_size, std::byte{0});
   DenseTensorView existing_view(*existing_value);
   DenseTensorView update_view(*update_value);
   std::vector<std::size_t> coordinates(descriptor.shape.size(), 0U);
 
-  const std::size_t element_count = storage_size / element_bytes;
-  for (std::size_t index = 0U; index < element_count; ++index) {
-    const DenseTensorView& source =
-        merge_coordinate_selected(updated_region, image_facet, coordinates)
-            ? update_view
-            : existing_view;
-    std::memcpy(storage.data() + checked_multiply(index, element_bytes),
-                source.element_data(coordinates), element_bytes);
+  const auto populate = [&](std::byte* destination) {
+    const std::size_t element_count = std::accumulate(
+        descriptor.shape.begin(), descriptor.shape.end(), std::size_t{1U},
+        [](std::size_t count, std::size_t extent) {
+          return checked_multiply(count, extent);
+        });
+    for (std::size_t index = 0U; index < element_count; ++index) {
+      const DenseTensorView& source =
+          merge_coordinate_selected(updated_region, image_facet, coordinates)
+              ? update_view
+              : existing_view;
+      const std::size_t destination_offset =
+          producer_coordinate_offset(coordinates, layout);
+      std::memcpy(destination + destination_offset,
+                  source.element_data(coordinates), element_bytes);
 
-    for (std::size_t reverse = coordinates.size(); reverse > 0U; --reverse) {
-      const std::size_t axis = reverse - 1U;
-      ++coordinates[axis];
-      if (coordinates[axis] < descriptor.shape[axis]) {
-        break;
+      for (std::size_t reverse = coordinates.size(); reverse > 0U; --reverse) {
+        const std::size_t axis = reverse - 1U;
+        ++coordinates[axis];
+        if (coordinates[axis] < descriptor.shape[axis]) {
+          break;
+        }
+        coordinates[axis] = 0U;
       }
-      coordinates[axis] = 0U;
     }
+  };
+
+  Value merged_value;
+  if (image_facet.has_value()) {
+    DenseImageOutputPlan plan = DenseImageOutputPlan::create(
+        std::string(NodeOutput::kImageOutputName), descriptor, *image_facet,
+        layout, storage_size, 64U);
+    HostOutputBinding binding = HostOutputBinding::allocate(std::move(plan));
+    HostOutputWriteGrant grant = binding.grant_whole();
+    populate(grant.data(0U));
+    grant.retire_success();
+    merged_value = binding.seal();
+  } else {
+    ValueBuilder builder = ValueBuilder::allocate_cpu_dense_tensor(
+        descriptor, std::nullopt, layout, storage_size);
+    {
+      WriteLease lease = builder.acquire_write();
+      populate(lease.data());
+    }
+    merged_value = builder.seal();
   }
 
   NodeOutput merged = update;
-  merged.image_value = Value::from_cpu_dense_tensor(descriptor, image_facet,
-                                                    layout, std::move(storage));
-  if (image_facet.has_value()) {
-    merged.image_buffer = snapshot_cpu_image_buffer(merged.image_value);
+  if (merged.has_image_value()) {
+    merged.replace_image_value(std::move(merged_value));
   } else {
-    merged.image_buffer = ImageBuffer{};
+    merged.publish_image_value(std::move(merged_value));
   }
+  merged.compatibility_image = ImageBuffer{};
   return merged;
 }
 

@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/value_image_adapter.hpp"
 #include "execution/device/device_execution_context.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/node.hpp"  // NOLINT(build/include_subdir)
@@ -104,6 +105,8 @@ SpatialContext to_private_spatial(const plugin::SpatialSnapshot& spatial) {
  *       invalidation during construction.
  */
 struct OperationInputStorage {
+  /** @brief Callback-local ImageBuffer projections retaining source Values. */
+  std::vector<ImageBuffer> images;
   /** @brief Owned public named-output snapshots. */
   std::vector<plugin::ParameterMap> data;
   /** @brief Owned public spatial snapshots. */
@@ -123,6 +126,77 @@ struct OperationInputStorage {
 bool has_image_payload(const ImageBuffer& buffer) noexcept {
   return buffer.width > 0 && buffer.height > 0 && buffer.channels > 0 &&
          (buffer.data || buffer.context);
+}
+
+/**
+ * @brief Converts one planned whole-byte element encoding to ImageBuffer type.
+ * @param descriptor Valid planned DenseTensor descriptor.
+ * @return Matching current compatibility scalar type.
+ * @throws std::invalid_argument when the current ABI cannot represent the
+ * semantics/bit-width pair.
+ * @note This is a callback-edge projection only; the plan remains descriptor
+ * authority and no conversion is performed.
+ */
+DataType compatibility_type_for_plan(const DenseTensorDescriptor& descriptor) {
+  const std::uint32_t bits = descriptor.storage_encoding.bit_width;
+  switch (descriptor.element_semantics) {
+    case ElementSemantics::UnsignedInteger:
+      if (bits == 8U)
+        return DataType::UINT8;
+      if (bits == 16U)
+        return DataType::UINT16;
+      break;
+    case ElementSemantics::SignedInteger:
+      if (bits == 8U)
+        return DataType::INT8;
+      if (bits == 16U)
+        return DataType::INT16;
+      break;
+    case ElementSemantics::FloatingPoint:
+      if (bits == 32U)
+        return DataType::FLOAT32;
+      if (bits == 64U)
+        return DataType::FLOAT64;
+      break;
+  }
+  throw std::invalid_argument(
+      "Host output plan cannot enter the ImageBuffer ABI v2 edge.");
+}
+
+/**
+ * @brief Creates one callback-local ABI v2 alias over an active Host grant.
+ * @param output Private tile containing a frozen plan and active grant.
+ * @return Full-image descriptor aliasing the binding allocation.
+ * @throws std::invalid_argument when the plan cannot be represented by the
+ * current ImageBuffer contract.
+ * @throws std::logic_error when plan/grant pointers or grant state are invalid.
+ * @throws std::system_error when grant synchronization fails.
+ * @note The returned owner must retire before the grant. It exists only for
+ * the synchronous callback and never becomes runtime or cache authority.
+ */
+ImageBuffer project_output_tile_for_abi_v2(const OutputTile& output) {
+  if (output.plan == nullptr || output.grant == nullptr) {
+    throw std::logic_error(
+        "Tiled ABI v2 projection requires a plan and active grant.");
+  }
+  const std::size_t maximum_extent =
+      static_cast<std::size_t>(std::numeric_limits<int>::max());
+  if (output.plan->width() > maximum_extent ||
+      output.plan->height() > maximum_extent ||
+      output.plan->channels() > maximum_extent) {
+    throw std::invalid_argument(
+        "Tiled ABI v2 projection exceeds ImageBuffer extents.");
+  }
+  ImageBuffer projected;
+  projected.width = static_cast<int>(output.plan->width());
+  projected.height = static_cast<int>(output.plan->height());
+  projected.channels = static_cast<int>(output.plan->channels());
+  projected.type = compatibility_type_for_plan(output.plan->descriptor());
+  projected.device = Device::CPU;
+  projected.step = output.plan->row_stride();
+  projected.data = output.grant->retain_abi_v2_allocation();
+  validate_image_buffer(projected);
+  return projected;
 }
 
 /**
@@ -175,8 +249,8 @@ std::shared_ptr<void> retain_plugin_payload(
 
 /**
  * @brief Attaches copy-safe plugin leases to one converted operation result.
- * @param result Converted host output whose image handles may originate in the
- * plugin DSO.
+ * @param result Converted host output whose compatibility image handles may
+ * originate in the plugin DSO.
  * @param library_lifetime Matching operation-plugin library lease.
  * @return Nothing.
  * @throws std::bad_alloc if either payload wrapper allocation fails.
@@ -187,11 +261,11 @@ std::shared_ptr<void> retain_plugin_payload(
 void attach_result_library_lifetime(
     NodeOutput& result, const std::shared_ptr<void>& library_lifetime) {
   std::shared_ptr<void> retained_data =
-      retain_plugin_payload(result.image_buffer.data, library_lifetime);
-  std::shared_ptr<void> retained_context =
-      retain_plugin_payload(result.image_buffer.context, library_lifetime);
-  result.image_buffer.data = std::move(retained_data);
-  result.image_buffer.context = std::move(retained_context);
+      retain_plugin_payload(result.compatibility_image.data, library_lifetime);
+  std::shared_ptr<void> retained_context = retain_plugin_payload(
+      result.compatibility_image.context, library_lifetime);
+  result.compatibility_image.data = std::move(retained_data);
+  result.compatibility_image.context = std::move(retained_context);
   result.plugin_library_lifetime = library_lifetime;
 }
 
@@ -199,7 +273,11 @@ void attach_result_library_lifetime(
  * @brief Builds callback-scoped public views for private upstream outputs.
  * @param inputs Borrowed private output pointers in image-input order.
  * @return Storage owning every copied non-image value and view.
- * @throws std::bad_alloc unchanged from recursive copying or vector allocation.
+ * @throws std::invalid_argument, std::out_of_range, std::overflow_error,
+ * ReadyFenceAccessError, or BufferAccessError when a canonical Value cannot be
+ * projected through the current CPU ImageBuffer edge.
+ * @throws std::bad_alloc unchanged from recursive copying, projection, or
+ * vector allocation.
  * @note Null inputs become empty views without dereferencing host storage.
  *       Every non-null NodeOutput exposes its spatial snapshot even when it is
  *       data-only and therefore has no image payload.
@@ -207,13 +285,21 @@ void attach_result_library_lifetime(
 OperationInputStorage make_operation_inputs(
     const std::vector<const NodeOutput*>& inputs) {
   OperationInputStorage storage;
+  storage.images.reserve(inputs.size());
   storage.data.reserve(inputs.size());
   storage.spatial.reserve(inputs.size());
   for (const NodeOutput* input : inputs) {
     if (!input) {
+      storage.images.emplace_back();
       storage.data.emplace_back();
       storage.spatial.emplace_back();
       continue;
+    }
+    if (input->has_image_value()) {
+      storage.images.push_back(
+          value_image_adapter::snapshot_cpu_image_buffer(input->image_value()));
+    } else {
+      storage.images.emplace_back();
     }
     storage.data.push_back(input->data);
     storage.spatial.push_back(to_public_spatial(input->space));
@@ -225,9 +311,9 @@ OperationInputStorage make_operation_inputs(
       storage.views.emplace_back();
       continue;
     }
-    const bool has_image = has_image_payload(input->image_buffer);
+    const bool has_image = has_image_payload(storage.images[index]);
     storage.views.push_back(plugin::OperationInputView{
-        has_image ? &input->image_buffer : nullptr,
+        has_image ? &storage.images[index] : nullptr,
         storage.data[index].empty() ? nullptr : &storage.data[index],
         &storage.spatial[index]});
   }
@@ -250,7 +336,7 @@ OperationInputStorage make_operation_inputs(
 NodeOutput operation_output_to_private(plugin::OperationOutput output) {
   validate_image_buffer(output.image_buffer);
   NodeOutput result;
-  result.image_buffer = std::move(output.image_buffer);
+  result.compatibility_image = std::move(output.image_buffer);
   result.data = std::move(output.data);
   result.space = to_private_spatial(output.spatial);
   result.debug.computed_by_worker_id = output.debug.computed_by_worker_id;
@@ -264,13 +350,18 @@ NodeOutput operation_output_to_private(plugin::OperationOutput output) {
           execution::current_metal_execution_context()) {
     Value published = context->take_published_value();
     if (published.valid()) {
-      if (result.image_buffer.width != 0 || result.image_buffer.height != 0 ||
-          result.image_buffer.channels != 0 || result.image_buffer.data ||
-          result.image_buffer.context) {
+      if (has_image_payload(result.compatibility_image) ||
+          result.compatibility_image.width != 0 ||
+          result.compatibility_image.height != 0 ||
+          result.compatibility_image.channels != 0 ||
+          result.compatibility_image.step != 0U ||
+          result.compatibility_image.device != Device::CPU ||
+          result.compatibility_image.data ||
+          result.compatibility_image.context) {
         throw std::logic_error(
             "Operation returned both ImageBuffer and pending device Value.");
       }
-      result.image_value = std::move(published);
+      result.publish_image_value(std::move(published));
     }
   }
   return result;
@@ -296,6 +387,8 @@ const NodeOutput* cached_output(const Node& node) noexcept {
 struct RoiInvocationStorage {
   /** @brief Current node identity and owned effective parameters. */
   plugin::NodeView node;
+  /** @brief Callback-local image projections in ordered image-edge order. */
+  std::vector<ImageBuffer> available_images;
   /** @brief Available input named-output snapshots. */
   std::vector<plugin::ParameterMap> available_data;
   /** @brief Available input spatial snapshots. */
@@ -347,6 +440,9 @@ struct RoiInvocationStorage {
  * @param available_inputs Optional destination-indexed execution inputs. Null
  * selects immutable snapshots from the supplied planning graph.
  * @return Owned invocation storage with stable internal pointers.
+ * @throws std::invalid_argument, std::out_of_range, std::overflow_error,
+ * ReadyFenceAccessError, or BufferAccessError when a canonical Value cannot be
+ * projected through the current CPU ImageBuffer edge.
  * @throws std::bad_alloc unchanged from snapshot construction.
  * @note The returned context contains no graph owner or mutable cache handle.
  *       Active-edge validation belongs to `RoiInvocationStorage::view()` after
@@ -371,10 +467,12 @@ RoiInvocationStorage make_roi_invocation(
             [](const GraphTopologyEdge& left, const GraphTopologyEdge& right) {
               return left.input_index < right.input_index;
             });
+  storage.available_images.reserve(image_edges.size());
   storage.available_data.reserve(image_edges.size());
   storage.available_spatial.reserve(image_edges.size());
   storage.edges.reserve(image_edges.size());
   for (const auto& edge : image_edges) {
+    storage.available_images.emplace_back();
     storage.available_data.emplace_back();
     storage.available_spatial.emplace_back();
     plugin::InputEdgeView public_edge;
@@ -393,19 +491,24 @@ RoiInvocationStorage make_roi_invocation(
       available = cached_output(graph.node(edge.from_node_id));
     }
     if (available) {
+      if (available->has_image_value()) {
+        storage.available_images.back() =
+            value_image_adapter::snapshot_cpu_image_buffer(
+                available->image_value());
+      }
       storage.available_data.back() = available->data;
       storage.available_spatial.back() = to_public_spatial(available->space);
       public_edge.has_available_input = true;
-      const bool has_image = has_image_payload(available->image_buffer);
+      const bool has_image = has_image_payload(storage.available_images.back());
       public_edge.available_input = plugin::OperationInputView{
-          has_image ? &available->image_buffer : nullptr,
+          has_image ? &storage.available_images.back() : nullptr,
           storage.available_data.back().empty()
               ? nullptr
               : &storage.available_data.back(),
           &storage.available_spatial.back()};
       if (public_edge.extent.width <= 0 || public_edge.extent.height <= 0) {
-        public_edge.extent = PixelSize{available->image_buffer.width,
-                                       available->image_buffer.height};
+        public_edge.extent = PixelSize{storage.available_images.back().width,
+                                       storage.available_images.back().height};
       }
     }
     storage.edges.push_back(std::move(public_edge));
@@ -600,6 +703,7 @@ MonolithicOpFunc adapt_monolithic_operation(
     if (library_lifetime) {
       attach_result_library_lifetime(result, library_lifetime);
     }
+    value_image_adapter::import_node_output_compatibility_image(&result);
     return result;
   };
 }
@@ -610,7 +714,8 @@ TileOpFunc adapt_tiled_operation(plugin::TiledOperation callback) {
              const Node& node, const OutputTile& output,
              const std::vector<InputTile>& inputs) mutable {
     plugin::NodeView node_view = make_node_view(node);
-    OutputTileView public_output{output.buffer, output.roi};
+    ImageBuffer projected_output = project_output_tile_for_abi_v2(output);
+    OutputTileView public_output{&projected_output, output.roi};
     std::vector<plugin::SpatialSnapshot> spatial;
     std::vector<plugin::OperationTileInputView> public_inputs;
     spatial.reserve(inputs.size());

@@ -300,7 +300,8 @@ class TaskSubmissionPlan {
    * @return True when a pending fence continuation was registered.
    * @throws std::bad_alloc, runtime, fence-registration, or access errors.
    * @note The method increments completion before registering the wait. A
-   * Ready value is materialized synchronously and returns false; Failed or
+   * Ready Value is accepted without a compatibility snapshot and returns
+   * false; Failed or
    * ProducerCancelled values throw without releasing dependents. Terminal
    * publication observed under the publication gate installs no wait.
    */
@@ -318,7 +319,7 @@ class TaskSubmissionPlan {
    * @param snapshot Terminal ReadyFence snapshot delivered asynchronously.
    * @return Nothing.
    * @throws ReadyFenceAccessError for failed/cancelled producer completion.
-   * @throws GraphError or runtime exceptions from materialization and release.
+   * @throws GraphError or runtime exceptions from Value validation/release.
    * @note ComputeRunLease owns the extra completion-unit retirement and failure
    * publication around this method.
    */

@@ -168,7 +168,10 @@ class MetalExecutionContext {
    * publication retains the source
    * descriptor, ImageFacet, layout, exact storage envelope, and logical
    * revision; only the private native R32Float row is flattened. The pending
-   * device-local destination settles from the command-buffer callback.
+   * device-local destination settles from the command-buffer callback. The
+   * final deadline observation precedes completion-handler installation, so a
+   * rejected pre-commit publication unwinds every native owner, transfer
+   * admission, and resource lease without leaving an uncommitted handler graph.
    */
   virtual void publish_float32_host_to_texture(Value source,
                                                std::uint32_t width,

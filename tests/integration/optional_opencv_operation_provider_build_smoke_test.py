@@ -233,7 +233,7 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
-        "DiskSaveSerializesSealedValueInsteadOfMutableCompatibilitySnapshot"
+        "DiskSaveRejectsCompatibilityStagingBesideSealedValue"
     ),
     (
         "CpuDenseTensorImageOperation."
@@ -301,7 +301,7 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
-        "RunnerRejectsExecuteDescriptorMismatchAsComputeError"
+        "RunnerRejectsExecuteAccessBeyondFrozenGrantAsComputeError"
     ),
 )
 
