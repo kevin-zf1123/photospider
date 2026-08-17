@@ -13,6 +13,7 @@
 #include "core/cpu_dense_image_operation.hpp"
 #include "core/param_utils.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/data/image_metadata.hpp"
 
 namespace ps::ops {
 namespace {
@@ -159,8 +160,18 @@ PixelRect identity_forward_roi(
  * @return Named `width` and `height` integer values.
  * @throws GraphError with `GraphErrc::MissingDependency` for an absent or empty
  *         input.
+ * @throws GraphError with `GraphErrc::ComputeError` if either validated extent
+ *         cannot be represented by the named-output Int64 alternative.
+ * @throws std::logic_error if the canonical image Value does not retain an
+ *         ordinary ImageFacet.
+ * @throws std::invalid_argument or std::overflow_error if retained bounds
+ *         violate their validated nonempty signed-extent invariant.
  * @throws std::bad_alloc if named-output storage allocation fails.
- * @note The callback reads only canonical immutable ImageFacet dimensions.
+ * @note The callback derives extents from `Value::image_bounds()` only. It
+ *       neither polls readiness nor creates a payload lease, so Pending and
+ *       opaque non-Host-readable Values retain their existing fence, binding,
+ *       allocation, and revision identities. Signed data-window origins are
+ *       logical coordinates and are not returned as dimensions.
  */
 NodeOutput op_get_dimensions(const Node& node,
                              const std::vector<const NodeOutput*>& inputs) {
@@ -173,18 +184,20 @@ NodeOutput op_get_dimensions(const Node& node,
     throw GraphError(GraphErrc::MissingDependency,
                      "analyzer:get_dimensions input image is empty.");
   }
-  const ImageView input_view(inputs[0]->image_value());
-  if (input_view.width() >
+  const ImageBounds& input_bounds = inputs[0]->image_value().image_bounds();
+  const std::size_t width = image_bounds_width(input_bounds);
+  const std::size_t height = image_bounds_height(input_bounds);
+  if (width >
           static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()) ||
-      input_view.height() >
+      height >
           static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) {
     throw GraphError(GraphErrc::ComputeError,
                      "analyzer:get_dimensions dimensions exceed int64.");
   }
 
   NodeOutput output;
-  output.data["width"] = static_cast<std::int64_t>(input_view.width());
-  output.data["height"] = static_cast<std::int64_t>(input_view.height());
+  output.data["width"] = static_cast<std::int64_t>(width);
+  output.data["height"] = static_cast<std::int64_t>(height);
   return output;
 }
 

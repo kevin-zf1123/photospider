@@ -22,6 +22,7 @@
 #include <thread>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
@@ -51,6 +52,7 @@
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
+#include "photospider/data/image_view.hpp"
 #include "photospider/host/host.hpp"
 #include "photospider/plugin/data_definition_registry.hpp"
 #include "plugin/operation_host_adapter.hpp"
@@ -3349,6 +3351,143 @@ TEST(NodeExecutorSplit,
   EXPECT_EQ(output_image.height, 5);
   EXPECT_TRUE(roi_context_preserved_index);
   EXPECT_TRUE(tiled_callback_preserved_slots);
+}
+
+/**
+ * @brief Proves the dimensions analyzer accepts one Ready imported image
+ * without opening a Host payload lease.
+ * @return Nothing; GoogleTest records binding, output, or identity failures.
+ * @throws Registry, compatibility-import, or operation exceptions unchanged;
+ * the expected direct ImageView access failure is consumed by GoogleTest.
+ * @note The imported ABI-v2 owner exposes no Host pointer. A successful
+ * analyzer result therefore proves width and height came only from immutable
+ * Value metadata and did not replace or mutate the input identity or fence.
+ */
+TEST(CoreOperationsSplit, GetDimensionsReadsReadyImportedMetadataOnly) {
+  register_split_ops();
+  const auto selected = OpRegistry::instance().resolve_for_intent(
+      "analyzer", "get_dimensions", ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected.has_value());
+  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*selected));
+
+  auto native_owner = std::make_shared<int>(17);
+  NodeOutput input;
+  input.compatibility_image.width = 17;
+  input.compatibility_image.height = 9;
+  input.compatibility_image.channels = 4;
+  input.compatibility_image.type = DataType::UINT8;
+  input.compatibility_image.device = Device::GPU_CUDA;
+  input.compatibility_image.context = native_owner;
+  value_image_adapter::import_node_output_compatibility_image(&input);
+
+  ASSERT_TRUE(input.has_image_value());
+  EXPECT_FALSE(input.has_compatibility_image());
+  const Value& imported = input.image_value();
+  ASSERT_EQ(imported.ready_fence().poll().state(), ReadyFenceState::Ready);
+  const StorageBinding original_binding = imported.storage_binding();
+  const AllocationIdentity original_allocation = imported.allocation_identity();
+  const ValueRevisionId original_revision = imported.revision_id();
+  EXPECT_EQ(original_binding.memory_domain, MemoryDomain::Imported);
+  EXPECT_FALSE(original_binding.host_visible);
+  EXPECT_THROW((void)ImageView(imported), BufferAccessError);
+
+  const std::vector<const NodeOutput*> inputs{&input};
+  const NodeOutput dimensions = std::get<MonolithicOpFunc>(*selected)(
+      make_node(9001, "analyzer", "get_dimensions"), inputs);
+
+  ASSERT_EQ(dimensions.data.size(), 2U);
+  ASSERT_TRUE(dimensions.data.at("width").is_int64());
+  ASSERT_TRUE(dimensions.data.at("height").is_int64());
+  EXPECT_EQ(dimensions.data.at("width").as_int64(), 17);
+  EXPECT_EQ(dimensions.data.at("height").as_int64(), 9);
+  EXPECT_TRUE(dimensions.named_values.empty());
+  EXPECT_EQ(input.image_value().storage_binding(), original_binding);
+  EXPECT_EQ(input.image_value().allocation_identity(), original_allocation);
+  EXPECT_EQ(input.image_value().revision_id(), original_revision);
+  EXPECT_EQ(input.image_value().ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+}
+
+/**
+ * @brief Proves the dimensions analyzer observes Pending device metadata
+ * without polling or settling the producer fence.
+ * @return Nothing; GoogleTest records extent, readiness, or identity failures.
+ * @throws Registry, pending-publication, or operation exceptions unchanged;
+ * the expected direct ImageView readiness failure is consumed by GoogleTest.
+ * @note Successful analysis must leave the original device-local Value
+ * Pending. The test explicitly cancels it afterward so no producer authority
+ * survives fixture teardown.
+ */
+TEST(CoreOperationsSplit, GetDimensionsPreservesPendingDeviceValue) {
+  register_split_ops();
+  const auto selected = OpRegistry::instance().resolve_for_intent(
+      "analyzer", "get_dimensions", ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected.has_value());
+  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*selected));
+
+  auto native_owner = std::make_shared<int>(31);
+  PendingDeviceValuePublication publication = publish_opaque_device_image(
+      31, 12, 1, DataType::UINT16, Device::GPU_CUDA, native_owner);
+  NodeOutput input;
+  input.publish_image_value(publication.value);
+  const StorageBinding original_binding = publication.value.storage_binding();
+  const AllocationIdentity original_allocation =
+      publication.value.allocation_identity();
+  const ValueRevisionId original_revision = publication.value.revision_id();
+  ASSERT_EQ(publication.value.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_EQ(original_binding.memory_domain, MemoryDomain::DeviceLocal);
+  EXPECT_FALSE(original_binding.host_visible);
+  EXPECT_THROW((void)ImageView(publication.value), ReadyFenceAccessError);
+
+  const std::vector<const NodeOutput*> inputs{&input};
+  const NodeOutput dimensions = std::get<MonolithicOpFunc>(*selected)(
+      make_node(9002, "analyzer", "get_dimensions"), inputs);
+
+  ASSERT_EQ(dimensions.data.size(), 2U);
+  EXPECT_EQ(dimensions.data.at("width").as_int64(), 31);
+  EXPECT_EQ(dimensions.data.at("height").as_int64(), 12);
+  EXPECT_TRUE(dimensions.named_values.empty());
+  EXPECT_EQ(input.image_value().storage_binding(), original_binding);
+  EXPECT_EQ(input.image_value().allocation_identity(), original_allocation);
+  EXPECT_EQ(input.image_value().revision_id(), original_revision);
+  EXPECT_EQ(input.image_value().ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_TRUE(publication.producer.cancel());
+}
+
+/**
+ * @brief Proves the dimensions analyzer reports signed-window extents as
+ * Int64 without interpreting their logical origin as an output coordinate.
+ * @return Nothing; GoogleTest records output type, extent, or input mutation.
+ * @throws Registry, metadata-only Value, or operation exceptions unchanged.
+ * @note Width deliberately exceeds `int` while remaining representable by
+ * both the validated ImageBounds extent and ParameterValue's Int64 storage.
+ */
+TEST(CoreOperationsSplit, GetDimensionsReportsWideSignedWindowExtents) {
+  register_split_ops();
+  const auto selected = OpRegistry::instance().resolve_for_intent(
+      "analyzer", "get_dimensions", ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected.has_value());
+  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*selected));
+
+  const std::int64_t width =
+      static_cast<std::int64_t>(std::numeric_limits<int>::max()) + 1;
+  const ImageBounds bounds{-37, -11, -37 + width, 2};
+  NodeOutput input = make_metadata_only_image_output(bounds);
+  const ValueRevisionId original_revision = input.image_value().revision_id();
+
+  const std::vector<const NodeOutput*> inputs{&input};
+  const NodeOutput dimensions = std::get<MonolithicOpFunc>(*selected)(
+      make_node(9003, "analyzer", "get_dimensions"), inputs);
+
+  ASSERT_EQ(dimensions.data.size(), 2U);
+  ASSERT_TRUE(dimensions.data.at("width").is_int64());
+  ASSERT_TRUE(dimensions.data.at("height").is_int64());
+  EXPECT_EQ(dimensions.data.at("width").as_int64(), width);
+  EXPECT_EQ(dimensions.data.at("height").as_int64(), 13);
+  EXPECT_EQ(input.image_value().image_bounds(), bounds);
+  EXPECT_EQ(input.image_value().revision_id(), original_revision);
 }
 
 TEST(ComputeMetricsRecorderSplit, FinalizesMetadataAndDebugStatistics) {
