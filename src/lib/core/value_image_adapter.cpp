@@ -143,6 +143,37 @@ DataType image_type_from_dense_element(
 }
 
 /**
+ * @brief Tests whether complete logical image rows are byte-contiguous HWC.
+ *
+ * @param view Valid host-readable image view.
+ * @return True when x advances by one complete pixel and an explicit channel
+ *         axis advances by one element; singleton axes impose no stride
+ *         requirement because their coordinate never changes.
+ * @throws std::overflow_error when one logical pixel width is unrepresentable.
+ * @note The y stride is deliberately unrestricted. Positive, zero, and
+ *       negative row origins remain safe because DenseTensorView resolves each
+ *       logical row start independently before a packed-row copy.
+ */
+bool has_contiguous_interleaved_rows(const ImageView& view) {
+  const std::size_t pixel_bytes =
+      checked_multiply(view.channels(), view.element_bytes());
+  const ImageFacet& image = view.image_facet();
+  const std::vector<std::ptrdiff_t>& strides = view.layout().byte_strides;
+  if (view.width() > 1U &&
+      (strides[image.x_axis] <= 0 ||
+       static_cast<std::size_t>(strides[image.x_axis]) != pixel_bytes)) {
+    return false;
+  }
+  if (image.channel_axis.has_value() && view.channels() > 1U &&
+      (strides[*image.channel_axis] <= 0 ||
+       static_cast<std::size_t>(strides[*image.channel_axis]) !=
+           view.element_bytes())) {
+    return false;
+  }
+  return true;
+}
+
+/**
  * @brief Obtains canonical immutable dense authority from one private output.
  * @param output Output whose permanent image port is inspected.
  * @return Existing image Value, or nullopt when the port is absent.
@@ -470,6 +501,7 @@ Value snapshot_cpu_image_value(const ImageBuffer& buffer) {
 ImageBuffer snapshot_cpu_image_buffer(const Value& value) {
   validate_image_buffer_compatible_value(value);
   ImageView view(value);
+  DenseTensorView tensor_view(value);
   const DataType type = image_type_from_dense_element(view.descriptor());
   ImageBuffer output = make_aligned_cpu_image_buffer(
       static_cast<int>(view.width()), static_cast<int>(view.height()),
@@ -477,15 +509,34 @@ ImageBuffer snapshot_cpu_image_buffer(const Value& value) {
 
   const std::size_t element_bytes = view.element_bytes();
   const std::size_t channels = view.channels();
+  const std::size_t row_bytes =
+      checked_multiply(checked_multiply(view.width(), channels), element_bytes);
+  const ImageFacet& image = view.image_facet();
+  std::vector<std::size_t> coordinates(view.descriptor().shape.size(), 0U);
   auto* output_base = static_cast<std::byte*>(output.data.get());
+  if (has_contiguous_interleaved_rows(view)) {
+    for (std::size_t y = 0U; y < view.height(); ++y) {
+      coordinates[image.y_axis] = y;
+      std::memcpy(output_base + y * output.step,
+                  tensor_view.element_data(coordinates), row_bytes);
+    }
+    validate_image_buffer(output);
+    return output;
+  }
+
   for (std::size_t y = 0U; y < view.height(); ++y) {
+    coordinates[image.y_axis] = y;
     std::byte* output_row = output_base + y * output.step;
     for (std::size_t x = 0U; x < view.width(); ++x) {
+      coordinates[image.x_axis] = x;
       for (std::size_t channel = 0U; channel < channels; ++channel) {
+        if (image.channel_axis.has_value()) {
+          coordinates[*image.channel_axis] = channel;
+        }
         const std::size_t element_index =
             checked_add(checked_multiply(x, channels), channel);
         std::memcpy(output_row + checked_multiply(element_index, element_bytes),
-                    view.channel_data(x, y, channel), element_bytes);
+                    tensor_view.element_data(coordinates), element_bytes);
       }
     }
   }

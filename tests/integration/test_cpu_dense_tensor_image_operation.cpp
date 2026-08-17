@@ -2352,6 +2352,51 @@ TEST(CpuDenseTensorImageOperation,
   }
 }
 
+/**
+ * @brief Proves ImageBuffer snapshots compact every supported signed layout.
+ *
+ * @return Nothing; GoogleTest reports a descriptor or active-byte mismatch.
+ * @throws Value, view, snapshot, or allocation exceptions unchanged.
+ * @note Reverse and broadcast y strides exercise packed-row copies without
+ *       assuming positive row progression. The planar channel layout exercises
+ *       the reusable-coordinate element fallback. All outputs must remain
+ *       independent row-major interleaved ImageBuffer snapshots.
+ */
+TEST(CpuDenseTensorImageOperation,
+     SnapshotCompactsReverseBroadcastAndPlanarImageLayouts) {
+  DenseTensorDescriptor descriptor{{2U, 3U, 2U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  const ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  std::vector<std::byte> storage(12U);
+  for (std::size_t index = 0U; index < storage.size(); ++index) {
+    storage[index] = std::byte{static_cast<std::uint8_t>(index + 1U)};
+  }
+  const Value base = Value::from_cpu_dense_tensor(
+      descriptor, image, StridedLayout{{6, 2, 1}}, std::move(storage));
+
+  const Value reverse = Value::from_cpu_dense_tensor(
+      descriptor, image, StridedLayout{{-6, 2, 1}, 6U}, base.buffer_handle());
+  EXPECT_EQ(read_unsigned8_image(
+                value_image_adapter::snapshot_cpu_image_buffer(reverse)),
+            (std::vector<std::uint8_t>{7U, 8U, 9U, 10U, 11U, 12U, 1U, 2U, 3U,
+                                       4U, 5U, 6U}));
+
+  const Value broadcast = Value::from_cpu_dense_tensor(
+      descriptor, image, StridedLayout{{0, 2, 1}}, base.buffer_handle());
+  EXPECT_EQ(read_unsigned8_image(
+                value_image_adapter::snapshot_cpu_image_buffer(broadcast)),
+            (std::vector<std::uint8_t>{1U, 2U, 3U, 4U, 5U, 6U, 1U, 2U, 3U, 4U,
+                                       5U, 6U}));
+
+  const Value planar = Value::from_cpu_dense_tensor(
+      descriptor, image, StridedLayout{{6, 1, 3}}, base.buffer_handle());
+  EXPECT_EQ(read_unsigned8_image(
+                value_image_adapter::snapshot_cpu_image_buffer(planar)),
+            (std::vector<std::uint8_t>{1U, 4U, 2U, 5U, 3U, 6U, 7U, 10U, 8U, 11U,
+                                       9U, 12U}));
+}
+
 TEST(CpuDenseTensorImageOperation,
      BuilderScopesWriteAuthorityAndReadLeaseLifetime) {
   DenseTensorDescriptor descriptor{{4U},

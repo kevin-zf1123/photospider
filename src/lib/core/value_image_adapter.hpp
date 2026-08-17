@@ -56,11 +56,14 @@ void validate_image_buffer_compatible_value(const Value& value);
  * @throws std::out_of_range when checked view coordinates are invalid.
  * @throws std::overflow_error when image-byte arithmetic is unrepresentable.
  * @throws std::bad_alloc when complete ImageFacet view metadata, output
- *         storage, or coordinate vectors cannot allocate.
+ *         storage, or one reusable coordinate vector cannot allocate.
  * @note Arbitrary validated positive, zero, or negative source strides are read
- * through ImageView; source padding is never copied as active pixels. Because
- * ImageBuffer cannot represent signed origin or richer image interpretation,
- * the returned compatibility snapshot deliberately projects those facts away.
+ * through DenseTensorView. Byte-contiguous interleaved rows use one checked
+ * row copy even when the y stride is positive, zero, or negative; other
+ * layouts reuse one coordinate vector for element-wise compaction. Source
+ * padding is never copied as active pixels. Because ImageBuffer cannot
+ * represent signed origin or richer image interpretation, the returned
+ * compatibility snapshot deliberately projects those facts away.
  */
 ImageBuffer snapshot_cpu_image_buffer(const Value& value);
 
