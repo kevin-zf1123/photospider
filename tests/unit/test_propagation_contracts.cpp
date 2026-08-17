@@ -16,7 +16,9 @@
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "adapters/yaml/parameter_value_yaml.hpp"
+#include "compute/compute_geometry.hpp"
 #include "compute/dirty/dirty_region_planner.hpp"
+#include "compute/dirty/dirty_region_snapshot_builder.hpp"
 #include "compute/dirty/tiled_input_normalizer.hpp"
 #include "compute/dispatch/task_graph_planning.hpp"
 #include "compute/image_buffer.hpp"
@@ -1375,6 +1377,61 @@ TEST(PropagationContracts, BoundsSharedAndLutContributionsBeforeBackwardUnion) {
   EXPECT_EQ(mapping.from_roi, (PixelRect{64, 0, 64, 64}));
   EXPECT_EQ(mapping.to_roi, (PixelRect{0, 0, 8, 8}));
   EXPECT_EQ(mapping.direction, compute::DirtyEdgeDirection::BackwardDemand);
+}
+
+/**
+ * @brief Verifies aligned storage tile identity stays distinct from bounded
+ * logical Region metadata at an image edge.
+ *
+ * @return Nothing; GoogleTest reports storage-key or Region mismatches.
+ * @throws std::invalid_argument, std::overflow_error, or std::bad_alloc when
+ * the test fixture violates the checked logical/storage boundary.
+ * @note A boundary tile key may extend beyond the allocation so task-grid
+ * identity remains stable. Its retained Region must still be clipped to the
+ * exact signed data window before origin translation.
+ */
+TEST(DirtyRegionSnapshotBuilderContract,
+     ClipsLogicalBoundaryRegionWithoutShrinkingAlignedStorageKey) {
+  compute::DirtyRegionSnapshot snapshot;
+  compute::DirtyRegionSnapshotBuilder builder;
+  const ImageBounds data_window{-10, -20, -2, -12};
+
+  builder.enumerate_tiles(
+      snapshot, compute::DirtyTileEnumeration{
+                    7, compute::DirtyDomain::HighPrecision,
+                    compute::DirtyTileLevel::Micro, PixelRect{0, 0, 8, 8},
+                    data_window, compute::kHpMicroTileSize});
+
+  ASSERT_EQ(snapshot.dirty_tiles.size(), 1U);
+  const compute::DirtyTileKey& tile = snapshot.dirty_tiles.front();
+  EXPECT_EQ(tile.pixel_roi, (PixelRect{0, 0, 64, 64}));
+  EXPECT_EQ(tile.region, RegionSet::from_image_rect(
+                             {image_region_domain(), -10, -2, -20, -12}));
+}
+
+/**
+ * @brief Verifies tile enumeration rejects a request ROI that crosses the
+ * storage allocation before publishing any tile key.
+ *
+ * @return Nothing; GoogleTest reports exception or publication mismatches.
+ * @throws std::bad_alloc if test-owned storage allocation fails.
+ * @note Boundary tile-key overhang is permitted only after a contained request
+ * ROI is aligned; callers cannot use alignment clipping to hide invalid input.
+ */
+TEST(DirtyRegionSnapshotBuilderContract,
+     RejectsRequestRoiOutsideStorageWithoutPublishingTiles) {
+  compute::DirtyRegionSnapshot snapshot;
+  compute::DirtyRegionSnapshotBuilder builder;
+  const ImageBounds data_window{-10, -20, -2, -12};
+
+  EXPECT_THROW(builder.enumerate_tiles(
+                   snapshot,
+                   compute::DirtyTileEnumeration{
+                       7, compute::DirtyDomain::HighPrecision,
+                       compute::DirtyTileLevel::Micro, PixelRect{7, 0, 2, 1},
+                       data_window, compute::kHpMicroTileSize}),
+               std::invalid_argument);
+  EXPECT_TRUE(snapshot.dirty_tiles.empty());
 }
 
 TEST(PropagationContracts,

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -216,6 +217,12 @@ void DirtyRegionSnapshotBuilder::enumerate_tiles(
   if (is_rect_empty(request.roi) || request.tile_size <= 0) {
     return;
   }
+  const PixelRect storage_bounds = region_image_adapter::to_storage_pixel_rect(
+      RegionSet::whole(), request.data_window);
+  if (intersect_rect(request.roi, storage_bounds) != request.roi) {
+    throw std::invalid_argument(
+        "Dirty tile enumeration ROI exceeds its image data window.");
+  }
   const PixelRect aligned = align_rect(request.roi, request.tile_size);
   const std::int64_t right =
       static_cast<std::int64_t>(aligned.x) + aligned.width;
@@ -223,16 +230,18 @@ void DirtyRegionSnapshotBuilder::enumerate_tiles(
       static_cast<std::int64_t>(aligned.y) + aligned.height;
   for (std::int64_t y = aligned.y; y < bottom; y += request.tile_size) {
     for (std::int64_t x = aligned.x; x < right; x += request.tile_size) {
-      PixelRect tile_roi{static_cast<int>(x), static_cast<int>(y),
-                         static_cast<int>(std::min<std::int64_t>(
-                             request.tile_size, right - x)),
-                         static_cast<int>(std::min<std::int64_t>(
-                             request.tile_size, bottom - y))};
+      const PixelRect tile_roi{static_cast<int>(x), static_cast<int>(y),
+                               static_cast<int>(std::min<std::int64_t>(
+                                   request.tile_size, right - x)),
+                               static_cast<int>(std::min<std::int64_t>(
+                                   request.tile_size, bottom - y))};
+      const PixelRect bounded_tile_roi =
+          intersect_rect(tile_roi, storage_bounds);
       snapshot.dirty_tiles.push_back(
           {request.node_id, request.domain, request.level,
            static_cast<int>(x / request.tile_size),
            static_cast<int>(y / request.tile_size), request.tile_size, tile_roi,
-           region_image_adapter::from_storage_pixel_rect(tile_roi,
+           region_image_adapter::from_storage_pixel_rect(bounded_tile_roi,
                                                          request.data_window)});
     }
   }

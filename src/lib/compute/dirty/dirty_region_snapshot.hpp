@@ -145,12 +145,17 @@ struct DirtyTileKey {
   int tile_y = 0;
   /** @brief Tile edge length in domain-local pixels. */
   int tile_size = 0;
-  /** @brief Zero-based storage ROI covered by this tile key. */
+  /**
+   * @brief Zero-based grid-aligned storage ROI identified by this tile key.
+   * @note A boundary key may extend beyond the allocation; execution clips its
+   * task shape, while region remains bounded logical metadata.
+   */
   PixelRect pixel_roi;
   /**
-   * @brief Authoritative logical ImageRect Region covered by this tile.
+   * @brief Authoritative in-data-window logical ImageRect covered by this tile.
    * @note Current tile enumeration is image-only; TensorSlice uses monolithic
-   *       Region work and never fabricates tile coordinates.
+   * Region work and never fabricates tile coordinates. Boundary-key overhang
+   * is clipped before storage-to-logical translation.
    */
   RegionSet region = RegionSet::empty();
 };

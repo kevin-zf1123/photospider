@@ -68,8 +68,8 @@ struct DirtyNodeWorkRecord {
  * @brief Tile enumeration request for one domain-local dirty ROI.
  *
  * @note The request is value-only and can be logged or inspected without
- * graph/runtime state. ROI is zero-based and data_window supplies its logical
- * metadata origin.
+ * graph/runtime state. When nonempty, ROI is zero-based and contained by
+ * data_window storage; data_window supplies its logical metadata origin.
  */
 struct DirtyTileEnumeration {
   /** @brief Node id associated with emitted tile keys. */
@@ -81,7 +81,7 @@ struct DirtyTileEnumeration {
   /** @brief Tile granularity level to store. */
   DirtyTileLevel level = DirtyTileLevel::Micro;
 
-  /** @brief Zero-based domain-local storage ROI to tile. */
+  /** @brief Contained zero-based domain-local storage ROI to tile. */
   PixelRect roi;
 
   /** @brief Logical data window used to translate emitted tile Regions. */
@@ -182,11 +182,15 @@ class DirtyRegionSnapshotBuilder {
    *
    * @param snapshot Snapshot receiving tile keys.
    * @param request Value-only tile enumeration request.
-   * @throws std::invalid_argument or std::overflow_error when a tile ROI
-   * cannot be translated through request.data_window.
+   * @throws std::invalid_argument or std::overflow_error when the request ROI
+   * is not contained by request.data_window or its bounded logical tile Region
+   * cannot be translated exactly.
    * @throws std::bad_alloc if snapshot or Region storage grows.
-   * @note The zero-based ROI is aligned before tile keys are appended. Each
-   * retained logical Region is translated through request.data_window.
+   * @note An empty ROI or nonpositive tile_size is a no-op. Otherwise, the
+   * zero-based ROI is aligned before tile keys are appended. A boundary key
+   * intentionally retains its full grid-aligned pixel_roi even when that key
+   * extends beyond storage; only its logical Region is clipped to
+   * request.data_window before origin translation.
    */
   void enumerate_tiles(DirtyRegionSnapshot& snapshot,
                        const DirtyTileEnumeration& request) const;
