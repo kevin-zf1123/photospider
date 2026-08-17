@@ -131,6 +131,18 @@ producer 正通过其受限 capability 完成已承诺的 payload，不会使 se
 验证必需的 Schema 与 Facet，要么返回 typed failure。它们绝不借用可能失去 owner 的裸
 descriptor 或 allocation。
 
+DI-2 通过一个 immutable `DenseImageOutputPlan` 与一个 Host-owned `HostOutputBinding`，为
+dense-image output 实现这条规则。plan 会在 execution 前冻结精确 descriptor、layout、byte
+envelope、allocation alignment、output name 与 producer count。binding 独占
+`ValueBuilder`，并签发 move-only whole-output grant 或 tile grant。grant 构造会在暴露 writable
+byte 前拒绝 empty、overlap、out-of-bounds、misaligned 或 overflowed envelope。grant
+retirement 必须精确，且不会推断 idempotence：duplicate retirement、存在 active 或 omitted
+grant 时 seal，以及 failure 后 publication 都会被拒绝。最后一次成功 retirement 使全部 write
+happen-before 一次 seal 与一次 named-`Value` publication；任何 exception、cancellation、
+abandoned grant 或 explicit failure 都会撤销所有 grant，并保留一个 sticky failure。这是 DI-3
+可以投影到 operation ABI v1 的唯一内部 output allocation/publication authority；它不是
+`ImageBuffer` 的 compatibility wrapper。
+
 `StructuredValueSchema` v1 是自包含的。它的 descriptor 可以递归描述字段，但一个 v1
 `Value` 不包含 runtime child `Value` object。独立结果使用命名 output port 或不带 identity 的
 `ValueBundle`。可共享的 `CompositeValue` DAG、跨 Value identity、cycle 与 graph persistence
@@ -617,4 +629,6 @@ standard-library ownership 或 toolchain ABI。
 
 [通用数据与 Region 路线图](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)是已接受
 目标和实现依赖顺序的权威来源。Live Issue 与 Project state 仍是交付状态的权威来源。本 ADR
-和路线图都不会把未实现的目标对象提升成当前 runtime 文档中的事实。
+和路线图都不会把未实现的目标对象提升成当前 runtime 文档中的事实。上述 DI-2 output plan、
+binding、grant 与 publication authority 已是当前实现行为；operation ABI v1 与最终
+Host/IPC/worker/durable/CLI boundary migration 仍属于后续切片。

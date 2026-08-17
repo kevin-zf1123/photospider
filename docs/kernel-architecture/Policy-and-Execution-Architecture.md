@@ -483,6 +483,23 @@ retry, overwrite, receipt, or durability policy. No current component provides
 a crash-durable user-output commit, and ADR 0009's post-publication independent
 cache outcome remains future work.
 
+### DI-2 statistics task ownership
+
+`GraphCacheService` owns one bounded `ImageStatisticsStore`, but the store owns
+no worker, ready queue, execution route, or policy context. Its
+`schedule_image_statistics()` boundary accepts a trusted one-task ownership
+receiver. On a miss, the callback independently retains the exact Ready Value
+and complete query until settlement; on a hit, no task is submitted. The
+receiver may execute inline or transfer the callback to an existing internal
+scheduler, and must either take it exactly once or throw before invocation.
+
+Cancellation and result publication linearize under request-local state before
+the derived-cache mutex. Cancellation that wins publishes no result; a result
+that wins remains a normal bounded cache entry. Scan exceptions settle only the
+future. This mechanism grants no Run, Graph, HP/RT generation, allocation,
+formal-cache, persistence, or worker authority and does not alter policy
+fairness or resource-ledger accounting.
+
 ## Host, CLI, and IPC Surfaces
 
 The public Host has eight policy operations and six execution operations. Its

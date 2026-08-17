@@ -238,22 +238,31 @@ dirty generation 或 route/runtime epoch 变成 cancellation authority。
 ## 暂存与提交
 
 HP dirty task 把 output 与 Region validity 暂存到 `HighPrecisionDirtyWriteBuffer`；RT dirty task
-把 image output 与 HP-space ImageRect validity 暂存到 `RealtimeProxyWriteBuffer`。成功 request
-会通过 intent-specific commit path，把 staged HP state
-提交到 `GraphModel`，或把 RT state 提交到 `RealtimeProxyGraph`。Standalone 非 realtime HP
-request 拥有一个 `ComputeRun`。每个 `RealTimeUpdate` 会在 preflight 前创建不同的 HP 与 RT child
-Run，并将它们放入一个 request-owned `RunGroup`；两者捕获相同的强 Graph instance identity、
+把 image output 与 HP-space ImageRect validity 暂存到 `RealtimeProxyWriteBuffer`。每个 write
+buffer 对每个节点最多拥有一个尚未发布的 `HostOutputBinding`。它冻结 selected task 中 immutable
+HP/RT geometry 实际可执行的 task 数量，从该单一 binding 签发 disjoint grant，并让最后一个
+executable task 恰好一次完成 seal。被裁剪为空 RT geometry 的 selected task 不会增加
+retirement count。成功 request 会通过 intent-specific commit path，把 staged HP state 提交到
+`GraphModel`，或把 RT state 提交到 `RealtimeProxyGraph`。Standalone 非 realtime HP request
+拥有一个 `ComputeRun`。每个 `RealTimeUpdate` 会在 preflight 前创建不同的 HP 与 RT child Run，
+并将它们放入一个 request-owned `RunGroup`；两者捕获相同的强 Graph instance identity、
 authoritative revision 与 request supersession generation，同时保留各自独立的 domain、lease、
 phase、terminal 与 staging state。当前不会创建 mixed-domain Run。
 
 Exact core Region bridge 会返回 complete-shaped dense result，但对于 partial invocation，
-只有 selected coordinate 是 authoritative。`HighPrecisionDirtyWriteBuffer` 会把这些
-coordinate 合并进 existing staged byte，再 seal 为一个 fresh Value；unselected
-coordinate 保持不变。若 prior output 为 complete，即使 full ImageRect proof 与
+只有 selected coordinate 是 authoritative。`HighPrecisionDirtyWriteBuffer` 会通过一个 checked
+whole grant seed 其 binding，随后 update grant 只替换 selected coordinate，最后只 seal 一次；
+unselected coordinate 保持不变。若 prior output 为 complete，即使 full ImageRect proof 与
 TensorSlice update 使用不同 Region domain，其 complete validity 仍保持为 true。fresh
 partial output 只有 partial validity，因此 whole-output dependency resolution 与当前
 regionless disk persistence 会拒绝它，直到 normal Whole commit 将其替换。Generic ABI v2
 monolithic callback 保持 complete-output replacement behavior。
+
+Task pruner 会把 active selected-task flag 之外的 dependency 视为已经满足。对于 active
+consumer，planning 还会 join 完整的 selected producer-node task set：tile 不能消费 sibling
+正在部分写入的 binding，因为只有 producer 的最终 seal 才会创建可观察 Value。overlap、
+out-of-range geometry、exception、cancellation、duplicate 或 missing retirement，或者使用未排空
+binding 执行 commit，都会形成 sticky failure，并保持此前的 formal/proxy Value 不变。
 
 Kernel 的 product commit policy 会先物化 publication copy，随后在 graph-state work item 内检查：
 每个 child Run 已处于 `CommitPending`、拥有精确 staged Graph/proxy，并且仍匹配 live Graph

@@ -645,6 +645,32 @@ Current defaults:
 
 These constants are not permanent ABI.
 
+## DI-2 Output Publication Flow
+
+Every ordinary dense-image producer now follows one private lifecycle:
+
+1. `NodeExecutor` freezes the complete `DenseImageOutputPlan` from immutable
+   input/inference facts before allocation;
+2. one `HostOutputBinding` creates the aligned allocation and owns the sole
+   builder write authority;
+3. whole-output work receives one whole grant, while tiled HP/RT work receives
+   checked pairwise-disjoint tile grants over the same per-node binding;
+4. each producer stops using its pointers and retires its grant exactly once;
+5. the final executable tile seals the binding and installs the canonical
+   named `image` Value in request-local output; and
+6. Run commit publishes that already Ready Value with independent graph,
+   Region, HP-generation, and RT-generation predicates.
+
+No consumer observes partial binding bytes. Task-graph planning therefore
+joins a consumer to the complete selected producer-node task set, not only an
+overlapping ROI task. An empty successful target remains data-only and
+publishes no synthetic image. Any grant error, exception, cancellation,
+missing retirement, or undrained binding fails the Run and leaves the prior
+visible Graph/RT state unchanged. Metal pre-commit deadline rejection installs
+no completion handler before the final deadline observation, so the
+unsubmitted owner graph and all device leases unwind instead of becoming an
+invisible publication.
+
 ## Events and Timing
 
 The I1 evidence path is separate from the public graph-event ring. Its bounded

@@ -94,8 +94,12 @@ NaN/infinity counts, and histogram counts where requested.
 
 Creating, replacing, or evicting a statistics result cannot change Value
 revision, descriptor/content identity, formal cache validity, or artifact
-identity. DI-1 defines and validates the records; it does not install a scan
-engine or cache owner.
+identity. DI-1 defines and validates the records. DI-2 installs the sole
+process-local derived-statistics cache in `GraphCacheService`; its scheduling
+key contains the complete `ValueRevisionId` plus the complete query, accepted
+tasks retain their input `Value`, and cancellation, execution failure,
+revision invalidation, eviction, or explicit clearing cannot mutate Value or
+formal-cache authority.
 
 ### Canonical versions and compatibility edges
 
@@ -128,6 +132,9 @@ facets before encoding rather than silently omitting fields.
   copy the complete bounded ImageFacet without payload access.
 - Canonical golden digests change deliberately with structural version 2.
 - Diagnostic spelling and derived statistics do not perturb semantic identity.
+- DI-2 schedules derived statistics against the complete frozen facet and
+  Value revision; an `ImageBuffer` compatibility projection is never a
+  statistics identity or cache-key authority.
 - Product wire/artifact/ABI migrations remain later slices and must encode the
   frozen records exactly or reject them.
 - OpenEXR Deep provider windows remain provider-defined metadata and are not
@@ -140,5 +147,6 @@ facets before encoding rather than silently omitting fields.
 - [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md)
 - [Kernel Cache Model](../kernel-architecture/Cache-Model.md)
 - [Dense Image Value Migration](../roadmap/Kernel-Evolution.md#dense-image-value-migration)
-- GitHub Project 6 / parent issue #128 / issue #129
+- GitHub Project 6 / parent issue #128 / issues #129 and #130
 - OpenSpec change `define-dense-image-coordinate-sample-statistics-contracts`
+- OpenSpec change `add-host-owned-output-authorization`

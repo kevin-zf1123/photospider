@@ -142,23 +142,26 @@ source-private core lookup bridge 只识别当前选中的精确 core dense call
 entry/callback 形态，但有意扩展临时 C++ v2 metadata layout；operation DSO 因而必须使用匹配 SDK
 重新构建。每个 scalar HP/RT registry slot 现在把 callback、metadata 与非零 identity 作为一个
 原子的 implementation value 拥有；注册另一种 callback shape 不能覆盖 sibling slot 的调度声明。
-Private core runner 会复用有效
-sealed CPU image Value；不存在 Value 时，
-才 snapshot 旧 ImageBuffer。它把 request-effective ParameterMap 深拷贝到一个不含 Node
-output/cache/topology state 的 configuration，只以该 configuration 与 logical
-DenseTensor/Image descriptor 调用 pure inference，再以同一 configuration、checked ImageView
-与 inferred descriptor 调用 execute，并校验完整 Value result。它还从
+Private core runner 要求规范 named sealed CPU image Value。它把 request-effective
+ParameterMap 深拷贝到一个不含 Node output/cache/topology state 的 configuration，只以该
+configuration 与 logical DenseTensor/Image descriptor 调用 pure inference，再以同一
+configuration、checked ImageView 与 inferred descriptor 调用 execute，并校验完整 Value
+result。它还从
 planning/`NodeExecutor` 接收规范化 Region，复制未选中的逻辑 coordinate，并通过 checked
 stride 对精确 ImageRect 或 rank-general TensorSlice coordinate 执行 invert。同 key plugin
 override 不能继承这份 private contract；通用 v2 monolithic callback 维持 complete-output
-behavior。Publication 会保留该精确 sealed result allocation/revision，再派生独立的
-ImageBuffer compatibility snapshot。
+behavior。Publication 会保留该精确 sealed result allocation/revision；只有显式的当前 ABI
+adapter 才可派生 use-scoped ImageBuffer snapshot。
 
-HP compute-service、result-committer、dirty-write 与 disk-load boundary 会在正式 publication
-前补齐缺失的 CPU image Value。可变 dirty clone 会清除旧 Value authority，并重新 seal settle
-后的 byte。V-5 不新增 callback slot 或 general planner inference；它会在 planned work 中新增
-callback-free implementation identity/metadata route，并要求 provider entry 前重新解析且精确
-identity 相同。
+DI-2 使 HP compute-service、result-committer、dirty-write、RT 与 disk-load boundary 在正式
+publication 前只使用 Value。一个 immutable `DenseImageOutputPlan` 会在单次 Host binding
+allocation 前固定 name、descriptor/facet、layout、storage、alignment 与 Region。whole/tile
+producer entry 使用该 binding 上经过检查的 move-only grant；所有 executable grant 都必须成功
+retirement 后才能完成一次 seal。validation、overlap、range、alignment、overflow、exception、
+cancellation、duplicate 或 omitted-retirement failure 都是 sticky failure，并阻止 publication。
+ABI v2/codec staging 会在其入站 adapter 处规范化并清除；正式 commit 绝不合成缺失的 Value。
+V-5 不新增 callback slot 或 general planner inference；它会在 planned work 中新增 callback-free
+implementation identity/metadata route，并要求 provider entry 前重新解析且精确 identity 相同。
 
 V-6 新增一个有界、source-private 的 physical task，但不会把 transfer node 插入 graph
 planning 或 `ComputeRun`。`ValueTransferTask` 会准备一个独立 pending CPU Value，并向共享的
@@ -190,9 +193,9 @@ identity、创建 ReadyFence、调用 provider 或发布 Pending destination 前
 preparation boundary 不会收紧通用 native publisher 对 checked signed immutable alias 的支持。
 `TaskSubmissionPlan` 会先递增 completion，再注册 fence wait；生产 ReadyFence executor 会保留精确 Run、lease、
 task 与 ready-store route，把早到 callback 停放到原始 QueueEntry 与 grant 退役之后，并在所有
-continuation owner 退役前阻止 terminal settlement。成功 continuation 会先物化 CPU
-compatibility snapshot，再释放 dependant；Failed、ProducerCancelled、stale 或 mismatched
-completion 不释放任何 dependant。
+continuation owner 退役前阻止 terminal settlement。成功 continuation 会重新验证规范 named
+Value，并在不创建 compatibility storage 的情况下释放 dependant；Failed、ProducerCancelled、
+stale 或 mismatched completion 不释放任何 dependant。
 
 V-13 会按 layout family 扩展同一条显式 task boundary，而不是引入隐式 conversion。Packed FP4
 source 会按照 version-1 Blocked producer envelope 校验：rank-matched 完整 quantization block、
@@ -930,6 +933,13 @@ Run-owned commit contender。该 claim 之前被接受的 cancellation 会使 Ru
 和 live Graph。只有有效 HP transaction 可以持久化变化的 staged cache artifact；完整 Graph/proxy
 publication 使用 no-throw state swap，并保留 revision。Contender 会在 publication 后解析为
 `Succeeded`，或在 work item 返回前把精确 predicate/persistence failure 保留为 `Failed`。
+
+正式 image output validation 只接受 Ready 的规范 named Value，并拒绝任何非空
+`compatibility_image`。data-only successful target 保持有效，且不会发布伪造的 image identity。
+tiled/dirty task 共享一个 per-node binding；最后一个 executable tile retirement 并 seal 它，
+而 planning 会把 consumer 与完整 producer task set join，因为 partial mutable binding 不会作为
+Value 被观察。Commit 会拒绝未排空的 binding，并以相互独立的 Graph revision、HP generation
+与 Region fact 恰好一次发布已经 sealed 的 Value。
 
 RT 会先应用该 predicate 并发布 proxy，再打开 sibling gate。HP 随后独立验证。因此，较新的 Graph
 revision 可以拒绝 HP，而不会回滚已经胜出的 RT publication。Gate 仍为 `Pending` 时发生的 RT

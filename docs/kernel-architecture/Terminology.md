@@ -535,10 +535,11 @@ ImageFacet, descriptor/content identity, or formal cache validity.
 **`ImageBuffer`**
 The current image payload contract: two-dimensional extent, channel count,
 one scalar type, device, row stride, shared data ownership, and optional
-backend context. In a formal CPU image cache entry with a valid sealed
-`image_value`, it is an independent compatibility snapshot rather than the
-allocation/revision identity authority. It is not a general Tensor, Deep
-Image, or vector-scene model.
+backend context. It remains at explicit ABI v2, codec, Host, and product
+compatibility edges, but private formal CPU image cache entries contain only
+canonical named Values. An ImageBuffer projection is use-scoped and is never
+allocation, readiness, revision, or cache authority. It is not a general
+Tensor, Deep Image, or vector-scene model.
 
 **`RegionDomainKey` / `RegionSet`**
 `RegionDomainKey` is a permanent 128-bit logical coordinate-domain identity.

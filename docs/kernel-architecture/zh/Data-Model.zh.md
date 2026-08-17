@@ -128,11 +128,11 @@ Scalar 拼写保持稳定；array 与 object 递归渲染；object key 保持 or
 
 | 字段 | 含义 |
 | --- | --- |
-| `image_buffer` | 独立的当前 plugin ABI v2、tiled-write、codec 与 Host compatibility snapshot。 |
-| `image_value` | 有效时作为带显式 allocation/binding/revision identity 的 immutable sealed 或 producer-pending Value。Pending state 只属于 request local，不能进入正式 cache 或 visible commit。 |
+| `compatibility_image` | 仅用于 operation ABI v2、codec 与其余 legacy adapter 的入站暂存。正式 commit 前必须清除，且它绝不是 cache、allocation、readiness 或 revision 权威。 |
+| `named_values` | 按规范顺序保存的 immutable Value。当前 image port 永久命名为 `image`；有效 entry 是唯一的 image payload、allocation、readiness 与 revision 权威。 |
 | `data` | 作为 `plugin::ParameterMap` 保存的命名标量或结构化输出。 |
 | `space` | 空间变换、尺度和 ROI 元数据。 |
-| `debug` | worker/设备/计时/范围诊断信息。启用的 CPU range inspection 会通过 `ImageBuffer::step` 遍历 active scalar byte；padding 被排除，opaque device value 保留 provider diagnostic。 |
+| `debug` | worker/设备/计时/范围诊断信息。启用的 CPU range inspection 会通过规范 Value layout 遍历 active scalar byte；padding 被排除，opaque device Value 保留 provider diagnostic。 |
 
 算子可以返回图像数据、命名数据，或两者都返回。
 
@@ -142,9 +142,19 @@ Scalar 拼写保持稳定；array 与 object 递归渲染；object key 保持 or
 
 对于 tiled `image_mixing`，需要 crop/pad 的 secondary input 会被物化为 request-local
 `NodeOutput`：named data、spatial/debug provenance 与 plugin-library lifetime 会被复制，而其
-image descriptor 会替换为通过内核 fill/copy 原语生成的 aligned storage。Resize 与 channel
-conversion 继续保留为局部 OpenCV algorithm call。Normalization context 会持有这些临时 output，
-直到所有同步 tile callback 完成；shape 完全匹配的 input 继续借用 upstream output。
+image Value 会替换为通过内核 fill/copy 原语生成、并在 normalized output 暴露前完成 seal 的
+aligned storage。Resize 与 channel conversion 继续保留为局部 OpenCV algorithm call。
+Normalization context 会持有这些临时 output，直到所有同步 tile callback 完成；shape 完全
+匹配的 input 继续借用 upstream output。
+
+DI-2 将 `DenseImageOutputPlan` 冻结为唯一 source-private 普通图像输出描述。该 immutable plan
+在 Host allocation 前持有 output name、完整 DenseTensor/ImageFacet fact、精确正向 Strided
+layout、byte envelope、base alignment 与完整 image Region。一个 `HostOutputBinding` 拥有
+aligned allocation 与 private builder lease。Move-only whole grant 或互不重叠的 tile grant
+只暴露经过检查的 row span；overlap、range、alignment、overflow、cancellation、exception、
+duplicate retirement 或 omitted retirement 都会使 binding 以关闭状态失败。只有所有 grant
+成功 retirement 后，binding 才能 seal 并恰好一次发布一个 Ready Value。该 plan 是唯一的
+内部 DI-3 mapping source，而不是临时 ABI record。
 
 ## 缓存字段
 
@@ -279,16 +289,16 @@ physical ownership 与正式 HP cache identity：
   stride-aware unsigned-8 execution；它会复用已有 sealed input Value，并发布完全相同的
   sealed result revision。
 
-私有 `NodeOutput` 同时保留 `image_value` 与 `image_buffer`。有效 Value 是 immutable
-allocation/binding/revision authority；ImageBuffer 是独立 CPU compatibility snapshot。
-Producer-pending Value 只能存在于 request-local 临时 output：`TaskSubmissionPlan` 会让其 Run
-保持未 settlement，并在 terminal Ready 后释放 dependant；Failed、ProducerCancelled 或
-stale-typed completion 不会释放任何 dependant。普通 HP commit、sequential HP compute、
-connected-preflight shadow cache、
-dirty HP commit 与 disk decode 都会在正式发布前规范化 legacy CPU buffer。immutable cache
-copy 保留两类 identity；dirty clone 在 mutation 前清除旧 Value 并对最终 byte 重新 seal；
-replacement 与 disk decode 生成新 identity。allocation/revision token 只在进程内有效，
-永不进入 task-graph key、cache path、graph/YAML document 或 artifact byte。
+私有 `NodeOutput::named_values` 是唯一正式 Value 权威；`image` entry 取代过去的
+image-buffer/value pair。Producer-pending Value 只能存在于 request-local 临时 output：
+`TaskSubmissionPlan` 会让其 Run 保持未 settlement，并在 terminal Ready 后释放 dependant；
+Failed、ProducerCancelled 或 stale-typed completion 不会释放任何 dependant。普通 HP commit、
+sequential HP compute、connected-preflight shadow cache、dirty HP commit 与 disk decode 都会在
+正式发布前拒绝或规范化 compatibility staging。immutable cache copy 保留 allocation 与
+revision；dirty/tiled execution 创建一个全新 Host binding，并在所有选中的 executable grant
+retirement 后只 seal 一次；replacement 与 disk decode 生成新 identity。allocation/revision
+token 只在进程内有效，永不进入 task-graph key、cache path、graph/YAML document 或 artifact
+byte。
 Shared operation runtime 是 static Host 与每个 Value-using DSO 共用的唯一进程级 minting
 authority。
 

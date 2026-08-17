@@ -164,27 +164,52 @@ The built-in `image_process:invert_dense` operation proves this surface on the
 production path:
 
 1. the current monolithic callback validates one nonempty CPU image input;
-2. when `NodeOutput::image_value` is valid, the private runner reuses that
-   sealed Value directly; otherwise a compatibility adapter snapshots the
-   legacy `ImageBuffer` into a new sealed allocation while preserving
-   `[height, width, channels]`, `step`, active rows, and independently
-   initialized padding;
+2. the private runner requires the canonical named `image` Value and never
+   falls back to formal compatibility storage;
 3. pure inference receives only a deep-owned effective parameter snapshot and
    logical DenseTensor/Image descriptors, with no Node output/cache state;
 4. execute receives checked ImageViews, follows explicit x/y/channel strides,
    and returns a separately owned sealed unsigned-8 Value; and
 5. the runner compares the complete result descriptor and Image Facet with
-   inference, publishes that exact result allocation/revision as
-   `NodeOutput::image_value`, and derives a separately owned compatibility
-   `ImageBuffer` snapshot for the current ABI, tiled-write, codec, and Host
-   boundaries.
+   inference and publishes that exact result allocation/revision as the
+   `NodeOutput` named `image` Value. Current external consumers derive
+   use-scoped compatibility snapshots only at their explicit adapters.
 
 Malformed caller input is `GraphErrc::InvalidParameter`; an unsupported or
 mismatched operation result is `GraphErrc::ComputeError`; `std::bad_alloc`
 propagates unchanged. The runner and compatibility adapter remain source-tree
 private. Operation ABI v2 and unconverted operations still use ImageBuffer;
-the private formal HP cache carries both representations and treats a valid
-sealed Value as allocation/revision identity authority.
+inbound results are normalized before private return and the formal HP cache
+stores only sealed named Values.
+
+## DI-2 Host-Owned Output Authorization
+
+DI-2 adds no public `ImageBuffer` field and does not change operation ABI v2.
+It freezes one source-private `DenseImageOutputPlan` before allocation. The
+plan owns the canonical output name, complete DenseTensor/ImageFacet metadata,
+positive interleaved Strided layout, exact storage envelope, required
+power-of-two alignment, and full image Region. All extent, stride, row-span,
+offset, alignment, range, and overflow checks finish before a producer can see
+mutable bytes.
+
+`HostOutputBinding` allocates exactly once through `ValueBuilder` and retains
+the sole builder `WriteLease`. Producers receive only move-only revocable whole
+or tile grants. A tile grant exposes checked active row spans; live grants must
+be logically and bytewise disjoint. Invalid overlap/range/alignment, an
+exception, cancellation, explicit failed retirement, duplicate retirement, or
+destruction while active records the first sticky failure and revokes every
+grant. Seal fails while any grant remains active and cannot be retried into
+success. After exact successful retirement, seal closes issuance, revokes
+write access, and publishes one Ready Value with the planned allocation and a
+single fresh revision. A second seal cannot mint another revision.
+
+The current ABI v2 tiled adapter may create one callback-local full-image
+`ImageBuffer` alias over an active grant because v2 cannot encode row-span
+capabilities. The alias is not stored, cannot outlive callback return, and is a
+named deletion edge for DI-3. CPU monolithic and codec inputs are copied through
+the plan/binding path. Opaque non-CPU plugin results become imported external
+Value bindings whose owner retains payload and DSO lifetime; they do not make
+the staging ImageBuffer a runtime authority.
 
 ## DI-1 Ordinary DenseImage Coordinate and Interpretation Contract
 
@@ -253,9 +278,9 @@ reserved start, the Metal Perlin provider borrows the process executor's
 command queue, invocation-scoped allocator, and validated pipeline cache, then
 encodes compute plus an explicit texture-to-shared-buffer blit, installs a
 native completion handler, commits without waiting, and source-privately
-returns a pending host-visible Value. `TaskSubmissionPlan` creates the CPU
-`ImageBuffer` compatibility snapshot only after that Value becomes Ready. The
-provider owns no independent native lifecycle, calls neither
+returns a pending host-visible Value. `TaskSubmissionPlan` releases dependants
+only after that canonical Value becomes Ready; it creates no ImageBuffer peer.
+The provider owns no independent native lifecycle, calls neither
 `waitUntilCompleted` nor `getBytes`, and cannot make `ImageBuffer::context` a
 portable memory contract.
 
@@ -344,9 +369,9 @@ The Region-aware core dense operation copies unselected bytes and changes only
 selected logical coordinates through checked strides. ImageBuffer structure,
 device field, operation DSO ABI, tiled writes, codecs, and Host/IPC v2
 rectangles remain role-specific compatibility contracts until their owning
-later slices migrate them. Within a formal CPU image cache entry that carries
-both forms, the valid sealed Value—not the mutable compatibility snapshot—is
-the allocation/revision identity authority.
+later slices migrate them. Formal CPU image cache entries carry only the valid
+sealed Value; compatibility snapshots are use-scoped and never become
+allocation/revision authority.
 
 V-6 adds `ReadyFence` to Value without changing `ImageBuffer`. Synchronous CPU
 Values start Ready; a pending Value retains immutable metadata but

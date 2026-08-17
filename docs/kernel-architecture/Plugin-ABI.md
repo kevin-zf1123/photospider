@@ -1092,9 +1092,10 @@ ValueBuilder sealing, byte offsets, bounded signed immutable views, and
 process-local allocation/revision identity. The runtime is shared so the Host
 and every Value-using DSO call one minting authority; the durable loader
 regression opens two independent DSOs and proves both identity domains remain
-distinct. One built-in operation uses that
-surface behind a private dual-representation bridge: it preserves the sealed
-result Value and derives an ImageBuffer compatibility snapshot.
+distinct. One built-in operation uses that surface behind a private
+Value-native bridge: it preserves the sealed result Value, while only an
+explicit current v2 callback adapter derives a use-scoped ImageBuffer
+projection.
 
 V-4 adds installed `RegionSet` and bounded algebra to `operation_runtime`.
 Region does not enter a new public v2 slot. A source-private bridge recognizes

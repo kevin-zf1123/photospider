@@ -563,15 +563,22 @@ does not query whether its allocation is still alive. The built-in
 `image_process:invert_dense`
 operation reaches those types through normal core seeding, `OpRegistry`
 resolution, and `NodeExecutor` monolithic invocation. Its private callback
-bridge reuses a valid sealed input Value or snapshots the legacy ImageBuffer,
-separates descriptor-only inference from stride-aware execution, validates the
-complete returned descriptor/facet/layout, preserves the exact result Value,
-and derives a new validated ImageBuffer compatibility snapshot.
+bridge reads the canonical named input Value, separates descriptor-only
+inference from stride-aware execution, validates the complete returned
+descriptor/facet/layout, and preserves the exact result Value. Current ABI v2
+and Host edges derive only use-scoped ImageBuffer projections.
 
-Private formal HP cache state carries that Value authority; copy preserves
-identity, while dirty mutation, replacement, and disk reload mint new runtime
-identities. Host and operation plugin ABI v2 remain on the current ImageBuffer
-compatibility boundary until their later migration slices.
+DI-2 makes private formal HP, dirty, tiled, RT, extent, metrics, and cache paths
+Value-only. `NodeOutput` carries canonical ordered named Values with `image` as
+the permanent image port; `compatibility_image` is inbound staging that must be
+cleared before formal commit. `DenseImageOutputPlan` freezes complete image
+facts, exact storage, alignment, and Region before one Host allocation.
+Move-only whole/tile grants reserve checked non-overlapping spans and must all
+retire before one seal and one publication. Sticky validation, retirement,
+exception, or cancellation failure revokes every grant and publishes nothing.
+Host and operation plugin ABI v2 remain on the current ImageBuffer
+compatibility boundary until DI-3/DI-4, but no compatibility object enters
+formal cache state.
 
 V-8 adds checked `DeviceId`, `MemoryDomain`, `StorageBinding`, native-allocation
 retention, producer identity, and an explicit `AccessPlan`. A transfer creates
@@ -592,6 +599,12 @@ completion. The Metal Perlin route produces a pending native Value and uses
 explicit asynchronous texture-to-buffer readback before downstream CPU access.
 Operation ABI v2 and Host surfaces still use ImageBuffer compatibility values;
 V-8 adds no public native-device context or new ABI slot.
+
+An ABI v2 non-CPU result is imported as one opaque external Value binding whose
+owner retains the plugin payload and DSO lease; its ImageBuffer staging is then
+cleared. A copied Value therefore remains safe after the enclosing NodeOutput
+retires. CPU results are copied through a Host binding. Neither route promotes
+ImageBuffer identity to runtime authority.
 
 V-14 adds provider-defined multi-buffer `Value` contracts without changing
 `ImageBuffer`. One injected `DataDefinitionRegistry` resolves complete typed

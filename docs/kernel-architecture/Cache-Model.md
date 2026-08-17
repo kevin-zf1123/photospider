@@ -169,6 +169,7 @@ independent typed outcome after Run publication.
 | Clear drive cache | Remove disk cache directory contents and recreate root. |
 | Clear memory cache | Clear in-memory HP cache tracked by `GraphModel`. |
 | Clear cache | Clear both disk and memory cache. |
+| Clear derived image statistics | Remove retained statistics results through the internal cache-service API; accepted in-flight work is not implicitly cancelled. |
 | Cache all nodes | Save nodes with complete HP output to disk when configured; partial nodes purge stale configured artifacts. |
 | Free transient memory | Clear non-ending node memory cache state. |
 | Synchronize disk cache | Save complete HP output and remove stale disk files for nodes without complete validity. |
@@ -211,23 +212,21 @@ describe the final adapter and document boundary.
 
 ## V-3 Runtime Allocation and Revision Identity
 
-A formal HP `NodeOutput` may carry both `image_value` and `image_buffer`.
-For a nonempty CPU image, a valid sealed Value is the allocation/revision
-identity authority; the ImageBuffer is an independently owned compatibility
-snapshot. Ordinary HP publication and cache-load boundaries normalize a
-missing Value from the current CPU ImageBuffer before the output becomes
-formal cache. Copying a formal cache entry preserves its
-`AllocationIdentity` and `ValueRevisionId`.
+A formal HP `NodeOutput` carries canonical ordered named Values. The permanent
+`image` entry is the sole image payload/allocation/readiness/revision authority;
+formal cache contains no ImageBuffer peer and rejects nonempty compatibility
+staging. Copying a formal cache entry preserves its `AllocationIdentity` and
+`ValueRevisionId`.
 
-Mutable dirty work cannot retain the old authority. Its clone clears
-`image_value` before any ImageBuffer write and seals the settled bytes into a
-fresh allocation and revision before HP commit. Replacement output and disk
-decode likewise create fresh identities. RT proxy output remains transient and
-does not become a formal cache identity source.
+Mutable dirty/tiled work cannot retain or expose the old authority. It creates
+one unpublished Host binding, seeds retained bytes through checked grants, and
+seals exactly once after every executable grant retires. Replacement output
+and disk decode likewise create fresh identities. RT proxy output is a fresh
+sealed Value with a separate HP-generation projection version; it remains
+transient and does not become a formal cache identity source.
 
-Disk save prefers the sealed Value when present and derives a temporary
-ImageBuffer snapshot from its checked image view, so later mutation of the
-compatibility snapshot cannot change the persisted bytes. The existing image
+Disk save requires the sealed Value and derives a temporary ImageBuffer
+snapshot from its checked image view. The existing image
 and YAML formats still persist only representation bytes and named metadata:
 neither `AllocationIdentity` nor `ValueRevisionId` is serialized, reconstructed
 from a path, or used as a persistent cache/task key. Both tokens are opaque,
@@ -306,24 +305,35 @@ facet, persist scales separately, or mint descriptor/content/layout/artifact
 digests. Supporting those behaviors requires a later generic artifact and
 manifest contract; the current `ImageArtifactCodec` ABI is unchanged.
 
-## DI-1 Observed Statistics Cache Boundary
+## DI-1/DI-2 Observed Statistics Cache Boundary
 
 Issue #129 defines bounded observed min/max and histogram query/result/cache-key
-values but installs no cache owner or calculation engine. A complete key
+values. DI-2 installs `ImageStatisticsStore` as a bounded, mutex-protected
+derived-result owner inside `GraphCacheService`. A complete key
 contains a valid process-local `ValueRevisionId`, an optional `ContentDigest`,
 the exact normalized `RegionSet`, exactly one stable `ChannelId` or
 `ChannelGroupId`, algorithm, positive algorithm version, and bounded algorithm
 parameters. Distinct revisions, content identities, Regions, selections,
 algorithms, versions, or histogram parameters are distinct derived requests.
 
+Each accepted task retains the exact Ready image Value, scans through
+`ImageView` only, validates a result, and arbitrates cancellation against
+single publication. The injected internal scheduler takes one task exactly
+once and may run it inline or asynchronously; the store owns no worker or
+execution policy. Exact cache hits return a ready future without scheduling.
+Scan failure or cancellation publishes no entry. Deterministic oldest-entry
+eviction, exact revision invalidation, and explicit clear affect derived data
+only; an already accepted in-flight task may publish after clear unless its
+request is explicitly cancelled.
+
 Statistics are not fields of `Value`, `ImageFacet`, formal HP cache entries,
 descriptor/content identity, disk-cache paths, or artifact manifests. Creating,
 recomputing, or evicting a result cannot modify Value revision, canonical
-digest, HP validity, or persisted representation. A future statistics cache
-must remain a separately owned discardable derived-data cache and use the
-complete key; descriptor digest alone is insufficient. Content digest is
-optional because a valid runtime revision may be observed before content
-traversal is requested.
+digest, HP validity, or persisted representation. The store uses the complete
+key; allocation identity, graph revision, HP/RT generation, descriptor digest,
+or ImageBuffer identity alone is insufficient. Content digest is optional
+because a valid runtime revision may be observed before content traversal is
+requested.
 
 ### Current bounded mechanism and future persistence relationship
 

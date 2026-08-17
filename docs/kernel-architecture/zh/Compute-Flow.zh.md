@@ -504,6 +504,29 @@ subscription surface 都不属于当前软件契约。
 
 这些常量不是永久 ABI。
 
+## DI-2 输出发布流程
+
+每个普通 dense-image producer 现在都遵循同一个 private lifecycle：
+
+1. `NodeExecutor` 在 allocation 前根据 immutable input/inference fact 冻结完整
+   `DenseImageOutputPlan`；
+2. 一个 `HostOutputBinding` 创建 aligned allocation，并拥有唯一 builder write authority；
+3. whole-output work 获得一个 whole grant，tiled HP/RT work 则在同一个 per-node binding 上
+   获得经过检查且两两互不重叠的 tile grant；
+4. 每个 producer 停止使用其 pointer，并恰好一次 retirement 其 grant；
+5. 最后一个 executable tile seal binding，并在 request-local output 中安装规范的 named
+   `image` Value；
+6. Run commit 以相互独立的 graph、Region、HP-generation 与 RT-generation predicate 发布该
+   已经 Ready 的 Value。
+
+任何 consumer 都不会观察 partial binding byte。因此，task-graph planning 会把 consumer 与
+完整的 selected producer-node task set join，而不只是某个重叠 ROI task。空的 successful
+target 保持 data-only，且不会发布 synthetic image。任何 grant error、exception、cancellation、
+missing retirement 或 undrained binding 都会使 Run 失败，并保持此前可见 Graph/RT state
+不变。Metal pre-commit deadline rejection 不会在最后一次 deadline observation 前安装
+completion handler，因此尚未提交的 owner graph 与所有 device lease 会正常 unwind，而不会
+变成不可见的 publication。
+
 ## 事件和计时
 
 I1 evidence path 与 public graph-event ring 分离。其有界 request-scoped collector 会为十二次

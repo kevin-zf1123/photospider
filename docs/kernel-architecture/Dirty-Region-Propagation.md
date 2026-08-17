@@ -293,8 +293,13 @@ or route/runtime epoch into cancellation authority.
 
 HP dirty tasks stage output and Region validity in
 `HighPrecisionDirtyWriteBuffer`; RT dirty tasks stage image output and
-HP-space ImageRect validity in `RealtimeProxyWriteBuffer`. A successful request commits staged
-HP state to `GraphModel` or RT state to `RealtimeProxyGraph` through the
+HP-space ImageRect validity in `RealtimeProxyWriteBuffer`. Each write buffer
+owns at most one unpublished `HostOutputBinding` per node. It freezes the
+number of selected tasks whose immutable HP/RT geometry is actually executable,
+issues disjoint grants from that one binding, and lets the last executable task
+seal exactly once. Selected tasks clipped to empty RT geometry do not inflate
+the retirement count. A successful request commits staged HP state to
+`GraphModel` or RT state to `RealtimeProxyGraph` through the
 intent-specific commit path. A standalone non-realtime HP request owns one
 `ComputeRun`. Each `RealTimeUpdate` creates distinct HP and RT child Runs inside
 one request-owned `RunGroup` before preflight; both capture the same strong
@@ -304,14 +309,23 @@ staging state. No mixed-domain Run is created.
 
 The exact core Region bridge returns a complete-shaped dense result, but only
 the selected coordinates are authoritative for a partial invocation.
-`HighPrecisionDirtyWriteBuffer` merges those coordinates into existing staged
-bytes and reseals one fresh Value; unselected coordinates remain unchanged. If
+`HighPrecisionDirtyWriteBuffer` seeds its binding through a checked whole grant,
+then update grants replace only selected coordinates before one final seal;
+unselected coordinates remain unchanged. If
 the prior output was complete, its complete validity remains true even when a
 full ImageRect proof and TensorSlice update use different Region domains. A
 fresh partial output has only partial validity, so whole-output dependency
 resolution and current regionless disk persistence reject it until a normal
 Whole commit replaces it. Generic ABI v2 monolithic callbacks retain
 complete-output replacement behavior.
+
+The task pruner treats dependencies outside the active selected task flags as
+already satisfied. For an active consumer, planning also joins the complete
+selected producer-node task set: a tile cannot consume a sibling's partially
+written binding because only the producer's final seal creates an observable
+Value. Overlap, out-of-range geometry, an exception, cancellation, duplicate or
+missing retirement, or commit with an undrained binding is sticky failure and
+leaves the previous formal/proxy Value unchanged.
 
 Kernel's product commit policy materializes publication copies and then checks
 that each child Run is `CommitPending`, owns the exact staged Graph/proxy, and

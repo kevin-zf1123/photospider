@@ -610,11 +610,12 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
   executor 创建 device memory/scratch account。空 registry 或 non-Apple 默认 registry 不暴露
   Metal account，而缺少候选 budget 的 registered executor 仍无法准入 native allocation；
 - `image_process:invert_dense` 把精确 descriptor-only inference 与 stride-aware
-  unsigned-8 execution 分开，已有 sealed input Value 时直接复用，并发布精确 sealed result
-  revision 与独立 ImageBuffer compatibility snapshot；
-- 私有正式 HP CPU image cache entry 把有效 sealed `NodeOutput::image_value` 作为
-  allocation/revision authority。普通 copy 保留 identity；dirty mutation、replacement 与
-  disk decode 创建新 identity；disk save 读取 Value byte；runtime token 永不成为持久
+  unsigned-8 execution 分开，要求规范 sealed input Value，并发布精确 sealed result revision；
+  显式的当前 ABI edge 只派生 use-scoped ImageBuffer compatibility snapshot；
+- 私有正式 HP CPU image cache entry 使用规范 named `image` Value 作为唯一
+  allocation/revision authority。普通 copy 保留 identity；dirty/tiled work seal 一个全新 Host
+  binding，replacement 与 disk decode 则创建新 identity；disk save 读取 Value byte；runtime
+  token 永不成为持久
   cache/task key。V-13 正式 memory-cache copy 还会保留 packed Value 与精确 TensorSlice
   validity，而 image-only disk cache 会在 executor admission、filesystem mutation 或 codec
   call 前拒绝 packed、quantized 或 latent 正式 Value；
@@ -781,7 +782,7 @@ package 路径会发现 OpenEXR 并导入 provider MODULE。
 | 切片 | 交付边界 | 阻塞切片 |
 | --- | --- | --- |
 | [#129 / DI-1](https://github.com/kevin-zf1123/photospider/issues/129) | 冻结并交付 ordinary-image coordinate、sample/color declaration、stable channel identity、canonical descriptor record 与不进入 identity 的 observed statistics | #78、#101、#102、#105 |
-| [#130 / DI-2](https://github.com/kevin-zf1123/photospider/issues/130) | 新增 Host-owned output authorization 并迁移 kernel runtime image path | #129 |
+| [#130 / DI-2](https://github.com/kevin-zf1123/photospider/issues/130) | 冻结 Host-owned dense-image output plan/binding/grant，并使 kernel runtime/cache/statistics image authority 由 Value 支撑 | #129 |
 | [#132 / DI-3](https://github.com/kevin-zf1123/photospider/issues/132) | 实现 pure-C operation ABI v1，并迁移 plugin 与 isolated execution | #129、#130 |
 | [#131 / DI-4](https://github.com/kevin-zf1123/photospider/issues/131) | 迁移外部产品边界并彻底删除 `ImageBuffer` | #129、#130、#132 |
 
@@ -790,7 +791,22 @@ DI-1 是第一个依赖切片。它把 immutable data window、optional display 
 sample domain、color 与 observed statistics 彼此独立；并冻结后续 output-plan、wire、artifact
 及 codec 工作所需的 bounded record。它刻意不删除 operation ABI v2 或 `ImageBuffer`，不迁移
 Host/IPC/worker/durable/CLI surface，不定义自动 color conversion，也不把 OpenEXR Deep
-provider-defined window 复用为普通 dense-image authority。DI-2、DI-3 与 DI-4 仍是下游交付切片。
+provider-defined window 复用为普通 dense-image authority。DI-2 实现下一个内部切片；DI-3 与
+DI-4 仍是下游交付切片。
+
+DI-2 是内部 runtime 交付切片。它会在 allocation 前冻结一个 source-private 普通图像 output
+plan，包含精确 name、DenseTensor/ImageFacet、Strided layout、storage envelope、alignment 与
+Region。一个 aligned Host binding 拥有一份 allocation，并通过 move-only、可撤销的 whole grant
+或互不重叠的 tile grant 进行 publication。每个 grant 都必须恰好一次 retirement；validation、
+overlap、range、alignment、overflow、exception、cancellation、duplicate retirement、omitted
+retirement、active-grant seal 或 second publication 都会以关闭状态失败。最后一个成功的
+executable tile 会 seal 一个 Ready Value，且任何 partial binding 都不会被 consumer 观察。
+
+私有 `NodeOutput`、full/dirty HP、RT proxy、formal/disk cache、extent、inspection、metrics 以及
+有界 statistics producer/cache 现在都从规范 named Value 派生 image fact。`image` 是永久的当前
+port；compatibility ImageBuffer staging 会在入站 adapter 处清除，并被正式 commit 拒绝。当前
+ABI v2、isolated execution、Host/IPC/worker、durable、CLI、codec 与最终 ImageBuffer 删除仍属于
+DI-3/DI-4。DI-2 不发布 pure-C ABI record，也不删除 v1/v2 loader。
 
 ## 异构 Executor
 

@@ -462,14 +462,19 @@ V-2 安装 immutable CPU DenseTensor `Value`、`DenseTensorView` 与 explicit-ax
 operation runtime 持有唯一进程级 minting authority；非零 identity token 只记录已签发状态，
 不会查询其 allocation 是否仍存活。内建
 `image_process:invert_dense` operation 会经过正常 core seeding、`OpRegistry` resolution 与
-`NodeExecutor` monolithic invocation 抵达这些 type。其 private callback bridge 会复用有效
-sealed input Value；不存在时才 snapshot 旧 ImageBuffer。它把 descriptor-only inference 与
-stride-aware execution 分开，校验返回的完整 descriptor/facet/layout，保留精确 result Value，
-再派生新的 validated ImageBuffer compatibility snapshot。
+`NodeExecutor` monolithic invocation 抵达这些 type。其 private callback bridge 会读取规范的
+named input Value，把 descriptor-only inference 与 stride-aware execution 分开，校验返回的
+完整 descriptor/facet/layout，并保留精确 result Value。当前 ABI v2 与 Host edge 只派生
+use-scoped ImageBuffer projection。
 
-私有正式 HP cache state 会携带该 Value authority；copy 保留 identity，dirty mutation、
-replacement 与 disk reload 则铸造新 runtime identity。Host 与 operation plugin ABI v2 会继续
-停留在当前 ImageBuffer compatibility 边界，直到后续 migration slice。
+DI-2 使私有正式 HP、dirty、tiled、RT、extent、metrics 与 cache path 全部只使用 Value。
+`NodeOutput` 按规范顺序携带 named Value，并将 `image` 作为永久 image port；
+`compatibility_image` 是正式 commit 前必须清除的入站暂存。`DenseImageOutputPlan` 在一次 Host
+allocation 前冻结完整 image fact、精确 storage、alignment 与 Region。Move-only whole/tile
+grant 预留经过检查且互不重叠的 span，并且必须全部 retirement 后才可完成一次 seal 和一次
+publication。sticky validation、retirement、exception 或 cancellation failure 会撤销所有
+grant，且不发布任何内容。Host 与 operation plugin ABI v2 会继续停留在当前 ImageBuffer
+compatibility 边界，直到 DI-3/DI-4，但 compatibility object 不会进入正式 cache state。
 
 V-8 新增经过检查的 `DeviceId`、`MemoryDomain`、`StorageBinding`、native-allocation retention、
 producer identity 与显式 `AccessPlan`。Transfer 会创建不同的物理 replica，同时保留同一个逻辑
@@ -485,6 +490,11 @@ coordinator-to-manager 顺序，在 currentness 可观察前把精确发布的 g
 会产生 pending native Value，并在下游 CPU access 前执行显式 asynchronous
 texture-to-buffer readback。Operation ABI v2 与 Host surface 仍使用 ImageBuffer compatibility
 value；V-8 不增加 public native-device context 或新 ABI slot。
+
+ABI v2 的 non-CPU result 会导入为一个 opaque external Value binding，其 owner 保留 plugin
+payload 与 DSO lease；随后清除其 ImageBuffer staging。因此，即使外围 `NodeOutput` 已退役，
+复制的 Value 仍然安全。CPU result 通过 Host binding 复制。两条路径都不会把 ImageBuffer
+identity 提升为 runtime authority。
 
 V-14 在不改变 `ImageBuffer` 的前提下新增 provider-defined multi-buffer `Value` contract。
 一个注入式 `DataDefinitionRegistry` 会把完整 typed Schema/Facet/Layout bundle 解析为不可变

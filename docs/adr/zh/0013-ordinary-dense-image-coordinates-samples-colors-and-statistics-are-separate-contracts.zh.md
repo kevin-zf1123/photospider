@@ -79,8 +79,11 @@ ID 排序的逐通道计数、有限极值、显式 NaN/infinity 计数，以及
 计数。
 
 创建、替换或驱逐统计结果不能改变 Value revision、descriptor/content 身份、
-正式 cache 有效性或 artifact 身份。DI-1 定义并校验记录；它不安装扫描引擎或
-cache owner。
+正式 cache 有效性或 artifact 身份。DI-1 定义并校验记录。DI-2 在
+`GraphCacheService` 中安装唯一 process-local derived-statistics cache；其 scheduling
+key 包含完整 `ValueRevisionId` 与完整 query，accepted task 会保留 input `Value`，
+而 cancellation、execution failure、revision invalidation、eviction 或 explicit clearing
+都不能修改 Value 或 formal-cache authority。
 
 ### 规范版本与兼容边界
 
@@ -108,6 +111,8 @@ facet，而不是静默省略字段。
   ImageFacet。
 - 规范 golden digest 随结构版本 2 有意改变。
 - 诊断拼写与派生统计不会扰动语义身份。
+- DI-2 针对完整 frozen facet 与 Value revision 调度派生统计；`ImageBuffer`
+  compatibility projection 绝不是 statistics identity 或 cache-key authority。
 - 产品 wire/artifact/ABI 迁移仍属于后续切片，必须精确编码冻结记录或拒绝它们。
 - OpenEXR Deep provider 窗口仍是 provider-defined 元数据，不会复用为内建普通
   DenseImage 权威。
@@ -119,5 +124,6 @@ facet，而不是静默省略字段。
 - [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)
 - [Kernel 缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)
 - [普通图像 Value 迁移](../../roadmap/zh/Kernel-Evolution.zh.md#普通图像-value-迁移)
-- GitHub Project 6 / parent issue #128 / issue #129
+- GitHub Project 6 / parent issue #128 / issues #129 and #130
 - OpenSpec change `define-dense-image-coordinate-sample-statistics-contracts`
+- OpenSpec change `add-host-owned-output-authorization`

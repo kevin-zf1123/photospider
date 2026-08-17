@@ -172,10 +172,9 @@ shapes but intentionally extends the provisional C++ v2 metadata layout; an
 operation DSO therefore requires a matching-SDK rebuild. Each scalar HP/RT
 registry slot now owns callback, metadata, and nonzero identity as one atomic
 implementation value; registering another callback shape cannot overwrite its
-sibling's scheduling declarations. The private core
-runner reuses a
-valid sealed CPU image Value or snapshots the legacy ImageBuffer when no Value
-exists, deep-copies the request-effective ParameterMap into a configuration
+sibling's scheduling declarations. The private core runner requires the
+canonical named sealed CPU image Value and deep-copies the request-effective
+ParameterMap into a configuration
 that omits Node output/cache/topology state, invokes pure inference with only
 that configuration and logical DenseTensor/Image descriptors, invokes execute
 with the same configuration, checked ImageViews, and inferred descriptor, and
@@ -184,15 +183,21 @@ from planning/`NodeExecutor`, copies unselected logical coordinates, and
 inverts exact ImageRect or rank-general TensorSlice coordinates through
 checked strides. A same-key plugin override cannot inherit this private
 contract; generic v2 monolithic callbacks retain complete-output behavior.
-Publication preserves the exact sealed result allocation/revision and derives
-a separate ImageBuffer compatibility snapshot.
+Publication preserves the exact sealed result allocation/revision; only an
+explicit current ABI adapter may derive a use-scoped ImageBuffer snapshot.
 
-HP compute-service, result-committer, dirty-write, and disk-load boundaries
-normalize missing CPU image Values before formal publication. Mutable dirty
-clones clear old Value authority and reseal settled bytes. V-5 adds no new
-callback slot or general planner inference. It does add a callback-free
-implementation identity/metadata route to planned work and requires exact
-identity re-resolution before provider entry.
+DI-2 makes HP compute-service, result-committer, dirty-write, RT, and disk-load
+boundaries Value-only before formal publication. One immutable
+`DenseImageOutputPlan` fixes name, descriptor/facet, layout, storage,
+alignment, and Region before one Host binding allocation. Whole/tile producer
+entry uses checked move-only grants over that binding; all executable grants
+must retire successfully before one seal. A validation, overlap, range,
+alignment, overflow, exception, cancellation, duplicate, or omitted-retirement
+failure is sticky and prevents publication. ABI v2/codec staging is normalized
+and cleared at its inbound adapter; formal commit never synthesizes a missing
+Value. V-5 adds no new callback slot or general planner inference. It does add
+a callback-free implementation identity/metadata route to planned work and
+requires exact identity re-resolution before provider entry.
 
 V-6 adds a bounded source-private physical task without inserting transfer
 nodes into graph planning or a `ComputeRun`. `ValueTransferTask` prepares a
@@ -235,9 +240,9 @@ the general native publisher's checked signed immutable aliases.
 the production ReadyFence executor retains the exact Run, lease, task, and
 ready-store route, parks an early callback until the original QueueEntry and
 grant retire, and keeps terminal settlement blocked until every continuation
-owner retires. A successful continuation materializes the CPU compatibility
-snapshot and only then releases dependants. Failed, ProducerCancelled, stale,
-or mismatched completion releases none.
+owner retires. A successful continuation revalidates the canonical named Value
+and releases dependants without creating compatibility storage. Failed,
+ProducerCancelled, stale, or mismatched completion releases none.
 
 V-13 extends the same explicit task boundary by layout family rather than by
 implicit conversion. A packed FP4 source is validated against the version-1
@@ -1207,6 +1212,15 @@ valid HP transaction may persist changed staged cache artifacts; complete
 Graph/proxy publication is a no-throw state swap and preserves the revision.
 The contender resolves `Succeeded` after publication or preserves the exact
 predicate/persistence failure as `Failed` before the work item returns.
+
+Formal image output validation accepts only Ready canonical named Values and
+rejects any nonempty `compatibility_image`. Data-only successful targets remain
+valid and publish no fabricated image identity. Tiled/dirty tasks share one
+per-node binding; the last executable tile retires and seals it, while planning
+joins a consumer to the complete producer task set because no partial mutable
+binding is observable as a Value. Commit rejects an undrained binding and
+publishes the already sealed Value once with independent Graph revision, HP
+generation, and Region facts.
 
 RT applies that predicate and publishes its proxy before opening the sibling
 gate. HP later validates independently. A newer Graph revision can therefore

@@ -856,8 +856,9 @@ V-2 在 `operation_runtime` 中实现 dependency-neutral C++ CPU DenseTensor `Va
 range、read/write lease、ValueBuilder seal、byte offset、受界限约束的 signed immutable view
 与 process-local allocation/revision identity。该 runtime 为 shared，因此 Host 与每个使用
 Value 的 DSO 都调用同一个 minting authority；长期 loader regression 会打开两个独立 DSO，
-并证明两类 identity 均保持不同。一条内建 operation 会在 private 双重表示 bridge
-后使用该 surface：它保留 sealed result Value，再派生 ImageBuffer compatibility snapshot。
+并证明两类 identity 均保持不同。一条内建 operation 会在 private Value-native bridge 后使用该
+surface：它保留 sealed result Value，而只有显式的当前 v2 callback adapter 才会派生 use-scoped
+ImageBuffer projection。
 
 V-4 把 installed `RegionSet` 与 bounded algebra 加入 `operation_runtime`。Region 不会进入新的
 public v2 slot。Source-private bridge 只识别通过 execution 的 route-visible device inventory

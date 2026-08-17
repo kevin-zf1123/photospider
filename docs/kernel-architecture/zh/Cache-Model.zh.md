@@ -124,6 +124,7 @@ live Graph/RT state 不变。这种顺序是当前行为，不表示 cache 属�
 | Clear drive cache | 删除磁盘缓存目录内容并重建根目录。 |
 | Clear memory cache | 清理 `GraphModel` 跟踪的内存 HP 缓存。 |
 | Clear cache | 同时清理磁盘和内存缓存。 |
+| Clear derived image statistics | 通过内部 cache-service API 移除保留的 statistics result；不会隐式取消已经接受的 in-flight work。 |
 | Cache all nodes | 在配置允许时将具有 complete HP 输出的节点保存到磁盘；partial node 会清理 stale configured artifact。 |
 | Free transient memory | 清理非终点节点的内存缓存状态。 |
 | Synchronize disk cache | 保存 complete HP 输出，并为没有 complete validity 的节点移除陈旧磁盘文件。 |
@@ -157,19 +158,18 @@ document boundary。
 
 ## V-3 Runtime Allocation 与 Revision Identity
 
-正式 HP `NodeOutput` 可以同时携带 `image_value` 与 `image_buffer`。对于非空 CPU 图像，
-有效 sealed Value 是 allocation/revision identity authority；ImageBuffer 是独立拥有的
-compatibility snapshot。普通 HP publication 与 cache-load boundary 会在 output 成为正式
-cache 前，根据当前 CPU ImageBuffer 补齐缺失的 Value。复制正式 cache entry 会保留其
-`AllocationIdentity` 与 `ValueRevisionId`。
+正式 HP `NodeOutput` 携带按规范顺序保存的 named Value。永久 `image` entry 是唯一 image
+payload/allocation/readiness/revision authority；正式 cache 不包含 ImageBuffer peer，并拒绝非空
+compatibility staging。复制正式 cache entry 会保留其 `AllocationIdentity` 与
+`ValueRevisionId`。
 
-可变 dirty work 不能保留旧 authority。其 clone 会在任何 ImageBuffer 写入前清除
-`image_value`，再在 HP commit 前把 settle 后的 byte seal 为全新的 allocation 与 revision。
-Replacement output 与 disk decode 同样创建新 identity。RT proxy output 继续保持 transient，
-不会成为正式 cache identity source。
+可变 dirty/tiled work 不能保留或暴露旧 authority。它会创建一个未发布的 Host binding，通过
+checked grant seed 保留的 byte，并在所有 executable grant retirement 后恰好一次完成 seal。
+Replacement output 与 disk decode 同样创建新 identity。RT proxy output 是带独立 HP-generation
+projection version 的全新 sealed Value；它继续保持 transient，不会成为正式 cache identity
+source。
 
-Disk save 会优先使用已存在的 sealed Value，并从其 checked image view 派生临时 ImageBuffer
-snapshot，因此之后对 compatibility snapshot 的 mutation 不会改变持久化 byte。现有 image
+Disk save 要求 sealed Value，并从其 checked image view 派生临时 ImageBuffer snapshot。现有 image
 与 YAML format 仍只持久化 representation byte 与 named metadata：
 `AllocationIdentity` 和 `ValueRevisionId` 都不会被序列化、从 path 重建或用作持久 cache/task
 key。两类 token 都是 opaque、process-local runtime identity；disk reload 必然铸造新 token。
@@ -233,19 +233,27 @@ no-op 行为，不会进入这条 validation boundary。
 descriptor/content/layout/artifact digest。支持这些行为需要后续通用 artifact 与 manifest
 contract；当前 `ImageArtifactCodec` ABI 保持不变。
 
-## DI-1 观测 Statistics Cache 边界
+## DI-1/DI-2 观测 Statistics Cache 边界
 
-Issue #129 定义有界观测 min/max 与 histogram query/result/cache-key value，但不安装
-cache owner 或计算引擎。完整 key 包含有效 process-local `ValueRevisionId`、可选
+Issue #129 定义有界观测 min/max 与 histogram query/result/cache-key value。DI-2 将
+`ImageStatisticsStore` 安装为 `GraphCacheService` 内部有界、受 mutex 保护的 derived-result
+owner。完整 key 包含有效 process-local `ValueRevisionId`、可选
 `ContentDigest`、精确 normalized `RegionSet`、恰好一个稳定 `ChannelId` 或
 `ChannelGroupId`、算法、正算法版本与有界算法参数。不同 revision、content identity、
 Region、selection、算法、版本或 histogram 参数对应不同派生请求。
 
+每个 accepted task 会保留精确 Ready image Value，只通过 `ImageView` 扫描、验证 result，并在
+single publication 之前仲裁 cancellation。注入的内部 scheduler 恰好一次接收一个 task，可以
+inline 或 asynchronous 执行；store 不拥有 worker 或 execution policy。精确 cache hit 会直接返回
+ready future，而不调度 task。scan failure 或 cancellation 不发布 entry。确定性的 oldest-entry
+eviction、精确 revision invalidation 与显式 clear 只影响 derived data；已经接受的 in-flight task
+在请求未被显式取消时，仍可在 clear 后发布。
+
 Statistics 不是 `Value`、`ImageFacet`、正式 HP cache entry、descriptor/content identity、
 disk-cache path 或 artifact manifest 的字段。创建、重新计算或驱逐 result 不能修改 Value
-revision、canonical digest、HP validity 或持久表示。未来 statistics cache 必须保持为独立
-所有的可丢弃派生数据 cache，并使用完整 key；descriptor digest 本身不充分。Content digest
-是可选的，因为有效 runtime revision 可能在请求 content traversal 前就被观测。
+revision、canonical digest、HP validity 或持久表示。store 使用完整 key；allocation identity、
+graph revision、HP/RT generation、descriptor digest 或 ImageBuffer identity 本身都不充分。
+Content digest 是可选的，因为有效 runtime revision 可能在请求 content traversal 前就被观测。
 
 ### 当前有界机制与未来持久化关系
 

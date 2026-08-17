@@ -15,7 +15,12 @@ copied HP/RT execution-route bindings, event/execution-trace state, and
 one stable Graph lifetime anchor. Native platform device, command-queue,
 allocator, pipeline-cache, and executor resources instead belong to the fixed
 `DeviceExecutorRegistry` in the process `ExecutionService`; they are not Graph
-lifetime resources. Map lookup copies one shared runtime owner inside a short
+lifetime resources. Kernel also owns one `GraphCacheService`; its bounded
+`ImageStatisticsStore` is process-service derived state, not a member of a
+GraphRuntime or GraphModel. An accepted statistics task retains only the
+store's opaque state and its exact source Value through settlement, so neither
+a Graph close nor facade destruction can leave a borrowed task target. Map
+lookup copies one shared runtime owner inside a short
 critical section; graph-state, compute, IO, inspection, and lane work run after
 releasing the map lock. A concurrent close may therefore remove the name
 without destroying a runtime already retained by an admitted internal call.
@@ -301,6 +306,13 @@ generation; an older staged compute is rejected by revision validation.
 Diagnostic record, snapshot, reset, clone, and staged exchange all use one
 encapsulated no-throw mutex contract, so clear can overlap worker diagnostic
 traffic without unsynchronized optional/path/string access.
+
+Model clear does not implicitly cancel or clear derived image-statistics work.
+Statistics identity contains the exact Value revision, so a later Graph Value
+cannot collide with an older result. The cache service exposes explicit exact-
+revision invalidation and bounded-store clear; accepted in-flight work may
+publish after clear unless its request-local cancellation wins first. Those
+operations mutate neither Graph revision nor formal HP/RT cache state.
 
 ## Close and Lifetime
 

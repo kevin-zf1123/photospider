@@ -387,6 +387,20 @@ ready store、Graph owner、policy decision surface、Host/device ledger dimensi
 组件提供 crash-durable user-output commit，ADR 0009 中 Run publication 之后的独立 cache
 outcome 仍是未来工作。
 
+### DI-2 statistics task 所有权
+
+`GraphCacheService` 拥有一个有界 `ImageStatisticsStore`，但该 store 不拥有 worker、ready
+queue、execution route 或 policy context。其 `schedule_image_statistics()` boundary 接受一个
+可信的单 task ownership receiver。发生 miss 时，callback 会独立保留精确 Ready Value 与完整
+query 直至 settlement；发生 hit 时不会提交 task。receiver 可以 inline 执行 callback，也可将其
+转移给既有内部 scheduler，并且必须恰好一次接收它，或者在 invocation 前抛出异常。
+
+Cancellation 与 result publication 会在 derived-cache mutex 之前，于 request-local state 内
+linearize。cancellation 先胜出时不发布 result；result 先胜出时会保留为普通有界 cache entry。
+scan exception 只会 settle future。该机制不授予 Run、Graph、HP/RT generation、allocation、
+formal-cache、persistence 或 worker authority，也不会改变 policy fairness 或 resource-ledger
+accounting。
+
 ## Host、CLI 与 IPC 接口面
 
 公共 Host 有八个策略操作和六个执行操作。其最终非析构虚函数数量为 58。

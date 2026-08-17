@@ -772,13 +772,14 @@ The implemented V-2 through V-15 and DI-1 subset is deliberately narrower:
   account, while a registered executor without a candidate budget remains
   unable to admit native allocation;
 - `image_process:invert_dense` separates exact descriptor-only inference from
-  stride-aware unsigned-8 execution, reuses a sealed input Value when present,
-  and publishes the exact sealed result revision plus an independent
-  ImageBuffer compatibility snapshot; and
-- private formal HP CPU image cache entries treat a valid sealed
-  `NodeOutput::image_value` as allocation/revision authority. Ordinary copies
-  preserve identity; dirty mutation, replacement, and disk decode create fresh
-  identity; disk save reads Value bytes; and runtime tokens are never
+  stride-aware unsigned-8 execution, requires a canonical sealed input Value,
+  and publishes the exact sealed result revision; explicit current ABI edges
+  derive only use-scoped ImageBuffer compatibility snapshots; and
+- private formal HP CPU image cache entries use the canonical named `image`
+  Value as the sole allocation/revision authority. Ordinary copies preserve
+  identity; dirty/tiled work seals one fresh Host binding, while replacement
+  and disk decode create fresh identity; disk save reads Value bytes; and
+  runtime tokens are never
   persistent cache/task keys. V-13 formal memory-cache copies also retain
   packed Values and exact TensorSlice validity, while the image-only disk cache
   rejects packed, quantized, or latent formal Values before executor admission,
@@ -980,7 +981,7 @@ than this target document, remain the live status authority.
 | Slice | Delivery boundary | Blocking slices |
 | --- | --- | --- |
 | [#129 / DI-1](https://github.com/kevin-zf1123/photospider/issues/129) | Freeze and deliver ordinary-image coordinates, sample/color declarations, stable channel identities, canonical descriptor records, and identity-independent observed statistics | #78, #101, #102, #105 |
-| [#130 / DI-2](https://github.com/kevin-zf1123/photospider/issues/130) | Add Host-owned output authorization and migrate kernel runtime image paths | #129 |
+| [#130 / DI-2](https://github.com/kevin-zf1123/photospider/issues/130) | Freeze Host-owned dense-image output plans/bindings/grants and make kernel runtime/cache/statistics image authority Value-backed | #129 |
 | [#132 / DI-3](https://github.com/kevin-zf1123/photospider/issues/132) | Implement pure-C operation ABI v1 and migrate plugins and isolated execution | #129, #130 |
 | [#131 / DI-4](https://github.com/kevin-zf1123/photospider/issues/131) | Migrate external product boundaries and remove `ImageBuffer` completely | #129, #130, #132 |
 
@@ -991,8 +992,26 @@ and observed statistics independent; and freezes bounded records needed by
 later output-plan, wire, artifact, and codec work. It deliberately does not
 remove operation ABI v2 or `ImageBuffer`, migrate Host/IPC/worker/durable/CLI
 surfaces, define automatic color conversion, or reuse OpenEXR Deep
-provider-defined windows as ordinary dense-image authority. DI-2, DI-3, and
-DI-4 remain downstream delivery slices.
+provider-defined windows as ordinary dense-image authority. DI-2 implements the
+next internal slice; DI-3 and DI-4 remain downstream delivery slices.
+
+DI-2 is the internal runtime delivery slice. It freezes one source-private
+ordinary-image output plan containing the exact name, DenseTensor/ImageFacet,
+Strided layout, storage envelope, alignment, and Region before allocation. One
+aligned Host binding owns one allocation and publishes through move-only,
+revocable whole or disjoint-tile grants. Every grant must retire exactly once;
+validation, overlap, range, alignment, overflow, exception, cancellation,
+duplicate retirement, omitted retirement, active-grant seal, or second
+publication fails closed. The last successful executable tile seals one Ready
+Value and no partial binding is consumer-visible.
+
+Private `NodeOutput`, full/dirty HP, RT proxy, formal/disk cache, extent,
+inspection, metrics, and the bounded statistics producer/cache now derive image
+facts from canonical named Values. `image` is the permanent current port;
+compatibility ImageBuffer staging is cleared at inbound adapters and rejected
+by formal commit. Current ABI v2, isolated execution, Host/IPC/worker, durable,
+CLI, codec, and final ImageBuffer removal remain DI-3/DI-4 work. DI-2 publishes
+no pure-C ABI record and removes no v1/v2 loader.
 
 ## Heterogeneous Executors
 

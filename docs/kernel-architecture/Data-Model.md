@@ -167,11 +167,11 @@ Graph state.
 
 | Field | Meaning |
 | --- | --- |
-| `image_buffer` | Independent current plugin ABI v2, tiled-write, codec, and Host compatibility snapshot. |
-| `image_value` | Immutable sealed or producer-pending Value with explicit allocation/binding/revision identity when valid. Pending state is request-local and cannot enter formal cache or visible commit. |
+| `compatibility_image` | Inbound-only staging for operation ABI v2, codecs, and remaining legacy adapters. It must be cleared before formal commit and is never cache, allocation, readiness, or revision authority. |
+| `named_values` | Canonically ordered immutable Values. The current image port is permanently named `image`; a valid entry is the sole image payload, allocation, readiness, and revision authority. |
 | `data` | Named scalar or structured outputs stored as a `plugin::ParameterMap`. |
 | `space` | Spatial transform, scale, and ROI metadata. |
-| `debug` | Worker/device/timing/range diagnostics. Enabled CPU range inspection walks active scalar bytes through `ImageBuffer::step`; padding is excluded and opaque device values retain provider diagnostics. |
+| `debug` | Worker/device/timing/range diagnostics. Enabled CPU range inspection walks active scalar bytes through the canonical Value layout; padding is excluded and opaque device Values retain provider diagnostics. |
 
 Operators may return image data, named data, or both.
 
@@ -183,11 +183,23 @@ configuration therefore survives parser destruction without retaining
 
 For tiled `image_mixing`, a secondary input that requires crop/pad is
 materialized as a request-local `NodeOutput`: named data, spatial/debug
-provenance, and plugin-library lifetime are copied, while its image descriptor
-is replaced by aligned storage produced through kernel fill/copy primitives.
+provenance, and plugin-library lifetime are copied, while its image Value is
+replaced by aligned storage produced through kernel fill/copy primitives and
+sealed before the normalized output is exposed.
 Resize and channel conversion remain local OpenCV algorithm calls. The
 normalization context owns these temporary outputs until every synchronous tile
 callback finishes; exact-shape inputs continue to borrow the upstream output.
+
+DI-2 freezes `DenseImageOutputPlan` as the one source-private ordinary-image
+output description. The immutable plan owns the output name, complete
+DenseTensor/ImageFacet facts, exact positive Strided layout, byte envelope,
+base alignment, and full image Region before Host allocation. One
+`HostOutputBinding` owns the aligned allocation and private builder lease.
+Move-only whole or disjoint-tile grants expose only checked row spans; overlap,
+range, alignment, overflow, cancellation, exception, duplicate retirement, or
+omitted retirement fails the binding closed. Only after every grant retires
+successfully may the binding seal and publish one Ready Value exactly once.
+The plan is the sole internal DI-3 mapping source, not an interim ABI record.
 
 ## Cache Fields
 
@@ -340,16 +352,16 @@ identity:
   stride-aware unsigned-8 execution, reuses a sealed input Value when present,
   and publishes its exact sealed result revision.
 
-Private `NodeOutput` retains `image_value` beside `image_buffer`. A valid Value
-is the immutable allocation/binding/revision authority; the ImageBuffer is an
-independent CPU compatibility snapshot. A producer-pending Value may live in
-request-local temporary output only: `TaskSubmissionPlan` holds its Run
-unsettled and releases dependants after terminal Ready, while Failed,
-ProducerCancelled, or stale-typed completion releases none. Ordinary HP commit,
-sequential HP compute, connected-preflight shadow cache, dirty HP commit, and
-disk decode normalize legacy CPU buffers before formal publication. Immutable
-cache copies preserve both identities; dirty clones clear the old Value before
-mutation and reseal final bytes; replacement and disk decode mint fresh
+Private `NodeOutput::named_values` is the only formal Value authority; the
+`image` entry replaces the former image-buffer/value pair. A producer-pending
+Value may live in request-local temporary output only: `TaskSubmissionPlan`
+holds its Run unsettled and releases dependants after terminal Ready, while
+Failed, ProducerCancelled, or stale-typed completion releases none. Ordinary
+HP commit, sequential HP compute, connected-preflight shadow cache, dirty HP
+commit, and disk decode reject or normalize compatibility staging before
+formal publication. Immutable cache copies preserve allocation and revision;
+dirty/tiled execution creates one fresh Host binding and seals once after all
+selected executable grants retire; replacement and disk decode mint fresh
 identities. Allocation and revision tokens remain process-local and never enter
 task-graph keys, cache paths, graph/YAML documents, or artifact bytes.
 The shared operation runtime is the one process-wide minting authority for the

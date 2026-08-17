@@ -133,23 +133,43 @@ stride。Checked view 同时保留完整 Value 和 read lease，且不暴露 wri
 内建 `image_process:invert_dense` operation 在生产路径证明这项 surface：
 
 1. 当前 monolithic callback 校验一个非空 CPU 图像 input；
-2. `NodeOutput::image_value` 有效时，private runner 直接复用该 sealed Value；否则，
-   compatibility adapter 会把旧 `ImageBuffer` snapshot 到新的 sealed allocation，保留
-   `[height, width, channels]`、`step` 与 active row，并独立初始化 padding；
+2. private runner 要求规范的 named `image` Value，绝不回退到正式 compatibility storage；
 3. pure inference 只接收 deep-owned effective parameter snapshot 与 logical
    DenseTensor/Image descriptor，不接收 Node output/cache state；
 4. execute 接收 checked ImageView，遵循显式 x/y/channel stride，并返回独立拥有的 padded
    sealed unsigned-8 Value；
-5. runner 将完整 result descriptor 与 Image Facet 和 inference 比较，要求可由当前 adapter
-   处理的 interleaved layout，把该精确 result allocation/revision 发布为
-   `NodeOutput::image_value`，再为当前 ABI、tiled-write、codec 与 Host 边界派生独立拥有的
-   compatibility `ImageBuffer` snapshot。
+5. runner 将完整 result descriptor 与 Image Facet 和 inference 比较，并把该精确 result
+   allocation/revision 发布为 `NodeOutput` 的 named `image` Value。当前 external consumer
+   只在其显式 adapter 处派生 use-scoped compatibility snapshot。
 
 Malformed caller input 映射为 `GraphErrc::InvalidParameter`；unsupported 或 mismatched
 operation result 映射为 `GraphErrc::ComputeError`；`std::bad_alloc` 原样传播。这项 bridge
 与 compatibility adapter 只在 source tree 内部使用。Operation ABI v2 与尚未转换的其他
-operation 继续使用 ImageBuffer；私有正式 HP cache 会保留两种表示，并把有效 sealed Value
-作为 allocation/revision identity authority。
+operation 继续使用 ImageBuffer；入站 result 会在 private return 前完成规范化，正式 HP cache
+只存储 sealed named Value。
+
+## DI-2 Host 所有的输出授权
+
+DI-2 不新增 public `ImageBuffer` 字段，也不改变 operation ABI v2。它在 allocation 前冻结一个
+source-private `DenseImageOutputPlan`。该 plan 持有规范 output name、完整
+DenseTensor/ImageFacet metadata、正向 interleaved Strided layout、精确 storage envelope、
+要求为二次幂的 alignment 与完整 image Region。所有 extent、stride、row-span、offset、
+alignment、range 与 overflow 检查都在 producer 可以看到 mutable byte 前完成。
+
+`HostOutputBinding` 通过 `ValueBuilder` 恰好 allocation 一次，并保留唯一 builder
+`WriteLease`。Producer 只能获得 move-only、可撤销的 whole grant 或 tile grant。tile grant
+暴露经过检查的 active row span；live grant 必须在逻辑与 byte 层面均互不重叠。invalid
+overlap/range/alignment、exception、cancellation、explicit failed retirement、duplicate
+retirement，或者 active 状态下析构，都会记录首个 sticky failure 并撤销所有 grant。任何 grant
+仍 active 时 seal 都会失败，且不能通过重试转为成功。完成精确的成功 retirement 后，seal 会
+关闭 grant issuance、撤销写访问，并以计划好的 allocation 和唯一 fresh revision 发布一个
+Ready Value。第二次 seal 不能铸造另一 revision。
+
+当前 ABI v2 tiled adapter 可以在 active grant 上创建一个 callback-local full-image
+`ImageBuffer` alias，因为 v2 无法编码 row-span capability。该 alias 不会被存储、不能活过
+callback return，并且是 DI-3 的具名删除边。CPU monolithic result 与 codec input 会通过
+plan/binding 路径复制。Opaque non-CPU plugin result 会成为 imported external Value binding，
+其 owner 保留 payload 与 DSO lifetime；它不会使 staging ImageBuffer 成为 runtime authority。
 
 ## DI-1 普通 DenseImage 坐标与解释契约
 
@@ -207,9 +227,9 @@ Metal operation 路径不使用该 adapter，也不保留 `ImageBuffer::context`
 之后，Metal Perlin provider 会借用进程 executor 的 command queue、invocation-scoped allocator
 与经过校验的 pipeline cache，编码 compute 加显式 texture-to-shared-buffer blit、安装 native
 completion handler、commit 且不等待，并通过 source-private 路径返回 pending host-visible
-Value。`TaskSubmissionPlan` 只会在该 Value 进入 Ready 后创建 CPU `ImageBuffer`
-compatibility snapshot。Provider 不拥有独立 native lifecycle，不调用 `waitUntilCompleted`
-或 `getBytes`，也不能把 `ImageBuffer::context` 变成可移植内存契约。
+Value。`TaskSubmissionPlan` 只会在该规范 Value 进入 Ready 后释放 dependant；它不会创建
+ImageBuffer peer。Provider 不拥有独立 native lifecycle，不调用 `waitUntilCompleted` 或
+`getBytes`，也不能把 `ImageBuffer::context` 变成可移植内存契约。
 
 ## 边界与原理
 
@@ -281,9 +301,9 @@ conversion 进入或离开 `PixelRect`；TensorSlice、Whole、custom domain、m
 uncertainty 与 overflow 都会在该 adapter 被拒绝。Region-aware core dense operation 会复制
 未选中的 byte，并通过 checked stride 只修改选中的逻辑 coordinate。在各自后续切片完成迁移
 之前，ImageBuffer structure、device field、operation DSO ABI、tiled write、codec 与 Host/IPC
-v2 rectangle 仍是角色区分明确的 compatibility contract。对于同时携带两种形式的正式 CPU
-image cache entry，有效 sealed Value（而不是 mutable compatibility snapshot）才是
-allocation/revision identity authority。
+v2 rectangle 仍是角色区分明确的 compatibility contract。正式 CPU image cache entry 只携带
+有效 sealed Value；compatibility snapshot 仅限 use scope，永远不会成为
+allocation/revision authority。
 
 V-6 在不修改 `ImageBuffer` 的前提下为 Value 新增 `ReadyFence`。同步 CPU Value 初始即为
 Ready；pending Value 保留 immutable metadata，但 `buffer_handle()` 与 checked view 会在

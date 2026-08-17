@@ -165,6 +165,21 @@ checked final facades that retain the complete `Value`. Their construction
 either validates the required Schema and Facets or returns a typed failure.
 They never borrow a naked descriptor or allocation.
 
+DI-2 realizes this rule for dense-image outputs through one immutable
+`DenseImageOutputPlan` and one Host-owned `HostOutputBinding`. The plan freezes
+the exact descriptor, layout, byte envelope, allocation alignment, output name,
+and producer count before execution. The binding alone owns the `ValueBuilder`
+and issues move-only whole-output or tile grants. Grant construction rejects
+empty, overlapping, out-of-bounds, misaligned, or overflowed envelopes before
+exposing writable bytes. A grant retirement is exact and idempotence is not
+inferred: duplicate retirement, sealing with an active or omitted grant, and
+publication after failure are rejected. The final successful retirement makes
+all writes happen-before one seal and one named-`Value` publication; any
+exception, cancellation, abandoned grant, or explicit failure instead revokes
+all grants and preserves one sticky failure. This is the sole internal output
+allocation and publication authority that DI-3 may project into operation ABI
+v1; it is not a compatibility wrapper around `ImageBuffer`.
+
 `StructuredValueSchema` v1 is self-contained. Its descriptor may recursively
 describe fields, but one v1 `Value` does not contain runtime child `Value`
 objects. Independent results use named output ports or an identity-free
@@ -748,4 +763,7 @@ The [general data and regions roadmap](../roadmap/Kernel-Evolution.md#general-da
 is authoritative for the accepted target and implementation dependency order.
 Live issue and Project state remain authoritative for delivery status. Neither
 this ADR nor the roadmap promotes an unimplemented target object into current
-runtime documentation.
+runtime documentation. The DI-2 output plan, binding, grant, and publication
+authority described above is implemented current behavior; operation ABI v1
+and the final Host/IPC/worker/durable/CLI boundary migrations remain later
+slices.

@@ -422,9 +422,10 @@ ImageFacet、descriptor/content identity 或正式 cache validity。
 
 **`ImageBuffer`**
 当前图像 payload 契约：二维 extent、通道数、单一 scalar type、device、row stride、共享数据
-所有权和可选 backend context。在带有效 sealed `image_value` 的正式 CPU image cache entry
-中，它是独立 compatibility snapshot，而不是 allocation/revision identity authority。它不是
-通用 Tensor、Deep Image 或 vector-scene 模型。
+所有权和可选 backend context。它仍位于显式 ABI v2、codec、Host 与 product compatibility
+edge，但私有正式 CPU image cache entry 只包含规范 named Value。ImageBuffer projection 仅限
+use scope，且绝不是 allocation、readiness、revision 或 cache authority。它不是通用 Tensor、
+Deep Image 或 vector-scene 模型。
 
 **`RegionDomainKey` / `RegionSet`**
 `RegionDomainKey` 是永久的 128-bit 逻辑 coordinate-domain identity。`RegionSet` 是 immutable
