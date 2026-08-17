@@ -455,6 +455,43 @@ NodeOutput make_offset_image_output(const ImageBounds& data_window) {
 }
 
 /**
+ * @brief Publishes image metadata with an arbitrary valid signed data window.
+ *
+ * @param data_window Signed logical bounds whose positive spans define shape.
+ * @return Canonical Ready image output backed by one repeated immutable byte.
+ * @throws std::invalid_argument, std::out_of_range, std::overflow_error, or
+ *         std::length_error when bounds, descriptor, facet, layout, or buffer
+ *         validation fails.
+ * @throws std::bad_alloc when descriptor, facet, layout, Value, or output
+ *         metadata storage cannot allocate.
+ * @note Zero read strides intentionally alias every logical sample to one
+ *       immutable byte. Callers use this fixture only for metadata paths with
+ *       pixel-statistics inspection disabled, so extreme logical extents need
+ *       no correspondingly large allocation.
+ */
+NodeOutput make_metadata_only_image_output(const ImageBounds& data_window) {
+  const std::size_t width = image_bounds_width(data_window);
+  const std::size_t height = image_bounds_height(data_window);
+  DenseTensorDescriptor descriptor{{height, width},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  ImageFacet facet =
+      make_zero_origin_image_facet(descriptor, 1U, 0U, std::nullopt);
+  facet.data_window = data_window;
+  const Value seed = Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{{1U},
+                            ElementSemantics::UnsignedInteger,
+                            StorageEncoding{8U}},
+      std::nullopt, StridedLayout{{1}},
+      std::vector<std::byte>{std::byte{0x2a}});
+  NodeOutput output;
+  output.publish_image_value(Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet), StridedLayout{{0, 0}},
+      seed.buffer_handle()));
+  return output;
+}
+
+/**
  * @brief Projects one canonical split-test image for callback-local access.
  *
  * @param output Output containing a Ready host-readable image Value.
@@ -3347,6 +3384,123 @@ TEST(ComputeMetricsRecorderSplit, FinalizesMetadataAndDebugStatistics) {
     EXPECT_EQ(backend.debug.compute_device, expected_label);
     EXPECT_DOUBLE_EQ(backend.debug.min_val, 12.0);
     EXPECT_DOUBLE_EQ(backend.debug.max_val, 34.0);
+  }
+}
+
+/**
+ * @brief Proves canonical bounds complete ROI only inside signed-int geometry.
+ *
+ * @return Nothing; GoogleTest reports endpoint conversion or bypass failures.
+ * @throws Value construction and metadata finalization exceptions unchanged.
+ * @note The first two outputs begin exactly at `INT_MIN` or end exactly at
+ *       `INT_MAX`. The third carries an explicit positive ROI, which remains
+ *       authoritative even though its image data-window endpoint cannot be
+ *       projected into `PixelRect`.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     CompletesAbsoluteRoiAtSignedIntEndpointBoundary) {
+  const auto pixel_min =
+      static_cast<std::int64_t>(std::numeric_limits<int>::min());
+  const auto pixel_max =
+      static_cast<std::int64_t>(std::numeric_limits<int>::max());
+  NodeOutput lower_boundary = make_metadata_only_image_output(
+      ImageBounds{pixel_min, pixel_min, pixel_min + 1, pixel_min + 1});
+  EXPECT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      lower_boundary, {}, false, 0.0));
+  EXPECT_EQ(lower_boundary.space.absolute_roi,
+            (PixelRect{std::numeric_limits<int>::min(),
+                       std::numeric_limits<int>::min(), 1, 1}));
+
+  NodeOutput boundary = make_metadata_only_image_output(
+      ImageBounds{pixel_max - 1, pixel_max - 1, pixel_max, pixel_max});
+  EXPECT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      boundary, {}, false, 1.0));
+  EXPECT_EQ(boundary.space.absolute_roi,
+            (PixelRect{std::numeric_limits<int>::max() - 1,
+                       std::numeric_limits<int>::max() - 1, 1, 1}));
+
+  NodeOutput explicit_roi = make_metadata_only_image_output(
+      ImageBounds{pixel_max, 0, pixel_max + 1, 1});
+  explicit_roi.space.absolute_roi = PixelRect{7, 8, 9, 10};
+  EXPECT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      explicit_roi, {}, false, 2.0));
+  EXPECT_EQ(explicit_roi.space.absolute_roi, (PixelRect{7, 8, 9, 10}));
+}
+
+/**
+ * @brief Rejects every unrepresentable fallback ROI before metadata mutation.
+ *
+ * @return Nothing; GoogleTest reports exception-type or strong-guarantee
+ *         failures.
+ * @throws Fixture allocation and Value publication exceptions unchanged;
+ *         expected `std::invalid_argument` finalization failures are consumed
+ *         by GoogleTest.
+ * @note Cases isolate x/y exclusive endpoints, x/y origins, and x/y extents.
+ *       A non-default input space proves inheritance is staged, while complete
+ *       debug and Value identity checks prove failure publishes no partial
+ *       output metadata or replacement payload.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     RejectsUnrepresentableAbsoluteRoiWithoutPartialMetadata) {
+  const auto pixel_min =
+      static_cast<std::int64_t>(std::numeric_limits<int>::min());
+  const auto pixel_max =
+      static_cast<std::int64_t>(std::numeric_limits<int>::max());
+  const std::array<std::pair<const char*, ImageBounds>, 6> invalid_bounds{{
+      {"x_end", {pixel_max - 1, 0, pixel_max + 1, 1}},
+      {"y_end", {0, pixel_max - 1, 1, pixel_max + 1}},
+      {"x_begin", {pixel_min - 1, 0, pixel_min, 1}},
+      {"y_begin", {0, pixel_min - 1, 1, pixel_min}},
+      {"width", {pixel_min, 0, pixel_max, 1}},
+      {"height", {0, pixel_min, 1, pixel_max}},
+  }};
+
+  NodeOutput inherited;
+  inherited.space.transform_matrix[2] = 17.0;
+  inherited.space.inverse_matrix[5] = 19.0;
+  inherited.space.local_inverse_matrix[6] = 23.0;
+  inherited.space.global_scale_x = 2.0;
+  inherited.space.global_scale_y = 3.0;
+
+  for (const auto& [label, bounds] : invalid_bounds) {
+    SCOPED_TRACE(label);
+    NodeOutput output = make_metadata_only_image_output(bounds);
+    output.space.local_inverse_matrix[7] = 29.0;
+    output.debug.computed_by_worker_id = 31;
+    output.debug.timestamp_us = 37U;
+    output.debug.execution_time_ms = 41U;
+    output.debug.min_val = 43.0;
+    output.debug.max_val = 47.0;
+    output.debug.has_nan = true;
+    output.debug.compute_device = "SENTINEL";
+    const SpatialContext original_space = output.space;
+    const DebugMeta original_debug = output.debug;
+    const ValueRevisionId original_revision =
+        output.image_value().revision_id();
+
+    EXPECT_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+                     output, {&inherited}, false, 53.0),
+                 std::invalid_argument);
+    EXPECT_EQ(output.space.transform_matrix, original_space.transform_matrix);
+    EXPECT_EQ(output.space.inverse_matrix, original_space.inverse_matrix);
+    EXPECT_EQ(output.space.local_inverse_matrix,
+              original_space.local_inverse_matrix);
+    EXPECT_EQ(output.space.absolute_roi, original_space.absolute_roi);
+    EXPECT_DOUBLE_EQ(output.space.global_scale_x,
+                     original_space.global_scale_x);
+    EXPECT_DOUBLE_EQ(output.space.global_scale_y,
+                     original_space.global_scale_y);
+    EXPECT_EQ(output.debug.computed_by_worker_id,
+              original_debug.computed_by_worker_id);
+    EXPECT_EQ(output.debug.timestamp_us, original_debug.timestamp_us);
+    EXPECT_EQ(output.debug.execution_time_ms, original_debug.execution_time_ms);
+    EXPECT_DOUBLE_EQ(output.debug.min_val, original_debug.min_val);
+    EXPECT_DOUBLE_EQ(output.debug.max_val, original_debug.max_val);
+    EXPECT_EQ(output.debug.has_nan, original_debug.has_nan);
+    EXPECT_EQ(output.debug.compute_device, original_debug.compute_device);
+    EXPECT_EQ(output.named_values.size(), 1U);
+    EXPECT_EQ(output.image_value().revision_id(), original_revision);
+    EXPECT_EQ(output.image_value().image_bounds(), bounds);
   }
 }
 

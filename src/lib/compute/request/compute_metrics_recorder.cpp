@@ -68,10 +68,11 @@ bool is_default_space(const SpatialContext& ctx) {
  * @param ctx Spatial metadata to update.
  * @param output Output whose named image Value supplies the fallback extent.
  * @return Nothing.
- * @throws std::invalid_argument when signed image bounds or spans cannot enter
- * the current PixelRect representation.
+ * @throws std::invalid_argument when a signed image endpoint or span cannot
+ * enter the current PixelRect representation.
  * @throws std::overflow_error when immutable data-window arithmetic overflows.
- * @note Existing positive ROI dimensions are preserved unchanged.
+ * @note Existing positive ROI dimensions are preserved unchanged. Fallback
+ *       validation completes before `ctx` receives the synthesized ROI.
  */
 void ensure_absolute_roi(SpatialContext& ctx, const NodeOutput& output) {
   if (ctx.absolute_roi.width > 0 && ctx.absolute_roi.height > 0) {
@@ -90,10 +91,12 @@ void ensure_absolute_roi(SpatialContext& ctx, const NodeOutput& output) {
       static_cast<std::int64_t>(std::numeric_limits<int>::max());
   if (bounds.x_begin < int_min || bounds.x_begin > int_max ||
       bounds.y_begin < int_min || bounds.y_begin > int_max ||
+      bounds.x_end < int_min || bounds.x_end > int_max ||
+      bounds.y_end < int_min || bounds.y_end > int_max ||
       width > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
       height > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     throw std::invalid_argument(
-        "Canonical image bounds exceed SpatialContext PixelRect.");
+        "Canonical image bounds exceed SpatialContext PixelRect geometry.");
   }
   ctx.absolute_roi = PixelRect{
       static_cast<int>(bounds.x_begin), static_cast<int>(bounds.y_begin),
@@ -108,21 +111,25 @@ void ensure_absolute_roi(SpatialContext& ctx, const NodeOutput& output) {
  * @throws std::invalid_argument or std::overflow_error when canonical image
  * bounds cannot enter SpatialContext.
  * @note Null placeholders are skipped without compressing callback-visible
- * input ordering. The output absolute ROI is always completed afterwards.
+ *       input ordering. The output absolute ROI is always completed
+ *       afterwards. Inheritance and fallback validation finish in a local
+ *       value, so either exception leaves the original output space unchanged.
  */
 void inherit_spatial_context(NodeOutput& output,
                              const std::vector<const NodeOutput*>& inputs) {
-  if (is_default_space(output.space)) {
+  SpatialContext resolved_space = output.space;
+  if (is_default_space(resolved_space)) {
     const auto first_connected =
         std::find_if(inputs.begin(), inputs.end(),
                      [](const NodeOutput* input) { return input != nullptr; });
     if (first_connected != inputs.end()) {
-      output.space = (*first_connected)->space;
-      output.space.local_inverse_matrix = {1.0, 0.0, 0.0, 0.0, 1.0,
-                                           0.0, 0.0, 0.0, 1.0};
+      resolved_space = (*first_connected)->space;
+      resolved_space.local_inverse_matrix = {1.0, 0.0, 0.0, 0.0, 1.0,
+                                             0.0, 0.0, 0.0, 1.0};
     }
   }
-  ensure_absolute_roi(output.space, output);
+  ensure_absolute_roi(resolved_space, output);
+  output.space = resolved_space;
 }
 
 /**
@@ -326,21 +333,24 @@ void populate_debug_statistics(NodeOutput& output) {
  *        milliseconds.
  * @return Nothing.
  * @throws std::invalid_argument if enabled statistics receive unsupported
- * immutable image element facts or signed image bounds cannot enter the
- * SpatialContext representation.
+ * immutable image element facts or signed image endpoints/spans cannot enter
+ * the SpatialContext representation.
  * @throws std::overflow_error when immutable image-window arithmetic is
  * unrepresentable.
  * @throws ReadyFenceAccessError, BufferAccessError, or std::out_of_range when
  * a Ready host-visible Value cannot provide a checked logical sample.
  * @throws std::bad_alloc if view metadata or the device label cannot allocate.
  * @note Spatial inheritance occurs before timestamp, worker, duration, and
- *       device publication. Debug identity fields are always updated; only
- *       Ready host-visible pixel statistics depend on `enable_timing`. Pending
- *       Values expose device metadata through representation-neutral indexed
- *       StorageBinding inspection without payload access and retain
- *       callback-provided statistics until a later Ready observation.
- *       ImageView walks logical samples and ignores padding; opaque backend
- *       statistics remain untouched without a device adapter.
+ *       device publication. A spatial fallback conversion failure leaves the
+ *       original space, debug metadata, and named Values unchanged. Debug
+ *       identity fields are always updated after successful spatial
+ *       completion; only Ready host-visible pixel statistics depend on
+ *       `enable_timing`. Pending Values expose device metadata through
+ *       representation-neutral indexed StorageBinding inspection without
+ *       payload access and retain callback-provided statistics until a later
+ *       Ready observation. ImageView walks logical samples and ignores
+ *       padding; opaque backend statistics remain untouched without a device
+ *       adapter.
  */
 void ComputeMetricsRecorder::finalize_output_metadata(
     NodeOutput& output, const std::vector<const NodeOutput*>& inputs,
