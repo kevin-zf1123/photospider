@@ -27,11 +27,15 @@ device identity, payload ownership, or backend context. Public
 receive inputs as `OperationTileInputView` values.
 
 The private compute layer separately uses `InputTile`, `OutputTile`, and
-`TileTask`. Those backend-only values also carry `PixelRect`; private
-`OutputTile` uses a mutable `ImageBuffer*` while bridging task-owned output
-storage to an adapter. An OpenCV adapter may translate the rectangle only
-locally when creating a matrix view; it does not retain or return `cv::Rect`
-through these values. They do not cross the public operation or Host contract.
+`TileTask`. Those backend-only values also carry zero-based storage-relative
+`PixelRect`; private `OutputTile` borrows an immutable
+`DenseImageOutputPlan` and an active `HostOutputWriteGrant` while bridging
+Host-owned output storage to an adapter. The grant Region is instead expressed
+in the plan's signed logical data-window domain. An OpenCV adapter adds the
+plan origin with checked arithmetic before comparing ROI endpoints to that
+grant, but retains the zero-based ROI for byte offsets and matrix construction.
+It does not retain or return `cv::Rect` through these values. They do not cross
+the public operation or Host contract.
 
 ## CPU Buffer Contract
 
@@ -203,6 +207,14 @@ success. After exact successful retirement, seal closes issuance, revokes
 write access, and publishes one Ready Value with the planned allocation and a
 single fresh revision. A second seal cannot mint another revision.
 
+Tile grant authorization and callback geometry deliberately use two coordinate
+representations. `HostOutputWriteGrant::image_region()` is a signed logical
+`ImageRect` contained by `ImageFacet::data_window`; `OutputTile::roi` is a
+zero-based storage rectangle contained by plan width/height. They describe the
+same pixels only after checked origin translation. Grant span offsets and
+strides remain allocation-relative, so a negative or nonzero logical origin
+does not alter storage view construction.
+
 The current ABI v2 tiled adapter may create one callback-local full-image
 `ImageBuffer` alias over an active grant because v2 cannot encode row-span
 capabilities. The alias is not stored, cannot outlive callback return, and is a
@@ -363,8 +375,12 @@ zero-stride immutable views, and allocation identity authority in formal HP
 cache entries.
 
 V-4 adds the installed dependency-neutral Region MVP. Exact built-in ImageRect
-can be checked into or out of `PixelRect`; TensorSlice, Whole, custom domains,
-multi-atom clauses, uncertainty, and overflow are rejected at that adapter.
+can be projected directly to a logical-coordinate `PixelRect` at legacy edges.
+Compute/dirty storage projections are a separate checked operation that clips
+to explicit `ImageBounds` and subtracts its origin; the reverse adds that
+origin after storage containment. TensorSlice, custom domains, multi-atom
+clauses, uncertainty, and overflow are rejected; Whole is accepted only by the
+explicit finite-bounds storage projection.
 The Region-aware core dense operation copies unselected bytes and changes only
 selected logical coordinates through checked strides. ImageBuffer structure,
 device field, operation DSO ABI, tiled writes, codecs, and Host/IPC v2

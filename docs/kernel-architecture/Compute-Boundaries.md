@@ -20,6 +20,9 @@ select the process executor. Logical dirty work and cache validity remain
 normalized `RegionSet` through planning, staging, and the Region-aware core
 dense path. Current image tile shapes, Host/IPC v2 inspection, ImageBuffer
 helpers, and operation ABI v2 use checked derived `PixelRect`/`PixelSize`.
+Private dirty/tile PixelRects are zero-based storage geometry; logical Regions
+and Host grants use the signed data-window domain. Crossing that boundary
+requires containment plus checked origin subtraction/addition.
 OpenCV geometry exists only inside a provider or algorithm implementation at
 the library call that consumes it.
 
@@ -198,6 +201,13 @@ and cleared at its inbound adapter; formal commit never synthesizes a missing
 Value. V-5 adds no new callback slot or general planner inference. It does add
 a callback-free implementation identity/metadata route to planned work and
 requires exact identity re-resolution before provider entry.
+
+`OutputTile::roi` remains a zero-based storage-relative callback projection,
+while `HostOutputWriteGrant::image_region()` remains a signed logical
+data-window Region. Adapters validate the former against plan width/height,
+translate both endpoints through the plan origin with checked arithmetic, and
+only then compare it with the grant. Byte offsets and OpenCV matrix views keep
+using the zero-based ROI and planned strides.
 
 V-6 adds a bounded source-private physical task without inserting transfer
 nodes into graph planning or a `ComputeRun`. `ValueTransferTask` prepares a
@@ -721,7 +731,9 @@ cancellation, retry choice, settlement, quota, artifact, or commit authority.
   fallback.
 - Current image tiling, ImageBuffer processing, Host/IPC v2 inspection, and
   operation ABI v2 carry checked derived `PixelRect`/`PixelSize`, never OpenCV
-  geometry. TensorSlice is HP-only monolithic work and never gets a rectangle.
+  geometry. Dirty/tile rectangles are zero-based storage projections; signed
+  logical Region metadata is translated through the owning data window.
+  TensorSlice is HP-only monolithic work and never gets a rectangle.
 - Tiled input normalization occurs once per node invocation where possible,
   rather than once per tile callback.
 - The V-3 dense invert inference callback cannot inspect payload bytes, and its

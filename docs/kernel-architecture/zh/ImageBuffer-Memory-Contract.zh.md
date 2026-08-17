@@ -24,9 +24,12 @@ identity、payload ownership 或 backend context。公共 `TiledOperation` callb
 `const OutputTileView&` 接收 output，并以 `OperationTileInputView` value 接收 input。
 
 私有 compute 层另行使用 `InputTile`、`OutputTile` 与 `TileTask`。这些只属于 backend 的 value
-也携带 `PixelRect`；私有 `OutputTile` 在把 task-owned output storage 接到 adapter 时使用可变
-`ImageBuffer*`。OpenCV adapter 只能在创建 matrix view 时局部转换该 rectangle，不会通过这些
-value 保留或返回 `cv::Rect`。它们不会跨越公共 operation 或 Host contract。
+也携带零基 storage-relative `PixelRect`；私有 `OutputTile` 在把 Host-owned output storage
+接到 adapter 时借用 immutable `DenseImageOutputPlan` 与 active
+`HostOutputWriteGrant`。Grant Region 则使用 plan 的有符号 logical data-window domain。
+OpenCV adapter 会先通过 checked arithmetic 加上 plan origin，再把 ROI endpoint 与 grant
+比较，但 byte offset 与 matrix construction 仍使用零基 ROI。它不会通过这些 value 保留或返回
+`cv::Rect`。它们不会跨越公共 operation 或 Host contract。
 
 ## CPU 缓冲区契约
 
@@ -165,6 +168,12 @@ retirement，或者 active 状态下析构，都会记录首个 sticky failure �
 关闭 grant issuance、撤销写访问，并以计划好的 allocation 和唯一 fresh revision 发布一个
 Ready Value。第二次 seal 不能铸造另一 revision。
 
+Tile grant authorization 与 callback geometry 有意使用两种坐标表示。
+`HostOutputWriteGrant::image_region()` 是被 `ImageFacet::data_window` 包含的有符号 logical
+`ImageRect`；`OutputTile::roi` 是被 plan width/height 包含的零基 storage rectangle。二者只有
+经过 checked origin translation 后才描述同一批像素。Grant span offset 与 stride 保持
+allocation-relative，因此 negative 或 nonzero logical origin 不会改变 storage view construction。
+
 当前 ABI v2 tiled adapter 可以在 active grant 上创建一个 callback-local full-image
 `ImageBuffer` alias，因为 v2 无法编码 row-span capability。该 alias 不会被存储、不能活过
 callback return，并且是 DI-3 的具名删除边。CPU monolithic result 与 codec input 会通过
@@ -296,9 +305,11 @@ read lease、独占 builder write lease、process-local allocation/revision iden
 受界限约束的 signed/zero-stride immutable view，以及正式 HP cache entry 中的 allocation
 identity authority。
 
-V-4 新增已安装、dependency-neutral 的 Region MVP。精确内建 ImageRect 可以经过 checked
-conversion 进入或离开 `PixelRect`；TensorSlice、Whole、custom domain、multi-atom clause、
-uncertainty 与 overflow 都会在该 adapter 被拒绝。Region-aware core dense operation 会复制
+V-4 新增已安装、dependency-neutral 的 Region MVP。精确内建 ImageRect 可以在 legacy edge
+直接投影为 logical-coordinate `PixelRect`。Compute/dirty storage projection 是另一项 checked
+operation：它会 clip 到显式 `ImageBounds` 并减去其 origin，反向转换则在 storage containment
+之后加回 origin。TensorSlice、custom domain、multi-atom clause、uncertainty 与 overflow 会被
+拒绝；Whole 只允许进入带显式有限 bounds 的 storage projection。Region-aware core dense operation 会复制
 未选中的 byte，并通过 checked stride 只修改选中的逻辑 coordinate。在各自后续切片完成迁移
 之前，ImageBuffer structure、device field、operation DSO ABI、tiled write、codec 与 Host/IPC
 v2 rectangle 仍是角色区分明确的 compatibility contract。正式 CPU image cache entry 只携带

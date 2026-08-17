@@ -41,7 +41,7 @@ Dirty RT execution 不会写 graph-owned RT 字段。Worker task 会先把代理
 | Proxy 字段 | 含义 |
 | --- | --- |
 | `version` | RT proxy 输出变化的版本计数器。 |
-| `region_hp` | RT 更新所代表的规范化 HP-space ImageRect Region。 |
+| `region_hp` | RT 更新所代表的规范化有符号 logical HP ImageRect Region；它不是 RT/storage ROI。 |
 | `dirty_source_generation` | 用于 stale source 检查的 RT dirty source generation。 |
 
 ## 磁盘缓存
@@ -209,10 +209,12 @@ dirty work satisfaction boundary。普通 full HP planning 仍可立即消费同
 selection 自身只会从 current-request external result 形成 satisfaction，绝不会使用旧 formal
 cache。
 
-RT proxy state 使用 HP-space `region_hp`，但仍只支持 image。Checked adapter 只会从一个精确
-内建 ImageRect 派生当前 rectangular downsample/inspection metadata。TensorSlice 与 Whole
-不会进入 RT 或 downsample rectangle boundary。Region value 与 Tensor axis 会计入
-retained-memory accounting。
+RT proxy state 使用有符号 logical HP `region_hp`，但仍只支持 image。Checked adapter 会把
+一个精确内建 logical ImageRect 传入 downsample，再减去已提交 HP Value 的 data-window
+origin，得到零基
+pixel ROI。`RealtimeProxyGraph::NodeState::region_hp` 保留 logical Region；downscaled
+proxy payload 与 `roi_rt` 保持为零基 RT storage。TensorSlice 与 Whole staged validity 不会创建 partial
+downsample request。Region value 与 Tensor axis 会计入 retained-memory accounting。
 
 ## V-13 Packed Memory Cache 与 Image Disk Boundary
 

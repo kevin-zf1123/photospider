@@ -293,8 +293,12 @@ propagation.
   outputs are `ParameterValue` trees. Logical dirty work and cache validity use
   normalized `RegionSet`; current image extents, physical tiles, Host/IPC v2
   inspection, and operation ABI v2 use checked derived `PixelSize` and
-  `PixelRect` values. OpenCV geometry is created only inside an OpenCV provider
-  or algorithm implementation when a matrix slice or library call requires it.
+  `PixelRect` values. In compute/dirty compatibility paths those rectangles are
+  zero-based storage coordinates relative to the owning data window; they are
+  never retained as logical metadata. Conversion to or from a signed logical
+  `ImageRect` requires checked origin translation through that exact
+  `ImageBounds`. OpenCV geometry is created only inside an OpenCV provider or
+  algorithm implementation when a matrix slice or library call requires it.
 
 ### Current persistence identity and completion boundaries
 
@@ -387,7 +391,9 @@ window is presentation metadata, while dynamic dirty/dependency/execution/HP
 validity remains `RegionSet`. `Value::image_bounds()` exposes data-window
 metadata in Pending, Failed, and ProducerCancelled states without weakening
 Ready-only payload leases; `ImageView` separately exposes zero-based storage
-indices and signed logical-coordinate access.
+indices and signed logical-coordinate access. Dirty planner entries therefore
+retain both an exact data window and a storage-relative `PixelRect`; their
+`RegionSet` validity is reconstructed only by checked origin addition.
 
 The optional bounded `ChannelSchema` uses stable nonzero `ChannelId` and
 `ChannelGroupId` values; diagnostic names do not select roles or enter semantic

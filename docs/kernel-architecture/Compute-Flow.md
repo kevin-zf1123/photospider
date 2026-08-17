@@ -83,7 +83,11 @@ fail-stop rather than a recoverable post-publication Host rejection.
 The dirty ROI remains a kernel-owned `PixelRect` while it is copied from
 `HostComputeRequest` through `Kernel::ComputeRequest`, graph propagation,
 planning, task selection, staged execution, and `NodeExecutor`. Extents use
-`PixelSize`. No OpenCV geometry conversion occurs on this path; a provider may
+`PixelSize`. This compatibility rectangle is always zero-based storage
+geometry, not a signed logical coordinate. Planner entries retain the owning
+HP `ImageBounds`; logical `RegionSet` requests are clipped and origin-subtracted
+before entering this path, and retained validity is rebuilt by checked origin
+addition. No OpenCV geometry conversion occurs on this path; a provider may
 create a local OpenCV rectangle or size only at an actual matrix or algorithm
 call.
 
@@ -548,6 +552,14 @@ and can schedule downsample work to refresh `RealtimeProxyGraph` state.
 `IntentUpdateCoordinator` routes global HP dirty requests to this path and
 records `intent_coordinator_global_dirty_update`.
 
+HP-to-RT downsample requests carry the committed logical HP `RegionSet`, not a
+storage rectangle. `DownsampleExecutor` observes the committed HP Value's
+signed data window, translates the request to a clipped zero-based
+`ImageBuffer` ROI for pixel selection, and commits the translated-back logical
+Region to `RealtimeProxyGraph::NodeState::region_hp`. Empty direct requests
+retain the legacy full-frame fallback, Whole maps to the explicit finite data window, and
+stale/failure/cancellation paths publish no staged proxy state.
+
 Forced HP dirty updates are the exception: when `force_recache=true`, the HP
 staging buffer intentionally does not seed pixels from the previous HP cache, so
 the executor expands the HP planning ROI to the target node's full current HP
@@ -562,6 +574,8 @@ Consequently, one public Host HP dirty request exercises one continuous
 kernel-native geometry path: request validation, graph-scoped backward
 projection, immutable plan selection, source-first ready dispatch, node
 execution, and staged HP commit all observe `PixelRect`/`PixelSize` values.
+The accompanying Region metadata remains in each Value's signed logical data
+window and is never inferred from an unqualified storage rectangle.
 
 ## RealTimeUpdate
 

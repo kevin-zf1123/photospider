@@ -22,7 +22,9 @@ it as an upstream root of the selected dependency cone.
 by `RegionSet`. V-4 supports exact ImageRect and rank-general TensorSlice for
 HP; RT accepts only exact ImageRect. Current Host/IPC v2 inspection, operation
 ABI v2, ImageBuffer processing, and physical image tiles use checked derived
-`PixelRect`/`PixelSize`. OpenCV rectangles and sizes are created only locally
+`PixelRect`/`PixelSize`. Those compatibility rectangles are zero-based within
+their HP or RT storage allocation and do not inherit a signed logical origin.
+OpenCV rectangles and sizes are created only locally
 inside providers or algorithms at actual matrix or algorithm calls.
 
 **Dirty generation** is the value stored in a `DirtyRegionSnapshot` and copied
@@ -387,6 +389,15 @@ checked, by subtracting the data-window origin. The optional display window
 does not redefine dirty coordinates, and a dynamic `RegionSet` does not mutate
 either window. Provider-defined OpenEXR Deep windows remain a separate
 provider contract and are not ordinary-dense-image authority.
+
+Accordingly, each image `HpPlanEntry`/`RtPlanEntry` retains the HP data window,
+a zero-based `roi_hp`, and a logical `region_hp`; `roi_rt` is separately
+zero-based in the RT proxy allocation. Edge/snapshot Region metadata is built
+from the relevant storage ROI only by checked origin addition. HP dirty writes
+send logical ImageRect validity to downsample; downsample subtracts the current
+committed HP origin for pixel access and stores the logical Region unchanged as
+RT HP-validity metadata. Empty, Whole, stale-generation, failure, and
+cancellation handling never authorize a mismatched coordinate domain.
 
 Keeping dirty facts, static task shape, ready dispatch, and staged commit as
 separate values prevents ROI updates from rewriting topology or transferring

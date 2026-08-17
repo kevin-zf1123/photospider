@@ -67,7 +67,10 @@ observation 或 product output binding。违反 one-delivery bridge 的结构性
 
 Dirty ROI 从 `HostComputeRequest` 复制到 `Kernel::ComputeRequest`，再经过 graph propagation、
 planning、task selection、staged execution 与 `NodeExecutor` 时，始终保持为内核自有的
-`PixelRect`；extent 使用 `PixelSize`。这条路径不会进行 OpenCV geometry 转换；provider 只有在
+`PixelRect`；extent 使用 `PixelSize`。该 compatibility rectangle 始终是零基 storage
+geometry，不是有符号逻辑坐标。Planner entry 会保留所属 HP `ImageBounds`；logical
+`RegionSet` request 进入这条路径前先被 clip 并减去 origin，保留的 validity 再通过 checked
+origin addition 重建。这条路径不会进行 OpenCV geometry 转换；provider 只有在
 真实 matrix 或算法 call 处才能创建局部 OpenCV rectangle 或 size。
 
 CLI/REPL 前端是固定的批处理取向界面。它不暴露 RT intent 命令、dirty ROI 创建命令，
@@ -426,6 +429,13 @@ HP 脏区更新是一等的 dirty-ROI 消费方，而不只是完整重算 fallb
 `IntentUpdateCoordinator` 会把 global HP dirty request 路由到该路径，并记录
 `intent_coordinator_global_dirty_update`。
 
+HP-to-RT downsample request 携带已提交的 logical HP `RegionSet`，而不是 storage rectangle。
+`DownsampleExecutor` 会读取已提交 HP Value 的有符号 data window，把 request 翻译成经过 clip 的
+零基 `ImageBuffer` ROI 来选择像素，再把翻译回逻辑域的 Region 提交到
+`RealtimeProxyGraph::NodeState::region_hp`。直接 Empty request 保留既有 full-frame
+fallback，Whole 映射到显式有限 data window，而 stale/failure/cancellation path 不发布
+staged proxy state。
+
 forced HP dirty update 是例外：当 `force_recache=true` 时，HP staging buffer
 有意不从旧 HP cache seed 像素，因此 executor 会在提交前把 HP planning ROI 扩展为目标节点
 当前完整 HP extent。这样可以保持 authoritative HP output 完整，同时让非 forced dirty ROI
@@ -437,6 +447,8 @@ Dirty-region state planning 通过图级 `DirtyRegionPlanner` 运行，产生的
 因此，一次 public Host HP dirty request 会经过一条连续的 kernel-native geometry 路径：
 request validation、graph-scoped backward projection、immutable plan selection、source-first
 ready dispatch、node execution 与 staged HP commit 都观察 `PixelRect`/`PixelSize` value。
+伴随的 Region metadata 始终位于各 Value 的有符号逻辑 data window 中，绝不会从一个未限定
+坐标域的 storage rectangle 推导。
 
 ## RealTimeUpdate
 

@@ -18,7 +18,8 @@ OpenCV adapter 或标准库实现，因此 compute/runtime 代码不会直接声
 **Dirty Region** 是由 `RegionSet` 表示的规范化逻辑 affected/demanded work。V-4 的 HP 支持
 精确 ImageRect 与 rank-general TensorSlice；RT 只接受精确 ImageRect。当前 Host/IPC v2
 inspection、operation ABI v2、ImageBuffer processing 与 physical image tile 使用 checked
-derived `PixelRect`/`PixelSize`。只有 provider 或算法在真实 matrix 或 algorithm call 处才会
+derived `PixelRect`/`PixelSize`。这些 compatibility rectangle 在各自 HP 或 RT storage
+allocation 中都是零基坐标，不继承有符号逻辑原点。只有 provider 或算法在真实 matrix 或 algorithm call 处才会
 局部创建 OpenCV rectangle 与 size。
 
 **Dirty generation** 是存储在 `DirtyRegionSnapshot` 中并复制到 selected task metadata 的值，用于
@@ -310,6 +311,13 @@ origin。只有在完成 containment 检查之后，才可通过减去 data-wind
 index。可选 display window 不会重定义 dirty coordinate，dynamic `RegionSet` 也不会修改任一
 window。provider-defined OpenEXR Deep window 仍是独立 provider contract，不是 ordinary dense
 image 的 authority。
+
+因此，每个 image `HpPlanEntry`/`RtPlanEntry` 都会保留 HP data window、零基 `roi_hp` 与逻辑
+`region_hp`；`roi_rt` 则独立地在 RT proxy allocation 中使用零基坐标。Edge/snapshot Region
+metadata 只能从相应 storage ROI 经 checked origin addition 构造。HP dirty write 会把 logical
+ImageRect validity 交给 downsample；downsample 为像素访问减去当前已提交 HP origin，并把逻辑
+Region 原样保存为 RT HP-validity metadata。Empty、Whole、stale-generation、failure 与
+cancellation handling 都不会授权一个坐标域不匹配的结果。
 
 把 dirty fact、static task shape、ready dispatch 与 staged commit 保持为不同 value，可以防止 ROI
 update 重写 topology，或把 graph ownership 转交 policy snapshot、ready store 或私有 execution

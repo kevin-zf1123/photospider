@@ -58,7 +58,7 @@ Associated fields:
 | Proxy field | Meaning |
 | --- | --- |
 | `version` | Version counter for RT proxy output changes. |
-| `region_hp` | Normalized HP-space ImageRect Region represented by RT update. |
+| `region_hp` | Normalized signed logical HP ImageRect Region represented by RT update; it is not an RT/storage ROI. |
 | `dirty_source_generation` | RT dirty source generation committed for stale source checks. |
 
 ## Disk Cache
@@ -275,11 +275,13 @@ dirty-work satisfaction boundary. Ordinary full HP planning may still consume
 the same exact cache immediately. Dirty selection itself forms satisfaction
 only from current-request external results, never from old formal cache.
 
-RT proxy state uses HP-space `region_hp` but remains image-only. The checked
-adapter derives current rectangular downsample/inspection metadata only from
-one exact built-in ImageRect. TensorSlice and Whole do not enter the RT or
-downsample rectangle boundary. Region values and Tensor axes are included in
-retained-memory accounting.
+RT proxy state uses signed logical HP `region_hp` but remains image-only. The
+checked adapter carries one exact built-in logical ImageRect into downsample, then
+subtracts the committed HP Value's data-window origin to obtain the zero-based
+pixel ROI. `RealtimeProxyGraph::NodeState::region_hp` retains the logical
+Region; the downscaled proxy payload and `roi_rt` remain zero-based RT storage. TensorSlice
+and Whole staged validity do not create partial downsample requests. Region
+values and Tensor axes are included in retained-memory accounting.
 
 ## V-13 Packed Memory Cache and Image Disk Boundary
 

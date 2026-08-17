@@ -15,7 +15,9 @@ transport 或进程级 operation plugin
 `maximum_parallelism` 作为 Run 上限；它不能调整进程 executor 的大小，也不能选择该 executor。
 逻辑 dirty work 与 cache validity 在 planning、staging 和 Region-aware core dense path 中
 保持为规范化 `RegionSet`。当前 image tile shape、Host/IPC v2 inspection、ImageBuffer helper
-与 operation ABI v2 使用 checked derived `PixelRect`/`PixelSize`。OpenCV geometry 只存在于
+与 operation ABI v2 使用 checked derived `PixelRect`/`PixelSize`。私有 dirty/tile
+PixelRect 是零基 storage geometry；逻辑 Region 与 Host grant 使用有符号 data-window domain。
+跨越这条边界必须先做 containment，再进行 checked origin subtraction/addition。OpenCV geometry 只存在于
 provider 或算法实现内部，并且位于真正消费它的 library call 处。
 
 [ADR 0012](../../adr/zh/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md)
@@ -162,6 +164,11 @@ cancellation、duplicate 或 omitted-retirement failure 都是 sticky failure，
 ABI v2/codec staging 会在其入站 adapter 处规范化并清除；正式 commit 绝不合成缺失的 Value。
 V-5 不新增 callback slot 或 general planner inference；它会在 planned work 中新增 callback-free
 implementation identity/metadata route，并要求 provider entry 前重新解析且精确 identity 相同。
+
+`OutputTile::roi` 保持为零基 storage-relative callback projection，而
+`HostOutputWriteGrant::image_region()` 保持为有符号 logical data-window Region。Adapter 会先按
+plan width/height 校验前者，用 checked arithmetic 把两个 endpoint 经 plan origin 翻译，再与 grant
+比较。Byte offset 与 OpenCV matrix view 继续使用零基 ROI 和已规划 stride。
 
 V-6 新增一个有界、source-private 的 physical task，但不会把 transfer node 插入 graph
 planning 或 `ComputeRun`。`ValueTransferTask` 会准备一个独立 pending CPU Value，并向共享的
@@ -554,8 +561,9 @@ retry choice、settlement、quota、artifact 或 commit authority。
   TensorSlice eligibility。只有选中的精确 core dense monolithic callback 具有 private tensor
   contract；选中的 same-key device replacement 会返回 Unsupported，不会回退到 scalar。
 - 当前 image tiling、ImageBuffer processing、Host/IPC v2 inspection 与 operation ABI v2
-  携带 checked derived `PixelRect`/`PixelSize`，绝不携带 OpenCV geometry。TensorSlice 是
-  HP-only monolithic work，绝不会获得 rectangle。
+  携带 checked derived `PixelRect`/`PixelSize`，绝不携带 OpenCV geometry。Dirty/tile
+  rectangle 是零基 storage projection；有符号 logical Region metadata 通过所属 data window
+  翻译。TensorSlice 是 HP-only monolithic work，绝不会获得 rectangle。
 - 在可行时，tiled input normalization 每次 node invocation 只执行一次，而不是每个 tile callback
   执行一次。
 - V-3 dense invert inference callback 无法检查 payload byte；其 execute result 必须与

@@ -238,7 +238,9 @@ RT proxy commit 之后。
   configuration 与 operation 命名 output 都是 `ParameterValue` tree。逻辑 dirty work 与
   cache validity 使用规范化 `RegionSet`；当前 image extent、physical tile、Host/IPC v2
   inspection 与 operation ABI v2 使用 checked derived `PixelSize` 和 `PixelRect` value。
-  只有 OpenCV provider 或算法实现在 matrix slice 或 library call
+  在 compute/dirty compatibility path 中，这些 rectangle 是相对于所属 data window 的零基
+  storage coordinate，绝不会被保留为逻辑 metadata。逻辑 `ImageRect` 与其互转时，必须通过
+  那个精确 `ImageBounds` 做 checked origin translation。只有 OpenCV provider 或算法实现在 matrix slice 或 library call
   确实需要时，才会创建 OpenCV geometry。
 
 ### 当前持久化 identity 与完成边界
@@ -318,7 +320,8 @@ descriptor shape 精确一致。负原点与非零原点合法。可选 display 
 元数据，而动态 dirty/dependency/execution/HP validity 仍属于 `RegionSet`。
 `Value::image_bounds()` 在 Pending、Failed 与 ProducerCancelled 状态下暴露 data-window
 元数据且不削弱只允许 Ready 的载荷 lease；`ImageView` 分别暴露零基存储索引与有符号
-逻辑坐标访问。
+逻辑坐标访问。因此 dirty planner entry 会同时保留精确 data window 与 storage-relative
+`PixelRect`；其 `RegionSet` validity 只能通过 checked origin addition 重建。
 
 可选有界 `ChannelSchema` 使用稳定非零 `ChannelId` 与 `ChannelGroupId`；诊断名称
 不选择角色，也不进入语义相等性/digest。版本 1 `SampleEncoding`/
