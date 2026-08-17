@@ -197,7 +197,7 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
  * @brief Executes one planned node and adds node context to recoverable errors.
  *
  * @param node_idx Dense index into the borrowed execution plan.
- * @return Nothing.
+ * @return Nothing after the node's request-local result is available.
  * @throws std::bad_alloc when node execution exhausts memory.
  * @throws GraphError directly when pre-entry cancellation is observed, or
  * wrapping other standard and unknown failures, including provider exceptions
@@ -226,7 +226,7 @@ void NodeTaskRunner::run_node(int node_idx) {
  * @brief Executes one planned task and adds task-node context to errors.
  *
  * @param task_id Dense id into the planned task graph.
- * @return Nothing.
+ * @return Exact dependency-release ownership after task execution.
  * @throws std::bad_alloc when task execution or dependency access exhausts
  * memory.
  * @throws GraphError directly when pre-entry cancellation is observed, or
@@ -237,13 +237,12 @@ void NodeTaskRunner::run_node(int node_idx) {
  * and monolithic tasks delegate to run_node(), while execution transport
  * remains outside this runner.
  */
-void NodeTaskRunner::run_task(int task_id) {
+NodeTaskRunner::TaskDependencyRelease NodeTaskRunner::run_task(int task_id) {
   observe_runner_cancellation(run_lease_);
   const PlannedTask& task = task_graph_.tasks.at(task_id);
   try {
     if (task.kind == PlannedTaskKind::Tile) {
-      compute_tile_task(task);
-      return;
+      return compute_tile_task(task);
     }
     auto idx_it = id_to_idx_.find(task.node_id);
     if (idx_it == id_to_idx_.end()) {
@@ -252,6 +251,7 @@ void NodeTaskRunner::run_task(int task_id) {
           "Task references unplanned node " + std::to_string(task.node_id));
     }
     run_node(idx_it->second);
+    return TaskDependencyRelease::CurrentTask;
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const std::exception& e) {
@@ -306,7 +306,8 @@ void NodeTaskRunner::compute_node(int node_idx, int node_id) {
 }
 
 /** @copydoc NodeTaskRunner::compute_tile_task */
-void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
+NodeTaskRunner::TaskDependencyRelease NodeTaskRunner::compute_tile_task(
+    const PlannedTask& task) {
   auto idx_it = id_to_idx_.find(task.node_id);
   if (idx_it == id_to_idx_.end()) {
     throw GraphError(
@@ -317,10 +318,10 @@ void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
   const Node& target_node = graph_.node(task.node_id);
   if (!force_recache_ && ComputeCachePolicy::has_reusable_output(target_node)) {
     node_precomputed_[node_idx].store(true, std::memory_order_release);
-    return;
+    return TaskDependencyRelease::CurrentTask;
   }
   if (node_precomputed_[node_idx].load(std::memory_order_acquire)) {
-    return;
+    return TaskDependencyRelease::CurrentTask;
   }
 
   const auto& op_opt = resolved_ops_[node_idx];
@@ -340,13 +341,13 @@ void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
       resolve_image_inputs(target_node);
 
   if (try_satisfy_tile_from_disk_cache(target_node, node_idx)) {
-    return;
+    return TaskDependencyRelease::CurrentTask;
   }
 
   HostOutputBinding* output_binding =
       ensure_tile_output_binding(node_idx, target_node, inputs_ready);
   if (!output_binding) {
-    return;
+    return TaskDependencyRelease::CurrentTask;
   }
   TiledExecutionConfig tiled_config = tiled_config_for(target_node, *op_opt);
   tiled_config.tile_size =
@@ -358,8 +359,10 @@ void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
   NodeExecutor::execute_tiled_into_binding(
       graph_, node_for_exec, std::get<TileOpFunc>(op_opt->func), inputs_ready,
       *output_binding, tiled_config);
-  finalize_tiled_node_if_complete(node_idx, target_node, inputs_ready,
-                                  current_event);
+  return finalize_tiled_node_if_complete(node_idx, target_node, inputs_ready,
+                                         current_event)
+             ? TaskDependencyRelease::CompleteTiledNode
+             : TaskDependencyRelease::DeferTiledNode;
 }
 
 bool NodeTaskRunner::try_satisfy_tile_from_disk_cache(const Node& target_node,
@@ -406,18 +409,18 @@ HostOutputBinding* NodeTaskRunner::ensure_tile_output_binding(
   return tile_output_bindings_[node_idx].get();
 }
 
-void NodeTaskRunner::finalize_tiled_node_if_complete(
+bool NodeTaskRunner::finalize_tiled_node_if_complete(
     int node_idx, const Node& target_node,
     const std::vector<const NodeOutput*>& image_inputs,
     BenchmarkEvent& current_event) {
   const int expected_tiles = tile_task_counts_.at(node_idx);
   if (expected_tiles <= 0) {
-    return;
+    return false;
   }
   const int previous =
       completed_tile_counts_[node_idx].fetch_add(1, std::memory_order_acq_rel);
   if (previous + 1 != expected_tiles) {
-    return;
+    return false;
   }
   std::unique_ptr<HostOutputBinding> binding;
   {
@@ -434,6 +437,7 @@ void NodeTaskRunner::finalize_tiled_node_if_complete(
       record_computed_output(target_node, current_event);
   finalize_output_metadata(output, image_inputs, enable_timing_, execution_ms);
   temp_results_[node_idx] = std::move(output);
+  return true;
 }
 
 void NodeTaskRunner::try_load_disk_cache(const Node& target_node,

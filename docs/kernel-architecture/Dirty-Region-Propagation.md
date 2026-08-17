@@ -320,12 +320,16 @@ Whole commit replaces it. Generic ABI v2 monolithic callbacks retain
 complete-output replacement behavior.
 
 The task pruner treats dependencies outside the active selected task flags as
-already satisfied. For an active consumer, planning also joins the complete
-selected producer-node task set: a tile cannot consume a sibling's partially
-written binding because only the producer's final seal creates an observable
-Value. Overlap, out-of-range geometry, an exception, cancellation, duplicate or
-missing retirement, or commit with an undrained binding is sticky failure and
-leaves the previous formal/proxy Value unchanged.
+already satisfied. An active spatial consumer retains its exact ROI-covered
+producer task ids. Each nonfinal tile retires without releasing those edges;
+after the final selected producer seals and installs the complete Value, its
+unique publisher batches release through every original selected sibling task
+map. A tile therefore cannot consume a sibling's partially written binding,
+while task identity remains exact and no continuation task is manufactured.
+Whole and parameter dependencies remain complete producer-node joins. Overlap,
+out-of-range geometry, an exception, cancellation, duplicate or missing
+retirement, or commit with an undrained binding is sticky failure, releases no
+unpublished tile edges, and leaves the previous formal/proxy Value unchanged.
 
 Kernel's product commit policy materializes publication copies and then checks
 that each child Run is `CommitPending`, owns the exact staged Graph/proxy, and

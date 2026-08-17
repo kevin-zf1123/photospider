@@ -661,15 +661,21 @@ Every ordinary dense-image producer now follows one private lifecycle:
 6. Run commit publishes that already Ready Value with independent graph,
    Region, HP-generation, and RT-generation predicates.
 
-No consumer observes partial binding bytes. Task-graph planning therefore
-joins a consumer to the complete selected producer-node task set, not only an
-overlapping ROI task. An empty successful target remains data-only and
-publishes no synthetic image. Any grant error, exception, cancellation,
-missing retirement, or undrained binding fails the Run and leaves the prior
-visible Graph/RT state unchanged. Metal pre-commit deadline rejection installs
-no completion handler before the final deadline observation, so the
-unsubmitted owner graph and all device leases unwind instead of becoming an
-invisible publication.
+No consumer observes partial binding bytes. Task-graph planning retains each
+consumer's exact ROI-covered producer task ids. A nonfinal producer tile
+retires successfully without releasing its dependency edges; after the final
+tile seals, finalizes metadata, and installs the complete request-local Value,
+that unique publisher batches physical release of every original sibling edge.
+Logical task identity therefore remains spatially exact without adding a
+second Value/readiness authority or extra provider callback. Whole-node and
+parameter dependencies retain their complete producer-node joins. An empty
+successful target remains data-only and publishes no synthetic image. Any
+grant error, exception, cancellation, missing retirement, or undrained binding
+fails the Run, releases no unpublished tile edges, and leaves the prior visible
+Graph/RT state unchanged. Metal pre-commit deadline rejection installs no
+completion handler before the final deadline observation, so the unsubmitted
+owner graph and all device leases unwind instead of becoming an invisible
+publication.
 
 ## Events and Timing
 

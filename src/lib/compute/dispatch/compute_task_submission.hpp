@@ -292,18 +292,18 @@ class TaskSubmissionPlan {
   };
 
   /**
-   * @brief Defers dependency release when a task published a pending Value.
+   * @brief Defers dependency release when one task publishes a pending Value.
    * @param task Registered task whose provider just returned.
    * @param identity Exact Run/local task identity.
    * @param lease Matching Run lease retained by the fence callback.
    * @param task_runtime Runtime whose completion count and executor are used.
-   * @return True when a pending fence continuation was registered.
+   * @return True when a pending Value continuation was registered.
    * @throws std::bad_alloc, runtime, fence-registration, or access errors.
-   * @note The method increments completion before registering the wait. A
-   * Ready Value is accepted without a compatibility snapshot and returns
-   * false; Failed or
-   * ProducerCancelled values throw without releasing dependents. Terminal
-   * publication observed under the publication gate installs no wait.
+   * @note Tiled Host output uses batched node release instead of this Value
+   * continuation. Other operations use the canonical Value ReadyFence. The
+   * method increments completion before registering the wait. Ready output
+   * returns false; Failed or ProducerCancelled state throws without releasing
+   * dependents. Terminal Run publication installs no wait.
    */
   bool defer_pending_value(const PlannedTask& task,
                            const ComputeRunTaskIdentity& identity,
@@ -316,7 +316,7 @@ class TaskSubmissionPlan {
    * @param lease Matching Run lease used for cancellation and dependent
    * release.
    * @param task_runtime Runtime used for trace and dependent submission.
-   * @param snapshot Terminal ReadyFence snapshot delivered asynchronously.
+   * @param snapshot Terminal Value ReadyFence snapshot.
    * @return Nothing.
    * @throws ReadyFenceAccessError for failed/cancelled producer completion.
    * @throws GraphError or runtime exceptions from Value validation/release.
@@ -327,6 +327,22 @@ class TaskSubmissionPlan {
                                const ComputeRunLease& lease,
                                ExecutionTaskRuntime& task_runtime,
                                ReadyFenceSnapshot snapshot);
+
+  /**
+   * @brief Releases every exact task edge for one completed tiled node.
+   *
+   * @param node_id Planned node whose complete Value is now installed.
+   * @param lease Matching Run lease copied into newly ready callbacks.
+   * @param task_runtime Runtime receiving dependency-ready submissions.
+   * @return Nothing after each selected sibling edge is released once.
+   * @throws GraphError, std::bad_alloc, or runtime submission exceptions.
+   * @note NodeTaskRunner grants this call to exactly one task only after the
+   * shared Host binding seals, metadata finalizes, and the request-local or
+   * reusable output is reachable. Logical dependency records remain exact ROI
+   * task ids; this method batches only their physical release time.
+   */
+  void release_tiled_node_dependents(int node_id, const ComputeRunLease& lease,
+                                     ExecutionTaskRuntime& task_runtime);
 
   /**
    * @brief Exact completion ownership for one runtime pre-counted plan task.

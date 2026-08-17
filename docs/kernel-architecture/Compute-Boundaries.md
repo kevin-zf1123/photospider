@@ -1217,10 +1217,14 @@ Formal image output validation accepts only Ready canonical named Values and
 rejects any nonempty `compatibility_image`. Data-only successful targets remain
 valid and publish no fabricated image identity. Tiled/dirty tasks share one
 per-node binding; the last executable tile retires and seals it, while planning
-joins a consumer to the complete producer task set because no partial mutable
-binding is observable as a Value. Commit rejects an undrained binding and
-publishes the already sealed Value once with independent Graph revision, HP
-generation, and Region facts.
+retains exact ROI-covered task dependencies. Nonfinal tiles do not release
+their original edges. Only after the unique final publisher seals, finalizes,
+and installs the complete request-local Value does dispatch batch release
+through every sibling task map. This preserves exact logical task identity and
+adds neither another Value/readiness authority nor another provider callback;
+whole and parameter dependencies remain complete node joins. Commit rejects an
+undrained binding and publishes the already sealed Value once with independent
+Graph revision, HP generation, and Region facts.
 
 RT applies that predicate and publishes its proxy before opening the sibling
 gate. HP later validates independently. A newer Graph revision can therefore

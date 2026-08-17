@@ -762,12 +762,12 @@ void append_node_dependency_tasks(
  * @param graph Optional graph used for execution-accurate tile input ROI.
  * @return Dependency task ids aligned with tasks by dense task id.
  * @throws GraphError, std::out_of_range, or standard allocation exceptions.
- * @note Tiled image edges first derive the exact ROI-covered producer set for
- * planning consistency, then join the complete selected upstream node task
- * set. DI-2 exposes downstream inputs only after that node's sole shared Host
- * binding seals; no consumer may read a partially mutable allocation. Whole-
- * node, parameter, non-grid, and parameterized random-access dependencies use
- * the same node join without constructing a Cartesian task-pair scan.
+ * @note Tiled image edges retain the exact ROI-covered producer set. Runtime
+ * batches release of those original task edges only after the shared Host
+ * binding seals, so dependency identity remains spatially exact without
+ * exposing partially mutable bytes. Whole-node, parameter, non-grid, and
+ * parameterized random-access dependencies still use a complete node join
+ * without constructing a Cartesian task-pair scan.
  */
 std::vector<std::vector<int>> build_task_dependency_ids(
     const std::vector<PlannedTask>& tasks,
@@ -811,7 +811,6 @@ std::vector<std::vector<int>> build_task_dependency_ids(
             extent_cache);
         append_covering_upstream_tiles(ids, upstream_index, required_roi,
                                        tasks);
-        append_node_dependency_tasks(ids, upstream_index);
         continue;
       }
       append_node_dependency_tasks(ids, upstream_index);
@@ -827,10 +826,10 @@ std::vector<std::vector<int>> build_task_dependency_ids(
  * @param result Plan whose ComputeTaskGraph task dependency metadata is
  * refreshed.
  * @throws std::bad_alloc if node-to-task lookup or ready ids grow.
- * @note Tile-to-tile image edges retain ROI derivation but join every selected
- * producer task so the producer's shared Host binding seals before any
- * downstream Value read. Whole-node and parameter dependencies already use
- * the same complete producer-node join.
+ * @note Tile-to-tile image edges retain exact ROI-derived dependencies.
+ * Runtime batches their physical release after complete producer publication.
+ * Whole-node and parameter dependencies retain their complete producer-node
+ * join.
  */
 void populate_task_dependencies(ComputePlan& result, const GraphModel* graph) {
   result.task_graph.initial_task_ids.clear();

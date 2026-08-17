@@ -258,11 +258,14 @@ partial output 只有 partial validity，因此 whole-output dependency resoluti
 regionless disk persistence 会拒绝它，直到 normal Whole commit 将其替换。Generic ABI v2
 monolithic callback 保持 complete-output replacement behavior。
 
-Task pruner 会把 active selected-task flag 之外的 dependency 视为已经满足。对于 active
-consumer，planning 还会 join 完整的 selected producer-node task set：tile 不能消费 sibling
-正在部分写入的 binding，因为只有 producer 的最终 seal 才会创建可观察 Value。overlap、
-out-of-range geometry、exception、cancellation、duplicate 或 missing retirement，或者使用未排空
-binding 执行 commit，都会形成 sticky failure，并保持此前的 formal/proxy Value 不变。
+Task pruner 会把 active selected-task flag 之外的 dependency 视为已经满足。Active spatial
+consumer 会保留精确覆盖 ROI 的 producer task id。每个非最终 tile 都会 retirement，但不释放
+这些 edge；最终 selected producer seal 并安装完整 Value 后，其唯一 publisher 才会通过每个
+原始 selected sibling task map 批量释放。这样，tile 无法消费 sibling 正在部分写入的 binding，
+同时 task identity 保持精确，也不会制造 continuation task。Whole 与 parameter dependency
+继续使用完整的 producer-node join。overlap、out-of-range geometry、exception、cancellation、
+duplicate 或 missing retirement，或者使用未排空 binding 执行 commit，都会形成 sticky failure，
+不释放尚未发布的 tile edge，并保持此前的 formal/proxy Value 不变。
 
 Kernel 的 product commit policy 会先物化 publication copy，随后在 graph-state work item 内检查：
 每个 child Run 已处于 `CommitPending`、拥有精确 staged Graph/proxy，并且仍匹配 live Graph

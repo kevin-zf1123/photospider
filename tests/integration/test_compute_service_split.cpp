@@ -575,6 +575,171 @@ class DirectDirtyProviderProbe final {
 };
 
 /**
+ * @brief Holds one source tile open while observing downstream tile entry.
+ *
+ * The left source tile writes its grant and retires normally. The right
+ * source tile announces entry, then waits before writing. A downstream
+ * callback records its first input sample so the owning test can distinguish
+ * complete publication from an early read of the still-open shared binding.
+ *
+ * @throws std::system_error from mutex or condition-variable operations.
+ * @note The owning test uses two execution workers, releases the blocked tile
+ * before joining its future, and retains this probe through callback captures.
+ */
+class TiledPublicationReleaseProbe final {
+ public:
+  /**
+   * @brief Creates one fresh blocked-source observation interval.
+   * @param fail_right_tile Whether the blocked tile throws after release.
+   * @throws Nothing.
+   */
+  explicit TiledPublicationReleaseProbe(bool fail_right_tile)
+      : fail_right_tile_(fail_right_tile) {}
+
+  /**
+   * @brief Writes one source tile, blocking the nonzero-x sibling first.
+   * @param output Borrowed checked source-tile write capability.
+   * @return Nothing after writing three to the left tile and, unless failure
+   * is injected, five to the right.
+   * @throws std::system_error from synchronization operations.
+   * @throws std::runtime_error when the armed right tile injects failure.
+   * @throws Image validation or OpenCV exceptions unchanged.
+   * @note The left-tile completion flag is published immediately before that
+   * callback returns. The right tile writes no bytes until release_source().
+   */
+  void write_source_tile(const OutputTile& output) {
+    if (output.roi.x == 0) {
+      toCvMat(output).setTo(3.0f);
+      std::lock_guard<std::mutex> lock(mutex_);
+      left_tile_written_ = true;
+      condition_.notify_all();
+      return;
+    }
+
+    bool fail_right_tile = false;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      right_tile_blocked_ = true;
+      condition_.notify_all();
+      condition_.wait(lock, [this] { return source_released_; });
+      fail_right_tile = fail_right_tile_;
+    }
+    if (fail_right_tile) {
+      throw std::runtime_error(
+          "injected tiled publication failure before final seal");
+    }
+    toCvMat(output).setTo(5.0f);
+  }
+
+  /**
+   * @brief Records one consumer entry and copies its first source sample.
+   * @param output Borrowed checked consumer-tile write capability.
+   * @param inputs Exact normalized source tile selected by ROI planning.
+   * @return Nothing after filling the output tile with the observed sample.
+   * @throws GraphError when the exact image input is absent.
+   * @throws std::system_error from synchronization operations.
+   * @throws Image validation or OpenCV exceptions unchanged.
+   * @note Entry is recorded before input validation so any premature callback
+   * remains observable even when the incomplete producer cannot be resolved.
+   */
+  void write_consumer_tile(const OutputTile& output,
+                           const std::vector<InputTile>& inputs) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++consumer_entries_;
+      condition_.notify_all();
+    }
+    if (inputs.size() != 1U || inputs.front().buffer == nullptr) {
+      throw GraphError(GraphErrc::MissingDependency,
+                       "publication-release consumer requires one input");
+    }
+    const InputTile& input = inputs.front();
+    const cv::Mat input_image = toCvMat(*input.buffer);
+    const float observed = input_image.at<float>(input.roi.y, input.roi.x);
+    toCvMat(output).setTo(observed);
+  }
+
+  /**
+   * @brief Waits until the left tile wrote and the right tile is blocked.
+   * @param timeout Maximum bounded wait.
+   * @return True when both source-side states are observed before timeout.
+   * @throws std::system_error from synchronization operations.
+   */
+  bool wait_for_partial_source(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout, [this] {
+      return left_tile_written_ && right_tile_blocked_;
+    });
+  }
+
+  /**
+   * @brief Waits for any downstream provider callback to enter.
+   * @param timeout Maximum bounded wait.
+   * @return True when at least one consumer entered before timeout.
+   * @throws std::system_error from synchronization operations.
+   */
+  bool wait_for_consumer(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout,
+                               [this] { return consumer_entries_ > 0; });
+  }
+
+  /**
+   * @brief Releases the blocked right source tile.
+   * @return Nothing.
+   * @throws std::system_error from synchronization operations.
+   * @note Release is monotonic and safe to invoke after a failed wait.
+   */
+  void release_source() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    source_released_ = true;
+    condition_.notify_all();
+  }
+
+  /**
+   * @brief Returns the number of entered consumer tile callbacks.
+   * @return Cumulative consumer entries under the probe lock.
+   * @throws std::system_error from synchronization operations.
+   */
+  int consumer_entries() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return consumer_entries_;
+  }
+
+  /**
+   * @brief Starts a clean successful interval after all callbacks settle.
+   * @return Nothing.
+   * @throws std::system_error from locking.
+   * @note The owning test invokes this only after the failed compute future
+   * returns, so no provider can observe the reset concurrently.
+   */
+  void reset_for_successful_retry() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    left_tile_written_ = false;
+    right_tile_blocked_ = false;
+    source_released_ = false;
+    fail_right_tile_ = false;
+    consumer_entries_ = 0;
+  }
+
+ private:
+  /** @brief Protects every state transition and observation. */
+  mutable std::mutex mutex_;
+  /** @brief Announces source and consumer state transitions. */
+  std::condition_variable condition_;
+  /** @brief Whether the nonblocking left source grant has been written. */
+  bool left_tile_written_ = false;
+  /** @brief Whether the right source grant is waiting before its write. */
+  bool right_tile_blocked_ = false;
+  /** @brief Monotonic authority allowing the right source tile to finish. */
+  bool source_released_ = false;
+  /** @brief Whether the blocked tile injects failure before writing. */
+  bool fail_right_tile_ = false;
+  /** @brief Number of downstream provider callbacks that entered. */
+  int consumer_entries_ = 0;
+};
+
+/**
  * @brief Coordinates the sequential-provider and post-provider lease boundary.
  *
  * One sequential callback blocks inside provider entry while a second request
@@ -3514,7 +3679,7 @@ TEST(TaskGraphPlanningSplit,
 }
 
 TEST(TaskGraphPlanningSplit,
-     TileDependenciesJoinCompleteProducerBeforeValueObservation) {
+     TileDependenciesRetainExactRoiWithBatchedPublicationRelease) {
   register_split_ops();
   GraphModel graph("cache/split-tile-overlap-dependencies");
   Node source = make_node(1, "split_plan", "tile");
@@ -3542,7 +3707,7 @@ TEST(TaskGraphPlanningSplit,
   ASSERT_EQ(downstream_tasks.size(), 2u);
   size_t dependency_edges = 0;
   for (const auto* task : downstream_tasks) {
-    ASSERT_EQ(task->dependency_task_ids.size(), 2u);
+    ASSERT_EQ(task->dependency_task_ids.size(), 1u);
     std::size_t overlapping_dependencies = 0U;
     for (int dependency_task_id : task->dependency_task_ids) {
       const auto& upstream_task = plan.task_graph.tasks.at(dependency_task_id);
@@ -3557,9 +3722,9 @@ TEST(TaskGraphPlanningSplit,
         << "ROI mapping still identifies one byte-producing sibling";
     dependency_edges += task->dependency_task_ids.size();
   }
-  EXPECT_EQ(dependency_edges, 4u)
-      << "each consumer waits for the producer node join because its immutable "
-         "Value is published only after both disjoint grants retire";
+  EXPECT_EQ(dependency_edges, 2u)
+      << "each consumer keeps only its exact spatial task dependency; runtime "
+         "batches physical release after complete Value publication";
 }
 
 TEST(TaskGraphPlanningSplit, TileDependenciesUseGaussianHaloInputRoi) {
@@ -3809,9 +3974,9 @@ TEST(TaskGraphPlanningSplit,
       image_dependency_count += dependency_node_id == 1 ? 1u : 0u;
       parameter_dependency_count += dependency_node_id == 3 ? 1u : 0u;
     }
-    EXPECT_EQ(image_dependency_count, 2u)
-        << "spatial ROI chooses one source tile, while Value observation waits "
-           "for the complete two-tile producer join";
+    EXPECT_EQ(image_dependency_count, 1u)
+        << "spatial ROI retains one exact source tile while the runtime "
+           "batches release until whole-Value publication";
     EXPECT_EQ(parameter_dependency_count, 1u)
         << "the uncached parameter producer remains a scheduling dependency "
            "even though SpatialAligned ROI geometry does not read its value";
@@ -6236,10 +6401,10 @@ TEST(TaskGraphPlanningSplit, RtDependencyPlanningUsesRtMetadata) {
     }
   }
   ASSERT_NE(middle_downstream_task, nullptr);
-  ASSERT_EQ(middle_downstream_task->dependency_task_ids.size(), 4u)
+  ASSERT_EQ(middle_downstream_task->dependency_task_ids.size(), 3u)
       << "RT random-access metadata expands the middle RT micro tile input "
-         "ROI across three upstream tiles, and immutable Value observation "
-         "also joins the remaining producer sibling";
+         "ROI across exactly three upstream tiles; batched physical release "
+         "does not add a false fourth task dependency";
   for (int dependency_task_id : middle_downstream_task->dependency_task_ids) {
     const auto& upstream_task = plan.task_graph.tasks.at(dependency_task_id);
     EXPECT_EQ(upstream_task.node_id, 1);
@@ -6507,6 +6672,135 @@ TEST(ComputeTaskRunnerSplit,
   EXPECT_FALSE(*graph.node(2).hp_region == partial_region);
 
   runtime.stop();
+}
+
+/**
+ * @brief Proves tiled failure releases no edges and retry publishes exactly.
+ *
+ * @return Nothing; GoogleTest reports early consumer entry, missing settlement,
+ * or final active-byte mismatches.
+ * @throws Graph, runtime, registry, allocation, future, synchronization, or
+ * image-adaptation exceptions when the production fixture cannot execute.
+ * @note Two source tiles occupy two workers. The left tile finishes while the
+ * right grant remains open and unwritten. The first interval injects failure
+ * and must release no exact dependent. A clean retry repeats the open interval,
+ * then makes both original ROI edges ready without extra continuation tasks or
+ * provider callbacks.
+ */
+TEST(ComputeTaskRunnerSplit,
+     TiledPublicationFailsClosedThenBatchesExactRoiEdgesAfterSeal) {
+  register_split_ops();
+  constexpr char kSourceType[] = "image_generator";
+  constexpr char kConsumerType[] = "issue130_publication_release";
+  constexpr char kSourceSubtype[] = "blocked_tiled_source";
+  constexpr char kConsumerSubtype[] = "observed_tiled_consumer";
+  auto probe = std::make_shared<TiledPublicationReleaseProbe>(true);
+  OpMetadata metadata;
+  metadata.tile_preference = TileSizePreference::MICRO;
+  auto& registry = OpRegistry::instance();
+  registry.register_op_hp_tiled(
+      kSourceType, kSourceSubtype,
+      TileOpFunc([probe](const Node&, const OutputTile& output,
+                         const std::vector<InputTile>&) {
+        probe->write_source_tile(output);
+      }),
+      metadata);
+  registry.register_op_hp_tiled(
+      kConsumerType, kConsumerSubtype,
+      TileOpFunc([probe](const Node&, const OutputTile& output,
+                         const std::vector<InputTile>& inputs) {
+        probe->write_consumer_tile(output, inputs);
+      }),
+      metadata);
+
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-tiled-publication-release");
+  GraphRuntime::Info info;
+  info.name = "tiled-publication-release";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+
+  GraphModel& graph = runtime.model();
+  Node source = make_node(1, kSourceType, kSourceSubtype);
+  source.parameters["width"] = 32;
+  source.parameters["height"] = 16;
+  Node consumer = make_node(2, kConsumerType, kConsumerSubtype);
+  consumer.parameters["width"] = 32;
+  consumer.parameters["height"] = 16;
+  consumer.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(consumer);
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(2U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  auto failed_compute = std::async(std::launch::async, [&] {
+    return &service.compute_parallel(graph, runtime, request);
+  });
+  const bool failed_partial_source_observed =
+      probe->wait_for_partial_source(std::chrono::seconds(2));
+  const bool failed_consumer_entered_early =
+      failed_partial_source_observed
+          ? probe->wait_for_consumer(std::chrono::milliseconds(250))
+          : false;
+  EXPECT_TRUE(failed_partial_source_observed);
+  EXPECT_FALSE(failed_consumer_entered_early)
+      << "exact ROI completion must not expose an open sibling grant";
+  EXPECT_EQ(failed_compute.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  probe->release_source();
+  EXPECT_THROW((void)failed_compute.get(), GraphError);
+  EXPECT_EQ(probe->consumer_entries(), 0);
+  EXPECT_FALSE(graph.node(1).cached_output_high_precision.has_value());
+  EXPECT_FALSE(graph.node(2).cached_output_high_precision.has_value());
+  expect_direct_authority_settled(execution_service);
+
+  probe->reset_for_successful_retry();
+  auto successful_compute = std::async(std::launch::async, [&] {
+    return &service.compute_parallel(graph, runtime, request);
+  });
+  const bool retry_partial_source_observed =
+      probe->wait_for_partial_source(std::chrono::seconds(2));
+  const bool retry_consumer_entered_early =
+      retry_partial_source_observed
+          ? probe->wait_for_consumer(std::chrono::milliseconds(250))
+          : false;
+  EXPECT_TRUE(retry_partial_source_observed);
+  EXPECT_FALSE(retry_consumer_entered_early)
+      << "retry must retain exact edges until the shared binding seals";
+  EXPECT_EQ(successful_compute.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  probe->release_source();
+
+  NodeOutput* output = nullptr;
+  EXPECT_NO_THROW(output = successful_compute.get());
+  EXPECT_EQ(probe->consumer_entries(), 2);
+  if (output != nullptr) {
+    const cv::Mat output_image = project_image_mat(*output);
+    ASSERT_EQ(output_image.rows, 16);
+    ASSERT_EQ(output_image.cols, 32);
+    EXPECT_FLOAT_EQ(output_image.at<float>(0, 0), 3.0f);
+    EXPECT_FLOAT_EQ(output_image.at<float>(0, 31), 5.0f);
+  }
+
+  runtime.stop();
+  registry.unregister_key(make_key(kSourceType, kSourceSubtype));
+  registry.unregister_key(make_key(kConsumerType, kConsumerSubtype));
 }
 
 /**

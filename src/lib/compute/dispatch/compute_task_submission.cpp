@@ -522,13 +522,22 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
                                          : ExecutionTraceAction::Execute;
   task_runtime.log_event(execute_action, task.node_id);
   try {
-    task_runner_->run_task(task_id);
-    if (defer_pending_value(task, identity, lease, task_runtime)) {
+    const NodeTaskRunner::TaskDependencyRelease dependency_release =
+        task_runner_->run_task(task_id);
+    if (dependency_release ==
+            NodeTaskRunner::TaskDependencyRelease::CurrentTask &&
+        defer_pending_value(task, identity, lease, task_runtime)) {
       return;
     }
     (void)lease.observe_cancellation();
     if (!lease.terminal_outcome().has_value()) {
-      release_dependents(task.task_id, task.node_id, lease, task_runtime);
+      if (dependency_release ==
+          NodeTaskRunner::TaskDependencyRelease::CompleteTiledNode) {
+        release_tiled_node_dependents(task.node_id, lease, task_runtime);
+      } else if (dependency_release ==
+                 NodeTaskRunner::TaskDependencyRelease::CurrentTask) {
+        release_dependents(task.task_id, task.node_id, lease, task_runtime);
+      }
     }
     task_execution_states_.at(task_id).store(
         static_cast<std::uint8_t>(TaskExecutionState::Completed),
@@ -670,6 +679,24 @@ void TaskSubmissionPlan::complete_deferred_value(
     } catch (...) {
     }
     std::rethrow_exception(failure);
+  }
+}
+
+/** @copydoc TaskSubmissionPlan::release_tiled_node_dependents */
+void TaskSubmissionPlan::release_tiled_node_dependents(
+    int node_id, const ComputeRunLease& lease,
+    ExecutionTaskRuntime& task_runtime) {
+  bool found_tile = false;
+  for (const PlannedTask& sibling : compute_plan_.task_graph.tasks) {
+    if (sibling.node_id != node_id || sibling.kind != PlannedTaskKind::Tile) {
+      continue;
+    }
+    found_tile = true;
+    release_dependents(sibling.task_id, node_id, lease, task_runtime);
+  }
+  if (!found_tile) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Tiled dependency release found no sibling tasks.");
   }
 }
 

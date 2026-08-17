@@ -937,9 +937,12 @@ publication 使用 no-throw state swap，并保留 revision。Contender 会在 p
 正式 image output validation 只接受 Ready 的规范 named Value，并拒绝任何非空
 `compatibility_image`。data-only successful target 保持有效，且不会发布伪造的 image identity。
 tiled/dirty task 共享一个 per-node binding；最后一个 executable tile retirement 并 seal 它，
-而 planning 会把 consumer 与完整 producer task set join，因为 partial mutable binding 不会作为
-Value 被观察。Commit 会拒绝未排空的 binding，并以相互独立的 Graph revision、HP generation
-与 Region fact 恰好一次发布已经 sealed 的 Value。
+而 planning 保留精确覆盖 ROI 的 task dependency。非最终 tile 不释放其原始 edge。只有唯一的
+最终 publisher seal、finalize 并安装完整 request-local Value 后，dispatch 才会通过每个 sibling
+task map 批量释放。这样既保留精确 logical task identity，也不会增加另一套 Value/readiness
+authority 或另一条 provider callback；whole 与 parameter dependency 继续使用完整 node join。
+Commit 会拒绝未排空的 binding，并以相互独立的 Graph revision、HP generation 与 Region fact
+恰好一次发布已经 sealed 的 Value。
 
 RT 会先应用该 predicate 并发布 proxy，再打开 sibling gate。HP 随后独立验证。因此，较新的 Graph
 revision 可以拒绝 HP，而不会回滚已经胜出的 RT publication。Gate 仍为 `Pending` 时发生的 RT

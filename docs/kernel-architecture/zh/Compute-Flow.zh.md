@@ -519,13 +519,17 @@ subscription surface 都不属于当前软件契约。
 6. Run commit 以相互独立的 graph、Region、HP-generation 与 RT-generation predicate 发布该
    已经 Ready 的 Value。
 
-任何 consumer 都不会观察 partial binding byte。因此，task-graph planning 会把 consumer 与
-完整的 selected producer-node task set join，而不只是某个重叠 ROI task。空的 successful
-target 保持 data-only，且不会发布 synthetic image。任何 grant error、exception、cancellation、
-missing retirement 或 undrained binding 都会使 Run 失败，并保持此前可见 Graph/RT state
-不变。Metal pre-commit deadline rejection 不会在最后一次 deadline observation 前安装
-completion handler，因此尚未提交的 owner graph 与所有 device lease 会正常 unwind，而不会
-变成不可见的 publication。
+任何 consumer 都不会观察 partial binding byte。Task-graph planning 会保留每个 consumer
+精确覆盖 ROI 的 producer task id。非最终 producer tile 会成功 retirement，但不释放其
+dependency edge；最终 tile seal、完成 metadata finalization 并安装完整的 request-local Value
+后，这个唯一 publisher 才会批量物理释放每条原始 sibling edge。因此，logical task identity
+保持空间精确，且不会增加第二套 Value/readiness authority 或额外 provider callback。
+Whole-node 与 parameter dependency 继续使用完整的 producer-node join。空的 successful target
+保持 data-only，且不会发布 synthetic image。任何 grant error、exception、cancellation、
+missing retirement 或 undrained binding 都会使 Run 失败，不释放尚未发布的 tile edge，并保持
+此前可见 Graph/RT state 不变。Metal pre-commit deadline rejection 不会在最后一次 deadline
+observation 前安装 completion handler，因此尚未提交的 owner graph 与所有 device lease 会正常
+unwind，而不会变成不可见的 publication。
 
 ## 事件和计时
 
