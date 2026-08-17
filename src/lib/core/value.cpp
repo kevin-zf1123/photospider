@@ -965,6 +965,14 @@ struct BufferHandle::ControlBlock final {
    */
   std::shared_ptr<void> external_owner;
 
+  /**
+   * @brief Optional immutable source-private callback-edge metadata.
+   * @note This metadata is co-owned by the allocation control block and grants
+   * no payload, native-handle, revision, readiness, cache, or runtime
+   * authority.
+   */
+  std::shared_ptr<const void> compatibility_projection;
+
   /** @brief Opaque native handle, or null for ordinary CPU storage. */
   void* native = nullptr;
 
@@ -1008,15 +1016,19 @@ struct BufferHandle::ControlBlock final {
    * @param size Positive complete allocation byte size.
    * @param device_in Concrete device binding.
    * @param memory_domain_in Explicit allocation domain.
+   * @param compatibility_projection_in Optional source-private callback-edge
+   * metadata.
    * @throws Nothing under shared ownership movement.
    */
   ControlBlock(AllocationIdentity identity_in, std::shared_ptr<void> owner_in,
                void* native_in, std::byte* host_data_in, std::size_t size,
-               DeviceId device_in, MemoryDomain memory_domain_in) noexcept
+               DeviceId device_in, MemoryDomain memory_domain_in,
+               std::shared_ptr<const void> compatibility_projection_in) noexcept
       : identity(identity_in),
         device(device_in),
         memory_domain(memory_domain_in),
         external_owner(std::move(owner_in)),
+        compatibility_projection(std::move(compatibility_projection_in)),
         native(native_in),
         host_data(host_data_in),
         byte_size(size) {}
@@ -1047,7 +1059,8 @@ BufferHandle BufferHandle::allocate_for_builder(std::size_t size,
 /** @copydoc BufferHandle::retain_external_binding */
 BufferHandle BufferHandle::retain_external_binding(
     std::shared_ptr<void> owner, void* native_handle, std::byte* host_pointer,
-    std::size_t size, DeviceId device, MemoryDomain memory_domain) {
+    std::size_t size, DeviceId device, MemoryDomain memory_domain,
+    std::shared_ptr<const void> compatibility_projection) {
   if (!owner || native_handle == nullptr || size == 0U) {
     throw std::invalid_argument(
         "External BufferHandle requires owner, native handle, and bytes.");
@@ -1062,8 +1075,16 @@ BufferHandle BufferHandle::retain_external_binding(
       process_identity_authority().mint_allocation_identity());
   return BufferHandle(
       std::make_shared<ControlBlock>(identity, std::move(owner), native_handle,
-                                     host_pointer, size, device, memory_domain),
+                                     host_pointer, size, device, memory_domain,
+                                     std::move(compatibility_projection)),
       0U, size);
+}
+
+/** @copydoc BufferHandle::retained_compatibility_projection */
+std::shared_ptr<const void> BufferHandle::retained_compatibility_projection()
+    const noexcept {
+  return control_ ? control_->compatibility_projection
+                  : std::shared_ptr<const void>{};
 }
 
 /** @copydoc BufferHandle::valid */
@@ -1873,8 +1894,9 @@ PendingDeviceValuePublication PendingDeviceValuePublisher::publish_dense_tensor(
     DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
     StridedLayout layout, std::shared_ptr<void> owner, void* native_handle,
     std::byte* host_pointer, std::size_t storage_size, DeviceId device,
-    MemoryDomain memory_domain,
-    std::optional<ValueRevisionId> replica_revision) {
+    MemoryDomain memory_domain, std::optional<ValueRevisionId> replica_revision,
+    std::shared_ptr<const ExternalBindingCompatibilityProjection>
+        compatibility_projection) {
   const std::size_t element_bytes =
       validate_descriptor_and_facet(descriptor, image_facet);
   const AddressEnvelope envelope =
@@ -1890,7 +1912,7 @@ PendingDeviceValuePublication PendingDeviceValuePublisher::publish_dense_tensor(
 
   BufferHandle buffer = BufferHandle::retain_external_binding(
       std::move(owner), native_handle, host_pointer, storage_size, device,
-      memory_domain);
+      memory_domain, std::move(compatibility_projection));
   PendingReadyFence pending_fence = make_pending_ready_fence();
   ValueRevisionId revision;
   if (replica_revision.has_value()) {
@@ -1906,6 +1928,14 @@ PendingDeviceValuePublication PendingDeviceValuePublisher::publish_dense_tensor(
       std::move(buffer), pending_fence.fence, revision, producer);
   return {Value(std::move(published)),
           PendingDeviceValueProducer(std::move(pending_fence.completer))};
+}
+
+/** @copydoc PendingDeviceValuePublisher::retained_compatibility_projection */
+std::shared_ptr<const ExternalBindingCompatibilityProjection>
+PendingDeviceValuePublisher::retained_compatibility_projection(
+    const Value& value) {
+  return std::static_pointer_cast<const ExternalBindingCompatibilityProjection>(
+      value.buffer_handle().retained_compatibility_projection());
 }
 
 /** @copydoc PendingDeviceValuePublisher::publish_blocked_dense_tensor */

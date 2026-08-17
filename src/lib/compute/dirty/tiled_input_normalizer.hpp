@@ -18,8 +18,9 @@ namespace ps::compute {
  * @note Pointers in inputs either reference upstream NodeOutput objects
  * supplied by the caller or elements owned by normalized_storage. Entries in
  * callback_images align with inputs and retain independent use-scoped
- * snapshots. The context must stay alive until all TileTask callbacks using
- * those pointers have finished.
+ * projections. CPU inputs are owned snapshots; exact imported ABI v2 inputs
+ * are opaque aliases retaining their canonical Values. The context must stay
+ * alive until all TileTask callbacks using those pointers have finished.
  */
 struct TiledInputContext {
   /** @brief Temporary normalized images used by image_mixing secondary inputs.
@@ -54,6 +55,9 @@ struct TiledInputContext {
  * named-data, spatial/debug provenance, and plugin DSO leases remain copied
  * from each upstream NodeOutput. Every materialized normalized image is
  * imported through a Host binding and sealed before it enters the context.
+ * Opaque non-CPU inputs pass through only while their shape already matches;
+ * resize, crop, and channel conversion remain explicit CPU-only operations
+ * and fail closed otherwise.
  */
 class TiledInputNormalizer {
  public:
@@ -68,6 +72,9 @@ class TiledInputNormalizer {
    * @throws std::invalid_argument, std::out_of_range, std::overflow_error, or
    *         std::bad_alloc when kernel validation, allocation, fill, or copy
    *         fails.
+   * @throws ReadyFenceAccessError or BufferAccessError when an input cannot
+   *         enter the current ABI v2 callback edge without an explicit access
+   *         or transfer plan.
    * @throws std::exception when the selected resize/channel implementation
    *         fails.
    * @note The method performs whole-input normalization only when needed; tile

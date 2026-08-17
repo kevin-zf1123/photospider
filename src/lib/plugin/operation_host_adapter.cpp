@@ -275,12 +275,15 @@ void attach_result_library_lifetime(
  * @return Storage owning every copied non-image value and view.
  * @throws std::invalid_argument, std::out_of_range, std::overflow_error,
  * ReadyFenceAccessError, or BufferAccessError when a canonical Value cannot be
- * projected through the current CPU ImageBuffer edge.
+ * projected through the current ImageBuffer ABI v2 edge.
  * @throws std::bad_alloc unchanged from recursive copying, projection, or
  * vector allocation.
- * @note Null inputs become empty views without dereferencing host storage.
- *       Every non-null NodeOutput exposes its spatial snapshot even when it is
- *       data-only and therefore has no image payload.
+ * @note Null inputs become empty views without dereferencing storage. CPU
+ *       Values become owned snapshots; exact imported ABI v2 bindings become
+ *       use-scoped opaque descriptor/context aliases that retain their source
+ *       Value and never become runtime authority. Every non-null NodeOutput
+ *       exposes its spatial snapshot even when it is data-only and therefore
+ *       has no image payload.
  */
 OperationInputStorage make_operation_inputs(
     const std::vector<const NodeOutput*>& inputs) {
@@ -297,7 +300,8 @@ OperationInputStorage make_operation_inputs(
     }
     if (input->has_image_value()) {
       storage.images.push_back(
-          value_image_adapter::snapshot_cpu_image_buffer(input->image_value()));
+          value_image_adapter::project_image_value_for_abi_v2(
+              input->image_value()));
     } else {
       storage.images.emplace_back();
     }
@@ -442,11 +446,13 @@ struct RoiInvocationStorage {
  * @return Owned invocation storage with stable internal pointers.
  * @throws std::invalid_argument, std::out_of_range, std::overflow_error,
  * ReadyFenceAccessError, or BufferAccessError when a canonical Value cannot be
- * projected through the current CPU ImageBuffer edge.
+ * projected through the current ImageBuffer ABI v2 edge.
  * @throws std::bad_alloc unchanged from snapshot construction.
  * @note The returned context contains no graph owner or mutable cache handle.
- *       Active-edge validation belongs to `RoiInvocationStorage::view()` after
- *       this storage has reached its final address.
+ *       CPU Values become snapshots; exact imported ABI v2 bindings become
+ *       use-scoped opaque aliases retaining their source Value. Active-edge
+ *       validation belongs to `RoiInvocationStorage::view()` after this
+ *       storage has reached its final address.
  */
 RoiInvocationStorage make_roi_invocation(
     const Node& node, const GraphModel& graph, const PixelRect& requested_roi,
@@ -493,7 +499,7 @@ RoiInvocationStorage make_roi_invocation(
     if (available) {
       if (available->has_image_value()) {
         storage.available_images.back() =
-            value_image_adapter::snapshot_cpu_image_buffer(
+            value_image_adapter::project_image_value_for_abi_v2(
                 available->image_value());
       }
       storage.available_data.back() = available->data;

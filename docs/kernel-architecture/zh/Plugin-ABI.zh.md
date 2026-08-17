@@ -120,6 +120,15 @@ CPU staging 前只做不可变共享；monolithic output 视为全量替换。Do
 descriptor 及其完整 extent 执行明确的 backend-preserving passthrough；它不会伪造低分辨率 pixel 或虚假的
 缩小 extent。对于没有匹配 device adapter 的 descriptor，cache 与 metrics pixel inspection 会跳过。
 
+在 Issue #132 替换 operation ABI v2 前，其 inbound adapter 会通过 Host-owned binding snapshot CPU
+result，但会把 opaque non-CPU result 导入为唯一 Ready、host-invisible Value。该 Value 的唯一
+`BufferHandle` control block 会把精确原始 descriptor、backend payload/context owner 与 DSO lease
+保留为 source-private compatibility metadata。后续 monolithic、ROI 或 tiled ABI v2 consumer 会接收
+use-scoped descriptor/context alias，其 owner 会保留 source Value。此路径不执行隐式 map 或 transfer，
+不创建第二套 runtime/cache authority；当 image-mixing resize、crop 或 channel conversion 需要 CPU
+pixel 时会 fail-closed。其他缺少这份精确 import metadata 的 non-host-visible Value 也会在 compatibility
+edge 显式失败。
+
 这个拆分支持静态 host 方向：
 
 - 静态 Photospider 进程拥有一个 `OpRegistry` 和一个 operation `PluginManager`，由所有 embedded Host 共享。

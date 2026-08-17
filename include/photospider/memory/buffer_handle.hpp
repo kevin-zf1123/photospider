@@ -294,19 +294,33 @@ class BufferHandle final {
    * @param size Positive complete allocation size.
    * @param device Concrete device binding.
    * @param memory_domain Explicit allocation domain.
+   * @param compatibility_projection Optional source-private compatibility
+   * metadata retained with this allocation.
    * @return Complete checked handle with a fresh allocation identity.
    * @throws std::invalid_argument for missing owner/native handle, zero size,
    * or a host domain without a host pointer.
    * @throws std::overflow_error when allocation identity is exhausted.
    * @throws std::bad_alloc when control-block allocation fails.
    * @note Only the source-private pending-device publisher can construct this
-   *       binding. The public handle exposes neither native_handle nor owner.
+   *       binding. The public handle exposes neither native_handle, owner, nor
+   *       compatibility metadata. Retained metadata is callback-edge state,
+   *       never allocation, Value, cache, or runtime authority.
    */
-  static BufferHandle retain_external_binding(std::shared_ptr<void> owner,
-                                              void* native_handle,
-                                              std::byte* host_pointer,
-                                              std::size_t size, DeviceId device,
-                                              MemoryDomain memory_domain);
+  static BufferHandle retain_external_binding(
+      std::shared_ptr<void> owner, void* native_handle, std::byte* host_pointer,
+      std::size_t size, DeviceId device, MemoryDomain memory_domain,
+      std::shared_ptr<const void> compatibility_projection = {});
+
+  /**
+   * @brief Returns retained source-private compatibility metadata.
+   * @return Shared immutable metadata, or empty when none was attached.
+   * @throws Nothing.
+   * @note Only the source-private pending-device publisher may inspect this
+   *       callback-edge metadata. The pointer grants no payload or native
+   *       access and remains co-owned by the allocation control block.
+   */
+  std::shared_ptr<const void> retained_compatibility_projection()
+      const noexcept;
 
   /**
    * @brief Returns the range start for a retaining friend access object.

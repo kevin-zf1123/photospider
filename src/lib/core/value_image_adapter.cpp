@@ -84,22 +84,37 @@ std::pair<ElementSemantics, StorageEncoding> dense_element_from_image_type(
  * owner. Individual data/context deleters, including plugin lease wrappers,
  * therefore remain alive until the final Value copy retires.
  */
-struct ImportedImageBindingOwner final {
+struct ImportedImageBindingOwner final
+    : public ExternalBindingCompatibilityProjection {
   /**
-   * @brief Takes complete ownership of one inbound compatibility payload.
-   * @param retained_data Optional backend data owner.
-   * @param retained_context Optional opaque backend context owner.
+   * @brief Takes complete ownership of one inbound compatibility descriptor.
+   * @param retained_image Exact opaque backend descriptor and owners.
    * @throws Nothing because shared-owner moves are non-throwing.
    */
-  ImportedImageBindingOwner(std::shared_ptr<void> retained_data,
-                            std::shared_ptr<void> retained_context) noexcept
-      : data(std::move(retained_data)), context(std::move(retained_context)) {}
+  explicit ImportedImageBindingOwner(ImageBuffer retained_image) noexcept
+      : image(std::move(retained_image)) {}
 
-  /** @brief Optional backend data owner retained through Value retirement. */
-  std::shared_ptr<void> data;
-  /** @brief Optional opaque backend context retained through Value retirement.
+  /** @brief Exact opaque descriptor retained through Value retirement. */
+  ImageBuffer image;
+};
+
+/**
+ * @brief Retains one canonical Value behind an ABI v2 ImageBuffer projection.
+ * @throws Nothing for construction and destruction.
+ * @note Aliasing ImageBuffer owners point at original backend addresses while
+ * this state keeps the unique immutable binding and its DSO owners alive.
+ */
+struct AbiV2ImageProjectionLifetime final {
+  /**
+   * @brief Retains the exact canonical source for a callback projection.
+   * @param retained_value Ready imported Value to keep alive.
+   * @throws Nothing because Value movement is non-throwing.
    */
-  std::shared_ptr<void> context;
+  explicit AbiV2ImageProjectionLifetime(Value retained_value) noexcept
+      : value(std::move(retained_value)) {}
+
+  /** @brief Canonical Value retained until every projection copy retires. */
+  Value value;
 };
 
 /**
@@ -544,6 +559,62 @@ ImageBuffer snapshot_cpu_image_buffer(const Value& value) {
   return output;
 }
 
+/** @copydoc project_image_value_for_abi_v2 */
+ImageBuffer project_image_value_for_abi_v2(const Value& value) {
+  if (!value.valid() ||
+      value.representation_kind() != ValueRepresentationKind::DenseTensor ||
+      value.storage_layout_kind() != StorageLayoutKind::Strided ||
+      !value.image_facet().has_value()) {
+    throw std::invalid_argument(
+        "ABI v2 projection requires a valid Strided image Value.");
+  }
+  const StorageBinding binding = value.storage_binding();
+  if (binding.host_visible) {
+    return snapshot_cpu_image_buffer(value);
+  }
+  if (binding.memory_domain != MemoryDomain::Imported) {
+    throw BufferAccessError();
+  }
+
+  const std::shared_ptr<const ExternalBindingCompatibilityProjection>
+      projection =
+          PendingDeviceValuePublisher::retained_compatibility_projection(value);
+  const auto imported =
+      std::dynamic_pointer_cast<const ImportedImageBindingOwner>(projection);
+  if (!imported) {
+    throw BufferAccessError();
+  }
+
+  validate_image_buffer(imported->image);
+  if (imported->image.device == Device::CPU) {
+    throw std::logic_error(
+        "Imported ABI v2 projection unexpectedly describes CPU storage.");
+  }
+  const DenseImageOutputPlan plan = compatibility_image_plan(imported->image);
+  if (!(value.dense_tensor_descriptor() == plan.descriptor()) ||
+      !(*value.image_facet() == plan.image_facet()) ||
+      !(value.strided_layout() == plan.layout()) ||
+      value.storage_size() != plan.storage_size() ||
+      binding.byte_size != plan.storage_size() || binding.host_visible ||
+      binding.device != DeviceId(device_backend(imported->image.device))) {
+    throw std::logic_error(
+        "Imported ABI v2 projection disagrees with canonical Value facts.");
+  }
+
+  ImageBuffer result = imported->image;
+  void* data_address = result.data.get();
+  void* context_address = result.context.get();
+  auto lifetime = std::make_shared<AbiV2ImageProjectionLifetime>(value);
+  result.data = data_address != nullptr
+                    ? std::shared_ptr<void>(lifetime, data_address)
+                    : std::shared_ptr<void>{};
+  result.context = context_address != nullptr
+                       ? std::shared_ptr<void>(lifetime, context_address)
+                       : std::shared_ptr<void>{};
+  validate_image_buffer(result);
+  return result;
+}
+
 /** @copydoc import_node_output_compatibility_image */
 void import_node_output_compatibility_image(NodeOutput* output) {
   if (output == nullptr) {
@@ -581,13 +652,16 @@ void import_node_output_compatibility_image(NodeOutput* output) {
   DenseImageOutputPlan plan = compatibility_image_plan(buffer);
   void* native_handle =
       buffer.context ? buffer.context.get() : buffer.data.get();
-  auto owner =
-      std::make_shared<ImportedImageBindingOwner>(buffer.data, buffer.context);
+  auto owner = std::make_shared<ImportedImageBindingOwner>(buffer);
+  std::shared_ptr<void> binding_owner = owner;
+  std::shared_ptr<const ExternalBindingCompatibilityProjection>
+      compatibility_projection = owner;
   PendingDeviceValuePublication publication =
       PendingDeviceValuePublisher::publish_dense_tensor(
           plan.descriptor(), plan.image_facet(), plan.layout(),
-          std::move(owner), native_handle, nullptr, plan.storage_size(),
-          DeviceId(device_backend(buffer.device)), MemoryDomain::Imported);
+          std::move(binding_owner), native_handle, nullptr, plan.storage_size(),
+          DeviceId(device_backend(buffer.device)), MemoryDomain::Imported,
+          std::nullopt, std::move(compatibility_projection));
   if (!publication.producer.complete_ready()) {
     throw std::logic_error(
         "ImageBuffer device import lost its pending publication authority.");

@@ -17,9 +17,11 @@
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "adapters/yaml/parameter_value_yaml.hpp"
 #include "compute/dirty/dirty_region_planner.hpp"
+#include "compute/dirty/tiled_input_normalizer.hpp"
 #include "compute/dispatch/task_graph_planning.hpp"
 #include "compute/image_buffer.hpp"
 #include "core/parameter_value_text.hpp"
+#include "core/pending_value.hpp"
 #include "core/value_image_adapter.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/graph_traversal_service.hpp"
@@ -921,18 +923,20 @@ TEST(OperationHostAdapter,
 }
 
 /**
- * @brief Verifies an imported device Value independently owns its plugin
- * payload and library lease in the required retirement order.
+ * @brief Verifies imported device Values cross every current ABI v2 input edge.
  *
  * @return Nothing; GoogleTest assertions report binding or lifetime defects.
  * @throws Allocation and adapter exceptions unchanged to the test framework.
  * @note The synthetic deleters execute in the test binary, while the real DSO
  * fixture exercises the same shared-owner graph on supported native-loading
- * platforms. Resetting the enclosing NodeOutput must not retire either owner;
- * resetting the final Value must retire payload before library.
+ * platforms. Monolithic, ROI, and tiled consumers receive the exact opaque
+ * descriptor/context without CPU access. A retained callback projection keeps
+ * the canonical Value alive after its NodeOutput retires, then releases payload
+ * before library. Pixel-transforming image_mixing and unmarked device Values
+ * remain fail-closed.
  */
 TEST(OperationHostAdapter,
-     ImportedDeviceValueRetainsPayloadAndLibraryAfterOutputRetires) {
+     ImportedDeviceValueProjectsToAbiV2ConsumersAndRetainsOwners) {
   std::vector<std::string> retirement_trace;
   auto library_lifetime =
       std::shared_ptr<void>(new int(1), [&retirement_trace](void* pointer) {
@@ -944,6 +948,7 @@ TEST(OperationHostAdapter,
         delete static_cast<int*>(pointer);
         retirement_trace.emplace_back("payload");
       });
+  void* const payload_address = payload.get();
 
   Node node;
   node.id = 45;
@@ -977,12 +982,140 @@ TEST(OperationHostAdapter,
   EXPECT_FALSE(binding.host_visible);
   EXPECT_EQ(converted.image_value().ready_fence().poll().state(),
             ReadyFenceState::Ready);
+  EXPECT_THROW((void)value_image_adapter::snapshot_cpu_image_buffer(
+                   converted.image_value()),
+               BufferAccessError);
 
-  Value retained_value = converted.image_value();
+  ImageBuffer retained_projection;
+  bool monolithic_saw_opaque_input = false;
+  Node consumer_node = node;
+  consumer_node.id = 46;
+  consumer_node.name = "imported_device_consumer";
+  consumer_node.subtype = "imported_device_consumer";
+  MonolithicOpFunc consumer = plugin_host::adapt_monolithic_operation(
+      [&](const plugin::NodeView&,
+          plugin::ArrayView<plugin::OperationInputView> inputs) {
+        monolithic_saw_opaque_input =
+            inputs.size() == 1U && inputs[0].image_buffer != nullptr &&
+            inputs[0].image_buffer->width == 2 &&
+            inputs[0].image_buffer->height == 3 &&
+            inputs[0].image_buffer->channels == 1 &&
+            inputs[0].image_buffer->type == DataType::UINT8 &&
+            inputs[0].image_buffer->device == Device::GPU_METAL &&
+            inputs[0].image_buffer->context.get() == payload_address;
+        if (inputs.size() == 1U && inputs[0].image_buffer != nullptr) {
+          retained_projection = *inputs[0].image_buffer;
+        }
+        return plugin::OperationOutput{};
+      });
+  const std::vector<const NodeOutput*> available_inputs{&converted};
+  EXPECT_NO_THROW((void)consumer(consumer_node, available_inputs));
+  EXPECT_TRUE(monolithic_saw_opaque_input);
+  ASSERT_TRUE(retained_projection.context);
+  EXPECT_EQ(retained_projection.context.get(), payload_address);
+
+  GraphModel graph = make_graph();
+  graph.add_node(make_source_node(45, "imported_device_source", 2, 3));
+  Node roi_node = make_blur_node(47, 45, 3);
+  roi_node.type = "operation_sdk_test";
+  roi_node.subtype = "imported_device_roi_consumer";
+  graph.add_node(roi_node);
+  graph.validate_topology();
+  bool roi_saw_opaque_input = false;
+  DirtyRoiPropFunc dirty = plugin_host::adapt_dirty_propagator(
+      [&](const plugin::RoiContext& context) {
+        roi_saw_opaque_input =
+            context.input_edges.size() == 1U &&
+            context.input_edges[0].has_available_input &&
+            context.input_edges[0].available_input.image_buffer != nullptr &&
+            context.input_edges[0].available_input.image_buffer->device ==
+                Device::GPU_METAL &&
+            context.input_edges[0]
+                    .available_input.image_buffer->context.get() ==
+                payload_address;
+        return context.requested_roi;
+      });
+  const plugin::ParameterMap effective_parameters;
+  EXPECT_EQ(
+      dirty(graph.node(47), (PixelRect{0, 0, 2, 3}), graph, (PixelSize{2, 3}),
+            {(PixelSize{2, 3})}, effective_parameters, &available_inputs),
+      (PixelRect{0, 0, 2, 3}));
+  EXPECT_TRUE(roi_saw_opaque_input);
+
+  {
+    Node tiled_node = consumer_node;
+    tiled_node.type = "opaque_passthrough";
+    const compute::TiledInputContext tiled_context =
+        compute::TiledInputNormalizer::normalize(tiled_node, available_inputs);
+    ASSERT_EQ(tiled_context.callback_images.size(), 1U);
+    EXPECT_EQ(tiled_context.callback_images.front().device, Device::GPU_METAL);
+    EXPECT_EQ(tiled_context.callback_images.front().context.get(),
+              payload_address);
+
+    bool tiled_saw_opaque_input = false;
+    TileOpFunc tiled_consumer = plugin_host::adapt_tiled_operation(
+        [&](const plugin::NodeView&, const OutputTileView&,
+            plugin::ArrayView<plugin::OperationTileInputView> inputs) {
+          tiled_saw_opaque_input =
+              inputs.size() == 1U && inputs[0].tile.buffer != nullptr &&
+              inputs[0].tile.buffer->device == Device::GPU_METAL &&
+              inputs[0].tile.buffer->context.get() == payload_address;
+        });
+    ImageBuffer tiled_output =
+        make_aligned_cpu_image_buffer(2, 3, 1, DataType::UINT8);
+    const Value tiled_plan_value =
+        value_image_adapter::snapshot_cpu_image_value(tiled_output);
+    ASSERT_TRUE(tiled_plan_value.image_facet().has_value());
+    HostOutputBinding tiled_binding =
+        HostOutputBinding::allocate(DenseImageOutputPlan::create(
+            "image", tiled_plan_value.dense_tensor_descriptor(),
+            *tiled_plan_value.image_facet(), tiled_plan_value.strided_layout(),
+            tiled_plan_value.storage_size(), 64U));
+    HostOutputWriteGrant tiled_grant =
+        tiled_binding.grant_tile({image_region_domain(), 0, 2, 0, 3});
+    OutputTile tiled_output_view{&tiled_binding.plan(), &tiled_grant,
+                                 (PixelRect{0, 0, 2, 3})};
+    const std::vector<InputTile> tiled_inputs{
+        InputTile{&tiled_context.callback_images.front(),
+                  (PixelRect{0, 0, 2, 3}), nullptr}};
+    EXPECT_NO_THROW(
+        tiled_consumer(tiled_node, tiled_output_view, tiled_inputs));
+    EXPECT_TRUE(tiled_saw_opaque_input);
+    tiled_grant.retire_success();
+    (void)tiled_binding.seal();
+
+    NodeOutput cpu_base;
+    cpu_base.publish_image_value(value_image_adapter::snapshot_cpu_image_value(
+        make_aligned_cpu_image_buffer(4, 3, 1, DataType::UINT8)));
+    Node mixing_node = consumer_node;
+    mixing_node.type = "image_mixing";
+    const std::vector<const NodeOutput*> mixing_inputs{&cpu_base, &converted};
+    EXPECT_THROW((void)compute::TiledInputNormalizer::normalize(mixing_node,
+                                                                mixing_inputs),
+                 std::invalid_argument);
+  }
+
+  ImageBuffer metadata_source =
+      make_aligned_cpu_image_buffer(2, 3, 1, DataType::UINT8);
+  const Value metadata_value =
+      value_image_adapter::snapshot_cpu_image_value(metadata_source);
+  auto unmarked_owner = std::make_shared<int>(9);
+  PendingDeviceValuePublication unmarked =
+      PendingDeviceValuePublisher::publish_dense_tensor(
+          metadata_value.dense_tensor_descriptor(),
+          metadata_value.image_facet(), metadata_value.strided_layout(),
+          unmarked_owner, unmarked_owner.get(), nullptr,
+          metadata_value.storage_size(), DeviceId(DeviceBackend::Metal),
+          MemoryDomain::DeviceLocal);
+  ASSERT_TRUE(unmarked.producer.complete_ready());
+  EXPECT_THROW(
+      (void)value_image_adapter::project_image_value_for_abi_v2(unmarked.value),
+      BufferAccessError);
+
   converted = NodeOutput{};
   EXPECT_TRUE(retirement_trace.empty());
 
-  retained_value = Value{};
+  retained_projection = ImageBuffer{};
   EXPECT_EQ(retirement_trace, (std::vector<std::string>{"payload", "library"}));
 }
 

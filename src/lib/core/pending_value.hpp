@@ -342,6 +342,23 @@ struct PendingDeviceValuePublication final {
 };
 
 /**
+ * @brief Polymorphic marker for one source-private compatibility projection.
+ *
+ * @throws Nothing for construction and destruction.
+ * @note Instances carry callback-edge metadata only. They grant no storage,
+ * native-handle, allocation, revision, readiness, cache, or runtime authority.
+ */
+class ExternalBindingCompatibilityProjection {
+ public:
+  /** @brief Releases source-private projection metadata. */
+  virtual ~ExternalBindingCompatibilityProjection() noexcept = default;
+
+ protected:
+  /** @brief Allows only a concrete source-private metadata record to exist. */
+  ExternalBindingCompatibilityProjection() noexcept = default;
+};
+
+/**
  * @brief Source-private factory for retained native and external bindings.
  *
  * @throws Nothing for construction and destruction.
@@ -365,6 +382,8 @@ class PendingDeviceValuePublisher final {
    * @param memory_domain Explicit allocation domain.
    * @param replica_revision Optional existing logical revision preserved by an
    *        explicit residency transfer; absence mints a new source revision.
+   * @param compatibility_projection Optional immutable source-private
+   *        callback-edge metadata retained by the external binding.
    * @return Pending Value plus unique terminal capability.
    * @throws std::invalid_argument for malformed logical, binding, or envelope
    * state.
@@ -374,13 +393,30 @@ class PendingDeviceValuePublisher final {
    * @throws std::bad_alloc when complete descriptor/ImageFacet metadata or
    *         immutable/control state cannot allocate.
    * @note Publication performs no payload access and submits no native work.
+   *       Compatibility metadata creates no allocation, revision, readiness,
+   *       cache, or native-access authority.
    */
   static PendingDeviceValuePublication publish_dense_tensor(
       DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
       StridedLayout layout, std::shared_ptr<void> owner, void* native_handle,
       std::byte* host_pointer, std::size_t storage_size, DeviceId device,
       MemoryDomain memory_domain,
-      std::optional<ValueRevisionId> replica_revision = std::nullopt);
+      std::optional<ValueRevisionId> replica_revision = std::nullopt,
+      std::shared_ptr<const ExternalBindingCompatibilityProjection>
+          compatibility_projection = {});
+
+  /**
+   * @brief Obtains callback-edge metadata retained by one Ready dense Value.
+   * @param value Valid Ready DenseTensor Value whose binding is inspected.
+   * @return Shared immutable metadata, or empty when none was attached.
+   * @throws std::logic_error for an invalid or provider-defined Value.
+   * @throws ReadyFenceAccessError when producer completion is not Ready.
+   * @note The returned pointer grants no payload or native access. This
+   *       source-private observation exists only for explicit compatibility
+   *       adapters and does not alter the Value or binding.
+   */
+  static std::shared_ptr<const ExternalBindingCompatibilityProjection>
+  retained_compatibility_projection(const Value& value);
 
   /**
    * @brief Publishes a validated pending FP4 Blocked external binding.

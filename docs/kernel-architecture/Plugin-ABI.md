@@ -158,6 +158,17 @@ backend-preserving passthrough; it does not fabricate reduced pixels or a false
 reduced extent. Cache and metrics pixel inspection skips descriptors for which
 no matching device adapter exists.
 
+Until Issue #132 replaces operation ABI v2, its inbound adapter snapshots CPU
+results through a Host-owned binding but imports an opaque non-CPU result as one
+Ready, host-invisible Value. That Value's sole `BufferHandle` control block
+retains the exact original descriptor, backend payload/context owners, and DSO
+lease as source-private compatibility metadata. A subsequent monolithic, ROI,
+or tiled ABI v2 consumer receives a use-scoped descriptor/context alias whose
+owner retains the source Value. This performs no implicit map or transfer,
+creates no second runtime/cache authority, and fails closed when image-mixing
+resize, crop, or channel conversion requires CPU pixels. Other non-host-visible
+Values without this exact import metadata also fail the compatibility edge.
+
 This split supports the static-host direction:
 
 - The static Photospider process owns one `OpRegistry` and one operation
