@@ -152,12 +152,15 @@ DenseImageOutputPlan make_offset_kernel_output_plan(
  * @brief Projects one canonical Kernel-test image for callback-local access.
  *
  * @param output Output containing a Ready host-readable image Value.
- * @return Callback-local ImageBuffer projection retaining the immutable Value.
+ * @return Callback-local, independently allocated ImageBuffer snapshot of the
+ * immutable Value bytes.
  * @throws std::invalid_argument when the canonical image is absent.
  * @throws ReadyFenceAccessError, BufferAccessError, or metadata conversion
  * exceptions unchanged.
- * @note Callers must treat the returned bytes as read-only. The projection is
- * never stored in graph, cache, proxy, or result authority.
+ * @note Callers must treat the returned bytes as read-only. The returned
+ * ImageBuffer owns its copied payload and does not retain the source Value;
+ * every borrowed adapter view must remain inside the ImageBuffer lifetime.
+ * The snapshot is never stored in graph, cache, proxy, or result authority.
  */
 ImageBuffer project_kernel_contract_image(const NodeOutput& output) {
   if (!output.has_image_value()) {
@@ -2335,7 +2338,8 @@ TEST(ImageBufferContract,
   grant.retire_success();
   NodeOutput published;
   published.publish_image_value(binding.seal());
-  const cv::Mat pixels = toCvMat(project_kernel_contract_image(published));
+  const ImageBuffer pixels_buffer = project_kernel_contract_image(published);
+  const cv::Mat pixels = toCvMat(pixels_buffer);
   EXPECT_FLOAT_EQ(pixels.at<float>(2, 3), 7.0F);
   EXPECT_FLOAT_EQ(pixels.at<float>(4, 7), 7.0F);
   EXPECT_FLOAT_EQ(pixels.at<float>(1, 3), 0.0F);
