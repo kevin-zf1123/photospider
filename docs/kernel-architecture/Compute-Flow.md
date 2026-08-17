@@ -181,6 +181,20 @@ and Host-authored completion identity. Realtime children settle through
 the request-owned `RunGroup`, whose stable control owns both observation leases,
 the RT-first gate, cancellation fan-out, and deterministic aggregate outcome.
 
+Issue #130 freezes output authority at that same planning boundary. The
+selected revision's `OperationMetadata` declares whether the exact canonical
+`image` output is required and the complete legal set of named parameter
+outputs. A `PlannedOutputAuthority` combines that declaration with the frozen
+implementation/device identity and, when known, the trusted Graph or dirty
+extent. Provider-returned names, descriptors, facets, layouts, or identities
+cannot expand the plan. Every route validates its staged `NodeOutput` before a
+dependent can observe it and validates again at formal commit. Full sequential
+and parallel HP work executes against a request-owned Graph clone; only a fully
+authorized result may replace live Graph state through the no-throw snapshot
+publication. Missing, extra, malformed, or mismatched output therefore leaves
+cache, Region, version, inspection, timing, and disk-persistence state
+unchanged.
+
 `FullTaskGraphExpander` expands the raw graph into the full node/tile task graph
 for one compute domain. It does not depend on the request target, cache state,
 or dirty snapshot. `NodeCacheTaskGraphPruner` then prunes that graph to the
@@ -693,6 +707,18 @@ Graph/RT state unchanged. Metal pre-commit deadline rejection installs no
 completion handler before the final deadline observation, so the unsubmitted
 owner graph and all device leases unwind instead of becoming an invisible
 publication.
+
+A dirty native producer may return that canonical Value while its
+`ReadyFence` is Pending. `DirtyReadyTaskContext` then registers a non-inline
+continuation on the Run-scoped executor instead of blocking a worker or
+releasing dependencies. The callback rechecks the exact staged Value revision,
+allocation, producer, and Run identity. Only the matching Ready value proceeds
+through the same formal output-authority commit; Failed, ProducerCancelled,
+explicit Run cancellation, stale execution, or staged-value replacement fails
+closed with no dependency release and no Graph/RT mutation. Cancellation closes
+publication and cancels registrations outside the continuation mutex; logical
+task accounting remains worker-owned, while retained contexts keep callback
+owners alive until service settlement.
 
 ## Events and Timing
 

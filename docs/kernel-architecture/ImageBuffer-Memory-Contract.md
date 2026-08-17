@@ -338,6 +338,18 @@ has stopped and the payload can proceed to a checked access plan. It does not
 mean that the enclosing `ComputeRun` committed Graph state, that a cache file
 was written, or that a user-visible output is durable.
 
+Readiness also does not authorize a provider-selected output shape. Issue #130
+requires the exact staged Value to match a Host-frozen output plan: canonical
+name, descriptor, ImageFacet, layout, implementation/device identity, and any
+trusted extent are checked independently of the fence. A dirty native producer
+may return that exact Value while Pending. The Run then installs a non-inline,
+Run-scoped continuation that keeps the owner alive without occupying a worker
+or releasing dependants. Only the same revision/allocation/producer Value in
+Ready state may continue to formal commit. Failed, ProducerCancelled,
+cancelled, stale, or replaced state closes without Graph/RT mutation; callback
+registration and retained-context drainage prevent duplicate terminal
+publication or an abandoned callback owner.
+
 The current IPC image-result path materializes a tight-row CPU artifact in the
 private daemon `OutputStore`, calls file `fsync`, atomically renames without
 replacement, revalidates filesystem identity, and returns metadata protected by

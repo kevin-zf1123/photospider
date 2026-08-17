@@ -586,6 +586,8 @@ extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void register_photospider_ops_v2(
   }
   ps::plugin::OperationMetadata metadata;
   metadata.cost_score = 1;
+  metadata.produces_image = false;
+  metadata.parameter_output_names = {"lifecycle_marker"};
   registrar->register_op_hp_monolithic("plugin_lifecycle", "op",
                                        make_lifecycle_test_op(), metadata);
   registrar->register_dirty_propagator("plugin_lifecycle", "op",
@@ -600,6 +602,7 @@ extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void register_photospider_ops_v2(
   if (register_devices && register_devices[0] != '\0') {
     ps::plugin::OperationMetadata device_monolithic_metadata;
     device_monolithic_metadata.cost_score = 3;
+    device_monolithic_metadata.produces_image = false;
     registrar->register_impl("plugin_lifecycle", "op", ps::Device::GPU_METAL,
                              make_lifecycle_device_monolithic(),
                              device_monolithic_metadata);
@@ -615,6 +618,7 @@ extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void register_photospider_ops_v2(
   if (register_cpu_device && register_cpu_device[0] != '\0') {
     ps::plugin::OperationMetadata cpu_device_metadata;
     cpu_device_metadata.cost_score = 5;
+    cpu_device_metadata.produces_image = false;
     registrar->register_impl("plugin_lifecycle", "cpu_device", ps::Device::CPU,
                              make_lifecycle_cpu_device_monolithic(),
                              cpu_device_metadata);

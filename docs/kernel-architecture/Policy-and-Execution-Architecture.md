@@ -305,6 +305,26 @@ Full HP, dirty HP/RT, connected preflight, initial ready work, and
 dependency-released work all enter the common ready-store, policy,
 reserved-start, private-route, and Run-lease completion path.
 
+Issue #130 also freezes the selected revision's output schema into every
+planned work item. The Host derives canonical image requirement and the exact
+named-data set from registered metadata, never from a provider return. That
+schema is combined with implementation/device identity and any trusted extent,
+then checked before dependency release and again before formal mutation. Full
+HP routes isolate all intermediate cache, Region, version, inspection, and
+timing writes in a request-owned Graph snapshot, so policy work and disk-cache
+staging cannot make an unauthorized result visible. The existing no-throw
+Graph publication remains the only live-state swap.
+
+Dirty work preserves the same authority when a registered Metal producer
+returns a Pending Value. A Run-scoped queued continuation owns the wait without
+occupying a CPU worker, and the source/dependent task is not completed or
+released until the exact revision, allocation, producer, and staged Value are
+Ready. Failed, ProducerCancelled, cancelled, stale, or replaced results fail
+the Run without formal mutation. Publication closure removes registrations
+outside the continuation lock, worker callbacks alone change logical task
+accounting, and prepared dirty contexts remain retained until their matching
+service callbacks settle.
+
 V-6 adds no configured execution route and no second ready store.
 `ReadyFence::async_wait` accepts a shared injected executor that must enqueue
 rather than invoke inline. Its preconstructed continuation retains the executor

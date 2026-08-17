@@ -13,6 +13,7 @@
  */
 #include "compute/compute_service.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <functional>
@@ -98,6 +99,30 @@ void finalize_output_metadata(NodeOutput& output,
                               bool enable_timing, double execution_ms) {
   compute::ComputeMetricsRecorder::finalize_output_metadata(
       output, inputs, enable_timing, execution_ms);
+}
+
+/**
+ * @brief Resolves one sequential node's frozen output authority.
+ * @param planned_work Immutable retained planning records.
+ * @param node_id Graph node being executed or satisfied from cache.
+ * @return Borrowed exact output authority.
+ * @throws GraphError with ComputeError when the trusted plan is incomplete.
+ * @note Live registry metadata and provider-returned values cannot create or
+ * widen this authority.
+ */
+const compute::PlannedOutputAuthority& sequential_output_authority(
+    const std::vector<compute::PlannedNodeWork>& planned_work, int node_id) {
+  const auto found =
+      std::find_if(planned_work.begin(), planned_work.end(),
+                   [node_id](const compute::PlannedNodeWork& work) {
+                     return work.node_id == node_id;
+                   });
+  if (found == planned_work.end() || !found->output_authority.has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Sequential compute is missing frozen output "
+                     "authority.");
+  }
+  return *found->output_authority;
 }
 
 /**
@@ -535,6 +560,45 @@ void commit_high_precision_if_requested(
 }
 
 /**
+ * @brief Publishes one fully validated full-HP snapshot at commit arbitration.
+ *
+ * @param run_lease Commit-pending Run whose terminal arbiter owns visibility.
+ * @param graph Caller-supplied staged or directly visible Graph destination.
+ * @param prepared Request-local compute snapshot containing all full results.
+ * @param proxy Optional staged proxy forwarded to a product commit policy.
+ * @param request Request carrying the optional product commit policy.
+ * @return Nothing after exactly one successful snapshot publication path.
+ * @throws GraphError when commit arbitration or the product policy fails.
+ * @throws Any product policy exception unchanged.
+ * @note Without a policy, the Run contender is claimed before the no-throw
+ * Graph swap, so cancellation/failure cannot leave a partially visible full
+ * result. With a policy, graph is already a product-owned request snapshot;
+ * the internal snapshot is first folded into that stable-address owner and
+ * the policy then performs its authoritative serialized visible commit.
+ */
+void commit_full_high_precision_snapshot_if_requested(
+    const compute::ComputeRunLease& run_lease, GraphModel& graph,
+    GraphModel& prepared, compute::RealtimeProxyGraph* proxy,
+    const ComputeService::Request& request) {
+  if (request.commit_policy) {
+    graph.publish_compute_snapshot(prepared);
+    request.commit_policy->commit_high_precision(run_lease, graph, proxy);
+    return;
+  }
+
+  std::optional<compute::ComputeRunCommitContender> contender =
+      run_lease.try_claim_commit();
+  if (!contender.has_value()) {
+    return;
+  }
+  graph.publish_compute_snapshot(prepared);
+  if (!contender->publish_succeeded()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "ComputeRun direct full-HP commit resolution failed.");
+  }
+}
+
+/**
  * @brief Invokes the optional product RT commit policy.
  * @param run_lease Commit-pending RT child lease whose contender arbitrates
  * visible publication against cancellation and failure.
@@ -891,12 +955,26 @@ NodeOutput& ComputeService::compute_internal(
   do {
     observe_open_run_or_throw(context.run_lease);
     if (compute::ComputeCachePolicy::has_reusable_output(target_node)) {
+      compute::validate_planned_output(
+          *target_node.cached_output_high_precision,
+          sequential_output_authority(context.planned_work, node_id),
+          compute::PlannedOutputReadiness::RequireReady);
       result_source = "memory_cache";
       break;
     }
+    NodeOutput disk_output;
     if (context.allow_disk_cache &&
-        cache_.try_load_from_disk_cache(graph, target_node)) {
+        cache_.try_load_from_disk_cache_into(graph, target_node, disk_output)) {
       observe_open_run_or_throw(context.run_lease);
+      compute::validate_planned_output(
+          disk_output,
+          sequential_output_authority(context.planned_work, node_id),
+          compute::PlannedOutputReadiness::RequireReady);
+      RegionSet disk_region =
+          value_image_adapter::full_node_output_region(disk_output);
+      target_node.cached_output_high_precision = std::move(disk_output);
+      target_node.hp_region = std::move(disk_region);
+      target_node.hp_version++;
       result_source = "disk_cache";
       break;
     }
@@ -955,19 +1033,10 @@ NodeOutput& ComputeService::compute_internal(
                                             monolithic_inputs, tiled_config);
     }();
     observe_open_run_or_throw(context.run_lease);
-    if (computed_output.has_compatibility_image()) {
-      throw GraphError(
-          GraphErrc::ComputeError,
-          "Sequential compute rejects compatibility image staging.");
-    }
-    for (const auto& [name, value] : computed_output.named_values) {
-      if (name.empty() || !value.valid() ||
-          !value.ready_fence().poll().ready()) {
-        throw GraphError(
-            GraphErrc::ComputeError,
-            "Sequential compute requires valid Ready named Values.");
-      }
-    }
+    compute::validate_planned_output(
+        computed_output,
+        sequential_output_authority(context.planned_work, node_id),
+        compute::PlannedOutputReadiness::RequireReady);
     RegionSet computed_region =
         value_image_adapter::full_node_output_region(computed_output);
     target_node.cached_output_high_precision = std::move(computed_output);
@@ -1157,13 +1226,14 @@ NodeOutput& ComputeService::compute_parallel(
   request_cancellation->attach(run);
   observe_open_run_or_throw(lifecycle_lease);
   if (is_full_high_precision_request(request)) {
+    std::unique_ptr<GraphModel> prepared_graph = graph.clone_for_compute();
     compute::ComputeTaskDispatcher dispatcher(traversal_, cache_, events_);
     const GraphRuntime::ExecutionRouteBinding route =
         runtime.execution_route(ComputeIntent::GlobalHighPrecision);
     std::optional<compute::PreparedComputeDispatch> prepared;
     try {
       prepared.emplace(dispatcher.prepare(
-          graph, execution_service_, runtime, route.execution_type,
+          *prepared_graph, execution_service_, runtime, route.execution_type,
           make_dispatch_request(request), run, lifecycle_lease));
     } catch (...) {
       rethrow_hp_preparation_failure(run, lifecycle_lease,
@@ -1178,7 +1248,8 @@ NodeOutput& ComputeService::compute_parallel(
           run, lifecycle_lease,
           [&](const compute::ComputeRunLease&) -> NodeOutput& {
             if (request.intent.has_value()) {
-              const Node* coordinator_node = graph.find_node(request.node_id);
+              const Node* coordinator_node =
+                  prepared_graph->find_node(request.node_id);
               events_.push(
                   request.node_id,
                   coordinator_node ? coordinator_node->name : std::string(),
@@ -1187,8 +1258,9 @@ NodeOutput& ComputeService::compute_parallel(
             return dispatcher.execute_prepared(std::move(*prepared));
           },
           [&](const compute::ComputeRunLease& run_lease) {
-            commit_high_precision_if_requested(
-                run_lease, graph, request.staged_realtime_proxy, request);
+            commit_full_high_precision_snapshot_if_requested(
+                run_lease, graph, *prepared_graph,
+                request.staged_realtime_proxy, request);
           });
       prepared.reset();
       release_request_lifecycle_lease(lifecycle_lease);
@@ -1554,9 +1626,11 @@ NodeOutput& ComputeService::compute(
   request_cancellation->attach(run);
   observe_open_run_or_throw(lifecycle_lease);
   if (is_full_high_precision_request(request)) {
+    std::unique_ptr<GraphModel> prepared_graph = graph.clone_for_compute();
     PreparedSequentialCompute prepared = [&]() {
       try {
-        return prepare_sequential_compute(graph, request, lifecycle_lease);
+        return prepare_sequential_compute(*prepared_graph, request,
+                                          lifecycle_lease);
       } catch (...) {
         rethrow_hp_preparation_failure(run, lifecycle_lease,
                                        std::current_exception());
@@ -1571,18 +1645,20 @@ NodeOutput& ComputeService::compute(
           run, lifecycle_lease,
           [&](const compute::ComputeRunLease& run_lease) -> NodeOutput& {
             if (request.intent.has_value()) {
-              const Node* coordinator_node = graph.find_node(request.node_id);
+              const Node* coordinator_node =
+                  prepared_graph->find_node(request.node_id);
               events_.push(
                   request.node_id,
                   coordinator_node ? coordinator_node->name : std::string(),
                   "intent_coordinator_global_high_precision", 0.0);
             }
-            return compute_sequential_impl(graph, request, std::move(prepared),
-                                           run, run_lease);
+            return compute_sequential_impl(*prepared_graph, request,
+                                           std::move(prepared), run, run_lease);
           },
           [&](const compute::ComputeRunLease& run_lease) {
-            commit_high_precision_if_requested(
-                run_lease, graph, request.staged_realtime_proxy, request);
+            commit_full_high_precision_snapshot_if_requested(
+                run_lease, graph, *prepared_graph,
+                request.staged_realtime_proxy, request);
           });
       release_request_lifecycle_lease(lifecycle_lease);
       execution_service_.finalize_graph_admission(admission);
@@ -1674,8 +1750,9 @@ ComputeService::prepare_sequential_compute(
         });
     if (planned_work == compute_plan.planned_work.end() ||
         !planned_work->operation_route.has_value() ||
-        planned_work->operation_route->implementation_identity !=
-            operation->implementation_identity) {
+        !planned_work->output_authority.has_value() ||
+        !compute::planned_operation_route_matches(
+            *planned_work->operation_route, *operation)) {
       throw GraphError(GraphErrc::ComputeError,
                        "Operation registry changed after planning for " +
                            node.type + ":" + node.subtype);
@@ -1747,6 +1824,7 @@ NodeOutput& ComputeService::compute_sequential_impl(
                                         allow_disk_cache,
                                         request.telemetry.benchmark_events,
                                         prepared.resolved_operations,
+                                        prepared.compute_plan.planned_work,
                                         run_lease};
   NodeOutput& result = compute_internal(graph, request.node_id, context);
   observe_open_run_or_throw(run_lease);

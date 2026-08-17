@@ -35,8 +35,11 @@ Device operation_device_to_private(Device device);
  *
  * @param metadata Public plugin metadata.
  * @return Equivalent private registry metadata.
- * @throws std::invalid_argument for an unknown enum value or negative cost.
- * @note The conversion performs no allocation or policy selection.
+ * @throws std::invalid_argument for an unknown enum value, negative cost, or
+ * malformed output declaration.
+ * @throws std::bad_alloc when copied output-name storage cannot allocate.
+ * @note The conversion validates and canonicalizes output names but performs
+ * no execution-route policy selection.
  */
 OpMetadata operation_metadata_to_private(
     const plugin::OperationMetadata& metadata);

@@ -505,6 +505,11 @@ class GraphTaskPopulationStrategy {
     PixelRect full_output{0, 0, std::max(0, extent.width),
                           std::max(0, extent.height)};
     work.operation_route = shape_strategy.select_route(node);
+    work.output_authority =
+        work.operation_route.has_value()
+            ? std::optional<PlannedOutputAuthority>(
+                  make_planned_output_authority(*work.operation_route, extent))
+            : std::nullopt;
     const PlannedTaskKind selected_kind =
         !work.operation_route
             ? PlannedTaskKind::Node

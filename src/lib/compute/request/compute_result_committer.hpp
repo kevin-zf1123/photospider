@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "compute/dispatch/task_graph_planning.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
@@ -57,9 +58,10 @@ class ComputeResultCommitter {
    *
    * @param graph Graph whose high-precision node caches are updated.
    * @param execution_order Dense planned node id order.
+   * @param planned_work Frozen per-node route and output authorities.
    * @param temp_results Temporary outputs aligned with execution_order.
-   * @throws GraphError with ComputeError for compatibility staging or an
-   * invalid/non-Ready named Value.
+   * @throws GraphError with ComputeError for absent authority, compatibility
+   * staging, an unauthorized name, or an invalid/non-Ready/mismatched Value.
    * @throws Exceptions from immutable Region derivation, GraphModel mutation,
    * or GraphCacheService writes.
    * @note temp_results values are moved. After commit(), populated slots no
@@ -69,6 +71,7 @@ class ComputeResultCommitter {
    * moved into the same GraphModel runtime-state mutation.
    */
   void commit(GraphModel& graph, const std::vector<int>& execution_order,
+              const std::vector<PlannedNodeWork>& planned_work,
               std::vector<std::optional<NodeOutput>>& temp_results) const;
 
  private:

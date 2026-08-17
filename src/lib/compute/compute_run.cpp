@@ -1846,6 +1846,16 @@ bool ComputeRunLease::publish_task_failure(
       ComputeRunTerminalKind::Failed, std::move(failure), std::nullopt});
 }
 
+/** @copydoc ComputeRunLease::publish_failure */
+bool ComputeRunLease::publish_failure(std::exception_ptr failure) {
+  if (!failure) {
+    throw std::invalid_argument(
+        "ComputeRun lease failure requires an exception.");
+  }
+  return control_->publish_terminal(ComputeRunTerminalOutcome{
+      ComputeRunTerminalKind::Failed, std::move(failure), std::nullopt});
+}
+
 /**
  * @brief Copies terminal outcome while this lease retains the Run.
  *

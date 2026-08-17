@@ -53,6 +53,13 @@ struct DirtyResolvedOperation {
    * concurrency behavior.
    */
   OpMetadata metadata;
+
+  /**
+   * @brief Exact callback-free output authority frozen by graph planning.
+   * @note Dirty execution validates provider results against this value before
+   * staging and again before formal HP/RT publication.
+   */
+  PlannedOutputAuthority output_authority;
 };
 
 /** @brief Node-id index of immutable dirty operation/device snapshots. */

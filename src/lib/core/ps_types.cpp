@@ -114,22 +114,46 @@ void sort_unique_keys(std::vector<std::string>& keys) {
 /**
  * @brief Validates bounded process-domain operation metadata.
  *
- * @param metadata Metadata supplied by a core registration API.
+ * @param metadata Mutable metadata supplied by a core registration API.
  * @return Nothing.
- * @throws std::invalid_argument when an exclusive key is too long or contains
- *         an embedded NUL.
+ * @throws std::invalid_argument when an exclusive key or output name is empty,
+ * too long, duplicated, contains an embedded NUL, or exceeds the bounded
+ * declaration count.
  * @note Public plugin metadata receives the same validation in the host
  *       adapter. Repeating it here prevents direct core registrations from
  *       publishing values that execution cannot identify unambiguously.
  */
-void validate_operation_metadata(const OpMetadata& metadata) {
-  if (metadata.exclusive_key.size() > OpMetadata::kExclusiveKeyMaxBytes) {
+void validate_operation_metadata(OpMetadata* metadata) {
+  if (metadata == nullptr) {
+    throw std::invalid_argument("Operation metadata validation requires input");
+  }
+  if (metadata->exclusive_key.size() > OpMetadata::kExclusiveKeyMaxBytes) {
     throw std::invalid_argument(
         "Operation metadata exclusive key exceeds 128 bytes");
   }
-  if (metadata.exclusive_key.find('\0') != std::string::npos) {
+  if (metadata->exclusive_key.find('\0') != std::string::npos) {
     throw std::invalid_argument(
         "Operation metadata exclusive key contains an embedded NUL");
+  }
+  if (metadata->parameter_output_names.size() >
+      OpMetadata::kParameterOutputCountMax) {
+    throw std::invalid_argument(
+        "Operation metadata declares too many parameter outputs");
+  }
+  for (const std::string& name : metadata->parameter_output_names) {
+    if (name.empty() || name.size() > OpMetadata::kOutputNameMaxBytes ||
+        name.find('\0') != std::string::npos) {
+      throw std::invalid_argument(
+          "Operation metadata contains a malformed parameter-output name");
+    }
+  }
+  std::sort(metadata->parameter_output_names.begin(),
+            metadata->parameter_output_names.end());
+  if (std::adjacent_find(metadata->parameter_output_names.begin(),
+                         metadata->parameter_output_names.end()) !=
+      metadata->parameter_output_names.end()) {
+    throw std::invalid_argument(
+        "Operation metadata contains duplicate parameter-output names");
   }
 }
 
@@ -1111,7 +1135,7 @@ void OpRegistry::swap_state(OpRegistry& other) noexcept {
 void OpRegistry::register_op(const std::string& type,
                              const std::string& subtype, MonolithicOpFunc fn,
                              OpMetadata meta) {
-  validate_operation_metadata(meta);
+  validate_operation_metadata(&meta);
   auto key = make_key(type, subtype);
   OpVariant legacy_replacement = fn;
   std::optional<OpImplementation> hp_replacement(
@@ -1140,7 +1164,7 @@ void OpRegistry::register_op(const std::string& type,
 void OpRegistry::register_op(const std::string& type,
                              const std::string& subtype, TileOpFunc fn,
                              OpMetadata meta) {
-  validate_operation_metadata(meta);
+  validate_operation_metadata(&meta);
   auto key = make_key(type, subtype);
   OpVariant legacy_replacement = fn;
   std::optional<OpImplementation> hp_replacement(
@@ -1305,7 +1329,7 @@ void OpRegistry::register_op_hp_monolithic(const std::string& type,
                                            const std::string& subtype,
                                            MonolithicOpFunc fn,
                                            OpMetadata meta) {
-  validate_operation_metadata(meta);
+  validate_operation_metadata(&meta);
   auto key = make_key(type, subtype);
   std::optional<OpImplementation> replacement(
       std::in_place,
@@ -1328,7 +1352,7 @@ void OpRegistry::register_op_hp_monolithic(const std::string& type,
 void OpRegistry::register_op_hp_tiled(const std::string& type,
                                       const std::string& subtype, TileOpFunc fn,
                                       OpMetadata meta) {
-  validate_operation_metadata(meta);
+  validate_operation_metadata(&meta);
   auto key = make_key(type, subtype);
   std::optional<OpImplementation> replacement(
       std::in_place,
@@ -1350,7 +1374,7 @@ void OpRegistry::register_op_hp_tiled(const std::string& type,
 void OpRegistry::register_op_rt_tiled(const std::string& type,
                                       const std::string& subtype, TileOpFunc fn,
                                       OpMetadata meta) {
-  validate_operation_metadata(meta);
+  validate_operation_metadata(&meta);
   auto key = make_key(type, subtype);
   std::optional<OpImplementation> replacement(
       std::in_place,
@@ -1610,7 +1634,7 @@ void OpRegistry::register_impl(const std::string& type,
                                MonolithicOpFunc fn, OpMetadata meta) {
   // 设置元数据中的设备偏好
   meta.device_preference = device;
-  validate_operation_metadata(meta);
+  validate_operation_metadata(&meta);
   OpImplementation impl;
   impl.func = std::move(fn);
   impl.metadata = meta;
@@ -1667,7 +1691,7 @@ void OpRegistry::register_impl(const std::string& type,
                                TileOpFunc fn, OpMetadata meta) {
   // 设置元数据中的设备偏好
   meta.device_preference = device;
-  validate_operation_metadata(meta);
+  validate_operation_metadata(&meta);
   OpImplementation impl;
   impl.func = std::move(fn);
   impl.metadata = meta;

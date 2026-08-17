@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -31,6 +32,17 @@ class ExecutionHostContext;
 }  // namespace ps
 
 namespace ps::compute {
+
+/**
+ * @brief Copies one task node's current dirty staging output.
+ * @param context Borrowed request state supplied with the callback.
+ * @param node_id Planned graph node whose output is observed.
+ * @return Mutex-protected output snapshot, or nullopt before publication.
+ * @throws Any staging-copy exception unchanged.
+ * @note The callback grants observation only. It must not wait, map payload,
+ * mutate staging, or derive authorization from the returned output.
+ */
+using DirtyTaskOutputSnapshot = std::optional<NodeOutput> (*)(const void*, int);
 
 /**
  * @brief Owns per-node critical sections for one dirty update transaction.
@@ -215,6 +227,17 @@ struct DirtySourceFirstRunRequest {
    */
   std::uint64_t additional_shared_retained_memory_bytes = 0U;
 
+  /** @brief Borrowed context passed to snapshot_task_output. */
+  const void* task_output_context = nullptr;
+
+  /**
+   * @brief Optional staging observer used for readiness continuation.
+   * @note Process-service and inline dirty routes use the same callback. A
+   * Pending image is continued only by a process service; inline execution
+   * rejects it explicitly without blocking.
+   */
+  DirtyTaskOutputSnapshot snapshot_task_output = nullptr;
+
   /**
    * @brief Computes phase-local retained bytes immediately before admission.
    *
@@ -389,6 +412,8 @@ class DirtyReadyTaskContext final
    * @param release_dependents Whether completion releases dependency-ready
    * work from this phase.
    * @param priority Process queue hint for every phase submission.
+   * @param task_output_context Borrowed request state for output snapshots.
+   * @param snapshot_task_output Optional mutex-protected output observer.
    * @throws std::invalid_argument if run_task is empty.
    * @throws std::bad_alloc from owned state construction.
    */
@@ -401,7 +426,25 @@ class DirtyReadyTaskContext final
       ReadyTaskResourceDemand task_operation_resource_demand,
       std::function<void(int)> run_task,
       std::uint64_t run_task_retained_memory_bytes, ComputeRunLease lease,
-      bool release_dependents, ExecutionTaskPriority priority);
+      bool release_dependents, ExecutionTaskPriority priority,
+      const void* task_output_context = nullptr,
+      DirtyTaskOutputSnapshot snapshot_task_output = nullptr);
+
+  /**
+   * @brief Installs cancellation cleanup after shared ownership exists.
+   * @return Nothing.
+   * @throws std::bad_alloc or synchronization exceptions from Run callback
+   * registration.
+   * @note The callback captures only a weak context and cancels every pending
+   * fence wait without retaining a callback-owner cycle.
+   */
+  void install_cancellation_notification();
+
+  /**
+   * @brief Cancels any unpublished fence continuation during destruction.
+   * @throws Nothing; impossible completion-accounting failure terminates.
+   */
+  ~DirtyReadyTaskContext() noexcept;
 
   /**
    * @brief Estimates complete context-owned structural storage.
@@ -446,6 +489,22 @@ class DirtyReadyTaskContext final
       const std::vector<int>& task_ids, bool initial_ready);
 
  private:
+  /** @brief Exact-once lifecycle of one active dirty task. */
+  enum class TaskState : std::uint8_t {
+    /** @brief No matching callback has entered. */
+    Pending = 0U,
+    /** @brief Original provider callback is executing. */
+    Executing = 1U,
+    /** @brief A ReadyFence wait owns deferred completion. */
+    AwaitingValue = 2U,
+    /** @brief The fence callback owns validation and release. */
+    CompletingValue = 3U,
+    /** @brief Task completed or terminal cancellation suppressed release. */
+    Completed = 4U,
+    /** @brief Task or continuation failed authoritatively. */
+    Failed = 5U,
+  };
+
   /**
    * @brief Executes one matching service callback and releases dependents.
    *
@@ -464,6 +523,73 @@ class DirtyReadyTaskContext final
    */
   void execute(ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
                ExecutionTaskRuntime& task_runtime);
+
+  /**
+   * @brief Defers one task whose exact staged image remains Pending.
+   * @param task Planned task whose provider returned.
+   * @param lease Matching Run observer.
+   * @param task_runtime Runtime providing non-inline fence continuation.
+   * @return True when a continuation owns an added completion unit.
+   * @throws GraphError, ReadyFenceAccessError, or allocation/runtime errors
+   * from output validation and wait registration.
+   * @note Ready or absent tiled staging returns false. Failed and
+   * ProducerCancelled fail closed. The exact pending Value identities are
+   * captured before registration.
+   */
+  bool defer_pending_value(const PlannedTask& task, ComputeRunLease& lease,
+                           ExecutionTaskRuntime& task_runtime);
+
+  /**
+   * @brief Completes one pending dirty Value after terminal fence delivery.
+   * @param task_id Exact planned task left in AwaitingValue.
+   * @param expected_value Immutable pending Value captured at registration.
+   * @param record Exact added completion-unit ownership record.
+   * @param snapshot Terminal fence observation delivered asynchronously.
+   * @return Nothing after same-identity validation and dependent release.
+   * @throws ReadyFenceAccessError for producer failure/cancellation.
+   * @throws GraphError or runtime exceptions from identity, authority,
+   * cancellation, or dependent publication.
+   * @note The method retires the dynamic completion unit exactly once on all
+   * paths and closes sibling waits before rethrowing a failure.
+   */
+  struct DeferredValueWait;
+  void complete_deferred_value(int task_id, Value expected_value,
+                               DeferredValueWait* record,
+                               ReadyFenceSnapshot snapshot);
+
+  /**
+   * @brief Releases ready dependents after a task is authoritatively complete.
+   * @param task Completed planned task.
+   * @param lease Matching Run lease copied into dependent submissions.
+   * @param task_runtime Active ready-submission runtime.
+   * @return Nothing.
+   * @throws Dependency, allocation, cancellation, or submission exceptions.
+   */
+  void release_task_dependents(const PlannedTask& task, ComputeRunLease& lease,
+                               ExecutionTaskRuntime& task_runtime);
+
+  /**
+   * @brief Resolves one task node's frozen output authority.
+   * @param task Planned task naming the graph node.
+   * @return Borrowed exact authority from compute_plan_.
+   * @throws GraphError when the retained plan is incomplete.
+   */
+  const PlannedOutputAuthority& output_authority_for(
+      const PlannedTask& task) const;
+
+  /**
+   * @brief Closes dependent publication and cancels every pending fence wait.
+   * @return Nothing.
+   * @throws Nothing; completion-accounting corruption terminates.
+   * @note The operation is idempotent and cancellation-safe. Registrations are
+   * moved out of the publication gate before cancellation. A wait cancelled
+   * before callback entry abandons its added logical unit instead of invoking
+   * the worker-only decrement API from the cancelling thread; the exact Run
+   * failure/cancellation terminal makes that count irrelevant, while retained
+   * fence-executor ownership still prevents settlement until queued callback
+   * state is destroyed or drained.
+   */
+  void close_publication() noexcept;
 
   /** @brief Immutable task shape copied into Run-phase ownership. */
   ComputePlan compute_plan_;
@@ -507,6 +633,30 @@ class DirtyReadyTaskContext final
 
   /** @brief Process ready-queue hint for this phase. */
   ExecutionTaskPriority priority_ = ExecutionTaskPriority::Normal;
+
+  /** @brief Borrowed request object passed to snapshot_task_output_. */
+  const void* task_output_context_ = nullptr;
+
+  /** @brief Optional mutex-protected dirty output snapshot callback. */
+  DirtyTaskOutputSnapshot snapshot_task_output_ = nullptr;
+
+  /** @brief Exact-once task lifecycle states guarded by publication_mutex_. */
+  std::vector<std::uint8_t> task_states_;
+
+  /** @brief Serializes continuation registration, completion, and closure. */
+  std::recursive_mutex publication_mutex_;
+
+  /** @brief True after cancellation or failure forbids dependent release. */
+  bool publication_closed_ = false;
+
+  /** @brief Pending wait records aligned with dense planned task ids. */
+  std::vector<std::unique_ptr<DeferredValueWait>> deferred_value_waits_;
+
+  /** @brief Run cancellation callback that closes pending wait ownership. */
+  ComputeRunCancellationRegistration cancellation_registration_;
+
+  /** @brief Prevents duplicate cancellation callback installation. */
+  bool cancellation_notification_installed_ = false;
 };
 
 /**

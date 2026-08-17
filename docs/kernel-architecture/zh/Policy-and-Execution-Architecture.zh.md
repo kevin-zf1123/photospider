@@ -253,6 +253,22 @@ authority 或 per-Graph executor。
 完整 HP、dirty HP/RT、连通性预检、初始就绪工作和依赖释放工作，都会进入同一套
 就绪存储、策略、预留后启动、私有路由及 Run 租约完成路径。
 
+Issue #130 还会把所选 revision 的 output schema 冻结进每个 planned work item。Host 从已注册
+metadata 派生规范 image requirement 与精确 named-data 集合，绝不从 provider return 派生。
+该 schema 会与 implementation/device identity 及任何可信 extent 结合，并在 dependency
+release 前与 formal mutation 前各校验一次。完整 HP route 会把所有中间 cache、Region、
+version、inspection 与 timing write 隔离在 request-owned Graph snapshot 中，因此 policy work
+与 disk-cache staging 都不能让未授权 result 变为可见。既有 no-throw Graph publication 仍是
+唯一 live-state swap。
+
+当已注册 Metal producer 返回 Pending Value 时，dirty work 会保留同一套 authority。一个
+Run-scoped queued continuation 在不占用 CPU worker 的情况下拥有 wait；在精确 revision、
+allocation、producer 与 staged Value 变为 Ready 前，source/dependent task 不会完成或释放。
+Failed、ProducerCancelled、cancelled、stale 或 replaced result 会使 Run 失败且不发生 formal
+mutation。Publication closure 会在 continuation lock 外移除 registration；只有 worker callback
+可以改变 logical task accounting；prepared dirty context 会一直保留到匹配的 service callback
+settlement。
+
 V-6 不新增 configured execution route，也不新增第二套 ready store。
 `ReadyFence::async_wait` 接收一个共享的注入 executor；该 executor 必须入队，而不能 inline
 调用。预先构造的 continuation 会在 pending 或 queued 时保留 executor，并在 callback 进入时

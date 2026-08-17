@@ -387,6 +387,9 @@ class ComputeService {
     /** @brief Off-registry operation lookup keyed by planned node id. */
     const std::unordered_map<int, OpImplementation>& resolved_operations;
 
+    /** @brief Frozen per-node output authorities from the retained plan. */
+    const std::vector<compute::PlannedNodeWork>& planned_work;
+
     /** @brief Retained read-only Run lease observed at recursive boundaries. */
     const compute::ComputeRunLease& run_lease;
   };

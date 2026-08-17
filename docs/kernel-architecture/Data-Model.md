@@ -175,6 +175,17 @@ Graph state.
 
 Operators may return image data, named data, or both.
 
+Return shape is not authorization. Issue #130 freezes a
+`PlannedOutputAuthority` from the selected registered operation revision before
+execution: it carries the exact canonical-image requirement, exact named-data
+set, implementation/device identity, required DenseTensor/ImageFacet/Strided
+structure, and any trusted finite Graph or dirty extent. A normal result must
+match that plan exactly; missing, extra, malformed, wrong-name, wrong-facet,
+wrong-layout, wrong-identity, or wrong-extent output is rejected before its
+first formal Graph mutation. Full HP routes stage all computation in a Graph
+clone and publish the complete snapshot only after authorization, so an empty
+`NodeOutput` can never manufacture Whole validity or a cacheable completion.
+
 Persistent `OutputPort::output_parameters` is an optional deep-owned
 `ParameterValue`. An empty optional means the document field was absent; an
 engaged null value preserves an explicitly present YAML null. Nested output
@@ -370,6 +381,16 @@ identities. Allocation and revision tokens remain process-local and never enter
 task-graph keys, cache paths, graph/YAML documents, or artifact bytes.
 The shared operation runtime is the one process-wide minting authority for the
 static Host and every Value-using DSO.
+
+Dirty HP/RT uses the same rule for a source-private Pending Value.
+`DirtyReadyTaskContext` queues a Run-scoped continuation without blocking a
+worker, retains the exact revision/allocation/producer/staged-Value identity,
+and releases dependants only after that same Value becomes Ready and passes the
+frozen plan again. Failure, producer cancellation, Run cancellation,
+supersession, or staged-value replacement publishes no formal output.
+Cancellation callbacks do not decrement worker-owned logical task accounting;
+prepared source/dependent contexts remain retained until their matching service
+callbacks have settled.
 
 V-4 installs `RegionDomainKey`, `ImageRect`, rank-general `TensorSlice`,
 `RegionAtom`, immutable normalized `RegionSet`, bounded algebra, typed

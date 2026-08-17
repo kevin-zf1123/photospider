@@ -136,6 +136,15 @@ Scalar 拼写保持稳定；array 与 object 递归渲染；object key 保持 or
 
 算子可以返回图像数据、命名数据，或两者都返回。
 
+Return shape 本身不是授权。Issue #130 会在 execution 前，根据所选 registered operation
+revision 冻结 `PlannedOutputAuthority`：它携带精确 canonical-image requirement、精确
+named-data 集合、implementation/device identity、要求的
+DenseTensor/ImageFacet/Strided structure，以及任何可信的有限 Graph 或 dirty extent。普通
+result 必须精确匹配该 plan；缺失、额外、malformed、wrong-name、wrong-facet、wrong-layout、
+wrong-identity 或 wrong-extent output 会在首次 formal Graph mutation 前被拒绝。完整 HP route
+会把所有 computation stage 在 Graph clone 中，仅在授权后发布完整 snapshot，因此空
+`NodeOutput` 绝不能制造 Whole validity 或 cacheable completion。
+
 持久 `OutputPort::output_parameters` 是可选、深度拥有的 `ParameterValue`。空 optional 表示
 文档字段缺失；已包含值的 null 会保留显式出现的 YAML null。因此，嵌套 output configuration
 可以在 parser 销毁后继续存在，而不保留 `YAML::Node`。
@@ -303,6 +312,13 @@ token 只在进程内有效，永不进入 task-graph key、cache path、graph/Y
 byte。
 Shared operation runtime 是 static Host 与每个 Value-using DSO 共用的唯一进程级 minting
 authority。
+
+Dirty HP/RT 对 source-private Pending Value 使用同一规则。`DirtyReadyTaskContext` 会在不阻塞
+worker 的情况下排入 Run-scoped continuation，保留精确 revision/allocation/producer/staged-Value
+identity，并且只在同一个 Value 变为 Ready 且再次通过 frozen plan 后释放 dependant。Failure、
+producer cancellation、Run cancellation、supersession 或 staged-value replacement 都不会发布
+formal output。Cancellation callback 不会递减由 worker 拥有的 logical task accounting；
+prepared source/dependent context 会一直保留到匹配的 service callback 完成 settlement。
 
 V-4 安装了 `RegionDomainKey`、`ImageRect`、rank-general `TensorSlice`、`RegionAtom`、
 immutable normalized `RegionSet`、bounded algebra、typed operation outcome 与 containment。

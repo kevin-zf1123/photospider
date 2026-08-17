@@ -141,6 +141,17 @@ move-only `ReadyTaskSubmission`，并发送到固定 multi-Run service。Plannin
 与 Host-authored completion identity。Realtime child 通过 request-owned `RunGroup` settle；其稳定 control 拥有两个
 observation lease、RT-first gate、cancellation fan-out 与确定性 aggregate outcome。
 
+Issue #130 在同一个 planning boundary 冻结 output authority。所选 revision 的
+`OperationMetadata` 声明是否要求精确、规范的 `image` output，并声明全部合法的 named
+parameter output 集合。`PlannedOutputAuthority` 把该声明与已冻结的
+implementation/device identity 结合；若可信 Graph 或 dirty extent 已知，也会将其纳入。
+Provider 返回的 name、descriptor、facet、layout 或 identity 不能扩大 plan。每条 route 都会在
+dependant 可观察 staged `NodeOutput` 前校验一次，并在 formal commit 时再次校验。完整的
+sequential 与 parallel HP work 只在 request-owned Graph clone 上执行；仅有完全通过授权的
+result 才能通过 no-throw snapshot publication 替换 live Graph state。因此，缺失、额外、
+malformed 或 mismatched output 不会改变 cache、Region、version、inspection、timing 或
+disk-persistence state。
+
 `FullTaskGraphExpander` 会把原始 graph 展开为一个 compute domain 的完整 node/tile task graph。
 它不依赖请求目标、cache 状态或 dirty snapshot。`NodeCacheTaskGraphPruner` 随后把该 graph
 裁剪到请求目标和依赖锥，并记录所选节点的 cache 可用性。Dirty update 会再经过独立的
@@ -544,6 +555,16 @@ missing retirement 或 undrained binding 都会使 Run 失败，不释放尚未�
 此前可见 Graph/RT state 不变。Metal pre-commit deadline rejection 不会在最后一次 deadline
 observation 前安装 completion handler，因此尚未提交的 owner graph 与所有 device lease 会正常
 unwind，而不会变成不可见的 publication。
+
+Dirty native producer 可以在规范 Value 的 `ReadyFence` 仍为 Pending 时返回它。此时
+`DirtyReadyTaskContext` 会在 Run-scoped executor 上注册 non-inline continuation，而不会阻塞
+worker 或释放 dependency。Callback 会重新校验精确 staged Value 的 revision、allocation、
+producer 与 Run identity。只有 identity 匹配且变为 Ready 的 Value 才能进入同一条 formal
+output-authority commit；Failed、ProducerCancelled、显式 Run cancellation、stale execution 或
+staged-value replacement 都会以关闭状态失败，不释放 dependency，也不修改 Graph/RT。
+Cancellation 会关闭 publication，并在 continuation mutex 外取消 registration；logical task
+accounting 仍由 worker 拥有，而 retained context 会让 callback owner 存活到 service
+settlement。
 
 ## 事件和计时
 

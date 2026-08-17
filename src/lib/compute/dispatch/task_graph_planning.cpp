@@ -42,6 +42,8 @@ bool operation_metadata_equal(const OpMetadata& lhs,
          lhs.maximum_parallelism == rhs.maximum_parallelism &&
          lhs.retained_memory_bytes == rhs.retained_memory_bytes &&
          lhs.scratch_bytes == rhs.scratch_bytes &&
+         lhs.produces_image == rhs.produces_image &&
+         lhs.parameter_output_names == rhs.parameter_output_names &&
          lhs.exclusive_key == rhs.exclusive_key;
 }
 
@@ -77,10 +79,142 @@ bool planned_operation_route_matches(
          operation_metadata_equal(route.metadata, implementation.metadata);
 }
 
+/** @copydoc make_planned_output_authority */
+PlannedOutputAuthority make_planned_output_authority(
+    const PlannedOperationRoute& route, const PixelSize& resolved_extent) {
+  if (route.implementation_identity == 0U) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Output planning requires a nonzero route identity.");
+  }
+  if ((resolved_extent.width > 0) != (resolved_extent.height > 0)) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Output planning received a partially positive image extent.");
+  }
+
+  PlannedOutputAuthority authority;
+  authority.implementation_identity = route.implementation_identity;
+  authority.route_device = route.device;
+  if (route.metadata.produces_image) {
+    authority.image_output_name = std::string(NodeOutput::kImageOutputName);
+    if (resolved_extent.width > 0 && resolved_extent.height > 0) {
+      authority.image_extent = resolved_extent;
+    }
+  }
+  authority.parameter_output_names = route.metadata.parameter_output_names;
+  return authority;
+}
+
+/** @copydoc validate_planned_output */
+void validate_planned_output(const NodeOutput& output,
+                             const PlannedOutputAuthority& authority,
+                             PlannedOutputReadiness readiness) {
+  if (authority.implementation_identity == 0U ||
+      (authority.image_output_name.has_value() &&
+       *authority.image_output_name != NodeOutput::kImageOutputName)) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Execution received a malformed planned output "
+                     "authority.");
+  }
+  if (output.has_compatibility_image()) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Planned output rejects compatibility ImageBuffer staging.");
+  }
+
+  const std::size_t expected_named_values =
+      authority.image_output_name.has_value() ? 1U : 0U;
+  if (output.named_values.size() != expected_named_values) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Operation output does not match the planned named-Value set.");
+  }
+  if (output.data.size() != authority.parameter_output_names.size()) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Operation output does not match the planned parameter-result set.");
+  }
+  for (const std::string& name : authority.parameter_output_names) {
+    if (output.data.find(name) == output.data.end()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Operation output is missing a planned parameter result.");
+    }
+  }
+
+  if (!authority.image_output_name.has_value()) {
+    return;
+  }
+  const auto found = output.named_values.find(*authority.image_output_name);
+  if (found == output.named_values.end() || !found->second.valid()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Operation output is missing its planned image Value.");
+  }
+  const Value& value = found->second;
+  if (value.representation_kind() != authority.image_representation ||
+      value.storage_layout_kind() != authority.image_layout) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Operation image Value violates its planned representation or "
+        "layout.");
+  }
+  const DenseTensorDescriptor& descriptor = value.dense_tensor_descriptor();
+  const std::optional<ImageFacet>& facet = value.image_facet();
+  if (authority.image_facet_required && !facet.has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Operation image Value lacks its planned ImageFacet.");
+  }
+  if (facet.has_value()) {
+    if (facet->x_axis >= descriptor.shape.size() ||
+        facet->y_axis >= descriptor.shape.size()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Operation image Value has malformed descriptor/facet axes.");
+    }
+    if (authority.image_extent.has_value()) {
+      const std::size_t expected_width =
+          static_cast<std::size_t>(authority.image_extent->width);
+      const std::size_t expected_height =
+          static_cast<std::size_t>(authority.image_extent->height);
+      if (image_bounds_width(facet->data_window) != expected_width ||
+          image_bounds_height(facet->data_window) != expected_height ||
+          descriptor.shape[facet->x_axis] != expected_width ||
+          descriptor.shape[facet->y_axis] != expected_height) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            "Operation image Value does not match its planned "
+            "shape (expected " +
+                std::to_string(expected_width) + "x" +
+                std::to_string(expected_height) + ", window " +
+                std::to_string(image_bounds_width(facet->data_window)) + "x" +
+                std::to_string(image_bounds_height(facet->data_window)) +
+                ", descriptor " +
+                std::to_string(descriptor.shape[facet->x_axis]) + "x" +
+                std::to_string(descriptor.shape[facet->y_axis]) + ").");
+      }
+    }
+  }
+  if (!value.revision_id().valid() || !value.producer_identity().valid() ||
+      !value.allocation_identity().valid()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Operation image Value lacks required identities.");
+  }
+
+  const ReadyFenceState state = value.ready_fence().poll().state();
+  if (state == ReadyFenceState::Failed ||
+      state == ReadyFenceState::ProducerCancelled ||
+      (readiness == PlannedOutputReadiness::RequireReady &&
+       state != ReadyFenceState::Ready)) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Operation image Value readiness violates its planned "
+                     "publication stage.");
+  }
+}
+
 namespace {
 
 /** @brief Task-shape config token used by FullTaskGraph cache keys. */
-constexpr const char* kTaskShapeConfigVersion = "task-shape-v3";
+constexpr const char* kTaskShapeConfigVersion = "task-shape-v4";
 
 /** @brief Maximum attempts to observe one stable operation-registry shape. */
 constexpr int kMaxRegistryStableExpansionAttempts = 8;

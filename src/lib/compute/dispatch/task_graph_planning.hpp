@@ -101,6 +101,83 @@ bool planned_operation_route_matches(
     const OpImplementation& implementation) noexcept;
 
 /**
+ * @brief Readiness state accepted while checking one planned NodeOutput.
+ *
+ * @throws Nothing for ordinary enum operations.
+ * @note Execution staging may retain the exact Pending Value so a supervised
+ * continuation can observe it. Formal graph publication requires Ready.
+ */
+enum class PlannedOutputReadiness {
+  /** @brief Accept Ready or Pending, but reject terminal failure states. */
+  AllowPending,
+  /** @brief Accept only a successfully Ready publication. */
+  RequireReady,
+};
+
+/**
+ * @brief Callback-free exact output authority frozen with a planned route.
+ *
+ * @throws std::bad_alloc when copied output-name storage cannot allocate.
+ * @note The authority originates only from revisioned registry metadata and
+ * graph extent inference. Provider-returned names, descriptors, layouts, and
+ * identities never create or widen this plan.
+ */
+struct PlannedOutputAuthority {
+  /** @brief Registry revision whose declared output schema was frozen. */
+  std::uint64_t implementation_identity = 0U;
+  /** @brief Device route associated with the declaration for diagnostics. */
+  Device route_device = Device::CPU;
+  /** @brief Required canonical image name, or absent for non-image routes. */
+  std::optional<std::string> image_output_name;
+  /** @brief Sorted exact required non-image parameter-result names. */
+  std::vector<std::string> parameter_output_names;
+  /** @brief Required representation for the canonical image Value. */
+  ValueRepresentationKind image_representation =
+      ValueRepresentationKind::DenseTensor;
+  /** @brief Required layout family for the canonical image Value. */
+  StorageLayoutKind image_layout = StorageLayoutKind::Strided;
+  /** @brief Whether the canonical image requires an ordinary ImageFacet. */
+  bool image_facet_required = true;
+  /** @brief Positive planned image extent, or absent when legitimately dynamic.
+   */
+  std::optional<PixelSize> image_extent;
+};
+
+/**
+ * @brief Derives one immutable output authority from trusted planning facts.
+ *
+ * @param route Coherent callback-free registry route.
+ * @param resolved_extent Graph-inferred output extent; nonpositive dimensions
+ * leave the image extent dynamic while preserving structural requirements.
+ * @return Exact required image/data schema and structural image contract.
+ * @throws GraphError with ComputeError for an invalid route identity or an
+ * inconsistent partially positive extent.
+ * @throws std::bad_alloc when copied name storage cannot allocate.
+ * @note No provider callback or provider-produced output participates.
+ */
+PlannedOutputAuthority make_planned_output_authority(
+    const PlannedOperationRoute& route, const PixelSize& resolved_extent);
+
+/**
+ * @brief Validates one result against a previously frozen output authority.
+ *
+ * @param output Provider or Host-produced request-local result.
+ * @param authority Trusted exact output declaration from planning.
+ * @param readiness Whether Pending may remain staged or Ready is mandatory.
+ * @return Nothing after exact name, representation, descriptor/facet, shape,
+ * layout, identity, and readiness validation succeeds.
+ * @throws GraphError with ComputeError for compatibility staging, missing,
+ * extra, invalid, structurally mismatched, or disallowed-readiness output.
+ * @throws std::logic_error or std::overflow_error only if a supposedly valid
+ * Value violates its own immutable metadata invariants.
+ * @note The check maps no payload, waits on no fence, invokes no provider, and
+ * mutates neither graph nor output state.
+ */
+void validate_planned_output(const NodeOutput& output,
+                             const PlannedOutputAuthority& authority,
+                             PlannedOutputReadiness readiness);
+
+/**
  * @brief Node-level dependency edge represented in a ComputeTaskGraph.
  *
  * PlannedDependency records the logical relationship between two planned
@@ -212,6 +289,13 @@ struct PlannedNodeWork {
    * execution re-resolves and validates the exact identity before admission.
    */
   std::optional<PlannedOperationRoute> operation_route;
+  /**
+   * @brief Exact callback-free output contract frozen with operation_route.
+   * @note Graphless compatibility plans may leave this empty. Every product
+   * graph execution path must fail closed before staging or publication when
+   * the authority is absent.
+   */
+  std::optional<PlannedOutputAuthority> output_authority;
 };
 
 /**

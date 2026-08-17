@@ -730,6 +730,12 @@ struct OpMetadata {
   /** @brief Maximum accepted bytes in a nonempty process exclusive key. */
   static constexpr std::size_t kExclusiveKeyMaxBytes = 128U;
 
+  /** @brief Maximum accepted bytes in one declared parameter-output name. */
+  static constexpr std::size_t kOutputNameMaxBytes = 128U;
+
+  /** @brief Maximum exact parameter-output names in one implementation. */
+  static constexpr std::size_t kParameterOutputCountMax = 64U;
+
   /** @brief Preferred private tile granularity. */
   TileSizePreference tile_preference = TileSizePreference::UNDEFINED;
   /** @brief Preferred execution device. */
@@ -759,6 +765,21 @@ struct OpMetadata {
   std::uint64_t retained_memory_bytes = 0U;
   /** @brief Additional scratch bytes held for each in-flight callback. */
   std::uint64_t scratch_bytes = 0U;
+
+  /**
+   * @brief Whether the callback must publish the canonical named image Value.
+   * @note True is the fail-closed default for existing image operations. A
+   * data-only producer or deliberate side effect must explicitly set false.
+   */
+  bool produces_image = true;
+
+  /**
+   * @brief Sorted exact names of legal non-image parameter results.
+   * @note Registration validates nonempty bounded unique names and sorts this
+   * vector. A callback may publish exactly this set, no more and no less.
+   */
+  std::vector<std::string> parameter_output_names;
+
   /**
    * @brief Optional process-domain mutual-exclusion key.
    * @note Registration validates bounded length and rejects embedded NUL.

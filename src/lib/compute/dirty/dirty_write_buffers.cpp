@@ -1,5 +1,6 @@
 #include "compute/dirty/dirty_write_buffers.hpp"
 
+#include <algorithm>
 #include <new>
 #include <string>
 #include <unordered_set>
@@ -171,6 +172,17 @@ const NodeOutput* HighPrecisionDirtyWriteBuffer::find_output(
   return &it->second.output;
 }
 
+/** @copydoc HighPrecisionDirtyWriteBuffer::copy_output */
+std::optional<NodeOutput> HighPrecisionDirtyWriteBuffer::copy_output(
+    int node_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto found = entries_.find(node_id);
+  if (found == entries_.end() || !found->second.has_output) {
+    return std::nullopt;
+  }
+  return found->second.output;
+}
+
 bool HighPrecisionDirtyWriteBuffer::has_output(int node_id) const {
   return find_output(node_id) != nullptr;
 }
@@ -317,10 +329,12 @@ int HighPrecisionDirtyWriteBuffer::mark_updated(const Node& node,
   return entry.hp_version;
 }
 
-void HighPrecisionDirtyWriteBuffer::commit_to_graph(GraphModel& graph) {
+void HighPrecisionDirtyWriteBuffer::commit_to_graph(
+    GraphModel& graph, const std::vector<PlannedNodeWork>& planned_work) {
   std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& [node_id, entry] : entries_) {
-    (void)node_id;
+  for (auto& item : entries_) {
+    const int node_id = item.first;
+    Entry& entry = item.second;
     if (entry.tiled_binding.has_value() || entry.tiled_tasks_remaining != 0U) {
       throw std::logic_error("HP dirty commit observed undrained tiled node " +
                              std::to_string(node_id) + " (remaining " +
@@ -329,7 +343,18 @@ void HighPrecisionDirtyWriteBuffer::commit_to_graph(GraphModel& graph) {
                              ").");
     }
     if (entry.has_output) {
-      validate_staged_output(entry.output);
+      const auto authority =
+          std::find_if(planned_work.begin(), planned_work.end(),
+                       [node_id](const PlannedNodeWork& work) {
+                         return work.node_id == node_id;
+                       });
+      if (authority == planned_work.end() ||
+          !authority->output_authority.has_value()) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "HP dirty commit lacks frozen output authority.");
+      }
+      validate_planned_output(entry.output, *authority->output_authority,
+                              PlannedOutputReadiness::RequireReady);
     }
   }
   for (auto& item : entries_) {
@@ -458,6 +483,18 @@ const NodeOutput* RealtimeProxyWriteBuffer::find_output(int node_id) const {
   return &*it->second.state.output;
 }
 
+/** @copydoc RealtimeProxyWriteBuffer::copy_output */
+std::optional<NodeOutput> RealtimeProxyWriteBuffer::copy_output(
+    int node_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto found = entries_.find(node_id);
+  if (found == entries_.end() || !found->second.has_output ||
+      !found->second.state.output.has_value()) {
+    return std::nullopt;
+  }
+  return *found->second.state.output;
+}
+
 bool RealtimeProxyWriteBuffer::has_output(int node_id) const {
   return find_output(node_id) != nullptr;
 }
@@ -581,10 +618,12 @@ int RealtimeProxyWriteBuffer::mark_updated(int node_id,
   return entry.state.version;
 }
 
-void RealtimeProxyWriteBuffer::commit_to_proxy_graph() {
+void RealtimeProxyWriteBuffer::commit_to_proxy_graph(
+    const std::vector<PlannedNodeWork>& planned_work) {
   std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& [node_id, entry] : entries_) {
-    (void)node_id;
+  for (auto& item : entries_) {
+    const int node_id = item.first;
+    Entry& entry = item.second;
     if (entry.tiled_binding.has_value() || entry.tiled_tasks_remaining != 0U) {
       throw std::logic_error("RT dirty commit observed undrained tiled node " +
                              std::to_string(node_id) + " (remaining " +
@@ -593,7 +632,18 @@ void RealtimeProxyWriteBuffer::commit_to_proxy_graph() {
                              ").");
     }
     if (entry.has_output && entry.state.output.has_value()) {
-      validate_staged_output(*entry.state.output);
+      const auto authority =
+          std::find_if(planned_work.begin(), planned_work.end(),
+                       [node_id](const PlannedNodeWork& work) {
+                         return work.node_id == node_id;
+                       });
+      if (authority == planned_work.end() ||
+          !authority->output_authority.has_value()) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "RT dirty commit lacks frozen output authority.");
+      }
+      validate_planned_output(*entry.state.output, *authority->output_authority,
+                              PlannedOutputReadiness::RequireReady);
     }
   }
   for (auto& item : entries_) {

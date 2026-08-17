@@ -66,6 +66,8 @@ contract contains:
 | `maximum_parallelism` | Exact-implementation callback cap; zero means no implementation-specific cap. |
 | `retained_memory_bytes` | Additional Host-retained bytes per in-flight callback; zero is an explicit declaration. |
 | `scratch_bytes` | Additional Host scratch bytes per in-flight callback; zero is an explicit declaration. |
+| `produces_image` | Whether the implementation must return exactly one canonical named `image` Value; defaults to `true`. |
+| `parameter_output_names` | Complete exact set of legal named parameter outputs; every declared name is required and undeclared names are rejected. |
 | `exclusive_key` | Optional execution-domain exclusion key shared across implementations, Runs, and Graphs. |
 
 `reentrant=false` has an effective cap of one regardless of
@@ -75,6 +77,16 @@ and plugin registrations before publication. These fields extend the
 provisional C++ v2 metadata layout without changing the registrar symbol or
 callback signatures. Existing v2 DSOs must be rebuilt against the matching
 SDK; no missing-tail, stale-layout, or compatibility interpretation exists.
+
+The output declaration is revisioned with the exact callback rather than
+inferred from its return. `produces_image=false` explicitly describes a
+data-only producer or side-effect operation; it does not make an arbitrary
+image name legal. At most 64 parameter-output names may be declared, each name
+must contain 1..128 bytes and no embedded NUL, and duplicates are rejected.
+The Host sorts and freezes the exact set before registry publication and every
+operation adapter preserves it. This changes only the already provisional C++
+operation metadata layout; the separately versioned pure-C provider and policy
+ABIs are unchanged.
 
 The canonical registry identity is `type:subtype`. Both segments must be
 non-empty and neither may contain the reserved `:` separator, otherwise two

@@ -93,6 +93,13 @@ struct NodeTaskRunnerContext {
    * synchronous execution settlement.
    */
   const ComputeRunLease* run_lease = nullptr;
+
+  /**
+   * @brief Frozen node output authorities retained by the ComputePlan.
+   * @note Product execution supplies this pointer. A null pointer is malformed
+   * preparation and fails closed before any result enters temporary staging.
+   */
+  const std::vector<PlannedNodeWork>* planned_work = nullptr;
 };
 
 /**
@@ -189,6 +196,17 @@ class NodeTaskRunner {
    * @note This request flag gate does not inspect node validity.
    */
   bool allow_disk_cache() const;
+
+  /**
+   * @brief Resolves the exact planned output authority for one dense node.
+   * @param node_idx Dense index into execution_order_.
+   * @return Borrowed callback-free authority frozen during graph planning.
+   * @throws GraphError with ComputeError when preparation omitted or corrupted
+   * the node's output authority.
+   * @note The lookup never consults provider-returned output or live registry
+   * metadata and therefore cannot widen the frozen declaration.
+   */
+  const PlannedOutputAuthority& output_authority(int node_idx) const;
 
   /**
    * @brief Resolves a complete upstream output for a whole-output dependency.
@@ -441,6 +459,9 @@ class NodeTaskRunner {
    * settlement by the NodeTaskRunnerContext contract.
    */
   const ComputeRunLease* run_lease_;
+
+  /** @brief Borrowed frozen per-node work and output-authority records. */
+  const std::vector<PlannedNodeWork>* planned_work_;
 };
 
 }  // namespace ps::compute

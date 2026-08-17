@@ -114,7 +114,9 @@ extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void register_photospider_ops_v2(
     throw std::invalid_argument(
         "register_photospider_ops_v2 requires registrar");
   }
-  registrar->register_op_hp_monolithic("io", "save", op_save);
+  ps::plugin::OperationMetadata metadata;
+  metadata.produces_image = false;
+  registrar->register_op_hp_monolithic("io", "save", op_save, metadata);
   registrar->register_dirty_propagator("io", "save", save_dirty_roi);
   registrar->register_forward_propagator("io", "save", save_forward_roi);
 }

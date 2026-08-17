@@ -55,6 +55,8 @@ dependency hint 外，CPU execution contract 还包含：
 | `maximum_parallelism` | 精确 implementation 的 callback 上限；零表示没有 implementation-specific cap。 |
 | `retained_memory_bytes` | 每个飞行中 callback 额外占用的 Host-retained byte；零是显式声明。 |
 | `scratch_bytes` | 每个飞行中 callback 额外占用的 Host scratch byte；零是显式声明。 |
+| `produces_image` | implementation 是否必须恰好返回一个规范 named `image` Value；默认 `true`。 |
+| `parameter_output_names` | 合法 named parameter output 的完整精确集合；每个已声明 name 都必须出现，未声明 name 会被拒绝。 |
 | `exclusive_key` | 跨 implementation、Run 与 Graph 共享的可选 execution-domain exclusion key。 |
 
 无论 `maximum_parallelism` 为何，`reentrant=false` 的有效上限都是一。非空
@@ -62,6 +64,13 @@ dependency hint 外，CPU execution contract 还包含：
 registration 执行相同校验。这些字段扩展了临时 C++ v2 metadata layout，但没有改变 registrar
 symbol 或 callback signature。已有 v2 DSO 必须针对匹配 SDK 重新构建；不存在 missing-tail、
 stale-layout 或 compatibility interpretation。
+
+Output declaration 会与精确 callback 一起被 revision，而不是从 callback return 推导。
+`produces_image=false` 会显式描述 data-only producer 或 side-effect operation；它不会让任意
+image name 变为合法。最多可以声明 64 个 parameter-output name；每个 name 必须包含
+1..128 byte 且不能含 embedded NUL，duplicate 会被拒绝。Host 会在 registry publication 前
+排序并冻结精确集合，每个 operation adapter 都会保留该集合。此变更仅影响已经是 provisional
+状态的 C++ operation metadata layout；独立版本化的 pure-C provider 与 policy ABI 不变。
 
 Canonical registry identity 为 `type:subtype`。两个 segment 都必须非空，且都不能包含保留分隔符 `:`，
 否则不同 pair 可能发生 identity collision。Public C++ registrar helper 还会在调用 `.c_str()` 前拒绝

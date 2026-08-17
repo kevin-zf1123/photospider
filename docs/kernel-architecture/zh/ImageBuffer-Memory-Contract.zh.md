@@ -273,6 +273,16 @@ Deep Image 或 vector-scene value。通用 `Value`、descriptor、handle 和 reg
 进入 checked access plan。它不表示包围它的 `ComputeRun` 已提交 Graph state，也不表示
 缓存文件已写入或用户可见输出已经 durable。
 
+Readiness 也不会授权由 provider 选择的 output shape。Issue #130 要求精确 staged Value 匹配
+Host-frozen output plan：canonical name、descriptor、ImageFacet、layout、
+implementation/device identity 与任何可信 extent 都会独立于 fence 被校验。Dirty native
+producer 可以在该精确 Value 仍为 Pending 时返回它。Run 随后安装 non-inline、Run-scoped
+continuation，在不占用 worker 或释放 dependant 的情况下保持 owner 存活。只有相同
+revision/allocation/producer Value 进入 Ready state 后，才可继续 formal commit。Failed、
+ProducerCancelled、cancelled、stale 或 replaced state 会在不修改 Graph/RT 的情况下关闭；
+callback registration 与 retained-context drainage 会防止重复 terminal publication 或遗留
+callback owner。
+
 当前 IPC image-result 路径会在私有 daemon `OutputStore` 中物化 tight-row CPU artifact，
 调用文件 `fsync`、执行禁止覆盖的原子 rename、重新校验文件系统 identity，并返回受进程级
 delivery lease 保护的 metadata。该 store 不同步包含目录，也不持久化 record/index；

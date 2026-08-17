@@ -307,10 +307,18 @@ int builtin_input_halo_radius(const std::string& type,
 /** @copydoc ps::ops::register_core_operations */
 void register_core_operations() {
   OpRegistry& registry = OpRegistry::instance();
+  OpMetadata dimensions_metadata;
+  dimensions_metadata.produces_image = false;
+  dimensions_metadata.parameter_output_names = {"height", "width"};
   registry.register_op_hp_monolithic("analyzer", "get_dimensions",
-                                     MonolithicOpFunc(op_get_dimensions));
+                                     MonolithicOpFunc(op_get_dimensions),
+                                     std::move(dimensions_metadata));
+  OpMetadata divide_metadata;
+  divide_metadata.produces_image = false;
+  divide_metadata.parameter_output_names = {"result"};
   registry.register_op_hp_monolithic("math", "divide",
-                                     MonolithicOpFunc(op_divide));
+                                     MonolithicOpFunc(op_divide),
+                                     std::move(divide_metadata));
   registry.register_op_hp_monolithic("image_process", "invert_dense",
                                      MonolithicOpFunc(op_invert_dense));
 

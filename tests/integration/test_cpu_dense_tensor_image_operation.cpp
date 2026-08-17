@@ -29,6 +29,7 @@
 #include "compute/dirty/dirty_region_planner.hpp"
 #include "compute/dirty/dirty_write_buffers.hpp"
 #include "compute/dirty/node_executor.hpp"
+#include "compute/dispatch/task_graph_planning.hpp"
 #include "compute/execution/resource_demand_estimator.hpp"
 #include "compute/request/compute_cache_policy.hpp"
 #include "compute/request/compute_result_committer.hpp"
@@ -91,6 +92,44 @@ static_assert(std::is_nothrow_move_assignable_v<PendingValueProducer>);
 static_assert(!std::is_copy_constructible_v<ValueTransferTask>);
 static_assert(std::is_nothrow_move_constructible_v<ValueTransferTask>);
 static_assert(std::is_nothrow_move_assignable_v<ValueTransferTask>);
+
+/**
+ * @brief Builds explicit image-output authority for low-level commit tests.
+ * @param node_id Graph-local node covered by the authority.
+ * @param width Positive planned image width.
+ * @param height Positive planned image height.
+ * @return One-work-item frozen plan requiring exactly canonical `image`.
+ * @throws std::bad_alloc when authority strings or vector storage allocate.
+ * @note This helper deliberately supplies test-owned planning facts. It does
+ * not derive authorization from the candidate output and does not model route
+ * selection; route-backed authorization is covered by ComputeService tests.
+ */
+std::vector<compute::PlannedNodeWork> make_explicit_image_output_plan(
+    int node_id, int width, int height) {
+  compute::PlannedNodeWork work;
+  work.node_id = node_id;
+  compute::PlannedOutputAuthority authority;
+  authority.implementation_identity = 1U;
+  authority.route_device = Device::CPU;
+  authority.image_output_name = std::string(NodeOutput::kImageOutputName);
+  authority.image_extent = PixelSize{width, height};
+  work.output_authority = std::move(authority);
+  return {std::move(work)};
+}
+
+/**
+ * @brief Builds trusted dynamic-extent authority from a registry snapshot.
+ * @param implementation Exact selected implementation revision.
+ * @return Callback-free authority with output schema but no spatial extent.
+ * @throws GraphError or std::bad_alloc from authority construction.
+ * @note Dirty unit fixtures later pair this authority with explicit formal
+ * commit plans; production dirty preparation refines its extent before entry.
+ */
+compute::PlannedOutputAuthority make_dynamic_output_authority(
+    const OpImplementation& implementation) {
+  return compute::make_planned_output_authority(
+      compute::make_planned_operation_route(implementation), PixelSize{});
+}
 
 /**
  * @brief Creates one valid padded unsigned-8 HWC Value for test inspection.
@@ -923,7 +962,8 @@ TensorRouteMutationPreparationResult prepare_after_tensor_route_mutation(
         execution_node_id,
         compute::DirtyResolvedOperation{
             selected->func, selected->metadata.device_preference,
-            selected->implementation_identity, selected->metadata},
+            selected->implementation_identity, selected->metadata,
+            make_dynamic_output_authority(*selected)},
     }};
     compute::ComputeRun run(compute::ComputeRunSubmission{
         "tensor-route-mutation", graph.instance_id(), graph.revision(),
@@ -3074,7 +3114,9 @@ TEST(CpuDenseTensorImageOperation,
   value_image_adapter::import_node_output_compatibility_image(&*results[0]);
   ASSERT_TRUE(results[0]->has_image_value());
   EXPECT_FALSE(results[0]->has_compatibility_image());
-  committer.commit(graph, {80}, results);
+  const std::vector<compute::PlannedNodeWork> output_plan =
+      make_explicit_image_output_plan(80, 3, 2);
+  committer.commit(graph, {80}, output_plan, results);
 
   ASSERT_TRUE(graph.node(80).cached_output_high_precision.has_value());
   ASSERT_TRUE(graph.node(80).hp_region.has_value());
@@ -3104,7 +3146,7 @@ TEST(CpuDenseTensorImageOperation,
   dirty.stage_region_output(graph.node(80), std::move(dirty_update),
                             dirty_region);
   (void)dirty.mark_updated(graph.node(80), dirty_region, false, 0U);
-  dirty.commit_to_graph(graph);
+  dirty.commit_to_graph(graph, output_plan);
 
   const Value dirty_value =
       graph.node(80).cached_output_high_precision->image_value();
@@ -3124,7 +3166,7 @@ TEST(CpuDenseTensorImageOperation,
       make_aligned_cpu_image_buffer(3, 2, 1, DataType::UINT8);
   (void)fill_unsigned8_image(&results[0]->compatibility_image);
   value_image_adapter::import_node_output_compatibility_image(&*results[0]);
-  committer.commit(graph, {80}, results);
+  committer.commit(graph, {80}, output_plan, results);
 
   const Value replacement =
       graph.node(80).cached_output_high_precision->image_value();
@@ -3144,20 +3186,21 @@ TEST(CpuDenseTensorImageOperation,
 }
 
 /**
- * @brief Proves an authorized pending native Value reaches formal HP cache only
- * after its existing producer fence becomes Ready.
+ * @brief Proves a pending native Value reaches formal HP cache only after its
+ * existing producer fence becomes Ready under an explicit local plan.
  *
  * @return Nothing; GoogleTest reports premature mutation, staging, identity,
  * owner-lifetime, Region, generation, binding, or readiness failures.
  * @throws Native Value publication, Region derivation, graph mutation, and
  * cache-service exceptions unchanged to the test runner.
- * @note This dependency-neutral fixture models the Metal readback destination:
- * a source-private publisher retains one HostPinned native/host binding while
- * the executor owns terminal authority. Platform-specific tests separately
- * exercise the real Metal command-buffer completion path.
+ * @note This dependency-neutral fixture tests only committer readiness and
+ * identity preservation against test-owned explicit authority; it is not
+ * evidence that a real route created that authority. Route-backed tests cover
+ * admission separately. The source-private publisher models a HostPinned
+ * Metal readback destination, while platform tests cover command completion.
  */
 TEST(CpuDenseTensorImageOperation,
-     FormalCommitPublishesAuthorizedPendingNativeValueAfterReady) {
+     FormalCommitPublishesPendingNativeValueAfterReadyUnderExplicitPlan) {
   GraphModel graph("cache/native-formal-publication");
   Node node;
   node.id = 89;
@@ -3206,8 +3249,10 @@ TEST(CpuDenseTensorImageOperation,
   GraphCacheService cache(image_codec, metadata_codec);
   std::mutex graph_mutex;
   compute::ComputeResultCommitter committer(cache, graph_mutex, "int8");
+  const std::vector<compute::PlannedNodeWork> output_plan =
+      make_explicit_image_output_plan(89, 4, 3);
 
-  EXPECT_THROW(committer.commit(graph, {89}, results), GraphError);
+  EXPECT_THROW(committer.commit(graph, {89}, output_plan, results), GraphError);
   EXPECT_FALSE(graph.node(89).cached_output_high_precision.has_value());
   EXPECT_FALSE(graph.node(89).hp_region.has_value());
   EXPECT_EQ(graph.node(89).hp_version, 0U);
@@ -3220,7 +3265,7 @@ TEST(CpuDenseTensorImageOperation,
   native_allocation.reset();
   ASSERT_FALSE(allocation_observer.expired());
 
-  committer.commit(graph, {89}, results);
+  committer.commit(graph, {89}, output_plan, results);
 
   ASSERT_TRUE(graph.node(89).cached_output_high_precision.has_value());
   const NodeOutput& committed = *graph.node(89).cached_output_high_precision;
@@ -3322,7 +3367,8 @@ TEST(CpuDenseTensorImageOperation,
   GraphCacheService cache(image_codec, metadata_codec);
   std::mutex graph_mutex;
   compute::ComputeResultCommitter committer(cache, graph_mutex, "int8");
-  committer.commit(graph, {81}, results);
+  committer.commit(graph, {81}, make_explicit_image_output_plan(81, 11, 7),
+                   results);
 
   ASSERT_TRUE(graph.node(81).cached_output_high_precision.has_value());
   const NodeOutput& committed = *graph.node(81).cached_output_high_precision;
@@ -3401,7 +3447,7 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_FALSE(*graph.node(86).hp_region == update);
   EXPECT_FALSE(graph.dirty_source_hp_commit_generation.count(86));
 
-  staging.commit_to_graph(graph);
+  staging.commit_to_graph(graph, make_explicit_image_output_plan(86, 4, 3));
 
   const Value committed =
       graph.node(86).cached_output_high_precision->image_value();
@@ -4030,7 +4076,8 @@ TEST(CpuDenseTensorImageOperation,
       88,
       compute::DirtyResolvedOperation{
           resolved->func, resolved->metadata.device_preference,
-          resolved->implementation_identity, resolved->metadata},
+          resolved->implementation_identity, resolved->metadata,
+          make_dynamic_output_authority(*resolved)},
   }};
   GraphEventService events;
   compute::DirtyNodeSynchronization synchronization(graph.node_ids());
@@ -4066,7 +4113,7 @@ TEST(CpuDenseTensorImageOperation,
     }
   }
 
-  staging.commit_to_graph(graph);
+  staging.commit_to_graph(graph, make_explicit_image_output_plan(88, 4, 3));
   ASSERT_TRUE(graph.node(88).cached_output_high_precision.has_value());
   EXPECT_EQ(graph.node(88).hp_region, requested);
   EXPECT_EQ(graph.node(88).hp_version, 1);
@@ -4332,10 +4379,12 @@ TEST(CpuDenseTensorImageOperation,
         {91,
          compute::DirtyResolvedOperation{
              resolved->func, resolved->metadata.device_preference,
-             resolved->implementation_identity, resolved->metadata}},
+             resolved->implementation_identity, resolved->metadata,
+             make_dynamic_output_authority(*resolved)}},
         {92, compute::DirtyResolvedOperation{
                  resolved->func, resolved->metadata.device_preference,
-                 resolved->implementation_identity, resolved->metadata}}};
+                 resolved->implementation_identity, resolved->metadata,
+                 make_dynamic_output_authority(*resolved)}}};
     GraphEventService events;
     compute::DirtyNodeSynchronization synchronization(graph.node_ids());
     compute::HighPrecisionDirtyWriteBuffer staging;
@@ -4499,7 +4548,8 @@ TEST(CpuDenseTensorImageOperation,
       94,
       compute::DirtyResolvedOperation{
           resolved->func, resolved->metadata.device_preference,
-          resolved->implementation_identity, resolved->metadata},
+          resolved->implementation_identity, resolved->metadata,
+          make_dynamic_output_authority(*resolved)},
   }};
   GraphEventService events;
   compute::DirtyNodeSynchronization synchronization(graph.node_ids());
@@ -4534,7 +4584,7 @@ TEST(CpuDenseTensorImageOperation,
     }
   }
 
-  staging.commit_to_graph(graph);
+  staging.commit_to_graph(graph, make_explicit_image_output_plan(94, 4, 3));
   EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(94)));
   EXPECT_EQ(graph.node(94).hp_region, complete_target_region);
   EXPECT_NE(
@@ -4590,7 +4640,8 @@ TEST(CpuDenseTensorImageOperation,
       96,
       compute::DirtyResolvedOperation{
           resolved->func, resolved->metadata.device_preference,
-          resolved->implementation_identity, resolved->metadata},
+          resolved->implementation_identity, resolved->metadata,
+          make_dynamic_output_authority(*resolved)},
   }};
   GraphEventService events;
   compute::DirtyNodeSynchronization synchronization(graph.node_ids());
@@ -4602,7 +4653,7 @@ TEST(CpuDenseTensorImageOperation,
   compute::HighPrecisionDirtyNodeExecutor executor(context, staging);
   Node execution_target = graph.node(96);
   executor.execute(execution_target, plan.entries.at(96));
-  staging.commit_to_graph(graph);
+  staging.commit_to_graph(graph, make_explicit_image_output_plan(96, 4, 3));
 
   EXPECT_EQ(graph.node(96).hp_region, requested);
   EXPECT_FALSE(
@@ -4622,7 +4673,8 @@ TEST(CpuDenseTensorImageOperation,
   GraphCacheService cache(image_codec, metadata_codec);
   std::mutex graph_mutex;
   compute::ComputeResultCommitter committer(cache, graph_mutex, "int8");
-  committer.commit(graph, {96}, results);
+  committer.commit(graph, {96}, make_explicit_image_output_plan(96, 4, 3),
+                   results);
 
   EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(96)));
   EXPECT_EQ(graph.node(96).hp_region,

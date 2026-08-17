@@ -1,5 +1,6 @@
 #include "compute/request/compute_result_committer.hpp"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -11,31 +12,26 @@ namespace ps::compute {
 namespace {
 
 /**
- * @brief Validates one private output before formal graph-cache publication.
- * @param output Candidate request-local output.
- * @return Nothing after every named Value is valid and Ready.
- * @throws GraphError with ComputeError for compatibility staging, an invalid
- * named Value, or a non-Ready producer fence.
- * @throws std::logic_error when a retained fence observer is invalid.
- * @note Validation performs no wait, allocation, compatibility import, graph
- * mutation, revision minting, or cache publication.
+ * @brief Resolves one node's frozen authority before graph mutation.
+ * @param planned_work Immutable per-node planning records.
+ * @param node_id Graph node whose authority is required.
+ * @return Borrowed exact output authority.
+ * @throws GraphError with ComputeError when the plan omitted the node or its
+ * authority.
+ * @note The lookup consumes only callback-free planning state and cannot use a
+ * provider result to invent authorization.
  */
-void validate_formal_output(const NodeOutput& output) {
-  if (output.has_compatibility_image()) {
-    throw GraphError(
-        GraphErrc::ComputeError,
-        "Formal commit rejects compatibility ImageBuffer staging.");
+const PlannedOutputAuthority& authority_for_node(
+    const std::vector<PlannedNodeWork>& planned_work, int node_id) {
+  const auto found = std::find_if(planned_work.begin(), planned_work.end(),
+                                  [node_id](const PlannedNodeWork& work) {
+                                    return work.node_id == node_id;
+                                  });
+  if (found == planned_work.end() || !found->output_authority.has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Formal commit is missing frozen output authority.");
   }
-  for (const auto& [name, value] : output.named_values) {
-    if (name.empty() || !value.valid()) {
-      throw GraphError(GraphErrc::ComputeError,
-                       "Formal commit received an invalid named Value.");
-    }
-    if (!value.ready_fence().poll().ready()) {
-      throw GraphError(GraphErrc::ComputeError,
-                       "Formal commit requires every named Value to be Ready.");
-    }
-  }
+  return *found->output_authority;
 }
 
 }  // namespace
@@ -62,11 +58,19 @@ void ComputeResultCommitter::finalize_timing(TimingCollector& timing_results,
 
 void ComputeResultCommitter::commit(
     GraphModel& graph, const std::vector<int>& execution_order,
+    const std::vector<PlannedNodeWork>& planned_work,
     std::vector<std::optional<NodeOutput>>& temp_results) const {
+  if (temp_results.size() < execution_order.size()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Formal commit received incomplete result storage.");
+  }
   std::vector<std::optional<RegionSet>> full_regions(temp_results.size());
   for (size_t i = 0; i < execution_order.size(); ++i) {
     if (temp_results[i].has_value()) {
-      validate_formal_output(*temp_results[i]);
+      validate_planned_output(
+          *temp_results[i],
+          authority_for_node(planned_work, execution_order[i]),
+          PlannedOutputReadiness::RequireReady);
       full_regions[i] =
           value_image_adapter::full_node_output_region(*temp_results[i]);
     }

@@ -369,6 +369,12 @@ struct OperationMetadata {
   /** @brief Maximum accepted UTF-8 byte length of a nonempty exclusive key. */
   static constexpr std::size_t kExclusiveKeyMaxBytes = 128U;
 
+  /** @brief Maximum accepted bytes in one declared parameter-output name. */
+  static constexpr std::size_t kOutputNameMaxBytes = 128U;
+
+  /** @brief Maximum exact parameter-output names in one implementation. */
+  static constexpr std::size_t kParameterOutputCountMax = 64U;
+
   /** @brief Preferred tile granularity. */
   TileSizePreference tile_preference = TileSizePreference::Undefined;
   /** @brief Preferred execution device. */
@@ -398,6 +404,22 @@ struct OperationMetadata {
    * @brief Additional temporary Host bytes required by each in-flight callback.
    */
   std::uint64_t scratch_bytes = 0U;
+
+  /**
+   * @brief Whether the callback must publish the canonical named image Value.
+   * @note True preserves the fail-closed image-operation default. Data-only
+   * producers and deliberate side effects must explicitly set false.
+   */
+  bool produces_image = true;
+
+  /**
+   * @brief Exact legal non-image parameter-result names.
+   * @note The Host validates, sorts, and freezes this set with the callback
+   * revision. A normal result must contain every name exactly once and no
+   * undeclared name.
+   */
+  std::vector<std::string> parameter_output_names;
+
   /**
    * @brief Optional process execution-domain mutual-exclusion key.
    * @note Equal nonempty keys cannot overlap across implementations, Runs, or

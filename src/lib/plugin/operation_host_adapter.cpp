@@ -679,6 +679,29 @@ OpMetadata operation_metadata_to_private(
   result.maximum_parallelism = metadata.maximum_parallelism;
   result.retained_memory_bytes = metadata.retained_memory_bytes;
   result.scratch_bytes = metadata.scratch_bytes;
+  result.produces_image = metadata.produces_image;
+  if (metadata.parameter_output_names.size() >
+      plugin::OperationMetadata::kParameterOutputCountMax) {
+    throw std::invalid_argument(
+        "Operation metadata declares too many parameter outputs");
+  }
+  result.parameter_output_names = metadata.parameter_output_names;
+  for (const std::string& name : result.parameter_output_names) {
+    if (name.empty() ||
+        name.size() > plugin::OperationMetadata::kOutputNameMaxBytes ||
+        name.find('\0') != std::string::npos) {
+      throw std::invalid_argument(
+          "Operation metadata contains a malformed parameter-output name");
+    }
+  }
+  std::sort(result.parameter_output_names.begin(),
+            result.parameter_output_names.end());
+  if (std::adjacent_find(result.parameter_output_names.begin(),
+                         result.parameter_output_names.end()) !=
+      result.parameter_output_names.end()) {
+    throw std::invalid_argument(
+        "Operation metadata contains duplicate parameter-output names");
+  }
   if (metadata.exclusive_key.size() >
       plugin::OperationMetadata::kExclusiveKeyMaxBytes) {
     throw std::invalid_argument(

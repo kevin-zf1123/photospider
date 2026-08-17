@@ -165,7 +165,8 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
       enable_timing_(context.enable_timing),
       disable_disk_cache_(context.disable_disk_cache),
       benchmark_events_(context.benchmark_events),
-      run_lease_(context.run_lease) {
+      run_lease_(context.run_lease),
+      planned_work_(context.planned_work) {
   planned_output_sizes_.assign(execution_order_.size(), PixelSize{});
   tile_task_counts_.assign(execution_order_.size(), 0);
   completed_tile_counts_ =
@@ -264,6 +265,25 @@ NodeTaskRunner::TaskDependencyRelease NodeTaskRunner::run_task(int task_id) {
 
 bool NodeTaskRunner::allow_disk_cache() const {
   return !disable_disk_cache_ && !force_recache_;
+}
+
+/** @copydoc NodeTaskRunner::output_authority */
+const PlannedOutputAuthority& NodeTaskRunner::output_authority(
+    int node_idx) const {
+  if (planned_work_ == nullptr) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Node execution has no frozen output-authority plan.");
+  }
+  const int node_id = execution_order_.at(node_idx);
+  const auto found = std::find_if(planned_work_->begin(), planned_work_->end(),
+                                  [node_id](const PlannedNodeWork& work) {
+                                    return work.node_id == node_id;
+                                  });
+  if (found == planned_work_->end() || !found->output_authority.has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Node execution is missing its frozen output authority.");
+  }
+  return *found->output_authority;
 }
 
 /** @copydoc NodeTaskRunner::upstream_output */
@@ -436,6 +456,8 @@ bool NodeTaskRunner::finalize_tiled_node_if_complete(
   const double execution_ms =
       record_computed_output(target_node, current_event);
   finalize_output_metadata(output, image_inputs, enable_timing_, execution_ms);
+  validate_planned_output(output, output_authority(node_idx),
+                          PlannedOutputReadiness::RequireReady);
   temp_results_[node_idx] = std::move(output);
   return true;
 }
@@ -447,6 +469,8 @@ void NodeTaskRunner::try_load_disk_cache(const Node& target_node,
   }
   NodeOutput from_disk;
   if (cache_.try_load_from_disk_cache_into(graph_, target_node, from_disk)) {
+    validate_planned_output(from_disk, output_authority(node_idx),
+                            PlannedOutputReadiness::RequireReady);
     temp_results_[node_idx] = std::move(from_disk);
     record_disk_cache_hit(target_node);
   }
@@ -568,6 +592,8 @@ void NodeTaskRunner::compute_uncached_node(const Node& target_node,
   const double execution_ms =
       record_computed_output(target_node, current_event);
   finalize_output_metadata(result, inputs_ready, enable_timing_, execution_ms);
+  validate_planned_output(result, output_authority(node_idx),
+                          PlannedOutputReadiness::AllowPending);
   temp_results_[node_idx] = std::move(result);
 }
 

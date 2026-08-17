@@ -182,6 +182,7 @@ extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void register_photospider_ops_v2(
   }
   ps::plugin::OperationMetadata metadata;
   metadata.cost_score = 2;
+  metadata.produces_image = false;
   registrar->register_op_hp_monolithic(
       "plugin_lifecycle", "op", make_override_lifecycle_test_op(), metadata);
   registrar->register_dirty_propagator("plugin_lifecycle", "op",

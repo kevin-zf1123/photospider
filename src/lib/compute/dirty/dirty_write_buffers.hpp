@@ -8,6 +8,7 @@
 
 #include "compute/dirty/downsample_executor.hpp"
 #include "compute/dirty/realtime_proxy_graph.hpp"
+#include "compute/dispatch/task_graph_planning.hpp"
 #include "core/host_output_authorization.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/data/region.hpp"
@@ -49,6 +50,16 @@ class HighPrecisionDirtyWriteBuffer {
    * @note The pointer remains valid until buffer destruction or commit.
    */
   const NodeOutput* find_output(int node_id) const;
+
+  /**
+   * @brief Copies one staged HP output under the buffer mutex.
+   * @param node_id Graph node id to inspect.
+   * @return Complete copied output, or nullopt when no output is staged.
+   * @throws std::bad_alloc when copied metadata storage cannot allocate.
+   * @note Fence continuations use this stable snapshot instead of retaining a
+   * pointer after the mutex is released. Immutable Value identity is retained.
+   */
+  std::optional<NodeOutput> copy_output(int node_id) const;
 
   /**
    * @brief Checks whether staged HP output exists for one node.
@@ -187,7 +198,8 @@ class HighPrecisionDirtyWriteBuffer {
    * retained binding before publishing any graph state, then moves all staged
    * outputs. It performs no locking on GraphModel.
    */
-  void commit_to_graph(GraphModel& graph);
+  void commit_to_graph(GraphModel& graph,
+                       const std::vector<PlannedNodeWork>& planned_work);
 
   /**
    * @brief Builds HP-to-RT downsample requests from committed staged state.
@@ -316,6 +328,16 @@ class RealtimeProxyWriteBuffer {
   const NodeOutput* find_output(int node_id) const;
 
   /**
+   * @brief Copies one staged RT output under the buffer mutex.
+   * @param node_id Original graph node id to inspect.
+   * @return Complete copied output, or nullopt when no output is staged.
+   * @throws std::bad_alloc when copied metadata storage cannot allocate.
+   * @note The snapshot retains immutable Value identity without exposing a
+   * pointer across concurrent dirty-task completion.
+   */
+  std::optional<NodeOutput> copy_output(int node_id) const;
+
+  /**
    * @brief Checks whether staged RT output exists for one node.
    *
    * @param node_id Graph node id to inspect.
@@ -418,7 +440,7 @@ class RealtimeProxyWriteBuffer {
    * are sealed and validated before any proxy state is published. GraphModel
    * is not read or mutated during this commit.
    */
-  void commit_to_proxy_graph();
+  void commit_to_proxy_graph(const std::vector<PlannedNodeWork>& planned_work);
 
   /**
    * @brief Estimates complete Host-owned RT staging structure.

@@ -230,6 +230,12 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
           implementation->metadata.exclusive_key, before_operation_key,
           estimate.bytes());
 #endif
+      estimate.add_objects<std::string>(static_cast<std::uint64_t>(
+          implementation->metadata.parameter_output_names.capacity()));
+      for (const std::string& name :
+           implementation->metadata.parameter_output_names) {
+        estimate.add_string_payload(name);
+      }
     }
   }
   estimate.add_objects<OperationExecutionConstraints>(

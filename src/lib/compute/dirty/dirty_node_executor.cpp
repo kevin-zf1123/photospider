@@ -439,11 +439,8 @@ void HighPrecisionDirtyNodeExecutor::execute_monolithic(
     result = NodeExecutor::execute(graph_, node, OpRegistry::OpVariant{mono_fn},
                                    image_inputs_ready, config);
   }
-  if (!result.has_image_value() && result.data.empty()) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "Monolithic HP operator produced no output for " +
-                         node.type + ":" + node.subtype);
-  }
+  validate_planned_output(result, operation.output_authority,
+                          PlannedOutputReadiness::AllowPending);
   std::lock_guard<std::mutex> lock(node_mutex(node.id));
   if (ops::find_core_region_monolithic_operation(node.type, node.subtype,
                                                  mono_fn)
@@ -543,12 +540,11 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
       result = std::get<MonolithicOpFunc>(operation)(
           node_for_exec, resolved_inputs.image_inputs);
     }
-    if (!result.has_image_value() && result.data.empty() &&
-        result.named_values.empty()) {
-      throw GraphError(GraphErrc::ComputeError,
-                       "Monolithic RT operator produced no output for " +
-                           node_for_exec.type + ":" + node_for_exec.subtype);
-    }
+    PlannedOutputAuthority provider_authority =
+        selected_operation.output_authority;
+    provider_authority.image_extent.reset();
+    validate_planned_output(result, provider_authority,
+                            PlannedOutputReadiness::RequireReady);
     bool preserved_existing_bytes = staged_output.has_image_value();
     if (result.has_image_value()) {
       const std::vector<const NodeOutput*> plan_inputs =
@@ -563,11 +559,10 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
       publish_staged_image_value(&result, output_binding.seal());
       staged_output = std::move(result);
     } else {
-      if (staged_output.has_image_value()) {
-        result.publish_image_value(staged_output.image_value());
-      }
       staged_output = std::move(result);
     }
+    validate_planned_output(staged_output, selected_operation.output_authority,
+                            PlannedOutputReadiness::RequireReady);
     std::lock_guard<std::mutex> lock(node_mutex(node.id));
     rt_write_buffer_.stage_output(node.id, std::move(staged_output),
                                   preserved_existing_bytes);
