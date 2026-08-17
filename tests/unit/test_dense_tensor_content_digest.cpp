@@ -1,12 +1,17 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "core/extension_internal.hpp"
 #include "photospider/data/extension.hpp"
 #include "photospider/data/value.hpp"
 
@@ -60,6 +65,174 @@ std::string digest_hex(const ContentDigest& digest) {
   }
   return result;
 }
+
+/** @brief Specification-owned DenseTensor canonical Schema identity. */
+constexpr ExtensionIdentity kReferenceDenseTensorSchemaIdentity{
+    0x70686f746f737069ULL,
+    0x6465722d64656e73ULL};  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Specification-owned built-in Image canonical Facet identity. */
+constexpr ExtensionIdentity kReferenceImageFacetIdentity{
+    0x70686f746f737069ULL,
+    0x6465722d696d6167ULL};  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Specification-owned Sample Domain canonical Facet identity. */
+constexpr ExtensionIdentity kReferenceSampleDomainFacetIdentity{
+    0x70686f746f737069ULL,
+    0x6465722d73616d70ULL};  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Appends one reference byte without native object representation.
+ * @param output Destination canonical reference payload.
+ * @param value Exact byte value.
+ * @return Nothing.
+ * @throws std::bad_alloc when vector growth cannot allocate.
+ */
+void append_reference_u8(std::vector<std::byte>* output, std::uint8_t value) {
+  output->push_back(static_cast<std::byte>(value));
+}
+
+/**
+ * @brief Appends one reference uint32 in explicit little-endian order.
+ * @param output Destination canonical reference payload.
+ * @param value Exact unsigned scalar value.
+ * @return Nothing.
+ * @throws std::bad_alloc when vector growth cannot allocate.
+ */
+void append_reference_u32(std::vector<std::byte>* output, std::uint32_t value) {
+  for (unsigned int byte = 0U; byte < 4U; ++byte) {
+    append_reference_u8(
+        output, static_cast<std::uint8_t>((value >> (byte * 8U)) & 0xffU));
+  }
+}
+
+/**
+ * @brief Appends one reference uint64 in explicit little-endian order.
+ * @param output Destination canonical reference payload.
+ * @param value Exact unsigned scalar or specification-owned binary64 bits.
+ * @return Nothing.
+ * @throws std::bad_alloc when vector growth cannot allocate.
+ */
+void append_reference_u64(std::vector<std::byte>* output, std::uint64_t value) {
+  for (unsigned int byte = 0U; byte < 8U; ++byte) {
+    append_reference_u8(
+        output, static_cast<std::uint8_t>((value >> (byte * 8U)) & 0xffU));
+  }
+}
+
+/**
+ * @brief Builds the independent canonical digest for one sample interval.
+ *
+ * The reference stream spells every structural scalar and binary64 field as
+ * an integer constant before explicit little-endian emission. It therefore
+ * cannot inherit the host double object's byte order or 32-bit word order.
+ *
+ * @param minimum_bits Canonical binary64 bits for the interval lower bound.
+ * @param maximum_bits Canonical binary64 bits for the interval upper bound.
+ * @return Exact canonical-v1 digest for a one-byte U8 image Value.
+ * @throws ExtensionContractError when the frozen reference envelope is
+ *         malformed or canonical framing rejects it.
+ * @throws std::bad_alloc when record, envelope, or digest state allocation
+ *         fails.
+ */
+ContentDigest reference_sample_domain_digest(std::uint64_t minimum_bits,
+                                             std::uint64_t maximum_bits) {
+  DataDescriptorEnvelope descriptor;
+  descriptor.schema.kind = ExtensionDefinitionKind::Schema;
+  descriptor.schema.identity = kReferenceDenseTensorSchemaIdentity;
+  descriptor.schema.structural_version = 2U;
+  append_reference_u32(&descriptor.schema.payload, 2U);
+  append_reference_u64(&descriptor.schema.payload, 1U);
+  append_reference_u64(&descriptor.schema.payload, 1U);
+  append_reference_u32(
+      &descriptor.schema.payload,
+      static_cast<std::uint32_t>(ElementSemantics::UnsignedInteger));
+  append_reference_u32(
+      &descriptor.schema.payload,
+      static_cast<std::uint32_t>(StorageEncodingKind::NativeScalar));
+  append_reference_u32(&descriptor.schema.payload, 8U);
+  append_reference_u8(&descriptor.schema.payload, 0U);
+
+  ExtensionRecord image;
+  image.kind = ExtensionDefinitionKind::Facet;
+  image.identity = kReferenceImageFacetIdentity;
+  image.structural_version = 2U;
+  append_reference_u64(&image.payload, 1U);
+  append_reference_u64(&image.payload, 0U);
+  append_reference_u8(&image.payload, 0U);
+  append_reference_u64(&image.payload, 0U);
+  append_reference_u64(&image.payload, 0U);
+  append_reference_u64(&image.payload, 0U);
+  append_reference_u64(&image.payload, 1U);
+  append_reference_u64(&image.payload, 1U);
+  append_reference_u8(&image.payload, 0U);
+  append_reference_u8(&image.payload, 0U);
+  descriptor.facets.push_back(std::move(image));
+
+  ExtensionRecord sample_domain;
+  sample_domain.kind = ExtensionDefinitionKind::Facet;
+  sample_domain.identity = kReferenceSampleDomainFacetIdentity;
+  sample_domain.structural_version = 1U;
+  append_reference_u32(&sample_domain.payload, 1U);
+  append_reference_u32(&sample_domain.payload, 1U);
+  append_reference_u32(&sample_domain.payload,
+                       static_cast<std::uint32_t>(SampleEncodingKind::Value));
+  append_reference_u32(&sample_domain.payload,
+                       static_cast<std::uint32_t>(SampleDomainKind::CodeValue));
+  append_reference_u64(&sample_domain.payload, minimum_bits);
+  append_reference_u64(&sample_domain.payload, maximum_bits);
+  append_reference_u32(&sample_domain.payload, 0U);
+  descriptor.facets.push_back(std::move(sample_domain));
+
+  const DescriptorDigest descriptor_digest =
+      compute_descriptor_digest(descriptor);
+  internal::CanonicalContentDigestWriter writer(descriptor_digest, 1U);
+  constexpr std::byte kLogicalSample{0x5a};
+  writer.append(&kLogicalSample, 1U);
+  return writer.finish();
+}
+
+/**
+ * @brief Publishes one single-pixel U8 image with a declared sample interval.
+ * @param minimum Finite inclusive interval lower bound.
+ * @param maximum Finite inclusive interval upper bound.
+ * @return Fresh Ready Value whose single logical sample is hexadecimal 5a.
+ * @throws std::invalid_argument for invalid sample-domain or tensor facts.
+ * @throws std::overflow_error when publication arithmetic cannot represent
+ *         the requested envelope or identity.
+ * @throws std::length_error when bounded image records exceed frozen limits.
+ * @throws std::bad_alloc when metadata, payload, or publication allocation
+ *         fails.
+ */
+Value make_sample_domain_value(double minimum, double maximum) {
+  ImageFacet facet;
+  facet.x_axis = 1U;
+  facet.y_axis = 0U;
+  facet.data_window = ImageBounds{0, 0, 1, 1};
+  facet.sample_domain = SampleDomainFacet{
+      1U,
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::CodeValue, minimum, maximum},
+      {}};
+  return make_u8_tensor({1U, 1U}, {1, 1}, {std::byte{0x5a}}, std::move(facet));
+}
+
+/**
+ * @brief Numeric inputs paired with specification-owned binary64 bit fields.
+ * @throws Nothing for aggregate construction and destruction.
+ */
+struct Binary64DomainCase final {
+  /** @brief Diagnostic case label used only by GoogleTest. */
+  const char* name = nullptr;
+  /** @brief Finite lower bound supplied through the public Value contract. */
+  double minimum = 0.0;
+  /** @brief Finite upper bound supplied through the public Value contract. */
+  double maximum = 0.0;
+  /** @brief Canonical binary64 bits expected for the lower bound. */
+  std::uint64_t minimum_bits = 0U;
+  /** @brief Canonical binary64 bits expected for the upper bound. */
+  std::uint64_t maximum_bits = 0U;
+};
 
 /**
  * @brief Proves canonical DenseTensor content ignores physical row padding.
@@ -214,6 +387,73 @@ TEST(DenseTensorContentDigest,
   EXPECT_FALSE(*base_digest == *regrouped_digest);
   EXPECT_FALSE(*base_digest == *reordered_digest);
   EXPECT_FALSE(base == reordered);
+}
+
+/**
+ * @brief Proves sample-domain binary64 encoding is numeric and word-order free.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         from valid sample-domain publication unchanged.
+ * @throws ExtensionContractError if independent canonical framing fails.
+ * @throws std::bad_alloc when Value, record, digest, or diagnostic allocation
+ *         fails.
+ * @note Expected records are assembled from specification-owned integer bit
+ *       patterns and explicit little-endian shifts, never from a host double
+ *       object's bytes.
+ */
+TEST(DenseTensorContentDigest, SampleDomainBinary64UsesCanonicalNumericBits) {
+  const double maximum_subnormal =
+      std::nextafter(std::numeric_limits<double>::min(), 0.0);
+  const std::array<Binary64DomainCase, 6U> cases{{
+      {"signed zero", -0.0, 0.0, 0x0000000000000000ULL, 0x0000000000000000ULL},
+      {"normal one", -1.0, 1.0, 0xbff0000000000000ULL, 0x3ff0000000000000ULL},
+      {"minimum subnormal", -std::numeric_limits<double>::denorm_min(),
+       std::numeric_limits<double>::denorm_min(), 0x8000000000000001ULL,
+       0x0000000000000001ULL},
+      {"maximum subnormal", -maximum_subnormal, maximum_subnormal,
+       0x800fffffffffffffULL, 0x000fffffffffffffULL},
+      {"minimum normal", -std::numeric_limits<double>::min(),
+       std::numeric_limits<double>::min(), 0x8010000000000000ULL,
+       0x0010000000000000ULL},
+      {"maximum finite", -std::numeric_limits<double>::max(),
+       std::numeric_limits<double>::max(), 0xffefffffffffffffULL,
+       0x7fefffffffffffffULL},
+  }};
+
+  for (const Binary64DomainCase& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+    const Value value =
+        make_sample_domain_value(test_case.minimum, test_case.maximum);
+    const ContentDigestResult actual = compute_content_digest(value);
+    ASSERT_EQ(actual.state, ContentDigestState::Available) << actual.diagnostic;
+    ASSERT_TRUE(actual.digest.has_value());
+    const ContentDigest expected = reference_sample_domain_digest(
+        test_case.minimum_bits, test_case.maximum_bits);
+    EXPECT_EQ(*actual.digest, expected);
+  }
+}
+
+/**
+ * @brief Preserves publication rejection of nonfinite sample-domain metadata.
+ * @throws std::bad_alloc if fixture assembly fails before expected validation.
+ * @note Expected std::invalid_argument failures are consumed by GoogleTest;
+ *       no invalid metadata can reach canonical binary64 encoding.
+ */
+TEST(DenseTensorContentDigest, NonFiniteSampleDomainRemainsRejected) {
+  const double infinity = std::numeric_limits<double>::infinity();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const std::array<SampleDomain, 4U> invalid_domains{{
+      {SampleDomainKind::CodeValue, -infinity, 0.0},
+      {SampleDomainKind::CodeValue, 0.0, infinity},
+      {SampleDomainKind::CodeValue, nan, 1.0},
+      {SampleDomainKind::CodeValue, 0.0, nan},
+  }};
+
+  for (std::size_t index = 0U; index < invalid_domains.size(); ++index) {
+    SCOPED_TRACE(index);
+    EXPECT_THROW((void)make_sample_domain_value(invalid_domains[index].minimum,
+                                                invalid_domains[index].maximum),
+                 std::invalid_argument);
+  }
 }
 
 /**

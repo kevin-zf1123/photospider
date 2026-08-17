@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -103,27 +104,55 @@ void append_i64(std::vector<std::byte>* output, std::int64_t value) {
 }
 
 /**
- * @brief Appends one finite binary64 value with canonical signed zero.
+ * @brief Numerically encodes one finite binary64 value with canonical zero.
  * @param output Destination payload.
  * @param value Validated finite metadata value.
  * @return Nothing.
+ * @throws std::invalid_argument when the finite-value precondition is broken.
  * @throws std::bad_alloc when vector growth cannot allocate.
  * @note Both signed-zero spellings encode as positive zero. Publication has
- *       already rejected NaN and infinity. Compilation rejects platforms
- *       whose native double is not the IEC 559 binary64 format copied below.
+ *       already rejected NaN and infinity; the local check prevents an
+ *       invalid floating-to-integer conversion if that invariant regresses.
+ * @note Sign, exponent, and fraction bits are derived from the numeric value,
+ *       so neither native object byte order nor floating-point word order
+ *       enters the canonical little-endian payload. Compilation rejects a
+ *       native double numeric model other than IEC 559 binary64 with
+ *       subnormal support.
  */
 void append_f64(std::vector<std::byte>* output, double value) {
-  const double canonical = value == 0.0 ? 0.0 : value;
-  std::uint64_t bits = 0U;
-  static_assert(std::numeric_limits<double>::is_iec559 &&
-                    std::numeric_limits<double>::radix == 2 &&
-                    std::numeric_limits<double>::digits == 53 &&
-                    std::numeric_limits<double>::min_exponent == -1021 &&
-                    std::numeric_limits<double>::max_exponent == 1024,
-                "binary64 canonical encoding requires IEC 559 binary64");
-  static_assert(sizeof(bits) == sizeof(canonical),
-                "binary64 canonical encoding requires 64-bit double");
-  std::memcpy(&bits, &canonical, sizeof(bits));
+  static_assert(
+      std::numeric_limits<double>::is_iec559 &&
+          std::numeric_limits<double>::radix == 2 &&
+          std::numeric_limits<double>::digits == 53 &&
+          std::numeric_limits<double>::min_exponent == -1021 &&
+          std::numeric_limits<double>::max_exponent == 1024 &&
+          std::numeric_limits<double>::has_denorm == std::denorm_present,
+      "binary64 canonical encoding requires IEC 559 binary64");
+
+  if (!std::isfinite(value)) {
+    throw std::invalid_argument(
+        "binary64 canonical encoding requires a finite value");
+  }
+  if (value == 0.0) {
+    append_u64(output, 0U);
+    return;
+  }
+
+  constexpr std::uint64_t kSignBit = std::uint64_t{1U} << 63U;
+  constexpr std::uint64_t kImplicitSignificandBit = std::uint64_t{1U} << 52U;
+  std::uint64_t bits = std::signbit(value) ? kSignBit : 0U;
+  const double magnitude = std::fabs(value);
+  if (magnitude < std::numeric_limits<double>::min()) {
+    bits |= static_cast<std::uint64_t>(std::ldexp(magnitude, 1074));
+  } else {
+    int exponent = 0;
+    const double fraction = std::frexp(magnitude, &exponent);
+    const std::uint64_t significand =
+        static_cast<std::uint64_t>(std::ldexp(fraction, 53));
+    const std::uint64_t biased_exponent =
+        static_cast<std::uint64_t>(exponent + 1022);
+    bits |= (biased_exponent << 52U) | (significand - kImplicitSignificandBit);
+  }
   append_u64(output, bits);
 }
 
