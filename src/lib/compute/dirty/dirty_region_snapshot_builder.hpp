@@ -22,7 +22,7 @@ struct DirtySourceLifecycleUpdate {
   /** @brief Dirty domain associated with the source node. */
   DirtyDomain domain = DirtyDomain::HighPrecision;
 
-  /** @brief Optional source ROI appended for begin/update transitions. */
+  /** @brief Optional zero-based HP storage ROI for begin/update transitions. */
   const PixelRect* source_roi = nullptr;
 
   /** @brief New lifecycle state for the source node. */
@@ -30,8 +30,9 @@ struct DirtySourceLifecycleUpdate {
 
   /**
    * @brief Optional authoritative Region for a V-4 lifecycle event.
-   * @note When null and source_roi is non-null, the builder performs one
-   *       checked ImageRect conversion at the current edge.
+   * @note When null and source_roi is non-null, the builder resolves the
+   * node's HP data window and performs one checked storage-to-logical
+   * conversion at the current edge.
    */
   const RegionSet* source_region = nullptr;
 };
@@ -40,7 +41,8 @@ struct DirtySourceLifecycleUpdate {
  * @brief Domain-local dirty work to append for one graph node.
  *
  * @note node must point to the GraphModel node identified by node_id and must
- * remain valid for the append_node_work call.
+ * remain valid for append_node_work. PixelRect uses zero-based storage while
+ * data_window supplies the logical metadata origin.
  */
 struct DirtyNodeWorkRecord {
   /** @brief Node whose execution boundary determines record shape. */
@@ -52,8 +54,11 @@ struct DirtyNodeWorkRecord {
   /** @brief Dirty domain for the records. */
   DirtyDomain domain = DirtyDomain::HighPrecision;
 
-  /** @brief Domain-local ROI to record. */
+  /** @brief Zero-based domain-local storage ROI to record. */
   PixelRect work_roi;
+
+  /** @brief Logical data window used to translate work_roi metadata. */
+  ImageBounds data_window;
 
   /** @brief Domain-local tile size for tiled records. */
   int tile_size = 0;
@@ -63,7 +68,8 @@ struct DirtyNodeWorkRecord {
  * @brief Tile enumeration request for one domain-local dirty ROI.
  *
  * @note The request is value-only and can be logged or inspected without
- * holding graph or execution-runtime state.
+ * graph/runtime state. ROI is zero-based and data_window supplies its logical
+ * metadata origin.
  */
 struct DirtyTileEnumeration {
   /** @brief Node id associated with emitted tile keys. */
@@ -75,8 +81,11 @@ struct DirtyTileEnumeration {
   /** @brief Tile granularity level to store. */
   DirtyTileLevel level = DirtyTileLevel::Micro;
 
-  /** @brief Domain-local ROI to tile. */
+  /** @brief Zero-based domain-local storage ROI to tile. */
   PixelRect roi;
+
+  /** @brief Logical data window used to translate emitted tile Regions. */
+  ImageBounds data_window;
 
   /** @brief Domain-local tile edge length. */
   int tile_size = 0;
@@ -105,6 +114,9 @@ class DirtyRegionSnapshotBuilder {
    * @param update Source lifecycle transition to apply.
    * @throws GraphError when node_id is missing, a supplied source fact is
    * empty, or both ROI and Region are supplied.
+   * @throws std::invalid_argument or std::overflow_error when a storage ROI
+   * cannot be translated through the node's signed HP data window.
+   * @throws std::bad_alloc when source or Region snapshot storage grows.
    * @note dirty_updating_count is recomputed from source lifecycle states after
    * the transition. Existing source membership is intentionally preserved until
    * the dirty generation settles.
@@ -120,6 +132,8 @@ class DirtyRegionSnapshotBuilder {
    * @param snapshot Snapshot whose derived dirty regions are replaced.
    * @param domain Dirty domain to refresh.
    * @throws GraphError from extent lookup when graph metadata is invalid.
+   * @throws std::invalid_argument or std::overflow_error when a source/work
+   * Region cannot cross its logical/storage boundary exactly.
    * @throws std::bad_alloc if cache, snapshot, implementation, or callback
    *         snapshot storage cannot be copied or grown.
    * @throws Any exception raised while copying a registered callback target.
@@ -153,9 +167,12 @@ class DirtyRegionSnapshotBuilder {
    * @param record Domain-local node work record to append.
    * @throws std::bad_alloc if snapshot or implementation snapshot storage
    *         allocation fails.
+   * @throws std::invalid_argument or std::overflow_error when the work ROI
+   * cannot be translated through record.data_window.
    * @throws Any exception raised while copying a registered callback target.
-   * @note Empty work ROIs are ignored. Monolithic nodes receive a single
-   * whole-output record; tiled nodes receive aligned micro tile keys.
+   * @note Empty work ROIs are ignored. PixelRect remains storage-relative;
+   * retained logical Region metadata is translated through data_window.
+   * Monolithic nodes receive one record and tiled nodes receive micro keys.
    */
   void append_node_work(DirtyRegionSnapshot& snapshot,
                         const DirtyNodeWorkRecord& record) const;
@@ -165,9 +182,11 @@ class DirtyRegionSnapshotBuilder {
    *
    * @param snapshot Snapshot receiving tile keys.
    * @param request Value-only tile enumeration request.
-   * @throws std::bad_alloc if snapshot storage grows and allocation fails.
-   * @note The ROI is aligned to request.tile_size before tile keys are
-   * appended.
+   * @throws std::invalid_argument or std::overflow_error when a tile ROI
+   * cannot be translated through request.data_window.
+   * @throws std::bad_alloc if snapshot or Region storage grows.
+   * @note The zero-based ROI is aligned before tile keys are appended. Each
+   * retained logical Region is translated through request.data_window.
    */
   void enumerate_tiles(DirtyRegionSnapshot& snapshot,
                        const DirtyTileEnumeration& request) const;
@@ -179,13 +198,13 @@ class DirtyRegionSnapshotBuilder {
    * @param graph Graph used for HP-authoritative extent lookup.
    * @param node_id Node id owning the source ROI.
    * @param domain Dirty domain to materialize.
-   * @param source_roi Source ROI recorded by a dirty lifecycle event.
+   * @param source_roi Zero-based HP storage ROI recorded by a lifecycle event.
    * @param hp_size_cache Shared HP extent cache for one refresh pass.
    * @return Domain-local dirty ROI, or an empty rect when no work remains.
    * @throws GraphError from extent lookup when graph metadata is invalid.
-   * @note The current lifecycle path first clips source ROIs in HP space, then
-   * projects RT snapshots down to proxy space. This preserves existing dirty
-   * source semantics.
+   * @note The current lifecycle path first clips source ROIs in HP storage,
+   * then projects RT snapshots down to proxy storage. This preserves existing
+   * dirty source semantics independently of logical data-window origin.
    */
   PixelRect normalize_source_roi(
       const GraphModel& graph, int node_id, DirtyDomain domain,

@@ -157,8 +157,8 @@ class HighPrecisionDirtyWriteBuffer {
    * @brief Records HP metadata for one successful dirty node update.
    *
    * @param node Graph node whose staged output was updated.
-   * @param region_hp Exact normalized HP-space Region represented by this
-   * update.
+   * @param region_hp Exact normalized signed logical HP Region represented by
+   * this update.
    * @param dirty_source Whether the node is a dirty source boundary.
    * @param dirty_generation Dirty generation committed for source nodes.
    * @return New staged HP version after incrementing.
@@ -192,11 +192,14 @@ class HighPrecisionDirtyWriteBuffer {
   /**
    * @brief Builds HP-to-RT downsample requests from committed staged state.
    *
-   * @return Downsample requests carrying final staged HP versions.
-   * @throws std::bad_alloc if result vector allocation fails.
+   * @return Downsample requests carrying signed logical HP Regions and final
+   * staged HP versions.
+   * @throws std::bad_alloc if result or copied Region storage allocation fails.
    * @note The requests are valid after commit_to_graph() has made HP outputs
-   * visible on GraphModel. TensorSlice and Whole validity have no current
-   * image-only projection and are intentionally omitted.
+   * visible on GraphModel. Exact ImageRect remains logical authority until the
+   * DownsampleExecutor observes the committed data-window origin. Empty keeps
+   * the legacy full-frame fallback; TensorSlice and Whole validity have no
+   * current partial image-only request and are intentionally omitted.
    */
   std::vector<DownsampleExecutor::Request> downsample_requests() const;
 
@@ -338,7 +341,7 @@ class RealtimeProxyWriteBuffer {
    * @param node_id Original graph node id.
    * @param output Complete result containing only immutable named Values.
    * @param preserved_existing_bytes Whether the new binding retained every
-   * byte covered by the prior HP-space validity Region.
+   * byte covered by the prior signed logical HP validity Region.
    * @return Nothing.
    * @throws GraphError when output contains compatibility staging.
    * @throws std::bad_alloc when map or output metadata ownership allocates.
@@ -392,14 +395,16 @@ class RealtimeProxyWriteBuffer {
    * @brief Records RT proxy metadata for one successful dirty update.
    *
    * @param node_id Graph node id whose proxy output was updated.
-   * @param region_hp Exact normalized HP-space ImageRect Region represented by
-   * this RT update.
+   * @param region_hp Exact normalized signed logical HP ImageRect Region
+   * represented by this RT update.
    * @param dirty_source Whether the node is a dirty source boundary.
    * @param dirty_generation Dirty generation committed for source nodes.
    * @return New staged RT proxy version after incrementing.
-   * @throws std::invalid_argument or std::overflow_error when region_hp cannot
-   * project exactly to the current PixelRect RT boundary.
+   * @throws std::invalid_argument when region_hp is not one exact built-in
+   * logical ImageRect.
    * @throws std::bad_alloc if the staged entry or Region algebra must allocate.
+   * @note No PixelRect projection occurs here; signed logical HP coordinates
+   * remain valid independently of the zero-based RT storage ROI.
    */
   int mark_updated(int node_id, const RegionSet& region_hp, bool dirty_source,
                    uint64_t dirty_generation);

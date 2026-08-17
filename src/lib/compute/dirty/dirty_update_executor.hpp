@@ -509,7 +509,11 @@ struct DirtyUpdateRequest {
   /** @brief Optional benchmark sink borrowed for the active request only. */
   std::vector<BenchmarkEvent>* benchmark_events = nullptr;
 
-  /** @brief Dirty ROI in high-precision graph coordinates. */
+  /**
+   * @brief Zero-based HP storage/compatibility ROI for the target output.
+   * @note Signed logical callers must translate through the target ImageBounds
+   * before constructing this private executor request.
+   */
   PixelRect dirty_roi;
 
   /**

@@ -55,7 +55,9 @@ struct InputTile {
  * OutputTile is the private compute write representation passed to backend
  * adapters and operation-host callbacks. Its immutable plan fixes metadata and
  * ownership while its active grant is the sole mutable authority. The ROI is a
- * backend-neutral projection of the grant's exact image Region.
+ * zero-based storage-relative projection of the grant's exact logical image
+ * Region: adapters must add the plan data-window origin before comparing it to
+ * grant.image_region(), while pixel/stride access keeps the zero-based value.
  *
  * @throws Nothing for value operations.
  * @note Neither pointer is owning. Both remain valid only during one trusted
@@ -69,7 +71,11 @@ struct OutputTile {
   /** @brief Borrowed active tile grant providing checked mutable spans. */
   HostOutputWriteGrant* grant = nullptr;
 
-  /** @brief Pixel ROI matching the grant, clipped before dispatch.
+  /**
+   * @brief Zero-based storage ROI matching the origin-adjusted logical grant.
+   * @note This value is clipped to plan width/height before dispatch and must
+   * never be retained as logical validity metadata without checked translation
+   * through plan.image_facet().data_window.
    */
   PixelRect roi;
 };

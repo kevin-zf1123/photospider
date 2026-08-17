@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -386,6 +387,68 @@ NodeOutput make_image_output(int width, int height, int channels = 1,
   NodeOutput output;
   output.publish_image_value(
       value_image_adapter::snapshot_cpu_image_value(buffer));
+  return output;
+}
+
+/**
+ * @brief Publishes a nonzero-origin CPU image with storage-distinct pixels.
+ *
+ * @param data_window Signed logical window whose spans define the image size.
+ * @return Canonical FLOAT32 single-channel output where storage pixel `(x,y)`
+ * contains `100*y+x`.
+ * @throws std::invalid_argument or std::overflow_error when bounds, layout, or
+ * storage arithmetic is invalid.
+ * @throws std::bad_alloc, std::logic_error, or std::system_error from Host
+ * allocation, grant retirement, sealing, or output publication.
+ * @note The fill pattern is storage-relative by design, allowing tests to prove
+ * a logical Region was translated through data_window before pixel access.
+ */
+NodeOutput make_offset_image_output(const ImageBounds& data_window) {
+  const std::size_t width = image_bounds_width(data_window);
+  const std::size_t height = image_bounds_height(data_window);
+  if (width == 0U || height == 0U) {
+    throw std::invalid_argument(
+        "Offset image fixture requires a nonempty data window.");
+  }
+  if (width > std::numeric_limits<std::size_t>::max() / sizeof(float) ||
+      height >
+          std::numeric_limits<std::size_t>::max() / (width * sizeof(float))) {
+    throw std::overflow_error("Offset image fixture storage size overflowed.");
+  }
+  DenseTensorDescriptor descriptor{{height, width, 1U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.data_window = data_window;
+  const std::size_t row_stride = width * sizeof(float);
+  if (row_stride >
+      static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
+    throw std::overflow_error("Offset image fixture stride overflowed.");
+  }
+  StridedLayout layout{{static_cast<std::ptrdiff_t>(row_stride),
+                        static_cast<std::ptrdiff_t>(sizeof(float)),
+                        static_cast<std::ptrdiff_t>(sizeof(float))}};
+  HostOutputBinding binding =
+      HostOutputBinding::allocate(DenseImageOutputPlan::create(
+          "image", std::move(descriptor), std::move(facet), std::move(layout),
+          row_stride * height, 64U));
+  HostOutputWriteGrant grant = binding.grant_whole();
+  if (grant.span_count() != 1U ||
+      grant.span(0U).byte_size != row_stride * height) {
+    throw std::logic_error(
+        "Offset image fixture expected one contiguous whole grant.");
+  }
+  std::byte* const bytes = grant.data(0U);
+  for (std::size_t y = 0U; y < height; ++y) {
+    for (std::size_t x = 0U; x < width; ++x) {
+      const float value = static_cast<float>(100U * y + x);
+      std::memcpy(bytes + y * row_stride + x * sizeof(float), &value,
+                  sizeof(value));
+    }
+  }
+  grant.retire_success();
+  NodeOutput output;
+  output.publish_image_value(binding.seal());
   return output;
 }
 
@@ -2340,7 +2403,9 @@ compute::HighPrecisionDirtyPlan make_sparse_monolithic_dirty_plan(
   const RegionSet region =
       RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
   for (int node_id : dirty_node_ids) {
-    plan.entries.emplace(node_id, compute::HpPlanEntry{region, roi, extent, 0});
+    plan.entries.emplace(
+        node_id,
+        compute::HpPlanEntry{region, roi, extent, ImageBounds{0, 0, 8, 8}, 0});
     plan.snapshot.per_node_dirty_rois[node_id].push_back(roi);
     plan.snapshot.actual_dirty_rois[node_id].push_back(roi);
     plan.snapshot.dirty_monolithic_nodes.push_back(
@@ -3027,6 +3092,74 @@ TEST(DirtyRegionPlannerSplit, PreservesDomainSpecificHpAndRtProjection) {
   ASSERT_TRUE(rt_plan.snapshot.per_node_dirty_rois.count(20));
   EXPECT_EQ(rt_plan.snapshot.per_node_dirty_rois.at(20).front(),
             (PixelRect{0, 0, 64, 64}));
+}
+
+/**
+ * @brief Verifies planner PixelRects remain storage-relative while every HP
+ * Region retains a negative signed data-window origin.
+ *
+ * @return Nothing; GoogleTest reports plan, edge, tile, or metadata failures.
+ * @throws Graph, Value, Region, allocation, or propagation exceptions when
+ * fixture construction or planning cannot complete.
+ * @note The requested logical quadrant maps exactly to storage ROI
+ * `{64,64,64,64}`. RT execution projects that storage ROI to `{16,16,16,16}`
+ * without rewriting HP validity into zero-origin coordinates.
+ */
+TEST(DirtyRegionPlannerSplit,
+     KeepsStorageRoisAndLogicalRegionsDistinctForNegativeOrigin) {
+  register_split_ops();
+  GraphModel graph("cache/split-negative-origin-dirty-planner");
+  const ImageBounds data_window{-64, -32, 64, 96};
+  Node source = make_node(10, "split_plan", "tile");
+  source.cached_output_high_precision = make_offset_image_output(data_window);
+  Node target = make_node(20, "split_plan", "tile");
+  target.cached_output_high_precision = make_offset_image_output(data_window);
+  target.image_inputs.push_back({10, "image"});
+  graph.add_node(source);
+  graph.add_node(target);
+  graph.validate_topology();
+
+  const RegionSet requested =
+      RegionSet::from_image_rect({image_region_domain(), 0, 64, 32, 96});
+  GraphTraversalService traversal;
+  RoiPropagationService propagation;
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+
+  const compute::HighPrecisionDirtyPlan hp_plan =
+      planner.plan_high_precision(graph, 20, requested);
+  ASSERT_EQ(hp_plan.entries.size(), 2U);
+  for (int node_id : {10, 20}) {
+    const compute::HpPlanEntry& entry = hp_plan.entries.at(node_id);
+    EXPECT_EQ(entry.hp_data_window, data_window);
+    EXPECT_EQ(entry.roi_hp, (PixelRect{64, 64, 64, 64}));
+    EXPECT_EQ(entry.region_hp, requested);
+  }
+  ASSERT_EQ(hp_plan.snapshot.edge_mappings.size(), 1U);
+  EXPECT_EQ(hp_plan.snapshot.edge_mappings.front().from_region, requested);
+  EXPECT_EQ(hp_plan.snapshot.edge_mappings.front().to_region, requested);
+  ASSERT_EQ(hp_plan.snapshot.dirty_tiles.size(), 2U);
+  for (const compute::DirtyTileKey& tile : hp_plan.snapshot.dirty_tiles) {
+    EXPECT_EQ(tile.pixel_roi, (PixelRect{64, 64, 64, 64}));
+    EXPECT_EQ(tile.region, requested);
+  }
+
+  const compute::RealTimeDirtyPlan rt_plan =
+      planner.plan_real_time(graph, 20, requested);
+  ASSERT_EQ(rt_plan.entries.size(), 2U);
+  for (int node_id : {10, 20}) {
+    const compute::RtPlanEntry& entry = rt_plan.entries.at(node_id);
+    EXPECT_EQ(entry.hp_data_window, data_window);
+    EXPECT_EQ(entry.roi_hp, (PixelRect{64, 64, 64, 64}));
+    EXPECT_EQ(entry.region_hp, requested);
+    EXPECT_EQ(entry.roi_rt, (PixelRect{16, 16, 16, 16}));
+  }
+  ASSERT_EQ(rt_plan.snapshot.dirty_tiles.size(), 2U);
+  const RegionSet expected_rt_tile =
+      RegionSet::from_image_rect({image_region_domain(), 16, 32, 16, 32});
+  for (const compute::DirtyTileKey& tile : rt_plan.snapshot.dirty_tiles) {
+    EXPECT_EQ(tile.pixel_roi, (PixelRect{16, 16, 16, 16}));
+    EXPECT_EQ(tile.region, expected_rt_tile);
+  }
 }
 
 TEST(DirtyRegionPlannerSplit,
@@ -6597,10 +6730,12 @@ TEST(DownsampleExecutorSplit,
   proxy.synchronize_with_graph(graph);
   GraphEventService events;
   compute::DownsampleExecutor downsample(graph, proxy, nullptr, events);
-  downsample.execute({{1, (PixelRect{8, 4, 16, 8}), 5}});
+  const RegionSet first_region =
+      RegionSet::from_image_rect({image_region_domain(), 8, 24, 4, 12});
+  downsample.execute({{1, first_region, 5}});
 
   const auto assert_passthrough = [&](int version,
-                                      const PixelRect& expected_roi) {
+                                      const RegionSet& expected_region) {
     const auto* state = proxy.find_state(1);
     ASSERT_NE(state, nullptr);
     ASSERT_TRUE(state->output.has_value());
@@ -6619,17 +6754,15 @@ TEST(DownsampleExecutorSplit,
     EXPECT_EQ(state->output->data.at("marker").as_int64(), 17);
     EXPECT_EQ(state->version, version);
     ASSERT_TRUE(state->region_hp.has_value());
-    EXPECT_EQ(*state->region_hp,
-              RegionSet::from_image_rect(
-                  {image_region_domain(), expected_roi.x,
-                   expected_roi.x + expected_roi.width, expected_roi.y,
-                   expected_roi.y + expected_roi.height}));
+    EXPECT_EQ(*state->region_hp, expected_region);
   };
-  assert_passthrough(5, (PixelRect{8, 4, 16, 8}));
+  assert_passthrough(5, first_region);
 
   graph.mutate_node_runtime_state(1, [](auto& state) { state.hp_version = 6; });
-  downsample.execute({{1, (PixelRect{40, 20, 8, 4}), 6}});
-  assert_passthrough(6, (PixelRect{40, 20, 8, 4}));
+  const RegionSet second_region =
+      RegionSet::from_image_rect({image_region_domain(), 40, 48, 20, 24});
+  downsample.execute({{1, second_region, 6}});
+  assert_passthrough(6, second_region);
 
   const ComputeEventBatch recorded = events.drain(kComputeEventDrainMaxLimit);
   ASSERT_EQ(recorded.events.size(), 2u);
@@ -6637,6 +6770,64 @@ TEST(DownsampleExecutorSplit,
                           [](const ComputeEventSnapshot& event) {
                             return event.source == "downsample_passthrough";
                           }));
+}
+
+/**
+ * @brief Proves logical HP validity and storage pixel selection share one
+ * checked data-window translation during a real CPU downsample.
+ *
+ * @return Nothing; GoogleTest reports request, pixel, identity, or metadata
+ * failures.
+ * @throws Host allocation, Region, graph staging, resize, grant, or Value
+ * exceptions when the fixture cannot execute.
+ * @note The selected logical bottom-right quadrant maps to storage ROI
+ * `{4,4,4,4}`. Its one-pixel RT projection must contain the bilinear center
+ * value 555.5 while proxy validity retains the original negative-origin HP
+ * Region rather than the zero-based storage ROI.
+ */
+TEST(DownsampleExecutorSplit,
+     TranslatesNegativeDataWindowForPixelsAndLogicalValidity) {
+  GraphModel graph("cache/split-negative-origin-downsample");
+  Node node = make_node(1, "split_plan", "tile");
+  graph.add_node(node);
+
+  const ImageBounds hp_bounds{-4, -3, 4, 5};
+  const RegionSet changed_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 4, 1, 5});
+  compute::HighPrecisionDirtyWriteBuffer hp_writes(false);
+  NodeOutput& staged = hp_writes.ensure_output(graph.node(1));
+  staged = make_offset_image_output(hp_bounds);
+  EXPECT_EQ(hp_writes.mark_updated(graph.node(1), changed_region, true, 9U), 1);
+  hp_writes.commit_to_graph(graph);
+  const std::vector<compute::DownsampleExecutor::Request> requests =
+      hp_writes.downsample_requests();
+  ASSERT_EQ(requests.size(), 1U);
+  EXPECT_EQ(requests.front().region_hp, changed_region);
+
+  const Value& hp_value =
+      graph.node(1).cached_output_high_precision->image_value();
+  const AllocationIdentity hp_allocation = hp_value.allocation_identity();
+  compute::RealtimeProxyGraph proxy;
+  proxy.synchronize_with_graph(graph);
+  GraphEventService events;
+  compute::DownsampleExecutor(graph, proxy, nullptr, events).execute(requests);
+
+  const compute::RealtimeProxyGraph::NodeState* state = proxy.find_state(1);
+  ASSERT_NE(state, nullptr);
+  ASSERT_TRUE(state->output.has_value());
+  ASSERT_TRUE(state->output->has_image_value());
+  EXPECT_EQ(state->version, 1);
+  ASSERT_TRUE(state->region_hp.has_value());
+  EXPECT_EQ(*state->region_hp, changed_region);
+  const Value& rt_value = state->output->image_value();
+  EXPECT_EQ(rt_value.image_bounds(), (ImageBounds{0, 0, 2, 2}));
+  EXPECT_TRUE(rt_value.revision_id().valid());
+  EXPECT_TRUE(rt_value.allocation_identity().valid());
+  EXPECT_NE(rt_value.allocation_identity(), hp_allocation);
+  const cv::Mat rt_pixels = project_image_mat(*state->output);
+  ASSERT_EQ(rt_pixels.rows, 2);
+  ASSERT_EQ(rt_pixels.cols, 2);
+  EXPECT_FLOAT_EQ(rt_pixels.at<float>(1, 1), 555.5F);
 }
 
 /**

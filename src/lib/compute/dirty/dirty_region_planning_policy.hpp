@@ -54,7 +54,8 @@ inline int scale_halo_to_rt(int halo_hp) {
  * The policy supplies the HP entry type, HP alignment constants, snapshot
  * domain, and tile ROI selection used by the shared dirty-planning template.
  *
- * @note All ROI fields stay in HP coordinates and no RT projection is produced.
+ * @note PixelRect fields stay in zero-based HP storage coordinates; signed
+ * logical metadata is translated through HpPlanEntry::hp_data_window.
  */
 struct HighPrecisionDirtyPolicy {
   /** @brief Plan type produced by the policy. */
@@ -94,11 +95,11 @@ struct HighPrecisionDirtyPolicy {
   /**
    * @brief Converts the target dirty ROI into final HP work coordinates.
    *
-   * @param dirty_roi Incoming HP-space dirty ROI.
+   * @param dirty_roi Incoming zero-based HP storage ROI.
    * @param entry Target entry containing the HP output extent.
    * @return Aligned and clipped HP dirty ROI.
    * @throws Nothing.
-   * @note HP planning aligns directly to HP micro tiles.
+   * @note HP planning aligns directly to HP storage micro tiles.
    */
   static PixelRect target_hp_roi(const PixelRect& dirty_roi,
                                  const Entry& entry) {
@@ -111,7 +112,7 @@ struct HighPrecisionDirtyPolicy {
    * @param entry Entry whose roi_hp was updated.
    * @return Always true for HP entries.
    * @throws Nothing.
-   * @note HP domain work uses roi_hp directly.
+   * @note HP domain work uses the zero-based roi_hp storage projection.
    */
   static bool refresh_domain_roi(Entry& entry) {
     return !is_rect_empty(entry.roi_hp);
@@ -131,7 +132,7 @@ struct HighPrecisionDirtyPolicy {
   /**
    * @brief Normalizes an upstream demand ROI before parent-edge clipping.
    *
-   * @param upstream_roi_hp HP-space upstream ROI returned by propagation.
+   * @param upstream_roi_hp Zero-based HP storage ROI from propagation.
    * @param current_entry Current node entry.
    * @return HP micro-aligned upstream ROI.
    * @throws Nothing.
@@ -174,9 +175,9 @@ struct HighPrecisionDirtyPolicy {
   /**
    * @brief Finalizes an accumulated HP ROI before snapshot materialization.
    *
-   * @param roi_hp Accumulated HP-space ROI.
-   * @param hp_size HP output extent.
-   * @return HP micro-aligned and clipped ROI.
+   * @param roi_hp Accumulated zero-based HP storage ROI.
+   * @param hp_size HP storage extent.
+   * @return HP storage ROI aligned to micro tiles and clipped.
    * @throws Nothing.
    */
   static PixelRect finalize_hp_roi(const PixelRect& roi_hp,
@@ -207,6 +208,17 @@ struct HighPrecisionDirtyPolicy {
   }
 
   /**
+   * @brief Returns the logical data window for HP snapshot tile Regions.
+   *
+   * @param entry Finalized HP entry.
+   * @return Signed HP data window corresponding to snapshot_work_roi().
+   * @throws Nothing.
+   */
+  static ImageBounds snapshot_data_window(const Entry& entry) {
+    return entry.hp_data_window;
+  }
+
+  /**
    * @brief Returns the tile size used for HP dirty micro tiles.
    *
    * @return HP micro tile size in HP pixels.
@@ -221,8 +233,9 @@ struct HighPrecisionDirtyPolicy {
  * The policy keeps HP-space propagation semantics while deriving RT proxy-space
  * extents, halos, ROIs, and tile records for execution.
  *
- * @note HP and RT task pools remain separate; this policy only projects HP
- * dirty demand into the RT domain for the RT plan.
+ * @note HP and RT task pools remain separate. HP PixelRect demand is
+ * zero-based relative to hp_data_window; RT PixelRect work is zero-based
+ * relative to the proxy allocation.
  */
 struct RealTimeDirtyPolicy {
   /** @brief Plan type produced by the policy. */
@@ -266,7 +279,7 @@ struct RealTimeDirtyPolicy {
   /**
    * @brief Converts the target dirty ROI into HP-aligned RT planning input.
    *
-   * @param dirty_roi Incoming HP-space dirty ROI.
+   * @param dirty_roi Incoming zero-based HP storage ROI.
    * @param entry Target entry containing the HP output extent.
    * @return HP ROI aligned to the RT projection grid.
    * @throws Nothing.
@@ -307,7 +320,7 @@ struct RealTimeDirtyPolicy {
   /**
    * @brief Normalizes an upstream demand ROI before parent-edge clipping.
    *
-   * @param upstream_roi_hp HP-space upstream ROI returned by propagation.
+   * @param upstream_roi_hp Zero-based HP storage ROI from propagation.
    * @param current_entry Current node entry containing the HP extent.
    * @return Upstream ROI clipped to the current HP output extent.
    * @throws Nothing.
@@ -348,9 +361,9 @@ struct RealTimeDirtyPolicy {
   /**
    * @brief Finalizes an accumulated RT plan ROI in HP coordinates.
    *
-   * @param roi_hp Accumulated HP-space ROI.
-   * @param hp_size HP output extent.
-   * @return HP ROI aligned to the RT projection grid and clipped to hp_size.
+   * @param roi_hp Accumulated zero-based HP storage ROI.
+   * @param hp_size HP storage extent.
+   * @return HP storage ROI aligned to the RT grid and clipped to hp_size.
    * @throws Nothing.
    */
   static PixelRect finalize_hp_roi(const PixelRect& roi_hp,
@@ -379,6 +392,19 @@ struct RealTimeDirtyPolicy {
    */
   static PixelRect snapshot_work_roi(const Entry& entry) {
     return entry.roi_rt;
+  }
+
+  /**
+   * @brief Returns the logical data window for RT snapshot tile Regions.
+   *
+   * @param entry Finalized RT entry.
+   * @return Zero-origin RT proxy window corresponding to roi_rt.
+   * @throws Nothing.
+   * @note HP logical validity remains in entry.region_hp and is not replaced by
+   * this RT execution-window projection.
+   */
+  static ImageBounds snapshot_data_window(const Entry& entry) {
+    return ImageBounds{0, 0, entry.rt_size.width, entry.rt_size.height};
   }
 
   /**

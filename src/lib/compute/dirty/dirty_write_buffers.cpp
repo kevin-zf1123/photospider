@@ -4,11 +4,11 @@
 #include <string>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "compute/compute_geometry.hpp"
 #include "compute/execution/resource_demand_estimator.hpp"
-#include "core/region_image_adapter.hpp"
 #include "core/value_image_adapter.hpp"
 
 namespace ps::compute {
@@ -359,13 +359,13 @@ HighPrecisionDirtyWriteBuffer::downsample_requests() const {
     if (!entry.has_output || !entry.hp_region) {
       continue;
     }
-    try {
-      requests.push_back({node_id,
-                          region_image_adapter::to_pixel_rect(*entry.hp_region),
-                          entry.hp_version});
-    } catch (const std::invalid_argument&) {
-      // TensorSlice and Whole have no current image-only downsample projection.
+    if (!entry.hp_region->is_empty() &&
+        (entry.hp_region->is_whole() || entry.hp_region->atoms().size() != 1U ||
+         !std::holds_alternative<ImageRect>(
+             entry.hp_region->atoms().front()))) {
+      continue;
     }
+    requests.push_back({node_id, *entry.hp_region, entry.hp_version});
   }
   return requests;
 }
@@ -564,7 +564,13 @@ int RealtimeProxyWriteBuffer::mark_updated(int node_id,
   std::lock_guard<std::mutex> lock(mutex_);
   Entry& entry = ensure_entry_locked(node_id);
   if (!region_hp.is_empty()) {
-    (void)region_image_adapter::to_pixel_rect(region_hp);
+    if (region_hp.is_whole() || region_hp.atoms().size() != 1U ||
+        !std::holds_alternative<ImageRect>(region_hp.atoms().front()) ||
+        !(std::get<ImageRect>(region_hp.atoms().front()).domain ==
+          image_region_domain())) {
+      throw std::invalid_argument(
+          "RT validity metadata requires one exact image Region.");
+    }
     entry.state.region_hp =
         merge_valid_regions(entry.state.region_hp, region_hp);
   }

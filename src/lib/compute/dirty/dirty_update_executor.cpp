@@ -671,15 +671,16 @@ void validate_rt_source_boundaries_ready(
  * @param graph Graph containing the target HP cache used for forced full-frame
  * dirty planning.
  * @param request Dirty update request inherited from ComputeService.
- * @return Requested dirty ROI for normal updates, or the full target HP extent
- * for forced HP dirty updates.
+ * @return Requested zero-based storage ROI for normal updates, or the full
+ * zero-based target HP storage extent for forced HP dirty updates.
  * @throws GraphError when a forced dirty update cannot derive a valid current
  * HP extent from the target node.
  * @throws std::bad_alloc unchanged when extent or diagnostic storage exhausts
  * memory.
  * @note Forced HP dirty updates do not seed existing HP output into the staging
  * buffer, so their dirty plan must cover the entire authoritative HP frame
- * before commit.
+ * before commit. ImageBounds origin remains logical metadata and is never
+ * copied into this PixelRect compatibility boundary.
  */
 PixelRect hp_planning_roi_for_request(const GraphModel& graph,
                                       const DirtyUpdateRequest& request) {

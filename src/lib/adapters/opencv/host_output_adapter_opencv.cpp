@@ -56,11 +56,36 @@ int to_cv_type(const DenseImageOutputPlan& plan) {
 }
 
 /**
+ * @brief Adds one zero-based storage offset to a signed image coordinate.
+ *
+ * @param origin Signed logical data-window origin.
+ * @param offset Nonnegative storage-relative endpoint or origin.
+ * @param diagnostic Stable overflow diagnostic.
+ * @return Exact signed logical coordinate.
+ * @throws std::invalid_argument when offset is negative.
+ * @throws std::overflow_error when the mathematical sum exceeds int64_t.
+ * @note Callers separately prove offset containment in the immutable plan.
+ */
+std::int64_t checked_logical_coordinate(std::int64_t origin,
+                                        std::int64_t offset,
+                                        const char* diagnostic) {
+  if (offset < 0) {
+    throw std::invalid_argument(
+        "OpenCV output tile requires a zero-based storage ROI");
+  }
+  if (origin > std::numeric_limits<std::int64_t>::max() - offset) {
+    throw std::overflow_error(diagnostic);
+  }
+  return origin + offset;
+}
+
+/**
  * @brief Validates one OutputTile and returns its first writable grant byte.
  *
- * Validation proves the integer ROI exactly matches the logical grant, every
- * row span has the planned width and allocation offset, and all derived row
- * addresses remain active before an OpenCV header is constructed.
+ * Validation translates the zero-based storage ROI through the signed plan
+ * origin before matching the logical grant. It then proves every row span has
+ * the planned width and allocation offset and every derived row address stays
+ * active before an OpenCV header is constructed.
  *
  * @param tile Output tile supplied to one trusted provider callback.
  * @return Mutable pointer to the first selected row.
@@ -83,21 +108,37 @@ std::byte* validate_output_tile(const OutputTile& tile) {
         "OpenCV output conversion requires a nonempty tile ROI");
   }
 
-  const ImageRect& granted = tile.grant->image_region();
+  const ImageBounds& bounds = tile.plan->image_facet().data_window;
   const std::int64_t roi_x_end = static_cast<std::int64_t>(tile.roi.x) +
                                  static_cast<std::int64_t>(tile.roi.width);
   const std::int64_t roi_y_end = static_cast<std::int64_t>(tile.roi.y) +
                                  static_cast<std::int64_t>(tile.roi.height);
+  if (tile.roi.x < 0 || tile.roi.y < 0 || roi_x_end < 0 || roi_y_end < 0 ||
+      static_cast<std::uint64_t>(roi_x_end) > tile.plan->width() ||
+      static_cast<std::uint64_t>(roi_y_end) > tile.plan->height()) {
+    throw std::invalid_argument(
+        "OpenCV output tile exceeds its zero-based storage extent");
+  }
+  const std::int64_t logical_x_begin = checked_logical_coordinate(
+      bounds.x_begin, tile.roi.x,
+      "OpenCV output tile logical x origin overflowed");
+  const std::int64_t logical_x_end = checked_logical_coordinate(
+      bounds.x_begin, roi_x_end,
+      "OpenCV output tile logical x endpoint overflowed");
+  const std::int64_t logical_y_begin = checked_logical_coordinate(
+      bounds.y_begin, tile.roi.y,
+      "OpenCV output tile logical y origin overflowed");
+  const std::int64_t logical_y_end = checked_logical_coordinate(
+      bounds.y_begin, roi_y_end,
+      "OpenCV output tile logical y endpoint overflowed");
+  const ImageRect& granted = tile.grant->image_region();
   if (!(granted.domain == image_region_domain()) ||
-      granted.x_begin != static_cast<std::int64_t>(tile.roi.x) ||
-      granted.x_end != roi_x_end ||
-      granted.y_begin != static_cast<std::int64_t>(tile.roi.y) ||
-      granted.y_end != roi_y_end) {
+      granted.x_begin != logical_x_begin || granted.x_end != logical_x_end ||
+      granted.y_begin != logical_y_begin || granted.y_end != logical_y_end) {
     throw std::invalid_argument(
         "OpenCV output tile ROI does not match its Host grant");
   }
 
-  const ImageBounds& bounds = tile.plan->image_facet().data_window;
   if (granted.x_begin < bounds.x_begin || granted.x_end > bounds.x_end ||
       granted.y_begin < bounds.y_begin || granted.y_end > bounds.y_end) {
     throw std::invalid_argument(
@@ -112,17 +153,8 @@ std::byte* validate_output_tile(const OutputTile& tile) {
         "OpenCV output tile span geometry is unrepresentable");
   }
   const std::size_t row_bytes = width * tile.plan->pixel_bytes();
-  const std::uint64_t y_distance = static_cast<std::uint64_t>(granted.y_begin) -
-                                   static_cast<std::uint64_t>(bounds.y_begin);
-  const std::uint64_t x_distance = static_cast<std::uint64_t>(granted.x_begin) -
-                                   static_cast<std::uint64_t>(bounds.x_begin);
-  if (y_distance > std::numeric_limits<std::size_t>::max() ||
-      x_distance > std::numeric_limits<std::size_t>::max()) {
-    throw std::overflow_error(
-        "OpenCV output tile coordinate distance exceeds size_t");
-  }
-  const std::size_t y = static_cast<std::size_t>(y_distance);
-  const std::size_t x = static_cast<std::size_t>(x_distance);
+  const std::size_t y = static_cast<std::size_t>(tile.roi.y);
+  const std::size_t x = static_cast<std::size_t>(tile.roi.x);
   if (y > std::numeric_limits<std::size_t>::max() / tile.plan->row_stride() ||
       x > std::numeric_limits<std::size_t>::max() / tile.plan->pixel_bytes()) {
     throw std::overflow_error(

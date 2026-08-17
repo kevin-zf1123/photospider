@@ -22,26 +22,30 @@ namespace ps::compute {
 /**
  * @brief Per-node planning state for high-precision dirty execution.
  *
- * The entry stores the HP-space dirty ROI selected for one node, the resolved
- * HP output extent used for clipping, and the operator halo required by tiled
- * execution.
+ * The entry stores the logical HP Region selected for one node, its derived
+ * zero-based storage ROI, the signed data window used to translate between
+ * them, and the operator halo required by tiled execution.
  *
- * @note All coordinates are in HP output space. The entry is transient and is
- * owned by HighPrecisionDirtyPlan for a single dirty update request.
+ * @note Region coordinates are signed logical HP coordinates. PixelRect fields
+ * are zero-based storage/compatibility coordinates inside hp_data_window. The
+ * entry is transient and owned by HighPrecisionDirtyPlan for one request.
  */
 struct HpPlanEntry {
   /**
    * @brief Exact normalized logical HP work and validity Region.
-   * @note This is the planning authority. roi_hp is a derived projection for
-   *       current image tiling/inspection and remains empty for TensorSlice.
+   * @note This is the planning and validity authority. roi_hp is a derived
+   *       zero-based storage projection and remains empty for TensorSlice.
    */
   RegionSet region_hp = RegionSet::empty();
 
-  /** @brief HP-space dirty ROI that should be recomputed for this node. */
+  /** @brief Zero-based HP storage ROI recomputed for this node. */
   PixelRect roi_hp;
 
-  /** @brief Resolved HP output extent used to clip roi_hp. */
+  /** @brief Resolved HP storage extent used to clip roi_hp. */
   PixelSize hp_size;
+
+  /** @brief Signed HP logical data window corresponding to hp_size. */
+  ImageBounds hp_data_window;
 
   /** @brief HP-space halo radius required by neighborhood operators. */
   int halo_hp = 0;
@@ -50,28 +54,32 @@ struct HpPlanEntry {
 /**
  * @brief Per-node planning state for real-time dirty execution.
  *
- * The entry keeps both HP-space ROI metadata and RT proxy-space work metadata.
- * HP coordinates remain the authoritative propagation and inspection space,
- * while RT coordinates drive proxy tile enumeration and execution.
+ * The entry keeps signed logical HP validity plus derived zero-based HP and RT
+ * storage work. HP logical coordinates remain authoritative for propagation
+ * and inspection, while storage coordinates drive tile enumeration.
  *
- * @note The RT fields are derived from HP fields using the current RT downscale
- * policy and must be refreshed whenever roi_hp or hp_size changes.
+ * @note roi_hp is relative to hp_data_window; roi_rt is relative to the
+ * zero-origin RT proxy buffer. RT fields must be refreshed whenever roi_hp or
+ * hp_size changes.
  */
 struct RtPlanEntry {
   /**
-   * @brief Exact normalized logical HP-space ImageRect Region.
+   * @brief Exact normalized signed logical HP ImageRect Region.
    * @note RT proxy execution rejects TensorSlice before an entry is published.
    */
   RegionSet region_hp = RegionSet::empty();
 
-  /** @brief HP-space dirty ROI used for propagation and debug metadata. */
+  /** @brief Zero-based HP storage ROI used for propagation callbacks. */
   PixelRect roi_hp;
 
-  /** @brief RT proxy-space dirty ROI used for RT tile execution. */
+  /** @brief Zero-based RT proxy storage ROI used for tile execution. */
   PixelRect roi_rt;
 
-  /** @brief Resolved HP output extent used to clip roi_hp. */
+  /** @brief Resolved HP storage extent used to clip roi_hp. */
   PixelSize hp_size;
+
+  /** @brief Signed HP logical data window corresponding to hp_size. */
+  ImageBounds hp_data_window;
 
   /** @brief RT proxy output extent derived from hp_size. */
   PixelSize rt_size;
@@ -217,11 +225,15 @@ class DirtyRegionPlanner {
    * @param graph Graph whose topology, extent metadata, and dirty generation
    * are updated.
    * @param node_id Target node that requested dirty recomputation.
-   * @param dirty_roi HP-space dirty ROI in the target output coordinate space.
+   * @param dirty_roi Zero-based HP storage ROI in the target output.
    * @return HP dirty plan with HP tile/monolithic snapshot records.
    * @throws GraphError when the node is missing, dirty_roi is empty, ROI
    * clipping removes all work, or no executable dirty entries remain.
-   * @note The returned plan keeps all ROI metadata in HP coordinates.
+   * @throws std::invalid_argument or std::overflow_error when retained image
+   * metadata cannot translate a storage ROI exactly.
+   * @throws std::bad_alloc when planning or Region storage grows.
+   * @note PixelRect compatibility fields remain zero-based. Region metadata is
+   * translated through each node's signed HP data window.
    */
   HighPrecisionDirtyPlan plan_high_precision(GraphModel& graph, int node_id,
                                              const PixelRect& dirty_roi);
@@ -236,8 +248,11 @@ class DirtyRegionPlanner {
    * logical and execution authorities.
    * @throws GraphError when the Region is empty, unsupported by the target,
    *         cannot be clipped to a concrete descriptor, or yields no work.
+   * @throws std::invalid_argument or std::overflow_error when image
+   * coordinates cannot cross the current PixelRect boundary exactly.
    * @throws std::bad_alloc when planning storage cannot allocate.
-   * @note ImageRect delegates through the checked current edge adapter.
+   * @note ImageRect is clipped to the signed target data window and translated
+   * through checked origin subtraction before compatibility planning.
    * TensorSlice selects each executable target/upstream implementation once,
    * accepts only the exact core dense identity, and freezes its callback-free
    * complete route for task-population validation.
@@ -251,15 +266,17 @@ class DirtyRegionPlanner {
    * @param graph Graph whose topology, extent metadata, and dirty generation
    * are updated.
    * @param node_id Target node that requested dirty recomputation.
-   * @param dirty_roi HP-space dirty ROI that will be projected to RT proxy
-   * space.
-   * @return RT dirty plan with RT tile/monolithic snapshot records and HP-space
-   * inspection ROIs.
+   * @param dirty_roi Zero-based HP storage ROI projected to RT proxy storage.
+   * @return RT dirty plan with RT tile/monolithic snapshot records and signed
+   * logical HP inspection Regions.
    * @throws GraphError when the node is missing, dirty_roi is empty, ROI
    * clipping removes all work, RT projection collapses the ROI, or no
    * executable dirty entries remain.
-   * @note RT planning never creates HP task dependencies; HP coordinates are
-   * used only for propagation and inspection metadata.
+   * @throws std::invalid_argument or std::overflow_error when retained image
+   * metadata cannot translate a storage ROI exactly.
+   * @throws std::bad_alloc when planning or Region storage grows.
+   * @note RT planning never creates HP task dependencies. Signed logical HP
+   * coordinates are retained only in Region metadata.
    */
   RealTimeDirtyPlan plan_real_time(GraphModel& graph, int node_id,
                                    const PixelRect& dirty_roi);
@@ -272,6 +289,9 @@ class DirtyRegionPlanner {
    * @return RT plan for one exact ImageRect.
    * @throws GraphError when TensorSlice, Whole, or an unsupported clause enters
    *         the current image-only RT proxy.
+   * @throws std::invalid_argument or std::overflow_error when image
+   * coordinates cannot cross the current PixelRect boundary exactly.
+   * @throws std::bad_alloc when planning or Region storage grows.
    * @note No TensorSlice-to-PixelRect projection is attempted.
    */
   RealTimeDirtyPlan plan_real_time(GraphModel& graph, int node_id,
@@ -283,9 +303,13 @@ class DirtyRegionPlanner {
    * @param graph Graph whose dirty snapshot is updated.
    * @param node_id Source node that started producing dirty regions.
    * @param domain Dirty domain associated with the source ROI.
-   * @param source_roi Node-local dirty ROI in domain-authoritative coordinates.
+   * @param source_roi Zero-based HP storage ROI. RT lifecycle derivation scales
+   * this HP fact into proxy storage after clipping.
    * @return Updated graph-scoped dirty snapshot.
    * @throws GraphError when node_id is missing or source_roi is empty.
+   * @throws std::invalid_argument or std::overflow_error when the ROI cannot
+   * be translated through the source node's signed HP data window.
+   * @throws std::bad_alloc when snapshot or Region storage grows.
    * @note Source membership remains until the dirty generation settles.
    */
   DirtyRegionSnapshot begin_dirty_source(GraphModel& graph, int node_id,
@@ -315,9 +339,13 @@ class DirtyRegionPlanner {
    * @param graph Graph whose dirty snapshot is updated.
    * @param node_id Source node that produced another dirty ROI.
    * @param domain Dirty domain associated with the source ROI.
-   * @param source_roi Node-local dirty ROI in domain-authoritative coordinates.
+   * @param source_roi Zero-based HP storage ROI. RT lifecycle derivation scales
+   * this HP fact into proxy storage after clipping.
    * @return Updated graph-scoped dirty snapshot.
    * @throws GraphError when node_id is missing or source_roi is empty.
+   * @throws std::invalid_argument or std::overflow_error when the ROI cannot
+   * be translated through the source node's signed HP data window.
+   * @throws std::bad_alloc when snapshot or Region storage grows.
    * @note The actual dirty region is refreshed from accumulated source records.
    */
   DirtyRegionSnapshot update_dirty_source(GraphModel& graph, int node_id,
@@ -374,7 +402,7 @@ class DirtyRegionPlanner {
    * projection, snapshot domain, and tile enumeration parameters.
    * @param graph Graph whose topology and dirty generation are used.
    * @param node_id Target node for the dirty request.
-   * @param dirty_roi Incoming HP-space dirty ROI.
+   * @param dirty_roi Incoming zero-based HP storage dirty ROI.
    * @return Domain-specific dirty plan.
    * @throws GraphError from request validation, ROI projection, propagation, or
    * empty plan detection.
@@ -440,12 +468,15 @@ class DirtyRegionPlanner {
    * @param graph Graph whose dirty snapshot is updated.
    * @param node_id Source node receiving the lifecycle transition.
    * @param domain Dirty domain associated with the source node.
-   * @param source_roi Optional current image ROI appended at a v2 edge.
+   * @param source_roi Optional zero-based HP storage ROI appended at a v2 edge.
    * @param source_region Optional authoritative Region appended directly.
    * @param lifecycle New lifecycle state for the source node.
    * @return Updated graph-scoped dirty snapshot.
    * @throws GraphError when node_id is missing or a supplied source fact is
    * empty/unsupported.
+   * @throws std::invalid_argument or std::overflow_error when a logical/storage
+   * coordinate translation cannot be represented exactly.
+   * @throws std::bad_alloc when snapshot or Region storage grows.
    * @note This helper owns the shared begin/update/end storage flow; snapshot
    * derivation is delegated to DirtyRegionSnapshotBuilder.
    */

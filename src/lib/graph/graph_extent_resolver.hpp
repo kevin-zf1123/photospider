@@ -43,6 +43,29 @@ class GraphExtentResolver {
   PixelSize resolve_output_extent(
       const GraphModel& graph, int node_id,
       std::unordered_map<int, PixelSize>& cache) const;
+
+  /**
+   * @brief Resolves one node's current HP logical data window.
+   *
+   * @param graph Graph whose committed image metadata and fallback extent are
+   * inspected.
+   * @param node_id Node whose output data window is requested.
+   * @param extent_cache Request-local extent memoization shared with callers.
+   * @return Exact committed signed data window when available; otherwise a
+   * zero-origin window matching the inferred compatibility extent. An empty
+   * window is returned when no positive extent can be inferred.
+   * @throws GraphError when node lookup or the current PixelSize boundary
+   * cannot represent committed metadata.
+   * @throws std::invalid_argument or std::overflow_error when retained image
+   * bounds violate their immutable Value contract.
+   * @throws std::bad_alloc when memoization or diagnostics allocate.
+   * @note A nonzero origin is never inferred from topology or display metadata.
+   * Only a committed canonical output can authorize it; uncached tiled and
+   * compatibility paths retain their existing zero-origin contract.
+   */
+  ImageBounds resolve_output_data_window(
+      const GraphModel& graph, int node_id,
+      std::unordered_map<int, PixelSize>& extent_cache) const;
 };
 
 }  // namespace ps

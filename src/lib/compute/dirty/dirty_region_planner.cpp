@@ -148,6 +148,55 @@ bool has_image_parent(const GraphModel& graph, int node_id) {
 }
 
 /**
+ * @brief Checked logical/storage projection for one node image Region.
+ *
+ * @throws std::bad_alloc when logical Region storage allocates.
+ * @note The logical Region is clipped to the node's current data window before
+ * storage projection. A committed Value is the only source of a nonzero
+ * origin; uncached compatibility paths resolve a zero-origin window.
+ */
+struct ProjectedNodeImageRegion {
+  /** @brief Signed logical Region clipped to the current data window. */
+  RegionSet logical_region = RegionSet::empty();
+  /** @brief Zero-based storage ROI corresponding exactly to logical_region. */
+  PixelRect storage_roi;
+};
+
+/**
+ * @brief Clips and translates one logical image Region for current planning.
+ *
+ * @param resolver Graph output data-window resolver.
+ * @param graph Graph containing the target output descriptor.
+ * @param node_id Node whose current data window supplies the origin.
+ * @param region Exact built-in logical image Region to project.
+ * @param empty_message Stable diagnostic when clipping removes all work.
+ * @return Exact clipped logical Region plus zero-based storage ROI.
+ * @throws GraphError when the node is missing or the Region is disjoint.
+ * @throws std::invalid_argument or std::overflow_error when coordinate
+ * metadata or the current PixelRect compatibility boundary is invalid.
+ * @throws std::bad_alloc when resolver or Region storage allocates.
+ */
+ProjectedNodeImageRegion project_node_image_region(
+    const GraphExtentResolver& resolver, const GraphModel& graph, int node_id,
+    const RegionSet& region, const char* empty_message) {
+  std::unordered_map<int, PixelSize> extent_cache;
+  const ImageBounds data_window =
+      resolver.resolve_output_data_window(graph, node_id, extent_cache);
+  if (data_window.x_end <= data_window.x_begin ||
+      data_window.y_end <= data_window.y_begin) {
+    throw GraphError(GraphErrc::InvalidParameter, empty_message);
+  }
+  const PixelRect storage_roi =
+      region_image_adapter::to_storage_pixel_rect(region, data_window);
+  if (is_rect_empty(storage_roi)) {
+    throw GraphError(GraphErrc::InvalidParameter, empty_message);
+  }
+  return ProjectedNodeImageRegion{
+      region_image_adapter::from_storage_pixel_rect(storage_roi, data_window),
+      storage_roi};
+}
+
+/**
  * @brief Canonicalizes one route-visible device inventory as a value set.
  *
  * @param available_devices Caller-ordered route inventory.
@@ -321,6 +370,8 @@ typename Policy::Entry& DirtyRegionPlanner::ensure_plan_entry(
   auto [it, inserted] = plan.entries.emplace(node_id, typename Policy::Entry{});
   typename Policy::Entry& entry = it->second;
   if (inserted || !has_valid_size(entry.hp_size)) {
+    entry.hp_data_window = extent_resolver_.resolve_output_data_window(
+        graph, node_id, hp_size_cache);
     entry.hp_size = infer_hp_size(graph, node_id, hp_size_cache);
     Policy::refresh_size_fields(entry);
   }
@@ -364,6 +415,7 @@ void DirtyRegionPlanner::propagate_dirty_entries(
             graph, plan, input.from_node_id, hp_size_cache);
         if (!has_valid_size(parameter_entry.hp_size)) {
           parameter_entry.hp_size = PixelSize{1, 1};
+          parameter_entry.hp_data_window = ImageBounds{0, 0, 1, 1};
           Policy::refresh_size_fields(parameter_entry);
         }
         parameter_entry.roi_hp =
@@ -390,9 +442,10 @@ void DirtyRegionPlanner::propagate_dirty_entries(
             edge.from_node_id,    current_id,
             Policy::kDomain,      parent_roi,
             current_entry.roi_hp, DirtyEdgeDirection::BackwardDemand};
-        mapping.from_region = region_image_adapter::from_pixel_rect(parent_roi);
-        mapping.to_region =
-            region_image_adapter::from_pixel_rect(current_entry.roi_hp);
+        mapping.from_region = region_image_adapter::from_storage_pixel_rect(
+            parent_roi, parent_entry.hp_data_window);
+        mapping.to_region = region_image_adapter::from_storage_pixel_rect(
+            current_entry.roi_hp, current_entry.hp_data_window);
         plan.snapshot.edge_mappings.push_back(std::move(mapping));
       }
       continue;
@@ -430,9 +483,10 @@ void DirtyRegionPlanner::propagate_dirty_entries(
           edge.from_node_id,    current_id,
           Policy::kDomain,      parent_roi,
           current_entry.roi_hp, DirtyEdgeDirection::BackwardDemand};
-      mapping.from_region = region_image_adapter::from_pixel_rect(parent_roi);
-      mapping.to_region =
-          region_image_adapter::from_pixel_rect(current_entry.roi_hp);
+      mapping.from_region = region_image_adapter::from_storage_pixel_rect(
+          parent_roi, parent_entry.hp_data_window);
+      mapping.to_region = region_image_adapter::from_storage_pixel_rect(
+          current_entry.roi_hp, current_entry.hp_data_window);
       plan.snapshot.edge_mappings.push_back(std::move(mapping));
     }
   }
@@ -452,7 +506,8 @@ void DirtyRegionPlanner::finalize_dirty_entries(GraphModel& graph,
       erase_ids.push_back(node_id);
       continue;
     }
-    entry.region_hp = region_image_adapter::from_pixel_rect(entry.roi_hp);
+    entry.region_hp = region_image_adapter::from_storage_pixel_rect(
+        entry.roi_hp, entry.hp_data_window);
     Policy::refresh_size_fields(entry);
     if (!Policy::refresh_domain_roi(entry)) {
       erase_ids.push_back(node_id);
@@ -469,6 +524,7 @@ void DirtyRegionPlanner::finalize_dirty_entries(GraphModel& graph,
     snapshot_builder_.append_node_work(
         plan.snapshot, DirtyNodeWorkRecord{&node, node_id, Policy::kDomain,
                                            Policy::snapshot_work_roi(entry),
+                                           Policy::snapshot_data_window(entry),
                                            Policy::tile_size()});
     plan.snapshot.per_node_dirty_rois[node_id].push_back(entry.roi_hp);
     plan.snapshot.per_node_dirty_regions[node_id].push_back(entry.region_hp);
@@ -524,6 +580,7 @@ typename Policy::Plan DirtyRegionPlanner::plan_dirty_domain(
           ensure_plan_entry<Policy>(graph, result, producer_id, hp_size_cache);
       if (!has_valid_size(producer_entry.hp_size)) {
         producer_entry.hp_size = PixelSize{1, 1};
+        producer_entry.hp_data_window = ImageBounds{0, 0, 1, 1};
         Policy::refresh_size_fields(producer_entry);
       }
       producer_entry.roi_hp = detail::full_extent_roi(producer_entry.hp_size);
@@ -560,8 +617,10 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
   }
   if (dirty_region.atoms().size() == 1U &&
       std::holds_alternative<ImageRect>(dirty_region.atoms().front())) {
-    return plan_high_precision(
-        graph, node_id, region_image_adapter::to_pixel_rect(dirty_region));
+    const ProjectedNodeImageRegion projected = project_node_image_region(
+        extent_resolver_, graph, node_id, dirty_region,
+        "Dirty Region does not intersect node output.");
+    return plan_high_precision(graph, node_id, projected.storage_roi);
   }
   const RegionSet clipped_region =
       clip_tensor_region_to_shape_or_throw(graph, node_id, dirty_region);
@@ -620,6 +679,7 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
           current_node.cached_output_high_precision->image_value());
       entry.hp_size = PixelSize{static_cast<int>(view.width()),
                                 static_cast<int>(view.height())};
+      entry.hp_data_window = view.image_facet().data_window;
     }
     result.entries.emplace(current_id, entry);
     result.operation_routes.node_routes.emplace(current_id,
@@ -683,8 +743,10 @@ RealTimeDirtyPlan DirtyRegionPlanner::plan_real_time(
         GraphErrc::InvalidParameter,
         "RT proxy accepts only one finite exact ImageRect Region.");
   }
-  return plan_real_time(graph, node_id,
-                        region_image_adapter::to_pixel_rect(dirty_region));
+  const ProjectedNodeImageRegion projected = project_node_image_region(
+      extent_resolver_, graph, node_id, dirty_region,
+      "RT dirty Region does not intersect node output.");
+  return plan_real_time(graph, node_id, projected.storage_roi);
 }
 
 DirtyRegionSnapshot DirtyRegionPlanner::begin_dirty_source(
@@ -708,7 +770,10 @@ DirtyRegionSnapshot DirtyRegionPlanner::begin_dirty_source(
   RegionSet normalized = source_region;
   if (source_region.atoms().size() == 1U &&
       std::holds_alternative<ImageRect>(source_region.atoms().front())) {
-    (void)region_image_adapter::to_pixel_rect(source_region);
+    normalized = project_node_image_region(
+                     extent_resolver_, graph, node_id, source_region,
+                     "Dirty source Region does not intersect node output.")
+                     .logical_region;
   } else {
     if (domain != DirtyDomain::HighPrecision) {
       throw GraphError(GraphErrc::InvalidParameter,
@@ -743,7 +808,10 @@ DirtyRegionSnapshot DirtyRegionPlanner::update_dirty_source(
   RegionSet normalized = source_region;
   if (source_region.atoms().size() == 1U &&
       std::holds_alternative<ImageRect>(source_region.atoms().front())) {
-    (void)region_image_adapter::to_pixel_rect(source_region);
+    normalized = project_node_image_region(
+                     extent_resolver_, graph, node_id, source_region,
+                     "Dirty source Region does not intersect node output.")
+                     .logical_region;
   } else {
     if (domain != DirtyDomain::HighPrecision) {
       throw GraphError(GraphErrc::InvalidParameter,
@@ -852,7 +920,8 @@ void DirtyRegionPlanner::populate_dirty_source_metadata(
       snapshot.source_roi_records[source_node_id].push_back(
           {source_node_id, domain, roi, snapshot.graph_generation});
       if (!has_region_records) {
-        const RegionSet region = region_image_adapter::from_pixel_rect(roi);
+        const RegionSet region = region_image_adapter::from_storage_pixel_rect(
+            roi, entries.at(source_node_id).hp_data_window);
         state.source_regions.push_back(region);
         snapshot.source_region_records[source_node_id].push_back(
             {source_node_id, domain, region, snapshot.graph_generation});

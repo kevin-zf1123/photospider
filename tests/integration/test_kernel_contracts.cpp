@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -96,6 +97,55 @@ NodeOutput make_kernel_contract_image_output(int width, int height,
   output.publish_image_value(
       value_image_adapter::snapshot_cpu_image_value(buffer));
   return output;
+}
+
+/**
+ * @brief Builds one padded FLOAT32 output plan with a signed logical origin.
+ *
+ * @param data_window Signed half-open image window with positive spans.
+ * @return Complete Host output plan with zero-based padded storage.
+ * @throws std::invalid_argument or std::overflow_error when the data window or
+ * byte envelope is unrepresentable.
+ * @throws std::bad_alloc when retained plan metadata allocates.
+ * @note Logical coordinates come only from data_window; the layout remains a
+ * conventional zero-based interleaved allocation used by OutputTile::roi.
+ */
+DenseImageOutputPlan make_offset_kernel_output_plan(
+    const ImageBounds& data_window) {
+  const std::size_t width = image_bounds_width(data_window);
+  const std::size_t height = image_bounds_height(data_window);
+  if (width == 0U || height == 0U) {
+    throw std::invalid_argument(
+        "Kernel offset plan requires a nonempty data window.");
+  }
+  if (width > std::numeric_limits<std::size_t>::max() / sizeof(float)) {
+    throw std::overflow_error("Kernel offset plan row size overflowed.");
+  }
+  const std::size_t row_bytes = width * sizeof(float);
+  constexpr std::size_t kAlignment = 64U;
+  if (row_bytes > std::numeric_limits<std::size_t>::max() - (kAlignment - 1U)) {
+    throw std::overflow_error("Kernel offset plan stride overflowed.");
+  }
+  const std::size_t row_stride =
+      (row_bytes + kAlignment - 1U) & ~(kAlignment - 1U);
+  if (row_stride > static_cast<std::size_t>(
+                       std::numeric_limits<std::ptrdiff_t>::max()) ||
+      height - 1U >
+          (std::numeric_limits<std::size_t>::max() - row_bytes) / row_stride) {
+    throw std::overflow_error("Kernel offset plan storage size overflowed.");
+  }
+  DenseTensorDescriptor descriptor{{height, width, 1U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.data_window = data_window;
+  StridedLayout layout{{static_cast<std::ptrdiff_t>(row_stride),
+                        static_cast<std::ptrdiff_t>(sizeof(float)),
+                        static_cast<std::ptrdiff_t>(sizeof(float))}};
+  const std::size_t storage_size = (height - 1U) * row_stride + row_bytes;
+  return DenseImageOutputPlan::create("image", std::move(descriptor),
+                                      std::move(facet), std::move(layout),
+                                      storage_size, kAlignment);
 }
 
 /**
@@ -2232,6 +2282,81 @@ TEST(ImageBufferContract, OpenCvAndTileAccessRespectPaddedStep) {
   EXPECT_FLOAT_EQ(mat.at<float>(2, 7), 7.0f);
   EXPECT_FLOAT_EQ(mat.at<float>(0, 3), 0.0f);
   EXPECT_FLOAT_EQ(mat.at<float>(1, 8), 0.0f);
+}
+
+/**
+ * @brief Proves OpenCV compares a logical Host grant with the origin-adjusted
+ * zero-based OutputTile ROI and still rejects mismatched storage geometry.
+ *
+ * @return Nothing; GoogleTest reports view, stride, pixel, or fail-closed
+ * behavior mismatches.
+ * @throws Host plan, allocation, grant, OpenCV, Value, or projection
+ * exceptions when the positive fixture cannot execute.
+ * @note The first grant is negative in logical coordinates but writes storage
+ * ROI `{3,2,5,3}`. A second binding supplies a valid logical grant with an
+ * intentionally shifted storage ROI and must be rejected before exposure. A
+ * final one-pixel tile reaches INT64_MAX exactly, while an unrepresentable
+ * data-window span fails before allocation.
+ */
+TEST(ImageBufferContract,
+     OpenCvOutputTileTranslatesSignedOriginAndRejectsMismatch) {
+  const ImageBounds bounds{-7, -5, 10, 7};
+  HostOutputBinding initial_binding =
+      HostOutputBinding::allocate(make_offset_kernel_output_plan(bounds));
+  HostOutputWriteGrant initial_grant = initial_binding.grant_whole();
+  ASSERT_EQ(initial_grant.span_count(), 1U);
+  std::memset(initial_grant.data(0U), 0, initial_grant.span(0U).byte_size);
+  initial_grant.retire_success();
+  const Value initial = initial_binding.seal();
+
+  HostOutputBinding binding =
+      HostOutputBinding::allocate(make_offset_kernel_output_plan(bounds));
+  binding.seed_from_value(initial);
+  HostOutputWriteGrant grant =
+      binding.grant_tile(ImageRect{image_region_domain(), -4, 1, -3, 0});
+  OutputTile output_tile{&binding.plan(), &grant, PixelRect{3, 2, 5, 3}};
+  cv::Mat tile = toCvMat(output_tile);
+  EXPECT_EQ(tile.rows, 3);
+  EXPECT_EQ(tile.cols, 5);
+  EXPECT_EQ(tile.step, binding.plan().row_stride());
+  tile.setTo(7.0F);
+  grant.retire_success();
+  NodeOutput published;
+  published.publish_image_value(binding.seal());
+  const cv::Mat pixels = toCvMat(project_kernel_contract_image(published));
+  EXPECT_FLOAT_EQ(pixels.at<float>(2, 3), 7.0F);
+  EXPECT_FLOAT_EQ(pixels.at<float>(4, 7), 7.0F);
+  EXPECT_FLOAT_EQ(pixels.at<float>(1, 3), 0.0F);
+  EXPECT_FLOAT_EQ(pixels.at<float>(2, 8), 0.0F);
+
+  HostOutputBinding mismatch_binding =
+      HostOutputBinding::allocate(make_offset_kernel_output_plan(bounds));
+  HostOutputWriteGrant mismatch_grant = mismatch_binding.grant_tile(
+      ImageRect{image_region_domain(), -7, -6, -5, -4});
+  OutputTile mismatch_tile{&mismatch_binding.plan(), &mismatch_grant,
+                           PixelRect{1, 0, 1, 1}};
+  EXPECT_THROW((void)toCvMat(mismatch_tile), std::invalid_argument);
+  mismatch_grant.retire_failure(
+      "Expected storage/logical coordinate mismatch.");
+
+  const std::int64_t maximum = std::numeric_limits<std::int64_t>::max();
+  const ImageBounds endpoint_bounds{maximum - 4, -2, maximum, 2};
+  HostOutputBinding endpoint_binding = HostOutputBinding::allocate(
+      make_offset_kernel_output_plan(endpoint_bounds));
+  HostOutputWriteGrant endpoint_grant = endpoint_binding.grant_tile(
+      ImageRect{image_region_domain(), maximum - 1, maximum, 1, 2});
+  OutputTile endpoint_tile{&endpoint_binding.plan(), &endpoint_grant,
+                           PixelRect{3, 3, 1, 1}};
+  cv::Mat endpoint_view = toCvMat(endpoint_tile);
+  ASSERT_EQ(endpoint_view.rows, 1);
+  ASSERT_EQ(endpoint_view.cols, 1);
+  endpoint_view.at<float>(0, 0) = 11.0F;
+  endpoint_grant.retire_success();
+  EXPECT_NO_THROW((void)endpoint_binding.seal());
+
+  EXPECT_THROW((void)make_offset_kernel_output_plan(ImageBounds{
+                   std::numeric_limits<std::int64_t>::min(), 0, maximum, 1}),
+               std::overflow_error);
 }
 
 TEST(InteractionInspectionContracts,

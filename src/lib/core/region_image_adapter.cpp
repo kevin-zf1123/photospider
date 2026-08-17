@@ -1,5 +1,6 @@
 #include "core/region_image_adapter.hpp"  // NOLINT(build/include_subdir)
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -50,6 +51,66 @@ int checked_extent(std::int64_t begin, std::int64_t end,
   return static_cast<int>(extent);
 }
 
+/**
+ * @brief Adds one nonnegative storage offset to a logical coordinate.
+ *
+ * @param origin Signed logical data-window origin.
+ * @param offset Nonnegative zero-based storage offset.
+ * @param diagnostic Stable overflow diagnostic.
+ * @return Exact translated logical coordinate.
+ * @throws std::invalid_argument when offset is negative.
+ * @throws std::overflow_error when the mathematical sum exceeds int64_t.
+ */
+std::int64_t checked_coordinate_add(std::int64_t origin, int offset,
+                                    const char* diagnostic) {
+  if (offset < 0) {
+    throw std::invalid_argument(
+        "Storage PixelRect requires a nonnegative origin.");
+  }
+  if (origin > std::numeric_limits<std::int64_t>::max() - offset) {
+    throw std::overflow_error(diagnostic);
+  }
+  return origin + offset;
+}
+
+/**
+ * @brief Converts one ordered signed-coordinate distance to current int.
+ *
+ * @param begin Inclusive lower coordinate.
+ * @param end Coordinate no smaller than begin.
+ * @param diagnostic Stable overflow diagnostic.
+ * @return Exact nonnegative distance represented as int.
+ * @throws std::invalid_argument when endpoints are inverted.
+ * @throws std::overflow_error when the distance exceeds int.
+ * @note Unsigned subtraction preserves the exact mathematical distance across
+ * zero after ordering has been established.
+ */
+int checked_distance(std::int64_t begin, std::int64_t end,
+                     const char* diagnostic) {
+  return checked_extent(begin, end, diagnostic);
+}
+
+/**
+ * @brief Validates one finite image data window and returns its int extent.
+ *
+ * @param data_window Candidate signed logical payload window.
+ * @return Zero-based PixelSize matching the exact window span.
+ * @throws std::invalid_argument for empty or reversed bounds.
+ * @throws std::overflow_error when either span exceeds PixelSize int.
+ */
+PixelSize checked_storage_size(const ImageBounds& data_window) {
+  const PixelSize result{
+      checked_extent(data_window.x_begin, data_window.x_end,
+                     "Image data-window width exceeds PixelRect int."),
+      checked_extent(data_window.y_begin, data_window.y_end,
+                     "Image data-window height exceeds PixelRect int.")};
+  if (result.width <= 0 || result.height <= 0) {
+    throw std::invalid_argument(
+        "Storage PixelRect conversion requires a nonempty data window.");
+  }
+  return result;
+}
+
 }  // namespace
 
 /** @copydoc from_pixel_rect */
@@ -97,6 +158,85 @@ PixelRect to_pixel_rect(const RegionSet& region) {
                      "ImageRect width exceeds PixelRect int."),
       checked_extent(rect.y_begin, rect.y_end,
                      "ImageRect height exceeds PixelRect int.")};
+}
+
+/** @copydoc from_storage_pixel_rect */
+RegionSet from_storage_pixel_rect(const PixelRect& storage_rect,
+                                  const ImageBounds& data_window) {
+  if (storage_rect.width < 0 || storage_rect.height < 0) {
+    throw std::invalid_argument(
+        "Storage PixelRect conversion rejects negative extents.");
+  }
+  const PixelSize storage_size = checked_storage_size(data_window);
+  const std::int64_t storage_x_end =
+      static_cast<std::int64_t>(storage_rect.x) + storage_rect.width;
+  const std::int64_t storage_y_end =
+      static_cast<std::int64_t>(storage_rect.y) + storage_rect.height;
+  if (storage_rect.x < 0 || storage_rect.y < 0 ||
+      storage_x_end > storage_size.width ||
+      storage_y_end > storage_size.height) {
+    throw std::invalid_argument(
+        "Storage PixelRect exceeds its image data window.");
+  }
+  if (storage_rect.width == 0 || storage_rect.height == 0) {
+    return RegionSet::empty();
+  }
+  const std::int64_t x_begin = checked_coordinate_add(
+      data_window.x_begin, storage_rect.x,
+      "Storage PixelRect x origin translation overflowed.");
+  const std::int64_t x_end = checked_coordinate_add(
+      x_begin, storage_rect.width,
+      "Storage PixelRect x endpoint translation overflowed.");
+  const std::int64_t y_begin = checked_coordinate_add(
+      data_window.y_begin, storage_rect.y,
+      "Storage PixelRect y origin translation overflowed.");
+  const std::int64_t y_end = checked_coordinate_add(
+      y_begin, storage_rect.height,
+      "Storage PixelRect y endpoint translation overflowed.");
+  return RegionSet::from_image_rect(
+      {image_region_domain(), x_begin, x_end, y_begin, y_end});
+}
+
+/** @copydoc to_storage_pixel_rect */
+PixelRect to_storage_pixel_rect(const RegionSet& region,
+                                const ImageBounds& data_window) {
+  const PixelSize storage_size = checked_storage_size(data_window);
+  if (region.is_empty()) {
+    return PixelRect{};
+  }
+  if (region.is_whole()) {
+    return PixelRect{0, 0, storage_size.width, storage_size.height};
+  }
+  if (region.atoms().size() != 1U ||
+      !std::holds_alternative<ImageRect>(region.atoms().front())) {
+    throw std::invalid_argument(
+        "Storage PixelRect projection accepts exactly one ImageRect atom.");
+  }
+  const ImageRect& rect = std::get<ImageRect>(region.atoms().front());
+  if (!(rect.domain == image_region_domain())) {
+    throw std::invalid_argument(
+        "Storage PixelRect projection rejects non-built-in image domains.");
+  }
+  if (rect.x_end < rect.x_begin || rect.y_end < rect.y_begin) {
+    throw std::invalid_argument(
+        "Storage PixelRect projection rejects inverted ImageRect endpoints.");
+  }
+  const std::int64_t x_begin = std::max(rect.x_begin, data_window.x_begin);
+  const std::int64_t x_end = std::min(rect.x_end, data_window.x_end);
+  const std::int64_t y_begin = std::max(rect.y_begin, data_window.y_begin);
+  const std::int64_t y_end = std::min(rect.y_end, data_window.y_end);
+  if (x_end <= x_begin || y_end <= y_begin) {
+    return PixelRect{};
+  }
+  return PixelRect{
+      checked_distance(data_window.x_begin, x_begin,
+                       "ImageRect storage x offset exceeds PixelRect int."),
+      checked_distance(data_window.y_begin, y_begin,
+                       "ImageRect storage y offset exceeds PixelRect int."),
+      checked_extent(x_begin, x_end,
+                     "ImageRect storage width exceeds PixelRect int."),
+      checked_extent(y_begin, y_end,
+                     "ImageRect storage height exceeds PixelRect int.")};
 }
 
 /** @copydoc exact_result_to_pixel_rect */

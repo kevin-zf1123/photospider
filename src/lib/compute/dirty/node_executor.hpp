@@ -29,14 +29,18 @@ struct TiledExecutionConfig {
    */
   int halo_size = 16;
 
-  /** @brief Optional output ROI limiting which output pixels are recomputed. */
+  /**
+   * @brief Optional zero-based storage ROI limiting recomputed output pixels.
+   * @note NodeExecutor adds the frozen plan data-window origin only when
+   * issuing the logical Host grant; callbacks keep this storage projection.
+   */
   std::optional<PixelRect> output_roi;
 
   /**
    * @brief Exact normalized logical work selection for Region-aware core work.
    * @note Current tiled callbacks continue to consume output_roi as a derived
-   *       physical projection. Generic monolithic callbacks retain their
-   *       existing complete-output behavior when no matching core bridge
+   *       zero-based storage projection. Generic monolithic callbacks retain
+   * their existing complete-output behavior when no matching core bridge
    * exists.
    */
   std::optional<RegionSet> output_region;

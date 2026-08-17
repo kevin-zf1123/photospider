@@ -232,6 +232,55 @@ TEST(RegionContract, IntersectsAndClipsImageRectExactly) {
             (ImageRect{image_region_domain(), 0, 8, 2, 6}));
 }
 
+/**
+ * @brief Verifies checked translation between signed logical image coordinates
+ * and zero-based storage PixelRects, including finite sentinel semantics.
+ *
+ * @return Nothing; GoogleTest reports translation and fail-closed behavior.
+ * @throws Region allocation exceptions only if fixture construction fails.
+ * @note Empty stays empty, Whole uses the explicit finite data window, partial
+ * logical overlap clips before origin subtraction, and unrepresentable bounds
+ * never produce a compatibility rectangle.
+ */
+TEST(RegionImageAdapter,
+     TranslatesSignedDataWindowAndPreservesEmptyWholeBoundaries) {
+  const ImageBounds bounds{-10, -20, 6, 12};
+  const PixelRect storage_roi{3, 4, 5, 6};
+  const RegionSet logical =
+      region_image_adapter::from_storage_pixel_rect(storage_roi, bounds);
+  EXPECT_EQ(logical, RegionSet::from_image_rect(
+                         {image_region_domain(), -7, -2, -16, -10}));
+  EXPECT_EQ(region_image_adapter::to_storage_pixel_rect(logical, bounds),
+            storage_roi);
+
+  EXPECT_TRUE(region_image_adapter::from_storage_pixel_rect(PixelRect{}, bounds)
+                  .is_empty());
+  EXPECT_EQ(
+      region_image_adapter::to_storage_pixel_rect(RegionSet::empty(), bounds),
+      PixelRect{});
+  EXPECT_EQ(
+      region_image_adapter::to_storage_pixel_rect(RegionSet::whole(), bounds),
+      (PixelRect{0, 0, 16, 32}));
+  const RegionSet partially_outside =
+      RegionSet::from_image_rect({image_region_domain(), -30, -6, -25, -15});
+  EXPECT_EQ(
+      region_image_adapter::to_storage_pixel_rect(partially_outside, bounds),
+      (PixelRect{0, 0, 4, 5}));
+
+  EXPECT_THROW(region_image_adapter::from_storage_pixel_rect(
+                   (PixelRect{15, 0, 2, 1}), bounds),
+               std::invalid_argument);
+  EXPECT_THROW(
+      region_image_adapter::to_storage_pixel_rect(
+          RegionSet::from_image_rect({{77U, 1U}, -7, -2, -16, -10}), bounds),
+      std::invalid_argument);
+  EXPECT_THROW(
+      region_image_adapter::to_storage_pixel_rect(
+          logical, ImageBounds{std::numeric_limits<std::int64_t>::min(), 0,
+                               std::numeric_limits<std::int64_t>::max(), 1}),
+      std::overflow_error);
+}
+
 TEST(RegionContract, CanonicalizesDisjointIntersectionsToEmpty) {
   const RegionSet left_image =
       RegionSet::from_image_rect({image_region_domain(), -8, -4, 0, 4});

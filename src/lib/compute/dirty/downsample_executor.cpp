@@ -8,6 +8,7 @@
 #include <new>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "compute/compute_geometry.hpp"
@@ -136,12 +137,12 @@ void copy_downsample_scratch(const ImageBuffer& source, const PixelRect& roi,
     throw std::invalid_argument(
         "Downsample scratch image disagrees with the RT output plan.");
   }
-  const ImageBounds& bounds = plan.image_facet().data_window;
-  const std::int64_t x_begin = bounds.x_begin + roi.x;
-  const std::int64_t y_begin = bounds.y_begin + roi.y;
-  HostOutputWriteGrant grant =
-      binding.grant_tile({image_region_domain(), x_begin, x_begin + roi.width,
-                          y_begin, y_begin + roi.height});
+  const RegionSet logical_region =
+      region_image_adapter::from_storage_pixel_rect(
+          roi, plan.image_facet().data_window);
+  const ImageRect& logical_roi =
+      std::get<ImageRect>(logical_region.atoms().front());
+  HostOutputWriteGrant grant = binding.grant_tile(logical_roi);
   try {
     const std::size_t row_bytes =
         static_cast<std::size_t>(roi.width) * plan.pixel_bytes();
@@ -227,8 +228,7 @@ void DownsampleExecutor::execute_one(const Request& request) {
   }
   const NodeOutput& hp_output = *node.cached_output_high_precision;
   if (!hp_output.has_image_value()) {
-    const PixelSize empty_size;
-    apply_passthrough(node, proxy_state, PixelRect{}, empty_size,
+    apply_passthrough(node, proxy_state, RegionSet::empty(),
                       request.hp_version);
     observe_downsample_cancellation(run_lease_);
     proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
@@ -245,7 +245,10 @@ void DownsampleExecutor::execute_one(const Request& request) {
   }
   const PixelSize hp_size{static_cast<int>(hp_width),
                           static_cast<int>(hp_height)};
-  const PixelRect roi_hp = normalize_hp_roi(request.roi_hp, hp_size);
+  const PixelRect roi_hp =
+      normalize_hp_roi(request.region_hp, hp_bounds, hp_size);
+  const RegionSet region_hp =
+      region_image_adapter::from_storage_pixel_rect(roi_hp, hp_bounds);
 
   if (!proxy_state.output) {
     proxy_state.output = NodeOutput{};
@@ -255,7 +258,7 @@ void DownsampleExecutor::execute_one(const Request& request) {
   const StorageBinding hp_binding = hp_value.storage_binding();
   if (hp_binding.device.backend() != DeviceBackend::CPU ||
       !hp_binding.host_visible) {
-    apply_passthrough(node, proxy_state, roi_hp, hp_size, request.hp_version);
+    apply_passthrough(node, proxy_state, region_hp, request.hp_version);
     observe_downsample_cancellation(run_lease_);
     proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
     return;
@@ -263,7 +266,7 @@ void DownsampleExecutor::execute_one(const Request& request) {
 
   const PixelSize rt_size = scale_down_size(hp_size, kRtDownscaleFactor);
   if (rt_size.width <= 0 || rt_size.height <= 0) {
-    apply_passthrough(node, proxy_state, roi_hp, hp_size, request.hp_version);
+    apply_passthrough(node, proxy_state, region_hp, request.hp_version);
     observe_downsample_cancellation(run_lease_);
     proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
     return;
@@ -288,7 +291,7 @@ void DownsampleExecutor::execute_one(const Request& request) {
   if (!preserved_existing_bytes) {
     proxy_state.region_hp.reset();
   }
-  commit_rt_metadata(proxy_state, roi_hp, hp_size, request.hp_version);
+  commit_rt_metadata(proxy_state, region_hp, request.hp_version);
   observe_downsample_cancellation(run_lease_);
   proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
   events_.push(node.id, node.name, "downsample", 0.0);
@@ -313,9 +316,12 @@ Node* DownsampleExecutor::find_current_node(const Request& request) {
 }
 
 /** @copydoc DownsampleExecutor::normalize_hp_roi */
-PixelRect DownsampleExecutor::normalize_hp_roi(const PixelRect& request_roi,
+PixelRect DownsampleExecutor::normalize_hp_roi(const RegionSet& request_region,
+                                               const ImageBounds& hp_bounds,
                                                const PixelSize& hp_size) const {
-  PixelRect roi_hp = clip_rect(request_roi, hp_size);
+  PixelRect roi_hp = clip_rect(
+      region_image_adapter::to_storage_pixel_rect(request_region, hp_bounds),
+      hp_size);
   if (is_rect_empty(roi_hp) && hp_size.width > 0 && hp_size.height > 0) {
     roi_hp = PixelRect{0, 0, hp_size.width, hp_size.height};
   }
@@ -325,9 +331,9 @@ PixelRect DownsampleExecutor::normalize_hp_roi(const PixelRect& request_roi,
 /** @copydoc DownsampleExecutor::apply_passthrough */
 void DownsampleExecutor::apply_passthrough(
     Node& node, RealtimeProxyGraph::NodeState& proxy_state,
-    const PixelRect& roi_hp, const PixelSize& hp_size, int hp_version) {
+    const RegionSet& region_hp, int hp_version) {
   proxy_state.output = node.cached_output_high_precision;
-  commit_rt_metadata(proxy_state, roi_hp, hp_size, hp_version);
+  commit_rt_metadata(proxy_state, region_hp, hp_version);
   events_.push(node.id, node.name, "downsample_passthrough", 0.0);
 }
 
@@ -352,20 +358,18 @@ PixelRect DownsampleExecutor::downsample_roi(const ImageBuffer& hp_buffer,
 
 /** @copydoc DownsampleExecutor::commit_rt_metadata */
 void DownsampleExecutor::commit_rt_metadata(
-    RealtimeProxyGraph::NodeState& proxy_state, const PixelRect& roi_hp,
-    const PixelSize& hp_size, int hp_version) {
-  (void)hp_size;
-  if (!is_rect_empty(roi_hp)) {
-    const RegionSet update = region_image_adapter::from_pixel_rect(roi_hp);
+    RealtimeProxyGraph::NodeState& proxy_state, const RegionSet& region_hp,
+    int hp_version) {
+  if (!region_hp.is_empty()) {
     if (proxy_state.region_hp.has_value()) {
       const RegionOperationResult merged =
-          union_regions(*proxy_state.region_hp, update);
+          union_regions(*proxy_state.region_hp, region_hp);
       proxy_state.region_hp = merged.status() == RegionOperationStatus::Exact &&
                                       merged.region().has_value()
                                   ? *merged.region()
-                                  : update;
+                                  : region_hp;
     } else {
-      proxy_state.region_hp = update;
+      proxy_state.region_hp = region_hp;
     }
   }
   proxy_state.version = hp_version;
