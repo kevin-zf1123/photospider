@@ -176,7 +176,7 @@ dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
 `test_cpu_dense_tensor_image_operation`、`test_packed_fp4_dense_tensor` 与
 `test_variable_sample_field_extensions`、`test_value_identity_across_dsos` binary。安装前，
-它会在该真实 disabled producer 中运行全部 49 个 dense-image case、全部 4 个 packed FP4 case、
+它会在该真实 disabled producer 中运行全部 50 个 dense-image case、全部 4 个 packed FP4 case、
 全部 17 个 provider-defined VariableSampleField case 与一个双 DSO identity case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
@@ -981,7 +981,7 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor、Packed FP4、Provider Extension、Region、ReadyFence 与 Transfer 验证
 
 `test_cpu_dense_tensor_image_operation` 是已实现 V-2 至 V-12 与 DI-1 边界的
-provider-independent integration binary。它的 49 个长期用例验证：
+provider-independent integration binary。它的 50 个长期用例验证：
 
 - copyable ReadyFence poll、queued non-inline wait、observer-local waiter cancellation、
   exactly-once Ready/Failed/ProducerCancelled settlement、typed failure retention 与
@@ -1005,8 +1005,9 @@ provider-independent integration binary。它的 49 个长期用例验证：
 - exclusive builder write authority、seal revocation、retaining read-lease lifetime、
   BufferHandle subrange、process-local identity，以及非零 `AllocationIdentity` 不表示
   allocation liveness；
-- 在 shared allocation 上受界限约束的正、零与负 immutable stride，以及彼此不同的 Value
-  revision；
+- 在 shared allocation 上受界限约束的正、零与负 immutable stride、彼此不同的 Value
+  revision，以及从 reverse-y、broadcast-y 与 planar-channel layout 得到的独立
+  row-major interleaved ImageBuffer snapshot；
 - immutable Value copy sharing、copy-like DenseTensorView/ImageView move，以及 lvalue/rvalue
   descriptor、layout 与 payload input 的 allocation 隔离；
 - 正式 HP cache alias 保留、dirty reseal、replacement identity、disk reload identity 更新、
@@ -1106,13 +1107,13 @@ ctest --test-dir build --output-on-failure \
 ```
 
 `DependencyDisabledInstallSmoke` 会在真实禁用 OpenCV/YAML/OpenEXR discovery 的 product 中构建并
-运行全部 49 个 dense 用例、全部 4 个 packed FP4 用例与 17 个 V-14 extension 用例，再证明
+运行全部 50 个 dense 用例、全部 4 个 packed FP4 用例与 17 个 V-14 extension 用例，再证明
 installed consumer；
 `StaticProductConsumerSmoke` 会证明 operation-SDK-only
 installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
 DSO，证明它们从同一个 shared runtime authority mint identity。两个 installed consumer
 都会在没有 optional dependency 时构造并计算 Region，并观察同步 Ready Value fence。下述
-provider-disabled nested build 也会编译并运行全部 49 个 dense case 与该双 DSO case，因此真实
+provider-disabled nested build 也会编译并运行全部 50 个 dense case 与该双 DSO case，因此真实
 core operation、fence/transfer proof 与 identity authority 都不依赖 optional OpenCV operation
 provider 或 native device SDK。
 
@@ -1158,14 +1159,15 @@ Focused build 完成后，driver 会从 executable 不是 regular file 的已注
 dependency），无需硬编码 target 数量或未来 target 名，也不会从 CTest 实际观察到的 sentinel
 反推 expectation。精确 CTest
 inventory 等于该推导集合与以下条目的并集：`DependencyDisabledInstallSmoke`、
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 49 个
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 50 个
 `CpuDenseTensorImageOperation.*` case、
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`、三个
 `DiskCacheDiagnosticConcurrency.*` case，以及两个 `KernelLifecycleConcurrency.*` case。推导出的
 sentinel 不得带 label 或 timeout。
 
-DI-1 把当前 dense-image 子集增加到 49 个用例。下列计数仍是历史 V-14 checkpoint，
-不是当前 inventory 算术。在该 V-14 checkpoint 中，CMake 在该 profile 下精确注册八个
+DI-1 建立了 49 个用例的 dense-image 子集；Issue #130 回归把当前子集增加到 50 个用例。
+下列计数仍是历史 V-14 checkpoint，不是当前 inventory 算术。在该 V-14 checkpoint 中，
+CMake 在该 profile 下精确注册八个
 active GoogleTest target。
 包含六个 target 的 focused build 会具现其中五个已注册 executable；第六个 target
 `test_kernel_contracts` 只参与构建，且特意不被 discover。CTest discover 出 55 个可运行
