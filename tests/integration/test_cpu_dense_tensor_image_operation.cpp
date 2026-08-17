@@ -3144,6 +3144,113 @@ TEST(CpuDenseTensorImageOperation,
 }
 
 /**
+ * @brief Proves an authorized pending native Value reaches formal HP cache only
+ * after its existing producer fence becomes Ready.
+ *
+ * @return Nothing; GoogleTest reports premature mutation, staging, identity,
+ * owner-lifetime, Region, generation, binding, or readiness failures.
+ * @throws Native Value publication, Region derivation, graph mutation, and
+ * cache-service exceptions unchanged to the test runner.
+ * @note This dependency-neutral fixture models the Metal readback destination:
+ * a source-private publisher retains one HostPinned native/host binding while
+ * the executor owns terminal authority. Platform-specific tests separately
+ * exercise the real Metal command-buffer completion path.
+ */
+TEST(CpuDenseTensorImageOperation,
+     FormalCommitPublishesAuthorizedPendingNativeValueAfterReady) {
+  GraphModel graph("cache/native-formal-publication");
+  Node node;
+  node.id = 89;
+  node.name = "native_formal_publication";
+  node.type = "operation_sdk_test";
+  node.subtype = "pending_native_output";
+  graph.add_node(node);
+
+  const DenseTensorDescriptor descriptor{{3U, 4U},
+                                         ElementSemantics::FloatingPoint,
+                                         StorageEncoding{32U}};
+  const ImageFacet image_facet =
+      make_zero_origin_image_facet(descriptor, 1U, 0U, std::nullopt);
+  const StridedLayout layout{{16, 4}, 0U};
+  constexpr std::size_t kStorageSize = 48U;
+  auto native_allocation =
+      std::make_shared<FakeMatrixDeviceAllocation>(kStorageSize);
+  const std::weak_ptr<FakeMatrixDeviceAllocation> allocation_observer =
+      native_allocation;
+  PendingDeviceValuePublication publication =
+      PendingDeviceValuePublisher::publish_dense_tensor(
+          descriptor, image_facet, layout, native_allocation,
+          native_allocation.get(), native_allocation->bytes.data(),
+          kStorageSize, DeviceId(DeviceBackend::CPU), MemoryDomain::HostPinned);
+  const Value pending_value = publication.value;
+  const StorageBinding expected_binding = pending_value.storage_binding();
+  const AllocationIdentity expected_allocation =
+      pending_value.allocation_identity();
+  const ValueRevisionId expected_revision = pending_value.revision_id();
+  const ProducerIdentity expected_producer = pending_value.producer_identity();
+  const std::byte* const expected_host_pointer =
+      native_allocation->bytes.data();
+  ASSERT_TRUE(
+      publication.producer.matches_pending_fence(pending_value.ready_fence()));
+  ASSERT_EQ(pending_value.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_EQ(expected_binding.device, DeviceId(DeviceBackend::CPU));
+  EXPECT_EQ(expected_binding.memory_domain, MemoryDomain::HostPinned);
+  EXPECT_TRUE(expected_binding.host_visible);
+
+  std::vector<std::optional<NodeOutput>> results(1U);
+  results[0] = NodeOutput{};
+  results[0]->publish_image_value(pending_value);
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>();
+  auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>();
+  GraphCacheService cache(image_codec, metadata_codec);
+  std::mutex graph_mutex;
+  compute::ComputeResultCommitter committer(cache, graph_mutex, "int8");
+
+  EXPECT_THROW(committer.commit(graph, {89}, results), GraphError);
+  EXPECT_FALSE(graph.node(89).cached_output_high_precision.has_value());
+  EXPECT_FALSE(graph.node(89).hp_region.has_value());
+  EXPECT_EQ(graph.node(89).hp_version, 0U);
+
+  native_allocation->bytes[0] = std::byte{0x13};
+  native_allocation->bytes[kStorageSize - 1U] = std::byte{0x30};
+  EXPECT_TRUE(publication.producer.complete_ready());
+  EXPECT_FALSE(publication.producer.valid());
+  ASSERT_EQ(pending_value.ready_fence().poll().state(), ReadyFenceState::Ready);
+  native_allocation.reset();
+  ASSERT_FALSE(allocation_observer.expired());
+
+  committer.commit(graph, {89}, results);
+
+  ASSERT_TRUE(graph.node(89).cached_output_high_precision.has_value());
+  const NodeOutput& committed = *graph.node(89).cached_output_high_precision;
+  ASSERT_TRUE(committed.has_image_value());
+  EXPECT_FALSE(committed.has_compatibility_image());
+  const Value& committed_value = committed.image_value();
+  EXPECT_EQ(committed_value.dense_tensor_descriptor(), descriptor);
+  EXPECT_EQ(committed_value.image_facet(), image_facet);
+  EXPECT_EQ(committed_value.strided_layout(), layout);
+  EXPECT_EQ(committed_value.storage_binding(), expected_binding);
+  EXPECT_EQ(committed_value.allocation_identity(), expected_allocation);
+  EXPECT_EQ(committed_value.revision_id(), expected_revision);
+  EXPECT_EQ(committed_value.producer_identity(), expected_producer);
+  EXPECT_EQ(committed_value.ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+  const ReadLease committed_read =
+      committed_value.buffer_handle().acquire_read();
+  EXPECT_EQ(committed_read.data(), expected_host_pointer);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(committed_read.data()[0]), 0x13U);
+  EXPECT_EQ(
+      std::to_integer<std::uint8_t>(committed_read.data()[kStorageSize - 1U]),
+      0x30U);
+  EXPECT_FALSE(allocation_observer.expired());
+  EXPECT_EQ(graph.node(89).hp_version, 1U);
+  ASSERT_TRUE(graph.node(89).hp_region.has_value());
+  EXPECT_EQ(*graph.node(89).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 3}));
+}
+
+/**
  * @brief Proves one validated opaque ABI v2 result enters formal HP cache.
  *
  * @return Nothing; GoogleTest reports staging, identity, Region, readiness,
