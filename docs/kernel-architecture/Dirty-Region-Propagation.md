@@ -321,12 +321,15 @@ complete-output replacement behavior.
 
 The task pruner treats dependencies outside the active selected task flags as
 already satisfied. An active spatial consumer retains its exact ROI-covered
-producer task ids. Each nonfinal tile retires without releasing those edges;
-after the final selected producer seals and installs the complete Value, its
-unique publisher batches release through every original selected sibling task
-map. A tile therefore cannot consume a sibling's partially written binding,
-while task identity remains exact and no continuation task is manufactured.
-Whole and parameter dependencies remain complete producer-node joins. Overlap,
+producer task ids for a nonempty mapping; an empty exact mapping retains the
+selected producer task set only as a publication join because execution still
+resolves the complete `NodeOutput`. Each nonfinal tile retires without releasing
+those edges; after the final selected producer seals and installs the complete
+Value, its unique publisher batches release through every original selected
+sibling task map. A tile therefore cannot consume a sibling's partially written
+binding, while nonempty task identity remains exact and no continuation task is
+manufactured. Whole and parameter dependencies remain complete producer-node
+joins. Overlap,
 out-of-range geometry, an exception, cancellation, duplicate or missing
 retirement, or commit with an undrained binding is sticky failure, releases no
 unpublished tile edges, and leaves the previous formal/proxy Value unchanged.

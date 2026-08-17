@@ -644,8 +644,11 @@ PixelRect required_upstream_roi_for_task(
  * @param required_roi Upstream input ROI consumed by the downstream task.
  * @param tasks Dense task list used to verify edge-tile overlap.
  * @throws std::bad_alloc if dependency_ids grows.
- * @note The helper enumerates coordinate ranges directly and performs a final
- * ROI overlap check only for edge tiles.
+ * @note A nonempty ROI enumerates coordinate ranges directly and performs a
+ * final overlap check only for edge tiles. An empty exact mapping consumes no
+ * source bytes, but the runner still resolves the complete upstream
+ * NodeOutput; that case therefore retains the producer node's task set only
+ * as a fail-closed publication join. Nonempty mappings remain spatially exact.
  */
 void append_covering_upstream_tiles(
     std::vector<int>& dependency_ids,
@@ -655,6 +658,9 @@ void append_covering_upstream_tiles(
     return;
   }
   if (!has_roi(required_roi)) {
+    for (int from_task_id : upstream_index.task_ids) {
+      append_unique(dependency_ids, from_task_id);
+    }
     return;
   }
   const int tile_size = upstream_index.tile_size;
@@ -762,12 +768,14 @@ void append_node_dependency_tasks(
  * @param graph Optional graph used for execution-accurate tile input ROI.
  * @return Dependency task ids aligned with tasks by dense task id.
  * @throws GraphError, std::out_of_range, or standard allocation exceptions.
- * @note Tiled image edges retain the exact ROI-covered producer set. Runtime
- * batches release of those original task edges only after the shared Host
- * binding seals, so dependency identity remains spatially exact without
- * exposing partially mutable bytes. Whole-node, parameter, non-grid, and
- * parameterized random-access dependencies still use a complete node join
- * without constructing a Cartesian task-pair scan.
+ * @note Tiled image edges retain the exact ROI-covered producer set. An empty
+ * mapped ROI retains a producer-node publication join because execution still
+ * resolves the complete upstream NodeOutput. Runtime batches release of those
+ * original task edges only after the shared Host binding seals, so nonempty
+ * dependency identity remains spatially exact without exposing partially
+ * mutable bytes. Whole-node, parameter, non-grid, and parameterized
+ * random-access dependencies still use a complete node join without
+ * constructing a Cartesian task-pair scan.
  */
 std::vector<std::vector<int>> build_task_dependency_ids(
     const std::vector<PlannedTask>& tasks,
@@ -826,8 +834,9 @@ std::vector<std::vector<int>> build_task_dependency_ids(
  * @param result Plan whose ComputeTaskGraph task dependency metadata is
  * refreshed.
  * @throws std::bad_alloc if node-to-task lookup or ready ids grow.
- * @note Tile-to-tile image edges retain exact ROI-derived dependencies.
- * Runtime batches their physical release after complete producer publication.
+ * @note Tile-to-tile image edges retain exact ROI-derived dependencies, with a
+ * producer publication join only when the exact mapping is empty. Runtime
+ * batches their physical release after complete producer publication.
  * Whole-node and parameter dependencies retain their complete producer-node
  * join.
  */

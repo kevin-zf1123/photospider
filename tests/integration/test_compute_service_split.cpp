@@ -3727,6 +3727,63 @@ TEST(TaskGraphPlanningSplit,
          "batches physical release after complete Value publication";
 }
 
+/**
+ * @brief Proves an empty exact mapping retains only publication dependencies.
+ *
+ * A 16x16 tiled source feeds a 32x16 SpatialAligned tiled consumer. The left
+ * consumer tile retains its exact byte-producing source edge; the right tile
+ * maps outside the source extent yet still waits for complete source Value
+ * publication because execution resolves the connected NodeOutput.
+ */
+TEST(TaskGraphPlanningSplit,
+     EmptyExactTileMappingRetainsProducerPublicationDependency) {
+  register_split_ops();
+  GraphModel graph("cache/split-empty-tile-publication-dependency");
+  Node source = make_node(1, "split_plan", "tile");
+  source.parameters["width"] = 16;
+  source.parameters["height"] = 16;
+  Node downstream = make_node(2, "split_plan", "tile");
+  downstream.parameters["width"] = 32;
+  downstream.parameters["height"] = 16;
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(downstream);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 2;
+  const auto plan = node_cache_pruned_plan(graph, request, {1, 2});
+
+  std::vector<const compute::PlannedTask*> downstream_tasks;
+  for (const auto& task : plan.task_graph.tasks) {
+    if (task.node_id == 2) {
+      downstream_tasks.push_back(&task);
+    }
+  }
+  ASSERT_EQ(downstream_tasks.size(), 2U);
+  std::sort(
+      downstream_tasks.begin(), downstream_tasks.end(),
+      [](const compute::PlannedTask* left, const compute::PlannedTask* right) {
+        return left->output_roi.x < right->output_roi.x;
+      });
+  for (const compute::PlannedTask* task : downstream_tasks) {
+    ASSERT_EQ(task->dependency_task_ids.size(), 1U);
+    const compute::PlannedTask& producer =
+        plan.task_graph.tasks.at(task->dependency_task_ids.front());
+    EXPECT_EQ(producer.node_id, 1);
+  }
+  const compute::PlannedTask& left_producer = plan.task_graph.tasks.at(
+      downstream_tasks.front()->dependency_task_ids.front());
+  const compute::PlannedTask& right_publication = plan.task_graph.tasks.at(
+      downstream_tasks.back()->dependency_task_ids.front());
+  EXPECT_FALSE(compute::is_rect_empty(compute::intersect_rect(
+      left_producer.output_roi, downstream_tasks.front()->output_roi)));
+  EXPECT_TRUE(compute::is_rect_empty(compute::intersect_rect(
+      right_publication.output_roi, downstream_tasks.back()->output_roi)))
+      << "the non-overlapping edge is retained only as a publication join";
+}
+
 TEST(TaskGraphPlanningSplit, TileDependenciesUseGaussianHaloInputRoi) {
   register_split_ops();
   GraphModel graph("cache/split-tile-halo-dependencies");
@@ -6797,6 +6854,93 @@ TEST(ComputeTaskRunnerSplit,
     EXPECT_FLOAT_EQ(output_image.at<float>(0, 0), 3.0f);
     EXPECT_FLOAT_EQ(output_image.at<float>(0, 31), 5.0f);
   }
+
+  runtime.stop();
+  registry.unregister_key(make_key(kSourceType, kSourceSubtype));
+  registry.unregister_key(make_key(kConsumerType, kConsumerSubtype));
+}
+
+/**
+ * @brief Proves an empty mapped tile waits for its connected source Value.
+ *
+ * @return Nothing; GoogleTest reports missing dependency or publication
+ * failures.
+ * @throws Graph, runtime, registry, allocation, cache, or execution exceptions
+ * when the focused product path cannot run.
+ * @note The right consumer tile reads no source pixels, but its callback input
+ * resolver still requires the complete source NodeOutput. The publication join
+ * prevents it from becoming initial-ready before the 16x16 source seals.
+ */
+TEST(ComputeTaskRunnerSplit,
+     EmptyExactTileMappingExecutesAfterProducerPublication) {
+  register_split_ops();
+  constexpr char kSourceType[] = "image_generator";
+  constexpr char kSourceSubtype[] = "issue130_empty_mapping_source";
+  constexpr char kConsumerType[] = "issue130_empty_mapping";
+  constexpr char kConsumerSubtype[] = "tiled_consumer";
+  OpMetadata metadata;
+  metadata.tile_preference = TileSizePreference::MICRO;
+  auto& registry = OpRegistry::instance();
+  registry.register_op_hp_tiled(
+      kSourceType, kSourceSubtype,
+      TileOpFunc(
+          [](const Node&, const OutputTile& output,
+             const std::vector<InputTile>&) { toCvMat(output).setTo(3.0f); }),
+      metadata);
+  registry.register_op_hp_tiled(
+      kConsumerType, kConsumerSubtype,
+      TileOpFunc(
+          [](const Node&, const OutputTile& output,
+             const std::vector<InputTile>&) { toCvMat(output).setTo(2.0f); }),
+      metadata);
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-empty-tile-publication");
+  GraphRuntime::Info info;
+  info.name = "empty-tile-publication";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+
+  GraphModel& graph = runtime.model();
+  Node source = make_node(1, kSourceType, kSourceSubtype);
+  source.parameters["width"] = 16;
+  source.parameters["height"] = 16;
+  Node consumer = make_node(2, kConsumerType, kConsumerSubtype);
+  consumer.parameters["width"] = 32;
+  consumer.parameters["height"] = 16;
+  consumer.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(consumer);
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(2U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  NodeOutput* output = nullptr;
+  EXPECT_NO_THROW(output = &service.compute_parallel(graph, runtime, request));
+  EXPECT_NE(output, nullptr);
+  if (output != nullptr) {
+    const cv::Mat output_image = project_image_mat(*output);
+    EXPECT_EQ(output_image.rows, 16);
+    EXPECT_EQ(output_image.cols, 32);
+    EXPECT_FLOAT_EQ(output_image.at<float>(0, 0), 2.0f);
+    EXPECT_FLOAT_EQ(output_image.at<float>(0, 31), 2.0f);
+  }
+  EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(1)));
+  EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
 
   runtime.stop();
   registry.unregister_key(make_key(kSourceType, kSourceSubtype));

@@ -661,13 +661,16 @@ Every ordinary dense-image producer now follows one private lifecycle:
 6. Run commit publishes that already Ready Value with independent graph,
    Region, HP-generation, and RT-generation predicates.
 
-No consumer observes partial binding bytes. Task-graph planning retains each
-consumer's exact ROI-covered producer task ids. A nonfinal producer tile
-retires successfully without releasing its dependency edges; after the final
-tile seals, finalizes metadata, and installs the complete request-local Value,
-that unique publisher batches physical release of every original sibling edge.
-Logical task identity therefore remains spatially exact without adding a
-second Value/readiness authority or extra provider callback. Whole-node and
+No consumer observes partial binding bytes. For a nonempty mapped ROI,
+task-graph planning retains each consumer's exact ROI-covered producer task
+ids. Exact clipping that yields an empty upstream ROI retains the complete
+producer task set only as a publication join because the current runner still
+resolves the connected complete `NodeOutput`. A nonfinal producer tile retires
+successfully without releasing its dependency edges; after the final tile
+seals, finalizes metadata, and installs the complete request-local Value, that
+unique publisher batches physical release of every original sibling edge.
+Nonempty logical task identity therefore remains spatially exact without adding
+a second Value/readiness authority or extra provider callback. Whole-node and
 parameter dependencies retain their complete producer-node joins. An empty
 successful target remains data-only and publishes no synthetic image. Any
 grant error, exception, cancellation, missing retirement, or undrained binding

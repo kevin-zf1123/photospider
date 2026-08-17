@@ -519,11 +519,13 @@ subscription surface 都不属于当前软件契约。
 6. Run commit 以相互独立的 graph、Region、HP-generation 与 RT-generation predicate 发布该
    已经 Ready 的 Value。
 
-任何 consumer 都不会观察 partial binding byte。Task-graph planning 会保留每个 consumer
-精确覆盖 ROI 的 producer task id。非最终 producer tile 会成功 retirement，但不释放其
-dependency edge；最终 tile seal、完成 metadata finalization 并安装完整的 request-local Value
-后，这个唯一 publisher 才会批量物理释放每条原始 sibling edge。因此，logical task identity
-保持空间精确，且不会增加第二套 Value/readiness authority 或额外 provider callback。
+任何 consumer 都不会观察 partial binding byte。对于非空 mapped ROI，Task-graph planning
+会保留每个 consumer 精确覆盖 ROI 的 producer task id。若 exact clipping 得到空 upstream
+ROI，则只把完整 producer task set 保留为 publication join，因为当前 runner 仍会解析连接的
+完整 `NodeOutput`。非最终 producer tile 会成功 retirement，但不释放其 dependency edge；
+最终 tile seal、完成 metadata finalization 并安装完整的 request-local Value 后，这个唯一
+publisher 才会批量物理释放每条原始 sibling edge。因此，非空 logical task identity 保持空间
+精确，且不会增加第二套 Value/readiness authority 或额外 provider callback。
 Whole-node 与 parameter dependency 继续使用完整的 producer-node join。空的 successful target
 保持 data-only，且不会发布 synthetic image。任何 grant error、exception、cancellation、
 missing retirement 或 undrained binding 都会使 Run 失败，不释放尚未发布的 tile edge，并保持
