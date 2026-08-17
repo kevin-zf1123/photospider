@@ -2285,18 +2285,20 @@ TEST(ImageBufferContract, OpenCvAndTileAccessRespectPaddedStep) {
 }
 
 /**
- * @brief Proves OpenCV compares a logical Host grant with the origin-adjusted
- * zero-based OutputTile ROI and still rejects mismatched storage geometry.
+ * @brief Proves OpenCV views compare a logical Host grant with the
+ * origin-adjusted zero-based OutputTile ROI and preserve UMat write-back.
  *
- * @return Nothing; GoogleTest reports view, stride, pixel, or fail-closed
- * behavior mismatches.
+ * @return Nothing; GoogleTest reports view, stride, UMat lifetime/write-back,
+ * pixel, or fail-closed behavior mismatches.
  * @throws Host plan, allocation, grant, OpenCV, Value, or projection
  * exceptions when the positive fixture cannot execute.
  * @note The first grant is negative in logical coordinates but writes storage
- * ROI `{3,2,5,3}`. A second binding supplies a valid logical grant with an
- * intentionally shifted storage ROI and must be rejected before exposure. A
- * final one-pixel tile reaches INT64_MAX exactly, while an unrepresentable
- * data-window span fails before allocation.
+ * ROI `{3,2,5,3}` through a padded-stride UMat destroyed before grant
+ * retirement; the sealed Value then proves write-back. A second binding
+ * supplies a valid logical grant with an intentionally shifted storage ROI
+ * and must be rejected before exposure. A final one-pixel tile reaches
+ * INT64_MAX exactly, while an unrepresentable data-window span fails before
+ * allocation.
  */
 TEST(ImageBufferContract,
      OpenCvOutputTileTranslatesSignedOriginAndRejectsMismatch) {
@@ -2315,11 +2317,21 @@ TEST(ImageBufferContract,
   HostOutputWriteGrant grant =
       binding.grant_tile(ImageRect{image_region_domain(), -4, 1, -3, 0});
   OutputTile output_tile{&binding.plan(), &grant, PixelRect{3, 2, 5, 3}};
-  cv::Mat tile = toCvMat(output_tile);
-  EXPECT_EQ(tile.rows, 3);
-  EXPECT_EQ(tile.cols, 5);
-  EXPECT_EQ(tile.step, binding.plan().row_stride());
-  tile.setTo(7.0F);
+  ASSERT_GT(binding.plan().row_stride(),
+            binding.plan().width() * binding.plan().pixel_bytes());
+  {
+    const cv::Mat tile = toCvMat(output_tile);
+    EXPECT_EQ(tile.rows, 3);
+    EXPECT_EQ(tile.cols, 5);
+    EXPECT_EQ(tile.step, binding.plan().row_stride());
+  }
+  {
+    cv::UMat tile = toCvUMat(output_tile);
+    EXPECT_EQ(tile.rows, 3);
+    EXPECT_EQ(tile.cols, 5);
+    EXPECT_EQ(tile.step, binding.plan().row_stride());
+    tile.setTo(7.0F);
+  }
   grant.retire_success();
   NodeOutput published;
   published.publish_image_value(binding.seal());
@@ -2347,10 +2359,12 @@ TEST(ImageBufferContract,
       ImageRect{image_region_domain(), maximum - 1, maximum, 1, 2});
   OutputTile endpoint_tile{&endpoint_binding.plan(), &endpoint_grant,
                            PixelRect{3, 3, 1, 1}};
-  cv::Mat endpoint_view = toCvMat(endpoint_tile);
-  ASSERT_EQ(endpoint_view.rows, 1);
-  ASSERT_EQ(endpoint_view.cols, 1);
-  endpoint_view.at<float>(0, 0) = 11.0F;
+  {
+    cv::Mat endpoint_view = toCvMat(endpoint_tile);
+    ASSERT_EQ(endpoint_view.rows, 1);
+    ASSERT_EQ(endpoint_view.cols, 1);
+    endpoint_view.at<float>(0, 0) = 11.0F;
+  }
   endpoint_grant.retire_success();
   EXPECT_NO_THROW((void)endpoint_binding.seal());
 
