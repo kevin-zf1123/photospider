@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <future>
+#include <limits>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -36,6 +39,41 @@ Value make_statistics_value() {
   std::vector<std::byte> storage{std::byte{1U}, std::byte{9U}, std::byte{2U},
                                  std::byte{8U}, std::byte{3U}, std::byte{7U},
                                  std::byte{4U}, std::byte{6U}};
+  return Value::from_cpu_dense_tensor(std::move(descriptor), std::move(image),
+                                      std::move(layout), std::move(storage));
+}
+
+/**
+ * @brief Creates one zero-origin Float64 single-channel statistics Value.
+ * @param samples Nonempty logical row of binary64 samples.
+ * @return Ready image Value with stable channel id 10.
+ * @throws std::invalid_argument for empty input.
+ * @throws Validation, overflow, length, or allocation exceptions from Value
+ * publication.
+ * @note Every double bit pattern is copied verbatim so NaN and infinity
+ * classification is exercised by the production scanner.
+ */
+Value make_f64_statistics_value(const std::vector<double>& samples) {
+  if (samples.empty()) {
+    throw std::invalid_argument(
+        "Float64 statistics fixture requires at least one sample.");
+  }
+  DenseTensorDescriptor descriptor{{1U, samples.size(), 1U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{64U}};
+  ImageFacet image;
+  image.y_axis = 0U;
+  image.x_axis = 1U;
+  image.channel_axis = 2U;
+  image.data_window =
+      ImageBounds{0, 0, static_cast<std::int64_t>(samples.size()), 1};
+  image.channel_schema = ChannelSchema{{{ChannelId{10U}, "samples"}}, {}};
+  const std::size_t row_bytes = samples.size() * sizeof(double);
+  StridedLayout layout{{static_cast<std::ptrdiff_t>(row_bytes),
+                        static_cast<std::ptrdiff_t>(sizeof(double)),
+                        static_cast<std::ptrdiff_t>(sizeof(double))}};
+  std::vector<std::byte> storage(row_bytes);
+  std::memcpy(storage.data(), samples.data(), row_bytes);
   return Value::from_cpu_dense_tensor(std::move(descriptor), std::move(image),
                                       std::move(layout), std::move(storage));
 }
@@ -87,6 +125,25 @@ ImageStatisticsQuery make_histogram_query() {
 }
 
 /**
+ * @brief Builds a single-channel version-one histogram query.
+ * @param minimum Finite inclusive lower bound.
+ * @param maximum Finite exclusive upper bound greater than minimum.
+ * @param bin_count Positive bounded histogram bin count.
+ * @return Whole-image query selecting stable channel id 10.
+ * @throws Nothing for aggregate construction.
+ */
+ImageStatisticsQuery make_single_channel_histogram_query(
+    double minimum, double maximum, std::size_t bin_count) {
+  ImageStatisticsQuery query;
+  query.region = RegionSet::whole();
+  query.selection.channel = ChannelId{10U};
+  query.algorithm = ImageStatisticsAlgorithm::Histogram;
+  query.algorithm_version = 1U;
+  query.histogram = ImageHistogramParameters{minimum, maximum, bin_count};
+  return query;
+}
+
+/**
  * @brief Executes accepted tasks immediately and counts scheduler entry.
  * @param scheduled Mutable invocation count.
  * @return Scheduler satisfying exact-once task ownership.
@@ -131,6 +188,92 @@ TEST(ImageStatisticsStore, ScansSignedImageRegionByStableChannelIdentity) {
   EXPECT_EQ(*result.channels[1].histogram_bins,
             (std::vector<std::uint64_t>{4U, 0U}));
   EXPECT_EQ(store.size(), 1U);
+}
+
+/**
+ * @brief Proves the widest legal finite interval bins without overflow or UB.
+ *
+ * Exact endpoints, interior values from both signs, the predecessor of the
+ * exclusive maximum, and all non-finite classes share one scan. Only finite
+ * samples contribute to bins/below/above and the exclusive maximum is above.
+ */
+TEST(ImageStatisticsStore,
+     WidestFiniteHistogramBoundsRemainStableAndExcludeNonfiniteSamples) {
+  const double finite_maximum = std::numeric_limits<double>::max();
+  const Value value = make_f64_statistics_value(
+      {-finite_maximum, -finite_maximum / 2.0, -1.0, 0.0, 1.0,
+       finite_maximum / 2.0, std::nextafter(finite_maximum, 0.0),
+       finite_maximum, std::numeric_limits<double>::quiet_NaN(),
+       std::numeric_limits<double>::infinity(),
+       -std::numeric_limits<double>::infinity()});
+  ImageStatisticsStore store(4U);
+  std::size_t scheduled = 0U;
+  ScheduledImageStatistics request = store.schedule(
+      value, std::nullopt,
+      make_single_channel_histogram_query(-finite_maximum, finite_maximum, 4U),
+      inline_scheduler(&scheduled));
+  const ImageStatisticsResult result = request.take_completion().get();
+
+  ASSERT_EQ(scheduled, 1U);
+  ASSERT_EQ(result.channels.size(), 1U);
+  const ImageChannelStatistics& channel = result.channels.front();
+  EXPECT_EQ(channel.finite_sample_count, 8U);
+  EXPECT_EQ(channel.nan_count, 1U);
+  EXPECT_EQ(channel.positive_infinity_count, 1U);
+  EXPECT_EQ(channel.negative_infinity_count, 1U);
+  EXPECT_EQ(channel.minimum, -finite_maximum);
+  EXPECT_EQ(channel.maximum, finite_maximum);
+  ASSERT_TRUE(channel.histogram_bins.has_value());
+  EXPECT_EQ(*channel.histogram_bins,
+            (std::vector<std::uint64_t>{1U, 1U, 3U, 2U}));
+  EXPECT_EQ(channel.below_histogram_count, 0U);
+  EXPECT_EQ(channel.above_histogram_count, 1U);
+}
+
+/**
+ * @brief Proves adjacent same-sign finite bounds do not collapse in scaling.
+ *
+ * Positive and negative intervals each span exactly one representable step.
+ * The inclusive minimum enters bin zero while the exclusive maximum and
+ * ordinary out-of-range samples retain below/above classification.
+ */
+TEST(ImageStatisticsStore,
+     AdjacentLargeFiniteBoundsPreserveEndpointAndOutsideClassification) {
+  const double positive_maximum = std::numeric_limits<double>::max();
+  const double positive_minimum = std::nextafter(positive_maximum, 0.0);
+  const double negative_minimum = -positive_maximum;
+  const double negative_maximum = std::nextafter(negative_minimum, 0.0);
+  ImageStatisticsStore store(4U);
+  std::size_t scheduled = 0U;
+
+  ScheduledImageStatistics positive = store.schedule(
+      make_f64_statistics_value({0.0, positive_minimum, positive_maximum}),
+      std::nullopt,
+      make_single_channel_histogram_query(positive_minimum, positive_maximum,
+                                          2U),
+      inline_scheduler(&scheduled));
+  const ImageChannelStatistics positive_channel =
+      positive.take_completion().get().channels.front();
+  ASSERT_TRUE(positive_channel.histogram_bins.has_value());
+  EXPECT_EQ(*positive_channel.histogram_bins,
+            (std::vector<std::uint64_t>{1U, 0U}));
+  EXPECT_EQ(positive_channel.below_histogram_count, 1U);
+  EXPECT_EQ(positive_channel.above_histogram_count, 1U);
+
+  ScheduledImageStatistics negative = store.schedule(
+      make_f64_statistics_value({negative_minimum, negative_maximum, 0.0}),
+      std::nullopt,
+      make_single_channel_histogram_query(negative_minimum, negative_maximum,
+                                          2U),
+      inline_scheduler(&scheduled));
+  const ImageChannelStatistics negative_channel =
+      negative.take_completion().get().channels.front();
+  ASSERT_TRUE(negative_channel.histogram_bins.has_value());
+  EXPECT_EQ(*negative_channel.histogram_bins,
+            (std::vector<std::uint64_t>{1U, 0U}));
+  EXPECT_EQ(negative_channel.below_histogram_count, 0U);
+  EXPECT_EQ(negative_channel.above_histogram_count, 2U);
+  EXPECT_EQ(scheduled, 2U);
 }
 
 /**

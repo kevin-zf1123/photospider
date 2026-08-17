@@ -155,6 +155,48 @@ Scalar read_statistics_scalar(const std::byte* bytes) noexcept {
 }
 
 /**
+ * @brief Maps one contained finite sample to a stable unit-interval position.
+ * @param value Finite sample in `[minimum, maximum)`.
+ * @param minimum Finite inclusive histogram lower bound.
+ * @param maximum Finite exclusive histogram upper bound greater than minimum.
+ * @return Finite position clamped to `[0,1]` for defensive rounding edges.
+ * @throws std::overflow_error when validated finite inputs cannot produce a
+ * finite positive normalization span or result.
+ * @note Same-sign bounds use their exact finite difference so adjacent large
+ * doubles remain distinguishable. Bounds that cross zero are first scaled by
+ * their largest magnitude; subtraction then occurs inside `[-1,1]` and cannot
+ * overflow even for `[-DBL_MAX, DBL_MAX]`.
+ */
+double normalized_histogram_position(double value, double minimum,
+                                     double maximum) {
+  double normalized = 0.0;
+  if (minimum < 0.0 && maximum > 0.0) {
+    const double scale = std::max(-minimum, maximum);
+    const double scaled_minimum = minimum / scale;
+    const double scaled_maximum = maximum / scale;
+    const double scaled_value = value / scale;
+    const double scaled_range = scaled_maximum - scaled_minimum;
+    if (!(scaled_range > 0.0) || !std::isfinite(scaled_range)) {
+      throw std::overflow_error(
+          "Image statistics histogram scaling lost its finite range.");
+    }
+    normalized = (scaled_value - scaled_minimum) / scaled_range;
+  } else {
+    const double range = maximum - minimum;
+    if (!(range > 0.0) || !std::isfinite(range)) {
+      throw std::overflow_error(
+          "Image statistics histogram bounds lost their finite range.");
+    }
+    normalized = (value - minimum) / range;
+  }
+  if (!std::isfinite(normalized)) {
+    throw std::overflow_error(
+        "Image statistics histogram position is not finite.");
+  }
+  return std::clamp(normalized, 0.0, 1.0);
+}
+
+/**
  * @brief Adds one converted scalar to a selected-channel accumulator.
  * @param value Scalar converted to binary64 for bounded observation.
  * @param floating_point Whether NaN/infinity classification applies.
@@ -163,8 +205,9 @@ Scalar read_statistics_scalar(const std::byte* bytes) noexcept {
  * @return Nothing.
  * @throws std::overflow_error when any observed count is unrepresentable.
  * @note Finite integer inputs in the implemented 8/16-bit domain convert
- * exactly. Histogram upper bounds are exclusive; a rounding-edge bin index is
- * clamped only after the finite interval containment check.
+ * exactly. Histogram upper bounds are exclusive. Every contained finite value
+ * is normalized without unbounded subtraction and checked before conversion
+ * to a bin index; a rounding-edge index is then clamped to the final bin.
  */
 void observe_statistics_scalar(
     double value, bool floating_point,
@@ -201,8 +244,8 @@ void observe_statistics_scalar(
     increment_count(&accumulator->above_histogram_count);
     return;
   }
-  const double normalized =
-      (value - histogram->minimum) / (histogram->maximum - histogram->minimum);
+  const double normalized = normalized_histogram_position(
+      value, histogram->minimum, histogram->maximum);
   std::size_t bin = static_cast<std::size_t>(
       normalized * static_cast<double>(histogram->bin_count));
   if (bin >= histogram->bin_count) {
