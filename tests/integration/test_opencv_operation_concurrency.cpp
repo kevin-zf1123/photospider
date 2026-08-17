@@ -22,8 +22,10 @@
 
 #include "benchmark/benchmark_service.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "graph/node.hpp"     // NOLINT(build/include_subdir)
+#include "core/value_image_adapter.hpp"
+#include "graph/node.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/image_buffer.hpp"
+#include "photospider/data/image_view.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
 #include "support/ipc_host_spy.hpp"
@@ -1053,12 +1055,13 @@ TEST(OpenCvOperationConcurrency,
  * @brief Proves the real curve provider restores the complete calling-thread
  * floating-point environment.
  *
- * @throws Provider, registry, allocation, or floating-point setup failures
- * unchanged to GoogleTest.
+ * @throws Provider, registry, Host output planning/grant, Value view,
+ * allocation, or floating-point setup failures unchanged to GoogleTest.
  * @note The callback runs synchronously on this thread after a non-default
  * rounding mode and two sticky exceptions are installed. The test snapshots
  * rounding and every `FE_ALL_EXCEPT` flag immediately after provider return,
- * while `ScopedTestFloatingPointEnvironment` restores the thread's original
+ * then retires the sole Host grant and inspects the sealed Value. The
+ * `ScopedTestFloatingPointEnvironment` restores the thread's original
  * environment on every later exit.
  */
 TEST(OpenCvOperationConcurrency,
@@ -1082,13 +1085,21 @@ TEST(OpenCvOperationConcurrency,
   node.runtime_parameters["k"] = 1.75;
 
   ImageBuffer input = make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
-  ImageBuffer output =
-      make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
   auto* const input_row = static_cast<float*>(input.data.get());
   input_row[0] = 0.25F;
   input_row[1] = 0.5F;
+  const Value input_value =
+      value_image_adapter::snapshot_cpu_image_value(input);
+  ASSERT_TRUE(input_value.image_facet().has_value());
+  HostOutputBinding output_binding =
+      HostOutputBinding::allocate(DenseImageOutputPlan::create(
+          std::string(NodeOutput::kImageOutputName),
+          input_value.dense_tensor_descriptor(), *input_value.image_facet(),
+          input_value.strided_layout(), input_value.storage_size(), 64U));
   const PixelRect tile_roi{0, 0, 2, 1};
-  const OutputTile output_tile{&output, tile_roi};
+  HostOutputWriteGrant output_grant =
+      output_binding.grant_tile({image_region_domain(), 0, 2, 0, 1});
+  const OutputTile output_tile{&output_binding.plan(), &output_grant, tile_roi};
   const std::vector<InputTile> input_tiles{{&input, tile_roi, nullptr}};
 
   ASSERT_EQ(fesetenv(FE_DFL_ENV), 0);
@@ -1105,9 +1116,16 @@ TEST(OpenCvOperationConcurrency,
 
   EXPECT_EQ(restored_rounding, FE_DOWNWARD);
   EXPECT_EQ(restored_exceptions, kPresetExceptions);
-  const auto* const output_row = static_cast<const float*>(output.data.get());
-  EXPECT_GT(output_row[0], 0.0F);
-  EXPECT_GT(output_row[1], 0.0F);
+  output_grant.retire_success();
+  const ImageView output_view(output_binding.seal());
+  float first_output = 0.0F;
+  float second_output = 0.0F;
+  std::memcpy(&first_output, output_view.channel_data(0U, 0U, 0U),
+              sizeof(first_output));
+  std::memcpy(&second_output, output_view.channel_data(1U, 0U, 0U),
+              sizeof(second_output));
+  EXPECT_GT(first_output, 0.0F);
+  EXPECT_GT(second_output, 0.0F);
 }
 
 /**
