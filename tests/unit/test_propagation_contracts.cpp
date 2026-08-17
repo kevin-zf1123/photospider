@@ -1415,21 +1415,24 @@ TEST(DirtyRegionSnapshotBuilderContract,
  *
  * @return Nothing; GoogleTest reports exception or publication mismatches.
  * @throws std::bad_alloc if test-owned storage allocation fails.
- * @note Boundary tile-key overhang is permitted only after a contained request
- * ROI is aligned; callers cannot use alignment clipping to hide invalid input.
+ * @note A one-pixel tile forces incremental implementations to publish the
+ * contained leading tile before reaching the out-of-window tile. Boundary
+ * tile-key overhang is permitted only after a contained request ROI is
+ * aligned; callers cannot use alignment clipping to hide invalid input.
  */
 TEST(DirtyRegionSnapshotBuilderContract,
      RejectsRequestRoiOutsideStorageWithoutPublishingTiles) {
   compute::DirtyRegionSnapshot snapshot;
   compute::DirtyRegionSnapshotBuilder builder;
   const ImageBounds data_window{-10, -20, -2, -12};
+  constexpr int kSinglePixelTileSize = 1;
 
   EXPECT_THROW(builder.enumerate_tiles(
                    snapshot,
                    compute::DirtyTileEnumeration{
                        7, compute::DirtyDomain::HighPrecision,
                        compute::DirtyTileLevel::Micro, PixelRect{7, 0, 2, 1},
-                       data_window, compute::kHpMicroTileSize}),
+                       data_window, kSinglePixelTileSize}),
                std::invalid_argument);
   EXPECT_TRUE(snapshot.dirty_tiles.empty());
 }

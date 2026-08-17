@@ -336,10 +336,11 @@ void populate_debug_statistics(NodeOutput& output) {
  * @note Spatial inheritance occurs before timestamp, worker, duration, and
  *       device publication. Debug identity fields are always updated; only
  *       Ready host-visible pixel statistics depend on `enable_timing`. Pending
- *       Values expose device metadata through StorageBinding without payload
- *       access and retain callback-provided statistics until a later Ready
- *       observation. ImageView walks logical samples and ignores padding;
- *       opaque backend statistics remain untouched without a device adapter.
+ *       Values expose device metadata through representation-neutral indexed
+ *       StorageBinding inspection without payload access and retain
+ *       callback-provided statistics until a later Ready observation.
+ *       ImageView walks logical samples and ignores padding; opaque backend
+ *       statistics remain untouched without a device adapter.
  */
 void ComputeMetricsRecorder::finalize_output_metadata(
     NodeOutput& output, const std::vector<const NodeOutput*>& inputs,
@@ -360,8 +361,7 @@ void ComputeMetricsRecorder::finalize_output_metadata(
     backend = output.image_value().storage_binding().device.backend();
   } else if (!output.named_values.empty()) {
     backend = output.named_values.begin()
-                  ->second.buffer_handle()
-                  .storage_binding()
+                  ->second.storage_binding(0U)
                   .device.backend();
   }
   output.debug.compute_device = device_to_string(backend);

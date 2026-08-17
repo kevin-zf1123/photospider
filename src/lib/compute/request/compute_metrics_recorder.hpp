@@ -35,9 +35,12 @@ class ComputeMetricsRecorder {
    * @note A default output spatial context inherits from the first live input,
    *       resets its local inverse transform, and completes an empty absolute
    *       ROI from output dimensions. Timestamp, worker id, duration, and
-   *       device are recorded regardless of `enable_timing`. Pixel statistics
-   *       are inspected only for Ready host-visible named image Values.
-   *       Inspection uses ImageView logical coordinates and excludes padding.
+   *       device are recorded regardless of `enable_timing`. Device metadata
+   *       for the first non-image named Value uses representation-neutral
+   *       indexed StorageBinding inspection, so ProviderDefined and non-Ready
+   *       DenseTensor Values require no payload access. Pixel statistics are
+   *       inspected only for Ready host-visible named image Values. Inspection
+   *       uses ImageView logical coordinates and excludes padding.
    *       Compatibility staging is never read. An all-NaN active payload
    *       retains the legacy positive/negative infinity empty-range sentinels;
    *       opaque/non-Ready resources retain callback-provided values.

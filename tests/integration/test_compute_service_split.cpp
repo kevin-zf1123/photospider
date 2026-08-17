@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -51,6 +52,7 @@
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
 #include "photospider/host/host.hpp"
+#include "photospider/plugin/data_definition_registry.hpp"
 #include "plugin/operation_host_adapter.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
 #include "providers/configured_operation_providers.hpp"
@@ -533,6 +535,359 @@ PendingDeviceValuePublication publish_opaque_device_image(
       template_value.strided_layout(), owner, owner.get(), nullptr,
       template_value.storage_size(), DeviceId(device_backend(device)),
       MemoryDomain::DeviceLocal);
+}
+
+/** @brief Permanent provider identity used only by metrics recorder tests. */
+constexpr ExtensionIdentity kMetricsProviderIdentity{
+    0x1300000000000001ULL,
+    0x0000000000000001ULL};  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Provider Schema identity used only by metrics recorder tests. */
+constexpr ExtensionIdentity kMetricsSchemaIdentity{
+    0x1300000000000010ULL,
+    0x0000000000000010ULL};  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Provider Layout identity used only by metrics recorder tests. */
+constexpr ExtensionIdentity kMetricsLayoutIdentity{
+    0x1300000000000020ULL,
+    0x0000000000000020ULL};  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Converts one C++ extension identity to the frozen provider record.
+ * @param identity Permanent identity to translate.
+ * @return Exact two-word pure-C identity.
+ * @throws Nothing.
+ * @note The helper performs no byte-order conversion or persistence work.
+ */
+constexpr ps_data_identity_v3 metrics_provider_identity(
+    ExtensionIdentity identity) noexcept {
+  return {identity.high, identity.low};
+}
+
+/**
+ * @brief Stable callback state for the minimal metrics provider generation.
+ * @throws std::bad_alloc if diagnostic string construction allocates.
+ * @note Definition names, records, context, and implementation bytes remain
+ * alive through the candidate module lease and every resulting Value.
+ */
+struct MetricsProviderState final {
+  /** @brief Stable provider implementation-version bytes. */
+  std::string implementation_version = "metrics-provider-v1";
+
+  /** @brief Stable diagnostic names for the Schema and Layout definitions. */
+  std::array<std::string, 2U> names{"metrics-schema", "metrics-layout"};
+
+  /** @brief Complete immutable definition bundle returned through the ABI. */
+  std::array<ps_data_definition_v3, 2U> definitions{};
+
+  /**
+   * @brief Builds the complete stable provider definition bundle.
+   * @throws std::bad_alloc when owned diagnostic strings cannot allocate.
+   * @note Pure-C record pointers are installed only after string members have
+   * completed construction.
+   */
+  MetricsProviderState() {
+    const std::array<ps_data_definition_kind_v3, 2U> kinds{
+        PS_DATA_DEFINITION_SCHEMA_V3, PS_DATA_DEFINITION_LAYOUT_V3};
+    const std::array<ExtensionIdentity, 2U> identities{kMetricsSchemaIdentity,
+                                                       kMetricsLayoutIdentity};
+    for (std::size_t index = 0U; index < definitions.size(); ++index) {
+      definitions[index].struct_size = PS_DATA_DEFINITION_V3_SIZE;
+      definitions[index].kind = kinds[index];
+      definitions[index].structural_version = 1U;
+      definitions[index].identity =
+          metrics_provider_identity(identities[index]);
+      definitions[index].canonical_name = {
+          reinterpret_cast<const std::uint8_t*>(names[index].data()),
+          static_cast<std::uint64_t>(names[index].size())};
+    }
+  }
+};
+
+/** @brief Same-thread candidate state visible only during synchronous load. */
+thread_local MetricsProviderState* staged_metrics_provider = nullptr;
+
+/**
+ * @brief Returns the exact provider ABI version for the metrics fixture.
+ * @return `PS_DATA_PROVIDER_ABI_VERSION`.
+ * @throws Nothing across the pure-C ABI.
+ * @note The numeric handshake exposes no provider state.
+ */
+std::uint32_t PS_DATA_CALL metrics_provider_abi_version(void) PS_DATA_NOEXCEPT {
+  return PS_DATA_PROVIDER_ABI_VERSION;
+}
+
+/**
+ * @brief Accepts the generically checked one-buffer fixture publication.
+ * @param provider_context Non-null MetricsProviderState retained by the module.
+ * @param value Payload-enabled Host view of the candidate Value.
+ * @param diagnostic Unused Host-owned diagnostic output.
+ * @param output Unused Host-owned variable-output sink.
+ * @return OK only for one present, payload-visible buffer.
+ * @throws Nothing across the pure-C ABI.
+ * @note Validation reads no payload byte; it checks only Host-supplied framing
+ * and availability facts needed by this minimal fixture.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_validate(
+    void* provider_context, const ps_data_value_view_v3* value,
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)diagnostic;
+  (void)output;
+  if (provider_context == nullptr || value == nullptr ||
+      value->buffer_count != 1U || value->buffers == nullptr ||
+      value->buffers[0].data == nullptr ||
+      (value->buffers[0].flags & PS_DATA_BUFFER_PAYLOAD_AVAILABLE_V3) == 0U) {
+    return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+  }
+  return PS_DATA_STATUS_OK_V3;
+}
+
+/**
+ * @brief Declines property queries outside this fixture's validation purpose.
+ * @param provider_context Ignored provider state.
+ * @param value Ignored metadata-only Value view.
+ * @param query Ignored property request.
+ * @param result Ignored Host-owned result.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return `PS_DATA_STATUS_UNSUPPORTED_V3`.
+ * @throws Nothing across the pure-C ABI.
+ * @note All callback inputs and outputs are intentionally ignored.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_query(
+    void* provider_context, const ps_data_value_view_v3* value,
+    const ps_data_property_query_v3* query, ps_data_property_result_v3* result,
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)provider_context;
+  (void)value;
+  (void)query;
+  (void)result;
+  (void)diagnostic;
+  (void)output;
+  return PS_DATA_STATUS_UNSUPPORTED_V3;
+}
+
+/**
+ * @brief Declines Region evaluation outside this fixture's validation purpose.
+ * @param provider_context Ignored provider state.
+ * @param value Ignored metadata-only Value view.
+ * @param request Ignored Region request.
+ * @param result Ignored Host-owned result.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return `PS_DATA_STATUS_UNSUPPORTED_V3`.
+ * @throws Nothing across the pure-C ABI.
+ * @note All callback inputs and outputs are intentionally ignored.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_evaluate_region(
+    void* provider_context, const ps_data_value_view_v3* value,
+    const ps_data_region_request_v3* request, ps_data_region_result_v3* result,
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)provider_context;
+  (void)value;
+  (void)request;
+  (void)result;
+  (void)diagnostic;
+  (void)output;
+  return PS_DATA_STATUS_UNSUPPORTED_V3;
+}
+
+/**
+ * @brief Declines DataSpec evaluation outside this fixture's validation role.
+ * @param provider_context Ignored provider state.
+ * @param value Ignored metadata-only Value view.
+ * @param request Ignored DataSpec request.
+ * @param result Ignored Host-owned result.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return `PS_DATA_STATUS_UNSUPPORTED_V3`.
+ * @throws Nothing across the pure-C ABI.
+ * @note All callback inputs and outputs are intentionally ignored.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_evaluate_spec(
+    void* provider_context, const ps_data_value_view_v3* value,
+    const ps_data_spec_request_v3* request, ps_data_spec_result_v3* result,
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)provider_context;
+  (void)value;
+  (void)request;
+  (void)result;
+  (void)diagnostic;
+  (void)output;
+  return PS_DATA_STATUS_UNSUPPORTED_V3;
+}
+
+/**
+ * @brief Declines content traversal outside this fixture's validation purpose.
+ * @param provider_context Ignored provider state.
+ * @param value Ignored payload-enabled Value view.
+ * @param sink Ignored canonical-content sink.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return `PS_DATA_STATUS_UNSUPPORTED_V3`.
+ * @throws Nothing across the pure-C ABI.
+ * @note All callback inputs and outputs are intentionally ignored.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_visit_content(
+    void* provider_context, const ps_data_value_view_v3* value,
+    const ps_data_byte_sink_v3* sink, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)provider_context;
+  (void)value;
+  (void)sink;
+  (void)diagnostic;
+  (void)output;
+  return PS_DATA_STATUS_UNSUPPORTED_V3;
+}
+
+/**
+ * @brief Creates a stable non-owning token for unused provider-owner tests.
+ * @param provider_context Non-null MetricsProviderState lifetime token.
+ * @param owner Host-owned pointer output.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return OK with the stable context token, otherwise invalid argument.
+ * @throws Nothing across the pure-C ABI.
+ * @note The token grants no ownership beyond the retained provider generation.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_create_owner(
+    void* provider_context, void** owner, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)diagnostic;
+  (void)output;
+  if (provider_context == nullptr || owner == nullptr) {
+    return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+  }
+  *owner = provider_context;
+  return PS_DATA_STATUS_OK_V3;
+}
+
+/**
+ * @brief Accepts retirement of the fixture's stable non-owning owner token.
+ * @param provider_context Expected MetricsProviderState token.
+ * @param owner Token previously returned by metrics_provider_create_owner.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return OK only when both pointers identify the same stable state.
+ * @throws Nothing across the pure-C ABI.
+ * @note No storage is released because the token never owned state.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_destroy_owner(
+    void* provider_context, void* owner, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)diagnostic;
+  (void)output;
+  return provider_context != nullptr && provider_context == owner
+             ? PS_DATA_STATUS_OK_V3
+             : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+}
+
+/**
+ * @brief Confirms final provider-generation retirement.
+ * @param provider_context Non-null MetricsProviderState retained through call.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return OK for a valid context, otherwise invalid argument.
+ * @throws Nothing across the pure-C ABI.
+ * @note The module lease releases state after this callback returns.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_destroy(
+    void* provider_context, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)diagnostic;
+  (void)output;
+  return provider_context != nullptr ? PS_DATA_STATUS_OK_V3
+                                     : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+}
+
+/**
+ * @brief Fills the exact metrics fixture provider callback table.
+ * @param api Host-owned exact-size output table.
+ * @return OK when one staged provider state and exact table are present.
+ * @throws Nothing across the pure-C ABI.
+ * @note The function borrows staged state only for this synchronous call.
+ */
+ps_data_status_v3 PS_DATA_CALL
+metrics_provider_get_api(ps_data_provider_api_v3* api) PS_DATA_NOEXCEPT {
+  MetricsProviderState* state = staged_metrics_provider;
+  if (api == nullptr || state == nullptr ||
+      api->struct_size != PS_DATA_PROVIDER_API_V3_SIZE) {
+    return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+  }
+  *api = {};
+  api->struct_size = PS_DATA_PROVIDER_API_V3_SIZE;
+  api->abi_version = PS_DATA_PROVIDER_ABI_VERSION;
+  api->definition_count = static_cast<std::uint32_t>(state->definitions.size());
+  api->provider_identity = metrics_provider_identity(kMetricsProviderIdentity);
+  api->implementation_version = {
+      reinterpret_cast<const std::uint8_t*>(
+          state->implementation_version.data()),
+      static_cast<std::uint64_t>(state->implementation_version.size())};
+  api->definitions = state->definitions.data();
+  api->provider_context = state;
+  api->validate = &metrics_provider_validate;
+  api->query = &metrics_provider_query;
+  api->evaluate_region = &metrics_provider_evaluate_region;
+  api->evaluate_spec = &metrics_provider_evaluate_spec;
+  api->visit_content = &metrics_provider_visit_content;
+  api->create_owner = &metrics_provider_create_owner;
+  api->destroy_owner = &metrics_provider_destroy_owner;
+  api->destroy_provider = &metrics_provider_destroy;
+  return PS_DATA_STATUS_OK_V3;
+}
+
+/**
+ * @brief Publishes one provider-defined Value over a supplied sealed binding.
+ *
+ * @param buffer Valid host-readable binding retained as provider buffer zero.
+ * @return Ready ProviderDefined Value retaining the fixture generation.
+ * @throws std::logic_error when the provider candidate cannot load.
+ * @throws ExtensionContractError, std::overflow_error, or std::bad_alloc from
+ * registry loading, provider validation, or Value publication.
+ * @note The local registry retires before return; the returned Value proves its
+ * generation and module lease remain sufficient for later metrics inspection.
+ */
+Value make_metrics_provider_defined_value(BufferHandle buffer) {
+  auto state = std::make_shared<MetricsProviderState>();
+  DataProviderCandidate candidate;
+  candidate.get_abi_version = &metrics_provider_abi_version;
+  candidate.get_api = &metrics_provider_get_api;
+  candidate.module_lease = state;
+
+  DataDefinitionRegistry registry;
+  staged_metrics_provider = state.get();
+  DataProviderLoadResult loaded;
+  try {
+    loaded = registry.load(std::move(candidate));
+  } catch (...) {
+    staged_metrics_provider = nullptr;
+    throw;
+  }
+  staged_metrics_provider = nullptr;
+  if (!loaded.ok()) {
+    throw std::logic_error("Metrics provider fixture failed to load: " +
+                           loaded.diagnostic);
+  }
+
+  DataDescriptorEnvelope descriptor;
+  descriptor.schema.kind = ExtensionDefinitionKind::Schema;
+  descriptor.schema.identity = kMetricsSchemaIdentity;
+  descriptor.schema.structural_version = 1U;
+  descriptor.schema.payload = {std::byte{0x13}};
+  ProviderDefinedLayout layout;
+  layout.definition.kind = ExtensionDefinitionKind::Layout;
+  layout.definition.identity = kMetricsLayoutIdentity;
+  layout.definition.structural_version = 1U;
+  layout.definition.payload = {std::byte{0x01}};
+  layout.buffers.push_back({0U, 1U, 0U, buffer.size()});
+  std::vector<BufferHandle> buffers;
+  buffers.push_back(std::move(buffer));
+  return Value::from_provider_defined(registry, std::move(descriptor),
+                                      std::move(layout), std::move(buffers));
 }
 
 /**
@@ -2993,6 +3348,89 @@ TEST(ComputeMetricsRecorderSplit, FinalizesMetadataAndDebugStatistics) {
     EXPECT_DOUBLE_EQ(backend.debug.min_val, 12.0);
     EXPECT_DOUBLE_EQ(backend.debug.max_val, 34.0);
   }
+}
+
+/**
+ * @brief Proves provider-defined named output metrics use indexed binding
+ * metadata instead of DenseTensor-only payload access.
+ * @return Nothing; GoogleTest reports publication or device-label failures.
+ * @throws Fixture allocation, provider loading, and Value validation
+ * exceptions unchanged.
+ * @note The provider Value's first binding is host-visible Metal rather than
+ * CPU so the assertion cannot pass by retaining the recorder's default label.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     ReadsProviderDefinedNamedValueBindingWithoutDenseAccess) {
+  auto bytes = std::make_shared<std::array<std::byte, 4U>>();
+  PendingDeviceValuePublication dense_publication =
+      PendingDeviceValuePublisher::publish_dense_tensor(
+          DenseTensorDescriptor{{bytes->size()},
+                                ElementSemantics::UnsignedInteger,
+                                StorageEncoding{8U}},
+          std::nullopt, StridedLayout{{1}, 0U}, bytes, bytes.get(),
+          bytes->data(), bytes->size(), DeviceId(DeviceBackend::Metal),
+          MemoryDomain::Shared);
+  ASSERT_TRUE(dense_publication.producer.complete_ready());
+  Value provider_value = make_metrics_provider_defined_value(
+      dense_publication.value.buffer_handle());
+  ASSERT_EQ(provider_value.representation_kind(),
+            ValueRepresentationKind::ProviderDefined);
+  ASSERT_EQ(provider_value.storage_binding(0U).device.backend(),
+            DeviceBackend::Metal);
+  EXPECT_THROW((void)provider_value.buffer_handle(), std::logic_error);
+
+  NodeOutput output;
+  output.publish_named_value("deep", std::move(provider_value));
+  output.debug.min_val = 12.0;
+  output.debug.max_val = 34.0;
+  EXPECT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      output, {}, true, 2.0));
+  EXPECT_EQ(output.debug.compute_device, "GPU_METAL");
+  EXPECT_DOUBLE_EQ(output.debug.min_val, 12.0);
+  EXPECT_DOUBLE_EQ(output.debug.max_val, 34.0);
+}
+
+/**
+ * @brief Proves pending and cancelled named DenseTensor Values expose device
+ * metadata without crossing their payload-read fence.
+ * @return Nothing; GoogleTest reports readiness or device-label failures.
+ * @throws Fixture allocation and pending Value publication exceptions
+ * unchanged.
+ * @note The Value is deliberately published under a non-image name so both
+ * observations exercise the recorder's first-named-Value fallback branch.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     ReadsNonReadyNamedDenseTensorBindingAcrossProducerCancellation) {
+  auto owner = std::make_shared<int>(7);
+  PendingDeviceValuePublication publication = publish_opaque_device_image(
+      3, 3, 1, DataType::FLOAT32, Device::GPU_CUDA, owner);
+  NodeOutput output;
+  output.publish_named_value("latent", publication.value);
+  output.debug.min_val = 56.0;
+  output.debug.max_val = 78.0;
+  ASSERT_EQ(publication.value.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_THROW((void)publication.value.buffer_handle(), ReadyFenceAccessError);
+
+  EXPECT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      output, {}, true, 3.0));
+  EXPECT_EQ(output.debug.compute_device, "GPU_CUDA");
+  EXPECT_DOUBLE_EQ(output.debug.min_val, 56.0);
+  EXPECT_DOUBLE_EQ(output.debug.max_val, 78.0);
+  EXPECT_EQ(publication.value.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+
+  ASSERT_TRUE(publication.producer.cancel());
+  ASSERT_EQ(publication.value.ready_fence().poll().state(),
+            ReadyFenceState::ProducerCancelled);
+  EXPECT_THROW((void)publication.value.buffer_handle(), ReadyFenceAccessError);
+  EXPECT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      output, {}, true, 4.0));
+  EXPECT_EQ(output.debug.compute_device, "GPU_CUDA");
+  EXPECT_DOUBLE_EQ(output.debug.min_val, 56.0);
+  EXPECT_DOUBLE_EQ(output.debug.max_val, 78.0);
+  EXPECT_EQ(publication.value.ready_fence().poll().state(),
+            ReadyFenceState::ProducerCancelled);
 }
 
 TEST(DirtyRegionPlannerSplit,
