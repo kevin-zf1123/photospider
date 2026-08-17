@@ -160,8 +160,6 @@ PixelRect identity_forward_roi(
  * @return Named `width` and `height` integer values.
  * @throws GraphError with `GraphErrc::MissingDependency` for an absent or empty
  *         input.
- * @throws GraphError with `GraphErrc::ComputeError` if either validated extent
- *         cannot be represented by the named-output Int64 alternative.
  * @throws std::logic_error if the canonical image Value does not retain an
  *         ordinary ImageFacet.
  * @throws std::invalid_argument or std::overflow_error if retained bounds
@@ -187,13 +185,6 @@ NodeOutput op_get_dimensions(const Node& node,
   const ImageBounds& input_bounds = inputs[0]->image_value().image_bounds();
   const std::size_t width = image_bounds_width(input_bounds);
   const std::size_t height = image_bounds_height(input_bounds);
-  if (width >
-          static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()) ||
-      height >
-          static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "analyzer:get_dimensions dimensions exceed int64.");
-  }
 
   NodeOutput output;
   output.data["width"] = static_cast<std::int64_t>(width);
