@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/pending_value.hpp"
 #include "graph/image_statistics_store.hpp"
 
 namespace ps {
@@ -41,6 +42,32 @@ Value make_statistics_value() {
                                  std::byte{4U}, std::byte{6U}};
   return Value::from_cpu_dense_tensor(std::move(descriptor), std::move(image),
                                       std::move(layout), std::move(storage));
+}
+
+/**
+ * @brief Creates the image fixture with an unresolved producer fence.
+ * @return Pending image Value plus its unique source-private producer.
+ * @throws std::invalid_argument for malformed fixture metadata or layout.
+ * @throws std::overflow_error for address or identity exhaustion.
+ * @throws std::length_error when bounded image metadata exceeds its limit.
+ * @throws std::bad_alloc when allocation or publication state cannot allocate.
+ * @note The payload remains uninitialized because readiness admission must
+ * reject the Value before a statistics task or payload scan is created.
+ */
+PendingValuePublication make_pending_statistics_value() {
+  DenseTensorDescriptor descriptor{{2U, 2U, 2U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  ImageFacet image;
+  image.y_axis = 0U;
+  image.x_axis = 1U;
+  image.channel_axis = 2U;
+  image.data_window = ImageBounds{-1, 10, 1, 12};
+  image.channel_schema = ChannelSchema{
+      {{ChannelId{20U}, "physical-first"}, {ChannelId{10U}, "physical-second"}},
+      {{ChannelGroupId{30U}, "pair", {ChannelId{10U}, ChannelId{20U}}}}};
+  return PendingValuePublisher::allocate_cpu_dense_tensor(
+      std::move(descriptor), std::move(image), StridedLayout{{4, 2, 1}}, 8U);
 }
 
 /**
@@ -154,6 +181,117 @@ ImageStatisticsStore::Scheduler inline_scheduler(std::size_t* scheduled) {
     ++*scheduled;
     task();
   };
+}
+
+/**
+ * @brief Verifies one non-Ready image fails before scheduling or caching.
+ * @param publication Image Value and producer already placed in the tested
+ * readiness state.
+ * @param expected_state Exact non-Ready state expected in the typed rejection.
+ * @return Nothing; GoogleTest records every contract mismatch.
+ * @throws std::bad_alloc when store, query, or rejection storage cannot
+ * allocate.
+ * @throws std::system_error when store synchronization fails.
+ * @note Admission must preserve Value identity, fence state, and any typed
+ * failure diagnostic while leaving the receiver and cache untouched. The
+ * expected ReadyFenceAccessError is consumed; any other production exception
+ * escapes and fails the test.
+ */
+void expect_nonready_schedule_rejection(PendingValuePublication publication,
+                                        ReadyFenceState expected_state) {
+  ImageStatisticsStore store(4U);
+  const AllocationIdentity allocation = publication.value.allocation_identity();
+  const ValueRevisionId revision = publication.value.revision_id();
+  const ReadyFenceSnapshot before = publication.value.ready_fence().poll();
+  ASSERT_EQ(before.state(), expected_state);
+  std::size_t scheduled = 0U;
+  bool rejected = false;
+
+  try {
+    (void)store.schedule(publication.value, std::nullopt,
+                         make_min_max_query(ChannelId{10U}),
+                         [&scheduled](ImageStatisticsStore::Task task) {
+                           ++scheduled;
+                           task();
+                         });
+  } catch (const ReadyFenceAccessError& error) {
+    rejected = true;
+    EXPECT_EQ(error.snapshot().state(), expected_state);
+    if (before.failure() != nullptr) {
+      ASSERT_NE(error.snapshot().failure(), nullptr);
+      EXPECT_TRUE(*error.snapshot().failure() == *before.failure());
+    } else {
+      EXPECT_EQ(error.snapshot().failure(), nullptr);
+    }
+  }
+
+  EXPECT_TRUE(rejected);
+  EXPECT_EQ(scheduled, 0U);
+  EXPECT_EQ(store.size(), 0U);
+  EXPECT_EQ(publication.value.allocation_identity(), allocation);
+  EXPECT_EQ(publication.value.revision_id(), revision);
+  const ReadyFenceSnapshot after = publication.value.ready_fence().poll();
+  EXPECT_EQ(after.state(), before.state());
+  if (before.failure() != nullptr) {
+    ASSERT_NE(after.failure(), nullptr);
+    EXPECT_TRUE(*after.failure() == *before.failure());
+  } else {
+    EXPECT_EQ(after.failure(), nullptr);
+  }
+}
+
+/**
+ * @brief Proves every non-Ready producer state fails closed synchronously.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ * from pending fixture validation unchanged.
+ * @throws std::bad_alloc when fixture or failure storage cannot allocate.
+ * @note Expected ReadyFenceAccessError rejections are consumed by the shared
+ * assertion helper.
+ */
+TEST(ImageStatisticsStore, NonReadyValuesFailBeforeSchedulingOrCaching) {
+  PendingValuePublication pending = make_pending_statistics_value();
+  expect_nonready_schedule_rejection(std::move(pending),
+                                     ReadyFenceState::Pending);
+
+  PendingValuePublication failed = make_pending_statistics_value();
+  ASSERT_TRUE(failed.producer.complete_failed(ReadyFenceFailure(
+      ReadyFenceFailureDomain::Producer, 31, "expected statistics failure")));
+  expect_nonready_schedule_rejection(std::move(failed),
+                                     ReadyFenceState::Failed);
+
+  PendingValuePublication cancelled = make_pending_statistics_value();
+  ASSERT_TRUE(cancelled.producer.cancel());
+  expect_nonready_schedule_rejection(std::move(cancelled),
+                                     ReadyFenceState::ProducerCancelled);
+}
+
+/**
+ * @brief Proves invalid and non-image Values keep structural rejection first.
+ * @throws std::overflow_error when fixture address or identity arithmetic
+ * cannot be represented.
+ * @throws std::bad_alloc when Ready non-image fixture storage cannot allocate.
+ * @note Expected std::invalid_argument rejections are consumed by GoogleTest;
+ * neither path may invoke the scheduler or create a cache entry.
+ */
+TEST(ImageStatisticsStore, InvalidOrNonImageValuesRejectWithoutScheduling) {
+  ImageStatisticsStore store(4U);
+  std::size_t scheduled = 0U;
+  EXPECT_THROW((void)store.schedule(Value(), std::nullopt,
+                                    make_min_max_query(ChannelId{10U}),
+                                    inline_scheduler(&scheduled)),
+               std::invalid_argument);
+
+  const Value non_image = Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{{1U},
+                            ElementSemantics::UnsignedInteger,
+                            StorageEncoding{8U}},
+      std::nullopt, StridedLayout{{1}}, std::vector<std::byte>{std::byte{7U}});
+  EXPECT_THROW((void)store.schedule(non_image, std::nullopt,
+                                    make_min_max_query(ChannelId{10U}),
+                                    inline_scheduler(&scheduled)),
+               std::invalid_argument);
+  EXPECT_EQ(scheduled, 0U);
+  EXPECT_EQ(store.size(), 0U);
 }
 
 /**
@@ -342,6 +480,9 @@ TEST(ImageStatisticsStore, RevisionNotAllocationIdentityKeysCacheReuse) {
 TEST(ImageStatisticsStore, ExactCacheHitDoesNotScheduleAnotherScan) {
   ImageStatisticsStore store(4U);
   const Value value = make_statistics_value();
+  const AllocationIdentity allocation = value.allocation_identity();
+  const ValueRevisionId revision = value.revision_id();
+  ASSERT_TRUE(value.ready_fence().poll().ready());
   std::size_t scheduled = 0U;
   const ImageStatisticsQuery query = make_min_max_query(ChannelId{10U});
   ScheduledImageStatistics first =
@@ -354,6 +495,9 @@ TEST(ImageStatisticsStore, ExactCacheHitDoesNotScheduleAnotherScan) {
   EXPECT_EQ(cached.take_completion().get(), expected);
   EXPECT_EQ(scheduled, 1U);
   EXPECT_EQ(store.size(), 1U);
+  EXPECT_EQ(value.allocation_identity(), allocation);
+  EXPECT_EQ(value.revision_id(), revision);
+  EXPECT_TRUE(value.ready_fence().poll().ready());
 }
 
 /**

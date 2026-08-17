@@ -577,6 +577,10 @@ ScheduledImageStatistics ImageStatisticsStore::schedule(
     throw std::invalid_argument(
         "Image statistics scheduling requires a valid image Value.");
   }
+  ReadyFenceSnapshot readiness = value.ready_fence().poll();
+  if (!readiness.ready()) {
+    throw ReadyFenceAccessError(std::move(readiness));
+  }
   if (!scheduler) {
     throw std::invalid_argument(
         "Image statistics scheduling requires a task receiver.");

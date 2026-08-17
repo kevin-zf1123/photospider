@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "photospider/data/image_statistics.hpp"
+#include "photospider/memory/ready_fence.hpp"
 
 namespace ps {
 
@@ -136,6 +137,8 @@ class ScheduledImageStatistics final {
  *
  * @throws std::invalid_argument for invalid bounds, keys, image metadata,
  * unsupported scan facts, or malformed selectors/Regions.
+ * @throws ReadyFenceAccessError when scheduling observes a Pending, Failed, or
+ * ProducerCancelled image Value.
  * @throws std::bad_alloc when request, view, result, promise, task, or cache
  * storage cannot allocate.
  * @note The store owns no Value payload, Graph, HP/RT generation, scheduler,
@@ -180,21 +183,30 @@ class ImageStatisticsStore final {
   /**
    * @brief Schedules or reuses one Value-backed statistics request.
    *
-   * Cache lookup occurs before task construction. On a miss, the complete Value
-   * and request state move into one callback transferred to `scheduler`.
+   * After structural image validation, admission polls the Value's ReadyFence
+   * exactly once without waiting. A non-Ready observation fails synchronously
+   * before scheduler validation, key construction, cache inspection, request
+   * allocation, callback construction, or receiver invocation. For an admitted
+   * Ready Value, cache lookup occurs before task construction. On a miss, the
+   * complete Value and request state move into one callback transferred to
+   * `scheduler`.
    *
-   * @param value Valid sealed image Value retained by scheduled work.
+   * @param value Valid Ready sealed image Value retained by scheduled work.
    * @param content_digest Optional already-known canonical logical content id.
    * @param query Complete canonical Region/selection/algorithm request.
    * @param scheduler Nonempty trusted one-task ownership receiver.
    * @return Move-only request with explicit cancellation and sole future.
    * @throws std::invalid_argument for invalid Value/query/digest or an empty
    * scheduler.
+   * @throws ReadyFenceAccessError when synchronous admission observes Pending,
+   * Failed, or ProducerCancelled, retaining the exact rejected snapshot.
    * @throws std::length_error for an over-limit query.
    * @throws Scheduler, future, allocation, or synchronization exceptions from
    * request construction and task transfer.
-   * @note A cache hit creates a ready future without invoking the scheduler.
-   * Scan failures and cancellation settle the future and insert no entry.
+   * @note Ready is terminal, so an admitted Value cannot regress before the
+   * scheduled `ImageView` acquires its read lease. A cache hit creates a ready
+   * future without invoking the scheduler. Non-Ready rejection, scan failure,
+   * and cancellation insert no entry or mutate the source Value/fence.
    */
   ScheduledImageStatistics schedule(Value value,
                                     std::optional<ContentDigest> content_digest,
