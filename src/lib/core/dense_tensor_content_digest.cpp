@@ -109,11 +109,18 @@ void append_i64(std::vector<std::byte>* output, std::int64_t value) {
  * @return Nothing.
  * @throws std::bad_alloc when vector growth cannot allocate.
  * @note Both signed-zero spellings encode as positive zero. Publication has
- *       already rejected NaN and infinity.
+ *       already rejected NaN and infinity. Compilation rejects platforms
+ *       whose native double is not the IEC 559 binary64 format copied below.
  */
 void append_f64(std::vector<std::byte>* output, double value) {
   const double canonical = value == 0.0 ? 0.0 : value;
   std::uint64_t bits = 0U;
+  static_assert(std::numeric_limits<double>::is_iec559 &&
+                    std::numeric_limits<double>::radix == 2 &&
+                    std::numeric_limits<double>::digits == 53 &&
+                    std::numeric_limits<double>::min_exponent == -1021 &&
+                    std::numeric_limits<double>::max_exponent == 1024,
+                "binary64 canonical encoding requires IEC 559 binary64");
   static_assert(sizeof(bits) == sizeof(canonical),
                 "binary64 canonical encoding requires 64-bit double");
   std::memcpy(&bits, &canonical, sizeof(bits));
