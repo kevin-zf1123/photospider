@@ -47,6 +47,7 @@
 #include "photospider/core/graph_error.hpp"
 #include "photospider/core/image_buffer.hpp"
 #include "photospider/data/image_view.hpp"
+#include "plugin/operation_host_adapter.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "support/fake_cache_metadata_codec.hpp"
 #include "support/fake_image_artifact_codec.hpp"
@@ -3140,6 +3141,110 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_FALSE(graph.node(80).cached_output_high_precision.has_value());
   EXPECT_FALSE(graph.node(80).hp_region.has_value());
   EXPECT_EQ(graph.node(80).hp_version, 3);
+}
+
+/**
+ * @brief Proves one validated opaque ABI v2 result enters formal HP cache.
+ *
+ * @return Nothing; GoogleTest reports staging, identity, Region, readiness,
+ * binding, projection, or DSO-lifetime failures.
+ * @throws Plugin adaptation, imported Value publication, Region derivation,
+ * graph mutation, and cache-service exceptions unchanged to the test runner.
+ * @note The real monolithic inbound adapter freezes the returned descriptor,
+ * retains its opaque backend context and library lease in one imported
+ * binding, and clears compatibility staging. Formal commit must preserve that
+ * exact Value without a Host copy or second image authority. The node has no
+ * disk-cache entry because non-host-visible persistence is a separate
+ * fail-closed contract.
+ */
+TEST(CpuDenseTensorImageOperation,
+     FormalCommitPublishesValidatedOpaqueAbiV2ImportedValue) {
+  GraphModel graph("cache/imported-formal-publication");
+  Node node;
+  node.id = 81;
+  node.name = "imported_formal_publication";
+  node.type = "operation_sdk_test";
+  node.subtype = "opaque_imported_output";
+  graph.add_node(node);
+
+  auto library_lifetime = std::make_shared<int>(130);
+  std::weak_ptr<void> library_observer = library_lifetime;
+  auto backend_context = std::make_shared<int>(131);
+  std::weak_ptr<void> context_observer = backend_context;
+  void* const expected_context = backend_context.get();
+  MonolithicOpFunc operation = plugin_host::adapt_monolithic_operation(
+      [backend_context = std::move(backend_context)](
+          const plugin::NodeView&,
+          plugin::ArrayView<plugin::OperationInputView>) mutable {
+        plugin::OperationOutput output;
+        output.image_buffer.width = 11;
+        output.image_buffer.height = 7;
+        output.image_buffer.channels = 4;
+        output.image_buffer.type = DataType::UINT8;
+        output.image_buffer.device = Device::GPU_CUDA;
+        output.image_buffer.context = std::move(backend_context);
+        return output;
+      },
+      library_lifetime);
+  library_lifetime.reset();
+
+  NodeOutput imported = operation(graph.node(81), {});
+  operation = MonolithicOpFunc{};
+  ASSERT_TRUE(imported.has_image_value());
+  EXPECT_FALSE(imported.has_compatibility_image());
+  const Value& imported_value = imported.image_value();
+  const DenseTensorDescriptor expected_descriptor =
+      imported_value.dense_tensor_descriptor();
+  const std::optional<ImageFacet> expected_image_facet =
+      imported_value.image_facet();
+  const StridedLayout expected_layout = imported_value.strided_layout();
+  const StorageBinding expected_binding = imported_value.storage_binding();
+  const AllocationIdentity expected_allocation =
+      imported_value.allocation_identity();
+  const ValueRevisionId expected_revision = imported_value.revision_id();
+  ASSERT_EQ(imported_value.ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+  EXPECT_EQ(expected_binding.memory_domain, MemoryDomain::Imported);
+  EXPECT_EQ(expected_binding.device, DeviceId(DeviceBackend::CUDA));
+  EXPECT_FALSE(expected_binding.host_visible);
+
+  std::vector<std::optional<NodeOutput>> results(1U);
+  results[0] = std::move(imported);
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>();
+  auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>();
+  GraphCacheService cache(image_codec, metadata_codec);
+  std::mutex graph_mutex;
+  compute::ComputeResultCommitter committer(cache, graph_mutex, "int8");
+  committer.commit(graph, {81}, results);
+
+  ASSERT_TRUE(graph.node(81).cached_output_high_precision.has_value());
+  const NodeOutput& committed = *graph.node(81).cached_output_high_precision;
+  ASSERT_TRUE(committed.has_image_value());
+  EXPECT_FALSE(committed.has_compatibility_image());
+  const Value& committed_value = committed.image_value();
+  EXPECT_EQ(committed_value.dense_tensor_descriptor(), expected_descriptor);
+  EXPECT_EQ(committed_value.image_facet(), expected_image_facet);
+  EXPECT_EQ(committed_value.strided_layout(), expected_layout);
+  EXPECT_EQ(committed_value.storage_binding(), expected_binding);
+  EXPECT_EQ(committed_value.allocation_identity(), expected_allocation);
+  EXPECT_EQ(committed_value.revision_id(), expected_revision);
+  EXPECT_EQ(committed_value.ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+  EXPECT_FALSE(library_observer.expired());
+  EXPECT_FALSE(context_observer.expired());
+  EXPECT_EQ(graph.node(81).hp_version, 1U);
+  ASSERT_TRUE(graph.node(81).hp_region.has_value());
+  EXPECT_EQ(*graph.node(81).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 0, 11, 0, 7}));
+
+  const ImageBuffer projected =
+      value_image_adapter::project_image_value_for_abi_v2(committed_value);
+  EXPECT_EQ(projected.width, 11);
+  EXPECT_EQ(projected.height, 7);
+  EXPECT_EQ(projected.channels, 4);
+  EXPECT_EQ(projected.type, DataType::UINT8);
+  EXPECT_EQ(projected.device, Device::GPU_CUDA);
+  EXPECT_EQ(projected.context.get(), expected_context);
 }
 
 /**
