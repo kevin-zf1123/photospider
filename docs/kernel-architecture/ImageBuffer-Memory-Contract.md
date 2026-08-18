@@ -1,9 +1,11 @@
 # ImageBuffer Memory Contract
 
-`ImageBuffer` is a public operation and Host value contract. Operations,
-plugins, adapters, cache code, Host implementations, and debugging tools may
-depend on the fields and invariants in this document. Scheduler contracts do
-not inspect image payloads.
+`ImageBuffer` is the public Host's two-dimensional compatibility value and a
+source-private payload for legacy built-in operations, adapters, caches, and
+debugging tools. It is not the public operation-plugin DSO contract; that
+boundary uses the pure-C Value/Facet/Layout/Region records described below.
+Code that still receives `ImageBuffer` may depend on this document's fields and
+invariants. Scheduler contracts do not inspect image payloads.
 
 ## Structure
 

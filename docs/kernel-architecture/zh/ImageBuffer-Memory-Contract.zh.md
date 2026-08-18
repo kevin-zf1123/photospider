@@ -1,8 +1,10 @@
 # ImageBuffer 内存契约
 
-`ImageBuffer` 是公共 operation 与 Host value 契约。Operation、plugin、adapter、cache code、
-Host implementation 和调试工具可以依赖本文档中的字段和不变量；scheduler contract 不检查
-image payload。
+`ImageBuffer` 是公共 Host 的二维 compatibility value，也是 legacy built-in operation、
+adapter、cache 与调试工具使用的 source-private payload。它不是公共 operation-plugin DSO
+契约；该边界使用下文所述的 pure-C Value/Facet/Layout/Region record。仍接收
+`ImageBuffer` 的代码可以依赖本文档中的字段和不变量；scheduler contract 不检查 image
+payload。
 
 ## 结构
 

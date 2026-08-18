@@ -100,19 +100,23 @@ operations, implementations, and ports also have installed bounds. Checked
 addition, multiplication, offset, extent, signed-window, and stride arithmetic
 is mandatory at every Host fence.
 
-### DenseImage and generic Value projection
+### DenseTensor and optional Image projection
 
-`ps_operation_value_descriptor_v1` preserves the exact Schema, Facet, and
-Layout identities, versions, and digests. An ordinary DenseImage points to:
+`ps_operation_value_descriptor_v1` preserves the exact Schema, optional Facet,
+and Layout identities, versions, and digests. Every supported Strided
+DenseTensor points to:
 
 - a `DenseTensorDescriptor` containing rank, exact `uint64_t` extents, element
   semantics, storage encoding, and optional quantization block shape and
   binary32 scales;
-- an `ImageFacet` containing explicit x/y/optional-channel axes, signed data
-  and optional display windows, channels and groups, optional per-channel
-  sample-domain overrides, and optional SampleDomain and Color facets; and
 - a physical `StridedLayout` containing rank, buffer index, byte offset,
   signed byte strides, and the exact storage span.
+
+An ordinary image additionally points to an `ImageFacet` containing explicit
+x/y/optional-channel axes, signed data and optional display windows, channels
+and groups, optional per-channel sample-domain overrides, and optional
+SampleDomain and Color facets. A facet-free DenseTensor instead has a null
+ImageFacet pointer, zero Facet identity, and a full TensorSlice Region.
 
 Channels and groups use stable 64-bit identities. Their diagnostic names are
 bounded byte views. Group membership and per-channel overrides are
@@ -126,13 +130,24 @@ dense slot, optional edge identity, exact logical Region, and connected or
 disconnected state. Disconnected slots remain explicit; compaction is never
 allowed to change port identity.
 
-An ordinary Host-built DenseImage that predates retained operation metadata is
-projected with the frozen Host-published DenseTensor Schema, ImageFacet, and
-Strided Layout identities and version-one compatibility spelling. The input
-port validates those publisher facts; it never supplies them. A custom or
-provider identity declared only by the consumer is rejected before trusted
-callback entry or supervised process creation in both monolithic and tiled
-routes.
+An ordinary Host-built Strided DenseTensor that predates retained operation
+metadata is projected with only the public specification-owned identities:
+DenseTensor `{0x70686f746f737069, 0x6465722d64656e73}`, optional Image
+`{0x70686f746f737069, 0x6465722d696d6167}`, and Strided Layout
+`{0x70686f746f737069, 0x6465722d73747269}`, all at the applicable structural
+version 2. The installed C11 and C++17 operation SDK exposes named constants
+and identity helpers for these publisher facts. The input port validates them;
+it never supplies them. A custom or provider identity declared only by the
+consumer is rejected before trusted callback entry or supervised process
+creation in both monolithic and tiled routes.
+
+Every accepted operation output attaches its exact descriptor metadata before
+immutable publication, whether or not ImageFacet is present. The publisher's
+Schema, optional Facet, Layout, two versions, and all three digest spellings
+survive Value copies, fresh-process adoption, named output publication, and a
+later trusted or supervised input projection. ImageFacet presence and identity
+must match exactly; all-zero digests remain unavailable rather than being
+synthesized.
 
 ### Output planning and Host-owned grants
 
@@ -141,7 +156,10 @@ output port and a Host-minted opaque plan identity, references one complete
 value descriptor and full logical Region, and contains exact-stride
 `OutputBufferPlan` rows. Each row freezes buffer index, access, offset, exact
 size, and alignment. The Host validates and deep-copies the complete plan
-before allocating anything.
+before allocating anything. Trusted and supervised monolithic execution accept
+both image and facet-free Strided DenseTensor plans; tiled output remains the
+single-image Host-grant boundary. A generic result may still become a later
+monolithic or tiled input when the private tile retains its canonical Value.
 
 Execution receives `MutableOutputBinding` records produced only by the Host.
 Each binding echoes the accepted plan, binding identity, and callback-scoped
@@ -179,7 +197,7 @@ object crosses the ABI.
 ### Registration and publication transaction
 
 The process `PluginManager` owns one operation registry and performs a single
-transaction for each candidate:
+transaction for each load candidate:
 
 1. resolve and authorize the exact opened object under the native trust policy;
 2. call only numeric discovery until ABI v1 is confirmed;
@@ -189,8 +207,8 @@ transaction for each candidate:
    mode, and runtime-package identity;
 6. deep-copy all definition metadata and prepare callback/context owners;
 7. install the combined sealed-object/native DSO lease; and
-8. atomically publish all private `OpRegistry` callbacks with no throwing work
-   under the visible-registry lock.
+8. atomically publish each operation's complete private `OpRegistry` candidate
+   set with no throwing work under the visible-registry lock.
 
 Any failure before step 8 leaves the visible registry unchanged. Definition
 identities and `(type, subtype)` keys are unique. Published callbacks capture
@@ -198,10 +216,20 @@ the exact immutable generation, operation and implementation identities,
 suite callback, and DSO lease. The source-private C++ registry model is a Host
 projection and is never an installed ABI.
 
-Each successful publication mints a revision and retains its predecessor.
-Replacing the active definition shadows but does not destroy the older
-generation while snapshots remain. Unloading a shadowed middle generation
-splices its predecessor into the newer snapshot. Unload-all follows reverse
+Each operation publishes all one-to-256 validated public implementation rows
+as one generation-owned candidate set. Intent and callable shape expansion is
+private, but every expanded candidate retains the same exact public
+implementation identity, device, relative cost, scheduling facts, and
+Region/dependency callback context. Selection first rejects intent-ineligible
+candidates, then applies device, shape, and cost ordering without overwriting
+same-shape candidates. Forward/backward Region planning, dependency building,
+and later callback reacquisition use the selected private revision only.
+
+Each successful set publication mints a set revision and one private revision
+per candidate while retaining the complete predecessor set. Replacing the
+active definition shadows but does not destroy the older generation while
+snapshots remain. Unloading a shadowed middle generation splices its complete
+predecessor set into the newer snapshot. Unload-all follows reverse
 successful-publication order. The registry lock is released before callbacks,
 context destruction, generation destruction, or DSO close.
 

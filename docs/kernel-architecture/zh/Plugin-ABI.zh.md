@@ -88,18 +88,20 @@ dependency row 为 4096；output/grant span 为 1,048,576。Name、diagnostic、
 operation、implementation 与 port 也有安装 contract 中的上限。Host 每一道 fence 都必须使用
 checked addition、multiplication、offset、extent、signed-window 与 stride arithmetic。
 
-### DenseImage 与 generic Value 投影
+### DenseTensor 与可选 Image 投影
 
-`ps_operation_value_descriptor_v1` 保留精确 Schema、Facet、Layout identity、version 与 digest。
-普通 DenseImage 指向：
+`ps_operation_value_descriptor_v1` 保留精确 Schema、可选 Facet、Layout identity、version 与
+digest。每个受支持的 Strided DenseTensor 都指向：
 
 - 一个 `DenseTensorDescriptor`，包含 rank、精确 `uint64_t` extent、element semantics、storage
   encoding，以及可选 quantization block shape 与 binary32 scale；
-- 一个 `ImageFacet`，包含显式 x/y/可选 channel axis、signed data window、可选 signed display
-  window、channel/group、可选逐 channel sample-domain override，以及可选 SampleDomain/Color
-  facet；
 - 一个物理 `StridedLayout`，包含 rank、buffer index、byte offset、signed byte stride 与精确
   storage span。
+
+普通 image 还会指向一个 `ImageFacet`，其中包含显式 x/y/可选 channel axis、signed data
+window、可选 signed display window、channel/group、可选逐 channel sample-domain override，
+以及可选 SampleDomain 与 Color facet。Facet-free DenseTensor 则使用 null ImageFacet pointer、
+零 Facet identity 与完整 TensorSlice Region。
 
 Channel/group 使用稳定 64-bit identity，诊断 name 是受限 byte view。Group membership 与逐
 channel override 是 exact-stride array。Optional-record presence bit 是闭集；缺席 record 的
@@ -109,18 +111,30 @@ storage 具有 C 语义的全零值。ABI enum 为固定宽度且从一开始，
 `InputBinding` 增加永久 port identity、dense slot、可选 edge identity、精确 logical Region 与
 connected/disconnected 状态。Disconnected slot 保持显式，绝不允许 compaction 改变 port identity。
 
-早于 retained operation metadata 的普通 Host-built DenseImage，会使用冻结的 Host-published
-DenseTensor Schema、ImageFacet 与 Strided Layout identity，以及 version-one 兼容拼写进行投影。
-Input port 只能校验这些 publisher fact，绝不提供它们。仅由 consumer 声明的 custom/provider
-identity 会在 trusted callback entry 或 supervised process creation 前被拒绝，monolithic 与
-tiled route 均相同。
+早于 retained operation metadata 的普通 Host-built Strided DenseTensor，只会使用公开且由规范
+拥有的 identity：DenseTensor `{0x70686f746f737069, 0x6465722d64656e73}`、可选 Image
+`{0x70686f746f737069, 0x6465722d696d6167}`，以及 Strided Layout
+`{0x70686f746f737069, 0x6465722d73747269}`；三者采用适用的 structural version 2。Installed
+C11 与 C++17 operation SDK 会为这些 publisher fact 暴露具名 constant 与 identity helper。
+Input port 只能校验它们，绝不提供它们。仅由 consumer 声明的 custom/provider identity 会在
+trusted callback entry 或 supervised process creation 前被拒绝，monolithic 与 tiled route
+均相同。
+
+每个已接受的 operation output 都会在 immutable publication 前附加其精确 descriptor
+metadata，无论 ImageFacet 是否存在。Publisher 的 Schema、可选 Facet、Layout、两个 version
+和全部三个 digest spelling 会经受 Value copy、fresh-process adoption、named output
+publication 与后续 trusted/supervised input projection。ImageFacet presence 与 identity 必须
+精确匹配；全零 digest 保持 unavailable，而不会被合成。
 
 ### Output planning 与 Host-owned grant
 
 Inference 通过 Host sink 发出 `OutputPlan` record。Plan 命名 output port 与 Host mint 的不透明
 plan identity，引用一个完整 value descriptor 与 full logical Region，并包含 exact-stride
 `OutputBufferPlan` row。每行冻结 buffer index、access、offset、精确 size 与 alignment。Host 在
-执行任何 allocation 前验证并深拷贝完整 plan。
+执行任何 allocation 前验证并深拷贝完整 plan。Trusted 与 supervised monolithic execution
+接受 image 和 facet-free Strided DenseTensor plan；tiled output 仍是 single-image Host-grant
+边界。当 private tile 保留 canonical Value 时，generic result 仍可成为后续 monolithic 或
+tiled input。
 
 Execution 只接收 Host 生成的 `MutableOutputBinding` record。每个 binding 回显已接受 plan、
 binding identity 与 callback-scoped grant identity。其 `OutputGrantSpan` row 包含 checked
@@ -150,7 +164,8 @@ status；exception object 不跨 ABI。
 
 ### Registration 与 publication transaction
 
-进程 `PluginManager` 拥有一个 operation registry，并为每个 candidate 执行单一 transaction：
+进程 `PluginManager` 拥有一个 operation registry，并为每个 load candidate 执行单一
+transaction：
 
 1. 在 native trust policy 下解析并授权精确 opened object；
 2. 在确认 ABI v1 前只调用数字 discovery；
@@ -160,17 +175,27 @@ status；exception object 不跨 ABI。
    identity；
 6. 深拷贝全部 definition metadata，并预备 callback/context owner；
 7. 安装 sealed-object/native DSO 组合 lease；
-8. 在 visible-registry lock 下不执行可能抛出的工作，原子发布全部私有 `OpRegistry` callback。
+8. 在 visible-registry lock 下不执行可能抛出的工作，原子发布每个 operation 的完整私有
+   `OpRegistry` candidate set。
 
 第 8 步之前任何失败都不会改变 visible registry。Definition identity 与 `(type, subtype)` key
 必须唯一。已发布 callback 捕获精确 immutable generation、operation/implementation identity、
 suite callback 与 DSO lease。Source-private C++ registry model 只是 Host projection，绝不是已安装
 ABI。
 
-每次成功 publication 都 mint revision 并保留 predecessor。替换 active definition 会 shadow
-旧 generation，但 snapshot 仍持有它时不会销毁。卸载被 shadow 的 middle generation 会把其
-predecessor splice 到更新 snapshot。Unload-all 按成功 publication 的逆序执行。调用 callback、
-销毁 context/generation 或关闭 DSO 前都会释放 registry lock。
+每个 operation 会把全部一到 256 个已验证 public implementation row 作为一个由 generation
+拥有的 candidate set 发布。Intent 与 callable shape expansion 属于私有实现，但每个展开后的
+candidate 都会保留相同的精确 public implementation identity、device、relative cost、
+scheduling fact 与 Region/dependency callback context。Selection 会先拒绝 intent-ineligible
+candidate，再应用 device、shape 与 cost 排序，且不会覆盖同 shape candidate。Forward/backward
+Region planning、dependency building 与后续 callback reacquisition 只使用 selected private
+revision。
+
+每次成功 set publication 都会 mint 一个 set revision 与每个 candidate 各自的 private
+revision，并保留完整 predecessor set。替换 active definition 会 shadow 旧 generation，但
+snapshot 仍持有它时不会销毁。卸载被 shadow 的 middle generation 会把其完整 predecessor set
+splice 到更新 snapshot。Unload-all 按成功 publication 的逆序执行。调用 callback、销毁
+context/generation 或关闭 DSO 前都会释放 registry lock。
 
 ### Context 与 DSO lifetime
 

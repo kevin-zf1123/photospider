@@ -600,6 +600,22 @@ shape, element semantics, storage encoding kind and width, and optional
 quantization block shape plus binary32 scale bits. Image structural version 2
 encodes axes, signed data/display windows, stable channel order, group IDs, and
 members; independent Sample Domain and Color Facets use structural version 1.
+The specification-owned DenseTensor Schema identity is
+`{0x70686f746f737069, 0x6465722d64656e73}`, the optional Image Facet identity
+is `{0x70686f746f737069, 0x6465722d696d6167}`, and the complete Strided Layout
+identity is `{0x70686f746f737069, 0x6465722d73747269}` at structural version 2.
+The installed operation C11 and C++17 SDK publishes these named facts. A
+facet-free DenseTensor uses the zero Facet identity; it does not acquire an
+Image identity from its consumer.
+
+Every operation-produced Strided DenseTensor retains its exact publisher
+Schema, optional Facet, Layout, descriptor/Layout versions, and descriptor,
+logical-content, and Layout digest words in the immutable `Value`. Publication
+attaches that metadata before sealing for trusted and supervised outputs,
+including fresh-process adoption and generic named outputs. Facet presence
+must exactly match the immutable ImageFacet presence. All-zero digests remain
+unavailable, and no DenseImage-only retained-metadata alias exists.
+
 Diagnostic names and observed statistics are absent. Content traversal follows
 row-major logical coordinates: whole-byte scalars are emitted little-endian,
 while blocked FP4 emits one low-nibble code byte per logical element. Strides,

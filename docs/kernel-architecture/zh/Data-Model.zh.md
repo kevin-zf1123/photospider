@@ -479,7 +479,21 @@ canonical-v1 stream identity，且不会调用 provider callback。内建 Schema
 编码 rank、shape、element semantics、storage encoding kind/width 以及可选 quantization
 block shape 和 binary32 scale bit。Image 结构版本 2 编码 axes、有符号 data/display
 windows、稳定 channel 顺序、group IDs 与成员；独立 Sample Domain 与 Color Facet 使用
-结构版本 1。诊断名称与观测统计均不存在。Content traversal 按 row-major logical
+结构版本 1。规范拥有的 DenseTensor Schema identity 是
+`{0x70686f746f737069, 0x6465722d64656e73}`，可选 Image Facet identity 是
+`{0x70686f746f737069, 0x6465722d696d6167}`，完整 Strided Layout identity 是
+`{0x70686f746f737069, 0x6465722d73747269}`，其结构版本为 2。Installed operation C11
+与 C++17 SDK 会发布这些具名 fact。Facet-free DenseTensor 使用零 Facet identity，不会从
+consumer 获得 Image identity。
+
+每个 operation-produced Strided DenseTensor 都会在 immutable `Value` 中保留其精确
+publisher Schema、可选 Facet、Layout、descriptor/Layout version，以及 descriptor、
+logical-content 与 Layout digest word。Trusted 与 supervised output（包括 fresh-process
+adoption 和 generic named output）都会在 seal 前附加该 metadata。Facet presence 必须与
+immutable ImageFacet presence 精确匹配。全零 digest 保持 unavailable，且不存在仅适用于
+DenseImage 的 retained-metadata alias。
+
+诊断名称与观测统计均不存在。Content traversal 按 row-major logical
 coordinate 执行：whole-byte
 scalar 以 little-endian 发出，blocked FP4 则为每个 logical element 发出一个 low-nibble code
 byte。Stride、byte/bit offset、padding、block placement、nibble order、allocation/binding
