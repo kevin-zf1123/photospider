@@ -1,30 +1,29 @@
 #pragma once
 
-#include "photospider/plugin/op_contract.hpp"
+#include "graph/node.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 namespace ops {
 
 /**
- * @brief Generates one Perlin noise image through the Apple Metal backend.
+ * @brief Executes one Host-private Perlin noise dispatch through Apple Metal.
  *
  * @param node Operation node containing width, height, grid_size, and seed
  * parameters.
- * @param inputs Unused borrowed public inputs; Perlin noise is a source
- * operation.
- * @return Public output containing a single-channel floating-point image.
+ * @return Nothing after publishing one pending CPU-replica Value into the
+ * current process-owned Metal execution context.
  * @throws std::bad_alloc unchanged when CPU-side parameter, permutation,
  * readback, output allocation, or contextual diagnostic construction exhausts
  * memory.
  * @throws std::runtime_error with the current Metal stage when executor
  * context, pipeline, allocation, command, invalid-parameter, or unknown
  * execution failures occur.
- * @note The operation must run inside a process-owned Metal executor context.
- * Its returned image owns a CPU copy independently of invocation resources.
+ * @note Pure-C operation ABI v1 is synchronous CPU-only and intentionally has
+ * no native handle or delayed completion. This function is therefore a
+ * source-private adapter, not an operation-plugin callback or installed API.
+ * It must run inside a process-owned Metal executor context.
  */
-plugin::OperationOutput op_perlin_noise_metal(
-    const plugin::NodeView& node,
-    plugin::ArrayView<plugin::OperationInputView> inputs);
+void execute_perlin_noise_metal(const Node& node);
 
 }  // namespace ops
 }  // namespace ps

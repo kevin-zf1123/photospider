@@ -79,8 +79,19 @@ namespace ps {
 namespace ops {
 
 /**
- * @brief Reads one optional integer parameter from a public node snapshot.
- * @param node Public operation identity and effective parameters.
+ * @brief Returns the exact effective parameter map for one private node.
+ * @param node Borrowed source-private operation node.
+ * @return Runtime-resolved parameters when present, otherwise persisted ones.
+ * @throws Nothing.
+ */
+const plugin::ParameterMap& effective_parameters(const Node& node) noexcept {
+  return node.runtime_parameters.empty() ? node.parameters
+                                         : node.runtime_parameters;
+}
+
+/**
+ * @brief Reads one optional integer parameter from a private node snapshot.
+ * @param node Private operation identity and effective parameters.
  * @param key Parameter name to read.
  * @param fallback Value returned when the parameter is absent.
  * @return Int64 or exactly integral Double converted after range validation.
@@ -89,12 +100,13 @@ namespace ops {
  * @note Numeric alternatives are inspected explicitly; exact public accessors
  *       never perform cross-alternative conversion.
  */
-int parameter_int(const plugin::NodeView& node, std::string_view key,
-                  int fallback) {
-  const plugin::ParameterValue* value = node.find_parameter(key);
-  if (!value) {
+int parameter_int(const Node& node, std::string_view key, int fallback) {
+  const auto& parameters = effective_parameters(node);
+  const auto found = parameters.find(key);
+  if (found == parameters.end()) {
     return fallback;
   }
+  const plugin::ParameterValue* value = &found->second;
   double numeric = 0.0;
   if (value->is_int64()) {
     numeric = static_cast<double>(value->as_int64());
@@ -116,20 +128,22 @@ int parameter_int(const plugin::NodeView& node, std::string_view key,
 }
 
 /**
- * @brief Reads one optional numeric parameter from a public node snapshot.
- * @param node Public operation identity and effective parameters.
+ * @brief Reads one optional numeric parameter from a private node snapshot.
+ * @param node Private operation identity and effective parameters.
  * @param key Parameter name to read.
  * @param fallback Value returned when the parameter is absent.
  * @return Double or integer alternative converted to double.
  * @throws plugin::ParameterTypeError for a non-numeric parameter.
  * @note Boolean and string alternatives are never converted implicitly.
  */
-double parameter_double(const plugin::NodeView& node, std::string_view key,
+double parameter_double(const Node& node, std::string_view key,
                         double fallback) {
-  const plugin::ParameterValue* value = node.find_parameter(key);
-  if (!value) {
+  const auto& parameters = effective_parameters(node);
+  const auto found = parameters.find(key);
+  if (found == parameters.end()) {
     return fallback;
   }
+  const plugin::ParameterValue* value = &found->second;
   if (value->is_double()) {
     return value->as_double();
   }
@@ -143,28 +157,24 @@ double parameter_double(const plugin::NodeView& node, std::string_view key,
 /**
  * @brief Executes the Metal Perlin source operation with contextual errors.
  *
- * @param node Public effective parameters controlling width, height, grid size,
- * and random seed.
- * @param inputs Unused borrowed source-operation input list.
- * @return Canonical empty public output; the source-private Host adapter takes
- * the pending revision-preserving host Value from MetalExecutionContext.
+ * @param node Private effective parameters controlling width, height, grid
+ * size, and random seed.
+ * @return Nothing after the source-private Host adapter publishes a pending,
+ * revision-preserving Value through MetalExecutionContext.
  * @throws std::bad_alloc unchanged from parameter parsing, working buffers, or
  * output conversion; also propagates diagnostic-construction exhaustion.
  * @throws std::runtime_error with the current stage for other standard or
  * unknown failures.
  * @note The process Metal executor serializes entry and supplies a borrowed
  * queue, invocation allocator, pipeline cache, and explicit transfer
- * publication boundary. The operation commits without waiting; the command
+ * publication boundary. The adapter commits without waiting; the command
  * buffer completion handler settles the Value fence and stale-safe residency.
  */
-plugin::OperationOutput op_perlin_noise_metal(
-    const plugin::NodeView& node,
-    plugin::ArrayView<plugin::OperationInputView> inputs) {
-  (void)inputs;
+void execute_perlin_noise_metal(const Node& node) {
   @autoreleasepool {
     const char* dbg_stage = "start";
-    return detail::run_metal_exception_boundary(
-        "perlin_noise_metal", dbg_stage, [&]() -> plugin::OperationOutput {
+    detail::run_metal_exception_boundary(
+        "perlin_noise_metal", dbg_stage, [&]() {
           int width = parameter_int(node, "width", 256);
           int height = parameter_int(node, "height", 256);
           float scale =
@@ -260,7 +270,6 @@ plugin::OperationOutput op_perlin_noise_metal(
               (__bridge void*)command_buffer, (__bridge void*)out_texture,
               static_cast<std::uint32_t>(width),
               static_cast<std::uint32_t>(height));
-          return {};
         });
   }
 }

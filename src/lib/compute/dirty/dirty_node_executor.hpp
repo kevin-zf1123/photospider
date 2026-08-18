@@ -249,8 +249,8 @@ class HighPrecisionDirtyNodeExecutor {
    * @throws GraphError if the operation produces no output.
    * @note The exact core Region bridge stages selected bytes through the HP
    *       write buffer so prior valid coordinates survive a partial result.
-   *       Generic ABI v2 monolithic callbacks preserve complete-output
-   *       replacement behavior.
+   *       Generic monolithic callbacks preserve complete-output replacement
+   *       behavior.
    */
   void execute_monolithic(
       Node& node, const HpPlanEntry& entry, const MonolithicOpFunc& mono_fn,

@@ -1758,86 +1758,347 @@ def installed_cpp_policy_plugin_source() -> str:
     ).lstrip()
 
 
-def installed_operation_plugin_source() -> str:
-    """@brief Build an operation DSO that needs only ``operation_sdk``.
+def installed_c_operation_header_probe_source() -> str:
+    """@brief Build an independent C11 operation-ABI conformance probe.
 
-    @return C++17 source registering one metadata-routed factory operation.
+    @return C11 source validating the installed pure-C ABI constants/layouts.
     @throws None The source is one immutable in-memory string.
-    @note Calling the image factory forces transitive runtime linkage, while
-      explicitly populating every V-5 CPU field proves the installed
-      provisional metadata layout is consumable.
+    @note The probe links no Host, runtime, C++, OpenCV, YAML, or Threads target.
     """
 
     return dedent(
         r"""
-        #include <stdexcept>
-        #include <string_view>
-        #include <type_traits>
+        #include <stdint.h>
 
-        #include <photospider/plugin/plugin_api.hpp>
+        #include <photospider/plugin/operation_plugin_api.h>
 
-        /**
-         * @brief Detects an added operation-registrar cancellation shim.
-         * @tparam T Installed registrar contract under inspection.
-         * @tparam Probe Substitution-only member-address expression.
-         * @throws Nothing.
-         * @note Operation ABI v2 receives callbacks only; it owns no Run.
-         */
-        template <typename T, typename Probe = void>
-        struct HasOperationCancel : std::false_type {};
-
-        /** @copydoc HasOperationCancel */
-        template <typename T>
-        struct HasOperationCancel<T, std::void_t<decltype(&T::cancel)>>
-            : std::true_type {};
-
-        static_assert(!HasOperationCancel<
-                          ps::plugin::OperationPluginRegistrar>::value,
-                      "operation ABI v2 must expose no cancellation shim");
-        static_assert(std::is_standard_layout_v<
-                          ps::plugin::OperationPluginRegistrar>,
-                      "operation ABI v2 registrar must remain standard layout");
-        static_assert(
-            sizeof(ps::plugin::OperationPluginRegistrar) == 9U * sizeof(void*),
-            "operation ABI v2 registrar pointer-table layout changed");
-        static_assert(
-            std::string_view(ps::plugin::kOperationPluginRegisterSymbolV2) ==
-                "register_photospider_ops_v2",
-            "operation plugin handshake must remain version two");
+        _Static_assert(PS_OPERATION_PLUGIN_ABI_VERSION == 1U,
+                       "unexpected operation ABI generation");
+        _Static_assert(sizeof(ps_operation_plugin_api_v1) ==
+                           PS_OPERATION_PLUGIN_API_V1_SIZE,
+                       "operation root layout mismatch");
+        _Static_assert(sizeof(ps_operation_output_plan_v1) ==
+                           PS_OPERATION_OUTPUT_PLAN_V1_SIZE,
+                       "operation output-plan layout mismatch");
+        _Static_assert(sizeof(ps_operation_output_grant_span_v1) ==
+                           PS_OPERATION_OUTPUT_GRANT_SPAN_V1_SIZE,
+                       "operation grant layout mismatch");
 
         /**
-         * @brief Registers one installed-SDK operation using the image factory.
-         * @param registrar Borrowed host registration transaction.
-         * @return Nothing.
-         * @throws std::invalid_argument for a null registrar.
-         * @throws Any allocation or host registration exception unchanged.
+         * @brief Verifies the installed numeric and root symbol constants.
+         * @return Zero only when both exact discovery names are preserved.
          */
-        extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void
-        register_photospider_ops_v2(
-            ps::plugin::OperationPluginRegistrar* registrar) {
-          if (registrar == nullptr) {
-            throw std::invalid_argument("installed operation registrar is null");
-          }
-          ps::plugin::OperationMetadata metadata;
-          metadata.reentrant = false;
-          metadata.maximum_parallelism = 3U;
-          metadata.retained_memory_bytes = 4096U;
-          metadata.scratch_bytes = 2048U;
-          metadata.exclusive_key = "installed-sdk";
-          registrar->register_op_hp_monolithic(
-              "installed", "factory",
-              [](const ps::plugin::NodeView&,
-                 ps::plugin::ArrayView<ps::plugin::OperationInputView>) {
-                ps::plugin::OperationOutput output;
-                output.image_buffer = ps::make_aligned_cpu_image_buffer(
-                    2, 2, 1, ps::DataType::UINT8);
-                return output;
-              },
-              std::move(metadata));
+        int main(void) {
+          return PS_OPERATION_PLUGIN_GET_ABI_VERSION_SYMBOL[0] == 'p' &&
+                         PS_OPERATION_PLUGIN_GET_API_V1_SYMBOL[0] == 'p'
+                     ? 0
+                     : 1;
         }
         """
     ).lstrip()
 
+
+def installed_operation_plugin_source() -> str:
+    """@brief Build a source-tree-independent C++17 operation ABI-v1 DSO.
+
+    @return C++17 source publishing one fixed dense-image factory operation.
+    @throws None The source is one immutable in-memory string.
+    @note Every exported/callback boundary is pure C; the installed helper keeps
+      C++ records, exceptions, and static definition state inside the DSO.
+    """
+
+    return dedent(
+        r"""
+        #include <algorithm>
+        #include <array>
+        #include <cstddef>
+        #include <cstdint>
+
+        #include <photospider/plugin/operation_plugin.hpp>
+
+        namespace ps::operation_plugin {
+        namespace {
+
+        /** @brief Permanent installed-consumer plugin identity. */
+        constexpr auto kPluginIdentity =
+            make_identity(0x5053494E5354504CULL, 0x0001ULL);
+        /** @brief Permanent installed factory operation identity. */
+        constexpr auto kOperationIdentity =
+            make_identity(0x5053494E53544F50ULL, 0x0001ULL);
+        /** @brief Permanent installed CPU implementation identity. */
+        constexpr auto kImplementationIdentity =
+            make_identity(0x5053494E5354494DULL, 0x0001ULL);
+        /** @brief Permanent installed configuration-Schema identity. */
+        constexpr auto kConfigurationIdentity =
+            make_identity(0x5053494E53544346ULL, 0x0001ULL);
+        /** @brief Permanent installed output-port identity. */
+        constexpr auto kOutputIdentity =
+            make_identity(0x5053494E5354504FULL, 0x0001ULL);
+        /** @brief Built-in Image Region-domain identity. */
+        constexpr auto kImageRegionDomainIdentity =
+            make_identity(0x50484F544F535049ULL, 0x4445525F494D4731ULL);
+        /** @brief Permanent ordinary-image Schema identity. */
+        constexpr auto kSchemaIdentity =
+            make_identity(0x50534449ULL, 0x1001ULL);
+        /** @brief Permanent ordinary-image Facet identity. */
+        constexpr auto kFacetIdentity =
+            make_identity(0x50534449ULL, 0x1002ULL);
+        /** @brief Permanent Strided Layout identity. */
+        constexpr auto kLayoutIdentity =
+            make_identity(0x50534449ULL, 0x1003ULL);
+
+        /**
+         * @brief Emits one immutable 2x2x1 unsigned-byte output plan.
+         * @param inputs Exact empty factory input array.
+         * @param sink Host-owned synchronous output-plan sink.
+         * @return Stable ABI-v1 status.
+         * @throws Nothing across the pure-C callback boundary.
+         * @note All nested stack records remain live through the synchronous
+         * sink call; the Host deep-copies and independently validates them.
+         */
+        ps_operation_status_v1 emit_factory_plan(
+            const ps_operation_array_ref_v1* inputs,
+            const ps_operation_output_sink_v1* sink) noexcept {
+          if (inputs == nullptr || inputs->count != 0U || sink == nullptr ||
+              sink->emit == nullptr) {
+            return PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
+          }
+          const std::array<std::uint64_t, 3U> extents{2U, 2U, 1U};
+          const std::array<std::int64_t, 3U> strides{2, 1, 1};
+          ps_operation_dense_tensor_descriptor_v1 dense{};
+          dense.header = make_record_header(
+              PS_OPERATION_DENSE_TENSOR_DESCRIPTOR_V1_SIZE,
+              PS_OPERATION_RECORD_DENSE_TENSOR_DESCRIPTOR_V1);
+          dense.rank = 3U;
+          dense.element_semantics =
+              PS_OPERATION_ELEMENT_UNSIGNED_INTEGER_V1;
+          dense.storage_encoding = PS_OPERATION_STORAGE_NATIVE_SCALAR_V1;
+          dense.bit_width = 8U;
+          dense.extents = make_array_ref(extents.data(), extents.size());
+          dense.quantization_block_shape = empty_array_ref();
+          dense.quantization_scales_binary32 = empty_array_ref();
+
+          ps_operation_image_facet_v1 image{};
+          image.header = make_record_header(
+              PS_OPERATION_IMAGE_FACET_V1_SIZE,
+              PS_OPERATION_RECORD_IMAGE_FACET_V1);
+          image.x_axis = 1U;
+          image.y_axis = 0U;
+          image.channel_axis = 2U;
+          image.presence_mask = PS_OPERATION_IMAGE_HAS_CHANNEL_AXIS_V1;
+          image.data_window = ps_operation_image_bounds_v1{0, 0, 2, 2};
+          image.channels = empty_array_ref();
+          image.channel_groups = empty_array_ref();
+
+          ps_operation_strided_layout_v1 layout{};
+          layout.header = make_record_header(
+              PS_OPERATION_STRIDED_LAYOUT_V1_SIZE,
+              PS_OPERATION_RECORD_STRIDED_LAYOUT_V1);
+          layout.rank = 3U;
+          layout.byte_strides =
+              make_array_ref(strides.data(), strides.size());
+          layout.storage_size = 4U;
+
+          ps_operation_value_descriptor_v1 descriptor{};
+          descriptor.header = make_record_header(
+              PS_OPERATION_VALUE_DESCRIPTOR_V1_SIZE,
+              PS_OPERATION_RECORD_VALUE_DESCRIPTOR_V1);
+          descriptor.schema_identity = kSchemaIdentity;
+          descriptor.facet_identity = kFacetIdentity;
+          descriptor.layout_identity = kLayoutIdentity;
+          descriptor.descriptor_version = 1U;
+          descriptor.layout_version = 1U;
+          descriptor.dense_tensor = &dense;
+          descriptor.image_facet = &image;
+          descriptor.strided_layout = &layout;
+
+          const std::array<ps_operation_axis_range_v1, 2U> ranges{
+              ps_operation_axis_range_v1{0, 2U},
+              ps_operation_axis_range_v1{0, 2U}};
+          ps_operation_region_atom_v1 atom{};
+          atom.header = make_record_header(
+              PS_OPERATION_REGION_ATOM_V1_SIZE,
+              PS_OPERATION_RECORD_REGION_ATOM_V1);
+          atom.atom_kind = PS_OPERATION_REGION_ATOM_IMAGE_RECT_V1;
+          atom.rank = 2U;
+          atom.domain_identity = kImageRegionDomainIdentity;
+          atom.axis_ranges = make_array_ref(ranges.data(), ranges.size());
+          ps_operation_region_set_view_v1 region{};
+          region.header = make_record_header(
+              PS_OPERATION_REGION_SET_VIEW_V1_SIZE,
+              PS_OPERATION_RECORD_REGION_SET_VIEW_V1);
+          region.set_kind = PS_OPERATION_REGION_SET_CLAUSE_V1;
+          region.atoms = make_array_ref(&atom, 1U);
+
+          ps_operation_output_buffer_plan_v1 buffer{};
+          buffer.header = make_record_header(
+              PS_OPERATION_OUTPUT_BUFFER_PLAN_V1_SIZE,
+              PS_OPERATION_RECORD_OUTPUT_BUFFER_PLAN_V1);
+          buffer.buffer_index = 0U;
+          buffer.access_mask = PS_OPERATION_ACCESS_WRITE_V1;
+          buffer.byte_size = 4U;
+          buffer.alignment = 64U;
+
+          ps_operation_output_plan_v1 plan{};
+          plan.header = make_record_header(
+              PS_OPERATION_OUTPUT_PLAN_V1_SIZE,
+              PS_OPERATION_RECORD_OUTPUT_PLAN_V1);
+          plan.port_identity = kOutputIdentity;
+          plan.port_index = 0U;
+          plan.buffer_count = 1U;
+          plan.descriptor = &descriptor;
+          plan.buffers = make_array_ref(&buffer, 1U);
+          plan.full_region = &region;
+          plan.access_mask = PS_OPERATION_ACCESS_WRITE_V1;
+          return sink->emit(sink->host_context, PS_OPERATION_OUTPUT_PLAN_V1,
+                            &plan, 1U, PS_OPERATION_OUTPUT_PLAN_V1_SIZE);
+        }
+
+        /**
+         * @brief Handles immutable output-plan inference for the factory.
+         * @param inputs Exact empty input-binding array.
+         * @param sink Host output-plan sink.
+         * @return Stable ABI-v1 status.
+         * @throws Nothing.
+         */
+        ps_operation_status_v1 PS_OPERATION_CALL infer_factory(
+            void*, const ps_operation_invocation_v1*,
+            const ps_operation_configuration_view_v1*,
+            const ps_operation_array_ref_v1* inputs,
+            const ps_operation_output_sink_v1* sink) noexcept {
+          return emit_factory_plan(inputs, sink);
+        }
+
+        /**
+         * @brief Fills the Host-owned output grant with a deterministic value.
+         * @param inputs Exact empty input-binding array.
+         * @param outputs Exact one-row mutable-output array.
+         * @param sink Host diagnostic sink used by the exception fence.
+         * @return Stable ABI-v1 status.
+         * @throws Nothing; all C++ exceptions remain inside the DSO.
+         * @note No descriptor, grant, pointer, or Host context survives return.
+         */
+        ps_operation_status_v1 PS_OPERATION_CALL execute_factory(
+            void*, const ps_operation_invocation_v1*,
+            const ps_operation_configuration_view_v1*,
+            const ps_operation_array_ref_v1* inputs,
+            const ps_operation_array_ref_v1* outputs,
+            const ps_operation_output_sink_v1* sink) noexcept {
+          return fence(sink, [&]() -> ps_operation_status_v1 {
+            const auto* output =
+                array_element<ps_operation_mutable_output_binding_v1>(
+                    outputs, 0U,
+                    PS_OPERATION_MUTABLE_OUTPUT_BINDING_V1_SIZE);
+            if (inputs == nullptr || inputs->count != 0U ||
+                output == nullptr || output->spans.count != 1U ||
+                output->spans.stride !=
+                    PS_OPERATION_OUTPUT_GRANT_SPAN_V1_SIZE ||
+                output->spans.data == nullptr) {
+              return PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
+            }
+            const auto& span =
+                *static_cast<const ps_operation_output_grant_span_v1*>(
+                    output->spans.data);
+            if (span.byte_size != 4U || span.bytes.size != 4U ||
+                span.bytes.data == nullptr) {
+              return PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
+            }
+            std::fill(span.bytes.data, span.bytes.data + span.bytes.size,
+                      std::uint8_t{23U});
+            return PS_OPERATION_STATUS_OK_V1;
+          });
+        }
+
+        /** @brief Creates the trusted factory implementation row. */
+        Implementation make_implementation() noexcept {
+          Implementation implementation;
+          auto& descriptor = implementation.descriptor;
+          descriptor.header = make_record_header(
+              PS_OPERATION_IMPLEMENTATION_DESCRIPTOR_V1_SIZE,
+              PS_OPERATION_RECORD_IMPLEMENTATION_DESCRIPTOR_V1);
+          descriptor.implementation_identity = kImplementationIdentity;
+          descriptor.operation_identity = kOperationIdentity;
+          descriptor.name = make_bytes("installed-cpu");
+          descriptor.intent_mask = PS_OPERATION_INTENT_HP_V1;
+          descriptor.execution_shape_mask =
+              PS_OPERATION_EXECUTION_MONOLITHIC_V1;
+          descriptor.device_kind = PS_OPERATION_DEVICE_CPU_V1;
+          descriptor.output_access_mask = PS_OPERATION_ACCESS_WRITE_V1;
+          descriptor.reentrant = 1U;
+          descriptor.maximum_parallelism = 3U;
+          descriptor.retained_memory_bytes = 4096U;
+          descriptor.scratch_bytes = 2048U;
+          descriptor.relative_cost_binary64_bits =
+              0x3FF0000000000000ULL;
+          descriptor.exclusive_key = make_bytes("installed-sdk");
+          descriptor.execution_mode =
+              PS_OPERATION_EXECUTION_TRUSTED_IN_PROCESS_V1;
+          implementation.infer = infer_factory;
+          implementation.execute_monolithic = execute_factory;
+          return implementation;
+        }
+
+        /** @brief Stable trusted factory implementation row. */
+        const Implementation kImplementations[]{make_implementation()};
+
+        /** @brief Creates the installed factory output port. */
+        ps_operation_port_descriptor_v1 make_output_port() noexcept {
+          ps_operation_port_descriptor_v1 port{};
+          port.header = make_record_header(
+              PS_OPERATION_PORT_DESCRIPTOR_V1_SIZE,
+              PS_OPERATION_RECORD_PORT_DESCRIPTOR_V1);
+          port.port_identity = kOutputIdentity;
+          port.index = 0U;
+          port.direction = PS_OPERATION_PORT_OUTPUT_V1;
+          port.name = make_bytes("image");
+          port.schema_identity = kSchemaIdentity;
+          port.facet_identity = kFacetIdentity;
+          port.layout_identity = kLayoutIdentity;
+          return port;
+        }
+
+        /** @brief Stable installed factory output-port row. */
+        const ps_operation_port_descriptor_v1 kOutputPort =
+            make_output_port();
+
+        /** @brief Creates the complete installed factory definition. */
+        ps_operation_descriptor_v1 make_operation() noexcept {
+          ps_operation_descriptor_v1 operation{};
+          operation.header = make_record_header(
+              PS_OPERATION_DESCRIPTOR_V1_SIZE,
+              PS_OPERATION_RECORD_OPERATION_DESCRIPTOR_V1);
+          operation.operation_identity = kOperationIdentity;
+          operation.type = make_bytes("installed");
+          operation.subtype = make_bytes("factory");
+          operation.display_name = make_bytes("Installed factory");
+          operation.configuration_schema_identity =
+              kConfigurationIdentity;
+          operation.input_ports = empty_array_ref();
+          operation.output_ports = make_array_ref(&kOutputPort, 1U);
+          return operation;
+        }
+
+        /** @brief Stable complete installed factory definition. */
+        const Definition kDefinition{kPluginIdentity,
+                                     "installed-operation-abi1",
+                                     make_operation(),
+                                     kImplementations,
+                                     1U,
+                                     nullptr,
+                                     nullptr};
+
+        }  // namespace
+
+        /** @copydoc plugin_definition */
+        const Definition& plugin_definition() noexcept {
+          return kDefinition;
+        }
+
+        }  // namespace ps::operation_plugin
+
+        PS_DEFINE_OPERATION_PLUGIN_V1()
+        """
+    ).lstrip()
 
 def write_extension_consumer_projects(
     policy_source_dir: Path,
@@ -1848,16 +2109,17 @@ def write_extension_consumer_projects(
     """@brief Create three independent installed extension-SDK consumers.
 
     @param policy_source_dir Pure-C/C++17 policy DSO project directory.
-    @param operation_source_dir Operation SDK DSO/executable project directory.
+    @param operation_source_dir Pure-C/C++ operation-plugin SDK and runtime
+      consumer project directory.
     @param opencv_source_dir OpenCV-core-only adapter consumer directory.
     @param real_opencv_config_dir Producer-resolved OpenCV config directory.
     @return Nothing.
     @throws OSError If project or shim files cannot be written.
     @throws RuntimeError If the real OpenCV package config cannot be located.
     @note No generated target receives a repository source include directory.
-      The operation fixture is a ``SHARED`` library so its platform suffix
-      matches the production directory scanner (``.dylib`` on macOS); the
-      both policy fixtures are ``SHARED`` libraries accepted by the production
+      The C++ operation fixture is a ``SHARED`` library so its platform suffix
+      matches the production directory scanner (``.dylib`` on macOS); both
+      policy fixtures are ``SHARED`` libraries accepted by the production
       loader. The policy project must also reject a packed C++17 ABI profile.
     """
 
@@ -1938,25 +2200,37 @@ def write_extension_consumer_projects(
         dedent(
             """
             cmake_minimum_required(VERSION 3.16)
-            project(installed_operation_sdk_consumer LANGUAGES CXX)
-            find_package(Photospider CONFIG REQUIRED COMPONENTS operation_sdk)
+            project(installed_operation_plugin_sdk_consumer LANGUAGES C CXX)
+            find_package(Photospider CONFIG REQUIRED
+                COMPONENTS operation_plugin_sdk operation_runtime)
             if(DEFINED OpenCV_FOUND OR TARGET yaml-cpp::yaml-cpp OR
                TARGET Threads::Threads)
-              message(FATAL_ERROR "operation SDK discovered backend packages")
+              message(FATAL_ERROR
+                  "operation plugin SDK discovered backend packages")
             endif()
+            add_executable(installed_c_operation_header_probe
+                operation_header_probe.c)
+            set_target_properties(installed_c_operation_header_probe PROPERTIES
+                C_STANDARD 11
+                C_STANDARD_REQUIRED YES)
+            target_link_libraries(installed_c_operation_header_probe PRIVATE
+                Photospider::operation_plugin_sdk)
+            file(GENERATE
+                OUTPUT "${CMAKE_BINARY_DIR}/installed_c_operation_header_probe_target_$<CONFIG>.txt"
+                CONTENT "$<TARGET_FILE:installed_c_operation_header_probe>\n")
             # The Host scans operation-plugin directories by the documented
             # platform shared-library suffix, including .dylib on macOS.
             add_library(installed_operation_plugin SHARED operation_plugin.cpp)
             target_compile_definitions(installed_operation_plugin PRIVATE
                 PHOTOSPIDER_PLUGIN_BUILD)
             target_link_libraries(installed_operation_plugin PRIVATE
-                Photospider::operation_sdk)
+                Photospider::operation_plugin_sdk)
             file(GENERATE
                 OUTPUT "${CMAKE_BINARY_DIR}/installed_operation_plugin_target_$<CONFIG>.txt"
                 CONTENT "$<TARGET_FILE:installed_operation_plugin>\n")
             add_executable(installed_operation_factory main.cpp)
             target_link_libraries(installed_operation_factory PRIVATE
-                Photospider::operation_sdk)
+                Photospider::operation_runtime)
             file(GENERATE
                 OUTPUT "${CMAKE_BINARY_DIR}/installed_operation_factory_target_$<CONFIG>.txt"
                 CONTENT "$<TARGET_FILE:installed_operation_factory>\n")
@@ -1966,6 +2240,9 @@ def write_extension_consumer_projects(
     )
     (operation_source_dir / "operation_plugin.cpp").write_text(
         installed_operation_plugin_source(), encoding="utf-8"
+    )
+    (operation_source_dir / "operation_header_probe.c").write_text(
+        installed_c_operation_header_probe_source(), encoding="utf-8"
     )
     (operation_source_dir / "main.cpp").write_text(
         dedent(
@@ -1983,14 +2260,14 @@ def write_extension_consumer_projects(
             #include <photospider/memory/ready_fence.hpp>
 
             /**
-             * @brief Calls SDK-transitive image and V-6 memory/Value symbols.
+             * @brief Calls operation-runtime image and memory/Value symbols.
              * @return Zero only when builder writes, sealed lease reads,
              *         runtime identities, readiness, and image dimensions are
              *         valid.
              * @throws std::bad_alloc or validation exceptions terminate the smoke
              *         process because the executable intentionally has no recovery
              *         path.
-             * @note The consumer requests only operation_sdk, so successful
+             * @note The consumer links only operation_runtime, so successful
              *       construction also proves all implementation symbols link
              *       without backend package discovery.
              */
@@ -2119,8 +2396,8 @@ def write_missing_opencv_component_projects(
 ) -> None:
     """@brief Create OpenCV-missing optional and required package probes.
 
-    @param optional_source_dir Consumer requiring the dependency-free operation
-      SDK while requesting ``operation_opencv`` as an optional component.
+    @param optional_source_dir Consumer requiring the dependency-free
+      operation-plugin SDK while requesting ``operation_opencv`` optionally.
     @param required_source_dir Consumer requiring ``operation_opencv``.
     @return Nothing.
     @throws OSError If either transient CMake project cannot be written.
@@ -2137,10 +2414,12 @@ def write_missing_opencv_component_projects(
             cmake_minimum_required(VERSION 3.16)
             project(optional_operation_opencv_consumer LANGUAGES NONE)
             find_package(Photospider CONFIG
-                COMPONENTS operation_sdk
+                COMPONENTS operation_plugin_sdk
                 OPTIONAL_COMPONENTS operation_opencv)
-            if(NOT Photospider_FOUND OR NOT Photospider_operation_sdk_FOUND)
-              message(FATAL_ERROR "required operation_sdk lookup failed")
+            if(NOT Photospider_FOUND OR
+               NOT Photospider_operation_plugin_sdk_FOUND)
+              message(FATAL_ERROR
+                  "required operation_plugin_sdk lookup failed")
             endif()
             if(Photospider_operation_opencv_FOUND)
               message(FATAL_ERROR "missing optional operation_opencv was found")
@@ -2148,13 +2427,14 @@ def write_missing_opencv_component_projects(
             if(TARGET Photospider::operation_opencv)
               message(FATAL_ERROR "missing optional operation_opencv target was exposed")
             endif()
-            if(NOT TARGET Photospider::operation_sdk OR
+            if(NOT TARGET Photospider::operation_plugin_sdk OR
                NOT TARGET Photospider::operation_runtime)
-              message(FATAL_ERROR "available operation SDK targets were not imported")
+              message(FATAL_ERROR
+                  "available operation targets were not imported")
             endif()
             add_library(optional_operation_opencv_consumer INTERFACE)
             target_link_libraries(optional_operation_opencv_consumer INTERFACE
-                Photospider::operation_sdk)
+                Photospider::operation_plugin_sdk)
             """
         ).lstrip(),
         encoding="utf-8",
@@ -3068,8 +3348,8 @@ def behavior_diagnostic_summary(
         "policy_sdk_build",
         "policy_contract_probe",
         "policy_cpp_contract_probe",
-        "operation_sdk_configure",
-        "operation_sdk_build",
+        "operation_plugin_sdk_configure",
+        "operation_plugin_sdk_build",
         "operation_opencv_configure",
         "operation_opencv_build",
         "optional_opencv_missing_configure",
@@ -3077,7 +3357,8 @@ def behavior_diagnostic_summary(
         "unknown_component_configure",
         "consumer_run",
         "ipc_consumer_run",
-        "operation_sdk_run",
+        "operation_c11_probe_run",
+        "operation_plugin_sdk_run",
         "operation_opencv_run",
     )
     command_input = observations.get("commands", {})
@@ -3285,11 +3566,11 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "installed C++17 policy DSO satisfies the exact ABI-v1 contract": (
             commands["policy_cpp_contract_probe"] == 0
         ),
-        "operation SDK configures with all backend discovery disabled": (
-            commands["operation_sdk_configure"] == 0
+        "operation plugin SDK configures with all backend discovery disabled": (
+            commands["operation_plugin_sdk_configure"] == 0
         ),
-        "operation SDK builds a DSO and factory executable": (
-            commands["operation_sdk_build"] == 0
+        "operation plugin SDK builds C11/C++17 consumers and runtime probe": (
+            commands["operation_plugin_sdk_build"] == 0
         ),
         "operation OpenCV config requests only the core component": (
             commands["operation_opencv_configure"] == 0
@@ -3350,16 +3631,19 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "CMake target manifest resolves IPC consumer executable": observations[
             "consumer"
         ]["ipc_executable_discovery"]["selected_from_manifest"],
-        "CMake target manifest resolves operation SDK executable": observations[
+        "CMake target manifest resolves operation plugin SDK executable": observations[
             "consumer"
-        ]["operation_sdk_executable_discovery"]["selected_from_manifest"],
+        ]["operation_plugin_sdk_executable_discovery"]["selected_from_manifest"],
+        "CMake target manifest resolves operation C11 probe": observations[
+            "consumer"
+        ]["operation_c11_probe_discovery"]["selected_from_manifest"],
         "CMake target manifest resolves policy SDK plugin": observations["consumer"][
             "policy_plugin_discovery"
         ]["selected_from_manifest"],
         "CMake target manifest resolves C++17 policy SDK plugin": observations[
             "consumer"
         ]["cpp_policy_plugin_discovery"]["selected_from_manifest"],
-        "CMake target manifest resolves operation SDK plugin": observations["consumer"][
+        "CMake target manifest resolves operation plugin SDK plugin": observations["consumer"][
             "operation_plugin_discovery"
         ]["selected_from_manifest"],
         "CMake target manifest resolves operation OpenCV executable": observations[
@@ -3370,8 +3654,12 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         ),
         "IPC-only consumer executable ran successfully": commands["ipc_consumer_run"]
         == 0,
-        "operation SDK-only factory executable ran successfully": commands[
-            "operation_sdk_run"
+        "installed C11 operation ABI layout probe ran successfully": commands[
+            "operation_c11_probe_run"
+        ]
+        == 0,
+        "operation plugin SDK-only factory executable ran successfully": commands[
+            "operation_plugin_sdk_run"
         ]
         == 0,
         "operation OpenCV core-only executable ran successfully": commands[
@@ -3442,8 +3730,8 @@ def main() -> int:
     ipc_consumer_build = work / "ipc-consumer-build"
     policy_sdk_src = work / "policy-sdk-consumer-src"
     policy_sdk_build = work / "policy-sdk-consumer-build"
-    operation_sdk_src = work / "operation-sdk-consumer-src"
-    operation_sdk_build = work / "operation-sdk-consumer-build"
+    operation_plugin_sdk_src = work / "operation-plugin-sdk-consumer-src"
+    operation_plugin_sdk_build = work / "operation-plugin-sdk-consumer-build"
     operation_opencv_src = work / "operation-opencv-consumer-src"
     operation_opencv_build = work / "operation-opencv-consumer-build"
     optional_opencv_missing_src = work / "optional-opencv-missing-src"
@@ -3490,7 +3778,7 @@ def main() -> int:
         raise RuntimeError("producer cache does not contain a usable OpenCV_DIR")
     write_extension_consumer_projects(
         policy_sdk_src,
-        operation_sdk_src,
+        operation_plugin_sdk_src,
         operation_opencv_src,
         Path(opencv_config_dir_value),
     )
@@ -3574,12 +3862,12 @@ def main() -> int:
         "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=TRUE",
         "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=TRUE",
     ]
-    operation_sdk_configure_command = [
+    operation_plugin_sdk_configure_command = [
         args.cmake_executable,
         "-S",
-        str(operation_sdk_src),
+        str(operation_plugin_sdk_src),
         "-B",
-        str(operation_sdk_build),
+        str(operation_plugin_sdk_build),
         f"-DCMAKE_PREFIX_PATH={prefix}",
         "-DCMAKE_DISABLE_FIND_PACKAGE_Threads=TRUE",
         "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=TRUE",
@@ -3627,7 +3915,7 @@ def main() -> int:
             embedded_configure_command,
             ipc_configure_command,
             policy_sdk_configure_command,
-            operation_sdk_configure_command,
+            operation_plugin_sdk_configure_command,
             operation_opencv_configure_command,
             optional_opencv_missing_configure_command,
             required_opencv_missing_configure_command,
@@ -3649,7 +3937,7 @@ def main() -> int:
         embedded_configure_command,
         ipc_configure_command,
         policy_sdk_configure_command,
-        operation_sdk_configure_command,
+        operation_plugin_sdk_configure_command,
         operation_opencv_configure_command,
         optional_opencv_missing_configure_command,
         required_opencv_missing_configure_command,
@@ -3659,7 +3947,7 @@ def main() -> int:
     embedded_configure_code = run_command(embedded_configure_command, repo)
     ipc_configure_code = run_command(ipc_configure_command, repo)
     policy_sdk_configure_code = run_command(policy_sdk_configure_command, repo)
-    operation_sdk_configure_code = run_command(operation_sdk_configure_command, repo)
+    operation_plugin_sdk_configure_code = run_command(operation_plugin_sdk_configure_command, repo)
     operation_opencv_configure_code = run_command(
         operation_opencv_configure_command, repo
     )
@@ -3688,10 +3976,10 @@ def main() -> int:
         "--build",
         str(policy_sdk_build),
     ]
-    operation_sdk_build_command = [
+    operation_plugin_sdk_build_command = [
         args.cmake_executable,
         "--build",
-        str(operation_sdk_build),
+        str(operation_plugin_sdk_build),
     ]
     operation_opencv_build_command = [
         args.cmake_executable,
@@ -3702,12 +3990,12 @@ def main() -> int:
         embedded_build_command.extend(["--config", args.config])
         ipc_build_command.extend(["--config", args.config])
         policy_sdk_build_command.extend(["--config", args.config])
-        operation_sdk_build_command.extend(["--config", args.config])
+        operation_plugin_sdk_build_command.extend(["--config", args.config])
         operation_opencv_build_command.extend(["--config", args.config])
     embedded_build_code = run_command(embedded_build_command, repo)
     ipc_build_code = run_command(ipc_build_command, repo)
     policy_sdk_build_code = run_command(policy_sdk_build_command, repo)
-    operation_sdk_build_code = run_command(operation_sdk_build_command, repo)
+    operation_plugin_sdk_build_code = run_command(operation_plugin_sdk_build_command, repo)
     operation_opencv_build_code = run_command(operation_opencv_build_command, repo)
 
     executable_discovery = find_consumer_executable(
@@ -3716,8 +4004,13 @@ def main() -> int:
     ipc_executable_discovery = find_consumer_executable(
         ipc_consumer_build, args.config, "photospider_ipc_consumer"
     )
-    operation_sdk_executable_discovery = find_consumer_executable(
-        operation_sdk_build, args.config, "installed_operation_factory"
+    operation_plugin_sdk_executable_discovery = find_consumer_executable(
+        operation_plugin_sdk_build, args.config, "installed_operation_factory"
+    )
+    operation_c11_probe_discovery = find_consumer_executable(
+        operation_plugin_sdk_build,
+        args.config,
+        "installed_c_operation_header_probe",
     )
     policy_plugin_discovery = find_consumer_executable(
         policy_sdk_build, args.config, "installed_policy_plugin"
@@ -3726,7 +4019,7 @@ def main() -> int:
         policy_sdk_build, args.config, "installed_cpp_policy_plugin"
     )
     operation_plugin_discovery = find_consumer_executable(
-        operation_sdk_build, args.config, "installed_operation_plugin"
+        operation_plugin_sdk_build, args.config, "installed_operation_plugin"
     )
     operation_opencv_executable_discovery = find_consumer_executable(
         operation_opencv_build, args.config, "installed_operation_opencv"
@@ -3891,18 +4184,36 @@ def main() -> int:
             flush=True,
         )
 
-    operation_sdk_executable = (
-        Path(operation_sdk_executable_discovery["selected"])
-        if operation_sdk_executable_discovery["selected"]
+    operation_plugin_sdk_executable = (
+        Path(operation_plugin_sdk_executable_discovery["selected"])
+        if operation_plugin_sdk_executable_discovery["selected"]
         else None
     )
-    operation_sdk_run_code = 127
-    if operation_sdk_executable is not None and operation_sdk_executable.is_file():
-        operation_sdk_run_code = run_command([str(operation_sdk_executable)], repo)
+    operation_plugin_sdk_run_code = 127
+    if operation_plugin_sdk_executable is not None and operation_plugin_sdk_executable.is_file():
+        operation_plugin_sdk_run_code = run_command([str(operation_plugin_sdk_executable)], repo)
     else:
         print(
-            "operation SDK consumer executable not found; discovery="
-            + json.dumps(operation_sdk_executable_discovery, sort_keys=True),
+            "operation plugin SDK consumer executable not found; discovery="
+            + json.dumps(operation_plugin_sdk_executable_discovery, sort_keys=True),
+            file=sys.stderr,
+            flush=True,
+        )
+
+    operation_c11_probe = (
+        Path(operation_c11_probe_discovery["selected"])
+        if operation_c11_probe_discovery["selected"]
+        else None
+    )
+    operation_c11_probe_run_code = 127
+    if operation_c11_probe is not None and operation_c11_probe.is_file():
+        operation_c11_probe_run_code = run_command(
+            [str(operation_c11_probe)], repo
+        )
+    else:
+        print(
+            "operation C11 probe executable not found; discovery="
+            + json.dumps(operation_c11_probe_discovery, sort_keys=True),
             file=sys.stderr,
             flush=True,
         )
@@ -3950,8 +4261,8 @@ def main() -> int:
             "policy_sdk_build": policy_sdk_build_code,
             "policy_contract_probe": policy_contract_probe_code,
             "policy_cpp_contract_probe": cpp_policy_contract_probe_code,
-            "operation_sdk_configure": operation_sdk_configure_code,
-            "operation_sdk_build": operation_sdk_build_code,
+            "operation_plugin_sdk_configure": operation_plugin_sdk_configure_code,
+            "operation_plugin_sdk_build": operation_plugin_sdk_build_code,
             "operation_opencv_configure": operation_opencv_configure_code,
             "operation_opencv_build": operation_opencv_build_code,
             "optional_opencv_missing_configure": (
@@ -3963,7 +4274,8 @@ def main() -> int:
             "unknown_component_configure": unknown_component_configure_code,
             "consumer_run": run_code,
             "ipc_consumer_run": ipc_run_code,
-            "operation_sdk_run": operation_sdk_run_code,
+            "operation_c11_probe_run": operation_c11_probe_run_code,
+            "operation_plugin_sdk_run": operation_plugin_sdk_run_code,
             "operation_opencv_run": operation_opencv_run_code,
         },
         "install_tree": install_tree,
@@ -3983,7 +4295,8 @@ def main() -> int:
             "ipc_configuration_types": ipc_consumer_configuration_types,
             "executable_discovery": executable_discovery,
             "ipc_executable_discovery": ipc_executable_discovery,
-            "operation_sdk_executable_discovery": (operation_sdk_executable_discovery),
+            "operation_plugin_sdk_executable_discovery": (operation_plugin_sdk_executable_discovery),
+            "operation_c11_probe_discovery": operation_c11_probe_discovery,
             "policy_plugin_discovery": policy_plugin_discovery,
             "cpp_policy_plugin_discovery": cpp_policy_plugin_discovery,
             "operation_plugin_discovery": operation_plugin_discovery,

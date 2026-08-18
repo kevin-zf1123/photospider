@@ -4,8 +4,8 @@
 #include <vector>
 
 #include "core/ps_types.hpp"
+#include "photospider/data/parameter_value.hpp"
 #include "photospider/data/region.hpp"
-#include "photospider/plugin/node_view.hpp"
 
 namespace ps {
 
@@ -13,8 +13,8 @@ namespace ps {
  * @brief Private image-input source identity used by dependency-LUT reuse.
  *
  * @throws std::bad_alloc when source_output storage is copied.
- * @note The value mirrors topology visible to a public RoiContext without
- *       exposing this private cache record through the SDK.
+ * @note The value mirrors topology projected into pure-C Region/dependency
+ *       records without exposing this private cache record through the SDK.
  */
 struct DependencyImageInputIdentity {
   /** @brief Upstream node id, or -1 for a disconnected input. */

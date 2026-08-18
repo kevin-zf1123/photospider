@@ -157,7 +157,7 @@ PixelRect clamp_rect_to_bounds(const PixelRect& rect,
  * singular projective divisor.
  * @throws Nothing.
  * @note Invalid historical/private spatial state is rejected defensively even
- * though the v2 operation output adapter validates newly returned snapshots.
+ * though the operation-v1 Host adapter validates newly returned snapshots.
  */
 std::optional<std::array<double, 2>> apply_matrix(
     const std::array<double, 9>& mat, double x, double y) noexcept {

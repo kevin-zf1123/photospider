@@ -9,19 +9,19 @@
 #include <map>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
 
 /**
- * @file node_view.hpp
- * @brief Host-independent parameter snapshots and operation identity views.
+ * @file parameter_value.hpp
+ * @brief Format-neutral recursive parameter values for public Host contracts.
  *
- * The declarations in this header use only the C++17 standard library. They
- * deliberately separate callback-lifetime identity strings from the owned
- * parameter tree that a plugin may retain after one invocation.
+ * The declarations use only the C++17 standard library and own every nested
+ * string, array, object, and key. They are ordinary public data values used by
+ * graph definitions, Host results, cache metadata, and format adapters; they
+ * are not an operation-plugin ABI or an isolation-wire representation.
  */
 
 namespace ps::plugin {
@@ -30,9 +30,9 @@ namespace ps::plugin {
  * @brief Identifies one public parameter-value alternative.
  *
  * @throws Nothing.
- * @note Values and the `uint32_t` representation are stable across the v2 C++
- * DSO boundary. `ParameterValue` remains a C++ value contract rather than a
- * pure-C wire representation.
+ * @note `ParameterValue` is a C++ public data contract. Operation ABI v1 and
+ * isolation protocol v2 encode configuration into their own bounded records;
+ * neither transports this C++ object representation.
  */
 enum class ParameterKind : std::uint32_t {
   /** @brief Null alternative. */
@@ -104,15 +104,16 @@ class ParameterTypeError final : public std::exception {
 };
 
 /**
- * @brief Deep-owned recursive parameter value used at the operation boundary.
+ * @brief Deep-owned recursive parameter value used by public Host data models.
  *
  * A value is exactly one of null, Boolean, signed 64-bit integer, double,
  * string, array, or string-keyed object. Arrays, objects, keys, and strings own
  * all storage, so copying a value recursively detaches it from its source.
  *
  * @throws std::bad_alloc from construction, copy, or container mutation.
- * @note Conversion from implementation configuration formats is host-owned.
- *       A plugin receives no alias to the host configuration tree.
+ * @note Conversion from implementation configuration formats is Host-owned.
+ *       Operation ABI v1 receives an independently encoded, bounded copy and
+ *       never aliases this object or its storage.
  */
 class ParameterValue final {
  public:
@@ -338,7 +339,7 @@ class ParameterValue final {
    * @brief Returns the complete storage variant for inspection.
    * @return Const storage reference valid while this value remains alive.
    * @throws Nothing.
-   * @note Prefer the explicit predicates and accessors in plugin logic.
+   * @note Prefer the explicit predicates and accessors in consumer logic.
    */
   const Storage& storage() const noexcept { return storage_; }
 
@@ -454,97 +455,11 @@ class ParameterValue final {
   Storage storage_;
 };
 
-/** @brief Canonical string-keyed effective parameter snapshot. */
-using ParameterMap = ParameterValue::Object;
-
 /**
- * @brief Borrowed operation identity plus an owned effective parameter map.
- *
- * Identity views refer to host strings that remain valid only for the current
- * callback. The parameter map is a recursive value copy and may be retained or
- * moved by plugin code independently of the callback.
- *
- * @throws std::bad_alloc when parameter construction or copying allocates.
- * @note The view is immutable to callback consumers and exposes no mutable
- *       graph, registry, cache, or configuration owner.
+ * @brief Canonical string-keyed effective parameter snapshot.
+ * @note This C++ map is a Host/Graph value. Operation ABI v1 projects it into
+ *       bounded pure-C configuration records before crossing a DSO boundary.
  */
-class NodeView final {
- public:
-  /**
-   * @brief Creates an empty identity with an empty parameter snapshot.
-   * @throws Nothing.
-   */
-  NodeView() = default;
-
-  /**
-   * @brief Creates a callback identity and takes an effective parameter map.
-   * @param id Stable node id for the current graph lifetime.
-   * @param name Borrowed display name valid through the callback.
-   * @param type Borrowed operation type valid through the callback.
-   * @param subtype Borrowed operation subtype valid through the callback.
-   * @param parameters Deep-owned effective parameter snapshot.
-   * @throws Nothing when standard container/string-view moves are non-throwing.
-   */
-  NodeView(int id, std::string_view name, std::string_view type,
-           std::string_view subtype, ParameterMap parameters)
-      : id_(id),
-        name_(name),
-        type_(type),
-        subtype_(subtype),
-        parameters_(std::move(parameters)) {}
-
-  /**
-   * @brief Returns the callback node id.
-   * @return Stable id copied from the host node.
-   * @throws Nothing.
-   */
-  int id() const noexcept { return id_; }
-  /**
-   * @brief Returns the callback-lifetime borrowed display name.
-   * @return Immutable name view.
-   * @throws Nothing.
-   */
-  std::string_view name() const noexcept { return name_; }
-  /**
-   * @brief Returns the callback-lifetime borrowed operation type.
-   * @return Immutable type view.
-   * @throws Nothing.
-   */
-  std::string_view type() const noexcept { return type_; }
-  /**
-   * @brief Returns the callback-lifetime borrowed operation subtype.
-   * @return Immutable subtype view.
-   * @throws Nothing.
-   */
-  std::string_view subtype() const noexcept { return subtype_; }
-
-  /**
-   * @brief Returns the complete owned effective parameter map.
-   * @return Const parameter map reference valid while this view remains alive.
-   * @throws Nothing; returning a reference performs no lookup or comparison.
-   */
-  const ParameterMap& parameters() const noexcept { return parameters_; }
-
-  /**
-   * @brief Finds one effective parameter by name.
-   * @param key Parameter key to locate.
-   * @return Pointer to the owned value, or nullptr when absent.
-   * @throws Nothing.
-   */
-  const ParameterValue* find_parameter(std::string_view key) const noexcept {
-    const auto found = parameters_.find(key);
-    return found == parameters_.end() ? nullptr : &found->second;
-  }
-
- private:
-  /** @brief Stable id copied for callback inspection. */
-  int id_ = -1;
-  /** @brief Borrowed identity strings valid only through one callback. */
-  std::string_view name_;
-  std::string_view type_;
-  std::string_view subtype_;
-  /** @brief Deep-owned effective parameter snapshot. */
-  ParameterMap parameters_;
-};
+using ParameterMap = ParameterValue::Object;
 
 }  // namespace ps::plugin

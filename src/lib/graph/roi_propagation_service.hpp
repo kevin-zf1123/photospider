@@ -192,8 +192,9 @@ class RoiPropagationService {
    * @throws GraphError or callback exceptions for the ImageRect path.
    * @throws std::bad_alloc when result storage cannot allocate.
    * @note TensorSlice is preserved only by the explicit core dense identity
-   *       operation; other current operations have only rectangular v2
-   *       propagation semantics.
+   *       operation; other current private core operations expose only
+   *       rectangular propagation semantics. Operation ABI v1 Region suites
+   *       use their separately validated rank-general contract.
    */
   RegionOperationResult compute_upstream_region(
       const Node& node, const RegionSet& downstream_region,

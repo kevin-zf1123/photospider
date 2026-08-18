@@ -525,20 +525,6 @@ void HostOutputWriteGrant::retire_failure(std::string diagnostic) {
   state_->fail(std::move(diagnostic));
 }
 
-/** @copydoc HostOutputWriteGrant::retain_abi_v2_allocation */
-std::shared_ptr<void> HostOutputWriteGrant::retain_abi_v2_allocation() const {
-  if (!state_ || retired_ || grant_id_ == 0U) {
-    throw std::logic_error(
-        "Inactive Host output grant cannot retain ABI v2 allocation.");
-  }
-  std::lock_guard<std::mutex> lock(state_->mutex);
-  if (!state_->grant_active(grant_id_, generation_)) {
-    throw std::logic_error(
-        "Revoked Host output grant cannot retain ABI v2 allocation.");
-  }
-  return std::shared_ptr<void>(state_, state_->allocation_base);
-}
-
 /** @copydoc HostOutputWriteGrant::abandon_noexcept */
 void HostOutputWriteGrant::abandon_noexcept() noexcept {
   if (!state_ || retired_ || grant_id_ == 0U) {

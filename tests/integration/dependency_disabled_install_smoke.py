@@ -2481,8 +2481,8 @@ def write_consumer(source: Path) -> None:
       ``$<TARGET_FILE_NAME:...>`` plus ``$<TARGET_FILE:...>`` manifest.
       Reserved dot spellings and typed ``_NOT_BUILT`` sentinels fail before
       target creation or serialization. The Host executable verifies neutral
-      allocation, installed V-6 readiness, operation metadata, empty-session
-      lifecycle, packed V-13 access, and persistence failure. Two additional
+      allocation, installed V-6 readiness, operation ABI-v1 records,
+      empty-session lifecycle, packed V-13 access, and persistence failure. Two additional
       executables independently load C11 and C++17 exact-name data-definition
       producers, while the clean producer runs the complete V-14 matrix.
     """
@@ -2494,7 +2494,8 @@ def write_consumer(source: Path) -> None:
                 "cmake_minimum_required(VERSION 3.16)",
                 "project(dependency_disabled_consumer LANGUAGES C CXX)",
                 "find_package(Photospider CONFIG REQUIRED",
-                "  COMPONENTS embedded operation_sdk data_provider_sdk)",
+                "  COMPONENTS embedded operation_plugin_sdk",
+                "             operation_runtime data_provider_sdk)",
                 "get_target_property(_data_provider_links",
                 "  Photospider::data_provider_sdk INTERFACE_LINK_LIBRARIES)",
                 "if(_data_provider_links)",
@@ -2611,13 +2612,14 @@ def write_consumer(source: Path) -> None:
                 "endforeach()",
                 "target_link_libraries(dependency_disabled_consumer",
                 "  PRIVATE Photospider::photospider",
-                "          Photospider::operation_sdk)",
+                "          Photospider::operation_plugin_sdk",
+                "          Photospider::operation_runtime)",
                 "target_link_libraries(installed_c11_data_provider_consumer",
                 "  PRIVATE installed_c11_data_provider",
-                "          Photospider::operation_sdk)",
+                "          Photospider::operation_runtime)",
                 "target_link_libraries(installed_cpp17_data_provider_consumer",
                 "  PRIVATE installed_cpp17_data_provider",
-                "          Photospider::operation_sdk)",
+                "          Photospider::operation_runtime)",
                 "set(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_INVENTORY_DIR",
                 "  \"${CMAKE_BINARY_DIR}/generated/ci_inventory\")",
                 "file(MAKE_DIRECTORY",
@@ -2664,7 +2666,7 @@ def write_consumer(source: Path) -> None:
                 "#include <photospider/host/host.hpp>",
                 "#include <photospider/memory/buffer_handle.hpp>",
                 "#include <photospider/memory/ready_fence.hpp>",
-                "#include <photospider/plugin/op_contract.hpp>",
+                "#include <photospider/plugin/operation_plugin.hpp>",
                 "",
                 "/**",
                 " * @brief Exercises the dependency-disabled installed product.",
@@ -2679,16 +2681,22 @@ def write_consumer(source: Path) -> None:
                 "  const std::filesystem::path root(argv[1]);",
                 "  std::filesystem::create_directories(root);",
                 "",
-                "  ps::plugin::OperationMetadata metadata;",
+                "  ps_operation_implementation_descriptor_v1 metadata{};",
+                "  metadata.header = ps::operation_plugin::make_record_header(",
+                "      PS_OPERATION_IMPLEMENTATION_DESCRIPTOR_V1_SIZE,",
+                "      PS_OPERATION_RECORD_IMPLEMENTATION_DESCRIPTOR_V1);",
                 "  metadata.reentrant = false;",
                 "  metadata.maximum_parallelism = 2U;",
                 "  metadata.retained_memory_bytes = 1024U;",
                 "  metadata.scratch_bytes = 512U;",
-                '  metadata.exclusive_key = "dependency-disabled";',
+                "  metadata.exclusive_key =",
+                '      ps::operation_plugin::make_bytes("dependency-disabled");',
                 "  if (metadata.reentrant || metadata.maximum_parallelism != 2U ||",
                 "      metadata.retained_memory_bytes != 1024U ||",
                 "      metadata.scratch_bytes != 512U ||",
-                '      metadata.exclusive_key != "dependency-disabled") {',
+                "      metadata.exclusive_key.size != 19U ||",
+                "      metadata.header.struct_size !=",
+                "          PS_OPERATION_IMPLEMENTATION_DESCRIPTOR_V1_SIZE) {",
                 "    return 18;",
                 "  }",
                 "",

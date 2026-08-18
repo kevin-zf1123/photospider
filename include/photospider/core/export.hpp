@@ -7,11 +7,10 @@
  * The supported embedded product remains a static archive. The separate
  * `Photospider::operation_runtime` is a shared library whose ordinary external
  * C++ symbols are exported by its CMake target (including a generated Windows
- * export table), while operation plugins export only
- * `register_photospider_ops_v2` through
- * `PHOTOSPIDER_OPERATION_PLUGIN_EXPORT`. `PHOTOSPIDER_API` therefore remains
- * the static embedded-product annotation and does not control operation
- * runtime exports.
+ * export table), while operation plugins export only the numeric discovery and
+ * ABI-v1 root symbols through `PHOTOSPIDER_OPERATION_PLUGIN_EXPORT`.
+ * `PHOTOSPIDER_API` therefore remains the static embedded-product annotation
+ * and does not control operation runtime exports.
  *
  * @note The macro only affects declarations that explicitly opt in. Header-only
  *       value types and operation-runtime declarations continue to use

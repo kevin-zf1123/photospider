@@ -13,25 +13,35 @@
 #include <vector>
 
 #include "photospider/data/extension.hpp"
+#include "photospider/data/image_metadata.hpp"
+#include "photospider/data/region.hpp"
 
 namespace ps::execution {
 
 /** @brief Sole supported isolated CPU invocation protocol version. */
-inline constexpr std::uint16_t kIsolatedCpuInvocationProtocolVersion = 1U;
+inline constexpr std::uint16_t kIsolatedCpuInvocationProtocolVersion = 2U;
 /** @brief Sole supported DenseTensor descriptor version. */
-inline constexpr std::uint16_t kIsolatedCpuTensorDescriptorVersion = 1U;
+inline constexpr std::uint16_t kIsolatedCpuTensorDescriptorVersion = 2U;
 /** @brief Fixed header bytes delimiting one framed Unix stream record. */
 inline constexpr std::size_t kIsolatedCpuPacketHeaderBytes = 12U;
 /** @brief Maximum complete framed request or response bytes. */
 inline constexpr std::size_t kMaximumIsolatedCpuPacketBytes = 64U << 10U;
-/** @brief Maximum invocation capabilities accepted by protocol version one. */
+/** @brief Maximum invocation capabilities accepted by protocol version two. */
 inline constexpr std::size_t kMaximumIsolatedCpuCapabilities = 32U;
-/** @brief Maximum tensor descriptors accepted by protocol version one. */
+/** @brief Maximum tensor descriptors accepted by protocol version two. */
 inline constexpr std::size_t kMaximumIsolatedCpuDescriptors = 32U;
-/** @brief Maximum DenseTensor rank accepted by protocol version one. */
+/** @brief Maximum DenseTensor rank accepted by protocol version two. */
 inline constexpr std::size_t kMaximumIsolatedCpuTensorRank = 16U;
 /** @brief Maximum scalar parameters accepted by one invocation. */
 inline constexpr std::size_t kMaximumIsolatedCpuParameters = 64U;
+/** @brief Maximum flattened configuration nodes in one invocation. */
+inline constexpr std::size_t kMaximumIsolatedCpuConfigurationNodes = 4096U;
+/** @brief Maximum root-inclusive configuration nesting depth. */
+inline constexpr std::size_t kMaximumIsolatedCpuConfigurationDepth = 64U;
+/** @brief Maximum object-key bytes in one configuration node. */
+inline constexpr std::size_t kMaximumIsolatedCpuConfigurationKeyBytes = 128U;
+/** @brief Maximum UTF-8/arbitrary bytes in one configuration scalar. */
+inline constexpr std::size_t kMaximumIsolatedCpuConfigurationValueBytes = 4096U;
 /** @brief Maximum operation-key bytes accepted by the wire. */
 inline constexpr std::size_t kMaximumIsolatedCpuOperationBytes = 256U;
 /** @brief Maximum scalar parameter-name bytes accepted by the wire. */
@@ -40,7 +50,7 @@ inline constexpr std::size_t kMaximumIsolatedCpuParameterNameBytes = 128U;
 inline constexpr std::size_t kMaximumIsolatedCpuParameterStringBytes = 4096U;
 /** @brief Maximum child-owned diagnostic bytes accepted by the wire. */
 inline constexpr std::size_t kMaximumIsolatedCpuDiagnosticBytes = 4096U;
-/** @brief Hard protocol-v1 aggregate shared-memory byte ceiling. */
+/** @brief Hard protocol-v2 aggregate shared-memory byte ceiling. */
 inline constexpr std::uint64_t kMaximumIsolatedCpuSharedBytes = 64U << 20U;
 
 /**
@@ -130,7 +140,7 @@ struct IsolatedCpuInvocationIdentity final {
 };
 
 /**
- * @brief Closed scalar parameter representations in protocol version one.
+ * @brief Closed scalar parameter representations in protocol version two.
  * @throws Nothing for ordinary enum operations.
  */
 enum class IsolatedCpuScalarKind : std::uint8_t {
@@ -175,6 +185,62 @@ struct IsolatedCpuScalarParameter final {
    * @throws Nothing under standard string equality.
    */
   bool operator==(const IsolatedCpuScalarParameter& other) const noexcept;
+};
+
+/**
+ * @brief Closed recursive configuration-node representations in wire v2.
+ * @throws Nothing for ordinary enum operations.
+ */
+enum class IsolatedCpuConfigurationKind : std::uint8_t {
+  /** @brief Explicit null scalar. */
+  Null = 1U,
+  /** @brief Closed boolean scalar. */
+  Boolean = 2U,
+  /** @brief Signed 64-bit integer scalar. */
+  SignedInteger = 3U,
+  /** @brief Finite IEEE-754 binary64 scalar. */
+  FloatingPoint = 4U,
+  /** @brief Bounded NUL-free UTF-8-intended bytes. */
+  String = 5U,
+  /** @brief Bounded arbitrary bytes. */
+  Bytes = 6U,
+  /** @brief Ordered child sequence with empty child keys. */
+  Array = 7U,
+  /** @brief Canonically key-sorted child mapping. */
+  Object = 8U,
+};
+
+/**
+ * @brief One pointer-free node in a canonical flattened configuration tree.
+ * @throws std::bad_alloc when copied key or byte storage cannot allocate.
+ * @note Inactive scalar fields are canonical zero/empty. Direct children are
+ * identified by one checked contiguous range in the enclosing node vector.
+ */
+struct IsolatedCpuConfigurationNode final {
+  /** @brief Active closed representation. */
+  IsolatedCpuConfigurationKind kind = IsolatedCpuConfigurationKind::Null;
+  /** @brief Nonempty object-child key, otherwise empty. */
+  std::string key;
+  /** @brief Boolean payload used only by Boolean. */
+  bool boolean_value = false;
+  /** @brief Signed payload used only by SignedInteger. */
+  std::int64_t signed_value = 0;
+  /** @brief Finite payload used only by FloatingPoint. */
+  double floating_value = 0.0;
+  /** @brief String/Bytes payload used only by those scalar kinds. */
+  std::string bytes_value;
+  /** @brief Dense first direct-child index for Array/Object. */
+  std::uint32_t first_child = 0U;
+  /** @brief Bounded direct-child count for Array/Object. */
+  std::uint32_t child_count = 0U;
+
+  /**
+   * @brief Compares every active and canonical inactive field.
+   * @param other Node to compare.
+   * @return True for exact canonical equality.
+   * @throws Nothing under string equality.
+   */
+  bool operator==(const IsolatedCpuConfigurationNode& other) const noexcept;
 };
 
 /**
@@ -252,7 +318,7 @@ enum class IsolatedCpuTensorOwnership : std::uint8_t {
 };
 
 /**
- * @brief Sole logical representation accepted by descriptor version one.
+ * @brief Sole logical representation accepted by descriptor version two.
  * @throws Nothing for ordinary enum operations.
  */
 enum class IsolatedCpuTensorKind : std::uint8_t {
@@ -261,7 +327,7 @@ enum class IsolatedCpuTensorKind : std::uint8_t {
 };
 
 /**
- * @brief Sole physical layout accepted by descriptor version one.
+ * @brief Sole physical layout accepted by descriptor version two.
  * @throws Nothing for ordinary enum operations.
  */
 enum class IsolatedCpuLayoutKind : std::uint8_t {
@@ -270,7 +336,7 @@ enum class IsolatedCpuLayoutKind : std::uint8_t {
 };
 
 /**
- * @brief Closed logical element semantics in descriptor version one.
+ * @brief Closed logical element semantics in descriptor version two.
  * @throws Nothing for ordinary enum operations.
  */
 enum class IsolatedCpuElementSemantics : std::uint8_t {
@@ -283,7 +349,7 @@ enum class IsolatedCpuElementSemantics : std::uint8_t {
 };
 
 /**
- * @brief Closed storage encoding in descriptor version one.
+ * @brief Closed storage encoding in descriptor version two.
  * @throws Nothing for ordinary enum operations.
  */
 enum class IsolatedCpuStorageEncoding : std::uint8_t {
@@ -292,8 +358,10 @@ enum class IsolatedCpuStorageEncoding : std::uint8_t {
 };
 
 /**
- * @brief Optional explicit image-axis interpretation for one tensor.
- * @throws Nothing for ordinary value operations.
+ * @brief Complete pointer-free ordinary-image interpretation for one tensor.
+ * @throws std::bad_alloc when copied diagnostic names or nested vectors fail.
+ * @note Diagnostic names are wire facts even though public semantic equality
+ * excludes them, so this record implements exact transport equality.
  */
 struct IsolatedCpuImageFacet final {
   /** @brief Logical x-coordinate axis. */
@@ -302,17 +370,24 @@ struct IsolatedCpuImageFacet final {
   std::uint32_t y_axis = 0U;
   /** @brief Optional distinct channel axis. */
   std::optional<std::uint32_t> channel_axis;
+  /** @brief Required signed nonempty logical payload window. */
+  ImageBounds data_window;
+  /** @brief Optional signed presentation window. */
+  std::optional<ImageBounds> display_window;
+  /** @brief Optional complete stable channel/group schema. */
+  std::optional<ChannelSchema> channel_schema;
+  /** @brief Optional complete declared sample interpretation. */
+  std::optional<SampleDomainFacet> sample_domain;
+  /** @brief Optional complete color interpretation. */
+  std::optional<ColorFacet> color;
 
   /**
-   * @brief Compares every image-axis fact.
+   * @brief Compares every image fact, including diagnostic spellings.
    * @param other Facet to compare.
    * @return True for exact equality.
    * @throws Nothing.
    */
-  bool operator==(const IsolatedCpuImageFacet& other) const noexcept {
-    return x_axis == other.x_axis && y_axis == other.y_axis &&
-           channel_axis == other.channel_axis;
-  }
+  bool operator==(const IsolatedCpuImageFacet& other) const noexcept;
 };
 
 /**
@@ -334,6 +409,20 @@ struct IsolatedCpuTensorDescriptor final {
   IsolatedCpuTensorReadiness readiness = IsolatedCpuTensorReadiness::ReadyInput;
   /** @brief Phase-specific untrusted ownership claim. */
   IsolatedCpuTensorOwnership ownership = IsolatedCpuTensorOwnership::HostInput;
+  /** @brief Permanent nonzero operation-port identity. */
+  IsolatedCpuOpaqueId port_identity;
+  /** @brief Invocation-local input-edge or immutable output-plan identity. */
+  IsolatedCpuOpaqueId binding_identity;
+  /** @brief Permanent nonzero representation-Schema identity. */
+  IsolatedCpuOpaqueId schema_identity;
+  /** @brief Optional primary Facet identity; zero iff no image facet. */
+  IsolatedCpuOpaqueId facet_identity;
+  /** @brief Permanent nonzero physical Layout identity. */
+  IsolatedCpuOpaqueId layout_identity;
+  /** @brief Nonzero logical descriptor structural version. */
+  std::uint64_t schema_version = 1U;
+  /** @brief Nonzero physical layout structural version. */
+  std::uint64_t layout_version = 1U;
   /** @brief Referenced invocation-local capability selector. */
   std::uint64_t capability_id = 0U;
   /** @brief Byte offset inside the referenced capability. */
@@ -356,6 +445,14 @@ struct IsolatedCpuTensorDescriptor final {
   std::uint64_t byte_offset = 0U;
   /** @brief Optional explicit image coordinate axes. */
   std::optional<IsolatedCpuImageFacet> image_facet;
+  /** @brief Exact validity Region or immutable full output Region. */
+  RegionSet region = RegionSet::whole();
+  /** @brief Output plan base alignment; zero for inputs. */
+  std::uint64_t allocation_alignment = 0U;
+  /** @brief Response-only checked written-range offset. */
+  std::uint64_t written_offset = 0U;
+  /** @brief Response-only checked written-range byte count. */
+  std::uint64_t written_length = 0U;
   /** @brief Exact canonical descriptor/physical-byte binding when required. */
   std::optional<ContentDigest> content_binding;
 
@@ -378,7 +475,7 @@ struct IsolatedCpuResourceDeclaration final {
   std::uint64_t shared_memory_bytes = 0U;
   /** @brief Exact tensor descriptor count. */
   std::uint32_t descriptor_count = 0U;
-  /** @brief Exact callback slot count; protocol v1 requires one. */
+  /** @brief Exact callback slot count; protocol v2 requires one. */
   std::uint32_t cpu_slots = 1U;
 
   /**
@@ -424,8 +521,20 @@ struct IsolatedCpuInvocationRequest final {
   IsolatedCpuInvocationIdentity identity;
   /** @brief Nonempty bounded operation key. */
   std::string operation;
+  /** @brief Permanent operation identity selected by the Host. */
+  IsolatedCpuOpaqueId operation_identity;
+  /** @brief Permanent implementation identity selected by the Host. */
+  IsolatedCpuOpaqueId implementation_identity;
+  /** @brief Permanent configuration-Schema identity. */
+  IsolatedCpuOpaqueId configuration_schema_identity;
   /** @brief Strictly name-sorted immutable scalar parameters. */
   std::vector<IsolatedCpuScalarParameter> parameters;
+  /**
+   * @brief Optional complete recursive configuration tree in flattened order.
+   * @note Empty selects the legacy scalar-parameter object representation;
+   * nonempty requires `parameters` to be empty.
+   */
+  std::vector<IsolatedCpuConfigurationNode> configuration;
   /** @brief Strictly id-sorted ancillary descriptor declarations. */
   std::vector<IsolatedCpuCapability> capabilities;
   /** @brief Input descriptors followed by output producer plans. */
@@ -493,9 +602,9 @@ struct IsolatedCpuInvocationResponse final {
  * @param limits Candidate runtime/Host limits.
  * @return Nothing when shared-byte, capability, and descriptor limits are
  * nonzero, the parameter limit is zero or greater, and every value is at or
- * below its protocol-v1 hard maximum.
+ * below its protocol-v2 hard maximum.
  * @throws std::invalid_argument when a required non-parameter limit is zero or
- * any field exceeds its protocol-v1 hard maximum.
+ * any field exceeds its protocol-v2 hard maximum.
  */
 void validate_isolated_cpu_invocation_limits(
     const IsolatedCpuInvocationLimits& limits);
@@ -549,7 +658,7 @@ void validate_isolated_cpu_invocation_response(
     const IsolatedCpuInvocationLimits& limits);
 
 /**
- * @brief Encodes one validated request into the canonical protocol-v1 packet.
+ * @brief Encodes one validated request into the canonical protocol-v2 packet.
  * @param request Complete request.
  * @param limits Retained endpoint hard limits used before encoding.
  * @return Complete header and payload bytes for repeated Unix stream sends.
@@ -560,7 +669,7 @@ std::vector<std::byte> encode_isolated_cpu_invocation_request(
     const IsolatedCpuInvocationLimits& limits);
 
 /**
- * @brief Decodes and validates one complete protocol-v1 request packet.
+ * @brief Decodes and validates one complete protocol-v2 request packet.
  * @param packet Exact framed bytes assembled from one or more stream receives.
  * @param limits Retained endpoint hard limits.
  * @return Newly owned validated request.
@@ -576,7 +685,7 @@ IsolatedCpuInvocationRequest decode_isolated_cpu_invocation_request(
  * @param request Previously validated request.
  * @param response Response candidate.
  * @param limits Retained endpoint hard limits.
- * @return Canonical protocol-v1 response packet.
+ * @return Canonical protocol-v2 response packet.
  * @throws Response validation, allocation, or aggregate-bound errors unchanged.
  */
 std::vector<std::byte> encode_isolated_cpu_invocation_response(

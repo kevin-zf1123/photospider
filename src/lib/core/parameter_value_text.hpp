@@ -2,7 +2,7 @@
 
 #include <string>
 
-#include "photospider/plugin/node_view.hpp"
+#include "photospider/data/parameter_value.hpp"
 
 namespace ps::core {
 

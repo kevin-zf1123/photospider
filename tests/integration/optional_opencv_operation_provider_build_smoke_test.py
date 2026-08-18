@@ -225,7 +225,7 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
-        "FormalCommitPublishesValidatedOpaqueAbiV2ImportedValue"
+        "FormalCommitPublishesValidatedOpaqueCompatibilityImageValue"
     ),
     (
         "CpuDenseTensorImageOperation."

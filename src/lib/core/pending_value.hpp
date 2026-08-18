@@ -24,7 +24,7 @@ namespace ps {
  *
  * @throws Nothing for movement and destruction.
  * @note This type is source-private and is never installed or exposed through
- *       operation ABI v2. Consumers cannot obtain it from a Value.
+ *       the operation-plugin ABI. Consumers cannot obtain it from a Value.
  * @note One producer object and any pointer borrowed from it are externally
  *       serialized by the owning physical task.
  */
@@ -362,7 +362,8 @@ class ExternalBindingCompatibilityProjection {
  * @brief Source-private factory for retained native and external bindings.
  *
  * @throws Nothing for construction and destruction.
- * @note The class is not installed and does not change operation ABI v2.
+ * @note The class is not installed and does not change the operation-plugin
+ *       ABI.
  */
 class PendingDeviceValuePublisher final {
  public:

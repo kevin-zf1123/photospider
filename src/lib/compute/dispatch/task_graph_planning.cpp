@@ -766,7 +766,7 @@ PixelSize resolve_planned_extent(
  * @throws GraphError or standard exceptions from extent resolution.
  * @throws std::bad_alloc when vector storage allocation fails.
  * @note This captures all graph-known inputs, not only the edge currently being
- *       mapped, so public random-access RoiContext snapshots remain complete.
+ *       mapped, so operation ABI Region/dependency snapshots remain complete.
  */
 std::vector<PixelSize> resolve_planned_input_extents(
     const GraphModel& graph, const Node& node, GraphExtentResolver& resolver,

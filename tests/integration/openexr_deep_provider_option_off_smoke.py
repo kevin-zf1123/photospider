@@ -533,7 +533,8 @@ def write_consumer(source: Path, enabled: bool) -> None:
                 endif()
                 set(_neutral_target_surface "")
                 foreach(_neutral_target
-                    data_provider_sdk operation_sdk operation_runtime policy_sdk)
+                    data_provider_sdk operation_plugin_sdk operation_runtime
+                    policy_sdk)
                   if(TARGET Photospider::${_neutral_target})
                     foreach(_property
                         INTERFACE_INCLUDE_DIRECTORIES

@@ -3205,7 +3205,7 @@ TEST(CpuDenseTensorImageOperation,
   Node node;
   node.id = 89;
   node.name = "native_formal_publication";
-  node.type = "operation_sdk_test";
+  node.type = "operation_contract_test";
   node.subtype = "pending_native_output";
   graph.add_node(node);
 
@@ -3296,26 +3296,27 @@ TEST(CpuDenseTensorImageOperation,
 }
 
 /**
- * @brief Proves one validated opaque ABI v2 result enters formal HP cache.
+ * @brief Proves one validated opaque private compatibility image enters HP
+ * cache.
  *
  * @return Nothing; GoogleTest reports staging, identity, Region, readiness,
  * binding, projection, or DSO-lifetime failures.
- * @throws Plugin adaptation, imported Value publication, Region derivation,
+ * @throws Compatibility import, Value publication, Region derivation,
  * graph mutation, and cache-service exceptions unchanged to the test runner.
- * @note The real monolithic inbound adapter freezes the returned descriptor,
- * retains its opaque backend context and library lease in one imported
+ * @note The remaining private inbound edge freezes the staged descriptor,
+ * retains its opaque backend context and explicit library lease in one imported
  * binding, and clears compatibility staging. Formal commit must preserve that
  * exact Value without a Host copy or second image authority. The node has no
  * disk-cache entry because non-host-visible persistence is a separate
  * fail-closed contract.
  */
 TEST(CpuDenseTensorImageOperation,
-     FormalCommitPublishesValidatedOpaqueAbiV2ImportedValue) {
+     FormalCommitPublishesValidatedOpaqueCompatibilityImageValue) {
   GraphModel graph("cache/imported-formal-publication");
   Node node;
   node.id = 81;
   node.name = "imported_formal_publication";
-  node.type = "operation_sdk_test";
+  node.type = "operation_contract_test";
   node.subtype = "opaque_imported_output";
   graph.add_node(node);
 
@@ -3324,20 +3325,20 @@ TEST(CpuDenseTensorImageOperation,
   auto backend_context = std::make_shared<int>(131);
   std::weak_ptr<void> context_observer = backend_context;
   void* const expected_context = backend_context.get();
-  MonolithicOpFunc operation = plugin_host::adapt_monolithic_operation(
-      [backend_context = std::move(backend_context)](
-          const plugin::NodeView&,
-          plugin::ArrayView<plugin::OperationInputView>) mutable {
-        plugin::OperationOutput output;
-        output.image_buffer.width = 11;
-        output.image_buffer.height = 7;
-        output.image_buffer.channels = 4;
-        output.image_buffer.type = DataType::UINT8;
-        output.image_buffer.device = Device::GPU_CUDA;
-        output.image_buffer.context = std::move(backend_context);
+  MonolithicOpFunc operation =
+      [backend_context = std::move(backend_context), library_lifetime](
+          const Node&, const std::vector<const NodeOutput*>&) mutable {
+        NodeOutput output;
+        output.plugin_library_lifetime = library_lifetime;
+        output.compatibility_image.width = 11;
+        output.compatibility_image.height = 7;
+        output.compatibility_image.channels = 4;
+        output.compatibility_image.type = DataType::UINT8;
+        output.compatibility_image.device = Device::GPU_CUDA;
+        output.compatibility_image.context = std::move(backend_context);
+        value_image_adapter::import_node_output_compatibility_image(&output);
         return output;
-      },
-      library_lifetime);
+      };
   library_lifetime.reset();
 
   NodeOutput imported = operation(graph.node(81), {});
@@ -3391,7 +3392,8 @@ TEST(CpuDenseTensorImageOperation,
             RegionSet::from_image_rect({image_region_domain(), 0, 11, 0, 7}));
 
   const ImageBuffer projected =
-      value_image_adapter::project_image_value_for_abi_v2(committed_value);
+      value_image_adapter::project_image_value_for_image_buffer_edge(
+          committed_value);
   EXPECT_EQ(projected.width, 11);
   EXPECT_EQ(projected.height, 7);
   EXPECT_EQ(projected.channels, 4);

@@ -340,17 +340,6 @@ class HostOutputWriteGrant final {
    */
   void retire_failure(std::string diagnostic);
 
-  /**
-   * @brief Retains the complete allocation for the current ABI v2 edge.
-   * @return Aliasing shared owner whose pointer is the allocation base.
-   * @throws std::logic_error when the grant is inactive or revoked.
-   * @throws std::system_error when mutex acquisition fails.
-   * @note This deliberately widening escape hatch exists only because ABI v2
-   * accepts a full mutable ImageBuffer. It must be destroyed before grant
-   * retirement and deleted by DI-3; internal kernels use `data()` spans.
-   */
-  std::shared_ptr<void> retain_abi_v2_allocation() const;
-
  private:
   /** @brief Shared synchronized binding and publication state. */
   struct State;

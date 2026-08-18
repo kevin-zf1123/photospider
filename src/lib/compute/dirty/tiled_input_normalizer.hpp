@@ -18,7 +18,7 @@ namespace ps::compute {
  * @note Pointers in inputs either reference upstream NodeOutput objects
  * supplied by the caller or elements owned by normalized_storage. Entries in
  * callback_images align with inputs and retain independent use-scoped
- * projections. CPU inputs are owned snapshots; exact imported ABI v2 inputs
+ * projections. CPU inputs are owned snapshots; exact imported device inputs
  * are opaque aliases retaining their canonical Values. The context must stay
  * alive until all TileTask callbacks using those pointers have finished.
  */
@@ -73,8 +73,8 @@ class TiledInputNormalizer {
    *         std::bad_alloc when kernel validation, allocation, fill, or copy
    *         fails.
    * @throws ReadyFenceAccessError or BufferAccessError when an input cannot
-   *         enter the current ABI v2 callback edge without an explicit access
-   *         or transfer plan.
+   *         enter the source-private ImageBuffer callback edge without an
+   *         explicit access or transfer plan.
    * @throws std::exception when the selected resize/channel implementation
    *         fails.
    * @note The method performs whole-input normalization only when needed; tile

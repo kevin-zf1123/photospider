@@ -243,7 +243,9 @@ TEST(OptionalOpenCvOperationProvider, ReplacementExecutesAndRestores) {
   ASSERT_TRUE(std::filesystem::exists(plugin_path));
   const PluginLoadResult load_result =
       manager.load_from_dirs_report({plugin_path.parent_path().string()});
-  ASSERT_EQ(load_result.loaded, 1);
+  ASSERT_EQ(load_result.loaded, 1)
+      << (load_result.errors.empty() ? std::string{}
+                                     : load_result.errors.front().message);
   ASSERT_TRUE(load_result.errors.empty());
   ASSERT_EQ(manager.op_sources().at(kResizeKey), plugin_path.string());
 

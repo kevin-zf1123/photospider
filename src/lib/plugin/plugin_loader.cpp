@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <exception>
-#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -10,13 +9,12 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/plugin/plugin_api.hpp"
+#include "photospider/plugin/operation_plugin_api.h"
 #include "plugin/operation_host_adapter.hpp"
 #include "plugin/plugin_trust.hpp"
 
@@ -83,509 +81,11 @@ void maybe_fail_operation_plugin_bookkeeping(
 }
 #endif
 
-using RegisterOpsFunc = plugin::RegisterPhotospiderOpsV2;
+/** @brief Numeric discovery entry resolved before any ABI record is read. */
+using GetOperationAbiVersion = ps_operation_plugin_get_abi_version_fn_v1;
 
-/**
- * @brief Host context passed through the operation plugin registrar.
- *
- * The context points at the transaction-local registry that receives all
- * registration calls made by a plugin. It has stack lifetime inside
- * `load_one_plugin` and is valid only while the plugin registration entry
- * point is executing.
- *
- * @note Plugins receive only the opaque `user_data` pointer inside
- * `plugin::OperationPluginRegistrar`; they must not retain it after
- * registration.
- */
-struct HostRegistrarContext {
-  /** @brief Staged registry that temporarily owns callbacks and metadata. */
-  OpRegistry* registry = nullptr;
-
-  /**
-   * @brief Candidate handle/capability lease captured by every callback.
-   *
-   * The lease prevents explicit process-global unload from unmapping plugin
-   * code or closing its sealed descriptor while a copied callback executes.
-   */
-  std::shared_ptr<void> library_lifetime;
-};
-
-/**
- * @brief Wraps a plugin callback with a shared handle/capability lease.
- *
- * @tparam Return Callback return type.
- * @tparam Args Callback parameter types, including reference qualifiers.
- * @param library_lifetime Shared owner for the candidate native handle and
- *        exact-object capability.
- * @param callback Plugin-provided callback to invoke.
- * @param observe_device_retirement Whether BUILD_TESTING should observe final
- *        device-wrapper retirement against the real registry lock token.
- * @return Host-code wrapper sharing callback state and the library lease.
- * @throws std::bad_alloc if shared state or std::function storage allocation
- *         fails.
- * @note State declares the lease before the callback, so reverse member
- *       destruction destroys plugin-owned callable state before releasing the
- *       last possible combined native-library lease. Copied wrappers share the
- *       state,
- *       allowing explicit unload to remove registry visibility immediately
- *       while an in-flight invocation safely finishes. In test builds, a true
- *       `observe_device_retirement` uses a borrowed process-global observer;
- *       its owner must outlive every wrapper copy and serialize clearing the
- *       observer with final wrapper retirement. Because wrapper copies share
- *       one plugin callback state and registry locking does not serialize
- *       invocation, the plugin target must be reentrant or internally
- *       synchronized. The exception fence covers only the actual plugin
- *       callback frame. Resource exhaustion keeps the `std::bad_alloc`
- *       category through a fresh host-owned object. Every other plugin-origin
- *       exception is inspected while the library lease is alive and converted
- *       to a host-owned `GraphError`;
- *       exact plugin exception types intentionally do not cross the unloadable
- *       DSO boundary. Host snapshot preparation before callback entry and
- *       validation after callback return execute outside this wrapper and
- *       preserve their host-owned exception types.
- */
-template <typename Return, typename... Args>
-std::function<Return(Args...)> retain_plugin_library(
-    std::shared_ptr<void> library_lifetime,
-    std::function<Return(Args...)> callback,
-    bool observe_device_retirement = false) {
-  /**
-   * @brief Shared callback and combined lease state owned by host wrappers.
-   * @throws Nothing directly; member destruction follows reverse declaration
-   *         order.
-   * @note Copies of the returned wrapper share one instance of this state.
-   */
-  struct RetainedCallbackState {
-    /**
-     * @brief Takes ownership of one plugin callback and its library lease.
-     * @param retained_library Library lease destroyed after the callback.
-     * @param retained_callback Plugin target moved into host-owned state.
-     * @param observe_retirement Whether test builds report final device-wrapper
-     *        retirement.
-     * @throws Nothing when the two ownership values are moved successfully.
-     * @note Construction itself does not invoke or copy the plugin target.
-     */
-    RetainedCallbackState(std::shared_ptr<void> retained_library,
-                          std::function<Return(Args...)> retained_callback,
-                          bool observe_retirement)
-        : library_lifetime(std::move(retained_library)),
-          callback(std::move(retained_callback))
-#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-          ,
-          observe_device_retirement(observe_retirement)
-#endif
-    {
-#if !defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-      (void)observe_retirement;
-#endif
-    }
-
-    /** @brief Handle/capability lease declared first and destroyed last. */
-    std::shared_ptr<void> library_lifetime;
-    /** @brief Plugin callback destroyed before the library lease. */
-    std::function<Return(Args...)> callback;
-#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-    /** @brief Whether final destruction reports one device-wrapper retirement.
-     */
-    bool observe_device_retirement = false;
-
-    /**
-     * @brief Reports final device-wrapper retirement before member destruction.
-     * @throws Nothing; the internal observer uses atomic operations only.
-     * @note The callback target and library lease are still alive in this
-     *       destructor body, so the observed lock state also governs their
-     *       immediately following reverse-order member destruction.
-     */
-    ~RetainedCallbackState() {
-      if (observe_device_retirement) {
-        testing::report_op_registry_device_callback_retirement_for_testing(
-            OpRegistry::instance());
-      }
-    }
-#endif
-  };
-
-  auto state = std::make_shared<RetainedCallbackState>(
-      std::move(library_lifetime), std::move(callback),
-      observe_device_retirement);
-  return [state = std::move(state)](Args... args) -> Return {
-    try {
-      if constexpr (std::is_void_v<Return>) {
-        state->callback(std::forward<Args>(args)...);
-        return;
-      } else {
-        return state->callback(std::forward<Args>(args)...);
-      }
-    } catch (const std::bad_alloc&) {
-      throw std::bad_alloc();
-    } catch (const GraphError& error) {
-      throw GraphError(error.code(), error.what());
-    } catch (const std::invalid_argument& error) {
-      throw GraphError(GraphErrc::InvalidParameter, error.what());
-    } catch (const std::exception& error) {
-      throw GraphError(GraphErrc::ComputeError, error.what());
-    } catch (...) {
-      throw GraphError(GraphErrc::ComputeError,
-                       "Operation plugin callback failed with an unknown "
-                       "exception");
-    }
-  };
-}
-
-/**
- * @brief Returns the host registrar context or reports ABI misuse.
- *
- * @param user_data Opaque pointer supplied by
- * `plugin::OperationPluginRegistrar`.
- * @return Mutable context reference owned by the loader stack frame.
- * @throws std::invalid_argument if the pointer or registry is missing.
- * @note A missing context indicates a loader bug or a plugin calling a copied
- * registrar after its valid registration lifetime.
- */
-HostRegistrarContext& require_registrar_context(void* user_data) {
-  if (!user_data) {
-    throw std::invalid_argument("Operation plugin registrar has no context.");
-  }
-  auto& context = *static_cast<HostRegistrarContext*>(user_data);
-  if (!context.registry || !context.library_lifetime) {
-    throw std::invalid_argument(
-        "Operation plugin registrar has incomplete host lifetime context.");
-  }
-  return context;
-}
-
-/**
- * @brief Converts a borrowed operation name segment to a C++ string.
- *
- * @param value Borrowed null-terminated type or subtype string.
- * @param label Diagnostic label used for invalid input.
- * @return Copied operation name segment.
- * @throws std::invalid_argument when `value` is null, empty, or contains the
- * canonical ':' key separator.
- * @throws std::bad_alloc if copying the string allocates and fails.
- * @note The registrar copies names immediately so plugin-owned string storage
- * does not have to outlive the registration callback.
- */
-std::string require_name_segment(const char* value, const char* label) {
-  if (!value || value[0] == '\0') {
-    throw std::invalid_argument(std::string("Operation plugin missing ") +
-                                label + ".");
-  }
-  std::string result(value);
-  if (result.find(':') != std::string::npos) {
-    throw std::invalid_argument(std::string("Operation plugin ") + label +
-                                " contains reserved ':' separator.");
-  }
-  return result;
-}
-
-/**
- * @brief Validates one plugin operation callback at the raw host boundary.
- * @tparam Callback Public std::function callback type.
- * @param callback Callback received directly through the raw registrar slot.
- * @param label Stable diagnostic label.
- * @return Nothing.
- * @throws std::invalid_argument when callback has no callable target.
- * @note Every raw registrar callback invokes this helper before adapting or
- * publishing anything to the shadow registry, independently defending callers
- * that bypass the typed SDK helpers.
- */
-template <typename Callback>
-void require_operation_callback(const Callback& callback, const char* label) {
-  if (!callback) {
-    throw std::invalid_argument(
-        std::string("Operation plugin supplied empty ") + label + " callback.");
-  }
-}
-
-/**
- * @brief Registers an HP monolithic callback through the host registry.
- *
- * @param user_data Opaque registrar context created by the loader.
- * @param type Borrowed operation type string.
- * @param subtype Borrowed operation subtype string.
- * @param fn Monolithic callback moved from the plugin into the registry.
- * @param meta Metadata associated with the HP implementation.
- * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context, names, empty
- * callback, unknown metadata enumerator, negative cost, malformed/duplicate/
- * over-limit/reserved/overlapping output declaration, or malformed exclusive
- * key; the loader reports this as `GraphErrc::InvalidParameter`.
- * @throws Exceptions from `OpRegistry` callback storage may propagate.
- * @note This callback is the host-side implementation of
- * `OperationPluginRegistrar::register_op_hp_monolithic`. Complete metadata
- * conversion and core validation precede shadow-registry mutation. Successful
- * snapshots retain the DSO lease and may be invoked concurrently according to
- * their frozen metadata.
- */
-void registrar_register_hp_monolithic(void* user_data, const char* type,
-                                      const char* subtype,
-                                      plugin::MonolithicOperation fn,
-                                      plugin::OperationMetadata meta) {
-  require_operation_callback(fn, "HP monolithic");
-  auto& context = require_registrar_context(user_data);
-  context.registry->register_op_hp_monolithic(
-      require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"),
-      plugin_host::adapt_monolithic_operation(
-          retain_plugin_library(context.library_lifetime, std::move(fn)),
-          context.library_lifetime),
-      plugin_host::operation_metadata_to_private(meta));
-}
-
-/**
- * @brief Registers an HP tiled callback through the host registry.
- *
- * @param user_data Opaque registrar context created by the loader.
- * @param type Borrowed operation type string.
- * @param subtype Borrowed operation subtype string.
- * @param fn Tiled callback moved from the plugin into the registry.
- * @param meta Metadata associated with the HP tiled implementation.
- * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context, names, empty
- * callback, unknown metadata enumerator, negative cost, malformed/duplicate/
- * over-limit/reserved/overlapping output declaration, malformed exclusive key,
- * or any schema other than exactly the canonical image; the loader reports
- * this as `GraphErrc::InvalidParameter`.
- * @throws Exceptions from `OpRegistry` callback storage may propagate.
- * @note This callback is the host-side implementation of
- * `OperationPluginRegistrar::register_op_hp_tiled`. Metadata conversion and
- * image-only core validation precede capture, revision/generation changes, and
- * shadow-registry mutation. Successful wrappers retain the DSO lease; tile
- * pointers remain invocation-scoped and callbacks may run concurrently.
- */
-void registrar_register_hp_tiled(void* user_data, const char* type,
-                                 const char* subtype, plugin::TiledOperation fn,
-                                 plugin::OperationMetadata meta) {
-  require_operation_callback(fn, "HP tiled");
-  auto& context = require_registrar_context(user_data);
-  context.registry->register_op_hp_tiled(
-      require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"),
-      plugin_host::adapt_tiled_operation(
-          retain_plugin_library(context.library_lifetime, std::move(fn))),
-      plugin_host::operation_metadata_to_private(meta));
-}
-
-/**
- * @brief Registers an RT tiled callback through the host registry.
- *
- * @param user_data Opaque registrar context created by the loader.
- * @param type Borrowed operation type string.
- * @param subtype Borrowed operation subtype string.
- * @param fn Tiled callback moved from the plugin into the registry.
- * @param meta Metadata associated with the RT tiled implementation.
- * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context, names, empty
- * callback, unknown metadata enumerator, negative cost, malformed/duplicate/
- * over-limit/reserved/overlapping output declaration, malformed exclusive key,
- * or any schema other than exactly the canonical image; the loader reports
- * this as `GraphErrc::InvalidParameter`.
- * @throws Exceptions from `OpRegistry` callback storage may propagate.
- * @note This callback is the host-side implementation of
- * `OperationPluginRegistrar::register_op_rt_tiled`. Metadata conversion and
- * image-only core validation precede capture, revision/generation changes, and
- * shadow-registry mutation. Successful wrappers retain the DSO lease; tile
- * pointers remain invocation-scoped and callbacks may run concurrently.
- */
-void registrar_register_rt_tiled(void* user_data, const char* type,
-                                 const char* subtype, plugin::TiledOperation fn,
-                                 plugin::OperationMetadata meta) {
-  require_operation_callback(fn, "RT tiled");
-  auto& context = require_registrar_context(user_data);
-  context.registry->register_op_rt_tiled(
-      require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"),
-      plugin_host::adapt_tiled_operation(
-          retain_plugin_library(context.library_lifetime, std::move(fn))),
-      plugin_host::operation_metadata_to_private(meta));
-}
-
-/**
- * @brief Registers a dirty ROI propagator through the host registry.
- *
- * @param user_data Opaque registrar context created by the loader.
- * @param type Borrowed operation type string.
- * @param subtype Borrowed operation subtype string.
- * @param fn Propagator moved from the plugin into the registry.
- * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context, names, or an
- * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
- * @throws Exceptions from `OpRegistry` callback storage may propagate.
- * @note The active registration capture records the touched operation key.
- */
-void registrar_register_dirty_propagator(void* user_data, const char* type,
-                                         const char* subtype,
-                                         plugin::DirtyRoiPropagator fn) {
-  require_operation_callback(fn, "dirty ROI");
-  auto& context = require_registrar_context(user_data);
-  context.registry->register_dirty_propagator(
-      require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"),
-      plugin_host::adapt_dirty_propagator(
-          retain_plugin_library(context.library_lifetime, std::move(fn))));
-}
-
-/**
- * @brief Registers a forward ROI propagator through the host registry.
- *
- * @param user_data Opaque registrar context created by the loader.
- * @param type Borrowed operation type string.
- * @param subtype Borrowed operation subtype string.
- * @param fn Propagator moved from the plugin into the registry.
- * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context, names, or an
- * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
- * @throws Exceptions from `OpRegistry` callback storage may propagate.
- * @note The active registration capture records the touched operation key.
- */
-void registrar_register_forward_propagator(void* user_data, const char* type,
-                                           const char* subtype,
-                                           plugin::ForwardRoiPropagator fn) {
-  require_operation_callback(fn, "forward ROI");
-  auto& context = require_registrar_context(user_data);
-  context.registry->register_forward_propagator(
-      require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"),
-      plugin_host::adapt_forward_propagator(
-          retain_plugin_library(context.library_lifetime, std::move(fn))));
-}
-
-/**
- * @brief Registers a dependency LUT builder through the host registry.
- *
- * @param user_data Opaque registrar context created by the loader.
- * @param type Borrowed operation type string.
- * @param subtype Borrowed operation subtype string.
- * @param fn Builder moved from the plugin into the registry.
- * @param data_dependent Whether image content revisions participate in cache
- * identity for this builder.
- * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context, names, or an
- * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
- * @throws Exceptions from `OpRegistry` callback storage may propagate.
- * @note Callback and dependency mode are registered in the same shadow
- * transaction. The active registration capture records the touched operation
- * key, and candidate rollback restores both ownership slots together.
- */
-void registrar_register_dependency_builder(void* user_data, const char* type,
-                                           const char* subtype,
-                                           plugin::DependencyLutBuilder fn,
-                                           bool data_dependent) {
-  require_operation_callback(fn, "dependency LUT");
-  auto& context = require_registrar_context(user_data);
-  context.registry->register_dependency_builder(
-      require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"),
-      plugin_host::adapt_dependency_builder(
-          retain_plugin_library(context.library_lifetime, std::move(fn))),
-      data_dependent);
-}
-
-/**
- * @brief Registers a device-specific monolithic callback through the host.
- *
- * @param user_data Opaque registrar context created by the loader.
- * @param type Borrowed operation type string.
- * @param subtype Borrowed operation subtype string.
- * @param device Device capability label for the implementation.
- * @param fn Monolithic callback moved from the plugin into the registry.
- * @param meta Metadata associated with the device implementation.
- * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context, names, empty
- * callback, unknown device/metadata enumerator, negative cost,
- * malformed/duplicate/over-limit/reserved/overlapping output declaration, or
- * malformed exclusive key; the loader reports this as
- * `GraphErrc::InvalidParameter`.
- * @throws Exceptions from `OpRegistry` callback storage may propagate.
- * @note This callback preserves the host-owned implementation selection policy.
- *       Metadata conversion/core validation precede shadow-registry mutation;
- *       successful snapshots retain the DSO lease and may execute concurrently.
- *       BUILD_TESTING retirement observation is borrowed and process-global;
- *       the installing test must keep it alive until every retained wrapper
- *       copy is destroyed and serialize observer clearing with that retirement.
- */
-void registrar_register_device_monolithic(void* user_data, const char* type,
-                                          const char* subtype, Device device,
-                                          plugin::MonolithicOperation fn,
-                                          plugin::OperationMetadata meta) {
-  require_operation_callback(fn, "device monolithic");
-  auto& context = require_registrar_context(user_data);
-  context.registry->register_impl(
-      require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"),
-      plugin_host::operation_device_to_private(device),
-      plugin_host::adapt_monolithic_operation(
-          retain_plugin_library(context.library_lifetime, std::move(fn), true),
-          context.library_lifetime),
-      plugin_host::operation_metadata_to_private(meta));
-}
-
-/**
- * @brief Registers a device-specific tiled callback through the host.
- *
- * @param user_data Opaque registrar context created by the loader.
- * @param type Borrowed operation type string.
- * @param subtype Borrowed operation subtype string.
- * @param device Device capability label for the implementation.
- * @param fn Tiled callback moved from the plugin into the registry.
- * @param meta Metadata associated with the device implementation.
- * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context, names, empty
- * callback, unknown device/metadata enumerator, negative cost,
- * malformed/duplicate/over-limit/reserved/overlapping output declaration,
- * malformed exclusive key, or any schema other than exactly the canonical
- * image; the loader reports this as `GraphErrc::InvalidParameter`.
- * @throws Exceptions from `OpRegistry` callback storage may propagate.
- * @note This callback preserves the host-owned implementation selection policy.
- *       Metadata conversion and image-only core validation precede capture,
- *       revision/generation changes, and shadow-registry mutation. Successful
- *       wrappers retain the DSO lease; tile pointers are invocation-scoped and
- *       callbacks may execute concurrently.
- *       BUILD_TESTING retirement observation is borrowed and process-global;
- *       the installing test must keep it alive until every retained wrapper
- *       copy is destroyed and serialize observer clearing with that retirement.
- */
-void registrar_register_device_tiled(void* user_data, const char* type,
-                                     const char* subtype, Device device,
-                                     plugin::TiledOperation fn,
-                                     plugin::OperationMetadata meta) {
-  require_operation_callback(fn, "device tiled");
-  auto& context = require_registrar_context(user_data);
-  context.registry->register_impl(
-      require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"),
-      plugin_host::operation_device_to_private(device),
-      plugin_host::adapt_tiled_operation(
-          retain_plugin_library(context.library_lifetime, std::move(fn), true)),
-      plugin_host::operation_metadata_to_private(meta));
-}
-
-/**
- * @brief Builds the registrar table passed to a plugin registration entry.
- *
- * @param context Host context whose lifetime covers the registration call.
- * @return Registrar populated with every supported operation registration
- * callback.
- * @throws Nothing.
- * @note The returned value is borrowed by plugin code only for the immediate
- * `register_photospider_ops_v2` call.
- */
-plugin::OperationPluginRegistrar make_operation_plugin_registrar(
-    HostRegistrarContext& context) {
-  plugin::OperationPluginRegistrar registrar;
-  registrar.user_data = &context;
-  registrar.register_hp_monolithic = registrar_register_hp_monolithic;
-  registrar.register_hp_tiled = registrar_register_hp_tiled;
-  registrar.register_rt_tiled = registrar_register_rt_tiled;
-  registrar.register_dirty = registrar_register_dirty_propagator;
-  registrar.register_forward = registrar_register_forward_propagator;
-  registrar.register_dependency = registrar_register_dependency_builder;
-  registrar.register_device_monolithic = registrar_register_device_monolithic;
-  registrar.register_device_tiled = registrar_register_device_tiled;
-  return registrar;
-}
-
+/** @brief Exact operation ABI-v1 root discovery entry. */
+using GetOperationApi = ps_operation_plugin_get_api_fn_v1;
 /**
  * @brief Returns the platform shared-library suffix for operation plugins.
  *
@@ -1129,8 +629,7 @@ class OperationPluginLoadTransaction final {
  * @brief Captures plugin registration inside an unpublished shadow registry.
  *
  * @param registry Host registry that owns the transactional capture.
- * @param register_ops Resolved canonical plugin registration entry.
- * @param library_lifetime Candidate library lease captured by every callback.
+ * @param generation Validated candidate generation captured by every callback.
  * @param registration_capture Destination snapshot populated by the registry.
  * @return Nothing.
  * @throws Exceptions from registrar construction, plugin registration, or
@@ -1143,20 +642,11 @@ class OperationPluginLoadTransaction final {
  * fresh host-owned instance before this lifetime can retire.
  */
 void capture_plugin_registration(
-    OpRegistry& registry, RegisterOpsFunc register_ops,
-    std::shared_ptr<void> library_lifetime,
+    OpRegistry& registry,
+    const std::shared_ptr<plugin_host::OperationPluginGeneration>& generation,
     OpRegistry::RegistrationCapture& registration_capture) {
-  try {
-    registry.capture_registration(
-        [&]() {
-          HostRegistrarContext context{&registry, std::move(library_lifetime)};
-          auto registrar = make_operation_plugin_registrar(context);
-          register_ops(&registrar);
-        },
-        registration_capture);
-  } catch (...) {
-    throw;
-  }
+  registry.capture_registration([&]() { generation->register_into(registry); },
+                                registration_capture);
 }
 
 /**
@@ -1220,22 +710,57 @@ void load_one_plugin(const fs::path& path,
     return;
   }
 
-  auto register_ops = library->resolve<RegisterOpsFunc>(
-      plugin::kOperationPluginRegisterSymbolV2, error_message);
-  if (!register_ops) {
+  auto get_abi_version = library->resolve<GetOperationAbiVersion>(
+      PS_OPERATION_PLUGIN_GET_ABI_VERSION_SYMBOL, error_message);
+  if (!get_abi_version) {
+    staged_result.errors.push_back(
+        {absolute_path, GraphErrc::InvalidParameter, error_message});
+    swap_plugin_load_result(result, staged_result);
+    return;
+  }
+  auto get_api = library->resolve<GetOperationApi>(
+      PS_OPERATION_PLUGIN_GET_API_V1_SYMBOL, error_message);
+  if (!get_api) {
     staged_result.errors.push_back(
         {absolute_path, GraphErrc::InvalidParameter, error_message});
     swap_plugin_load_result(result, staged_result);
     return;
   }
 
+  std::shared_ptr<plugin_host::OperationPluginGeneration> generation;
+  try {
+    generation = plugin_host::OperationPluginGeneration::create(
+        library->lifetime(), get_abi_version, get_api);
+  } catch (const std::bad_alloc&) {
+    throw std::bad_alloc();
+  } catch (const GraphError& error) {
+    staged_result.errors.push_back({absolute_path, error.code(), error.what()});
+    swap_plugin_load_result(result, staged_result);
+    return;
+  } catch (const std::invalid_argument& error) {
+    staged_result.errors.push_back(
+        {absolute_path, GraphErrc::InvalidParameter, error.what()});
+    swap_plugin_load_result(result, staged_result);
+    return;
+  } catch (const std::exception& error) {
+    staged_result.errors.push_back(
+        {absolute_path, GraphErrc::Unknown, error.what()});
+    swap_plugin_load_result(result, staged_result);
+    return;
+  } catch (...) {
+    staged_result.errors.push_back(
+        {absolute_path, GraphErrc::Unknown,
+         "operation ABI discovery failed with an unknown exception"});
+    swap_plugin_load_result(result, staged_result);
+    return;
+  }
+
   auto& registry = OpRegistry::instance();
-  OperationPluginLoadTransaction transaction(
-      library->lifetime(), registry, op_sources, loaded_plugins, staged_result);
+  OperationPluginLoadTransaction transaction(generation, registry, op_sources,
+                                             loaded_plugins, staged_result);
   auto& registration_capture = transaction.registration_capture();
   try {
-    capture_plugin_registration(transaction.registry(), register_ops,
-                                transaction.library_lifetime(),
+    capture_plugin_registration(transaction.registry(), generation,
                                 registration_capture);
   } catch (const std::bad_alloc&) {
     throw std::bad_alloc();
@@ -1257,7 +782,7 @@ void load_one_plugin(const fs::path& path,
   } catch (...) {
     transaction.result().errors.push_back(
         {absolute_path, GraphErrc::Unknown,
-         "register_photospider_ops_v2 threw"});
+         "operation ABI registration failed with an unknown exception"});
     transaction.commit_result_only(result);
     return;
   }

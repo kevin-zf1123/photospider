@@ -62,6 +62,12 @@ IsolatedCpuTensorDescriptor test_tensor(std::uint64_t capability_id,
                                         IsolatedCpuTensorAccess access) {
   IsolatedCpuTensorDescriptor tensor;
   tensor.access = access;
+  tensor.port_identity = test_opaque_id(
+      access == IsolatedCpuTensorAccess::InputReadOnly ? 97U : 113U);
+  tensor.binding_identity = test_opaque_id(
+      access == IsolatedCpuTensorAccess::InputReadOnly ? 98U : 114U);
+  tensor.schema_identity = test_opaque_id(99U);
+  tensor.layout_identity = test_opaque_id(100U);
   tensor.capability_id = capability_id;
   tensor.capability_length = 6U;
   tensor.element_semantics = IsolatedCpuElementSemantics::UnsignedInteger;
@@ -74,6 +80,7 @@ IsolatedCpuTensorDescriptor test_tensor(std::uint64_t capability_id,
   } else {
     tensor.readiness = IsolatedCpuTensorReadiness::WritableOutput;
     tensor.ownership = IsolatedCpuTensorOwnership::RuntimeOutput;
+    tensor.allocation_alignment = 1U;
   }
   return tensor;
 }
@@ -88,6 +95,9 @@ IsolatedCpuInvocationRequest test_request() {
   IsolatedCpuInvocationRequest request;
   request.identity = test_identity();
   request.operation = "test.copy";
+  request.operation_identity = test_opaque_id(121U);
+  request.implementation_identity = test_opaque_id(137U);
+  request.configuration_schema_identity = test_opaque_id(153U);
   IsolatedCpuScalarParameter enabled;
   enabled.name = "alpha";
   enabled.kind = IsolatedCpuScalarKind::Boolean;
@@ -117,6 +127,60 @@ IsolatedCpuInvocationRequest test_request() {
 }
 
 /**
+ * @brief Creates a negative-origin rich-image protocol-v2 request.
+ * @return One input/output request carrying complete channel/sample/color,
+ * padded layout, Region, identity, and immutable-plan facts.
+ * @throws Protocol, digest, Region, or allocation errors unchanged.
+ */
+IsolatedCpuInvocationRequest rich_image_request() {
+  IsolatedCpuInvocationRequest request = test_request();
+  IsolatedCpuImageFacet facet;
+  facet.x_axis = 1U;
+  facet.y_axis = 0U;
+  facet.channel_axis = 2U;
+  facet.data_window = ImageBounds{-3, -2, 0, 0};
+  facet.display_window = ImageBounds{-5, -4, 5, 4};
+  ChannelSchema schema;
+  schema.channels = {
+      ChannelDescription{ChannelId{10U}, "red"},
+      ChannelDescription{ChannelId{20U}, "green"},
+      ChannelDescription{ChannelId{30U}, "blue"},
+      ChannelDescription{ChannelId{40U}, "alpha"},
+  };
+  schema.groups = {ChannelGroupDescription{
+      ChannelGroupId{100U}, "display color",
+      std::vector<ChannelId>{ChannelId{10U}, ChannelId{20U}, ChannelId{30U}}}};
+  facet.channel_schema = std::move(schema);
+  SampleDomainFacet sample;
+  sample.encoding.kind = SampleEncodingKind::Normalized;
+  sample.default_domain = SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0};
+  sample.per_channel = {ChannelSampleDomain{
+      ChannelId{40U}, SampleDomain{SampleDomainKind::Legal, 0.1, 0.9}}};
+  facet.sample_domain = std::move(sample);
+  facet.color = ColorFacet{1U, ChannelGroupId{100U},
+                           ColorTransferFunction::Srgb, ColorPrimaries::Rec709};
+  const RegionSet full_region = RegionSet::from_image_rect(
+      ImageRect{image_region_domain(), -3, 0, -2, 0});
+  for (IsolatedCpuTensorDescriptor& tensor : request.tensors) {
+    tensor.extents = {2U, 3U, 4U};
+    tensor.byte_strides = {16, 4, 1};
+    tensor.capability_length = 28U;
+    tensor.image_facet = facet;
+    tensor.facet_identity = test_opaque_id(169U);
+    tensor.region = full_region;
+  }
+  request.tensors[1].allocation_alignment = 16U;
+  request.capabilities[0].byte_size = 28U;
+  request.capabilities[1].byte_size = 28U;
+  request.resources.shared_memory_bytes = 56U;
+  const std::array<std::byte, 28U> input{};
+  request.tensors[0].content_binding = compute_isolated_cpu_content_binding(
+      request.identity, request.tensors[0], input.data(), input.size());
+  validate_isolated_cpu_invocation_request(request, {});
+  return request;
+}
+
+/**
  * @brief Creates one successful exact-plan response for a valid test request.
  * @param request Exact retained request.
  * @return Digest-bound six-byte output candidate.
@@ -132,9 +196,10 @@ IsolatedCpuInvocationResponse test_response(
   IsolatedCpuTensorDescriptor output = request.tensors[request.input_count];
   output.readiness = IsolatedCpuTensorReadiness::ReadyOutputCandidate;
   output.ownership = IsolatedCpuTensorOwnership::HostOutputCandidate;
-  const std::array<std::byte, 6U> output_bytes{std::byte{7},  std::byte{8},
-                                               std::byte{9},  std::byte{10},
-                                               std::byte{11}, std::byte{12}};
+  output.written_offset = 0U;
+  output.written_length = output.capability_length;
+  const std::vector<std::byte> output_bytes(
+      static_cast<std::size_t>(output.capability_length), std::byte{7});
   output.content_binding = compute_isolated_cpu_content_binding(
       request.identity, output, output_bytes.data(), output_bytes.size());
   response.outputs.push_back(std::move(output));
@@ -253,7 +318,7 @@ struct RequestWireOffsets final {
  * @return Checked offsets for parameter, capability, and stride mutations.
  * @throws std::runtime_error when the deterministic fixture shape changes.
  * @throws std::bad_alloc when bounded offset storage cannot allocate.
- * @note This parser is test-only and intentionally follows protocol-v1 field
+ * @note This parser is test-only and intentionally follows protocol-v2 field
  * order so mutations exercise the production top-level decoder.
  */
 RequestWireOffsets locate_request_wire_offsets(
@@ -262,6 +327,7 @@ RequestWireOffsets locate_request_wire_offsets(
   std::size_t cursor = kIsolatedCpuPacketHeaderBytes;
   skip_wire_bytes(packet, kEncodedIdentityBytes, &cursor);
   static_cast<void>(skip_wire_string(packet, &cursor));
+  skip_wire_bytes(packet, 3U * 16U, &cursor);
 
   RequestWireOffsets offsets;
   const std::uint32_t parameter_count = read_wire_u32(packet, &cursor);
@@ -296,6 +362,11 @@ RequestWireOffsets locate_request_wire_offsets(
     }
   }
 
+  if (read_wire_u32(packet, &cursor) != 0U) {
+    throw std::runtime_error(
+        "isolated CPU scalar fixture unexpectedly has recursive config");
+  }
+
   const std::uint32_t capability_count = read_wire_u32(packet, &cursor);
   offsets.capability_id_offsets.reserve(capability_count);
   for (std::uint32_t index = 0U; index < capability_count; ++index) {
@@ -308,7 +379,9 @@ RequestWireOffsets locate_request_wire_offsets(
   if (tensor_count == 0U) {
     throw std::runtime_error("isolated CPU test request has no tensor");
   }
-  skip_wire_bytes(packet, 2U + 5U + 8U + 8U + 8U + 1U + 1U + 4U, &cursor);
+  skip_wire_bytes(
+      packet, 2U + 5U + (5U * 16U) + (2U * 8U) + 8U + 8U + 8U + 1U + 1U + 4U,
+      &cursor);
   const std::uint32_t extent_count = read_wire_u32(packet, &cursor);
   skip_wire_bytes(packet, static_cast<std::size_t>(extent_count) * 8U, &cursor);
   const std::uint32_t stride_count = read_wire_u32(packet, &cursor);
@@ -339,6 +412,81 @@ TEST(IsolatedCpuInvocationProtocol, RequestAndResponseRoundTripExactly) {
   EXPECT_EQ(encode_isolated_cpu_invocation_response(decoded_request,
                                                     decoded_response, {}),
             response_packet);
+}
+
+TEST(IsolatedCpuInvocationProtocol,
+     RichImageMetadataAndImmutablePlanRoundTripExactly) {
+  const IsolatedCpuInvocationRequest request = rich_image_request();
+  const std::vector<std::byte> request_packet =
+      encode_isolated_cpu_invocation_request(request, {});
+  const IsolatedCpuInvocationRequest decoded_request =
+      decode_isolated_cpu_invocation_request(request_packet, {});
+  ASSERT_EQ(decoded_request, request);
+  ASSERT_TRUE(decoded_request.tensors[0].image_facet.has_value());
+  EXPECT_EQ(decoded_request.tensors[0]
+                .image_facet->channel_schema->channels[0]
+                .diagnostic_name,
+            "red");
+  EXPECT_EQ(decoded_request.tensors[0].image_facet->data_window.x_begin, -3);
+  EXPECT_EQ(decoded_request.tensors[1].allocation_alignment, 16U);
+  EXPECT_EQ(decoded_request.tensors[1].region, request.tensors[1].region);
+
+  const IsolatedCpuInvocationResponse valid = test_response(request);
+  EXPECT_NO_THROW(
+      validate_isolated_cpu_invocation_response(request, valid, {}));
+
+  IsolatedCpuInvocationResponse hostile = valid;
+  hostile.outputs[0].binding_identity = test_opaque_id(201U);
+  EXPECT_THROW(validate_isolated_cpu_invocation_response(request, hostile, {}),
+               IsolatedCpuProtocolError);
+
+  hostile = valid;
+  hostile.outputs[0].image_facet->data_window.x_begin -= 1;
+  EXPECT_THROW(validate_isolated_cpu_invocation_response(request, hostile, {}),
+               IsolatedCpuProtocolError);
+
+  hostile = valid;
+  hostile.outputs[0].written_length -= 1U;
+  EXPECT_THROW(validate_isolated_cpu_invocation_response(request, hostile, {}),
+               IsolatedCpuProtocolError);
+}
+
+TEST(IsolatedCpuInvocationProtocol,
+     RecursiveConfigurationRoundTripsAndRejectsHostileRelationships) {
+  IsolatedCpuInvocationRequest request = test_request();
+  request.parameters.clear();
+  IsolatedCpuConfigurationNode root;
+  root.kind = IsolatedCpuConfigurationKind::Object;
+  root.first_child = 1U;
+  root.child_count = 2U;
+  IsolatedCpuConfigurationNode array;
+  array.kind = IsolatedCpuConfigurationKind::Array;
+  array.key = "items";
+  array.first_child = 3U;
+  array.child_count = 2U;
+  IsolatedCpuConfigurationNode threshold;
+  threshold.kind = IsolatedCpuConfigurationKind::FloatingPoint;
+  threshold.key = "threshold";
+  threshold.floating_value = 0.5;
+  IsolatedCpuConfigurationNode item;
+  item.kind = IsolatedCpuConfigurationKind::SignedInteger;
+  item.signed_value = -7;
+  IsolatedCpuConfigurationNode null_item;
+  request.configuration = {root, array, threshold, item, null_item};
+
+  const std::vector<std::byte> packet =
+      encode_isolated_cpu_invocation_request(request, {});
+  EXPECT_EQ(decode_isolated_cpu_invocation_request(packet, {}), request);
+
+  IsolatedCpuInvocationRequest hostile = request;
+  hostile.configuration[2].key = "items";
+  EXPECT_THROW(validate_isolated_cpu_invocation_request(hostile, {}),
+               IsolatedCpuProtocolError);
+
+  hostile = request;
+  hostile.configuration[1].first_child = 2U;
+  EXPECT_THROW(validate_isolated_cpu_invocation_request(hostile, {}),
+               IsolatedCpuProtocolError);
 }
 
 TEST(IsolatedCpuInvocationProtocol,

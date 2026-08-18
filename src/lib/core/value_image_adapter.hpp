@@ -68,15 +68,15 @@ void validate_image_buffer_compatible_value(const Value& value);
 ImageBuffer snapshot_cpu_image_buffer(const Value& value);
 
 /**
- * @brief Projects one sealed image Value into the current operation ABI v2.
+ * @brief Projects one sealed image Value into a source-private ImageBuffer.
  *
  * @param value Valid Ready image Value consumed by one compatibility callback.
  * @return A Host-owned CPU snapshot for a host-readable binding, or the exact
- * retained opaque backend descriptor for an imported ABI v2 binding.
+ * retained opaque backend descriptor from an imported compatibility image.
  * @throws std::invalid_argument for non-image or unsupported logical facts.
  * @throws ReadyFenceAccessError when producer completion is not Ready.
  * @throws BufferAccessError when a non-host-visible Value lacks the exact
- * imported ABI v2 projection retained at its inbound adapter.
+ * imported ImageBuffer projection retained at its inbound adapter.
  * @throws std::logic_error when retained private projection metadata disagrees
  * with the immutable Value or binding facts.
  * @throws std::out_of_range, std::overflow_error, or std::bad_alloc from CPU
@@ -86,7 +86,7 @@ ImageBuffer snapshot_cpu_image_buffer(const Value& value);
  * readiness, Region, cache, or runtime authority. No mapping, transfer, or
  * device pixel access is inferred.
  */
-ImageBuffer project_image_value_for_abi_v2(const Value& value);
+ImageBuffer project_image_value_for_image_buffer_edge(const Value& value);
 
 /**
  * @brief Imports one inbound compatibility image as the sole Value output.
@@ -106,7 +106,8 @@ ImageBuffer project_image_value_for_abi_v2(const Value& value);
  * bytes are snapshotted into Host-owned storage. A non-CPU opaque binding is
  * retained as an immediately Ready imported allocation with tight rows when
  * the legacy descriptor omits its stride; its exact descriptor/context is
- * retained with that single binding for a later ABI v2 callback projection.
+ * retained with that single binding for a later source-private ImageBuffer
+ * projection.
  * This is an explicit ABI/codec boundary conversion, never a formal-commit
  * fallback or a second runtime authority.
  */
@@ -171,9 +172,9 @@ bool node_output_region_is_complete(const NodeOutput& output,
  * @throws std::bad_alloc when complete descriptor/ImageFacet snapshots,
  *         coordinate or output storage, or immutable Value publication cannot
  *         allocate.
- * @note This source-private bridge changes neither operation ABI v2 nor the
- *       immutable Value contract. Empty returns `existing`; Whole returns
- *       `update`.
+ * @note This source-private bridge changes neither the operation plugin ABI
+ *       nor the immutable Value contract. Empty returns `existing`; Whole
+ *       returns `update`.
  */
 std::optional<NodeOutput> merge_node_output_region(
     const NodeOutput& existing, const NodeOutput& update,

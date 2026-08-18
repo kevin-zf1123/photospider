@@ -2,62 +2,51 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <limits>
-#include <memory>
 #include <new>
 #include <stdexcept>
-#include <string>
 #include <thread>
-#include <utility>
 
-#include "photospider/plugin/plugin_api.hpp"
+#include "photospider/plugin/operation_plugin.hpp"
 
+namespace ps::operation_plugin {
 namespace {
 
+/** @brief Environment variable selecting the lifecycle trace file. */
 constexpr const char* kTraceEnvironment = "PS_LIFECYCLE_PLUGIN_TRACE";
-constexpr const char* kThrowEnvironment = "PS_LIFECYCLE_PLUGIN_REGISTRAR_THROW";
+/** @brief Environment variable selecting an in-flight callback release file. */
 constexpr const char* kCallbackReleaseEnvironment =
-    "PS_LIFECYCLE_PLUGIN_CALLBACK_RELEASE_FILE";  // NOLINT(whitespace/indent_namespace)
+    "PS_LIFECYCLE_PLUGIN_CALLBACK_RELEASE_FILE";
+/** @brief Environment variable selecting a plugin-local exception mode. */
 constexpr const char* kCallbackThrowEnvironment =
-    "PS_LIFECYCLE_PLUGIN_CALLBACK_THROW";  // NOLINT(whitespace/indent_namespace)
-constexpr const char* kRegistrarReleaseEnvironment =
-    "PS_LIFECYCLE_PLUGIN_REGISTRAR_RELEASE_FILE";  // NOLINT(whitespace/indent_namespace)
-constexpr const char* kResultProbeEnvironment =
-    "PS_LIFECYCLE_PLUGIN_RESULT_PROBE";  // NOLINT(whitespace/indent_namespace)
-constexpr const char* kInvalidResultEnvironment =
-    "PS_LIFECYCLE_PLUGIN_INVALID_RESULT";  // NOLINT(whitespace/indent_namespace)
-constexpr const char* kDeviceRegistrarEnvironment =
-    "PS_LIFECYCLE_PLUGIN_REGISTER_DEVICES";  // NOLINT(whitespace/indent_namespace)
-constexpr const char* kCpuDeviceRegistrarEnvironment =
-    "PS_LIFECYCLE_PLUGIN_REGISTER_CPU_DEVICE";  // NOLINT(whitespace/indent_namespace)
-constexpr const char* kTaskShapeOverrideEnvironment =
-    "PS_LIFECYCLE_PLUGIN_REGISTER_TASK_SHAPE_OVERRIDE";  // NOLINT(whitespace/indent_namespace)
-constexpr const char* kDataDependentEnvironment =
-    "PS_LIFECYCLE_PLUGIN_DATA_DEPENDENT_LUT";  // NOLINT(whitespace/indent_namespace)
-constexpr const char* kInvalidRoiEnvironment =
-    "PS_LIFECYCLE_PLUGIN_INVALID_ROI";  // NOLINT(whitespace/indent_namespace)
-constexpr const char* kInvalidNameEnvironment =
-    "PS_LIFECYCLE_PLUGIN_INVALID_NAME";  // NOLINT(whitespace/indent_namespace)
-constexpr const char* kEmptyCallbackEnvironment =
-    "PS_LIFECYCLE_PLUGIN_EMPTY_CALLBACK";  // NOLINT(whitespace/indent_namespace)
+    "PS_LIFECYCLE_PLUGIN_CALLBACK_THROW";
+
+/** @brief Permanent lifecycle fixture plugin identity. */
+constexpr auto kPluginIdentity =
+    make_identity(0x50534C4946454359ULL, 0x0001ULL);
+/** @brief Permanent lifecycle fixture operation identity. */
+constexpr auto kOperationIdentity =
+    make_identity(0x50534C4946454F50ULL, 0x0001ULL);
+/** @brief Permanent lifecycle fixture implementation identity. */
+constexpr auto kImplementationIdentity =
+    make_identity(0x50534C494645494DULL, 0x0001ULL);
+/** @brief Permanent lifecycle fixture configuration identity. */
+constexpr auto kConfigurationIdentity =
+    make_identity(0x50534C4946454346ULL, 0x0001ULL);
 
 /**
- * @brief Appends one real lifecycle event to the test-selected trace file.
- *
- * @param event Stable event label owned by the caller.
+ * @brief Appends one lifecycle event to the test-selected trace file.
+ * @param event Stable event label.
  * @return Nothing.
- * @throws Nothing; file/open/write failures are intentionally ignored in this
- * dynamic-library destructor probe.
- * @note No trace is emitted unless the test process sets
- * `PS_LIFECYCLE_PLUGIN_TRACE`; production-like fixture loads remain unchanged.
+ * @throws Nothing; missing configuration and I/O failures are ignored.
+ * @note Each event is emitted by code that must still be mapped in the DSO.
  */
 void append_lifecycle_trace(const char* event) noexcept {
   const char* path = std::getenv(kTraceEnvironment);
-  if (!path || path[0] == '\0') {
+  if (path == nullptr || path[0] == '\0') {
     return;
   }
   std::FILE* output = std::fopen(path, "a");
-  if (!output) {
+  if (output == nullptr) {
     return;
   }
   (void)std::fputs(event, output);
@@ -66,76 +55,16 @@ void append_lifecycle_trace(const char* event) noexcept {
 }
 
 /**
- * @brief Plugin-defined ordinary exception used to audit DSO retirement.
- * @throws Nothing from destruction or what().
- * @note Both virtual calls trace execution so the host test proves they occur
- * before the dynamic library is unmapped.
- */
-class LifecycleCallbackException final : public std::exception {
- public:
-  /** @brief Traces destruction of the plugin-owned exception object. */
-  ~LifecycleCallbackException() override {
-    append_lifecycle_trace("exception_destroy");
-  }
-
-  /**
-   * @brief Returns the deterministic plugin diagnostic.
-   * @return Static message owned by the mapped fixture library.
-   * @throws Nothing.
-   */
-  const char* what() const noexcept override {
-    append_lifecycle_trace("exception_what");
-    return "lifecycle plugin callback exception";
-  }
-};
-
-/**
- * @brief Plugin-defined bad_alloc subtype used to audit category normalization.
- * @throws Nothing from destruction.
- * @note The host must throw a fresh standard bad_alloc rather than rethrow this
- * DSO-owned dynamic type across unload.
- */
-class LifecycleCallbackBadAlloc final : public std::bad_alloc {
- public:
-  /** @brief Traces destruction of the plugin-owned resource exception. */
-  ~LifecycleCallbackBadAlloc() override {
-    append_lifecycle_trace("bad_alloc_exception_destroy");
-  }
-};
-
-/**
- * @brief Plugin-defined invalid-argument subtype used to audit host coding.
- * @throws std::bad_alloc if the standard diagnostic storage cannot allocate.
- * @note Destruction is traced so the host proves the dynamic exception object
- * is retired before the callback state and DSO lease.
- */
-class LifecycleCallbackInvalidArgument final : public std::invalid_argument {
- public:
-  /** @brief Constructs the deterministic plugin-origin diagnostic. */
-  LifecycleCallbackInvalidArgument()
-      : std::invalid_argument("lifecycle plugin invalid argument") {}
-
-  /** @brief Traces destruction of the plugin-owned dynamic exception. */
-  ~LifecycleCallbackInvalidArgument() override {
-    append_lifecycle_trace("invalid_argument_exception_destroy");
-  }
-};
-
-/**
  * @brief Waits until the test process creates one release file.
- *
- * @param release_file Borrowed non-empty path selected through an environment
- *        variable.
+ * @param release_file Borrowed nonempty release path.
  * @return Nothing.
- * @throws Nothing; file-open failures are treated as a not-yet-released state.
- * @note The fixture uses this bounded-by-test handshake for deterministic
- *       callback and registrar overlap. Production plugin behavior leaves the
- *       corresponding environment variables unset.
+ * @throws Nothing; transient file-open failures mean not-yet-released.
+ * @note The test owns the bounded wait and always creates the release file.
  */
 void wait_for_release_file(const char* release_file) noexcept {
   while (true) {
     std::FILE* release = std::fopen(release_file, "r");
-    if (release) {
+    if (release != nullptr) {
       (void)std::fclose(release);
       return;
     }
@@ -143,530 +72,242 @@ void wait_for_release_file(const char* release_file) noexcept {
   }
 }
 
-/**
- * @brief Shared callback owner whose final destruction runs inside the plugin.
- *
- * @note The registered lambda captures one shared instance. Its trace proves
- * all host-side callback copies die before the library-unload destructor runs.
- */
-struct CallbackLifetimeProbe {
-  /**
-   * @brief Records the final callable-state destruction without throwing.
-   * @throws Nothing; trace I/O failures are suppressed by the helper.
-   * @note This destructor must execute while plugin code is still mapped.
-   */
-  ~CallbackLifetimeProbe() { append_lifecycle_trace("callback_destroy"); }
-};
+/** @brief Plugin-defined ordinary exception kept behind the C ABI fence. */
+class LifecycleCallbackException final : public std::exception {
+ public:
+  /** @brief Traces destruction before the callback returns to the Host. */
+  ~LifecycleCallbackException() override {
+    append_lifecycle_trace("exception_destroy");
+  }
 
-/**
- * @brief Plugin-defined state whose final owner traces device-target
- * retirement.
- *
- * @throws Nothing directly; construction stores a borrowed static event label
- *         and destruction suppresses trace I/O failures.
- * @note Host wrappers may copy shared ownership of this state, but its
- *       destructor runs exactly once inside the mapped plugin after the final
- *       callback target is released.
- */
-struct DeviceCallbackLifetimeProbe {
   /**
-   * @brief Selects the trace event emitted at final target retirement.
-   * @param event Stable static event label borrowed for this probe's lifetime.
+   * @brief Returns the deterministic plugin-local failure diagnostic.
+   * @return Static message owned by the mapped DSO.
    * @throws Nothing.
-   * @note Fixture callers pass string literals, so the pointer never dangles.
    */
-  explicit DeviceCallbackLifetimeProbe(const char* event) noexcept
-      : destruction_event(event) {}
-
-  /**
-   * @brief Records final destruction of the plugin-defined callback state.
-   * @throws Nothing; trace I/O failures are suppressed by the helper.
-   * @note The event must precede `library_unload` because host wrappers retain
-   *       the matching dynamic-library lease through callback destruction.
-   */
-  ~DeviceCallbackLifetimeProbe() { append_lifecycle_trace(destruction_event); }
-
-  /** @brief Static trace label emitted by the final state destructor. */
-  const char* destruction_event;
+  const char* what() const noexcept override {
+    append_lifecycle_trace("exception_what");
+    return "lifecycle operation ABI callback exception";
+  }
 };
 
-/**
- * @brief Plugin-defined state stored inside a returned operation image
- * context.
- *
- * @throws Nothing directly.
- * @note The shared-pointer control block and this destructor are instantiated
- * in the dynamic plugin. The host must therefore keep the library mapped until
- * the final copied or moved result payload is destroyed.
- */
-struct ResultLifetimeProbe {
-  /**
-   * @brief Records destruction of the final plugin-instantiated result payload.
-   *
-   * @throws Nothing; trace I/O failures are suppressed by the helper.
-   * @note `result_payload_destroy` must precede `library_unload` after explicit
-   *       global unload and any host-output assignment path.
-   */
-  ~ResultLifetimeProbe() { append_lifecycle_trace("result_payload_destroy"); }
+/** @brief Plugin-defined resource failure kept behind the C ABI fence. */
+class LifecycleCallbackBadAlloc final : public std::bad_alloc {
+ public:
+  /** @brief Traces plugin-local exception destruction. */
+  ~LifecycleCallbackBadAlloc() override {
+    append_lifecycle_trace("bad_alloc_exception_destroy");
+  }
 };
 
-/**
- * @brief Dynamic-library static lifetime probe for real `dlclose`/FreeLibrary.
- *
- * @note The event must follow `callback_destroy` on every failed transaction or
- * explicit unload; otherwise host state may still reference unmapped code.
- */
-struct LibraryLifetimeProbe {
-  /**
-   * @brief Records actual library teardown without surfacing I/O failures.
-   * @throws Nothing; trace I/O failures are suppressed by the helper.
-   * @note Static destruction corresponds to real library unmapping.
-   */
+/** @brief Plugin-owned configured context destroyed exactly once per call. */
+struct LifecycleContext final {
+  /** @brief Magic used to reject a hostile configured-context pointer. */
+  std::uint64_t magic = 0x50534C4946454358ULL;
+
+  /** @brief Traces final configured-context destruction inside the DSO. */
+  ~LifecycleContext() { append_lifecycle_trace("callback_destroy"); }
+};
+
+/** @brief Static probe corresponding to actual native-library retirement. */
+struct LibraryLifetimeProbe final {
+  /** @brief Traces DSO teardown after every Host lease has retired. */
   ~LibraryLifetimeProbe() { append_lifecycle_trace("library_unload"); }
 };
 
-/** @brief Process-per-load static whose destructor proves handle release. */
+/** @brief Process-per-load static whose destructor proves DSO release. */
 LibraryLifetimeProbe library_lifetime_probe;
 
 /**
- * @brief Minimal operation used to verify dynamic plugin lifetime handling.
- *
- * The callback is registered through the multi-implementation operation API so
- * unload tests can prove `OpRegistry::unregister_key` removes `impl_table_`
- * state as well as legacy table entries.
- *
- * @param node Borrowed public node view; unused because the test only verifies
- * registration and unload behavior.
- * @param inputs Borrowed public upstream views; unused by this deterministic
- * fixture.
- * @return Data-bearing public output with a diagnostic device marker.
- * @throws LifecycleCallbackException, LifecycleCallbackBadAlloc, or
- * LifecycleCallbackInvalidArgument in the test-selected exception modes.
- * @throws std::bad_alloc if result-probe allocation, shared ownership, output
- * map/YAML insertion, or diagnostic string storage cannot allocate.
- * @note The function lives inside the dynamic library, so host code must keep
- * the library mapped through invocation completion. Tests may set
- * `PS_LIFECYCLE_PLUGIN_CALLBACK_RELEASE_FILE` to hold a callback in flight
- * until that file appears, allowing deterministic explicit-unload coverage.
+ * @brief Creates one plugin-owned configured context.
+ * @param operation Exact lifecycle operation identity.
+ * @param implementation Exact lifecycle implementation identity.
+ * @param configuration Host-validated immutable configuration tree.
+ * @param context Receives the new plugin-owned pointer.
+ * @return Stable ABI status.
+ * @throws Nothing; allocation failure is returned explicitly.
  */
-ps::plugin::OperationOutput lifecycle_test_op(
-    const ps::plugin::NodeView& node,
-    ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) {
-  (void)node;
-  (void)inputs;
-
-  const char* release_file = std::getenv(kCallbackReleaseEnvironment);
-  if (release_file && release_file[0] != '\0') {
-    append_lifecycle_trace("callback_enter");
-    wait_for_release_file(release_file);
-    append_lifecycle_trace("callback_return");
+ps_operation_status_v1 PS_OPERATION_CALL create_lifecycle_context(
+    void*, const ps_operation_identity_v1* operation,
+    const ps_operation_identity_v1* implementation,
+    const ps_operation_configuration_view_v1* configuration, void** context,
+    const ps_operation_output_sink_v1*) noexcept {
+  if (operation == nullptr || implementation == nullptr ||
+      configuration == nullptr || context == nullptr ||
+      !identity_equal(*operation, kOperationIdentity) ||
+      !identity_equal(*implementation, kImplementationIdentity)) {
+    return PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
   }
-  const char* throw_mode = std::getenv(kCallbackThrowEnvironment);
-  if (throw_mode && std::strcmp(throw_mode, "custom") == 0) {
-    append_lifecycle_trace("callback_throw");
-    throw LifecycleCallbackException();
+  auto* created = new (std::nothrow) LifecycleContext;
+  if (created == nullptr) {
+    return PS_OPERATION_STATUS_OUT_OF_MEMORY_V1;
   }
-  if (throw_mode && std::strcmp(throw_mode, "bad_alloc") == 0) {
-    append_lifecycle_trace("callback_throw_bad_alloc");
-    throw LifecycleCallbackBadAlloc();
-  }
-  if (throw_mode && std::strcmp(throw_mode, "invalid_argument") == 0) {
-    append_lifecycle_trace("callback_throw_invalid_argument");
-    throw LifecycleCallbackInvalidArgument();
-  }
-
-  ps::plugin::OperationOutput output;
-  const char* result_probe = std::getenv(kResultProbeEnvironment);
-  if (result_probe && result_probe[0] != '\0') {
-    output.image_buffer.width = 1;
-    output.image_buffer.height = 1;
-    output.image_buffer.channels = 1;
-    output.image_buffer.type = ps::DataType::UINT8;
-    output.image_buffer.device = ps::Device::GPU_METAL;
-    output.image_buffer.context =
-        std::shared_ptr<void>(new ResultLifetimeProbe());
-  }
-  const char* invalid_result = std::getenv(kInvalidResultEnvironment);
-  if (invalid_result && invalid_result[0] != '\0') {
-    output.image_buffer.width = 1;
-    output.image_buffer.height = 1;
-    output.image_buffer.channels = 1;
-    output.image_buffer.type = ps::DataType::FLOAT32;
-    output.image_buffer.device = ps::Device::CPU;
-    output.image_buffer.step = sizeof(float);
-    output.image_buffer.data.reset();
-    output.image_buffer.context = std::make_shared<int>(7);
-  }
-  output.data["lifecycle_marker"] =
-      ps::plugin::ParameterValue("PLUGIN_LIFECYCLE_TEST");
-  output.spatial.absolute_roi = ps::PixelRect{0, 0, 11, 7};
-  output.debug.compute_device = "PLUGIN_LIFECYCLE_TEST";
-  return output;
+  *context = created;
+  append_lifecycle_trace("context_create");
+  return PS_OPERATION_STATUS_OK_V1;
 }
 
 /**
- * @brief Creates a lifecycle operation retaining one plugin-owned probe.
- *
- * @return Monolithic callback whose final state destruction is traced.
- * @throws std::bad_alloc if shared state or `std::function` allocation fails.
- * @note The callback body delegates to `lifecycle_test_op`; only ownership is
- * extended so tests can audit callback destruction before library unload.
- */
-ps::plugin::MonolithicOperation make_lifecycle_test_op() {
-  auto probe = std::make_shared<CallbackLifetimeProbe>();
-  return [probe = std::move(probe)](
-             const ps::plugin::NodeView& node,
-             ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) {
-    (void)probe;
-    return lifecycle_test_op(node, inputs);
-  };
-}
-
-/**
- * @brief Produces the lifecycle fixture's device-specific monolithic marker.
- *
- * @param node Borrowed public node view; unused by this fixture.
- * @param inputs Borrowed public upstream views; unused by this fixture.
- * @return Output identifying the plugin-owned device implementation.
- * @throws std::bad_alloc if diagnostic string storage cannot allocate.
- * @note The callback intentionally owns no trace probe. Its host wrapper still
- *       retains the real plugin library, while the single HP callback probe
- *       keeps existing lifecycle traces unambiguous.
- */
-ps::plugin::OperationOutput lifecycle_device_monolithic(
-    const ps::plugin::NodeView& node,
-    ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) {
-  (void)node;
-  (void)inputs;
-  ps::plugin::OperationOutput output;
-  output.debug.compute_device = "PLUGIN_DEVICE_MONOLITHIC";
-  return output;
-}
-
-/**
- * @brief Executes the lifecycle fixture's device-specific tiled no-op.
- *
- * @param node Borrowed public node view; unused by this deterministic fixture.
- * @param output Borrowed writable tile; intentionally left unchanged.
- * @param inputs Borrowed public input tiles; unused by this fixture.
- * @return Nothing.
+ * @brief Destroys one configured context exactly once.
+ * @param operation Exact lifecycle operation identity.
+ * @param implementation Exact lifecycle implementation identity.
+ * @param context Plugin-owned context returned by the matching create call.
+ * @return Stable ABI status.
  * @throws Nothing.
- * @note Registration through the real device registrar exercises a tiled
- *       plugin callback and its parallel ownership token without synthetic
- *       test-only registry writes.
  */
-void lifecycle_device_tiled(
-    const ps::plugin::NodeView& node, const ps::OutputTileView& output,
-    ps::plugin::ArrayView<ps::plugin::OperationTileInputView> inputs) {
-  (void)node;
-  (void)output;
-  (void)inputs;
-}
-
-/**
- * @brief Creates the plugin-owned monolithic device target with final-state
- * trace.
- *
- * @return Callback that delegates to `lifecycle_device_monolithic`.
- * @throws std::bad_alloc if probe or callback storage cannot allocate.
- * @note The shared probe emits only after all host wrapper and reader copies
- *       release the original plugin-defined target state.
- */
-ps::plugin::MonolithicOperation make_lifecycle_device_monolithic() {
-  auto probe = std::make_shared<DeviceCallbackLifetimeProbe>(
-      "device_monolithic_target_destroy");
-  return [probe = std::move(probe)](
-             const ps::plugin::NodeView& node,
-             ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) {
-    (void)probe;
-    return lifecycle_device_monolithic(node, inputs);
-  };
-}
-
-/**
- * @brief Creates the plugin-owned tiled device target with final-state trace.
- *
- * @return Callback that delegates to `lifecycle_device_tiled`.
- * @throws std::bad_alloc if probe or callback storage cannot allocate.
- * @note Its final probe event distinguishes tiled target retirement from the
- *       scalar HP callback and monolithic device target.
- */
-ps::plugin::TiledOperation make_lifecycle_device_tiled() {
-  auto probe = std::make_shared<DeviceCallbackLifetimeProbe>(
-      "device_tiled_target_destroy");
-  return [probe = std::move(probe)](
-             const ps::plugin::NodeView& node, const ps::OutputTileView& output,
-             ps::plugin::ArrayView<ps::plugin::OperationTileInputView> inputs) {
-    (void)probe;
-    lifecycle_device_tiled(node, output, inputs);
-  };
-}
-
-/**
- * @brief Stateful CPU device candidate used to audit the stable-owner HP
- * bridge.
- *
- * Copies emit a trace event, while one shared lifetime probe emits the final
- * target-destruction event. Tests record the copy count after registration and
- * require reader snapshots, bridge copies, and unload to leave it unchanged.
- *
- * @throws std::bad_alloc when callback invocation constructs diagnostic output.
- * @note Construction, copying, and moving the target itself do not throw.
- */
-class CpuDeviceMonolithicCallback final {
- public:
-  /**
-   * @brief Creates one callback around the final-target lifetime probe.
-   * @param probe Shared plugin-defined state retained by every genuine copy.
-   * @throws Nothing; ownership is moved into this callback.
-   * @note The caller provides the sole initial probe owner.
-   */
-  explicit CpuDeviceMonolithicCallback(
-      std::shared_ptr<DeviceCallbackLifetimeProbe> probe) noexcept
-      : probe_(std::move(probe)) {}
-
-  /**
-   * @brief Copies the original plugin target and records that operation.
-   * @param other Live plugin target whose shared state is retained.
-   * @throws Nothing; shared-owner copying is noexcept.
-   * @note Host stable-owner readers and HP bridge copies must not invoke this
-   *       constructor after registration has completed.
-   */
-  CpuDeviceMonolithicCallback(const CpuDeviceMonolithicCallback& other) noexcept
-      : probe_(other.probe_) {
-    append_lifecycle_trace("cpu_device_target_copy");
+ps_operation_status_v1 PS_OPERATION_CALL destroy_lifecycle_context(
+    void*, const ps_operation_identity_v1* operation,
+    const ps_operation_identity_v1* implementation, void* context,
+    const ps_operation_output_sink_v1*) noexcept {
+  auto* owned = static_cast<LifecycleContext*>(context);
+  if (operation == nullptr || implementation == nullptr || owned == nullptr ||
+      !identity_equal(*operation, kOperationIdentity) ||
+      !identity_equal(*implementation, kImplementationIdentity) ||
+      owned->magic != 0x50534C4946454358ULL) {
+    return PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
   }
-
-  /**
-   * @brief Transfers plugin target state without creating another owner.
-   * @param other Target relinquishing its shared probe reference.
-   * @throws Nothing.
-   * @note Registration may move this target while constructing std::function.
-   */
-  CpuDeviceMonolithicCallback(CpuDeviceMonolithicCallback&& other) noexcept
-      : probe_(std::move(other.probe_)) {}
-
-  /**
-   * @brief Prevents replacing a live plugin target through copy assignment.
-   * @param other Target that retains its existing shared state.
-   * @return No value because this operation is deleted.
-   * @throws Nothing; operation is deleted.
-   * @note The callback is immutable after std::function construction.
-   */
-  CpuDeviceMonolithicCallback& operator=(
-      const CpuDeviceMonolithicCallback& other) = delete;
-
-  /**
-   * @brief Prevents replacing a live plugin target through move assignment.
-   * @param other Target that retains its existing shared state.
-   * @return No value because this operation is deleted.
-   * @throws Nothing; operation is deleted.
-   * @note Stable-owner publication moves the surrounding std::function instead.
-   */
-  CpuDeviceMonolithicCallback& operator=(CpuDeviceMonolithicCallback&& other) =
-      delete;
-
-  /**
-   * @brief Produces the deterministic CPU device marker.
-   * @param node Borrowed public node view; unused.
-   * @param inputs Borrowed public upstream views; unused.
-   * @return Output matching both device-reader and HP-bridge invocation paths.
-   * @throws std::bad_alloc if diagnostic string storage cannot allocate.
-   * @note Invocation does not mutate or replace the retained target state.
-   */
-  ps::plugin::OperationOutput operator()(
-      const ps::plugin::NodeView& node,
-      ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) const {
-    (void)node;
-    (void)inputs;
-    ps::plugin::OperationOutput output;
-    output.debug.compute_device = "PLUGIN_CPU_DEVICE_MONOLITHIC";
-    return output;
-  }
-
- private:
-  /** @brief Shared state whose final destructor traces target retirement. */
-  std::shared_ptr<DeviceCallbackLifetimeProbe> probe_;
-};
-
-/**
- * @brief Creates the stateful CPU candidate used by stable-owner bridge tests.
- *
- * @return Monolithic callback containing one plugin-defined stateful target.
- * @throws std::bad_alloc if probe or std::function storage cannot allocate.
- * @note Registration-time target copies are traced before the test records its
- *       baseline; later host readers must share the retained wrapper instead.
- */
-ps::plugin::MonolithicOperation make_lifecycle_cpu_device_monolithic() {
-  return CpuDeviceMonolithicCallback(
-      std::make_shared<DeviceCallbackLifetimeProbe>(
-          "cpu_device_target_destroy"));
+  owned->magic = 0U;
+  delete owned;
+  return PS_OPERATION_STATUS_OK_V1;
 }
 
 /**
- * @brief Propagates lifecycle-fixture dirty demand unchanged.
- *
- * @param context Borrowed public dirty ROI snapshot.
- * @return The unchanged dirty region.
+ * @brief Accepts the lifecycle operation's intentionally empty output plan.
+ * @param invocation Exact callback invocation containing the configured state.
+ * @param inputs Exact empty input-binding array.
+ * @return Stable ABI status.
  * @throws Nothing.
- * @note This explicit plugin-owned slot lets mixed-ownership unload prove that
- *       a later direct callback replacement does not leave plugin code active.
  */
-ps::PixelRect lifecycle_dirty_propagator(
-    const ps::plugin::RoiContext& context) {
-  const char* invalid_roi = std::getenv(kInvalidRoiEnvironment);
-  if (invalid_roi && std::strcmp(invalid_roi, "negative") == 0) {
-    append_lifecycle_trace("dirty_roi_return");
-    return ps::PixelRect{0, 0, -1, 1};
-  }
-  return context.requested_roi;
+ps_operation_status_v1 PS_OPERATION_CALL
+infer_lifecycle(void*, const ps_operation_invocation_v1* invocation,
+                const ps_operation_configuration_view_v1*,
+                const ps_operation_array_ref_v1* inputs,
+                const ps_operation_output_sink_v1*) noexcept {
+  const auto* context = invocation == nullptr
+                            ? nullptr
+                            : static_cast<const LifecycleContext*>(
+                                  invocation->configured_context);
+  return context != nullptr && context->magic == 0x50534C4946454358ULL &&
+                 inputs != nullptr && inputs->count == 0U
+             ? PS_OPERATION_STATUS_OK_V1
+             : PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
 }
 
 /**
- * @brief Propagates lifecycle-fixture affected regions unchanged.
- *
- * @param context Borrowed public forward ROI and active-edge snapshot.
- * @return The unchanged affected region.
+ * @brief Executes the empty lifecycle operation behind the pure-C fence.
+ * @param invocation Exact callback invocation containing the configured state.
+ * @param inputs Exact empty input-binding array.
+ * @param outputs Exact empty mutable-output array.
+ * @param sink Host diagnostic sink used by exception normalization.
+ * @return Stable ABI status.
+ * @throws Nothing; all plugin-local exceptions are caught before returning.
+ * @note A test-selected release file can hold the callback in flight while the
+ * active registry generation is unloaded or replaced.
+ */
+ps_operation_status_v1 PS_OPERATION_CALL
+execute_lifecycle(void*, const ps_operation_invocation_v1* invocation,
+                  const ps_operation_configuration_view_v1*,
+                  const ps_operation_array_ref_v1* inputs,
+                  const ps_operation_array_ref_v1* outputs,
+                  const ps_operation_output_sink_v1* sink) noexcept {
+  return fence(sink, [&]() -> ps_operation_status_v1 {
+    const auto* context = invocation == nullptr
+                              ? nullptr
+                              : static_cast<const LifecycleContext*>(
+                                    invocation->configured_context);
+    if (context == nullptr || context->magic != 0x50534C4946454358ULL ||
+        inputs == nullptr || outputs == nullptr || inputs->count != 0U ||
+        outputs->count != 0U) {
+      return PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
+    }
+    const char* release_file = std::getenv(kCallbackReleaseEnvironment);
+    if (release_file != nullptr && release_file[0] != '\0') {
+      append_lifecycle_trace("callback_enter");
+      wait_for_release_file(release_file);
+      append_lifecycle_trace("callback_return");
+    }
+    const char* throw_mode = std::getenv(kCallbackThrowEnvironment);
+    if (throw_mode != nullptr && std::strcmp(throw_mode, "custom") == 0) {
+      append_lifecycle_trace("callback_throw");
+      throw LifecycleCallbackException();
+    }
+    if (throw_mode != nullptr && std::strcmp(throw_mode, "bad_alloc") == 0) {
+      append_lifecycle_trace("callback_throw_bad_alloc");
+      throw LifecycleCallbackBadAlloc();
+    }
+    return PS_OPERATION_STATUS_OK_V1;
+  });
+}
+
+/**
+ * @brief Observes the exactly-once root destroy callback.
+ * @return Stable ABI status.
  * @throws Nothing.
- * @note The callback is registered through the host registrar and therefore
- *       carries the same plugin-library lease as the operation callback.
  */
-ps::PixelRect lifecycle_forward_propagator(
-    const ps::plugin::RoiContext& context) {
-  const char* invalid_roi = std::getenv(kInvalidRoiEnvironment);
-  if (invalid_roi && std::strcmp(invalid_roi, "overflow") == 0) {
-    append_lifecycle_trace("forward_roi_return");
-    return ps::PixelRect{std::numeric_limits<int>::max(), 0, 1, 1};
-  }
-  return context.requested_roi;
+ps_operation_status_v1 PS_OPERATION_CALL destroy_lifecycle_generation(
+    void*, const ps_operation_output_sink_v1*) noexcept {
+  append_lifecycle_trace("plugin_destroy");
+  return PS_OPERATION_STATUS_OK_V1;
 }
 
-/**
- * @brief Builds the original lifecycle plugin's one-cell dependency table.
- * @param context Borrowed public topology and output-extent snapshot.
- * @return One-cell table routed to input zero with x marker one.
- * @throws std::bad_alloc if cell vector growth cannot allocate.
- * @note The marker lets override/unload tests distinguish callback ownership
- * without retaining plugin code addresses.
- */
-ps::plugin::DependencyLutSnapshot lifecycle_dependency_builder(
-    const ps::plugin::RoiContext& context) {
-  ps::plugin::DependencyLutSnapshot result;
-  result.upstream_input_index = 0;
-  result.cell_size = context.output_extent;
-  result.output_extent = context.output_extent;
-  result.cell_to_upstream_roi.push_back(ps::PixelRect{1, 0, 1, 1});
-  return result;
+/** @brief Creates the trusted lifecycle implementation record. */
+Implementation make_implementation() noexcept {
+  Implementation implementation;
+  auto& descriptor = implementation.descriptor;
+  descriptor.header =
+      make_record_header(PS_OPERATION_IMPLEMENTATION_DESCRIPTOR_V1_SIZE,
+                         PS_OPERATION_RECORD_IMPLEMENTATION_DESCRIPTOR_V1);
+  descriptor.implementation_identity = kImplementationIdentity;
+  descriptor.operation_identity = kOperationIdentity;
+  descriptor.name = make_bytes("PLUGIN_LIFECYCLE_TEST");
+  descriptor.intent_mask = PS_OPERATION_INTENT_HP_V1;
+  descriptor.execution_shape_mask = PS_OPERATION_EXECUTION_MONOLITHIC_V1;
+  descriptor.device_kind = PS_OPERATION_DEVICE_CPU_V1;
+  descriptor.reentrant = 1U;
+  descriptor.relative_cost_binary64_bits = 0x3FF0000000000000ULL;
+  descriptor.execution_mode = PS_OPERATION_EXECUTION_TRUSTED_IN_PROCESS_V1;
+  implementation.infer = infer_lifecycle;
+  implementation.execute_monolithic = execute_lifecycle;
+  implementation.create_context = create_lifecycle_context;
+  implementation.destroy_context = destroy_lifecycle_context;
+  return implementation;
 }
+
+/** @brief Stable lifecycle implementation row. */
+const Implementation kImplementations[]{make_implementation()};
+
+/** @brief Creates the immutable zero-port lifecycle operation definition. */
+ps_operation_descriptor_v1 make_operation() noexcept {
+  ps_operation_descriptor_v1 operation{};
+  operation.header =
+      make_record_header(PS_OPERATION_DESCRIPTOR_V1_SIZE,
+                         PS_OPERATION_RECORD_OPERATION_DESCRIPTOR_V1);
+  operation.operation_identity = kOperationIdentity;
+  operation.type = make_bytes("plugin_lifecycle");
+  operation.subtype = make_bytes("op");
+  operation.display_name = make_bytes("Lifecycle operation ABI fixture");
+  operation.configuration_schema_identity = kConfigurationIdentity;
+  operation.input_ports = empty_array_ref();
+  operation.output_ports = empty_array_ref();
+  return operation;
+}
+
+/** @brief Stable complete lifecycle fixture definition. */
+const Definition kDefinition{kPluginIdentity,
+                             "lifecycle-operation-abi1",
+                             make_operation(),
+                             kImplementations,
+                             1U,
+                             destroy_lifecycle_generation,
+                             nullptr};
 
 }  // namespace
 
-/**
- * @brief Registers the lifecycle fixture operation with Photospider.
- *
- * @param registrar Host-provided operation registration API.
- * @return Nothing.
- * @throws std::invalid_argument when the loader passes a null registrar.
- * @throws std::logic_error if the host registrar is incomplete.
- * @throws std::runtime_error when the fixture's ordinary-failure mode is set.
- * @throws std::bad_alloc if callback state/wrappers, throw-mode strings, copied
- *         operation names, active capture bookkeeping, or registry storage
- *         cannot allocate.
- * @note The host loader discovers this versioned C symbol and records the new
- * `plugin_lifecycle:op` key for later unload without the plugin touching
- * `OpRegistry::instance()`. Invalid-name test modes intentionally call the raw
- * registrar slot after ordinary staging to exercise the host's independent
- * separator/empty-callback validation and complete transaction rollback.
- */
-extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void register_photospider_ops_v2(
-    ps::plugin::OperationPluginRegistrar* registrar) {
-  if (!registrar) {
-    throw std::invalid_argument(
-        "register_photospider_ops_v2 requires registrar");
-  }
-  ps::plugin::OperationMetadata metadata;
-  metadata.cost_score = 1;
-  metadata.produces_image = false;
-  metadata.parameter_output_names = {"lifecycle_marker"};
-  registrar->register_op_hp_monolithic("plugin_lifecycle", "op",
-                                       make_lifecycle_test_op(), metadata);
-  registrar->register_dirty_propagator("plugin_lifecycle", "op",
-                                       lifecycle_dirty_propagator);
-  registrar->register_forward_propagator("plugin_lifecycle", "op",
-                                         lifecycle_forward_propagator);
-  const char* data_dependent = std::getenv(kDataDependentEnvironment);
-  registrar->register_dependency_builder(
-      "plugin_lifecycle", "op", lifecycle_dependency_builder,
-      data_dependent && data_dependent[0] != '\0');
-  const char* register_devices = std::getenv(kDeviceRegistrarEnvironment);
-  if (register_devices && register_devices[0] != '\0') {
-    ps::plugin::OperationMetadata device_monolithic_metadata;
-    device_monolithic_metadata.cost_score = 3;
-    device_monolithic_metadata.produces_image = false;
-    registrar->register_impl("plugin_lifecycle", "op", ps::Device::GPU_METAL,
-                             make_lifecycle_device_monolithic(),
-                             device_monolithic_metadata);
-    ps::plugin::OperationMetadata device_tiled_metadata;
-    device_tiled_metadata.cost_score = 4;
-    device_tiled_metadata.tile_preference =
-        ps::plugin::TileSizePreference::Micro;
-    registrar->register_impl("plugin_lifecycle", "op", ps::Device::GPU_CUDA,
-                             make_lifecycle_device_tiled(),
-                             device_tiled_metadata);
-  }
-  const char* register_cpu_device = std::getenv(kCpuDeviceRegistrarEnvironment);
-  if (register_cpu_device && register_cpu_device[0] != '\0') {
-    ps::plugin::OperationMetadata cpu_device_metadata;
-    cpu_device_metadata.cost_score = 5;
-    cpu_device_metadata.produces_image = false;
-    registrar->register_impl("plugin_lifecycle", "cpu_device", ps::Device::CPU,
-                             make_lifecycle_cpu_device_monolithic(),
-                             cpu_device_metadata);
-  }
-  const char* register_task_shape_override =
-      std::getenv(kTaskShapeOverrideEnvironment);
-  if (register_task_shape_override && register_task_shape_override[0] != '\0') {
-    registrar->register_op_hp_monolithic(
-        "plugin_lifecycle", "task_shape_override", lifecycle_test_op, metadata);
-  }
-
-  const char* invalid_name = std::getenv(kInvalidNameEnvironment);
-  if (invalid_name && std::strcmp(invalid_name, "type") == 0) {
-    append_lifecycle_trace("registrar_invalid_type");
-    registrar->register_hp_monolithic(registrar->user_data, "plugin:lifecycle",
-                                      "invalid_name", lifecycle_test_op,
-                                      metadata);
-  }
-  if (invalid_name && std::strcmp(invalid_name, "subtype") == 0) {
-    append_lifecycle_trace("registrar_invalid_subtype");
-    registrar->register_hp_monolithic(registrar->user_data, "plugin_lifecycle",
-                                      "invalid:name", lifecycle_test_op,
-                                      metadata);
-  }
-
-  const char* empty_callback = std::getenv(kEmptyCallbackEnvironment);
-  if (empty_callback && empty_callback[0] != '\0') {
-    append_lifecycle_trace("registrar_empty_callback");
-    registrar->register_hp_monolithic(
-        registrar->user_data, "plugin_lifecycle", "empty_callback",
-        ps::plugin::MonolithicOperation{}, metadata);
-  }
-
-  const char* throw_mode = std::getenv(kThrowEnvironment);
-  if (throw_mode && std::string(throw_mode) == "bad_alloc") {
-    append_lifecycle_trace("registrar_throw_bad_alloc");
-    throw std::bad_alloc();
-  }
-  if (throw_mode && std::string(throw_mode) == "runtime_error") {
-    append_lifecycle_trace("registrar_throw_runtime_error");
-    throw std::runtime_error("lifecycle registrar runtime failure");
-  }
-
-  const char* registrar_release = std::getenv(kRegistrarReleaseEnvironment);
-  if (registrar_release && registrar_release[0] != '\0') {
-    append_lifecycle_trace("registrar_wait_enter");
-    wait_for_release_file(registrar_release);
-    append_lifecycle_trace("registrar_wait_exit");
-  }
-  append_lifecycle_trace("registrar_return");
+/** @copydoc plugin_definition */
+const Definition& plugin_definition() noexcept {
+  return kDefinition;
 }
+
+}  // namespace ps::operation_plugin
+
+PS_DEFINE_OPERATION_PLUGIN_V1()

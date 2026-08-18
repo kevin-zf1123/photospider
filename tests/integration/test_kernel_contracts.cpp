@@ -980,22 +980,25 @@ void register_contract_ops() {
     parameter_value_source_metadata.parameter_output_names = {"dynamic_count"};
     registry.register_op_hp_monolithic(
         "kernel_contract_test", "parameter_value_source",
-        plugin_host::adapt_monolithic_operation(plugin::MonolithicOperation(
-            [](const plugin::NodeView& node,
-               plugin::ArrayView<plugin::OperationInputView>) {
+        MonolithicOpFunc(
+            [](const Node& node, const std::vector<const NodeOutput*>&) {
               g_parameter_value_source_calls.fetch_add(
                   1, std::memory_order_relaxed);
+              const plugin::ParameterMap& effective_parameters =
+                  node.runtime_parameters.empty() ? node.parameters
+                                                  : node.runtime_parameters;
               const plugin::ParameterValue* enabled =
-                  node.find_parameter("enabled");
+                  find_parameter(effective_parameters, "enabled");
               const plugin::ParameterValue* count =
-                  node.find_parameter("count");
+                  find_parameter(effective_parameters, "count");
               const plugin::ParameterValue* ratio =
-                  node.find_parameter("ratio");
+                  find_parameter(effective_parameters, "ratio");
               const plugin::ParameterValue* label =
-                  node.find_parameter("label");
+                  find_parameter(effective_parameters, "label");
               if (enabled == nullptr || count == nullptr || ratio == nullptr ||
                   label == nullptr ||
-                  node.find_parameter("optional_value") != nullptr) {
+                  find_parameter(effective_parameters, "optional_value") !=
+                      nullptr) {
                 throw GraphError(GraphErrc::InvalidParameter,
                                  "parameter source contract is incomplete");
               }
@@ -1004,48 +1007,49 @@ void register_contract_ops() {
                 throw GraphError(GraphErrc::InvalidParameter,
                                  "parameter source contract values differ");
               }
-              plugin::OperationOutput output;
+              NodeOutput output;
               output.data["dynamic_count"] = count->as_int64() + 4;
               return output;
-            })),
+            }),
         std::move(parameter_value_source_metadata));
 
     registry.register_op_hp_monolithic(
         "kernel_contract_test", "parameter_value_consumer",
-        plugin_host::adapt_monolithic_operation(plugin::MonolithicOperation(
-            [](const plugin::NodeView& node,
-               plugin::ArrayView<plugin::OperationInputView>) {
-              g_parameter_value_consumer_calls.fetch_add(
-                  1, std::memory_order_relaxed);
-              const plugin::ParameterValue* enabled =
-                  node.find_parameter("enabled");
-              const plugin::ParameterValue* count =
-                  node.find_parameter("count");
-              const plugin::ParameterValue* ratio =
-                  node.find_parameter("ratio");
-              const plugin::ParameterValue* label =
-                  node.find_parameter("label");
-              if (enabled == nullptr || count == nullptr || ratio == nullptr ||
-                  label == nullptr ||
-                  node.find_parameter("optional_value") != nullptr) {
-                throw GraphError(GraphErrc::InvalidParameter,
-                                 "parameter consumer contract is incomplete");
-              }
-              if (enabled->as_bool() || count->as_int64() != 11 ||
-                  ratio->as_double() != 2.5 ||
-                  label->as_string() != "consumer") {
-                throw GraphError(GraphErrc::InvalidParameter,
-                                 "effective parameter contract values differ");
-              }
-              constexpr int kDefaultHeight = 3;
-              plugin::OperationOutput output;
-              output.image_buffer = make_aligned_cpu_image_buffer(
-                  static_cast<int>(count->as_int64()), kDefaultHeight, 1,
-                  DataType::FLOAT32);
-              cv::Mat image = toCvMat(output.image_buffer);
-              image.setTo(2.0f);
-              return output;
-            })));
+        MonolithicOpFunc([](const Node& node,
+                            const std::vector<const NodeOutput*>&) {
+          g_parameter_value_consumer_calls.fetch_add(1,
+                                                     std::memory_order_relaxed);
+          const plugin::ParameterMap& effective_parameters =
+              node.runtime_parameters.empty() ? node.parameters
+                                              : node.runtime_parameters;
+          const plugin::ParameterValue* enabled =
+              find_parameter(effective_parameters, "enabled");
+          const plugin::ParameterValue* count =
+              find_parameter(effective_parameters, "count");
+          const plugin::ParameterValue* ratio =
+              find_parameter(effective_parameters, "ratio");
+          const plugin::ParameterValue* label =
+              find_parameter(effective_parameters, "label");
+          if (enabled == nullptr || count == nullptr || ratio == nullptr ||
+              label == nullptr ||
+              find_parameter(effective_parameters, "optional_value") !=
+                  nullptr) {
+            throw GraphError(GraphErrc::InvalidParameter,
+                             "parameter consumer contract is incomplete");
+          }
+          if (enabled->as_bool() || count->as_int64() != 11 ||
+              ratio->as_double() != 2.5 || label->as_string() != "consumer") {
+            throw GraphError(GraphErrc::InvalidParameter,
+                             "effective parameter contract values differ");
+          }
+          constexpr int kDefaultHeight = 3;
+          ImageBuffer output = make_aligned_cpu_image_buffer(
+              static_cast<int>(count->as_int64()), kDefaultHeight, 1,
+              DataType::FLOAT32);
+          cv::Mat image = toCvMat(output);
+          image.setTo(2.0f);
+          return publish_kernel_contract_image(output);
+        }));
   });
 }
 

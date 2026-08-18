@@ -154,7 +154,7 @@ enum class Device : std::uint32_t {
 };
 
 /**
- * @brief Converts a provisional ABI-v2 Device label to its backend family.
+ * @brief Converts a compatibility ImageBuffer Device label to its backend.
  * @param device Valid provisional execution label.
  * @return Matching stable backend family.
  * @throws std::invalid_argument for an unknown Device enum value.

@@ -174,6 +174,7 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     data/image_metadata.hpp
     data/image_statistics.hpp
     data/image_view.hpp
+    data/parameter_value.hpp
     data/extension.hpp
     data/packed_dense_tensor_view.hpp
     data/region.hpp
@@ -187,11 +188,10 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     memory/buffer_handle.hpp
     memory/ready_fence.hpp
     memory/strided_layout.hpp
-    plugin/node_view.hpp
     plugin/data_definition_registry.hpp
     plugin/data_provider_api.h
-    plugin/op_contract.hpp
-    plugin/plugin_api.hpp
+    plugin/operation_plugin_api.h
+    plugin/operation_plugin.hpp
     policy/policy_plugin_api.h
     public_boundary.hpp
 )
@@ -312,18 +312,19 @@ target_include_directories(photospider_operation_runtime
     PRIVATE
         "${PROJECT_SOURCE_DIR}/src/lib")
 
-# Public operation contracts plus the standard-library-only image factory.
-# Linking the SDK is sufficient for a complete external operation DSO.
-add_library(photospider_operation_sdk INTERFACE)
-add_library(Photospider::operation_sdk ALIAS photospider_operation_sdk)
-set_target_properties(photospider_operation_sdk PROPERTIES
-    EXPORT_NAME operation_sdk)
-target_compile_features(photospider_operation_sdk INTERFACE cxx_std_17)
-target_include_directories(photospider_operation_sdk INTERFACE
+# Public pure-C operation-plugin SDK. C11 and C++17 producers receive only the
+# generated/installed include root; Host registry and runtime authority never
+# cross this independently versioned interface target.
+add_library(photospider_operation_plugin_sdk INTERFACE)
+add_library(Photospider::operation_plugin_sdk ALIAS
+    photospider_operation_plugin_sdk)
+set_target_properties(photospider_operation_plugin_sdk PROPERTIES
+    EXPORT_NAME operation_plugin_sdk)
+target_compile_features(photospider_operation_plugin_sdk INTERFACE
+    c_std_11 cxx_std_17)
+target_include_directories(photospider_operation_plugin_sdk INTERFACE
     "$<BUILD_INTERFACE:${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
-target_link_libraries(photospider_operation_sdk INTERFACE
-    Photospider::operation_runtime)
 
 # Public data-definition SDK: one dependency-neutral pure-C ABI header. C11
 # and C++17 definition producers receive only the generated/installed include
@@ -430,7 +431,6 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     target_include_directories(photospider_operation_opencv PRIVATE
         ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
     target_link_libraries(photospider_operation_opencv PUBLIC
-        Photospider::operation_sdk
         Photospider::operation_runtime
         ${PHOTOSPIDER_OPENCV_CORE_TARGET})
 endif()
@@ -583,7 +583,7 @@ target_include_directories(photospider_graph_internal PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(photospider_graph_internal PRIVATE
     photospider_core_internal
-    Photospider::operation_sdk)
+    Photospider::operation_runtime)
 
 # Module: configured YAML value translation, graph-document IO, and cache
 # metadata persistence. GraphIO, cache, and Kernel see only neutral contracts;
@@ -664,6 +664,7 @@ set(PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES
     src/lib/plugin/plugin_manager.cpp
     src/lib/plugin/plugin_loader.cpp
     src/lib/plugin/operation_host_adapter.cpp
+    src/lib/plugin/operation_runtime_router.cpp
     src/lib/providers/configured_operation_providers.cpp
 )
 
@@ -674,8 +675,10 @@ target_include_directories(photospider_plugin_host_internal PRIVATE
 target_link_libraries(photospider_plugin_host_internal PRIVATE
     photospider_core_internal
     photospider_graph_internal
+    photospider_execution_internal
     photospider_plugin_trust_internal
-    Photospider::operation_sdk
+    Photospider::operation_plugin_sdk
+    Photospider::operation_runtime
     ${CMAKE_DL_LIBS})
 if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
     target_compile_definitions(photospider_plugin_host_internal PRIVATE
@@ -844,7 +847,7 @@ target_link_libraries(photospider_compute_internal PRIVATE
     photospider_plugin_host_internal
     photospider_policy_internal
     photospider_execution_internal
-    Photospider::operation_sdk)
+    Photospider::operation_runtime)
 
 # Module: private Kernel/Interaction facades and the embedded Host composition
 # root. The installed product compiles the same source set into its standalone
@@ -861,7 +864,7 @@ target_link_libraries(photospider_host_internal PRIVATE
     photospider_policy_internal
     photospider_execution_internal
     photospider_compute_internal
-    Photospider::operation_sdk
+    Photospider::operation_runtime
     PkgConfig::UTF8PROC)
 if(PHOTOSPIDER_ENABLE_YAML)
     target_compile_definitions(photospider_host_internal PRIVATE
@@ -957,7 +960,7 @@ function(configure_photospider_product_objects TARGET_NAME)
     target_include_directories(${TARGET_NAME} PRIVATE
         ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
     target_link_libraries(${TARGET_NAME} PRIVATE
-        Photospider::operation_sdk
+        Photospider::operation_plugin_sdk
         Photospider::operation_runtime
         Photospider::policy_sdk
         OpenSSL::Crypto
@@ -991,7 +994,7 @@ function(configure_photospider_product_archive TARGET_NAME)
             "$<BUILD_INTERFACE:${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}>"
             "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
     target_link_libraries(${TARGET_NAME} PRIVATE
-        Photospider::operation_sdk
+        Photospider::operation_plugin_sdk
         Photospider::operation_runtime
         Photospider::policy_sdk
         OpenSSL::Crypto
@@ -1460,7 +1463,7 @@ install(TARGETS photospider
 
 install(TARGETS
     photospider_data_provider_sdk
-    photospider_operation_sdk
+    photospider_operation_plugin_sdk
     photospider_operation_runtime
     photospider_policy_sdk
     EXPORT PhotospiderTargets
@@ -1658,11 +1661,8 @@ if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
         )
 
         target_link_libraries(${PLUGIN_NAME} PRIVATE
-            Photospider::operation_opencv)
-        if(PLUGIN_NAME STREQUAL "threshold_op")
-            target_link_libraries(${PLUGIN_NAME} PRIVATE
-                ${PHOTOSPIDER_OPENCV_IMGPROC_TARGET})
-        elseif(PLUGIN_NAME STREQUAL "save_op")
+            Photospider::operation_plugin_sdk)
+        if(PLUGIN_NAME STREQUAL "save_op")
             target_link_libraries(${PLUGIN_NAME} PRIVATE
                 ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET})
         endif()
@@ -1801,7 +1801,7 @@ if(BUILD_TESTING)
         )
     endif()
     target_link_libraries(lifecycle_op_plugin PRIVATE
-        Photospider::operation_sdk)
+        Photospider::operation_plugin_sdk)
 
     add_library(override_lifecycle_op_plugin SHARED
         tests/fixtures/ops/override_lifecycle_op_plugin.cpp
@@ -1821,7 +1821,7 @@ if(BUILD_TESTING)
         )
     endif()
     target_link_libraries(override_lifecycle_op_plugin PRIVATE
-        Photospider::operation_sdk)
+        Photospider::operation_plugin_sdk)
 
     add_library(resize_replacement_op_plugin SHARED
         tests/fixtures/ops/resize_replacement_op_plugin.cpp
@@ -1843,13 +1843,25 @@ if(BUILD_TESTING)
         )
     endif()
     target_link_libraries(resize_replacement_op_plugin PRIVATE
-        Photospider::operation_sdk)
+        Photospider::operation_plugin_sdk)
 
-    add_library(v1_only_op_plugin SHARED
-        tests/fixtures/ops/v1_only_op_plugin.cpp)
-    set_target_properties(v1_only_op_plugin PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/v1_only"
-        RUNTIME_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/v1_only")
+    add_library(unsupported_operation_abi_plugin SHARED
+        tests/fixtures/ops/unsupported_operation_abi_plugin.cpp)
+    set_target_properties(unsupported_operation_abi_plugin PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/unsupported_abi"
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/unsupported_abi")
+    target_link_libraries(unsupported_operation_abi_plugin PRIVATE
+        Photospider::operation_plugin_sdk)
+
+    add_library(conformance_operation_abi_plugin SHARED
+        tests/fixtures/ops/conformance_operation_abi_plugin.cpp)
+    target_compile_definitions(conformance_operation_abi_plugin PRIVATE
+        PHOTOSPIDER_PLUGIN_BUILD)
+    set_target_properties(conformance_operation_abi_plugin PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/conformance_abi"
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/conformance_abi")
+    target_link_libraries(conformance_operation_abi_plugin PRIVATE
+        Photospider::operation_plugin_sdk)
 
     foreach(VALUE_IDENTITY_DSO_NAME
             value_identity_dso_a value_identity_dso_b)
@@ -1867,7 +1879,7 @@ if(BUILD_TESTING)
                 MACOSX_RPATH ON)
         endif()
         target_link_libraries(${VALUE_IDENTITY_DSO_NAME} PRIVATE
-            Photospider::operation_sdk)
+            Photospider::operation_runtime)
     endforeach()
 endif()
 
@@ -1875,11 +1887,6 @@ endif()
 # 7. Metal Support (Apple Only)
 # ==============================================================================
 if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
-    set(METAL_ROOT_DIR ${CMAKE_BINARY_DIR}/high_performance/metal)
-    set(METAL_OPS_DIR  ${METAL_ROOT_DIR}/ops)
-    file(MAKE_DIRECTORY ${METAL_ROOT_DIR})
-    file(MAKE_DIRECTORY ${METAL_OPS_DIR})
-
     # The real process executor makes the product depend on native Metal.
     target_link_libraries(photospider PRIVATE
         "-framework Metal"
@@ -1892,48 +1899,22 @@ if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
         )
     endif()
 
-    # 1. The Implementation Library (the actual op logic)
-    add_library(perlin_noise_metal SHARED
+    # Source-private native/async adapter. Pure-C operation ABI v1 is
+    # synchronous CPU-only, so this target is neither installed nor loaded as
+    # an operation plugin.
+    add_library(photospider_metal_perlin_adapter_internal STATIC
         plugins/ops/metal/perlin_noise_metal.mm)
     set_source_files_properties(
         plugins/ops/metal/perlin_noise_metal.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    set_target_properties(perlin_noise_metal PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
-        MACOSX_RPATH ON
-    )
-    target_link_libraries(perlin_noise_metal PRIVATE
-        Photospider::operation_opencv
+    target_link_libraries(photospider_metal_perlin_adapter_internal PRIVATE
+        Photospider::operation_runtime
         ${METAL_FRAMEWORK}
         ${FOUNDATION_FRAMEWORK}
     )
-    target_include_directories(perlin_noise_metal PRIVATE
+    target_include_directories(photospider_metal_perlin_adapter_internal PRIVATE
         "${PROJECT_SOURCE_DIR}/plugins/ops"
         "${PROJECT_SOURCE_DIR}/src/lib"
-    )
-
-    # 2. The Loader Plugin (registers the op with the Kernel)
-    add_library(metal_ops_loader SHARED
-        plugins/ops/metal/metal_ops_loader.cpp)
-    target_compile_definitions(metal_ops_loader PRIVATE
-        PHOTOSPIDER_PLUGIN_BUILD)
-    set_target_properties(metal_ops_loader PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
-        # Point RPATH to 'ops' subdir so loader can find perlin_noise_metal
-        BUILD_RPATH "@loader_path/ops;${CMAKE_BINARY_DIR}/lib"
-        INSTALL_RPATH "@loader_path/ops;$ORIGIN/../lib"
-        MACOSX_RPATH ON
-    )
-
-    target_include_directories(metal_ops_loader PRIVATE
-        "${PROJECT_SOURCE_DIR}/plugins/ops"
-    )
-
-    # The loader directly calls implementation symbols and therefore owns
-    # the implementation DSO dependency.
-    target_link_libraries(metal_ops_loader PRIVATE
-        perlin_noise_metal
-        Photospider::operation_sdk
     )
 
 endif()
@@ -2251,6 +2232,18 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
     endif()
+
+    add_ps_test(test_operation_plugin_abi
+        tests/integration/test_operation_plugin_abi.cpp)
+    target_link_libraries(test_operation_plugin_abi PRIVATE ${CMAKE_DL_LIBS})
+    target_compile_definitions(test_operation_plugin_abi PRIVATE
+        PS_TEST_LIFECYCLE_OPERATION_PLUGIN="$<TARGET_FILE:lifecycle_op_plugin>"
+        PS_TEST_CONFORMANCE_OPERATION_PLUGIN="$<TARGET_FILE:conformance_operation_abi_plugin>")
+    add_dependencies(test_operation_plugin_abi lifecycle_op_plugin
+        conformance_operation_abi_plugin)
+    gtest_discover_tests(test_operation_plugin_abi
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES RUN_SERIAL TRUE TIMEOUT 20)
 
     if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
         add_ps_test(test_single_tenant_job_service
@@ -2775,7 +2768,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PS_TEST_PLUGIN_TRUST_PRIVATE_KEY="${PROJECT_SOURCE_DIR}/tests/fixtures/trust/test_ed25519_private_key.pem"
         PS_TEST_SIGNED_OPERATION_PLUGIN="$<TARGET_FILE:lifecycle_op_plugin>"
         PS_TEST_SIGNED_POLICY_PLUGIN="$<TARGET_FILE:test_policy_plugin>"
-        PS_TEST_WRONG_KIND_PLUGIN="$<TARGET_FILE:v1_only_op_plugin>"
+        PS_TEST_WRONG_KIND_PLUGIN="$<TARGET_FILE:unsupported_operation_abi_plugin>"
         PS_TEST_SIGNED_RUNTIME_PLUGIN="$<TARGET_FILE:test_isolated_cpu_plugin_fixture>"
         PS_TEST_UNTRUSTED_INITIALIZER_PLUGIN="$<TARGET_FILE:untrusted_initializer_plugin>")
     target_link_libraries(test_plugin_trust PRIVATE OpenSSL::Crypto)
@@ -2856,23 +2849,19 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     add_ps_test(test_bad_alloc_boundaries
         tests/integration/test_bad_alloc_boundaries.cpp
         photospider_internal_test_product)
-    target_sources(test_bad_alloc_boundaries PRIVATE
-        plugins/ops/threshold_op.cpp)
     target_include_directories(test_bad_alloc_boundaries PRIVATE
         "${PROJECT_SOURCE_DIR}/apps/graph_cli/include"
         "${PROJECT_SOURCE_DIR}/plugins/ops"
         "${PROJECT_SOURCE_DIR}")
     target_compile_definitions(test_bad_alloc_boundaries PRIVATE
-        PHOTOSPIDER_PLUGIN_BUILD
-        PHOTOSPIDER_THRESHOLD_BAD_ALLOC_TESTING)
+        PHOTOSPIDER_PLUGIN_BUILD)
     target_link_libraries(test_bad_alloc_boundaries PRIVATE
         photospider_cli_common)
     if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
-        target_sources(test_bad_alloc_boundaries PRIVATE
-            plugins/ops/metal/perlin_noise_metal.mm)
         target_compile_definitions(test_bad_alloc_boundaries PRIVATE
             PHOTOSPIDER_INTERNAL_METAL_PERLIN_TESTING)
         target_link_libraries(test_bad_alloc_boundaries PRIVATE
+            photospider_metal_perlin_adapter_internal
             ${METAL_FRAMEWORK}
             ${FOUNDATION_FRAMEWORK})
     endif()
@@ -2882,7 +2871,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         target_include_directories(test_metal_device_executor PRIVATE
             "${PROJECT_SOURCE_DIR}/plugins/ops")
         target_link_libraries(test_metal_device_executor PRIVATE
-            perlin_noise_metal)
+            photospider_metal_perlin_adapter_internal)
     endif()
     add_ps_test(test_cli_dirty_snapshot_formatter
         tests/integration/test_cli_dirty_snapshot_formatter.cpp)
@@ -2914,12 +2903,16 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_compile_definitions(test_plugin_manager PRIVATE
         PS_STANDARD_OP_PLUGIN_DIR="${PLUGIN_OUTPUT_DIR}"
         PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
+        PS_TEST_LIFECYCLE_OPERATION_PLUGIN="$<TARGET_FILE:lifecycle_op_plugin>"
+        PS_TEST_OVERRIDE_OPERATION_PLUGIN="$<TARGET_FILE:override_lifecycle_op_plugin>"
+        PS_TEST_UNSUPPORTED_OPERATION_PLUGIN="$<TARGET_FILE:unsupported_operation_abi_plugin>"
         PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>"
         PS_TEST_ALTERNATE_POLICY_PLUGIN_PATH="$<TARGET_FILE:alternate_policy_plugin>"
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
     )
     add_dependencies(test_plugin_manager lifecycle_op_plugin
-        override_lifecycle_op_plugin v1_only_op_plugin test_policy_plugin
+        override_lifecycle_op_plugin unsupported_operation_abi_plugin
+        test_policy_plugin
         alternate_policy_plugin ${OP_PLUGIN_TARGETS})
 
     set(PHOTOSPIDER_PUBLIC_HEADER_ROOT
@@ -3347,7 +3340,7 @@ if(BUILD_TESTING)
             lifecycle_op_plugin
             override_lifecycle_op_plugin
             resize_replacement_op_plugin
-            v1_only_op_plugin)
+            unsupported_operation_abi_plugin)
         if(TARGET ${PHOTOSPIDER_TEST_OPERATION_TARGET})
             list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_ENTRY_ARGUMENTS
                 --entry operation 11111111111111111111111111111111
@@ -3610,6 +3603,6 @@ message(STATUS "  Single-Tenant Job: ${PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB}")
 message(STATUS "  Focused Tests     : ${PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS}")
 message(STATUS "  Full Test Suite   : ${PHOTOSPIDER_BUILD_FULL_TEST_SUITE}")
 if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
-    message(STATUS "  Metal Plugins     : ${METAL_ROOT_DIR}")
+    message(STATUS "  Metal Adapter     : Host-private")
 endif()
 message(STATUS "-----------------------------------------------------------")

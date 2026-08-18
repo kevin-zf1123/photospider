@@ -32,7 +32,6 @@
 #include "execution/execution_task_runtime.hpp"
 #include "metal/perlin_noise_metal.hpp"
 #include "photospider/core/image_buffer.hpp"
-#include "photospider/plugin/op_contract.hpp"
 
 namespace ps::compute {
 namespace {
@@ -626,24 +625,27 @@ struct PerlinInvocationState final {
   /**
    * @brief Builds the deterministic operation node.
    * @param node_id Stable node identity.
-   * @return Complete public node snapshot.
+   * @return Complete private node snapshot.
    * @throws std::bad_alloc from parameter storage.
    */
-  static plugin::NodeView make_node(int node_id) {
-    plugin::ParameterMap parameters;
-    parameters.emplace("width", plugin::ParameterValue(8));
-    parameters.emplace("height", plugin::ParameterValue(8));
-    parameters.emplace("grid_size", plugin::ParameterValue(3.0));
-    parameters.emplace("seed", plugin::ParameterValue(84));
-    return plugin::NodeView(node_id, "perlin_noise_metal", "image_generator",
-                            "perlin_noise_metal", std::move(parameters));
+  static Node make_node(int node_id) {
+    Node result;
+    result.id = node_id;
+    result.name = "perlin_noise_metal";
+    result.type = "image_generator";
+    result.subtype = "perlin_noise_metal";
+    result.parameters.emplace("width", plugin::ParameterValue(8));
+    result.parameters.emplace("height", plugin::ParameterValue(8));
+    result.parameters.emplace("grid_size", plugin::ParameterValue(3.0));
+    result.parameters.emplace("seed", plugin::ParameterValue(84));
+    return result;
   }
 
   /** @brief Immutable effective operation parameters. */
-  plugin::NodeView node;
+  Node node;
 
-  /** @brief Output published by the worker before Run settlement. */
-  std::optional<plugin::OperationOutput> output;
+  /** @brief Settled CPU compatibility snapshot owned by the test. */
+  std::optional<ImageBuffer> output;
 
   /** @brief Pending host replica retained through native completion. */
   Value pending_value;
@@ -750,8 +752,7 @@ std::shared_ptr<PerlinInvocationState> execute_perlin(
       std::move(lease), task_identity, static_cast<int>(identity), true,
       [state](ComputeRunLease&, const ComputeRunTaskIdentity&,
               ExecutionTaskRuntime& runtime) {
-        state->output = ops::op_perlin_noise_metal(
-            state->node, plugin::ArrayView<plugin::OperationInputView>{});
+        ops::execute_perlin_noise_metal(state->node);
         execution::MetalExecutionContext& context =
             execution::require_current_metal_execution_context();
         state->pending_value = context.take_published_value();
@@ -769,8 +770,7 @@ std::shared_ptr<PerlinInvocationState> execute_perlin(
                   if (snapshot.state() != ReadyFenceState::Ready) {
                     throw ReadyFenceAccessError(std::move(snapshot));
                   }
-                  state->output.emplace();
-                  state->output->image_buffer =
+                  state->output =
                       value_image_adapter::snapshot_cpu_image_buffer(
                           state->pending_value);
                   runtime->dec_tasks_to_complete();
@@ -803,7 +803,7 @@ void expect_valid_perlin_output(
   EXPECT_EQ(binding.memory_domain, MemoryDomain::HostPinned);
   EXPECT_TRUE(binding.host_visible);
   ASSERT_TRUE(state->output.has_value());
-  const ImageBuffer& image = state->output->image_buffer;
+  const ImageBuffer& image = *state->output;
   ASSERT_NO_THROW(validate_image_buffer(image));
   EXPECT_EQ(image.width, 8);
   EXPECT_EQ(image.height, 8);
@@ -848,8 +848,8 @@ void expect_identical_perlin_outputs(
   ASSERT_TRUE(second);
   ASSERT_TRUE(first->output.has_value());
   ASSERT_TRUE(second->output.has_value());
-  const ImageBuffer& first_image = first->output->image_buffer;
-  const ImageBuffer& second_image = second->output->image_buffer;
+  const ImageBuffer& first_image = *first->output;
+  const ImageBuffer& second_image = *second->output;
   ASSERT_EQ(first_image.width, second_image.width);
   ASSERT_EQ(first_image.height, second_image.height);
   ASSERT_EQ(first_image.channels, second_image.channels);

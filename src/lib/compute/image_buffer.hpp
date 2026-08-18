@@ -61,8 +61,8 @@ struct InputTile {
  *
  * @throws Nothing for value operations.
  * @note Neither pointer is owning. Both remain valid only during one trusted
- * callback. Adapters may create a callback-local ABI v2 ImageBuffer alias, but
- * no mutable pointer or owner may survive grant retirement.
+ * callback. Source-private adapters may create a callback-local ImageBuffer
+ * alias, but no mutable pointer or owner may survive grant retirement.
  */
 struct OutputTile {
   /** @brief Borrowed immutable output plan. */

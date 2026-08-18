@@ -99,18 +99,18 @@ struct ImportedImageBindingOwner final
 };
 
 /**
- * @brief Retains one canonical Value behind an ABI v2 ImageBuffer projection.
+ * @brief Retains one canonical Value behind an ImageBuffer projection.
  * @throws Nothing for construction and destruction.
  * @note Aliasing ImageBuffer owners point at original backend addresses while
  * this state keeps the unique immutable binding and its DSO owners alive.
  */
-struct AbiV2ImageProjectionLifetime final {
+struct ImageBufferProjectionLifetime final {
   /**
    * @brief Retains the exact canonical source for a callback projection.
    * @param retained_value Ready imported Value to keep alive.
    * @throws Nothing because Value movement is non-throwing.
    */
-  explicit AbiV2ImageProjectionLifetime(Value retained_value) noexcept
+  explicit ImageBufferProjectionLifetime(Value retained_value) noexcept
       : value(std::move(retained_value)) {}
 
   /** @brief Canonical Value retained until every projection copy retires. */
@@ -559,14 +559,14 @@ ImageBuffer snapshot_cpu_image_buffer(const Value& value) {
   return output;
 }
 
-/** @copydoc project_image_value_for_abi_v2 */
-ImageBuffer project_image_value_for_abi_v2(const Value& value) {
+/** @copydoc project_image_value_for_image_buffer_edge */
+ImageBuffer project_image_value_for_image_buffer_edge(const Value& value) {
   if (!value.valid() ||
       value.representation_kind() != ValueRepresentationKind::DenseTensor ||
       value.storage_layout_kind() != StorageLayoutKind::Strided ||
       !value.image_facet().has_value()) {
     throw std::invalid_argument(
-        "ABI v2 projection requires a valid Strided image Value.");
+        "ImageBuffer projection requires a valid Strided image Value.");
   }
   const StorageBinding binding = value.storage_binding();
   if (binding.host_visible) {
@@ -588,7 +588,7 @@ ImageBuffer project_image_value_for_abi_v2(const Value& value) {
   validate_image_buffer(imported->image);
   if (imported->image.device == Device::CPU) {
     throw std::logic_error(
-        "Imported ABI v2 projection unexpectedly describes CPU storage.");
+        "Imported ImageBuffer projection unexpectedly describes CPU storage.");
   }
   const DenseImageOutputPlan plan = compatibility_image_plan(imported->image);
   if (!(value.dense_tensor_descriptor() == plan.descriptor()) ||
@@ -598,13 +598,14 @@ ImageBuffer project_image_value_for_abi_v2(const Value& value) {
       binding.byte_size != plan.storage_size() || binding.host_visible ||
       binding.device != DeviceId(device_backend(imported->image.device))) {
     throw std::logic_error(
-        "Imported ABI v2 projection disagrees with canonical Value facts.");
+        "Imported ImageBuffer projection disagrees with canonical Value "
+        "facts.");
   }
 
   ImageBuffer result = imported->image;
   void* data_address = result.data.get();
   void* context_address = result.context.get();
-  auto lifetime = std::make_shared<AbiV2ImageProjectionLifetime>(value);
+  auto lifetime = std::make_shared<ImageBufferProjectionLifetime>(value);
   result.data = data_address != nullptr
                     ? std::shared_ptr<void>(lifetime, data_address)
                     : std::shared_ptr<void>{};

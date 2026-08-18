@@ -758,7 +758,8 @@ class RequestRouter {
    * @brief Routes process-global operation-plugin control and copied views.
    *
    * @param id Valid request id correlated with the response.
-   * @param method Exact version 2 operation-plugin method name.
+   * @param method Exact IPC protocol-v2 operation-plugin method name; this is
+   *        unrelated to the separately versioned operation DSO ABI.
    * @param routed_params Internal adapter borrowing structurally valid params.
    * @return Complete response for this family, or `std::nullopt` when another
    *         route family must handle the method.

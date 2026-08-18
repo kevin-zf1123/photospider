@@ -107,8 +107,8 @@ using CpuDenseImageExecuteFunc = std::function<void(
  * @brief Private production definition for a Value-backed CPU image operation.
  *
  * @throws std::bad_alloc or callback-defined copy exceptions when copied.
- * @note This type is source-tree private and does not modify operation plugin
- *       ABI v2 or create a second registry callback slot.
+ * @note This type is source-tree private and does not create a second
+ *       operation-plugin ABI or registry callback slot.
  */
 struct CpuDenseImageOperation {
   /** @brief Pure descriptor-only output inference callback. */

@@ -25,8 +25,8 @@
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/geometry.hpp"
 #include "photospider/core/graph_error.hpp"
+#include "photospider/data/parameter_value.hpp"
 #include "photospider/data/value.hpp"
-#include "photospider/plugin/node_view.hpp"
 
 namespace ps {
 /** @brief Private filesystem namespace shorthand used by backend contracts. */
@@ -134,7 +134,8 @@ struct DebugMeta {
  * @brief Owns one operation result and its plugin-derived value lifetime.
  *
  * Private operation callbacks and compute services exchange this value after
- * the operation host adapter has converted the public `OperationOutput`.
+ * the operation Host has validated pure-C output records or source-private
+ * providers have produced canonical Values.
  * The canonical named-Value collection is the only image payload, allocation,
  * readiness, and revision authority. A current ImageBuffer may exist only as
  * explicitly named compatibility staging before an inbound legacy edge is
@@ -264,7 +265,7 @@ struct NodeOutput {
   /**
    * @brief Host-attached lease for plugin-derived return-value internals.
    *
-   * The host registrar wrapper attaches the same shared dynamic-library owner
+   * The operation Host adapter attaches the same shared dynamic-library owner
    * retained by the callback. Copy operations share it; move operations
    * transfer it only together with all payload members.
    *
@@ -277,10 +278,10 @@ struct NodeOutput {
    * @brief Callback-local or inbound legacy ImageBuffer staging only.
    *
    * @note This member is never an allocation, revision, readiness, Region, or
-   * cache authority. Operation ABI v2, codec, Host, and remaining product
-   * adapters must normalize a nonempty value into `named_values` and clear it
-   * before formal commit. Plugin-defined `data` or `context` deleters execute
-   * before the result's dynamic-library lease is released.
+   * cache authority. Codec, Host, and remaining product adapters must
+   * normalize a nonempty value into `named_values` and clear it before formal
+   * commit. Provider-defined `data` or `context` deleters execute before the
+   * result's dynamic-library lease is released.
    */
   ps::ImageBuffer compatibility_image;
 
@@ -1877,8 +1878,8 @@ class OpRegistry {
   /**
    * @brief Runs a registration callback while capturing touched keys.
    *
-   * @param registration Callback that calls one or more OpRegistry register
-   * APIs, usually a plugin's `register_photospider_ops_v2` entry point.
+   * @param registration Callback that calls one or more source-private
+   * OpRegistry registration APIs after pure-C records are validated.
    * @param capture Output capture receiving touched keys and prior table state.
    * @return Nothing.
    * @throws std::bad_alloc if key recording or snapshot copying cannot

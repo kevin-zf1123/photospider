@@ -32,15 +32,11 @@
 #include "photospider/core/inspection_types.hpp"
 #include "photospider/host/compute_request.hpp"
 #include "photospider/plugin/opencv_adapter.hpp"
-#include "photospider/plugin/plugin_api.hpp"
-#include "plugin/operation_host_adapter.hpp"
 #include "providers/configured_operation_providers.hpp"
 
 namespace ps {
 namespace {
 
-static_assert(sizeof(plugin::TileSizePreference) == sizeof(std::uint32_t));
-static_assert(sizeof(plugin::InputAccessPattern) == sizeof(std::uint32_t));
 static_assert(sizeof(plugin::ParameterKind) == sizeof(std::uint32_t));
 static_assert(sizeof(DataType) == sizeof(std::uint32_t));
 static_assert(static_cast<std::uint32_t>(DataType::UINT8) == 0U);
@@ -134,127 +130,6 @@ static_assert(std::is_same_v<
               typename decltype(DirtyRegionInspectionSnapshot::
                                     actual_dirty_rois)::mapped_type::value_type,
               PixelRect>);
-static_assert(
-    std::is_same_v<decltype(plugin::RoiContext::requested_roi), PixelRect>);
-static_assert(
-    std::is_same_v<decltype(plugin::RoiContext::output_extent), PixelSize>);
-static_assert(
-    std::is_same_v<decltype(plugin::SpatialSnapshot::absolute_roi), PixelRect>);
-static_assert(
-    std::is_same_v<typename decltype(plugin::DependencyLutSnapshot::
-                                         cell_to_upstream_roi)::value_type,
-                   PixelRect>);
-
-TEST(OperationPluginRegistrar,
-     RejectsInvalidNamesAndEmptyCallbacksBeforeRawHostCallbacks) {
-  int host_calls = 0;
-  plugin::OperationPluginRegistrar registrar;
-  registrar.user_data = &host_calls;
-  registrar.register_hp_monolithic =
-      [](void* user_data, const char*, const char*, plugin::MonolithicOperation,
-         plugin::OperationMetadata) { ++*static_cast<int*>(user_data); };
-  registrar.register_hp_tiled =
-      [](void* user_data, const char*, const char*, plugin::TiledOperation,
-         plugin::OperationMetadata) { ++*static_cast<int*>(user_data); };
-  registrar.register_rt_tiled =
-      [](void* user_data, const char*, const char*, plugin::TiledOperation,
-         plugin::OperationMetadata) { ++*static_cast<int*>(user_data); };
-  registrar.register_dirty = [](void* user_data, const char*, const char*,
-                                plugin::DirtyRoiPropagator) {
-    ++*static_cast<int*>(user_data);
-  };
-  registrar.register_forward = [](void* user_data, const char*, const char*,
-                                  plugin::ForwardRoiPropagator) {
-    ++*static_cast<int*>(user_data);
-  };
-  registrar.register_dependency = [](void* user_data, const char*, const char*,
-                                     plugin::DependencyLutBuilder,
-                                     bool) { ++*static_cast<int*>(user_data); };
-  registrar.register_device_monolithic =
-      [](void* user_data, const char*, const char*, Device,
-         plugin::MonolithicOperation,
-         plugin::OperationMetadata) { ++*static_cast<int*>(user_data); };
-  registrar.register_device_tiled =
-      [](void* user_data, const char*, const char*, Device,
-         plugin::TiledOperation,
-         plugin::OperationMetadata) { ++*static_cast<int*>(user_data); };
-  const auto operation = [](const plugin::NodeView&,
-                            plugin::ArrayView<plugin::OperationInputView>) {
-    return plugin::OperationOutput{};
-  };
-  const auto tiled_operation =
-      [](const plugin::NodeView&, const OutputTileView&,
-         plugin::ArrayView<plugin::OperationTileInputView>) {};
-
-  EXPECT_THROW(registrar.register_op_hp_monolithic("", "ok", operation),
-               std::invalid_argument);
-  EXPECT_THROW(registrar.register_op_hp_monolithic("bad:type", "ok", operation),
-               std::invalid_argument);
-  EXPECT_THROW(
-      registrar.register_op_hp_monolithic("ok", "bad:subtype", operation),
-      std::invalid_argument);
-  EXPECT_THROW(registrar.register_op_hp_monolithic(std::string("bad\0type", 8),
-                                                   "ok", operation),
-               std::invalid_argument);
-
-  EXPECT_THROW(registrar.register_op_hp_monolithic(
-                   "valid", "name", plugin::MonolithicOperation{}),
-               std::invalid_argument);
-  EXPECT_THROW(
-      registrar.register_op_hp_tiled("valid", "name", plugin::TiledOperation{}),
-      std::invalid_argument);
-  EXPECT_THROW(
-      registrar.register_op_rt_tiled("valid", "name", plugin::TiledOperation{}),
-      std::invalid_argument);
-  EXPECT_THROW(registrar.register_dirty_propagator(
-                   "valid", "name", plugin::DirtyRoiPropagator{}),
-               std::invalid_argument);
-  EXPECT_THROW(registrar.register_forward_propagator(
-                   "valid", "name", plugin::ForwardRoiPropagator{}),
-               std::invalid_argument);
-  EXPECT_THROW(registrar.register_dependency_builder(
-                   "valid", "name", plugin::DependencyLutBuilder{}),
-               std::invalid_argument);
-  EXPECT_THROW(registrar.register_impl("valid", "name", Device::CPU,
-                                       plugin::MonolithicOperation{}),
-               std::invalid_argument);
-  EXPECT_THROW(registrar.register_impl("valid", "name", Device::CPU,
-                                       plugin::TiledOperation{}),
-               std::invalid_argument);
-  EXPECT_EQ(host_calls, 0);
-
-  const auto expect_tiled_schema_rejected =
-      [&](const plugin::OperationMetadata& metadata) {
-        EXPECT_THROW(registrar.register_op_hp_tiled("valid", "name",
-                                                    tiled_operation, metadata),
-                     std::invalid_argument);
-        EXPECT_THROW(registrar.register_op_rt_tiled("valid", "name",
-                                                    tiled_operation, metadata),
-                     std::invalid_argument);
-        EXPECT_THROW(registrar.register_impl("valid", "name", Device::CPU,
-                                             tiled_operation, metadata),
-                     std::invalid_argument);
-        EXPECT_EQ(host_calls, 0);
-      };
-  plugin::OperationMetadata no_image;
-  no_image.produces_image = false;
-  expect_tiled_schema_rejected(no_image);
-  plugin::OperationMetadata generic_output;
-  generic_output.named_value_output_names = {"deep"};
-  expect_tiled_schema_rejected(generic_output);
-  plugin::OperationMetadata parameter_output;
-  parameter_output.parameter_output_names = {"score"};
-  expect_tiled_schema_rejected(parameter_output);
-
-  registrar.register_op_hp_monolithic("valid", "name", operation);
-  EXPECT_EQ(host_calls, 1);
-  registrar.register_op_hp_tiled("valid", "name", tiled_operation);
-  EXPECT_EQ(host_calls, 2);
-  registrar.register_op_rt_tiled("valid", "name", tiled_operation);
-  EXPECT_EQ(host_calls, 3);
-  registrar.register_impl("valid", "name", Device::CPU, tiled_operation);
-  EXPECT_EQ(host_calls, 4);
-}
 
 Node make_source_node(int id, const std::string& name, int width, int height) {
   Node node;
@@ -346,7 +221,7 @@ Node make_public_dependency_node(int id, int image_parent_id,
   Node node;
   node.id = id;
   node.name = "public_dependency";
-  node.type = "operation_sdk_test";
+  node.type = "operation_contract_test";
   node.subtype = "dependency";
   node.parameters["width"] = 8;
   node.parameters["height"] = 8;
@@ -662,211 +537,12 @@ TEST(SpatialDependencyMapContract,
   EXPECT_EQ(lut.lookup((PixelRect{0, 15, 10, 10})), (PixelRect{3, 3, 1, 1}));
 }
 
-TEST(OperationHostAdapter,
-     NormalizesDependencyLutHaloAndRejectsMalformedGeometry) {
-  GraphModel graph = make_graph();
-  graph.add_node(make_source_node(1, "source", 8, 8));
-  Node child;
-  child.id = 2;
-  child.name = "lut_validation";
-  child.type = "operation_sdk_test";
-  child.subtype = "lut_validation";
-  child.parameters["width"] = 4;
-  child.parameters["height"] = 4;
-  child.image_inputs.push_back(ImageInput{1, "image"});
-  graph.add_node(child);
-  graph.validate_topology();
-
-  PixelRect cell{-2, -2, 5, 5};
-  PixelSize cell_size{4, 4};
-  PixelSize output_extent{4, 4};
-  auto builder =
-      plugin_host::adapt_dependency_builder([&](const plugin::RoiContext&) {
-        plugin::DependencyLutSnapshot result;
-        result.upstream_input_index = 0;
-        result.cell_size = cell_size;
-        result.output_extent = output_extent;
-        result.cell_to_upstream_roi.push_back(cell);
-        return result;
-      });
-  const plugin::ParameterMap parameters;
-  SpatialDependencyMap normalized = builder(
-      graph.node(2), graph, {(PixelSize{8, 8})}, (PixelSize{4, 4}), parameters);
-  ASSERT_TRUE(normalized.is_valid_for((PixelSize{4, 4})));
-  ASSERT_EQ(normalized.cell_to_upstream_roi.size(), 1u);
-  EXPECT_EQ(normalized.cell_to_upstream_roi.front(), (PixelRect{0, 0, 3, 3}));
-
-  cell = PixelRect{std::numeric_limits<int>::max(), 0,
-                   std::numeric_limits<int>::max(), 1};
-  normalized = builder(graph.node(2), graph, {(PixelSize{8, 8})},
-                       (PixelSize{4, 4}), parameters);
-  EXPECT_EQ(normalized.cell_to_upstream_roi.front(), (PixelRect{}));
-
-  cell = (PixelRect{0, 0, -1, 1});
-  EXPECT_THROW(builder(graph.node(2), graph, {(PixelSize{8, 8})},
-                       (PixelSize{4, 4}), parameters),
-               std::invalid_argument);
-  cell = (PixelRect{0, 0, 1, 1});
-  cell_size = (PixelSize{-1, 4});
-  EXPECT_THROW(builder(graph.node(2), graph, {(PixelSize{8, 8})},
-                       (PixelSize{4, 4}), parameters),
-               std::invalid_argument);
-  cell_size = (PixelSize{4, 4});
-  output_extent = (PixelSize{8, 4});
-  EXPECT_THROW(builder(graph.node(2), graph, {(PixelSize{8, 8})},
-                       (PixelSize{4, 4}), parameters),
-               std::invalid_argument);
-}
-
-TEST(OperationHostAdapter,
-     PreservesDisconnectedSlotsAndDataOnlySpatialSnapshots) {
-  Node node;
-  node.id = 41;
-  node.name = "null_views";
-  node.type = "operation_sdk_test";
-  node.subtype = "null_views";
-  bool monolithic_saw_nulls = false;
-  MonolithicOpFunc monolithic = plugin_host::adapt_monolithic_operation(
-      [&](const plugin::NodeView& public_node,
-          plugin::ArrayView<plugin::OperationInputView> inputs) {
-        monolithic_saw_nulls =
-            public_node.id() == node.id && inputs.size() == 1 &&
-            inputs[0].image_buffer == nullptr &&
-            inputs[0].named_values == nullptr && inputs[0].data == nullptr &&
-            inputs[0].spatial == nullptr;
-        return plugin::OperationOutput{};
-      });
-  const std::vector<const NodeOutput*> missing_inputs{nullptr};
-  (void)monolithic(node, missing_inputs);
-  EXPECT_TRUE(monolithic_saw_nulls);
-
-  NodeOutput data_only;
-  const Value generic_value = Value::from_cpu_dense_tensor(
-      DenseTensorDescriptor{{4U},
-                            ElementSemantics::FloatingPoint,
-                            StorageEncoding{32U}},
-      std::nullopt, StridedLayout{{4}},
-      std::vector<std::byte>(16U, std::byte{0x31}));
-  data_only.publish_named_value("deep", generic_value);
-  data_only.data.emplace("answer", plugin::ParameterValue(42));
-  data_only.space.absolute_roi = (PixelRect{3, 4, 5, 6});
-  data_only.space.global_scale_x = 2.0;
-  bool monolithic_saw_data_only = false;
-  MonolithicOpFunc inspect_data_only = plugin_host::adapt_monolithic_operation(
-      [&](const plugin::NodeView&,
-          plugin::ArrayView<plugin::OperationInputView> inputs) {
-        monolithic_saw_data_only =
-            inputs.size() == 1 && inputs[0].image_buffer == nullptr &&
-            inputs[0].named_values != nullptr &&
-            inputs[0].named_values->size() == 1U &&
-            inputs[0].named_values->at("deep").revision_id() ==
-                generic_value.revision_id() &&
-            inputs[0].data != nullptr &&
-            inputs[0].data->at("answer").as_int64() == 42 &&
-            inputs[0].spatial != nullptr &&
-            inputs[0].spatial->absolute_roi.x == 3 &&
-            inputs[0].spatial->absolute_roi.y == 4 &&
-            inputs[0].spatial->absolute_roi.width == 5 &&
-            inputs[0].spatial->absolute_roi.height == 6 &&
-            inputs[0].spatial->global_scale_x == 2.0;
-        plugin::OperationOutput output;
-        output.named_values.emplace("deep", inputs[0].named_values->at("deep"));
-        return output;
-      });
-  const std::vector<const NodeOutput*> data_only_inputs{&data_only};
-  const NodeOutput converted_data_only =
-      inspect_data_only(node, data_only_inputs);
-  EXPECT_TRUE(monolithic_saw_data_only);
-  ASSERT_EQ(converted_data_only.named_values.size(), 1U);
-  EXPECT_EQ(converted_data_only.named_values.at("deep").revision_id(),
-            generic_value.revision_id());
-  EXPECT_TRUE(converted_data_only.data.empty());
-
-  MonolithicOpFunc reserved_generic = plugin_host::adapt_monolithic_operation(
-      [&](const plugin::NodeView&,
-          plugin::ArrayView<plugin::OperationInputView>) {
-        plugin::OperationOutput output;
-        output.named_values.emplace("image", generic_value);
-        return output;
-      });
-  EXPECT_THROW((void)reserved_generic(node, {}), std::invalid_argument);
-  MonolithicOpFunc invalid_generic = plugin_host::adapt_monolithic_operation(
-      [](const plugin::NodeView&,
-         plugin::ArrayView<plugin::OperationInputView>) {
-        plugin::OperationOutput output;
-        output.named_values.emplace("deep", Value{});
-        return output;
-      });
-  EXPECT_THROW((void)invalid_generic(node, {}), std::invalid_argument);
-
-  bool tiled_saw_null_spatial = false;
-  TileOpFunc tiled = plugin_host::adapt_tiled_operation(
-      [&](const plugin::NodeView&, const OutputTileView&,
-          plugin::ArrayView<plugin::OperationTileInputView> inputs) {
-        tiled_saw_null_spatial =
-            inputs.size() == 1 && inputs[0].spatial == nullptr;
-      });
-  ImageBuffer image = make_aligned_cpu_image_buffer(2, 2, 1, DataType::FLOAT32);
-  const Value planned_value =
-      value_image_adapter::snapshot_cpu_image_value(image);
-  ASSERT_TRUE(planned_value.image_facet().has_value());
-  HostOutputBinding binding =
-      HostOutputBinding::allocate(DenseImageOutputPlan::create(
-          "image", planned_value.dense_tensor_descriptor(),
-          *planned_value.image_facet(), planned_value.strided_layout(),
-          planned_value.storage_size(), 64U));
-  HostOutputWriteGrant grant =
-      binding.grant_tile({image_region_domain(), 0, 1, 0, 1});
-  OutputTile output{&binding.plan(), &grant, (PixelRect{0, 0, 1, 1})};
-  const std::vector<InputTile> inputs{
-      InputTile{&image, (PixelRect{0, 0, 1, 1}), nullptr}};
-  tiled(node, output, inputs);
-  grant.retire_success();
-  (void)binding.seal();
-  EXPECT_TRUE(tiled_saw_null_spatial);
-
-  GraphModel graph = make_graph();
-  graph.add_node(make_source_node(51, "data_only_parent", 0, 0));
-  Node roi_child = make_blur_node(52, 51, 3);
-  graph.add_node(roi_child);
-  graph.validate_topology();
-  graph.mutate_node_runtime_state(
-      51, [&](auto& state) { state.cached_output_high_precision = data_only; });
-  bool roi_saw_data_only_spatial = false;
-  DirtyRoiPropFunc dirty = plugin_host::adapt_dirty_propagator(
-      [&](const plugin::RoiContext& context) {
-        roi_saw_data_only_spatial =
-            context.input_edges.size() == 1 &&
-            context.input_edges[0].has_available_input &&
-            context.input_edges[0].available_input.image_buffer == nullptr &&
-            context.input_edges[0].available_input.data != nullptr &&
-            context.input_edges[0]
-                    .available_input.data->at("answer")
-                    .as_int64() == 42 &&
-            context.input_edges[0].available_input.spatial != nullptr &&
-            context.input_edges[0].available_input.spatial->absolute_roi.x ==
-                3 &&
-            context.input_edges[0].available_input.spatial->absolute_roi.y ==
-                4 &&
-            context.input_edges[0]
-                    .available_input.spatial->absolute_roi.width == 5 &&
-            context.input_edges[0]
-                    .available_input.spatial->absolute_roi.height == 6;
-        return context.requested_roi;
-      });
-  const plugin::ParameterMap effective = roi_child.parameters;
-  EXPECT_EQ(dirty(graph.node(52), (PixelRect{0, 0, 1, 1}), graph,
-                  (PixelSize{1, 1}), {(PixelSize{})}, effective, nullptr),
-            (PixelRect{0, 0, 1, 1}));
-  EXPECT_TRUE(roi_saw_data_only_spatial);
-}
-
 TEST(OperationParameterAdapter,
      RejectsMalformedTaggedParametersBeforeGraphStorage) {
   Node node;
   node.id = 42;
   node.name = "malformed_parameter";
-  node.type = "operation_sdk_test";
+  node.type = "operation_contract_test";
   node.subtype = "malformed_parameter";
   const std::vector<std::string> malformed_documents{
       "{value: !!null nope}", "{value: !!bool nope}", "{value: !!int nope}",
@@ -885,504 +561,31 @@ TEST(OperationParameterAdapter,
   EXPECT_DOUBLE_EQ(node.parameters.at("value").as_double(), 1.0);
 }
 
-TEST(OperationHostAdapter, RejectsInvalidPublicSpatialMetadata) {
-  Node node;
-  node.id = 43;
-  node.name = "invalid_spatial";
-  node.type = "operation_sdk_test";
-  node.subtype = "invalid_spatial";
-  std::vector<plugin::SpatialSnapshot> invalid_snapshots(3);
-  invalid_snapshots[0].transform_matrix[0] =
-      std::numeric_limits<double>::quiet_NaN();
-  invalid_snapshots[1].global_scale_y = std::numeric_limits<double>::infinity();
-  invalid_snapshots[2].absolute_roi =
-      (PixelRect{std::numeric_limits<int>::max(), 0, 2, 1});
-  std::size_t selected = 0;
-  MonolithicOpFunc operation = plugin_host::adapt_monolithic_operation(
-      [&](const plugin::NodeView&,
-          plugin::ArrayView<plugin::OperationInputView>) {
-        plugin::OperationOutput output;
-        output.spatial = invalid_snapshots[selected];
-        return output;
-      });
-
-  for (selected = 0; selected < invalid_snapshots.size(); ++selected) {
-    EXPECT_THROW((void)operation(node, {}), std::invalid_argument);
-  }
-}
-
-TEST(OperationHostAdapter,
-     ValidatesPublicImageDescriptorsAndAcceptsOwnedUmatOutputAsSealedValue) {
-  Node node;
-  node.id = 44;
-  node.name = "image_descriptor";
-  node.type = "operation_sdk_test";
-  node.subtype = "image_descriptor";
-  cv::Mat source(3, 5, CV_32FC1, cv::Scalar(4.0f));
-  cv::UMat unified;
-  source.copyTo(unified);
-  MonolithicOpFunc valid = plugin_host::adapt_monolithic_operation(
-      [&](const plugin::NodeView&,
-          plugin::ArrayView<plugin::OperationInputView>) {
-        plugin::OperationOutput output;
-        output.image_buffer = plugin::opencv::from_umat(unified);
-        return output;
-      });
-  NodeOutput converted = valid(node, {});
-  ASSERT_TRUE(converted.has_image_value());
-  EXPECT_FALSE(converted.has_compatibility_image());
-  EXPECT_TRUE(converted.image_value().revision_id().valid());
-  const ImageBuffer converted_image =
-      value_image_adapter::snapshot_cpu_image_buffer(converted.image_value());
-  EXPECT_TRUE(converted_image.data);
-  EXPECT_EQ(converted_image.width, 5);
-  EXPECT_FLOAT_EQ(toCvMat(converted_image).at<float>(1, 2), 4.0f);
-
-  auto owned_byte = std::shared_ptr<void>(
-      new std::uint8_t[64],
-      [](void* pointer) { delete[] static_cast<std::uint8_t*>(pointer); });
-  std::vector<ImageBuffer> invalid(9);
-  invalid[0].width = -1;
-  invalid[0].height = 1;
-  invalid[0].channels = 1;
-  invalid[0].step = 4;
-  invalid[0].data = owned_byte;
-  invalid[1].width = 4;
-  invalid[1].height = 1;
-  invalid[1].channels = 1;
-  invalid[1].step = 1;
-  invalid[1].data = owned_byte;
-  invalid[2] = invalid[1];
-  invalid[2].step = 16;
-  invalid[2].type = static_cast<DataType>(999);
-  invalid[3] = invalid[2];
-  invalid[3].type = DataType::FLOAT32;
-  invalid[3].device = static_cast<Device>(999);
-  invalid[4].width = 1;
-  invalid[4].height = 1;
-  invalid[4].channels = 1;
-  invalid[4].step = 4;
-  invalid[4].data = std::shared_ptr<void>(std::shared_ptr<void>{},
-                                          reinterpret_cast<void*>(1));
-  invalid[5].width = 1;
-  invalid[5].height = 1;
-  invalid[5].channels = 1;
-  invalid[5].step = 4;
-  invalid[5].context = std::make_shared<int>(1);
-  invalid[5].device = Device::CPU;
-  invalid[6].type = DataType::UINT8;
-  invalid[7].device = Device::GPU_METAL;
-  invalid[8].width = 2;
-  invalid[8].height = 2;
-  invalid[8].channels = 1;
-  invalid[8].type = DataType::UINT8;
-  invalid[8].device = Device::GPU_METAL;
-  invalid[8].step = 1U;
-  invalid[8].context = std::make_shared<int>(1);
-
-  std::size_t selected = 0;
-  MonolithicOpFunc rejected = plugin_host::adapt_monolithic_operation(
-      [&](const plugin::NodeView&,
-          plugin::ArrayView<plugin::OperationInputView>) {
-        plugin::OperationOutput output;
-        output.image_buffer = invalid[selected];
-        return output;
-      });
-  for (selected = 0; selected < invalid.size(); ++selected) {
-    EXPECT_THROW((void)rejected(node, {}), std::invalid_argument);
-  }
-}
-
-/**
- * @brief Verifies imported device Values cross every current ABI v2 input edge.
- *
- * @return Nothing; GoogleTest assertions report binding or lifetime defects.
- * @throws Allocation and adapter exceptions unchanged to the test framework.
- * @note The synthetic deleters execute in the test binary, while the real DSO
- * fixture exercises the same shared-owner graph on supported native-loading
- * platforms. Monolithic, ROI, and tiled consumers receive the exact opaque
- * descriptor/context without CPU access. A retained callback projection keeps
- * the canonical Value alive after its NodeOutput retires, then releases payload
- * before library. Pixel-transforming image_mixing and unmarked device Values
- * remain fail-closed.
- */
-TEST(OperationHostAdapter,
-     ImportedDeviceValueProjectsToAbiV2ConsumersAndRetainsOwners) {
-  std::vector<std::string> retirement_trace;
-  auto library_lifetime =
-      std::shared_ptr<void>(new int(1), [&retirement_trace](void* pointer) {
-        delete static_cast<int*>(pointer);
-        retirement_trace.emplace_back("library");
-      });
-  auto payload =
-      std::shared_ptr<void>(new int(2), [&retirement_trace](void* pointer) {
-        delete static_cast<int*>(pointer);
-        retirement_trace.emplace_back("payload");
-      });
-  void* const payload_address = payload.get();
-
-  Node node;
-  node.id = 45;
-  node.name = "imported_device_value";
-  node.type = "operation_sdk_test";
-  node.subtype = "imported_device_value";
-  MonolithicOpFunc operation = plugin_host::adapt_monolithic_operation(
-      [payload = std::move(payload)](
-          const plugin::NodeView&,
-          plugin::ArrayView<plugin::OperationInputView>) mutable {
-        plugin::OperationOutput output;
-        output.image_buffer.width = 2;
-        output.image_buffer.height = 3;
-        output.image_buffer.channels = 1;
-        output.image_buffer.type = DataType::UINT8;
-        output.image_buffer.device = Device::GPU_METAL;
-        output.image_buffer.context = std::move(payload);
-        return output;
-      },
-      library_lifetime);
-  library_lifetime.reset();
-
-  NodeOutput converted = operation(node, {});
-  operation = MonolithicOpFunc{};
-  ASSERT_TRUE(converted.has_image_value());
-  EXPECT_FALSE(converted.has_compatibility_image());
-  const StorageBinding binding = converted.image_value().storage_binding();
-  EXPECT_EQ(binding.device, DeviceId(DeviceBackend::Metal));
-  EXPECT_EQ(binding.memory_domain, MemoryDomain::Imported);
-  EXPECT_EQ(binding.byte_size, 6U);
-  EXPECT_FALSE(binding.host_visible);
-  EXPECT_EQ(converted.image_value().ready_fence().poll().state(),
-            ReadyFenceState::Ready);
-  EXPECT_THROW((void)value_image_adapter::snapshot_cpu_image_buffer(
-                   converted.image_value()),
-               BufferAccessError);
-
-  ImageBuffer retained_projection;
-  bool monolithic_saw_opaque_input = false;
-  Node consumer_node = node;
-  consumer_node.id = 46;
-  consumer_node.name = "imported_device_consumer";
-  consumer_node.subtype = "imported_device_consumer";
-  MonolithicOpFunc consumer = plugin_host::adapt_monolithic_operation(
-      [&](const plugin::NodeView&,
-          plugin::ArrayView<plugin::OperationInputView> inputs) {
-        monolithic_saw_opaque_input =
-            inputs.size() == 1U && inputs[0].image_buffer != nullptr &&
-            inputs[0].image_buffer->width == 2 &&
-            inputs[0].image_buffer->height == 3 &&
-            inputs[0].image_buffer->channels == 1 &&
-            inputs[0].image_buffer->type == DataType::UINT8 &&
-            inputs[0].image_buffer->device == Device::GPU_METAL &&
-            inputs[0].image_buffer->context.get() == payload_address;
-        if (inputs.size() == 1U && inputs[0].image_buffer != nullptr) {
-          retained_projection = *inputs[0].image_buffer;
-        }
-        return plugin::OperationOutput{};
-      });
-  const std::vector<const NodeOutput*> available_inputs{&converted};
-  EXPECT_NO_THROW((void)consumer(consumer_node, available_inputs));
-  EXPECT_TRUE(monolithic_saw_opaque_input);
-  ASSERT_TRUE(retained_projection.context);
-  EXPECT_EQ(retained_projection.context.get(), payload_address);
-
-  GraphModel graph = make_graph();
-  graph.add_node(make_source_node(45, "imported_device_source", 2, 3));
-  Node roi_node = make_blur_node(47, 45, 3);
-  roi_node.type = "operation_sdk_test";
-  roi_node.subtype = "imported_device_roi_consumer";
-  graph.add_node(roi_node);
-  graph.validate_topology();
-  bool roi_saw_opaque_input = false;
-  DirtyRoiPropFunc dirty = plugin_host::adapt_dirty_propagator(
-      [&](const plugin::RoiContext& context) {
-        roi_saw_opaque_input =
-            context.input_edges.size() == 1U &&
-            context.input_edges[0].has_available_input &&
-            context.input_edges[0].available_input.image_buffer != nullptr &&
-            context.input_edges[0].available_input.image_buffer->device ==
-                Device::GPU_METAL &&
-            context.input_edges[0]
-                    .available_input.image_buffer->context.get() ==
-                payload_address;
-        return context.requested_roi;
-      });
-  const plugin::ParameterMap effective_parameters;
-  EXPECT_EQ(
-      dirty(graph.node(47), (PixelRect{0, 0, 2, 3}), graph, (PixelSize{2, 3}),
-            {(PixelSize{2, 3})}, effective_parameters, &available_inputs),
-      (PixelRect{0, 0, 2, 3}));
-  EXPECT_TRUE(roi_saw_opaque_input);
-
-  {
-    Node tiled_node = consumer_node;
-    tiled_node.type = "opaque_passthrough";
-    const compute::TiledInputContext tiled_context =
-        compute::TiledInputNormalizer::normalize(tiled_node, available_inputs);
-    ASSERT_EQ(tiled_context.callback_images.size(), 1U);
-    EXPECT_EQ(tiled_context.callback_images.front().device, Device::GPU_METAL);
-    EXPECT_EQ(tiled_context.callback_images.front().context.get(),
-              payload_address);
-
-    bool tiled_saw_opaque_input = false;
-    TileOpFunc tiled_consumer = plugin_host::adapt_tiled_operation(
-        [&](const plugin::NodeView&, const OutputTileView&,
-            plugin::ArrayView<plugin::OperationTileInputView> inputs) {
-          tiled_saw_opaque_input =
-              inputs.size() == 1U && inputs[0].tile.buffer != nullptr &&
-              inputs[0].tile.buffer->device == Device::GPU_METAL &&
-              inputs[0].tile.buffer->context.get() == payload_address;
-        });
-    ImageBuffer tiled_output =
-        make_aligned_cpu_image_buffer(2, 3, 1, DataType::UINT8);
-    const Value tiled_plan_value =
-        value_image_adapter::snapshot_cpu_image_value(tiled_output);
-    ASSERT_TRUE(tiled_plan_value.image_facet().has_value());
-    HostOutputBinding tiled_binding =
-        HostOutputBinding::allocate(DenseImageOutputPlan::create(
-            "image", tiled_plan_value.dense_tensor_descriptor(),
-            *tiled_plan_value.image_facet(), tiled_plan_value.strided_layout(),
-            tiled_plan_value.storage_size(), 64U));
-    HostOutputWriteGrant tiled_grant =
-        tiled_binding.grant_tile({image_region_domain(), 0, 2, 0, 3});
-    OutputTile tiled_output_view{&tiled_binding.plan(), &tiled_grant,
-                                 (PixelRect{0, 0, 2, 3})};
-    const std::vector<InputTile> tiled_inputs{
-        InputTile{&tiled_context.callback_images.front(),
-                  (PixelRect{0, 0, 2, 3}), nullptr}};
-    EXPECT_NO_THROW(
-        tiled_consumer(tiled_node, tiled_output_view, tiled_inputs));
-    EXPECT_TRUE(tiled_saw_opaque_input);
-    tiled_grant.retire_success();
-    (void)tiled_binding.seal();
-
-    NodeOutput cpu_base;
-    cpu_base.publish_image_value(value_image_adapter::snapshot_cpu_image_value(
-        make_aligned_cpu_image_buffer(4, 3, 1, DataType::UINT8)));
-    Node mixing_node = consumer_node;
-    mixing_node.type = "image_mixing";
-    const std::vector<const NodeOutput*> mixing_inputs{&cpu_base, &converted};
-    EXPECT_THROW((void)compute::TiledInputNormalizer::normalize(mixing_node,
-                                                                mixing_inputs),
-                 std::invalid_argument);
-  }
-
-  ImageBuffer metadata_source =
-      make_aligned_cpu_image_buffer(2, 3, 1, DataType::UINT8);
-  const Value metadata_value =
-      value_image_adapter::snapshot_cpu_image_value(metadata_source);
-  auto unmarked_owner = std::make_shared<int>(9);
-  PendingDeviceValuePublication unmarked =
-      PendingDeviceValuePublisher::publish_dense_tensor(
-          metadata_value.dense_tensor_descriptor(),
-          metadata_value.image_facet(), metadata_value.strided_layout(),
-          unmarked_owner, unmarked_owner.get(), nullptr,
-          metadata_value.storage_size(), DeviceId(DeviceBackend::Metal),
-          MemoryDomain::DeviceLocal);
-  ASSERT_TRUE(unmarked.producer.complete_ready());
-  EXPECT_THROW(
-      (void)value_image_adapter::project_image_value_for_abi_v2(unmarked.value),
-      BufferAccessError);
-
-  converted = NodeOutput{};
-  EXPECT_TRUE(retirement_trace.empty());
-
-  retained_projection = ImageBuffer{};
-  EXPECT_EQ(retirement_trace, (std::vector<std::string>{"payload", "library"}));
-}
-
-/**
- * @brief Verifies the installed operation ABI forwards all routing metadata.
- *
- * @return Nothing; GoogleTest assertions report translation mismatches.
- * @throws Adapter validation and string-allocation exceptions unchanged.
- * @note This tests the ABI-to-private boundary only; execution gates consume
- * the resulting private value in ExecutionService tests.
- */
-TEST(OperationHostAdapter, ConvertsCompleteOperationRoutingMetadata) {
-  plugin::OperationMetadata metadata;
-  metadata.reentrant = false;
-  metadata.maximum_parallelism = 5U;
-  metadata.retained_memory_bytes = 4096U;
-  metadata.scratch_bytes = 8192U;
-  metadata.exclusive_key = "plugin-shared-context";
-  metadata.named_value_output_names = {"z-depth", "deep"};
-  metadata.parameter_output_names = {"variance", "score"};
-
-  const OpMetadata converted =
-      plugin_host::operation_metadata_to_private(metadata);
-  EXPECT_FALSE(converted.reentrant);
-  EXPECT_EQ(converted.maximum_parallelism, 5U);
-  EXPECT_EQ(converted.retained_memory_bytes, 4096U);
-  EXPECT_EQ(converted.scratch_bytes, 8192U);
-  EXPECT_EQ(converted.exclusive_key, "plugin-shared-context");
-  EXPECT_EQ(converted.named_value_output_names,
-            (std::vector<std::string>{"deep", "z-depth"}));
-  EXPECT_EQ(converted.parameter_output_names,
-            (std::vector<std::string>{"score", "variance"}));
-}
-
-/**
- * @brief Verifies malformed ABI metadata is rejected before registration.
- *
- * @return Nothing; GoogleTest assertions report accepted invalid values.
- * @throws Adapter validation exceptions are consumed by GoogleTest.
- * @note Every case starts from a fresh default metadata value so failures are
- * attributable to exactly one malformed field.
- */
-TEST(OperationHostAdapter, RejectsInvalidRegistrarMetadataValues) {
-  plugin::OperationMetadata metadata;
-  metadata.tile_preference = static_cast<plugin::TileSizePreference>(999);
-  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
-               std::invalid_argument);
-  metadata = plugin::OperationMetadata{};
-  metadata.access_pattern = static_cast<plugin::InputAccessPattern>(999);
-  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
-               std::invalid_argument);
-  metadata = plugin::OperationMetadata{};
-  metadata.device_preference = static_cast<Device>(999);
-  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
-               std::invalid_argument);
-  metadata = plugin::OperationMetadata{};
-  metadata.cost_score = -1;
-  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
-               std::invalid_argument);
-  metadata = plugin::OperationMetadata{};
-  metadata.exclusive_key.assign(
-      plugin::OperationMetadata::kExclusiveKeyMaxBytes + 1U, 'x');
-  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
-               std::invalid_argument);
-  metadata = plugin::OperationMetadata{};
-  metadata.exclusive_key = std::string("invalid\0key", 11U);
-  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
-               std::invalid_argument);
-  metadata = plugin::OperationMetadata{};
-  metadata.named_value_output_names = {""};
-  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
-               std::invalid_argument);
-  metadata = plugin::OperationMetadata{};
-  metadata.named_value_output_names = {"image"};
-  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
-               std::invalid_argument);
-  metadata = plugin::OperationMetadata{};
-  metadata.named_value_output_names = {"deep", "deep"};
-  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
-               std::invalid_argument);
-  metadata = plugin::OperationMetadata{};
-  metadata.named_value_output_names.assign(
-      plugin::OperationMetadata::kNamedValueOutputCountMax + 1U, "deep");
-  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
-               std::invalid_argument);
-  metadata = plugin::OperationMetadata{};
-  metadata.named_value_output_names = {
-      std::string(plugin::OperationMetadata::kOutputNameMaxBytes + 1U, 'x')};
-  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
-               std::invalid_argument);
-  metadata = plugin::OperationMetadata{};
-  metadata.named_value_output_names = {std::string("deep\0value", 10U)};
-  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
-               std::invalid_argument);
-  metadata = plugin::OperationMetadata{};
-  metadata.named_value_output_names = {"score"};
-  metadata.parameter_output_names = {"score"};
-  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
-               std::invalid_argument);
-  EXPECT_THROW(
-      plugin_host::operation_device_to_private(static_cast<Device>(999)),
-      std::invalid_argument);
-}
-
-TEST(OperationHostAdapter,
-     ForwardSnapshotCarriesAllExtentsAndExactActiveInput) {
-  GraphModel graph = make_graph();
-  graph.add_node(make_source_node(1, "left", 10, 11));
-  graph.add_node(make_source_node(2, "right", 20, 21));
-  Node child;
-  child.id = 3;
-  child.name = "merge";
-  child.type = "operation_sdk_test";
-  child.subtype = "forward";
-  child.parameters["mode"] = "exact";
-  child.image_inputs = {ImageInput{1, "image"}, ImageInput{2, "image"}};
-  graph.add_node(child);
-  graph.validate_topology();
-
-  bool snapshot_is_exact = false;
-  ForwardRoiPropFunc forward = plugin_host::adapt_forward_propagator(
-      [&](const plugin::RoiContext& context) {
-        const plugin::ParameterValue* mode =
-            context.node ? context.node->find_parameter("mode") : nullptr;
-        snapshot_is_exact =
-            context.input_edges.size() == 2 && context.active_edge != nullptr &&
-            context.active_edge->input_index == 1 &&
-            context.input_edges[0].extent.width == 10 &&
-            context.input_edges[0].extent.height == 11 &&
-            context.input_edges[1].extent.width == 20 &&
-            context.input_edges[1].extent.height == 21 && mode &&
-            mode->is_string() && mode->as_string() == "exact";
-        return context.requested_roi;
-      });
-  const std::vector<PixelSize> extents{(PixelSize{10, 11}),
-                                       (PixelSize{20, 21})};
-  const plugin::ParameterMap effective = child.parameters;
-  const PixelRect result =
-      forward(graph.node(3), (PixelRect{1, 2, 3, 4}), graph,
-              (PixelSize{20, 21}), (PixelSize{20, 21}), 1, extents, effective);
-
-  EXPECT_TRUE(snapshot_is_exact);
-  EXPECT_EQ(result, (PixelRect{1, 2, 3, 4}));
-}
-
-TEST(OperationHostAdapter, ValidatesReturnedRoiGeometryAfterCallbackReturn) {
-  GraphModel graph = make_graph();
-  graph.add_node(make_source_node(1, "roi_parent", 10, 11));
-  Node child = make_blur_node(2, 1, 3);
-  graph.add_node(child);
-  graph.validate_topology();
-  const plugin::ParameterMap effective = child.parameters;
-
-  DirtyRoiPropFunc negative_origin = plugin_host::adapt_dirty_propagator(
-      [](const plugin::RoiContext&) { return (PixelRect{-7, -5, 3, 4}); });
-  EXPECT_EQ(negative_origin(graph.node(2), (PixelRect{0, 0, 1, 1}), graph,
-                            (PixelSize{10, 11}), {(PixelSize{10, 11})},
-                            effective, nullptr),
-            (PixelRect{-7, -5, 3, 4}));
-
-  DirtyRoiPropFunc negative_size = plugin_host::adapt_dirty_propagator(
-      [](const plugin::RoiContext&) { return (PixelRect{0, 0, -1, 2}); });
-  EXPECT_THROW((void)negative_size(graph.node(2), (PixelRect{0, 0, 1, 1}),
-                                   graph, (PixelSize{10, 11}),
-                                   {(PixelSize{10, 11})}, effective, nullptr),
-               std::invalid_argument);
-
-  ForwardRoiPropFunc overflowing =
-      plugin_host::adapt_forward_propagator([](const plugin::RoiContext&) {
-        return (PixelRect{std::numeric_limits<int>::max(), 0, 1, 1});
-      });
-  EXPECT_THROW((void)overflowing(graph.node(2), (PixelRect{0, 0, 1, 1}), graph,
-                                 (PixelSize{10, 11}), (PixelSize{10, 11}), 0,
-                                 {(PixelSize{10, 11})}, effective),
-               std::invalid_argument);
-}
-
 TEST(PropagationContracts, DependencyLutRoutesOnlyToItsSelectedImageInputEdge) {
-  const std::string type = "operation_sdk_test";
+  const std::string type = "operation_contract_test";
   const std::string subtype = "dependency_route";
   auto& registry = OpRegistry::instance();
   registry.register_dirty_propagator(
       type, subtype,
-      plugin_host::adapt_dirty_propagator(
-          [](const plugin::RoiContext&) { return (PixelRect{0, 0, 1, 1}); }));
+      [](const Node&, const PixelRect&, const GraphModel&, const PixelSize&,
+         const std::vector<PixelSize>&, const plugin::ParameterMap&,
+         const std::vector<const NodeOutput*>*) {
+        return PixelRect{0, 0, 1, 1};
+      });
   registry.register_dependency_builder(
       type, subtype,
-      plugin_host::adapt_dependency_builder(
-          [](const plugin::RoiContext& context) {
-            plugin::DependencyLutSnapshot result;
-            result.upstream_input_index = 1;
-            result.cell_size = context.output_extent;
-            result.output_extent = context.output_extent;
-            result.cell_to_upstream_roi.push_back((PixelRect{5, 0, 1, 1}));
-            return result;
-          }),
+      [](const Node&, const GraphModel&, const std::vector<PixelSize>&,
+         const PixelSize& output_extent, const plugin::ParameterMap&) {
+        SpatialDependencyMap result;
+        result.grid_size_x = output_extent.width;
+        result.grid_size_y = output_extent.height;
+        result.cols = 1;
+        result.rows = 1;
+        result.output_extent = output_extent;
+        result.upstream_input_index = 1;
+        result.cell_to_upstream_roi.push_back((PixelRect{5, 0, 1, 1}));
+        return result;
+      },
       false);
 
   GraphModel graph = make_graph();
@@ -1416,26 +619,31 @@ TEST(PropagationContracts, DependencyLutRoutesOnlyToItsSelectedImageInputEdge) {
 }
 
 TEST(PropagationContracts, BoundsSharedAndLutContributionsBeforeBackwardUnion) {
-  const std::string type = "operation_sdk_test";
+  const std::string type = "operation_contract_test";
   const std::string subtype = "bounded_dependency_union";
   auto& registry = OpRegistry::instance();
   registry.register_dirty_propagator(
       type, subtype,
-      plugin_host::adapt_dirty_propagator([](const plugin::RoiContext&) {
+      [](const Node&, const PixelRect&, const GraphModel&, const PixelSize&,
+         const std::vector<PixelSize>&, const plugin::ParameterMap&,
+         const std::vector<const NodeOutput*>*) {
         return PixelRect{std::numeric_limits<int>::min(), 0,
                          std::numeric_limits<int>::max(), 1};
-      }));
+      });
   registry.register_dependency_builder(
       type, subtype,
-      plugin_host::adapt_dependency_builder(
-          [](const plugin::RoiContext& context) {
-            plugin::DependencyLutSnapshot result;
-            result.upstream_input_index = 0;
-            result.cell_size = context.output_extent;
-            result.output_extent = context.output_extent;
-            result.cell_to_upstream_roi.push_back((PixelRect{70, 0, 1, 1}));
-            return result;
-          }),
+      [](const Node&, const GraphModel&, const std::vector<PixelSize>&,
+         const PixelSize& output_extent, const plugin::ParameterMap&) {
+        SpatialDependencyMap result;
+        result.grid_size_x = output_extent.width;
+        result.grid_size_y = output_extent.height;
+        result.cols = 1;
+        result.rows = 1;
+        result.output_extent = output_extent;
+        result.upstream_input_index = 0;
+        result.cell_to_upstream_roi.push_back((PixelRect{70, 0, 1, 1}));
+        return result;
+      },
       false);
 
   GraphModel graph = make_graph();
@@ -1545,30 +753,36 @@ TEST(DirtyRegionSnapshotBuilderContract,
 
 TEST(PropagationContracts,
      DependencyLutReusesExactSnapshotAndPublishesWithStrongGuarantee) {
-  const std::string type = "operation_sdk_test";
+  const std::string type = "operation_contract_test";
   const std::string subtype = "dependency";
   auto builder_calls = std::make_shared<int>(0);
   auto last_source_id = std::make_shared<int>(-1);
   auto& registry = OpRegistry::instance();
   registry.register_dirty_propagator(
       type, subtype,
-      plugin_host::adapt_dirty_propagator(
-          [](const plugin::RoiContext&) { return (PixelRect{}); }));
+      [](const Node&, const PixelRect&, const GraphModel&, const PixelSize&,
+         const std::vector<PixelSize>&, const plugin::ParameterMap&,
+         const std::vector<const NodeOutput*>*) { return PixelRect{}; });
   registry.register_dependency_builder(
       type, subtype,
-      plugin_host::adapt_dependency_builder(
-          [builder_calls, last_source_id](const plugin::RoiContext& context) {
-            ++*builder_calls;
-            *last_source_id = context.input_edges[0].source_node_id;
-            const auto* radius = context.node->find_parameter("radius");
-            const int value = static_cast<int>(radius->as_int64());
-            plugin::DependencyLutSnapshot result;
-            result.upstream_input_index = value == 99 ? 9 : 0;
-            result.cell_size = context.output_extent;
-            result.output_extent = context.output_extent;
-            result.cell_to_upstream_roi.push_back((PixelRect{value, 0, 1, 1}));
-            return result;
-          }),
+      [builder_calls, last_source_id](
+          const Node& node, const GraphModel&, const std::vector<PixelSize>&,
+          const PixelSize& output_extent,
+          const plugin::ParameterMap& effective_parameters) {
+        ++*builder_calls;
+        *last_source_id = node.image_inputs[0].from_node_id;
+        const int value =
+            static_cast<int>(effective_parameters.at("radius").as_int64());
+        SpatialDependencyMap result;
+        result.grid_size_x = output_extent.width;
+        result.grid_size_y = output_extent.height;
+        result.cols = 1;
+        result.rows = 1;
+        result.output_extent = output_extent;
+        result.upstream_input_index = value == 99 ? 9 : 0;
+        result.cell_to_upstream_roi.push_back((PixelRect{value, 0, 1, 1}));
+        return result;
+      },
       false);
 
   GraphModel graph = make_graph();
@@ -1635,7 +849,7 @@ TEST(PropagationContracts,
             4);
 
   seed_parameter_output(graph, 2, 99, 4);
-  EXPECT_THROW((void)project(), std::invalid_argument);
+  EXPECT_THROW((void)project(), GraphError);
   EXPECT_EQ(*builder_calls, 6);
   EXPECT_EQ(graph.node(3).dependency_lut_version, 5u);
   ASSERT_TRUE(graph.node(3).dependency_lut_cache.has_value());
@@ -1663,27 +877,31 @@ TEST(PropagationContracts,
 
 TEST(PropagationContracts,
      DirectBuilderReplacementInvalidatesTheExistingDependencyCache) {
-  const std::string type = "operation_sdk_test";
+  const std::string type = "operation_contract_test";
   const std::string subtype = "builder_revision";
   auto& registry = OpRegistry::instance();
   registry.register_dirty_propagator(
       type, subtype,
-      plugin_host::adapt_dirty_propagator(
-          [](const plugin::RoiContext&) { return (PixelRect{}); }));
+      [](const Node&, const PixelRect&, const GraphModel&, const PixelSize&,
+         const std::vector<PixelSize>&, const plugin::ParameterMap&,
+         const std::vector<const NodeOutput*>*) { return PixelRect{}; });
   auto register_builder = [&](int marker, const std::shared_ptr<int>& calls) {
     registry.register_dependency_builder(
         type, subtype,
-        plugin_host::adapt_dependency_builder(
-            [marker, calls](const plugin::RoiContext& context) {
-              ++*calls;
-              plugin::DependencyLutSnapshot result;
-              result.upstream_input_index = 0;
-              result.cell_size = context.output_extent;
-              result.output_extent = context.output_extent;
-              result.cell_to_upstream_roi.push_back(
-                  (PixelRect{marker, 0, 1, 1}));
-              return result;
-            }),
+        [marker, calls](
+            const Node&, const GraphModel&, const std::vector<PixelSize>&,
+            const PixelSize& output_extent, const plugin::ParameterMap&) {
+          ++*calls;
+          SpatialDependencyMap result;
+          result.grid_size_x = output_extent.width;
+          result.grid_size_y = output_extent.height;
+          result.cols = 1;
+          result.rows = 1;
+          result.output_extent = output_extent;
+          result.upstream_input_index = 0;
+          result.cell_to_upstream_roi.push_back((PixelRect{marker, 0, 1, 1}));
+          return result;
+        },
         false);
   };
 
@@ -1727,7 +945,7 @@ TEST(PropagationContracts,
 
 TEST(OperationRegistryContract,
      DependencyBuilderSnapshotNeverMixesConcurrentCallbackAndFlagState) {
-  const std::string type = "operation_sdk_test";
+  const std::string type = "operation_contract_test";
   const std::string subtype = "concurrent_builder_snapshot";
   auto& registry = OpRegistry::instance();
   registry.unregister_key(make_key(type, subtype));
@@ -1809,7 +1027,7 @@ TEST(OperationRegistryContract,
 
 TEST(OperationRegistryContract,
      DependencyFlagAggregatesBuilderMetadataAndDeviceSourcesIndependently) {
-  const std::string type = "operation_sdk_test";
+  const std::string type = "operation_contract_test";
   const std::string subtype = "dependency_flag_sources";
   auto& registry = OpRegistry::instance();
   registry.unregister_key(make_key(type, subtype));

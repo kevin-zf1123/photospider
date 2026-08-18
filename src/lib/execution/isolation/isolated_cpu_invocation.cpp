@@ -2892,25 +2892,18 @@ IsolatedCpuElementSemantics to_wire_element_semantics(
 }
 
 /**
- * @brief Projects one optional public image facet into legacy bounded axes.
+ * @brief Projects one optional public image facet into complete wire metadata.
  * @param facet Optional facet from a public Value or output plan.
  * @return Exact optional wire facet.
- * @throws IsolatedCpuProtocolError when an axis exceeds uint32 representation
- *         or the facet carries any fact the axis-only wire cannot encode.
- * @note A zero-origin data window is reproducible from tensor extents. Display,
- *       stable channel/group, sample-domain, and color facts are rejected
- *       before packet creation rather than silently omitted.
+ * @throws IsolatedCpuProtocolError when an axis exceeds uint32 representation.
+ * @throws std::bad_alloc when bounded nested metadata copying fails.
+ * @note Every signed window, stable channel/group identity, diagnostic name,
+ * sample-domain fact, and color fact is retained without a process pointer.
  */
 std::optional<IsolatedCpuImageFacet> to_wire_image_facet(
     const std::optional<ImageFacet>& facet) {
   if (!facet.has_value()) {
     return std::nullopt;
-  }
-  if (facet->data_window.x_begin != 0 || facet->data_window.y_begin != 0 ||
-      facet->display_window.has_value() || facet->channel_schema.has_value() ||
-      facet->sample_domain.has_value() || facet->color.has_value()) {
-    throw IsolatedCpuProtocolError(
-        "isolated CPU axis-only image facet cannot encode rich metadata");
   }
   const auto to_axis = [](std::size_t axis) {
     if (axis > std::numeric_limits<std::uint32_t>::max()) {
@@ -2925,6 +2918,11 @@ std::optional<IsolatedCpuImageFacet> to_wire_image_facet(
   if (facet->channel_axis.has_value()) {
     wire.channel_axis = to_axis(*facet->channel_axis);
   }
+  wire.data_window = facet->data_window;
+  wire.display_window = facet->display_window;
+  wire.channel_schema = facet->channel_schema;
+  wire.sample_domain = facet->sample_domain;
+  wire.color = facet->color;
   return wire;
 }
 
@@ -3019,7 +3017,7 @@ std::uint64_t complete_capability_size(std::size_t payload_bytes) {
 /**
  * @brief Side-effect-free Host plan retained before capability materialization.
  * @throws Nothing for moves and destruction.
- * @note Every vector is bounded by protocol-v1 endpoint limits.
+ * @note Every vector is bounded by protocol-v2 endpoint limits.
  */
 struct HostInvocationPreflight final {
   /** @brief Fully validated canonical request before shared-memory creation. */
@@ -3212,6 +3210,13 @@ HostInvocationPreflight preflight_host_invocation(
     throw IsolatedCpuProtocolError(
         "isolated CPU invocation requires at least one output");
   }
+  if (!invocation.operation_identity.valid() ||
+      !invocation.implementation_identity.valid() ||
+      !invocation.configuration_schema_identity.valid() ||
+      invocation.input_bindings.size() != invocation.inputs.size()) {
+    throw IsolatedCpuProtocolError(
+        "isolated CPU operation identity or input binding is incomplete");
+  }
   if (invocation.inputs.size() >
           std::numeric_limits<std::size_t>::max() - invocation.outputs.size() ||
       invocation.inputs.size() + invocation.outputs.size() >
@@ -3228,7 +3233,12 @@ HostInvocationPreflight preflight_host_invocation(
   IsolatedCpuInvocationRequest& request = preflight.request;
   request.identity = invocation.identity;
   request.operation = invocation.operation;
+  request.operation_identity = invocation.operation_identity;
+  request.implementation_identity = invocation.implementation_identity;
+  request.configuration_schema_identity =
+      invocation.configuration_schema_identity;
   request.parameters = invocation.parameters;
+  request.configuration = invocation.configuration;
   request.input_count = static_cast<std::uint32_t>(invocation.inputs.size());
   request.output_count = static_cast<std::uint32_t>(invocation.outputs.size());
   const std::size_t total_count =
@@ -3239,7 +3249,11 @@ HostInvocationPreflight preflight_host_invocation(
 
   std::uint64_t aggregate_shared_bytes = 0U;
   std::uint64_t next_capability_id = 1U;
-  for (const Value& value : invocation.inputs) {
+  for (std::size_t input_index = 0U; input_index < invocation.inputs.size();
+       ++input_index) {
+    const Value& value = invocation.inputs[input_index];
+    const IsolatedCpuInputBinding& binding =
+        invocation.input_bindings[input_index];
     if (!value.valid() ||
         value.representation_kind() != ValueRepresentationKind::DenseTensor ||
         value.storage_layout_kind() != StorageLayoutKind::Strided) {
@@ -3264,6 +3278,14 @@ HostInvocationPreflight preflight_host_invocation(
     tensor.access = IsolatedCpuTensorAccess::InputReadOnly;
     tensor.readiness = IsolatedCpuTensorReadiness::ReadyInput;
     tensor.ownership = IsolatedCpuTensorOwnership::HostInput;
+    tensor.port_identity = binding.port_identity;
+    tensor.binding_identity = binding.edge_identity;
+    tensor.schema_identity = binding.schema_identity;
+    tensor.facet_identity = binding.facet_identity;
+    tensor.layout_identity = binding.layout_identity;
+    tensor.schema_version = binding.schema_version;
+    tensor.layout_version = binding.layout_version;
+    tensor.region = binding.region;
     tensor.capability_id = capability.capability_id;
     tensor.capability_offset = kCapabilityHeaderBytes;
     tensor.capability_length = static_cast<std::uint64_t>(lease.size());
@@ -3287,6 +3309,15 @@ HostInvocationPreflight preflight_host_invocation(
     tensor.access = IsolatedCpuTensorAccess::OutputWriteOnly;
     tensor.readiness = IsolatedCpuTensorReadiness::WritableOutput;
     tensor.ownership = IsolatedCpuTensorOwnership::RuntimeOutput;
+    tensor.port_identity = plan.port_identity;
+    tensor.binding_identity = plan.plan_identity;
+    tensor.schema_identity = plan.schema_identity;
+    tensor.facet_identity = plan.facet_identity;
+    tensor.layout_identity = plan.layout_identity;
+    tensor.schema_version = plan.schema_version;
+    tensor.layout_version = plan.layout_version;
+    tensor.region = plan.region;
+    tensor.allocation_alignment = static_cast<std::uint64_t>(plan.alignment);
     tensor.capability_id = capability.capability_id;
     tensor.capability_offset = kCapabilityHeaderBytes;
     tensor.capability_length = static_cast<std::uint64_t>(plan.storage_size);
@@ -3379,7 +3410,7 @@ PreparedHostInvocation materialize_host_invocation(
 /**
  * @brief Authorizes resources and materializes capabilities in strict order.
  * @param invocation Host-owned invocation plan.
- * @param limits Validated protocol-v1 bounds.
+ * @param limits Validated protocol-v2 bounds.
  * @param authorized_runtime Retained signed runtime package.
  * @param ledger Attempt-local sole Host resource mint.
  * @param policy Validated composition resource policy.
@@ -3485,7 +3516,12 @@ IsolatedCpuRuntimeInvocation build_runtime_invocation(
   IsolatedCpuRuntimeInvocation invocation;
   invocation.identity = request.identity;
   invocation.operation = request.operation;
+  invocation.operation_identity = request.operation_identity;
+  invocation.implementation_identity = request.implementation_identity;
+  invocation.configuration_schema_identity =
+      request.configuration_schema_identity;
   invocation.parameters = request.parameters;
+  invocation.configuration = request.configuration;
   invocation.inputs.reserve(request.input_count);
   invocation.outputs.reserve(request.output_count);
   for (std::size_t index = 0U; index < request.tensors.size(); ++index) {
@@ -3564,6 +3600,8 @@ IsolatedCpuInvocationResponse execute_runtime_callback(
                                    capability.capability);
         output.readiness = IsolatedCpuTensorReadiness::ReadyOutputCandidate;
         output.ownership = IsolatedCpuTensorOwnership::HostOutputCandidate;
+        output.written_offset = 0U;
+        output.written_length = output.capability_length;
         output.content_binding = compute_isolated_cpu_content_binding(
             request.identity, output,
             capability.mapping.data() + output.capability_offset,
@@ -4386,7 +4424,7 @@ PluginRuntimeFaultKind supervised_deadline_fault_kind(
  * @param resource_ledger Attempt-local sole resource-token mint.
  * @param resource_policy Validated admission and child-limit policy.
  * @param options Validated lifecycle timing policy.
- * @param limits Retained protocol-v1 bounds.
+ * @param limits Retained protocol-v2 bounds.
  * @param invocation Host-owned invocation plan.
  * @param pending_reap Receives quarantine completion if synchronous reap fails.
  * @return Complete typed callback result with fresh outputs after success.
@@ -4754,7 +4792,7 @@ class PluginRuntimeSupervisor::Impl final {
    * @param ledger Attempt-local sole plugin resource authority.
    * @param invocation_resource_policy Validated admission/rlimit policy.
    * @param supervisor_options Validated lifecycle timing policy.
-   * @param invocation_limits Validated protocol-v1 bounds.
+   * @param invocation_limits Validated protocol-v2 bounds.
    * @throws std::bad_alloc when retained path storage cannot allocate.
    */
   Impl(std::filesystem::path runtime_executable,
@@ -4780,7 +4818,7 @@ class PluginRuntimeSupervisor::Impl final {
   PluginInvocationResourcePolicy resource_policy;
   /** @brief Immutable positive bounded lifecycle timing policy. */
   PluginRuntimeSupervisorOptions options;
-  /** @brief Immutable protocol-v1 endpoint bounds. */
+  /** @brief Immutable protocol-v2 endpoint bounds. */
   IsolatedCpuInvocationLimits limits;
   /** @brief Serializes calls and all exact child/recovery authority. */
   std::mutex invocation_mutex;
@@ -4798,7 +4836,7 @@ class PluginRuntimeSupervisor::Impl final {
  * @param resource_ledger Attempt-local sole resource-token mint.
  * @param resource_policy Positive admission and child-limit policy.
  * @param options Positive, ordered lifecycle bounds.
- * @param limits Protocol-v1 endpoint bounds.
+ * @param limits Protocol-v2 endpoint bounds.
  * @throws std::invalid_argument for a null resource ledger, invalid resource
  * policy, path, options, or limits.
  * @throws PluginTrustError when process trust initialization or exact-runtime
@@ -4914,6 +4952,12 @@ IsolatedCpuInvocationLimits PluginRuntimeSupervisor::limits() const noexcept {
   return impl_->limits;
 }
 
+/** @copydoc PluginRuntimeSupervisor::package_identity */
+PluginPackageIdentity PluginRuntimeSupervisor::package_identity()
+    const noexcept {
+  return impl_->authorized_runtime.package_identity();
+}
+
 // NOLINTBEGIN(whitespace/indent_namespace)
 /**
  * @brief Constructs the sole supervised route selected by this executor.
@@ -4921,7 +4965,7 @@ IsolatedCpuInvocationLimits PluginRuntimeSupervisor::limits() const noexcept {
  * @param resource_ledger Attempt-local sole resource-token mint.
  * @param resource_policy Positive admission and child-limit policy.
  * @param options Positive lifecycle timing policy.
- * @param limits Protocol-v1 endpoint bounds.
+ * @param limits Protocol-v2 endpoint bounds.
  * @throws std::invalid_argument for invalid path, resource authority/policy,
  * supervisor options, endpoint limits, or auto-reaping `SIGCHLD` state.
  * @throws PluginTrustError from immutable process trust initialization or
@@ -4954,6 +4998,12 @@ IsolatedCpuHostInvocationResult PluginInvocationExecutor::invoke(
   return supervisor_.invoke(invocation);
 }
 
+/** @copydoc PluginInvocationExecutor::package_identity */
+PluginPackageIdentity PluginInvocationExecutor::package_identity()
+    const noexcept {
+  return supervisor_.package_identity();
+}
+
 // NOLINTBEGIN(whitespace/indent_namespace)
 /**
  * @brief Validates and retains the one-shot runtime path and protocol limits.
@@ -4961,7 +5011,7 @@ IsolatedCpuHostInvocationResult PluginInvocationExecutor::invoke(
  * with an empty environment and fixed control descriptor.
  * @param resource_ledger Attempt-local sole resource-token mint.
  * @param resource_policy Positive admission and child-limit policy.
- * @param limits Protocol-v1 bounds; only the parameter limit may be zero.
+ * @param limits Protocol-v2 bounds; only the parameter limit may be zero.
  * @throws std::invalid_argument for invalid path, resource authority/policy,
  * endpoint limits, or auto-reaping `SIGCHLD` state.
  * @throws PluginTrustError when process trust initialization or exact-runtime
@@ -5100,7 +5150,7 @@ int serve_non_supervised_isolated_cpu_invocation_once(
  * @brief Serves one nonce-bound invocation with independent heartbeat events.
  * @param control_fd Connected #102 framed stream, normally fixed fd 3.
  * @param supervision_fd Connected lifecycle datagram socket, normally fd 5.
- * @param limits Runtime-local protocol-v1 hard bounds.
+ * @param limits Runtime-local protocol-v2 hard bounds.
  * @param callback Nonempty process-local callback.
  * @param startup_behavior Deterministic startup behavior for maintained
  * fail-closed fixtures.

@@ -15,8 +15,8 @@
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
 #include "compute/execution/execution_service_test_probe.hpp"
 #endif
+#include "photospider/data/parameter_value.hpp"
 #include "photospider/data/region.hpp"
-#include "photospider/plugin/node_view.hpp"
 
 namespace ps::compute {
 namespace {

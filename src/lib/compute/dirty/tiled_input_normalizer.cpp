@@ -304,7 +304,7 @@ TiledInputContext TiledInputNormalizer::normalize(
   for (const NodeOutput* input : inputs) {
     if (input != nullptr && input->has_image_value()) {
       context.callback_images.push_back(
-          value_image_adapter::project_image_value_for_abi_v2(
+          value_image_adapter::project_image_value_for_image_buffer_edge(
               input->image_value()));
     } else {
       context.callback_images.emplace_back();
@@ -327,7 +327,7 @@ TiledInputContext TiledInputNormalizer::normalize(
     if (normalized) {
       replace_input_with_normalized_output(context, i, std::move(*normalized));
       context.callback_images[i] =
-          value_image_adapter::project_image_value_for_abi_v2(
+          value_image_adapter::project_image_value_for_image_buffer_edge(
               context.inputs[i]->image_value());
     }
   }

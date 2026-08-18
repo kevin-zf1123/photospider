@@ -2570,28 +2570,31 @@ NodeOutput execute_host_preparation_source(
 }
 
 /**
- * @brief Produces a data-only radius through the public operation contract.
+ * @brief Produces a data-only radius through the private registry callback.
  *
- * @param node Public callback identity with copied effective parameters.
- * @param inputs Source image/data views prepared by the host adapter.
+ * @param node Private execution snapshot with resolved effective parameters.
+ * @param inputs Destination-indexed private input outputs.
  * @return Data-only output containing radius 1.
  * @throws std::bad_alloc when public output-map storage cannot grow.
  * @throws plugin::ParameterTypeError when `injected` is not exact Int64.
  * @note The callback increments its entry count first, then exercises the
- * public exact accessor before publishing its output.
+ * exact `ParameterValue` accessor before publishing its output.
  */
-plugin::OperationOutput execute_host_preparation_parameter(
-    const plugin::NodeView& node,
-    plugin::ArrayView<plugin::OperationInputView> inputs) {
+NodeOutput execute_host_preparation_parameter(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
   (void)inputs;
   g_host_preparation_plugin_calls.fetch_add(1, std::memory_order_relaxed);
-  const plugin::ParameterValue* injected = node.find_parameter("injected");
+  const plugin::ParameterMap& effective_parameters =
+      node.runtime_parameters.empty() ? node.parameters
+                                      : node.runtime_parameters;
+  const plugin::ParameterValue* injected =
+      find_parameter(effective_parameters, "injected");
   if (injected == nullptr) {
     throw GraphError(GraphErrc::InvalidParameter,
                      "host-preparation parameter is missing injected");
   }
   (void)injected->as_int64();
-  plugin::OperationOutput output;
+  NodeOutput output;
   output.data.emplace("radius", plugin::ParameterValue(std::int64_t{1}));
   return output;
 }
@@ -2966,11 +2969,10 @@ void register_split_ops() {
         "image_generator", "host_preparation_source",
         MonolithicOpFunc(execute_host_preparation_source),
         image_injected_metadata);
-    registry.register_op_hp_monolithic("split_plan",
-                                       "host_preparation_parameter",
-                                       plugin_host::adapt_monolithic_operation(
-                                           execute_host_preparation_parameter),
-                                       radius_parameter_metadata);
+    registry.register_op_hp_monolithic(
+        "split_plan", "host_preparation_parameter",
+        MonolithicOpFunc(execute_host_preparation_parameter),
+        radius_parameter_metadata);
     registry.register_op_hp_monolithic(
         "split_plan", "monolithic",
         MonolithicOpFunc(
@@ -3690,29 +3692,30 @@ TEST(NodeExecutorSplit,
   auto exact_context_count = std::make_shared<int>(0);
   OpRegistry::instance().register_dirty_propagator(
       "split_exec", "same_batch_random",
-      plugin_host::adapt_dirty_propagator(
-          [exact_context_count](const plugin::RoiContext& context) {
+      DirtyRoiPropFunc(
+          [exact_context_count](
+              const Node&, const PixelRect& requested, const GraphModel&,
+              const PixelSize& output_extent,
+              const std::vector<PixelSize>& input_extents,
+              const plugin::ParameterMap& effective_parameters,
+              const std::vector<const NodeOutput*>* available_inputs) {
             const plugin::ParameterValue* radius =
-                context.node->find_parameter("radius");
-            if (radius && radius->as_int64() == 3 &&
-                context.output_extent.width == 40 &&
-                context.output_extent.height == 20 &&
-                context.input_edges.size() == 2 &&
-                context.input_edges[0].extent.width == 40 &&
-                context.input_edges[0].extent.height == 20 &&
-                context.input_edges[0].has_available_input &&
-                context.input_edges[0].available_input.data != nullptr &&
-                context.input_edges[0]
-                        .available_input.data->at("generation")
-                        .as_int64() == 99 &&
-                context.input_edges[0].available_input.spatial != nullptr &&
-                context.input_edges[0]
-                        .available_input.spatial->absolute_roi.x == 7 &&
-                context.input_edges[1].extent.width == 3 &&
-                context.input_edges[1].extent.height == 4) {
+                find_parameter(effective_parameters, "radius");
+            const bool inputs_complete = available_inputs != nullptr &&
+                                         available_inputs->size() == 2U &&
+                                         (*available_inputs)[0] != nullptr &&
+                                         (*available_inputs)[1] != nullptr;
+            if (radius != nullptr && radius->as_int64() == 3 &&
+                output_extent == (PixelSize{40, 20}) &&
+                input_extents.size() == 2U &&
+                input_extents[0] == (PixelSize{40, 20}) &&
+                input_extents[1] == (PixelSize{3, 4}) && inputs_complete &&
+                (*available_inputs)[0]->data.at("generation").as_int64() ==
+                    99 &&
+                (*available_inputs)[0]->space.absolute_roi.x == 7) {
               ++*exact_context_count;
             }
-            return context.requested_roi;
+            return requested;
           }));
 
   Node execution_node = graph.node(12);
@@ -3745,7 +3748,7 @@ TEST(NodeExecutorSplit,
 }
 
 TEST(NodeExecutorSplit,
-     PreservesDisconnectedSlotIdentityThroughPublicTiledCallback) {
+     PreservesDisconnectedSlotIdentityThroughPrivateTiledCallback) {
   GraphModel graph("cache/split-disconnected-public-input-slot");
   graph.add_node(make_node(11, "split_exec", "source"));
   Node graph_child = make_node(12, "split_exec", "disconnected_slot");
@@ -3771,26 +3774,34 @@ TEST(NodeExecutorSplit,
   bool roi_context_preserved_index = false;
   OpRegistry::instance().register_dirty_propagator(
       execution_node.type, execution_node.subtype,
-      plugin_host::adapt_dirty_propagator(
-          [&](const plugin::RoiContext& context) {
+      DirtyRoiPropFunc(
+          [&](const Node& callback_node, const PixelRect& requested,
+              const GraphModel&, const PixelSize&,
+              const std::vector<PixelSize>& input_extents,
+              const plugin::ParameterMap&,
+              const std::vector<const NodeOutput*>* available_inputs) {
             roi_context_preserved_index =
-                context.input_edges.size() == 1 &&
-                context.input_edges[0].input_index == 1 &&
-                context.input_edges[0].extent.width == 7 &&
-                context.input_edges[0].extent.height == 5;
-            return context.requested_roi;
+                callback_node.image_inputs.size() == 2U &&
+                callback_node.image_inputs[0].from_node_id == -1 &&
+                callback_node.image_inputs[1].from_node_id == 11 &&
+                input_extents.size() == 2U && input_extents[0] == PixelSize{} &&
+                input_extents[1] == (PixelSize{7, 5}) &&
+                available_inputs != nullptr && available_inputs->size() == 2U &&
+                (*available_inputs)[0] == nullptr &&
+                (*available_inputs)[1] != nullptr;
+            return requested;
           }));
 
   bool tiled_callback_preserved_slots = false;
-  OpRegistry::OpVariant operation = plugin_host::adapt_tiled_operation(
-      [&](const plugin::NodeView&, const OutputTileView& output,
-          plugin::ArrayView<plugin::OperationTileInputView> inputs) {
+  OpRegistry::OpVariant operation =
+      TileOpFunc([&](const Node&, const OutputTile& output,
+                     const std::vector<InputTile>& inputs) {
         tiled_callback_preserved_slots =
-            inputs.size() == 2 && inputs[0].tile.buffer == nullptr &&
-            inputs[0].spatial == nullptr && inputs[1].tile.buffer != nullptr &&
-            inputs[1].tile.buffer->width == 7 &&
-            inputs[1].tile.buffer->height == 5 &&
-            inputs[1].spatial != nullptr && output.buffer != nullptr;
+            inputs.size() == 2U && inputs[0].buffer == nullptr &&
+            inputs[0].spatial == nullptr && inputs[1].buffer != nullptr &&
+            inputs[1].buffer->width == 7 && inputs[1].buffer->height == 5 &&
+            inputs[1].spatial != nullptr && output.plan != nullptr &&
+            output.grant != nullptr;
       });
   compute::TiledExecutionConfig config;
   config.tile_size = 16;
@@ -3813,7 +3824,7 @@ TEST(NodeExecutorSplit,
  * @return Nothing; GoogleTest records binding, output, or identity failures.
  * @throws Registry, compatibility-import, or operation exceptions unchanged;
  * the expected direct ImageView access failure is consumed by GoogleTest.
- * @note The imported ABI-v2 owner exposes no Host pointer. A successful
+ * @note The imported compatibility owner exposes no Host pointer. A successful
  * analyzer result therefore proves width and height came only from immutable
  * Value metadata and did not replace or mutate the input identity or fence.
  */
@@ -7741,16 +7752,17 @@ TEST(ComputeOutputAuthority,
 }
 
 /**
- * @brief Proves the restricted public adapter may commit one imported Value
- * under the same real full-route authority.
+ * @brief Proves the remaining private compatibility edge may commit one
+ * imported Value under the same real full-route authority.
  *
  * @return Nothing; GoogleTest reports adapter, binding, identity, route, or
  * formal publication failures.
- * @throws Registry, runtime, public-contract, graph, or service exceptions
+ * @throws Registry, runtime, compatibility-import, graph, or service exceptions
  * unchanged.
- * @note The callback returns an opaque GPU_CUDA ABI-v2 descriptor. The Host
- * adapter validates and imports it before route validation; neither planning
- * nor the committer infers authorization from that returned descriptor.
+ * @note The callback returns an opaque GPU_CUDA compatibility descriptor. The
+ * Host adapter validates and imports it before route validation; neither
+ * planning nor the committer infers authorization from that returned
+ * descriptor.
  */
 TEST(ComputeOutputAuthority, FullRoutesCommitAuthorizedImportedValue) {
   constexpr char kType[] = "issue130_output_authority";
@@ -7760,19 +7772,19 @@ TEST(ComputeOutputAuthority, FullRoutesCommitAuthorizedImportedValue) {
   auto native_owner = std::make_shared<int>(130);
   registry.register_op_hp_monolithic(
       kType, kSubtype,
-      plugin_host::adapt_monolithic_operation(
-          [native_owner](const plugin::NodeView&,
-                         plugin::ArrayView<plugin::OperationInputView>) {
-            plugin::OperationOutput output;
-            output.image_buffer.width = 4;
-            output.image_buffer.height = 3;
-            output.image_buffer.channels = 1;
-            output.image_buffer.type = DataType::FLOAT32;
-            output.image_buffer.device = Device::GPU_CUDA;
-            output.image_buffer.step = 4U * sizeof(float);
-            output.image_buffer.context = native_owner;
-            return output;
-          }));
+      MonolithicOpFunc([native_owner](const Node&,
+                                      const std::vector<const NodeOutput*>&) {
+        NodeOutput output;
+        output.compatibility_image.width = 4;
+        output.compatibility_image.height = 3;
+        output.compatibility_image.channels = 1;
+        output.compatibility_image.type = DataType::FLOAT32;
+        output.compatibility_image.device = Device::GPU_CUDA;
+        output.compatibility_image.step = 4U * sizeof(float);
+        output.compatibility_image.context = native_owner;
+        value_image_adapter::import_node_output_compatibility_image(&output);
+        return output;
+      }));
 
   const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                                  "photospider-issue130-authority-imported");
