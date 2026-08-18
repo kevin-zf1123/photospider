@@ -411,7 +411,10 @@ class ComputeService {
    * Effective parameters and execution-facing node state remain on a
    * request-local Node snapshot. Before HP publication, every named output is
    * required to be a valid Ready Value and compatibility image staging is
-   * rejected. The method commits only the resolved graph-owned input-size
+   * rejected. A frozen schema containing any generic named Value treats the
+   * current image disk cache as an incompatible miss before filesystem or
+   * codec inspection and recomputes through the provider. The method commits
+   * only the resolved graph-owned input-size
    * hint, HP cache/version,
    * disk-cache effects, and telemetry on the calling thread. Cooperative
    * observations surround recursive dependency resolution, disk cache,

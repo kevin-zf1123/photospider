@@ -6357,6 +6357,312 @@ TEST(ComputeOutputAuthority, FullRoutesCommitCanonicalImageAndGenericValue) {
 }
 
 /**
+ * @brief Proves image-plus-generic full routes never accept or create a
+ * partial image disk-cache artifact.
+ *
+ * @return Nothing; GoogleTest reports provider-count, named-output, artifact,
+ * diagnostic, or sequential/parallel route failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged.
+ * @note Each route computes twice with disk cache enabled and clears only
+ * formal memory cache between requests. Both requests must reach the provider,
+ * preserve the exact `image` plus `deep` declaration, and leave the configured
+ * image/metadata paths absent.
+ */
+TEST(ComputeOutputAuthority,
+     DiskEnabledImageAndGenericRoutesRecomputeWithoutPartialArtifact) {
+  constexpr char kType[] = "issue130_generic_disk_cache";
+  constexpr char kSubtype[] = "image_and_generic";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  auto provider_entries = std::make_shared<std::atomic_int>(0);
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc([provider_entries](
+                           const Node&, const std::vector<const NodeOutput*>&) {
+        const int entry =
+            provider_entries->fetch_add(1, std::memory_order_relaxed) + 1;
+        NodeOutput output =
+            make_image_output(4, 3, 1, static_cast<float>(entry));
+        output.publish_named_value(
+            "deep", make_generic_dense_value(static_cast<std::byte>(entry)));
+        return output;
+      }),
+      declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    provider_entries->store(0, std::memory_order_relaxed);
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-generic-disk-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-generic-disk-parallel"
+                         : "issue130-generic-disk-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    GraphTraversalService traversal;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                            testing::make_yaml_cache_metadata_codec()};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+    const auto verify_output = [](const NodeOutput& output) {
+      ASSERT_EQ(output.named_values.size(), 2U);
+      EXPECT_TRUE(output.has_image_value());
+      EXPECT_TRUE(output.named_values.count("deep"));
+      EXPECT_TRUE(output.data.empty());
+    };
+
+    verify_output(compute_once());
+    EXPECT_EQ(provider_entries->load(std::memory_order_relaxed), 1);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    auto metadata = artifact;
+    metadata.replace_extension(".yml");
+    EXPECT_FALSE(std::filesystem::exists(artifact));
+    EXPECT_FALSE(std::filesystem::exists(metadata));
+
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+    verify_output(compute_once());
+    EXPECT_EQ(provider_entries->load(std::memory_order_relaxed), 2);
+    EXPECT_FALSE(std::filesystem::exists(artifact));
+    EXPECT_FALSE(std::filesystem::exists(metadata));
+    const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Miss);
+    EXPECT_NE(diagnostic->message.find("generic named Values"),
+              std::string::npos);
+    runtime.stop();
+  }
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves a revisioned image-plus-generic schema cannot consume an old
+ * image-only artifact at the same configured path.
+ *
+ * @return Nothing; GoogleTest reports registry-generation, provider-count,
+ * disk-diagnostic, output-schema, or artifact-path failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged.
+ * @note The first request writes a real image-only artifact. After memory
+ * eviction, the same operation key is replaced with an image-plus-`deep`
+ * declaration. Both sequential and parallel routes must record an
+ * incompatible miss and recompute without accepting the predecessor bytes.
+ */
+TEST(ComputeOutputAuthority,
+     RevisionedGenericSchemaMissesExistingImageOnlyArtifact) {
+  constexpr char kType[] = "issue130_generic_disk_cache";
+  constexpr char kSubtype[] = "schema_upgrade";
+  OpRegistry& registry = OpRegistry::instance();
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto image_only_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [image_only_entries](const Node&,
+                                 const std::vector<const NodeOutput*>&) {
+              image_only_entries->fetch_add(1, std::memory_order_relaxed);
+              return make_image_output(4, 3, 1, 31.0f);
+            }),
+        declare_test_outputs(OpMetadata{}, true, {}));
+
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-schema-upgrade-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-schema-upgrade-parallel"
+                         : "issue130-schema-upgrade-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    GraphTraversalService traversal;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                            testing::make_yaml_cache_metadata_codec()};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+
+    const NodeOutput& image_only = compute_once();
+    ASSERT_EQ(image_only.named_values.size(), 1U);
+    ASSERT_TRUE(image_only.has_image_value());
+    EXPECT_EQ(image_only_entries->load(std::memory_order_relaxed), 1);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    ASSERT_TRUE(std::filesystem::exists(artifact));
+    ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
+    const std::string image_only_plan_key =
+        graph.last_compute_plan_summary->full_graph_cache_key;
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto generic_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [generic_entries](const Node&,
+                              const std::vector<const NodeOutput*>&) {
+              generic_entries->fetch_add(1, std::memory_order_relaxed);
+              NodeOutput output = make_image_output(4, 3, 1, 32.0f);
+              output.publish_named_value(
+                  "deep", make_generic_dense_value(std::byte{0x32}));
+              return output;
+            }),
+        declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+    const NodeOutput& upgraded = compute_once();
+    ASSERT_EQ(upgraded.named_values.size(), 2U);
+    EXPECT_TRUE(upgraded.has_image_value());
+    EXPECT_TRUE(upgraded.named_values.count("deep"));
+    EXPECT_TRUE(upgraded.data.empty());
+    EXPECT_EQ(generic_entries->load(std::memory_order_relaxed), 1);
+    ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
+    EXPECT_NE(graph.last_compute_plan_summary->full_graph_cache_key,
+              image_only_plan_key);
+    EXPECT_TRUE(std::filesystem::exists(artifact));
+    const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Miss);
+    EXPECT_NE(diagnostic->message.find("generic named Values"),
+              std::string::npos);
+    runtime.stop();
+  }
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves the existing image-only disk-cache hit remains reusable.
+ *
+ * @return Nothing; GoogleTest reports provider-count, artifact, diagnostic,
+ * image-authority, or sequential/parallel route failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged.
+ * @note The first request writes a configured image artifact, formal memory is
+ * cleared, and the second request must load that artifact without another
+ * provider entry. This is the negative control for generic-schema bypass.
+ */
+TEST(ComputeOutputAuthority, ImageOnlyRoutesStillHitDiskWithoutRecompute) {
+  constexpr char kType[] = "issue130_generic_disk_cache";
+  constexpr char kSubtype[] = "image_only";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  auto provider_entries = std::make_shared<std::atomic_int>(0);
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc([provider_entries](
+                           const Node&, const std::vector<const NodeOutput*>&) {
+        provider_entries->fetch_add(1, std::memory_order_relaxed);
+        return make_image_output(4, 3, 1, 41.0f);
+      }),
+      declare_test_outputs(OpMetadata{}, true, {}));
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    provider_entries->store(0, std::memory_order_relaxed);
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-image-only-disk-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-image-only-disk-parallel"
+                         : "issue130-image-only-disk-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    GraphTraversalService traversal;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                            testing::make_yaml_cache_metadata_codec()};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+
+    const NodeOutput& computed = compute_once();
+    ASSERT_EQ(computed.named_values.size(), 1U);
+    ASSERT_TRUE(computed.has_image_value());
+    EXPECT_EQ(provider_entries->load(std::memory_order_relaxed), 1);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    ASSERT_TRUE(std::filesystem::exists(artifact));
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+
+    const NodeOutput& loaded = compute_once();
+    ASSERT_EQ(loaded.named_values.size(), 1U);
+    EXPECT_TRUE(loaded.has_image_value());
+    EXPECT_EQ(image_bounds_width(loaded.image_value().image_bounds()), 4U);
+    EXPECT_EQ(image_bounds_height(loaded.image_value().image_bounds()), 3U);
+    EXPECT_EQ(provider_entries->load(std::memory_order_relaxed), 1);
+    EXPECT_TRUE(std::filesystem::exists(artifact));
+    const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Hit);
+    runtime.stop();
+  }
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
  * @brief Proves a parallel full route waits for every authorized Pending
  * native generic Value before releasing its image dependent.
  *

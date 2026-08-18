@@ -334,6 +334,22 @@ struct NodeOutput {
   }
 
   /**
+   * @brief Reports whether any named Value is outside the canonical image
+   * slot.
+   * @return True when at least one exact key differs from `image`.
+   * @throws Nothing.
+   * @note This classification inspects names only; planned output validation
+   * separately proves the exact generic schema, immutable Value identities,
+   * representation, and readiness. The current image disk-cache format uses
+   * this fact to avoid silently persisting a partial formal output.
+   */
+  bool has_generic_named_values() const noexcept {
+    return std::any_of(
+        named_values.begin(), named_values.end(),
+        [](const auto& entry) { return entry.first != kImageOutputName; });
+  }
+
+  /**
    * @brief Returns the canonical immutable image Value.
    * @return Borrowed valid Value stored under `image`.
    * @throws std::logic_error when the image output is absent or invalid.

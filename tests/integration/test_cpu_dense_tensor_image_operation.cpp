@@ -3493,15 +3493,17 @@ TEST(CpuDenseTensorImageOperation,
   graph.add_node(node);
 
   NodeOutput first_output;
-  ASSERT_TRUE(
-      cache.try_load_from_disk_cache_into(graph, graph.node(81), first_output));
+  ASSERT_TRUE(cache.try_load_from_disk_cache_into(
+      graph, graph.node(81), first_output,
+      ImageDiskCacheOutputSchema::NoGenericNamedValues));
   const Value first = first_output.image_value();
   ASSERT_TRUE(first.valid());
   EXPECT_EQ(cache.node_cache_dir(graph, 81), node_directory);
 
   NodeOutput second_output;
-  ASSERT_TRUE(cache.try_load_from_disk_cache_into(graph, graph.node(81),
-                                                  second_output));
+  ASSERT_TRUE(cache.try_load_from_disk_cache_into(
+      graph, graph.node(81), second_output,
+      ImageDiskCacheOutputSchema::NoGenericNamedValues));
   const Value second = second_output.image_value();
   ASSERT_TRUE(second.valid());
   EXPECT_NE(second.allocation_identity(), first.allocation_identity());
@@ -3605,7 +3607,8 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_FALSE(std::filesystem::exists(node_directory));
   EXPECT_TRUE(image_codec->calls().empty());
   EXPECT_TRUE(metadata_codec->calls().empty());
-  EXPECT_FALSE(cache.try_load_from_disk_cache(graph, node));
+  EXPECT_FALSE(cache.try_load_from_disk_cache(
+      graph, node, ImageDiskCacheOutputSchema::NoGenericNamedValues));
   EXPECT_TRUE(image_codec->calls().empty());
   EXPECT_TRUE(metadata_codec->calls().empty());
 }

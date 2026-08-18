@@ -183,6 +183,14 @@ key。两类 token 都是 opaque、process-local runtime identity；disk reload 
 这项 image-only mechanism 不会静默序列化 generic named Value，也不会把 parameter metadata
 转成 generic Value storage。
 
+已配置 artifact path 仍为 `cache_root/node_id/location`，其中不包含带 revision 的 output-schema
+component。因此，只要 frozen plan 声明了任意 generic named Value，所有已配置 image artifact
+都会在 filesystem 或 codec inspection 之前被归类为 incompatible miss。在 exact formal output
+validation 之后，任何包含 generic named Value 的输出同样会在 planned-byte admission 或
+persistent side effect 之前跳过 image/YAML save。这样可以防止 operation schema replacement
+之后，较旧的 image-only artifact 进入当前 authority validation。Image-only schema 与仅含
+parameter metadata 的 schema 会保留既有 hit、save、error、timing 与 diagnostic 行为。
+
 ## V-4 Region Validity
 
 `Node::hp_region` 是唯一正式 HP cache authority 的规范化逻辑 validity metadata；它不是另一份

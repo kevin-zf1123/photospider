@@ -95,7 +95,8 @@ bool has_image_disk_cache_entry(const Node& node) {
  * @throws std::bad_alloc when validation state or diagnostic allocation fails.
  * @note This helper performs no planned-byte admission, filesystem operation,
  * codec call, ImageBuffer allocation, payload read, or persistent identity
- * creation. Metadata-only outputs with no formal Value remain supported.
+ * creation. Callers first bypass outputs containing generic named Values;
+ * metadata-only parameter results with no formal Value remain supported.
  */
 void validate_image_disk_cache_output(const NodeOutput& output) {
   if (output.has_compatibility_image()) {
@@ -264,6 +265,9 @@ std::optional<std::uint64_t> cache_save_planned_bytes(
   if (!has_image_disk_cache_entry(node)) {
     return std::nullopt;
   }
+  if (hp_cache_ptr(node)->has_generic_named_values()) {
+    return std::nullopt;
+  }
   validate_image_disk_cache_output(*hp_cache_ptr(node));
 
   constexpr std::uint64_t kTaskAndPathOverhead = 1024U;
@@ -418,6 +422,24 @@ DiskCacheReadAttempt make_skipped_attempt(int node_id, std::string message) {
   attempt.result =
       make_load_result(node_id, nullptr, {}, {}, DiskCacheLoadStatus::Skipped,
                        GraphErrc::Unknown, std::move(message));
+  return attempt;
+}
+
+/**
+ * @brief Creates a miss for a plan the current image artifact cannot encode.
+ * @param node_id Node id associated with the incompatible artifact lookup.
+ * @return Diagnostic result with Miss status and no concrete artifact path.
+ * @throws std::bad_alloc from diagnostic message allocation.
+ * @note The caller invokes this before filesystem inspection or codec entry.
+ * Existing image-only artifacts remain untouched but cannot enter formal
+ * output-authority validation for this planned schema.
+ */
+DiskCacheReadAttempt make_generic_schema_miss(int node_id) {
+  DiskCacheReadAttempt attempt;
+  attempt.result = make_load_result(
+      node_id, nullptr, {}, {}, DiskCacheLoadStatus::Miss, GraphErrc::Unknown,
+      "Planned output schema contains generic named Values; the current "
+      "image disk cache treats configured artifacts as incompatible.");
   return attempt;
 }
 
@@ -616,7 +638,8 @@ bool finalize_disk_cache_load(
  * @throws Codec, filesystem, Graph, Value, or allocation exceptions unchanged.
  * @note A null timing sink guarantees that provider work mutates no Graph
  * state. Partial HP output removes older artifacts exactly as the synchronous
- * path did before the executor vertical.
+ * path did before the executor vertical. Generic named Values make the current
+ * image/YAML projection ineligible and return before filesystem or codec work.
  */
 void save_cache_mechanism(const GraphModel& graph, const Node& node,
                           const std::string& cache_precision,
@@ -631,6 +654,9 @@ void save_cache_mechanism(const GraphModel& graph, const Node& node,
     return;
   }
   if (!has_image_disk_cache_entry(node)) {
+    return;
+  }
+  if (output->has_generic_named_values()) {
     return;
   }
   validate_image_disk_cache_output(*output);
@@ -817,8 +843,9 @@ void GraphCacheService::save_cache_if_configured_via_executor(
   result.rethrow_if_failed();
 }
 
-bool GraphCacheService::try_load_from_disk_cache(GraphModel& graph,
-                                                 Node& node) const {
+bool GraphCacheService::try_load_from_disk_cache(
+    GraphModel& graph, Node& node,
+    ImageDiskCacheOutputSchema output_schema) const {
   if (node.cached_output_high_precision.has_value()) {
     const bool complete_output = has_complete_hp_cache(node);
     record_disk_cache_load_result(
@@ -830,6 +857,11 @@ bool GraphCacheService::try_load_from_disk_cache(GraphModel& graph,
                          "whole-output recomputation.")
                    .result);
     return complete_output;
+  }
+  if (output_schema != ImageDiskCacheOutputSchema::NoGenericNamedValues) {
+    record_disk_cache_load_result(graph,
+                                  make_generic_schema_miss(node.id).result);
+    return false;
   }
 
   auto start_io = std::chrono::high_resolution_clock::now();
@@ -845,9 +877,9 @@ bool GraphCacheService::try_load_from_disk_cache(GraphModel& graph,
       });
 }
 
-bool GraphCacheService::try_load_from_disk_cache_into(GraphModel& graph,
-                                                      const Node& node,
-                                                      NodeOutput& out) const {
+bool GraphCacheService::try_load_from_disk_cache_into(
+    GraphModel& graph, const Node& node, NodeOutput& out,
+    ImageDiskCacheOutputSchema output_schema) const {
   if (node.cached_output_high_precision.has_value()) {
     record_disk_cache_load_result(
         graph, make_skipped_attempt(
@@ -855,6 +887,11 @@ bool GraphCacheService::try_load_from_disk_cache_into(GraphModel& graph,
                    "Node already has formal HP memory state; disk cache cannot "
                    "override complete or partial runtime validity.")
                    .result);
+    return false;
+  }
+  if (output_schema != ImageDiskCacheOutputSchema::NoGenericNamedValues) {
+    record_disk_cache_load_result(graph,
+                                  make_generic_schema_miss(node.id).result);
     return false;
   }
   auto start_io = std::chrono::high_resolution_clock::now();

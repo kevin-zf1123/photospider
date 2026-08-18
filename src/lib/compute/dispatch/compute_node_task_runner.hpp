@@ -319,7 +319,18 @@ class NodeTaskRunner {
       const std::vector<const NodeOutput*>& image_inputs,
       BenchmarkEvent& current_event);
 
-  /** @brief Attempts to satisfy a node from disk cache into its temp slot. */
+  /**
+   * @brief Attempts to satisfy a node from disk cache into its temp slot.
+   * @param target_node Planned node whose configured artifact may be read.
+   * @param node_idx Dense planned-node index resolving the frozen schema.
+   * @return Nothing after a compatible hit is staged or an incompatible/missing
+   * artifact is left for provider recomputation.
+   * @throws GraphError, allocation, diagnostic, or output-validation
+   * exceptions unchanged.
+   * @note A planned generic named-Value schema is classified before the cache
+   * service inspects filesystem state and therefore can never turn an old
+   * image-only artifact into a partial staged hit.
+   */
   void try_load_disk_cache(const Node& target_node, int node_idx);
 
   /**

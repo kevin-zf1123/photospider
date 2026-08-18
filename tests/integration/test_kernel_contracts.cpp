@@ -838,6 +838,8 @@ bool wait_for_blocking_contract_source(std::chrono::milliseconds timeout) {
  * allocated during the one-time registration.
  * @note Registration is process-wide and idempotent through std::call_once.
  * The blocking operation borrows only the separately synchronized test future.
+ * The parameter source freezes the exact data-only `dynamic_count` result
+ * schema consumed by the parameter-input vertical.
  */
 void register_contract_ops() {
   static std::once_flag once;
@@ -973,6 +975,9 @@ void register_contract_ops() {
         }),
         OpMetadata{});
 
+    OpMetadata parameter_value_source_metadata;
+    parameter_value_source_metadata.produces_image = false;
+    parameter_value_source_metadata.parameter_output_names = {"dynamic_count"};
     registry.register_op_hp_monolithic(
         "kernel_contract_test", "parameter_value_source",
         plugin_host::adapt_monolithic_operation(plugin::MonolithicOperation(
@@ -1002,7 +1007,8 @@ void register_contract_ops() {
               plugin::OperationOutput output;
               output.data["dynamic_count"] = count->as_int64() + 4;
               return output;
-            })));
+            })),
+        std::move(parameter_value_source_metadata));
 
     registry.register_op_hp_monolithic(
         "kernel_contract_test", "parameter_value_consumer",
@@ -2448,8 +2454,9 @@ TEST(InteractionInspectionContracts,
  * @return Nothing; GoogleTest assertions report kind, value, merge, and output
  * mismatches.
  * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
- * @note The producer emits a named Int64 value which overrides the consumer's
- * static Int64 parameter without passing through YAML storage.
+ * @note The producer's frozen data-only schema declares exactly the named
+ * Int64 `dynamic_count` result, which overrides the consumer's static Int64
+ * parameter without passing through YAML storage.
  */
 TEST(ParameterValuePath, DocumentGraphAndOperationsStayFormatNeutral) {
   register_contract_ops();
@@ -2732,8 +2739,9 @@ TEST(CacheSemantics, DiskCacheMissRecordsDiagnostic) {
                                  "missing.png");
 
   NodeOutput out;
-  EXPECT_FALSE(
-      ctx.cache.try_load_from_disk_cache_into(ctx.graph, ctx.node, out));
+  EXPECT_FALSE(ctx.cache.try_load_from_disk_cache_into(
+      ctx.graph, ctx.node, out,
+      ImageDiskCacheOutputSchema::NoGenericNamedValues));
 
   const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
   ASSERT_TRUE(result.has_value());
@@ -2751,8 +2759,9 @@ TEST(CacheSemantics, DiskCacheMetadataHitPreservesTryLoadBehavior) {
   write_text(metadata_file, "answer: 42\nlabel: cached\n");
 
   NodeOutput out;
-  EXPECT_TRUE(
-      ctx.cache.try_load_from_disk_cache_into(ctx.graph, ctx.node, out));
+  EXPECT_TRUE(ctx.cache.try_load_from_disk_cache_into(
+      ctx.graph, ctx.node, out,
+      ImageDiskCacheOutputSchema::NoGenericNamedValues));
   ASSERT_NE(out.data.find("answer"), out.data.end());
   ASSERT_NE(out.data.find("label"), out.data.end());
   EXPECT_EQ(out.data.at("answer").as_int64(), 42);
@@ -2796,7 +2805,8 @@ TEST(CacheSemantics, ConfiguredYamlMetadataCodecRoundTripsNamedValues) {
   ASSERT_TRUE(std::filesystem::exists(metadata_file));
 
   Node loaded = make_cached_process_node("output.png");
-  ASSERT_TRUE(cache.try_load_from_disk_cache(graph, loaded));
+  ASSERT_TRUE(cache.try_load_from_disk_cache(
+      graph, loaded, ImageDiskCacheOutputSchema::NoGenericNamedValues));
   ASSERT_TRUE(loaded.cached_output_high_precision.has_value());
   EXPECT_EQ(loaded.cached_output_high_precision->data, expected);
   EXPECT_EQ(loaded.hp_version, 1);
@@ -2813,8 +2823,9 @@ TEST(CacheSemantics, DiskCacheInvalidMetadataRecordsErrorDiagnostic) {
   write_text(metadata_file, "answer: [1, 2\n");
 
   NodeOutput out;
-  EXPECT_FALSE(
-      ctx.cache.try_load_from_disk_cache_into(ctx.graph, ctx.node, out));
+  EXPECT_FALSE(ctx.cache.try_load_from_disk_cache_into(
+      ctx.graph, ctx.node, out,
+      ImageDiskCacheOutputSchema::NoGenericNamedValues));
 
   const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
   ASSERT_TRUE(result.has_value());
@@ -2836,7 +2847,8 @@ TEST(CacheSemantics, InjectedCodecIoErrorLeavesHpCacheUnchanged) {
   auto image_file = ctx.cache_file();
   write_text(image_file, "fake image bytes");
 
-  EXPECT_FALSE(ctx.cache.try_load_from_disk_cache(ctx.graph, ctx.node));
+  EXPECT_FALSE(ctx.cache.try_load_from_disk_cache(
+      ctx.graph, ctx.node, ImageDiskCacheOutputSchema::NoGenericNamedValues));
   EXPECT_FALSE(ctx.node.cached_output_high_precision.has_value());
 
   const auto calls = ctx.codec->calls();
@@ -2862,7 +2874,9 @@ TEST(CacheSemantics, InjectedCodecBadAllocPropagatesWithoutHpMutation) {
       });
   write_text(ctx.cache_file(), "fake image bytes");
 
-  EXPECT_THROW(ctx.cache.try_load_from_disk_cache(ctx.graph, ctx.node),
+  EXPECT_THROW(ctx.cache.try_load_from_disk_cache(
+                   ctx.graph, ctx.node,
+                   ImageDiskCacheOutputSchema::NoGenericNamedValues),
                std::bad_alloc);
   EXPECT_FALSE(ctx.node.cached_output_high_precision.has_value());
   ASSERT_EQ(ctx.codec->calls().size(), 1u);
@@ -2912,7 +2926,9 @@ TEST(CacheSemantics,
 
     Node loaded = make_cached_process_node("output.png");
     NodeOutput output;
-    ASSERT_TRUE(cache.try_load_from_disk_cache_into(graph, loaded, output));
+    ASSERT_TRUE(cache.try_load_from_disk_cache_into(
+        graph, loaded, output,
+        ImageDiskCacheOutputSchema::NoGenericNamedValues));
     EXPECT_EQ(output.data, read_values);
 
     const auto retained = weak_codec.lock();
@@ -2955,7 +2971,8 @@ TEST(CacheSemantics,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           metadata_codec};
 
-  EXPECT_FALSE(cache.try_load_from_disk_cache(graph, node));
+  EXPECT_FALSE(cache.try_load_from_disk_cache(
+      graph, node, ImageDiskCacheOutputSchema::NoGenericNamedValues));
   EXPECT_FALSE(node.cached_output_high_precision.has_value());
   const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
   ASSERT_TRUE(diagnostic.has_value());
@@ -2988,7 +3005,10 @@ TEST(CacheSemantics, InjectedMetadataCodecBadAllocPropagatesUnchanged) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           metadata_codec};
 
-  EXPECT_THROW(cache.try_load_from_disk_cache(graph, node), std::bad_alloc);
+  EXPECT_THROW(
+      cache.try_load_from_disk_cache(
+          graph, node, ImageDiskCacheOutputSchema::NoGenericNamedValues),
+      std::bad_alloc);
   EXPECT_FALSE(node.cached_output_high_precision.has_value());
   EXPECT_FALSE(graph.last_disk_cache_load_result_snapshot().has_value());
 
@@ -3028,7 +3048,8 @@ TEST(CacheSemantics,
       });
   GraphCacheService cache{image_codec, metadata_codec};
 
-  EXPECT_FALSE(cache.try_load_from_disk_cache(graph, node));
+  EXPECT_FALSE(cache.try_load_from_disk_cache(
+      graph, node, ImageDiskCacheOutputSchema::NoGenericNamedValues));
   EXPECT_FALSE(node.cached_output_high_precision.has_value());
 
   const auto image_calls = image_codec->calls();
@@ -3086,7 +3107,8 @@ TEST(CacheSemantics,
       [](const std::filesystem::path&) -> plugin::ParameterMap { throw 73; });
   GraphCacheService cache{image_codec, metadata_codec};
 
-  EXPECT_FALSE(cache.try_load_from_disk_cache(graph, node));
+  EXPECT_FALSE(cache.try_load_from_disk_cache(
+      graph, node, ImageDiskCacheOutputSchema::NoGenericNamedValues));
   EXPECT_FALSE(node.cached_output_high_precision.has_value());
 
   const auto image_calls = image_codec->calls();

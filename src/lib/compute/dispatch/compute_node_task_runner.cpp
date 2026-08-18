@@ -467,9 +467,15 @@ void NodeTaskRunner::try_load_disk_cache(const Node& target_node,
   if (!allow_disk_cache()) {
     return;
   }
+  const PlannedOutputAuthority& authority = output_authority(node_idx);
+  const ImageDiskCacheOutputSchema disk_schema =
+      authority.named_value_output_names.empty()
+          ? ImageDiskCacheOutputSchema::NoGenericNamedValues
+          : ImageDiskCacheOutputSchema::ContainsGenericNamedValues;
   NodeOutput from_disk;
-  if (cache_.try_load_from_disk_cache_into(graph_, target_node, from_disk)) {
-    validate_planned_output(from_disk, output_authority(node_idx),
+  if (cache_.try_load_from_disk_cache_into(graph_, target_node, from_disk,
+                                           disk_schema)) {
+    validate_planned_output(from_disk, authority,
                             PlannedOutputReadiness::RequireReady);
     temp_results_[node_idx] = std::move(from_disk);
     record_disk_cache_hit(target_node);

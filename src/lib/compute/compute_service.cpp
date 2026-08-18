@@ -954,21 +954,26 @@ NodeOutput& ComputeService::compute_internal(
   std::vector<const NodeOutput*> monolithic_inputs;
   do {
     observe_open_run_or_throw(context.run_lease);
+    const compute::PlannedOutputAuthority& output_authority =
+        sequential_output_authority(context.planned_work, node_id);
     if (compute::ComputeCachePolicy::has_reusable_output(target_node)) {
       compute::validate_planned_output(
-          *target_node.cached_output_high_precision,
-          sequential_output_authority(context.planned_work, node_id),
+          *target_node.cached_output_high_precision, output_authority,
           compute::PlannedOutputReadiness::RequireReady);
       result_source = "memory_cache";
       break;
     }
     NodeOutput disk_output;
+    const ImageDiskCacheOutputSchema disk_schema =
+        output_authority.named_value_output_names.empty()
+            ? ImageDiskCacheOutputSchema::NoGenericNamedValues
+            : ImageDiskCacheOutputSchema::ContainsGenericNamedValues;
     if (context.allow_disk_cache &&
-        cache_.try_load_from_disk_cache_into(graph, target_node, disk_output)) {
+        cache_.try_load_from_disk_cache_into(graph, target_node, disk_output,
+                                             disk_schema)) {
       observe_open_run_or_throw(context.run_lease);
       compute::validate_planned_output(
-          disk_output,
-          sequential_output_authority(context.planned_work, node_id),
+          disk_output, output_authority,
           compute::PlannedOutputReadiness::RequireReady);
       RegionSet disk_region =
           value_image_adapter::full_node_output_region(disk_output);
@@ -1034,8 +1039,7 @@ NodeOutput& ComputeService::compute_internal(
     }();
     observe_open_run_or_throw(context.run_lease);
     compute::validate_planned_output(
-        computed_output,
-        sequential_output_authority(context.planned_work, node_id),
+        computed_output, output_authority,
         compute::PlannedOutputReadiness::RequireReady);
     RegionSet computed_region =
         value_image_adapter::full_node_output_region(computed_output);

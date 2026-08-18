@@ -18,6 +18,21 @@ class ComputeIoExecutor;
 }  // namespace execution
 
 /**
+ * @brief Classifies a frozen output schema for the current image disk cache.
+ *
+ * @throws Nothing for ordinary enum operations.
+ * @note The current image/YAML artifact pair can represent the canonical image
+ * Value and `NodeOutput::data` parameter results, but it has no durable format
+ * for generic named Values.
+ */
+enum class ImageDiskCacheOutputSchema {
+  /** @brief The plan declares no generic named Value output. */
+  NoGenericNamedValues,
+  /** @brief The plan declares one or more generic named Value outputs. */
+  ContainsGenericNamedValues,
+};
+
+/**
  * @class GraphCacheService
  * @brief Coordinates graph memory-cache cleanup and HP disk-cache persistence.
  *
@@ -33,9 +48,14 @@ class ComputeIoExecutor;
  * detached named values cross injected `ImageArtifactCodec` and
  * `CacheMetadataCodec` boundaries; packed, quantized, or latent formal Values
  * fail with a typed invalid-parameter error before executor admission,
- * filesystem mutation, or codec invocation. This service contains no
- * OpenCV/YAML calls or provider-library types. Staged HP commit may submit the
- * const cache-save mechanism to the
+ * filesystem mutation, or codec invocation. A planned schema containing any
+ * generic named Value makes every existing image artifact an incompatible
+ * miss before filesystem or codec inspection. Exact validated formal outputs
+ * containing such Values also skip image/YAML persistence before planned-byte
+ * admission, filesystem work, or codec invocation. Parameter-result data
+ * remains supported independently. This service contains no OpenCV/YAML calls
+ * or provider-library types. Staged HP commit may submit the const cache-save
+ * mechanism to the
  * process compute-I/O executor while the graph-state policy owner retains path,
  * failure, timing, and publication decisions; synchronous administration and
  * load paths remain unchanged.
@@ -215,7 +235,10 @@ class GraphCacheService {
    * unsupported cache-entry types, empty locations, or nodes without HP
    * output. A configured image entry with a packed, quantized, or latent formal
    * Value instead throws `GraphError{InvalidParameter}` before filesystem or
-   * codec effects.
+   * codec effects. A formal output containing generic named Values is an
+   * explicit no-op before planned-byte admission, filesystem work, or codec
+   * effects because the current artifact pair cannot encode that exact output
+   * schema.
    * Partial hp_region validity is never serialized; any older configured
    * artifact for that node is removed so a later load cannot relabel stale
    * bytes as complete.
@@ -268,6 +291,7 @@ class GraphCacheService {
    *
    * @param graph Graph whose cache root, timing, and diagnostics are updated.
    * @param node Node receiving the loaded HP output on cache hit.
+   * @param output_schema Frozen planned named-Value schema classification.
    * @return true when complete HP output is already present or disk cache was
    * loaded; false for partial memory validity, cache miss, skipped load, or
    * read/parse error.
@@ -277,10 +301,13 @@ class GraphCacheService {
    * @note This preserves the legacy try-load bool contract while making disk
    * errors distinguishable from misses through graph diagnostics. Successful
    * CPU image decode mints fresh process-local allocation/revision identities.
+   * A schema containing generic named Values records an incompatible Miss and
+   * performs no filesystem or codec inspection.
    * A hit publishes the output, incremented HP content version, and derived
    * full-validity Region together on the supplied Node.
    */
-  bool try_load_from_disk_cache(GraphModel& graph, Node& node) const;
+  bool try_load_from_disk_cache(GraphModel& graph, Node& node,
+                                ImageDiskCacheOutputSchema output_schema) const;
 
   /**
    * @brief Attempts to load a node's disk cache into a caller-owned output.
@@ -288,6 +315,7 @@ class GraphCacheService {
    * @param graph Graph whose cache root, timing, and diagnostics are updated.
    * @param node Node whose cache entries define candidate disk files.
    * @param out Receives the loaded output on cache hit.
+   * @param output_schema Frozen planned named-Value schema classification.
    * @return true on disk cache hit; false on cache miss, skipped load, or
    * read/parse error.
    * @throws std::bad_alloc from diagnostic/output/Value storage. Disk read,
@@ -296,10 +324,12 @@ class GraphCacheService {
    * @note Used by execution worker paths that stage outputs outside the
    * formal HP cache before committing. Existing complete or partial formal
    * memory state prevents disk load so regionless artifacts cannot override
-   * current runtime validity.
+   * current runtime validity. A schema containing generic named Values records
+   * an incompatible Miss and performs no filesystem or codec inspection.
    */
-  bool try_load_from_disk_cache_into(GraphModel& graph, const Node& node,
-                                     NodeOutput& out) const;
+  bool try_load_from_disk_cache_into(
+      GraphModel& graph, const Node& node, NodeOutput& out,
+      ImageDiskCacheOutputSchema output_schema) const;
 
  private:
   /**

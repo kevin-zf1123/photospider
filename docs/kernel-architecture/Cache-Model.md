@@ -243,6 +243,17 @@ process-local runtime identities; a disk reload necessarily mints new ones.
 This image-only mechanism does not silently serialize generic named Values or
 turn parameter metadata into generic Value storage.
 
+The configured artifact path remains `cache_root/node_id/location` and contains
+no revisioned output-schema component. Consequently, a frozen plan that
+declares any generic named Value classifies every configured image artifact as
+an incompatible miss before filesystem or codec inspection. After exact formal
+output validation, an output containing any generic named Value likewise skips
+image/YAML save before planned-byte admission or persistent side effects. This
+prevents an older image-only artifact from entering current authority
+validation after an operation-schema replacement. Image-only and
+parameter-metadata-only schemas retain their existing hit, save, error, timing,
+and diagnostic behavior.
+
 ## V-4 Region Validity
 
 `Node::hp_region` is normalized logical validity metadata for the one formal HP
