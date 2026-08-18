@@ -247,7 +247,8 @@ class DirtyRegionPlanner {
    * @return HP plan retaining Region and callback-free selected routes as
    * logical and execution authorities.
    * @throws GraphError when the Region is empty, unsupported by the target,
-   *         cannot be clipped to a concrete descriptor, or yields no work.
+   *         cannot be clipped to a concrete descriptor, yields no work, or a
+   *         retained image extent exceeds the current PixelSize boundary.
    * @throws std::invalid_argument or std::overflow_error when image
    * coordinates cannot cross the current PixelRect boundary exactly.
    * @throws std::bad_alloc when planning storage cannot allocate.
@@ -255,7 +256,9 @@ class DirtyRegionPlanner {
    * through checked origin subtraction before compatibility planning.
    * TensorSlice selects each executable target/upstream implementation once,
    * accepts only the exact core dense identity, and freezes its callback-free
-   * complete route for task-population validation.
+   * complete route for task-population validation. TensorSlice entry
+   * validation completes before a standalone dirty generation is allocated,
+   * so a rejected extent preserves prior Graph dirty state.
    */
   HighPrecisionDirtyPlan plan_high_precision(GraphModel& graph, int node_id,
                                              const RegionSet& dirty_region);

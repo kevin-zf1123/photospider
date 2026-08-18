@@ -78,6 +78,33 @@ Value make_region_rank_four_tensor() {
 }
 
 /**
+ * @brief Creates a legal DenseImage whose width exceeds PixelSize.
+ *
+ * @return Rank-three unsigned-8 image with width `INT_MAX + 1`, zero strides,
+ *         and a one-byte immutable backing allocation.
+ * @throws std::invalid_argument, std::overflow_error, or std::bad_alloc from
+ *         descriptor, facet, layout, or Value validation.
+ * @note Every logical element aliases the same retained byte. This keeps the
+ *       fixture deterministic while proving ImageView preserves its size_t
+ *       extent beyond the current signed-int planning boundary.
+ */
+Value make_region_oversized_zero_stride_image() {
+  const std::size_t oversized_extent =
+      static_cast<std::size_t>(std::numeric_limits<int>::max()) + 1U;
+  const Value storage = Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{{1U},
+                            ElementSemantics::UnsignedInteger,
+                            StorageEncoding{8U}},
+      std::nullopt, StridedLayout{{1}}, {std::byte{7U}});
+  const DenseTensorDescriptor descriptor{{1U, oversized_extent, 1U},
+                                         ElementSemantics::UnsignedInteger,
+                                         StorageEncoding{8U}};
+  const ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  return Value::from_cpu_dense_tensor(
+      descriptor, image, StridedLayout{{0, 0, 0}}, storage.buffer_handle());
+}
+
+/**
  * @brief Returns complete validity for make_region_rank_four_tensor().
  * @return Exact rank-four TensorSlice covering shape `[1,3,4,3]`.
  * @throws std::bad_alloc when Region storage cannot allocate.
@@ -833,6 +860,80 @@ TEST(RegionPlanning, ClipsRankGeneralTensorAndRejectsRtProjection) {
   EXPECT_EQ(task_plan.task_graph.tasks.front().output_roi, PixelRect{});
   EXPECT_TRUE(task_plan.task_graph.tasks.front().dirty_selected);
   EXPECT_THROW(planner.plan_real_time(graph, 2, requested), GraphError);
+}
+
+/**
+ * @brief Proves TensorSlice planning rejects an unrepresentable image extent.
+ *
+ * @return Nothing; GoogleTest reports the exception or Graph-state mutation.
+ * @throws GraphError, std::invalid_argument, std::overflow_error, or
+ *         std::bad_alloc if fixture or graph setup fails before the expected
+ *         planner rejection is inspected.
+ * @note The planner must fail before allocating another dirty generation or
+ *       changing the previously published last/recent lifecycle snapshots.
+ */
+TEST(RegionPlanning,
+     RejectsOversizedTensorImageExtentBeforePlannerStateMutation) {
+  ops::register_core_operations();
+  GraphModel graph("");
+  Node target;
+  target.id = 1;
+  target.name = "oversized_tensor_image";
+  target.type = "image_process";
+  target.subtype = "invert_dense";
+  target.cached_output_high_precision = NodeOutput{};
+  target.cached_output_high_precision->publish_image_value(
+      make_region_oversized_zero_stride_image());
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  RoiPropagationService propagation;
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+  const RegionSet requested = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 1U}, {0U, 1U}, {0U, 1U}}});
+  const compute::DirtyRegionSnapshot seeded = planner.begin_dirty_source(
+      graph, 1, compute::DirtyDomain::HighPrecision, requested);
+  const std::uint64_t generation_before = graph.dirty_generation_counter;
+  const std::optional<std::string> debug_before =
+      graph.last_dirty_region_snapshot_debug;
+  const std::size_t recent_size_before =
+      graph.recent_dirty_region_snapshots.size();
+  const std::string last_snapshot_before =
+      compute::DirtyRegionPlanner::describe_snapshot(seeded);
+  const std::string recent_snapshot_before =
+      compute::DirtyRegionPlanner::describe_snapshot(
+          graph.recent_dirty_region_snapshots.back());
+
+  bool rejected = false;
+  try {
+    (void)planner.plan_high_precision(graph, 1, requested);
+  } catch (const GraphError& error) {
+    rejected = true;
+    EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+    EXPECT_STREQ(error.what(),
+                 "TensorSlice planning image extent exceeds PixelSize for "
+                 "node 1.");
+  }
+
+  EXPECT_TRUE(rejected)
+      << "Oversized ImageView extent must fail before PixelSize narrowing";
+  EXPECT_EQ(graph.dirty_generation_counter, generation_before);
+  EXPECT_EQ(graph.last_dirty_region_snapshot_debug, debug_before);
+  ASSERT_TRUE(graph.last_dirty_region_snapshot.has_value());
+  EXPECT_EQ(compute::DirtyRegionPlanner::describe_snapshot(
+                *graph.last_dirty_region_snapshot),
+            last_snapshot_before);
+  ASSERT_EQ(graph.recent_dirty_region_snapshots.size(), recent_size_before);
+  EXPECT_EQ(compute::DirtyRegionPlanner::describe_snapshot(
+                graph.recent_dirty_region_snapshots.back()),
+            recent_snapshot_before);
+  ASSERT_EQ(
+      graph.last_dirty_region_snapshot->source_region_records.at(1).size(), 1U);
+  EXPECT_EQ(graph.last_dirty_region_snapshot->source_region_records.at(1)
+                .front()
+                .source_region,
+            requested);
 }
 
 TEST(RegionPlanning, RejectsRankMismatchAndMissingTensorContract) {

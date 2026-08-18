@@ -1,6 +1,7 @@
 #include "compute/dirty/dirty_region_planner.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -628,7 +629,6 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
       select_tensor_operation_route_or_throw(
           roi_propagation_, graph.node(node_id), node_id, true);
   HighPrecisionDirtyPlan result;
-  result.snapshot.graph_generation = select_plan_generation(graph);
   result.operation_routes.intent = roi_propagation_.intent();
   result.operation_routes.available_devices =
       canonicalize_route_devices(roi_propagation_.available_devices());
@@ -677,8 +677,18 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
             .has_value()) {
       const ImageView view(
           current_node.cached_output_high_precision->image_value());
-      entry.hp_size = PixelSize{static_cast<int>(view.width()),
-                                static_cast<int>(view.height())};
+      const std::size_t width = view.width();
+      const std::size_t height = view.height();
+      const std::size_t maximum_extent =
+          static_cast<std::size_t>(std::numeric_limits<int>::max());
+      if (width > maximum_extent || height > maximum_extent) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            "TensorSlice planning image extent exceeds PixelSize for node " +
+                std::to_string(current_id) + ".");
+      }
+      entry.hp_size =
+          PixelSize{static_cast<int>(width), static_cast<int>(height)};
       entry.hp_data_window = view.image_facet().data_window;
     }
     result.entries.emplace(current_id, entry);
@@ -722,6 +732,7 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
     throw GraphError(GraphErrc::InvalidParameter,
                      "TensorSlice planning produced no executable work.");
   }
+  result.snapshot.graph_generation = select_plan_generation(graph);
   populate_dirty_source_metadata(graph, result.snapshot,
                                  DirtyDomain::HighPrecision, result.entries);
   return result;
