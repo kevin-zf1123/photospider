@@ -213,6 +213,25 @@ contract. Once `main` and every maintained branch use only policy/execution, a
 later trusted CI cleanup should remove the legacy profile and capability
 switch.
 
+## Plugin-Manager Suite Name Transition
+
+While the plugin manager moves to the pure-C operation ABI,
+`plugin_load_test.sh` uses the explicit positive filter
+`PluginManagerLifecycleTest.*:PluginManagerPureCAbiTest.*`. GoogleTest treats
+the colon-separated patterns as a union, and `run_gtest_checked` applies the
+same filter to discovery and execution while rejecting an empty selection.
+The legacy suite on `main`, the renamed suite on a migration branch, or both
+suites when they coexist are therefore exercised without a broad glob that
+could select unrelated tests. Branch names and commit identities never choose
+the suite; the built test inventory is authoritative.
+
+This is test-selection compatibility only. It does not add product or ABI
+compatibility, and it does not claim that `main` has completed the pure-C ABI
+migration. After `main` and every maintained branch expose only
+`PluginManagerPureCAbiTest.*`, and the legacy suite is absent from every
+supported build inventory, a later trusted `CI/**` cleanup should narrow the
+filter to the new suite.
+
 ## Scripted CLI Capability Transition
 
 `graph_cli_script_test.sh` selects the explicit-missing-source contract before
