@@ -765,6 +765,6 @@ is authoritative for the accepted target and implementation dependency order.
 Live issue and Project state remain authoritative for delivery status. Neither
 this ADR nor the roadmap promotes an unimplemented target object into current
 runtime documentation. The DI-2 output plan, binding, grant, and publication
-authority described above is implemented current behavior; operation ABI v1
-and the final Host/IPC/worker/durable/CLI boundary migrations remain later
-slices.
+authority described above and the DI-3 pure-C operation ABI v1 projection are
+implemented current behavior. Only the remaining Host/IPC/worker/durable/CLI
+boundary migrations remain later slices.

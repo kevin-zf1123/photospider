@@ -120,9 +120,11 @@ other shape.
 The transitional `ImageBuffer -> Value` bridge creates an explicit zero-origin
 data window and no display/channel-schema/sample/color facts. Reverse projection
 copies active elements and knowingly loses richer metadata because ImageBuffer
-cannot represent it. The current isolated CPU wire remains axis-only and
-accepts only this zero-origin/no-rich-metadata projection; it rejects richer
-facets before encoding rather than silently omitting fields.
+cannot represent it. Isolated CPU protocol v2 instead encodes the complete
+optional ImageFacet record. Image outputs preserve axes, signed windows,
+channels, sample domains, and color facts; generic DenseTensor outputs omit the
+facet entirely. Presence/identity mismatches fail closed rather than being
+silently synthesized or dropped.
 
 ## Consequences
 
@@ -136,8 +138,9 @@ facets before encoding rather than silently omitting fields.
 - DI-2 schedules derived statistics against the complete frozen facet and
   Value revision; an `ImageBuffer` compatibility projection is never a
   statistics identity or cache-key authority.
-- Product wire/artifact/ABI migrations remain later slices and must encode the
-  frozen records exactly or reject them.
+- Remaining product wire/artifact migrations must encode the frozen records
+  exactly or reject them; operation ABI v1 and isolated CPU protocol v2 already
+  do so for their implemented DenseImage routes.
 - OpenEXR Deep provider windows remain provider-defined metadata and are not
   reused as built-in ordinary DenseImage authority.
 

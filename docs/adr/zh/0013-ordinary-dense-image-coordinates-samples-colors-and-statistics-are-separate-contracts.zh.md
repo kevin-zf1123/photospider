@@ -98,9 +98,10 @@ Image Facet 升级到结构版本 2，编码 axes、有符号 data/display windo
 
 过渡期 `ImageBuffer -> Value` bridge 创建显式零原点数据窗口，且不携带
 display/channel-schema/sample/color 事实。反向投影复制活跃元素，并因为
-ImageBuffer 无法表示丰富元数据而有意识地丢失它们。当前 isolated CPU wire
-仍只支持 axes，且只接受该零原点/无丰富元数据投影；它会在编码前拒绝丰富
-facet，而不是静默省略字段。
+ImageBuffer 无法表示丰富元数据而有意识地丢失它们。Isolated CPU protocol v2
+则编码完整的可选 ImageFacet 记录。图像 output 会保留 axes、有符号 window、channel、
+sample domain 与 color 事实；generic DenseTensor output 完全不携带 facet。任何
+presence/identity 不匹配都会 fail closed，而不会被静默合成或丢弃。
 
 ## 后果
 
@@ -113,7 +114,8 @@ facet，而不是静默省略字段。
 - 诊断拼写与派生统计不会扰动语义身份。
 - DI-2 针对完整 frozen facet 与 Value revision 调度派生统计；`ImageBuffer`
   compatibility projection 绝不是 statistics identity 或 cache-key authority。
-- 产品 wire/artifact/ABI 迁移仍属于后续切片，必须精确编码冻结记录或拒绝它们。
+- 余下产品 wire/artifact migration 必须精确编码冻结记录或拒绝它们；operation ABI v1 与
+  isolated CPU protocol v2 已在各自实现的 DenseImage 路径上做到这一点。
 - OpenEXR Deep provider 窗口仍是 provider-defined 元数据，不会复用为内建普通
   DenseImage 权威。
 

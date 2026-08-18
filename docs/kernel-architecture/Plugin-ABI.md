@@ -126,6 +126,14 @@ dense slot, optional edge identity, exact logical Region, and connected or
 disconnected state. Disconnected slots remain explicit; compaction is never
 allowed to change port identity.
 
+An ordinary Host-built DenseImage that predates retained operation metadata is
+projected with the frozen Host-published DenseTensor Schema, ImageFacet, and
+Strided Layout identities and version-one compatibility spelling. The input
+port validates those publisher facts; it never supplies them. A custom or
+provider identity declared only by the consumer is rejected before trusted
+callback entry or supervised process creation in both monolithic and tiled
+routes.
+
 ### Output planning and Host-owned grants
 
 Inference emits `OutputPlan` records through a Host sink. A plan names the

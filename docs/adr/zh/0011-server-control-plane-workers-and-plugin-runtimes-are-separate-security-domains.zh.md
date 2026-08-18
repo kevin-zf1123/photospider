@@ -7,8 +7,11 @@ tenant、Job、authentication、quota、artifact、worker 与 plugin 边界。�
 server、worker-manager、独立 artifact data plane、sandbox 或 isolated-plugin 目标已是当前软件行为。
 实时交付状态仍由所链接的 Issue 与 Project 维护。
 
-当前 `photospiderd` 与 plugin loader 均保持不变。Issues #99、#100 和 #105 现在实现了源码私有的
-本地 JobSpec 纵向路径，其中包含 complete-envelope tenant quota accounting、durable
+当前 `photospiderd` 保持不变。DI-3 另行以 pure-C ABI v1 替换 operation-plugin registrar
+边界，并允许每份从已签名 package 准入且经过验证的 operation descriptor 选择 trusted
+in-process 或 supervised isolated CPU 路径。Data-definition 与 policy loader 仍是彼此独立的
+版本化契约。Issues #99、#100 和 #105 现在实现了源码私有的本地 JobSpec 纵向路径，其中包含
+complete-envelope tenant quota accounting、durable
 Job/image artifact recovery、显式 retry/checkpoint identity，以及每个 attempt 一个全新 exec
 的 Embedded Host worker process。一个同进程 `WorkerManager` object 拥有 private socket、
 PID、heartbeat、cancellation escalation、精确 reaping 与 supervision handle；control-plane
@@ -61,12 +64,13 @@ quarantine，并且只在有界 backoff 后于新进程中启动后续 invocatio
 会把 executor 组合进既有 `ExecutionService` callback/request boundary，并证明失败 Run 不会
 终止其固定 worker 或后续无关 Run。
 
-上述 #103 boundary 是经过认证的私有 session supervision，不是 hostile-child attestation、
-package trust、sandboxing、resource enforcement 或已选择的最终用户 operation route。Issue #104
-现在会用签名 package admission、一次性 Host resource admission 与 process rlimit 包裹长期维护的
-直接/受监督入口。当前没有 `ExecutionService`、`WorkerManager`、embedded Host/CLI、
-`photospider-worker` 或 operation loader 会为最终用户 Graph operation 构造该路径；完整
-operation-ABI migration 仍负责最终选择，通用 syscall/network sandbox 仍是独立工作。
+上述 #103 boundary 是经过认证的私有 session supervision，本身并不是 hostile-child
+attestation、package trust、sandboxing、resource enforcement 或已选择的最终用户 operation
+route。Issue #104 会用签名 package admission、一次性 Host resource admission 与 process
+rlimit 包裹长期维护的直接/受监督入口。DI-3 现在允许 operation loader 在经过验证的 pure-C
+operation descriptor 选择 supervised 模式且签名 runtime route 完整时构造该路径；不存在
+trusted fallback。`WorkerManager`、`photospider-worker` 与通用 syscall/network sandbox 仍是
+彼此独立的边界。
 
 ## 背景
 

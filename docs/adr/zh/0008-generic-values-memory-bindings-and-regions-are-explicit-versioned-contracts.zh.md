@@ -629,5 +629,5 @@ standard-library ownership 或 toolchain ABI。
 [通用数据与 Region 路线图](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)是已接受
 目标和实现依赖顺序的权威来源。Live Issue 与 Project state 仍是交付状态的权威来源。本 ADR
 和路线图都不会把未实现的目标对象提升成当前 runtime 文档中的事实。上述 DI-2 output plan、
-binding、grant 与 publication authority 已是当前实现行为；operation ABI v1 与最终
-Host/IPC/worker/durable/CLI boundary migration 仍属于后续切片。
+binding、grant 与 publication authority，以及 DI-3 pure-C operation ABI v1 投影，均已是
+当前实现行为。只有余下 Host/IPC/worker/durable/CLI boundary migration 仍属于后续切片。

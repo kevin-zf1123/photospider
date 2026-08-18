@@ -109,6 +109,12 @@ storage 具有 C 语义的全零值。ABI enum 为固定宽度且从一开始，
 `InputBinding` 增加永久 port identity、dense slot、可选 edge identity、精确 logical Region 与
 connected/disconnected 状态。Disconnected slot 保持显式，绝不允许 compaction 改变 port identity。
 
+早于 retained operation metadata 的普通 Host-built DenseImage，会使用冻结的 Host-published
+DenseTensor Schema、ImageFacet 与 Strided Layout identity，以及 version-one 兼容拼写进行投影。
+Input port 只能校验这些 publisher fact，绝不提供它们。仅由 consumer 声明的 custom/provider
+identity 会在 trusted callback entry 或 supervised process creation 前被拒绝，monolithic 与
+tiled route 均相同。
+
 ### Output planning 与 Host-owned grant
 
 Inference 通过 Host sink 发出 `OutputPlan` record。Plan 命名 output port 与 Host mint 的不透明

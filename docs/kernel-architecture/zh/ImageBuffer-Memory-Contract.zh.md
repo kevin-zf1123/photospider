@@ -244,9 +244,11 @@ Adapter 不拥有独立 native lifecycle，不调用 `waitUntilCompleted` 或
 
 ## 边界与原理
 
-`ImageBuffer` 是当前二维图像 payload 和 operation DSO 契约。其 channel count 在结构上不限制为
-四，`FLOAT64` 也是已声明 scalar type，但这些事实不承诺每个 loader、operation、cache 或
-adapter 都提供端到端支持。
+`ImageBuffer` 是当前 legacy Host、codec 与 built-in 路径所用的二维兼容 payload；它不是
+operation DSO 契约。Pure-C operation ABI v1 使用 `ValueDescriptor`、可选 ImageFacet、Layout、
+Region，以及 Host 自有 output-plan/publication 记录。`ImageBuffer` 的 channel count 在结构上
+不限制为四，`FLOAT64` 也是已声明 scalar type，但这些事实不承诺每个 loader、operation、
+cache 或 adapter 都提供端到端支持。
 
 该 payload 不是通用 graph value 模型。Operation result 会把 generic non-image Value 保存在
 `NodeOutput::named_values`，并把 parameter result 保存在独立 `data` map；这两个类别与 opaque
@@ -326,9 +328,9 @@ operation：它会 clip 到显式 `ImageBounds` 并减去其 origin，反向转�
 之后加回 origin。TensorSlice、custom domain、multi-atom clause、uncertainty 与 overflow 会被
 拒绝；Whole 只允许进入带显式有限 bounds 的 storage projection。Region-aware core dense operation 会复制
 未选中的 byte，并通过 checked stride 只修改选中的逻辑 coordinate。在各自后续切片完成迁移
-之前，ImageBuffer structure、device field、operation DSO ABI、tiled write、codec 与 Host/IPC
-v2 rectangle 仍是角色区分明确的 compatibility contract。正式 CPU image cache entry 只携带
-有效 sealed Value；compatibility snapshot 仅限 use scope，永远不会成为
+之前，ImageBuffer structure、device field、tiled write、codec 与 Host/IPC v2 rectangle 仍是
+角色区分明确的 compatibility contract；DI-3 已把 operation DSO 边界迁移到 pure-C ABI v1。
+正式 CPU image cache entry 只携带有效 sealed Value；compatibility snapshot 仅限 use scope，永远不会成为
 allocation/revision authority。
 
 V-6 在不修改 `ImageBuffer` 的前提下为 Value 新增 `ReadyFence`。同步 CPU Value 初始即为
@@ -363,9 +365,10 @@ snapshot 验证 binding。Descriptor 可寻址的 padding 参与 content binding
 取整的 POSIX
 shared-memory slack 位于所有 descriptor range 之外，但其精确 physical capability size 仍受
 header 与 resource declaration 绑定。该切片不引入 `ImageBuffer` adaptation，也不扩大公共
-memory contract。其当前仅支持 axis 的 image record 只接受零原点且没有
-display/channel-schema/sample/color 元数据的普通 ImageFacet；丰富元数据会在 request
-encoding 前失败，而不是被省略。
+memory contract。Isolated CPU protocol v2 携带完整的可选 ImageFacet：image output 会保留
+axes、有符号 data/display window、稳定 channel/group 元数据、sample domain 与 color 事实；
+generic DenseTensor output 则不携带 ImageFacet。Host 会拒绝 presence/identity 不匹配，而不会
+虚构或丢弃元数据。
 
 Issue #86 / V-9 在不修改 `ImageBuffer` 或公共 operation 与 Host 契约的前提下，新增
 source-private device resource accounting。唯一 service ledger 只为 fixed registry 中具有

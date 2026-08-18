@@ -1514,7 +1514,7 @@ Issue #97 只做分配，不吸收后续交付：
 | [#98](https://github.com/kevin-zf1123/photospider/issues/98) | Immutable single-tenant JobSpec，以及带 artifact identity 的 control-plane-to-worker submit/query/cancel/completion |
 | [#99](https://github.com/kevin-zf1123/photospider/issues/99) | Tenant quota、durable artifact、retry/checkpoint 与 recovery semantics |
 | [#100](https://github.com/kevin-zf1123/photospider/issues/100) | WorkerManager/worker supervision、crash isolation 与 bounded cancellation/shutdown |
-| [#101](https://github.com/kevin-zf1123/photospider/issues/101) | 已接受的独立版本化 pure-C operation-plugin ABI v1 决策；实现仍属于后续 breaking migration |
+| [#101](https://github.com/kevin-zf1123/photospider/issues/101) | 已接受的独立版本化 pure-C operation-plugin ABI v1 决策；DI-3 已将其实现为唯一 operation DSO 契约，并提供 trusted 与 supervised isolation-v2 路径 |
 | [#102](https://github.com/kevin-zf1123/photospider/issues/102) | 已实现源码私有的 Darwin/Linux isolated CPU shared-memory/FD invocation，并具有精确 descriptor/stride/size/ownership/content validation；authenticated supervision 仍属于 #103 |
 | [#103](https://github.com/kevin-zf1123/photospider/issues/103) | 已实现源码私有的 `PluginRuntimeSupervisor` heartbeat/deadline、基于事实的 crash/hang/signal/bad-output containment、fresh-process restart 与精确 reap；不包含最终用户路径或 OOM 归因 |
 | [#104](https://github.com/kevin-zf1123/photospider/issues/104) | 已实现 operation/policy DSO 与私有 isolated runtime 的进程不可变签名 admission，以及一次性 ledger token 和 exec 前 rlimit；不包含最终用户 route 或通用 sandbox |

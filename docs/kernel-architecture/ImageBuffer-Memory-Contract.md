@@ -303,10 +303,13 @@ portable memory contract.
 
 ## Boundaries and Rationale
 
-`ImageBuffer` is the current two-dimensional image payload and operation DSO
-contract. Its channel count is not structurally limited to four, and
-`FLOAT64` is a declared scalar type, but those facts do not promise end-to-end
-support by every loader, operation, cache, or adapter.
+`ImageBuffer` is the current two-dimensional compatibility payload for legacy
+Host, codec, and built-in paths; it is not the operation DSO contract. Pure-C
+operation ABI v1 carries `ValueDescriptor`, optional ImageFacet, Layout,
+Region, and Host-owned output-plan/publication records. `ImageBuffer` channel
+count is not structurally limited to four, and `FLOAT64` is a declared scalar
+type, but those facts do not promise end-to-end support by every loader,
+operation, cache, or adapter.
 
 This payload is not the generic graph value model. Operation results keep
 generic non-image Values in `NodeOutput::named_values` and keep parameter
@@ -406,9 +409,10 @@ clauses, uncertainty, and overflow are rejected; Whole is accepted only by the
 explicit finite-bounds storage projection.
 The Region-aware core dense operation copies unselected bytes and changes only
 selected logical coordinates through checked strides. ImageBuffer structure,
-device field, operation DSO ABI, tiled writes, codecs, and Host/IPC v2
-rectangles remain role-specific compatibility contracts until their owning
-later slices migrate them. Formal CPU image cache entries carry only the valid
+device field, tiled writes, codecs, and Host/IPC v2 rectangles remain role-
+specific compatibility contracts until their owning later slices migrate
+them; DI-3 has already migrated the operation DSO boundary to pure-C ABI v1.
+Formal CPU image cache entries carry only the valid
 sealed Value; compatibility snapshots are use-scoped and never become
 allocation/revision authority.
 
@@ -454,9 +458,11 @@ Darwin's page-rounded POSIX
 shared-memory slack remains outside every descriptor range, while its exact
 physical capability size is still bound by the header and resource
 declaration. No `ImageBuffer` adaptation or public memory-contract widening is
-introduced. Its current axis-only image record accepts only a zero-origin
-ordinary ImageFacet with no display/channel-schema/sample/color metadata;
-richer metadata fails before request encoding instead of being omitted.
+introduced. Isolated CPU protocol v2 carries the complete optional ImageFacet:
+image outputs preserve axes, signed data/display windows, stable channel/group
+metadata, sample domains, and color facts, while generic DenseTensor outputs
+carry no ImageFacet. The Host rejects presence/identity mismatches instead of
+inventing or dropping metadata.
 
 Issue #86 / V-9 adds source-private device resource accounting without
 changing `ImageBuffer` or the public operation and Host contracts. The sole

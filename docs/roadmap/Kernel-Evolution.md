@@ -1896,7 +1896,7 @@ Delivery remains allocated rather than absorbed by Issue #97:
 | [#98](https://github.com/kevin-zf1123/photospider/issues/98) | Immutable single-tenant JobSpec and control-plane-to-worker submit/query/cancel/completion with artifact identity |
 | [#99](https://github.com/kevin-zf1123/photospider/issues/99) | Tenant quota, durable artifacts, retry/checkpoint, and recovery semantics |
 | [#100](https://github.com/kevin-zf1123/photospider/issues/100) | WorkerManager/worker supervision, crash isolation, and bounded cancellation/shutdown |
-| [#101](https://github.com/kevin-zf1123/photospider/issues/101) | Accepted separately versioned pure-C operation-plugin ABI v1 decision; implementation remains a later breaking migration |
+| [#101](https://github.com/kevin-zf1123/photospider/issues/101) | Accepted separately versioned pure-C operation-plugin ABI v1 decision, implemented by DI-3 as the sole operation DSO contract with trusted and supervised isolation-v2 routes |
 | [#102](https://github.com/kevin-zf1123/photospider/issues/102) | Implemented source-private Darwin/Linux isolated CPU shared-memory/FD invocation with exact descriptor/stride/size/ownership/content validation; authenticated supervision remains #103 |
 | [#103](https://github.com/kevin-zf1123/photospider/issues/103) | Implemented source-private `PluginRuntimeSupervisor` heartbeat/deadline, factual crash/hang/signal/bad-output containment, fresh-process restart, and exact reap; no end-user route or OOM attribution |
 | [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Implemented process-immutable signed admission for operation/policy DSOs and private isolated runtime, plus one-use ledger tokens and pre-exec rlimits; no end-user route or general sandbox |

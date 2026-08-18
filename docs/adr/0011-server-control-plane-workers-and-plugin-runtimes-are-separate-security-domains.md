@@ -9,9 +9,13 @@ worker-manager, standalone artifact data plane, sandbox, or isolated-plugin
 target is current software behavior. Live delivery status remains in the linked
 Issue and Project.
 
-The current `photospiderd` and plugin loaders remain unchanged. Issues #99,
-#100, and #105 now implement a source-private local JobSpec vertical with complete-
-envelope tenant quota accounting, durable Job/image artifact recovery,
+The current `photospiderd` remains unchanged. DI-3 separately replaces the
+operation-plugin registrar boundary with pure-C ABI v1 and lets each validated
+operation descriptor admitted from a signed package select its trusted in-
+process or supervised isolated CPU route. Data-definition and policy loaders
+remain separate versioned contracts. Issues #99, #100, and #105 now implement
+a source-private local JobSpec vertical with complete-envelope tenant quota
+accounting, durable Job/image artifact recovery,
 explicit retry/checkpoint identity, and one freshly execed Embedded Host worker
 process per attempt. One same-process `WorkerManager` object owns the private
 socket, PID, heartbeat, cancellation escalation, exact reaping, and supervision
@@ -80,14 +84,14 @@ executor inside the existing `ExecutionService` callback/request boundary and
 proves a failed Run does not kill its fixed worker or a later unrelated Run.
 
 That #103 boundary is authenticated private-session supervision, not hostile-
-child attestation, package trust, sandboxing, resource enforcement, or a
-selected end-user operation route. Issue #104 now wraps the maintained direct
-and supervised entries with signed package admission, one-use Host resource
-admission, and process rlimits. No current `ExecutionService`, `WorkerManager`,
-embedded Host/CLI, `photospider-worker`, or operation loader constructs this
-path for an end-user Graph operation; the complete operation-ABI migration
-still owns final selection, and a general syscall/network sandbox remains
-separate.
+child attestation, package trust, sandboxing, resource enforcement, or by
+itself a selected end-user operation route. Issue #104 wraps the maintained
+direct and supervised entries with signed package admission, one-use Host
+resource admission, and process rlimits. DI-3 now lets the operation loader
+construct the supervised path when a validated pure-C operation descriptor
+selects it and the signed runtime route is complete; there is no trusted
+fallback. `WorkerManager`, `photospider-worker`, and a general syscall/network
+sandbox remain separate boundaries.
 
 ## Context
 
