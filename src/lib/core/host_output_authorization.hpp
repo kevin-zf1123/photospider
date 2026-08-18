@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "core/value_descriptor_metadata.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/data/region.hpp"
 #include "photospider/data/value.hpp"
 
@@ -318,6 +319,21 @@ class HostOutputWriteGrant final {
    * @throws Nothing.
    */
   const ImageRect& image_region() const noexcept { return image_region_; }
+
+  /**
+   * @brief Binds exact operation descriptor metadata to the final Value.
+   * @param metadata Complete nonzero identity/version and opaque digest facts.
+   * @return Nothing after an initial or identical idempotent attachment.
+   * @throws std::logic_error when the grant is moved, retired, revoked, or the
+   * binding already carries different metadata.
+   * @throws std::invalid_argument for malformed identities or versions.
+   * @throws std::system_error when mutex acquisition fails.
+   * @note This operation changes no plan, allocation, payload byte, pointer,
+   * reservation, or grant authority. A mismatch fails the complete binding
+   * closed before successful retirement or publication.
+   */
+  void bind_value_descriptor_metadata(
+      DenseImageValueDescriptorMetadata metadata);
 
   /**
    * @brief Retires this grant successfully exactly once.

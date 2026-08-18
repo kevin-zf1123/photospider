@@ -32,13 +32,6 @@
 namespace ps::plugin_host {
 namespace {
 
-/** @brief Permanent built-in Schema identity used by ordinary DenseTensor. */
-constexpr ps_operation_identity_v1 kDenseTensorSchemaIdentity{
-    0x50534449U,
-    0x1001U,
-};
-/** @brief Permanent built-in Facet identity used by ordinary DenseImage. */
-constexpr ps_operation_identity_v1 kImageFacetIdentity{0x50534449U, 0x1002U};
 /** @brief Permanent built-in Layout identity used by signed Strided storage. */
 constexpr ps_operation_identity_v1 kStridedLayoutIdentity{0x50534449U, 0x1003U};
 
@@ -80,6 +73,20 @@ execution::IsolatedCpuOpaqueId to_isolated_identity(
           static_cast<std::byte>((words[word] >> ((7U - byte) * 8U)) & 0xffU);
     }
   }
+  return result;
+}
+
+/**
+ * @brief Copies one operation-ABI SHA-256 digest into isolation metadata.
+ * @param digest Four exact canonical words, including all zero.
+ * @return Pointer-free digest with identical numeric words.
+ * @throws Nothing.
+ */
+execution::IsolatedCpuSha256Digest to_isolated_digest(
+    const ps_operation_sha256_digest_v1& digest) noexcept {
+  execution::IsolatedCpuSha256Digest result;
+  std::copy(std::begin(digest.words), std::end(digest.words),
+            result.words.begin());
   return result;
 }
 
@@ -255,6 +262,110 @@ struct CopiedDependency {
   RegionSet input_region = RegionSet::empty();
 };
 
+/**
+ * @brief Exact representation metadata retained across inference and execution.
+ * @throws Nothing for ordinary copy and comparison operations.
+ * @note Digests are opaque SHA-256 words. All-zero values remain a meaningful
+ * "unavailable" spelling and are preserved without synthesis.
+ */
+struct DescriptorMetadata final {
+  /** @brief Permanent representation-Schema identity. */
+  ps_operation_identity_v1 schema_identity{};
+  /** @brief Optional permanent primary Facet identity. */
+  ps_operation_identity_v1 facet_identity{};
+  /** @brief Permanent physical Layout identity. */
+  ps_operation_identity_v1 layout_identity{};
+  /** @brief Nonzero descriptor structural version. */
+  std::uint64_t descriptor_version = 0U;
+  /** @brief Nonzero Layout structural version. */
+  std::uint64_t layout_version = 0U;
+  /** @brief Exact descriptor digest, including the all-zero spelling. */
+  ps_operation_sha256_digest_v1 descriptor_digest{};
+  /** @brief Exact logical-content digest, including all zero. */
+  ps_operation_sha256_digest_v1 content_digest{};
+  /** @brief Exact physical-Layout digest, including all zero. */
+  ps_operation_sha256_digest_v1 layout_digest{};
+};
+
+/**
+ * @brief Converts callback metadata into the source-private Value record.
+ * @param metadata Exact ABI identities, versions, and digest words.
+ * @return Equivalent pointer-free metadata retained at Value publication.
+ * @throws Nothing.
+ */
+DenseImageValueDescriptorMetadata retained_value_metadata(
+    const DescriptorMetadata& metadata) noexcept {
+  DenseImageValueDescriptorMetadata result;
+  result.schema_identity = ExtensionIdentity{metadata.schema_identity.word0,
+                                             metadata.schema_identity.word1};
+  result.facet_identity = ExtensionIdentity{metadata.facet_identity.word0,
+                                            metadata.facet_identity.word1};
+  result.layout_identity = ExtensionIdentity{metadata.layout_identity.word0,
+                                             metadata.layout_identity.word1};
+  result.descriptor_version = metadata.descriptor_version;
+  result.layout_version = metadata.layout_version;
+  std::copy(std::begin(metadata.descriptor_digest.words),
+            std::end(metadata.descriptor_digest.words),
+            result.descriptor_digest.begin());
+  std::copy(std::begin(metadata.content_digest.words),
+            std::end(metadata.content_digest.words),
+            result.content_digest.begin());
+  std::copy(std::begin(metadata.layout_digest.words),
+            std::end(metadata.layout_digest.words),
+            result.layout_digest.begin());
+  return result;
+}
+
+/**
+ * @brief Converts one Value-retained descriptor identity back to ABI fields.
+ * @param metadata Exact immutable source-private representation metadata.
+ * @return Equivalent operation-v1 descriptor metadata.
+ * @throws Nothing.
+ */
+DescriptorMetadata projected_value_metadata(
+    const DenseImageValueDescriptorMetadata& metadata) noexcept {
+  DescriptorMetadata result;
+  result.schema_identity = ps_operation_identity_v1{
+      metadata.schema_identity.high, metadata.schema_identity.low};
+  result.facet_identity = ps_operation_identity_v1{metadata.facet_identity.high,
+                                                   metadata.facet_identity.low};
+  result.layout_identity = ps_operation_identity_v1{
+      metadata.layout_identity.high, metadata.layout_identity.low};
+  result.descriptor_version = metadata.descriptor_version;
+  result.layout_version = metadata.layout_version;
+  std::copy(metadata.descriptor_digest.begin(),
+            metadata.descriptor_digest.end(),
+            std::begin(result.descriptor_digest.words));
+  std::copy(metadata.content_digest.begin(), metadata.content_digest.end(),
+            std::begin(result.content_digest.words));
+  std::copy(metadata.layout_digest.begin(), metadata.layout_digest.end(),
+            std::begin(result.layout_digest.words));
+  return result;
+}
+
+/**
+ * @brief Owns declared output-port facts required to admit one inferred plan.
+ * @throws std::bad_alloc when canonical name ownership cannot allocate.
+ * @note A zero Layout identity means the declaration leaves Layout selection
+ * unconstrained; Schema and Facet comparisons remain exact.
+ */
+struct OutputPortContract final {
+  /** @brief Canonical Host-owned output name. */
+  std::string name;
+  /** @brief Required representation-Schema identity. */
+  ps_operation_identity_v1 schema_identity{};
+  /** @brief Required Facet identity, or zero when absent. */
+  ps_operation_identity_v1 facet_identity{};
+  /** @brief Required Layout identity, or zero when unconstrained. */
+  ps_operation_identity_v1 layout_identity{};
+};
+
+/** @brief Stable two-word output-port identity used as an inventory key. */
+using OutputPortKey = std::pair<std::uint64_t, std::uint64_t>;
+
+/** @brief Ordered output-port identity to complete declaration inventory. */
+using OutputPortContracts = std::map<OutputPortKey, OutputPortContract>;
+
 /** @brief One accepted output plan plus its Host-minted ABI identity. */
 struct CopiedOutputPlan {
   /** @brief Exact declared output port identity. */
@@ -263,6 +374,8 @@ struct CopiedOutputPlan {
   ps_operation_identity_v1 plan_identity{};
   /** @brief Dense output port index echoed by the proposal. */
   std::uint32_t port_index = 0U;
+  /** @brief Exact descriptor identity/version/digest facts from inference. */
+  DescriptorMetadata metadata;
   /** @brief Complete validated source-private allocation plan. */
   DenseImageOutputPlan plan;
 
@@ -270,15 +383,19 @@ struct CopiedOutputPlan {
    * @brief Stores one completely validated output plan.
    * @param port Exact output port identity.
    * @param identity Host-minted plan identity.
+   * @param index Dense declared output index.
+   * @param descriptor_metadata Exact immutable representation metadata.
    * @param value Complete immutable plan.
    * @throws Nothing under move construction.
    */
   CopiedOutputPlan(ps_operation_identity_v1 port,
                    ps_operation_identity_v1 identity, std::uint32_t index,
+                   DescriptorMetadata descriptor_metadata,
                    DenseImageOutputPlan value)
       : port_identity(port),
         plan_identity(identity),
         port_index(index),
+        metadata(descriptor_metadata),
         plan(std::move(value)) {}
 };
 
@@ -299,9 +416,8 @@ struct SinkState {
   ps_operation_status_v1 diagnostic_status = PS_OPERATION_STATUS_OK_V1;
   /** @brief Host exception captured inside the noexcept emit callback. */
   std::exception_ptr host_exception;
-  /** @brief Exact output-port identity to canonical name inventory. */
-  const std::map<std::pair<std::uint64_t, std::uint64_t>, std::string>*
-      output_names = nullptr;
+  /** @brief Exact output-port identity to complete declaration inventory. */
+  const OutputPortContracts* output_contracts = nullptr;
   /** @brief Copied and Host-identified immutable output plans. */
   std::vector<CopiedOutputPlan> output_plans;
   /** @brief Copied Region rows. */
@@ -841,24 +957,23 @@ StridedLayout copy_strided_layout(const ps_operation_strided_layout_v1* record,
 /**
  * @brief Validates and converts one emitted immutable output plan.
  * @param record Plugin-emitted plan proposal.
- * @param output_names Declared output identity/name inventory.
+ * @param output_contracts Declared output identity/representation inventory.
  * @param plan_identity Host-minted identity assigned after validation.
  * @return Complete source-private plan and correlation identity.
  * @throws std::invalid_argument, std::overflow_error, std::length_error, or
  * std::bad_alloc for malformed plan metadata.
  */
-CopiedOutputPlan copy_output_plan(
-    const ps_operation_output_plan_v1& record,
-    const std::map<std::pair<std::uint64_t, std::uint64_t>, std::string>&
-        output_names,
-    ps_operation_identity_v1 plan_identity) {
+CopiedOutputPlan copy_output_plan(const ps_operation_output_plan_v1& record,
+                                  const OutputPortContracts& output_contracts,
+                                  ps_operation_identity_v1 plan_identity) {
   require_record_header(record.header, PS_OPERATION_OUTPUT_PLAN_V1_SIZE,
                         PS_OPERATION_RECORD_OUTPUT_PLAN_V1);
   const auto key =
       std::make_pair(record.port_identity.word0, record.port_identity.word1);
-  const auto output = output_names.find(key);
-  if (identity_is_zero(record.port_identity) || output == output_names.end() ||
-      record.descriptor == nullptr || record.full_region == nullptr ||
+  const auto output = output_contracts.find(key);
+  if (identity_is_zero(record.port_identity) ||
+      output == output_contracts.end() || record.descriptor == nullptr ||
+      record.full_region == nullptr ||
       !identity_is_zero(record.plan_identity) ||
       record.access_mask != PS_OPERATION_ACCESS_WRITE_V1 ||
       record.reserved0 != 0U || !all_zero(record.reserved)) {
@@ -877,6 +992,17 @@ CopiedOutputPlan copy_output_plan(
       descriptor_record.strided_layout == nullptr ||
       !all_zero(descriptor_record.reserved)) {
     throw std::invalid_argument("operation ABI value descriptor malformed");
+  }
+  const OutputPortContract& contract = output->second;
+  if (!identities_equal(descriptor_record.schema_identity,
+                        contract.schema_identity) ||
+      !identities_equal(descriptor_record.facet_identity,
+                        contract.facet_identity) ||
+      (!identity_is_zero(contract.layout_identity) &&
+       !identities_equal(descriptor_record.layout_identity,
+                         contract.layout_identity))) {
+    throw std::invalid_argument(
+        "operation ABI output descriptor identity does not match output port");
   }
   DenseTensorDescriptor descriptor =
       copy_dense_tensor(descriptor_record.dense_tensor);
@@ -905,14 +1031,23 @@ CopiedOutputPlan copy_output_plan(
   }
   RegionSet full_region = copy_region(record.full_region);
   DenseImageOutputPlan plan = DenseImageOutputPlan::create(
-      output->second, std::move(descriptor), std::move(facet),
-      std::move(layout), static_cast<std::size_t>(buffer.byte_size),
+      contract.name, std::move(descriptor), std::move(facet), std::move(layout),
+      static_cast<std::size_t>(buffer.byte_size),
       static_cast<std::size_t>(buffer.alignment));
   if (!(plan.region() == full_region)) {
     throw std::invalid_argument("operation ABI output full Region mismatch");
   }
+  DescriptorMetadata metadata;
+  metadata.schema_identity = descriptor_record.schema_identity;
+  metadata.facet_identity = descriptor_record.facet_identity;
+  metadata.layout_identity = descriptor_record.layout_identity;
+  metadata.descriptor_version = descriptor_record.descriptor_version;
+  metadata.layout_version = descriptor_record.layout_version;
+  metadata.descriptor_digest = descriptor_record.descriptor_digest;
+  metadata.content_digest = descriptor_record.content_digest;
+  metadata.layout_digest = descriptor_record.layout_digest;
   return CopiedOutputPlan(record.port_identity, plan_identity,
-                          record.port_index, std::move(plan));
+                          record.port_index, metadata, std::move(plan));
 }
 
 /** @brief Process-unique source for callback-local ABI correlation values. */
@@ -985,7 +1120,7 @@ ps_operation_status_v1 PS_OPERATION_CALL emit_to_host(
         state->mode == SinkMode::OutputPlans) {
       if (stride != PS_OPERATION_OUTPUT_PLAN_V1_SIZE ||
           count > PS_OPERATION_MAX_PORTS_V1 - state->output_plans.size() ||
-          state->output_names == nullptr) {
+          state->output_contracts == nullptr) {
         return fail(PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1);
       }
       const auto* plans =
@@ -993,7 +1128,7 @@ ps_operation_status_v1 PS_OPERATION_CALL emit_to_host(
       for (std::uint32_t index = 0; index < count; ++index) {
         const auto identity = mint_identity(0x504C414EU);
         CopiedOutputPlan copied =
-            copy_output_plan(plans[index], *state->output_names, identity);
+            copy_output_plan(plans[index], *state->output_contracts, identity);
         const auto duplicate =
             std::find_if(state->output_plans.begin(), state->output_plans.end(),
                          [&](const CopiedOutputPlan& existing) {
@@ -1479,6 +1614,7 @@ class DescriptorProjection final {
  public:
   /**
    * @brief Copies and projects one complete dense-image descriptor.
+   * @param metadata Exact representation identities, versions, and digests.
    * @param descriptor Canonical logical tensor metadata.
    * @param facet Canonical ordinary-image metadata.
    * @param layout Canonical exact signed byte layout.
@@ -1486,12 +1622,18 @@ class DescriptorProjection final {
    * @throws std::invalid_argument or std::overflow_error for facts that cannot
    * enter ABI v1, plus allocation failures from copied metadata.
    */
-  DescriptorProjection(DenseTensorDescriptor descriptor, ImageFacet facet,
+  DescriptorProjection(DescriptorMetadata metadata,
+                       DenseTensorDescriptor descriptor, ImageFacet facet,
                        StridedLayout layout, std::size_t storage_size)
-      : descriptor_(std::move(descriptor)),
+      : metadata_(metadata),
+        descriptor_(std::move(descriptor)),
         facet_(std::move(facet)),
         layout_(std::move(layout)) {
-    if (descriptor_.shape.empty() ||
+    if (identity_is_zero(metadata_.schema_identity) ||
+        identity_is_zero(metadata_.facet_identity) ||
+        identity_is_zero(metadata_.layout_identity) ||
+        metadata_.descriptor_version == 0U || metadata_.layout_version == 0U ||
+        descriptor_.shape.empty() ||
         descriptor_.shape.size() > PS_OPERATION_MAX_RANK_V1 ||
         layout_.byte_strides.size() != descriptor_.shape.size()) {
       throw std::invalid_argument(
@@ -1569,11 +1711,14 @@ class DescriptorProjection final {
     descriptor_record_.header = ps_operation_record_header_v1{
         PS_OPERATION_VALUE_DESCRIPTOR_V1_SIZE,
         PS_OPERATION_RECORD_VALUE_DESCRIPTOR_V1, 1U, 0U};
-    descriptor_record_.schema_identity = kDenseTensorSchemaIdentity;
-    descriptor_record_.facet_identity = kImageFacetIdentity;
-    descriptor_record_.layout_identity = kStridedLayoutIdentity;
-    descriptor_record_.descriptor_version = 1U;
-    descriptor_record_.layout_version = 1U;
+    descriptor_record_.schema_identity = metadata_.schema_identity;
+    descriptor_record_.facet_identity = metadata_.facet_identity;
+    descriptor_record_.layout_identity = metadata_.layout_identity;
+    descriptor_record_.descriptor_version = metadata_.descriptor_version;
+    descriptor_record_.layout_version = metadata_.layout_version;
+    descriptor_record_.descriptor_digest = metadata_.descriptor_digest;
+    descriptor_record_.content_digest = metadata_.content_digest;
+    descriptor_record_.layout_digest = metadata_.layout_digest;
     descriptor_record_.dense_tensor = &dense_;
     descriptor_record_.image_facet = &image_;
     descriptor_record_.strided_layout = &layout_record_;
@@ -1681,6 +1826,8 @@ class DescriptorProjection final {
     image_.presence_mask |= PS_OPERATION_IMAGE_HAS_COLOR_V1;
   }
 
+  /** @brief Owned exact representation identity/version/digest facts. */
+  DescriptorMetadata metadata_;
   /** @brief Owned source logical descriptor. */
   DenseTensorDescriptor descriptor_;
   /** @brief Owned source ordinary-image metadata. */
@@ -1718,6 +1865,48 @@ class DescriptorProjection final {
 };
 
 /**
+ * @brief Selects and validates exact representation metadata for one input.
+ * @param value Immutable input whose publication metadata has priority.
+ * @param port Exact declared destination input port.
+ * @return Value-retained facts, or the legacy port-selected version-one and
+ * unavailable-digest projection when the Value predates operation metadata.
+ * @throws std::invalid_argument when retained identities conflict with the
+ * destination port or the image route has no explicit Facet.
+ * @note A zero port Layout leaves the retained Strided identity unconstrained.
+ * The fallback exists only for Values published outside the operation ABI; it
+ * never overwrites metadata retained from an operation output plan.
+ */
+DescriptorMetadata input_descriptor_metadata(const Value& value,
+                                             const PortDefinition& port) {
+  if (identity_is_zero(port.facet_identity)) {
+    throw std::invalid_argument(
+        "operation ABI DenseImage input port has no Facet identity");
+  }
+  const DenseImageValueDescriptorMetadata* retained =
+      DenseImageValueDescriptorMetadataAccess::get(value);
+  if (retained != nullptr) {
+    DescriptorMetadata metadata = projected_value_metadata(*retained);
+    if (!identities_equal(metadata.schema_identity, port.schema_identity) ||
+        !identities_equal(metadata.facet_identity, port.facet_identity) ||
+        (!identity_is_zero(port.layout_identity) &&
+         !identities_equal(metadata.layout_identity, port.layout_identity))) {
+      throw std::invalid_argument(
+          "operation ABI input descriptor identity does not match input port");
+    }
+    return metadata;
+  }
+  DescriptorMetadata metadata;
+  metadata.schema_identity = port.schema_identity;
+  metadata.facet_identity = port.facet_identity;
+  metadata.layout_identity = identity_is_zero(port.layout_identity)
+                                 ? kStridedLayoutIdentity
+                                 : port.layout_identity;
+  metadata.descriptor_version = 1U;
+  metadata.layout_version = 1U;
+  return metadata;
+}
+
+/**
  * @brief Owns one complete callback-local immutable input projection.
  * @throws Metadata, readiness, host-access, and allocation failures from Value.
  * @note The retained Value and ReadLease outlive every pointer in the records.
@@ -1727,12 +1916,13 @@ class ValueProjection final {
   /**
    * @brief Projects one Ready host-readable ordinary DenseImage Value.
    * @param value Immutable Value to retain.
+   * @param port Exact destination port selecting representation identities.
    * @param include_payload Whether execution may observe the CPU buffer.
    * @throws std::invalid_argument when the Value is not Strided DenseImage.
    * @throws ReadyFenceAccessError or BufferAccessError when execution payload
    * access is unavailable.
    */
-  ValueProjection(Value value, bool include_payload)
+  ValueProjection(Value value, const PortDefinition& port, bool include_payload)
       : value_(std::move(value)) {
     if (!value_.valid() ||
         value_.representation_kind() != ValueRepresentationKind::DenseTensor ||
@@ -1742,6 +1932,7 @@ class ValueProjection final {
           "operation ABI input requires a Strided DenseImage Value");
     }
     descriptor_ = std::make_unique<DescriptorProjection>(
+        input_descriptor_metadata(value_, port),
         value_.dense_tensor_descriptor(), *value_.image_facet(),
         value_.strided_layout(), value_.storage_size());
     extents_.reserve(value_.dense_tensor_descriptor().shape.size());
@@ -1864,8 +2055,8 @@ class InputBindingsProjection final {
       const NodeOutput* input = index < inputs.size() ? inputs[index] : nullptr;
       std::unique_ptr<ValueProjection> value;
       if (input != nullptr && input->has_image_value()) {
-        value = std::make_unique<ValueProjection>(input->image_value(),
-                                                  include_payload);
+        value = std::make_unique<ValueProjection>(
+            input->image_value(), operation.inputs[index], include_payload);
       }
       ps_operation_input_binding_v1 binding{};
       binding.header = ps_operation_record_header_v1{
@@ -2001,6 +2192,896 @@ class ImageRegionProjection final {
 };
 
 /**
+ * @brief Compares every scalar in two ABI record headers.
+ * @param left First header.
+ * @param right Second header.
+ * @return True only for exact equality.
+ * @throws Nothing.
+ */
+bool headers_equal(const ps_operation_record_header_v1& left,
+                   const ps_operation_record_header_v1& right) noexcept {
+  return left.struct_size == right.struct_size &&
+         left.struct_kind == right.struct_kind &&
+         left.struct_version == right.struct_version &&
+         left.flags == right.flags;
+}
+
+/**
+ * @brief Compares an ABI array's immutable pointer/count/stride topology.
+ * @param left Host-owned snapshot topology.
+ * @param right Post-callback topology.
+ * @return True only when every field is exact.
+ * @throws Nothing.
+ */
+bool array_topology_equal(const ps_operation_array_ref_v1& left,
+                          const ps_operation_array_ref_v1& right) noexcept {
+  return left.data == right.data && left.count == right.count &&
+         left.stride == right.stride;
+}
+
+/**
+ * @brief Compares every word in two fixed reserved arrays.
+ * @tparam Count Number of words.
+ * @param left First fixed array.
+ * @param right Second fixed array.
+ * @return True only for exact word equality.
+ * @throws Nothing.
+ */
+template <std::size_t Count>
+bool reserved_equal(const std::uint64_t (&left)[Count],
+                    const std::uint64_t (&right)[Count]) noexcept {
+  return std::equal(std::begin(left), std::end(left), std::begin(right));
+}
+
+/**
+ * @brief Copies one Host-built exact-stride array into snapshot ownership.
+ * @tparam Element Scalar or ABI record element.
+ * @param array Valid Host-created array reference.
+ * @return Independent value copies in original order.
+ * @throws std::bad_alloc when snapshot storage cannot allocate.
+ * @note This helper runs before plugin entry, so its pointer is trusted Host
+ * topology. Post-callback code never calls it on an untrusted pointer.
+ */
+template <typename Element>
+std::vector<Element> snapshot_host_array(
+    const ps_operation_array_ref_v1& array) {
+  if (array.count == 0U) {
+    return {};
+  }
+  const auto* values = static_cast<const Element*>(array.data);
+  return std::vector<Element>(values, values + array.count);
+}
+
+/**
+ * @brief Owns a recursive validation snapshot of one diagnostic byte view.
+ * @throws std::bad_alloc when independent byte storage cannot allocate.
+ * @note Payload identity is pointer-sensitive because the plugin may not
+ * replace Host-owned metadata storage during a callback.
+ */
+struct BytesAuthoritySnapshot final {
+  /** @brief Original pointer/size topology. */
+  ps_operation_bytes_v1 view{};
+  /** @brief Independent exact byte values. */
+  std::vector<std::uint8_t> bytes;
+
+  /**
+   * @brief Captures one valid Host-created byte view.
+   * @param source Pre-callback view.
+   * @throws std::bad_alloc when byte ownership cannot allocate.
+   * @note The source pointer remains Host-trusted until callback return.
+   */
+  explicit BytesAuthoritySnapshot(ps_operation_bytes_v1 source) : view(source) {
+    if (source.size != 0U) {
+      bytes.assign(source.data, source.data + source.size);
+    }
+  }
+
+  /**
+   * @brief Validates topology before comparing reachable bytes.
+   * @param observed Post-callback view.
+   * @return True only for exact pointer, size, and byte equality.
+   * @throws Nothing.
+   */
+  bool matches(const ps_operation_bytes_v1& observed) const noexcept {
+    return view.data == observed.data && view.size == observed.size &&
+           (bytes.empty() ||
+            std::equal(bytes.begin(), bytes.end(), observed.data));
+  }
+};
+
+/**
+ * @brief Owns a recursive validation snapshot of one Region atom.
+ * @throws std::bad_alloc when independent axis-range storage cannot allocate.
+ * @note Construction reads only pre-callback Host-created array topology.
+ */
+struct RegionAtomAuthoritySnapshot final {
+  /** @brief Independent atom scalar/pointer record. */
+  ps_operation_region_atom_v1 record{};
+  /** @brief Independent axis-range values. */
+  std::vector<ps_operation_axis_range_v1> ranges;
+
+  /**
+   * @brief Captures one Host-created atom and reachable ranges.
+   * @param source Pre-callback atom.
+   * @throws std::bad_alloc when range storage cannot allocate.
+   * @note The snapshot preserves both array topology and every range value.
+   */
+  explicit RegionAtomAuthoritySnapshot(
+      const ps_operation_region_atom_v1& source)
+      : record(source),
+        ranges(snapshot_host_array<ps_operation_axis_range_v1>(
+            source.axis_ranges)) {}
+
+  /**
+   * @brief Recursively validates one observed atom.
+   * @param observed Post-callback atom at the original safe address.
+   * @return True only when every scalar, pointer, and range is exact.
+   * @throws Nothing.
+   */
+  bool matches(const ps_operation_region_atom_v1& observed) const noexcept {
+    if (!headers_equal(record.header, observed.header) ||
+        record.atom_kind != observed.atom_kind ||
+        record.rank != observed.rank ||
+        !identities_equal(record.domain_identity, observed.domain_identity) ||
+        !array_topology_equal(record.axis_ranges, observed.axis_ranges) ||
+        !reserved_equal(record.reserved, observed.reserved) ||
+        ranges.size() != observed.axis_ranges.count) {
+      return false;
+    }
+    const auto* observed_ranges =
+        static_cast<const ps_operation_axis_range_v1*>(
+            observed.axis_ranges.data);
+    for (std::size_t index = 0U; index < ranges.size(); ++index) {
+      if (ranges[index].origin != observed_ranges[index].origin ||
+          ranges[index].extent != observed_ranges[index].extent) {
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
+/**
+ * @brief Owns a recursive validation snapshot of one complete Region graph.
+ * @throws std::invalid_argument for an incomplete Host graph.
+ * @throws std::bad_alloc when independent atom storage cannot allocate.
+ * @note Root and nested pointers must remain unchanged after callback return.
+ */
+struct RegionAuthoritySnapshot final {
+  /** @brief Original safe root address. */
+  const ps_operation_region_set_view_v1* address = nullptr;
+  /** @brief Independent root scalar/pointer record. */
+  ps_operation_region_set_view_v1 record{};
+  /** @brief Independent recursive atom snapshots. */
+  std::vector<RegionAtomAuthoritySnapshot> atoms;
+
+  /**
+   * @brief Captures one nonnull Host-created Region graph.
+   * @param source Pre-callback Region root.
+   * @throws std::invalid_argument for a null source.
+   * @throws std::bad_alloc when snapshot storage cannot allocate.
+   * @note The Host-created topology is trusted only during construction.
+   */
+  explicit RegionAuthoritySnapshot(
+      const ps_operation_region_set_view_v1* source)
+      : address(source),
+        record(source == nullptr ? ps_operation_region_set_view_v1{}
+                                 : *source) {
+    if (source == nullptr) {
+      throw std::invalid_argument("output authority Region snapshot is null");
+    }
+    const auto rows =
+        snapshot_host_array<ps_operation_region_atom_v1>(source->atoms);
+    atoms.reserve(rows.size());
+    for (const auto& atom : rows) {
+      atoms.emplace_back(atom);
+    }
+  }
+
+  /**
+   * @brief Validates root topology before recursively reading reachable rows.
+   * @param observed Post-callback Region pointer.
+   * @return True only for exact recursive equality.
+   * @throws Nothing.
+   */
+  bool matches(const ps_operation_region_set_view_v1* observed) const noexcept {
+    if (observed != address || observed == nullptr ||
+        !headers_equal(record.header, observed->header) ||
+        record.set_kind != observed->set_kind ||
+        record.reserved0 != observed->reserved0 ||
+        !array_topology_equal(record.atoms, observed->atoms) ||
+        record.reserved1 != observed->reserved1 ||
+        atoms.size() != observed->atoms.count) {
+      return false;
+    }
+    const auto* observed_atoms =
+        static_cast<const ps_operation_region_atom_v1*>(observed->atoms.data);
+    for (std::size_t index = 0U; index < atoms.size(); ++index) {
+      if (!atoms[index].matches(observed_atoms[index])) {
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
+/**
+ * @brief Owns a validation snapshot of one stable ImageFacet channel record.
+ * @throws std::bad_alloc when diagnostic-name ownership cannot allocate.
+ * @note Semantic identity and diagnostic bytes are compared independently.
+ */
+struct ChannelAuthoritySnapshot final {
+  /** @brief Independent scalar/pointer record. */
+  ps_operation_channel_v1 record{};
+  /** @brief Independent diagnostic bytes. */
+  BytesAuthoritySnapshot name;
+
+  /**
+   * @brief Captures one Host-created channel row and diagnostic name.
+   * @param source Pre-callback channel row.
+   * @throws std::bad_alloc when diagnostic-name ownership cannot allocate.
+   */
+  explicit ChannelAuthoritySnapshot(const ps_operation_channel_v1& source)
+      : record(source), name(source.diagnostic_name) {}
+
+  /**
+   * @brief Recursively compares one observed channel row.
+   * @param observed Post-callback row at the original Host address.
+   * @return True only when header, identity, name, and reserved facts match.
+   * @throws Nothing.
+   */
+  bool matches(const ps_operation_channel_v1& observed) const noexcept {
+    return headers_equal(record.header, observed.header) &&
+           record.channel_id == observed.channel_id &&
+           name.matches(observed.diagnostic_name) &&
+           record.reserved0 == observed.reserved0;
+  }
+};
+
+/**
+ * @brief Owns a recursive snapshot of one ImageFacet channel-group graph.
+ * @throws std::bad_alloc when diagnostic or member storage cannot allocate.
+ * @note The group name, stable identity, and ordered member ids are immutable.
+ */
+struct ChannelGroupAuthoritySnapshot final {
+  /** @brief Independent scalar/pointer record. */
+  ps_operation_channel_group_v1 record{};
+  /** @brief Independent diagnostic bytes. */
+  BytesAuthoritySnapshot name;
+  /** @brief Independent stable member identities. */
+  std::vector<std::uint64_t> members;
+
+  /**
+   * @brief Captures one Host-created channel-group row and reachable arrays.
+   * @param source Pre-callback group row.
+   * @throws std::bad_alloc when snapshot ownership cannot allocate.
+   */
+  explicit ChannelGroupAuthoritySnapshot(
+      const ps_operation_channel_group_v1& source)
+      : record(source),
+        name(source.diagnostic_name),
+        members(snapshot_host_array<std::uint64_t>(source.member_channel_ids)) {
+  }
+
+  /**
+   * @brief Recursively compares one observed channel-group graph.
+   * @param observed Post-callback row at the original safe address.
+   * @return True only when topology, identity, name, and members are exact.
+   * @throws Nothing.
+   */
+  bool matches(const ps_operation_channel_group_v1& observed) const noexcept {
+    if (!headers_equal(record.header, observed.header) ||
+        record.channel_group_id != observed.channel_group_id ||
+        !name.matches(observed.diagnostic_name) ||
+        !array_topology_equal(record.member_channel_ids,
+                              observed.member_channel_ids) ||
+        record.reserved0 != observed.reserved0 ||
+        members.size() != observed.member_channel_ids.count) {
+      return false;
+    }
+    const auto* observed_members =
+        static_cast<const std::uint64_t*>(observed.member_channel_ids.data);
+    return members.empty() ||
+           std::equal(members.begin(), members.end(), observed_members);
+  }
+};
+
+/**
+ * @brief Compares every scalar in one declared sample interval.
+ * @param left Snapshot interval.
+ * @param right Observed interval.
+ * @return True only for exact bit equality.
+ * @throws Nothing.
+ */
+bool sample_domains_equal(const ps_operation_sample_domain_v1& left,
+                          const ps_operation_sample_domain_v1& right) noexcept {
+  return left.kind == right.kind && left.reserved0 == right.reserved0 &&
+         left.minimum_binary64_bits == right.minimum_binary64_bits &&
+         left.maximum_binary64_bits == right.maximum_binary64_bits;
+}
+
+/**
+ * @brief Owns a recursive snapshot of an optional SampleDomainFacet graph.
+ * @throws std::bad_alloc when per-channel override storage cannot allocate.
+ * @note Null presence is an immutable descriptor fact and is compared exactly.
+ */
+struct SampleFacetAuthoritySnapshot final {
+  /** @brief Original safe optional root address. */
+  const ps_operation_sample_domain_facet_v1* address = nullptr;
+  /** @brief Independent scalar/pointer record when present. */
+  ps_operation_sample_domain_facet_v1 record{};
+  /** @brief Independent per-channel override rows. */
+  std::vector<ps_operation_channel_sample_domain_v1> overrides;
+
+  /**
+   * @brief Captures an optional Host-created SampleDomainFacet.
+   * @param source Pre-callback optional root pointer.
+   * @throws std::bad_alloc when override ownership cannot allocate.
+   */
+  explicit SampleFacetAuthoritySnapshot(
+      const ps_operation_sample_domain_facet_v1* source)
+      : address(source),
+        record(source == nullptr ? ps_operation_sample_domain_facet_v1{}
+                                 : *source) {
+    if (source != nullptr) {
+      overrides = snapshot_host_array<ps_operation_channel_sample_domain_v1>(
+          source->per_channel);
+    }
+  }
+
+  /**
+   * @brief Recursively compares an optional observed SampleDomainFacet.
+   * @param observed Post-callback optional root pointer.
+   * @return True only when presence, topology, domains, and overrides match.
+   * @throws Nothing.
+   */
+  bool matches(
+      const ps_operation_sample_domain_facet_v1* observed) const noexcept {
+    if (address == nullptr || observed == nullptr) {
+      return observed == address;
+    }
+    if (observed != address ||
+        !headers_equal(record.header, observed->header) ||
+        record.structural_version != observed->structural_version ||
+        record.encoding_structural_version !=
+            observed->encoding_structural_version ||
+        record.encoding_kind != observed->encoding_kind ||
+        record.reserved0 != observed->reserved0 ||
+        !sample_domains_equal(record.default_domain,
+                              observed->default_domain) ||
+        !array_topology_equal(record.per_channel, observed->per_channel) ||
+        record.reserved1 != observed->reserved1 ||
+        overrides.size() != observed->per_channel.count) {
+      return false;
+    }
+    const auto* rows =
+        static_cast<const ps_operation_channel_sample_domain_v1*>(
+            observed->per_channel.data);
+    for (std::size_t index = 0U; index < overrides.size(); ++index) {
+      if (!headers_equal(overrides[index].header, rows[index].header) ||
+          overrides[index].channel_id != rows[index].channel_id ||
+          !sample_domains_equal(overrides[index].domain, rows[index].domain) ||
+          !reserved_equal(overrides[index].reserved, rows[index].reserved)) {
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
+/**
+ * @brief Owns a snapshot of an optional fixed ColorFacet record.
+ * @throws Nothing for ordinary construction and comparison.
+ * @note Null presence and the original nonnull address are immutable facts.
+ */
+struct ColorFacetAuthoritySnapshot final {
+  /** @brief Original safe optional root address. */
+  const ps_operation_color_facet_v1* address = nullptr;
+  /** @brief Independent complete record when present. */
+  ps_operation_color_facet_v1 record{};
+
+  /**
+   * @brief Captures an optional Host-created ColorFacet.
+   * @param source Pre-callback optional root pointer.
+   * @throws Nothing.
+   */
+  explicit ColorFacetAuthoritySnapshot(
+      const ps_operation_color_facet_v1* source)
+      : address(source),
+        record(source == nullptr ? ps_operation_color_facet_v1{} : *source) {}
+
+  /**
+   * @brief Compares an optional observed ColorFacet record.
+   * @param observed Post-callback optional root pointer.
+   * @return True only when presence, address, and every scalar are exact.
+   * @throws Nothing.
+   */
+  bool matches(const ps_operation_color_facet_v1* observed) const noexcept {
+    if (address == nullptr || observed == nullptr) {
+      return observed == address;
+    }
+    return observed == address &&
+           headers_equal(record.header, observed->header) &&
+           record.structural_version == observed->structural_version &&
+           record.transfer == observed->transfer &&
+           record.primaries == observed->primaries &&
+           record.reserved0 == observed->reserved0 &&
+           record.channel_group_id == observed->channel_group_id &&
+           reserved_equal(record.reserved, observed->reserved);
+  }
+};
+
+/**
+ * @brief Owns a recursive snapshot of one complete ImageFacet record graph.
+ * @throws std::invalid_argument for an incomplete Host graph.
+ * @throws std::bad_alloc when nested snapshot ownership cannot allocate.
+ * @note Windows, channel arrays, optional facets, and reserved facts are all
+ * immutable callback authority.
+ */
+struct ImageFacetAuthoritySnapshot final {
+  /** @brief Original safe root address. */
+  const ps_operation_image_facet_v1* address = nullptr;
+  /** @brief Independent root scalar/pointer record. */
+  ps_operation_image_facet_v1 record{};
+  /** @brief Independent channel snapshots. */
+  std::vector<ChannelAuthoritySnapshot> channels;
+  /** @brief Independent channel-group snapshots. */
+  std::vector<ChannelGroupAuthoritySnapshot> groups;
+  /** @brief Independent optional SampleDomainFacet snapshot. */
+  SampleFacetAuthoritySnapshot sample;
+  /** @brief Independent optional ColorFacet snapshot. */
+  ColorFacetAuthoritySnapshot color;
+
+  /**
+   * @brief Captures one nonnull Host-created ImageFacet graph.
+   * @param source Pre-callback descriptor facet root.
+   * @throws std::invalid_argument for a null root.
+   * @throws std::bad_alloc when nested snapshot ownership cannot allocate.
+   */
+  explicit ImageFacetAuthoritySnapshot(
+      const ps_operation_image_facet_v1* source)
+      : address(source),
+        record(source == nullptr ? ps_operation_image_facet_v1{} : *source),
+        sample(source == nullptr ? nullptr : source->sample_domain),
+        color(source == nullptr ? nullptr : source->color) {
+    if (source == nullptr) {
+      throw std::invalid_argument(
+          "output authority ImageFacet snapshot is null");
+    }
+    const auto channel_rows =
+        snapshot_host_array<ps_operation_channel_v1>(source->channels);
+    channels.reserve(channel_rows.size());
+    for (const auto& channel : channel_rows) {
+      channels.emplace_back(channel);
+    }
+    const auto group_rows = snapshot_host_array<ps_operation_channel_group_v1>(
+        source->channel_groups);
+    groups.reserve(group_rows.size());
+    for (const auto& group : group_rows) {
+      groups.emplace_back(group);
+    }
+  }
+
+  /**
+   * @brief Recursively compares one observed ImageFacet graph.
+   * @param observed Post-callback facet root pointer.
+   * @return True only when root topology and every reachable fact are exact.
+   * @throws Nothing.
+   */
+  bool matches(const ps_operation_image_facet_v1* observed) const noexcept {
+    if (observed != address || observed == nullptr ||
+        !headers_equal(record.header, observed->header) ||
+        record.x_axis != observed->x_axis ||
+        record.y_axis != observed->y_axis ||
+        record.channel_axis != observed->channel_axis ||
+        record.presence_mask != observed->presence_mask ||
+        record.data_window.x_begin != observed->data_window.x_begin ||
+        record.data_window.y_begin != observed->data_window.y_begin ||
+        record.data_window.x_end != observed->data_window.x_end ||
+        record.data_window.y_end != observed->data_window.y_end ||
+        record.display_window.x_begin != observed->display_window.x_begin ||
+        record.display_window.y_begin != observed->display_window.y_begin ||
+        record.display_window.x_end != observed->display_window.x_end ||
+        record.display_window.y_end != observed->display_window.y_end ||
+        !array_topology_equal(record.channels, observed->channels) ||
+        !array_topology_equal(record.channel_groups,
+                              observed->channel_groups) ||
+        !sample.matches(observed->sample_domain) ||
+        !color.matches(observed->color) ||
+        !reserved_equal(record.reserved, observed->reserved) ||
+        channels.size() != observed->channels.count ||
+        groups.size() != observed->channel_groups.count) {
+      return false;
+    }
+    const auto* channel_rows =
+        static_cast<const ps_operation_channel_v1*>(observed->channels.data);
+    for (std::size_t index = 0U; index < channels.size(); ++index) {
+      if (!channels[index].matches(channel_rows[index])) {
+        return false;
+      }
+    }
+    const auto* group_rows = static_cast<const ps_operation_channel_group_v1*>(
+        observed->channel_groups.data);
+    for (std::size_t index = 0U; index < groups.size(); ++index) {
+      if (!groups[index].matches(group_rows[index])) {
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
+/**
+ * @brief Owns a recursive snapshot of one DenseTensor descriptor record.
+ * @throws std::invalid_argument for an incomplete Host descriptor.
+ * @throws std::bad_alloc when nested array ownership cannot allocate.
+ * @note Logical extents and every optional quantization array remain immutable.
+ */
+struct DenseDescriptorAuthoritySnapshot final {
+  /** @brief Original safe root address. */
+  const ps_operation_dense_tensor_descriptor_v1* address = nullptr;
+  /** @brief Independent root scalar/pointer record. */
+  ps_operation_dense_tensor_descriptor_v1 record{};
+  /** @brief Independent logical extents. */
+  std::vector<std::uint64_t> extents;
+  /** @brief Independent quantization block extents. */
+  std::vector<std::uint64_t> quantization_blocks;
+  /** @brief Independent quantization scale bits. */
+  std::vector<std::uint32_t> quantization_scales;
+
+  /**
+   * @brief Captures one nonnull Host-created DenseTensor record.
+   * @param source Pre-callback DenseTensor descriptor root.
+   * @throws std::invalid_argument for a null root.
+   * @throws std::bad_alloc when nested array ownership cannot allocate.
+   */
+  explicit DenseDescriptorAuthoritySnapshot(
+      const ps_operation_dense_tensor_descriptor_v1* source)
+      : address(source),
+        record(source == nullptr ? ps_operation_dense_tensor_descriptor_v1{}
+                                 : *source) {
+    if (source == nullptr) {
+      throw std::invalid_argument(
+          "output authority DenseTensor snapshot is null");
+    }
+    extents = snapshot_host_array<std::uint64_t>(source->extents);
+    quantization_blocks =
+        snapshot_host_array<std::uint64_t>(source->quantization_block_shape);
+    quantization_scales = snapshot_host_array<std::uint32_t>(
+        source->quantization_scales_binary32);
+  }
+
+  /**
+   * @brief Recursively compares one observed DenseTensor record.
+   * @param observed Post-callback DenseTensor root pointer.
+   * @return True only when topology and every scalar/array value are exact.
+   * @throws Nothing.
+   */
+  bool matches(
+      const ps_operation_dense_tensor_descriptor_v1* observed) const noexcept {
+    if (observed != address || observed == nullptr ||
+        !headers_equal(record.header, observed->header) ||
+        record.rank != observed->rank ||
+        record.element_semantics != observed->element_semantics ||
+        record.storage_encoding != observed->storage_encoding ||
+        record.bit_width != observed->bit_width ||
+        !array_topology_equal(record.extents, observed->extents) ||
+        !array_topology_equal(record.quantization_block_shape,
+                              observed->quantization_block_shape) ||
+        !array_topology_equal(record.quantization_scales_binary32,
+                              observed->quantization_scales_binary32) ||
+        record.quantization_present != observed->quantization_present ||
+        record.reserved0 != observed->reserved0 ||
+        record.reserved1 != observed->reserved1) {
+      return false;
+    }
+    const auto* observed_extents =
+        static_cast<const std::uint64_t*>(observed->extents.data);
+    const auto* observed_blocks = static_cast<const std::uint64_t*>(
+        observed->quantization_block_shape.data);
+    const auto* observed_scales = static_cast<const std::uint32_t*>(
+        observed->quantization_scales_binary32.data);
+    return (extents.empty() ||
+            std::equal(extents.begin(), extents.end(), observed_extents)) &&
+           (quantization_blocks.empty() ||
+            std::equal(quantization_blocks.begin(), quantization_blocks.end(),
+                       observed_blocks)) &&
+           (quantization_scales.empty() ||
+            std::equal(quantization_scales.begin(), quantization_scales.end(),
+                       observed_scales));
+  }
+};
+
+/**
+ * @brief Owns a recursive snapshot of one StridedLayout record.
+ * @throws std::invalid_argument for an incomplete Host layout.
+ * @throws std::bad_alloc when stride ownership cannot allocate.
+ * @note Signed stride topology and storage envelope are immutable Host facts.
+ */
+struct LayoutAuthoritySnapshot final {
+  /** @brief Original safe root address. */
+  const ps_operation_strided_layout_v1* address = nullptr;
+  /** @brief Independent root scalar/pointer record. */
+  ps_operation_strided_layout_v1 record{};
+  /** @brief Independent signed strides. */
+  std::vector<std::int64_t> strides;
+
+  /**
+   * @brief Captures one nonnull Host-created StridedLayout record.
+   * @param source Pre-callback Layout root.
+   * @throws std::invalid_argument for a null root.
+   * @throws std::bad_alloc when stride ownership cannot allocate.
+   */
+  explicit LayoutAuthoritySnapshot(const ps_operation_strided_layout_v1* source)
+      : address(source),
+        record(source == nullptr ? ps_operation_strided_layout_v1{} : *source) {
+    if (source == nullptr) {
+      throw std::invalid_argument(
+          "output authority StridedLayout snapshot is null");
+    }
+    strides = snapshot_host_array<std::int64_t>(source->byte_strides);
+  }
+
+  /**
+   * @brief Recursively compares one observed StridedLayout record.
+   * @param observed Post-callback Layout root pointer.
+   * @return True only when root topology and every layout fact are exact.
+   * @throws Nothing.
+   */
+  bool matches(const ps_operation_strided_layout_v1* observed) const noexcept {
+    if (observed != address || observed == nullptr ||
+        !headers_equal(record.header, observed->header) ||
+        record.rank != observed->rank ||
+        record.buffer_index != observed->buffer_index ||
+        record.byte_offset != observed->byte_offset ||
+        !array_topology_equal(record.byte_strides, observed->byte_strides) ||
+        record.storage_size != observed->storage_size ||
+        record.reserved0 != observed->reserved0) {
+      return false;
+    }
+    const auto* observed_strides =
+        static_cast<const std::int64_t*>(observed->byte_strides.data);
+    return strides.empty() ||
+           std::equal(strides.begin(), strides.end(), observed_strides);
+  }
+};
+
+/**
+ * @brief Owns a recursive snapshot of one complete ValueDescriptor graph.
+ * @throws std::invalid_argument for an incomplete Host descriptor graph.
+ * @throws std::bad_alloc when nested snapshot ownership cannot allocate.
+ * @note Identities, versions, all digests, and nested representation records
+ * remain immutable after inference acceptance.
+ */
+struct DescriptorAuthoritySnapshot final {
+  /** @brief Original safe root address. */
+  const ps_operation_value_descriptor_v1* address = nullptr;
+  /** @brief Independent root scalar/pointer record. */
+  ps_operation_value_descriptor_v1 record{};
+  /** @brief Independent DenseTensor graph snapshot. */
+  DenseDescriptorAuthoritySnapshot dense;
+  /** @brief Independent ImageFacet graph snapshot. */
+  ImageFacetAuthoritySnapshot image;
+  /** @brief Independent StridedLayout graph snapshot. */
+  LayoutAuthoritySnapshot layout;
+
+  /**
+   * @brief Captures one nonnull Host-created ValueDescriptor graph.
+   * @param source Pre-callback descriptor root.
+   * @throws std::invalid_argument for a missing root or nested record.
+   * @throws std::bad_alloc when nested snapshot ownership cannot allocate.
+   */
+  explicit DescriptorAuthoritySnapshot(
+      const ps_operation_value_descriptor_v1* source)
+      : address(source),
+        record(source == nullptr ? ps_operation_value_descriptor_v1{}
+                                 : *source),
+        dense(source == nullptr ? nullptr : source->dense_tensor),
+        image(source == nullptr ? nullptr : source->image_facet),
+        layout(source == nullptr ? nullptr : source->strided_layout) {
+    if (source == nullptr) {
+      throw std::invalid_argument(
+          "output authority ValueDescriptor snapshot is null");
+    }
+  }
+
+  /**
+   * @brief Recursively compares one observed ValueDescriptor graph.
+   * @param observed Post-callback descriptor root pointer.
+   * @return True only when root and every reachable representation fact match.
+   * @throws Nothing.
+   */
+  bool matches(
+      const ps_operation_value_descriptor_v1* observed) const noexcept {
+    if (observed != address || observed == nullptr ||
+        !headers_equal(record.header, observed->header) ||
+        !identities_equal(record.schema_identity, observed->schema_identity) ||
+        !identities_equal(record.facet_identity, observed->facet_identity) ||
+        !identities_equal(record.layout_identity, observed->layout_identity) ||
+        record.descriptor_version != observed->descriptor_version ||
+        record.layout_version != observed->layout_version ||
+        !std::equal(std::begin(record.descriptor_digest.words),
+                    std::end(record.descriptor_digest.words),
+                    std::begin(observed->descriptor_digest.words)) ||
+        !std::equal(std::begin(record.content_digest.words),
+                    std::end(record.content_digest.words),
+                    std::begin(observed->content_digest.words)) ||
+        !std::equal(std::begin(record.layout_digest.words),
+                    std::end(record.layout_digest.words),
+                    std::begin(observed->layout_digest.words)) ||
+        !reserved_equal(record.reserved, observed->reserved)) {
+      return false;
+    }
+    return dense.matches(observed->dense_tensor) &&
+           image.matches(observed->image_facet) &&
+           layout.matches(observed->strided_layout);
+  }
+};
+
+/**
+ * @brief Owns a recursive snapshot of one immutable OutputPlan graph.
+ * @throws std::invalid_argument for an incomplete Host plan graph.
+ * @throws std::bad_alloc when buffer-plan ownership cannot allocate.
+ * @note The descriptor graph is snapshotted separately by the binding root;
+ * this snapshot preserves its exact pointer plus plan-local reachable records.
+ */
+struct OutputPlanAuthoritySnapshot final {
+  /** @brief Original safe root address. */
+  const ps_operation_output_plan_v1* address = nullptr;
+  /** @brief Independent root scalar/pointer record. */
+  ps_operation_output_plan_v1 record{};
+  /** @brief Independent buffer-plan rows. */
+  std::vector<ps_operation_output_buffer_plan_v1> buffers;
+  /** @brief Independent recursive full-Region snapshot. */
+  RegionAuthoritySnapshot full_region;
+
+  /**
+   * @brief Captures one nonnull Host-created OutputPlan graph.
+   * @param source Pre-callback immutable plan root.
+   * @throws std::invalid_argument for a missing plan or full Region.
+   * @throws std::bad_alloc when nested snapshot ownership cannot allocate.
+   */
+  explicit OutputPlanAuthoritySnapshot(
+      const ps_operation_output_plan_v1* source)
+      : address(source),
+        record(source == nullptr ? ps_operation_output_plan_v1{} : *source),
+        buffers(source == nullptr
+                    ? std::vector<ps_operation_output_buffer_plan_v1>{}
+                    : snapshot_host_array<ps_operation_output_buffer_plan_v1>(
+                          source->buffers)),
+        full_region(source == nullptr ? nullptr : source->full_region) {
+    if (source == nullptr) {
+      throw std::invalid_argument("output authority plan snapshot is null");
+    }
+  }
+
+  /**
+   * @brief Recursively compares one observed OutputPlan graph.
+   * @param observed Post-callback plan root pointer.
+   * @return True only when plan topology, buffer rows, and Region are exact.
+   * @throws Nothing.
+   */
+  bool matches(const ps_operation_output_plan_v1* observed) const noexcept {
+    if (observed != address || observed == nullptr ||
+        !headers_equal(record.header, observed->header) ||
+        !identities_equal(record.port_identity, observed->port_identity) ||
+        record.port_index != observed->port_index ||
+        record.buffer_count != observed->buffer_count ||
+        record.descriptor != observed->descriptor ||
+        !array_topology_equal(record.buffers, observed->buffers) ||
+        !identities_equal(record.plan_identity, observed->plan_identity) ||
+        record.access_mask != observed->access_mask ||
+        record.reserved0 != observed->reserved0 ||
+        !reserved_equal(record.reserved, observed->reserved) ||
+        buffers.size() != observed->buffers.count ||
+        !full_region.matches(observed->full_region)) {
+      return false;
+    }
+    const auto* rows = static_cast<const ps_operation_output_buffer_plan_v1*>(
+        observed->buffers.data);
+    for (std::size_t index = 0U; index < buffers.size(); ++index) {
+      const auto& expected = buffers[index];
+      const auto& actual = rows[index];
+      if (!headers_equal(expected.header, actual.header) ||
+          expected.buffer_index != actual.buffer_index ||
+          expected.access_mask != actual.access_mask ||
+          expected.byte_offset != actual.byte_offset ||
+          expected.byte_size != actual.byte_size ||
+          expected.alignment != actual.alignment ||
+          !reserved_equal(expected.reserved, actual.reserved)) {
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
+/**
+ * @brief Host-owned recursive snapshot of the actual mutable-output graph.
+ * @throws std::bad_alloc when bounded snapshot ownership cannot allocate.
+ * @note Snapshot construction precedes plugin entry. Validation first compares
+ * each pointer/count/stride topology, then dereferences only original safe
+ * addresses and compares every reachable immutable scalar. Payload bytes are
+ * deliberately excluded; their mutation is the granted operation authority.
+ */
+class MutableOutputAuthoritySnapshot final {
+ public:
+  /**
+   * @brief Captures one complete actual callback output record graph.
+   * @param source Pre-callback top-level record copied into the callback array.
+   * @throws std::invalid_argument for an incomplete Host graph.
+   * @throws std::bad_alloc when snapshot storage cannot allocate.
+   */
+  explicit MutableOutputAuthoritySnapshot(
+      const ps_operation_mutable_output_binding_v1& source)
+      : binding_(source),
+        descriptor_(source.descriptor),
+        plan_(source.plan),
+        spans_(snapshot_host_array<ps_operation_output_grant_span_v1>(
+            source.spans)),
+        region_(source.region) {}
+
+  /**
+   * @brief Recursively revalidates the exact record graph after callback.
+   * @param observed Actual top-level record supplied to plugin code.
+   * @return Nothing when every immutable fact is exact.
+   * @throws std::invalid_argument for any top-level or reachable mutation.
+   */
+  void validate(const ps_operation_mutable_output_binding_v1& observed) const {
+    bool unchanged =
+        headers_equal(binding_.header, observed.header) &&
+        identities_equal(binding_.port_identity, observed.port_identity) &&
+        identities_equal(binding_.binding_identity,
+                         observed.binding_identity) &&
+        identities_equal(binding_.grant_identity, observed.grant_identity) &&
+        binding_.port_index == observed.port_index &&
+        binding_.binding_flags == observed.binding_flags &&
+        binding_.plan == observed.plan &&
+        binding_.descriptor == observed.descriptor &&
+        array_topology_equal(binding_.spans, observed.spans) &&
+        binding_.region == observed.region &&
+        reserved_equal(binding_.reserved, observed.reserved) &&
+        descriptor_.matches(observed.descriptor) &&
+        plan_.matches(observed.plan) && region_.matches(observed.region) &&
+        spans_.size() == observed.spans.count;
+    if (unchanged) {
+      const auto* rows = static_cast<const ps_operation_output_grant_span_v1*>(
+          observed.spans.data);
+      for (std::size_t index = 0U; index < spans_.size(); ++index) {
+        const auto& expected = spans_[index];
+        const auto& actual = rows[index];
+        if (!headers_equal(expected.header, actual.header) ||
+            expected.allocation_offset != actual.allocation_offset ||
+            expected.byte_size != actual.byte_size ||
+            expected.bytes.data != actual.bytes.data ||
+            expected.bytes.size != actual.bytes.size ||
+            expected.alignment != actual.alignment ||
+            expected.reserved0 != actual.reserved0) {
+          unchanged = false;
+          break;
+        }
+      }
+    }
+    if (!unchanged) {
+      throw std::invalid_argument(
+          "operation plugin modified immutable output authority records");
+    }
+  }
+
+ private:
+  /** @brief Independent top-level record snapshot. */
+  ps_operation_mutable_output_binding_v1 binding_{};
+  /** @brief Independent recursive descriptor snapshot. */
+  DescriptorAuthoritySnapshot descriptor_;
+  /** @brief Independent recursive immutable-plan snapshot. */
+  OutputPlanAuthoritySnapshot plan_;
+  /** @brief Independent grant-span metadata snapshots. */
+  std::vector<ps_operation_output_grant_span_v1> spans_;
+  /** @brief Independent recursive grant-Region snapshot. */
+  RegionAuthoritySnapshot region_;
+};
+
+/**
  * @brief Owns one Host-created mutable output binding ABI projection.
  * @throws Metadata, grant-access, and allocation failures.
  * @note Every writable pointer is derived from the active grant and remains
@@ -2021,8 +3102,9 @@ class MutableOutputProjection final {
                           std::uint64_t allocation_identity,
                           HostOutputWriteGrant* grant)
       : descriptor_(std::make_unique<DescriptorProjection>(
-            copied.plan.descriptor(), copied.plan.image_facet(),
-            copied.plan.layout(), copied.plan.storage_size())),
+            copied.metadata, copied.plan.descriptor(),
+            copied.plan.image_facet(), copied.plan.layout(),
+            copied.plan.storage_size())),
         full_region_(copied.plan.region()),
         grant_region_(grant->image_region()) {
     buffer_plan_.header = ps_operation_record_header_v1{
@@ -2079,9 +3161,8 @@ class MutableOutputProjection final {
     binding_.descriptor = descriptor_->record();
     binding_.spans = array_ref(spans_);
     binding_.region = grant_region_.view();
-    expected_plan_ = plan_;
-    expected_binding_ = binding_;
-    expected_spans_ = spans_;
+    authority_snapshot_ =
+        std::make_unique<MutableOutputAuthoritySnapshot>(binding_);
   }
 
   MutableOutputProjection(const MutableOutputProjection&) = delete;
@@ -2093,20 +3174,16 @@ class MutableOutputProjection final {
   }
 
   /**
-   * @brief Revalidates immutable plan/grant rows after untrusted callback code.
-   * @return Nothing when records remain byte-for-byte identical.
+   * @brief Recursively revalidates the actual record graph after callback code.
+   * @param observed Actual top-level record passed to the plugin callback.
+   * @return Nothing when every immutable Host fact remains exact.
    * @throws std::invalid_argument when the plugin modified any Host fact.
+   * @note Pointer/count/stride topology is checked before reachable memory is
+   * read, so a plugin cannot redirect validation through an untrusted pointer.
    */
-  void validate_unchanged() const {
-    if (std::memcmp(&plan_, &expected_plan_, sizeof(plan_)) != 0 ||
-        std::memcmp(&binding_, &expected_binding_, sizeof(binding_)) != 0 ||
-        spans_.size() != expected_spans_.size() ||
-        (!spans_.empty() &&
-         std::memcmp(spans_.data(), expected_spans_.data(),
-                     spans_.size() * sizeof(spans_.front())) != 0)) {
-      throw std::invalid_argument(
-          "operation plugin modified immutable output authority records");
-    }
+  void validate_unchanged(
+      const ps_operation_mutable_output_binding_v1& observed) const {
+    authority_snapshot_->validate(observed);
   }
 
  private:
@@ -2120,18 +3197,14 @@ class MutableOutputProjection final {
   std::vector<ps_operation_output_buffer_plan_v1> buffer_plans_;
   /** @brief Active checked mutable spans. */
   std::vector<ps_operation_output_grant_span_v1> spans_;
-  /** @brief Snapshot used for post-callback mutation detection. */
-  std::vector<ps_operation_output_grant_span_v1> expected_spans_;
   /** @brief Buffer-plan staging row. */
   ps_operation_output_buffer_plan_v1 buffer_plan_{};
   /** @brief Complete immutable ABI output plan. */
   ps_operation_output_plan_v1 plan_{};
   /** @brief Complete Host-created mutable binding. */
   ps_operation_mutable_output_binding_v1 binding_{};
-  /** @brief Post-callback expected plan bytes. */
-  ps_operation_output_plan_v1 expected_plan_{};
-  /** @brief Post-callback expected binding bytes. */
-  ps_operation_mutable_output_binding_v1 expected_binding_{};
+  /** @brief Recursive snapshot of the actual callback record graph. */
+  std::unique_ptr<MutableOutputAuthoritySnapshot> authority_snapshot_;
 };
 
 /**
@@ -2774,17 +3847,19 @@ void copy_definitions(OperationPluginGeneration::Impl& impl) {
 }
 
 /**
- * @brief Builds the identity/name inventory accepted by inference output.
+ * @brief Builds the complete port contract inventory accepted by inference.
  * @param operation Valid copied operation definition.
- * @return Exact output identity to canonical name map.
+ * @return Exact output identity to name and representation requirements.
  * @throws std::bad_alloc when map storage cannot allocate.
  */
-std::map<std::pair<std::uint64_t, std::uint64_t>, std::string>
-make_output_name_inventory(const OperationDefinition& operation) {
-  std::map<std::pair<std::uint64_t, std::uint64_t>, std::string> result;
+OutputPortContracts make_output_contract_inventory(
+    const OperationDefinition& operation) {
+  OutputPortContracts result;
   for (const PortDefinition& output : operation.outputs) {
-    result.emplace(std::make_pair(output.identity.word0, output.identity.word1),
-                   output.name);
+    result.emplace(
+        std::make_pair(output.identity.word0, output.identity.word1),
+        OutputPortContract{output.name, output.schema_identity,
+                           output.facet_identity, output.layout_identity});
   }
   return result;
 }
@@ -2804,10 +3879,10 @@ std::vector<CopiedOutputPlan> infer_output_plans(
     const ps_operation_invocation_v1& invocation,
     const ps_operation_configuration_view_v1* configuration,
     const ps_operation_array_ref_v1* inputs) {
-  const auto output_names = make_output_name_inventory(operation);
+  const auto output_contracts = make_output_contract_inventory(operation);
   SinkState state;
   state.mode = SinkMode::OutputPlans;
-  state.output_names = &output_names;
+  state.output_contracts = &output_contracts;
   state.output_plans.reserve(operation.outputs.size());
   const auto sink = make_sink(&state);
   const auto status = impl.inference.infer_output_plans(
@@ -3368,6 +4443,26 @@ RegionSet isolated_input_region(const Value& value) {
 }
 
 /**
+ * @brief Compares every authoritative private field of two output plans.
+ * @param left First validated immutable plan.
+ * @param right Second validated immutable plan.
+ * @return True only when name, descriptor, Facet, Layout, size, and alignment
+ * match exactly.
+ * @throws Nothing under contained equality contracts.
+ * @note Region and cached dimensions are deterministic derivatives of these
+ * fields and therefore need no independent comparison.
+ */
+bool output_plans_equal(const DenseImageOutputPlan& left,
+                        const DenseImageOutputPlan& right) noexcept {
+  return left.output_name() == right.output_name() &&
+         left.descriptor() == right.descriptor() &&
+         left.image_facet() == right.image_facet() &&
+         left.layout() == right.layout() &&
+         left.storage_size() == right.storage_size() &&
+         left.alignment() == right.alignment();
+}
+
+/**
  * @brief Converts one accepted ABI output plan into isolation-v2 metadata.
  * @param copied Valid Host-owned immutable plan and correlation identities.
  * @return Complete pointer-free supervised output plan.
@@ -3378,11 +4473,18 @@ execution::IsolatedCpuDenseTensorOutputPlan isolated_output_plan(
   execution::IsolatedCpuDenseTensorOutputPlan result;
   result.port_identity = to_isolated_identity(copied.port_identity);
   result.plan_identity = to_isolated_identity(copied.plan_identity);
-  result.schema_identity = to_isolated_identity(kDenseTensorSchemaIdentity);
-  result.facet_identity = to_isolated_identity(kImageFacetIdentity);
-  result.layout_identity = to_isolated_identity(kStridedLayoutIdentity);
-  result.schema_version = 1U;
-  result.layout_version = 1U;
+  result.schema_identity =
+      to_isolated_identity(copied.metadata.schema_identity);
+  result.facet_identity = to_isolated_identity(copied.metadata.facet_identity);
+  result.layout_identity =
+      to_isolated_identity(copied.metadata.layout_identity);
+  result.schema_version = copied.metadata.descriptor_version;
+  result.layout_version = copied.metadata.layout_version;
+  result.descriptor_digest =
+      to_isolated_digest(copied.metadata.descriptor_digest);
+  result.logical_content_digest =
+      to_isolated_digest(copied.metadata.content_digest);
+  result.layout_digest = to_isolated_digest(copied.metadata.layout_digest);
   result.descriptor = copied.plan.descriptor();
   result.image_facet = copied.plan.image_facet();
   result.layout = copied.plan.layout();
@@ -3440,11 +4542,17 @@ NodeOutput execute_supervised_monolithic(
         to_isolated_identity(operation.inputs[index].identity);
     binding.edge_identity =
         to_isolated_identity(ps_operation_identity_v1{0x45444745U, index + 1U});
-    binding.schema_identity = to_isolated_identity(kDenseTensorSchemaIdentity);
-    binding.facet_identity = to_isolated_identity(kImageFacetIdentity);
-    binding.layout_identity = to_isolated_identity(kStridedLayoutIdentity);
-    binding.schema_version = 1U;
-    binding.layout_version = 1U;
+    const DescriptorMetadata metadata =
+        input_descriptor_metadata(value, operation.inputs[index]);
+    binding.schema_identity = to_isolated_identity(metadata.schema_identity);
+    binding.facet_identity = to_isolated_identity(metadata.facet_identity);
+    binding.layout_identity = to_isolated_identity(metadata.layout_identity);
+    binding.schema_version = metadata.descriptor_version;
+    binding.layout_version = metadata.layout_version;
+    binding.descriptor_digest = to_isolated_digest(metadata.descriptor_digest);
+    binding.logical_content_digest =
+        to_isolated_digest(metadata.content_digest);
+    binding.layout_digest = to_isolated_digest(metadata.layout_digest);
     binding.region = isolated_input_region(value);
     invocation.inputs.push_back(value);
     invocation.input_bindings.push_back(std::move(binding));
@@ -3541,6 +4649,8 @@ NodeOutput execute_monolithic_implementation(
     for (std::size_t index = 0; index < plans.size(); ++index) {
       bindings.push_back(HostOutputBinding::allocate(plans[index].plan));
       grants.push_back(bindings.back().grant_whole());
+      grants.back().bind_value_descriptor_metadata(
+          retained_value_metadata(plans[index].metadata));
       projections.push_back(std::make_unique<MutableOutputProjection>(
           plans[index], static_cast<std::uint32_t>(index),
           bindings.back().allocation_identity().value(), &grants.back()));
@@ -3555,8 +4665,8 @@ NodeOutput execute_monolithic_implementation(
         impl.api.plugin_context, &invocation, configuration.view(),
         execution_inputs.array(), &output_array, &execution_sink);
     finish_callback(status, execution_state);
-    for (const auto& projection : projections) {
-      projection->validate_unchanged();
+    for (std::size_t index = 0U; index < projections.size(); ++index) {
+      projections[index]->validate_unchanged(output_records[index]);
     }
     for (HostOutputWriteGrant& grant : grants) {
       grant.retire_success();
@@ -3629,15 +4739,19 @@ class TileProjection final {
 };
 
 /**
- * @brief Snapshots current private compatibility input tiles as Values.
+ * @brief Projects current private input tiles through canonical Values.
  * @param operation Exact operation definition controlling destination arity.
  * @param input_tiles Destination-indexed borrowed tile buffers.
  * @param storage Destination NodeOutput owners.
  * @param views Destination pointer sequence into `storage`.
  * @return Nothing after exact destination-index preservation.
- * @throws Input snapshot, Value publication, or allocation failures.
- * @note This bridge is temporary private compatibility staging; no
- * `ImageBuffer` or pointer enters the public operation ABI record graph.
+ * @throws Input validation, fallback snapshot, Value publication, or
+ * allocation failures.
+ * @note Production tiles retain the normalized canonical Value so operation
+ * descriptor identities, versions, and digests survive compatibility image
+ * staging. Geometry-only focused callers may omit it and receive the legacy
+ * callback-local snapshot with unavailable operation metadata. No
+ * `ImageBuffer` or private pointer enters the public operation ABI graph.
  */
 void snapshot_tiled_inputs(const OperationDefinition& operation,
                            const std::vector<InputTile>& input_tiles,
@@ -3651,9 +4765,13 @@ void snapshot_tiled_inputs(const OperationDefinition& operation,
       views->push_back(nullptr);
       continue;
     }
-    storage->back().publish_image_value(
-        value_image_adapter::snapshot_cpu_image_value(
-            *input_tiles[index].buffer));
+    if (input_tiles[index].value != nullptr) {
+      storage->back().publish_image_value(*input_tiles[index].value);
+    } else {
+      storage->back().publish_image_value(
+          value_image_adapter::snapshot_cpu_image_value(
+              *input_tiles[index].buffer));
+    }
     views->push_back(&storage->back());
   }
 }
@@ -3713,11 +4831,17 @@ void execute_supervised_tiled(
         to_isolated_identity(operation.inputs[index].identity);
     binding.edge_identity =
         to_isolated_identity(ps_operation_identity_v1{0x45444745U, index + 1U});
-    binding.schema_identity = to_isolated_identity(kDenseTensorSchemaIdentity);
-    binding.facet_identity = to_isolated_identity(kImageFacetIdentity);
-    binding.layout_identity = to_isolated_identity(kStridedLayoutIdentity);
-    binding.schema_version = 1U;
-    binding.layout_version = 1U;
+    const DescriptorMetadata metadata =
+        input_descriptor_metadata(value, operation.inputs[index]);
+    binding.schema_identity = to_isolated_identity(metadata.schema_identity);
+    binding.facet_identity = to_isolated_identity(metadata.facet_identity);
+    binding.layout_identity = to_isolated_identity(metadata.layout_identity);
+    binding.schema_version = metadata.descriptor_version;
+    binding.layout_version = metadata.layout_version;
+    binding.descriptor_digest = to_isolated_digest(metadata.descriptor_digest);
+    binding.logical_content_digest =
+        to_isolated_digest(metadata.content_digest);
+    binding.layout_digest = to_isolated_digest(metadata.layout_digest);
     binding.region = region_image_adapter::from_storage_pixel_rect(
         input_tiles[index].roi, value.image_bounds());
     invocation.inputs.push_back(std::move(value));
@@ -3806,8 +4930,27 @@ void execute_tiled_implementation(
   std::vector<NodeOutput> input_storage;
   std::vector<const NodeOutput*> input_views;
   snapshot_tiled_inputs(operation, input_tiles, &input_storage, &input_views);
-  CopiedOutputPlan copied(operation.outputs.front().identity,
-                          mint_identity(0x504C414EU), 0U, *output_tile.plan);
+
+  ConfiguredContext configured(&impl, &operation, &implementation,
+                               configuration.view());
+  const ps_operation_intent_mask_v1 intent =
+      (implementation.intent_mask & PS_OPERATION_INTENT_RT_V1) != 0U
+          ? PS_OPERATION_INTENT_RT_V1
+          : PS_OPERATION_INTENT_HP_V1;
+  const auto invocation = make_invocation(impl, operation, implementation,
+                                          configured.get(), intent);
+  InputBindingsProjection planning_inputs(operation, input_views, false);
+  std::vector<CopiedOutputPlan> inferred =
+      infer_output_plans(impl, operation, invocation, configuration.view(),
+                         planning_inputs.array());
+  if (inferred.size() != 1U ||
+      !output_plans_equal(inferred.front().plan, *output_tile.plan)) {
+    throw std::invalid_argument(
+        "operation ABI tiled output does not match inferred immutable plan");
+  }
+  CopiedOutputPlan copied = std::move(inferred.front());
+  output_tile.grant->bind_value_descriptor_metadata(
+      retained_value_metadata(copied.metadata));
 
   if (implementation.execution_mode ==
       PS_OPERATION_EXECUTION_SUPERVISED_PROCESS_V1) {
@@ -3822,14 +4965,6 @@ void execute_tiled_implementation(
                      "operation ABI execution mode is invalid");
   }
 
-  ConfiguredContext configured(&impl, &operation, &implementation,
-                               configuration.view());
-  const ps_operation_intent_mask_v1 intent =
-      (implementation.intent_mask & PS_OPERATION_INTENT_RT_V1) != 0U
-          ? PS_OPERATION_INTENT_RT_V1
-          : PS_OPERATION_INTENT_HP_V1;
-  const auto invocation = make_invocation(impl, operation, implementation,
-                                          configured.get(), intent);
   InputBindingsProjection inputs(operation, input_views, true);
   MutableOutputProjection output(copied, 0U, mint_identity(0x42494E44U).word1,
                                  output_tile.grant);
@@ -3843,7 +4978,7 @@ void execute_tiled_implementation(
       impl.api.plugin_context, &invocation, configuration.view(),
       inputs.array(), &output_array, tile.record(), &execution_sink);
   finish_callback(status, execution_state);
-  output.validate_unchanged();
+  output.validate_unchanged(output_records.front());
 }
 
 }  // namespace

@@ -485,6 +485,27 @@ std::byte* HostOutputWriteGrant::data(std::size_t index) const {
   return state_->allocation_base + selected.allocation_offset;
 }
 
+/** @copydoc HostOutputWriteGrant::bind_value_descriptor_metadata */
+void HostOutputWriteGrant::bind_value_descriptor_metadata(
+    DenseImageValueDescriptorMetadata metadata) {
+  if (!state_ || retired_ || grant_id_ == 0U) {
+    throw std::logic_error(
+        "Inactive Host output grant cannot bind descriptor metadata.");
+  }
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  if (!state_->grant_active(grant_id_, generation_)) {
+    throw std::logic_error(
+        "Revoked Host output grant cannot bind descriptor metadata.");
+  }
+  try {
+    DenseImageValueDescriptorMetadataAccess::attach(&state_->builder,
+                                                    std::move(metadata));
+  } catch (...) {
+    state_->fail("Host output descriptor metadata attachment failed.");
+    throw;
+  }
+}
+
 /** @copydoc HostOutputWriteGrant::retire_success */
 void HostOutputWriteGrant::retire_success() {
   if (!state_ || grant_id_ == 0U) {

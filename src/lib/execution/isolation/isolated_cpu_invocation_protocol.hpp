@@ -391,6 +391,27 @@ struct IsolatedCpuImageFacet final {
 };
 
 /**
+ * @brief Opaque exact SHA-256 words transported for operation descriptors.
+ * @throws Nothing for ordinary copy and comparison operations.
+ * @note All zero denotes unavailable metadata and is preserved exactly. This
+ * type is distinct from the protocol's independently computed content binding.
+ */
+struct IsolatedCpuSha256Digest final {
+  /** @brief Four canonical numeric words copied from the operation ABI. */
+  std::array<std::uint64_t, 4U> words{};
+
+  /**
+   * @brief Compares all four opaque words.
+   * @param other Digest to compare.
+   * @return True only for exact equality, including all zero.
+   * @throws Nothing.
+   */
+  bool operator==(const IsolatedCpuSha256Digest& other) const noexcept {
+    return words == other.words;
+  }
+};
+
+/**
  * @brief Complete pointer-free DenseTensor descriptor for one shared range.
  * @throws std::bad_alloc when copied vectors allocate and fail.
  * @note The optional binding covers immutable descriptor facts and every byte
@@ -423,6 +444,12 @@ struct IsolatedCpuTensorDescriptor final {
   std::uint64_t schema_version = 1U;
   /** @brief Nonzero physical layout structural version. */
   std::uint64_t layout_version = 1U;
+  /** @brief Exact descriptor digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest descriptor_digest;
+  /** @brief Exact logical-content digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest logical_content_digest;
+  /** @brief Exact physical-Layout digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest layout_digest;
   /** @brief Referenced invocation-local capability selector. */
   std::uint64_t capability_id = 0U;
   /** @brief Byte offset inside the referenced capability. */

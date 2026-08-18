@@ -938,6 +938,42 @@ IsolatedCpuStorageEncoding parse_storage_encoding(std::uint8_t value) {
 }
 
 /**
+ * @brief Encodes one exact operation descriptor digest.
+ * @param digest Four opaque canonical words, including all zero.
+ * @param writer Nonnull bounded output owner.
+ * @return Nothing after writing all words.
+ * @throws std::invalid_argument for a null writer.
+ * @throws Encoding bound errors unchanged.
+ */
+void encode_operation_digest(const IsolatedCpuSha256Digest& digest,
+                             ByteWriter* writer) {
+  if (writer == nullptr) {
+    throw std::invalid_argument("isolated CPU operation digest writer is null");
+  }
+  for (const std::uint64_t word : digest.words) {
+    writer->put_u64(word);
+  }
+}
+
+/**
+ * @brief Decodes one exact operation descriptor digest.
+ * @param reader Nonnull bounded input owner.
+ * @return Four opaque words, preserving the all-zero spelling.
+ * @throws std::invalid_argument for a null reader.
+ * @throws IsolatedCpuProtocolError for truncation.
+ */
+IsolatedCpuSha256Digest decode_operation_digest(ByteReader* reader) {
+  if (reader == nullptr) {
+    throw std::invalid_argument("isolated CPU operation digest reader is null");
+  }
+  IsolatedCpuSha256Digest digest;
+  for (std::uint64_t& word : digest.words) {
+    word = reader->get_u64();
+  }
+  return digest;
+}
+
+/**
  * @brief Encodes one optional canonical ContentDigest.
  * @param digest Optional digest.
  * @param writer Non-null output owner.
@@ -1404,6 +1440,9 @@ void encode_tensor(const IsolatedCpuTensorDescriptor& descriptor,
   encode_opaque_id(descriptor.layout_identity, writer);
   writer->put_u64(descriptor.schema_version);
   writer->put_u64(descriptor.layout_version);
+  encode_operation_digest(descriptor.descriptor_digest, writer);
+  encode_operation_digest(descriptor.logical_content_digest, writer);
+  encode_operation_digest(descriptor.layout_digest, writer);
   writer->put_u64(descriptor.capability_id);
   writer->put_u64(descriptor.capability_offset);
   writer->put_u64(descriptor.capability_length);
@@ -1477,6 +1516,9 @@ IsolatedCpuTensorDescriptor decode_tensor(ByteReader* reader) {
   descriptor.layout_identity = decode_opaque_id(reader);
   descriptor.schema_version = reader->get_u64();
   descriptor.layout_version = reader->get_u64();
+  descriptor.descriptor_digest = decode_operation_digest(reader);
+  descriptor.logical_content_digest = decode_operation_digest(reader);
+  descriptor.layout_digest = decode_operation_digest(reader);
   descriptor.capability_id = reader->get_u64();
   descriptor.capability_offset = reader->get_u64();
   descriptor.capability_length = reader->get_u64();
@@ -2107,6 +2149,9 @@ bool same_output_plan(const IsolatedCpuTensorDescriptor& expected,
          expected.layout_identity == observed.layout_identity &&
          expected.schema_version == observed.schema_version &&
          expected.layout_version == observed.layout_version &&
+         expected.descriptor_digest == observed.descriptor_digest &&
+         expected.logical_content_digest == observed.logical_content_digest &&
+         expected.layout_digest == observed.layout_digest &&
          expected.capability_id == observed.capability_id &&
          expected.capability_offset == observed.capability_offset &&
          expected.capability_length == observed.capability_length &&
@@ -2286,6 +2331,9 @@ DataDescriptorEnvelope binding_descriptor_envelope(
   encode_opaque_id(descriptor.layout_identity, &writer);
   writer.put_u64(descriptor.schema_version);
   writer.put_u64(descriptor.layout_version);
+  encode_operation_digest(descriptor.descriptor_digest, &writer);
+  encode_operation_digest(descriptor.logical_content_digest, &writer);
+  encode_operation_digest(descriptor.layout_digest, &writer);
   writer.put_u64(descriptor.capability_id);
   writer.put_u64(descriptor.capability_offset);
   writer.put_u64(descriptor.capability_length);
@@ -2412,6 +2460,9 @@ bool IsolatedCpuTensorDescriptor::operator==(
          layout_identity == other.layout_identity &&
          schema_version == other.schema_version &&
          layout_version == other.layout_version &&
+         descriptor_digest == other.descriptor_digest &&
+         logical_content_digest == other.logical_content_digest &&
+         layout_digest == other.layout_digest &&
          capability_id == other.capability_id &&
          capability_offset == other.capability_offset &&
          capability_length == other.capability_length &&

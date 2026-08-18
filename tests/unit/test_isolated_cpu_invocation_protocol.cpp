@@ -34,6 +34,20 @@ IsolatedCpuOpaqueId test_opaque_id(std::uint8_t seed) noexcept {
 }
 
 /**
+ * @brief Creates four deterministic nonzero operation-descriptor digest words.
+ * @param seed First word in the deterministic sequence.
+ * @return Exact opaque digest suitable for round-trip comparisons.
+ * @throws Nothing.
+ */
+IsolatedCpuSha256Digest test_operation_digest(std::uint64_t seed) noexcept {
+  IsolatedCpuSha256Digest digest;
+  for (std::size_t index = 0U; index < digest.words.size(); ++index) {
+    digest.words[index] = seed + index;
+  }
+  return digest;
+}
+
+/**
  * @brief Creates one complete deterministic identity tuple.
  * @return Valid comparison-only identity with nonzero generations.
  * @throws Nothing.
@@ -68,6 +82,11 @@ IsolatedCpuTensorDescriptor test_tensor(std::uint64_t capability_id,
       access == IsolatedCpuTensorAccess::InputReadOnly ? 98U : 114U);
   tensor.schema_identity = test_opaque_id(99U);
   tensor.layout_identity = test_opaque_id(100U);
+  tensor.schema_version = 7U;
+  tensor.layout_version = 11U;
+  tensor.descriptor_digest = test_operation_digest(0x101U);
+  tensor.logical_content_digest = test_operation_digest(0x201U);
+  tensor.layout_digest = test_operation_digest(0x301U);
   tensor.capability_id = capability_id;
   tensor.capability_length = 6U;
   tensor.element_semantics = IsolatedCpuElementSemantics::UnsignedInteger;
@@ -379,9 +398,10 @@ RequestWireOffsets locate_request_wire_offsets(
   if (tensor_count == 0U) {
     throw std::runtime_error("isolated CPU test request has no tensor");
   }
-  skip_wire_bytes(
-      packet, 2U + 5U + (5U * 16U) + (2U * 8U) + 8U + 8U + 8U + 1U + 1U + 4U,
-      &cursor);
+  skip_wire_bytes(packet,
+                  2U + 5U + (5U * 16U) + (2U * 8U) + (3U * 4U * 8U) + 8U + 8U +
+                      8U + 1U + 1U + 4U,
+                  &cursor);
   const std::uint32_t extent_count = read_wire_u32(packet, &cursor);
   skip_wire_bytes(packet, static_cast<std::size_t>(extent_count) * 8U, &cursor);
   const std::uint32_t stride_count = read_wire_u32(packet, &cursor);
@@ -430,6 +450,20 @@ TEST(IsolatedCpuInvocationProtocol,
   EXPECT_EQ(decoded_request.tensors[0].image_facet->data_window.x_begin, -3);
   EXPECT_EQ(decoded_request.tensors[1].allocation_alignment, 16U);
   EXPECT_EQ(decoded_request.tensors[1].region, request.tensors[1].region);
+  EXPECT_EQ(decoded_request.tensors[1].schema_identity,
+            request.tensors[1].schema_identity);
+  EXPECT_EQ(decoded_request.tensors[1].facet_identity,
+            request.tensors[1].facet_identity);
+  EXPECT_EQ(decoded_request.tensors[1].layout_identity,
+            request.tensors[1].layout_identity);
+  EXPECT_EQ(decoded_request.tensors[1].schema_version, 7U);
+  EXPECT_EQ(decoded_request.tensors[1].layout_version, 11U);
+  EXPECT_EQ(decoded_request.tensors[1].descriptor_digest,
+            test_operation_digest(0x101U));
+  EXPECT_EQ(decoded_request.tensors[1].logical_content_digest,
+            test_operation_digest(0x201U));
+  EXPECT_EQ(decoded_request.tensors[1].layout_digest,
+            test_operation_digest(0x301U));
 
   const IsolatedCpuInvocationResponse valid = test_response(request);
   EXPECT_NO_THROW(
@@ -447,6 +481,31 @@ TEST(IsolatedCpuInvocationProtocol,
 
   hostile = valid;
   hostile.outputs[0].written_length -= 1U;
+  EXPECT_THROW(validate_isolated_cpu_invocation_response(request, hostile, {}),
+               IsolatedCpuProtocolError);
+
+  hostile = valid;
+  hostile.outputs[0].schema_identity = test_opaque_id(202U);
+  EXPECT_THROW(validate_isolated_cpu_invocation_response(request, hostile, {}),
+               IsolatedCpuProtocolError);
+
+  hostile = valid;
+  hostile.outputs[0].schema_version += 1U;
+  EXPECT_THROW(validate_isolated_cpu_invocation_response(request, hostile, {}),
+               IsolatedCpuProtocolError);
+
+  hostile = valid;
+  hostile.outputs[0].descriptor_digest.words[0] ^= 1U;
+  EXPECT_THROW(validate_isolated_cpu_invocation_response(request, hostile, {}),
+               IsolatedCpuProtocolError);
+
+  hostile = valid;
+  hostile.outputs[0].logical_content_digest.words[1] ^= 1U;
+  EXPECT_THROW(validate_isolated_cpu_invocation_response(request, hostile, {}),
+               IsolatedCpuProtocolError);
+
+  hostile = valid;
+  hostile.outputs[0].layout_digest.words[2] ^= 1U;
   EXPECT_THROW(validate_isolated_cpu_invocation_response(request, hostile, {}),
                IsolatedCpuProtocolError);
 }

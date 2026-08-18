@@ -17,6 +17,7 @@
 
 #include "core/dense_tensor_content_digest.hpp"
 #include "core/pending_value.hpp"
+#include "core/value_descriptor_metadata.hpp"
 #include "core/value_validation.hpp"
 #include "photospider/data/image_view.hpp"
 
@@ -1312,6 +1313,10 @@ struct Value::Impl final {
   /** @brief Optional validated complete ordinary-image interpretation. */
   std::optional<ImageFacet> image_facet;
 
+  /** @brief Optional exact pure-C operation descriptor identity. */
+  std::optional<DenseImageValueDescriptorMetadata>
+      dense_image_descriptor_metadata;
+
   /** @brief Optional byte-preserved provider-defined logical descriptor. */
   std::optional<DataDescriptorEnvelope> provider_descriptor;
 
@@ -1347,6 +1352,8 @@ struct Value::Impl final {
    * @param ready_fence_in Valid producer-completion observer.
    * @param revision_in Fresh nonzero publication revision.
    * @param producer_in Fresh nonzero producer identity.
+   * @param descriptor_metadata_in Optional exact operation-ABI identity,
+   * versions, and digest words retained before publication.
    * @throws std::bad_alloc when the by-value complete descriptor/ImageFacet or
    *         layout copies used to construct this immutable state cannot
    *         allocate.
@@ -1358,10 +1365,13 @@ struct Value::Impl final {
   Impl(DenseTensorDescriptor descriptor_in,
        std::optional<ImageFacet> image_facet_in, ValueLayout layout_in,
        BufferHandle buffer_in, ReadyFence ready_fence_in,
-       ValueRevisionId revision_in, ProducerIdentity producer_in)
+       ValueRevisionId revision_in, ProducerIdentity producer_in,
+       std::optional<DenseImageValueDescriptorMetadata> descriptor_metadata_in =
+           std::nullopt)
       : representation(ValueRepresentationKind::DenseTensor),
         descriptor(std::move(descriptor_in)),
         image_facet(std::move(image_facet_in)),
+        dense_image_descriptor_metadata(std::move(descriptor_metadata_in)),
         layout(std::move(layout_in)),
         buffer(std::move(buffer_in)),
         ready_fence(std::move(ready_fence_in)),
@@ -1412,6 +1422,10 @@ struct ValueBuilder::Impl final {
   /** @brief Validated exact Strided or Blocked producer layout. */
   ValueLayout layout;
 
+  /** @brief Optional exact operation metadata installed before publication. */
+  std::optional<DenseImageValueDescriptorMetadata>
+      dense_image_descriptor_metadata;
+
   /** @brief Private complete allocation handle. */
   BufferHandle buffer;
 
@@ -1441,6 +1455,47 @@ struct ValueBuilder::Impl final {
         buffer(std::move(buffer_in)),
         authority(std::move(authority_in)) {}
 };
+
+/** @copydoc DenseImageValueDescriptorMetadataAccess::attach */
+void DenseImageValueDescriptorMetadataAccess::attach(
+    ValueBuilder* builder, DenseImageValueDescriptorMetadata metadata) {
+  if (builder == nullptr) {
+    throw std::invalid_argument(
+        "DenseImage descriptor metadata requires a nonnull builder.");
+  }
+  if (!metadata.schema_identity.valid() || !metadata.facet_identity.valid() ||
+      !metadata.layout_identity.valid() || metadata.descriptor_version == 0U ||
+      metadata.layout_version == 0U) {
+    throw std::invalid_argument(
+        "DenseImage descriptor metadata identities and versions must be "
+        "nonzero.");
+  }
+  if (!builder->impl_ || builder->impl_->sealed ||
+      !builder->impl_->authority->builder_open.load(
+          std::memory_order_acquire)) {
+    throw std::logic_error(
+        "DenseImage descriptor metadata requires an open builder.");
+  }
+  if (builder->impl_->dense_image_descriptor_metadata.has_value()) {
+    if (*builder->impl_->dense_image_descriptor_metadata == metadata) {
+      return;
+    }
+    throw std::logic_error(
+        "DenseImage builder already carries different descriptor metadata.");
+  }
+  builder->impl_->dense_image_descriptor_metadata = std::move(metadata);
+}
+
+/** @copydoc DenseImageValueDescriptorMetadataAccess::get */
+const DenseImageValueDescriptorMetadata*
+DenseImageValueDescriptorMetadataAccess::get(const Value& value) noexcept {
+  if (!value.impl_ ||
+      value.impl_->representation != ValueRepresentationKind::DenseTensor ||
+      !value.impl_->dense_image_descriptor_metadata.has_value()) {
+    return nullptr;
+  }
+  return &*value.impl_->dense_image_descriptor_metadata;
+}
 
 /**
  * @brief Exclusive source-private producer implementation for a pending Value.
@@ -1670,7 +1725,8 @@ Value ValueBuilder::seal() {
       process_identity_authority().mint_producer_identity());
   auto published = std::make_shared<const Value::Impl>(
       impl_->descriptor, impl_->image_facet, impl_->layout, impl_->buffer,
-      ReadyFence::already_ready(), revision, producer);
+      ReadyFence::already_ready(), revision, producer,
+      impl_->dense_image_descriptor_metadata);
 
   impl_->authority->builder_open.store(false, std::memory_order_release);
   impl_->sealed = true;

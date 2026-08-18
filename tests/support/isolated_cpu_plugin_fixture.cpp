@@ -27,6 +27,59 @@ namespace ps::execution {
 namespace {
 
 /**
+ * @brief Compares one canonical opaque identity with two operation-ABI words.
+ * @param observed Pointer-free big-endian identity bytes.
+ * @param word0 First opaque 64-bit word.
+ * @param word1 Second opaque 64-bit word.
+ * @return True only when all sixteen bytes preserve the two words exactly.
+ * @throws Nothing.
+ */
+bool identity_matches_words(const IsolatedCpuOpaqueId& observed,
+                            std::uint64_t word0, std::uint64_t word1) noexcept {
+  const std::array<std::uint64_t, 2U> expected_words{word0, word1};
+  for (std::size_t word = 0U; word < expected_words.size(); ++word) {
+    for (std::size_t byte = 0U; byte < 8U; ++byte) {
+      const std::byte expected = static_cast<std::byte>(
+          (expected_words[word] >> ((7U - byte) * 8U)) & 0xffU);
+      if (observed.bytes[word * 8U + byte] != expected) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * @brief Validates exact non-default operation metadata on one tensor.
+ * @param tensor Child-local mapped input or output descriptor.
+ * @return True only when identities, versions, and all digest words match the
+ * conformance operation's inference proposal.
+ * @throws Nothing.
+ * @note This is a real fresh-exec observation of protocol-v2 fields; it does
+ * not reconstruct or substitute metadata inside the fixture.
+ */
+bool conformance_metadata_is_exact(
+    const IsolatedCpuRuntimeTensor& tensor) noexcept {
+  const IsolatedCpuTensorDescriptor& descriptor = tensor.descriptor;
+  const std::array<std::uint64_t, 4U> descriptor_digest{
+      0x0102030405060708ULL, 0U, 0U, 0x1112131415161718ULL};
+  const std::array<std::uint64_t, 4U> content_digest{0U, 0x2122232425262728ULL,
+                                                     0U, 0U};
+  const std::array<std::uint64_t, 4U> layout_digest{0U, 0U,
+                                                    0x3132333435363738ULL, 0U};
+  return identity_matches_words(descriptor.schema_identity, 0x50534449U,
+                                0x1001U) &&
+         identity_matches_words(descriptor.facet_identity, 0x50534449U,
+                                0x1002U) &&
+         identity_matches_words(descriptor.layout_identity, 0x50534449U,
+                                0x1003U) &&
+         descriptor.schema_version == 7U && descriptor.layout_version == 11U &&
+         descriptor.descriptor_digest.words == descriptor_digest &&
+         descriptor.logical_content_digest.words == content_digest &&
+         descriptor.layout_digest.words == layout_digest;
+}
+
+/**
  * @brief Sends a malformed response whose rights arrive after prior bytes.
  * @return Never returns; the fixture exits after transferring the test frame.
  * @throws Nothing; syscall failures terminate the fixture with status 74.
@@ -218,6 +271,25 @@ IsolatedCpuRuntimeCallbackResult run_fixture_operation(
     return IsolatedCpuRuntimeCallbackResult{
         IsolatedCpuInvocationOutcome::Cancelled,
         "fixture callback observed cooperative cancellation"};
+  }
+  if (invocation.operation == "operation_conformance:supervised_tile") {
+    const char* mode = std::getenv("PS_OPERATION_CONFORMANCE_MODE");
+    const bool require_input_metadata =
+        mode != nullptr && std::strstr(mode, "input_metadata") != nullptr;
+    if (invocation.inputs.size() != 1U || invocation.outputs.size() != 1U ||
+        invocation.outputs[0].size != 4U ||
+        !conformance_metadata_is_exact(invocation.outputs[0]) ||
+        (require_input_metadata &&
+         !conformance_metadata_is_exact(invocation.inputs[0]))) {
+      return IsolatedCpuRuntimeCallbackResult{
+          IsolatedCpuInvocationOutcome::PluginFailed,
+          "operation conformance descriptor metadata changed in isolation"};
+    }
+    std::memset(invocation.outputs[0].output_data, 0x5A,
+                invocation.outputs[0].size);
+    return IsolatedCpuRuntimeCallbackResult{
+        IsolatedCpuInvocationOutcome::Succeeded,
+        {}};
   }
   if (invocation.operation == "fixture.fill_sequence" ||
       invocation.operation == "fixture.delayed_fill_sequence" ||

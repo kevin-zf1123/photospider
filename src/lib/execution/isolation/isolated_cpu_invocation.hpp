@@ -66,6 +66,12 @@ struct IsolatedCpuDenseTensorOutputPlan final {
   std::uint64_t schema_version = 1U;
   /** @brief Nonzero layout structural version. */
   std::uint64_t layout_version = 1U;
+  /** @brief Exact descriptor digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest descriptor_digest;
+  /** @brief Exact logical-content digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest logical_content_digest;
+  /** @brief Exact physical-Layout digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest layout_digest;
   /** @brief Logical whole-byte DenseTensor descriptor. */
   DenseTensorDescriptor descriptor;
   /** @brief Owned optional complete public ordinary-image interpretation. */
@@ -101,6 +107,12 @@ struct IsolatedCpuInputBinding final {
   std::uint64_t schema_version = 1U;
   /** @brief Nonzero layout structural version. */
   std::uint64_t layout_version = 1U;
+  /** @brief Exact descriptor digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest descriptor_digest;
+  /** @brief Exact logical-content digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest logical_content_digest;
+  /** @brief Exact physical-Layout digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest layout_digest;
   /** @brief Exact immutable validity Region. */
   RegionSet region = RegionSet::whole();
 };

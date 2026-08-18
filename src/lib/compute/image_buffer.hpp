@@ -47,6 +47,16 @@ struct InputTile {
    * geometry-only tile.
    */
   const SpatialContext* spatial = nullptr;
+
+  /**
+   * @brief Borrowed canonical immutable Value for operation-ABI projection.
+   *
+   * @note The pointer is null for geometry-only focused callers. Production
+   * NodeExecutor tiles point at the exact normalized input Value that outlives
+   * dispatch, allowing descriptor identities, versions, and digests to remain
+   * independent from the callback-local ImageBuffer compatibility snapshot.
+   */
+  const Value* value = nullptr;
 };
 
 /**

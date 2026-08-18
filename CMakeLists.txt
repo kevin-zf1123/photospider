@@ -2280,6 +2280,15 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             photospider
             Threads::Threads)
 
+        if(TARGET test_operation_plugin_abi)
+            target_compile_definitions(test_operation_plugin_abi PRIVATE
+                PS_TEST_ISOLATED_CPU_FIXTURE_PATH="$<TARGET_FILE:test_isolated_cpu_plugin_fixture>")
+            add_dependencies(test_operation_plugin_abi
+                test_isolated_cpu_plugin_fixture)
+            photospider_enable_plugin_trust_test_environment(
+                test_operation_plugin_abi)
+        endif()
+
         # Compile deterministic startup-fault variants from the same real
         # product-linked endpoint; no test replacement implements supervision.
         add_executable(test_plugin_runtime_silent_fixture
@@ -3425,6 +3434,7 @@ if(BUILD_TESTING)
             graph_cli
             test_isolated_cpu_invocation
             test_plugin_runtime_supervisor
+            test_operation_plugin_abi
             test_optional_opencv_operation_provider
             test_plugin_manager
             test_ipc_protocol

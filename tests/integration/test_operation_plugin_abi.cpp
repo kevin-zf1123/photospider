@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -23,6 +24,7 @@
 
 #include "core/host_output_authorization.hpp"  // NOLINT(build/include_subdir)
 #include "core/ps_types.hpp"                   // NOLINT(build/include_subdir)
+#include "core/value_image_adapter.hpp"        // NOLINT(build/include_subdir)
 #include "graph/node.hpp"                      // NOLINT(build/include_subdir)
 #include "plugin/operation_host_adapter.hpp"
 #include "plugin/operation_runtime_router.hpp"
@@ -46,9 +48,59 @@ constexpr const char* kConformanceTraceEnvironment{
 };
 /** @brief Runtime package identity declared by the conformance fixture. */
 constexpr ps_operation_identity_v1 kConformanceRuntimePackage{
-    0x5053434F4E465254ULL,
-    0x0001ULL,
+    0x4142434445464748ULL,
+    0x494A4B4C4D4E4F50ULL,
 };
+
+#if defined(__linux__) && defined(PS_TEST_ISOLATED_CPU_FIXTURE_PATH)
+/**
+ * @brief Creates one deterministic nonzero supervised identity component.
+ * @param seed Final canonical byte, which must be nonzero in these tests.
+ * @return Comparison-only opaque identity.
+ * @throws Nothing.
+ */
+execution::IsolatedCpuOpaqueId conformance_supervised_id(
+    std::uint8_t seed) noexcept {
+  execution::IsolatedCpuOpaqueId identity;
+  identity.bytes.back() = static_cast<std::byte>(seed);
+  return identity;
+}
+
+/**
+ * @brief Mints one complete fresh supervised invocation identity.
+ * @return Nonzero caller/worker facts and a process-unique invocation id.
+ * @throws Nothing.
+ * @note The runtime router replaces package bytes and generation with the
+ * signed executor facts before protocol validation.
+ */
+execution::IsolatedCpuInvocationIdentity
+conformance_supervised_identity() noexcept {
+  static std::atomic<std::uint8_t> next_invocation{80U};
+  execution::IsolatedCpuInvocationIdentity identity;
+  identity.tenant_id = conformance_supervised_id(1U);
+  identity.job_id = conformance_supervised_id(2U);
+  identity.attempt_id = conformance_supervised_id(3U);
+  identity.worker_id = conformance_supervised_id(4U);
+  identity.worker_lease_generation = 1U;
+  identity.plugin_package_id = conformance_supervised_id(5U);
+  identity.plugin_generation = 1U;
+  identity.invocation_id =
+      conformance_supervised_id(next_invocation.fetch_add(1U));
+  return identity;
+}
+
+/**
+ * @brief Creates isolated-runtime resource authority for conformance calls.
+ * @return Fresh ledger sized for two sequential four-byte invocations.
+ * @throws std::bad_alloc when ledger ownership cannot allocate.
+ */
+std::shared_ptr<ResourceLedger> conformance_resource_ledger() {
+  return std::make_shared<ResourceLedger>(
+      ResourceVector{}, std::vector<DeviceResourceLimit>{},
+      PluginResourceVector{1U, 1U, 1ULL << 40U, 64ULL * 1024ULL * 1024ULL,
+                           4096U});
+}
+#endif
 
 /**
  * @brief Restores one process environment variable after a test scope.
@@ -294,6 +346,162 @@ DenseImageOutputPlan conformance_output_plan() {
 }
 
 /**
+ * @brief Publishes one ordinary fallback input for conformance invocations.
+ * @return Ready two-by-two UINT8 image with no operation-specific metadata.
+ * @throws Value validation, allocation, or publication failures unchanged.
+ * @note Dedicated input-metadata tests replace this fallback with a preceding
+ * conformance output; ordinary route tests only need a connected input slot.
+ */
+NodeOutput conformance_fallback_input() {
+  DenseTensorDescriptor descriptor{{2U, 2U, 1U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  StridedLayout layout{{2, 1, 1}};
+  NodeOutput output;
+  output.publish_image_value(Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(image), std::move(layout),
+      std::vector<std::byte>(4U, std::byte{0x11})));
+  return output;
+}
+
+/** @brief Detects the post-DI-3 canonical Value pointer on InputTile. */
+template <typename Tile, typename = void>
+struct HasCanonicalInputValue : std::false_type {};
+
+/** @brief True when InputTile exposes its canonical immutable Value pointer. */
+template <typename Tile>
+struct HasCanonicalInputValue<
+    Tile, std::void_t<decltype(std::declval<Tile&>().value)>> : std::true_type {
+};
+
+/**
+ * @brief Attaches canonical input authority when the production type supports
+ * it.
+ * @tparam Tile InputTile revision compiled by the production tree.
+ * @param tile Nonnull tile to update.
+ * @param value Nonnull immutable image Value that outlives callback dispatch.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note The detection keeps the final regression buildable against the old
+ * production snapshot, where the missing member yields the expected RED.
+ */
+template <typename Tile>
+void attach_canonical_input_value(Tile* tile, const Value* value) noexcept {
+  if constexpr (HasCanonicalInputValue<Tile>::value) {
+    tile->value = value;
+  } else {
+    static_cast<void>(tile);
+    static_cast<void>(value);
+  }
+}
+
+/**
+ * @brief Executes one conformance implementation in monolithic shape.
+ * @param mode Fixture mode selected before DSO discovery.
+ * @param input Optional exact upstream output; null selects a fallback Value.
+ * @return Fresh output after complete Host retirement and publication.
+ * @throws Discovery, inference, callback, validation, or publication failures
+ * unchanged.
+ */
+NodeOutput execute_conformance_monolithic(const char* mode,
+                                          const NodeOutput* input = nullptr) {
+  ScopedEnvironment selected_mode(kConformanceModeEnvironment, mode);
+  auto generation = load_generation(PS_TEST_CONFORMANCE_OPERATION_PLUGIN);
+  OpRegistry registry;
+  generation->register_into(registry);
+  auto selected =
+      registry.resolve_for_intent("operation_conformance", "supervised_tile",
+                                  ComputeIntent::GlobalHighPrecision);
+  if (!selected.has_value() ||
+      !std::holds_alternative<MonolithicOpFunc>(*selected)) {
+    throw std::runtime_error(
+        "conformance fixture did not publish a monolithic callback");
+  }
+  Node node;
+  node.type = "operation_conformance";
+  node.subtype = "supervised_tile";
+  NodeOutput fallback;
+  if (input == nullptr) {
+    fallback = conformance_fallback_input();
+    input = &fallback;
+  }
+  return std::get<MonolithicOpFunc>(*selected)(node, {input});
+}
+
+/**
+ * @brief Executes one conformance implementation against a whole-image tile.
+ * @param mode Fixture mode selected before DSO discovery.
+ * @param input Optional exact upstream output; null selects a fallback Value.
+ * @return Fresh sealed output after callback completion and grant retirement.
+ * @throws Discovery, inference, callback, or validation failures unchanged.
+ * @note Failure cleanup retires the still-active borrowed tile grant before
+ * rethrowing so hostile callbacks cannot leak test-owned authority.
+ */
+NodeOutput execute_conformance_tiled(const char* mode,
+                                     const NodeOutput* input = nullptr) {
+  ScopedEnvironment selected_mode(kConformanceModeEnvironment, mode);
+  auto generation = load_generation(PS_TEST_CONFORMANCE_OPERATION_PLUGIN);
+  OpRegistry registry;
+  generation->register_into(registry);
+  auto selected =
+      registry.resolve_for_intent("operation_conformance", "supervised_tile",
+                                  ComputeIntent::GlobalHighPrecision);
+  if (!selected.has_value() || !std::holds_alternative<TileOpFunc>(*selected)) {
+    throw std::runtime_error(
+        "conformance fixture did not publish a tiled callback");
+  }
+  HostOutputBinding binding =
+      HostOutputBinding::allocate(conformance_output_plan());
+  HostOutputWriteGrant grant =
+      binding.grant_tile({image_region_domain(), 0, 2, 0, 2});
+  OutputTile output{&binding.plan(), &grant, PixelRect{0, 0, 2, 2}};
+  Node node;
+  node.type = "operation_conformance";
+  node.subtype = "supervised_tile";
+  NodeOutput fallback;
+  if (input == nullptr) {
+    fallback = conformance_fallback_input();
+    input = &fallback;
+  }
+  ImageBuffer input_buffer =
+      value_image_adapter::project_image_value_for_image_buffer_edge(
+          input->image_value());
+  InputTile input_tile{&input_buffer, PixelRect{0, 0, 2, 2}, nullptr};
+  attach_canonical_input_value(&input_tile, &input->image_value());
+  try {
+    std::get<TileOpFunc> (*selected)(node, output, {input_tile});
+    grant.retire_success();
+  } catch (...) {
+    if (grant.active()) {
+      grant.retire_failure("expected conformance callback failure");
+    }
+    throw;
+  }
+  NodeOutput result;
+  result.plugin_library_lifetime = generation;
+  result.publish_image_value(binding.seal());
+  return result;
+}
+
+/**
+ * @brief Captures one invalid-argument diagnostic from a conformance call.
+ * @tparam Callback Nullary callable expected to fail.
+ * @param callback Test body.
+ * @return Host-owned diagnostic text.
+ * @throws Any non-invalid-argument failure unchanged.
+ */
+template <typename Callback>
+std::string invalid_argument_message(Callback&& callback) {
+  try {
+    std::forward<Callback>(callback)();
+  } catch (const std::invalid_argument& error) {
+    return error.what();
+  }
+  throw std::runtime_error("expected std::invalid_argument was not thrown");
+}
+
+/**
  * @brief Proves callback snapshots retain the DSO through in-flight unload.
  * @throws Nothing when discovery, execution, retirement, and assertions pass.
  * @note Production trust admission is intentionally outside this focused test;
@@ -429,6 +637,120 @@ TEST(OperationPluginAbi, RejectsMalformedRootSuiteAndDefinitionRecords) {
 }
 
 /**
+ * @brief Proves output descriptor identities must match the declared port in
+ * every execution mode and shape before grants or supervised routing.
+ * @throws Nothing when all four fail-closed boundaries reject the fixture.
+ */
+TEST(OperationPluginAbi,
+     RejectsOutputDescriptorIdentityMismatchInEveryRouteAndShape) {
+  EXPECT_THROW((void)execute_conformance_monolithic(
+                   "trusted_monolithic_identity_mismatch"),
+               std::invalid_argument);
+  EXPECT_THROW(execute_conformance_tiled("trusted_tiled_identity_mismatch"),
+               std::invalid_argument);
+
+  const std::string supervised_monolithic = invalid_argument_message([]() {
+    (void)execute_conformance_monolithic(
+        "supervised_monolithic_identity_mismatch");
+  });
+  EXPECT_NE(supervised_monolithic.find("descriptor identity"),
+            std::string::npos);
+  const std::string supervised_tiled = invalid_argument_message([]() {
+    execute_conformance_tiled("supervised_tiled_identity_mismatch");
+  });
+  EXPECT_NE(supervised_tiled.find("descriptor identity"), std::string::npos);
+}
+
+/**
+ * @brief Proves trusted monolithic and tiled callbacks receive the exact
+ * non-default versions and three digests accepted during inference.
+ * @throws Nothing when both callbacks validate and fulfill their grants.
+ */
+TEST(OperationPluginAbi, TrustedExecutionEchoesExactDescriptorMetadata) {
+  EXPECT_NO_THROW(
+      (void)execute_conformance_monolithic("trusted_monolithic_metadata"));
+  EXPECT_NO_THROW(execute_conformance_tiled("trusted_tiled_metadata"));
+}
+
+/**
+ * @brief Proves one operation output preserves exact descriptor metadata when
+ * consumed by the next trusted monolithic or tiled invocation.
+ * @throws Nothing when both publication-to-input routes retain every field.
+ */
+TEST(OperationPluginAbi, TrustedValuesPreserveExactInputDescriptorMetadata) {
+  const NodeOutput monolithic =
+      execute_conformance_monolithic("trusted_monolithic_metadata");
+  EXPECT_NO_THROW((void)execute_conformance_monolithic(
+      "trusted_monolithic_input_metadata", &monolithic));
+
+  const NodeOutput tiled = execute_conformance_tiled("trusted_tiled_metadata");
+  EXPECT_NO_THROW(
+      (void)execute_conformance_tiled("trusted_tiled_input_metadata", &tiled));
+}
+
+/**
+ * @brief Proves supervised monolithic and tiled execution carry exact
+ * non-default descriptor identities, versions, and digests through fresh exec.
+ * @throws Standard trust, routing, protocol, execution, or assertion failures.
+ * @note Exact-object positive execution is Linux-only; portable tests still
+ * cover pre-route inference rejection and trusted exact echo on other hosts.
+ */
+TEST(OperationPluginAbi, SupervisedExecutionEchoesExactDescriptorMetadata) {
+#if defined(__linux__) && defined(PS_TEST_ISOLATED_CPU_FIXTURE_PATH)
+  EXPECT_FALSE(plugin_host::remove_supervised_operation_runtime_route(
+      kConformanceRuntimePackage));
+  auto executor = std::make_shared<execution::PluginInvocationExecutor>(
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      conformance_resource_ledger());
+  plugin_host::install_supervised_operation_runtime_route(
+      kConformanceRuntimePackage, executor,
+      []() { return conformance_supervised_identity(); });
+  try {
+    const NodeOutput output =
+        execute_conformance_monolithic("supervised_monolithic_metadata");
+    EXPECT_TRUE(output.has_image_value());
+    EXPECT_NO_THROW((void)execute_conformance_monolithic(
+        "supervised_monolithic_input_metadata", &output));
+    const NodeOutput tiled =
+        execute_conformance_tiled("supervised_tiled_metadata");
+    EXPECT_NO_THROW((void)execute_conformance_tiled(
+        "supervised_tiled_input_metadata", &tiled));
+  } catch (...) {
+    static_cast<void>(plugin_host::remove_supervised_operation_runtime_route(
+        kConformanceRuntimePackage));
+    throw;
+  }
+  EXPECT_TRUE(plugin_host::remove_supervised_operation_runtime_route(
+      kConformanceRuntimePackage));
+#else
+  GTEST_SKIP() << "exact signed supervised execution is Linux-only";
+#endif
+}
+
+/**
+ * @brief Proves every reachable Host-owned output authority surface is
+ * recursively revalidated after trusted callbacks in both execution shapes.
+ * @throws Nothing when all hostile graph mutations fail closed.
+ */
+TEST(OperationPluginAbi,
+     RejectsTrustedCallbackMutationAcrossCompleteOutputRecordGraph) {
+  constexpr const char* kMutations[]{
+      "mutate_binding",     "mutate_descriptor",   "mutate_buffer_plan",
+      "mutate_full_region", "mutate_grant_region", "mutate_nested_extent",
+  };
+  for (const char* mutation : kMutations) {
+    SCOPED_TRACE(mutation);
+    const std::string monolithic =
+        std::string("trusted_monolithic_") + mutation;
+    EXPECT_THROW((void)execute_conformance_monolithic(monolithic.c_str()),
+                 std::invalid_argument);
+    const std::string tiled = std::string("trusted_tiled_") + mutation;
+    EXPECT_THROW(execute_conformance_tiled(tiled.c_str()),
+                 std::invalid_argument);
+  }
+}
+
+/**
  * @brief Proves a supervised tiled descriptor reaches the runtime router and
  * never its DSO execution callback when the signed route is absent.
  * @throws Nothing when registration, resolution, grant cleanup, and assertions
@@ -466,7 +788,13 @@ TEST(OperationPluginAbi, SupervisedTiledSelectionFailsClosedWithoutFallback) {
   Node node;
   node.type = "operation_conformance";
   node.subtype = "supervised_tile";
-  EXPECT_THROW(std::get<TileOpFunc>(*selected)(node, output, {}),
+  NodeOutput input = conformance_fallback_input();
+  ImageBuffer input_buffer =
+      value_image_adapter::project_image_value_for_image_buffer_edge(
+          input.image_value());
+  InputTile input_tile{&input_buffer, PixelRect{0, 0, 2, 2}, nullptr};
+  attach_canonical_input_value(&input_tile, &input.image_value());
+  EXPECT_THROW(std::get<TileOpFunc>(*selected)(node, output, {input_tile}),
                std::invalid_argument);
   ASSERT_TRUE(grant.active());
   grant.retire_failure("expected missing supervised runtime route");

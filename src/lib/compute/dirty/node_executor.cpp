@@ -479,7 +479,7 @@ void populate_input_tiles(GraphModel& graph, const Node& node,
         NodeExecutor::input_roi_for_tile(graph, node, output_roi, input_buffer,
                                          config, input_extents, nullptr,
                                          &input_context.inputs),
-        &input->space});
+        &input->space, &input->image_value()});
   }
 }
 

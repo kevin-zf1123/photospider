@@ -46,6 +46,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/value_descriptor_metadata.hpp"  // NOLINT(build/include_subdir)
 #include "execution/isolation/isolated_cpu_invocation_test_probe.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::execution {
@@ -63,6 +64,46 @@ constexpr std::size_t kCapabilityHeaderBytes = 40U;
 constexpr std::uint32_t kCapabilityHeaderMagic = 0x50534331U;
 /** @brief Exact capability header structural version. */
 constexpr std::uint16_t kCapabilityHeaderVersion = 1U;
+
+/**
+ * @brief Decodes one canonical operation identity into its two opaque words.
+ * @param identity Pointer-free big-endian identity bytes.
+ * @return Equivalent process-independent extension identity.
+ * @throws Nothing.
+ */
+ExtensionIdentity dense_image_extension_identity(
+    const IsolatedCpuOpaqueId& identity) noexcept {
+  std::array<std::uint64_t, 2U> words{};
+  for (std::size_t word = 0U; word < words.size(); ++word) {
+    for (std::size_t byte = 0U; byte < 8U; ++byte) {
+      words[word] = (words[word] << 8U) | std::to_integer<std::uint8_t>(
+                                              identity.bytes[word * 8U + byte]);
+    }
+  }
+  return ExtensionIdentity{words[0], words[1]};
+}
+
+/**
+ * @brief Builds immutable Value metadata from one validated output plan.
+ * @param plan Exact high-level plan retained before process execution.
+ * @return Equivalent identities, versions, and opaque digest words.
+ * @throws Nothing.
+ */
+DenseImageValueDescriptorMetadata dense_image_value_metadata(
+    const IsolatedCpuDenseTensorOutputPlan& plan) noexcept {
+  DenseImageValueDescriptorMetadata metadata;
+  metadata.schema_identity =
+      dense_image_extension_identity(plan.schema_identity);
+  metadata.facet_identity = dense_image_extension_identity(plan.facet_identity);
+  metadata.layout_identity =
+      dense_image_extension_identity(plan.layout_identity);
+  metadata.descriptor_version = plan.schema_version;
+  metadata.layout_version = plan.layout_version;
+  metadata.descriptor_digest = plan.descriptor_digest.words;
+  metadata.content_digest = plan.logical_content_digest.words;
+  metadata.layout_digest = plan.layout_digest.words;
+  return metadata;
+}
 
 /**
  * @brief Invokes POSIX close after descriptor ownership has been cleared.
@@ -3285,6 +3326,9 @@ HostInvocationPreflight preflight_host_invocation(
     tensor.layout_identity = binding.layout_identity;
     tensor.schema_version = binding.schema_version;
     tensor.layout_version = binding.layout_version;
+    tensor.descriptor_digest = binding.descriptor_digest;
+    tensor.logical_content_digest = binding.logical_content_digest;
+    tensor.layout_digest = binding.layout_digest;
     tensor.region = binding.region;
     tensor.capability_id = capability.capability_id;
     tensor.capability_offset = kCapabilityHeaderBytes;
@@ -3316,6 +3360,9 @@ HostInvocationPreflight preflight_host_invocation(
     tensor.layout_identity = plan.layout_identity;
     tensor.schema_version = plan.schema_version;
     tensor.layout_version = plan.layout_version;
+    tensor.descriptor_digest = plan.descriptor_digest;
+    tensor.logical_content_digest = plan.logical_content_digest;
+    tensor.layout_digest = plan.layout_digest;
     tensor.region = plan.region;
     tensor.allocation_alignment = static_cast<std::uint64_t>(plan.alignment);
     tensor.capability_id = capability.capability_id;
@@ -3688,6 +3735,8 @@ std::vector<Value> publish_host_outputs(
     }
     ValueBuilder builder = ValueBuilder::allocate_cpu_dense_tensor(
         plan.descriptor, plan.image_facet, plan.layout, plan.storage_size);
+    DenseImageValueDescriptorMetadataAccess::attach(
+        &builder, dense_image_value_metadata(plan));
     {
       WriteLease lease = builder.acquire_write();
       if (lease.size() != plan.storage_size) {
