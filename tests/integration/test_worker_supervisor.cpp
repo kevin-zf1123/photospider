@@ -1464,9 +1464,36 @@ TEST(WorkerSupervisor,
 
 TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {
   ScopedSupervisorRoot root;
-  auto service = make_service(root.path(), supervisor_options());
+  auto heartbeat_observed = std::make_shared<std::atomic<bool>>(false);
+  WorkerManagerOptions options = supervisor_options();
+  options.first_external_heartbeat_observed_for_test = heartbeat_observed;
+  auto service = make_service(root.path(), std::move(options));
   const JobSubmission unrelated =
       service->submit(fixture_spec("fixture.slow.success"));
+  const bool unrelated_ready = wait_until(
+      [&] { return heartbeat_observed->load(std::memory_order_acquire); }, 2s);
+  const std::optional<JobSnapshot> readiness_snapshot =
+      service->query(unrelated.job_id);
+  ASSERT_TRUE(readiness_snapshot.has_value());
+  const int readiness_outcome =
+      readiness_snapshot->attempt_outcome.has_value()
+          ? static_cast<int>(*readiness_snapshot->attempt_outcome)
+          : -1;
+  ASSERT_TRUE(unrelated_ready)
+      << "job=" << readiness_snapshot->job_id.value()
+      << " state=" << static_cast<int>(readiness_snapshot->state)
+      << " failure=" << static_cast<int>(readiness_snapshot->failure)
+      << " outcome=" << readiness_outcome
+      << " settled=" << readiness_snapshot->attempt_settled
+      << " cancellation=" << readiness_snapshot->cancellation_requested
+      << " attempt=" << readiness_snapshot->assignment.attempt_id.value()
+      << " worker=" << readiness_snapshot->assignment.worker_instance_id.value()
+      << " lease="
+      << readiness_snapshot->assignment.worker_lease_generation.value
+      << " receipt=" << readiness_snapshot->output_receipt.has_value()
+      << " artifact=" << readiness_snapshot->output_artifact_id.value()
+      << " commit=" << readiness_snapshot->output_commit_id.value()
+      << " message=" << readiness_snapshot->message;
   const std::vector<std::pair<std::string, JobAttemptFailure>> cases{
       {"fixture.preaccept.nonzero", JobAttemptFailure::WorkerExit},
       {"fixture.nonzero", JobAttemptFailure::WorkerExit},
@@ -1490,8 +1517,63 @@ TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {
     EXPECT_EQ(service->find_artifact(terminal.output_artifact_id), nullptr)
         << test_case.first;
   }
-  EXPECT_EQ(wait_terminal(*service, unrelated.job_id).state,
-            JobState::Succeeded);
+  const JobSnapshot unrelated_terminal =
+      wait_terminal(*service, unrelated.job_id);
+  const int unrelated_outcome =
+      unrelated_terminal.attempt_outcome.has_value()
+          ? static_cast<int>(*unrelated_terminal.attempt_outcome)
+          : -1;
+  EXPECT_EQ(unrelated_terminal.state, JobState::Succeeded)
+      << "job=" << unrelated_terminal.job_id.value()
+      << " state=" << static_cast<int>(unrelated_terminal.state)
+      << " failure=" << static_cast<int>(unrelated_terminal.failure)
+      << " outcome=" << unrelated_outcome
+      << " settled=" << unrelated_terminal.attempt_settled
+      << " cancellation=" << unrelated_terminal.cancellation_requested
+      << " attempt=" << unrelated_terminal.assignment.attempt_id.value()
+      << " worker=" << unrelated_terminal.assignment.worker_instance_id.value()
+      << " lease="
+      << unrelated_terminal.assignment.worker_lease_generation.value
+      << " receipt=" << unrelated_terminal.output_receipt.has_value()
+      << " artifact=" << unrelated_terminal.output_artifact_id.value()
+      << " commit=" << unrelated_terminal.output_commit_id.value()
+      << " message=" << unrelated_terminal.message;
+  EXPECT_EQ(unrelated_terminal.job_id, unrelated.job_id);
+  EXPECT_EQ(unrelated_terminal.assignment, unrelated.assignment);
+  EXPECT_FALSE(unrelated_terminal.cancellation_requested);
+  EXPECT_TRUE(unrelated_terminal.attempt_settled);
+  EXPECT_EQ(unrelated_terminal.attempt_outcome, JobAttemptOutcome::Succeeded);
+  EXPECT_EQ(unrelated_terminal.failure, JobAttemptFailure::None);
+  ASSERT_TRUE(unrelated_terminal.output_receipt.has_value());
+  EXPECT_EQ(unrelated_terminal.output_receipt->attempt, unrelated.assignment);
+  EXPECT_EQ(unrelated_terminal.output_receipt->artifact_id,
+            unrelated_terminal.output_artifact_id);
+  EXPECT_EQ(unrelated_terminal.output_receipt->output_commit_id,
+            unrelated_terminal.output_commit_id);
+  const std::shared_ptr<const ArtifactRecord> unrelated_artifact =
+      service->find_artifact(unrelated_terminal.output_artifact_id);
+  ASSERT_NE(unrelated_artifact, nullptr);
+  EXPECT_EQ(unrelated_artifact->receipt.attempt, unrelated.assignment);
+  EXPECT_EQ(unrelated_artifact->receipt.artifact_id,
+            unrelated_terminal.output_artifact_id);
+  EXPECT_EQ(unrelated_artifact->receipt.output_commit_id,
+            unrelated_terminal.output_commit_id);
+  EXPECT_EQ(unrelated_artifact->receipt.content_digest,
+            unrelated_terminal.output_receipt->content_digest);
+  EXPECT_TRUE(SingleTenantJobServiceTestAccess::
+                  wait_for_owned_worker_thread_count_at_most(*service, 0U, 2s));
+  EXPECT_EQ(
+      SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
+      0U);
+  const TenantQuotaSnapshot quota = service->quota_snapshot();
+  EXPECT_EQ(quota.active_attempts, 0U);
+  EXPECT_EQ(quota.cpu_slots, 0U);
+  EXPECT_EQ(quota.host_memory_bytes, 0U);
+  EXPECT_EQ(quota.output_bytes, 0U);
+  EXPECT_EQ(quota.staging_bytes, 0U);
+  EXPECT_EQ(quota.retention_bytes, unrelated_artifact->payload.size());
+  EXPECT_EQ(quota.retained_artifacts, 1U);
+  EXPECT_TRUE(quota.device_bytes.empty());
 }
 
 TEST(WorkerSupervisor,
