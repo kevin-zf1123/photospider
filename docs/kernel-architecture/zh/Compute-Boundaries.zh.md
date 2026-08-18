@@ -293,9 +293,10 @@ allocation、unordered-map bucket、value 与 linkage、每个由 `unique_ptr` �
 mutex allocation 仍排除在外。并发 HP/RT sibling 会在两个独立 phase reservation 中保守地
 计入同一个 shared synchronization object。这种有意的双 reservation 允许任一 sibling 先
 settle，同时不会让仍存活 Run 的 shared ownership 失去计费覆盖。Estimator 只计算所有权与
-大小均可见的 Host-owned C++ storage；不会伪造未来由 operation 产生的 image pixel、
-named-value 增长，以及不透明的 backend、device、plugin 或 allocator-owned allocation。
-当前内建 adapter 声明 scratch 为零，仅因为它们不拥有需要独立计量的固定 Host scratch。
+大小均可见的 Host-owned C++ storage；当前 demand record 未表示的 operation-produced image
+pixel 与 named-value 增长，以及不透明的 backend、device、plugin 或 allocator-owned
+allocation，都不会被虚构。当前内建 adapter 声明 scratch 为零，仅因为它们不拥有需要独立计量
+的固定 Host scratch。
 
 在 process-service dirty source segment 期间，source context 拥有外层 task
 `std::function` 的左值副本，而该外层 function 仍保持存活。因此 source demand
@@ -315,9 +316,9 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
 私有的 `ExecutionResourceLimits`；第三方 policy selection 使用独立的纯 C policy ABI v1，且不会
 获得任何执行资源。
 
-### 已接受的 operation-plugin v1 compute adapter 目标
+### 当前 operation-plugin v1 compute adapter
 
-未来 operation-v1 loader 仍把 immutable implementation 发布到 process-owned registry；
+Operation-v1 loader 会把 immutable implementation 发布到 process-owned registry；
 plugin 不获得 `ComputeService`、`ExecutionService`、`OpRegistry`、scheduler、cache、
 Graph、Run、ledger、device owner 或 commit callback。一个 Host adapter 把 private compute
 snapshot 转为 borrowed exact-size C record，再把 copied sink output 转回 private plan、
@@ -354,20 +355,22 @@ callback-local Host sink 流动，其第一次 failure 为 sticky。Host 在 ret
 emitted record；missing、duplicate、stale、malformed、out-of-plan、out-of-range 或 overlapping
 write 都会在 cache/Run-visible commit 前被拒绝。
 
-未来 v1 publication 保留当前 strong transaction 与 per-slot revision/predecessor rule。每个
+当前 v1 publication 保留 strong transaction 与 per-slot revision/predecessor rule。每个
 callback/configured context 在 validation、status normalization 与一次 destroy attempt 完成前
 保留精确 DSO generation。Retirement 先移除 visibility，再等待，reverse destroy，最后 unmap。
 调用 plugin code 时不持有 registry、scheduler、execution 或 publication lock。
 
 进程内 callback 仍可永久忽略 cancellation。Host 可令其 result 失去资格，却不能虚构 return、
 回收 write grant、destroy context 或安全卸载 DSO。因此 operation v1 是 operator-trusted
-compatibility boundary。Issue #102 现在实现一个源码私有、无指针的 Darwin/Linux
-protocol-v1 invocation 切片，它使用 framed Unix stream、有序 `SCM_RIGHTS` descriptor 与已
-unlink 的 POSIX shared memory。Issue #103 现在已经围绕该 transport 实现源码私有的有界
-supervision 组合。Issue #104 现在为长期维护的直接与受监督入口增加签名 immutable-snapshot
-admission 与可执行 Host resource policy。Linux 通过 sealed descriptor 支持这些 runtime 入口；
-Darwin 会在 invocation 副作用前拒绝构造。ABI pointer record 与 Host 铸造的 resource token 永远
-不是其 wire protocol。通用 syscall/network sandbox 仍在本切片之外。
+compatibility boundary。Issue #102 最初引入源码私有、无指针的 Darwin/Linux protocol-v1
+invocation 切片，它使用 framed Unix stream、有序 `SCM_RIGHTS` descriptor 与已 unlink 的 POSIX
+shared memory。DI-3 后续把这套独立 wire contract 推进到 isolation protocol v2，使 supervised
+operation ABI v1 record 精确保留 descriptor identity、version、digest、Region 与 immutable
+plan。Issue #103 围绕该 transport 提供源码私有的有界 supervision 组合；Issue #104 则为长期
+维护的直接与受监督入口增加签名 immutable-snapshot admission 与可执行 Host resource policy。
+Linux 通过 sealed descriptor 支持这些 runtime 入口；Darwin 会在 invocation 副作用前拒绝构造。
+ABI pointer record 与 Host 铸造的 resource token 永远不是其 wire protocol。通用
+syscall/network sandbox 仍在本切片之外。
 
 `NonSupervisedIsolatedCpuInvocationExecutor` 会在 spawn 前验证 invocation identity、
 generation/operation binding、scalar parameter、resource declaration、readiness/ownership、

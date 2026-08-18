@@ -792,8 +792,9 @@ DI-1 是第一个依赖切片。它把 immutable data window、optional display 
 sample domain、color 与 observed statistics 彼此独立；并冻结后续 output-plan、wire、artifact
 及 codec 工作所需的 bounded record。DI-1 本身刻意不删除当时的 operation 边界或 `ImageBuffer`，不迁移
 Host/IPC/worker/durable/CLI surface，不定义自动 color conversion，也不把 OpenEXR Deep
-provider-defined window 复用为普通 dense-image authority。DI-2 实现下一个内部切片；DI-3 与
-DI-4 仍是下游交付切片。
+provider-defined window 复用为普通 dense-image authority。在 DI-1 决策时点，DI-2、DI-3 与
+DI-4 都是下游交付切片。现在 DI-2 已交付内部 runtime 切片，DI-3 已交付 pure-C operation ABI
+v1 与 isolation protocol v2，DI-4 仍负责 external boundary 与最终 `ImageBuffer` 删除。
 
 DI-2 是内部 runtime 交付切片。它会在 allocation 前冻结一个 source-private 普通图像 output
 plan，包含精确 name、DenseTensor/ImageFacet、Strided layout、storage envelope、alignment 与
@@ -1303,7 +1304,7 @@ liveness、report 或 completion authority。Write 会在正向 progress 前后�
 late frame 必须被视为 write 失败，并且绝不重试。Cancellation owner 只能为有界 receive-side
 report/EOF/exit 排空继续保留 channel。
 
-凡是加载到 Host 的 DSO 都仍是 operator-trusted native code。当前 operation C++ ABI、
+凡是加载到 Host 的 DSO 都仍是 operator-trusted native code。当前 operation pure-C ABI v1、
 data-definition pure-C ABI 与 policy pure-C ABI 都不提供 sandbox、timeout、syscall、thread 或
 memory-corruption boundary。当前 operation/policy DSO 候选必须先通过进程不可变的签名内容/role
 admission，但批准不会削弱其进程内能力。Control plane 与 WorkerManager 不加载 DSO。
@@ -1314,9 +1315,11 @@ lifecycle、authenticated IPC、heartbeat/deadline、process rlimit、restart ba
 memory/FD transport。Invocation 携带有界且带版本 descriptor 与 checked range，而不携带 C++
 object、Host callback、raw pointer、native GPU handle、credential、artifact capability 或 resource
 token。可信 Host 代码会在使用前重新校验全部返回 descriptor、offset、ownership、size、readiness、
-identity 与 declared bound。当前没有 composition root 通过这条路径选择最终用户 Graph operation，
-且已实现控制不是通用 syscall/network sandbox。纯 C 能改善 record compatibility；它不能让恶意
-native code 在进程内安全执行。
+identity 与 declared bound。DI-3 现在会在已加载的 pure-C operation ABI v1 implementation 声明
+supervised CPU mode 且安装了精确 signed-package route 时选择这条路径；不允许 direct callback
+fallback。Public Host/CLI/worker surface 仍不暴露通用的最终用户 runtime selector，且已实现控制
+不是通用 syscall/network sandbox。纯 C 能改善 record compatibility；它不能让恶意 native code
+在进程内安全执行。
 
 ### Issue #101 已接受的 operation ABI 决策
 
@@ -1468,9 +1471,10 @@ limit setup failure。
 
 这会完成私有 Linux runtime 组合的 package/resource admission、Linux operation/policy loader 的
 签名 immutable-snapshot admission 与 mapping/capability 生命周期一致性，以及 Darwin 每个 native
-role 有类型的访问前拒绝。在当时 Issue #104 的边界内，它不会选择最终用户 Graph operation、实现
-当时仍为目标态的 operation ABI v1、隔离获批进程内 DSO、提供通用 syscall/network sandbox，
-或从 `SIGKILL` 证明 OOM。
+role 有类型的访问前拒绝。在当时 Issue #104 的历史边界内，它不会选择最终用户 Graph operation、
+实现当时仍为目标态的 operation ABI v1、隔离获批进程内 DSO、提供通用 syscall/network
+sandbox，或从 `SIGKILL` 证明 OOM。DI-3 后续实现了 operation ABI 及其 supervised
+exact-package selection；进程内 DSO 隔离、通用 sandbox 与 OOM 证明仍不属于该交付。
 
 当前 Issue #99/#100/#105 基线是源码私有的
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)。它冻结

@@ -134,10 +134,12 @@ Planner 记录 `BackwardDemand` edge mapping。Forward affected-region projectio
 
 ## Region 传播
 
-对于精确内建 ImageRect，`RoiPropagationService` 会经过 checked private adapter 转换，向当前
-选中的 v2 callback 请求 projection，验证返回 rectangle，再把它包装成 Exact Region。Static
-formula 继续覆盖 identity、neighborhood、crop、resize 与其他 image geometry；data-dependent
-operation 可以提供经过验证的 dependency LUT。同一 parent 的 image demand 保留当前有界矩形行为。
+对于精确内建 ImageRect，`RoiPropagationService` 会经过 checked private adapter 转换，向选中的
+provider-neutral propagation callback 请求 projection，验证返回 rectangle，再把它包装成 Exact
+Region。这个 callback 可以来自 dependency-neutral core、optional provider 或当前 pure-C
+operation ABI v1 adapter。Static formula 继续覆盖 identity、neighborhood、crop、resize 与其他
+image geometry；data-dependent operation 可以提供经过验证的 dependency LUT。同一 parent 的
+image demand 保留当前有界矩形行为。
 
 TensorSlice 绝不进入 rectangular callback。Request-bound `RoiPropagationService` 会使用与
 execution 相同的规范 route device inventory 和 HP/RT intent 选出实际的 revisioned

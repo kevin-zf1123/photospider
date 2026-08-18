@@ -565,9 +565,10 @@ An implementation source for operation callbacks, propagation contracts, and
 metadata. Dependency-neutral core operations are always composed at process
 seed. The repository OpenCV CPU provider is a separate optional build module
 that owns its algorithms, process initialization, and exception translation.
-Both it and v2 DSO providers publish into the same provider-neutral registry
-slots, so a DSO can replace an active operation and unload restores its
-predecessor. Public operation contracts use Photospider values.
+Both it and pure-C operation ABI v1 DSO generations publish into the same
+provider-neutral registry slots, so a DSO can replace an active operation and
+unload restores its predecessor. Public operation contracts use Photospider
+values.
 
 **Adapter**
 A narrow translation at an external library, transport, or product edge. An

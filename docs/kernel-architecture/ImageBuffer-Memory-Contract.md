@@ -269,13 +269,14 @@ object stored in `context` is backend-specific.
 ## Metal Buffers
 
 The Metal buffer adapter is implemented in
-`src/lib/adapters/metal/buffer_adapter_metal.{hpp,mm}`, but it is not currently enabled in
-the core library build and is not connected to the production compute path.
-`CMakeLists.txt` builds the current Metal operation path separately through
-`plugins/ops/metal/perlin_noise_metal.mm` and
-`plugins/ops/metal/metal_ops_loader.cpp`; that op
-path registers `image_generator:perlin_noise_metal` when the loader directory is
-manually present in `plugin_dirs`.
+`src/lib/adapters/metal/buffer_adapter_metal.{hpp,mm}`, but it is not currently
+enabled in the core library build and is not connected to the production
+compute path. `CMakeLists.txt` separately builds
+`plugins/ops/metal/perlin_noise_metal.mm` as the source-private static target
+`photospider_metal_perlin_adapter_internal`. There is no separate dynamic
+loader translation unit, loader directory, or operation-plugin registration
+for this adapter; it is neither installed nor loaded through the pure-C
+operation ABI v1.
 
 Implemented adapter behavior:
 
@@ -285,14 +286,17 @@ Implemented adapter behavior:
 - Download returns a new CPU `ImageBuffer`.
 
 Plugin, scheduler, and core compute code must not treat the Metal buffer adapter
-as a production runtime boundary. The current production Metal operation path
-does not use that adapter or retain an `ImageBuffer::context` payload. After
-reserved start, the Metal Perlin provider borrows the process executor's
-command queue, invocation-scoped allocator, and validated pipeline cache, then
-encodes compute plus an explicit texture-to-shared-buffer blit, installs a
-native completion handler, commits without waiting, and source-privately
-returns a pending host-visible Value. `TaskSubmissionPlan` releases dependants
-only after that canonical Value becomes Ready; it creates no ImageBuffer peer.
+as a production runtime boundary. The source-private Metal Perlin adapter does
+not use that buffer adapter or retain an `ImageBuffer::context` payload. When a
+maintained internal test invokes it after reserved start, it borrows the
+process executor's command queue, invocation-scoped allocator, and validated
+pipeline cache, then encodes compute plus an explicit texture-to-shared-buffer
+blit, installs a native completion handler, commits without waiting, and
+source-privately returns a pending host-visible Value. `TaskSubmissionPlan`
+releases dependants only after that canonical Value becomes Ready; it creates
+no ImageBuffer peer. The production provider seed in
+`src/lib/providers/configured_operation_providers.cpp` does not register this
+adapter as a Graph operation.
 The provider owns no independent native lifecycle, calls neither
 `waitUntilCompleted` nor `getBytes`, and cannot make `ImageBuffer::context` a
 portable memory contract.

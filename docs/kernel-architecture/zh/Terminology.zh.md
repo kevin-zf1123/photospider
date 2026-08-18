@@ -444,9 +444,9 @@ multi-atom clause 或 uncertainty。只能在 OpenCV adapter 或 provider 实际
 **Operation provider**
 operation callback、propagation contract 与 metadata 的实现来源。依赖中立 core operation
 始终在进程 seed 时组合。仓库 OpenCV CPU provider 是独立的可选 build module，拥有自身
-algorithm、进程初始化与异常翻译。它与 v2 DSO provider 都向相同的 provider-neutral registry
-slot 发布，因此 DSO 可以替换 active operation，并在卸载后恢复其 predecessor。公共 operation
-契约使用 Photospider 值类型。
+algorithm、进程初始化与异常翻译。它与 pure-C operation ABI v1 DSO generation 都向相同的
+provider-neutral registry slot 发布，因此 DSO 可以替换 active operation，并在卸载后恢复其
+predecessor。公共 operation 契约使用 Photospider 值类型。
 
 **Adapter**
 位于外部库、transport 或产品边缘的窄转换。Adapter 转换表示，但不会成为 graph、planning、

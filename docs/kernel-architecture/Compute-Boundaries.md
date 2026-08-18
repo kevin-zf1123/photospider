@@ -375,10 +375,11 @@ remain excluded. Concurrent HP/RT siblings conservatively include the same
 shared synchronization object in both independent phase reservations. This
 intentional double reservation lets either sibling settle first without
 leaving the surviving Run's shared ownership unaccounted. The estimator counts
-only visible Host-owned C++ storage; future operation-produced image pixels,
-named-value growth, and opaque backend, device, plugin, or allocator-owned
-allocations are not fabricated. Current built-in adapters declare zero scratch
-only because they own no separately metered fixed Host scratch.
+only visible Host-owned C++ storage; operation-produced image pixels and named-
+value growth that are not represented by the current demand record, plus opaque
+backend, device, plugin, or allocator-owned allocations, are not fabricated.
+Current built-in adapters declare zero scratch only because they own no
+separately metered fixed Host scratch.
 
 During a process-service dirty source segment, the outer task
 `std::function` remains live while its lvalue copy is owned by the source
@@ -402,9 +403,9 @@ installed replacement. Composition limits use the private source-tree
 `ExecutionResourceLimits`; third-party policy selection uses the independent
 pure-C policy ABI v1 and receives no execution resource.
 
-### Accepted operation-plugin v1 compute adapter target
+### Current operation-plugin v1 compute adapter
 
-The future operation-v1 loader still publishes immutable implementations into
+The operation-v1 loader publishes immutable implementations into
 the process-owned registry; the plugin receives no `ComputeService`,
 `ExecutionService`, `OpRegistry`, scheduler, cache, Graph, Run, ledger, device
 owner, or commit callback. One Host adapter converts private compute snapshots
@@ -449,7 +450,7 @@ sticky. The Host validates and deep-copies emitted records before return and
 rejects missing, duplicate, stale, malformed, out-of-plan, out-of-range, or
 overlapping writes before any cache or Run-visible commit.
 
-Future v1 publication preserves the current strong transaction and per-slot
+Current v1 publication preserves the strong transaction and per-slot
 revision/predecessor rules. Every callback and configured context retains its
 exact DSO generation through validation, status normalization, and exactly one
 destroy attempt. Retirement removes visibility before waiting, destroys in
@@ -459,16 +460,19 @@ publication lock is held while plugin code runs.
 An in-process callback can still ignore cancellation forever. The Host may
 make its result ineligible, but cannot fabricate return, reclaim its write
 grant, destroy its context, or unload its DSO safely. Operation v1 is therefore
-an operator-trusted compatibility boundary. Issue #102 now implements a
-source-private, pointer-free Darwin/Linux protocol-v1 invocation slice over a
-framed Unix stream, ordered `SCM_RIGHTS` descriptors, and unlinked POSIX shared
-memory. Issue #103 now implements the source-private bounded supervision
-composition around that transport. Issue #104 now adds signed immutable-
-snapshot admission and enforceable Host resource policy to the maintained
-direct and supervised entries. Linux supports those runtime entries through a
-sealed descriptor; Darwin rejects their construction before invocation
-effects. ABI pointer records and Host-minted resource tokens are never their
-wire protocol. A general syscall/network sandbox remains outside this slice.
+an operator-trusted compatibility boundary. Issue #102 originally introduced
+the source-private, pointer-free Darwin/Linux protocol-v1 invocation slice over
+a framed Unix stream, ordered `SCM_RIGHTS` descriptors, and unlinked POSIX
+shared memory. DI-3 subsequently advanced that separate wire contract to
+isolation protocol v2 so supervised operation ABI v1 records preserve exact
+descriptor identities, versions, digests, Regions, and immutable plans. Issue
+#103 supplies the source-private bounded supervision composition around that
+transport, while Issue #104 adds signed immutable-snapshot admission and
+enforceable Host resource policy to the maintained direct and supervised
+entries. Linux supports those runtime entries through a sealed descriptor;
+Darwin rejects their construction before invocation effects. ABI pointer
+records and Host-minted resource tokens are never their wire protocol. A
+general syscall/network sandbox remains outside this slice.
 
 `NonSupervisedIsolatedCpuInvocationExecutor` validates the invocation identity,
 generation/operation binding, scalar parameters, resource declarations,

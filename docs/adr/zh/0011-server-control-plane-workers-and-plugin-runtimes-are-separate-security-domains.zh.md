@@ -440,8 +440,10 @@ Issue #101 拥有 pure-C operation ABI 决策，Issue #102 拥有首个 invocati
 拥有 authenticated private-session supervision，Issue #104 拥有当前签名 admission 与 resource-
 token 组合。Session authentication 证明私有 launch 的 binding/liveness；签名 content approval
 建立 package admission；二者都不证明 returned output truth。本 ADR 冻结这些 authority/process
-boundary。Atomic operation-ABI migration 与最终用户 selection、通用 syscall/network sandbox、
-cross-process GPU handle/fence、长期 fuzz/audit evidence 都留给后续决策。
+boundary。DI-3 后续完成了到 pure-C operation ABI v1 的原子迁移，并通过精确 signed-package
+executor 路由 supervised CPU descriptor。Public 最终用户 isolated-runtime selector、通用
+syscall/network sandbox、cross-process GPU handle/fence 与长期 fuzz/audit evidence 都留给后续
+决策。
 
 ### Failure、Revocation 与 Replay
 

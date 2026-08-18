@@ -159,9 +159,11 @@ is not the traversal used to materialize the current dirty execution plan.
 ## Region Propagation
 
 For exact built-in ImageRect, `RoiPropagationService` converts through the
-checked private adapter, asks the selected current v2 callback for its
-projection, validates the returned rectangle, and wraps it as Exact Region.
-Static formulas still cover identity, neighborhood, crop, resize, and other
+checked private adapter, asks the selected provider-neutral propagation
+callback for its projection, validates the returned rectangle, and wraps it as
+Exact Region. That selected callback may come from the dependency-neutral core,
+an optional provider, or the current pure-C operation ABI v1 adapter. Static
+formulas still cover identity, neighborhood, crop, resize, and other
 image geometry; data-dependent operations may provide a validated dependency
 LUT. Image demands for the same parent retain current bounded rectangular
 behavior.

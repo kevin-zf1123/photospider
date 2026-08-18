@@ -993,8 +993,11 @@ and observed statistics independent; and freezes bounded records needed by
 later output-plan, wire, artifact, and codec work. DI-1 deliberately did not
 remove the then-current operation boundary or `ImageBuffer`, migrate
 Host/IPC/worker/durable/CLI surfaces, define automatic color conversion, or reuse OpenEXR Deep
-provider-defined windows as ordinary dense-image authority. DI-2 implements the
-next internal slice; DI-3 and DI-4 remain downstream delivery slices.
+provider-defined windows as ordinary dense-image authority. At the DI-1
+decision point, DI-2, DI-3, and DI-4 were downstream delivery slices. DI-2 is
+now the delivered internal runtime slice, DI-3 has delivered the pure-C
+operation ABI v1 plus isolation protocol v2, and DI-4 remains the external-
+boundary and final `ImageBuffer` removal slice.
 
 DI-2 is the internal runtime delivery slice. It freezes one source-private
 ordinary-image output plan containing the exact name, DenseTensor/ImageFacet,
@@ -1624,7 +1627,7 @@ treated as a failed write and is never retried. A cancellation owner may retain
 the channel only for bounded receive-side report/EOF/exit drainage.
 
 Every DSO loaded into a Host remains operator-trusted native code. The current
-operation C++ ABI, data-definition pure-C ABI, and policy pure-C ABI provide no
+operation pure-C ABI v1, data-definition pure-C ABI, and policy pure-C ABI provide no
 sandbox, timeout, syscall, thread, or memory-corruption boundary. Current
 operation and policy DSO candidates first require process-immutable signed
 content/role admission, but approval does not reduce their in-process powers.
@@ -1638,11 +1641,13 @@ shared-memory/FD transport. An invocation carries bounded, versioned
 descriptors and checked ranges, not C++ objects, Host callbacks, raw pointers,
 native GPU handles, credentials, artifact capabilities, or resource tokens.
 Trusted Host code revalidates all returned descriptors, offsets, ownership,
-sizes, readiness, identities, and declared bounds before use. No current
-composition root selects an end-user Graph operation through this path, and the
-implemented controls are not a general syscall/network sandbox. Pure C
-improves record compatibility; it does not make hostile native code safe
-in-process.
+sizes, readiness, identities, and declared bounds before use. DI-3 now selects
+this path when a loaded pure-C operation ABI v1 implementation declares the
+supervised CPU mode and an exact signed-package route is installed; no direct
+callback fallback is permitted. Public Host/CLI/worker surfaces still expose no
+general end-user runtime selector, and the implemented controls are not a
+general syscall/network sandbox. Pure C improves record compatibility; it does
+not make hostile native code safe in-process.
 
 ### Issue #101 accepted operation ABI decision
 
@@ -1835,10 +1840,13 @@ code executes.
 This completes package and resource admission for the private Linux runtime
 composition, signed immutable-snapshot admission plus mapping/capability
 lifetime consistency for Linux operation/policy loaders, and typed pre-access
-Darwin rejection for every native role. At that Issue #104 boundary it did not
-select an end-user Graph operation, implement the then-target operation ABI v1,
-isolate approved in-process DSOs, provide a general syscall/network sandbox,
-or prove OOM from `SIGKILL`.
+Darwin rejection for every native role. At that historical Issue #104 boundary
+it did not select an end-user Graph operation, implement the then-target
+operation ABI v1, isolate approved in-process DSOs, provide a general
+syscall/network sandbox, or prove OOM from `SIGKILL`. DI-3 subsequently
+implemented the operation ABI and its supervised exact-package selection;
+in-process DSO isolation, a general sandbox, and OOM proof remain outside that
+delivery.
 
 The current Issue #99/#100/#105 baseline is the source-private
 [Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).

@@ -218,11 +218,11 @@ RGB、alpha、transfer function 或 primaries。Provider-defined OpenEXR Deep wi
 ## Metal 缓冲区
 
 Metal buffer adapter 已在 `src/lib/adapters/metal/buffer_adapter_metal.{hpp,mm}` 中实现，
-但当前未在核心库构建中启用，也未接入生产
-compute 路径。`CMakeLists.txt` 通过 `plugins/ops/metal/perlin_noise_metal.mm` 和
-`plugins/ops/metal/metal_ops_loader.cpp` 单独构建当前 Metal operation 路径；只有当 loader
-目录被手动加入 `plugin_dirs` 后，该 op 路径才会注册
-`image_generator:perlin_noise_metal`。
+但当前未在核心库构建中启用，也未接入生产 compute 路径。`CMakeLists.txt` 会把
+`plugins/ops/metal/perlin_noise_metal.mm` 单独构建为 source-private static target
+`photospider_metal_perlin_adapter_internal`。该 adapter 没有独立 dynamic loader translation
+unit、loader directory 或 operation-plugin registration；它既不会安装，也不会通过 pure-C
+operation ABI v1 加载。
 
 已实现的 adapter 行为：
 
@@ -231,13 +231,15 @@ compute 路径。`CMakeLists.txt` 通过 `plugins/ops/metal/perlin_noise_metal.m
 - `context` 拥有 Metal texture holder。
 - 下载返回新的 CPU `ImageBuffer`。
 
-插件、调度器和核心 compute 代码不得把 Metal buffer adapter 视为生产运行边界。当前生产
-Metal operation 路径不使用该 adapter，也不保留 `ImageBuffer::context` payload。Reserved start
-之后，Metal Perlin provider 会借用进程 executor 的 command queue、invocation-scoped allocator
-与经过校验的 pipeline cache，编码 compute 加显式 texture-to-shared-buffer blit、安装 native
-completion handler、commit 且不等待，并通过 source-private 路径返回 pending host-visible
-Value。`TaskSubmissionPlan` 只会在该规范 Value 进入 Ready 后释放 dependant；它不会创建
-ImageBuffer peer。Provider 不拥有独立 native lifecycle，不调用 `waitUntilCompleted` 或
+插件、调度器和核心 compute 代码不得把 Metal buffer adapter 视为生产运行边界。Source-private
+Metal Perlin adapter 不使用该 buffer adapter，也不保留 `ImageBuffer::context` payload。当一个
+长期维护的内部测试在 reserved start 后调用它时，它会借用进程 executor 的 command queue、
+invocation-scoped allocator 与经过校验的 pipeline cache，编码 compute 加显式
+texture-to-shared-buffer blit、安装 native completion handler、commit 且不等待，并通过
+source-private 路径返回 pending host-visible Value。`TaskSubmissionPlan` 只会在该规范 Value 进入
+Ready 后释放 dependant；它不会创建 ImageBuffer peer。生产 provider seed
+`src/lib/providers/configured_operation_providers.cpp` 不会把该 adapter 注册为 Graph operation。
+Adapter 不拥有独立 native lifecycle，不调用 `waitUntilCompleted` 或
 `getBytes`，也不能把 `ImageBuffer::context` 变成可移植内存契约。
 
 ## 边界与原理

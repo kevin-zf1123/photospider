@@ -550,9 +550,11 @@ and Issue #104 owns the current signed admission and resource-token
 composition. Session authentication proves binding and liveness of the private
 launch; signed content approval establishes package admission; neither proves
 returned output truth. This ADR fixes their authority and process boundaries.
-Atomic operation-ABI migration and end-user selection, a general syscall/
-network sandbox, cross-process GPU handles/fences, and long-lived fuzz/audit
-evidence remain later decisions.
+DI-3 subsequently completed the atomic migration to pure-C operation ABI v1
+and routes supervised CPU descriptors through the exact signed-package
+executor. A public end-user isolated-runtime selector, a general
+syscall/network sandbox, cross-process GPU handles/fences, and long-lived
+fuzz/audit evidence remain later decisions.
 
 ### Failure, revocation, and replay
 
