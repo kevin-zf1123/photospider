@@ -1226,11 +1226,13 @@ void validate_dirty_region_operation_routes(
     const DirtyRegionOperationRouteSnapshot& route_snapshot,
     const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay& selection,
     const ComputeRequest& request) {
-  if (route_snapshot.node_routes.empty()) {
-    return;
-  }
   if (selection.active_task_ids.empty()) {
     return;
+  }
+  if (route_snapshot.node_routes.empty()) {
+    throw GraphError(
+        GraphErrc::NoOperation,
+        "Dirty Region planning supplied no operation routes for active work.");
   }
   if (route_snapshot.intent != request.intent ||
       route_snapshot.intent != compute_plan.intent) {

@@ -18,6 +18,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -798,6 +799,326 @@ void expect_positive_matrix_boundaries(
 RegionSet full_rank4_region() {
   return RegionSet::from_tensor_slice(
       {dense_tensor_region_domain(), {{0U, 1U}, {0U, 3U}, {0U, 4U}, {0U, 3U}}});
+}
+
+/**
+ * @brief Removes one test-owned operation key at scope exit.
+ *
+ * @param type Canonical operation type owned exclusively by the test.
+ * @param subtype Canonical operation subtype owned exclusively by the test.
+ * @throws std::bad_alloc when the canonical cleanup key cannot allocate.
+ * @note Construction happens before any registry mutation. Destruction uses
+ * the registry's no-throw complete-key retirement and prevents a failed
+ * assertion from leaking one generation into another test.
+ */
+class ScopedRectangularRouteKey final {
+ public:
+  ScopedRectangularRouteKey(std::string type, std::string subtype)
+      : key_(make_key(type, subtype)) {}
+
+  ScopedRectangularRouteKey(const ScopedRectangularRouteKey&) = delete;
+  ScopedRectangularRouteKey& operator=(const ScopedRectangularRouteKey&) =
+      delete;
+
+  /**
+   * @brief Retires the complete test-owned registry key.
+   * @throws Nothing.
+   */
+  ~ScopedRectangularRouteKey() { OpRegistry::instance().unregister_key(key_); }
+
+ private:
+  /** @brief Canonical operation key retired by the destructor. */
+  std::string key_;
+};
+
+/**
+ * @brief Observable behavior owned by one rectangular route generation.
+ *
+ * @throws Nothing for default construction.
+ * @note Callback counters are atomic because registry callback values may be
+ * copied into worker-capable execution paths. Region values are immutable
+ * after the generation is published.
+ */
+struct RectangularRouteProbe final {
+  /** @brief Number of provider callback entries. */
+  std::atomic_int provider_entries{0};
+  /** @brief Number of backward dirty-propagation callback entries. */
+  std::atomic_int dirty_entries{0};
+  /** @brief Number of dependency-LUT builder entries. */
+  std::atomic_int dependency_entries{0};
+  /** @brief Generation-specific backward propagation result. */
+  PixelRect dirty_roi;
+  /** @brief Generation-specific dependency-LUT result. */
+  PixelRect dependency_roi;
+};
+
+/**
+ * @brief Creates one callback-coherent rectangular route candidate.
+ *
+ * @param intent Sole compute intent accepted by the candidate.
+ * @param probe Shared generation probe and deterministic ROI behavior.
+ * @return One CPU monolithic candidate with exact dirty/dependency callbacks.
+ * @throws std::bad_alloc when callback or metadata ownership allocates.
+ * @note The provider returns a complete 256-by-256 image. Its planning
+ * callbacks are deliberately generation-specific so a route A Region plan
+ * cannot be mistaken for route B execution.
+ */
+OpImplementation make_rectangular_route_candidate(
+    ComputeIntent intent, const std::shared_ptr<RectangularRouteProbe>& probe) {
+  OpMetadata metadata;
+  metadata.device_preference = Device::CPU;
+  metadata.cost_score = 1;
+  metadata.supports_high_precision =
+      intent == ComputeIntent::GlobalHighPrecision;
+  metadata.supports_realtime = intent == ComputeIntent::RealTimeUpdate;
+  metadata.data_dependent = true;
+
+  MonolithicOpFunc provider = [probe](const Node&,
+                                      const std::vector<const NodeOutput*>&) {
+    probe->provider_entries.fetch_add(1, std::memory_order_relaxed);
+    NodeOutput output;
+    output.publish_image_value(make_unsigned8_value(256U, 256U, 1U, 256U));
+    return output;
+  };
+  DirtyRoiPropFunc dirty = [probe](const Node&, const PixelRect&,
+                                   const GraphModel&, const PixelSize&,
+                                   const std::vector<PixelSize>&,
+                                   const plugin::ParameterMap&,
+                                   const std::vector<const NodeOutput*>*) {
+    probe->dirty_entries.fetch_add(1, std::memory_order_relaxed);
+    return probe->dirty_roi;
+  };
+  DependencyLutBuilder dependency =
+      [probe](const Node&, const GraphModel&, const std::vector<PixelSize>&,
+              const PixelSize& downstream_extent, const plugin::ParameterMap&) {
+        probe->dependency_entries.fetch_add(1, std::memory_order_relaxed);
+        SpatialDependencyMap result;
+        result.grid_size_x = downstream_extent.width;
+        result.grid_size_y = downstream_extent.height;
+        result.cols = 1;
+        result.rows = 1;
+        result.output_extent = downstream_extent;
+        result.upstream_input_index = 0U;
+        result.cell_to_upstream_roi.push_back(probe->dependency_roi);
+        return result;
+      };
+  return OpImplementation{OpRegistry::OpVariant{std::move(provider)},
+                          std::move(metadata),
+                          0U,
+                          std::move(dirty),
+                          {},
+                          std::move(dependency)};
+}
+
+/**
+ * @brief Publishes one complete rectangular route generation.
+ *
+ * @param type Test-owned operation type.
+ * @param subtype Test-owned operation subtype.
+ * @param intent Sole intent accepted by the exact candidate.
+ * @param probe Generation-specific provider and planning behavior.
+ * @param install_shape_compatibility Whether to seed scalar HP compatibility
+ * slots before the first complete candidate-set publication.
+ * @throws Registry validation, callback-copy, or allocation exceptions.
+ * @note Compatibility slots keep snapshot tile/monolithic classification
+ * representative of ordinary CPU registration. Device-candidate selection
+ * still chooses only the complete candidate set and its exact callbacks.
+ */
+void publish_rectangular_route_generation(
+    const std::string& type, const std::string& subtype, ComputeIntent intent,
+    const std::shared_ptr<RectangularRouteProbe>& probe,
+    bool install_shape_compatibility) {
+  auto& registry = OpRegistry::instance();
+  if (install_shape_compatibility) {
+    OpMetadata compatibility_metadata;
+    compatibility_metadata.supports_high_precision =
+        intent == ComputeIntent::GlobalHighPrecision;
+    compatibility_metadata.supports_realtime =
+        intent == ComputeIntent::RealTimeUpdate;
+    registry.register_impl(
+        type, subtype, Device::CPU,
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              return NodeOutput{};
+            }),
+        compatibility_metadata);
+    registry.register_impl(type, subtype, Device::CPU,
+                           TileOpFunc([](const Node&, const OutputTile&,
+                                         const std::vector<InputTile>&) {}),
+                           compatibility_metadata);
+  }
+  registry.replace_implementation_candidates(
+      type, subtype,
+      std::vector<OpImplementation>{
+          make_rectangular_route_candidate(intent, probe)});
+}
+
+/**
+ * @brief Builds one image graph whose target exercises dirty and dependency
+ * callbacks from the selected route.
+ *
+ * @param graph Empty destination graph to populate.
+ * @param target_type Test-owned target operation type.
+ * @param target_subtype Test-owned target operation subtype.
+ * @return Nothing after publishing one source and target.
+ * @throws Graph, Value, Region, topology, or allocation exceptions.
+ * @note The cached source supplies exact input extent and content revision.
+ * Both nodes use the test-owned route key so planning must freeze every node
+ * that task selection can retain.
+ */
+void populate_rectangular_route_graph(GraphModel* graph,
+                                      const std::string& target_type,
+                                      const std::string& target_subtype) {
+  if (graph == nullptr) {
+    throw std::invalid_argument(
+        "rectangular route graph destination must not be null");
+  }
+  Node source;
+  source.id = 120;
+  source.name = "rectangular_route_source";
+  source.type = target_type;
+  source.subtype = target_subtype;
+  source.parameters["width"] = 256;
+  source.parameters["height"] = 256;
+  source.cached_output_high_precision = NodeOutput{};
+  source.cached_output_high_precision->publish_image_value(
+      make_unsigned8_value(256U, 256U, 1U, 256U));
+  source.hp_region = value_image_adapter::full_node_output_region(
+      *source.cached_output_high_precision);
+  source.hp_version = 1;
+  graph->add_node(std::move(source));
+
+  Node target;
+  target.id = 121;
+  target.name = "rectangular_route_target";
+  target.type = target_type;
+  target.subtype = target_subtype;
+  target.parameters["width"] = 256;
+  target.parameters["height"] = 256;
+  target.image_inputs.push_back({120, "image"});
+  graph->add_node(std::move(target));
+  graph->validate_topology();
+}
+
+/**
+ * @brief Executes the current target route through the real dirty node seam.
+ *
+ * @tparam DirtyPlan HighPrecisionDirtyPlan or RealTimeDirtyPlan.
+ * @param graph Request-local graph used by the prepared plan.
+ * @param prepared Successful production dirty preparation.
+ * @param intent Intent selecting the current callback revision.
+ * @return True when provider execution created request-local staged output.
+ * @throws Graph, registry, provider, Value, staging, or allocation exceptions.
+ * @note No write buffer is committed. A stale-plan caller therefore exposes
+ * incorrect provider entry and staging without changing live Graph or proxy
+ * publication state.
+ */
+template <typename DirtyPlan>
+bool execute_rectangular_target_from_current_route(
+    GraphModel& graph, const compute::PreparedDirtyPlan<DirtyPlan>& prepared,
+    ComputeIntent intent) {
+  constexpr int kTargetNodeId = 121;
+  const Node& target = graph.node(kTargetNodeId);
+  const std::optional<OpImplementation> selected =
+      OpRegistry::instance().select_implementation(target.type, target.subtype,
+                                                   {Device::CPU}, intent);
+  if (!selected.has_value()) {
+    throw std::logic_error("rectangular target route disappeared");
+  }
+  const compute::DirtyResolvedOperationMap operations{{
+      kTargetNodeId,
+      compute::DirtyResolvedOperation{
+          selected->func, selected->metadata.device_preference,
+          selected->implementation_identity, selected->metadata,
+          make_dynamic_output_authority(*selected), selected->dirty_propagator},
+  }};
+  GraphEventService events;
+  compute::DirtyNodeSynchronization synchronization(graph.node_ids());
+  Node target_copy = target;
+  compute::DirtyNodeExecutionContext context{
+      graph,          nullptr,
+      events,         prepared.dirty_plan.snapshot,
+      operations,     prepared.dirty_plan.snapshot.graph_generation,
+      synchronization};
+
+  if constexpr (std::is_same_v<DirtyPlan, compute::HighPrecisionDirtyPlan>) {
+    compute::HighPrecisionDirtyWriteBuffer staging(false);
+    compute::HighPrecisionDirtyNodeExecutor executor(context, staging);
+    executor.execute(target_copy,
+                     prepared.dirty_plan.entries.at(kTargetNodeId));
+    return staging.has_output(kTargetNodeId);
+  } else {
+    static_assert(std::is_same_v<DirtyPlan, compute::RealTimeDirtyPlan>);
+    compute::RealtimeProxyGraph proxy_graph;
+    proxy_graph.synchronize_with_graph(graph);
+    compute::RealtimeProxyWriteBuffer staging(proxy_graph, false);
+    compute::RealTimeDirtyNodeExecutor executor(context, proxy_graph, staging);
+    executor.execute(target_copy,
+                     prepared.dirty_plan.entries.at(kTargetNodeId));
+    return staging.has_output(kTargetNodeId);
+  }
+}
+
+/**
+ * @brief Captures stale rectangular-route preparation and wrong execution.
+ *
+ * @throws std::bad_alloc when retained diagnostics allocate.
+ * @note A correct route snapshot rejects before execution. When the snapshot
+ * is absent, this result records the newly selected population identity and
+ * deliberately enters that provider to make the old mismatch observable.
+ */
+struct RectangularRoutePreparationResult final {
+  /** @brief Whether preparation rejected the stale route. */
+  bool rejected = false;
+  /** @brief Typed stale-route error, or Unknown when no rejection occurred. */
+  GraphErrc error = GraphErrc::Unknown;
+  /** @brief Current task-population implementation identity when prepared. */
+  std::uint64_t population_identity = 0U;
+  /** @brief Whether incorrect provider execution created request-local data. */
+  bool staged_output = false;
+};
+
+/**
+ * @brief Runs production dirty preparation after a rectangular route switch.
+ *
+ * @tparam DirtyPlan HighPrecisionDirtyPlan or RealTimeDirtyPlan.
+ * @param graph Graph that produced dirty_plan under the predecessor route.
+ * @param dirty_plan Callback-free predecessor plan moved into preparation.
+ * @param request Same-domain task-population request.
+ * @return Typed rejection, or the wrong successor identity/staging evidence.
+ * @throws Non-GraphError preparation and provider exceptions unchanged.
+ * @note The helper supplies the same CPU inventory to both phases; only the
+ * exact operation generation changes.
+ */
+template <typename DirtyPlan>
+RectangularRoutePreparationResult prepare_after_rectangular_route_switch(
+    GraphModel& graph, DirtyPlan dirty_plan,
+    const compute::ComputeRequest& request) {
+  RectangularRoutePreparationResult result;
+  try {
+    const compute::PreparedDirtyPlan<DirtyPlan> prepared =
+        compute::prepare_dirty_execution(graph, std::move(dirty_plan), request,
+                                         {Device::CPU});
+    const auto target_work =
+        std::find_if(prepared.compute_plan.planned_work.begin(),
+                     prepared.compute_plan.planned_work.end(),
+                     [](const compute::PlannedNodeWork& work) {
+                       return work.node_id == 121;
+                     });
+    if (target_work == prepared.compute_plan.planned_work.end() ||
+        !target_work->operation_route.has_value()) {
+      throw std::logic_error(
+          "rectangular target lacks a task-population route");
+    }
+    result.population_identity =
+        target_work->operation_route->implementation_identity;
+    result.staged_output = execute_rectangular_target_from_current_route(
+        graph, prepared, request.intent);
+  } catch (const GraphError& error) {
+    result.rejected = true;
+    result.error = error.code();
+  }
+  return result;
 }
 
 /**
@@ -3997,6 +4318,236 @@ TEST(CpuDenseTensorImageOperation,
   } catch (const GraphError& error) {
     EXPECT_EQ(error.code(), GraphErrc::ComputeError);
   }
+}
+
+/**
+ * @brief Freezes ImageRect HP planning to its exact selected generation.
+ *
+ * @return Nothing; GoogleTest reports route, Region/dependency, provider, or
+ * publication mismatches.
+ * @throws Graph, registry, Value, planning, preparation, or execution
+ * exceptions unchanged.
+ * @note The stable A generation must prepare and execute. Replacing it with a
+ * callback-distinct B generation after Region planning must reject before B
+ * provider entry or request-local staging, leaving the live Graph unchanged.
+ */
+TEST(CpuDenseTensorImageOperation,
+     ImageRectHpPlanRejectsRouteSwitchBeforeTaskPopulation) {
+  ops::register_core_operations();
+  const std::string type = "issue132_rectangular_route";
+  const std::string subtype = "hp";
+  ScopedRectangularRouteKey cleanup(type, subtype);
+  auto route_a = std::make_shared<RectangularRouteProbe>();
+  route_a->dirty_roi = PixelRect{64, 64, 8, 8};
+  route_a->dependency_roi = PixelRect{128, 64, 8, 8};
+  auto route_b = std::make_shared<RectangularRouteProbe>();
+  route_b->dirty_roi = PixelRect{0, 192, 8, 8};
+  route_b->dependency_roi = PixelRect{192, 0, 8, 8};
+  publish_rectangular_route_generation(
+      type, subtype, ComputeIntent::GlobalHighPrecision, route_a, true);
+
+  const auto selected_a = OpRegistry::instance().select_implementation(
+      type, subtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected_a.has_value());
+  GraphModel graph("cache/rectangular-route-freeze-hp");
+  populate_rectangular_route_graph(&graph, type, subtype);
+  GraphTraversalService traversal;
+  RoiPropagationService propagation({Device::CPU},
+                                    ComputeIntent::GlobalHighPrecision);
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+  const PixelRect requested{16, 16, 8, 8};
+  const compute::HighPrecisionDirtyPlan stable_plan =
+      planner.plan_high_precision(graph, 121, requested);
+
+  EXPECT_GT(route_a->dirty_entries.load(std::memory_order_relaxed), 0);
+  EXPECT_GT(route_a->dependency_entries.load(std::memory_order_relaxed), 0);
+  const auto a_mapping = std::find_if(
+      stable_plan.snapshot.edge_mappings.begin(),
+      stable_plan.snapshot.edge_mappings.end(),
+      [](const compute::DirtyEdgeMapping& mapping) {
+        return mapping.from_node_id == 120 && mapping.to_node_id == 121;
+      });
+  ASSERT_NE(a_mapping, stable_plan.snapshot.edge_mappings.end());
+  EXPECT_EQ(a_mapping->from_roi, (PixelRect{64, 64, 128, 64}));
+  EXPECT_EQ(stable_plan.operation_routes.intent,
+            ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(stable_plan.operation_routes.available_devices,
+            (std::vector<Device>{Device::CPU}));
+  EXPECT_EQ(stable_plan.operation_routes.node_routes.size(), 2U);
+  const auto stable_frozen = stable_plan.operation_routes.node_routes.find(121);
+  if (stable_frozen != stable_plan.operation_routes.node_routes.end()) {
+    EXPECT_EQ(stable_frozen->second.route.implementation_identity,
+              selected_a->implementation_identity);
+  }
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 121;
+  request.parallel = true;
+  request.dirty_roi = requested;
+  const compute::PreparedDirtyPlan<compute::HighPrecisionDirtyPlan> stable =
+      compute::prepare_dirty_execution(
+          graph, compute::HighPrecisionDirtyPlan(stable_plan), request,
+          {Device::CPU});
+  const auto stable_work = std::find_if(
+      stable.compute_plan.planned_work.begin(),
+      stable.compute_plan.planned_work.end(),
+      [](const compute::PlannedNodeWork& work) { return work.node_id == 121; });
+  ASSERT_NE(stable_work, stable.compute_plan.planned_work.end());
+  ASSERT_TRUE(stable_work->operation_route.has_value());
+  EXPECT_EQ(stable_work->operation_route->implementation_identity,
+            selected_a->implementation_identity);
+  EXPECT_TRUE(execute_rectangular_target_from_current_route(graph, stable,
+                                                            request.intent));
+  EXPECT_EQ(route_a->provider_entries.load(std::memory_order_relaxed), 1);
+  EXPECT_FALSE(graph.node(121).cached_output_high_precision.has_value());
+  route_a->provider_entries.store(0, std::memory_order_relaxed);
+
+  compute::HighPrecisionDirtyPlan missing_route_plan = stable_plan;
+  missing_route_plan.operation_routes.node_routes.clear();
+  const RectangularRoutePreparationResult missing_route =
+      prepare_after_rectangular_route_switch(
+          graph, std::move(missing_route_plan), request);
+  EXPECT_TRUE(missing_route.rejected);
+  EXPECT_EQ(missing_route.error, GraphErrc::NoOperation);
+  EXPECT_EQ(missing_route.population_identity, 0U);
+  EXPECT_FALSE(missing_route.staged_output);
+  EXPECT_EQ(route_a->provider_entries.load(std::memory_order_relaxed), 0);
+
+  const compute::HighPrecisionDirtyPlan stale_plan =
+      planner.plan_high_precision(graph, 121, requested);
+  publish_rectangular_route_generation(
+      type, subtype, ComputeIntent::GlobalHighPrecision, route_b, false);
+  const auto selected_b = OpRegistry::instance().select_implementation(
+      type, subtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected_b.has_value());
+  EXPECT_NE(selected_b->implementation_identity,
+            selected_a->implementation_identity);
+  std::unordered_map<int, PixelSize> b_sizes;
+  const UpstreamRoiProjection b_projection =
+      propagation.compute_upstream_projection(graph.node(121), requested, graph,
+                                              b_sizes);
+  EXPECT_EQ(b_projection.shared_roi, route_b->dirty_roi);
+  ASSERT_TRUE(b_projection.dependency_input_index.has_value());
+  EXPECT_EQ(b_projection.dependency_roi, route_b->dependency_roi);
+
+  const RectangularRoutePreparationResult switched =
+      prepare_after_rectangular_route_switch(graph, stale_plan, request);
+  EXPECT_TRUE(switched.rejected);
+  EXPECT_EQ(switched.error, GraphErrc::NoOperation);
+  EXPECT_EQ(switched.population_identity, 0U);
+  EXPECT_FALSE(switched.staged_output);
+  EXPECT_EQ(route_b->provider_entries.load(std::memory_order_relaxed), 0);
+  EXPECT_FALSE(graph.node(121).cached_output_high_precision.has_value());
+}
+
+/**
+ * @brief Freezes ImageRect RT planning to its exact selected generation.
+ *
+ * @return Nothing; GoogleTest reports route, Region/dependency, provider, or
+ * publication mismatches.
+ * @throws Graph, registry, Value, planning, preparation, or execution
+ * exceptions unchanged.
+ * @note This mirrors the HP generation switch through the independent RT
+ * intent and real RealtimeProxyWriteBuffer seam. The successor may shape task
+ * population but must never enter its provider or stage proxy output.
+ */
+TEST(CpuDenseTensorImageOperation,
+     ImageRectRtPlanRejectsRouteSwitchBeforeTaskPopulation) {
+  ops::register_core_operations();
+  const std::string type = "issue132_rectangular_route";
+  const std::string subtype = "rt";
+  ScopedRectangularRouteKey cleanup(type, subtype);
+  auto route_a = std::make_shared<RectangularRouteProbe>();
+  route_a->dirty_roi = PixelRect{64, 64, 8, 8};
+  route_a->dependency_roi = PixelRect{128, 64, 8, 8};
+  auto route_b = std::make_shared<RectangularRouteProbe>();
+  route_b->dirty_roi = PixelRect{0, 192, 8, 8};
+  route_b->dependency_roi = PixelRect{192, 0, 8, 8};
+  publish_rectangular_route_generation(
+      type, subtype, ComputeIntent::RealTimeUpdate, route_a, true);
+
+  const auto selected_a = OpRegistry::instance().select_implementation(
+      type, subtype, {Device::CPU}, ComputeIntent::RealTimeUpdate);
+  ASSERT_TRUE(selected_a.has_value());
+  GraphModel graph("cache/rectangular-route-freeze-rt");
+  populate_rectangular_route_graph(&graph, type, subtype);
+  GraphTraversalService traversal;
+  RoiPropagationService propagation({Device::CPU},
+                                    ComputeIntent::RealTimeUpdate);
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+  const PixelRect requested{16, 16, 8, 8};
+  const compute::RealTimeDirtyPlan stable_plan =
+      planner.plan_real_time(graph, 121, requested);
+
+  EXPECT_GT(route_a->dirty_entries.load(std::memory_order_relaxed), 0);
+  EXPECT_GT(route_a->dependency_entries.load(std::memory_order_relaxed), 0);
+  const auto a_mapping = std::find_if(
+      stable_plan.snapshot.edge_mappings.begin(),
+      stable_plan.snapshot.edge_mappings.end(),
+      [](const compute::DirtyEdgeMapping& mapping) {
+        return mapping.from_node_id == 120 && mapping.to_node_id == 121;
+      });
+  ASSERT_NE(a_mapping, stable_plan.snapshot.edge_mappings.end());
+  EXPECT_EQ(a_mapping->from_roi, (PixelRect{64, 64, 128, 64}));
+  EXPECT_EQ(stable_plan.operation_routes.intent, ComputeIntent::RealTimeUpdate);
+  EXPECT_EQ(stable_plan.operation_routes.available_devices,
+            (std::vector<Device>{Device::CPU}));
+  EXPECT_EQ(stable_plan.operation_routes.node_routes.size(), 2U);
+  const auto stable_frozen = stable_plan.operation_routes.node_routes.find(121);
+  if (stable_frozen != stable_plan.operation_routes.node_routes.end()) {
+    EXPECT_EQ(stable_frozen->second.route.implementation_identity,
+              selected_a->implementation_identity);
+  }
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::RealTimeUpdate;
+  request.target_node_id = 121;
+  request.parallel = true;
+  request.dirty_roi = requested;
+  const compute::PreparedDirtyPlan<compute::RealTimeDirtyPlan> stable =
+      compute::prepare_dirty_execution(graph,
+                                       compute::RealTimeDirtyPlan(stable_plan),
+                                       request, {Device::CPU});
+  const auto stable_work = std::find_if(
+      stable.compute_plan.planned_work.begin(),
+      stable.compute_plan.planned_work.end(),
+      [](const compute::PlannedNodeWork& work) { return work.node_id == 121; });
+  ASSERT_NE(stable_work, stable.compute_plan.planned_work.end());
+  ASSERT_TRUE(stable_work->operation_route.has_value());
+  EXPECT_EQ(stable_work->operation_route->implementation_identity,
+            selected_a->implementation_identity);
+  EXPECT_TRUE(execute_rectangular_target_from_current_route(graph, stable,
+                                                            request.intent));
+  EXPECT_EQ(route_a->provider_entries.load(std::memory_order_relaxed), 1);
+  EXPECT_FALSE(graph.node(121).cached_output_high_precision.has_value());
+  route_a->provider_entries.store(0, std::memory_order_relaxed);
+
+  const compute::RealTimeDirtyPlan stale_plan =
+      planner.plan_real_time(graph, 121, requested);
+  publish_rectangular_route_generation(
+      type, subtype, ComputeIntent::RealTimeUpdate, route_b, false);
+  const auto selected_b = OpRegistry::instance().select_implementation(
+      type, subtype, {Device::CPU}, ComputeIntent::RealTimeUpdate);
+  ASSERT_TRUE(selected_b.has_value());
+  EXPECT_NE(selected_b->implementation_identity,
+            selected_a->implementation_identity);
+  std::unordered_map<int, PixelSize> b_sizes;
+  const UpstreamRoiProjection b_projection =
+      propagation.compute_upstream_projection(graph.node(121), requested, graph,
+                                              b_sizes);
+  EXPECT_EQ(b_projection.shared_roi, route_b->dirty_roi);
+  ASSERT_TRUE(b_projection.dependency_input_index.has_value());
+  EXPECT_EQ(b_projection.dependency_roi, route_b->dependency_roi);
+
+  const RectangularRoutePreparationResult switched =
+      prepare_after_rectangular_route_switch(graph, stale_plan, request);
+  EXPECT_TRUE(switched.rejected);
+  EXPECT_EQ(switched.error, GraphErrc::NoOperation);
+  EXPECT_EQ(switched.population_identity, 0U);
+  EXPECT_FALSE(switched.staged_output);
+  EXPECT_EQ(route_b->provider_entries.load(std::memory_order_relaxed), 0);
+  EXPECT_FALSE(graph.node(121).cached_output_high_precision.has_value());
 }
 
 /**

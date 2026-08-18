@@ -112,10 +112,10 @@ struct DirtyRegionPlannedOperationRoute {
  *
  * @throws std::bad_alloc when owned inventory, map, keys, or route metadata
  * allocate.
- * @note An empty `node_routes` map means the dirty plan did not require a
- * route-sensitive exact Region contract. TensorSlice HP planning fills the
- * context and every executable node route; current ImageRect and RT plans
- * leave it empty.
+ * @note Every nonempty HP or RT Region plan fills the context and freezes one
+ * route for every executable node. An empty map is valid only when subsequent
+ * pruning leaves no active work; active task population treats it as a
+ * fail-closed route-presence mismatch.
  */
 struct DirtyRegionOperationRouteSnapshot {
   /** @brief Intent used for every frozen registry selection. */
@@ -149,7 +149,8 @@ struct HighPrecisionDirtyPlan {
 
   /**
    * @brief Callback-free exact Region route authority for task population.
-   * @note Empty for the rectangular HP planning path.
+   * @note ImageRect and TensorSlice planning both freeze every executable node
+   * route without retaining callbacks or plugin DSO leases.
    */
   DirtyRegionOperationRouteSnapshot operation_routes;
 };
@@ -176,7 +177,8 @@ struct RealTimeDirtyPlan {
 
   /**
    * @brief Callback-free exact Region route authority for task population.
-   * @note Current RT planning rejects TensorSlice and leaves this empty.
+   * @note Current RT planning rejects TensorSlice; every accepted ImageRect
+   * plan freezes every executable node route.
    */
   DirtyRegionOperationRouteSnapshot operation_routes;
 };
@@ -407,10 +409,13 @@ class DirtyRegionPlanner {
    * @param node_id Target node for the dirty request.
    * @param dirty_roi Incoming zero-based HP storage dirty ROI.
    * @return Domain-specific dirty plan.
-   * @throws GraphError from request validation, ROI projection, propagation, or
-   * empty plan detection.
+   * @throws GraphError from request validation, route selection, ROI
+   * projection, propagation, or empty plan detection. No eligible operation
+   * route is reported as `GraphErrc::NoOperation`.
    * @note The template is defined in the .cpp and instantiated only for the
-   * built-in HP and RT policies.
+   * built-in HP and RT policies. Each executable route is selected before its
+   * propagation behavior is consumed, then reduced to callback-free scalar
+   * identity before the plan escapes.
    */
   template <typename Policy>
   typename Policy::Plan plan_dirty_domain(GraphModel& graph, int node_id,
@@ -427,7 +432,9 @@ class DirtyRegionPlanner {
    * @param hp_size_cache Shared HP extent cache for the planning request.
    * @return Mutable entry for node_id.
    * @throws GraphError from extent resolution when graph metadata is invalid.
-   * @note Existing entries preserve accumulated ROIs; only missing extent or
+   * @note A newly inserted entry selects and freezes its callback-free route
+   * before any later propagation can consume callback behavior. Existing
+   * entries preserve that route and accumulated ROIs; only missing extent or
    * halo metadata is refreshed.
    */
   template <typename Policy>
@@ -443,8 +450,11 @@ class DirtyRegionPlanner {
    * @param graph Graph whose image-input edges are traversed.
    * @param plan Plan whose entries and edge mappings are updated.
    * @param hp_size_cache Shared HP extent cache for parent entry creation.
-   * @throws GraphError from ROI propagation or extent resolution.
-   * @note The method preserves policy-specific HP and RT clipping order.
+   * @throws GraphError from exact route selection, ROI propagation, or extent
+   * resolution.
+   * @note The method preserves policy-specific HP and RT clipping order. Dirty
+   * and dependency behavior is invoked through the same selected revision
+   * whose callback-free route is stored in the plan.
    */
   template <typename Policy>
   void propagate_dirty_entries(

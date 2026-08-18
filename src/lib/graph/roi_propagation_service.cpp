@@ -752,6 +752,65 @@ std::optional<DependencyRoiContribution> dependency_lut_roi(
 }
 
 /**
+ * @brief Computes one upstream projection against an optional exact route.
+ *
+ * @param resolver Extent authority shared by the owning propagation service.
+ * @param node Node whose output demand is projected to its image inputs.
+ * @param downstream_roi Requested output ROI.
+ * @param graph Graph supplying topology, extents, parameters, and metadata.
+ * @param size_cache Request-local output extent cache.
+ * @param selected Exact selected implementation, or null for legacy
+ *        operation-level propagation lookup.
+ * @return Shared and input-selected upstream ROI contributions.
+ * @throws GraphError or callback exceptions from extent, parameter, dirty,
+ *         spatial, or dependency propagation.
+ * @throws std::bad_alloc when request-local snapshots cannot allocate.
+ * @note When `selected` is non-null, every optional callback and metadata
+ *       decision is resolved from that same revision. Missing callbacks use
+ *       only the documented identity/absence behavior and never a sibling
+ *       registry revision.
+ */
+UpstreamRoiProjection compute_upstream_projection_for_route(
+    const GraphExtentResolver& resolver, const Node& node,
+    const PixelRect& downstream_roi, const GraphModel& graph,
+    std::unordered_map<int, PixelSize>& size_cache,
+    const OpImplementation* selected) {
+  if (is_rect_empty(downstream_roi)) {
+    return {};
+  }
+
+  auto get_size = [&](int nid) {
+    return resolver.resolve_output_extent(graph, nid, size_cache);
+  };
+  const PixelRect clamped_roi =
+      clamp_rect_to_bounds(downstream_roi, get_size(node.id));
+  if (is_rect_empty(clamped_roi)) {
+    return {};
+  }
+
+  const PixelSize output_extent = get_size(node.id);
+  DependencyInputState input_state =
+      dependency_input_state(graph, node.id, get_size);
+  const plugin::ParameterMap effective_parameters =
+      resolve_effective_parameter_snapshot(node, graph);
+  RoiAccumulator upstream;
+  append_operator_upstream_roi(node, clamped_roi, output_extent, graph,
+                               input_state.extents, effective_parameters,
+                               selected, upstream);
+  append_spatial_metadata_roi(node, clamped_roi, upstream);
+  UpstreamRoiProjection projection;
+  projection.shared_roi = upstream.value();
+  const auto dependency = dependency_lut_roi(
+      node, graph, clamped_roi, output_extent, std::move(input_state),
+      effective_parameters, selected);
+  if (dependency && !is_rect_empty(dependency->roi)) {
+    projection.dependency_input_index = dependency->input_index;
+    projection.dependency_roi = dependency->roi;
+  }
+  return projection;
+}
+
+/**
  * @brief Propagates one forward image edge into a child ROI.
  *
  * @param graph Graph containing the child node.
@@ -994,39 +1053,26 @@ PixelRect UpstreamRoiProjection::combined_roi() const noexcept {
 UpstreamRoiProjection RoiPropagationService::compute_upstream_projection(
     const Node& node, const PixelRect& downstream_roi, const GraphModel& graph,
     std::unordered_map<int, PixelSize>& size_cache) const {
-  if (is_rect_empty(downstream_roi))
+  if (is_rect_empty(downstream_roi)) {
     return {};
-
-  auto get_size = [&](int nid) {
-    return extent_resolver_.resolve_output_extent(graph, nid, size_cache);
-  };
-  PixelRect clamped_roi =
-      clamp_rect_to_bounds(downstream_roi, get_size(node.id));
-  if (is_rect_empty(clamped_roi))
-    return {};
-
-  const PixelSize output_extent = get_size(node.id);
+  }
   const std::optional<OpImplementation> selected =
       select_route_implementation(node);
-  DependencyInputState input_state =
-      dependency_input_state(graph, node.id, get_size);
-  const plugin::ParameterMap effective_parameters =
-      resolve_effective_parameter_snapshot(node, graph);
-  RoiAccumulator upstream;
-  append_operator_upstream_roi(node, clamped_roi, output_extent, graph,
-                               input_state.extents, effective_parameters,
-                               selected ? &*selected : nullptr, upstream);
-  append_spatial_metadata_roi(node, clamped_roi, upstream);
-  UpstreamRoiProjection projection;
-  projection.shared_roi = upstream.value();
-  const auto dependency = dependency_lut_roi(
-      node, graph, clamped_roi, output_extent, std::move(input_state),
-      effective_parameters, selected ? &*selected : nullptr);
-  if (dependency && !is_rect_empty(dependency->roi)) {
-    projection.dependency_input_index = dependency->input_index;
-    projection.dependency_roi = dependency->roi;
-  }
-  return projection;
+  return compute_upstream_projection_for_route(
+      extent_resolver_, node, downstream_roi, graph, size_cache,
+      selected ? &*selected : nullptr);
+}
+
+/** @copydoc
+ * RoiPropagationService::compute_upstream_projection_for_selected_implementation
+ */
+UpstreamRoiProjection
+RoiPropagationService::compute_upstream_projection_for_selected_implementation(
+    const Node& node, const PixelRect& downstream_roi, const GraphModel& graph,
+    std::unordered_map<int, PixelSize>& size_cache,
+    const OpImplementation& selected) const {
+  return compute_upstream_projection_for_route(
+      extent_resolver_, node, downstream_roi, graph, size_cache, &selected);
 }
 
 PixelRect RoiPropagationService::compute_upstream_roi(

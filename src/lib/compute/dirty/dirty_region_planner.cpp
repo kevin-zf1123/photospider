@@ -217,6 +217,86 @@ std::vector<Device> canonicalize_route_devices(
 }
 
 /**
+ * @brief Selects one exact dirty route and freezes its callback-free identity.
+ *
+ * @param propagation Request-bound route and ROI authority.
+ * @param node Executable graph node whose current route is selected.
+ * @param node_id Stable node id used as the snapshot key and in diagnostics.
+ * @param snapshot Request-local route snapshot receiving scalar route fields.
+ * @return Owned selected implementation for immediate propagation callbacks,
+ * or nullopt when no route is currently eligible.
+ * @throws GraphError with `GraphErrc::NoOperation` when a repeated selection in
+ * the same planning pass changes identity.
+ * @throws std::bad_alloc or callback-copy exceptions from registry selection
+ * or callback-free route construction.
+ * @note The returned value may own callbacks and a plugin DSO lease. Callers
+ * must keep it only for immediate planning; `snapshot` retains only operation
+ * key, revision identity, device, callback shape, and metadata.
+ */
+std::optional<OpImplementation> select_and_freeze_dirty_operation_route(
+    const RoiPropagationService& propagation, const Node& node, int node_id,
+    DirtyRegionOperationRouteSnapshot* snapshot) {
+  std::optional<OpImplementation> selected =
+      propagation.select_route_implementation(node);
+  if (!selected.has_value() || selected->implementation_identity == 0U) {
+    return std::nullopt;
+  }
+
+  DirtyRegionPlannedOperationRoute frozen{
+      make_key(node.type, node.subtype),
+      make_planned_operation_route(*selected),
+  };
+  const auto [it, inserted] =
+      snapshot->node_routes.emplace(node_id, std::move(frozen));
+  if (!inserted &&
+      (it->second.operation_key != make_key(node.type, node.subtype) ||
+       !planned_operation_route_matches(it->second.route, *selected))) {
+    throw GraphError(
+        GraphErrc::NoOperation,
+        "Dirty Region operation route changed during planning at node " +
+            std::to_string(node_id) + ".");
+  }
+  return selected;
+}
+
+/**
+ * @brief Reacquires the callback-bearing revision frozen for one dirty node.
+ *
+ * @param node Current graph node whose operation key must remain unchanged.
+ * @param node_id Stable node id used to find the frozen route.
+ * @param snapshot Request-local callback-free route authority.
+ * @return Exact active implementation, or nullopt when planning originally
+ *         found no eligible route for this node.
+ * @throws GraphError with `GraphErrc::NoOperation` when the operation key or
+ * exact revision/device/shape/metadata route is no longer active.
+ * @throws std::bad_alloc or callback-copy exceptions from exact registry
+ * reacquisition.
+ * @note The returned callback and any DSO lease are request-local temporaries;
+ * no callback-bearing value is written back to `snapshot`.
+ */
+std::optional<OpImplementation> reacquire_frozen_dirty_operation_route(
+    const Node& node, int node_id,
+    const DirtyRegionOperationRouteSnapshot& snapshot) {
+  const auto frozen = snapshot.node_routes.find(node_id);
+  if (frozen == snapshot.node_routes.end()) {
+    return std::nullopt;
+  }
+  const std::string operation_key = make_key(node.type, node.subtype);
+  const std::optional<OpImplementation> selected =
+      OpRegistry::instance().get_implementation_by_identity(
+          node.type, node.subtype,
+          frozen->second.route.implementation_identity);
+  if (frozen->second.operation_key != operation_key || !selected.has_value() ||
+      !planned_operation_route_matches(frozen->second.route, *selected)) {
+    throw GraphError(
+        GraphErrc::NoOperation,
+        "Dirty Region operation route changed during planning at node " +
+            std::to_string(node_id) + ".");
+  }
+  return selected;
+}
+
+/**
  * @brief Selects and freezes one exact core TensorSlice execution route.
  *
  * @param propagation Request-bound route selection authority.
@@ -370,6 +450,10 @@ typename Policy::Entry& DirtyRegionPlanner::ensure_plan_entry(
     std::unordered_map<int, PixelSize>& hp_size_cache) {
   auto [it, inserted] = plan.entries.emplace(node_id, typename Policy::Entry{});
   typename Policy::Entry& entry = it->second;
+  if (inserted) {
+    (void)select_and_freeze_dirty_operation_route(
+        roi_propagation_, graph.node(node_id), node_id, &plan.operation_routes);
+  }
   if (inserted || !has_valid_size(entry.hp_size)) {
     entry.hp_data_window = extent_resolver_.resolve_output_data_window(
         graph, node_id, hp_size_cache);
@@ -399,6 +483,9 @@ void DirtyRegionPlanner::propagate_dirty_entries(
       continue;
 
     const Node& current_node = graph.node(current_id);
+    const std::optional<OpImplementation> selected =
+        reacquire_frozen_dirty_operation_route(current_node, current_id,
+                                               plan.operation_routes);
     if (has_stabilized_geometry(current_id)) {
       current_entry.roi_hp = detail::full_extent_roi(current_entry.hp_size);
     }
@@ -456,8 +543,13 @@ void DirtyRegionPlanner::propagate_dirty_entries(
     Policy::refresh_halo_fields(current_entry);
 
     const UpstreamRoiProjection upstream_projection =
-        roi_propagation_.compute_upstream_projection(
-            current_node, current_entry.roi_hp, graph, size_cache);
+        selected.has_value()
+            ? roi_propagation_
+                  .compute_upstream_projection_for_selected_implementation(
+                      current_node, current_entry.roi_hp, graph, size_cache,
+                      *selected)
+            : roi_propagation_.compute_upstream_projection(
+                  current_node, current_entry.roi_hp, graph, size_cache);
 
     for (const auto& edge : graph.upstream_edges(current_id)) {
       if (edge.kind != GraphTopologyEdgeKind::ImageInput ||
@@ -554,6 +646,9 @@ typename Policy::Plan DirtyRegionPlanner::plan_dirty_domain(
   if (result.execution_order.empty())
     result.execution_order.push_back(node_id);
   result.snapshot.graph_generation = select_plan_generation(graph);
+  result.operation_routes.intent = roi_propagation_.intent();
+  result.operation_routes.available_devices =
+      canonicalize_route_devices(roi_propagation_.available_devices());
 
   std::unordered_map<int, PixelSize> hp_size_cache;
   typename Policy::Entry& target_entry =

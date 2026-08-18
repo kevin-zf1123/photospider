@@ -848,8 +848,8 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
  * @param selection Active dirty task overlay after cache and external
  * satisfaction pruning.
  * @param request Intent and target associated with the same dirty request.
- * @return Nothing when no route-sensitive Region snapshot exists, no task is
- * active after pruning, or every active node still matches.
+ * @return Nothing when no task is active after pruning or every active node
+ * still matches its frozen route.
  * @throws GraphError with `GraphErrc::NoOperation` when intent, device
  * inventory, operation key, route presence, identity, callback shape, or
  * metadata differs.
@@ -859,10 +859,11 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
  * cannot allocate.
  * @note An empty active selection returns before intent, device-inventory,
  * task-id, or node-route comparison because no planned operation can execute.
- * Otherwise inactive and externally satisfied nodes remain ignored while every
- * active node is checked. Validation runs before ROI application, task
- * materialization, callable resolution, resource estimation, gate/grant
- * construction, reservation, or provider entry.
+ * An empty route snapshot with active work is a route-presence mismatch and
+ * fails closed. Otherwise inactive and externally satisfied nodes remain
+ * ignored while every active node is checked. Validation runs before ROI
+ * application, task materialization, callable resolution, resource
+ * estimation, gate/grant construction, reservation, or provider entry.
  */
 void validate_dirty_region_operation_routes(
     const GraphModel& graph,

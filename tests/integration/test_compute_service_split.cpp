@@ -3260,9 +3260,14 @@ void register_counted_monolithic_operation(
  * @param execution_order Complete dependency order retained for demand cuts.
  * @param dirty_node_ids Nodes carrying actual phase-two dirty work.
  * @return HP plan whose snapshot selects exactly dirty_node_ids.
- * @throws std::bad_alloc when plan or snapshot storage grows.
+ * @throws GraphError with `GraphErrc::NoOperation` when a dirty candidate has
+ * no current HP route.
+ * @throws std::bad_alloc or callback-copy exceptions when route, plan, or
+ * snapshot storage grows.
  * @note Nodes omitted from dirty_node_ids remain valid topology boundaries but
- * have neither an HpPlanEntry nor an active dirty task candidate.
+ * have neither an HpPlanEntry nor an active dirty task candidate. The helper
+ * mirrors production Region planning by freezing callback-free routes for
+ * every candidate that task selection may retain.
  */
 compute::HighPrecisionDirtyPlan make_sparse_monolithic_dirty_plan(
     const GraphModel& graph, const std::vector<int>& execution_order,
@@ -3270,11 +3275,26 @@ compute::HighPrecisionDirtyPlan make_sparse_monolithic_dirty_plan(
   compute::HighPrecisionDirtyPlan plan;
   plan.execution_order = execution_order;
   plan.snapshot.graph_generation = graph.topology_generation();
+  plan.operation_routes.intent = ComputeIntent::GlobalHighPrecision;
+  plan.operation_routes.available_devices = {Device::CPU};
   const PixelRect roi{0, 0, 8, 8};
   const PixelSize extent{8, 8};
   const RegionSet region =
       RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
   for (int node_id : dirty_node_ids) {
+    const Node& node = graph.node(node_id);
+    const std::optional<OpImplementation> selected =
+        OpRegistry::instance().select_implementation(
+            node.type, node.subtype, {Device::CPU},
+            ComputeIntent::GlobalHighPrecision);
+    if (!selected.has_value()) {
+      throw GraphError(GraphErrc::NoOperation,
+                       "Sparse dirty fixture has no HP operation route.");
+    }
+    plan.operation_routes.node_routes.emplace(
+        node_id, compute::DirtyRegionPlannedOperationRoute{
+                     make_key(node.type, node.subtype),
+                     compute::make_planned_operation_route(*selected)});
     plan.entries.emplace(
         node_id,
         compute::HpPlanEntry{region, roi, extent, ImageBounds{0, 0, 8, 8}, 0});

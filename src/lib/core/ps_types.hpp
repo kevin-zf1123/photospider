@@ -1923,21 +1923,45 @@ class OpRegistry {
   /**
    * @brief Selects one coherent revisioned implementation including fallbacks.
    *
-   * Device-specific candidates retain the existing intent/device/cost ordering.
-   * When no device candidate survives, the method selects the matching HP/RT
-   * scalar slot and its metadata/ownership revision, then the legacy slot.
+   * The registry first snapshots device, scalar, legacy, metadata, auxiliary
+   * propagation, and ownership-revision state under its lock. Device candidates
+   * must have a nonzero identity, expose the requested device, satisfy the
+   * intent eligibility bit, and pass `candidate_filter`. HP ranks GPU, then
+   * ASIC/NPU, then CPU or other devices. RT ranks tiled CPU, then GPU, then
+   * remaining device/shape combinations. Lower `cost_score` wins within one
+   * priority, while an exact tie preserves first-seen registration order.
+   *
+   * Only when no device candidate survives does scalar fallback run. HP tries
+   * monolithic HP then tiled HP; RT tries tiled RT, tiled HP, then monolithic
+   * HP. Each scalar candidate must pass the same identity, intent, device, and
+   * filter checks. A coherent legacy callback/metadata/ownership candidate is
+   * considered last.
    *
    * @param type Operation type.
    * @param subtype Operation subtype.
-   * @param available_devices Route-visible devices.
-   * @param intent HP or RT selection policy.
-   * @param candidate_filter Optional task-shape compatibility predicate.
-   * @return Selected callback, metadata, device, and nonzero identity, or
-   * nullopt when no coherent candidate exists.
-   * @throws std::bad_alloc or callback-copy exceptions from snapshot creation.
+   * @param available_devices Route-visible device membership; caller order
+   *        does not override registry ordering.
+   * @param intent HP or RT selection and eligibility policy.
+   * @param candidate_filter Optional task-shape compatibility predicate. It is
+   *        invoked outside the registry lock for every otherwise eligible
+   *        device or fallback candidate.
+   * @return One selected execution callback plus metadata, exact nonzero
+   *         revision identity, device, callback shape, and the dirty, forward,
+   *         and dependency callbacks belonging to that same revision; or
+   *         nullopt when no coherent candidate exists.
+   * @throws std::bad_alloc or any callback-copy exception from coherent
+   *         snapshot materialization.
    * @throws Any exception raised by candidate_filter.
-   * @note The selected value owns its callback and any plugin DSO lease. A
-   * missing metadata record or ownership identity is not silently synthesized.
+   * @note The selected value owns its callbacks and any plugin DSO lease, so it
+   *       remains callable after concurrent replacement or unload. Invocation
+   *       and filtering occur outside registry locking and providers own
+   *       synchronization. A selected revision whose dirty or forward callback
+   *       is absent uses identity propagation at its consumer; an absent
+   *       dependency builder means no dependency contribution. Consumers must
+   *       never borrow those callbacks from a sibling revision. Missing
+   *       metadata or ownership identity is not synthesized. Long-lived plans
+   *       must immediately copy callback-free route fields and release this
+   *       callback-bearing value.
    */
   std::optional<OpImplementation> select_implementation(
       const std::string& type, const std::string& subtype,

@@ -98,13 +98,19 @@ class RoiPropagationService {
    * context.
    *
    * @param node Node whose operation key is selected.
-   * @return Owned callback, metadata, identity, and device snapshot, or
-   * nullopt when no implementation can run on the bound inventory.
-   * @throws std::bad_alloc or callback-copy exceptions from registry snapshot
-   * selection.
-   * @note The returned value may retain a plugin DSO lease. Region planning
-   * must immediately copy only its callback-free route fields and release this
-   * temporary before returning a plan.
+   * @return Owned execution and propagation callbacks, metadata, exact
+   *         revision identity, device, and callback-shape snapshot; or nullopt
+   *         when no implementation can run on the bound inventory and intent.
+   * @throws std::bad_alloc or any callback-copy exception from coherent
+   *         registry snapshot selection.
+   * @note This delegates to OpRegistry::select_implementation(): intent
+   *       eligibility is checked before HP/RT device-shape priority and cost,
+   *       followed only then by intent-specific scalar and legacy fallback.
+   *       All callbacks belong to the selected revision; absence uses identity
+   *       or no-dependency behavior and never a sibling callback. The returned
+   *       value remains valid across registry mutation and may retain a plugin
+   *       DSO lease. Region planning must immediately copy callback-free route
+   *       fields and release the temporary before returning a plan.
    */
   std::optional<OpImplementation> select_route_implementation(
       const Node& node) const;
@@ -203,19 +209,55 @@ class RoiPropagationService {
 
   /**
    * @brief Computes shared and input-selected upstream ROI contributions.
+   *
    * @param node Node whose input demand is being computed.
    * @param downstream_roi ROI in node output coordinates.
    * @param graph Graph supplying topology, caches, and extent context.
    * @param size_cache Request-local output extent cache.
    * @return Projection retaining dependency input-index routing.
-   * @throws GraphError or callback exceptions from extent/propagation logic.
-   * @note The effective parameter snapshot and all input extents are resolved
-   *       once and shared by dirty and dependency callbacks for this request.
+   * @throws GraphError or callback exceptions from extent, parameter, dirty,
+   *         spatial, or dependency propagation.
+   * @throws std::bad_alloc when route or request-local snapshots cannot
+   *         allocate.
+   * @note One exact implementation is selected using this service's intent and
+   *       device context, then its coherent dirty/dependency callbacks and
+   *       metadata consume one effective parameter and input-extent snapshot.
+   *       A selected revision with no dirty callback uses identity propagation;
+   *       one with no dependency builder adds no dependency demand. Only when
+   *       no implementation is selectable does this compatibility API consult
+   *       operation-level legacy propagation registrations.
    */
   UpstreamRoiProjection compute_upstream_projection(
       const Node& node, const PixelRect& downstream_roi,
       const GraphModel& graph,
       std::unordered_map<int, PixelSize>& size_cache) const;
+
+  /**
+   * @brief Computes upstream demand with one already selected exact revision.
+   *
+   * @param node Node whose input demand is being computed.
+   * @param downstream_roi ROI in node output coordinates.
+   * @param graph Graph supplying topology, caches, and extent context.
+   * @param size_cache Request-local output extent cache.
+   * @param selected Exact implementation returned by
+   *        select_route_implementation() for this node and service context.
+   * @return Projection retaining dependency input-index routing.
+   * @throws GraphError or callback exceptions from extent, parameter, dirty,
+   *         spatial, or dependency propagation.
+   * @throws std::bad_alloc when request-local snapshots cannot allocate.
+   * @note Dirty and dependency callbacks, their metadata, and the execution
+   *       identity all come from `selected`. If that revision omits a dirty
+   *       callback, identity propagation is used; if it omits a dependency
+   *       builder, no dependency contribution is produced. Neither absence
+   *       may borrow a callback from a sibling revision. The caller may keep
+   *       `selected` only long enough to copy callback-free route fields; the
+   *       value may own a plugin DSO lease and must not enter a long-lived
+   *       Region snapshot.
+   */
+  UpstreamRoiProjection compute_upstream_projection_for_selected_implementation(
+      const Node& node, const PixelRect& downstream_roi,
+      const GraphModel& graph, std::unordered_map<int, PixelSize>& size_cache,
+      const OpImplementation& selected) const;
 
   /**
    * @brief Computes the upstream input ROI required by one node output ROI.
