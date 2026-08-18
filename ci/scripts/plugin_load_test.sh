@@ -59,7 +59,7 @@ test -s "$CI_ARTIFACT_DIR/test_op_plugins.txt"
 
 run_gtest_checked plugin_manager_gtest \
   "$BUILD_DIR/tests/test_plugin_manager" \
-  "PluginManagerLifecycleTest.*"
+  "PluginManagerLifecycleTest.*:PluginManagerPureCAbiTest.*"
 
 case "$runtime_contract" in
   legacy_scheduler)
