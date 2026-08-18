@@ -80,6 +80,15 @@ exception translation。Null document 解码为空 map；无效 representation �
 `std::bad_alloc` 原样传播。确定性 fake 会验证精确 path、value、保留生命周期、error category
 与资源耗尽，而 cache code 不声明 YAML type。
 
+每次 load 都会收到从 frozen `PlannedOutputAuthority` 复制而来的
+`ImageDiskCacheOutputSchema`：是否计划 canonical image、精确 parameter-result 名称，以及是否
+计划任意 generic named Value。Generic schema 会在 filesystem inspection 之前成为
+incompatible miss。对于可表示 schema，任何既存 image/YAML sibling 集合都必须在进入任一 codec
+之前与计划的 image/parameter presence 精确一致。随后会解码预期 metadata；只有其 key set 与
+frozen parameter name 精确相等，该次尝试才能返回 Hit。Presence 或 key 不匹配会成为通往
+provider recomputation 的 miss；它绝不会成为被推迟到 strict output validation 的 partial Hit。
+缺失 sibling 仍是普通 miss。
+
 磁盘缓存加载尝试会保留既有 try-load 布尔返回契约，同时通过 GraphModel 私有的 disk-cache
 diagnostic store 记录最新诊断。该 store 独占 optional value 与 no-throw mutex，因此 worker
 record、reader snapshot、clear/reload reset、compute clone 与 staged publication 无法绕过同一套
@@ -95,9 +104,16 @@ worker，都必须在所属 model 销毁前排空并 join；任何访问都不�
 ## 当前耐久性与失败边界
 
 当前 cache save 不是 atomic cache-entry transaction。`GraphCacheService` 会创建目录，并针对
-最终的两个同级 path 调用已配置 image 与 metadata codec。因此 image payload 与 YAML metadata
-可以分别成功或失败。该 service 不提供 entry-level staging rename、rollback、manifest-last
-publication、file 或 directory synchronization receipt、retry protocol 或 crash recovery。
+最终的两个同级 path 调用已配置 image 与 metadata codec。完成 exact formal-output validation
+之后，generic named Value 会在 planned-byte admission 之前跳过 persistence。Complete 且可表示的
+output 会先写入全部 required sibling，再仅移除其实际 shape 排除的 configured sibling：data-only
+先写 YAML，再移除旧 image；image-only 先编码 image，再移除旧 YAML；image-plus-parameter 保留
+两者；empty 与 partial output 两者都不保留。Required write 失败会在 stale sibling cleanup 前传播；
+cleanup 失败则在成功 write 后传播，并可能留下 shape 不匹配的 pair，下一次 load 会在 codec entry
+前拒绝它。因此 image payload、YAML metadata 与 cleanup 可以分别成功或失败。该 service 不提供
+entry-level staging rename、rollback、manifest-last publication、file 或 directory
+synchronization receipt、retry protocol 或 crash recovery。Sequential save、parallel committer、
+compute-I/O executor、cache-all 与 synchronization 全部汇聚到同一 mechanism。
 
 `cache_all_nodes` 统计存在 HP output、因而尝试过 save path 的 node；该计数并不证明每个 node
 都配置了 artifact，也不证明存在 durable cache entry。Cache load diagnostic 是进程内关于最近
@@ -184,12 +200,15 @@ key。两类 token 都是 opaque、process-local runtime identity；disk reload 
 转成 generic Value storage。
 
 已配置 artifact path 仍为 `cache_root/node_id/location`，其中不包含带 revision 的 output-schema
-component。因此，只要 frozen plan 声明了任意 generic named Value，所有已配置 image artifact
-都会在 filesystem 或 codec inspection 之前被归类为 incompatible miss。在 exact formal output
-validation 之后，任何包含 generic named Value 的输出同样会在 planned-byte admission 或
-persistent side effect 之前跳过 image/YAML save。这样可以防止 operation schema replacement
-之后，较旧的 image-only artifact 进入当前 authority validation。Image-only schema 与仅含
-parameter metadata 的 schema 会保留既有 hit、save、error、timing 与 diagnostic 行为。
+component。因此，每次 read 都会携带完整 frozen image/parameter/generic shape，而不是信任 path。
+Generic named Value 会在 filesystem inspection 前把所有 configured artifact 归类为
+incompatible miss。对于可表示 shape，会在 codec 前检查既存 image 与 YAML sibling presence，且
+decoded metadata key 必须在 Hit 前与 frozen parameter-result name 精确匹配。因此，data-only plan
+旁的旧 image、image-only plan 旁的旧 YAML、不完整的 image-plus-parameter pair，或被替换的
+parameter name，都会成为 miss 并触发 provider recomputation，而不是导致 authority-validation
+failure。Exact formal output validation 之后，generic output 会跳过 persistence；可表示 save 会先
+写 required sibling，再依照上面的共同非事务 failure boundary 移除被排除的 predecessor。这样无需
+新增 generic durable format 或 persistent schema key，即可闭合 schema replacement。
 
 ## V-4 Region Validity
 

@@ -468,10 +468,9 @@ void NodeTaskRunner::try_load_disk_cache(const Node& target_node,
     return;
   }
   const PlannedOutputAuthority& authority = output_authority(node_idx);
-  const ImageDiskCacheOutputSchema disk_schema =
-      authority.named_value_output_names.empty()
-          ? ImageDiskCacheOutputSchema::NoGenericNamedValues
-          : ImageDiskCacheOutputSchema::ContainsGenericNamedValues;
+  const ImageDiskCacheOutputSchema disk_schema{
+      authority.image_output_name.has_value(), authority.parameter_output_names,
+      !authority.named_value_output_names.empty()};
   NodeOutput from_disk;
   if (cache_.try_load_from_disk_cache_into(graph_, target_node, from_disk,
                                            disk_schema)) {

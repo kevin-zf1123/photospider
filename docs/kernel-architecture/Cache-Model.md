@@ -110,6 +110,17 @@ unchanged. A deterministic fake verifies exact paths, values, retained
 lifetime, error categories, and resource exhaustion without declaring YAML
 types in cache code.
 
+Every load receives an `ImageDiskCacheOutputSchema` copied from the frozen
+`PlannedOutputAuthority`: whether the canonical image is planned, the exact
+parameter-result names, and whether any generic named Value is planned. A
+generic schema is an incompatible miss before filesystem inspection. For a
+representable schema, any existing image/YAML sibling set must exactly match
+the planned image/parameter presence before either codec is entered. Expected
+metadata is then decoded and its key set must exactly equal the frozen
+parameter names before the attempt can return Hit. A presence or key mismatch
+is a miss that routes to provider recomputation; it is never a partial Hit
+deferred to strict output validation. Missing siblings remain ordinary misses.
+
 Disk cache load attempts preserve the existing try-load bool contract while also
 recording the latest diagnostic through GraphModel's private disk-cache
 diagnostic store. That store exclusively owns the optional value and its
@@ -132,10 +143,21 @@ indistinguishable from a normal cache miss.
 
 Current cache save is not an atomic cache-entry transaction.
 `GraphCacheService` creates directories and invokes the configured image and
-metadata codecs against their final sibling paths. The image payload and YAML
-metadata can therefore succeed or fail independently. The service provides no
-entry-level staging rename, rollback, manifest-last publication, file or
-directory synchronization receipt, retry protocol, or crash recovery.
+metadata codecs against their final sibling paths. After exact formal-output
+validation, generic named Values skip persistence before planned-byte
+admission. A complete representable output writes every required sibling
+before removing only the configured sibling excluded by its actual shape:
+data-only writes YAML and then removes an old image; image-only encodes the
+image and then removes old YAML; image-plus-parameter retains both; empty and
+partial output retain neither. Required-write failure propagates before stale
+sibling cleanup, while cleanup failure propagates after successful writes and
+may leave a shape-mismatched pair that the next load rejects before codec
+entry. The image payload, YAML metadata, and cleanup can therefore succeed or
+fail independently. The service provides no entry-level staging rename,
+rollback, manifest-last publication, file or directory synchronization
+receipt, retry protocol, or crash recovery. Sequential save, parallel
+committer, compute-I/O executor, cache-all, and synchronization all converge on
+this same mechanism.
 
 `cache_all_nodes` counts nodes with present HP output for which the save path
 was attempted; the count is not proof that each node had a configured artifact
@@ -244,15 +266,19 @@ This image-only mechanism does not silently serialize generic named Values or
 turn parameter metadata into generic Value storage.
 
 The configured artifact path remains `cache_root/node_id/location` and contains
-no revisioned output-schema component. Consequently, a frozen plan that
-declares any generic named Value classifies every configured image artifact as
-an incompatible miss before filesystem or codec inspection. After exact formal
-output validation, an output containing any generic named Value likewise skips
-image/YAML save before planned-byte admission or persistent side effects. This
-prevents an older image-only artifact from entering current authority
-validation after an operation-schema replacement. Image-only and
-parameter-metadata-only schemas retain their existing hit, save, error, timing,
-and diagnostic behavior.
+no revisioned output-schema component. Consequently, each read carries the
+complete frozen image/parameter/generic shape rather than trusting the path.
+Generic named Values classify every configured artifact as an incompatible
+miss before filesystem inspection. For representable shapes, existing image
+and YAML sibling presence is checked before codecs, and decoded metadata keys
+must exactly match the frozen parameter-result names before Hit. Thus an old
+image beside a data-only plan, old YAML beside an image-only plan, a partial
+image-plus-parameter pair, or replaced parameter names all become misses and
+provider recomputation rather than authority-validation failures. After exact
+formal output validation, generic output skips persistence; representable save
+writes required siblings and then removes excluded predecessors according to
+the common non-transactional failure boundary above. This closes schema
+replacement without adding a generic durable format or persistent schema key.
 
 ## V-4 Region Validity
 

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <initializer_list>
@@ -62,6 +63,7 @@
 #include "runtime/graph_runtime.hpp"
 #include "runtime/interaction.hpp"
 #include "support/execution_service_test_access.hpp"
+#include "support/fake_cache_metadata_codec.hpp"
 #include "support/fake_image_artifact_codec.hpp"
 #include "support/kernel_test_access.hpp"
 #include "support/kernel_test_dependencies.hpp"
@@ -839,6 +841,97 @@ ImageBuffer project_image_output(const NodeOutput& output) {
         "Split test image projection requires a canonical Value.");
   }
   return value_image_adapter::snapshot_cpu_image_buffer(output.image_value());
+}
+
+/**
+ * @brief Owns detached metadata persisted by recording disk-cache codecs.
+ *
+ * @throws Nothing from default construction and destruction.
+ * @note The mutex serializes fake codec callbacks across sequential, task,
+ * committer, and compute-I/O executor lanes. The state is test authority only;
+ * physical marker files remain the production filesystem-presence evidence.
+ */
+struct RecordingDiskCacheCodecState final {
+  /** @brief Serializes reads and replacement of detached metadata values. */
+  std::mutex mutex;
+  /** @brief Last complete parameter map accepted by the fake writer. */
+  plugin::ParameterMap metadata;
+};
+
+/**
+ * @brief Bundles observable image and metadata codecs for schema regressions.
+ *
+ * @throws Nothing from member destruction.
+ * @note Tests retain these shared owners while GraphCacheService holds const
+ * codec interfaces, allowing exact call-count assertions after real requests.
+ */
+struct RecordingDiskCacheCodecs final {
+  /** @brief Image codec whose callbacks maintain a physical marker artifact. */
+  std::shared_ptr<testing::FakeImageArtifactCodec> image;
+  /** @brief Metadata codec backed by detached state and a marker sidecar. */
+  std::shared_ptr<testing::FakeCacheMetadataCodec> metadata;
+};
+
+/**
+ * @brief Writes one nonempty marker at a production cache artifact path.
+ *
+ * @param path Existing-parent destination selected by GraphCacheService.
+ * @param marker Deterministic byte distinguishing image and metadata writes.
+ * @return Nothing after close-time stream state has been checked.
+ * @throws std::runtime_error when opening, writing, or closing the marker
+ * fails.
+ * @note The helper models only artifact existence. Codec payload semantics are
+ * retained separately so tests can force sibling-shape decisions before any
+ * decode or metadata parse callback.
+ */
+void write_disk_cache_marker(const std::filesystem::path& path, char marker) {
+  std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+  if (!stream.is_open()) {
+    throw std::runtime_error("Could not open disk-cache marker path.");
+  }
+  stream.put(marker);
+  stream.close();
+  if (!stream) {
+    throw std::runtime_error("Could not persist disk-cache marker path.");
+  }
+}
+
+/**
+ * @brief Creates stateful fake codecs that also maintain sibling existence.
+ *
+ * @return Shared observable codecs suitable for GraphCacheService injection.
+ * @throws std::bad_alloc when shared ownership, callback, image, or map storage
+ * cannot allocate.
+ * @throws ImageBuffer or filesystem exceptions from callback execution.
+ * @note Image decode returns a fresh 4x3 float image. Metadata reads return the
+ * last detached successful write. Both writers create real marker files so the
+ * production filesystem preflight, not the fake call history, chooses a hit.
+ */
+RecordingDiskCacheCodecs make_recording_disk_cache_codecs() {
+  auto state = std::make_shared<RecordingDiskCacheCodecState>();
+  auto image = std::make_shared<testing::FakeImageArtifactCodec>(
+      [](const std::filesystem::path&) {
+        ImageBuffer buffer =
+            make_aligned_cpu_image_buffer(4, 3, 1, DataType::FLOAT32);
+        toCvMat(buffer).setTo(73.0f);
+        return buffer;
+      },
+      [](const std::filesystem::path& path, const ImageBuffer&,
+         ImageArtifactPrecision) { write_disk_cache_marker(path, 'I'); });
+  auto metadata = std::make_shared<testing::FakeCacheMetadataCodec>(
+      [state](const std::filesystem::path&) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        return state->metadata;
+      },
+      [state](const std::filesystem::path& path,
+              const plugin::ParameterMap& values) {
+        {
+          std::lock_guard<std::mutex> lock(state->mutex);
+          state->metadata = values;
+        }
+        write_disk_cache_marker(path, 'M');
+      });
+  return {std::move(image), std::move(metadata)};
 }
 
 /**
@@ -6660,6 +6753,539 @@ TEST(ComputeOutputAuthority, ImageOnlyRoutesStillHitDiskWithoutRecompute) {
     runtime.stop();
   }
   registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves image-to-data-only schema replacement misses before decoding.
+ *
+ * @return Nothing; GoogleTest reports route, provider-count, codec-call,
+ * sibling-lifecycle, parameter-authority, or diagnostic failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged outside the explicit replacement no-throw boundary.
+ * @note A real first request persists only the image sibling. Re-registering
+ * the same operation key as data-only must treat that image as incompatible,
+ * recompute through each real full route, write metadata, remove the image,
+ * and then reuse the exact data-only artifact without another provider call.
+ */
+TEST(ComputeOutputAuthority,
+     ImageArtifactThenDataOnlySchemaRecomputesAndRetainsDataHit) {
+  constexpr char kType[] = "issue130_disk_schema_replacement";
+  constexpr char kSubtype[] = "image_to_data";
+  OpRegistry& registry = OpRegistry::instance();
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto image_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [image_entries](const Node&,
+                            const std::vector<const NodeOutput*>&) {
+              image_entries->fetch_add(1, std::memory_order_relaxed);
+              return make_image_output(4, 3, 1, 51.0f);
+            }),
+        declare_test_outputs(OpMetadata{}, true, {}));
+
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-image-to-data-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-image-to-data-parallel"
+                         : "issue130-image-to-data-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    RecordingDiskCacheCodecs codecs = make_recording_disk_cache_codecs();
+    GraphTraversalService traversal;
+    GraphCacheService cache{codecs.image, codecs.metadata};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+
+    ASSERT_TRUE(compute_once().has_image_value());
+    EXPECT_EQ(image_entries->load(std::memory_order_relaxed), 1);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    auto metadata = artifact;
+    metadata.replace_extension(".yml");
+    ASSERT_TRUE(std::filesystem::exists(artifact));
+    ASSERT_FALSE(std::filesystem::exists(metadata));
+    ASSERT_EQ(codecs.image->calls().size(), 1U);
+    ASSERT_TRUE(codecs.metadata->calls().empty());
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto data_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [data_entries](const Node&, const std::vector<const NodeOutput*>&) {
+              data_entries->fetch_add(1, std::memory_order_relaxed);
+              NodeOutput output;
+              output.data["radius"] = 17;
+              return output;
+            }),
+        declare_test_outputs(OpMetadata{}, false, {"radius"}));
+
+    const NodeOutput* replaced = nullptr;
+    EXPECT_NO_THROW(replaced = &compute_once());
+    if (replaced != nullptr) {
+      EXPECT_FALSE(replaced->has_image_value());
+      ASSERT_EQ(replaced->data.size(), 1U);
+      EXPECT_EQ(replaced->data.at("radius").as_int64(), 17);
+      EXPECT_EQ(data_entries->load(std::memory_order_relaxed), 1);
+      EXPECT_FALSE(std::filesystem::exists(artifact));
+      EXPECT_TRUE(std::filesystem::exists(metadata));
+      EXPECT_EQ(codecs.image->calls().size(), 1U);
+      ASSERT_EQ(codecs.metadata->calls().size(), 1U);
+      EXPECT_EQ(codecs.metadata->calls().front().kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Write);
+      const auto miss = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(miss.has_value());
+      EXPECT_EQ(miss->status, GraphModel::DiskCacheLoadStatus::Miss);
+
+      EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+      const NodeOutput& hit = compute_once();
+      EXPECT_FALSE(hit.has_image_value());
+      ASSERT_EQ(hit.data.size(), 1U);
+      EXPECT_EQ(hit.data.at("radius").as_int64(), 17);
+      EXPECT_EQ(data_entries->load(std::memory_order_relaxed), 1);
+      EXPECT_EQ(codecs.image->calls().size(), 1U);
+      const std::size_t expected_metadata_calls = parallel ? 3U : 2U;
+      ASSERT_EQ(codecs.metadata->calls().size(), expected_metadata_calls);
+      const std::size_t read_call =
+          expected_metadata_calls - (parallel ? 2U : 1U);
+      EXPECT_EQ(codecs.metadata->calls()[read_call].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Read);
+      if (parallel) {
+        EXPECT_EQ(codecs.metadata->calls().back().kind,
+                  testing::FakeCacheMetadataCodec::Call::Kind::Write);
+      }
+      const auto hit_diagnostic = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(hit_diagnostic.has_value());
+      EXPECT_EQ(hit_diagnostic->status, GraphModel::DiskCacheLoadStatus::Hit);
+    }
+    runtime.stop();
+    registry.unregister_key(make_key(kType, kSubtype));
+  }
+}
+
+/**
+ * @brief Proves image-plus-parameter to image-only replacement is symmetric.
+ *
+ * @return Nothing; GoogleTest reports route, provider-count, codec-call,
+ * sibling-lifecycle, image-authority, or diagnostic failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged outside the explicit replacement no-throw boundary.
+ * @note The replacement request must reject the unexpected metadata sibling
+ * without image decode or metadata read, recompute, encode the new image, and
+ * remove YAML only after that encode succeeds. A following image-only request
+ * proves the remaining image is a real reusable hit.
+ */
+TEST(ComputeOutputAuthority,
+     ImageAndParameterArtifactThenImageOnlySchemaRecomputesAndHits) {
+  constexpr char kType[] = "issue130_disk_schema_replacement";
+  constexpr char kSubtype[] = "image_data_to_image";
+  OpRegistry& registry = OpRegistry::instance();
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto combined_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [combined_entries](const Node&,
+                               const std::vector<const NodeOutput*>&) {
+              combined_entries->fetch_add(1, std::memory_order_relaxed);
+              NodeOutput output = make_image_output(4, 3, 1, 61.0f);
+              output.data["radius"] = 19;
+              return output;
+            }),
+        declare_test_outputs(OpMetadata{}, true, {"radius"}));
+
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-data-to-image-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-data-to-image-parallel"
+                         : "issue130-data-to-image-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    RecordingDiskCacheCodecs codecs = make_recording_disk_cache_codecs();
+    GraphTraversalService traversal;
+    GraphCacheService cache{codecs.image, codecs.metadata};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+
+    const NodeOutput& combined = compute_once();
+    ASSERT_TRUE(combined.has_image_value());
+    ASSERT_EQ(combined.data.size(), 1U);
+    EXPECT_EQ(combined_entries->load(std::memory_order_relaxed), 1);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    auto metadata = artifact;
+    metadata.replace_extension(".yml");
+    ASSERT_TRUE(std::filesystem::exists(artifact));
+    ASSERT_TRUE(std::filesystem::exists(metadata));
+    ASSERT_EQ(codecs.image->calls().size(), 1U);
+    ASSERT_EQ(codecs.metadata->calls().size(), 1U);
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto image_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [image_entries](const Node&,
+                            const std::vector<const NodeOutput*>&) {
+              image_entries->fetch_add(1, std::memory_order_relaxed);
+              return make_image_output(4, 3, 1, 62.0f);
+            }),
+        declare_test_outputs(OpMetadata{}, true, {}));
+
+    const NodeOutput* replaced = nullptr;
+    EXPECT_NO_THROW(replaced = &compute_once());
+    if (replaced != nullptr) {
+      EXPECT_TRUE(replaced->has_image_value());
+      EXPECT_TRUE(replaced->data.empty());
+      EXPECT_EQ(image_entries->load(std::memory_order_relaxed), 1);
+      EXPECT_TRUE(std::filesystem::exists(artifact));
+      EXPECT_FALSE(std::filesystem::exists(metadata));
+      ASSERT_EQ(codecs.image->calls().size(), 2U);
+      EXPECT_EQ(codecs.image->calls().back().kind,
+                testing::FakeImageArtifactCodec::Call::Kind::Encode);
+      EXPECT_EQ(codecs.metadata->calls().size(), 1U);
+      const auto miss = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(miss.has_value());
+      EXPECT_EQ(miss->status, GraphModel::DiskCacheLoadStatus::Miss);
+
+      EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+      const NodeOutput& hit = compute_once();
+      EXPECT_TRUE(hit.has_image_value());
+      EXPECT_TRUE(hit.data.empty());
+      EXPECT_EQ(image_entries->load(std::memory_order_relaxed), 1);
+      const std::size_t expected_image_calls = parallel ? 4U : 3U;
+      ASSERT_EQ(codecs.image->calls().size(), expected_image_calls);
+      const std::size_t decode_call =
+          expected_image_calls - (parallel ? 2U : 1U);
+      EXPECT_EQ(codecs.image->calls()[decode_call].kind,
+                testing::FakeImageArtifactCodec::Call::Kind::Decode);
+      if (parallel) {
+        EXPECT_EQ(codecs.image->calls().back().kind,
+                  testing::FakeImageArtifactCodec::Call::Kind::Encode);
+      }
+      EXPECT_EQ(codecs.metadata->calls().size(), 1U);
+      const auto hit_diagnostic = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(hit_diagnostic.has_value());
+      EXPECT_EQ(hit_diagnostic->status, GraphModel::DiskCacheLoadStatus::Hit);
+    }
+    runtime.stop();
+    registry.unregister_key(make_key(kType, kSubtype));
+  }
+}
+
+/**
+ * @brief Proves data-only cache hits require the exact planned parameter keys.
+ *
+ * @return Nothing; GoogleTest reports route, provider-count, metadata-call,
+ * parameter-authority, persisted-key, or diagnostic failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged outside the explicit replacement no-throw boundary.
+ * @note Both revisions plan a metadata sibling, so presence alone is
+ * insufficient. The old `radius` map must parse once into an incompatible
+ * miss, the `sigma` provider must replace it, and a second `sigma` request must
+ * reuse that exact map without another provider entry.
+ */
+TEST(ComputeOutputAuthority,
+     ParameterNameReplacementRecomputesAndRetainsExactDataHit) {
+  constexpr char kType[] = "issue130_disk_schema_replacement";
+  constexpr char kSubtype[] = "parameter_name";
+  OpRegistry& registry = OpRegistry::instance();
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto radius_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [radius_entries](const Node&,
+                             const std::vector<const NodeOutput*>&) {
+              radius_entries->fetch_add(1, std::memory_order_relaxed);
+              NodeOutput output;
+              output.data["radius"] = 23;
+              return output;
+            }),
+        declare_test_outputs(OpMetadata{}, false, {"radius"}));
+
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-parameter-name-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-parameter-name-parallel"
+                         : "issue130-parameter-name-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    RecordingDiskCacheCodecs codecs = make_recording_disk_cache_codecs();
+    GraphTraversalService traversal;
+    GraphCacheService cache{codecs.image, codecs.metadata};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+
+    const NodeOutput& radius = compute_once();
+    ASSERT_EQ(radius.data.size(), 1U);
+    EXPECT_EQ(radius.data.at("radius").as_int64(), 23);
+    EXPECT_EQ(radius_entries->load(std::memory_order_relaxed), 1);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    auto metadata = artifact;
+    metadata.replace_extension(".yml");
+    ASSERT_FALSE(std::filesystem::exists(artifact));
+    ASSERT_TRUE(std::filesystem::exists(metadata));
+    ASSERT_TRUE(codecs.image->calls().empty());
+    ASSERT_EQ(codecs.metadata->calls().size(), 1U);
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto sigma_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [sigma_entries](const Node&,
+                            const std::vector<const NodeOutput*>&) {
+              sigma_entries->fetch_add(1, std::memory_order_relaxed);
+              NodeOutput output;
+              output.data["sigma"] = 29;
+              return output;
+            }),
+        declare_test_outputs(OpMetadata{}, false, {"sigma"}));
+
+    const NodeOutput* replaced = nullptr;
+    EXPECT_NO_THROW(replaced = &compute_once());
+    if (replaced != nullptr) {
+      ASSERT_EQ(replaced->data.size(), 1U);
+      EXPECT_EQ(replaced->data.at("sigma").as_int64(), 29);
+      EXPECT_EQ(sigma_entries->load(std::memory_order_relaxed), 1);
+      EXPECT_TRUE(codecs.image->calls().empty());
+      ASSERT_EQ(codecs.metadata->calls().size(), 3U);
+      EXPECT_EQ(codecs.metadata->calls()[1U].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Read);
+      EXPECT_EQ(codecs.metadata->calls()[2U].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Write);
+      const auto miss = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(miss.has_value());
+      EXPECT_EQ(miss->status, GraphModel::DiskCacheLoadStatus::Miss);
+
+      EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+      const NodeOutput& hit = compute_once();
+      ASSERT_EQ(hit.data.size(), 1U);
+      EXPECT_EQ(hit.data.at("sigma").as_int64(), 29);
+      EXPECT_EQ(sigma_entries->load(std::memory_order_relaxed), 1);
+      const std::size_t expected_metadata_calls = parallel ? 5U : 4U;
+      ASSERT_EQ(codecs.metadata->calls().size(), expected_metadata_calls);
+      const std::size_t read_call =
+          expected_metadata_calls - (parallel ? 2U : 1U);
+      EXPECT_EQ(codecs.metadata->calls()[read_call].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Read);
+      if (parallel) {
+        EXPECT_EQ(codecs.metadata->calls().back().kind,
+                  testing::FakeCacheMetadataCodec::Call::Kind::Write);
+      }
+      const auto hit_diagnostic = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(hit_diagnostic.has_value());
+      EXPECT_EQ(hit_diagnostic->status, GraphModel::DiskCacheLoadStatus::Hit);
+    }
+    runtime.stop();
+    registry.unregister_key(make_key(kType, kSubtype));
+  }
+}
+
+/**
+ * @brief Proves an empty output schema removes both predecessor siblings.
+ *
+ * @return Nothing; GoogleTest reports route, provider-count, codec-call,
+ * sibling-lifecycle, empty-authority, or diagnostic failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged outside the explicit replacement no-throw boundary.
+ * @note The first request persists image plus metadata. Empty replacement must
+ * miss before both codecs, recompute, and remove both siblings. Since empty
+ * outputs have no durable artifact, the following request must recompute again
+ * while still avoiding every codec.
+ */
+TEST(ComputeOutputAuthority,
+     ImageAndParameterArtifactThenEmptySchemaClearsBothSiblings) {
+  constexpr char kType[] = "issue130_disk_schema_replacement";
+  constexpr char kSubtype[] = "combined_to_empty";
+  OpRegistry& registry = OpRegistry::instance();
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    registry.unregister_key(make_key(kType, kSubtype));
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              NodeOutput output = make_image_output(4, 3, 1, 71.0f);
+              output.data["radius"] = 31;
+              return output;
+            }),
+        declare_test_outputs(OpMetadata{}, true, {"radius"}));
+
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-combined-to-empty-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-combined-to-empty-parallel"
+                         : "issue130-combined-to-empty-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    RecordingDiskCacheCodecs codecs = make_recording_disk_cache_codecs();
+    GraphTraversalService traversal;
+    GraphCacheService cache{codecs.image, codecs.metadata};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+
+    const NodeOutput& combined = compute_once();
+    ASSERT_TRUE(combined.has_image_value());
+    ASSERT_EQ(combined.data.size(), 1U);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    auto metadata = artifact;
+    metadata.replace_extension(".yml");
+    ASSERT_TRUE(std::filesystem::exists(artifact));
+    ASSERT_TRUE(std::filesystem::exists(metadata));
+    ASSERT_EQ(codecs.image->calls().size(), 1U);
+    ASSERT_EQ(codecs.metadata->calls().size(), 1U);
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto empty_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [empty_entries](const Node&,
+                            const std::vector<const NodeOutput*>&) {
+              empty_entries->fetch_add(1, std::memory_order_relaxed);
+              return NodeOutput{};
+            }),
+        declare_test_outputs(OpMetadata{}, false, {}));
+
+    const NodeOutput* replaced = nullptr;
+    EXPECT_NO_THROW(replaced = &compute_once());
+    if (replaced != nullptr) {
+      EXPECT_FALSE(replaced->has_image_value());
+      EXPECT_TRUE(replaced->data.empty());
+      EXPECT_TRUE(replaced->named_values.empty());
+      EXPECT_EQ(empty_entries->load(std::memory_order_relaxed), 1);
+      EXPECT_FALSE(std::filesystem::exists(artifact));
+      EXPECT_FALSE(std::filesystem::exists(metadata));
+      EXPECT_EQ(codecs.image->calls().size(), 1U);
+      EXPECT_EQ(codecs.metadata->calls().size(), 1U);
+      const auto miss = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(miss.has_value());
+      EXPECT_EQ(miss->status, GraphModel::DiskCacheLoadStatus::Miss);
+
+      EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+      const NodeOutput& second = compute_once();
+      EXPECT_FALSE(second.has_image_value());
+      EXPECT_TRUE(second.data.empty());
+      EXPECT_TRUE(second.named_values.empty());
+      EXPECT_EQ(empty_entries->load(std::memory_order_relaxed), 2);
+      EXPECT_FALSE(std::filesystem::exists(artifact));
+      EXPECT_FALSE(std::filesystem::exists(metadata));
+      EXPECT_EQ(codecs.image->calls().size(), 1U);
+      EXPECT_EQ(codecs.metadata->calls().size(), 1U);
+      const auto second_miss = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(second_miss.has_value());
+      EXPECT_EQ(second_miss->status, GraphModel::DiskCacheLoadStatus::Miss);
+    }
+    runtime.stop();
+    registry.unregister_key(make_key(kType, kSubtype));
+  }
 }
 
 /**

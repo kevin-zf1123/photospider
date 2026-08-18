@@ -2740,8 +2740,7 @@ TEST(CacheSemantics, DiskCacheMissRecordsDiagnostic) {
 
   NodeOutput out;
   EXPECT_FALSE(ctx.cache.try_load_from_disk_cache_into(
-      ctx.graph, ctx.node, out,
-      ImageDiskCacheOutputSchema::NoGenericNamedValues));
+      ctx.graph, ctx.node, out, ImageDiskCacheOutputSchema{true, {}, false}));
 
   const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
   ASSERT_TRUE(result.has_value());
@@ -2761,7 +2760,7 @@ TEST(CacheSemantics, DiskCacheMetadataHitPreservesTryLoadBehavior) {
   NodeOutput out;
   EXPECT_TRUE(ctx.cache.try_load_from_disk_cache_into(
       ctx.graph, ctx.node, out,
-      ImageDiskCacheOutputSchema::NoGenericNamedValues));
+      ImageDiskCacheOutputSchema{false, {"answer", "label"}, false}));
   ASSERT_NE(out.data.find("answer"), out.data.end());
   ASSERT_NE(out.data.find("label"), out.data.end());
   EXPECT_EQ(out.data.at("answer").as_int64(), 42);
@@ -2806,7 +2805,8 @@ TEST(CacheSemantics, ConfiguredYamlMetadataCodecRoundTripsNamedValues) {
 
   Node loaded = make_cached_process_node("output.png");
   ASSERT_TRUE(cache.try_load_from_disk_cache(
-      graph, loaded, ImageDiskCacheOutputSchema::NoGenericNamedValues));
+      graph, loaded,
+      ImageDiskCacheOutputSchema{false, {"answer", "nested"}, false}));
   ASSERT_TRUE(loaded.cached_output_high_precision.has_value());
   EXPECT_EQ(loaded.cached_output_high_precision->data, expected);
   EXPECT_EQ(loaded.hp_version, 1);
@@ -2825,7 +2825,7 @@ TEST(CacheSemantics, DiskCacheInvalidMetadataRecordsErrorDiagnostic) {
   NodeOutput out;
   EXPECT_FALSE(ctx.cache.try_load_from_disk_cache_into(
       ctx.graph, ctx.node, out,
-      ImageDiskCacheOutputSchema::NoGenericNamedValues));
+      ImageDiskCacheOutputSchema{false, {"answer"}, false}));
 
   const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
   ASSERT_TRUE(result.has_value());
@@ -2848,7 +2848,7 @@ TEST(CacheSemantics, InjectedCodecIoErrorLeavesHpCacheUnchanged) {
   write_text(image_file, "fake image bytes");
 
   EXPECT_FALSE(ctx.cache.try_load_from_disk_cache(
-      ctx.graph, ctx.node, ImageDiskCacheOutputSchema::NoGenericNamedValues));
+      ctx.graph, ctx.node, ImageDiskCacheOutputSchema{true, {}, false}));
   EXPECT_FALSE(ctx.node.cached_output_high_precision.has_value());
 
   const auto calls = ctx.codec->calls();
@@ -2874,10 +2874,10 @@ TEST(CacheSemantics, InjectedCodecBadAllocPropagatesWithoutHpMutation) {
       });
   write_text(ctx.cache_file(), "fake image bytes");
 
-  EXPECT_THROW(ctx.cache.try_load_from_disk_cache(
-                   ctx.graph, ctx.node,
-                   ImageDiskCacheOutputSchema::NoGenericNamedValues),
-               std::bad_alloc);
+  EXPECT_THROW(
+      ctx.cache.try_load_from_disk_cache(
+          ctx.graph, ctx.node, ImageDiskCacheOutputSchema{true, {}, false}),
+      std::bad_alloc);
   EXPECT_FALSE(ctx.node.cached_output_high_precision.has_value());
   ASSERT_EQ(ctx.codec->calls().size(), 1u);
 }
@@ -2928,7 +2928,7 @@ TEST(CacheSemantics,
     NodeOutput output;
     ASSERT_TRUE(cache.try_load_from_disk_cache_into(
         graph, loaded, output,
-        ImageDiskCacheOutputSchema::NoGenericNamedValues));
+        ImageDiskCacheOutputSchema{false, {"loaded"}, false}));
     EXPECT_EQ(output.data, read_values);
 
     const auto retained = weak_codec.lock();
@@ -2972,7 +2972,7 @@ TEST(CacheSemantics,
                           metadata_codec};
 
   EXPECT_FALSE(cache.try_load_from_disk_cache(
-      graph, node, ImageDiskCacheOutputSchema::NoGenericNamedValues));
+      graph, node, ImageDiskCacheOutputSchema{false, {"answer"}, false}));
   EXPECT_FALSE(node.cached_output_high_precision.has_value());
   const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
   ASSERT_TRUE(diagnostic.has_value());
@@ -3007,7 +3007,7 @@ TEST(CacheSemantics, InjectedMetadataCodecBadAllocPropagatesUnchanged) {
 
   EXPECT_THROW(
       cache.try_load_from_disk_cache(
-          graph, node, ImageDiskCacheOutputSchema::NoGenericNamedValues),
+          graph, node, ImageDiskCacheOutputSchema{false, {"answer"}, false}),
       std::bad_alloc);
   EXPECT_FALSE(node.cached_output_high_precision.has_value());
   EXPECT_FALSE(graph.last_disk_cache_load_result_snapshot().has_value());
@@ -3049,7 +3049,7 @@ TEST(CacheSemantics,
   GraphCacheService cache{image_codec, metadata_codec};
 
   EXPECT_FALSE(cache.try_load_from_disk_cache(
-      graph, node, ImageDiskCacheOutputSchema::NoGenericNamedValues));
+      graph, node, ImageDiskCacheOutputSchema{true, {"answer"}, false}));
   EXPECT_FALSE(node.cached_output_high_precision.has_value());
 
   const auto image_calls = image_codec->calls();
@@ -3108,7 +3108,7 @@ TEST(CacheSemantics,
   GraphCacheService cache{image_codec, metadata_codec};
 
   EXPECT_FALSE(cache.try_load_from_disk_cache(
-      graph, node, ImageDiskCacheOutputSchema::NoGenericNamedValues));
+      graph, node, ImageDiskCacheOutputSchema{true, {"answer"}, false}));
   EXPECT_FALSE(node.cached_output_high_precision.has_value());
 
   const auto image_calls = image_codec->calls();
@@ -3167,6 +3167,102 @@ TEST(CacheSemantics, InjectedCodecLifetimeAndPrecisionFollowCacheService) {
 
   EXPECT_TRUE(weak_codec.expired());
   std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Proves replacement cleanup begins only after required writes succeed.
+ *
+ * @return Nothing; GoogleTest reports exception, sibling, codec-call, timing,
+ * or formal-output mutation failures.
+ * @throws Filesystem, allocation, Value, Region, or Graph exceptions unchanged
+ * outside the two expected injected GraphError boundaries.
+ * @note Data-only replacement injects metadata-write failure and must retain a
+ * stale image. Image-only replacement injects image-encode failure and must
+ * retain stale YAML. Both cases exercise the common synchronous save mechanism;
+ * executor propagation of the same mechanism is covered independently.
+ */
+TEST(CacheSemantics, SchemaReplacementWriteFailureRetainsPredecessorSibling) {
+  {
+    const auto root =
+        clean_temp_path("photospider-schema-data-write-failure-root");
+    GraphModel graph(root);
+    Node node = make_cached_process_node("output.png");
+    node.cached_output_high_precision = NodeOutput{};
+    node.cached_output_high_precision->data.emplace("radius",
+                                                    plugin::ParameterValue(37));
+    node.hp_region = value_image_adapter::full_node_output_region(
+        *node.cached_output_high_precision);
+    const std::filesystem::path image_path =
+        root / std::to_string(node.id) / node.caches.front().location;
+    auto metadata_path = image_path;
+    metadata_path.replace_extension(".yml");
+    write_text(image_path, "stale image sibling");
+
+    auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>();
+    auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
+        testing::FakeCacheMetadataCodec::ReadCallback{},
+        [](const std::filesystem::path&, const plugin::ParameterMap&) -> void {
+          throw GraphError(GraphErrc::Io,
+                           "injected metadata replacement failure");
+        });
+    GraphCacheService cache{image_codec, metadata_codec};
+    const plugin::ParameterMap expected =
+        node.cached_output_high_precision->data;
+    const double timing_before = graph.total_io_time_ms.load();
+
+    EXPECT_THROW(cache.save_cache_if_configured(graph, node, "int8"),
+                 GraphError);
+    EXPECT_TRUE(std::filesystem::exists(image_path));
+    EXPECT_FALSE(std::filesystem::exists(metadata_path));
+    EXPECT_TRUE(image_codec->calls().empty());
+    ASSERT_EQ(metadata_codec->calls().size(), 1U);
+    EXPECT_EQ(metadata_codec->calls().front().kind,
+              testing::FakeCacheMetadataCodec::Call::Kind::Write);
+    EXPECT_EQ(node.cached_output_high_precision->data, expected);
+    EXPECT_EQ(graph.total_io_time_ms.load(), timing_before);
+    std::filesystem::remove_all(root);
+  }
+
+  {
+    const auto root =
+        clean_temp_path("photospider-schema-image-write-failure-root");
+    GraphModel graph(root);
+    Node node = make_cached_process_node("output.png");
+    node.cached_output_high_precision =
+        make_kernel_contract_image_output(2, 1, 1, 41.0F);
+    node.hp_region = value_image_adapter::full_node_output_region(
+        *node.cached_output_high_precision);
+    const ValueRevisionId expected_revision =
+        node.cached_output_high_precision->image_value().revision_id();
+    const std::filesystem::path image_path =
+        root / std::to_string(node.id) / node.caches.front().location;
+    auto metadata_path = image_path;
+    metadata_path.replace_extension(".yml");
+    write_text(metadata_path, "stale metadata sibling");
+
+    auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
+        testing::FakeImageArtifactCodec::DecodeCallback{},
+        [](const std::filesystem::path&, const ImageBuffer&,
+           ImageArtifactPrecision) {
+          throw GraphError(GraphErrc::Io, "injected image replacement failure");
+        });
+    auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>();
+    GraphCacheService cache{image_codec, metadata_codec};
+    const double timing_before = graph.total_io_time_ms.load();
+
+    EXPECT_THROW(cache.save_cache_if_configured(graph, node, "int8"),
+                 GraphError);
+    EXPECT_FALSE(std::filesystem::exists(image_path));
+    EXPECT_TRUE(std::filesystem::exists(metadata_path));
+    ASSERT_EQ(image_codec->calls().size(), 1U);
+    EXPECT_EQ(image_codec->calls().front().kind,
+              testing::FakeImageArtifactCodec::Call::Kind::Encode);
+    EXPECT_TRUE(metadata_codec->calls().empty());
+    EXPECT_EQ(node.cached_output_high_precision->image_value().revision_id(),
+              expected_revision);
+    EXPECT_EQ(graph.total_io_time_ms.load(), timing_before);
+    std::filesystem::remove_all(root);
+  }
 }
 
 /**

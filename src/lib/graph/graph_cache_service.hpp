@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "core/cache_metadata_codec.hpp"
 #include "core/image_artifact_codec.hpp"
@@ -18,18 +19,22 @@ class ComputeIoExecutor;
 }  // namespace execution
 
 /**
- * @brief Classifies a frozen output schema for the current image disk cache.
+ * @brief Freezes the complete planned shape representable by image disk cache.
  *
- * @throws Nothing for ordinary enum operations.
- * @note The current image/YAML artifact pair can represent the canonical image
- * Value and `NodeOutput::data` parameter results, but it has no durable format
- * for generic named Values.
+ * @throws std::bad_alloc when owning or copying parameter-output names cannot
+ * allocate.
+ * @note The image/YAML artifact pair can represent one canonical image and an
+ * exact `NodeOutput::data` parameter map. Generic named Values have no durable
+ * format and therefore force pre-filesystem miss/save-skip behavior. Instances
+ * are request-owned snapshots and retain no Graph, registry, or codec state.
  */
-enum class ImageDiskCacheOutputSchema {
-  /** @brief The plan declares no generic named Value output. */
-  NoGenericNamedValues,
-  /** @brief The plan declares one or more generic named Value outputs. */
-  ContainsGenericNamedValues,
+struct ImageDiskCacheOutputSchema final {
+  /** @brief Whether the frozen plan requires the canonical image sibling. */
+  bool canonical_image_planned = false;
+  /** @brief Exact frozen parameter-result names requiring the YAML sibling. */
+  std::vector<std::string> parameter_output_names;
+  /** @brief Whether any unrepresentable generic named Value is planned. */
+  bool contains_generic_named_values = false;
 };
 
 /**
@@ -49,12 +54,17 @@ enum class ImageDiskCacheOutputSchema {
  * `CacheMetadataCodec` boundaries; packed, quantized, or latent formal Values
  * fail with a typed invalid-parameter error before executor admission,
  * filesystem mutation, or codec invocation. A planned schema containing any
- * generic named Value makes every existing image artifact an incompatible
- * miss before filesystem or codec inspection. Exact validated formal outputs
- * containing such Values also skip image/YAML persistence before planned-byte
- * admission, filesystem work, or codec invocation. Parameter-result data
- * remains supported independently. This service contains no OpenCV/YAML calls
- * or provider-library types. Staged HP commit may submit the const cache-save
+ * generic named Value makes every existing artifact an incompatible miss
+ * before filesystem or codec inspection. Otherwise, physical image/YAML
+ * sibling presence must equal the frozen image/parameter shape before either
+ * codec is entered, and decoded metadata keys must equal the exact frozen
+ * parameter names before a Hit is returned. Exact validated formal outputs
+ * containing generic Values skip image/YAML persistence before planned-byte
+ * admission, filesystem work, or codec invocation. Successful representable
+ * saves write every planned sibling before removing an unplanned predecessor
+ * sibling; failures remain non-transactional but cannot produce a reusable
+ * shape-mismatched hit. This service contains no OpenCV/YAML calls or
+ * provider-library types. Staged HP commit may submit the const cache-save
  * mechanism to the
  * process compute-I/O executor while the graph-state policy owner retains path,
  * failure, timing, and publication decisions; synchronous administration and
@@ -246,10 +256,16 @@ class GraphCacheService {
    * copied into a callback-local codec-compatible ImageBuffer. Nonempty
    * compatibility staging is rejected instead of serving as a fallback.
    * Named ParameterValue outputs cross the metadata codec; a future device
-   * adapter may add explicit download. The current Value must be image-faceted,
-   * Strided, unquantized, host-readable, and whole-byte compatible before the
-   * save mechanism proceeds. Runtime allocation and Value revision identities
-   * are never persisted.
+   * adapter may add explicit download. After all required writes succeed, an
+   * absent image removes only the configured image sibling and empty parameter
+   * data removes only its YAML sibling. Image-plus-parameter output retains
+   * both, while an empty complete output removes both. If a required write
+   * fails, stale siblings are retained and the exception propagates; cleanup
+   * failures may leave a partially updated pair, which later shape validation
+   * rejects as a miss. The current Value must be image-faceted, Strided,
+   * unquantized, host-readable, and whole-byte compatible before the save
+   * mechanism proceeds. Runtime allocation and Value revision identities are
+   * never persisted.
    */
   void save_cache_if_configured(GraphModel& graph, const Node& node,
                                 const std::string& cache_precision) const;
@@ -291,7 +307,7 @@ class GraphCacheService {
    *
    * @param graph Graph whose cache root, timing, and diagnostics are updated.
    * @param node Node receiving the loaded HP output on cache hit.
-   * @param output_schema Frozen planned named-Value schema classification.
+   * @param output_schema Complete frozen image/parameter/generic output shape.
    * @return true when complete HP output is already present or disk cache was
    * loaded; false for partial memory validity, cache miss, skipped load, or
    * read/parse error.
@@ -302,7 +318,10 @@ class GraphCacheService {
    * errors distinguishable from misses through graph diagnostics. Successful
    * CPU image decode mints fresh process-local allocation/revision identities.
    * A schema containing generic named Values records an incompatible Miss and
-   * performs no filesystem or codec inspection.
+   * performs no filesystem or codec inspection. Representable plans compare
+   * sibling presence before either codec and compare exact decoded parameter
+   * keys before returning Hit; mismatches are misses and never reach output
+   * authority validation as false hits.
    * A hit publishes the output, incremented HP content version, and derived
    * full-validity Region together on the supplied Node.
    */
@@ -315,7 +334,7 @@ class GraphCacheService {
    * @param graph Graph whose cache root, timing, and diagnostics are updated.
    * @param node Node whose cache entries define candidate disk files.
    * @param out Receives the loaded output on cache hit.
-   * @param output_schema Frozen planned named-Value schema classification.
+   * @param output_schema Complete frozen image/parameter/generic output shape.
    * @return true on disk cache hit; false on cache miss, skipped load, or
    * read/parse error.
    * @throws std::bad_alloc from diagnostic/output/Value storage. Disk read,
@@ -326,6 +345,9 @@ class GraphCacheService {
    * memory state prevents disk load so regionless artifacts cannot override
    * current runtime validity. A schema containing generic named Values records
    * an incompatible Miss and performs no filesystem or codec inspection.
+   * Representable plans compare sibling presence before either codec and
+   * compare exact decoded parameter keys before returning Hit; mismatches are
+   * misses and leave `out` unchanged.
    */
   bool try_load_from_disk_cache_into(
       GraphModel& graph, const Node& node, NodeOutput& out,

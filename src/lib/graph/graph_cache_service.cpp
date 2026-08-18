@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "core/value_image_adapter.hpp"
 #include "execution/device/compute_io_executor.hpp"
@@ -35,10 +36,18 @@ using DiskCacheLoadStatus = GraphModel::DiskCacheLoadStatus;
  * The public diagnostic record is stored separately from the NodeOutput so
  * GraphModel can retain lightweight inspectable state without owning decoded
  * image payloads for failed or historical attempts.
+ *
+ * @throws std::bad_alloc when contained diagnostic or output state allocates.
+ * @note Instances are request-local and moved between read helpers; they own no
+ * Graph, codec, filesystem handle, or worker lifetime.
  */
 struct DiskCacheReadAttempt {
+  /** @brief Lightweight diagnostic published after this attempt settles. */
   GraphModel::DiskCacheLoadResult result;
+  /** @brief Detached candidate populated only for successful reusable hits. */
   NodeOutput output;
+  /** @brief Whether final multi-entry handling must retain this miss reason. */
+  bool preserve_miss_diagnostic = false;
 };
 
 /**
@@ -444,6 +453,52 @@ DiskCacheReadAttempt make_generic_schema_miss(int node_id) {
 }
 
 /**
+ * @brief Creates a concrete miss for incompatible artifact/schema shape.
+ *
+ * @param node_id Node id associated with the incompatible entry.
+ * @param cache_entry Entry that supplied the inspected sibling paths.
+ * @param cache_file Resolved canonical image sibling path.
+ * @param metadata_file Resolved parameter-metadata sibling path.
+ * @param message Exact sibling or decoded-key incompatibility reason.
+ * @return Miss whose specific diagnostic survives multi-entry finalization.
+ * @throws std::bad_alloc from path and message copies.
+ * @note The output is empty. Presence mismatches call this before either codec;
+ * decoded-key mismatches discard every candidate decoded by the attempt.
+ */
+DiskCacheReadAttempt make_schema_shape_miss(int node_id,
+                                            const CacheEntry& cache_entry,
+                                            const fs::path& cache_file,
+                                            const fs::path& metadata_file,
+                                            std::string message) {
+  DiskCacheReadAttempt attempt;
+  attempt.result = make_load_result(node_id, &cache_entry, cache_file,
+                                    metadata_file, DiskCacheLoadStatus::Miss,
+                                    GraphErrc::Unknown, std::move(message));
+  attempt.preserve_miss_diagnostic = true;
+  return attempt;
+}
+
+/**
+ * @brief Compares detached metadata keys with the exact frozen plan.
+ *
+ * @param values Decoded parameter map owned by the current read attempt.
+ * @param planned_names Exact unique parameter names frozen by planning.
+ * @return True only when cardinality and every planned key match exactly.
+ * @throws Nothing for current container size and lookup operations.
+ * @note Values are deliberately not interpreted here; codec parsing owns value
+ * validity, while output authority later validates the same admitted map.
+ */
+bool has_exact_parameter_output_names(
+    const plugin::ParameterMap& values,
+    const std::vector<std::string>& planned_names) {
+  return values.size() == planned_names.size() &&
+         std::all_of(planned_names.begin(), planned_names.end(),
+                     [&](const std::string& name) {
+                       return values.find(name) != values.end();
+                     });
+}
+
+/**
  * @brief Creates an error result for a concrete cache entry.
  *
  * @param node_id Node id whose cache file failed to load.
@@ -474,15 +529,19 @@ DiskCacheReadAttempt make_error_attempt(int node_id,
  * @param graph Graph whose cache root anchors the cache entry.
  * @param node Node that owns the cache entry.
  * @param cache_entry Image cache entry to inspect.
+ * @param output_schema Complete frozen image/parameter output shape.
  * @param image_codec Injected codec used to decode image bytes.
  * @param metadata_codec Injected codec used to decode named-value metadata.
  * @return Hit, Miss, or Error attempt with diagnostic details.
  * @throws std::bad_alloc from result/message allocation.
- * @note Exceptions from filesystem and injected codecs are converted into
- * Error results instead of being silently collapsed into miss.
+ * @note Filesystem sibling presence is compared with the planned shape before
+ * either codec. Metadata's exact key set is checked before returning Hit.
+ * Shape/key mismatches are Miss; filesystem and codec exceptions are converted
+ * into Error rather than silently collapsed into miss.
  */
 DiskCacheReadAttempt read_cache_entry(
     const GraphModel& graph, const Node& node, const CacheEntry& cache_entry,
+    const ImageDiskCacheOutputSchema& output_schema,
     const ImageArtifactCodec& image_codec,
     const CacheMetadataCodec& metadata_codec) {
   auto cache_file =
@@ -502,12 +561,30 @@ DiskCacheReadAttempt read_cache_entry(
       return attempt;
     }
 
+    const bool expects_cache_file = output_schema.canonical_image_planned;
+    const bool expects_metadata_file =
+        !output_schema.parameter_output_names.empty();
+    if (has_cache_file != expects_cache_file ||
+        has_metadata_file != expects_metadata_file) {
+      return make_schema_shape_miss(
+          node.id, cache_entry, cache_file, metadata_file,
+          "Disk-cache artifact siblings do not match the frozen planned "
+          "output shape.");
+    }
+
     DiskCacheReadAttempt attempt;
     if (has_cache_file) {
       attempt.output.compatibility_image = image_codec.decode(cache_file);
     }
     if (has_metadata_file) {
       attempt.output.data = metadata_codec.read(metadata_file);
+      if (!has_exact_parameter_output_names(
+              attempt.output.data, output_schema.parameter_output_names)) {
+        return make_schema_shape_miss(
+            node.id, cache_entry, cache_file, metadata_file,
+            "Disk-cache metadata keys do not match the frozen planned "
+            "parameter-output schema.");
+      }
     }
     value_image_adapter::import_node_output_compatibility_image(
         &attempt.output);
@@ -542,16 +619,19 @@ DiskCacheReadAttempt read_cache_entry(
  *
  * @param graph Graph whose cache root anchors the entries.
  * @param node Node whose cache entries should be inspected.
+ * @param output_schema Complete frozen image/parameter output shape.
  * @param image_codec Injected codec used for every supported image entry.
  * @param metadata_codec Injected codec used for every existing metadata file.
  * @return Hit/Error for the first existing or failing entry, Miss when all
  * supported entries are absent, or Skipped when no load should be attempted.
  * @throws std::bad_alloc from diagnostic construction.
- * @note Missing files remain true cache misses and do not stop scanning later
- * entries; read/parse errors stop immediately to preserve their diagnostics.
+ * @note Missing and incompatible entries remain cache misses and do not stop
+ * scanning later entries; the last incompatibility reason is retained.
+ * Read/parse errors stop immediately to preserve their diagnostics.
  */
 DiskCacheReadAttempt read_first_disk_cache_entry(
     const GraphModel& graph, const Node& node,
+    const ImageDiskCacheOutputSchema& output_schema,
     const ImageArtifactCodec& image_codec,
     const CacheMetadataCodec& metadata_codec) {
   if (graph.cache_root.empty()) {
@@ -564,20 +644,28 @@ DiskCacheReadAttempt read_first_disk_cache_entry(
   bool saw_supported_entry = false;
   DiskCacheReadAttempt last_miss =
       make_skipped_attempt(node.id, "No supported image cache entry found.");
+  std::optional<DiskCacheReadAttempt> last_incompatible_miss;
   for (const auto& cache_entry : node.caches) {
     if (cache_entry.cache_type != "image" || cache_entry.location.empty()) {
       continue;
     }
 
     saw_supported_entry = true;
-    DiskCacheReadAttempt attempt =
-        read_cache_entry(graph, node, cache_entry, image_codec, metadata_codec);
+    DiskCacheReadAttempt attempt = read_cache_entry(
+        graph, node, cache_entry, output_schema, image_codec, metadata_codec);
     if (attempt.result.status != DiskCacheLoadStatus::Miss) {
       return attempt;
+    }
+    if (attempt.preserve_miss_diagnostic) {
+      last_incompatible_miss = std::move(attempt);
+      continue;
     }
     last_miss = std::move(attempt);
   }
 
+  if (last_incompatible_miss.has_value()) {
+    return std::move(*last_incompatible_miss);
+  }
   if (saw_supported_entry) {
     last_miss.result.message =
         "No disk cache files exist for configured image cache entries.";
@@ -627,6 +715,39 @@ bool finalize_disk_cache_load(
 }
 
 /**
+ * @brief Removes only configured siblings excluded by the retained shape.
+ *
+ * @param directory Exact per-node cache directory containing both siblings.
+ * @param image_path Exact configured canonical image sibling.
+ * @param metadata_path Exact derived YAML parameter sibling.
+ * @param retain_image Whether the completed output retains the image sibling.
+ * @param retain_metadata Whether it retains the parameter-metadata sibling.
+ * @return Nothing after optional empty-directory removal.
+ * @throws std::filesystem::filesystem_error when an existence, removal, or
+ * emptiness query fails.
+ * @note Callers invoke this after every required write succeeds, or directly
+ * for partial/empty outputs that retain no sibling. Removal is intentionally
+ * scoped to the configured pair and is not transactional: one removal can
+ * succeed before a later removal fails. A remaining shape mismatch is rejected
+ * before codecs on the next read.
+ */
+void remove_cache_siblings_not_retained(const fs::path& directory,
+                                        const fs::path& image_path,
+                                        const fs::path& metadata_path,
+                                        bool retain_image,
+                                        bool retain_metadata) {
+  if (!retain_image && fs::exists(image_path)) {
+    (void)fs::remove(image_path);
+  }
+  if (!retain_metadata && fs::exists(metadata_path)) {
+    (void)fs::remove(metadata_path);
+  }
+  if (fs::exists(directory) && fs::is_empty(directory)) {
+    (void)fs::remove(directory);
+  }
+}
+
+/**
  * @brief Executes the service-owned cache-save filesystem and codec mechanism.
  * @param graph Read-only Graph policy, cache root, and prepared output owner.
  * @param node Read-only node whose configured cache entries are processed.
@@ -640,6 +761,10 @@ bool finalize_disk_cache_load(
  * state. Partial HP output removes older artifacts exactly as the synchronous
  * path did before the executor vertical. Generic named Values make the current
  * image/YAML projection ineligible and return before filesystem or codec work.
+ * Complete representable output writes all retained siblings first, then
+ * removes only excluded configured siblings. Write failure therefore preserves
+ * predecessor siblings; cleanup failure propagates after successful writes and
+ * may leave a pair that the next pre-codec shape check rejects as a miss.
  */
 void save_cache_mechanism(const GraphModel& graph, const Node& node,
                           const std::string& cache_precision,
@@ -672,29 +797,29 @@ void save_cache_mechanism(const GraphModel& graph, const Node& node,
     fs::path metadata_path = final_path;
     metadata_path.replace_extension(".yml");
     if (!complete_output) {
-      if (fs::exists(final_path)) {
-        (void)fs::remove(final_path);
-      }
-      if (fs::exists(metadata_path)) {
-        (void)fs::remove(metadata_path);
-      }
-      if (fs::exists(dir) && fs::is_empty(dir)) {
-        (void)fs::remove(dir);
-      }
+      remove_cache_siblings_not_retained(dir, final_path, metadata_path, false,
+                                         false);
       continue;
     }
-    fs::create_directories(dir);
+
+    const bool retain_image = output->has_image_value();
+    const bool retain_metadata = !output->data.empty();
+    if (retain_image || retain_metadata) {
+      fs::create_directories(dir);
+    }
 
     const auto start_io = std::chrono::high_resolution_clock::now();
-    if (output->has_image_value()) {
+    if (retain_image) {
       const ImageBuffer image =
           value_image_adapter::snapshot_cpu_image_buffer(output->image_value());
       image_codec.encode(final_path, image,
                          artifact_precision(cache_precision));
     }
-    if (!output->data.empty()) {
+    if (retain_metadata) {
       metadata_codec.write(metadata_path, output->data);
     }
+    remove_cache_siblings_not_retained(dir, final_path, metadata_path,
+                                       retain_image, retain_metadata);
     if (timing_graph != nullptr) {
       add_io_duration(*timing_graph, start_io);
     }
@@ -858,15 +983,15 @@ bool GraphCacheService::try_load_from_disk_cache(
                    .result);
     return complete_output;
   }
-  if (output_schema != ImageDiskCacheOutputSchema::NoGenericNamedValues) {
+  if (output_schema.contains_generic_named_values) {
     record_disk_cache_load_result(graph,
                                   make_generic_schema_miss(node.id).result);
     return false;
   }
 
   auto start_io = std::chrono::high_resolution_clock::now();
-  DiskCacheReadAttempt attempt =
-      read_first_disk_cache_entry(graph, node, *image_codec_, *metadata_codec_);
+  DiskCacheReadAttempt attempt = read_first_disk_cache_entry(
+      graph, node, output_schema, *image_codec_, *metadata_codec_);
   return finalize_disk_cache_load(
       graph, std::move(attempt), start_io, [&](NodeOutput output) {
         RegionSet full_region =
@@ -889,14 +1014,14 @@ bool GraphCacheService::try_load_from_disk_cache_into(
                    .result);
     return false;
   }
-  if (output_schema != ImageDiskCacheOutputSchema::NoGenericNamedValues) {
+  if (output_schema.contains_generic_named_values) {
     record_disk_cache_load_result(graph,
                                   make_generic_schema_miss(node.id).result);
     return false;
   }
   auto start_io = std::chrono::high_resolution_clock::now();
-  DiskCacheReadAttempt attempt =
-      read_first_disk_cache_entry(graph, node, *image_codec_, *metadata_codec_);
+  DiskCacheReadAttempt attempt = read_first_disk_cache_entry(
+      graph, node, output_schema, *image_codec_, *metadata_codec_);
   return finalize_disk_cache_load(
       graph, std::move(attempt), start_io,
       [&](NodeOutput output) { out = std::move(output); });

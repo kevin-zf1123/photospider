@@ -930,8 +930,11 @@ struct PreparedIntentUpdateState final {
  * hint retains its existing Graph state behavior, while runtime parameters and
  * other operation-facing state remain request-local. Observations surround
  * recursive dependency, disk-cache, provider/tile, cache-commit, and return
- * boundaries; a monolithic provider already entered is non-preemptible. The
- * direct operation lease is scoped only around NodeExecutor provider entry:
+ * boundaries. Disk reuse receives the complete frozen image, exact parameter,
+ * and generic output shape, so incompatible siblings or decoded parameter keys
+ * remain misses and cannot reach strict output validation as false hits. A
+ * monolithic provider already entered is non-preemptible. The direct operation
+ * lease is scoped only around NodeExecutor provider entry:
  * provider exceptions release it during stack unwinding, while named-Value
  * validation, Graph cache publication, disk persistence, and any failures from
  * those Host stages occur after release.
@@ -964,10 +967,10 @@ NodeOutput& ComputeService::compute_internal(
       break;
     }
     NodeOutput disk_output;
-    const ImageDiskCacheOutputSchema disk_schema =
-        output_authority.named_value_output_names.empty()
-            ? ImageDiskCacheOutputSchema::NoGenericNamedValues
-            : ImageDiskCacheOutputSchema::ContainsGenericNamedValues;
+    const ImageDiskCacheOutputSchema disk_schema{
+        output_authority.image_output_name.has_value(),
+        output_authority.parameter_output_names,
+        !output_authority.named_value_output_names.empty()};
     if (context.allow_disk_cache &&
         cache_.try_load_from_disk_cache_into(graph, target_node, disk_output,
                                              disk_schema)) {

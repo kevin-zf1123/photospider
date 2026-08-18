@@ -327,9 +327,10 @@ class NodeTaskRunner {
    * artifact is left for provider recomputation.
    * @throws GraphError, allocation, diagnostic, or output-validation
    * exceptions unchanged.
-   * @note A planned generic named-Value schema is classified before the cache
-   * service inspects filesystem state and therefore can never turn an old
-   * image-only artifact into a partial staged hit.
+   * @note The complete frozen image/parameter/generic shape is passed to the
+   * cache service. Generic output misses before filesystem inspection; sibling
+   * presence misses before either codec; decoded parameter-key mismatch misses
+   * before returning Hit. None can become a partial staged hit.
    */
   void try_load_disk_cache(const Node& target_node, int node_idx);
 
