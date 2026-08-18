@@ -904,39 +904,30 @@ JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
 }
 
 /**
- * @brief Waits for one exact cancel and then exits only after manager closure.
+ * @brief Waits silently for one exact cancel and subsequent manager closure.
  * @param fd Connected manager socket.
  * @param assignment Exact current assignment.
- * @param io_timeout Positive manager-selected write bound.
  * @return Nothing after the cancel was validated and clean channel EOF arrived.
- * @throws WorkerProtocolTimeout when a heartbeat write deadline expires.
  * @throws WorkerProtocolError or WorkerChannelError for malformed/early
  * channel termination or another channel failure.
- * @throws std::invalid_argument for an invalid descriptor, identity, or
- * deadline duration.
- * @throws std::overflow_error if a captured base cannot represent a heartbeat
- * or poll deadline.
- * @throws std::bad_alloc when deadline diagnostics or frame processing exhausts
- * memory.
- * @note Heartbeats continue only until cancellation is semantically accepted.
- * A complete Cancel remains decoder-owned across a missed slice deadline. The
- * final return lets the fixture process reach normal `exit(0)` after channel
- * revocation, which the manager test seam can retain as a zombie. Read-slice
- * timeouts and the expected post-cancel EOF are contained; `fd` is borrowed.
+ * @throws std::invalid_argument for an invalid descriptor or identity.
+ * @throws std::overflow_error if a captured base cannot represent a poll
+ * deadline.
+ * @throws std::bad_alloc when deadline diagnostics or frame processing
+ * exhausts memory.
+ * @note The fixture deliberately emits no frames after AssignmentAccepted, so
+ * manager closure cannot discard unread fixture-to-manager Heartbeats and turn
+ * the peer observation into `ECONNRESET`. A complete Cancel remains
+ * decoder-owned across a missed slice deadline. The final return lets the
+ * fixture process reach normal `exit(0)` after channel revocation, which the
+ * manager test seam can retain as a zombie. Read-slice timeouts and the
+ * expected post-cancel EOF are contained; `fd` is borrowed.
  */
-void wait_for_cancel_then_channel_close(int fd, const JobAssignment& assignment,
-                                        std::chrono::milliseconds io_timeout) {
-  auto next_heartbeat = checked_worker_deadline(
-      std::chrono::steady_clock::now(), kFixtureHeartbeatCadence);
+void wait_for_cancel_then_channel_close_without_heartbeat(
+    int fd, const JobAssignment& assignment) {
   bool cancel_observed = false;
   WorkerFrameDecoder frame_decoder;
   for (;;) {
-    const auto now = std::chrono::steady_clock::now();
-    if (!cancel_observed && now >= next_heartbeat) {
-      send_heartbeat(fd, assignment.identity, io_timeout);
-      next_heartbeat = checked_worker_deadline(std::chrono::steady_clock::now(),
-                                               kFixtureHeartbeatCadence);
-    }
     try {
       const auto read_deadline = checked_worker_deadline(
           std::chrono::steady_clock::now(), kFixtureHeartbeatCadence);
@@ -1268,8 +1259,8 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     return 0;
   }
   if (mode == "fixture.cancel-race.zero-exit-zombie") {
-    wait_for_cancel_then_channel_close(launch.control_fd, assignment,
-                                       launch.io_timeout);
+    wait_for_cancel_then_channel_close_without_heartbeat(launch.control_fd,
+                                                         assignment);
     return 0;
   }
   if (mode == "fixture.ignore") {
