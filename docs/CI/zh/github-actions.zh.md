@@ -170,6 +170,19 @@ request 随后纳入该可信 commit，并删除自身独立的受保护路径�
 policy/execution 契约。当 `main` 与所有维护分支都只使用 policy/execution 后，后续可信 CI 清理
 应删除旧 profile 与能力切换。
 
+## Plugin-Manager 测试套件名称过渡
+
+在 plugin manager 迁移到纯 C operation ABI 期间，`plugin_load_test.sh` 使用显式正向
+过滤器 `PluginManagerLifecycleTest.*:PluginManagerPureCAbiTest.*`。GoogleTest 会把冒号
+分隔的 pattern 视为并集；`run_gtest_checked` 会把同一过滤器同时用于发现和执行，并拒绝
+空 selection。因此，无论 `main` 上的旧测试套件、迁移分支上已改名的测试套件，还是两者
+并存，都会被执行，而且不需要使用可能选中无关测试的宽泛 glob。测试套件绝不由分支名或
+commit identity 选择；构建后的测试清单才是权威来源。
+
+这只是一层测试选择兼容，不会增加产品或 ABI 兼容层，也不表示 `main` 已经完成纯 C ABI
+迁移。只有当 `main` 与所有维护分支都只公开 `PluginManagerPureCAbiTest.*`，并且所有受支持
+构建清单中都不再出现旧测试套件后，后续可信 `CI/**` 清理才应把过滤器收窄到新测试套件。
+
 ## 脚本式 CLI 能力过渡
 
 `graph_cli_script_test.sh` 会在启动任何 `graph_cli` 进程前选择“显式来源缺失”契约。稳定能力标记是
