@@ -60,6 +60,13 @@ struct DirtyResolvedOperation {
    * staging and again before formal HP/RT publication.
    */
   PlannedOutputAuthority output_authority;
+
+  /**
+   * @brief Dirty-ROI callback frozen with the exact selected implementation.
+   * @note Tiled execution uses this copy instead of consulting the mutable
+   * operation-level registry callback after admission.
+   */
+  std::optional<DirtyRoiPropFunc> dirty_propagator;
 };
 
 /** @brief Node-id index of immutable dirty operation/device snapshots. */
@@ -224,7 +231,7 @@ class HighPrecisionDirtyNodeExecutor {
    * @param node Node being computed.
    * @param tile_fn Tiled HP operation implementation.
    * @param entry HP ROI, extent, and halo metadata.
-   * @param metadata Metadata frozen with the selected tiled implementation.
+   * @param operation Exact selected implementation metadata and ROI callback.
    * @param image_inputs_ready Resolved HP image inputs.
    * @param output_binding Open request-local destination binding.
    * @return Nothing.
@@ -234,7 +241,8 @@ class HighPrecisionDirtyNodeExecutor {
    * observed before every tile callback enters provider work.
    */
   void execute_tiled(Node& node, const TileOpFunc& tile_fn,
-                     const HpPlanEntry& entry, const OpMetadata& metadata,
+                     const HpPlanEntry& entry,
+                     const DirtyResolvedOperation& operation,
                      const std::vector<const NodeOutput*>& image_inputs_ready,
                      HostOutputBinding& output_binding) const;
 
@@ -416,7 +424,7 @@ class RealTimeDirtyNodeExecutor {
    * @param node Node being computed.
    * @param tile_fn Tiled operation implementation.
    * @param entry RT dirty ROI, extent, and halo metadata.
-   * @param metadata Metadata frozen with the selected tiled implementation.
+   * @param operation Exact selected implementation metadata and ROI callback.
    * @param image_inputs_ready Resolved RT image inputs.
    * @param output_binding Open request-local destination binding.
    * @return Nothing.
@@ -426,7 +434,8 @@ class RealTimeDirtyNodeExecutor {
    * observed before every tile callback enters provider work.
    */
   void execute_tiled(Node& node, const TileOpFunc& tile_fn,
-                     const RtPlanEntry& entry, const OpMetadata& metadata,
+                     const RtPlanEntry& entry,
+                     const DirtyResolvedOperation& operation,
                      const std::vector<const NodeOutput*>& image_inputs_ready,
                      HostOutputBinding& output_binding) const;
 

@@ -1314,8 +1314,8 @@ struct Value::Impl final {
   std::optional<ImageFacet> image_facet;
 
   /** @brief Optional exact pure-C operation descriptor identity. */
-  std::optional<DenseImageValueDescriptorMetadata>
-      dense_image_descriptor_metadata;
+  std::optional<DenseTensorValueDescriptorMetadata>
+      dense_tensor_descriptor_metadata;
 
   /** @brief Optional byte-preserved provider-defined logical descriptor. */
   std::optional<DataDescriptorEnvelope> provider_descriptor;
@@ -1366,12 +1366,12 @@ struct Value::Impl final {
        std::optional<ImageFacet> image_facet_in, ValueLayout layout_in,
        BufferHandle buffer_in, ReadyFence ready_fence_in,
        ValueRevisionId revision_in, ProducerIdentity producer_in,
-       std::optional<DenseImageValueDescriptorMetadata> descriptor_metadata_in =
-           std::nullopt)
+       std::optional<DenseTensorValueDescriptorMetadata>
+           descriptor_metadata_in = std::nullopt)
       : representation(ValueRepresentationKind::DenseTensor),
         descriptor(std::move(descriptor_in)),
         image_facet(std::move(image_facet_in)),
-        dense_image_descriptor_metadata(std::move(descriptor_metadata_in)),
+        dense_tensor_descriptor_metadata(std::move(descriptor_metadata_in)),
         layout(std::move(layout_in)),
         buffer(std::move(buffer_in)),
         ready_fence(std::move(ready_fence_in)),
@@ -1423,8 +1423,8 @@ struct ValueBuilder::Impl final {
   ValueLayout layout;
 
   /** @brief Optional exact operation metadata installed before publication. */
-  std::optional<DenseImageValueDescriptorMetadata>
-      dense_image_descriptor_metadata;
+  std::optional<DenseTensorValueDescriptorMetadata>
+      dense_tensor_descriptor_metadata;
 
   /** @brief Private complete allocation handle. */
   BufferHandle buffer;
@@ -1456,45 +1456,49 @@ struct ValueBuilder::Impl final {
         authority(std::move(authority_in)) {}
 };
 
-/** @copydoc DenseImageValueDescriptorMetadataAccess::attach */
-void DenseImageValueDescriptorMetadataAccess::attach(
-    ValueBuilder* builder, DenseImageValueDescriptorMetadata metadata) {
+/** @copydoc DenseTensorValueDescriptorMetadataAccess::attach */
+void DenseTensorValueDescriptorMetadataAccess::attach(
+    ValueBuilder* builder, DenseTensorValueDescriptorMetadata metadata) {
   if (builder == nullptr) {
     throw std::invalid_argument(
-        "DenseImage descriptor metadata requires a nonnull builder.");
-  }
-  if (!metadata.schema_identity.valid() || !metadata.facet_identity.valid() ||
-      !metadata.layout_identity.valid() || metadata.descriptor_version == 0U ||
-      metadata.layout_version == 0U) {
-    throw std::invalid_argument(
-        "DenseImage descriptor metadata identities and versions must be "
-        "nonzero.");
+        "DenseTensor descriptor metadata requires a nonnull builder.");
   }
   if (!builder->impl_ || builder->impl_->sealed ||
       !builder->impl_->authority->builder_open.load(
           std::memory_order_acquire)) {
     throw std::logic_error(
-        "DenseImage descriptor metadata requires an open builder.");
+        "DenseTensor descriptor metadata requires an open builder.");
   }
-  if (builder->impl_->dense_image_descriptor_metadata.has_value()) {
-    if (*builder->impl_->dense_image_descriptor_metadata == metadata) {
+  if (!metadata.schema_identity.valid() || !metadata.layout_identity.valid() ||
+      metadata.descriptor_version == 0U || metadata.layout_version == 0U) {
+    throw std::invalid_argument(
+        "DenseTensor Schema/Layout identities and versions must be "
+        "nonzero.");
+  }
+  if (metadata.facet_identity.valid() !=
+      builder->impl_->image_facet.has_value()) {
+    throw std::invalid_argument(
+        "DenseTensor descriptor Facet identity presence must match its Facet.");
+  }
+  if (builder->impl_->dense_tensor_descriptor_metadata.has_value()) {
+    if (*builder->impl_->dense_tensor_descriptor_metadata == metadata) {
       return;
     }
     throw std::logic_error(
-        "DenseImage builder already carries different descriptor metadata.");
+        "DenseTensor builder already carries different descriptor metadata.");
   }
-  builder->impl_->dense_image_descriptor_metadata = std::move(metadata);
+  builder->impl_->dense_tensor_descriptor_metadata = std::move(metadata);
 }
 
-/** @copydoc DenseImageValueDescriptorMetadataAccess::get */
-const DenseImageValueDescriptorMetadata*
-DenseImageValueDescriptorMetadataAccess::get(const Value& value) noexcept {
+/** @copydoc DenseTensorValueDescriptorMetadataAccess::get */
+const DenseTensorValueDescriptorMetadata*
+DenseTensorValueDescriptorMetadataAccess::get(const Value& value) noexcept {
   if (!value.impl_ ||
       value.impl_->representation != ValueRepresentationKind::DenseTensor ||
-      !value.impl_->dense_image_descriptor_metadata.has_value()) {
+      !value.impl_->dense_tensor_descriptor_metadata.has_value()) {
     return nullptr;
   }
-  return &*value.impl_->dense_image_descriptor_metadata;
+  return &*value.impl_->dense_tensor_descriptor_metadata;
 }
 
 /**
@@ -1726,7 +1730,7 @@ Value ValueBuilder::seal() {
   auto published = std::make_shared<const Value::Impl>(
       impl_->descriptor, impl_->image_facet, impl_->layout, impl_->buffer,
       ReadyFence::already_ready(), revision, producer,
-      impl_->dense_image_descriptor_metadata);
+      impl_->dense_tensor_descriptor_metadata);
 
   impl_->authority->builder_open.store(false, std::memory_order_release);
   impl_->sealed = true;

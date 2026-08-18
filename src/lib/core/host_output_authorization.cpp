@@ -487,7 +487,7 @@ std::byte* HostOutputWriteGrant::data(std::size_t index) const {
 
 /** @copydoc HostOutputWriteGrant::bind_value_descriptor_metadata */
 void HostOutputWriteGrant::bind_value_descriptor_metadata(
-    DenseImageValueDescriptorMetadata metadata) {
+    DenseTensorValueDescriptorMetadata metadata) {
   if (!state_ || retired_ || grant_id_ == 0U) {
     throw std::logic_error(
         "Inactive Host output grant cannot bind descriptor metadata.");
@@ -498,8 +498,8 @@ void HostOutputWriteGrant::bind_value_descriptor_metadata(
         "Revoked Host output grant cannot bind descriptor metadata.");
   }
   try {
-    DenseImageValueDescriptorMetadataAccess::attach(&state_->builder,
-                                                    std::move(metadata));
+    DenseTensorValueDescriptorMetadataAccess::attach(&state_->builder,
+                                                     std::move(metadata));
   } catch (...) {
     state_->fail("Host output descriptor metadata attachment failed.");
     throw;

@@ -385,8 +385,8 @@ std::map<std::string, std::optional<std::string>> collect_previous_sources(
  * @brief Preallocates callback retirement slots for one plugin publication.
  *
  * @param owned_entries Final per-key slot revisions written by the registrar.
- * @return Snapshot map containing empty callable placeholders and one default
- *         stable device-owner slot per plugin-owned appended element.
+ * @return Snapshot map containing empty scalar placeholders, empty whole-set
+ *         vector receivers, or one stable owner slot per legacy appended item.
  * @throws std::bad_alloc if map, key, or device-placeholder storage allocation
  *         fails.
  * @note The returned storage contains no plugin callback yet. Allocation-free
@@ -412,11 +412,14 @@ make_retirement_registry_entries(
         owned.monolithic_hp != 0 || owned.tiled_hp != 0 ||
         owned.tiled_rt != 0 || owned.dirty_propagator != 0 ||
         owned.forward_propagator != 0 || owned.dependency_builder != 0 ||
-        owned.data_dependent != 0 || !owned.device_impls.empty();
+        owned.data_dependent != 0 || owned.device_impl_set != 0 ||
+        !owned.device_impls.empty();
     if (owns_implementation_slot) {
       retirement.implementations.emplace();
-      retirement.implementations->device_impl_slots.resize(
-          owned.device_impls.size());
+      if (owned.device_impl_set == 0U) {
+        retirement.implementations->device_impl_slots.resize(
+            owned.device_impls.size());
+      }
     }
     retirement_entries.emplace(key, std::move(retirement));
   }

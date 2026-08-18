@@ -14,21 +14,21 @@
 namespace ps {
 
 /**
- * @brief Exact representation identity carried by one operation DenseImage.
+ * @brief Exact representation identity carried by one operation DenseTensor.
  *
  * The ordinary C++ DenseTensor/ImageFacet/StridedLayout objects retain the
  * interpreted metadata graph. This record independently retains the publisher
- * assigned Schema, Facet, and Layout identities, structural versions, and
- * opaque digest words that the pure-C operation ABI must echo unchanged.
+ * assigned Schema, optional Facet, and Layout identities, structural versions,
+ * and opaque digest words that the pure-C operation ABI must echo unchanged.
  *
  * @throws Nothing for ordinary construction, copying, and comparison.
  * @note All-zero digest words mean unavailable and remain distinct from a
  * synthesized digest. The Host never interprets or recomputes these words.
  */
-struct DenseImageValueDescriptorMetadata final {
+struct DenseTensorValueDescriptorMetadata final {
   /** @brief Permanent representation-Schema identity. */
   ExtensionIdentity schema_identity;
-  /** @brief Permanent primary Image Facet identity. */
+  /** @brief Permanent primary Facet identity, or zero when no Facet exists. */
   ExtensionIdentity facet_identity;
   /** @brief Permanent physical Strided Layout identity. */
   ExtensionIdentity layout_identity;
@@ -50,7 +50,7 @@ struct DenseImageValueDescriptorMetadata final {
    * @throws Nothing.
    */
   bool operator==(
-      const DenseImageValueDescriptorMetadata& other) const noexcept {
+      const DenseTensorValueDescriptorMetadata& other) const noexcept {
     return schema_identity == other.schema_identity &&
            facet_identity == other.facet_identity &&
            layout_identity == other.layout_identity &&
@@ -68,7 +68,7 @@ struct DenseImageValueDescriptorMetadata final {
    * @throws Nothing.
    */
   bool operator!=(
-      const DenseImageValueDescriptorMetadata& other) const noexcept {
+      const DenseTensorValueDescriptorMetadata& other) const noexcept {
     return !(*this == other);
   }
 };
@@ -82,12 +82,13 @@ struct DenseImageValueDescriptorMetadata final {
  * readiness, revision, or producer identity. Attachment occurs before Value
  * publication and an identical repeated attachment is idempotent.
  */
-class DenseImageValueDescriptorMetadataAccess final {
+class DenseTensorValueDescriptorMetadataAccess final {
  public:
   /**
    * @brief Attaches exact metadata to one unsealed DenseTensor builder.
    * @param builder Nonnull exclusive builder before publication.
-   * @param metadata Complete nonzero identity/version record to retain.
+   * @param metadata Complete Schema/Layout identity/version record to retain;
+   *        Facet identity is zero exactly when the builder has no Facet.
    * @return Nothing.
    * @throws std::invalid_argument for null builder or malformed metadata.
    * @throws std::logic_error when the builder is moved-from, sealed, or already
@@ -98,7 +99,7 @@ class DenseImageValueDescriptorMetadataAccess final {
    * record changes no payload address, byte, or producer authority.
    */
   static void attach(ValueBuilder* builder,
-                     DenseImageValueDescriptorMetadata metadata);
+                     DenseTensorValueDescriptorMetadata metadata);
 
   /**
    * @brief Observes exact operation metadata retained by one immutable Value.
@@ -109,7 +110,7 @@ class DenseImageValueDescriptorMetadataAccess final {
    * @note The pointer remains valid while `value` or one of its copies retains
    * the shared immutable publication.
    */
-  static const DenseImageValueDescriptorMetadata* get(
+  static const DenseTensorValueDescriptorMetadata* get(
       const Value& value) noexcept;
 };
 

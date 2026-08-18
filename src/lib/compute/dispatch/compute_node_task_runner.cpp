@@ -553,6 +553,8 @@ TiledExecutionConfig NodeTaskRunner::tiled_config_for(
     return tiled_config;
   }
   tiled_config.metadata = implementation.metadata;
+  tiled_config.dirty_propagator = implementation.dirty_propagator;
+  tiled_config.implementation_identity = implementation.implementation_identity;
   if (implementation.metadata.tile_preference == TileSizePreference::MICRO) {
     tiled_config.tile_size = 16;
   } else if (implementation.metadata.tile_preference ==

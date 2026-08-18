@@ -393,7 +393,7 @@ void HighPrecisionDirtyNodeExecutor::execute_operation(
       OperationExecutionLease operation_lease = acquire_direct_dirty_operation(
           direct_execution_service_, run_lease_, operation);
       execute_tiled(node, std::get<TileOpFunc>(operation.operation), entry,
-                    operation.metadata, image_inputs_ready, output_binding);
+                    operation, image_inputs_ready, output_binding);
     }
     return;
   }
@@ -405,7 +405,7 @@ void HighPrecisionDirtyNodeExecutor::execute_operation(
 /** @copydoc HighPrecisionDirtyNodeExecutor::execute_tiled */
 void HighPrecisionDirtyNodeExecutor::execute_tiled(
     Node& node, const TileOpFunc& tile_fn, const HpPlanEntry& entry,
-    const OpMetadata& metadata,
+    const DirtyResolvedOperation& operation,
     const std::vector<const NodeOutput*>& image_inputs_ready,
     HostOutputBinding& output_binding) const {
   TiledExecutionConfig config;
@@ -413,7 +413,9 @@ void HighPrecisionDirtyNodeExecutor::execute_tiled(
   config.output_roi = entry.roi_hp;
   config.output_size = entry.hp_size;
   config.forced_halo = entry.halo_hp;
-  config.metadata = metadata;
+  config.metadata = operation.metadata;
+  config.dirty_propagator = operation.dirty_propagator;
+  config.implementation_identity = operation.implementation_identity;
   config.on_tile = [this](const PixelRect&) {
     observe_dirty_node_cancellation(run_lease_);
   };
@@ -578,7 +580,7 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
       OperationExecutionLease operation_lease = acquire_direct_dirty_operation(
           direct_execution_service_, run_lease_, selected_operation);
       execute_tiled(node_for_exec, std::get<TileOpFunc>(operation), entry,
-                    selected_operation.metadata, resolved_inputs.image_inputs,
+                    selected_operation, resolved_inputs.image_inputs,
                     output_binding);
     }
   }
@@ -651,7 +653,7 @@ void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
 /** @copydoc RealTimeDirtyNodeExecutor::execute_tiled */
 void RealTimeDirtyNodeExecutor::execute_tiled(
     Node& node, const TileOpFunc& tile_fn, const RtPlanEntry& entry,
-    const OpMetadata& metadata,
+    const DirtyResolvedOperation& operation,
     const std::vector<const NodeOutput*>& image_inputs_ready,
     HostOutputBinding& output_binding) const {
   TiledExecutionConfig config;
@@ -659,7 +661,9 @@ void RealTimeDirtyNodeExecutor::execute_tiled(
   config.output_roi = entry.roi_rt;
   config.output_size = entry.rt_size;
   config.forced_halo = entry.halo_rt;
-  config.metadata = metadata;
+  config.metadata = operation.metadata;
+  config.dirty_propagator = operation.dirty_propagator;
+  config.implementation_identity = operation.implementation_identity;
   config.on_tile = [this](const PixelRect&) {
     observe_dirty_node_cancellation(run_lease_);
   };

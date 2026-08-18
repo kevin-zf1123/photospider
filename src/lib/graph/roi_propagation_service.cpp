@@ -649,17 +649,32 @@ std::optional<DependencyRoiContribution> dependency_lookup(
  * @param graph Graph passed to the operator propagator.
  * @param input_extents Known image-input extents by destination index.
  * @param effective_parameters Exact parameters resolved for this request.
+ * @param selected Exact request-selected implementation, when one exists.
  * @param accumulator Accumulator receiving the propagated upstream ROI.
  * @throws Exceptions propagated by registered operator propagators.
+ * @note A selected implementation without an explicit callback uses the
+ * identity fallback and never borrows another implementation's callback.
  */
 void append_operator_upstream_roi(
     const Node& node, const PixelRect& clamped_roi,
     const PixelSize& output_extent, const GraphModel& graph,
     const std::vector<PixelSize>& input_extents,
     const plugin::ParameterMap& effective_parameters,
-    RoiAccumulator& accumulator) {
-  auto propagate_fn =
-      OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
+    const OpImplementation* selected, RoiAccumulator& accumulator) {
+  DirtyRoiPropFunc propagate_fn;
+  if (selected != nullptr) {
+    propagate_fn =
+        selected->dirty_propagator
+            ? *selected->dirty_propagator
+            : DirtyRoiPropFunc(
+                  [](const Node&, const PixelRect& roi, const GraphModel&,
+                     const PixelSize&, const std::vector<PixelSize>&,
+                     const plugin::ParameterMap&,
+                     const std::vector<const NodeOutput*>*) { return roi; });
+  } else {
+    propagate_fn =
+        OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
+  }
   accumulator.include(propagate_fn(node, clamped_roi, graph, output_extent,
                                    input_extents, effective_parameters,
                                    nullptr));
@@ -694,6 +709,7 @@ void append_spatial_metadata_roi(const Node& node, const PixelRect& clamped_roi,
  * @param downstream_size Current node output extent.
  * @param input_state Current input extents and revisions.
  * @param effective_parameters Exact parameters resolved for this request.
+ * @param selected Exact request-selected implementation, when one exists.
  * @return Routed LUT contribution, or nullopt when no builder/demand exists.
  * @throws Exceptions propagated by the registered LUT builder or extent
  * resolver.
@@ -703,10 +719,25 @@ void append_spatial_metadata_roi(const Node& node, const PixelRect& clamped_roi,
 std::optional<DependencyRoiContribution> dependency_lut_roi(
     const Node& node, const GraphModel& graph, const PixelRect& clamped_roi,
     const PixelSize& downstream_size, DependencyInputState input_state,
-    const plugin::ParameterMap& effective_parameters) {
-  const auto builder_snapshot =
-      OpRegistry::instance().get_dependency_builder_snapshot(node.type,
-                                                             node.subtype);
+    const plugin::ParameterMap& effective_parameters,
+    const OpImplementation* selected) {
+  std::optional<DependencyBuilderSnapshot> builder_snapshot;
+  if (selected != nullptr) {
+    if (!selected->dependency_builder) {
+      return std::nullopt;
+    }
+    builder_snapshot.emplace();
+    builder_snapshot->callback = *selected->dependency_builder;
+    builder_snapshot->data_dependent = selected->metadata.data_dependent;
+    builder_snapshot->dependency_builder_revision =
+        selected->implementation_identity;
+    builder_snapshot->data_dependent_revision =
+        selected->metadata.data_dependent ? selected->implementation_identity
+                                          : 0U;
+  } else {
+    builder_snapshot = OpRegistry::instance().get_dependency_builder_snapshot(
+        node.type, node.subtype);
+  }
   if (!builder_snapshot) {
     return std::nullopt;
   }
@@ -730,18 +761,34 @@ std::optional<DependencyRoiContribution> dependency_lut_roi(
  * @param child_size Child output extent.
  * @param input_extents Known child image-input extents by destination index.
  * @param effective_parameters Exact child parameters for this request.
+ * @param selected Exact request-selected implementation, when one exists.
  * @return Child ROI clipped to child output extent, or nullopt when no work is
  * affected.
  * @throws Exceptions propagated by registered forward propagators.
+ * @note A selected implementation without an explicit callback uses the
+ * identity fallback and never borrows another implementation's callback.
  */
 std::optional<PixelRect> propagate_forward_edge_roi(
     const GraphModel& graph, const GraphTopologyEdge& edge,
     const PixelRect& parent_roi, const PixelSize& parent_size,
     const PixelSize& child_size, const std::vector<PixelSize>& input_extents,
-    const plugin::ParameterMap& effective_parameters) {
+    const plugin::ParameterMap& effective_parameters,
+    const OpImplementation* selected) {
   const Node& child = graph.node(edge.to_node_id);
-  auto forward_fn =
-      OpRegistry::instance().get_forward_propagator(child.type, child.subtype);
+  ForwardRoiPropFunc forward_fn;
+  if (selected != nullptr) {
+    forward_fn =
+        selected->forward_propagator
+            ? *selected->forward_propagator
+            : ForwardRoiPropFunc(
+                  [](const Node&, const PixelRect& roi, const GraphModel&,
+                     const PixelSize&, const PixelSize&, std::size_t,
+                     const std::vector<PixelSize>&,
+                     const plugin::ParameterMap&) { return roi; });
+  } else {
+    forward_fn = OpRegistry::instance().get_forward_propagator(child.type,
+                                                               child.subtype);
+  }
   const PixelRect propagated = clamp_rect_to_bounds(
       forward_fn(child, parent_roi, graph, parent_size, child_size,
                  edge.input_index, input_extents, effective_parameters),
@@ -959,6 +1006,8 @@ UpstreamRoiProjection RoiPropagationService::compute_upstream_projection(
     return {};
 
   const PixelSize output_extent = get_size(node.id);
+  const std::optional<OpImplementation> selected =
+      select_route_implementation(node);
   DependencyInputState input_state =
       dependency_input_state(graph, node.id, get_size);
   const plugin::ParameterMap effective_parameters =
@@ -966,13 +1015,13 @@ UpstreamRoiProjection RoiPropagationService::compute_upstream_projection(
   RoiAccumulator upstream;
   append_operator_upstream_roi(node, clamped_roi, output_extent, graph,
                                input_state.extents, effective_parameters,
-                               upstream);
+                               selected ? &*selected : nullptr, upstream);
   append_spatial_metadata_roi(node, clamped_roi, upstream);
   UpstreamRoiProjection projection;
   projection.shared_roi = upstream.value();
-  const auto dependency =
-      dependency_lut_roi(node, graph, clamped_roi, output_extent,
-                         std::move(input_state), effective_parameters);
+  const auto dependency = dependency_lut_roi(
+      node, graph, clamped_roi, output_extent, std::move(input_state),
+      effective_parameters, selected ? &*selected : nullptr);
   if (dependency && !is_rect_empty(dependency->roi)) {
     projection.dependency_input_index = dependency->input_index;
     projection.dependency_roi = dependency->roi;
@@ -1028,9 +1077,12 @@ std::optional<PixelRect> RoiPropagationService::project_roi_forward(
           dependency_input_state(graph, child_id, get_size);
       const plugin::ParameterMap effective_parameters =
           resolve_effective_parameter_snapshot(child, graph);
+      const std::optional<OpImplementation> selected =
+          select_route_implementation(child);
       auto propagated = propagate_forward_edge_roi(
           graph, edge, *current_roi, parent_size, child_size,
-          input_state.extents, effective_parameters);
+          input_state.extents, effective_parameters,
+          selected ? &*selected : nullptr);
       if (propagated) {
         frontier.merge_or_enqueue(child_id, *propagated, child_size);
       }

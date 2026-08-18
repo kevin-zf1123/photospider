@@ -333,7 +333,7 @@ class HostOutputWriteGrant final {
    * closed before successful retirement or publication.
    */
   void bind_value_descriptor_metadata(
-      DenseImageValueDescriptorMetadata metadata);
+      DenseTensorValueDescriptorMetadata metadata);
 
   /**
    * @brief Retires this grant successfully exactly once.

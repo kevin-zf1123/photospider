@@ -776,6 +776,10 @@ struct OpMetadata {
   Device device_preference = Device::CPU;
   /** @brief Relative scheduling cost; lower values are preferred. */
   int cost_score = 100;
+  /** @brief Whether this exact candidate may satisfy high-precision intent. */
+  bool supports_high_precision = true;
+  /** @brief Whether this exact candidate may satisfy real-time intent. */
+  bool supports_realtime = true;
 
   /** @brief Private image-input access pattern used during planning. */
   enum class InputAccessPattern {
@@ -1023,6 +1027,29 @@ struct OpImplementation {
    * predecessor's recorded revision.
    */
   std::uint64_t implementation_identity = 0U;
+
+  /**
+   * @brief Backward Region callback owned by this exact implementation.
+   * @note Absence selects this implementation's conservative identity
+   * fallback. Consumers must not borrow an operation-level callback after this
+   * implementation has been selected.
+   */
+  std::optional<DirtyRoiPropFunc> dirty_propagator;
+
+  /**
+   * @brief Forward Region callback owned by this exact implementation.
+   * @note Absence selects this implementation's conservative identity
+   * fallback. Consumers must not borrow an operation-level callback after this
+   * implementation has been selected.
+   */
+  std::optional<ForwardRoiPropFunc> forward_propagator;
+
+  /**
+   * @brief Data-dependent LUT builder owned by this exact implementation.
+   * @note Presence is meaningful only when `metadata.data_dependent` is true.
+   * Absence never selects another implementation's operation-level builder.
+   */
+  std::optional<DependencyLutBuilder> dependency_builder;
 
   /**
    * @brief Checks whether the callable consumes complete NodeOutput values.
@@ -1273,6 +1300,11 @@ class OpRegistry {
     std::uint64_t dependency_builder = 0;
     /** @brief Revision owning the builder-specific dependency contribution. */
     std::uint64_t data_dependent = 0;
+    /**
+     * @brief Revision owning an atomically replaced complete candidate set.
+     * @note Zero denotes legacy append-owned device entries.
+     */
+    std::uint64_t device_impl_set = 0;
     /**
      * @brief Revisions parallel to active device implementation entries.
      * @note Whole-key unregister removes this vector with the implementation
@@ -1756,6 +1788,27 @@ class OpRegistry {
                      Device device, TileOpFunc fn, OpMetadata meta);
 
   /**
+   * @brief Atomically replaces one operation's complete implementation set.
+   *
+   * @param type Operation type.
+   * @param subtype Operation subtype.
+   * @param candidates Nonempty complete same-generation candidate inventory.
+   * @return Nothing.
+   * @throws std::invalid_argument when the set is empty, a callback is empty,
+   *         intent eligibility is empty, or candidate metadata is malformed.
+   * @throws std::bad_alloc when stable owners, revisions, capture, or table
+   *         storage cannot allocate.
+   * @throws Any exception raised while copying callback targets.
+   * @note Validation and stable-owner construction finish before mutation. One
+   *       set revision replaces every predecessor candidate under the registry
+   *       lock; capture, reverse unload, and middle-generation splice restore
+   *       the whole predecessor set without mixing generations.
+   */
+  void replace_implementation_candidates(
+      const std::string& type, const std::string& subtype,
+      std::vector<OpImplementation> candidates);
+
+  /**
    * @brief Copies implementations for one operation and device.
    *
    * @param type Operation type.
@@ -1790,6 +1843,23 @@ class OpRegistry {
    */
   std::vector<OpImplementation> get_all_implementations(
       const std::string& type, const std::string& subtype) const;
+
+  /**
+   * @brief Copies one exact currently active implementation revision.
+   * @param type Operation type.
+   * @param subtype Operation subtype.
+   * @param implementation_identity Nonzero selected registry revision.
+   * @return Exact device candidate, scalar compatibility slot, or legacy
+   * callback; nullopt after replacement/unload.
+   * @throws std::bad_alloc or callback-copy failures from snapshot
+   * materializing.
+   * @note Identity lookup covers every selectable registry surface but never
+   * substitutes another revision, shape, intent, cost, or propagation
+   * contract; stale plans therefore fail closed.
+   */
+  std::optional<OpImplementation> get_implementation_by_identity(
+      const std::string& type, const std::string& subtype,
+      std::uint64_t implementation_identity) const;
 
   /**
    * @brief Selects the best registered implementation for an intent.

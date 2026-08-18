@@ -1,8 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -13,6 +17,7 @@
 #include <string_view>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -26,7 +31,9 @@
 #include "core/host_output_authorization.hpp"  // NOLINT(build/include_subdir)
 #include "core/ps_types.hpp"                   // NOLINT(build/include_subdir)
 #include "core/value_image_adapter.hpp"        // NOLINT(build/include_subdir)
+#include "graph/graph_model.hpp"               // NOLINT(build/include_subdir)
 #include "graph/node.hpp"                      // NOLINT(build/include_subdir)
+#include "graph/roi_propagation_service.hpp"   // NOLINT(build/include_subdir)
 #include "plugin/operation_host_adapter.hpp"
 #include "plugin/operation_runtime_router.hpp"
 
@@ -200,6 +207,65 @@ class ScopedEnvironment final {
   /** @brief Whether `previous_` represents an existing variable. */
   bool had_previous_ = false;
 };  // NOLINT(readability/braces)
+
+/**
+ * @brief Removes one process-registry key when a focused test scope exits.
+ * @throws Nothing.
+ * @note The fixture owns only the named key and never clears unrelated
+ * process-global registrations.
+ */
+class ScopedRegistryKeyCleanup final {
+ public:
+  /**
+   * @brief Takes cleanup responsibility for one canonical registry key.
+   * @param key Exact `type:subtype` key.
+   * @throws std::bad_alloc when retaining the key cannot allocate.
+   */
+  explicit ScopedRegistryKeyCleanup(std::string key) : key_(std::move(key)) {}
+
+  /** @brief Removes the owned key after all callback snapshots leave scope. */
+  ~ScopedRegistryKeyCleanup() noexcept {
+    static_cast<void>(OpRegistry::instance().unregister_key(key_));
+  }
+
+  ScopedRegistryKeyCleanup(const ScopedRegistryKeyCleanup&) = delete;
+  ScopedRegistryKeyCleanup& operator=(const ScopedRegistryKeyCleanup&) = delete;
+
+ private:
+  /** @brief Canonical key removed at scope exit. */
+  std::string key_;
+};
+
+/**
+ * @brief Preallocates callback retirement storage for one captured key.
+ * @param owned Exact slot revisions published by the captured generation.
+ * @return Empty snapshot whose topology can receive every owned callback.
+ * @throws std::bad_alloc when legacy or device placeholder storage allocates.
+ * @note This focused helper mirrors the production loader's pre-publication
+ * allocation so retirement and middle-generation splicing remain noexcept.
+ */
+OpRegistry::RegistryEntrySnapshot make_retirement_snapshot(
+    const OpRegistry::RegistryEntryOwnership& owned) {
+  OpRegistry::RegistryEntrySnapshot retirement;
+  if (owned.legacy_op != 0U) {
+    retirement.legacy_op.emplace(MonolithicOpFunc{});
+  }
+  if (owned.metadata != 0U) {
+    retirement.metadata.emplace();
+  }
+  if (owned.monolithic_hp != 0U || owned.tiled_hp != 0U ||
+      owned.tiled_rt != 0U || owned.dirty_propagator != 0U ||
+      owned.forward_propagator != 0U || owned.dependency_builder != 0U ||
+      owned.data_dependent != 0U || owned.device_impl_set != 0U ||
+      !owned.device_impls.empty()) {
+    retirement.implementations.emplace();
+    if (owned.device_impl_set == 0U) {
+      retirement.implementations->device_impl_slots.resize(
+          owned.device_impls.size());
+    }
+  }
+  return retirement;
+}
 
 /**
  * @brief Closes one direct-test native library handle.
@@ -386,6 +452,82 @@ NodeOutput conformance_fallback_input() {
   return output;
 }
 
+/**
+ * @brief Publishes one ordinary facet-free fallback DenseTensor input.
+ * @return Ready two-by-three UINT8 tensor with no retained operation metadata.
+ * @throws Value validation, allocation, or publication failures unchanged.
+ * @note This ordinary publisher proves the adapter derives only the public
+ * built-in Schema/Layout facts when no retained publisher record exists.
+ */
+NodeOutput conformance_generic_fallback_input() {
+  DenseTensorDescriptor descriptor{{2U, 3U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  StridedLayout layout{{3, 1}};
+  NodeOutput output;
+  output.publish_named_value(
+      "tensor", Value::from_cpu_dense_tensor(
+                    std::move(descriptor), std::nullopt, std::move(layout),
+                    std::vector<std::byte>(6U, std::byte{0x11})));
+  return output;
+}
+
+/**
+ * @brief Reports whether one fixture mode contains a stable feature token.
+ * @param mode Nonnull fixture mode bytes.
+ * @param token Nonnull token to search for.
+ * @return True when token occurs in mode.
+ * @throws Nothing.
+ */
+bool conformance_mode_contains(const char* mode, const char* token) noexcept {
+  return mode != nullptr && token != nullptr &&
+         std::strstr(mode, token) != nullptr;
+}
+
+/**
+ * @brief Asserts one facet-free conformance output retained every publisher
+ * fact.
+ * @param output Operation result expected to contain exactly `tensor`.
+ * @return Nothing; GoogleTest records representation or payload mismatches.
+ * @throws DenseTensor view/access failures when the published Value is invalid.
+ */
+void expect_conformance_generic_output(const NodeOutput& output) {
+  ASSERT_EQ(output.named_values.size(), 1U);
+  const auto found = output.named_values.find("tensor");
+  ASSERT_NE(found, output.named_values.end());
+  const Value& value = found->second;
+  EXPECT_FALSE(value.image_facet().has_value());
+  EXPECT_EQ(value.dense_tensor_descriptor().shape,
+            (std::vector<std::size_t>{2U, 3U}));
+  EXPECT_EQ(value.strided_layout().byte_strides,
+            (std::vector<std::ptrdiff_t>{3, 1}));
+  const auto* metadata = DenseTensorValueDescriptorMetadataAccess::get(value);
+  ASSERT_NE(metadata, nullptr);
+  EXPECT_EQ(metadata->schema_identity,
+            (ExtensionIdentity{
+                PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD0_V1,
+                PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD1_V1}));
+  EXPECT_EQ(metadata->facet_identity, ExtensionIdentity{});
+  EXPECT_EQ(metadata->layout_identity,
+            (ExtensionIdentity{
+                PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD0_V1,
+                PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD1_V1}));
+  EXPECT_EQ(metadata->descriptor_version, 7U);
+  EXPECT_EQ(metadata->layout_version, 11U);
+  EXPECT_EQ(metadata->descriptor_digest,
+            (std::array<std::uint64_t, 4U>{0x0102030405060708ULL, 0U, 0U,
+                                           0x1112131415161718ULL}));
+  EXPECT_EQ(metadata->content_digest,
+            (std::array<std::uint64_t, 4U>{0U, 0x2122232425262728ULL, 0U, 0U}));
+  EXPECT_EQ(metadata->layout_digest,
+            (std::array<std::uint64_t, 4U>{0U, 0U, 0x3132333435363738ULL, 0U}));
+  const DenseTensorView view(value);
+  ASSERT_EQ(view.storage_size(), 6U);
+  for (std::size_t index = 0U; index < view.storage_size(); ++index) {
+    EXPECT_EQ(view.data()[index], std::byte{0x5A});
+  }
+}
+
 /** @brief Detects the post-DI-3 canonical Value pointer on InputTile. */
 template <typename Tile, typename = void>
 struct HasCanonicalInputValue : std::false_type {};
@@ -444,7 +586,9 @@ NodeOutput execute_conformance_monolithic(const char* mode,
   node.subtype = "supervised_tile";
   NodeOutput fallback;
   if (input == nullptr) {
-    fallback = conformance_fallback_input();
+    fallback = conformance_mode_contains(mode, "facet_free_input")
+                   ? conformance_generic_fallback_input()
+                   : conformance_fallback_input();
     input = &fallback;
   }
   return std::get<MonolithicOpFunc>(*selected)(node, {input});
@@ -482,14 +626,30 @@ NodeOutput execute_conformance_tiled(const char* mode,
   node.subtype = "supervised_tile";
   NodeOutput fallback;
   if (input == nullptr) {
-    fallback = conformance_fallback_input();
+    fallback = conformance_mode_contains(mode, "facet_free_input")
+                   ? conformance_generic_fallback_input()
+                   : conformance_fallback_input();
     input = &fallback;
   }
-  ImageBuffer input_buffer =
-      value_image_adapter::project_image_value_for_image_buffer_edge(
-          input->image_value());
-  InputTile input_tile{&input_buffer, PixelRect{0, 0, 2, 2}, nullptr};
-  attach_canonical_input_value(&input_tile, &input->image_value());
+  ImageBuffer input_buffer;
+  const Value* input_value = nullptr;
+  PixelRect input_roi{};
+  if (conformance_mode_contains(mode, "facet_free_input")) {
+    const auto found = input->named_values.find("tensor");
+    if (found == input->named_values.end()) {
+      throw std::runtime_error("conformance generic input is absent");
+    }
+    input_value = &found->second;
+  } else {
+    input_value = &input->image_value();
+    input_buffer =
+        value_image_adapter::project_image_value_for_image_buffer_edge(
+            *input_value);
+    input_roi = PixelRect{0, 0, 2, 2};
+  }
+  InputTile input_tile{input_value->image_facet() ? &input_buffer : nullptr,
+                       input_roi, nullptr};
+  attach_canonical_input_value(&input_tile, input_value);
   try {
     std::get<TileOpFunc> (*selected)(node, output, {input_tile});
     grant.retire_success();
@@ -719,6 +879,246 @@ TEST(OperationPluginAbi, TrustedExecutionEchoesExactDescriptorMetadata) {
 }
 
 /**
+ * @brief Proves generic descriptor authority survives publication and reuse.
+ * @throws Discovery, execution, Value, and assertion failures unchanged.
+ * @note The first call exercises the ordinary public built-in identity
+ * fallback. The second consumes a retained generic output monolithically; the
+ * third consumes the same Value through a tiled image-producing callback.
+ */
+TEST(OperationPluginAbi, TrustedGenericOutputBecomesMonolithicAndTiledInput) {
+  const NodeOutput ordinary = execute_conformance_monolithic(
+      "trusted_monolithic_facet_free_input_facet_free_output");
+  expect_conformance_generic_output(ordinary);
+
+  const NodeOutput source =
+      execute_conformance_monolithic("trusted_monolithic_facet_free_output");
+  expect_conformance_generic_output(source);
+  const NodeOutput consumed = execute_conformance_monolithic(
+      "trusted_monolithic_facet_free_input_facet_free_output_input_metadata",
+      &source);
+  expect_conformance_generic_output(consumed);
+  EXPECT_NO_THROW(execute_conformance_tiled(
+      "trusted_tiled_facet_free_input_input_metadata", &source));
+}
+
+/**
+ * @brief Proves one public generation publishes and plans its full candidate
+ * set.
+ * @throws Discovery, registry, graph, callback, and assertion failures
+ * unchanged.
+ * @note The fixture expands five public rows into eight intent/shape
+ * candidates. HP selects the data-dependent fast monolithic row; RT selects the
+ * fast tiled row. Backward, forward, and dependency markers must come from
+ * those exact selected rows rather than the definition's first implementation.
+ */
+TEST(OperationPluginAbi, CompleteCandidateSetDrivesIntentCostAndPlanning) {
+  ScopedEnvironment selected_mode(kConformanceModeEnvironment, "candidate_set");
+  auto generation = load_generation(PS_TEST_CONFORMANCE_OPERATION_PLUGIN);
+  auto& registry = OpRegistry::instance();
+  constexpr const char* kKey = "operation_conformance:supervised_tile";
+  static_cast<void>(registry.unregister_key(kKey));
+  ScopedRegistryKeyCleanup cleanup(kKey);
+  registry.register_dependency_builder(
+      "operation_conformance", "supervised_tile",
+      [](const Node&, const GraphModel&, const std::vector<PixelSize>&,
+         const PixelSize& output_extent, const plugin::ParameterMap&) {
+        SpatialDependencyMap result;
+        result.grid_size_x = output_extent.width;
+        result.grid_size_y = output_extent.height;
+        result.cols = 1;
+        result.rows = 1;
+        result.output_extent = output_extent;
+        result.upstream_input_index = 0U;
+        result.cell_to_upstream_roi.push_back(PixelRect{1, 1, 1, 1});
+        return result;
+      },
+      false);
+  generation->register_into(registry);
+
+  const std::vector<OpImplementation> candidates =
+      registry.get_all_implementations("operation_conformance",
+                                       "supervised_tile");
+  ASSERT_EQ(candidates.size(), 8U);
+  EXPECT_EQ(std::count_if(candidates.begin(), candidates.end(),
+                          [](const OpImplementation& candidate) {
+                            return candidate.metadata.supports_high_precision;
+                          }),
+            4);
+  EXPECT_EQ(std::count_if(candidates.begin(), candidates.end(),
+                          [](const OpImplementation& candidate) {
+                            return candidate.metadata.supports_realtime;
+                          }),
+            4);
+  EXPECT_EQ(std::count_if(candidates.begin(), candidates.end(),
+                          [](const OpImplementation& candidate) {
+                            return candidate.is_monolithic();
+                          }),
+            4);
+  EXPECT_EQ(std::count_if(candidates.begin(), candidates.end(),
+                          [](const OpImplementation& candidate) {
+                            return candidate.is_tiled();
+                          }),
+            4);
+
+  const auto hp = registry.select_implementation(
+      "operation_conformance", "supervised_tile", {Device::CPU},
+      ComputeIntent::GlobalHighPrecision);
+  const auto rt = registry.select_implementation(
+      "operation_conformance", "supervised_tile", {Device::CPU},
+      ComputeIntent::RealTimeUpdate);
+  ASSERT_TRUE(hp.has_value());
+  ASSERT_TRUE(rt.has_value());
+  EXPECT_TRUE(hp->is_monolithic());
+  EXPECT_EQ(hp->metadata.cost_score, 100);
+  EXPECT_TRUE(hp->metadata.data_dependent);
+  EXPECT_TRUE(hp->dirty_propagator.has_value());
+  EXPECT_TRUE(hp->forward_propagator.has_value());
+  EXPECT_TRUE(hp->dependency_builder.has_value());
+  EXPECT_TRUE(rt->is_tiled());
+  EXPECT_EQ(rt->metadata.cost_score, 100);
+  EXPECT_FALSE(rt->metadata.data_dependent);
+  EXPECT_NE(hp->implementation_identity, rt->implementation_identity);
+
+  Node source;
+  source.id = 1;
+  source.type = "candidate_source";
+  source.subtype = "cached";
+  source.cached_output_high_precision = conformance_fallback_input();
+  Node child;
+  child.id = 2;
+  child.type = "operation_conformance";
+  child.subtype = "supervised_tile";
+  child.image_inputs.push_back({1, "image"});
+  GraphModel graph("");
+  graph.add_node(std::move(source));
+  graph.add_node(std::move(child));
+  graph.validate_topology();
+
+  std::unordered_map<int, PixelSize> hp_sizes;
+  RoiPropagationService hp_propagation({Device::CPU},
+                                       ComputeIntent::GlobalHighPrecision);
+  const UpstreamRoiProjection hp_upstream =
+      hp_propagation.compute_upstream_projection(
+          graph.node(2), PixelRect{0, 0, 2, 2}, graph, hp_sizes);
+  EXPECT_EQ(hp_upstream.shared_roi, (PixelRect{1, 0, 1, 1}));
+  ASSERT_TRUE(hp_upstream.dependency_input_index.has_value());
+  EXPECT_EQ(*hp_upstream.dependency_input_index, 0U);
+  EXPECT_EQ(hp_upstream.dependency_roi, (PixelRect{0, 1, 1, 1}));
+  const auto hp_forward =
+      hp_propagation.project_roi_forward(graph, 1, PixelRect{0, 0, 1, 1}, 2);
+  ASSERT_TRUE(hp_forward.has_value());
+  EXPECT_EQ(*hp_forward, (PixelRect{1, 0, 1, 1}));
+
+  std::unordered_map<int, PixelSize> rt_sizes;
+  RoiPropagationService rt_propagation({Device::CPU},
+                                       ComputeIntent::RealTimeUpdate);
+  const UpstreamRoiProjection rt_upstream =
+      rt_propagation.compute_upstream_projection(
+          graph.node(2), PixelRect{0, 0, 2, 2}, graph, rt_sizes);
+  EXPECT_EQ(rt_upstream.shared_roi, (PixelRect{0, 1, 1, 1}));
+  EXPECT_FALSE(rt_upstream.dependency_input_index.has_value());
+  const auto rt_forward =
+      rt_propagation.project_roi_forward(graph, 1, PixelRect{0, 0, 1, 1}, 2);
+  ASSERT_TRUE(rt_forward.has_value());
+  EXPECT_EQ(*rt_forward, (PixelRect{0, 1, 1, 1}));
+}
+
+/**
+ * @brief Proves whole candidate generations restore across middle removal.
+ * @throws Discovery, capture, restoration, and assertion failures unchanged.
+ * @note The test drives the same preallocated retire/splice primitives used by
+ * PluginManager. Removing the middle one-row generation while the third
+ * eight-row generation is active must splice its predecessor. Removing the
+ * third then restores the first generation's exact eight identities, and final
+ * reverse removal leaves no candidate behind.
+ */
+TEST(OperationPluginAbi, WholeCandidateGenerationsRestoreAcrossMiddleUnload) {
+  std::shared_ptr<plugin_host::OperationPluginGeneration> first;
+  std::shared_ptr<plugin_host::OperationPluginGeneration> middle;
+  std::shared_ptr<plugin_host::OperationPluginGeneration> third;
+  {
+    ScopedEnvironment selected_mode(kConformanceModeEnvironment,
+                                    "candidate_set");
+    first = load_generation(PS_TEST_CONFORMANCE_OPERATION_PLUGIN);
+  }
+  {
+    ScopedEnvironment selected_mode(kConformanceModeEnvironment, "valid");
+    middle = load_generation(PS_TEST_CONFORMANCE_OPERATION_PLUGIN);
+  }
+  {
+    ScopedEnvironment selected_mode(kConformanceModeEnvironment,
+                                    "candidate_set");
+    third = load_generation(PS_TEST_CONFORMANCE_OPERATION_PLUGIN);
+  }
+
+  OpRegistry registry;
+  OpRegistry::RegistrationCapture first_capture;
+  OpRegistry::RegistrationCapture middle_capture;
+  OpRegistry::RegistrationCapture third_capture;
+  registry.capture_registration([&]() { first->register_into(registry); },
+                                first_capture);
+  const std::vector<OpImplementation> first_candidates =
+      registry.get_all_implementations("operation_conformance",
+                                       "supervised_tile");
+  ASSERT_EQ(first_candidates.size(), 8U);
+
+  registry.capture_registration([&]() { middle->register_into(registry); },
+                                middle_capture);
+  ASSERT_EQ(
+      registry
+          .get_all_implementations("operation_conformance", "supervised_tile")
+          .size(),
+      1U);
+  registry.capture_registration([&]() { third->register_into(registry); },
+                                third_capture);
+  const std::vector<OpImplementation> third_candidates =
+      registry.get_all_implementations("operation_conformance",
+                                       "supervised_tile");
+  ASSERT_EQ(third_candidates.size(), 8U);
+  EXPECT_NE(third_candidates.front().implementation_identity,
+            first_candidates.front().implementation_identity);
+
+  constexpr const char* kKey = "operation_conformance:supervised_tile";
+  auto& middle_owned = middle_capture.owned_entries.at(kKey);
+  auto& middle_previous = middle_capture.previous_entries.at(kKey);
+  auto middle_retirement = make_retirement_snapshot(middle_owned);
+  EXPECT_FALSE(registry.retire_owned_entry_noexcept(
+      kKey, middle_owned, middle_previous, middle_retirement));
+  auto& third_previous = third_capture.previous_entries.at(kKey);
+  OpRegistry::splice_owned_snapshot_noexcept(
+      third_previous, middle_owned, middle_previous, middle_retirement);
+  const std::vector<OpImplementation> after_middle =
+      registry.get_all_implementations("operation_conformance",
+                                       "supervised_tile");
+  ASSERT_EQ(after_middle.size(), 8U);
+  EXPECT_EQ(after_middle.front().implementation_identity,
+            third_candidates.front().implementation_identity);
+
+  auto& third_owned = third_capture.owned_entries.at(kKey);
+  auto third_retirement = make_retirement_snapshot(third_owned);
+  EXPECT_TRUE(registry.retire_owned_entry_noexcept(
+      kKey, third_owned, third_previous, third_retirement));
+  const std::vector<OpImplementation> restored =
+      registry.get_all_implementations("operation_conformance",
+                                       "supervised_tile");
+  ASSERT_EQ(restored.size(), 8U);
+  for (std::size_t index = 0U; index < restored.size(); ++index) {
+    EXPECT_EQ(restored[index].implementation_identity,
+              first_candidates[index].implementation_identity);
+  }
+
+  auto& first_owned = first_capture.owned_entries.at(kKey);
+  auto& first_previous = first_capture.previous_entries.at(kKey);
+  auto first_retirement = make_retirement_snapshot(first_owned);
+  EXPECT_TRUE(registry.retire_owned_entry_noexcept(
+      kKey, first_owned, first_previous, first_retirement));
+  EXPECT_TRUE(
+      registry
+          .get_all_implementations("operation_conformance", "supervised_tile")
+          .empty());
+}
+
+/**
  * @brief Rejects consumer-declared custom publisher identity for ordinary
  * Values in every execution mode and shape.
  * @throws Nothing when all four routes fail at the shared input projection.
@@ -791,6 +1191,16 @@ TEST(OperationPluginAbi, SupervisedExecutionEchoesExactDescriptorMetadata) {
         execute_conformance_tiled("supervised_tiled_metadata");
     EXPECT_NO_THROW((void)execute_conformance_tiled(
         "supervised_tiled_input_metadata", &tiled));
+    const NodeOutput generic = execute_conformance_monolithic(
+        "supervised_monolithic_facet_free_output");
+    expect_conformance_generic_output(generic);
+    const NodeOutput generic_consumed = execute_conformance_monolithic(
+        "supervised_monolithic_facet_free_input_facet_free_output_"
+        "input_metadata",
+        &generic);
+    expect_conformance_generic_output(generic_consumed);
+    EXPECT_NO_THROW(execute_conformance_tiled(
+        "supervised_tiled_facet_free_input_input_metadata", &generic));
   } catch (...) {
     static_cast<void>(plugin_host::remove_supervised_operation_runtime_route(
         kConformanceRuntimePackage));

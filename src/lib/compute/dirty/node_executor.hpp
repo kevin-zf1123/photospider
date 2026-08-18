@@ -56,6 +56,23 @@ struct TiledExecutionConfig {
    * handling. */
   std::optional<OpMetadata> metadata;
 
+  /**
+   * @brief Optional dirty-ROI callback from the exact selected implementation.
+   * @note When present this callback is authoritative for RandomAccess input
+   * mapping. It must be copied from the same registry snapshot as metadata so
+   * planning and execution cannot mix callbacks from different candidates.
+   * A nonzero `implementation_identity` plus absence selects that exact
+   * implementation's identity fallback, never an operation-level callback.
+   */
+  std::optional<DirtyRoiPropFunc> dirty_propagator;
+
+  /**
+   * @brief Registry identity paired with dirty_propagator and metadata.
+   * @note Zero is permitted only for legacy callers that provide no exact
+   * callback. Core planning paths always retain a nonzero identity.
+   */
+  std::uint64_t implementation_identity = 0U;
+
   /** @brief Synchronous hook called with each output tile ROI before execution.
    */
   std::function<void(const PixelRect&)> on_tile;
@@ -169,7 +186,8 @@ class NodeExecutor {
    * @param node Node whose operator metadata defines access behavior.
    * @param output_roi Output tile ROI being computed.
    * @param input_buffer Input buffer whose bounds clip the mapped ROI.
-   * @param config Tiled execution metadata and halo overrides.
+   * @param config Tiled execution metadata, exact implementation callback,
+   * and halo overrides.
    * @param known_input_extents Request-local image-input extents by destination
    *        index; empty means resolve committed cache hints.
    * @param known_effective_parameters Optional caller-resolved parameter

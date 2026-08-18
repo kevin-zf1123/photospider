@@ -281,6 +281,24 @@ bool implementation_less_for_intent(const OpImplementation* lhs,
 }
 
 /**
+ * @brief Checks whether one exact candidate accepts the requested intent.
+ * @param metadata Candidate eligibility metadata.
+ * @param intent Requested compute intent.
+ * @return True only when the matching closed eligibility bit is enabled.
+ * @throws Nothing.
+ */
+bool implementation_supports_intent(const OpMetadata& metadata,
+                                    ComputeIntent intent) noexcept {
+  switch (intent) {
+    case ComputeIntent::GlobalHighPrecision:
+      return metadata.supports_high_precision;
+    case ComputeIntent::RealTimeUpdate:
+      return metadata.supports_realtime;
+  }
+  return false;
+}
+
+/**
  * @brief Reports whether an implementation group contains no active slot.
  *
  * @param implementations Group to inspect after slot-wise retirement.
@@ -773,12 +791,14 @@ void OpRegistry::prune_registration_capture(
         previous.ownership.data_dependent = 0;
       }
 
-      // Device registration appends instead of replacing. The live vector
-      // already retains every predecessor element, so no callback copy is
-      // needed in the restoration snapshot.
-      implementations.device_impl_slots.clear();
-      implementations.device_impls.clear();
-      previous.ownership.device_impls.clear();
+      if (owned.device_impl_set == 0U) {
+        // Legacy device registration appends instead of replacing. The live
+        // vector already retains every predecessor element, so no callback copy
+        // is needed in the restoration snapshot.
+        implementations.device_impl_slots.clear();
+        implementations.device_impls.clear();
+        previous.ownership.device_impls.clear();
+      }
       if (implementation_group_is_empty(implementations)) {
         previous.implementations.reset();
       }
@@ -898,15 +918,21 @@ OpRegistry::OwnershipMatch OpRegistry::classify_active_ownership(
     classify(implementations.data_dependent, active_ownership.data_dependent,
              owned.data_dependent);
 
-    for (std::size_t index = 0;
-         index < implementations.device_impl_slots.size(); ++index) {
-      const std::uint64_t active = index < active_ownership.device_impls.size()
-                                       ? active_ownership.device_impls[index]
-                                       : 0;
-      if (owns_device_revision(owned, active)) {
-        plugin_owned = true;
-      } else {
-        foreign_owned = true;
+    if (!implementations.device_impl_slots.empty() &&
+        active_ownership.device_impl_set != 0U) {
+      classify(true, active_ownership.device_impl_set, owned.device_impl_set);
+    } else {
+      for (std::size_t index = 0;
+           index < implementations.device_impl_slots.size(); ++index) {
+        const std::uint64_t active =
+            index < active_ownership.device_impls.size()
+                ? active_ownership.device_impls[index]
+                : 0;
+        if (owns_device_revision(owned, active)) {
+          plugin_owned = true;
+        } else {
+          foreign_owned = true;
+        }
       }
     }
   }
@@ -1028,43 +1054,59 @@ bool OpRegistry::retire_owned_entry_noexcept(
     changed = true;
   }
 
-  static_assert(
-      std::is_nothrow_swappable_v<std::shared_ptr<const OpImplementation>>);
-  std::size_t write_index = 0;
-  for (std::size_t read_index = 0; read_index < active.device_impl_slots.size();
-       ++read_index) {
-    const std::uint64_t revision =
-        read_index < active_ownership.device_impls.size()
-            ? active_ownership.device_impls[read_index]
-            : 0;
-    auto owned_token = std::find(owned.device_impls.begin(),
-                                 owned.device_impls.end(), revision);
-    if (revision != 0 && owned_token != owned.device_impls.end()) {
-      const std::size_t retirement_index = static_cast<std::size_t>(
-          std::distance(owned.device_impls.begin(), owned_token));
-      using std::swap;
-      swap(active.device_impl_slots[read_index],
-           retired.device_impl_slots[retirement_index]);
-      changed = true;
-      continue;
+  const bool retire_complete_set =
+      owned.device_impl_set != 0U &&
+      active_ownership.device_impl_set == owned.device_impl_set;
+  if (retire_complete_set) {
+    using std::swap;
+    if (predecessor) {
+      swap(active.device_impl_slots, predecessor->device_impl_slots);
+      swap(active_ownership.device_impls, previous.ownership.device_impls);
+    } else {
+      swap(active.device_impl_slots, retired.device_impl_slots);
+      active_ownership.device_impls.clear();
     }
-    if (write_index != read_index) {
-      // Every gap was created by swapping an owned slot into retirement, so
-      // the destination is empty. Swapping transfers only a shared owner and
-      // cannot release or relocate either callback target under this lock.
-      using std::swap;
-      swap(active.device_impl_slots[write_index],
-           active.device_impl_slots[read_index]);
+    active_ownership.device_impl_set = previous.ownership.device_impl_set;
+    changed = true;
+  } else {
+    static_assert(
+        std::is_nothrow_swappable_v<std::shared_ptr<const OpImplementation>>);
+    std::size_t write_index = 0;
+    for (std::size_t read_index = 0;
+         read_index < active.device_impl_slots.size(); ++read_index) {
+      const std::uint64_t revision =
+          read_index < active_ownership.device_impls.size()
+              ? active_ownership.device_impls[read_index]
+              : 0;
+      auto owned_token = std::find(owned.device_impls.begin(),
+                                   owned.device_impls.end(), revision);
+      if (revision != 0 && owned_token != owned.device_impls.end()) {
+        const std::size_t retirement_index = static_cast<std::size_t>(
+            std::distance(owned.device_impls.begin(), owned_token));
+        using std::swap;
+        swap(active.device_impl_slots[read_index],
+             retired.device_impl_slots[retirement_index]);
+        changed = true;
+        continue;
+      }
+      if (write_index != read_index) {
+        // Every gap was created by swapping an owned slot into retirement, so
+        // the destination is empty. Swapping transfers only a shared owner and
+        // cannot release or relocate either callback target under this lock.
+        using std::swap;
+        swap(active.device_impl_slots[write_index],
+             active.device_impl_slots[read_index]);
+      }
+      if (write_index < active_ownership.device_impls.size()) {
+        active_ownership.device_impls[write_index] = revision;
+      }
+      ++write_index;
     }
-    if (write_index < active_ownership.device_impls.size()) {
-      active_ownership.device_impls[write_index] = revision;
-    }
-    ++write_index;
+    // Compaction leaves only empty owners in the tail, so resize cannot release
+    // a callback target or its final plugin lease while the lock is held.
+    active.device_impl_slots.resize(write_index);
+    active_ownership.device_impls.resize(write_index);
   }
-  // Compaction leaves only empty owners in the tail, so resize cannot release
-  // a callback target or its final plugin lease while the lock is held.
-  active.device_impl_slots.resize(write_index);
-  active_ownership.device_impls.resize(write_index);
 
   if (implementation_group_is_empty(active)) {
     impl_table_.erase(active_implementations);
@@ -1147,8 +1189,20 @@ void OpRegistry::splice_owned_snapshot_noexcept(
     dependent.ownership.data_dependent = previous.ownership.data_dependent;
   }
 
-  // Pruned predecessor snapshots never retain device-vector entries: device
-  // registration is append-only, so those predecessors remain in live state.
+  if (owned.device_impl_set != 0U &&
+      dependent.ownership.device_impl_set == owned.device_impl_set) {
+    using std::swap;
+    if (previous.implementations) {
+      swap(dependent_impl.device_impl_slots, previous_impl.device_impl_slots);
+      swap(dependent.ownership.device_impls, previous.ownership.device_impls);
+    } else {
+      swap(dependent_impl.device_impl_slots, retired_impl.device_impl_slots);
+      dependent.ownership.device_impls.clear();
+    }
+    dependent.ownership.device_impl_set = previous.ownership.device_impl_set;
+  }
+
+  // Legacy append-owned predecessors never retain device-vector entries.
   if (implementation_group_is_empty(dependent_impl)) {
     dependent.implementations.reset();
   }
@@ -1200,7 +1254,8 @@ void OpRegistry::register_op(const std::string& type,
   auto key = make_key(type, subtype);
   OpVariant legacy_replacement = fn;
   std::optional<OpImplementation> hp_replacement(
-      std::in_place, OpImplementation{OpVariant{std::move(fn)}, meta, 0U});
+      std::in_place,
+      OpImplementation{OpVariant{std::move(fn)}, meta, 0U, {}, {}, {}});
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
@@ -1230,7 +1285,8 @@ void OpRegistry::register_op(const std::string& type,
   auto key = make_key(type, subtype);
   OpVariant legacy_replacement = fn;
   std::optional<OpImplementation> hp_replacement(
-      std::in_place, OpImplementation{OpVariant{std::move(fn)}, meta, 0U});
+      std::in_place,
+      OpImplementation{OpVariant{std::move(fn)}, meta, 0U, {}, {}, {}});
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
@@ -1394,8 +1450,12 @@ void OpRegistry::register_op_hp_monolithic(const std::string& type,
   validate_operation_metadata(&meta);
   auto key = make_key(type, subtype);
   std::optional<OpImplementation> replacement(
-      std::in_place,
-      OpImplementation{OpVariant{std::move(fn)}, std::move(meta), 0U});
+      std::in_place, OpImplementation{OpVariant{std::move(fn)},
+                                      std::move(meta),
+                                      0U,
+                                      {},
+                                      {},
+                                      {}});
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
@@ -1418,8 +1478,12 @@ void OpRegistry::register_op_hp_tiled(const std::string& type,
   validate_tiled_operation_metadata(meta);
   auto key = make_key(type, subtype);
   std::optional<OpImplementation> replacement(
-      std::in_place,
-      OpImplementation{OpVariant{std::move(fn)}, std::move(meta), 0U});
+      std::in_place, OpImplementation{OpVariant{std::move(fn)},
+                                      std::move(meta),
+                                      0U,
+                                      {},
+                                      {},
+                                      {}});
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
@@ -1441,8 +1505,12 @@ void OpRegistry::register_op_rt_tiled(const std::string& type,
   validate_tiled_operation_metadata(meta);
   auto key = make_key(type, subtype);
   std::optional<OpImplementation> replacement(
-      std::in_place,
-      OpImplementation{OpVariant{std::move(fn)}, std::move(meta), 0U});
+      std::in_place, OpImplementation{OpVariant{std::move(fn)},
+                                      std::move(meta),
+                                      0U,
+                                      {},
+                                      {},
+                                      {}});
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
@@ -1519,34 +1587,11 @@ void OpRegistry::register_dependency_builder(const std::string& type,
 std::optional<OpRegistry::OpVariant> OpRegistry::resolve_for_intent(
     const std::string& type, const std::string& subtype,
     ComputeIntent intent) const {
-  StateLockGuard lock(*this);
-  auto key = make_key(type, subtype);
-  auto it = impl_table_.find(key);
-  if (it == impl_table_.end()) {
-    const auto legacy = table_.find(key);
-    return legacy == table_.end() ? std::nullopt
-                                  : std::optional<OpVariant>{legacy->second};
-  }
-  const auto& impls = it->second;
-  switch (intent) {
-    case ComputeIntent::GlobalHighPrecision:
-      if (impls.monolithic_hp)
-        return impls.monolithic_hp->func;
-      if (impls.tiled_hp)
-        return impls.tiled_hp->func;
-      break;
-    case ComputeIntent::RealTimeUpdate:
-      if (impls.tiled_rt)
-        return impls.tiled_rt->func;
-      if (impls.tiled_hp)
-        return impls.tiled_hp->func;
-      break;
-    default:
-      break;
-  }
-  const auto legacy = table_.find(key);
-  return legacy == table_.end() ? std::nullopt
-                                : std::optional<OpVariant>{legacy->second};
+  const auto selected = select_implementation(
+      type, subtype,
+      {Device::CPU, Device::GPU_METAL, Device::GPU_CUDA, Device::ASIC_NPU},
+      intent);
+  return selected ? std::optional<OpVariant>{selected->func} : std::nullopt;
 }
 
 /** @copydoc OpRegistry::get_dirty_propagator */
@@ -1716,7 +1761,11 @@ void OpRegistry::register_impl(const std::string& type,
 #endif
     cpu_compatibility.emplace(OpImplementation{
         OpVariant{make_monolithic_device_compatibility_bridge(device_slot)},
-        meta, 0U});
+        meta,
+        0U,
+        {},
+        {},
+        {}});
   }
   auto key = make_key(type, subtype);
   {
@@ -1739,6 +1788,7 @@ void OpRegistry::register_impl(const std::string& type,
 
     implementations.device_impl_slots.push_back(std::move(device_slot));
     record_device_ownership(key, ownership, revision);
+    ownership.device_impl_set = 0U;
 
     // 同时更新传统表以保持向后兼容
     if (device == Device::CPU && !implementations.monolithic_hp) {
@@ -1773,8 +1823,12 @@ void OpRegistry::register_impl(const std::string& type,
         testing::OpRegistryDeviceRegistrationFailpoint::CpuCompatibilityBridge);
 #endif
     cpu_compatibility.emplace(OpImplementation{
-        OpVariant{make_tiled_device_compatibility_bridge(device_slot)}, meta,
-        0U});
+        OpVariant{make_tiled_device_compatibility_bridge(device_slot)},
+        meta,
+        0U,
+        {},
+        {},
+        {}});
   }
   auto key = make_key(type, subtype);
   {
@@ -1797,12 +1851,87 @@ void OpRegistry::register_impl(const std::string& type,
 
     implementations.device_impl_slots.push_back(std::move(device_slot));
     record_device_ownership(key, ownership, revision);
+    ownership.device_impl_set = 0U;
 
     // 同时更新传统表以保持向后兼容
     if (device == Device::CPU && !implementations.tiled_hp) {
       implementations.tiled_hp.swap(cpu_compatibility);
       record_scalar_ownership(key, ownership, OwnershipSlot::TiledHp, revision);
     }
+  }
+}
+
+/** @copydoc OpRegistry::replace_implementation_candidates */
+void OpRegistry::replace_implementation_candidates(
+    const std::string& type, const std::string& subtype,
+    std::vector<OpImplementation> candidates) {
+  if (candidates.empty()) {
+    throw std::invalid_argument(
+        "operation implementation candidate set must be nonempty");
+  }
+
+  std::vector<std::shared_ptr<const OpImplementation>> replacement_slots;
+  replacement_slots.reserve(candidates.size());
+  for (OpImplementation& candidate : candidates) {
+    if (!candidate.metadata.supports_high_precision &&
+        !candidate.metadata.supports_realtime) {
+      throw std::invalid_argument(
+          "operation implementation must support at least one intent");
+    }
+    validate_operation_metadata(&candidate.metadata);
+    if (candidate.is_monolithic()) {
+      if (!std::get<MonolithicOpFunc>(candidate.func)) {
+        throw std::invalid_argument(
+            "operation monolithic implementation callback is empty");
+      }
+    } else {
+      if (!std::get<TileOpFunc>(candidate.func)) {
+        throw std::invalid_argument(
+            "operation tiled implementation callback is empty");
+      }
+      validate_tiled_operation_metadata(candidate.metadata);
+    }
+    if ((candidate.dirty_propagator && !*candidate.dirty_propagator) ||
+        (candidate.forward_propagator && !*candidate.forward_propagator) ||
+        (candidate.dependency_builder && !*candidate.dependency_builder)) {
+      throw std::invalid_argument(
+          "operation implementation planning callback is empty");
+    }
+    candidate.implementation_identity = 0U;
+    replacement_slots.push_back(
+        std::make_shared<OpImplementation>(std::move(candidate)));
+  }
+
+  const std::string key = make_key(type, subtype);
+  std::vector<std::shared_ptr<const OpImplementation>> retired_slots;
+  std::vector<std::uint64_t> replacement_revisions(candidates.size(), 0U);
+  std::vector<std::uint64_t> retired_revisions;
+  {
+    StateLockGuard lock(*this);
+    capture_key_before_mutation(key);
+    RegistryEntryOwnership& ownership = ownership_table_[key];
+    OpImplementations& implementations = impl_table_[key];
+    RegistryEntryOwnership* captured = nullptr;
+    if (active_registration_capture) {
+      captured = &active_registration_capture->owned_entries[key];
+      captured->device_impls.resize(replacement_revisions.size());
+    }
+
+    const std::uint64_t set_revision = next_ownership_revision();
+    for (std::uint64_t& revision : replacement_revisions) {
+      revision = next_ownership_revision();
+    }
+    implementations.device_impl_slots.swap(replacement_slots);
+    retired_slots.swap(replacement_slots);
+    ownership.device_impls.swap(replacement_revisions);
+    retired_revisions.swap(replacement_revisions);
+    ownership.device_impl_set = set_revision;
+    if (captured != nullptr) {
+      captured->device_impl_set = set_revision;
+      std::copy(ownership.device_impls.begin(), ownership.device_impls.end(),
+                captured->device_impls.begin());
+    }
+    advance_task_shape_generation();
   }
 }
 
@@ -1857,6 +1986,73 @@ std::vector<OpImplementation> OpRegistry::get_all_implementations(
   return materialize_device_implementations(slots, revisions);
 }
 
+/** @copydoc OpRegistry::get_implementation_by_identity */
+std::optional<OpImplementation> OpRegistry::get_implementation_by_identity(
+    const std::string& type, const std::string& subtype,
+    std::uint64_t implementation_identity) const {
+  if (implementation_identity == 0U) {
+    return std::nullopt;
+  }
+
+  const std::string key = make_key(type, subtype);
+  std::optional<OpImplementations> implementations;
+  std::optional<OpVariant> legacy;
+  std::optional<OpMetadata> legacy_metadata;
+  RegistryEntryOwnership revisions;
+  {
+    StateLockGuard lock(*this);
+    const auto implementations_it = impl_table_.find(key);
+    if (implementations_it != impl_table_.end()) {
+      implementations = implementations_it->second;
+    }
+    const auto legacy_it = table_.find(key);
+    if (legacy_it != table_.end()) {
+      legacy = legacy_it->second;
+    }
+    const auto metadata_it = metadata_table_.find(key);
+    if (metadata_it != metadata_table_.end()) {
+      legacy_metadata = metadata_it->second;
+    }
+    const auto revisions_it = ownership_table_.find(key);
+    if (revisions_it != ownership_table_.end()) {
+      revisions = revisions_it->second;
+    }
+  }
+
+  const std::vector<OpImplementation> candidates =
+      implementations
+          ? materialize_device_implementations(
+                implementations->device_impl_slots, revisions.device_impls)
+          : std::vector<OpImplementation>{};
+  const auto selected = std::find_if(
+      candidates.begin(), candidates.end(),
+      [implementation_identity](const OpImplementation& implementation) {
+        return implementation.implementation_identity ==
+               implementation_identity;
+      });
+  if (selected != candidates.end()) {
+    return *selected;
+  }
+
+  if (implementations) {
+    const std::optional<OpImplementation>* scalar_slots[] = {
+        &implementations->monolithic_hp, &implementations->tiled_hp,
+        &implementations->tiled_rt};
+    for (const std::optional<OpImplementation>* slot : scalar_slots) {
+      if (*slot &&
+          (*slot)->implementation_identity == implementation_identity) {
+        return **slot;
+      }
+    }
+  }
+  if (legacy && legacy_metadata &&
+      revisions.legacy_op == implementation_identity) {
+    return OpImplementation{
+        *legacy, *legacy_metadata, revisions.legacy_op, {}, {}, {}};
+  }
+  return std::nullopt;
+}
+
 /** @copydoc OpRegistry::select_implementation */
 std::optional<OpImplementation> OpRegistry::select_implementation(
     const std::string& type, const std::string& subtype,
@@ -1896,6 +2092,7 @@ std::optional<OpImplementation> OpRegistry::select_implementation(
     candidates.reserve(device_implementations.size());
     for (const OpImplementation& implementation : device_implementations) {
       if (implementation.implementation_identity == 0U ||
+          !implementation_supports_intent(implementation.metadata, intent) ||
           std::find(available_devices.begin(), available_devices.end(),
                     implementation.metadata.device_preference) ==
               available_devices.end() ||
@@ -1917,6 +2114,7 @@ std::optional<OpImplementation> OpRegistry::select_implementation(
   const auto scalar_candidate = [&](const std::optional<OpImplementation>& slot)
       -> std::optional<OpImplementation> {
     if (!slot || slot->implementation_identity == 0U ||
+        !implementation_supports_intent(slot->metadata, intent) ||
         std::find(available_devices.begin(), available_devices.end(),
                   slot->metadata.device_preference) ==
             available_devices.end()) {
@@ -1952,8 +2150,8 @@ std::optional<OpImplementation> OpRegistry::select_implementation(
   if (!legacy || !legacy_metadata) {
     return std::nullopt;
   }
-  const std::optional<OpImplementation> legacy_candidate =
-      OpImplementation{*legacy, *legacy_metadata, revisions.legacy_op};
+  const std::optional<OpImplementation> legacy_candidate = OpImplementation{
+      *legacy, *legacy_metadata, revisions.legacy_op, {}, {}, {}};
   return scalar_candidate(legacy_candidate);
 }
 
@@ -1982,7 +2180,8 @@ std::optional<OpImplementation> OpRegistry::select_best_implementation(
   for (const auto& impl : implementations) {
     Device impl_device = impl.metadata.device_preference;
     // 检查实现的设备是否在可用设备列表中
-    if (std::find(available_devices.begin(), available_devices.end(),
+    if (implementation_supports_intent(impl.metadata, intent) &&
+        std::find(available_devices.begin(), available_devices.end(),
                   impl_device) != available_devices.end()) {
       if (candidate_filter && !candidate_filter(impl)) {
         continue;

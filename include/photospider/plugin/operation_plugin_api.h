@@ -351,6 +351,74 @@ typedef struct ps_operation_identity_v1 {
   uint64_t word1;
 } ps_operation_identity_v1;
 
+/** @brief Canonical built-in DenseTensor Schema identity words. */
+#define PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD0_V1 \
+  UINT64_C(0x70686f746f737069)
+#define PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD1_V1 \
+  UINT64_C(0x6465722d64656e73)
+/** @brief Canonical built-in DenseTensor Schema structural version. */
+#define PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_VERSION_V1 UINT64_C(2)
+
+/** @brief Canonical built-in Image Facet identity words. */
+#define PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD0_V1 \
+  UINT64_C(0x70686f746f737069)
+#define PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD1_V1 \
+  UINT64_C(0x6465722d696d6167)
+/** @brief Canonical built-in Image Facet structural version. */
+#define PS_OPERATION_BUILTIN_IMAGE_FACET_VERSION_V1 UINT64_C(2)
+
+/** @brief Canonical built-in Strided Layout identity words. */
+#define PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD0_V1 \
+  UINT64_C(0x70686f746f737069)
+#define PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD1_V1 \
+  UINT64_C(0x6465722d73747269)
+/** @brief Canonical built-in Strided Layout structural version. */
+#define PS_OPERATION_BUILTIN_STRIDED_LAYOUT_VERSION_V1 UINT64_C(2)
+
+/**
+ * @brief Returns the canonical built-in DenseTensor Schema identity.
+ * @return Specification-owned permanent Schema identity.
+ * @throws Nothing.
+ * @note The paired structural version is
+ * `PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_VERSION_V1`.
+ */
+static inline ps_operation_identity_v1
+ps_operation_builtin_dense_tensor_schema_identity_v1(void) {
+  const ps_operation_identity_v1 identity = {
+      PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD0_V1,
+      PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD1_V1};
+  return identity;
+}
+
+/**
+ * @brief Returns the canonical optional built-in Image Facet identity.
+ * @return Specification-owned permanent Facet identity.
+ * @throws Nothing.
+ * @note A facet-free DenseTensor uses the all-zero identity instead.
+ */
+static inline ps_operation_identity_v1
+ps_operation_builtin_image_facet_identity_v1(void) {
+  const ps_operation_identity_v1 identity = {
+      PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD0_V1,
+      PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD1_V1};
+  return identity;
+}
+
+/**
+ * @brief Returns the canonical built-in Strided Layout identity.
+ * @return Specification-owned permanent Layout identity.
+ * @throws Nothing.
+ * @note The paired structural version is
+ * `PS_OPERATION_BUILTIN_STRIDED_LAYOUT_VERSION_V1`.
+ */
+static inline ps_operation_identity_v1
+ps_operation_builtin_strided_layout_identity_v1(void) {
+  const ps_operation_identity_v1 identity = {
+      PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD0_V1,
+      PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD1_V1};
+  return identity;
+}
+
 /** @brief Unpredictable Host-minted operation-generation handle. */
 typedef struct ps_operation_generation_handle_v1 {
   /** @brief First opaque generation word. */

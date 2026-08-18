@@ -244,9 +244,9 @@ std::optional<DirtyResolvedOperation> select_dirty_operation(
           : make_planned_output_authority(
                 make_planned_operation_route(*selected), PixelSize{});
   return DirtyResolvedOperation{
-      std::move(selected->func), selected->metadata.device_preference,
+      std::move(selected->func),         selected->metadata.device_preference,
       selected->implementation_identity, std::move(selected->metadata),
-      std::move(output_authority)};
+      std::move(output_authority),       std::move(selected->dirty_propagator)};
 }
 
 /**
@@ -1363,11 +1363,21 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
         selected_operation->metadata.scratch_bytes, 0U, 1U};
     PlannedOutputAuthority output_authority =
         selected_operation->output_authority;
+    OpMetadata operation_metadata = selected_operation->metadata;
+    std::optional<DirtyRoiPropFunc> dirty_propagator =
+        selected_operation->dirty_propagator;
+    const std::uint64_t implementation_identity =
+        selected_operation->implementation_identity;
     OpRegistry::OpVariant operation = std::move(selected_operation->operation);
     auto execute_preflight_node = [state_ptr, result, node_id, operation,
                                    operation_constraints =
                                        std::move(operation_constraints),
                                    operation_demand,
+                                   operation_metadata =
+                                       std::move(operation_metadata),
+                                   dirty_propagator =
+                                       std::move(dirty_propagator),
+                                   implementation_identity,
                                    output_authority =
                                        std::move(output_authority)]() {
       const ComputeRunLease* active_lease =
@@ -1390,6 +1400,9 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
       const ResolvedNodeInputs resolved = NodeInputResolver::resolve(
           node_for_exec, lookup, "Connected-parameter stabilization");
       TiledExecutionConfig tiled_config;
+      tiled_config.metadata = operation_metadata;
+      tiled_config.dirty_propagator = dirty_propagator;
+      tiled_config.implementation_identity = implementation_identity;
       tiled_config.on_tile = [state_ptr](const PixelRect&) {
         const ComputeRunLease* lease =
             state_ptr->run_lease.has_value() ? &*state_ptr->run_lease : nullptr;

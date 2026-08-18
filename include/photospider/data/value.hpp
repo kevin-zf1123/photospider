@@ -24,7 +24,7 @@ namespace ps {
 
 class PendingValuePublisher;
 class PendingDeviceValuePublisher;
-class DenseImageValueDescriptorMetadataAccess;
+class DenseTensorValueDescriptorMetadataAccess;
 
 /**
  * @brief Identifies the logical interpretation of one tensor element.
@@ -567,7 +567,7 @@ class ValueBuilder final {
   std::unique_ptr<Impl> impl_;
 
   friend class PendingValuePublisher;
-  friend class DenseImageValueDescriptorMetadataAccess;
+  friend class DenseTensorValueDescriptorMetadataAccess;
 };
 
 /**
@@ -1014,7 +1014,7 @@ class Value final {
   friend class PendingValuePublisher;
   friend class PendingDeviceValuePublisher;
   friend class ValueBuilder;
-  friend class DenseImageValueDescriptorMetadataAccess;
+  friend class DenseTensorValueDescriptorMetadataAccess;
   friend ContentDigestResult compute_content_digest(const Value& value);
 };
 

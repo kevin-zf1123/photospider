@@ -680,8 +680,18 @@ PixelRect NodeExecutor::input_roi_for_tile(
 
   PixelRect input_roi;
   if (meta.access_pattern == OpMetadata::InputAccessPattern::RandomAccess) {
-    auto prop_fn =
-        OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
+    DirtyRoiPropFunc prop_fn;
+    if (config.dirty_propagator.has_value()) {
+      prop_fn = *config.dirty_propagator;
+    } else if (config.implementation_identity != 0U) {
+      prop_fn = [](const Node&, const PixelRect& roi, const GraphModel&,
+                   const PixelSize&, const std::vector<PixelSize>&,
+                   const plugin::ParameterMap&,
+                   const std::vector<const NodeOutput*>*) { return roi; };
+    } else {
+      prop_fn =
+          OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
+    }
     const std::int64_t output_right =
         static_cast<std::int64_t>(output_roi.x) + output_roi.width;
     const std::int64_t output_bottom =

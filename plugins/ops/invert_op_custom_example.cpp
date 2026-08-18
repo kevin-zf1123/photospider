@@ -24,9 +24,9 @@ constexpr ps_operation_identity_v1 kConfigurationIdentity{
 };
 constexpr ps_operation_identity_v1 kInputIdentity{0x5053504F5254494EULL, 1U};
 constexpr ps_operation_identity_v1 kOutputIdentity{0x5053504F52544F55ULL, 1U};
-constexpr ps_operation_identity_v1 kDenseSchema{0x50534449U, 0x1001U};
-constexpr ps_operation_identity_v1 kImageFacet{0x50534449U, 0x1002U};
-constexpr ps_operation_identity_v1 kStridedLayout{0x50534449U, 0x1003U};
+constexpr auto kDenseSchema{kBuiltinDenseTensorSchemaIdentity};
+constexpr auto kImageFacet{kBuiltinImageFacetIdentity};
+constexpr auto kStridedLayout{kBuiltinStridedLayoutIdentity};
 
 /**
  * @brief Creates one stable image port descriptor.

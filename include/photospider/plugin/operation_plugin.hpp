@@ -41,6 +41,36 @@ constexpr ps_operation_identity_v1 make_identity(std::uint64_t word0,
   return ps_operation_identity_v1{word0, word1};
 }
 
+/** @brief Canonical built-in DenseTensor Schema identity and version. */
+inline constexpr ps_operation_identity_v1 kBuiltinDenseTensorSchemaIdentity{
+    PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD0_V1,
+    PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD1_V1,
+};
+/** @brief Canonical built-in DenseTensor Schema structural version. */
+inline constexpr std::uint64_t kBuiltinDenseTensorSchemaVersion{
+    PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_VERSION_V1,
+};
+
+/** @brief Canonical optional built-in Image Facet identity and version. */
+inline constexpr ps_operation_identity_v1 kBuiltinImageFacetIdentity{
+    PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD0_V1,
+    PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD1_V1,
+};
+/** @brief Canonical built-in Image Facet structural version. */
+inline constexpr std::uint64_t kBuiltinImageFacetVersion{
+    PS_OPERATION_BUILTIN_IMAGE_FACET_VERSION_V1,
+};
+
+/** @brief Canonical built-in Strided Layout identity and version. */
+inline constexpr ps_operation_identity_v1 kBuiltinStridedLayoutIdentity{
+    PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD0_V1,
+    PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD1_V1,
+};
+/** @brief Canonical built-in Strided Layout structural version. */
+inline constexpr std::uint64_t kBuiltinStridedLayoutVersion{
+    PS_OPERATION_BUILTIN_STRIDED_LAYOUT_VERSION_V1,
+};
+
 /**
  * @brief Creates one exact semantic-record header.
  * @param size Exact complete v1 record size.

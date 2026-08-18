@@ -43,9 +43,9 @@ ps_operation_port_descriptor_v1 make_input_port() noexcept {
   port.index = 0U;
   port.direction = PS_OPERATION_PORT_INPUT_V1;
   port.name = make_bytes("image");
-  port.schema_identity = make_identity(0x50534449U, 0x1001U);
-  port.facet_identity = make_identity(0x50534449U, 0x1002U);
-  port.layout_identity = make_identity(0x50534449U, 0x1003U);
+  port.schema_identity = kBuiltinDenseTensorSchemaIdentity;
+  port.facet_identity = kBuiltinImageFacetIdentity;
+  port.layout_identity = kBuiltinStridedLayoutIdentity;
   return port;
 }
 

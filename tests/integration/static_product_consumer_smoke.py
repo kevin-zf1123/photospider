@@ -1783,14 +1783,54 @@ def installed_c_operation_header_probe_source() -> str:
         _Static_assert(sizeof(ps_operation_output_grant_span_v1) ==
                            PS_OPERATION_OUTPUT_GRANT_SPAN_V1_SIZE,
                        "operation grant layout mismatch");
+        _Static_assert(
+            PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD0_V1 ==
+                UINT64_C(0x70686f746f737069) &&
+                PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD1_V1 ==
+                    UINT64_C(0x6465722d64656e73) &&
+                PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_VERSION_V1 ==
+                    UINT64_C(2),
+            "DenseTensor Schema identity mismatch");
+        _Static_assert(
+            PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD0_V1 ==
+                UINT64_C(0x70686f746f737069) &&
+                PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD1_V1 ==
+                    UINT64_C(0x6465722d696d6167) &&
+                PS_OPERATION_BUILTIN_IMAGE_FACET_VERSION_V1 == UINT64_C(2),
+            "Image Facet identity mismatch");
+        _Static_assert(
+            PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD0_V1 ==
+                UINT64_C(0x70686f746f737069) &&
+                PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD1_V1 ==
+                    UINT64_C(0x6465722d73747269) &&
+                PS_OPERATION_BUILTIN_STRIDED_LAYOUT_VERSION_V1 == UINT64_C(2),
+            "Strided Layout identity mismatch");
 
         /**
          * @brief Verifies the installed numeric and root symbol constants.
          * @return Zero only when both exact discovery names are preserved.
          */
         int main(void) {
+          const ps_operation_identity_v1 schema =
+              ps_operation_builtin_dense_tensor_schema_identity_v1();
+          const ps_operation_identity_v1 facet =
+              ps_operation_builtin_image_facet_identity_v1();
+          const ps_operation_identity_v1 layout =
+              ps_operation_builtin_strided_layout_identity_v1();
           return PS_OPERATION_PLUGIN_GET_ABI_VERSION_SYMBOL[0] == 'p' &&
-                         PS_OPERATION_PLUGIN_GET_API_V1_SYMBOL[0] == 'p'
+                         PS_OPERATION_PLUGIN_GET_API_V1_SYMBOL[0] == 'p' &&
+                         schema.word0 ==
+                             PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD0_V1 &&
+                         schema.word1 ==
+                             PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD1_V1 &&
+                         facet.word0 ==
+                             PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD0_V1 &&
+                         facet.word1 ==
+                             PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD1_V1 &&
+                         layout.word0 ==
+                             PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD0_V1 &&
+                         layout.word1 ==
+                             PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD1_V1
                      ? 0
                      : 1;
         }
@@ -1837,15 +1877,9 @@ def installed_operation_plugin_source() -> str:
         /** @brief Built-in Image Region-domain identity. */
         constexpr auto kImageRegionDomainIdentity =
             make_identity(0x50484F544F535049ULL, 0x4445525F494D4731ULL);
-        /** @brief Permanent ordinary-image Schema identity. */
-        constexpr auto kSchemaIdentity =
-            make_identity(0x50534449ULL, 0x1001ULL);
-        /** @brief Permanent ordinary-image Facet identity. */
-        constexpr auto kFacetIdentity =
-            make_identity(0x50534449ULL, 0x1002ULL);
-        /** @brief Permanent Strided Layout identity. */
-        constexpr auto kLayoutIdentity =
-            make_identity(0x50534449ULL, 0x1003ULL);
+        static_assert(kBuiltinDenseTensorSchemaVersion == 2U);
+        static_assert(kBuiltinImageFacetVersion == 2U);
+        static_assert(kBuiltinStridedLayoutVersion == 2U);
 
         /**
          * @brief Emits one immutable 2x2x1 unsigned-byte output plan.
@@ -1903,11 +1937,11 @@ def installed_operation_plugin_source() -> str:
           descriptor.header = make_record_header(
               PS_OPERATION_VALUE_DESCRIPTOR_V1_SIZE,
               PS_OPERATION_RECORD_VALUE_DESCRIPTOR_V1);
-          descriptor.schema_identity = kSchemaIdentity;
-          descriptor.facet_identity = kFacetIdentity;
-          descriptor.layout_identity = kLayoutIdentity;
-          descriptor.descriptor_version = 1U;
-          descriptor.layout_version = 1U;
+          descriptor.schema_identity = kBuiltinDenseTensorSchemaIdentity;
+          descriptor.facet_identity = kBuiltinImageFacetIdentity;
+          descriptor.layout_identity = kBuiltinStridedLayoutIdentity;
+          descriptor.descriptor_version = kBuiltinDenseTensorSchemaVersion;
+          descriptor.layout_version = kBuiltinStridedLayoutVersion;
           descriptor.dense_tensor = &dense;
           descriptor.image_facet = &image;
           descriptor.strided_layout = &layout;
@@ -2051,9 +2085,9 @@ def installed_operation_plugin_source() -> str:
           port.index = 0U;
           port.direction = PS_OPERATION_PORT_OUTPUT_V1;
           port.name = make_bytes("image");
-          port.schema_identity = kSchemaIdentity;
-          port.facet_identity = kFacetIdentity;
-          port.layout_identity = kLayoutIdentity;
+          port.schema_identity = kBuiltinDenseTensorSchemaIdentity;
+          port.facet_identity = kBuiltinImageFacetIdentity;
+          port.layout_identity = kBuiltinStridedLayoutIdentity;
           return port;
         }
 

@@ -32,24 +32,6 @@
 namespace ps::plugin_host {
 namespace {
 
-/** @brief Permanent Host-published Schema identity for ordinary DenseTensor. */
-constexpr ps_operation_identity_v1 kDenseTensorSchemaIdentity{
-    0x50534449U,
-    0x1001U,
-};  // NOLINT(whitespace/indent_namespace)
-
-/** @brief Permanent Host-published Facet identity for ordinary ImageFacet. */
-constexpr ps_operation_identity_v1 kImageFacetIdentity{0x50534449U, 0x1002U};
-
-/** @brief Permanent Host-published Layout identity for Strided storage. */
-constexpr ps_operation_identity_v1 kStridedLayoutIdentity{0x50534449U, 0x1003U};
-
-/** @brief Structural version of the Host built-in DenseImage projection. */
-constexpr std::uint64_t kDenseImageDescriptorVersion = 1U;
-
-/** @brief Structural version of the Host built-in Strided projection. */
-constexpr std::uint64_t kStridedLayoutVersion = 1U;
-
 /**
  * @brief Reports whether one 128-bit ABI identity is absent.
  * @param identity Identity to inspect.
@@ -308,9 +290,9 @@ struct DescriptorMetadata final {
  * @return Equivalent pointer-free metadata retained at Value publication.
  * @throws Nothing.
  */
-DenseImageValueDescriptorMetadata retained_value_metadata(
+DenseTensorValueDescriptorMetadata retained_value_metadata(
     const DescriptorMetadata& metadata) noexcept {
-  DenseImageValueDescriptorMetadata result;
+  DenseTensorValueDescriptorMetadata result;
   result.schema_identity = ExtensionIdentity{metadata.schema_identity.word0,
                                              metadata.schema_identity.word1};
   result.facet_identity = ExtensionIdentity{metadata.facet_identity.word0,
@@ -338,7 +320,7 @@ DenseImageValueDescriptorMetadata retained_value_metadata(
  * @throws Nothing.
  */
 DescriptorMetadata projected_value_metadata(
-    const DenseImageValueDescriptorMetadata& metadata) noexcept {
+    const DenseTensorValueDescriptorMetadata& metadata) noexcept {
   DescriptorMetadata result;
   result.schema_identity = ps_operation_identity_v1{
       metadata.schema_identity.high, metadata.schema_identity.low};
@@ -381,6 +363,228 @@ using OutputPortKey = std::pair<std::uint64_t, std::uint64_t>;
 /** @brief Ordered output-port identity to complete declaration inventory. */
 using OutputPortContracts = std::map<OutputPortKey, OutputPortContract>;
 
+/**
+ * @brief Complete validated Strided DenseTensor output plan copied from ABI.
+ *
+ * The plan represents either a facet-free rank-general DenseTensor or an
+ * ordinary image DenseTensor. Image plans additionally retain the existing
+ * source-private DenseImageOutputPlan used by tiled execution.
+ *
+ * @throws std::bad_alloc when copied metadata or Region storage allocates.
+ * @note This value carries no allocation, mutable address, Value revision, or
+ * callback authority.
+ */
+class CopiedDenseTensorOutputPlan final {
+ public:
+  /**
+   * @brief Validates and stores one complete output plan.
+   * @param output_name Canonical declared output name.
+   * @param descriptor Complete logical DenseTensor descriptor.
+   * @param image_facet Optional ordinary-image interpretation.
+   * @param layout Exact positive Strided producer layout.
+   * @param storage_size Exact allocation envelope size.
+   * @param alignment Required power-of-two base alignment.
+   * @param region Exact full logical output Region.
+   * @return Complete immutable copied plan.
+   * @throws std::invalid_argument, std::overflow_error, std::length_error,
+   * std::bad_alloc, or DenseImageOutputPlan validation failures.
+   * @note Facet-free plans require the complete built-in DenseTensor slice;
+   * image plans require the exact data-window Region.
+   */
+  static CopiedDenseTensorOutputPlan create(
+      std::string output_name, DenseTensorDescriptor descriptor,
+      std::optional<ImageFacet> image_facet, StridedLayout layout,
+      std::size_t storage_size, std::size_t alignment, RegionSet region) {
+    if (output_name.empty() ||
+        output_name.size() > kMaximumHostOutputNameBytes ||
+        output_name.find('\0') != std::string::npos || storage_size == 0U ||
+        alignment == 0U || (alignment & (alignment - 1U)) != 0U ||
+        alignment > kMaximumHostOutputAlignment) {
+      throw std::invalid_argument(
+          "operation ABI DenseTensor output plan has invalid bounds");
+    }
+    validate_dense_tensor_image_metadata(descriptor, image_facet);
+    const std::size_t element_bytes = dense_tensor_element_bytes(descriptor);
+    if (layout.byte_offset != 0U ||
+        layout.byte_strides.size() != descriptor.shape.size() ||
+        alignment < element_bytes) {
+      throw std::invalid_argument(
+          "operation ABI DenseTensor output layout is invalid");
+    }
+    std::vector<std::pair<std::size_t, std::size_t>> ordered_axes;
+    ordered_axes.reserve(descriptor.shape.size());
+    std::size_t envelope = element_bytes;
+    for (std::size_t axis = 0U; axis < descriptor.shape.size(); ++axis) {
+      const std::ptrdiff_t stride = layout.byte_strides[axis];
+      if (stride <= 0 || static_cast<std::uintmax_t>(stride) >
+                             std::numeric_limits<std::size_t>::max()) {
+        throw std::invalid_argument(
+            "operation ABI DenseTensor output stride is invalid");
+      }
+      ordered_axes.emplace_back(static_cast<std::size_t>(stride),
+                                descriptor.shape[axis]);
+    }
+    std::sort(ordered_axes.begin(), ordered_axes.end());
+    for (const auto& [stride, extent] : ordered_axes) {
+      if (stride < envelope) {
+        throw std::invalid_argument(
+            "operation ABI DenseTensor output layout overlaps");
+      }
+      if (extent - 1U >
+          (std::numeric_limits<std::size_t>::max() - envelope) / stride) {
+        throw std::overflow_error(
+            "operation ABI DenseTensor output envelope overflows");
+      }
+      envelope += (extent - 1U) * stride;
+    }
+    if (envelope != storage_size) {
+      throw std::invalid_argument(
+          "operation ABI DenseTensor output storage size is not exact");
+    }
+
+    std::optional<DenseImageOutputPlan> image_plan;
+    if (image_facet) {
+      image_plan.emplace(DenseImageOutputPlan::create(output_name, descriptor,
+                                                      *image_facet, layout,
+                                                      storage_size, alignment));
+      if (!(image_plan->region() == region)) {
+        throw std::invalid_argument(
+            "operation ABI image output full Region mismatch");
+      }
+    } else {
+      TensorSlice slice;
+      slice.domain = dense_tensor_region_domain();
+      slice.axes.reserve(descriptor.shape.size());
+      for (const std::size_t extent : descriptor.shape) {
+        if (extent > std::numeric_limits<std::uint64_t>::max()) {
+          throw std::overflow_error(
+              "operation ABI DenseTensor output extent overflows Region");
+        }
+        slice.axes.push_back(
+            RegionInterval{0U, static_cast<std::uint64_t>(extent)});
+      }
+      if (!(RegionSet::from_tensor_slice(std::move(slice)) == region)) {
+        throw std::invalid_argument(
+            "operation ABI DenseTensor output full Region mismatch");
+      }
+    }
+    return CopiedDenseTensorOutputPlan(
+        std::move(output_name), std::move(descriptor), std::move(image_facet),
+        std::move(layout), storage_size, alignment, std::move(region),
+        std::move(image_plan));
+  }
+
+  /**
+   * @brief Returns the canonical output name.
+   * @return Borrowed immutable name retained by this plan.
+   * @throws Nothing.
+   */
+  const std::string& output_name() const noexcept { return output_name_; }
+  /**
+   * @brief Returns the complete logical descriptor.
+   * @return Borrowed immutable DenseTensor descriptor retained by this plan.
+   * @throws Nothing.
+   */
+  const DenseTensorDescriptor& descriptor() const noexcept {
+    return descriptor_;
+  }
+  /**
+   * @brief Returns the optional ordinary-image interpretation.
+   * @return Borrowed optional ImageFacet retained by this plan.
+   * @throws Nothing.
+   */
+  const std::optional<ImageFacet>& image_facet() const noexcept {
+    return image_facet_;
+  }
+  /**
+   * @brief Returns the exact Strided layout.
+   * @return Borrowed immutable layout retained by this plan.
+   * @throws Nothing.
+   */
+  const StridedLayout& layout() const noexcept { return layout_; }
+  /**
+   * @brief Returns the exact allocation envelope size.
+   * @return Positive checked byte count.
+   * @throws Nothing.
+   */
+  std::size_t storage_size() const noexcept { return storage_size_; }
+  /**
+   * @brief Returns the required base alignment.
+   * @return Positive checked power-of-two byte alignment.
+   * @throws Nothing.
+   */
+  std::size_t alignment() const noexcept { return alignment_; }
+  /**
+   * @brief Returns the exact full logical output Region.
+   * @return Borrowed immutable image rectangle or TensorSlice Region.
+   * @throws Nothing.
+   */
+  const RegionSet& region() const noexcept { return region_; }
+  /**
+   * @brief Reports whether this plan is an ordinary image.
+   * @return True exactly when an ImageFacet and image plan are present.
+   * @throws Nothing.
+   */
+  bool is_image() const noexcept { return image_plan_.has_value(); }
+
+  /**
+   * @brief Returns the validated image-only plan used by tiled execution.
+   * @return Borrowed image plan.
+   * @throws std::logic_error when this is a facet-free DenseTensor plan.
+   */
+  const DenseImageOutputPlan& dense_image_plan() const {
+    if (!image_plan_) {
+      throw std::logic_error("facet-free DenseTensor has no image output plan");
+    }
+    return *image_plan_;
+  }
+
+ private:
+  /**
+   * @brief Stores fully validated plan state without repeating validation.
+   * @param output_name Canonical declared output name.
+   * @param descriptor Complete logical DenseTensor descriptor.
+   * @param image_facet Optional ordinary-image interpretation.
+   * @param layout Exact positive Strided producer layout.
+   * @param storage_size Exact allocation envelope size.
+   * @param alignment Required power-of-two base alignment.
+   * @param region Exact full logical output Region.
+   * @param image_plan Validated image-only plan when a Facet is present.
+   * @throws Nothing.
+   * @note Call only from create() after all cross-field checks succeed.
+   */
+  CopiedDenseTensorOutputPlan(
+      std::string output_name, DenseTensorDescriptor descriptor,
+      std::optional<ImageFacet> image_facet, StridedLayout layout,
+      std::size_t storage_size, std::size_t alignment, RegionSet region,
+      std::optional<DenseImageOutputPlan> image_plan) noexcept
+      : output_name_(std::move(output_name)),
+        descriptor_(std::move(descriptor)),
+        image_facet_(std::move(image_facet)),
+        layout_(std::move(layout)),
+        storage_size_(storage_size),
+        alignment_(alignment),
+        region_(std::move(region)),
+        image_plan_(std::move(image_plan)) {}
+
+  /** @brief Canonical declared output name. */
+  std::string output_name_;
+  /** @brief Complete logical DenseTensor descriptor. */
+  DenseTensorDescriptor descriptor_;
+  /** @brief Optional ordinary-image interpretation. */
+  std::optional<ImageFacet> image_facet_;
+  /** @brief Exact positive Strided layout. */
+  StridedLayout layout_;
+  /** @brief Exact positive allocation envelope size. */
+  std::size_t storage_size_ = 0U;
+  /** @brief Required positive power-of-two base alignment. */
+  std::size_t alignment_ = 0U;
+  /** @brief Exact full logical output Region. */
+  RegionSet region_;
+  /** @brief Validated image plan when a Facet is present. */
+  std::optional<DenseImageOutputPlan> image_plan_;
+};
+
 /** @brief One accepted output plan plus its Host-minted ABI identity. */
 struct CopiedOutputPlan {
   /** @brief Exact declared output port identity. */
@@ -391,8 +595,8 @@ struct CopiedOutputPlan {
   std::uint32_t port_index = 0U;
   /** @brief Exact descriptor identity/version/digest facts from inference. */
   DescriptorMetadata metadata;
-  /** @brief Complete validated source-private allocation plan. */
-  DenseImageOutputPlan plan;
+  /** @brief Complete validated rank-general allocation plan. */
+  CopiedDenseTensorOutputPlan plan;
 
   /**
    * @brief Stores one completely validated output plan.
@@ -406,7 +610,7 @@ struct CopiedOutputPlan {
   CopiedOutputPlan(ps_operation_identity_v1 port,
                    ps_operation_identity_v1 identity, std::uint32_t index,
                    DescriptorMetadata descriptor_metadata,
-                   DenseImageOutputPlan value)
+                   CopiedDenseTensorOutputPlan value)
       : port_identity(port),
         plan_identity(identity),
         port_index(index),
@@ -1003,12 +1207,20 @@ CopiedOutputPlan copy_output_plan(const ps_operation_output_plan_v1& record,
       descriptor_record.descriptor_version == 0U ||
       descriptor_record.layout_version == 0U ||
       descriptor_record.dense_tensor == nullptr ||
-      descriptor_record.image_facet == nullptr ||
       descriptor_record.strided_layout == nullptr ||
       !all_zero(descriptor_record.reserved)) {
     throw std::invalid_argument("operation ABI value descriptor malformed");
   }
   const OutputPortContract& contract = output->second;
+  const bool descriptor_has_facet = descriptor_record.image_facet != nullptr;
+  const bool identity_has_facet =
+      !identity_is_zero(descriptor_record.facet_identity);
+  const bool contract_has_facet = !identity_is_zero(contract.facet_identity);
+  if (descriptor_has_facet != identity_has_facet ||
+      identity_has_facet != contract_has_facet) {
+    throw std::invalid_argument(
+        "operation ABI output Facet presence does not match identity");
+  }
   if (!identities_equal(descriptor_record.schema_identity,
                         contract.schema_identity) ||
       !identities_equal(descriptor_record.facet_identity,
@@ -1021,14 +1233,17 @@ CopiedOutputPlan copy_output_plan(const ps_operation_output_plan_v1& record,
   }
   DenseTensorDescriptor descriptor =
       copy_dense_tensor(descriptor_record.dense_tensor);
-  ImageFacet facet = copy_image_facet(descriptor_record.image_facet);
+  std::optional<ImageFacet> facet;
+  if (descriptor_record.image_facet != nullptr) {
+    facet = copy_image_facet(descriptor_record.image_facet);
+  }
   StridedLayout layout = copy_strided_layout(descriptor_record.strided_layout,
                                              descriptor.shape.size());
   require_array(record.buffers, PS_OPERATION_OUTPUT_BUFFER_PLAN_V1_SIZE,
                 PS_OPERATION_MAX_BUFFERS_V1);
   if (record.buffer_count != 1U || record.buffers.count != 1U) {
     throw std::invalid_argument(
-        "operation ABI v1 DenseImage plan requires one buffer");
+        "operation ABI v1 DenseTensor plan requires one buffer");
   }
   const auto& buffer = *static_cast<const ps_operation_output_buffer_plan_v1*>(
       record.buffers.data);
@@ -1045,13 +1260,10 @@ CopiedOutputPlan copy_output_plan(const ps_operation_output_plan_v1& record,
     throw std::invalid_argument("operation ABI output buffer plan malformed");
   }
   RegionSet full_region = copy_region(record.full_region);
-  DenseImageOutputPlan plan = DenseImageOutputPlan::create(
+  CopiedDenseTensorOutputPlan plan = CopiedDenseTensorOutputPlan::create(
       contract.name, std::move(descriptor), std::move(facet), std::move(layout),
       static_cast<std::size_t>(buffer.byte_size),
-      static_cast<std::size_t>(buffer.alignment));
-  if (!(plan.region() == full_region)) {
-    throw std::invalid_argument("operation ABI output full Region mismatch");
-  }
+      static_cast<std::size_t>(buffer.alignment), std::move(full_region));
   DescriptorMetadata metadata;
   metadata.schema_identity = descriptor_record.schema_identity;
   metadata.facet_identity = descriptor_record.facet_identity;
@@ -1620,7 +1832,7 @@ ps_operation_bytes_v1 bytes_view(std::string_view value) noexcept {
 }
 
 /**
- * @brief Owns one complete pure-C projection of private dense-image metadata.
+ * @brief Owns one complete pure-C projection of private DenseTensor metadata.
  * @throws std::bad_alloc when copied bounded metadata allocates.
  * @note All pointers installed in ABI records refer to members of this stable
  * object. Callers allocate it behind `unique_ptr` and never move it afterward.
@@ -1628,31 +1840,32 @@ ps_operation_bytes_v1 bytes_view(std::string_view value) noexcept {
 class DescriptorProjection final {
  public:
   /**
-   * @brief Copies and projects one complete dense-image descriptor.
+   * @brief Copies and projects one complete DenseTensor descriptor.
    * @param metadata Exact representation identities, versions, and digests.
    * @param descriptor Canonical logical tensor metadata.
-   * @param facet Canonical ordinary-image metadata.
+   * @param facet Optional canonical ordinary-image metadata.
    * @param layout Canonical exact signed byte layout.
    * @param storage_size Exact containing byte span.
    * @throws std::invalid_argument or std::overflow_error for facts that cannot
    * enter ABI v1, plus allocation failures from copied metadata.
    */
   DescriptorProjection(DescriptorMetadata metadata,
-                       DenseTensorDescriptor descriptor, ImageFacet facet,
-                       StridedLayout layout, std::size_t storage_size)
+                       DenseTensorDescriptor descriptor,
+                       std::optional<ImageFacet> facet, StridedLayout layout,
+                       std::size_t storage_size)
       : metadata_(metadata),
         descriptor_(std::move(descriptor)),
         facet_(std::move(facet)),
         layout_(std::move(layout)) {
     if (identity_is_zero(metadata_.schema_identity) ||
-        identity_is_zero(metadata_.facet_identity) ||
         identity_is_zero(metadata_.layout_identity) ||
         metadata_.descriptor_version == 0U || metadata_.layout_version == 0U ||
+        identity_is_zero(metadata_.facet_identity) == facet_.has_value() ||
         descriptor_.shape.empty() ||
         descriptor_.shape.size() > PS_OPERATION_MAX_RANK_V1 ||
         layout_.byte_strides.size() != descriptor_.shape.size()) {
       throw std::invalid_argument(
-          "private dense image cannot enter operation ABI v1");
+          "private DenseTensor cannot enter operation ABI v1");
     }
     extents_.reserve(descriptor_.shape.size());
     for (std::size_t extent : descriptor_.shape) {
@@ -1701,27 +1914,29 @@ class DescriptorProjection final {
     layout_record_.byte_strides = array_ref(strides_);
     layout_record_.storage_size = storage_size;
 
-    image_.header = ps_operation_record_header_v1{
-        PS_OPERATION_IMAGE_FACET_V1_SIZE, PS_OPERATION_RECORD_IMAGE_FACET_V1,
-        1U, 0U};
-    image_.x_axis = static_cast<std::uint32_t>(facet_.x_axis);
-    image_.y_axis = static_cast<std::uint32_t>(facet_.y_axis);
-    if (facet_.channel_axis) {
-      image_.presence_mask |= PS_OPERATION_IMAGE_HAS_CHANNEL_AXIS_V1;
-      image_.channel_axis = static_cast<std::uint32_t>(*facet_.channel_axis);
+    if (facet_) {
+      image_.header = ps_operation_record_header_v1{
+          PS_OPERATION_IMAGE_FACET_V1_SIZE, PS_OPERATION_RECORD_IMAGE_FACET_V1,
+          1U, 0U};
+      image_.x_axis = static_cast<std::uint32_t>(facet_->x_axis);
+      image_.y_axis = static_cast<std::uint32_t>(facet_->y_axis);
+      if (facet_->channel_axis) {
+        image_.presence_mask |= PS_OPERATION_IMAGE_HAS_CHANNEL_AXIS_V1;
+        image_.channel_axis = static_cast<std::uint32_t>(*facet_->channel_axis);
+      }
+      image_.data_window = ps_operation_image_bounds_v1{
+          facet_->data_window.x_begin, facet_->data_window.y_begin,
+          facet_->data_window.x_end, facet_->data_window.y_end};
+      if (facet_->display_window) {
+        image_.presence_mask |= PS_OPERATION_IMAGE_HAS_DISPLAY_WINDOW_V1;
+        image_.display_window = ps_operation_image_bounds_v1{
+            facet_->display_window->x_begin, facet_->display_window->y_begin,
+            facet_->display_window->x_end, facet_->display_window->y_end};
+      }
+      project_channels();
+      project_sample_domain();
+      project_color();
     }
-    image_.data_window = ps_operation_image_bounds_v1{
-        facet_.data_window.x_begin, facet_.data_window.y_begin,
-        facet_.data_window.x_end, facet_.data_window.y_end};
-    if (facet_.display_window) {
-      image_.presence_mask |= PS_OPERATION_IMAGE_HAS_DISPLAY_WINDOW_V1;
-      image_.display_window = ps_operation_image_bounds_v1{
-          facet_.display_window->x_begin, facet_.display_window->y_begin,
-          facet_.display_window->x_end, facet_.display_window->y_end};
-    }
-    project_channels();
-    project_sample_domain();
-    project_color();
 
     descriptor_record_.header = ps_operation_record_header_v1{
         PS_OPERATION_VALUE_DESCRIPTOR_V1_SIZE,
@@ -1735,7 +1950,7 @@ class DescriptorProjection final {
     descriptor_record_.content_digest = metadata_.content_digest;
     descriptor_record_.layout_digest = metadata_.layout_digest;
     descriptor_record_.dense_tensor = &dense_;
-    descriptor_record_.image_facet = &image_;
+    descriptor_record_.image_facet = facet_ ? &image_ : nullptr;
     descriptor_record_.strided_layout = &layout_record_;
   }
 
@@ -1753,12 +1968,12 @@ class DescriptorProjection final {
    * @throws std::bad_alloc when projection storage grows.
    */
   void project_channels() {
-    if (!facet_.channel_schema) {
+    if (!facet_->channel_schema) {
       return;
     }
     image_.presence_mask |= PS_OPERATION_IMAGE_HAS_CHANNEL_SCHEMA_V1;
-    channels_.reserve(facet_.channel_schema->channels.size());
-    for (const auto& channel : facet_.channel_schema->channels) {
+    channels_.reserve(facet_->channel_schema->channels.size());
+    for (const auto& channel : facet_->channel_schema->channels) {
       ps_operation_channel_v1 record{};
       record.header = ps_operation_record_header_v1{
           PS_OPERATION_CHANNEL_V1_SIZE, PS_OPERATION_RECORD_CHANNEL_V1, 1U, 0U};
@@ -1766,9 +1981,9 @@ class DescriptorProjection final {
       record.diagnostic_name = bytes_view(channel.diagnostic_name);
       channels_.push_back(record);
     }
-    group_members_.reserve(facet_.channel_schema->groups.size());
-    groups_.reserve(facet_.channel_schema->groups.size());
-    for (const auto& group : facet_.channel_schema->groups) {
+    group_members_.reserve(facet_->channel_schema->groups.size());
+    groups_.reserve(facet_->channel_schema->groups.size());
+    for (const auto& group : facet_->channel_schema->groups) {
       group_members_.emplace_back();
       auto& members = group_members_.back();
       members.reserve(group.members.size());
@@ -1793,7 +2008,7 @@ class DescriptorProjection final {
    * @throws std::bad_alloc when override storage grows.
    */
   void project_sample_domain() {
-    if (!facet_.sample_domain) {
+    if (!facet_->sample_domain) {
       return;
     }
     const auto make_domain = [](const SampleDomain& domain) {
@@ -1804,14 +2019,14 @@ class DescriptorProjection final {
     sample_.header = ps_operation_record_header_v1{
         PS_OPERATION_SAMPLE_DOMAIN_FACET_V1_SIZE,
         PS_OPERATION_RECORD_SAMPLE_DOMAIN_FACET_V1, 1U, 0U};
-    sample_.structural_version = facet_.sample_domain->structural_version;
+    sample_.structural_version = facet_->sample_domain->structural_version;
     sample_.encoding_structural_version =
-        facet_.sample_domain->encoding.structural_version;
+        facet_->sample_domain->encoding.structural_version;
     sample_.encoding_kind =
-        static_cast<std::uint32_t>(facet_.sample_domain->encoding.kind) + 1U;
-    sample_.default_domain = make_domain(facet_.sample_domain->default_domain);
-    sample_overrides_.reserve(facet_.sample_domain->per_channel.size());
-    for (const auto& value : facet_.sample_domain->per_channel) {
+        static_cast<std::uint32_t>(facet_->sample_domain->encoding.kind) + 1U;
+    sample_.default_domain = make_domain(facet_->sample_domain->default_domain);
+    sample_overrides_.reserve(facet_->sample_domain->per_channel.size());
+    for (const auto& value : facet_->sample_domain->per_channel) {
       ps_operation_channel_sample_domain_v1 record{};
       record.header = ps_operation_record_header_v1{
           PS_OPERATION_CHANNEL_SAMPLE_DOMAIN_V1_SIZE,
@@ -1827,16 +2042,17 @@ class DescriptorProjection final {
 
   /** @brief Projects the optional explicit color facet. */
   void project_color() noexcept {
-    if (!facet_.color) {
+    if (!facet_->color) {
       return;
     }
     color_.header = ps_operation_record_header_v1{
         PS_OPERATION_COLOR_FACET_V1_SIZE, PS_OPERATION_RECORD_COLOR_FACET_V1,
         1U, 0U};
-    color_.structural_version = facet_.color->structural_version;
-    color_.transfer = static_cast<std::uint32_t>(facet_.color->transfer) + 1U;
-    color_.primaries = static_cast<std::uint32_t>(facet_.color->primaries) + 1U;
-    color_.channel_group_id = facet_.color->channel_group.value;
+    color_.structural_version = facet_->color->structural_version;
+    color_.transfer = static_cast<std::uint32_t>(facet_->color->transfer) + 1U;
+    color_.primaries =
+        static_cast<std::uint32_t>(facet_->color->primaries) + 1U;
+    color_.channel_group_id = facet_->color->channel_group.value;
     image_.color = &color_;
     image_.presence_mask |= PS_OPERATION_IMAGE_HAS_COLOR_V1;
   }
@@ -1845,8 +2061,8 @@ class DescriptorProjection final {
   DescriptorMetadata metadata_;
   /** @brief Owned source logical descriptor. */
   DenseTensorDescriptor descriptor_;
-  /** @brief Owned source ordinary-image metadata. */
-  ImageFacet facet_;
+  /** @brief Owned optional source ordinary-image metadata. */
+  std::optional<ImageFacet> facet_;
   /** @brief Owned source signed layout. */
   StridedLayout layout_;
   /** @brief ABI shape scalars. */
@@ -1883,12 +2099,12 @@ class DescriptorProjection final {
  * @brief Selects and validates exact representation metadata for one input.
  * @param value Immutable input whose publication metadata has priority.
  * @param port Exact declared destination input port.
- * @return Value-retained facts, or the permanent Host built-in DenseTensor,
- * ImageFacet, and Strided identities with their frozen version-one spelling
- * and unavailable digests when the Value predates operation metadata.
+ * @return Value-retained facts, or the public built-in DenseTensor, optional
+ * ImageFacet, and Strided identities at structural version two with
+ * unavailable digests when the Value predates operation metadata.
  * @throws std::invalid_argument when retained identities conflict with the
- * destination port, the image route has no explicit Facet, or an ordinary
- * Value is consumed through identities that only its consumer declared.
+ * destination port, Facet presence differs, or an ordinary Value is consumed
+ * through identities that only its consumer declared.
  * @note A zero port Layout leaves the retained Strided identity unconstrained.
  * The compatibility projection exists only for Values published outside the
  * operation ABI. Its identity/version tuple belongs to the Host publisher,
@@ -1896,12 +2112,8 @@ class DescriptorProjection final {
  */
 DescriptorMetadata input_descriptor_metadata(const Value& value,
                                              const PortDefinition& port) {
-  if (identity_is_zero(port.facet_identity)) {
-    throw std::invalid_argument(
-        "operation ABI DenseImage input port has no Facet identity");
-  }
-  const DenseImageValueDescriptorMetadata* retained =
-      DenseImageValueDescriptorMetadataAccess::get(value);
+  const DenseTensorValueDescriptorMetadata* retained =
+      DenseTensorValueDescriptorMetadataAccess::get(value);
   if (retained != nullptr) {
     DescriptorMetadata metadata = projected_value_metadata(*retained);
     if (!identities_equal(metadata.schema_identity, port.schema_identity) ||
@@ -1913,19 +2125,31 @@ DescriptorMetadata input_descriptor_metadata(const Value& value,
     }
     return metadata;
   }
-  if (!identities_equal(port.schema_identity, kDenseTensorSchemaIdentity) ||
-      !identities_equal(port.facet_identity, kImageFacetIdentity) ||
+  const bool value_has_facet = value.image_facet().has_value();
+  const bool port_has_facet = !identity_is_zero(port.facet_identity);
+  if (value_has_facet != port_has_facet ||
+      (port_has_facet &&
+       !identities_equal(port.facet_identity,
+                         ps_operation_builtin_image_facet_identity_v1())) ||
+      !identities_equal(
+          port.schema_identity,
+          ps_operation_builtin_dense_tensor_schema_identity_v1()) ||
       (!identity_is_zero(port.layout_identity) &&
-       !identities_equal(port.layout_identity, kStridedLayoutIdentity))) {
+       !identities_equal(port.layout_identity,
+                         ps_operation_builtin_strided_layout_identity_v1()))) {
     throw std::invalid_argument(
         "operation ABI ordinary input requires built-in publisher identity");
   }
   DescriptorMetadata metadata;
-  metadata.schema_identity = kDenseTensorSchemaIdentity;
-  metadata.facet_identity = kImageFacetIdentity;
-  metadata.layout_identity = kStridedLayoutIdentity;
-  metadata.descriptor_version = kDenseImageDescriptorVersion;
-  metadata.layout_version = kStridedLayoutVersion;
+  metadata.schema_identity =
+      ps_operation_builtin_dense_tensor_schema_identity_v1();
+  metadata.facet_identity = value_has_facet
+                                ? ps_operation_builtin_image_facet_identity_v1()
+                                : ps_operation_identity_v1{};
+  metadata.layout_identity = ps_operation_builtin_strided_layout_identity_v1();
+  metadata.descriptor_version =
+      PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_VERSION_V1;
+  metadata.layout_version = PS_OPERATION_BUILTIN_STRIDED_LAYOUT_VERSION_V1;
   return metadata;
 }
 
@@ -1937,11 +2161,11 @@ DescriptorMetadata input_descriptor_metadata(const Value& value,
 class ValueProjection final {
  public:
   /**
-   * @brief Projects one Ready host-readable ordinary DenseImage Value.
+   * @brief Projects one Ready host-readable Strided DenseTensor Value.
    * @param value Immutable Value to retain.
    * @param port Exact destination port selecting representation identities.
    * @param include_payload Whether execution may observe the CPU buffer.
-   * @throws std::invalid_argument when the Value is not Strided DenseImage.
+   * @throws std::invalid_argument when the Value is not Strided DenseTensor.
    * @throws ReadyFenceAccessError or BufferAccessError when execution payload
    * access is unavailable.
    */
@@ -1949,14 +2173,13 @@ class ValueProjection final {
       : value_(std::move(value)) {
     if (!value_.valid() ||
         value_.representation_kind() != ValueRepresentationKind::DenseTensor ||
-        value_.storage_layout_kind() != StorageLayoutKind::Strided ||
-        !value_.image_facet()) {
+        value_.storage_layout_kind() != StorageLayoutKind::Strided) {
       throw std::invalid_argument(
-          "operation ABI input requires a Strided DenseImage Value");
+          "operation ABI input requires a Strided DenseTensor Value");
     }
     descriptor_ = std::make_unique<DescriptorProjection>(
         input_descriptor_metadata(value_, port),
-        value_.dense_tensor_descriptor(), *value_.image_facet(),
+        value_.dense_tensor_descriptor(), value_.image_facet(),
         value_.strided_layout(), value_.storage_size());
     extents_.reserve(value_.dense_tensor_descriptor().shape.size());
     for (std::size_t extent : value_.dense_tensor_descriptor().shape) {
@@ -2007,19 +2230,30 @@ class ValueProjection final {
   }
 
  private:
-  /** @brief Constructs a one-atom full image Region from the data window. */
+  /** @brief Constructs the exact full image or rank-general tensor Region. */
   void project_full_region() {
-    const auto& bounds = value_.image_bounds();
-    const auto width = image_bounds_width(bounds);
-    const auto height = image_bounds_height(bounds);
-    ranges_ = {ps_operation_axis_range_v1{bounds.x_begin, width},
-               ps_operation_axis_range_v1{bounds.y_begin, height}};
-    const RegionDomainKey domain = image_region_domain();
+    RegionDomainKey domain;
+    if (value_.image_facet()) {
+      const auto& bounds = value_.image_bounds();
+      const auto width = image_bounds_width(bounds);
+      const auto height = image_bounds_height(bounds);
+      ranges_ = {ps_operation_axis_range_v1{bounds.x_begin, width},
+                 ps_operation_axis_range_v1{bounds.y_begin, height}};
+      domain = image_region_domain();
+      atom_.atom_kind = PS_OPERATION_REGION_ATOM_IMAGE_RECT_V1;
+    } else {
+      ranges_.reserve(value_.dense_tensor_descriptor().shape.size());
+      for (const std::size_t extent : value_.dense_tensor_descriptor().shape) {
+        ranges_.push_back(
+            ps_operation_axis_range_v1{0, static_cast<std::uint64_t>(extent)});
+      }
+      domain = dense_tensor_region_domain();
+      atom_.atom_kind = PS_OPERATION_REGION_ATOM_TENSOR_SLICE_V1;
+    }
     atom_.header = ps_operation_record_header_v1{
         PS_OPERATION_REGION_ATOM_V1_SIZE, PS_OPERATION_RECORD_REGION_ATOM_V1,
         1U, 0U};
-    atom_.atom_kind = PS_OPERATION_REGION_ATOM_IMAGE_RECT_V1;
-    atom_.rank = 2U;
+    atom_.rank = static_cast<std::uint32_t>(ranges_.size());
     atom_.domain_identity = ps_operation_identity_v1{domain.high, domain.low};
     atom_.axis_ranges = array_ref(ranges_);
     atoms_.push_back(atom_);
@@ -2055,6 +2289,44 @@ class ValueProjection final {
 };
 
 /**
+ * @brief Resolves one connected NodeOutput Value for a declared input port.
+ * @param input Optional upstream output.
+ * @param port Exact destination port contract.
+ * @return Borrowed matching Value, or nullptr for a disconnected input.
+ * @throws std::invalid_argument when multiple generic Values are ambiguous.
+ * @note The canonical image remains the compatibility choice for an
+ * image-Facet input. A generic input first matches its declared name, then a
+ * sole remaining named Value; consumer identities are never used to invent a
+ * publisher identity.
+ */
+const Value* input_value_for_port(const NodeOutput* input,
+                                  const PortDefinition& port) {
+  if (input == nullptr) {
+    return nullptr;
+  }
+  if (!identity_is_zero(port.facet_identity) && input->has_image_value()) {
+    return &input->image_value();
+  }
+  const auto named = input->named_values.find(port.name);
+  if (named != input->named_values.end() && named->second.valid()) {
+    return &named->second;
+  }
+  const Value* sole = nullptr;
+  for (const auto& [name, value] : input->named_values) {
+    static_cast<void>(name);
+    if (!value.valid()) {
+      continue;
+    }
+    if (sole != nullptr) {
+      throw std::invalid_argument(
+          "operation ABI generic input is ambiguous by output name");
+    }
+    sole = &value;
+  }
+  return sole;
+}
+
+/**
  * @brief Owns one callback-local destination-indexed input binding sequence.
  * @throws Value projection and allocation failures.
  * @note Disconnected input slots remain present with null value/Region and a
@@ -2077,9 +2349,10 @@ class InputBindingsProjection final {
     for (std::size_t index = 0; index < operation.inputs.size(); ++index) {
       const NodeOutput* input = index < inputs.size() ? inputs[index] : nullptr;
       std::unique_ptr<ValueProjection> value;
-      if (input != nullptr && input->has_image_value()) {
+      if (const Value* selected =
+              input_value_for_port(input, operation.inputs[index])) {
         value = std::make_unique<ValueProjection>(
-            input->image_value(), operation.inputs[index], include_payload);
+            *selected, operation.inputs[index], include_payload);
       }
       ps_operation_input_binding_v1 binding{};
       binding.header = ps_operation_record_header_v1{
@@ -2127,58 +2400,29 @@ class InputBindingsProjection final {
 };
 
 /**
- * @brief Owns one callback-local ABI Region projection.
- * @throws std::invalid_argument for non-image multi-atom Regions in the
- * current ordinary DenseImage execution bridge.
- * @note The public ABI remains rank-general; this adapter projects the current
- * private ordinary-image execution surface without guessing another domain.
+ * @brief Owns one callback-local rank-general ABI Region projection.
+ * @throws std::invalid_argument or std::overflow_error when a canonical
+ * private Region cannot enter operation ABI v1.
+ * @note Every projected pointer refers to stable storage retained by this
+ * object for the complete callback.
  */
-class ImageRegionProjection final {
+class RegionProjection final {
  public:
   /**
    * @brief Projects one exact nonempty or empty image rectangle.
    * @param rect Canonical private image rectangle.
    * @throws std::overflow_error when signed span arithmetic is invalid.
    */
-  explicit ImageRegionProjection(const ImageRect& rect) {
-    if (rect.x_end < rect.x_begin || rect.y_end < rect.y_begin) {
-      throw std::invalid_argument("private image Region is inverted");
-    }
-    if (rect.x_end == rect.x_begin || rect.y_end == rect.y_begin) {
-      view_.header = ps_operation_record_header_v1{
-          PS_OPERATION_REGION_SET_VIEW_V1_SIZE,
-          PS_OPERATION_RECORD_REGION_SET_VIEW_V1, 1U, 0U};
-      view_.set_kind = PS_OPERATION_REGION_SET_EMPTY_V1;
-      return;
-    }
-    ranges_ = {ps_operation_axis_range_v1{
-                   rect.x_begin,
-                   static_cast<std::uint64_t>(rect.x_end - rect.x_begin)},
-               ps_operation_axis_range_v1{
-                   rect.y_begin,
-                   static_cast<std::uint64_t>(rect.y_end - rect.y_begin)}};
-    atom_.header = ps_operation_record_header_v1{
-        PS_OPERATION_REGION_ATOM_V1_SIZE, PS_OPERATION_RECORD_REGION_ATOM_V1,
-        1U, 0U};
-    atom_.atom_kind = PS_OPERATION_REGION_ATOM_IMAGE_RECT_V1;
-    atom_.rank = 2U;
-    atom_.domain_identity =
-        ps_operation_identity_v1{rect.domain.high, rect.domain.low};
-    atom_.axis_ranges = array_ref(ranges_);
-    atoms_.push_back(atom_);
-    view_.header = ps_operation_record_header_v1{
-        PS_OPERATION_REGION_SET_VIEW_V1_SIZE,
-        PS_OPERATION_RECORD_REGION_SET_VIEW_V1, 1U, 0U};
-    view_.set_kind = PS_OPERATION_REGION_SET_CLAUSE_V1;
-    view_.atoms = array_ref(atoms_);
-  }
+  explicit RegionProjection(const ImageRect& rect)
+      : RegionProjection(RegionSet::from_image_rect(rect)) {}
 
   /**
-   * @brief Projects one canonical private Region that must be image-only.
-   * @param region Empty, Whole, or one image rectangle clause.
-   * @throws std::invalid_argument for Whole or non-image/multi-atom clauses.
+   * @brief Projects one canonical private image/tensor Region.
+   * @param region Empty, Whole, or one bounded canonical clause.
+   * @throws std::invalid_argument or std::overflow_error when a signed ABI
+   * origin/extent cannot represent the canonical Region.
    */
-  explicit ImageRegionProjection(const RegionSet& region) {
+  explicit RegionProjection(const RegionSet& region) {
     view_.header = ps_operation_record_header_v1{
         PS_OPERATION_REGION_SET_VIEW_V1_SIZE,
         PS_OPERATION_RECORD_REGION_SET_VIEW_V1, 1U, 0U};
@@ -2190,12 +2434,52 @@ class ImageRegionProjection final {
       view_.set_kind = PS_OPERATION_REGION_SET_WHOLE_V1;
       return;
     }
-    if (region.atoms().size() != 1U ||
-        !std::holds_alternative<ImageRect>(region.atoms().front())) {
-      throw std::invalid_argument(
-          "ordinary image ABI bridge requires one image Region atom");
+    ranges_.resize(region.atoms().size());
+    atoms_.resize(region.atoms().size());
+    for (std::size_t index = 0U; index < region.atoms().size(); ++index) {
+      const RegionAtom& source = region.atoms()[index];
+      auto& ranges = ranges_[index];
+      auto& atom = atoms_[index];
+      atom.header = ps_operation_record_header_v1{
+          PS_OPERATION_REGION_ATOM_V1_SIZE, PS_OPERATION_RECORD_REGION_ATOM_V1,
+          1U, 0U};
+      if (const auto* image = std::get_if<ImageRect>(&source)) {
+        if (image->x_end < image->x_begin || image->y_end < image->y_begin) {
+          throw std::invalid_argument("private image Region is inverted");
+        }
+        ranges = {
+            ps_operation_axis_range_v1{
+                image->x_begin,
+                static_cast<std::uint64_t>(image->x_end - image->x_begin)},
+            ps_operation_axis_range_v1{
+                image->y_begin,
+                static_cast<std::uint64_t>(image->y_end - image->y_begin)}};
+        atom.atom_kind = PS_OPERATION_REGION_ATOM_IMAGE_RECT_V1;
+        atom.rank = 2U;
+        atom.domain_identity =
+            ps_operation_identity_v1{image->domain.high, image->domain.low};
+      } else {
+        const TensorSlice& tensor = std::get<TensorSlice>(source);
+        ranges.reserve(tensor.axes.size());
+        for (const RegionInterval& axis : tensor.axes) {
+          if (axis.begin > static_cast<std::uint64_t>(
+                               std::numeric_limits<std::int64_t>::max()) ||
+              axis.end < axis.begin) {
+            throw std::overflow_error(
+                "private tensor Region origin cannot enter operation ABI");
+          }
+          ranges.push_back(ps_operation_axis_range_v1{
+              static_cast<std::int64_t>(axis.begin), axis.end - axis.begin});
+        }
+        atom.atom_kind = PS_OPERATION_REGION_ATOM_TENSOR_SLICE_V1;
+        atom.rank = static_cast<std::uint32_t>(ranges.size());
+        atom.domain_identity =
+            ps_operation_identity_v1{tensor.domain.high, tensor.domain.low};
+      }
+      atom.axis_ranges = array_ref(ranges);
     }
-    *this = ImageRegionProjection(std::get<ImageRect>(region.atoms().front()));
+    view_.set_kind = PS_OPERATION_REGION_SET_CLAUSE_V1;
+    view_.atoms = array_ref(atoms_);
   }
 
   /** @brief Returns the exact RegionSetView record. */
@@ -2204,12 +2488,10 @@ class ImageRegionProjection final {
   }
 
  private:
-  /** @brief Image x/y range records. */
-  std::vector<ps_operation_axis_range_v1> ranges_;
-  /** @brief Single image atom row. */
+  /** @brief Stable rank-sized axis ranges for every atom. */
+  std::vector<std::vector<ps_operation_axis_range_v1>> ranges_;
+  /** @brief Complete projected atom rows. */
   std::vector<ps_operation_region_atom_v1> atoms_;
-  /** @brief Atom staging record. */
-  ps_operation_region_atom_v1 atom_{};
   /** @brief Complete Region view. */
   ps_operation_region_set_view_v1 view_{};
 };
@@ -2635,11 +2917,11 @@ struct ColorFacetAuthoritySnapshot final {
 };
 
 /**
- * @brief Owns a recursive snapshot of one complete ImageFacet record graph.
- * @throws std::invalid_argument for an incomplete Host graph.
+ * @brief Owns a recursive snapshot of an optional complete ImageFacet graph.
  * @throws std::bad_alloc when nested snapshot ownership cannot allocate.
- * @note Windows, channel arrays, optional facets, and reserved facts are all
- * immutable callback authority.
+ * @note Presence, windows, channel arrays, optional facets, and reserved facts
+ * are all immutable callback authority. Facet-free DenseTensor descriptors
+ * retain an exact null snapshot.
  */
 struct ImageFacetAuthoritySnapshot final {
   /** @brief Original safe root address. */
@@ -2656,9 +2938,8 @@ struct ImageFacetAuthoritySnapshot final {
   ColorFacetAuthoritySnapshot color;
 
   /**
-   * @brief Captures one nonnull Host-created ImageFacet graph.
-   * @param source Pre-callback descriptor facet root.
-   * @throws std::invalid_argument for a null root.
+   * @brief Captures one optional Host-created ImageFacet graph.
+   * @param source Pre-callback descriptor facet root, which may be null.
    * @throws std::bad_alloc when nested snapshot ownership cannot allocate.
    */
   explicit ImageFacetAuthoritySnapshot(
@@ -2668,8 +2949,7 @@ struct ImageFacetAuthoritySnapshot final {
         sample(source == nullptr ? nullptr : source->sample_domain),
         color(source == nullptr ? nullptr : source->color) {
     if (source == nullptr) {
-      throw std::invalid_argument(
-          "output authority ImageFacet snapshot is null");
+      return;
     }
     const auto channel_rows =
         snapshot_host_array<ps_operation_channel_v1>(source->channels);
@@ -2692,7 +2972,10 @@ struct ImageFacetAuthoritySnapshot final {
    * @throws Nothing.
    */
   bool matches(const ps_operation_image_facet_v1* observed) const noexcept {
-    if (observed != address || observed == nullptr ||
+    if (address == nullptr || observed == nullptr) {
+      return observed == address;
+    }
+    if (observed != address ||
         !headers_equal(record.header, observed->header) ||
         record.x_axis != observed->x_axis ||
         record.y_axis != observed->y_axis ||
@@ -3105,6 +3388,204 @@ class MutableOutputAuthoritySnapshot final {
 };
 
 /**
+ * @brief Owns one trusted monolithic Host output allocation and write lease.
+ *
+ * Image plans delegate to HostOutputBinding. Facet-free DenseTensor plans use
+ * ValueBuilder directly while preserving allocate/write/retire/seal ordering
+ * and retained descriptor metadata.
+ *
+ * @throws Value, Host binding, metadata, or allocation failures.
+ * @note Destruction fails an active image grant closed and abandons any
+ * unsealed generic builder; publication occurs only through seal().
+ */
+class MonolithicOutputAllocation final {
+ public:
+  /**
+   * @brief Allocates one plan and attaches retained descriptor metadata.
+   * @param copied Complete accepted output plan.
+   * @throws Value, Host binding, metadata, or allocation failures.
+   */
+  explicit MonolithicOutputAllocation(const CopiedOutputPlan& copied)
+      : copied_(&copied) {
+    if (copied.plan.is_image()) {
+      image_binding_.emplace(
+          HostOutputBinding::allocate(copied.plan.dense_image_plan()));
+      image_grant_.emplace(image_binding_->grant_whole());
+      image_grant_->bind_value_descriptor_metadata(
+          retained_value_metadata(copied.metadata));
+      return;
+    }
+    builder_.emplace(ValueBuilder::allocate_cpu_dense_tensor(
+        copied.plan.descriptor(), copied.plan.image_facet(),
+        copied.plan.layout(), copied.plan.storage_size(),
+        copied.plan.alignment()));
+    DenseTensorValueDescriptorMetadataAccess::attach(
+        &*builder_, retained_value_metadata(copied.metadata));
+    lease_.emplace(builder_->acquire_write());
+  }
+
+  MonolithicOutputAllocation(const MonolithicOutputAllocation&) = delete;
+  MonolithicOutputAllocation& operator=(const MonolithicOutputAllocation&) =
+      delete;
+
+  /**
+   * @brief Cancels any active authority without throwing.
+   * @throws Nothing; retirement diagnostics are suppressed during teardown.
+   */
+  ~MonolithicOutputAllocation() noexcept { cancel_noexcept(); }
+
+  /**
+   * @brief Returns the active allocation identity.
+   * @return Nonzero Host allocation identity for the current mutable owner.
+   * @throws std::logic_error when generic authority is unavailable.
+   */
+  AllocationIdentity allocation_identity() const {
+    if (image_grant_) {
+      return image_binding_->allocation_identity();
+    }
+    if (!lease_) {
+      throw std::logic_error("generic output write authority is unavailable");
+    }
+    return lease_->allocation_identity();
+  }
+
+  /**
+   * @brief Returns one for generic storage or the image grant span count.
+   * @return Positive number of writable spans exposed to the callback.
+   * @throws std::logic_error when write authority is unavailable.
+   */
+  std::size_t span_count() const {
+    if (image_grant_) {
+      return image_grant_->span_count();
+    }
+    if (!lease_) {
+      throw std::logic_error("generic output write authority is unavailable");
+    }
+    return 1U;
+  }
+
+  /**
+   * @brief Returns checked span metadata by dense index.
+   * @param index Zero-based span index.
+   * @return Value copy of checked span metadata.
+   * @throws std::out_of_range for an invalid index, or std::logic_error when
+   * generic write authority is unavailable.
+   */
+  HostOutputWriteSpan span(std::size_t index) const {
+    if (image_grant_) {
+      return image_grant_->span(index);
+    }
+    if (index != 0U) {
+      throw std::out_of_range("generic output span index is invalid");
+    }
+    if (!lease_) {
+      throw std::logic_error("generic output write authority is unavailable");
+    }
+    return HostOutputWriteSpan{0U, lease_->size()};
+  }
+
+  /**
+   * @brief Returns one active mutable span address.
+   * @param index Zero-based span index.
+   * @return Mutable address valid until complete_success().
+   * @throws std::out_of_range, std::logic_error, or image write-authority
+   * failures.
+   */
+  std::byte* data(std::size_t index) const {
+    if (image_grant_) {
+      return image_grant_->data(index);
+    }
+    if (index != 0U) {
+      throw std::out_of_range("generic output span index is invalid");
+    }
+    if (!lease_) {
+      throw std::logic_error("generic output write authority is unavailable");
+    }
+    return lease_->data();
+  }
+
+  /**
+   * @brief Returns the exact active grant Region.
+   * @return Complete generic output Region or current image grant rectangle.
+   * @throws Region validation or inactive image-grant access failures.
+   */
+  RegionSet region() const {
+    return image_grant_
+               ? RegionSet::from_image_rect(image_grant_->image_region())
+               : copied_->plan.region();
+  }
+
+  /**
+   * @brief Retires mutable authority after a successful callback.
+   * @return Nothing.
+   * @throws Host grant retirement failures or duplicate completion.
+   */
+  void complete_success() {
+    if (complete_) {
+      throw std::logic_error("output authority completed more than once");
+    }
+    if (image_grant_) {
+      image_grant_->retire_success();
+    } else {
+      lease_.reset();
+    }
+    successful_ = true;
+    complete_ = true;
+  }
+
+  /**
+   * @brief Seals the immutable Value after successful retirement.
+   * @return Fresh immutable Value with retained descriptor metadata.
+   * @throws std::logic_error before completion, plus seal failures.
+   */
+  Value seal() {
+    if (!complete_ || !successful_) {
+      throw std::logic_error(
+          "output allocation cannot seal without successful retirement");
+    }
+    return image_binding_ ? image_binding_->seal() : builder_->seal();
+  }
+
+  /**
+   * @brief Fails active image authority and abandons generic authority.
+   * @return Nothing.
+   * @throws Nothing; teardown is best-effort and idempotent.
+   * @note No Value can be sealed after cancellation.
+   */
+  void cancel_noexcept() noexcept {
+    if (complete_) {
+      return;
+    }
+    if (image_grant_) {
+      try {
+        if (image_grant_->active()) {
+          image_grant_->retire_failure("operation ABI execution failed");
+        }
+      } catch (...) {
+      }
+    }
+    lease_.reset();
+    complete_ = true;
+  }
+
+ private:
+  /** @brief Borrowed plan outliving this callback-local allocation. */
+  const CopiedOutputPlan* copied_ = nullptr;
+  /** @brief Image-only Host binding. */
+  std::optional<HostOutputBinding> image_binding_;
+  /** @brief Image-only whole-output write grant. */
+  std::optional<HostOutputWriteGrant> image_grant_;
+  /** @brief Facet-free generic Value builder. */
+  std::optional<ValueBuilder> builder_;
+  /** @brief Facet-free generic complete write lease. */
+  std::optional<WriteLease> lease_;
+  /** @brief Whether mutable authority has been retired or cancelled. */
+  bool complete_ = false;
+  /** @brief Whether completion retired authority successfully. */
+  bool successful_ = false;
+};
+
+/**
  * @brief Owns one Host-created mutable output binding ABI projection.
  * @throws Metadata, grant-access, and allocation failures.
  * @note Every writable pointer is derived from the active grant and remains
@@ -3127,65 +3608,27 @@ class MutableOutputProjection final {
       : descriptor_(std::make_unique<DescriptorProjection>(
             copied.metadata, copied.plan.descriptor(),
             copied.plan.image_facet(), copied.plan.layout(),
-            copied.plan.storage_size())),
-        full_region_(copied.plan.region()),
-        grant_region_(grant->image_region()) {
-    buffer_plan_.header = ps_operation_record_header_v1{
-        PS_OPERATION_OUTPUT_BUFFER_PLAN_V1_SIZE,
-        PS_OPERATION_RECORD_OUTPUT_BUFFER_PLAN_V1, 1U, 0U};
-    buffer_plan_.buffer_index = 0U;
-    buffer_plan_.access_mask = PS_OPERATION_ACCESS_WRITE_V1;
-    buffer_plan_.byte_size = copied.plan.storage_size();
-    buffer_plan_.alignment = copied.plan.alignment();
-    buffer_plans_.push_back(buffer_plan_);
+            copied.plan.storage_size())) {
+    initialize(copied, port_index, allocation_identity, *grant,
+               RegionSet::from_image_rect(grant->image_region()));
+  }
 
-    plan_.header = ps_operation_record_header_v1{
-        PS_OPERATION_OUTPUT_PLAN_V1_SIZE, PS_OPERATION_RECORD_OUTPUT_PLAN_V1,
-        1U, 0U};
-    plan_.port_identity = copied.port_identity;
-    plan_.port_index = port_index;
-    plan_.buffer_count = 1U;
-    plan_.descriptor = descriptor_->record();
-    plan_.buffers = array_ref(buffer_plans_);
-    plan_.full_region = full_region_.view();
-    plan_.plan_identity = copied.plan_identity;
-    plan_.access_mask = PS_OPERATION_ACCESS_WRITE_V1;
-
-    spans_.reserve(grant->span_count());
-    for (std::size_t index = 0; index < grant->span_count(); ++index) {
-      const auto& source = grant->span(index);
-      ps_operation_output_grant_span_v1 span{};
-      span.header = ps_operation_record_header_v1{
-          PS_OPERATION_OUTPUT_GRANT_SPAN_V1_SIZE,
-          PS_OPERATION_RECORD_OUTPUT_GRANT_SPAN_V1, 1U, 0U};
-      span.allocation_offset = source.allocation_offset;
-      span.byte_size = source.byte_size;
-      span.bytes = ps_operation_mutable_bytes_v1{
-          reinterpret_cast<std::uint8_t*>(grant->data(index)),
-          source.byte_size};
-      const auto address = reinterpret_cast<std::uintptr_t>(span.bytes.data);
-      const auto address_alignment =
-          address == 0U ? std::uintptr_t{1U}
-                        : address & (~address + std::uintptr_t{1U});
-      span.alignment = static_cast<std::uint64_t>(
-          std::min<std::uintptr_t>(copied.plan.alignment(), address_alignment));
-      spans_.push_back(span);
-    }
-
-    binding_.header = ps_operation_record_header_v1{
-        PS_OPERATION_MUTABLE_OUTPUT_BINDING_V1_SIZE,
-        PS_OPERATION_RECORD_MUTABLE_OUTPUT_BINDING_V1, 1U, 0U};
-    binding_.port_identity = copied.port_identity;
-    binding_.binding_identity =
-        ps_operation_identity_v1{0x42494E44U, allocation_identity};
-    binding_.grant_identity = mint_identity(0x4752414EU);
-    binding_.port_index = port_index;
-    binding_.plan = &plan_;
-    binding_.descriptor = descriptor_->record();
-    binding_.spans = array_ref(spans_);
-    binding_.region = grant_region_.view();
-    authority_snapshot_ =
-        std::make_unique<MutableOutputAuthoritySnapshot>(binding_);
+  /**
+   * @brief Projects one trusted monolithic image or generic allocation.
+   * @param copied Accepted immutable plan with Host identity.
+   * @param port_index Dense output port index.
+   * @param allocation Active allocation owning exact writable spans.
+   * @throws Grant access and metadata projection failures.
+   */
+  MutableOutputProjection(const CopiedOutputPlan& copied,
+                          std::uint32_t port_index,
+                          MonolithicOutputAllocation* allocation)
+      : descriptor_(std::make_unique<DescriptorProjection>(
+            copied.metadata, copied.plan.descriptor(),
+            copied.plan.image_facet(), copied.plan.layout(),
+            copied.plan.storage_size())) {
+    initialize(copied, port_index, allocation->allocation_identity().value(),
+               *allocation, allocation->region());
   }
 
   MutableOutputProjection(const MutableOutputProjection&) = delete;
@@ -3210,12 +3653,86 @@ class MutableOutputProjection final {
   }
 
  private:
+  /**
+   * @brief Builds plan and span records from one active checked authority.
+   * @tparam SpanSource HostOutputWriteGrant or MonolithicOutputAllocation.
+   * @param copied Accepted immutable output plan.
+   * @param port_index Dense output port index.
+   * @param allocation_identity Process-local allocation scalar.
+   * @param source Active checked span source.
+   * @param grant_region Exact logical Region covered by source.
+   * @return Nothing after complete immutable record construction.
+   * @throws Projection, allocation, and span-access failures.
+   */
+  template <typename SpanSource>
+  void initialize(const CopiedOutputPlan& copied, std::uint32_t port_index,
+                  std::uint64_t allocation_identity, SpanSource& source,
+                  RegionSet grant_region) {
+    full_region_ = std::make_unique<RegionProjection>(copied.plan.region());
+    grant_region_ = std::make_unique<RegionProjection>(std::move(grant_region));
+    buffer_plan_.header = ps_operation_record_header_v1{
+        PS_OPERATION_OUTPUT_BUFFER_PLAN_V1_SIZE,
+        PS_OPERATION_RECORD_OUTPUT_BUFFER_PLAN_V1, 1U, 0U};
+    buffer_plan_.buffer_index = 0U;
+    buffer_plan_.access_mask = PS_OPERATION_ACCESS_WRITE_V1;
+    buffer_plan_.byte_size = copied.plan.storage_size();
+    buffer_plan_.alignment = copied.plan.alignment();
+    buffer_plans_.push_back(buffer_plan_);
+
+    plan_.header = ps_operation_record_header_v1{
+        PS_OPERATION_OUTPUT_PLAN_V1_SIZE, PS_OPERATION_RECORD_OUTPUT_PLAN_V1,
+        1U, 0U};
+    plan_.port_identity = copied.port_identity;
+    plan_.port_index = port_index;
+    plan_.buffer_count = 1U;
+    plan_.descriptor = descriptor_->record();
+    plan_.buffers = array_ref(buffer_plans_);
+    plan_.full_region = full_region_->view();
+    plan_.plan_identity = copied.plan_identity;
+    plan_.access_mask = PS_OPERATION_ACCESS_WRITE_V1;
+
+    spans_.reserve(source.span_count());
+    for (std::size_t index = 0; index < source.span_count(); ++index) {
+      const HostOutputWriteSpan source_span = source.span(index);
+      ps_operation_output_grant_span_v1 span{};
+      span.header = ps_operation_record_header_v1{
+          PS_OPERATION_OUTPUT_GRANT_SPAN_V1_SIZE,
+          PS_OPERATION_RECORD_OUTPUT_GRANT_SPAN_V1, 1U, 0U};
+      span.allocation_offset = source_span.allocation_offset;
+      span.byte_size = source_span.byte_size;
+      span.bytes = ps_operation_mutable_bytes_v1{
+          reinterpret_cast<std::uint8_t*>(source.data(index)),
+          source_span.byte_size};
+      const auto address = reinterpret_cast<std::uintptr_t>(span.bytes.data);
+      const auto address_alignment =
+          address == 0U ? std::uintptr_t{1U}
+                        : address & (~address + std::uintptr_t{1U});
+      span.alignment = static_cast<std::uint64_t>(
+          std::min<std::uintptr_t>(copied.plan.alignment(), address_alignment));
+      spans_.push_back(span);
+    }
+
+    binding_.header = ps_operation_record_header_v1{
+        PS_OPERATION_MUTABLE_OUTPUT_BINDING_V1_SIZE,
+        PS_OPERATION_RECORD_MUTABLE_OUTPUT_BINDING_V1, 1U, 0U};
+    binding_.port_identity = copied.port_identity;
+    binding_.binding_identity =
+        ps_operation_identity_v1{0x42494E44U, allocation_identity};
+    binding_.grant_identity = mint_identity(0x4752414EU);
+    binding_.port_index = port_index;
+    binding_.plan = &plan_;
+    binding_.descriptor = descriptor_->record();
+    binding_.spans = array_ref(spans_);
+    binding_.region = grant_region_->view();
+    authority_snapshot_ =
+        std::make_unique<MutableOutputAuthoritySnapshot>(binding_);
+  }
   /** @brief Stable complete descriptor projection. */
   std::unique_ptr<DescriptorProjection> descriptor_;
   /** @brief Stable immutable full output Region projection. */
-  ImageRegionProjection full_region_;
+  std::unique_ptr<RegionProjection> full_region_;
   /** @brief Stable active grant Region projection. */
-  ImageRegionProjection grant_region_;
+  std::unique_ptr<RegionProjection> grant_region_;
   /** @brief One immutable output buffer-plan row. */
   std::vector<ps_operation_output_buffer_plan_v1> buffer_plans_;
   /** @brief Active checked mutable spans. */
@@ -3939,13 +4456,14 @@ std::vector<CopiedOutputPlan> infer_output_plans(
  * @brief Converts copied ABI scheduling facts into the private registry model.
  * @param operation Parent operation definition including output names.
  * @param implementation Exact implementation definition.
+ * @param intent Exact one-bit intent represented by the expanded candidate.
  * @return Validated private metadata for one registry candidate.
  * @throws std::overflow_error when relative cost cannot enter the private
  * integer score; allocation failures propagate from copied names.
  */
-OpMetadata make_private_metadata(
-    const OperationDefinition& operation,
-    const ImplementationDefinition& implementation) {
+OpMetadata make_private_metadata(const OperationDefinition& operation,
+                                 const ImplementationDefinition& implementation,
+                                 ps_operation_intent_mask_v1 intent) {
   OpMetadata metadata;
   metadata.device_preference = Device::CPU;
   const double scaled_cost = implementation.relative_cost * 100.0;
@@ -3954,6 +4472,8 @@ OpMetadata make_private_metadata(
         "operation ABI relative cost exceeds private scheduler range");
   }
   metadata.cost_score = std::max(1, static_cast<int>(std::lround(scaled_cost)));
+  metadata.supports_high_precision = intent == PS_OPERATION_INTENT_HP_V1;
+  metadata.supports_realtime = intent == PS_OPERATION_INTENT_RT_V1;
   metadata.access_pattern =
       (implementation.behavior_mask &
        PS_OPERATION_BEHAVIOR_DATA_DEPENDENT_V1) != 0U
@@ -4020,7 +4540,7 @@ class DemandedRegionsProjection final {
 
  private:
   /** @brief Stable ABI Region projection. */
-  ImageRegionProjection region_;
+  RegionProjection region_;
   /** @brief Dense demanded output bindings. */
   std::vector<ps_operation_region_binding_v1> bindings_;
   /** @brief Wrapper over demanded output bindings. */
@@ -4137,6 +4657,8 @@ PixelRect copied_region_to_pixel_rect(const CopiedRegionBinding& binding,
  * @param generation Shared generation/DSO lease.
  * @param implementation_state Live immutable generation implementation.
  * @param operation_index Dense operation index.
+ * @param implementation_index Dense implementation index in that operation.
+ * @param intent Exact one-bit intent of the selected registry candidate.
  * @param node Current destination node.
  * @param requested Exact downstream private ROI.
  * @param graph Current graph/cache snapshot.
@@ -4151,8 +4673,10 @@ PixelRect copied_region_to_pixel_rect(const CopiedRegionBinding& binding,
 PixelRect propagate_backward_implementation(
     const std::shared_ptr<OperationPluginGeneration>& generation,
     OperationPluginGeneration::Impl* implementation_state,
-    std::size_t operation_index, const Node& node, const PixelRect& requested,
-    const GraphModel& graph, const std::vector<PixelSize>& input_extents,
+    std::size_t operation_index, std::size_t implementation_index,
+    ps_operation_intent_mask_v1 intent, const Node& node,
+    const PixelRect& requested, const GraphModel& graph,
+    const std::vector<PixelSize>& input_extents,
     const plugin::ParameterMap& effective_parameters,
     const std::vector<const NodeOutput*>* available_inputs) {
   (void)generation;
@@ -4162,13 +4686,12 @@ PixelRect propagate_backward_implementation(
     return requested;
   }
   const ImplementationDefinition& implementation =
-      operation.implementations.front();
+      operation.implementations.at(implementation_index);
   ConfigurationStorage configuration(effective_parameters);
   ConfiguredContext configured(&impl, &operation, &implementation,
                                configuration.view());
-  const auto invocation =
-      make_invocation(impl, operation, implementation, configured.get(),
-                      PS_OPERATION_INTENT_HP_V1);
+  const auto invocation = make_invocation(impl, operation, implementation,
+                                          configured.get(), intent);
   const auto views =
       collect_region_inputs(operation, node, graph, available_inputs);
   InputBindingsProjection inputs(operation, views, false);
@@ -4217,6 +4740,8 @@ PixelRect propagate_backward_implementation(
  * @param generation Shared generation/DSO lease.
  * @param implementation_state Live immutable generation implementation.
  * @param operation_index Dense operation index.
+ * @param implementation_index Dense implementation index in that operation.
+ * @param intent Exact one-bit intent of the selected registry candidate.
  * @param node Current destination node.
  * @param changed Exact active-input private ROI.
  * @param graph Current graph/cache snapshot.
@@ -4229,9 +4754,10 @@ PixelRect propagate_backward_implementation(
 PixelRect propagate_forward_implementation(
     const std::shared_ptr<OperationPluginGeneration>& generation,
     OperationPluginGeneration::Impl* implementation_state,
-    std::size_t operation_index, const Node& node, const PixelRect& changed,
-    const GraphModel& graph, const PixelSize& child_extent,
-    std::size_t active_input_index,
+    std::size_t operation_index, std::size_t implementation_index,
+    ps_operation_intent_mask_v1 intent, const Node& node,
+    const PixelRect& changed, const GraphModel& graph,
+    const PixelSize& child_extent, std::size_t active_input_index,
     const plugin::ParameterMap& effective_parameters) {
   (void)generation;
   auto& impl = *implementation_state;
@@ -4243,18 +4769,17 @@ PixelRect propagate_forward_implementation(
     throw std::invalid_argument("operation ABI active input index is invalid");
   }
   const ImplementationDefinition& implementation =
-      operation.implementations.front();
+      operation.implementations.at(implementation_index);
   ConfigurationStorage configuration(effective_parameters);
   ConfiguredContext configured(&impl, &operation, &implementation,
                                configuration.view());
-  const auto invocation =
-      make_invocation(impl, operation, implementation, configured.get(),
-                      PS_OPERATION_INTENT_HP_V1);
+  const auto invocation = make_invocation(impl, operation, implementation,
+                                          configured.get(), intent);
   const auto views = collect_region_inputs(operation, node, graph, nullptr);
   InputBindingsProjection inputs(operation, views, false);
   const RegionSet logical_changed =
       region_image_adapter::from_pixel_rect(changed);
-  ImageRegionProjection changed_projection(logical_changed);
+  RegionProjection changed_projection(logical_changed);
   ps_operation_identity_v1 active_edge =
       inputs.edge_identity(active_input_index);
   if (identity_is_zero(active_edge)) {
@@ -4319,6 +4844,8 @@ PixelRect clip_dependency_roi(const PixelRect& roi, const PixelSize& extent) {
  * @param generation Shared generation/DSO lease.
  * @param implementation_state Live immutable generation implementation.
  * @param operation_index Dense operation index.
+ * @param implementation_index Dense implementation index in that operation.
+ * @param intent Exact one-bit intent of the selected registry candidate.
  * @param node Current destination node.
  * @param graph Current graph/cache snapshot.
  * @param upstream_extents Destination-indexed finite input extents.
@@ -4332,8 +4859,9 @@ PixelRect clip_dependency_roi(const PixelRect& roi, const PixelSize& extent) {
 SpatialDependencyMap build_dependency_implementation(
     const std::shared_ptr<OperationPluginGeneration>& generation,
     OperationPluginGeneration::Impl* implementation_state,
-    std::size_t operation_index, const Node& node, const GraphModel& graph,
-    const std::vector<PixelSize>& upstream_extents,
+    std::size_t operation_index, std::size_t implementation_index,
+    ps_operation_intent_mask_v1 intent, const Node& node,
+    const GraphModel& graph, const std::vector<PixelSize>& upstream_extents,
     const PixelSize& downstream_extent,
     const plugin::ParameterMap& effective_parameters) {
   (void)generation;
@@ -4345,13 +4873,12 @@ SpatialDependencyMap build_dependency_implementation(
         "operation ABI dependency callback requires image inputs and outputs");
   }
   const ImplementationDefinition& implementation =
-      operation.implementations.front();
+      operation.implementations.at(implementation_index);
   ConfigurationStorage configuration(effective_parameters);
   ConfiguredContext configured(&impl, &operation, &implementation,
                                configuration.view());
-  const auto invocation =
-      make_invocation(impl, operation, implementation, configured.get(),
-                      PS_OPERATION_INTENT_HP_V1);
+  const auto invocation = make_invocation(impl, operation, implementation,
+                                          configured.get(), intent);
   const auto views = collect_region_inputs(operation, node, graph, nullptr);
   InputBindingsProjection inputs(operation, views, false);
 
@@ -4434,35 +4961,26 @@ SpatialDependencyMap build_dependency_implementation(
 }
 
 /**
- * @brief Best-effort fails every still-active output grant during unwinding.
- * @param grants Callback-local grants that may have reached plugin code.
- * @return Nothing.
- * @throws Nothing; lifecycle/diagnostic failures are swallowed after every
- * grant gets an independent retirement attempt.
- */
-void fail_active_grants_noexcept(
-    std::vector<HostOutputWriteGrant>* grants) noexcept {
-  for (HostOutputWriteGrant& grant : *grants) {
-    try {
-      if (grant.active()) {
-        grant.retire_failure("operation ABI execution failed");
-      }
-    } catch (...) {
-    }
-  }
-}
-
-/**
- * @brief Builds the exact full image Region carried by one ordinary Value.
- * @param value Valid Ready ordinary DenseImage Value.
- * @return One canonical signed image rectangle.
- * @throws Public image-window or Region validation failures unchanged.
+ * @brief Builds the exact full Region carried by one ordinary DenseTensor.
+ * @param value Valid Ready Strided DenseTensor Value.
+ * @return Canonical image rectangle or rank-general DenseTensor slice.
+ * @throws Public metadata or Region validation failures unchanged.
  */
 RegionSet isolated_input_region(const Value& value) {
-  const ImageBounds& bounds = value.image_bounds();
-  return RegionSet::from_image_rect(ImageRect{image_region_domain(),
-                                              bounds.x_begin, bounds.x_end,
-                                              bounds.y_begin, bounds.y_end});
+  if (value.image_facet()) {
+    const ImageBounds& bounds = value.image_bounds();
+    return RegionSet::from_image_rect(ImageRect{image_region_domain(),
+                                                bounds.x_begin, bounds.x_end,
+                                                bounds.y_begin, bounds.y_end});
+  }
+  TensorSlice slice;
+  slice.domain = dense_tensor_region_domain();
+  slice.axes.reserve(value.dense_tensor_descriptor().shape.size());
+  for (const std::size_t extent : value.dense_tensor_descriptor().shape) {
+    slice.axes.push_back(
+        RegionInterval{0U, static_cast<std::uint64_t>(extent)});
+  }
+  return RegionSet::from_tensor_slice(std::move(slice));
 }
 
 /**
@@ -4475,11 +4993,12 @@ RegionSet isolated_input_region(const Value& value) {
  * @note Region and cached dimensions are deterministic derivatives of these
  * fields and therefore need no independent comparison.
  */
-bool output_plans_equal(const DenseImageOutputPlan& left,
+bool output_plans_equal(const CopiedDenseTensorOutputPlan& left,
                         const DenseImageOutputPlan& right) noexcept {
-  return left.output_name() == right.output_name() &&
+  return left.is_image() && left.output_name() == right.output_name() &&
          left.descriptor() == right.descriptor() &&
-         left.image_facet() == right.image_facet() &&
+         left.image_facet().has_value() &&
+         *left.image_facet() == right.image_facet() &&
          left.layout() == right.layout() &&
          left.storage_size() == right.storage_size() &&
          left.alignment() == right.alignment();
@@ -4527,7 +5046,7 @@ execution::IsolatedCpuDenseTensorOutputPlan isolated_output_plan(
  * @param inputs Destination-indexed private upstream results.
  * @param plans Validated immutable Host output plans.
  * @return Fresh sealed NodeOutput retaining the operation generation lease.
- * @throws GraphError for disconnected/non-image inputs, typed runtime failure,
+ * @throws GraphError for disconnected inputs, typed runtime failure,
  * cancellation, or output-count inconsistency.
  * @throws Protocol, supervisor, Value, Region, and allocation failures
  * unchanged.
@@ -4554,12 +5073,13 @@ NodeOutput execute_supervised_monolithic(
   invocation.input_bindings.reserve(operation.inputs.size());
   for (std::size_t index = 0U; index < operation.inputs.size(); ++index) {
     const NodeOutput* input = index < inputs.size() ? inputs[index] : nullptr;
-    if (input == nullptr || !input->has_image_value()) {
-      throw GraphError(
-          GraphErrc::ComputeError,
-          "supervised operation requires every declared image input");
+    const Value* selected =
+        input_value_for_port(input, operation.inputs[index]);
+    if (selected == nullptr) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "supervised operation requires every declared input");
     }
-    const Value value = input->image_value();
+    const Value value = *selected;
     execution::IsolatedCpuInputBinding binding;
     binding.port_identity =
         to_isolated_identity(operation.inputs[index].identity);
@@ -4611,8 +5131,10 @@ NodeOutput execute_supervised_monolithic(
 /**
  * @brief Executes one trusted in-process monolithic ABI implementation.
  * @param generation Shared generation/DSO lease retained for the whole call.
+ * @param implementation_state Live immutable generation implementation.
  * @param operation_index Dense copied operation index.
  * @param implementation_index Dense copied implementation index.
+ * @param intent Exact one-bit intent of the selected registry candidate.
  * @param node Borrowed execution node with resolved effective parameters.
  * @param inputs Destination-indexed immutable upstream outputs.
  * @return Complete newly sealed private output.
@@ -4625,7 +5147,8 @@ NodeOutput execute_monolithic_implementation(
     const std::shared_ptr<OperationPluginGeneration>& generation,
     OperationPluginGeneration::Impl* implementation_state,
     std::size_t operation_index, std::size_t implementation_index,
-    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    ps_operation_intent_mask_v1 intent, const Node& node,
+    const std::vector<const NodeOutput*>& inputs) {
   auto& impl = *implementation_state;
   const OperationDefinition& operation = impl.operations.at(operation_index);
   const ImplementationDefinition& implementation =
@@ -4637,10 +5160,6 @@ NodeOutput execute_monolithic_implementation(
   ConfigurationStorage configuration(effective_parameters);
   ConfiguredContext configured(&impl, &operation, &implementation,
                                configuration.view());
-  const ps_operation_intent_mask_v1 intent =
-      (implementation.intent_mask & PS_OPERATION_INTENT_HP_V1) != 0U
-          ? PS_OPERATION_INTENT_HP_V1
-          : PS_OPERATION_INTENT_RT_V1;
   const auto invocation = make_invocation(impl, operation, implementation,
                                           configured.get(), intent);
   InputBindingsProjection planning_inputs(operation, inputs, false);
@@ -4660,23 +5179,19 @@ NodeOutput execute_monolithic_implementation(
                      "operation ABI execution mode is invalid");
   }
 
-  std::vector<HostOutputBinding> bindings;
-  std::vector<HostOutputWriteGrant> grants;
+  std::vector<std::unique_ptr<MonolithicOutputAllocation>> allocations;
   std::vector<std::unique_ptr<MutableOutputProjection>> projections;
   std::vector<ps_operation_mutable_output_binding_v1> output_records;
-  bindings.reserve(plans.size());
-  grants.reserve(plans.size());
+  allocations.reserve(plans.size());
   projections.reserve(plans.size());
   output_records.reserve(plans.size());
   try {
     for (std::size_t index = 0; index < plans.size(); ++index) {
-      bindings.push_back(HostOutputBinding::allocate(plans[index].plan));
-      grants.push_back(bindings.back().grant_whole());
-      grants.back().bind_value_descriptor_metadata(
-          retained_value_metadata(plans[index].metadata));
+      allocations.push_back(
+          std::make_unique<MonolithicOutputAllocation>(plans[index]));
       projections.push_back(std::make_unique<MutableOutputProjection>(
           plans[index], static_cast<std::uint32_t>(index),
-          bindings.back().allocation_identity().value(), &grants.back()));
+          allocations.back().get()));
       output_records.push_back(projections.back()->binding());
     }
 
@@ -4691,11 +5206,13 @@ NodeOutput execute_monolithic_implementation(
     for (std::size_t index = 0U; index < projections.size(); ++index) {
       projections[index]->validate_unchanged(output_records[index]);
     }
-    for (HostOutputWriteGrant& grant : grants) {
-      grant.retire_success();
+    for (const auto& allocation : allocations) {
+      allocation->complete_success();
     }
   } catch (...) {
-    fail_active_grants_noexcept(&grants);
+    for (const auto& allocation : allocations) {
+      allocation->cancel_noexcept();
+    }
     throw;
   }
 
@@ -4704,7 +5221,7 @@ NodeOutput execute_monolithic_implementation(
   output.debug.compute_device = implementation.name;
   for (std::size_t index = 0; index < plans.size(); ++index) {
     output.publish_named_value(plans[index].plan.output_name(),
-                               bindings[index].seal());
+                               allocations[index]->seal());
   }
   return output;
 }
@@ -4784,12 +5301,14 @@ void snapshot_tiled_inputs(const OperationDefinition& operation,
   views->reserve(operation.inputs.size());
   for (std::size_t index = 0; index < operation.inputs.size(); ++index) {
     storage->emplace_back();
-    if (index >= input_tiles.size() || input_tiles[index].buffer == nullptr) {
+    if (index >= input_tiles.size() || (input_tiles[index].buffer == nullptr &&
+                                        input_tiles[index].value == nullptr)) {
       views->push_back(nullptr);
       continue;
     }
     if (input_tiles[index].value != nullptr) {
-      storage->back().publish_image_value(*input_tiles[index].value);
+      storage->back().publish_named_value(operation.inputs[index].name,
+                                          *input_tiles[index].value);
     } else {
       storage->back().publish_image_value(
           value_image_adapter::snapshot_cpu_image_value(
@@ -4842,13 +5361,14 @@ void execute_supervised_tiled(
   for (std::size_t index = 0U; index < operation.inputs.size(); ++index) {
     const NodeOutput* input =
         index < input_views.size() ? input_views[index] : nullptr;
-    if (input == nullptr || !input->has_image_value() ||
-        index >= input_tiles.size() || input_tiles[index].buffer == nullptr) {
+    const Value* selected =
+        input_value_for_port(input, operation.inputs[index]);
+    if (selected == nullptr || index >= input_tiles.size()) {
       throw GraphError(
           GraphErrc::ComputeError,
-          "supervised tiled operation requires every declared image input");
+          "supervised tiled operation requires every declared input");
     }
-    Value value = input->image_value();
+    Value value = *selected;
     execution::IsolatedCpuInputBinding binding;
     binding.port_identity =
         to_isolated_identity(operation.inputs[index].identity);
@@ -4865,8 +5385,16 @@ void execute_supervised_tiled(
     binding.logical_content_digest =
         to_isolated_digest(metadata.content_digest);
     binding.layout_digest = to_isolated_digest(metadata.layout_digest);
-    binding.region = region_image_adapter::from_storage_pixel_rect(
-        input_tiles[index].roi, value.image_bounds());
+    if (value.image_facet()) {
+      if (input_tiles[index].buffer == nullptr) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "supervised tiled image input requires tile geometry");
+      }
+      binding.region = region_image_adapter::from_storage_pixel_rect(
+          input_tiles[index].roi, value.image_bounds());
+    } else {
+      binding.region = isolated_input_region(value);
+    }
     invocation.inputs.push_back(std::move(value));
     invocation.input_bindings.push_back(std::move(binding));
   }
@@ -4916,8 +5444,10 @@ void execute_supervised_tiled(
 /**
  * @brief Executes one trusted or supervised tiled ABI implementation.
  * @param generation Shared generation/DSO lease retained for the whole call.
+ * @param implementation_state Live immutable generation implementation.
  * @param operation_index Dense copied operation index.
  * @param implementation_index Dense copied implementation index.
+ * @param intent Exact one-bit intent of the selected registry candidate.
  * @param node Borrowed execution node with resolved parameters.
  * @param output_tile Checked private output tile and active grant.
  * @param input_tiles Borrowed destination-indexed private inputs.
@@ -4932,8 +5462,8 @@ void execute_tiled_implementation(
     const std::shared_ptr<OperationPluginGeneration>& generation,
     OperationPluginGeneration::Impl* implementation_state,
     std::size_t operation_index, std::size_t implementation_index,
-    const Node& node, const OutputTile& output_tile,
-    const std::vector<InputTile>& input_tiles) {
+    ps_operation_intent_mask_v1 intent, const Node& node,
+    const OutputTile& output_tile, const std::vector<InputTile>& input_tiles) {
   auto& impl = *implementation_state;
   const OperationDefinition& operation = impl.operations.at(operation_index);
   const ImplementationDefinition& implementation =
@@ -4956,10 +5486,6 @@ void execute_tiled_implementation(
 
   ConfiguredContext configured(&impl, &operation, &implementation,
                                configuration.view());
-  const ps_operation_intent_mask_v1 intent =
-      (implementation.intent_mask & PS_OPERATION_INTENT_RT_V1) != 0U
-          ? PS_OPERATION_INTENT_RT_V1
-          : PS_OPERATION_INTENT_HP_V1;
   const auto invocation = make_invocation(impl, operation, implementation,
                                           configured.get(), intent);
   InputBindingsProjection planning_inputs(operation, input_views, false);
@@ -5013,97 +5539,106 @@ void OperationPluginGeneration::register_into(OpRegistry& registry) {
   for (std::size_t operation_index = 0U;
        operation_index < impl_->operations.size(); ++operation_index) {
     const OperationDefinition& operation = impl_->operations[operation_index];
-    registry.register_dirty_propagator(
-        operation.type, operation.subtype,
-        DirtyRoiPropFunc(
-            [generation, implementation_state, operation_index](
-                const Node& node, const PixelRect& requested,
-                const GraphModel& graph, const PixelSize&,
-                const std::vector<PixelSize>& input_extents,
-                const plugin::ParameterMap& effective_parameters,
-                const std::vector<const NodeOutput*>* available_inputs) {
+    std::vector<OpImplementation> candidates;
+    candidates.reserve(operation.implementations.size() * 4U);
+    for (std::size_t implementation_index = 0U;
+         implementation_index < operation.implementations.size();
+         ++implementation_index) {
+      const ImplementationDefinition& implementation =
+          operation.implementations[implementation_index];
+      for (const ps_operation_intent_mask_v1 intent :
+           {PS_OPERATION_INTENT_HP_V1, PS_OPERATION_INTENT_RT_V1}) {
+        if ((implementation.intent_mask & intent) == 0U) {
+          continue;
+        }
+        const OpMetadata metadata =
+            make_private_metadata(operation, implementation, intent);
+        DirtyRoiPropFunc dirty =
+            [generation, implementation_state, operation_index,
+             implementation_index,
+             intent](const Node& node, const PixelRect& requested,
+                     const GraphModel& graph, const PixelSize&,
+                     const std::vector<PixelSize>& input_extents,
+                     const plugin::ParameterMap& effective_parameters,
+                     const std::vector<const NodeOutput*>* available_inputs) {
               return propagate_backward_implementation(
-                  generation, implementation_state, operation_index, node,
-                  requested, graph, input_extents, effective_parameters,
-                  available_inputs);
-            }));
-    registry.register_forward_propagator(
-        operation.type, operation.subtype,
-        ForwardRoiPropFunc(
-            [generation, implementation_state, operation_index](
+                  generation, implementation_state, operation_index,
+                  implementation_index, intent, node, requested, graph,
+                  input_extents, effective_parameters, available_inputs);
+            };
+        ForwardRoiPropFunc forward =
+            [generation, implementation_state, operation_index,
+             implementation_index, intent](
                 const Node& node, const PixelRect& changed,
                 const GraphModel& graph, const PixelSize&,
                 const PixelSize& child_extent, std::size_t active_input_index,
                 const std::vector<PixelSize>&,
                 const plugin::ParameterMap& effective_parameters) {
               return propagate_forward_implementation(
-                  generation, implementation_state, operation_index, node,
-                  changed, graph, child_extent, active_input_index,
-                  effective_parameters);
-            }));
-    const bool data_dependent = std::any_of(
-        operation.implementations.begin(), operation.implementations.end(),
-        [](const ImplementationDefinition& implementation) {
-          return (implementation.behavior_mask &
-                  PS_OPERATION_BEHAVIOR_DATA_DEPENDENT_V1) != 0U;
-        });
-    if (data_dependent) {
-      registry.register_dependency_builder(
-          operation.type, operation.subtype,
-          DependencyLutBuilder(
-              [generation, implementation_state, operation_index](
-                  const Node& node, const GraphModel& graph,
-                  const std::vector<PixelSize>& upstream_extents,
-                  const PixelSize& downstream_extent,
-                  const plugin::ParameterMap& effective_parameters) {
+                  generation, implementation_state, operation_index,
+                  implementation_index, intent, node, changed, graph,
+                  child_extent, active_input_index, effective_parameters);
+            };
+        std::optional<DependencyLutBuilder> dependency;
+        if (metadata.data_dependent) {
+          dependency.emplace(
+              [generation, implementation_state, operation_index,
+               implementation_index,
+               intent](const Node& node, const GraphModel& graph,
+                       const std::vector<PixelSize>& upstream_extents,
+                       const PixelSize& downstream_extent,
+                       const plugin::ParameterMap& effective_parameters) {
                 return build_dependency_implementation(
-                    generation, implementation_state, operation_index, node,
-                    graph, upstream_extents, downstream_extent,
-                    effective_parameters);
-              }),
-          true);
-    }
-    for (std::size_t implementation_index = 0U;
-         implementation_index < operation.implementations.size();
-         ++implementation_index) {
-      const ImplementationDefinition& implementation =
-          operation.implementations[implementation_index];
-      const OpMetadata metadata =
-          make_private_metadata(operation, implementation);
-      if ((implementation.execution_shape_mask &
-           PS_OPERATION_EXECUTION_MONOLITHIC_V1) != 0U) {
-        registry.register_op_hp_monolithic(
-            operation.type, operation.subtype,
-            MonolithicOpFunc([generation, implementation_state, operation_index,
-                              implementation_index](
-                                 const Node& node,
-                                 const std::vector<const NodeOutput*>& inputs) {
-              return execute_monolithic_implementation(
-                  generation, implementation_state, operation_index,
-                  implementation_index, node, inputs);
-            }),
-            metadata);
-      }
-      if ((implementation.execution_shape_mask &
-           PS_OPERATION_EXECUTION_TILED_V1) != 0U) {
-        if (operation.outputs.size() != 1U ||
-            operation.outputs.front().name != NodeOutput::kImageOutputName) {
-          throw std::invalid_argument(
-              "operation ABI tiled bridge requires exactly image output");
+                    generation, implementation_state, operation_index,
+                    implementation_index, intent, node, graph, upstream_extents,
+                    downstream_extent, effective_parameters);
+              });
         }
-        registry.register_op_hp_tiled(
-            operation.type, operation.subtype,
-            TileOpFunc([generation, implementation_state, operation_index,
-                        implementation_index](
-                           const Node& node, const OutputTile& output,
-                           const std::vector<InputTile>& inputs) {
-              execute_tiled_implementation(
-                  generation, implementation_state, operation_index,
-                  implementation_index, node, output, inputs);
-            }),
-            metadata);
+        if ((implementation.execution_shape_mask &
+             PS_OPERATION_EXECUTION_MONOLITHIC_V1) != 0U) {
+          OpImplementation candidate;
+          candidate.func = MonolithicOpFunc(
+              [generation, implementation_state, operation_index,
+               implementation_index,
+               intent](const Node& node,
+                       const std::vector<const NodeOutput*>& inputs) {
+                return execute_monolithic_implementation(
+                    generation, implementation_state, operation_index,
+                    implementation_index, intent, node, inputs);
+              });
+          candidate.metadata = metadata;
+          candidate.dirty_propagator = dirty;
+          candidate.forward_propagator = forward;
+          candidate.dependency_builder = dependency;
+          candidates.push_back(std::move(candidate));
+        }
+        if ((implementation.execution_shape_mask &
+             PS_OPERATION_EXECUTION_TILED_V1) != 0U) {
+          if (operation.outputs.size() != 1U ||
+              operation.outputs.front().name != NodeOutput::kImageOutputName) {
+            throw std::invalid_argument(
+                "operation ABI tiled bridge requires exactly image output");
+          }
+          OpImplementation candidate;
+          candidate.func =
+              TileOpFunc([generation, implementation_state, operation_index,
+                          implementation_index,
+                          intent](const Node& node, const OutputTile& output,
+                                  const std::vector<InputTile>& inputs) {
+                execute_tiled_implementation(
+                    generation, implementation_state, operation_index,
+                    implementation_index, intent, node, output, inputs);
+              });
+          candidate.metadata = metadata;
+          candidate.dirty_propagator = std::move(dirty);
+          candidate.forward_propagator = std::move(forward);
+          candidate.dependency_builder = std::move(dependency);
+          candidates.push_back(std::move(candidate));
+        }
       }
     }
+    registry.replace_implementation_candidates(
+        operation.type, operation.subtype, std::move(candidates));
   }
 }
 

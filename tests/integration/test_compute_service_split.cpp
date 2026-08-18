@@ -2806,6 +2806,38 @@ PixelRect propagate_exact_sibling_full_input(
 }
 
 /**
+ * @brief Expands one output ROI by the effective integer radius parameter.
+ *
+ * @param node Downstream node retained for the propagator contract.
+ * @param roi Output ROI to expand in image coordinates.
+ * @param graph Graph retained for the propagator contract.
+ * @param output_extent Complete downstream output extent.
+ * @param input_extents Destination-indexed upstream image extents.
+ * @param parameters Effective request parameters containing optional radius.
+ * @param available_inputs Optional current input outputs.
+ * @return ROI expanded by radius, defaulting to 16 when absent.
+ * @throws plugin::ParameterTypeError when radius is not an exact Int64.
+ * @note This callback is attached directly to each candidate whose planning
+ * contract requires radius expansion; it is never borrowed from a sibling.
+ */
+PixelRect propagate_parameter_radius(
+    const Node& node, const PixelRect& roi, const GraphModel& graph,
+    const PixelSize& output_extent, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters,
+    const std::vector<const NodeOutput*>* available_inputs) {
+  (void)node;
+  (void)graph;
+  (void)output_extent;
+  (void)input_extents;
+  (void)available_inputs;
+  const auto found = parameters.find("radius");
+  const int radius = found == parameters.end()
+                         ? 16
+                         : static_cast<int>(found->second.as_int64());
+  return compute::expand_rect(roi, radius);
+}
+
+/**
  * @brief Registers deterministic split-test operations once per process.
  *
  * The registration set supplies HP/RT source, tiled, random-access, cache,
@@ -3054,32 +3086,48 @@ void register_split_ops() {
         ps::TileSizePreference::UNDEFINED;
     exact_sibling_monolithic_meta.access_pattern =
         ps::OpMetadata::InputAccessPattern::SpatialAligned;
-    registry.register_op_hp_monolithic(
-        "split_plan", "exact_sibling_metadata",
-        MonolithicOpFunc([](const Node& node,
-                            const std::vector<const NodeOutput*>& inputs) {
-          g_exact_sibling_monolithic_calls.fetch_add(1,
-                                                     std::memory_order_relaxed);
-          std::optional<ImageBuffer> input_image;
-          if (!inputs.empty() && inputs.front() != nullptr) {
-            input_image = project_image_output(*inputs.front());
-          }
-          const int width = input_image.has_value()
-                                ? input_image->width
-                                : as_int_flexible(node.parameters, "width", 1);
-          const int height =
-              input_image.has_value()
-                  ? input_image->height
-                  : as_int_flexible(node.parameters, "height", 1);
-          return make_image_output(width, height, 1, 17.0f);
-        }),
-        exact_sibling_monolithic_meta);
+    exact_sibling_monolithic_meta.cost_score = 200;
+    exact_sibling_monolithic_meta.supports_realtime = false;
     ps::OpMetadata exact_sibling_tiled_meta = micro_meta;
     exact_sibling_tiled_meta.access_pattern =
         ps::OpMetadata::InputAccessPattern::RandomAccess;
-    registry.register_impl("split_plan", "exact_sibling_metadata", Device::CPU,
-                           TileOpFunc(execute_exact_sibling_metadata_tile),
-                           exact_sibling_tiled_meta);
+    exact_sibling_tiled_meta.supports_realtime = false;
+    registry.replace_implementation_candidates(
+        "split_plan", "exact_sibling_metadata",
+        std::vector<OpImplementation>{
+            OpImplementation{
+                OpRegistry::OpVariant{MonolithicOpFunc(
+                    [](const Node& node,
+                       const std::vector<const NodeOutput*>& inputs) {
+                      g_exact_sibling_monolithic_calls.fetch_add(
+                          1, std::memory_order_relaxed);
+                      std::optional<ImageBuffer> input_image;
+                      if (!inputs.empty() && inputs.front() != nullptr) {
+                        input_image = project_image_output(*inputs.front());
+                      }
+                      const int width =
+                          input_image.has_value()
+                              ? input_image->width
+                              : as_int_flexible(node.parameters, "width", 1);
+                      const int height =
+                          input_image.has_value()
+                              ? input_image->height
+                              : as_int_flexible(node.parameters, "height", 1);
+                      return make_image_output(width, height, 1, 17.0f);
+                    })},
+                exact_sibling_monolithic_meta,
+                0U,
+                {},
+                {},
+                {}},
+            OpImplementation{
+                OpRegistry::OpVariant{
+                    TileOpFunc(execute_exact_sibling_metadata_tile)},
+                exact_sibling_tiled_meta,
+                0U,
+                DirtyRoiPropFunc(propagate_exact_sibling_full_input),
+                {},
+                {}}});
     registry.register_op_hp_tiled(
         "split_plan", "random_tile",
         TileOpFunc([](const Node&, const OutputTile& output_tile,
@@ -3090,20 +3138,32 @@ void register_split_ops() {
     ps::OpMetadata rt_random_meta = micro_meta;
     rt_random_meta.access_pattern =
         ps::OpMetadata::InputAccessPattern::RandomAccess;
-    registry.register_op_hp_tiled(
+    ps::OpMetadata hp_random_meta = macro_meta;
+    hp_random_meta.supports_realtime = false;
+    rt_random_meta.supports_high_precision = false;
+    registry.replace_implementation_candidates(
         "split_plan", "domain_random_tile",
-        TileOpFunc([](const Node&, const OutputTile& output_tile,
-                      const std::vector<InputTile>&) {
-          toCvMat(output_tile).setTo(7.0f);
-        }),
-        macro_meta);
-    registry.register_op_rt_tiled(
-        "split_plan", "domain_random_tile",
-        TileOpFunc([](const Node&, const OutputTile& output_tile,
-                      const std::vector<InputTile>&) {
-          toCvMat(output_tile).setTo(7.0f);
-        }),
-        rt_random_meta);
+        std::vector<OpImplementation>{
+            OpImplementation{OpRegistry::OpVariant{TileOpFunc(
+                                 [](const Node&, const OutputTile& output_tile,
+                                    const std::vector<InputTile>&) {
+                                   toCvMat(output_tile).setTo(7.0f);
+                                 })},
+                             hp_random_meta,
+                             0U,
+                             {},
+                             {},
+                             {}},
+            OpImplementation{OpRegistry::OpVariant{TileOpFunc(
+                                 [](const Node&, const OutputTile& output_tile,
+                                    const std::vector<InputTile>&) {
+                                   toCvMat(output_tile).setTo(7.0f);
+                                 })},
+                             rt_random_meta,
+                             0U,
+                             DirtyRoiPropFunc(propagate_parameter_radius),
+                             {},
+                             {}}});
     registry.register_op_hp_tiled(
         "split_plan", "disk_cache_guard_tile",
         TileOpFunc([](const Node&, const OutputTile& output_tile,
@@ -3120,33 +3180,7 @@ void register_split_ops() {
                                   micro_meta);
     registry.register_dirty_propagator(
         "split_plan", "random_tile",
-        DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
-                            const GraphModel&, const PixelSize&,
-                            const std::vector<PixelSize>&,
-                            const plugin::ParameterMap& parameters,
-                            const std::vector<const NodeOutput*>*) {
-          const auto found = parameters.find("radius");
-          const int radius = found == parameters.end()
-                                 ? 16
-                                 : static_cast<int>(found->second.as_int64());
-          return compute::expand_rect(roi, radius);
-        }));
-    registry.register_dirty_propagator(
-        "split_plan", "exact_sibling_metadata",
-        DirtyRoiPropFunc(propagate_exact_sibling_full_input));
-    registry.register_dirty_propagator(
-        "split_plan", "domain_random_tile",
-        DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
-                            const GraphModel&, const PixelSize&,
-                            const std::vector<PixelSize>&,
-                            const plugin::ParameterMap& parameters,
-                            const std::vector<const NodeOutput*>*) {
-          const auto found = parameters.find("radius");
-          const int radius = found == parameters.end()
-                                 ? 16
-                                 : static_cast<int>(found->second.as_int64());
-          return compute::expand_rect(roi, radius);
-        }));
+        DirtyRoiPropFunc(propagate_parameter_radius));
   });
 }
 
@@ -3331,7 +3365,7 @@ void execute_selected_dirty_providers(
         node_id, compute::DirtyResolvedOperation{
                      selected->func, selected->metadata.device_preference,
                      selected->implementation_identity, selected->metadata,
-                     *planned->output_authority});
+                     *planned->output_authority, selected->dirty_propagator});
   }
 
   GraphEventService events;

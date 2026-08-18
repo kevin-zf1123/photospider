@@ -36,6 +36,8 @@ bool operation_metadata_equal(const OpMetadata& lhs,
   return lhs.tile_preference == rhs.tile_preference &&
          lhs.device_preference == rhs.device_preference &&
          lhs.cost_score == rhs.cost_score &&
+         lhs.supports_high_precision == rhs.supports_high_precision &&
+         lhs.supports_realtime == rhs.supports_realtime &&
          lhs.access_pattern == rhs.access_pattern &&
          lhs.data_dependent == rhs.data_dependent &&
          lhs.reentrant == rhs.reentrant &&
@@ -856,6 +858,21 @@ PixelRect required_upstream_roi_for_task(
                                         extent_cache);
       config.metadata =
           downstream_route ? downstream_route->metadata : OpMetadata{};
+      if (downstream_route != nullptr) {
+        const auto implementation =
+            OpRegistry::instance().get_implementation_by_identity(
+                downstream_node.type, downstream_node.subtype,
+                downstream_route->implementation_identity);
+        if (!implementation || !planned_operation_route_matches(
+                                   *downstream_route, *implementation)) {
+          throw GraphError(
+              GraphErrc::ComputeError,
+              "Planned ROI route no longer names the selected operation.");
+        }
+        config.dirty_propagator = implementation->dirty_propagator;
+        config.implementation_identity =
+            implementation->implementation_identity;
+      }
       std::optional<plugin::ParameterMap> effective_parameters;
       if (config.metadata->access_pattern ==
           OpMetadata::InputAccessPattern::RandomAccess) {

@@ -1020,6 +1020,10 @@ NodeOutput& ComputeService::compute_internal(
       observe_open_run_or_throw(run_lease);
     };
     const OpImplementation& implementation = resolved_operation->second;
+    tiled_config.metadata = implementation.metadata;
+    tiled_config.dirty_propagator = implementation.dirty_propagator;
+    tiled_config.implementation_identity =
+        implementation.implementation_identity;
     const compute::OperationExecutionConstraints operation_constraints{
         implementation.implementation_identity,
         implementation.metadata.reentrant,

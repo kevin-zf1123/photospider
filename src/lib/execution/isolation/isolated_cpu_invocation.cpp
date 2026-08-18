@@ -71,7 +71,7 @@ constexpr std::uint16_t kCapabilityHeaderVersion = 1U;
  * @return Equivalent process-independent extension identity.
  * @throws Nothing.
  */
-ExtensionIdentity dense_image_extension_identity(
+ExtensionIdentity dense_tensor_extension_identity(
     const IsolatedCpuOpaqueId& identity) noexcept {
   std::array<std::uint64_t, 2U> words{};
   for (std::size_t word = 0U; word < words.size(); ++word) {
@@ -84,22 +84,22 @@ ExtensionIdentity dense_image_extension_identity(
 }
 
 /**
- * @brief Builds immutable DenseImage metadata from one validated image plan.
- * @param plan Exact high-level image plan retained before process execution.
+ * @brief Builds immutable DenseTensor metadata from one validated output plan.
+ * @param plan Exact high-level tensor plan retained before process execution.
  * @return Equivalent identities, versions, and opaque digest words.
  * @throws Nothing.
- * @note The caller invokes this helper only when `image_facet` and its matching
- * nonzero Facet identity passed protocol validation. Generic DenseTensor plans
- * retain their descriptor and Layout without DenseImage-only metadata.
+ * @note Facet identity is zero exactly for a facet-free plan; Schema/Layout
+ * identity, versions, and all three opaque digests are always retained.
  */
-DenseImageValueDescriptorMetadata dense_image_value_metadata(
+DenseTensorValueDescriptorMetadata dense_tensor_value_metadata(
     const IsolatedCpuDenseTensorOutputPlan& plan) noexcept {
-  DenseImageValueDescriptorMetadata metadata;
+  DenseTensorValueDescriptorMetadata metadata;
   metadata.schema_identity =
-      dense_image_extension_identity(plan.schema_identity);
-  metadata.facet_identity = dense_image_extension_identity(plan.facet_identity);
+      dense_tensor_extension_identity(plan.schema_identity);
+  metadata.facet_identity =
+      dense_tensor_extension_identity(plan.facet_identity);
   metadata.layout_identity =
-      dense_image_extension_identity(plan.layout_identity);
+      dense_tensor_extension_identity(plan.layout_identity);
   metadata.descriptor_version = plan.schema_version;
   metadata.layout_version = plan.layout_version;
   metadata.descriptor_digest = plan.descriptor_digest.words;
@@ -3738,10 +3738,8 @@ std::vector<Value> publish_host_outputs(
     }
     ValueBuilder builder = ValueBuilder::allocate_cpu_dense_tensor(
         plan.descriptor, plan.image_facet, plan.layout, plan.storage_size);
-    if (plan.image_facet.has_value()) {
-      DenseImageValueDescriptorMetadataAccess::attach(
-          &builder, dense_image_value_metadata(plan));
-    }
+    DenseTensorValueDescriptorMetadataAccess::attach(
+        &builder, dense_tensor_value_metadata(plan));
     {
       WriteLease lease = builder.acquire_write();
       if (lease.size() != plan.storage_size) {
