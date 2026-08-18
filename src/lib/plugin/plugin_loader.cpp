@@ -307,11 +307,16 @@ void require_operation_callback(const Callback& callback, const char* label) {
  * @param fn Monolithic callback moved from the plugin into the registry.
  * @param meta Metadata associated with the HP implementation.
  * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context, names, or an
- * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
+ * @throws std::invalid_argument for invalid registrar context, names, empty
+ * callback, unknown metadata enumerator, negative cost, malformed/duplicate/
+ * over-limit/reserved/overlapping output declaration, or malformed exclusive
+ * key; the loader reports this as `GraphErrc::InvalidParameter`.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note This callback is the host-side implementation of
- * `OperationPluginRegistrar::register_op_hp_monolithic`.
+ * `OperationPluginRegistrar::register_op_hp_monolithic`. Complete metadata
+ * conversion and core validation precede shadow-registry mutation. Successful
+ * snapshots retain the DSO lease and may be invoked concurrently according to
+ * their frozen metadata.
  */
 void registrar_register_hp_monolithic(void* user_data, const char* type,
                                       const char* subtype,
@@ -337,11 +342,17 @@ void registrar_register_hp_monolithic(void* user_data, const char* type,
  * @param fn Tiled callback moved from the plugin into the registry.
  * @param meta Metadata associated with the HP tiled implementation.
  * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context, names, or an
- * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
+ * @throws std::invalid_argument for invalid registrar context, names, empty
+ * callback, unknown metadata enumerator, negative cost, malformed/duplicate/
+ * over-limit/reserved/overlapping output declaration, malformed exclusive key,
+ * or any schema other than exactly the canonical image; the loader reports
+ * this as `GraphErrc::InvalidParameter`.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note This callback is the host-side implementation of
- * `OperationPluginRegistrar::register_op_hp_tiled`.
+ * `OperationPluginRegistrar::register_op_hp_tiled`. Metadata conversion and
+ * image-only core validation precede capture, revision/generation changes, and
+ * shadow-registry mutation. Successful wrappers retain the DSO lease; tile
+ * pointers remain invocation-scoped and callbacks may run concurrently.
  */
 void registrar_register_hp_tiled(void* user_data, const char* type,
                                  const char* subtype, plugin::TiledOperation fn,
@@ -365,11 +376,17 @@ void registrar_register_hp_tiled(void* user_data, const char* type,
  * @param fn Tiled callback moved from the plugin into the registry.
  * @param meta Metadata associated with the RT tiled implementation.
  * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context, names, or an
- * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
+ * @throws std::invalid_argument for invalid registrar context, names, empty
+ * callback, unknown metadata enumerator, negative cost, malformed/duplicate/
+ * over-limit/reserved/overlapping output declaration, malformed exclusive key,
+ * or any schema other than exactly the canonical image; the loader reports
+ * this as `GraphErrc::InvalidParameter`.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note This callback is the host-side implementation of
- * `OperationPluginRegistrar::register_op_rt_tiled`.
+ * `OperationPluginRegistrar::register_op_rt_tiled`. Metadata conversion and
+ * image-only core validation precede capture, revision/generation changes, and
+ * shadow-registry mutation. Successful wrappers retain the DSO lease; tile
+ * pointers remain invocation-scoped and callbacks may run concurrently.
  */
 void registrar_register_rt_tiled(void* user_data, const char* type,
                                  const char* subtype, plugin::TiledOperation fn,
@@ -475,10 +492,15 @@ void registrar_register_dependency_builder(void* user_data, const char* type,
  * @param fn Monolithic callback moved from the plugin into the registry.
  * @param meta Metadata associated with the device implementation.
  * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context, names, or an
- * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
+ * @throws std::invalid_argument for invalid registrar context, names, empty
+ * callback, unknown device/metadata enumerator, negative cost,
+ * malformed/duplicate/over-limit/reserved/overlapping output declaration, or
+ * malformed exclusive key; the loader reports this as
+ * `GraphErrc::InvalidParameter`.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note This callback preserves the host-owned implementation selection policy.
+ *       Metadata conversion/core validation precede shadow-registry mutation;
+ *       successful snapshots retain the DSO lease and may execute concurrently.
  *       BUILD_TESTING retirement observation is borrowed and process-global;
  *       the installing test must keep it alive until every retained wrapper
  *       copy is destroyed and serialize observer clearing with that retirement.
@@ -509,10 +531,17 @@ void registrar_register_device_monolithic(void* user_data, const char* type,
  * @param fn Tiled callback moved from the plugin into the registry.
  * @param meta Metadata associated with the device implementation.
  * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context, names, or an
- * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
+ * @throws std::invalid_argument for invalid registrar context, names, empty
+ * callback, unknown device/metadata enumerator, negative cost,
+ * malformed/duplicate/over-limit/reserved/overlapping output declaration,
+ * malformed exclusive key, or any schema other than exactly the canonical
+ * image; the loader reports this as `GraphErrc::InvalidParameter`.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note This callback preserves the host-owned implementation selection policy.
+ *       Metadata conversion and image-only core validation precede capture,
+ *       revision/generation changes, and shadow-registry mutation. Successful
+ *       wrappers retain the DSO lease; tile pointers are invocation-scoped and
+ *       callbacks may execute concurrently.
  *       BUILD_TESTING retirement observation is borrowed and process-global;
  *       the installing test must keep it alive until every retained wrapper
  *       copy is destroyed and serialize observer clearing with that retirement.

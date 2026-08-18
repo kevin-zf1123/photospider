@@ -53,8 +53,9 @@ inline constexpr const char* kOperationPluginRegisterSymbolV2 =
  * never be retained.
  *
  * @throws std::invalid_argument from helpers when type/subtype is empty,
- * contains ':', or contains an embedded NUL, or the operation callback is
- * empty.
+ * contains ':', or contains an embedded NUL, the operation callback is empty,
+ * output metadata is malformed, duplicated, over-limit, reserved, or
+ * cross-category overlapping, or a tiled schema is not image-only.
  * @throws std::logic_error from helpers when the host table is incomplete.
  * @note Every successful helper call mutates only a host shadow transaction
  *       until the complete candidate is published.
@@ -69,7 +70,10 @@ struct OperationPluginRegistrar {
    * @param metadata Scheduling and resource metadata copied into staged host
    * state.
    * @return Nothing.
-   * @throws Host validation, callback-copy, or allocation exceptions unchanged.
+   * @throws std::invalid_argument for an unknown metadata enumerator, negative
+   * cost, malformed exclusive key, or malformed, duplicate, over-limit,
+   * reserved, or cross-category-overlapping output declarations.
+   * @throws Host callback-copy or allocation exceptions unchanged.
    * @note No registration becomes process-visible before candidate commit.
    */
   using RegisterHpMonolithic = void (*)(void*, const char*, const char*,
@@ -83,7 +87,11 @@ struct OperationPluginRegistrar {
    * @param metadata Scheduling and resource metadata copied into staged host
    * state.
    * @return Nothing.
-   * @throws Host validation, callback-copy, or allocation exceptions unchanged.
+   * @throws std::invalid_argument for an unknown metadata enumerator, negative
+   * cost, malformed exclusive key, malformed/duplicate/over-limit/reserved/
+   * overlapping output declaration, or any schema other than exactly the
+   * canonical image.
+   * @throws Host callback-copy or allocation exceptions unchanged.
    * @note Registration is transaction-local until candidate commit.
    */
   using RegisterHpTiled = void (*)(void*, const char*, const char*,
@@ -97,7 +105,11 @@ struct OperationPluginRegistrar {
    * @param metadata Scheduling and resource metadata copied into staged host
    * state.
    * @return Nothing.
-   * @throws Host validation, callback-copy, or allocation exceptions unchanged.
+   * @throws std::invalid_argument for an unknown metadata enumerator, negative
+   * cost, malformed exclusive key, malformed/duplicate/over-limit/reserved/
+   * overlapping output declaration, or any schema other than exactly the
+   * canonical image.
+   * @throws Host callback-copy or allocation exceptions unchanged.
    * @note Registration is transaction-local until candidate commit.
    */
   using RegisterRtTiled = void (*)(void*, const char*, const char*,
@@ -109,7 +121,8 @@ struct OperationPluginRegistrar {
    * @param subtype Borrowed null-terminated operation subtype.
    * @param callback Owned dirty propagator moved into staged host state.
    * @return Nothing.
-   * @throws Host validation, callback-copy, or allocation exceptions unchanged.
+   * @throws Host name validation, callback-copy, or allocation exceptions
+   * unchanged.
    * @note Registration is transaction-local until candidate commit.
    */
   using RegisterDirty = void (*)(void*, const char*, const char*,
@@ -121,7 +134,8 @@ struct OperationPluginRegistrar {
    * @param subtype Borrowed null-terminated operation subtype.
    * @param callback Owned forward propagator moved into staged host state.
    * @return Nothing.
-   * @throws Host validation, callback-copy, or allocation exceptions unchanged.
+   * @throws Host name validation, callback-copy, or allocation exceptions
+   * unchanged.
    * @note Registration is transaction-local until candidate commit.
    */
   using RegisterForward = void (*)(void*, const char*, const char*,
@@ -153,7 +167,10 @@ struct OperationPluginRegistrar {
    * @param metadata Scheduling and resource metadata copied into staged host
    * state.
    * @return Nothing.
-   * @throws Host validation, callback-copy, or allocation exceptions unchanged.
+   * @throws std::invalid_argument for an unknown device/metadata enumerator,
+   * negative cost, malformed exclusive key, or malformed, duplicate,
+   * over-limit, reserved, or cross-category-overlapping output declarations.
+   * @throws Host callback-copy or allocation exceptions unchanged.
    * @note Registration is transaction-local until candidate commit.
    */
   using RegisterDeviceMonolithic = void (*)(void*, const char*, const char*,
@@ -169,7 +186,11 @@ struct OperationPluginRegistrar {
    * @param metadata Scheduling and resource metadata copied into staged host
    * state.
    * @return Nothing.
-   * @throws Host validation, callback-copy, or allocation exceptions unchanged.
+   * @throws std::invalid_argument for an unknown device/metadata enumerator,
+   * negative cost, malformed exclusive key, malformed/duplicate/over-limit/
+   * reserved/overlapping output declaration, or any schema other than exactly
+   * the canonical image.
+   * @throws Host callback-copy or allocation exceptions unchanged.
    * @note Registration is transaction-local until candidate commit.
    */
   using RegisterDeviceTiled = void (*)(void*, const char*, const char*, Device,
@@ -201,10 +222,16 @@ struct OperationPluginRegistrar {
    * @param callback Plugin callback to move into the host transaction.
    * @param metadata Scheduling and resource metadata.
    * @return Nothing.
-   * @throws std::invalid_argument for an invalid type/subtype segment or empty
-   * callback.
+   * @throws std::invalid_argument for an invalid type/subtype segment, empty
+   * callback, unknown metadata enumerator, negative cost, malformed exclusive
+   * key, or malformed/duplicate/over-limit/reserved/overlapping output
+   * declaration.
    * @throws std::logic_error if the host callback is absent.
    * @throws Any host registration/storage exception unchanged.
+   * @note Name/callback validation precedes raw host entry. The Host validates
+   * metadata before candidate mutation; on success it copies callback,
+   * revision, and metadata into transaction-owned storage. Callback snapshots
+   * may later execute concurrently and retain their plugin lifetime.
    */
   void register_op_hp_monolithic(const std::string& type,
                                  const std::string& subtype,
@@ -225,10 +252,16 @@ struct OperationPluginRegistrar {
    * @param callback Plugin callback to move into the host transaction.
    * @param metadata Scheduling and resource metadata.
    * @return Nothing.
-   * @throws std::invalid_argument for an invalid type/subtype segment or empty
-   * callback.
+   * @throws std::invalid_argument for an invalid type/subtype segment, empty
+   * callback, unknown metadata enumerator, negative cost, malformed exclusive
+   * key or output declaration, or any schema other than exactly the canonical
+   * image; malformed output includes duplicate, over-limit, reserved, and
+   * cross-category-overlapping names.
    * @throws std::logic_error if the host callback is absent.
    * @throws Any host registration/storage exception unchanged.
+   * @note Image-only validation occurs before raw host entry, so rejection
+   * cannot mutate transaction/registry state. Successful callback ownership is
+   * transaction-local until commit and may be invoked concurrently afterward.
    */
   void register_op_hp_tiled(const std::string& type, const std::string& subtype,
                             TiledOperation callback,
@@ -236,6 +269,7 @@ struct OperationPluginRegistrar {
     require_name_segment(type, "operation type");
     require_name_segment(subtype, "operation subtype");
     require_operation_callback(callback, "HP tiled");
+    require_image_only_tiled_metadata(metadata);
     require(register_hp_tiled, "HP tiled");
     register_hp_tiled(user_data, type.c_str(), subtype.c_str(),
                       std::move(callback), metadata);
@@ -248,10 +282,16 @@ struct OperationPluginRegistrar {
    * @param callback Plugin callback to move into the host transaction.
    * @param metadata Scheduling and resource metadata.
    * @return Nothing.
-   * @throws std::invalid_argument for an invalid type/subtype segment or empty
-   * callback.
+   * @throws std::invalid_argument for an invalid type/subtype segment, empty
+   * callback, unknown metadata enumerator, negative cost, malformed exclusive
+   * key or output declaration, or any schema other than exactly the canonical
+   * image; malformed output includes duplicate, over-limit, reserved, and
+   * cross-category-overlapping names.
    * @throws std::logic_error if the host callback is absent.
    * @throws Any host registration/storage exception unchanged.
+   * @note Image-only validation occurs before raw host entry, so rejection
+   * cannot mutate transaction/registry state. Successful callback ownership is
+   * transaction-local until commit and may be invoked concurrently afterward.
    */
   void register_op_rt_tiled(const std::string& type, const std::string& subtype,
                             TiledOperation callback,
@@ -259,6 +299,7 @@ struct OperationPluginRegistrar {
     require_name_segment(type, "operation type");
     require_name_segment(subtype, "operation subtype");
     require_operation_callback(callback, "RT tiled");
+    require_image_only_tiled_metadata(metadata);
     require(register_rt_tiled, "RT tiled");
     register_rt_tiled(user_data, type.c_str(), subtype.c_str(),
                       std::move(callback), metadata);
@@ -341,10 +382,15 @@ struct OperationPluginRegistrar {
    * @param callback Plugin callback to move into the host transaction.
    * @param metadata Scheduling and resource metadata.
    * @return Nothing.
-   * @throws std::invalid_argument for an invalid type/subtype segment or empty
-   * callback.
+   * @throws std::invalid_argument for an invalid type/subtype segment, empty
+   * callback, unknown device/metadata enumerator, negative cost, malformed
+   * exclusive key, or malformed/duplicate/over-limit/reserved/overlapping
+   * output declaration.
    * @throws std::logic_error if the host callback is absent.
    * @throws Any host registration/storage exception unchanged.
+   * @note Name/callback validation precedes raw host entry. Host-side metadata
+   * conversion precedes transaction mutation; successful callback snapshots
+   * retain plugin lifetime and own their concurrency contract.
    */
   void register_impl(const std::string& type, const std::string& subtype,
                      Device device, MonolithicOperation callback,
@@ -365,10 +411,16 @@ struct OperationPluginRegistrar {
    * @param callback Plugin callback to move into the host transaction.
    * @param metadata Scheduling and resource metadata.
    * @return Nothing.
-   * @throws std::invalid_argument for an invalid type/subtype segment or empty
-   * callback.
+   * @throws std::invalid_argument for an invalid type/subtype segment, empty
+   * callback, unknown device/metadata enumerator, negative cost, malformed
+   * exclusive key or output declaration, or any schema other than exactly the
+   * canonical image; malformed output includes duplicate, over-limit,
+   * reserved, and cross-category-overlapping names.
    * @throws std::logic_error if the host callback is absent.
    * @throws Any host registration/storage exception unchanged.
+   * @note Image-only validation occurs before raw host entry, so rejection
+   * cannot append or replace transaction/registry state. Successful callback
+   * snapshots retain plugin lifetime and own their concurrency contract.
    */
   void register_impl(const std::string& type, const std::string& subtype,
                      Device device, TiledOperation callback,
@@ -376,6 +428,7 @@ struct OperationPluginRegistrar {
     require_name_segment(type, "operation type");
     require_name_segment(subtype, "operation subtype");
     require_operation_callback(callback, "device tiled");
+    require_image_only_tiled_metadata(metadata);
     require(register_device_tiled, "device tiled");
     register_device_tiled(user_data, type.c_str(), subtype.c_str(), device,
                           std::move(callback), metadata);
@@ -418,6 +471,26 @@ struct OperationPluginRegistrar {
     if (!callback) {
       throw std::invalid_argument(std::string("Empty ") + label +
                                   " operation callback");
+    }
+  }
+
+  /**
+   * @brief Rejects output schemas unavailable to the current tiled ABI.
+   * @param metadata Public metadata inspected without copying or mutation.
+   * @return Nothing when the schema declares exactly the canonical image.
+   * @throws std::invalid_argument when image production is disabled or any
+   * generic named-Value or parameter-result output is declared.
+   * @note Validation precedes the raw host callback, so rejected public
+   * registration cannot enter or mutate the host transaction. Supporting
+   * additional tiled outputs requires a separately versioned callback shape.
+   */
+  static void require_image_only_tiled_metadata(
+      const OperationMetadata& metadata) {
+    if (!metadata.produces_image ||
+        !metadata.named_value_output_names.empty() ||
+        !metadata.parameter_output_names.empty()) {
+      throw std::invalid_argument(
+          "Current tiled operations require an image-only output schema");
     }
   }
 

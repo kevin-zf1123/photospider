@@ -9,8 +9,11 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
@@ -700,6 +703,199 @@ TEST_F(OpRegistryM31Test, RejectsMalformedExclusiveKeysWithoutRegistration) {
                    .select_implementation(kType, kSubtype, {Device::CPU},
                                           ComputeIntent::GlobalHighPrecision)
                    .has_value());
+}
+
+/**
+ * @brief Verifies private generic/parameter output declarations are sorted and
+ * every malformed or ambiguous replacement is rejected before mutation.
+ *
+ * @return Nothing; GoogleTest reports canonicalization, generation, identity,
+ * or predecessor drift.
+ * @throws Registry validation exceptions are consumed by GoogleTest.
+ * @note Monolithic registration permits generic outputs and therefore isolates
+ * the shared schema validator from the stricter tiled image-only boundary.
+ */
+TEST_F(OpRegistryM31Test,
+       CanonicalizesAndRejectsGenericOutputMetadataBeforeReplacement) {
+  constexpr const char* kType = "issue130_generic_metadata";
+  constexpr const char* kSubtype = "validation";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+
+  OpMetadata legal;
+  legal.produces_image = false;
+  legal.named_value_output_names = {"z-depth", "deep"};
+  legal.parameter_output_names = {"variance", "score"};
+  registry.register_op_hp_monolithic(kType, kSubtype, dummy_cpu_op, legal);
+  const auto predecessor = registry.select_implementation(
+      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(predecessor.has_value());
+  EXPECT_EQ(predecessor->metadata.named_value_output_names,
+            (std::vector<std::string>{"deep", "z-depth"}));
+  EXPECT_EQ(predecessor->metadata.parameter_output_names,
+            (std::vector<std::string>{"score", "variance"}));
+  const std::uint64_t identity = predecessor->implementation_identity;
+  const std::uint64_t generation = registry.task_shape_generation();
+
+  std::vector<OpMetadata> invalid(7U);
+  invalid[0].named_value_output_names = {""};
+  invalid[1].named_value_output_names = {"image"};
+  invalid[2].named_value_output_names = {"deep", "deep"};
+  invalid[3].named_value_output_names.assign(
+      OpMetadata::kNamedValueOutputCountMax + 1U, "deep");
+  invalid[4].named_value_output_names = {
+      std::string(OpMetadata::kOutputNameMaxBytes + 1U, 'x')};
+  invalid[5].named_value_output_names = {std::string("deep\0value", 10U)};
+  invalid[6].named_value_output_names = {"score"};
+  invalid[6].parameter_output_names = {"score"};
+  for (const OpMetadata& metadata : invalid) {
+    EXPECT_THROW(registry.register_op_hp_monolithic(kType, kSubtype,
+                                                    dummy_cpu_op, metadata),
+                 std::invalid_argument);
+    EXPECT_EQ(registry.task_shape_generation(), generation);
+    const auto current = registry.select_implementation(
+        kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+    ASSERT_TRUE(current.has_value());
+    EXPECT_EQ(current->implementation_identity, identity);
+    EXPECT_EQ(current->metadata.named_value_output_names,
+              (std::vector<std::string>{"deep", "z-depth"}));
+    EXPECT_EQ(current->metadata.parameter_output_names,
+              (std::vector<std::string>{"score", "variance"}));
+  }
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves an output-incompatible tiled schema fails before registry and
+ * task-shape revision mutation.
+ *
+ * @return Nothing; GoogleTest reports accepted metadata, generation drift, or
+ * leaked registry state.
+ * @throws Registry validation exceptions are consumed by GoogleTest.
+ * @note The current tiled callback has only a canonical image grant. A schema
+ * that omits that image therefore cannot be repaired at execution time.
+ */
+TEST_F(OpRegistryM31Test,
+       RejectsEveryIncompatibleTiledSchemaOnEveryRegistrationSurface) {
+  constexpr const char* kType = "issue130_tiled_schema";
+  auto& registry = OpRegistry::instance();
+
+  const std::array<
+      std::pair<const char*, std::function<void(const OpMetadata&)>>, 4U>
+      registrations{{
+          {"legacy",
+           [&](const OpMetadata& metadata) {
+             registry.register_op(kType, "legacy",
+                                  TileOpFunc{dummy_tiled_cpu_op}, metadata);
+           }},
+          {"hp",
+           [&](const OpMetadata& metadata) {
+             registry.register_op_hp_tiled(kType, "hp", dummy_tiled_cpu_op,
+                                           metadata);
+           }},
+          {"rt",
+           [&](const OpMetadata& metadata) {
+             registry.register_op_rt_tiled(kType, "rt", dummy_tiled_cpu_op,
+                                           metadata);
+           }},
+          {"device",
+           [&](const OpMetadata& metadata) {
+             registry.register_impl(kType, "device", Device::GPU_METAL,
+                                    TileOpFunc{dummy_tiled_metal_op}, metadata);
+           }},
+      }};
+
+  std::array<OpMetadata, 3U> incompatible;
+  incompatible[0].produces_image = false;
+  incompatible[1].named_value_output_names = {"deep"};
+  incompatible[2].parameter_output_names = {"score"};
+
+  for (const auto& [subtype, registration] : registrations) {
+    const std::string key = make_key(kType, subtype);
+    registry.unregister_key(key);
+    for (const OpMetadata& metadata : incompatible) {
+      const std::uint64_t generation_before = registry.task_shape_generation();
+      EXPECT_THROW(registration(metadata), std::invalid_argument);
+      EXPECT_EQ(registry.task_shape_generation(), generation_before);
+      EXPECT_FALSE(registry.find(kType, subtype).has_value());
+      EXPECT_FALSE(registry.get_implementations(kType, subtype).has_value());
+    }
+    registry.unregister_key(key);
+  }
+}
+
+/**
+ * @brief Proves failed tiled replacement and append attempts preserve the
+ * complete predecessor and that the compatible image-only schema succeeds.
+ *
+ * @return Nothing; GoogleTest records generation, identity, metadata, or slot
+ * drift.
+ * @throws Registry validation exceptions are consumed by GoogleTest.
+ * @note HP replacement and device append exercise the two mutation shapes used
+ * by core, plugin override, and device-specific registration paths.
+ */
+TEST_F(OpRegistryM31Test,
+       TiledSchemaRejectionIsAtomicForReplacementAndDeviceAppend) {
+  constexpr const char* kType = "issue130_tiled_atomic";
+  auto& registry = OpRegistry::instance();
+
+  constexpr const char* kReplacementSubtype = "replacement";
+  registry.unregister_key(make_key(kType, kReplacementSubtype));
+  OpMetadata image_only;
+  image_only.cost_score = 17;
+  registry.register_op_hp_tiled(kType, kReplacementSubtype, dummy_tiled_cpu_op,
+                                image_only);
+  const auto before_replacement =
+      registry.get_implementations(kType, kReplacementSubtype);
+  ASSERT_TRUE(before_replacement.has_value());
+  ASSERT_TRUE(before_replacement->tiled_hp.has_value());
+  const std::uint64_t replacement_generation = registry.task_shape_generation();
+  const std::uint64_t replacement_identity =
+      before_replacement->tiled_hp->implementation_identity;
+
+  OpMetadata generic_output;
+  generic_output.named_value_output_names = {"deep"};
+  EXPECT_THROW(
+      registry.register_op_hp_tiled(kType, kReplacementSubtype,
+                                    dummy_tiled_metal_op, generic_output),
+      std::invalid_argument);
+  const auto after_replacement =
+      registry.get_implementations(kType, kReplacementSubtype);
+  ASSERT_TRUE(after_replacement.has_value());
+  ASSERT_TRUE(after_replacement->tiled_hp.has_value());
+  EXPECT_EQ(registry.task_shape_generation(), replacement_generation);
+  EXPECT_EQ(after_replacement->tiled_hp->implementation_identity,
+            replacement_identity);
+  EXPECT_EQ(after_replacement->tiled_hp->metadata.cost_score, 17);
+
+  constexpr const char* kAppendSubtype = "device_append";
+  registry.unregister_key(make_key(kType, kAppendSubtype));
+  registry.register_impl(kType, kAppendSubtype, Device::GPU_METAL,
+                         TileOpFunc{dummy_tiled_metal_op}, image_only);
+  const auto before_append =
+      registry.get_implementations(kType, kAppendSubtype);
+  ASSERT_TRUE(before_append.has_value());
+  ASSERT_EQ(before_append->device_impls.size(), 1U);
+  const std::uint64_t append_generation = registry.task_shape_generation();
+  const std::uint64_t append_identity =
+      before_append->device_impls.front().implementation_identity;
+
+  OpMetadata parameter_output;
+  parameter_output.parameter_output_names = {"score"};
+  EXPECT_THROW(
+      registry.register_impl(kType, kAppendSubtype, Device::GPU_METAL,
+                             TileOpFunc{dummy_tiled_cpu_op}, parameter_output),
+      std::invalid_argument);
+  const auto after_append = registry.get_implementations(kType, kAppendSubtype);
+  ASSERT_TRUE(after_append.has_value());
+  ASSERT_EQ(after_append->device_impls.size(), 1U);
+  EXPECT_EQ(registry.task_shape_generation(), append_generation);
+  EXPECT_EQ(after_append->device_impls.front().implementation_identity,
+            append_identity);
+  EXPECT_EQ(after_append->device_impls.front().metadata.cost_score, 17);
+
+  registry.unregister_key(make_key(kType, kReplacementSubtype));
+  registry.unregister_key(make_key(kType, kAppendSubtype));
 }
 
 // 测试：向后兼容性 - 传统 API 仍然可用

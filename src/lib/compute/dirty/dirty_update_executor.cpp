@@ -563,6 +563,12 @@ std::uint64_t dirty_operation_retained_memory_bytes(
         estimate.bytes());
 #endif
     estimate.add_objects<std::string>(static_cast<std::uint64_t>(
+        operation.metadata.named_value_output_names.capacity()));
+    for (const std::string& name :
+         operation.metadata.named_value_output_names) {
+      estimate.add_string_payload(name);
+    }
+    estimate.add_objects<std::string>(static_cast<std::uint64_t>(
         operation.metadata.parameter_output_names.capacity()));
     for (const std::string& name : operation.metadata.parameter_output_names) {
       estimate.add_string_payload(name);

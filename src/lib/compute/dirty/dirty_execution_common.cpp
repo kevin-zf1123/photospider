@@ -157,6 +157,32 @@ void validate_inline_dirty_task_output_ready(
                           PlannedOutputReadiness::RequireReady);
 }
 
+/**
+ * @brief Compares complete immutable publication and indexed binding identity.
+ * @param lhs First valid canonical or generic Value.
+ * @param rhs Second valid canonical or generic Value.
+ * @return True when revision, producer, representation, binding count, and
+ * every indexed StorageBinding match.
+ * @throws std::logic_error if either supposedly valid Value violates its own
+ * immutable representation or binding invariants.
+ * @note Readiness is deliberately excluded because a Pending publication and
+ * its Ready continuation retain the same identities and binding facts.
+ */
+bool same_value_publication_identity(const Value& lhs, const Value& rhs) {
+  if (!lhs.valid() || !rhs.valid() || lhs.revision_id() != rhs.revision_id() ||
+      lhs.producer_identity() != rhs.producer_identity() ||
+      lhs.representation_kind() != rhs.representation_kind() ||
+      lhs.buffer_count() != rhs.buffer_count()) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < lhs.buffer_count(); ++index) {
+    if (lhs.storage_binding(index) != rhs.storage_binding(index)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 /** @copydoc PreparedDirtySourceFirstRun::PreparedDirtySourceFirstRun */
@@ -705,20 +731,26 @@ bool DirtyReadyTaskContext::defer_pending_value(
   if (!output.has_value()) {
     return false;
   }
-  if (task.kind != PlannedTaskKind::Tile || output->has_image_value()) {
-    validate_planned_output(*output, output_authority_for(task),
-                            PlannedOutputReadiness::AllowPending);
-  }
-  if (!output->has_image_value()) {
+  if (task.kind == PlannedTaskKind::Tile && !output->has_image_value()) {
     return false;
   }
-  const Value expected_value = output->image_value();
-  const ReadyFenceSnapshot observed = expected_value.ready_fence().poll();
-  if (observed.state() == ReadyFenceState::Ready) {
-    return false;
+  validate_planned_output(*output, output_authority_for(task),
+                          PlannedOutputReadiness::AllowPending);
+  std::string expected_name;
+  Value expected_value;
+  for (const auto& [name, value] : output->named_values) {
+    const ReadyFenceSnapshot observed = value.ready_fence().poll();
+    if (observed.state() == ReadyFenceState::Pending) {
+      expected_name = name;
+      expected_value = value;
+      break;
+    }
+    if (observed.state() != ReadyFenceState::Ready) {
+      throw ReadyFenceAccessError(observed);
+    }
   }
-  if (observed.state() != ReadyFenceState::Pending) {
-    throw ReadyFenceAccessError(observed);
+  if (!expected_value.valid()) {
+    return false;
   }
 
   std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
@@ -737,10 +769,11 @@ bool DirtyReadyTaskContext::defer_pending_value(
       task_runtime.make_ready_fence_executor();
   const std::shared_ptr<DirtyReadyTaskContext> self = shared_from_this();
   ReadyFence::Callback callback =
-      [self, task_id = task.task_id, expected_value,
+      [self, task_id = task.task_id, expected_name, expected_value,
        record](ReadyFenceSnapshot snapshot) mutable {
-        self->complete_deferred_value(task_id, std::move(expected_value),
-                                      record, std::move(snapshot));
+        self->complete_deferred_value(task_id, std::move(expected_name),
+                                      std::move(expected_value), record,
+                                      std::move(snapshot));
       };
   record->runtime = &task_runtime;
   record->completion_outstanding.store(true, std::memory_order_release);
@@ -792,8 +825,8 @@ void DirtyReadyTaskContext::release_task_dependents(
 
 /** @copydoc DirtyReadyTaskContext::complete_deferred_value */
 void DirtyReadyTaskContext::complete_deferred_value(
-    int task_id, Value expected_value, DeferredValueWait* record,
-    ReadyFenceSnapshot snapshot) {
+    int task_id, std::string expected_name, Value expected_value,
+    DeferredValueWait* record, ReadyFenceSnapshot snapshot) {
   if (record == nullptr || record->runtime == nullptr ||
       !record->completion_outstanding.exchange(false,
                                                std::memory_order_acq_rel)) {
@@ -801,6 +834,7 @@ void DirtyReadyTaskContext::complete_deferred_value(
   }
   ExecutionTaskRuntime& task_runtime = *record->runtime;
   std::exception_ptr failure;
+  bool deferred_again = false;
   const PlannedTask& task =
       compute_plan_.task_graph.tasks.at(static_cast<std::size_t>(task_id));
   try {
@@ -826,30 +860,87 @@ void DirtyReadyTaskContext::complete_deferred_value(
           snapshot_task_output_ == nullptr
               ? std::nullopt
               : snapshot_task_output_(task_output_context_, task.node_id);
-      if (!output.has_value() || !output->has_image_value()) {
+      if (!output.has_value()) {
         throw GraphError(GraphErrc::ComputeError,
-                         "Dirty continuation lost its staged image Value.");
+                         "Dirty continuation lost its staged output.");
       }
-      const Value& current_value = output->image_value();
-      if (current_value.revision_id() != expected_value.revision_id() ||
-          current_value.allocation_identity() !=
-              expected_value.allocation_identity() ||
-          current_value.producer_identity() !=
-              expected_value.producer_identity()) {
+      const auto current = output->named_values.find(expected_name);
+      if (current == output->named_values.end() ||
+          !same_value_publication_identity(current->second, expected_value)) {
         throw GraphError(
             GraphErrc::ComputeError,
             "Dirty continuation observed a replaced staged Value.");
       }
       validate_planned_output(*output, output_authority_for(task),
-                              PlannedOutputReadiness::RequireReady);
+                              PlannedOutputReadiness::AllowPending);
+      std::string next_name;
+      Value next_value;
+      for (const auto& [name, value] : output->named_values) {
+        const ReadyFenceSnapshot observed = value.ready_fence().poll();
+        if (observed.state() == ReadyFenceState::Pending) {
+          next_name = name;
+          next_value = value;
+          break;
+        }
+        if (observed.state() != ReadyFenceState::Ready) {
+          throw ReadyFenceAccessError(observed);
+        }
+      }
+      if (next_value.valid()) {
+        std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+        if (publication_closed_ || lease_.terminal_outcome().has_value()) {
+          task_states_.at(static_cast<std::size_t>(task_id)) =
+              static_cast<std::uint8_t>(TaskState::Completed);
+          suppress_completion = true;
+        } else {
+          std::shared_ptr<ReadyFenceExecutor> executor =
+              task_runtime.make_ready_fence_executor();
+          const std::shared_ptr<DirtyReadyTaskContext> self =
+              shared_from_this();
+          ReadyFence::Callback callback =
+              [self, task_id, next_name, next_value,
+               record](ReadyFenceSnapshot next_snapshot) mutable {
+                self->complete_deferred_value(task_id, std::move(next_name),
+                                              std::move(next_value), record,
+                                              std::move(next_snapshot));
+              };
+          record->completion_outstanding.store(true, std::memory_order_release);
+          task_states_.at(static_cast<std::size_t>(task_id)) =
+              static_cast<std::uint8_t>(TaskState::AwaitingValue);
+          bool completion_counted = false;
+          try {
+            task_runtime.inc_tasks_to_complete(1);
+            completion_counted = true;
+            record->registration = next_value.ready_fence().async_wait(
+                std::move(executor), std::move(callback));
+            deferred_again = true;
+          } catch (...) {
+            task_states_.at(static_cast<std::size_t>(task_id)) =
+                static_cast<std::uint8_t>(TaskState::Failed);
+            record->completion_outstanding.store(false,
+                                                 std::memory_order_release);
+            if (completion_counted) {
+              task_runtime.dec_tasks_to_complete();
+            }
+            throw;
+          }
+        }
+      }
+      if (!suppress_completion && !deferred_again) {
+        validate_planned_output(*output, output_authority_for(task),
+                                PlannedOutputReadiness::RequireReady);
+      }
       {
         std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
         (void)lease_.observe_cancellation();
-        if (!publication_closed_ && !lease_.terminal_outcome().has_value()) {
+        if (!suppress_completion && !deferred_again && !publication_closed_ &&
+            !lease_.terminal_outcome().has_value()) {
           release_task_dependents(task, lease_, task_runtime);
         }
-        task_states_.at(static_cast<std::size_t>(task_id)) =
-            static_cast<std::uint8_t>(TaskState::Completed);
+        if (!deferred_again) {
+          task_states_.at(static_cast<std::size_t>(task_id)) =
+              static_cast<std::uint8_t>(TaskState::Completed);
+        }
       }
     }
   } catch (...) {
@@ -873,7 +964,9 @@ void DirtyReadyTaskContext::complete_deferred_value(
       failure = std::current_exception();
     }
   }
-  record->runtime = nullptr;
+  if (!deferred_again) {
+    record->runtime = nullptr;
+  }
   if (failure) {
     try {
       (void)lease_.publish_failure(failure);

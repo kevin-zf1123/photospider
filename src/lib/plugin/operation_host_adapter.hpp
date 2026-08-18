@@ -35,11 +35,15 @@ Device operation_device_to_private(Device device);
  *
  * @param metadata Public plugin metadata.
  * @return Equivalent private registry metadata.
- * @throws std::invalid_argument for an unknown enum value, negative cost, or
- * malformed output declaration.
+ * @throws std::invalid_argument for an unknown device/tile/access enumerator,
+ * negative cost, oversized or NUL-containing exclusive key, or an output
+ * declaration with an excessive count, empty/oversized/NUL/reserved name,
+ * duplicate, or generic/parameter overlap.
  * @throws std::bad_alloc when copied output-name storage cannot allocate.
- * @note The conversion validates and canonicalizes output names but performs
- * no execution-route policy selection.
+ * @note The conversion validates and canonically sorts both output-name
+ * categories before the returned metadata can enter a registry transaction.
+ * It performs no registry mutation, callback invocation, or execution-route
+ * policy selection.
  */
 OpMetadata operation_metadata_to_private(
     const plugin::OperationMetadata& metadata);
@@ -53,11 +57,19 @@ OpMetadata operation_metadata_to_private(
  * @return Private callback that constructs complete public input snapshots and
  *         converts complete output values before returning.
  * @throws std::bad_alloc if adapter callable storage cannot be allocated.
+ * @throws std::invalid_argument from the returned callable when plugin output
+ * contains an invalid image/spatial descriptor, a reserved generic `image`
+ * name, or an invalid generic Value publication.
+ * @throws std::logic_error from the returned callable when one invocation
+ * publishes both a compatibility image and a private pending device image.
  * @note For loaded plugins, the caller must fence the public callback itself
  * with the DSO exception wrapper before passing it here. Host pre-entry
  * conversion and post-return validation then remain outside that fence and
- * preserve their host-owned exception types. Effective parameters are copied
- * directly from Graph-owned format-neutral storage.
+ * preserve their host-owned exception types. Canonical image, generic Values,
+ * and parameter results remain distinct across the adapter; generic Values
+ * retain their immutable handles. Effective parameters are copied directly
+ * from Graph-owned format-neutral storage. The returned wrapper retains the
+ * supplied DSO lease through callback and converted payload retirement.
  */
 MonolithicOpFunc adapt_monolithic_operation(
     plugin::MonolithicOperation callback,

@@ -214,9 +214,18 @@ describe the final adapter and document boundary.
 
 A formal HP `NodeOutput` carries canonical ordered named Values. The permanent
 `image` entry is the sole image payload/allocation/readiness/revision authority;
-formal cache contains no ImageBuffer peer and rejects nonempty compatibility
-staging. Copying a formal cache entry preserves its `AllocationIdentity` and
-`ValueRevisionId`.
+every declared generic entry is the corresponding non-image Value authority
+and remains distinct from `NodeOutput::data`. Formal cache contains no
+ImageBuffer peer and rejects nonempty compatibility staging. Copying a formal
+cache entry preserves each Value's revision, producer, representation, indexed
+storage bindings, and Ready state; provider-defined multi-buffer Values are not
+collapsed to one image allocation identity.
+
+The revisioned generic-name vector participates in planned-route equality,
+implementation replacement, and task-graph cache identity. Retained-memory
+accounting charges metadata/authority vectors, string payloads, and
+`named_values` map nodes. Physical allocation bytes remain charged by their
+existing allocation/cache owner and are not counted again as route metadata.
 
 Mutable dirty/tiled work cannot retain or expose the old authority. It creates
 one unpublished Host binding, seeds retained bytes through checked grants, and
@@ -231,6 +240,8 @@ and YAML formats still persist only representation bytes and named metadata:
 neither `AllocationIdentity` nor `ValueRevisionId` is serialized, reconstructed
 from a path, or used as a persistent cache/task key. Both tokens are opaque,
 process-local runtime identities; a disk reload necessarily mints new ones.
+This image-only mechanism does not silently serialize generic named Values or
+turn parameter metadata into generic Value storage.
 
 ## V-4 Region Validity
 

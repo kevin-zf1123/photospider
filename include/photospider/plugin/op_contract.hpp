@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -13,6 +14,7 @@
 #include "photospider/core/device.hpp"
 #include "photospider/core/geometry.hpp"
 #include "photospider/core/image_buffer.hpp"
+#include "photospider/data/value.hpp"
 #include "photospider/plugin/node_view.hpp"
 
 /**
@@ -169,16 +171,27 @@ struct DebugMetadata {
 };
 
 /**
+ * @brief Canonically ordered generic named-Value collection at the public
+ * operation edge.
+ * @throws std::bad_alloc when copied names or Value handles allocate.
+ * @note The reserved canonical `image` Value is never stored in this map;
+ * parameter results remain in `ParameterMap`.
+ */
+using NamedValueMap = std::map<std::string, ps::Value, std::less<>>;
+
+/**
  * @brief Borrowed input payload snapshot for one upstream output.
  * @throws Nothing for value operations.
  * @note All pointers are read-only and valid only for the callback. Every
- *       connected input exposes `spatial`; a null image pointer with non-null
- *       data and spatial pointers represents a named-data-only input. A
- *       disconnected slot has all three pointers null.
+ * connected input exposes `spatial`; canonical image, generic named Values,
+ * and parameter results occupy separate fields. A disconnected slot has all
+ * four payload/spatial pointers null.
  */
 struct OperationInputView {
   /** @brief Borrowed image descriptor, or nullptr when absent. */
   const ImageBuffer* image_buffer = nullptr;
+  /** @brief Borrowed generic named Values excluding `image`, or nullptr. */
+  const NamedValueMap* named_values = nullptr;
   /** @brief Borrowed named parameter output map, or nullptr when absent. */
   const ParameterMap* data = nullptr;
   /** @brief Borrowed spatial snapshot, or nullptr for a disconnected slot. */
@@ -187,7 +200,8 @@ struct OperationInputView {
 
 /**
  * @brief Owned operation result crossing from plugin code to the host.
- * @throws std::bad_alloc from copied/moved parameter or diagnostic storage.
+ * @throws std::bad_alloc from copied/moved Value, parameter, or diagnostic
+ * storage.
  * @note No field carries a dynamic-library lease. The host converts the whole
  *       value before attaching its private lifetime owner.
  */
@@ -199,10 +213,16 @@ struct OperationOutput {
    * are copied into Host-owned storage; opaque non-CPU bindings retain the
    * wrapped payload owner and DSO lease through Value retirement. The host
    * does not publish this staging descriptor as private cache or revision
-   * authority. Generic or named non-image values belong in `data`, not here.
+   * authority. Generic named Values belong in `named_values`, not here.
    */
   ImageBuffer image_buffer;
-  /** @brief Named deep-owned non-image outputs. */
+  /**
+   * @brief Exact generic named immutable Value outputs excluding `image`.
+   * @note The Host validates each name/Value and keeps this category distinct
+   * from both the canonical image and `data` parameter results.
+   */
+  NamedValueMap named_values;
+  /** @brief Named deep-owned parameter-result outputs. */
   ParameterMap data;
   /** @brief Owned spatial metadata. */
   SpatialSnapshot spatial;
@@ -369,8 +389,11 @@ struct OperationMetadata {
   /** @brief Maximum accepted UTF-8 byte length of a nonempty exclusive key. */
   static constexpr std::size_t kExclusiveKeyMaxBytes = 128U;
 
-  /** @brief Maximum accepted bytes in one declared parameter-output name. */
+  /** @brief Maximum accepted bytes in one declared non-image output name. */
   static constexpr std::size_t kOutputNameMaxBytes = 128U;
+
+  /** @brief Maximum exact generic named-Value names in one implementation. */
+  static constexpr std::size_t kNamedValueOutputCountMax = 64U;
 
   /** @brief Maximum exact parameter-output names in one implementation. */
   static constexpr std::size_t kParameterOutputCountMax = 64U;
@@ -413,10 +436,18 @@ struct OperationMetadata {
   bool produces_image = true;
 
   /**
+   * @brief Exact legal generic named-Value outputs excluding `image`.
+   * @note The Host validates, sorts, and freezes this set with the callback
+   * revision. Names are bounded, unique, disjoint from parameter outputs, and
+   * may not use the reserved canonical image name.
+   */
+  std::vector<std::string> named_value_output_names;
+
+  /**
    * @brief Exact legal non-image parameter-result names.
    * @note The Host validates, sorts, and freezes this set with the callback
-   * revision. A normal result must contain every name exactly once and no
-   * undeclared name.
+   * revision. Names are bounded, unique, disjoint from generic Value outputs,
+   * and may not use `image`; a result must contain every name exactly once.
    */
   std::vector<std::string> parameter_output_names;
 

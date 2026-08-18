@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -181,6 +182,9 @@ TEST(OperationPluginRegistrar,
                             plugin::ArrayView<plugin::OperationInputView>) {
     return plugin::OperationOutput{};
   };
+  const auto tiled_operation =
+      [](const plugin::NodeView&, const OutputTileView&,
+         plugin::ArrayView<plugin::OperationTileInputView>) {};
 
   EXPECT_THROW(registrar.register_op_hp_monolithic("", "ok", operation),
                std::invalid_argument);
@@ -219,8 +223,37 @@ TEST(OperationPluginRegistrar,
                std::invalid_argument);
   EXPECT_EQ(host_calls, 0);
 
+  const auto expect_tiled_schema_rejected =
+      [&](const plugin::OperationMetadata& metadata) {
+        EXPECT_THROW(registrar.register_op_hp_tiled("valid", "name",
+                                                    tiled_operation, metadata),
+                     std::invalid_argument);
+        EXPECT_THROW(registrar.register_op_rt_tiled("valid", "name",
+                                                    tiled_operation, metadata),
+                     std::invalid_argument);
+        EXPECT_THROW(registrar.register_impl("valid", "name", Device::CPU,
+                                             tiled_operation, metadata),
+                     std::invalid_argument);
+        EXPECT_EQ(host_calls, 0);
+      };
+  plugin::OperationMetadata no_image;
+  no_image.produces_image = false;
+  expect_tiled_schema_rejected(no_image);
+  plugin::OperationMetadata generic_output;
+  generic_output.named_value_output_names = {"deep"};
+  expect_tiled_schema_rejected(generic_output);
+  plugin::OperationMetadata parameter_output;
+  parameter_output.parameter_output_names = {"score"};
+  expect_tiled_schema_rejected(parameter_output);
+
   registrar.register_op_hp_monolithic("valid", "name", operation);
   EXPECT_EQ(host_calls, 1);
+  registrar.register_op_hp_tiled("valid", "name", tiled_operation);
+  EXPECT_EQ(host_calls, 2);
+  registrar.register_op_rt_tiled("valid", "name", tiled_operation);
+  EXPECT_EQ(host_calls, 3);
+  registrar.register_impl("valid", "name", Device::CPU, tiled_operation);
+  EXPECT_EQ(host_calls, 4);
 }
 
 Node make_source_node(int id, const std::string& name, int width, int height) {
@@ -698,7 +731,8 @@ TEST(OperationHostAdapter,
           plugin::ArrayView<plugin::OperationInputView> inputs) {
         monolithic_saw_nulls =
             public_node.id() == node.id && inputs.size() == 1 &&
-            inputs[0].image_buffer == nullptr && inputs[0].data == nullptr &&
+            inputs[0].image_buffer == nullptr &&
+            inputs[0].named_values == nullptr && inputs[0].data == nullptr &&
             inputs[0].spatial == nullptr;
         return plugin::OperationOutput{};
       });
@@ -707,6 +741,13 @@ TEST(OperationHostAdapter,
   EXPECT_TRUE(monolithic_saw_nulls);
 
   NodeOutput data_only;
+  const Value generic_value = Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{{4U},
+                            ElementSemantics::FloatingPoint,
+                            StorageEncoding{32U}},
+      std::nullopt, StridedLayout{{4}},
+      std::vector<std::byte>(16U, std::byte{0x31}));
+  data_only.publish_named_value("deep", generic_value);
   data_only.data.emplace("answer", plugin::ParameterValue(42));
   data_only.space.absolute_roi = (PixelRect{3, 4, 5, 6});
   data_only.space.global_scale_x = 2.0;
@@ -716,6 +757,10 @@ TEST(OperationHostAdapter,
           plugin::ArrayView<plugin::OperationInputView> inputs) {
         monolithic_saw_data_only =
             inputs.size() == 1 && inputs[0].image_buffer == nullptr &&
+            inputs[0].named_values != nullptr &&
+            inputs[0].named_values->size() == 1U &&
+            inputs[0].named_values->at("deep").revision_id() ==
+                generic_value.revision_id() &&
             inputs[0].data != nullptr &&
             inputs[0].data->at("answer").as_int64() == 42 &&
             inputs[0].spatial != nullptr &&
@@ -724,11 +769,35 @@ TEST(OperationHostAdapter,
             inputs[0].spatial->absolute_roi.width == 5 &&
             inputs[0].spatial->absolute_roi.height == 6 &&
             inputs[0].spatial->global_scale_x == 2.0;
-        return plugin::OperationOutput{};
+        plugin::OperationOutput output;
+        output.named_values.emplace("deep", inputs[0].named_values->at("deep"));
+        return output;
       });
   const std::vector<const NodeOutput*> data_only_inputs{&data_only};
-  (void)inspect_data_only(node, data_only_inputs);
+  const NodeOutput converted_data_only =
+      inspect_data_only(node, data_only_inputs);
   EXPECT_TRUE(monolithic_saw_data_only);
+  ASSERT_EQ(converted_data_only.named_values.size(), 1U);
+  EXPECT_EQ(converted_data_only.named_values.at("deep").revision_id(),
+            generic_value.revision_id());
+  EXPECT_TRUE(converted_data_only.data.empty());
+
+  MonolithicOpFunc reserved_generic = plugin_host::adapt_monolithic_operation(
+      [&](const plugin::NodeView&,
+          plugin::ArrayView<plugin::OperationInputView>) {
+        plugin::OperationOutput output;
+        output.named_values.emplace("image", generic_value);
+        return output;
+      });
+  EXPECT_THROW((void)reserved_generic(node, {}), std::invalid_argument);
+  MonolithicOpFunc invalid_generic = plugin_host::adapt_monolithic_operation(
+      [](const plugin::NodeView&,
+         plugin::ArrayView<plugin::OperationInputView>) {
+        plugin::OperationOutput output;
+        output.named_values.emplace("deep", Value{});
+        return output;
+      });
+  EXPECT_THROW((void)invalid_generic(node, {}), std::invalid_argument);
 
   bool tiled_saw_null_spatial = false;
   TileOpFunc tiled = plugin_host::adapt_tiled_operation(
@@ -1136,6 +1205,8 @@ TEST(OperationHostAdapter, ConvertsCompleteOperationRoutingMetadata) {
   metadata.retained_memory_bytes = 4096U;
   metadata.scratch_bytes = 8192U;
   metadata.exclusive_key = "plugin-shared-context";
+  metadata.named_value_output_names = {"z-depth", "deep"};
+  metadata.parameter_output_names = {"variance", "score"};
 
   const OpMetadata converted =
       plugin_host::operation_metadata_to_private(metadata);
@@ -1144,6 +1215,10 @@ TEST(OperationHostAdapter, ConvertsCompleteOperationRoutingMetadata) {
   EXPECT_EQ(converted.retained_memory_bytes, 4096U);
   EXPECT_EQ(converted.scratch_bytes, 8192U);
   EXPECT_EQ(converted.exclusive_key, "plugin-shared-context");
+  EXPECT_EQ(converted.named_value_output_names,
+            (std::vector<std::string>{"deep", "z-depth"}));
+  EXPECT_EQ(converted.parameter_output_names,
+            (std::vector<std::string>{"score", "variance"}));
 }
 
 /**
@@ -1178,6 +1253,37 @@ TEST(OperationHostAdapter, RejectsInvalidRegistrarMetadataValues) {
                std::invalid_argument);
   metadata = plugin::OperationMetadata{};
   metadata.exclusive_key = std::string("invalid\0key", 11U);
+  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
+               std::invalid_argument);
+  metadata = plugin::OperationMetadata{};
+  metadata.named_value_output_names = {""};
+  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
+               std::invalid_argument);
+  metadata = plugin::OperationMetadata{};
+  metadata.named_value_output_names = {"image"};
+  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
+               std::invalid_argument);
+  metadata = plugin::OperationMetadata{};
+  metadata.named_value_output_names = {"deep", "deep"};
+  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
+               std::invalid_argument);
+  metadata = plugin::OperationMetadata{};
+  metadata.named_value_output_names.assign(
+      plugin::OperationMetadata::kNamedValueOutputCountMax + 1U, "deep");
+  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
+               std::invalid_argument);
+  metadata = plugin::OperationMetadata{};
+  metadata.named_value_output_names = {
+      std::string(plugin::OperationMetadata::kOutputNameMaxBytes + 1U, 'x')};
+  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
+               std::invalid_argument);
+  metadata = plugin::OperationMetadata{};
+  metadata.named_value_output_names = {std::string("deep\0value", 10U)};
+  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
+               std::invalid_argument);
+  metadata = plugin::OperationMetadata{};
+  metadata.named_value_output_names = {"score"};
+  metadata.parameter_output_names = {"score"};
   EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
                std::invalid_argument);
   EXPECT_THROW(

@@ -3877,6 +3877,122 @@ TEST(OperationMetadataRouting, FullPlanCarriesIdentityConstraintsAndResources) {
 }
 
 /**
+ * @brief Proves generic output declarations participate in implementation,
+ * route, authority, and full-task-graph cache identity.
+ *
+ * @return Nothing; GoogleTest reports stale revisions, cache keys, or output
+ * authority.
+ * @throws Registry, graph, route-copy, and allocation exceptions unchanged.
+ * @note Replacing one HP slot is intentional: callback shape and every other
+ * metadata field remain fixed, isolating the generic name-set revision.
+ */
+TEST(OperationMetadataRouting,
+     GenericOutputSchemaRevisionsRouteAndTaskCacheIdentity) {
+  constexpr const char* kType = "issue130_generic_route";
+  constexpr const char* kSubtype = "source";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+
+  GraphModel graph("cache/issue130-generic-route");
+  Node node = make_plan_node(1301);
+  node.type = kType;
+  node.subtype = kSubtype;
+  graph.add_node(std::move(node));
+  graph.validate_topology();
+
+  const MonolithicOpFunc operation = [](const Node&,
+                                        const std::vector<const NodeOutput*>&) {
+    return NodeOutput{};
+  };
+  OpMetadata deep_metadata;
+  deep_metadata.produces_image = false;
+  deep_metadata.named_value_output_names = {"deep"};
+  registry.register_op_hp_monolithic(kType, kSubtype, operation, deep_metadata);
+  const std::uint64_t deep_generation = registry.task_shape_generation();
+  const std::string deep_cache_key = full_task_graph_cache_key(
+      graph, ComputeIntent::GlobalHighPrecision, {Device::CPU});
+  const auto deep_implementation = registry.select_implementation(
+      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(deep_implementation.has_value());
+  const PlannedOperationRoute deep_route =
+      make_planned_operation_route(*deep_implementation);
+  const PlannedOutputAuthority deep_authority =
+      make_planned_output_authority(deep_route, PixelSize{});
+  EXPECT_EQ(deep_authority.named_value_output_names,
+            (std::vector<std::string>{"deep"}));
+  EXPECT_FALSE(deep_authority.image_output_name.has_value());
+
+  OpMetadata latent_metadata = deep_metadata;
+  latent_metadata.named_value_output_names = {"latent"};
+  registry.register_op_hp_monolithic(kType, kSubtype, operation,
+                                     latent_metadata);
+  const auto latent_implementation = registry.select_implementation(
+      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(latent_implementation.has_value());
+  const PlannedOperationRoute latent_route =
+      make_planned_operation_route(*latent_implementation);
+  const std::string latent_cache_key = full_task_graph_cache_key(
+      graph, ComputeIntent::GlobalHighPrecision, {Device::CPU});
+
+  EXPECT_GT(registry.task_shape_generation(), deep_generation);
+  EXPECT_NE(latent_implementation->implementation_identity,
+            deep_implementation->implementation_identity);
+  EXPECT_FALSE(planned_operation_routes_equal(deep_route, latent_route));
+  EXPECT_NE(deep_cache_key, latent_cache_key);
+  EXPECT_EQ(latent_route.metadata.named_value_output_names,
+            (std::vector<std::string>{"latent"}));
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Verifies generic output names and map nodes are charged by retained
+ * accounting for full, dirty, and materialized output ownership.
+ *
+ * @return Nothing; GoogleTest reports an unchanged structural byte estimate.
+ * @throws Value publication, plan-copy, or checked estimator exceptions
+ * unchanged.
+ * @note Opaque payload capacity remains outside the estimator; this test locks
+ * only Host-visible vectors, strings, and ordered-map nodes introduced by the
+ * generic output contract.
+ */
+TEST(OperationMetadataRouting,
+     GenericOutputSchemaAndValuesIncreaseRetainedAccounting) {
+  ComputePlan baseline_plan;
+  PlannedNodeWork baseline_work;
+  baseline_work.node_id = 1302;
+  baseline_work.operation_route = PlannedOperationRoute{};
+  baseline_work.output_authority = PlannedOutputAuthority{};
+  baseline_plan.planned_work.push_back(std::move(baseline_work));
+
+  ComputePlan generic_plan = baseline_plan;
+  generic_plan.planned_work.front()
+      .operation_route->metadata.named_value_output_names = {
+      "deep-generic-output"};
+  generic_plan.planned_work.front()
+      .output_authority->named_value_output_names = {"deep-generic-output"};
+  EXPECT_GT(compute_plan_dynamic_retained_memory_bytes(generic_plan),
+            compute_plan_dynamic_retained_memory_bytes(baseline_plan));
+
+  HighPrecisionDirtyPlan baseline_dirty;
+  DirtyRegionPlannedOperationRoute dirty_route;
+  dirty_route.operation_key = "issue130:generic";
+  baseline_dirty.operation_routes.node_routes.emplace(1302,
+                                                      std::move(dirty_route));
+  HighPrecisionDirtyPlan generic_dirty = baseline_dirty;
+  generic_dirty.operation_routes.node_routes.at(1302)
+      .route.metadata.named_value_output_names = {"deep-generic-output"};
+  EXPECT_GT(high_precision_dirty_plan_retained_memory_bytes(generic_dirty),
+            high_precision_dirty_plan_retained_memory_bytes(baseline_dirty));
+
+  NodeOutput baseline_output = make_resource_dirty_output(130);
+  NodeOutput generic_output = baseline_output;
+  generic_output.publish_named_value("deep-generic-output",
+                                     baseline_output.image_value());
+  EXPECT_GT(node_output_dynamic_retained_memory_bytes(generic_output),
+            node_output_dynamic_retained_memory_bytes(baseline_output));
+}
+
+/**
  * @brief Verifies route inventory canonicalization and mixed-operation demand.
  *
  * @return Nothing; assertions report cache-key or component maximum mismatch.

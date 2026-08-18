@@ -129,21 +129,27 @@ Scalar 拼写保持稳定；array 与 object 递归渲染；object key 保持 or
 | 字段 | 含义 |
 | --- | --- |
 | `compatibility_image` | 仅用于 operation ABI v2、codec 与其余 legacy adapter 的入站暂存。正式 commit 前必须清除，且它绝不是 cache、allocation、readiness 或 revision 权威。 |
-| `named_values` | 按规范顺序保存的 immutable Value。当前 image port 永久命名为 `image`；有效 entry 是唯一的 image payload、allocation、readiness 与 revision 权威。 |
-| `data` | 作为 `plugin::ParameterMap` 保存的命名标量或结构化输出。 |
+| `named_values` | 按规范顺序保存的 immutable Value。当前 image port 永久命名为 `image`；每个 image 或 generic entry 都是该精确名称唯一的 payload、allocation、readiness 与 revision 权威。 |
+| `data` | 作为 `plugin::ParameterMap` 保存的 named parameter-result 标量或结构；generic Value 绝不进入此字段。 |
 | `space` | 空间变换、尺度和 ROI 元数据。 |
 | `debug` | worker/设备/计时/范围诊断信息。启用的 CPU range inspection 会通过规范 Value layout 遍历 active scalar byte；padding 被排除，opaque device Value 保留 provider diagnostic。 |
 
-算子可以返回图像数据、命名数据，或两者都返回。
+算子可以返回 canonical image Value、独立命名的 generic Value、parameter result，或这些类别
+的已授权组合。
 
 Return shape 本身不是授权。Issue #130 会在 execution 前，根据所选 registered operation
 revision 冻结 `PlannedOutputAuthority`：它携带精确 canonical-image requirement、精确
-named-data 集合、implementation/device identity、要求的
-DenseTensor/ImageFacet/Strided structure，以及任何可信的有限 Graph 或 dirty extent。普通
-result 必须精确匹配该 plan；缺失、额外、malformed、wrong-name、wrong-facet、wrong-layout、
-wrong-identity 或 wrong-extent output 会在首次 formal Graph mutation 前被拒绝。完整 HP route
-会把所有 computation stage 在 Graph clone 中，仅在授权后发布完整 snapshot，因此空
-`NodeOutput` 绝不能制造 Whole validity 或 cacheable completion。
+generic Value 与 parameter result 两类 named-data 集合、implementation/device identity、要求
+的 canonical-image DenseTensor/ImageFacet/Strided structure，以及任何可信的有限 Graph 或
+dirty extent。每个 generic Value 必须保留有效 revision/producer identity 与有效、非空的
+indexed storage binding；其 representation/layout 必须是具有 Strided 或 Blocked layout 的
+DenseTensor，或具有 ProviderDefined layout 的 ProviderDefined。Generic Value 不会因此获得
+image-facet 要求。普通 result 必须精确匹配每个类别；缺失、额外、malformed、wrong-name、
+wrong-facet、wrong-layout、wrong-identity 或 wrong-extent output 会在 dependent release 或
+首次 formal Graph mutation 前被拒绝。有监督的 staging 可以保留精确 Pending Value，但每个
+formal 边界都要求全部 declared Value 为 Ready。完整 HP route 会把所有 computation stage 在
+Graph clone 中，仅在授权后发布完整 snapshot，因此空 `NodeOutput` 绝不能制造 Whole
+validity 或 cacheable completion。
 
 持久 `OutputPort::output_parameters` 是可选、深度拥有的 `ParameterValue`。空 optional 表示
 文档字段缺失；已包含值的 null 会保留显式出现的 YAML null。因此，嵌套 output configuration
@@ -152,7 +158,8 @@ wrong-identity 或 wrong-extent output 会在首次 formal Graph mutation 前被
 对于 tiled `image_mixing`，需要 crop/pad 的 secondary input 会被物化为 request-local
 `NodeOutput`：named data、spatial/debug provenance 与 plugin-library lifetime 会被复制，而其
 image Value 会替换为通过内核 fill/copy 原语生成、并在 normalized output 暴露前完成 seal 的
-aligned storage。Resize 与 channel conversion 继续保留为局部 OpenCV algorithm call。
+aligned storage。这里的“named data”同时包括 generic named Value 与 parameter result，且不会
+把任一类别移入另一类别。Resize 与 channel conversion 继续保留为局部 OpenCV algorithm call。
 Normalization context 会持有这些临时 output，直到所有同步 tile callback 完成；shape 完全
 匹配的 input 继续借用 upstream output。
 

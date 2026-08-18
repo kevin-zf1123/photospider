@@ -43,8 +43,111 @@ bool operation_metadata_equal(const OpMetadata& lhs,
          lhs.retained_memory_bytes == rhs.retained_memory_bytes &&
          lhs.scratch_bytes == rhs.scratch_bytes &&
          lhs.produces_image == rhs.produces_image &&
+         lhs.named_value_output_names == rhs.named_value_output_names &&
          lhs.parameter_output_names == rhs.parameter_output_names &&
          lhs.exclusive_key == rhs.exclusive_key;
+}
+
+/**
+ * @brief Checks one frozen output-name vector for canonical structure.
+ * @param names Sorted generic-Value or parameter-result names to inspect.
+ * @param maximum_count Frozen maximum number of names in the category.
+ * @return True only for a strictly sorted bounded vector of valid non-image
+ * names.
+ * @throws Nothing.
+ * @note Registration owns canonicalization; this defensive execution check
+ * detects malformed manually constructed or stale planning authorities without
+ * allocating or mutating the plan.
+ */
+bool planned_output_names_valid(const std::vector<std::string>& names,
+                                std::size_t maximum_count) noexcept {
+  if (names.size() > maximum_count) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < names.size(); ++index) {
+    const std::string& name = names[index];
+    if (name.empty() || name.size() > OpMetadata::kOutputNameMaxBytes ||
+        name.find('\0') != std::string::npos ||
+        name == NodeOutput::kImageOutputName ||
+        (index != 0U && names[index - 1U] >= name)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * @brief Validates immutable Value identity and phase readiness.
+ * @param value Candidate generic or canonical image Value.
+ * @param readiness Staging or formal readiness policy.
+ * @param image True when diagnostics should identify the canonical image.
+ * @return Nothing when the Value is valid, its publication and every indexed
+ * binding are fully identified, and it is Ready or explicitly allowed Pending.
+ * @throws GraphError with ComputeError for an invalid publication/binding
+ * identity or any readiness state not authorized by the requested phase.
+ * @throws std::logic_error only if a supposedly valid Value violates its own
+ * immutable indexed-binding invariant.
+ * @note The helper polls once, waits on no fence, maps no payload, and mutates
+ * neither the Value nor graph state.
+ */
+void validate_value_identity_and_readiness(const Value& value,
+                                           PlannedOutputReadiness readiness,
+                                           bool image) {
+  if (!value.valid() || !value.revision_id().valid() ||
+      !value.producer_identity().valid() || value.buffer_count() == 0U) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        image ? "Operation image Value lacks required identities."
+              : "Operation generic Value lacks required identities.");
+  }
+  for (std::size_t index = 0U; index < value.buffer_count(); ++index) {
+    const StorageBinding binding = value.storage_binding(index);
+    if (!binding.allocation.valid() || binding.byte_size == 0U) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          image ? "Operation image Value lacks required binding identities."
+                : "Operation generic Value lacks required binding identities.");
+    }
+  }
+  const ReadyFenceState state = value.ready_fence().poll().state();
+  const bool accepted = state == ReadyFenceState::Ready ||
+                        (readiness == PlannedOutputReadiness::AllowPending &&
+                         state == ReadyFenceState::Pending);
+  if (!accepted) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        image ? "Operation image Value readiness violates its planned "
+                "publication stage."
+              : "Operation generic Value readiness violates its planned "
+                "publication stage.");
+  }
+}
+
+/**
+ * @brief Validates the current representation/layout boundary of one generic
+ * named Value.
+ * @param value Valid immutable generic candidate.
+ * @return Nothing for DenseTensor with Strided/Blocked layout or
+ * ProviderDefined with ProviderDefined layout.
+ * @throws GraphError with ComputeError for a mismatched or unknown pair.
+ * @note No DenseTensor descriptor, provider envelope, ImageFacet, image extent,
+ * or payload byte is inspected. Value construction remains the authority for
+ * representation-specific metadata validity.
+ */
+void validate_generic_value_representation(const Value& value) {
+  const ValueRepresentationKind representation = value.representation_kind();
+  const StorageLayoutKind layout = value.storage_layout_kind();
+  const bool accepted =
+      (representation == ValueRepresentationKind::DenseTensor &&
+       (layout == StorageLayoutKind::Strided ||
+        layout == StorageLayoutKind::Blocked)) ||
+      (representation == ValueRepresentationKind::ProviderDefined &&
+       layout == StorageLayoutKind::ProviderDefined);
+  if (!accepted) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Operation generic Value has an unsupported representation/layout.");
+  }
 }
 
 }  // namespace
@@ -101,6 +204,7 @@ PlannedOutputAuthority make_planned_output_authority(
       authority.image_extent = resolved_extent;
     }
   }
+  authority.named_value_output_names = route.metadata.named_value_output_names;
   authority.parameter_output_names = route.metadata.parameter_output_names;
   return authority;
 }
@@ -111,7 +215,16 @@ void validate_planned_output(const NodeOutput& output,
                              PlannedOutputReadiness readiness) {
   if (authority.implementation_identity == 0U ||
       (authority.image_output_name.has_value() &&
-       *authority.image_output_name != NodeOutput::kImageOutputName)) {
+       *authority.image_output_name != NodeOutput::kImageOutputName) ||
+      !planned_output_names_valid(authority.named_value_output_names,
+                                  OpMetadata::kNamedValueOutputCountMax) ||
+      !planned_output_names_valid(authority.parameter_output_names,
+                                  OpMetadata::kParameterOutputCountMax) ||
+      std::find_first_of(authority.named_value_output_names.begin(),
+                         authority.named_value_output_names.end(),
+                         authority.parameter_output_names.begin(),
+                         authority.parameter_output_names.end()) !=
+          authority.named_value_output_names.end()) {
     throw GraphError(GraphErrc::ComputeError,
                      "Execution received a malformed planned output "
                      "authority.");
@@ -123,7 +236,8 @@ void validate_planned_output(const NodeOutput& output,
   }
 
   const std::size_t expected_named_values =
-      authority.image_output_name.has_value() ? 1U : 0U;
+      authority.named_value_output_names.size() +
+      (authority.image_output_name.has_value() ? 1U : 0U);
   if (output.named_values.size() != expected_named_values) {
     throw GraphError(
         GraphErrc::ComputeError,
@@ -142,15 +256,26 @@ void validate_planned_output(const NodeOutput& output,
     }
   }
 
+  for (const std::string& name : authority.named_value_output_names) {
+    const auto found = output.named_values.find(name);
+    if (found == output.named_values.end()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Operation output is missing a planned generic Value.");
+    }
+    validate_value_identity_and_readiness(found->second, readiness, false);
+    validate_generic_value_representation(found->second);
+  }
+
   if (!authority.image_output_name.has_value()) {
     return;
   }
   const auto found = output.named_values.find(*authority.image_output_name);
-  if (found == output.named_values.end() || !found->second.valid()) {
+  if (found == output.named_values.end()) {
     throw GraphError(GraphErrc::ComputeError,
                      "Operation output is missing its planned image Value.");
   }
   const Value& value = found->second;
+  validate_value_identity_and_readiness(value, readiness, true);
   if (value.representation_kind() != authority.image_representation ||
       value.storage_layout_kind() != authority.image_layout) {
     throw GraphError(
@@ -194,27 +319,12 @@ void validate_planned_output(const NodeOutput& output,
       }
     }
   }
-  if (!value.revision_id().valid() || !value.producer_identity().valid() ||
-      !value.allocation_identity().valid()) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "Operation image Value lacks required identities.");
-  }
-
-  const ReadyFenceState state = value.ready_fence().poll().state();
-  if (state == ReadyFenceState::Failed ||
-      state == ReadyFenceState::ProducerCancelled ||
-      (readiness == PlannedOutputReadiness::RequireReady &&
-       state != ReadyFenceState::Ready)) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "Operation image Value readiness violates its planned "
-                     "publication stage.");
-  }
 }
 
 namespace {
 
 /** @brief Task-shape config token used by FullTaskGraph cache keys. */
-constexpr const char* kTaskShapeConfigVersion = "task-shape-v4";
+constexpr const char* kTaskShapeConfigVersion = "task-shape-v5";
 
 /** @brief Maximum attempts to observe one stable operation-registry shape. */
 constexpr int kMaxRegistryStableExpansionAttempts = 8;

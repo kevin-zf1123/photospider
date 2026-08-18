@@ -143,14 +143,16 @@ observation lease、RT-first gate、cancellation fan-out 与确定性 aggregate 
 
 Issue #130 在同一个 planning boundary 冻结 output authority。所选 revision 的
 `OperationMetadata` 声明是否要求精确、规范的 `image` output，并声明全部合法的 named
-parameter output 集合。`PlannedOutputAuthority` 把该声明与已冻结的
-implementation/device identity 结合；若可信 Graph 或 dirty extent 已知，也会将其纳入。
-Provider 返回的 name、descriptor、facet、layout 或 identity 不能扩大 plan。每条 route 都会在
-dependant 可观察 staged `NodeOutput` 前校验一次，并在 formal commit 时再次校验。完整的
-sequential 与 parallel HP work 只在 request-owned Graph clone 上执行；仅有完全通过授权的
-result 才能通过 no-throw snapshot publication 替换 live Graph state。因此，缺失、额外、
-malformed 或 mismatched output 不会改变 cache、Region、version、inspection、timing 或
-disk-persistence state。
+generic named-Value 集合与全部合法 parameter-result 集合。`PlannedOutputAuthority` 把该声明
+与已冻结的 implementation/device identity 结合；若可信 Graph 或 dirty extent 已知，也会将其
+纳入。Provider 返回的 name、descriptor、facet、layout 或 identity 不能扩大 plan。Generic
+Value 与 parameter data 保持分离，也不会继承 image-only facet/extent rule。每条 route 都会在
+dependent 可观察 staged `NodeOutput` 前校验一次，并在 formal commit 时再次校验。有监督的
+continuation 可以保留精确 Pending named Value；inline/sequential 与每个 formal 边界都要求
+Ready。完整的 sequential 与 parallel HP work 只在 request-owned Graph clone 上执行；仅有完全
+通过授权的 result 才能通过 no-throw snapshot publication 替换 live Graph state。因此，缺失、
+额外、malformed 或 mismatched output 不会改变 cache、Region、version、inspection、timing
+或 disk-persistence state。
 
 `FullTaskGraphExpander` 会把原始 graph 展开为一个 compute domain 的完整 node/tile task graph。
 它不依赖请求目标、cache 状态或 dirty snapshot。`NodeCacheTaskGraphPruner` 随后把该 graph
@@ -556,15 +558,18 @@ missing retirement 或 undrained binding 都会使 Run 失败，不释放尚未�
 observation 前安装 completion handler，因此尚未提交的 owner graph 与所有 device lease 会正常
 unwind，而不会变成不可见的 publication。
 
-Dirty native producer 可以在规范 Value 的 `ReadyFence` 仍为 Pending 时返回它。此时
-`DirtyReadyTaskContext` 会在 Run-scoped executor 上注册 non-inline continuation，而不会阻塞
-worker 或释放 dependency。Callback 会重新校验精确 staged Value 的 revision、allocation、
-producer 与 Run identity。只有 identity 匹配且变为 Ready 的 Value 才能进入同一条 formal
-output-authority commit；Failed、ProducerCancelled、显式 Run cancellation、stale execution 或
-staged-value replacement 都会以关闭状态失败，不释放 dependency，也不修改 Graph/RT。
-Cancellation 会关闭 publication，并在 continuation mutex 外取消 registration；logical task
-accounting 仍由 worker 拥有，而 retained context 会让 callback owner 存活到 service
-settlement。
+受监督的 native producer 可以在一个或多个 declared named Value 的 `ReadyFence` 仍为 Pending
+时返回它们。Full parallel continuation 或 `DirtyReadyTaskContext` 会在 Run-scoped executor 上
+注册 non-inline wait，而不会阻塞 worker 或释放 dependency。多个 Pending name 会按 canonical
+map 顺序串行衔接，并在每次下一 wait 前增加 replacement completion unit。Dirty callback 会
+重新校验精确 staged name、revision、producer、representation 与每个 indexed
+`StorageBinding`；所有路径都会重新执行 frozen authority，并在 dependent release 或 formal
+commit 前要求每个 declared Value 为 Ready。Inline sequential 与 direct formal dirty 路径没有
+这种 continuation，因此会同步拒绝 Pending。Failed、ProducerCancelled、显式 Run
+cancellation、stale execution 或 staged-Value replacement 都会 fail closed，不释放
+dependency，也不修改 Graph/RT。Cancellation 会关闭 publication，并在 continuation mutex 外
+取消 registration；logical task accounting 仍由 worker 拥有，而 retained context 会让
+callback owner 存活到 service settlement。
 
 ## 事件和计时
 

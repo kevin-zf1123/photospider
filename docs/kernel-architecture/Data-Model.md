@@ -168,23 +168,31 @@ Graph state.
 | Field | Meaning |
 | --- | --- |
 | `compatibility_image` | Inbound-only staging for operation ABI v2, codecs, and remaining legacy adapters. It must be cleared before formal commit and is never cache, allocation, readiness, or revision authority. |
-| `named_values` | Canonically ordered immutable Values. The current image port is permanently named `image`; a valid entry is the sole image payload, allocation, readiness, and revision authority. |
-| `data` | Named scalar or structured outputs stored as a `plugin::ParameterMap`. |
+| `named_values` | Canonically ordered immutable Values. The current image port is permanently named `image`; every image or generic entry is the sole payload, allocation, readiness, and revision authority for that exact name. |
+| `data` | Named parameter-result scalars or structures stored as a `plugin::ParameterMap`; generic Values never enter this field. |
 | `space` | Spatial transform, scale, and ROI metadata. |
 | `debug` | Worker/device/timing/range diagnostics. Enabled CPU range inspection walks active scalar bytes through the canonical Value layout; padding is excluded and opaque device Values retain provider diagnostics. |
 
-Operators may return image data, named data, or both.
+Operators may return a canonical image Value, independently named generic
+Values, parameter results, or an authorized combination of those categories.
 
 Return shape is not authorization. Issue #130 freezes a
 `PlannedOutputAuthority` from the selected registered operation revision before
 execution: it carries the exact canonical-image requirement, exact named-data
-set, implementation/device identity, required DenseTensor/ImageFacet/Strided
-structure, and any trusted finite Graph or dirty extent. A normal result must
-match that plan exactly; missing, extra, malformed, wrong-name, wrong-facet,
-wrong-layout, wrong-identity, or wrong-extent output is rejected before its
-first formal Graph mutation. Full HP routes stage all computation in a Graph
-clone and publish the complete snapshot only after authorization, so an empty
-`NodeOutput` can never manufacture Whole validity or a cacheable completion.
+sets for generic Values and parameter results, implementation/device identity,
+required canonical-image DenseTensor/ImageFacet/Strided structure, and any
+trusted finite Graph or dirty extent. Each generic Value must retain valid
+revision/producer identity and valid nonempty indexed storage bindings; its
+representation/layout is either DenseTensor with Strided or Blocked layout, or
+ProviderDefined with ProviderDefined layout. Generic Values do not acquire an
+image-facet requirement. A normal result must match every category exactly;
+missing, extra, malformed, wrong-name, wrong-facet, wrong-layout,
+wrong-identity, or wrong-extent output is rejected before dependent release or
+the first formal Graph mutation. Supervised staging may retain exact Pending
+Values, but every formal boundary requires all declared Values to be Ready.
+Full HP routes stage all computation in a Graph clone and publish the complete
+snapshot only after authorization, so an empty `NodeOutput` can never
+manufacture Whole validity or a cacheable completion.
 
 Persistent `OutputPort::output_parameters` is an optional deep-owned
 `ParameterValue`. An empty optional means the document field was absent; an
@@ -196,7 +204,9 @@ For tiled `image_mixing`, a secondary input that requires crop/pad is
 materialized as a request-local `NodeOutput`: named data, spatial/debug
 provenance, and plugin-library lifetime are copied, while its image Value is
 replaced by aligned storage produced through kernel fill/copy primitives and
-sealed before the normalized output is exposed.
+sealed before the normalized output is exposed. “Named data” here includes
+generic named Values and parameter results without moving either category into
+the other.
 Resize and channel conversion remain local OpenCV algorithm calls. The
 normalization context owns these temporary outputs until every synchronous tile
 callback finishes; exact-shape inputs continue to borrow the upstream output.

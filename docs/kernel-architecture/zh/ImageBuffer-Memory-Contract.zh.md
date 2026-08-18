@@ -176,9 +176,12 @@ allocation-relative，因此 negative 或 nonzero logical origin 不会改变 st
 
 当前 ABI v2 tiled adapter 可以在 active grant 上创建一个 callback-local full-image
 `ImageBuffer` alias，因为 v2 无法编码 row-span capability。该 alias 不会被存储、不能活过
-callback return，并且是 DI-3 的具名删除边。CPU monolithic result 与 codec input 会通过
-plan/binding 路径复制。Opaque non-CPU plugin result 会成为 imported external Value binding，
-其 owner 保留 payload 与 DSO lifetime；它不会使 staging ImageBuffer 成为 runtime authority。
+callback return，并且是 DI-3 的具名删除边。由于 callback 返回 `void` 且只能 seal 这份
+canonical image binding，所有 tiled 注册面都会在 registry mutation 前拒绝
+`produces_image=false` 或任何 declared generic/parameter output。CPU monolithic result 与 codec
+input 会通过 plan/binding 路径复制。Opaque non-CPU plugin result 会成为 imported external
+Value binding，其 owner 保留 payload 与 DSO lifetime；它不会使 staging ImageBuffer 成为
+runtime authority。
 
 ## DI-1 普通 DenseImage 坐标与解释契约
 
@@ -246,10 +249,10 @@ ImageBuffer peer。Provider 不拥有独立 native lifecycle，不调用 `waitUn
 四，`FLOAT64` 也是已声明 scalar type，但这些事实不承诺每个 loader、operation、cache 或
 adapter 都提供端到端支持。
 
-该 payload 不是通用 graph value 模型。Operation result 会把具名非图像 value 保存在单独的
-data map 中；这些 value 与 opaque backend `context` 都不会让 `ImageBuffer` 变成任意 payload
-carrier。新增通用 value kind、rank/shape model、descriptor、handle 或 region 必须经过独立的
-带版本设计。
+该 payload 不是通用 graph value 模型。Operation result 会把 generic non-image Value 保存在
+`NodeOutput::named_values`，并把 parameter result 保存在独立 `data` map；这两个类别与 opaque
+backend `context` 都不会让 `ImageBuffer` 变成任意 payload carrier。新增 Value kind、
+representation、descriptor、handle 或 Region 必须经过独立的带版本设计。
 
 当前限制必须明确：
 
@@ -273,15 +276,18 @@ Deep Image 或 vector-scene value。通用 `Value`、descriptor、handle 和 reg
 进入 checked access plan。它不表示包围它的 `ComputeRun` 已提交 Graph state，也不表示
 缓存文件已写入或用户可见输出已经 durable。
 
-Readiness 也不会授权由 provider 选择的 output shape。Issue #130 要求精确 staged Value 匹配
-Host-frozen output plan：canonical name、descriptor、ImageFacet、layout、
-implementation/device identity 与任何可信 extent 都会独立于 fence 被校验。Dirty native
-producer 可以在该精确 Value 仍为 Pending 时返回它。Run 随后安装 non-inline、Run-scoped
-continuation，在不占用 worker 或释放 dependant 的情况下保持 owner 存活。只有相同
-revision/allocation/producer Value 进入 Ready state 后，才可继续 formal commit。Failed、
-ProducerCancelled、cancelled、stale 或 replaced state 会在不修改 Graph/RT 的情况下关闭；
-callback registration 与 retained-context drainage 会防止重复 terminal publication 或遗留
-callback owner。
+Readiness 也不会授权由 provider 选择的 output shape。Issue #130 要求精确 staged output 匹配
+Host-frozen authority：canonical image 保留 descriptor、ImageFacet、Strided layout、identity 与
+trusted-extent 校验；每个 declared generic Value 保留其精确 name、revision/producer identity、
+受支持 representation/layout 与每个非空 indexed `StorageBinding`，但不要求 image facet。
+Provider output 不能扩大任一 named category，也不能把 generic Value 移入 parameter data。有
+监督的 native producer 可以在精确 named Value 仍为 Pending 时返回它们。Run 随后安装
+non-inline、Run-scoped continuation，在不占用 worker 或释放 dependant 的情况下保持 owner
+存活，并确定性地串行衔接多个 Pending name。只有全部相同精确 publication 都进入 Ready 后，
+才可继续 formal commit；inline/sequential 与 direct formal dirty 路径会同步拒绝 Pending。
+Failed、ProducerCancelled、cancelled、stale 或 replaced state 会在不修改 Graph/RT 的情况下
+关闭；callback registration 与 retained-context drainage 会防止重复 terminal publication 或
+遗留 callback owner。
 
 当前 IPC image-result 路径会在私有 daemon `OutputStore` 中物化 tight-row CPU artifact，
 调用文件 `fsync`、执行禁止覆盖的原子 rename、重新校验文件系统 identity，并返回受进程级

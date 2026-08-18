@@ -869,12 +869,15 @@ void register_host_adapter_ops() {
           output.debug.compute_device = "host-adapter-resized-test";
           return output;
         }));
+    OpMetadata no_image_metadata;
+    no_image_metadata.produces_image = false;
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "no_image",
         MonolithicOpFunc(
             [](const Node&, const std::vector<const NodeOutput*>&) {
               return NodeOutput{};
-            }));
+            }),
+        std::move(no_image_metadata));
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "resource_exhausted",
         MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&)

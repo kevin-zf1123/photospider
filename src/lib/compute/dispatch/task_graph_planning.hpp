@@ -129,6 +129,8 @@ struct PlannedOutputAuthority {
   Device route_device = Device::CPU;
   /** @brief Required canonical image name, or absent for non-image routes. */
   std::optional<std::string> image_output_name;
+  /** @brief Sorted exact required generic Value names excluding `image`. */
+  std::vector<std::string> named_value_output_names;
   /** @brief Sorted exact required non-image parameter-result names. */
   std::vector<std::string> parameter_output_names;
   /** @brief Required representation for the canonical image Value. */
@@ -149,7 +151,8 @@ struct PlannedOutputAuthority {
  * @param route Coherent callback-free registry route.
  * @param resolved_extent Graph-inferred output extent; nonpositive dimensions
  * leave the image extent dynamic while preserving structural requirements.
- * @return Exact required image/data schema and structural image contract.
+ * @return Exact required image/generic/parameter schema and structural image
+ * contract.
  * @throws GraphError with ComputeError for an invalid route identity or an
  * inconsistent partially positive extent.
  * @throws std::bad_alloc when copied name storage cannot allocate.
@@ -164,8 +167,9 @@ PlannedOutputAuthority make_planned_output_authority(
  * @param output Provider or Host-produced request-local result.
  * @param authority Trusted exact output declaration from planning.
  * @param readiness Whether Pending may remain staged or Ready is mandatory.
- * @return Nothing after exact name, representation, descriptor/facet, shape,
- * layout, identity, and readiness validation succeeds.
+ * @return Nothing after exact category names, generic representation/layout,
+ * image descriptor/facet/shape/layout, identity, and readiness validation
+ * succeeds.
  * @throws GraphError with ComputeError for compatibility staging, missing,
  * extra, invalid, structurally mismatched, or disallowed-readiness output.
  * @throws std::logic_error or std::overflow_error only if a supposedly valid

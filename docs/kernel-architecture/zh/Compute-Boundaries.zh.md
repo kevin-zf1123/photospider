@@ -200,9 +200,12 @@ identity、创建 ReadyFence、调用 provider 或发布 Pending destination 前
 preparation boundary 不会收紧通用 native publisher 对 checked signed immutable alias 的支持。
 `TaskSubmissionPlan` 会先递增 completion，再注册 fence wait；生产 ReadyFence executor 会保留精确 Run、lease、
 task 与 ready-store route，把早到 callback 停放到原始 QueueEntry 与 grant 退役之后，并在所有
-continuation owner 退役前阻止 terminal settlement。成功 continuation 会重新验证规范 named
-Value，并在不创建 compatibility storage 的情况下释放 dependant；Failed、ProducerCancelled、
-stale 或 mismatched completion 不释放任何 dependant。
+continuation owner 退役前阻止 terminal settlement。成功 continuation 会重新验证 canonical
+named Value 与每个 declared generic named Value，并在不创建 compatibility storage 的情况下
+释放 dependant。多个 Pending name 会按 canonical 顺序等待，且全部精确 staged Value 必须在
+release 前为 Ready。Generic Value 会保留自身 representation 与 indexed binding identity，绝不
+进入 parameter data。Failed、ProducerCancelled、stale 或 mismatched completion 不释放任何
+dependant。
 
 V-13 会按 layout family 扩展同一条显式 task boundary，而不是引入隐式 conversion。Packed FP4
 source 会按照 version-1 Blocked producer envelope 校验：rank-matched 完整 quantization block、
@@ -942,8 +945,9 @@ Run-owned commit contender。该 claim 之前被接受的 cancellation 会使 Ru
 publication 使用 no-throw state swap，并保留 revision。Contender 会在 publication 后解析为
 `Succeeded`，或在 work item 返回前把精确 predicate/persistence failure 保留为 `Failed`。
 
-正式 image output validation 只接受 Ready 的规范 named Value，并拒绝任何非空
-`compatibility_image`。data-only successful target 保持有效，且不会发布伪造的 image identity。
+正式 output validation 只接受精确 declared canonical-image-plus-generic 集合中的 Ready Value，
+并拒绝任何非空 `compatibility_image`。Parameter result 会作为独立精确集合校验。Image-free
+successful target 保持有效，且不会发布伪造的 image identity。
 tiled/dirty task 共享一个 per-node binding；最后一个 executable tile retirement 并 seal 它，
 而 planning 保留精确覆盖 ROI 的 task dependency。非最终 tile 不释放其原始 edge。只有唯一的
 最终 publisher seal、finalize 并安装完整 request-local Value 后，dispatch 才会通过每个 sibling

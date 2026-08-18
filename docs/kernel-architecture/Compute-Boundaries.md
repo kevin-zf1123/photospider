@@ -251,8 +251,12 @@ the production ReadyFence executor retains the exact Run, lease, task, and
 ready-store route, parks an early callback until the original QueueEntry and
 grant retire, and keeps terminal settlement blocked until every continuation
 owner retires. A successful continuation revalidates the canonical named Value
-and releases dependants without creating compatibility storage. Failed,
-ProducerCancelled, stale, or mismatched completion releases none.
+plus every declared generic named Value and releases dependants without
+creating compatibility storage. Multiple Pending names are waited in canonical
+order, and all exact staged Values must be Ready before release. Generic Values
+retain their own representation and indexed binding identities and never enter
+parameter data. Failed, ProducerCancelled, stale, or mismatched completion
+releases none.
 
 V-13 extends the same explicit task boundary by layout family rather than by
 implicit conversion. A packed FP4 source is validated against the version-1
@@ -1225,9 +1229,11 @@ Graph/proxy publication is a no-throw state swap and preserves the revision.
 The contender resolves `Succeeded` after publication or preserves the exact
 predicate/persistence failure as `Failed` before the work item returns.
 
-Formal image output validation accepts only Ready canonical named Values and
-rejects any nonempty `compatibility_image`. Data-only successful targets remain
-valid and publish no fabricated image identity. Tiled/dirty tasks share one
+Formal output validation accepts only Ready Values across the exact declared
+canonical-image-plus-generic set and rejects any nonempty
+`compatibility_image`. Parameter results are checked as a separate exact set.
+Image-free successful targets remain valid and publish no fabricated image
+identity. Tiled/dirty tasks share one
 per-node binding; the last executable tile retires and seals it, while planning
 retains exact ROI-covered task dependencies. Nonfinal tiles do not release
 their original edges. Only after the unique final publisher seals, finalizes,

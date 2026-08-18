@@ -183,17 +183,20 @@ the RT-first gate, cancellation fan-out, and deterministic aggregate outcome.
 
 Issue #130 freezes output authority at that same planning boundary. The
 selected revision's `OperationMetadata` declares whether the exact canonical
-`image` output is required and the complete legal set of named parameter
-outputs. A `PlannedOutputAuthority` combines that declaration with the frozen
-implementation/device identity and, when known, the trusted Graph or dirty
-extent. Provider-returned names, descriptors, facets, layouts, or identities
-cannot expand the plan. Every route validates its staged `NodeOutput` before a
-dependent can observe it and validates again at formal commit. Full sequential
-and parallel HP work executes against a request-owned Graph clone; only a fully
-authorized result may replace live Graph state through the no-throw snapshot
-publication. Missing, extra, malformed, or mismatched output therefore leaves
-cache, Region, version, inspection, timing, and disk-persistence state
-unchanged.
+`image` output is required, the complete legal generic named-Value set, and the
+complete legal parameter-result set. A `PlannedOutputAuthority` combines that
+declaration with the frozen implementation/device identity and, when known,
+the trusted Graph or dirty extent. Provider-returned names, descriptors,
+facets, layouts, or identities cannot expand the plan. Generic Values remain
+separate from parameter data and do not inherit image-only facet/extent rules.
+Every route validates its staged `NodeOutput` before a dependent can observe
+it and validates again at formal commit. Supervised continuation may retain
+exact Pending named Values; inline/sequential and every formal boundary require
+Ready. Full sequential and parallel HP work executes against a request-owned
+Graph clone; only a fully authorized result may replace live Graph state
+through the no-throw snapshot publication. Missing, extra, malformed, or
+mismatched output therefore leaves cache, Region, version, inspection, timing,
+and disk-persistence state unchanged.
 
 `FullTaskGraphExpander` expands the raw graph into the full node/tile task graph
 for one compute domain. It does not depend on the request target, cache state,
@@ -708,17 +711,21 @@ completion handler before the final deadline observation, so the unsubmitted
 owner graph and all device leases unwind instead of becoming an invisible
 publication.
 
-A dirty native producer may return that canonical Value while its
-`ReadyFence` is Pending. `DirtyReadyTaskContext` then registers a non-inline
-continuation on the Run-scoped executor instead of blocking a worker or
-releasing dependencies. The callback rechecks the exact staged Value revision,
-allocation, producer, and Run identity. Only the matching Ready value proceeds
-through the same formal output-authority commit; Failed, ProducerCancelled,
-explicit Run cancellation, stale execution, or staged-value replacement fails
-closed with no dependency release and no Graph/RT mutation. Cancellation closes
-publication and cancels registrations outside the continuation mutex; logical
-task accounting remains worker-owned, while retained contexts keep callback
-owners alive until service settlement.
+A supervised native producer may return one or more declared named Values while
+their `ReadyFence` is Pending. Full parallel continuation or
+`DirtyReadyTaskContext` registers a non-inline wait on the Run-scoped executor
+instead of blocking a worker or releasing dependencies. Multiple Pending names
+are chained in canonical map order, with a replacement completion unit added
+before each next wait. Dirty callbacks recheck the exact staged name, revision,
+producer, representation, and every indexed `StorageBinding`; all paths rerun
+the frozen authority and require every declared Value to be Ready before
+dependent release or formal commit. Inline sequential and direct formal dirty
+paths have no such continuation and reject Pending synchronously. Failed,
+ProducerCancelled, explicit Run cancellation, stale execution, or staged-Value
+replacement fails closed with no dependency release and no Graph/RT mutation.
+Cancellation closes publication and cancels registrations outside the
+continuation mutex; logical task accounting remains worker-owned, while
+retained contexts keep callback owners alive until service settlement.
 
 ## Events and Timing
 

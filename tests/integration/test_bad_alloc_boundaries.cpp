@@ -934,7 +934,7 @@ TEST(ThresholdBadAllocBoundary,
                         std::move(parameters));
   ImageBuffer input = make_threshold_input();
   const std::vector<plugin::OperationInputView> inputs{
-      plugin::OperationInputView{&input, nullptr, nullptr}};
+      plugin::OperationInputView{&input, nullptr, nullptr, nullptr}};
 
   EXPECT_THROW((void)capture.operation(
                    node, plugin::ArrayView<plugin::OperationInputView>(inputs)),
@@ -962,7 +962,7 @@ TEST(ThresholdBadAllocBoundary,
                         std::move(parameters));
   ImageBuffer input = make_threshold_input();
   const std::vector<plugin::OperationInputView> inputs{
-      plugin::OperationInputView{&input, nullptr, nullptr}};
+      plugin::OperationInputView{&input, nullptr, nullptr, nullptr}};
 
   EXPECT_THROW((void)capture.operation(
                    node, plugin::ArrayView<plugin::OperationInputView>(inputs)),
@@ -993,7 +993,7 @@ TEST(ThresholdBadAllocBoundary,
                         std::move(parameters));
   ImageBuffer input = make_threshold_input();
   const std::vector<plugin::OperationInputView> inputs{
-      plugin::OperationInputView{&input, nullptr, nullptr}};
+      plugin::OperationInputView{&input, nullptr, nullptr, nullptr}};
   const plugin::OperationOutput output = capture.operation(
       node, plugin::ArrayView<plugin::OperationInputView>(inputs));
   EXPECT_EQ(output.image_buffer.width, 2);

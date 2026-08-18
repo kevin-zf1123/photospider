@@ -99,6 +99,26 @@ SpatialContext to_private_spatial(const plugin::SpatialSnapshot& spatial) {
 }
 
 /**
+ * @brief Copies only generic named Values from one private operation output.
+ * @param output Private output whose canonical map is inspected.
+ * @return Public generic map excluding the reserved canonical `image` entry.
+ * @throws std::bad_alloc when copied names, Value handles, or map nodes cannot
+ * allocate.
+ * @note Values retain their immutable identities and storage owners. The
+ * canonical image remains exposed solely through `OperationInputView`'s image
+ * projection, and parameter results remain outside this map.
+ */
+plugin::NamedValueMap copy_generic_named_values(const NodeOutput& output) {
+  plugin::NamedValueMap result;
+  for (const auto& [name, value] : output.named_values) {
+    if (name != NodeOutput::kImageOutputName) {
+      result.emplace(name, value);
+    }
+  }
+  return result;
+}
+
+/**
  * @brief Owns all storage behind one monolithic input view array.
  * @throws std::bad_alloc from recursive values or vector growth.
  * @note Vectors are reserved before pointers are installed, preventing pointer
@@ -107,7 +127,9 @@ SpatialContext to_private_spatial(const plugin::SpatialSnapshot& spatial) {
 struct OperationInputStorage {
   /** @brief Callback-local ImageBuffer projections retaining source Values. */
   std::vector<ImageBuffer> images;
-  /** @brief Owned public named-output snapshots. */
+  /** @brief Owned public generic named-Value snapshots. */
+  std::vector<plugin::NamedValueMap> named_values;
+  /** @brief Owned public parameter-result snapshots. */
   std::vector<plugin::ParameterMap> data;
   /** @brief Owned public spatial snapshots. */
   std::vector<plugin::SpatialSnapshot> spatial;
@@ -289,11 +311,13 @@ OperationInputStorage make_operation_inputs(
     const std::vector<const NodeOutput*>& inputs) {
   OperationInputStorage storage;
   storage.images.reserve(inputs.size());
+  storage.named_values.reserve(inputs.size());
   storage.data.reserve(inputs.size());
   storage.spatial.reserve(inputs.size());
   for (const NodeOutput* input : inputs) {
     if (!input) {
       storage.images.emplace_back();
+      storage.named_values.emplace_back();
       storage.data.emplace_back();
       storage.spatial.emplace_back();
       continue;
@@ -305,6 +329,7 @@ OperationInputStorage make_operation_inputs(
     } else {
       storage.images.emplace_back();
     }
+    storage.named_values.push_back(copy_generic_named_values(*input));
     storage.data.push_back(input->data);
     storage.spatial.push_back(to_public_spatial(input->space));
   }
@@ -318,6 +343,8 @@ OperationInputStorage make_operation_inputs(
     const bool has_image = has_image_payload(storage.images[index]);
     storage.views.push_back(plugin::OperationInputView{
         has_image ? &storage.images[index] : nullptr,
+        storage.named_values[index].empty() ? nullptr
+                                            : &storage.named_values[index],
         storage.data[index].empty() ? nullptr : &storage.data[index],
         &storage.spatial[index]});
   }
@@ -328,19 +355,27 @@ OperationInputStorage make_operation_inputs(
  * @brief Converts a complete public operation output to private storage.
  * @param output Public value moved out of plugin code.
  * @return Complete private output without a library lease.
- * @throws std::invalid_argument for an invalid image descriptor or spatial
- * snapshot.
+ * @throws std::invalid_argument for an invalid image descriptor, generic name
+ * or Value, reserved generic `image` entry, or spatial snapshot.
  * @throws std::logic_error when one provider returns both a public image and a
  * source-private pending device Value.
  * @throws std::bad_alloc unchanged from recursive map moves/copies.
  * @note The caller attaches its private DSO lease only after this conversion
  *       succeeds; during conversion the callback wrapper still retains it.
- *       Named values remain ParameterValue objects without format conversion.
+ * Generic Values preserve their exact immutable handles and remain distinct
+ * from ParameterValue data without format conversion.
  */
 NodeOutput operation_output_to_private(plugin::OperationOutput output) {
   validate_image_buffer(output.image_buffer);
   NodeOutput result;
   result.compatibility_image = std::move(output.image_buffer);
+  for (auto& [name, value] : output.named_values) {
+    if (name == NodeOutput::kImageOutputName) {
+      throw std::invalid_argument(
+          "Operation generic Value output cannot use reserved image name");
+    }
+    result.publish_named_value(name, std::move(value));
+  }
   result.data = std::move(output.data);
   result.space = to_private_spatial(output.spatial);
   result.debug.computed_by_worker_id = output.debug.computed_by_worker_id;
@@ -393,7 +428,9 @@ struct RoiInvocationStorage {
   plugin::NodeView node;
   /** @brief Callback-local image projections in ordered image-edge order. */
   std::vector<ImageBuffer> available_images;
-  /** @brief Available input named-output snapshots. */
+  /** @brief Available input generic named-Value snapshots. */
+  std::vector<plugin::NamedValueMap> available_named_values;
+  /** @brief Available input parameter-result snapshots. */
   std::vector<plugin::ParameterMap> available_data;
   /** @brief Available input spatial snapshots. */
   std::vector<plugin::SpatialSnapshot> available_spatial;
@@ -474,11 +511,13 @@ RoiInvocationStorage make_roi_invocation(
               return left.input_index < right.input_index;
             });
   storage.available_images.reserve(image_edges.size());
+  storage.available_named_values.reserve(image_edges.size());
   storage.available_data.reserve(image_edges.size());
   storage.available_spatial.reserve(image_edges.size());
   storage.edges.reserve(image_edges.size());
   for (const auto& edge : image_edges) {
     storage.available_images.emplace_back();
+    storage.available_named_values.emplace_back();
     storage.available_data.emplace_back();
     storage.available_spatial.emplace_back();
     plugin::InputEdgeView public_edge;
@@ -502,12 +541,17 @@ RoiInvocationStorage make_roi_invocation(
             value_image_adapter::project_image_value_for_abi_v2(
                 available->image_value());
       }
+      storage.available_named_values.back() =
+          copy_generic_named_values(*available);
       storage.available_data.back() = available->data;
       storage.available_spatial.back() = to_public_spatial(available->space);
       public_edge.has_available_input = true;
       const bool has_image = has_image_payload(storage.available_images.back());
       public_edge.available_input = plugin::OperationInputView{
           has_image ? &storage.available_images.back() : nullptr,
+          storage.available_named_values.back().empty()
+              ? nullptr
+              : &storage.available_named_values.back(),
           storage.available_data.back().empty()
               ? nullptr
               : &storage.available_data.back(),
@@ -523,6 +567,52 @@ RoiInvocationStorage make_roi_invocation(
   storage.output_extent = output_extent;
   storage.active_input_index = active_input_index;
   return storage;
+}
+
+/**
+ * @brief Copies, validates, and sorts one public output-name category.
+ * @param names Public generic-Value or parameter-result declaration.
+ * @param maximum_count Frozen maximum number of names in the category.
+ * @param generic_value True for generic named Values, false for parameters.
+ * @return Canonically sorted private name vector.
+ * @throws std::invalid_argument for excessive count, empty/oversized/NUL/
+ * reserved names, or duplicates.
+ * @throws std::bad_alloc when copying the vector or strings fails.
+ * @note The helper performs no registry mutation. Cross-category overlap is
+ * checked only after both independently validated vectors are available.
+ */
+std::vector<std::string> validated_public_output_names(
+    const std::vector<std::string>& names, std::size_t maximum_count,
+    bool generic_value) {
+  if (names.size() > maximum_count) {
+    throw std::invalid_argument(
+        generic_value
+            ? "Operation metadata declares too many generic Value outputs"
+            : "Operation metadata declares too many parameter outputs");
+  }
+  std::vector<std::string> result = names;
+  for (const std::string& name : result) {
+    if (name.empty() ||
+        name.size() > plugin::OperationMetadata::kOutputNameMaxBytes ||
+        name.find('\0') != std::string::npos ||
+        name == NodeOutput::kImageOutputName) {
+      throw std::invalid_argument(
+          generic_value
+              ? "Operation metadata contains a malformed or reserved generic "
+                "Value output name"
+              : "Operation metadata contains a malformed or reserved "
+                "parameter-output name");
+    }
+  }
+  std::sort(result.begin(), result.end());
+  if (std::adjacent_find(result.begin(), result.end()) != result.end()) {
+    throw std::invalid_argument(
+        generic_value
+            ? "Operation metadata contains duplicate generic Value output "
+              "names"
+            : "Operation metadata contains duplicate parameter-output names");
+  }
+  return result;
 }
 
 /**
@@ -680,27 +770,19 @@ OpMetadata operation_metadata_to_private(
   result.retained_memory_bytes = metadata.retained_memory_bytes;
   result.scratch_bytes = metadata.scratch_bytes;
   result.produces_image = metadata.produces_image;
-  if (metadata.parameter_output_names.size() >
-      plugin::OperationMetadata::kParameterOutputCountMax) {
-    throw std::invalid_argument(
-        "Operation metadata declares too many parameter outputs");
-  }
-  result.parameter_output_names = metadata.parameter_output_names;
-  for (const std::string& name : result.parameter_output_names) {
-    if (name.empty() ||
-        name.size() > plugin::OperationMetadata::kOutputNameMaxBytes ||
-        name.find('\0') != std::string::npos) {
-      throw std::invalid_argument(
-          "Operation metadata contains a malformed parameter-output name");
-    }
-  }
-  std::sort(result.parameter_output_names.begin(),
-            result.parameter_output_names.end());
-  if (std::adjacent_find(result.parameter_output_names.begin(),
+  result.named_value_output_names = validated_public_output_names(
+      metadata.named_value_output_names,
+      plugin::OperationMetadata::kNamedValueOutputCountMax, true);
+  result.parameter_output_names = validated_public_output_names(
+      metadata.parameter_output_names,
+      plugin::OperationMetadata::kParameterOutputCountMax, false);
+  if (std::find_first_of(result.named_value_output_names.begin(),
+                         result.named_value_output_names.end(),
+                         result.parameter_output_names.begin(),
                          result.parameter_output_names.end()) !=
-      result.parameter_output_names.end()) {
+      result.named_value_output_names.end()) {
     throw std::invalid_argument(
-        "Operation metadata contains duplicate parameter-output names");
+        "Operation metadata output categories contain overlapping names");
   }
   if (metadata.exclusive_key.size() >
       plugin::OperationMetadata::kExclusiveKeyMaxBytes) {

@@ -56,6 +56,7 @@ dependency hint 外，CPU execution contract 还包含：
 | `retained_memory_bytes` | 每个飞行中 callback 额外占用的 Host-retained byte；零是显式声明。 |
 | `scratch_bytes` | 每个飞行中 callback 额外占用的 Host scratch byte；零是显式声明。 |
 | `produces_image` | implementation 是否必须恰好返回一个规范 named `image` Value；默认 `true`。 |
+| `named_value_output_names` | 合法 generic named `Value` output 的完整精确集合；不包含 canonical image。 |
 | `parameter_output_names` | 合法 named parameter output 的完整精确集合；每个已声明 name 都必须出现，未声明 name 会被拒绝。 |
 | `exclusive_key` | 跨 implementation、Run 与 Graph 共享的可选 execution-domain exclusion key。 |
 
@@ -66,11 +67,20 @@ symbol 或 callback signature。已有 v2 DSO 必须针对匹配 SDK 重新构�
 stale-layout 或 compatibility interpretation。
 
 Output declaration 会与精确 callback 一起被 revision，而不是从 callback return 推导。
-`produces_image=false` 会显式描述 data-only producer 或 side-effect operation；它不会让任意
-image name 变为合法。最多可以声明 64 个 parameter-output name；每个 name 必须包含
-1..128 byte 且不能含 embedded NUL，duplicate 会被拒绝。Host 会在 registry publication 前
-排序并冻结精确集合，每个 operation adapter 都会保留该集合。此变更仅影响已经是 provisional
-状态的 C++ operation metadata layout；独立版本化的 pure-C provider 与 policy ABI 不变。
+`produces_image=false` 会显式描述 generic-only/parameter-only producer 或 side-effect
+operation；它不会让任意 image name 变为合法。两个 non-image category 各自最多包含 64 个
+name。每个 name 必须包含 1..128 byte 且不能含 embedded NUL；`image`、类别内 duplicate 与
+generic/parameter 跨类别 overlap 都会被拒绝。Host 会在 registry publication 前排序并冻结
+两个精确集合，每个 operation adapter 都会保留它们。此变更仅影响已经是 provisional 状态的
+C++ operation metadata layout；独立版本化的 pure-C provider 与 policy ABI 不变。
+
+当前 tiled callback 返回 `void`，且只接收 mutable canonical image grant。因此它只接受
+`produces_image=true` 且两个 non-image output-name vector 均为空。Legacy、HP、RT、
+device-specific、public、replacement 与 override 注册面都会在 key lookup、implementation-
+revision allocation、task-shape generation 变化或 registry/transaction mutation 前，以
+`std::invalid_argument` 拒绝所有不兼容 schema。Image-only tiled registration 仍合法。能够
+产生 generic 或 parameter 的 tiled callback 需要独立版本化的新 callback shape；不提供兼容
+shim。
 
 Canonical registry identity 为 `type:subtype`。两个 segment 都必须非空，且都不能包含保留分隔符 `:`，
 否则不同 pair 可能发生 identity collision。Public C++ registrar helper 还会在调用 `.c_str()` 前拒绝
@@ -84,11 +94,13 @@ Callback 边界与 host 实现解耦：
 
 - `NodeView` 暴露 callback 周期内借用的 identity string，以及深拷贝拥有的有效
   `ParameterValue` tree；它不暴露 `Node`、`YAML::Node`、cache state 或 graph/runtime owner。
-- `OperationInputView` 与 `OperationTileInputView` 只在 callback 期间借用不可变 image、named-data
-  与 spatial snapshot。
-- `OperationOutput` 拥有 image descriptor、named parameter value、spatial metadata 与 debug metadata；
-  named value 会在 `ParameterMap` storage 与 private `NodeOutput` 之间直接复制或移动；host
-  在附着 private DSO lease 前验证完整 output。
+- `OperationInputView` 将 canonical image、generic `NamedValueMap`、parameter-result data 与
+  spatial snapshot 作为相互独立的 callback-scoped field 借用；`OperationTileInputView` 仍只
+  包含 image/spatial。
+- `OperationOutput` 拥有 image descriptor、generic `NamedValueMap`、named parameter value、
+  spatial metadata 与 debug metadata。Host 将 generic Value 直接移动到
+  `NodeOutput::named_values`，绝不放入 `data`；并在附着 private DSO lease 前拒绝 invalid
+  Value 或保留的 generic `image` name。
 - `RoiContext` 暴露按输入顺序排列的 `InputEdgeView` topology snapshot；forward ROI callback 能识别
   active edge，dependency builder 返回 host 在缓存前验证的 owned `DependencyLutSnapshot`。
 - `ParameterTypeError` 报告 plugin code 内明确的 `ParameterValue` alternative mismatch。

@@ -218,10 +218,13 @@ does not alter storage view construction.
 The current ABI v2 tiled adapter may create one callback-local full-image
 `ImageBuffer` alias over an active grant because v2 cannot encode row-span
 capabilities. The alias is not stored, cannot outlive callback return, and is a
-named deletion edge for DI-3. CPU monolithic and codec inputs are copied through
-the plan/binding path. Opaque non-CPU plugin results become imported external
-Value bindings whose owner retains payload and DSO lifetime; they do not make
-the staging ImageBuffer a runtime authority.
+named deletion edge for DI-3. Because the callback returns `void` and can seal
+only this canonical image binding, every tiled registration surface rejects
+`produces_image=false` or any declared generic/parameter output before registry
+mutation. CPU monolithic and codec inputs are copied through the plan/binding
+path. Opaque non-CPU plugin results become imported external Value bindings
+whose owner retains payload and DSO lifetime; they do not make the staging
+ImageBuffer a runtime authority.
 
 ## DI-1 Ordinary DenseImage Coordinate and Interpretation Contract
 
@@ -304,10 +307,11 @@ contract. Its channel count is not structurally limited to four, and
 support by every loader, operation, cache, or adapter.
 
 This payload is not the generic graph value model. Operation results keep
-named non-image values in a separate data map; neither those values nor an
-opaque backend `context` turn `ImageBuffer` into an arbitrary payload carrier.
-Adding a general value kind, rank/shape model, descriptor, handle, or region
-requires a separate versioned design.
+generic non-image Values in `NodeOutput::named_values` and keep parameter
+results in the separate `data` map; neither category nor an opaque backend
+`context` turns `ImageBuffer` into an arbitrary payload carrier. Adding a new
+Value kind, representation, descriptor, handle, or Region requires a separate
+versioned design.
 
 Current limitations are explicit:
 
@@ -339,16 +343,21 @@ mean that the enclosing `ComputeRun` committed Graph state, that a cache file
 was written, or that a user-visible output is durable.
 
 Readiness also does not authorize a provider-selected output shape. Issue #130
-requires the exact staged Value to match a Host-frozen output plan: canonical
-name, descriptor, ImageFacet, layout, implementation/device identity, and any
-trusted extent are checked independently of the fence. A dirty native producer
-may return that exact Value while Pending. The Run then installs a non-inline,
-Run-scoped continuation that keeps the owner alive without occupying a worker
-or releasing dependants. Only the same revision/allocation/producer Value in
-Ready state may continue to formal commit. Failed, ProducerCancelled,
-cancelled, stale, or replaced state closes without Graph/RT mutation; callback
-registration and retained-context drainage prevent duplicate terminal
-publication or an abandoned callback owner.
+requires the exact staged output to match a Host-frozen authority: the
+canonical image keeps its descriptor, ImageFacet, Strided layout, identity,
+and trusted-extent checks; each declared generic Value keeps its exact name,
+revision/producer identity, supported representation/layout, and every indexed
+nonempty `StorageBinding`, without an image-facet requirement. Provider output
+cannot widen either named category or move a generic Value into parameter data.
+A supervised native producer may return exact named Values while Pending. The
+Run then installs non-inline, Run-scoped continuations that keep owners alive
+without occupying a worker or releasing dependants, chaining multiple Pending
+names deterministically. Only after the same exact publications are all Ready
+may formal commit proceed; inline/sequential and direct formal dirty paths
+reject Pending synchronously. Failed, ProducerCancelled, cancelled, stale, or
+replaced state closes without Graph/RT mutation; callback registration and
+retained-context drainage prevent duplicate terminal publication or an
+abandoned callback owner.
 
 The current IPC image-result path materializes a tight-row CPU artifact in the
 private daemon `OutputStore`, calls file `fsync`, atomically renames without

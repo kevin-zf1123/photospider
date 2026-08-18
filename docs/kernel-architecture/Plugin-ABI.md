@@ -67,6 +67,7 @@ contract contains:
 | `retained_memory_bytes` | Additional Host-retained bytes per in-flight callback; zero is an explicit declaration. |
 | `scratch_bytes` | Additional Host scratch bytes per in-flight callback; zero is an explicit declaration. |
 | `produces_image` | Whether the implementation must return exactly one canonical named `image` Value; defaults to `true`. |
+| `named_value_output_names` | Complete exact set of legal generic named `Value` outputs, excluding the canonical image. |
 | `parameter_output_names` | Complete exact set of legal named parameter outputs; every declared name is required and undeclared names are rejected. |
 | `exclusive_key` | Optional execution-domain exclusion key shared across implementations, Runs, and Graphs. |
 
@@ -80,13 +81,24 @@ SDK; no missing-tail, stale-layout, or compatibility interpretation exists.
 
 The output declaration is revisioned with the exact callback rather than
 inferred from its return. `produces_image=false` explicitly describes a
-data-only producer or side-effect operation; it does not make an arbitrary
-image name legal. At most 64 parameter-output names may be declared, each name
-must contain 1..128 bytes and no embedded NUL, and duplicates are rejected.
-The Host sorts and freezes the exact set before registry publication and every
-operation adapter preserves it. This changes only the already provisional C++
-operation metadata layout; the separately versioned pure-C provider and policy
-ABIs are unchanged.
+generic-only/parameter-only producer or side-effect operation; it does not
+make an arbitrary image name legal. Each non-image category is independently
+bounded to 64 names. Every name contains 1..128 bytes and no embedded NUL;
+`image`, duplicates within one category, and overlap between generic and
+parameter names are rejected. The Host sorts and freezes both exact sets
+before registry publication and every operation adapter preserves them. This
+changes only the already provisional C++ operation metadata layout; the
+separately versioned pure-C provider and policy ABIs are unchanged.
+
+The current tiled callback returns `void` and receives only a mutable canonical
+image grant. It therefore accepts exactly `produces_image=true` with both
+non-image output-name vectors empty. Legacy, HP, RT, device-specific, public,
+replacement, and override registration surfaces reject every incompatible
+schema with `std::invalid_argument` before key lookup, implementation-revision
+allocation, task-shape generation change, or registry/transaction mutation.
+Image-only tiled registration remains legal. A generic or parameter-producing
+tiled callback requires a separately versioned callback shape; there is no
+compatibility shim.
 
 The canonical registry identity is `type:subtype`. Both segments must be
 non-empty and neither may contain the reserved `:` separator, otherwise two
@@ -106,12 +118,14 @@ The callback boundary is host-independent:
 - `NodeView` exposes borrowed identity strings plus a deep-owned effective
   `ParameterValue` tree. It never exposes `Node`, `YAML::Node`, cache state, or
   a graph/runtime owner.
-- `OperationInputView` and `OperationTileInputView` borrow immutable image,
-  named-data, and spatial snapshots only for the callback duration.
-- `OperationOutput` owns its image descriptor, named parameter values, spatial
-  metadata, and debug metadata. Named values are copied or moved directly
-  between `ParameterMap` storage and the private `NodeOutput`; the host
-  validates the complete output before attaching the private DSO lease.
+- `OperationInputView` borrows the canonical image, a generic `NamedValueMap`,
+  parameter-result data, and spatial snapshots as separate callback-scoped
+  fields. `OperationTileInputView` remains image/spatial-only.
+- `OperationOutput` owns its image descriptor, generic `NamedValueMap`, named
+  parameter values, spatial metadata, and debug metadata. The host moves
+  generic Values directly into `NodeOutput::named_values`, never into `data`,
+  and rejects invalid Values or the reserved generic `image` name before
+  attaching the private DSO lease.
 - `RoiContext` exposes ordered `InputEdgeView` topology snapshots; forward ROI
   callbacks receive the active edge, and dependency builders return an owned
   `DependencyLutSnapshot` that the host validates before caching.

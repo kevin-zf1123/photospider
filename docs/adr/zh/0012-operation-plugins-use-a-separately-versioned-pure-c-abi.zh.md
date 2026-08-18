@@ -17,6 +17,12 @@ callback 会交换 `std::function`、standard-library value、public C++ object�
 allocator、RTTI 与 exception。Symbol 能检测一个期望 generation，却不能使 data boundary
 兼容 C 或在 C++ toolchain 之间可移植。
 
+在 v2 仍为 installed interface 期间，对其 provisional C++ record layout 的 corrective change
+只能采用 matching-SDK rebuild 要求；`register_photospider_ops_v2` symbol 标识 entry family，
+而不是 structure-layout fingerprint。因此 Issue #130 增加精确 generic named-Value 声明与
+public map，并使当前返回 `void` 的 tiled callback 拒绝 non-image-only schema。这既不会把
+missing tail 解释为兼容，也不实现目标 pure-C v1，且不增加 shim 或 dual layout。
+
 Photospider 另有两个独立 pure-C plugin family：
 
 - data-definition provider ABI v3 发布 Schema/Facet/Layout definition 与 bounded

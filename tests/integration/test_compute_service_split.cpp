@@ -398,6 +398,7 @@ std::vector<compute::PlannedNodeWork> make_explicit_image_output_plan(
  * @param metadata Base scheduling/resource metadata to preserve.
  * @param produces_image Whether canonical `image` is required.
  * @param parameter_names Exact legal non-image result names.
+ * @param generic_value_names Exact legal generic Value names excluding image.
  * @return Updated metadata ready for registry validation and sorting.
  * @throws std::bad_alloc when copied result names allocate.
  * @note The declaration describes callback behavior independently of any
@@ -405,8 +406,14 @@ std::vector<compute::PlannedNodeWork> make_explicit_image_output_plan(
  */
 OpMetadata declare_test_outputs(
     OpMetadata metadata, bool produces_image,
-    std::initializer_list<const char*> parameter_names) {
+    std::initializer_list<const char*> parameter_names,
+    std::initializer_list<const char*> generic_value_names = {}) {
   metadata.produces_image = produces_image;
+  metadata.named_value_output_names.clear();
+  metadata.named_value_output_names.reserve(generic_value_names.size());
+  for (const char* name : generic_value_names) {
+    metadata.named_value_output_names.emplace_back(name);
+  }
   metadata.parameter_output_names.clear();
   metadata.parameter_output_names.reserve(parameter_names.size());
   for (const char* name : parameter_names) {
@@ -440,6 +447,42 @@ NodeOutput make_image_output(int width, int height, int channels = 1,
 }
 
 /**
+ * @brief Publishes one Ready generic CPU DenseTensor without ImageFacet.
+ * @param value Byte-fill seed retained only to distinguish test revisions.
+ * @return Valid Ready one-dimensional DenseTensor Value.
+ * @throws DenseTensor validation, allocation, or publication exceptions
+ * unchanged.
+ * @note The missing ImageFacet is intentional: generic output authority must
+ * validate Value representation and identity without imposing image metadata.
+ */
+Value make_generic_dense_value(std::byte value = std::byte{0x13}) {
+  return Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{{4U},
+                            ElementSemantics::FloatingPoint,
+                            StorageEncoding{32U}},
+      std::nullopt, StridedLayout{{4}}, std::vector<std::byte>(16U, value));
+}
+
+/**
+ * @brief Publishes one Pending native generic DenseTensor without ImageFacet.
+ * @return Pending Value plus its unique source-private terminal producer.
+ * @throws std::invalid_argument, std::overflow_error, or std::bad_alloc from
+ * descriptor, binding, identity, or ownership construction.
+ * @note HostPinned CPU storage keeps the fixture deterministic while exercising
+ * the same native pending publication path used by device producers.
+ */
+PendingDeviceValuePublication make_pending_generic_dense_value() {
+  constexpr std::size_t kStorageSize = 16U;
+  auto owner = std::make_shared<std::array<std::byte, kStorageSize>>();
+  return PendingDeviceValuePublisher::publish_dense_tensor(
+      DenseTensorDescriptor{{4U},
+                            ElementSemantics::FloatingPoint,
+                            StorageEncoding{32U}},
+      std::nullopt, StridedLayout{{4}}, owner, owner.get(), owner->data(),
+      owner->size(), DeviceId(DeviceBackend::CPU), MemoryDomain::HostPinned);
+}
+
+/**
  * @brief Malformed and control results used by full-route admission tests.
  *
  * @throws Nothing for ordinary enum operations.
@@ -461,6 +504,83 @@ enum class FullRouteOutputFixture {
   /** @brief Publishes one valid canonical Host image matching the plan. */
   ValidHost,
 };
+
+/**
+ * @brief Malformed generic candidates used by exact authority regressions.
+ * @throws Nothing for ordinary enum operations.
+ * @note Every case also publishes a valid canonical image so rejection is
+ * attributable solely to the independent generic output category.
+ */
+enum class GenericRouteOutputFixture {
+  /** @brief Omits the declared `deep` Value. */
+  Missing,
+  /** @brief Adds undeclared `rogue` beside `deep`. */
+  Extra,
+  /** @brief Substitutes undeclared `latent` for `deep`. */
+  WrongName,
+  /** @brief Stores an invalid Value under the declared name. */
+  Invalid,
+  /** @brief Publishes the declared Value with a Failed fence. */
+  Failed,
+  /** @brief Publishes the declared Value after producer cancellation. */
+  ProducerCancelled,
+};
+
+/**
+ * @brief Builds one image-plus-generic provider candidate for rejection tests.
+ * @param fixture Exact malformed generic category to construct.
+ * @return NodeOutput with one valid 4-by-3 image and the selected generic map.
+ * @throws Value publication, pending-producer, or allocation exceptions
+ * unchanged.
+ * @note Invalid Values are inserted directly because `publish_named_value`
+ * correctly rejects them during assembly; the runtime validator must still
+ * fail closed against a malicious/private provider that constructs the public
+ * map member directly.
+ */
+NodeOutput make_generic_route_output_fixture(
+    GenericRouteOutputFixture fixture) {
+  NodeOutput output = make_image_output(4, 3, 1, 13.0f);
+  switch (fixture) {
+    case GenericRouteOutputFixture::Missing:
+      return output;
+    case GenericRouteOutputFixture::Extra:
+      output.publish_named_value("deep", make_generic_dense_value());
+      output.publish_named_value("rogue",
+                                 make_generic_dense_value(std::byte{0x14}));
+      return output;
+    case GenericRouteOutputFixture::WrongName:
+      output.publish_named_value("latent", make_generic_dense_value());
+      return output;
+    case GenericRouteOutputFixture::Invalid:
+      output.named_values.emplace("deep", Value{});
+      return output;
+    case GenericRouteOutputFixture::Failed: {
+      PendingDeviceValuePublication pending =
+          make_pending_generic_dense_value();
+      const Value value = pending.value;
+      if (!pending.producer.complete_failed(
+              ReadyFenceFailure(ReadyFenceFailureDomain::Producer, 130,
+                                "generic authority fixture failure"))) {
+        throw std::logic_error(
+            "Generic authority fixture could not fail its producer.");
+      }
+      output.publish_named_value("deep", value);
+      return output;
+    }
+    case GenericRouteOutputFixture::ProducerCancelled: {
+      PendingDeviceValuePublication pending =
+          make_pending_generic_dense_value();
+      const Value value = pending.value;
+      if (!pending.producer.cancel()) {
+        throw std::logic_error(
+            "Generic authority fixture could not cancel its producer.");
+      }
+      output.publish_named_value("deep", value);
+      return output;
+    }
+  }
+  throw std::logic_error("Unknown generic route output fixture.");
+}
 
 /**
  * @brief Builds one full-route provider result without consulting its plan.
@@ -504,6 +624,103 @@ NodeOutput make_full_route_output_fixture(FullRouteOutputFixture fixture) {
       return make_image_output(4, 3, 1, 4.0f);
   }
   throw std::logic_error("Unknown full-route output fixture.");
+}
+
+/**
+ * @brief Declares the provider-defined Value fixture used by authority tests.
+ * @param buffer Valid host-readable binding retained as provider buffer zero.
+ * @return Ready provider-defined Value retaining its provider generation.
+ * @throws Provider registry, validation, overflow, or allocation exceptions
+ * unchanged.
+ * @note The definition follows the provider ABI fixture callbacks below.
+ */
+Value make_metrics_provider_defined_value(BufferHandle buffer);
+
+/**
+ * @brief Proves a legal provider-defined generic Value needs independent
+ * revisioned output authority.
+ *
+ * @return Nothing; GoogleTest reports route admission, representation, or
+ * formal identity failures.
+ * @throws Registry, provider, runtime, graph, service, or allocation
+ * exceptions unchanged.
+ * @note This graph-backed regression intentionally declares no image or
+ * parameter result. The callback publishes `deep` in `named_values`; routing
+ * it through `NodeOutput::data` would invalidate the test's contract.
+ */
+TEST(ComputeOutputAuthority,
+     FullRouteCommitsDeclaredReadyProviderDefinedGenericValue) {
+  constexpr char kType[] = "issue130_generic_named_value_red";
+  constexpr char kSubtype[] = "provider_defined";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  const Value deep = make_metrics_provider_defined_value(
+      make_image_output(1, 1, 1, 13.0f).image_value().buffer_handle());
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc(
+          [deep](const Node&, const std::vector<const NodeOutput*>&) {
+            NodeOutput output;
+            output.publish_named_value("deep", deep);
+            return output;
+          }),
+      declare_test_outputs(OpMetadata{}, false, {}, {"deep"}));
+
+  const ScopedTestDirectory root(
+      std::filesystem::temp_directory_path() /
+      "photospider-issue130-generic-provider-defined-red");
+  GraphRuntime::Info info;
+  info.name = "issue130-generic-provider-defined-red";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  graph.add_node(make_node(1, kType, kSubtype));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    const NodeOutput* committed = nullptr;
+    if (parallel) {
+      EXPECT_NO_THROW(committed =
+                          &service.compute_parallel(graph, runtime, request));
+    } else {
+      EXPECT_NO_THROW(committed = &service.compute(graph, request));
+    }
+    ASSERT_NE(committed, nullptr);
+    ASSERT_EQ(committed->named_values.size(), 1U);
+    const auto deep_entry = committed->named_values.find("deep");
+    ASSERT_NE(deep_entry, committed->named_values.end());
+    const Value& actual = deep_entry->second;
+    EXPECT_EQ(actual.representation_kind(),
+              ValueRepresentationKind::ProviderDefined);
+    EXPECT_EQ(actual.revision_id(), deep.revision_id());
+    EXPECT_EQ(actual.producer_identity(), deep.producer_identity());
+    ASSERT_EQ(actual.buffer_count(), deep.buffer_count());
+    for (std::size_t index = 0U; index < actual.buffer_count(); ++index) {
+      EXPECT_EQ(actual.storage_binding(index).allocation,
+                deep.storage_binding(index).allocation);
+    }
+    EXPECT_TRUE(committed->data.empty());
+    EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
+  }
+  EXPECT_EQ(graph.node(1).hp_version, 2);
+  runtime.stop();
+  registry.unregister_key(make_key(kType, kSubtype));
 }
 
 /**
@@ -5918,6 +6135,472 @@ TEST(ComputeOutputAuthority,
 }
 
 /**
+ * @brief Proves malformed generic outputs cannot release dependent work or
+ * replace prior formal image/generic identities.
+ *
+ * @return Nothing; GoogleTest reports provider admission, dependency release,
+ * graph mutation, identity, Region, version, or resource residue failures.
+ * @throws Registry, runtime, graph, service, Value, pending-producer, or
+ * allocation exceptions unchanged outside expected GraphError boundaries.
+ * @note Each source has a revisioned image-plus-`deep` declaration and a prior
+ * complete formal output. Both sequential and parallel full routes execute a
+ * real two-node graph; the dependent callback is observable evidence that
+ * unauthorized generic results never release the edge.
+ */
+TEST(ComputeOutputAuthority,
+     FullRoutesRejectMalformedGenericValuesBeforeReleaseOrMutation) {
+  struct Case final {
+    /** @brief Unique registry subtype and trace label. */
+    const char* subtype;
+    /** @brief Malformed candidate returned by the source provider. */
+    GenericRouteOutputFixture fixture;
+  };
+  constexpr char kType[] = "issue130_generic_output_authority";
+  constexpr char kDependentSubtype[] = "dependent";
+  const std::array<Case, 6U> cases{{
+      {"missing", GenericRouteOutputFixture::Missing},
+      {"extra", GenericRouteOutputFixture::Extra},
+      {"wrong_name", GenericRouteOutputFixture::WrongName},
+      {"invalid", GenericRouteOutputFixture::Invalid},
+      {"failed", GenericRouteOutputFixture::Failed},
+      {"producer_cancelled", GenericRouteOutputFixture::ProducerCancelled},
+  }};
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+  auto dependent_entries = std::make_shared<std::atomic_int>(0);
+  registry.register_op_hp_monolithic(
+      kType, kDependentSubtype,
+      MonolithicOpFunc([dependent_entries](
+                           const Node&, const std::vector<const NodeOutput*>&) {
+        dependent_entries->fetch_add(1, std::memory_order_relaxed);
+        return make_image_output(4, 3, 1, 21.0f);
+      }));
+
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.subtype);
+    registry.unregister_key(make_key(kType, test_case.subtype));
+    registry.register_op_hp_monolithic(
+        kType, test_case.subtype,
+        MonolithicOpFunc(
+            [fixture = test_case.fixture](
+                const Node&, const std::vector<const NodeOutput*>&) {
+              return make_generic_route_output_fixture(fixture);
+            }),
+        declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-generic-reject-") +
+         test_case.subtype));
+    GraphRuntime::Info info;
+    info.name = std::string("issue130-generic-reject-") + test_case.subtype;
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node source = make_node(1, kType, test_case.subtype);
+    source.parameters["width"] = 4;
+    source.parameters["height"] = 3;
+    NodeOutput prior = make_image_output(4, 3, 1, 7.0f);
+    prior.publish_named_value("deep",
+                              make_generic_dense_value(std::byte{0x33}));
+    source.cached_output_high_precision = std::move(prior);
+    source.hp_region =
+        RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 3});
+    source.hp_version = 17;
+    Node dependent = make_node(2, kType, kDependentSubtype);
+    dependent.parameters["width"] = 4;
+    dependent.parameters["height"] = 3;
+    dependent.image_inputs.push_back(ImageInput{1, "image"});
+    dependent.cached_output_high_precision = make_image_output(4, 3, 1, 8.0f);
+    dependent.hp_region =
+        RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 3});
+    dependent.hp_version = 23;
+    graph.add_node(std::move(source));
+    graph.add_node(std::move(dependent));
+    graph.validate_topology();
+
+    const NodeOutput& old_source = *graph.node(1).cached_output_high_precision;
+    const ValueRevisionId old_image_revision =
+        old_source.image_value().revision_id();
+    const ValueRevisionId old_deep_revision =
+        old_source.named_values.at("deep").revision_id();
+    const ValueRevisionId old_dependent_revision =
+        graph.node(2).cached_output_high_precision->image_value().revision_id();
+    GraphTraversalService traversal;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                            testing::make_yaml_cache_metadata_codec()};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 2;
+    request.cache.precision = "float32";
+    request.cache.force_recache = true;
+    request.cache.disable_disk_cache = true;
+    dependent_entries->store(0, std::memory_order_relaxed);
+
+    for (const bool parallel : {false, true}) {
+      SCOPED_TRACE(parallel ? "parallel" : "sequential");
+      if (parallel) {
+        EXPECT_THROW((void)service.compute_parallel(graph, runtime, request),
+                     GraphError);
+      } else {
+        EXPECT_THROW((void)service.compute(graph, request), GraphError);
+      }
+      EXPECT_EQ(dependent_entries->load(std::memory_order_relaxed), 0);
+      ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+      const NodeOutput& current_source =
+          *graph.node(1).cached_output_high_precision;
+      EXPECT_EQ(current_source.image_value().revision_id(), old_image_revision);
+      ASSERT_EQ(current_source.named_values.size(), 2U);
+      EXPECT_EQ(current_source.named_values.at("deep").revision_id(),
+                old_deep_revision);
+      EXPECT_TRUE(current_source.data.empty());
+      EXPECT_EQ(graph.node(1).hp_version, 17);
+      EXPECT_EQ(
+          graph.node(1).hp_region,
+          RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 3}));
+      ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+      EXPECT_EQ(graph.node(2)
+                    .cached_output_high_precision->image_value()
+                    .revision_id(),
+                old_dependent_revision);
+      EXPECT_EQ(graph.node(2).hp_version, 23);
+      EXPECT_EQ(execution_service.resource_snapshot().reserved,
+                ResourceVector{});
+    }
+    runtime.stop();
+    registry.unregister_key(make_key(kType, test_case.subtype));
+  }
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+}
+
+/**
+ * @brief Proves canonical image and a non-image DenseTensor generic Value can
+ * commit together without category conflation.
+ *
+ * @return Nothing; GoogleTest reports route, category, representation,
+ * identity, extent, or publication failures.
+ * @throws Registry, runtime, graph, service, Value, or allocation exceptions
+ * unchanged.
+ * @note Both sequential and parallel routes freeze the same image-plus-`deep`
+ * declaration. The generic Value deliberately has no ImageFacet and never
+ * appears in `NodeOutput::data`.
+ */
+TEST(ComputeOutputAuthority, FullRoutesCommitCanonicalImageAndGenericValue) {
+  constexpr char kType[] = "issue130_generic_output_authority";
+  constexpr char kSubtype[] = "image_and_generic";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  const Value deep = make_generic_dense_value(std::byte{0x44});
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc(
+          [deep](const Node&, const std::vector<const NodeOutput*>&) {
+            NodeOutput output = make_image_output(4, 3, 1, 14.0f);
+            output.publish_named_value("deep", deep);
+            return output;
+          }),
+      declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-issue130-image-generic");
+  GraphRuntime::Info info;
+  info.name = "issue130-image-generic";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  Node node = make_node(1, kType, kSubtype);
+  node.parameters["width"] = 4;
+  node.parameters["height"] = 3;
+  graph.add_node(std::move(node));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    const NodeOutput& output =
+        parallel ? service.compute_parallel(graph, runtime, request)
+                 : service.compute(graph, request);
+    ASSERT_EQ(output.named_values.size(), 2U);
+    ASSERT_TRUE(output.has_image_value());
+    EXPECT_EQ(image_bounds_width(output.image_value().image_bounds()), 4U);
+    EXPECT_EQ(image_bounds_height(output.image_value().image_bounds()), 3U);
+    const Value& actual = output.named_values.at("deep");
+    EXPECT_EQ(actual.representation_kind(),
+              ValueRepresentationKind::DenseTensor);
+    EXPECT_FALSE(actual.image_facet().has_value());
+    EXPECT_EQ(actual.revision_id(), deep.revision_id());
+    EXPECT_TRUE(output.data.empty());
+  }
+  EXPECT_EQ(graph.node(1).hp_version, 2);
+  runtime.stop();
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves a parallel full route waits for every authorized Pending
+ * native generic Value before releasing its image dependent.
+ *
+ * @return Nothing; GoogleTest reports early dependency entry, graph mutation,
+ * identity replacement, readiness, chained-wait, or completion failures.
+ * @throws Registry, runtime, graph, service, future, pending-producer, or
+ * synchronization exceptions unchanged.
+ * @note The source image is Ready immediately while `latent-a` and `latent-b`
+ * remain independently Pending. Settling only the first must keep the real
+ * task edge blocked; formal publication preserves both native identities.
+ */
+TEST(ComputeOutputAuthority,
+     ParallelFullRouteWaitsForEveryPendingGenericBeforeDependentRelease) {
+  struct Probe final {
+    /** @brief Serializes pending publication and terminal producer handoff. */
+    std::mutex mutex;
+    /** @brief Announces that the source returned its pending candidate. */
+    std::promise<void> published;
+    /** @brief First immutable generic candidate for identity checks. */
+    Value first_value;
+    /** @brief Second immutable generic candidate for identity checks. */
+    Value second_value;
+    /** @brief Unique first native producer settled by the test. */
+    std::optional<PendingDeviceValueProducer> first_producer;
+    /** @brief Unique second native producer settled by the test. */
+    std::optional<PendingDeviceValueProducer> second_producer;
+  };
+
+  constexpr char kType[] = "issue130_generic_output_authority";
+  constexpr char kSourceSubtype[] = "pending_generic";
+  constexpr char kDependentSubtype[] = "pending_generic_dependent";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+  auto probe = std::make_shared<Probe>();
+  auto dependent_entries = std::make_shared<std::atomic_int>(0);
+  std::future<void> published = probe->published.get_future();
+  registry.register_op_hp_monolithic(
+      kType, kSourceSubtype,
+      MonolithicOpFunc([probe](const Node&,
+                               const std::vector<const NodeOutput*>&) {
+        PendingDeviceValuePublication first_publication =
+            make_pending_generic_dense_value();
+        PendingDeviceValuePublication second_publication =
+            make_pending_generic_dense_value();
+        NodeOutput output = make_image_output(4, 3, 1, 15.0f);
+        output.publish_named_value("latent-a", first_publication.value);
+        output.publish_named_value("latent-b", second_publication.value);
+        {
+          std::lock_guard<std::mutex> lock(probe->mutex);
+          probe->first_value = first_publication.value;
+          probe->second_value = second_publication.value;
+          probe->first_producer.emplace(std::move(first_publication.producer));
+          probe->second_producer.emplace(
+              std::move(second_publication.producer));
+        }
+        probe->published.set_value();
+        return output;
+      }),
+      declare_test_outputs(OpMetadata{}, true, {}, {"latent-a", "latent-b"}));
+  registry.register_op_hp_monolithic(
+      kType, kDependentSubtype,
+      MonolithicOpFunc([dependent_entries](
+                           const Node&, const std::vector<const NodeOutput*>&) {
+        dependent_entries->fetch_add(1, std::memory_order_release);
+        return make_image_output(4, 3, 1, 16.0f);
+      }));
+
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-issue130-pending-generic");
+  GraphRuntime::Info info;
+  info.name = "issue130-pending-generic";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  Node source = make_node(1, kType, kSourceSubtype);
+  source.parameters["width"] = 4;
+  source.parameters["height"] = 3;
+  Node dependent = make_node(2, kType, kDependentSubtype);
+  dependent.parameters["width"] = 4;
+  dependent.parameters["height"] = 3;
+  dependent.image_inputs.push_back(ImageInput{1, "image"});
+  graph.add_node(std::move(source));
+  graph.add_node(std::move(dependent));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  auto completion = std::async(std::launch::async, [&] {
+    return &service.compute_parallel(graph, runtime, request);
+  });
+  ASSERT_EQ(published.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  EXPECT_EQ(dependent_entries->load(std::memory_order_acquire), 0);
+  EXPECT_FALSE(graph.node(1).cached_output_high_precision.has_value());
+  EXPECT_FALSE(graph.node(2).cached_output_high_precision.has_value());
+
+  ValueRevisionId expected_first_revision;
+  ProducerIdentity expected_first_producer;
+  StorageBinding expected_first_binding;
+  ValueRevisionId expected_second_revision;
+  ProducerIdentity expected_second_producer;
+  StorageBinding expected_second_binding;
+  {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    ASSERT_TRUE(probe->first_value.valid());
+    ASSERT_TRUE(probe->second_value.valid());
+    ASSERT_TRUE(probe->first_producer.has_value());
+    ASSERT_TRUE(probe->second_producer.has_value());
+    expected_first_revision = probe->first_value.revision_id();
+    expected_first_producer = probe->first_value.producer_identity();
+    expected_first_binding = probe->first_value.storage_binding(0U);
+    expected_second_revision = probe->second_value.revision_id();
+    expected_second_producer = probe->second_value.producer_identity();
+    expected_second_binding = probe->second_value.storage_binding(0U);
+    ASSERT_TRUE(probe->first_producer->matches_pending_fence(
+        probe->first_value.ready_fence()));
+    ASSERT_TRUE(probe->second_producer->matches_pending_fence(
+        probe->second_value.ready_fence()));
+    ASSERT_TRUE(probe->first_producer->complete_ready());
+  }
+
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  EXPECT_EQ(dependent_entries->load(std::memory_order_acquire), 0);
+  {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    ASSERT_TRUE(probe->second_producer->complete_ready());
+  }
+
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW((void)completion.get());
+  EXPECT_EQ(dependent_entries->load(std::memory_order_acquire), 1);
+  ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+  const NodeOutput& source_output = *graph.node(1).cached_output_high_precision;
+  const Value& first = source_output.named_values.at("latent-a");
+  const Value& second = source_output.named_values.at("latent-b");
+  EXPECT_EQ(first.ready_fence().poll().state(), ReadyFenceState::Ready);
+  EXPECT_EQ(first.revision_id(), expected_first_revision);
+  EXPECT_EQ(first.producer_identity(), expected_first_producer);
+  EXPECT_EQ(first.storage_binding(0U), expected_first_binding);
+  EXPECT_EQ(second.ready_fence().poll().state(), ReadyFenceState::Ready);
+  EXPECT_EQ(second.revision_id(), expected_second_revision);
+  EXPECT_EQ(second.producer_identity(), expected_second_producer);
+  EXPECT_EQ(second.storage_binding(0U), expected_second_binding);
+  EXPECT_EQ(graph.node(1).hp_version, 1);
+  EXPECT_EQ(graph.node(2).hp_version, 1);
+  EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
+  runtime.stop();
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+}
+
+/**
+ * @brief Proves sequential formal publication rejects an otherwise authorized
+ * generic Value that remains Pending and preserves prior formal state.
+ *
+ * @return Nothing; GoogleTest reports unexpected acceptance, graph mutation,
+ * identity replacement, or resource residue.
+ * @throws Registry, runtime, graph, service, pending-producer, or allocation
+ * exceptions unchanged outside the expected GraphError boundary.
+ * @note Sequential execution has no asynchronous continuation. Its
+ * request-local candidate may pass staging but must fail the Ready-only formal
+ * gate.
+ */
+TEST(ComputeOutputAuthority,
+     SequentialFullRouteRejectsPendingGenericAtFormalBoundary) {
+  constexpr char kType[] = "issue130_generic_output_authority";
+  constexpr char kSubtype[] = "pending_generic_formal";
+  PendingDeviceValuePublication pending = make_pending_generic_dense_value();
+  const Value candidate = pending.value;
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc(
+          [candidate](const Node&, const std::vector<const NodeOutput*>&) {
+            NodeOutput output = make_image_output(4, 3, 1, 17.0f);
+            output.publish_named_value("deep", candidate);
+            return output;
+          }),
+      declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+  GraphModel graph("cache/issue130-pending-generic-formal");
+  Node node = make_node(1, kType, kSubtype);
+  node.parameters["width"] = 4;
+  node.parameters["height"] = 3;
+  NodeOutput prior = make_image_output(4, 3, 1, 18.0f);
+  prior.publish_named_value("deep", make_generic_dense_value(std::byte{0x55}));
+  node.cached_output_high_precision = std::move(prior);
+  node.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 3});
+  node.hp_version = 31;
+  graph.add_node(std::move(node));
+  graph.validate_topology();
+  const ValueRevisionId old_image_revision =
+      graph.node(1).cached_output_high_precision->image_value().revision_id();
+  const ValueRevisionId old_deep_revision =
+      graph.node(1)
+          .cached_output_high_precision->named_values.at("deep")
+          .revision_id();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  EXPECT_THROW((void)service.compute(graph, request), GraphError);
+  ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+  const NodeOutput& current = *graph.node(1).cached_output_high_precision;
+  EXPECT_EQ(current.image_value().revision_id(), old_image_revision);
+  EXPECT_EQ(current.named_values.at("deep").revision_id(), old_deep_revision);
+  EXPECT_EQ(graph.node(1).hp_version, 31);
+  EXPECT_EQ(graph.node(1).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 3}));
+  EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_TRUE(pending.producer.cancel());
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
  * @brief Proves a Host-sealed canonical image passes real full-route authority.
  *
  * @return Nothing; GoogleTest reports route, binding, shape, or publication
@@ -6261,6 +6944,182 @@ TEST(ComputeServiceSplit,
   EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed),
             calls_after_full + 2)
       << "each dirty request stabilizes its data-only producer exactly once";
+}
+
+/**
+ * @brief Proves direct HP dirty execution preserves an independently declared
+ * generic Value beside the canonical image.
+ *
+ * @return Nothing; GoogleTest reports dirty selection, exact name, identity,
+ * formal readiness, version, or resource-release failures.
+ * @throws Graph, registry, service, Value, or allocation exceptions unchanged.
+ * @note The initialization compute and subsequent dirty request use the same
+ * revisioned image-plus-`deep` declaration. Each provider entry publishes a
+ * fresh generic revision without routing it through parameter data.
+ */
+TEST(ComputeServiceDirectDirtyAdmission,
+     NonparallelHpDirtyCommitsCanonicalImageAndGenericValue) {
+  constexpr const char* kType = "issue82_direct_dirty";
+  constexpr const char* kSubtype = "issue130_image_generic";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  auto entries = std::make_shared<std::atomic_int>(0);
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc(
+          [entries](const Node& node, const std::vector<const NodeOutput*>&) {
+            const int generation =
+                entries->fetch_add(1, std::memory_order_relaxed) + 1;
+            NodeOutput output =
+                make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                  as_int_flexible(node.parameters, "height", 8),
+                                  1, static_cast<float>(generation));
+            output.publish_named_value(
+                "deep",
+                make_generic_dense_value(static_cast<std::byte>(generation)));
+            return output;
+          }),
+      declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+  compute::ExecutionService authority;
+  DirectDirtyComputeHarness harness(authority,
+                                    "issue130-hp-image-generic-dirty");
+  populate_direct_dirty_graph(harness.graph(), kSubtype);
+  ComputeService::Request full =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+  full.intent.reset();
+  full.dirty_roi.reset();
+  const NodeOutput& initial = harness.service().compute(harness.graph(), full);
+  ASSERT_TRUE(initial.has_image_value());
+  ASSERT_TRUE(initial.named_values.count("deep"));
+  const ValueRevisionId initial_image_revision =
+      initial.image_value().revision_id();
+  const ValueRevisionId initial_deep_revision =
+      initial.named_values.at("deep").revision_id();
+
+  const ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+  const NodeOutput& updated = harness.service().compute(harness.graph(), dirty);
+  ASSERT_EQ(updated.named_values.size(), 2U);
+  ASSERT_TRUE(updated.has_image_value());
+  ASSERT_TRUE(updated.named_values.count("deep"));
+  const Value& deep = updated.named_values.at("deep");
+  EXPECT_EQ(deep.ready_fence().poll().state(), ReadyFenceState::Ready);
+  EXPECT_EQ(deep.representation_kind(), ValueRepresentationKind::DenseTensor);
+  EXPECT_FALSE(deep.image_facet().has_value());
+  EXPECT_NE(updated.image_value().revision_id(), initial_image_revision);
+  EXPECT_NE(deep.revision_id(), initial_deep_revision);
+  EXPECT_TRUE(updated.data.empty());
+  EXPECT_EQ(entries->load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+  expect_direct_authority_settled(authority);
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves a nonparallel graph-backed HP dirty request rejects a Pending
+ * generic Value at its Ready-only formal boundary without graph mutation.
+ *
+ * @return Nothing; GoogleTest reports acceptance, graph mutation, readiness,
+ * version, or resource-release failures.
+ * @throws Graph, registry, service, producer, Value, or allocation exceptions
+ * unchanged outside the expected GraphError boundary.
+ * @note Initialization publishes a Ready image-plus-generic output. This
+ * direct nonparallel entry has no asynchronous fence continuation, so the
+ * dirty provider's Pending generic candidate must fail before commit.
+ */
+TEST(ComputeServiceDirectDirtyAdmission,
+     HpDirtyRejectsPendingGenericAtFormalBoundaryWithoutMutation) {
+  struct Probe final {
+    /** @brief Serializes pending Value and producer publication. */
+    std::mutex mutex;
+    /** @brief Announces that the dirty callback staged its Pending Value. */
+    std::promise<void> published;
+    /** @brief Exact immutable dirty candidate retained for identity checks. */
+    Value value;
+    /** @brief Unique source-private terminal producer. */
+    std::optional<PendingDeviceValueProducer> producer;
+    /** @brief Counts initialization and dirty provider entries. */
+    std::atomic_int entries{0};
+  };
+
+  constexpr const char* kType = "issue82_direct_dirty";
+  constexpr const char* kSubtype = "issue130_pending_generic";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  auto probe = std::make_shared<Probe>();
+  std::future<void> published = probe->published.get_future();
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc(
+          [probe](const Node& node, const std::vector<const NodeOutput*>&) {
+            const int entry =
+                probe->entries.fetch_add(1, std::memory_order_relaxed) + 1;
+            NodeOutput output =
+                make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                  as_int_flexible(node.parameters, "height", 8),
+                                  1, static_cast<float>(entry));
+            if (entry == 1) {
+              output.publish_named_value(
+                  "deep", make_generic_dense_value(std::byte{0x61}));
+              return output;
+            }
+            PendingDeviceValuePublication pending =
+                make_pending_generic_dense_value();
+            output.publish_named_value("deep", pending.value);
+            {
+              std::lock_guard<std::mutex> lock(probe->mutex);
+              probe->value = pending.value;
+              probe->producer.emplace(std::move(pending.producer));
+            }
+            probe->published.set_value();
+            return output;
+          }),
+      declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+  compute::ExecutionService authority;
+  DirectDirtyComputeHarness harness(authority,
+                                    "issue130-hp-pending-generic-dirty");
+  populate_direct_dirty_graph(harness.graph(), kSubtype);
+  ComputeService::Request full =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+  full.intent.reset();
+  full.dirty_roi.reset();
+  const NodeOutput& initial = harness.service().compute(harness.graph(), full);
+  const ValueRevisionId initial_image_revision =
+      initial.image_value().revision_id();
+  const ValueRevisionId initial_deep_revision =
+      initial.named_values.at("deep").revision_id();
+
+  const ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+  EXPECT_THROW((void)harness.service().compute(harness.graph(), dirty),
+               GraphError);
+  ASSERT_EQ(published.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_TRUE(harness.graph().node(1).cached_output_high_precision.has_value());
+  const NodeOutput& while_pending =
+      *harness.graph().node(1).cached_output_high_precision;
+  EXPECT_EQ(while_pending.image_value().revision_id(), initial_image_revision);
+  EXPECT_EQ(while_pending.named_values.at("deep").revision_id(),
+            initial_deep_revision);
+  EXPECT_EQ(harness.graph().node(1).hp_version, 1);
+
+  {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    ASSERT_TRUE(probe->value.valid());
+    ASSERT_TRUE(probe->producer.has_value());
+    EXPECT_EQ(probe->value.ready_fence().poll().state(),
+              ReadyFenceState::Pending);
+    ASSERT_TRUE(
+        probe->producer->matches_pending_fence(probe->value.ready_fence()));
+    ASSERT_TRUE(probe->producer->cancel());
+  }
+  EXPECT_EQ(harness.graph().node(1).hp_version, 1);
+  EXPECT_EQ(probe->entries.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+  expect_direct_authority_settled(authority);
+  registry.unregister_key(make_key(kType, kSubtype));
 }
 
 /**

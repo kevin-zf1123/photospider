@@ -112,16 +112,65 @@ void sort_unique_keys(std::vector<std::string>& keys) {
 }
 
 /**
+ * @brief Validates and sorts one exact operation output-name category.
+ *
+ * @param names Mutable generic-Value or parameter-result name vector.
+ * @param maximum_count Frozen maximum number of names in this category.
+ * @param generic_value True for generic named Values, false for parameters.
+ * @return Nothing after the vector is sorted into canonical order.
+ * @throws std::invalid_argument when the vector is null, exceeds its count
+ * limit, contains an empty/oversized/NUL/reserved name, or has duplicates.
+ * @note The reserved `image` name belongs only to `produces_image`. Sorting is
+ * completed before duplicate and cross-category validation and mutates no
+ * registry state.
+ */
+void validate_operation_output_names(std::vector<std::string>* names,
+                                     std::size_t maximum_count,
+                                     bool generic_value) {
+  if (names == nullptr) {
+    throw std::invalid_argument(
+        "Operation output-name validation requires input");
+  }
+  if (names->size() > maximum_count) {
+    throw std::invalid_argument(
+        generic_value
+            ? "Operation metadata declares too many generic Value outputs"
+            : "Operation metadata declares too many parameter outputs");
+  }
+  for (const std::string& name : *names) {
+    if (name.empty() || name.size() > OpMetadata::kOutputNameMaxBytes ||
+        name.find('\0') != std::string::npos ||
+        name == NodeOutput::kImageOutputName) {
+      throw std::invalid_argument(
+          generic_value
+              ? "Operation metadata contains a malformed or reserved generic "
+                "Value output name"
+              : "Operation metadata contains a malformed or reserved "
+                "parameter-output name");
+    }
+  }
+  std::sort(names->begin(), names->end());
+  if (std::adjacent_find(names->begin(), names->end()) != names->end()) {
+    throw std::invalid_argument(
+        generic_value
+            ? "Operation metadata contains duplicate generic Value output "
+              "names"
+            : "Operation metadata contains duplicate parameter-output names");
+  }
+}
+
+/**
  * @brief Validates bounded process-domain operation metadata.
  *
  * @param metadata Mutable metadata supplied by a core registration API.
- * @return Nothing.
- * @throws std::invalid_argument when an exclusive key or output name is empty,
- * too long, duplicated, contains an embedded NUL, or exceeds the bounded
- * declaration count.
+ * @return Nothing after both output categories are sorted canonically.
+ * @throws std::invalid_argument when an exclusive key is oversized or contains
+ * an embedded NUL, or an output declaration has excessive count, an
+ * empty/oversized/NUL/reserved name, duplicate, or cross-category overlap.
  * @note Public plugin metadata receives the same validation in the host
- *       adapter. Repeating it here prevents direct core registrations from
- *       publishing values that execution cannot identify unambiguously.
+ * adapter. Repeating it here prevents direct core registrations from
+ * publishing values that execution cannot identify unambiguously. No registry
+ * state is read or changed.
  */
 void validate_operation_metadata(OpMetadata* metadata) {
   if (metadata == nullptr) {
@@ -135,25 +184,37 @@ void validate_operation_metadata(OpMetadata* metadata) {
     throw std::invalid_argument(
         "Operation metadata exclusive key contains an embedded NUL");
   }
-  if (metadata->parameter_output_names.size() >
-      OpMetadata::kParameterOutputCountMax) {
-    throw std::invalid_argument(
-        "Operation metadata declares too many parameter outputs");
-  }
-  for (const std::string& name : metadata->parameter_output_names) {
-    if (name.empty() || name.size() > OpMetadata::kOutputNameMaxBytes ||
-        name.find('\0') != std::string::npos) {
-      throw std::invalid_argument(
-          "Operation metadata contains a malformed parameter-output name");
-    }
-  }
-  std::sort(metadata->parameter_output_names.begin(),
-            metadata->parameter_output_names.end());
-  if (std::adjacent_find(metadata->parameter_output_names.begin(),
+  validate_operation_output_names(&metadata->named_value_output_names,
+                                  OpMetadata::kNamedValueOutputCountMax, true);
+  validate_operation_output_names(&metadata->parameter_output_names,
+                                  OpMetadata::kParameterOutputCountMax, false);
+  if (std::find_first_of(metadata->named_value_output_names.begin(),
+                         metadata->named_value_output_names.end(),
+                         metadata->parameter_output_names.begin(),
                          metadata->parameter_output_names.end()) !=
-      metadata->parameter_output_names.end()) {
+      metadata->named_value_output_names.end()) {
     throw std::invalid_argument(
-        "Operation metadata contains duplicate parameter-output names");
+        "Operation metadata output categories contain overlapping names");
+  }
+}
+
+/**
+ * @brief Enforces the current canonical-image-only tiled callback schema.
+ *
+ * @param metadata Already validated and canonically sorted metadata.
+ * @return Nothing when exactly one canonical image and no other outputs are
+ * declared.
+ * @throws std::invalid_argument when image production is disabled or either
+ * generic named-Value or parameter-result outputs are declared.
+ * @note Every tiled registry entry point calls this before key construction,
+ * capture, revision allocation, generation increment, replacement, or
+ * insertion. Rejection therefore provides the strong no-mutation guarantee.
+ */
+void validate_tiled_operation_metadata(const OpMetadata& metadata) {
+  if (!metadata.produces_image || !metadata.named_value_output_names.empty() ||
+      !metadata.parameter_output_names.empty()) {
+    throw std::invalid_argument(
+        "Current tiled operations require an image-only output schema");
   }
 }
 
@@ -1165,6 +1226,7 @@ void OpRegistry::register_op(const std::string& type,
                              const std::string& subtype, TileOpFunc fn,
                              OpMetadata meta) {
   validate_operation_metadata(&meta);
+  validate_tiled_operation_metadata(meta);
   auto key = make_key(type, subtype);
   OpVariant legacy_replacement = fn;
   std::optional<OpImplementation> hp_replacement(
@@ -1353,6 +1415,7 @@ void OpRegistry::register_op_hp_tiled(const std::string& type,
                                       const std::string& subtype, TileOpFunc fn,
                                       OpMetadata meta) {
   validate_operation_metadata(&meta);
+  validate_tiled_operation_metadata(meta);
   auto key = make_key(type, subtype);
   std::optional<OpImplementation> replacement(
       std::in_place,
@@ -1375,6 +1438,7 @@ void OpRegistry::register_op_rt_tiled(const std::string& type,
                                       const std::string& subtype, TileOpFunc fn,
                                       OpMetadata meta) {
   validate_operation_metadata(&meta);
+  validate_tiled_operation_metadata(meta);
   auto key = make_key(type, subtype);
   std::optional<OpImplementation> replacement(
       std::in_place,
@@ -1692,6 +1756,7 @@ void OpRegistry::register_impl(const std::string& type,
   // 设置元数据中的设备偏好
   meta.device_preference = device;
   validate_operation_metadata(&meta);
+  validate_tiled_operation_metadata(meta);
   OpImplementation impl;
   impl.func = std::move(fn);
   impl.metadata = meta;

@@ -159,9 +159,16 @@ document boundary。
 ## V-3 Runtime Allocation 与 Revision Identity
 
 正式 HP `NodeOutput` 携带按规范顺序保存的 named Value。永久 `image` entry 是唯一 image
-payload/allocation/readiness/revision authority；正式 cache 不包含 ImageBuffer peer，并拒绝非空
-compatibility staging。复制正式 cache entry 会保留其 `AllocationIdentity` 与
-`ValueRevisionId`。
+payload/allocation/readiness/revision authority；每个 declared generic entry 都是对应 non-image
+Value authority，并与 `NodeOutput::data` 保持分离。正式 cache 不包含 ImageBuffer peer，并拒绝
+非空 compatibility staging。复制正式 cache entry 会保留每个 Value 的 revision、producer、
+representation、indexed storage binding 与 Ready state；provider-defined multi-buffer Value 不会
+被折叠成单一 image allocation identity。
+
+带 revision 的 generic-name vector 会参与 planned-route equality、implementation replacement 与
+task-graph cache identity。Retained-memory accounting 会核算 metadata/authority vector、string
+payload 与 `named_values` map node。物理 allocation byte 继续由现有 allocation/cache owner
+核算，不会作为 route metadata 再次计费。
 
 可变 dirty/tiled work 不能保留或暴露旧 authority。它会创建一个未发布的 Host binding，通过
 checked grant seed 保留的 byte，并在所有 executable grant retirement 后恰好一次完成 seal。
@@ -173,6 +180,8 @@ Disk save 要求 sealed Value，并从其 checked image view 派生临时 ImageB
 与 YAML format 仍只持久化 representation byte 与 named metadata：
 `AllocationIdentity` 和 `ValueRevisionId` 都不会被序列化、从 path 重建或用作持久 cache/task
 key。两类 token 都是 opaque、process-local runtime identity；disk reload 必然铸造新 token。
+这项 image-only mechanism 不会静默序列化 generic named Value，也不会把 parameter metadata
+转成 generic Value storage。
 
 ## V-4 Region Validity
 

@@ -21,6 +21,15 @@ allocators, RTTI, and exceptions. The symbol detects one expected generation;
 it does not make the data boundary C-compatible or portable between C++
 toolchains.
 
+While v2 remains installed, corrective changes may revise its provisional C++
+record layouts only under the matching-SDK rebuild requirement; the
+`register_photospider_ops_v2` symbol identifies the entry family, not a
+structure-layout fingerprint. Issue #130 therefore adds an exact generic
+named-Value declaration and public map, and rejects non-image-only schemas for
+the current `void` tiled callback. This neither treats a missing tail as
+compatible nor implements the target pure-C v1, and it adds no shim or dual
+layout.
+
 Photospider also has two independent pure-C plugin families:
 
 - data-definition provider ABI v3 publishes Schema/Facet/Layout definitions

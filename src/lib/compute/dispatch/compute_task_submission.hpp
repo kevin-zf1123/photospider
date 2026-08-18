@@ -292,7 +292,8 @@ class TaskSubmissionPlan {
   };
 
   /**
-   * @brief Defers dependency release when one task publishes a pending Value.
+   * @brief Defers dependency release when one task publishes a pending named
+   * Value.
    * @param task Registered task whose provider just returned.
    * @param identity Exact Run/local task identity.
    * @param lease Matching Run lease retained by the fence callback.
@@ -300,10 +301,13 @@ class TaskSubmissionPlan {
    * @return True when a pending Value continuation was registered.
    * @throws std::bad_alloc, runtime, fence-registration, or access errors.
    * @note Tiled Host output uses batched node release instead of this Value
-   * continuation. Other operations use the canonical Value ReadyFence. The
-   * method increments completion before registering the wait. Ready output
-   * returns false; Failed or ProducerCancelled state throws without releasing
-   * dependents. Terminal Run publication installs no wait.
+   * continuation. Other operations scan the exact canonical-plus-generic map
+   * and register the first Pending fence; continuation serially registers each
+   * remaining Pending fence in canonical name order, and formal validation
+   * requires every declared Value to be Ready before release. Each wait adds
+   * one completion unit before registration. Fully Ready output returns false;
+   * Failed or ProducerCancelled state throws without releasing dependents.
+   * Terminal Run publication installs no wait.
    */
   bool defer_pending_value(const PlannedTask& task,
                            const ComputeRunTaskIdentity& identity,
@@ -311,7 +315,8 @@ class TaskSubmissionPlan {
                            ExecutionTaskRuntime& task_runtime);
 
   /**
-   * @brief Completes one exact task after its pending Value becomes terminal.
+   * @brief Completes one exact task after its pending named Value becomes
+   * terminal.
    * @param identity Exact task identity previously moved to AwaitingValue.
    * @param lease Matching Run lease used for cancellation and dependent
    * release.
@@ -320,7 +325,9 @@ class TaskSubmissionPlan {
    * @return Nothing.
    * @throws ReadyFenceAccessError for failed/cancelled producer completion.
    * @throws GraphError or runtime exceptions from Value validation/release.
-   * @note ComputeRunLease owns the extra completion-unit retirement and failure
+   * @note The method either chains the next exact Pending fence or revalidates
+   * the complete output set as Ready before releasing dependents.
+   * ComputeRunLease owns the current completion-unit retirement and failure
    * publication around this method.
    */
   void complete_deferred_value(const ComputeRunTaskIdentity& identity,

@@ -525,16 +525,18 @@ class DirtyReadyTaskContext final
                ExecutionTaskRuntime& task_runtime);
 
   /**
-   * @brief Defers one task whose exact staged image remains Pending.
+   * @brief Defers one task whose exact staged named Value remains Pending.
    * @param task Planned task whose provider returned.
    * @param lease Matching Run observer.
    * @param task_runtime Runtime providing non-inline fence continuation.
    * @return True when a continuation owns an added completion unit.
    * @throws GraphError, ReadyFenceAccessError, or allocation/runtime errors
    * from output validation and wait registration.
-   * @note Ready or absent tiled staging returns false. Failed and
-   * ProducerCancelled fail closed. The exact pending Value identities are
-   * captured before registration.
+   * @note Ready or absent tiled staging returns false. Canonical image and
+   * generic names are scanned together; Failed and ProducerCancelled fail
+   * closed. The exact pending name and Value identities are captured before
+   * registration. Continuations chain remaining Pending names in canonical
+   * order, and every declared Value must be Ready before release.
    */
   bool defer_pending_value(const PlannedTask& task, ComputeRunLease& lease,
                            ExecutionTaskRuntime& task_runtime);
@@ -542,19 +544,22 @@ class DirtyReadyTaskContext final
   /**
    * @brief Completes one pending dirty Value after terminal fence delivery.
    * @param task_id Exact planned task left in AwaitingValue.
+   * @param expected_name Exact pending output name captured at registration.
    * @param expected_value Immutable pending Value captured at registration.
    * @param record Exact added completion-unit ownership record.
    * @param snapshot Terminal fence observation delivered asynchronously.
-   * @return Nothing after same-identity validation and dependent release.
+   * @return Nothing after same-identity validation and either the next
+   * Pending-name registration or dependent release.
    * @throws ReadyFenceAccessError for producer failure/cancellation.
    * @throws GraphError or runtime exceptions from identity, authority,
    * cancellation, or dependent publication.
-   * @note The method retires the dynamic completion unit exactly once on all
-   * paths and closes sibling waits before rethrowing a failure.
+   * @note The method retires the current dynamic completion unit exactly once
+   * on all paths, adds a replacement unit before chaining, and closes sibling
+   * waits before rethrowing a failure.
    */
   struct DeferredValueWait;
-  void complete_deferred_value(int task_id, Value expected_value,
-                               DeferredValueWait* record,
+  void complete_deferred_value(int task_id, std::string expected_name,
+                               Value expected_value, DeferredValueWait* record,
                                ReadyFenceSnapshot snapshot);
 
   /**
