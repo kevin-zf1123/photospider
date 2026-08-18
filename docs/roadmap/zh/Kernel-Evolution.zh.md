@@ -22,7 +22,7 @@ GitHub Project 和 Issue 跟踪。
 | Run 与进程执行域 | [compute-run-execution-domain](https://github.com/users/kevin-zf1123/projects/3) | [#64](https://github.com/kevin-zf1123/photospider/issues/64) | Request-owned `ComputeRun`、process-owned CPU execution、资源账本、graph revision、取消和 supersession。 |
 | 通用数据与异构执行 | [generic-data-heterogeneous-execution](https://github.com/users/kevin-zf1123/projects/4) | [#77](https://github.com/kevin-zf1123/photospider/issues/77) | `Value`、`DataDescriptor`、`BufferHandle`、`Region`、device queue、fence、transfer 和有界 compute I/O。 |
 | 执行画像与安全服务 | [execution-profiles-server-isolation](https://github.com/users/kevin-zf1123/projects/5) | [#91](https://github.com/kevin-zf1123/photospider/issues/91) | 交互/吞吐画像、独立 server control plane、受限 worker 和隔离插件执行。 |
-| 普通图像 Value 迁移 | [dense-image-value-migration](https://github.com/users/kevin-zf1123/projects/6) | [#128](https://github.com/kevin-zf1123/photospider/issues/128) | 普通图像先采用完整 `Value` metadata 与 Host-owned output authority，再删除过渡期 `ImageBuffer` 与 operation ABI v2 边界。 |
+| 普通图像 Value 迁移 | [dense-image-value-migration](https://github.com/users/kevin-zf1123/projects/6) | [#128](https://github.com/kevin-zf1123/photospider/issues/128) | 普通图像采用完整 `Value` metadata 与 Host-owned output authority；operation plugin 使用纯 C ABI v1，DI-4 负责最终 public `ImageBuffer` 删除。 |
 
 当前重构的合并门禁继续由
 [codebase-refactor](https://github.com/users/kevin-zf1123/projects/1) 跟踪，并由
@@ -467,7 +467,7 @@ ROI、dirty propagation、planning、cache 或 runtime interface。当前仓库�
 并发方向：使用可重入 `cv::Mat` callback，在发布前把 OpenCV 内部 CPU threading 固定为一，把
 外层并行交给 Host 已准入的 execution start，并让真实共享 backend 同步保持 provider-local。仓库自有
 operation algorithm、对应 OpenCV 初始化与异常翻译现已位于可独立开关的 provider module 中；
-provider-disabled profile 会证明 stdlib-only v2 provider 能提供并执行缺失 operation。Issue #63
+provider-disabled profile 会证明 stdlib-only ABI-v1 provider 能提供并执行缺失 operation。Issue #63
 让 image processing、codec、public adapter、provider/plugin 默认值与 embedded product 都由
 capability 选择。Dependency-disabled profile 不发现 OpenCV，并使用标准库或显式 unavailable
 adapter 构建真实 kernel aggregate 与 Host product。
@@ -486,8 +486,8 @@ Issue #62 让 runtime/cache value 纵向切片成为当前行为：共享 YAML c
 
 ## 通用数据与 Region
 
-当前 baseline：`ImageBuffer`、`DataType`、`Device`、`PixelRect`、`ParameterMap`、
-operation ABI v2 以及既有 cache/execution ownership 仍是已经实现的 compatibility contract。
+当前 baseline：`ImageBuffer`、`DataType`、`Device`、`PixelRect`、`ParameterMap` 以及既有
+cache/execution ownership 仍是已经实现的 compatibility contract。Operation plugin 使用纯 C ABI v1。
 V-2 实现了有界、dependency-neutral 的 CPU DenseTensor `Value`/`ImageView` 子集与一条内建
 operation。V-3 现已新增 checked BufferHandle ownership、由 lease 控制的 construction、
 process-local allocation/revision identity、受界限约束的 signed layout，以及 CPU image Value
@@ -623,7 +623,7 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
   组成的一个有界 nonempty conjunction、checked normalization/clipping/algebra/containment、
   显式 budget，以及 typed Exact/ConservativeSuperset/Unknown/Unsupported/TooComplex outcome；
 - dirty source、per-node、edge、monolithic 与 HP validity record 保留规范化 Region；当前 image
-  tile、ImageBuffer helper、Host/IPC v2 inspection 与 operation ABI v2 使用 checked derived
+  tile、ImageBuffer helper、Host/IPC v2 inspection 与 operation ABI v1 adapter 使用 checked derived
   PixelRect；
 - 当前选中的精确 core `invert_dense` callback 通过 checked stride 执行 ImageRect 或
   TensorSlice；TensorSlice 是 HP-only monolithic work，same-key plugin replacement 无法继承该
@@ -690,8 +690,9 @@ V-15 仍不含 public device registry、device queue/in-flight dimension、更�
 suite、通用 graph/cache Value persistence、manifest/chunk、deep-tiled/multipart/mixed-part OpenEXR，
 或通用 named graph Value output。Native
 executor、transfer submission、mutable producer、completion admission 与 residency owner
-仍是 source-private。ImageBuffer 仍是 operation ABI v2、tiled write、现有 image codec 与 Host
-surface 的 compatibility representation；V-15 不会让其 deep Value 经过这套表示。
+仍是 source-private。ImageBuffer 在 DI-4 前仍是 private tiled write、现有 image codec 与 public
+Host surface 的 compatibility representation；operation ABI v1 使用完整 Value/grant record，
+V-15 不会让其 deep Value 经过 ImageBuffer。
 
 `ElementSemantics`、`StorageEncoding` 与 `QuantizationSchema` 彼此独立。Describable、
 executable 与 convertible 支持也彼此独立，而且 conversion 始终显式。因此 FP64、任意
@@ -728,13 +729,13 @@ Public migration 会完整收口，而不是永久保留双重边界：
 ImageBuffer     -> Value + ImageFacet + ImageView
 PixelRect       -> RegionSet atom ImageRect
 Device          -> DeviceBackend + DeviceId + MemoryDomain
-OperationOutput -> named Value outputs
+Operation result -> named Value outputs
 ParameterMap    -> configuration only
 ```
 
-只有精确 record 与自有 consumer 已经存在后，operation plugin 才从临时 C++ ABI v2 迁移到
-ADR 0012 接受的独立版本化 pure-C operation-plugin ABI v1。完成边界会删除 v2，不保留永久
-wrapper、alias、forwarding header、dual loader 或 v2-to-v1 shim。Data-definition provider
+Operation plugin 已从临时 C++ registration generation 迁移到 ADR 0012 接受的独立版本化 pure-C
+operation-plugin ABI v1。完成边界删除 predecessor，不保留永久 wrapper、alias、forwarding
+header、dual loader 或 compatibility shim。Data-definition provider
 v3 与 policy ABI v1 仍是独立 family。
 
 ### Project 4 实现依赖契约
@@ -789,7 +790,7 @@ package 路径会发现 OpenEXR 并导入 provider MODULE。
 DI-1 是第一个依赖切片。它把 immutable data window、optional display window 与 dynamic
 `RegionSet` 保持为三项独立 authority；让 storage representability、quantization、declared
 sample domain、color 与 observed statistics 彼此独立；并冻结后续 output-plan、wire、artifact
-及 codec 工作所需的 bounded record。它刻意不删除 operation ABI v2 或 `ImageBuffer`，不迁移
+及 codec 工作所需的 bounded record。DI-1 本身刻意不删除当时的 operation 边界或 `ImageBuffer`，不迁移
 Host/IPC/worker/durable/CLI surface，不定义自动 color conversion，也不把 OpenEXR Deep
 provider-defined window 复用为普通 dense-image authority。DI-2 实现下一个内部切片；DI-3 与
 DI-4 仍是下游交付切片。
@@ -804,9 +805,9 @@ executable tile 会 seal 一个 Ready Value，且任何 partial binding 都不�
 
 私有 `NodeOutput`、full/dirty HP、RT proxy、formal/disk cache、extent、inspection、metrics 以及
 有界 statistics producer/cache 现在都从规范 named Value 派生 image fact。`image` 是永久的当前
-port；compatibility ImageBuffer staging 会在入站 adapter 处清除，并被正式 commit 拒绝。当前
-ABI v2、isolated execution、Host/IPC/worker、durable、CLI、codec 与最终 ImageBuffer 删除仍属于
-DI-3/DI-4。DI-2 不发布 pure-C ABI record，也不删除 v1/v2 loader。
+port；compatibility ImageBuffer staging 会在入站 adapter 处清除，并被正式 commit 拒绝。DI-3
+随后交付纯 C operation ABI v1 与 isolation protocol v2。Host/IPC/worker、durable、CLI、codec
+与最终 ImageBuffer 删除仍属于 DI-4；DI-2 本身不发布 ABI record。
 
 ## 异构 Executor
 
@@ -1320,53 +1321,34 @@ native code 在进程内安全执行。
 ### Issue #101 已接受的 operation ABI 决策
 
 [ADR 0012](../../adr/zh/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md)
-接受独立 operation-plugin ABI v1 目标。它既不是 data-provider-v3 suite，也不是 policy-v1
-演进。在后续一次 implementation 迁移每个仓库 plugin 与 installed consumer 并完整删除 v2 之前，
-当前 installed boundary 仍是 operation C++ ABI v2；不保留 wrapper、alias、dual loader、
-forwarding header 或 v2-to-v1 shim。
+接受独立 operation-plugin ABI v1。DI-3 现在把该决策实现为唯一 installed/loaded operation
+contract；它继续独立于 data-provider v3 与 policy v1。
 
-未来 self-contained C11/C++17 contract 具有 numeric ABI-one handshake、一个 exact 96-byte
-root API，以及独立 exact 64-byte v1 Definition、Configuration、Inference、Region、Dependency、
-Execution suite。Definition、Configuration、Inference、Region、Execution required；当 copied
-implementation metadata 声明 data dependence 时 Dependency required。只有 20 个 semantic
-record kind 携带 exact size/kind/version/flags。Plain identity、handle、byte view、digest、array
-reference、configuration value、axis range 不携带 record header；root/suite 使用各自 prefix。
-Reserved storage、pointer/count/stride framing 与全部 exact offset 都会检查。Unknown tail 与
-partial-prefix compatibility 会被拒绝。
+Self-contained C11/C++17 surface 具有 numeric ABI-one handshake、一个精确 96-byte root API、
+精确 64-byte Definition、Configuration、Inference、Region、Dependency、Execution suite，以及
+30 个精确 semantic record kind。它往返完整 DI-1 descriptor/facet/layout metadata 与 DI-2
+immutable output plan/callback-scoped Host grant。Reserved storage、pointer/count/stride framing、
+bound、identity、enum 与精确 offset 都会检查；unknown tail 与 partial prefix 被拒绝。
 
-Permanent 128-bit plugin/operation/implementation identity 与 Host-minted process-local
-generation/invocation handle 保持不同。Opaque plugin context 只 round-trip 到 defining generation。
-Input 在一次同步 call 中借用；metadata 与 sink output 会被验证并复制；Host 拥有 output buffer，
-不提供 allocator callback。成功 root/configured context 在精确 DSO lease 下得到一次 destroy
-attempt。Status 0 至 8 分别冻结 success、caller error、allocation failure、unsupported request、
-invalid descriptor、excessive complexity、cancellation、failed precondition、internal failure。
-Exception 不跨 DSO。
+Permanent plugin/operation/implementation identity 与 Host mint 的 generation、invocation、plan、
+binding、grant identity 保持不同。Borrowed pointer 只在 callback 中有效。Host 验证并复制 sink
+output，拥有 allocation/seal/publication，并保留精确 callback/context DSO lease。Replacement
+保留 atomic visibility、revision/predecessor restoration、middle-generation splice、reverse unload、
+in-flight lifetime 与 exactly-once context/generation destruction。
 
-V1 execution 有意限制为 synchronous、CPU-addressable。它不携带 native device handle、
-device-resident buffer、fence、completion owner、delayed sink、Graph/Run/scheduler/cache/resource
-authority 或 wire representation。Private device implementation 必须在 return 前 stage 到 Host
-CPU output，或保持在 Host-private adapter 后面。未来 native/async execution 使用新 suite/ABI
-决策。
+Trusted implementation 在进程内调用纯 C suite。Supervised implementation 只携带 signed
+runtime-package identity，并通过既有 `PluginInvocationExecutor` 与 isolation protocol v2 路由；
+没有 direct fallback，也不序列化 process pointer。Pure C 不会 sandbox trusted native code，
+`SIGKILL` 仍只能作为 memory-pressure-compatible evidence。
 
-Publication 保留当前 shadow transaction、atomic immutable slot visibility、per-slot revision/
-predecessor restoration、middle-generation splice、reverse retirement，以及精确 callback/context
-DSO lease。永不返回的 callback 可以永久保留这些 owner；pure C 不提供 bounded termination。
-Issue #102 现在已经实现其 pointer-free shared-memory/FD invocation record，Issue #103 已经实现
-authenticated private-session supervision 与基于事实的 crash/hang/signal/bad-output containment，
-Issue #104 已经为当前 operation/policy DSO 实现签名 admission，并为私有 isolated runtime 实现
-package/resource admission。这些控制既不完成 operation-ABI migration，也不增加通用 sandbox。
-`SIGKILL` observation 只表示 memory-pressure-compatible，不能证明 OOM。
-
-当这些中英文 artifact 通过本地验证、fresh 独立 diff 审核、经授权的 exact-head PR
-Integration、finding 已裁定的 fresh Codex exact-head review、zero unresolved review thread
-与 Issue/Project 行政门禁时，Issue #101 作为 decision 即完成。归档该 decision 与关闭 #101
-不等待后续 header/loader/plugin 迁移或 v2 删除；v2 仍为 current、v1 仍为 target-only 时，
-这些工作仍属于一次独立 breaking implementation change。
+该 breaking migration 同时删除 predecessor header、symbol、registrar/callback surface、loader
+lookup、component assertion、fixture 与 active documentation，不保留 wrapper、alias、dual loader、
+forwarding header 或 compatibility shim。
 
 ### Issue #102 当前 isolated CPU invocation 切片
 
-Issue #102 现在提供源码私有的 Darwin/Linux protocol-v1 CPU invocation adapter 与 one-call
-runtime endpoint。有界 framed Unix stream 承载 canonical request/response；有序
+Issue #102 提供源码私有 Darwin/Linux CPU invocation adapter 与 one-call runtime endpoint；
+DI-3 已把独立 wire 升级到 protocol v2。有界 framed Unix stream 承载 canonical request/response；有序
 `SCM_RIGHTS` descriptor 授予已 unlink 的 POSIX shared-memory capability。Wire 包含精确
 tenant/Job/attempt/worker-lease/plugin-generation/invocation identity tuple、operation key、
 immutable scalar parameter、capability/tensor descriptor、resource declaration、response status
@@ -1390,17 +1372,17 @@ Adapter 与 endpoint 会编入 installable product archive，该真实 exec inte
 两端链接 product archive。这是完整的 #102 product inclusion 纵向路径，不是已选择的终端用户
 路径：没有 `ExecutionService`、`WorkerManager`、embedded Host/CLI、
 `photospider-worker` 或其他 composition root 会调用它。范围更窄的
-`NonSupervisedIsolatedCpuInvocationExecutor` 仍是 pre-supervisor transport 子角色，而不是
-目标私有 `PluginInvocationExecutor`；后者通过 `PluginRuntimeSupervisor` 的组合属于 #103。
+`NonSupervisedIsolatedCpuInvocationExecutor` 仍是 #103 交付的私有
+`PluginInvocationExecutor`/`PluginRuntimeSupervisor` 组合内部 transport 子角色。
 
 每次调用都使用全新的 native exec，environment 为空，并且除 stdio 外只保留固定 control/status/
 executable descriptor。Issue #104 要求该直接入口先满足签名 package equality、Host ledger
 admission 与 exec 前 address-space/CPU/descriptor/core limit。直接调用时它仍有意保持 non-
 supervised：不包含 deadline、heartbeat、restart policy、有界 hang recovery 或通用 syscall/network
 sandbox，callback 可以无限期 hang。Issue #103 会组合下文独立 supervised path；non-supervised
-adapter 绝不作为其 fallback。Process-local callback seam 既不调用也不迁移当前 operation ABI v2
-或仍为目标态的 operation ABI v1；它不会新增 ABI compatibility wrapper、shim、adapter 或 dual
-loader。Cross-process GPU/native-handle support 仍是后续工作。
+adapter 绝不作为其 fallback。DI-3 只把 operation ABI v1 supervised CPU record 映射到该组合，
+不增加 compatibility wrapper 或 native-handle transport。Cross-process GPU/native-handle support
+仍是后续工作。
 
 ### Issue #103 当前 plugin runtime supervision 切片
 
@@ -1439,11 +1421,11 @@ output rejection、FD/PID 精确 retirement、后续健康恢复，以及真实 
 boundary。在该 boundary，原始 `PluginRuntimeFault` 到达 request owner，只有 owning Run 被发布
 为 Failed，固定 service worker 随后会执行无关 Run。
 
-这尚不是最终用户选择的 operation path。当前没有 `ExecutionService`、`WorkerManager`、
-embedded Host/CLI、`photospider-worker` 或 operation loader 会从 Graph operation 构造 isolated
-invocation。Operation ABI v2 无法跨越该 wire，仍为目标态的 ABI v1 既未实现也未通过 shim
-接入。Issue #104 现在为该私有组合提供 package trust 与 enforceable quota；更强 sandbox profile
-仍是独立工作。Issue #105 负责 network/artifact plane。Issue #106 现在维护两个手工 opt-in、
+DI-3 现在让 operation loader 从 supervised 纯 C ABI v1 descriptor 构造该 isolated invocation。
+它要求 signed runtime-package route，并禁止 direct trusted fallback。Public `ExecutionService`、
+`WorkerManager`、embedded Host/CLI 与 `photospider-worker` 仍不暴露最终用户 selector。Issue #104
+为该私有组合提供 package trust 与 enforceable quota；更强 sandbox profile 仍是独立工作。
+Issue #105 负责 network/artifact plane。Issue #106 现在维护两个手工 opt-in、
 调用生产 decoder 的 harness，分别覆盖有界 worker metadata 与 isolated invocation
 packet/descriptor，并维护已注册的确定性 codec regression。它还会让只用于观察的
 `(GraphSessionId, GraphRevision, RunId, RunLocalTaskId)` join 贯通 execution ring、Host page
@@ -1486,9 +1468,9 @@ limit setup failure。
 
 这会完成私有 Linux runtime 组合的 package/resource admission、Linux operation/policy loader 的
 签名 immutable-snapshot admission 与 mapping/capability 生命周期一致性，以及 Darwin 每个 native
-role 有类型的访问前拒绝。它不
-会选择最终用户 Graph operation、实现目标 operation ABI v1、隔离获批进程内
-DSO、提供通用 syscall/network sandbox，或从 `SIGKILL` 证明 OOM。
+role 有类型的访问前拒绝。在当时 Issue #104 的边界内，它不会选择最终用户 Graph operation、实现
+当时仍为目标态的 operation ABI v1、隔离获批进程内 DSO、提供通用 syscall/network sandbox，
+或从 `SIGKILL` 证明 OOM。
 
 当前 Issue #99/#100/#105 基线是源码私有的
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)。它冻结

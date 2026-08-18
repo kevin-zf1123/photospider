@@ -36,20 +36,20 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 | `photospider_graph_internal` | 仅用于构建的依赖中立 core operation source、`GraphModel`、registry behavior、graph IO、遍历、缓存、传播与 inspect 服务。 |
 | `photospider_yaml_adapter_internal` | 仅在 `PHOTOSPIDER_ENABLE_YAML=ON` 时存在的构建期 YAML adapter。它拥有共享 parameter-value translation、graph-document parsing/emission、cache-metadata parsing/emission 及其直接 filesystem 行为；格式中立的 GraphIO、Kernel、runtime 与 cache contract 不声明 parser value。 |
 | `photospider_opencv_operation_provider_internal` | 仅用于构建、可选的仓库 OpenCV CPU operation provider。它拥有 operation algorithm、OpenCV 进程初始化与 OpenCV 异常翻译，并且只在 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON` 时存在。 |
-| `photospider_plugin_host_internal` | 仅用于构建的 host-side operation plugin manager、configured-provider composition、v2 loader、value adapter 与 DSO lifetime owner。 |
+| `photospider_plugin_host_internal` | 仅用于构建的 Host-side operation plugin manager、纯 C ABI v1 loader/value adapter、supervised runtime router 与 DSO generation-lifetime owner。 |
 | `photospider_policy_internal` | 仅用于构建的进程 policy registry、纯 C ABI-v1 DSO loader、不可变 binding、sticky fault 与 DSO lease。 |
 | `photospider_execution_internal` | 仅用于构建的私有物理资源计账、execution-domain 支持、显式 CPU/Metal Value-transfer task、精确 completion identity 与进程级 residency。 |
 | `photospider_compute_internal` | 仅用于构建的 compute、dirty-region、runtime、interaction、event、固定 worker service、reserved-start 与私有 route 实现；它单向依赖 policy 和 execution internal。 |
 | `photospider_host_internal` | 仅用于构建的 Kernel/Interaction facade 与 embedded Host composition root。它根据 producer capability 选择真实 YAML persistence adapter 或显式 unavailable adapter。 |
 | `photospider_kernel` | 可构建的聚合 target，编译实际选中的 core、graph、operation-plugin、policy、execution、compute、Host 以及可选 provider/adapter 模块；它不是安装 artifact，也不是占位 library。 |
 | `photospider_operation_runtime` | 可安装的 public image-buffer factory、DenseTensor 与 provider-defined Value contract、Region algebra、ReadyFence、canonical extension metadata/digest 及注入式 data-definition registry 共享实现。它持有静态 Host 与每个 Value-using DSO 共用的唯一进程级 allocation/revision minting authority；不依赖 OpenCV、yaml-cpp、Graph、policy registry、native-device SDK 或 embedded product。 |
-| `photospider_operation_sdk` | operation v2 与 dependency-neutral data/memory header 的可安装 interface target；传递链接 `operation_runtime`。 |
+| `photospider_operation_plugin_sdk` | 携带纯 C operation ABI v1 C11 header 与 header-only C++17 helper 的可安装、dependency-neutral interface target。 |
 | `photospider_data_provider_sdk` | 只携带自包含纯 C data-definition provider ABI v3 头文件与 C11/C++17 requirement 的可安装、dependency-neutral interface target。 |
 | `photospider_openexr_deep_provider` | 仅在 `PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER=ON` 时构建的可选、可安装 MODULE provider。它实现 data-definition provider ABI v3 的 single-part deep-scanline OpenEXR candidate，链接 `data_provider_sdk` 与 `OpenEXR::OpenEXR`，并导出为 `Photospider::openexr_deep_provider`。 |
 | `photospider_openexr_deep_adapter` | 随 provider option 构建、供 Host composition 与长期 product test 使用的 source-private 可选 STATIC Host codec adapter。它链接 `operation_runtime` 与 `OpenEXR::OpenEXR`，既不安装也不导出。 |
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter，只使用 OpenCV `core` component；仅在 `PHOTOSPIDER_ENABLE_OPENCV=ON` 时存在。 |
 | `photospider_policy_sdk` | 携带自包含纯 C policy ABI header 与 C11/C++17 requirement 的可安装、无依赖 interface target。 |
-| `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`，由已启用的 CLI 和 embedded Host 前端链接。它导出 `Photospider::photospider`，在 OpenCV 与 YAML 均禁用时仍可构建；operation plugin 通过 `ps::plugin::OperationPluginRegistrar` 和 `register_photospider_ops_v2` 注册，而不是为了 registry 状态链接该产品。 |
+| `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`，由已启用的 CLI 和 embedded Host 前端链接。它导出 `Photospider::photospider`，在 OpenCV 与 YAML 均禁用时仍可构建；operation plugin 发布精确纯 C ABI v1 root/suite，绝不接收私有 registry state。 |
 | `photospider_ipc_client` | 已安装的 static typed Unix IPC client 与完整 IPC Host adapter。它导出 `Photospider::photospider_ipc_client`，实现全部 60 个 direct Client method 和当前全部 58 个 Host virtual，且不链接 backend，也不暴露 JSON/POSIX implementation type。 |
 | `photospider_ipc_server_internal` | 不安装的 bounded Unix listener、typed router，以及 private session/job/snapshot/output registry。它让所有 backend access 经由一个 daemon-owned Host 串行执行。 |
 | `photospiderd` | 已安装的 foreground macOS/Linux daemon，拥有一个 embedded Host、protected per-user socket/output store 与确定性的 joined shutdown。 |
@@ -108,19 +108,19 @@ Package 边界：
   只对仓库内部构建私有。在 build tree 中，该 target 的 generated public include root 只包含
   `photospider/` forwarding header。CMake 会跟踪 header 的新增和删除，wrapper 直接读取实时
   source header，不需要目录 symlink。
-- `Photospider::operation_runtime` 是唯一 installed shared library。
-  `Photospider::operation_sdk` 与 static embedded product 都链接该 target，因此独立加载且使用
-  Value 的 operation DSO 会调用同一个确定性 allocation/revision authority。其 installed
+- `Photospider::operation_runtime` 是唯一 installed shared library。Static embedded product 与
+  使用 Value 的 operation DSO 都显式链接该 target，因此独立加载的 Value 用户会调用同一个确定性
+  allocation/revision authority。其 installed
   `photospider/memory/ready_fence.hpp` surface 与实现只使用 C++ 标准库；source-private pending
   producer 与 transfer task 不会安装。该 runtime 不依赖 ELF/Mach-O symbol interposition，也不
   新增 package component。
 - `Photospider::data_provider_sdk` 是没有 link interface 的纯 interface producer target。
   C11 与 C++17 provider 只获得安装后的 include root；Host-side registry/Value consumer
   单独链接 `operation_runtime`。
-- Package component 包括 `embedded`、`ipc_client`、`data_provider_sdk`、`operation_sdk`、
+- Package component 包括 `embedded`、`ipc_client`、`data_provider_sdk`、`operation_plugin_sdk`、
   `operation_runtime`、`operation_opencv`、`openexr_deep_provider` 与 `policy_sdk`。省略
   component 时保留 embedded 默认行为，且不导入 provider。`data_provider_sdk`、
-  `policy_sdk`、`operation_sdk` 和 `operation_runtime` 不发现外部 package；
+  `policy_sdk`、`operation_plugin_sdk` 和 `operation_runtime` 不发现外部 package；
   `operation_opencv` 只发现 OpenCV `core`；`openexr_deep_provider` 只发现
   `OpenEXR::OpenEXR`；`ipc_client` 只解析 Threads。如果 optional `operation_opencv`
   discovery 找不到 OpenCV `core`，package 仍保持 found，
@@ -427,9 +427,9 @@ CPU、retained-memory、scratch、ready-entry 与 ready-byte vector。容量耗�
 `src/lib/providers/configured_operation_providers.cpp`；启用可选 provider 时，
 `src/lib/providers/opencv/` 下的实现会注册 OpenCV image algorithm，并拥有对应的 process policy
 与 exception translation。运行时插件示例位于 `plugins/ops/`；Metal operation 实现仅属于
-`plugins/ops/metal/`。Dynamic operation plugin 通过精确 v2 registrar，使用 `ps::plugin`
-snapshot 注册；public callback 不会获得可变 `Node`、`GraphModel`、`OpRegistry`、YAML tree
-或 private cache owner。
+`plugins/ops/metal/`。Dynamic operation plugin 先执行 numeric ABI-v1 discovery，再使用精确
+root 与 suite record。其 pure-C callback 只接收有界 configuration/input/plan/grant record，
+不会获得可变 `Node`、`GraphModel`、`OpRegistry`、YAML tree 或 private cache owner。
 
 ### 缓存模型
 
@@ -464,8 +464,8 @@ operation runtime 持有唯一进程级 minting authority；非零 identity toke
 `image_process:invert_dense` operation 会经过正常 core seeding、`OpRegistry` resolution 与
 `NodeExecutor` monolithic invocation 抵达这些 type。其 private callback bridge 会读取规范的
 named input Value，把 descriptor-only inference 与 stride-aware execution 分开，校验返回的
-完整 descriptor/facet/layout，并保留精确 result Value。当前 ABI v2 与 Host edge 只派生
-use-scoped ImageBuffer projection。
+完整 descriptor/facet/layout，并保留精确 result Value。Operation ABI v1 投影完整 Value 与
+Host-owned output grant；其余 public Host edge 在 DI-4 前仍可派生 use-scoped ImageBuffer projection。
 
 DI-2 使私有正式 HP、dirty、tiled、RT、extent、metrics 与 cache path 全部只使用 Value。
 `NodeOutput` 按规范顺序携带 named Value，并将 `image` 作为永久 image port；
@@ -473,8 +473,9 @@ DI-2 使私有正式 HP、dirty、tiled、RT、extent、metrics 与 cache path �
 allocation 前冻结完整 image fact、精确 storage、alignment 与 Region。Move-only whole/tile
 grant 预留经过检查且互不重叠的 span，并且必须全部 retirement 后才可完成一次 seal 和一次
 publication。sticky validation、retirement、exception 或 cancellation failure 会撤销所有
-grant，且不发布任何内容。Host 与 operation plugin ABI v2 会继续停留在当前 ImageBuffer
-compatibility 边界，直到 DI-3/DI-4，但 compatibility object 不会进入正式 cache state。
+grant，且不发布任何内容。Operation ABI v1 现在携带同一套不可变 plan 与 callback-scoped Host
+grant。DI-4 仍负责其余 public Host/IPC/worker/durable/codec/CLI ImageBuffer surface；
+compatibility object 不会进入正式 cache state。
 
 V-8 新增经过检查的 `DeviceId`、`MemoryDomain`、`StorageBinding`、native-allocation retention、
 producer identity 与显式 `AccessPlan`。Transfer 会创建不同的物理 replica，同时保留同一个逻辑
@@ -488,13 +489,9 @@ coordinator-to-manager 顺序，在 currentness 可观察前把精确发布的 g
 通过 Run-scoped continuation 重新进入既有
 `ExecutionService` ready store，因此 CPU worker 不会等待 Metal completion。Metal Perlin route
 会产生 pending native Value，并在下游 CPU access 前执行显式 asynchronous
-texture-to-buffer readback。Operation ABI v2 与 Host surface 仍使用 ImageBuffer compatibility
-value；V-8 不增加 public native-device context 或新 ABI slot。
-
-ABI v2 的 non-CPU result 会导入为一个 opaque external Value binding，其 owner 保留 plugin
-payload 与 DSO lease；随后清除其 ImageBuffer staging。因此，即使外围 `NodeOutput` 已退役，
-复制的 Value 仍然安全。CPU result 通过 Host binding 复制。两条路径都不会把 ImageBuffer
-identity 提升为 runtime authority。
+texture-to-buffer readback。Operation ABI v1 只支持同步 CPU，不暴露 native-device context 或
+asynchronous owner。其余 Host surface 在 DI-4 前仍可使用 ImageBuffer compatibility value；
+两条路径都不会把 ImageBuffer identity 提升为 runtime authority。
 
 V-14 在不改变 `ImageBuffer` 的前提下新增 provider-defined multi-buffer `Value` contract。
 一个注入式 `DataDefinitionRegistry` 会把完整 typed Schema/Facet/Layout bundle 解析为不可变
@@ -502,7 +499,7 @@ generation。通用 bounds check 先于 provider validation 和 revision minting
 保留选中的 `BufferHandle` 及该 generation。纯 property、DataSpec 与 Region callback 能看到
 metadata，但看不到 payload。系统安装 canonical descriptor/content/layout SHA-256 identity 与
 保留 byte 的 artifact envelope，但不会增加 provider-defined graph operation、cache policy、codec、
-OpenEXR path、operation ABI v2 slot 或 Host command。
+OpenEXR path、operation ABI extension slot 或 Host command。
 
 ### 脏区传播
 
@@ -546,7 +543,7 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   `GraphError`；若 OpenCV 报告资源耗尽，则翻译为新建的 `std::bad_alloc`。已准入 execution
   grant 拥有外层 callback parallelism，真实共享 backend state 则继续在对应 provider 内同步。
 - `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` 会省略这些 builtin image operation
-  callback，同时保留依赖中立 core operation。此时 v2 operation plugin 可以提供缺失 key。启用
+  callback，同时保留依赖中立 core operation。此时纯 C operation ABI v1 plugin 可以提供缺失 key。启用
   provider 时，同一 registration transaction 可以替换 active key，卸载后恢复 builtin
   predecessor。
 - 多 graph/intent 的内建 CPU work 会共享每个 embedded Host 的一个固定 `ExecutionService`。
@@ -589,7 +586,8 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   定义版本化 data、binding 与 Region 方向。其中 issue #79 至 #90 和 #117 已是当前行为。Issue #118
   已完成实现并通过独立验证。V-8 提供显式
   CPU/Metal transfer、保留 revision 的 replica、进程级 residency、精确 stale-completion
-  rejection 与 pending-Value continuation，且不改变 operation ABI v2。V-9 在唯一的 service
+  rejection 与 pending-Value continuation。DI-3 随后把 operation plugin 迁到完整纯 C ABI v1，
+  且不暴露 native-device ownership。V-9 在唯一的 service
   `ResourceLedger` 内新增原子 per-device memory/scratch plan、native actual-byte 校准，以及
   persistent/completion 生命周期 lease。V-13 新增一条 packed FP4/quantized 垂直路径。V-14
   新增纯 C definition-suite ABI、注入式 typed registry、provider-defined multi-buffer Value、

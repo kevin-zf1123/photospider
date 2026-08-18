@@ -167,7 +167,7 @@ Graph state.
 
 | Field | Meaning |
 | --- | --- |
-| `compatibility_image` | Inbound-only staging for operation ABI v2, codecs, and remaining legacy adapters. It must be cleared before formal commit and is never cache, allocation, readiness, or revision authority. |
+| `compatibility_image` | Inbound-only staging for codecs and remaining Host/legacy adapters. It must be cleared before formal commit and is never cache, allocation, readiness, or revision authority; operation ABI v1 uses complete Value/grant records. |
 | `named_values` | Canonically ordered immutable Values. The current image port is permanently named `image`; every image or generic entry is the sole payload, allocation, readiness, and revision authority for that exact name. |
 | `data` | Named parameter-result scalars or structures stored as a `plugin::ParameterMap`; generic Values never enter this field. |
 | `space` | Spatial transform, scale, and ROI metadata. |
@@ -313,7 +313,7 @@ propagation.
   Static/effective parameters, output-port configuration, and named operation
   outputs are `ParameterValue` trees. Logical dirty work and cache validity use
   normalized `RegionSet`; current image extents, physical tiles, Host/IPC v2
-  inspection, and operation ABI v2 use checked derived `PixelSize` and
+  inspection, and operation ABI v1 adapters use checked derived `PixelSize` and
   `PixelRect` values. In compute/dirty compatibility paths those rectangles are
   zero-based storage coordinates relative to the owning data window; they are
   never retained as logical metadata. Conversion to or from a signed logical
@@ -408,8 +408,9 @@ operation outcomes, and containment. `Node::hp_region` is validity metadata
 published with the one formal HP cache authority. Dirty source history,
 per-node state, monolithic work, and edge mappings retain Region; image-only
 tile rectangles are derived beside their source Region. The core dense invert
-path executes exact ImageRect or TensorSlice selections, while RT rejects
-TensorSlice and operation ABI v2 remains unchanged. Exact one-clause
+  path executes exact ImageRect or TensorSlice selections, while RT rejects
+  TensorSlice. Operation ABI v1 carries the bounded matching Region records.
+  Exact one-clause
 difference preserves every equal constrained-domain atom when only one
 compatible atom varies and the overlap removes one of its edges; differences
 that would split an atom or vary multiple domains remain typed `TooComplex`.
@@ -561,7 +562,7 @@ DataSpec, canonical-content, owner, and destroy callbacks. Pure callbacks
 receive descriptor/Layout/buffer metadata with every payload pointer cleared;
 validation and canonical-content traversal are the only semantic callbacks
 that receive payload in V-14. Access, mapping, transfer, conversion, inference,
-execution, native-device, and operation ABI v2 authority are absent.
+execution, native-device, and operation-plugin authority are absent.
 
 Borrowed ABI byte views are input-only. Each callback receives one Host-owned
 output sink; diagnostic and BYTES-property records declare scalar lengths, and

@@ -182,14 +182,16 @@ production path:
 Malformed caller input is `GraphErrc::InvalidParameter`; an unsupported or
 mismatched operation result is `GraphErrc::ComputeError`; `std::bad_alloc`
 propagates unchanged. The runner and compatibility adapter remain source-tree
-private. Operation ABI v2 and unconverted operations still use ImageBuffer;
-inbound results are normalized before private return and the formal HP cache
-stores only sealed named Values.
+private. Operation ABI v1 carries complete Value descriptor/facet/layout and
+Host-owned grant records. Unconverted internal/Host/codec paths may still use
+ImageBuffer; inbound results are normalized before private return and the
+formal HP cache stores only sealed named Values.
 
 ## DI-2 Host-Owned Output Authorization
 
-DI-2 adds no public `ImageBuffer` field and does not change operation ABI v2.
-It freezes one source-private `DenseImageOutputPlan` before allocation. The
+DI-2 added no public `ImageBuffer` field and froze one source-private
+`DenseImageOutputPlan` before allocation. DI-3 projects that same authority
+through exact pure-C operation ABI v1 plan and grant records. The private plan
 plan owns the canonical output name, complete DenseTensor/ImageFacet metadata,
 positive interleaved Strided layout, exact storage envelope, required
 power-of-two alignment, and full image Region. All extent, stride, row-span,
@@ -215,16 +217,12 @@ same pixels only after checked origin translation. Grant span offsets and
 strides remain allocation-relative, so a negative or nonzero logical origin
 does not alter storage view construction.
 
-The current ABI v2 tiled adapter may create one callback-local full-image
-`ImageBuffer` alias over an active grant because v2 cannot encode row-span
-capabilities. The alias is not stored, cannot outlive callback return, and is a
-named deletion edge for DI-3. Because the callback returns `void` and can seal
-only this canonical image binding, every tiled registration surface rejects
-`produces_image=false` or any declared generic/parameter output before registry
-mutation. CPU monolithic and codec inputs are copied through the plan/binding
-path. Opaque non-CPU plugin results become imported external Value bindings
-whose owner retains payload and DSO lifetime; they do not make the staging
-ImageBuffer a runtime authority.
+The current operation ABI v1 tiled adapter emits exact callback-scoped
+`OutputGrantSpan` rows over the active Host grant. It never transfers the
+builder, owner, allocator, or seal authority and accepts no out-of-plan row.
+CPU monolithic/tiled inputs and codec compatibility inputs are normalized at
+their explicit adapters. The synchronous CPU-only operation ABI exposes no
+opaque non-CPU result owner or native-device handle.
 
 ## DI-1 Ordinary DenseImage Coordinate and Interpretation Contract
 
@@ -561,8 +559,9 @@ current: the process executor retains transaction lifetime and budgets work,
 but does not change `ImageBuffer` or codec ABI. The V-12 I/O observation proves
 generic Value retention by an admitted task, not a lossless artifact format.
 Post-publication cache outcomes and durable output remain future.
-`ImageBuffer` remains the compatibility contract for operation ABI v2, tiled
-writes, existing image codecs, and Host surfaces; the V-15 adapter does not
+`ImageBuffer` remains the compatibility contract for private tiled writes,
+existing image codecs, and public Host surfaces until DI-4; operation ABI v1
+uses complete Value/grant records. The V-15 adapter does not
 route its provider-defined Value through that compatibility representation.
 
 Issue #94 keeps `ImageBuffer` and every installed memory contract unchanged.
@@ -617,7 +616,7 @@ operation ABI.
 - `include/photospider/memory/blocked_layout.hpp`
 - `include/photospider/data/region.hpp`
 - `include/photospider/memory/strided_layout.hpp`
-- `include/photospider/plugin/op_contract.hpp`
+- `include/photospider/plugin/operation_plugin_api.h`
 - `include/photospider/plugin/data_definition_registry.hpp`
 - `include/photospider/plugin/data_provider_api.h`
 - `src/lib/core/image_buffer.cpp`

@@ -129,8 +129,8 @@ classifier 只识别 producer 接受的精确 OpenCV component target 拼写：�
 `OpenCV::opencv_*` target，以及 `OpenCV::Core` 这类 component-specific CamelCase target；partial-name
 match 仍会被拒绝。验证证据来自真实 exported package/consumer 行为，而不是 synthetic verifier
 self-test。禁用 OpenCV discovery
-时，请求 `COMPONENTS operation_sdk OPTIONAL_COMPONENTS operation_opencv` 的 consumer 必须让
-package 与 `operation_sdk` 保持 found，将 `operation_opencv` 标记为 not found，导入无依赖的
+时，请求 `COMPONENTS operation_plugin_sdk OPTIONAL_COMPONENTS operation_opencv` 的 consumer 必须让
+package 与 `operation_plugin_sdk` 保持 found，将 `operation_opencv` 标记为 not found，导入无依赖的
 SDK/runtime target，并且不导入 `Photospider::operation_opencv`。在相同条件下 required
 `operation_opencv` 必须使 package discovery 失败。OpenCV 可用时，adapter consumer 仅通过 OpenCV
 `core` component 导入该 target，并且不会发现无关 package。
@@ -197,7 +197,7 @@ producer cache identity、configuration、完整 capability profile 与已构建
 target 后才可复用该 producer。
 同一个 external project 还会请求 `data_provider_sdk`，验证其 interface 不含 link dependency，
 并根据安装后的 header 分别构建采用精确名称的 C11 与 C++17 v3 definition producer，再将二者
-分别通过 `Photospider::operation_sdk` 链接进独立的 C++ Host consumer。每个 consumer 都会从
+分别通过 `Photospider::operation_runtime` 链接进独立的 C++ Host consumer。每个 consumer 都会从
 active snapshot 派生一份 Schema/Facet/Layout 三字段 manifest，发布 compact 与 repacked 两种
 形式的有界三 buffer provider-defined Value，编译 output-sink/diagnostic/property layout
 assertion，并执行纯 property、DataSpec 与 Region callback。每个 producer 都会从
@@ -525,7 +525,7 @@ inventory、拒绝 `compute.cancel`、round-trip 每个 version-two status label
 `cancellable: false`；`test_compute_request_registry` 固定 daemon job snapshot；
 `test_policy_registry` 固定事务型 ABI-v1 load rejection、由 binding 保持的 DSO lifetime 与首个
 fault stability；`StaticProductConsumerSmoke` 则会编译并运行已安装的 58-virtual Host、60-call
-Client、operation ABI v2 与纯 C policy ABI v1 consumer。这些测试不得为该私有变更新增
+Client、纯 C operation ABI v1 与纯 C policy ABI v1 consumer。这些测试不得为该私有变更新增
 compatibility cancellation shim。
 
 可用以下命令执行 focused cancellation boundary：
@@ -661,12 +661,13 @@ pending Value dependency deferral、无需等待 producer 即可退役 continuat
 绝不释放 dependent work 的 typed stale failure。这些 case 使用 gate 和 future，不含 timing sleep。
 
 `test_cli_policy_execution_config` 固定事务型 policy/execution config parsing 与精确 Host
-application。`test_host_adapter` 会加载真实 operation ABI-v2 与纯 C policy ABI-v1 fixture，配置两种
-extension、验证其 snapshot，并通过私有 CPU route 完成 compute。`GraphCliPluginComputeSmoke`
+application。`test_host_adapter` 会加载真实纯 C operation ABI-v1 与纯 C policy ABI-v1 fixture，
+配置两种 extension、验证其 snapshot，并通过私有 CPU route 完成 compute。`GraphCliPluginComputeSmoke`
 会通过真实 REPL 重复这条纵向路径。`test_ipc_protocol` 与 `test_ipc_daemon` 负责 protocol-v2
 routing、process-owned policy state、会改变 generation 的 replacement、scan 与共享 execution
-default。`StaticProductConsumerSmoke` 会独立构建已安装的 C11 policy DSO 与 C++ operation DSO，
-再执行同一条 external-consumer path。
+default。`StaticProductConsumerSmoke` 会独立构建已安装的 C11/C++17 operation ABI consumer 与
+C11 policy DSO，再执行同一条 external-consumer path。Operation consumer 会断言全部精确 v1
+record 布局，并且只导出数字/root 两个纯 C discovery symbol。
 
 Installed Host、CLI 与 IPC protocol-v2 surface 仍不暴露 cancellation command。IPC 继续拒绝
 `compute.cancel` 并发布 `cancellable: false`；supersession 仍是私有 embedded-kernel 行为，不是
@@ -1123,7 +1124,7 @@ provider 或 native device SDK。
 `test_optional_opencv_operation_provider` 是针对两种 provider 配置构建并注册到 CTest 的
 integration binary。在普通配置中，它会 seed 仓库 OpenCV provider，执行真实 resize callback，
 证明无效 OpenCV matrix shape 会被翻译为 host-owned `GraphErrc::ComputeError`，再加载一个
-stdlib-only v2 provider，使其完整拥有 resize 的 execution/dirty/forward slot，执行 replacement
+stdlib-only ABI-v1 provider，使其完整拥有 resize 的 execution/dirty/forward slot，执行 replacement
 sentinel output，卸载该 provider，最后执行已恢复的 OpenCV predecessor。
 
 `test_opencv_operation_provider_exceptions` 在独立进程中运行，因此第一次 provider 初始化尝试

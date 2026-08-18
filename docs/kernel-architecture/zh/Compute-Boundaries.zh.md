@@ -15,14 +15,13 @@ transport 或进程级 operation plugin
 `maximum_parallelism` 作为 Run 上限；它不能调整进程 executor 的大小，也不能选择该 executor。
 逻辑 dirty work 与 cache validity 在 planning、staging 和 Region-aware core dense path 中
 保持为规范化 `RegionSet`。当前 image tile shape、Host/IPC v2 inspection、ImageBuffer helper
-与 operation ABI v2 使用 checked derived `PixelRect`/`PixelSize`。私有 dirty/tile
+与 operation ABI v1 adapter 使用 checked derived `PixelRect`/`PixelSize`。私有 dirty/tile
 PixelRect 是零基 storage geometry；逻辑 Region 与 Host grant 使用有符号 data-window domain。
 跨越这条边界必须先做 containment，再进行 checked origin subtraction/addition。OpenCV geometry 只存在于
 provider 或算法实现内部，并且位于真正消费它的 library call 处。
 
 [ADR 0012](../../adr/zh/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md)
-还冻结了已接受的 operation-plugin ABI v1 目标。本文中的目标段落均有明确标记，不会覆盖
-上述当前 v2 事实，也不表示已经安装 v1 loader。
+定义已实现的纯 C operation ABI v1、Host-owned output grant 与 trusted/supervised routing 边界。
 
 ## 所有权图
 
@@ -139,11 +138,12 @@ Compute collaborator 位于 `src/lib/compute/`；ledger 与 Graph route binding 
 `src/lib/execution/`。这些类都是私有实现模块，不构成可安装 API。本区域唯一已安装的扩展契约是
 `include/photospider/policy/policy_plugin_api.h` 声明的纯 C policy ABI。
 
-V-4 保持 public monolithic registry slot、registrar entry 与 callback signature 不变，同时由
-source-private core lookup bridge 只识别当前选中的精确 core dense callback。V-5 保留这些
-entry/callback 形态，但有意扩展临时 C++ v2 metadata layout；operation DSO 因而必须使用匹配 SDK
-重新构建。每个 scalar HP/RT registry slot 现在把 callback、metadata 与非零 identity 作为一个
-原子的 implementation value 拥有；注册另一种 callback shape 不能覆盖 sibling slot 的调度声明。
+V-4 与 V-5 建立 private monolithic registry slot，以及只识别当前选中精确 core dense callback
+的 source-private lookup bridge。DI-3 现在把经过验证的 pure-C operation ABI v1 suite 投影进这些
+private slot；每个 operation DSO 因而都必须使用当前 SDK，且不会有 C++ registrar 或 callback
+object 跨越该边界。每个 scalar HP/RT registry slot 现在把 callback、metadata 与非零 identity
+作为一个原子的 implementation value 拥有；注册另一种 callback shape 不能覆盖 sibling slot
+的调度声明。
 Private core runner 要求规范 named sealed CPU image Value。它把 request-effective
 ParameterMap 深拷贝到一个不含 Node output/cache/topology state 的 configuration，只以该
 configuration 与 logical DenseTensor/Image descriptor 调用 pure inference，再以同一
@@ -151,9 +151,9 @@ configuration、checked ImageView 与 inferred descriptor 调用 execute，并�
 result。它还从
 planning/`NodeExecutor` 接收规范化 Region，复制未选中的逻辑 coordinate，并通过 checked
 stride 对精确 ImageRect 或 rank-general TensorSlice coordinate 执行 invert。同 key plugin
-override 不能继承这份 private contract；通用 v2 monolithic callback 维持 complete-output
-behavior。Publication 会保留该精确 sealed result allocation/revision；只有显式的当前 ABI
-adapter 才可派生 use-scoped ImageBuffer snapshot。
+override 使用自身经过验证的 operation ABI v1 descriptor、Region、plan 与 grant contract，而不
+继承这份 private core contract。Publication 会保留该精确 sealed result allocation/revision；
+只有显式 Host/codec adapter 才可派生 use-scoped ImageBuffer snapshot。
 
 DI-2 使 HP compute-service、result-committer、dirty-write、RT 与 disk-load boundary 在正式
 publication 前只使用 Value。一个 immutable `DenseImageOutputPlan` 会在单次 Host binding
@@ -161,7 +161,7 @@ allocation 前固定 name、descriptor/facet、layout、storage、alignment 与 
 producer entry 使用该 binding 上经过检查的 move-only grant；所有 executable grant 都必须成功
 retirement 后才能完成一次 seal。validation、overlap、range、alignment、overflow、exception、
 cancellation、duplicate 或 omitted-retirement failure 都是 sticky failure，并阻止 publication。
-ABI v2/codec staging 会在其入站 adapter 处规范化并清除；正式 commit 绝不合成缺失的 Value。
+Operation ABI v1 与 codec staging 会在各自入站 adapter 处规范化；正式 commit 绝不合成缺失 Value。
 V-5 不新增 callback slot 或 general planner inference；它会在 planned work 中新增 callback-free
 implementation identity/metadata route，并要求 provider entry 前重新解析且精确 identity 相同。
 
@@ -463,12 +463,12 @@ Native exec 前，child 会应用已经准入的 `RLIMIT_AS`、正值 `RLIMIT_CP
 Aggregate ledger admission 与 per-process rlimit 是独立 Host 检查；它们既不建立 syscall/network
 sandbox，也不会把 `SIGKILL` 变成 OOM 证明。
 
-Adapter、runtime endpoint、supervisor 与 executor 都会编入 installable product archive，但
-这仍是内部 composition proof，不是终端用户路径。当前没有 `ExecutionService`、
-`WorkerManager`、embedded Host/CLI、`photospider-worker` 或 operation loader 会从 Graph
-operation 构造 isolated request。当前 operation ABI v2 无法跨越此 wire；仍为目标态的
-operation ABI v1 既未在此实现也未通过 shim 接入；atomic operation-ABI migration 与最终用户
-selection、更强 platform sandbox profile 仍是独立工作。Issue #106 现在通过两个手工 opt-in、
+Adapter、runtime endpoint、supervisor 与 executor 都会编入 installable product archive。
+Operation ABI v1 supervised descriptor 现在通过 matching signed-package
+`PluginInvocationExecutor` route；request/response 使用 isolation protocol v2，且没有 direct
+callback fallback。Public `ExecutionService`、`WorkerManager`、embedded Host/CLI 与
+`photospider-worker` 仍不暴露终端用户 runtime selector；更强 platform sandbox profile 仍是
+独立工作。Issue #106 现在通过两个手工 opt-in、
 调用生产 decoder 的 harness 负责范围收窄的长期 codec evidence，并负责 execution observation
 join `(page session, GraphRevision, RunId, RunLocalTaskId)`。该 tuple 在每个 event 上可缺省、大小
 固定，并从已校验的 ready submission 复制；它绝不参与 scheduling、cache reuse、cancellation、
@@ -563,7 +563,7 @@ retry choice、settlement、quota、artifact 或 commit authority。
   inventory 与 compute-domain intent，选择实际的 revisioned implementation 后再判断
   TensorSlice eligibility。只有选中的精确 core dense monolithic callback 具有 private tensor
   contract；选中的 same-key device replacement 会返回 Unsupported，不会回退到 scalar。
-- 当前 image tiling、ImageBuffer processing、Host/IPC v2 inspection 与 operation ABI v2
+- 当前 image tiling、ImageBuffer processing、Host/IPC v2 inspection 与 operation ABI v1 adapter
   携带 checked derived `PixelRect`/`PixelSize`，绝不携带 OpenCV geometry。Dirty/tile
   rectangle 是零基 storage projection；有符号 logical Region metadata 通过所属 data window
   翻译。TensorSlice 是 HP-only monolithic work，绝不会获得 rectangle。
@@ -899,9 +899,9 @@ OpenCV threading。其 callback fence 会在仍处于 provider 代码内部时�
 是仓库自有的外层 CPU parallelism，而 OpenCV 内部 CPU parallelism 保持禁用。
 
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` 会省略该 provider 的 callback，但依赖中立
-core operation 仍保持注册。Registry 与 v2 registrar 不依赖 OpenCV：其他 provider 可以发布
-缺失 operation，也可以通过相同 slot 替换已启用的 OpenCV operation。由 manager 驱动的卸载会
-退役 replacement，并恢复已捕获的 predecessor。
+core operation 仍保持注册。Registry 与 pure-C ABI v1 publication transaction 不依赖
+OpenCV：其他 provider 可以发布缺失 operation，也可以通过相同 slot 替换已启用的 OpenCV
+operation。由 manager 驱动的卸载会退役 replacement，并恢复已捕获的 predecessor。
 
 围绕真实 backend state 的同步仍由 backend owner 负责。进程 Metal executor 会串行化对 command
 queue、invocation allocator counter 与 pipeline cache 的访问。初次取得 admission mutex 可以

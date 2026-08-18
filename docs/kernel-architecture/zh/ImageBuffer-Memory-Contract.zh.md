@@ -147,14 +147,15 @@ stride。Checked view 同时保留完整 Value 和 read lease，且不暴露 wri
 
 Malformed caller input 映射为 `GraphErrc::InvalidParameter`；unsupported 或 mismatched
 operation result 映射为 `GraphErrc::ComputeError`；`std::bad_alloc` 原样传播。这项 bridge
-与 compatibility adapter 只在 source tree 内部使用。Operation ABI v2 与尚未转换的其他
-operation 继续使用 ImageBuffer；入站 result 会在 private return 前完成规范化，正式 HP cache
-只存储 sealed named Value。
+与 compatibility adapter 只在 source tree 内部使用。Operation ABI v1 携带完整 Value
+descriptor/facet/layout 与 Host-owned grant record。尚未转换的 internal/Host/codec path 仍可使用
+ImageBuffer；入站 result 会在 private return 前完成规范化，正式 HP cache 只存 sealed named Value。
 
 ## DI-2 Host 所有的输出授权
 
-DI-2 不新增 public `ImageBuffer` 字段，也不改变 operation ABI v2。它在 allocation 前冻结一个
-source-private `DenseImageOutputPlan`。该 plan 持有规范 output name、完整
+DI-2 不新增 public `ImageBuffer` 字段，并在 allocation 前冻结一个 source-private
+`DenseImageOutputPlan`。DI-3 通过精确纯 C operation ABI v1 plan/grant record 投影同一份
+authority。该 private plan 持有规范 output name、完整
 DenseTensor/ImageFacet metadata、正向 interleaved Strided layout、精确 storage envelope、
 要求为二次幂的 alignment 与完整 image Region。所有 extent、stride、row-span、offset、
 alignment、range 与 overflow 检查都在 producer 可以看到 mutable byte 前完成。
@@ -174,14 +175,10 @@ Tile grant authorization 与 callback geometry 有意使用两种坐标表示。
 经过 checked origin translation 后才描述同一批像素。Grant span offset 与 stride 保持
 allocation-relative，因此 negative 或 nonzero logical origin 不会改变 storage view construction。
 
-当前 ABI v2 tiled adapter 可以在 active grant 上创建一个 callback-local full-image
-`ImageBuffer` alias，因为 v2 无法编码 row-span capability。该 alias 不会被存储、不能活过
-callback return，并且是 DI-3 的具名删除边。由于 callback 返回 `void` 且只能 seal 这份
-canonical image binding，所有 tiled 注册面都会在 registry mutation 前拒绝
-`produces_image=false` 或任何 declared generic/parameter output。CPU monolithic result 与 codec
-input 会通过 plan/binding 路径复制。Opaque non-CPU plugin result 会成为 imported external
-Value binding，其 owner 保留 payload 与 DSO lifetime；它不会使 staging ImageBuffer 成为
-runtime authority。
+当前 operation ABI v1 tiled adapter 会在 active Host grant 上发出精确 callback-scoped
+`OutputGrantSpan` row。它绝不转移 builder、owner、allocator 或 seal authority，也不接受
+out-of-plan row。CPU monolithic/tiled input 与 codec compatibility input 都在各自显式 adapter 处
+规范化。同步 CPU-only operation ABI 不暴露 opaque non-CPU result owner 或 native-device handle。
 
 ## DI-1 普通 DenseImage 坐标与解释契约
 
@@ -448,9 +445,9 @@ compute-I/O durability 决策与 Issue #88 首条有界 cache/codec execution �
 行为：process executor 会保留 transaction lifetime 并预算 work，但不改变 `ImageBuffer` 或
 codec ABI。V-12 I/O observation 证明已准入 task 对通用 Value 的 retention，而不是 lossless
 artifact format。Run publication 之后的 cache outcome 与 durable output 仍是未来工作。
-`ImageBuffer` 仍是 operation ABI v2、tiled write、现有 image codec 与 Host surface 的
-compatibility contract；V-15 adapter 不会让其 provider-defined Value 经过这套 compatibility
-representation。
+`ImageBuffer` 在 DI-4 前仍是 private tiled write、现有 image codec 与 public Host surface 的
+compatibility contract；operation ABI v1 使用完整 Value/grant record。V-15 adapter 不会让其
+provider-defined Value 经过这套 compatibility representation。
 
 Issue #94 保持 `ImageBuffer` 与全部 installed memory contract 不变。其 source-private
 progressive RT branch 使用 `exact_box_average_factor_four_region()`，从原始 2048x2048
@@ -495,7 +492,7 @@ OpenCV geometry 或 TensorSlice reinterpretation 进入 operation ABI。
 - `include/photospider/memory/blocked_layout.hpp`
 - `include/photospider/data/region.hpp`
 - `include/photospider/memory/strided_layout.hpp`
-- `include/photospider/plugin/op_contract.hpp`
+- `include/photospider/plugin/operation_plugin_api.h`
 - `include/photospider/plugin/data_definition_registry.hpp`
 - `include/photospider/plugin/data_provider_api.h`
 - `src/lib/core/image_buffer.cpp`

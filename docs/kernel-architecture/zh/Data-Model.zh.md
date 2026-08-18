@@ -128,7 +128,7 @@ Scalar 拼写保持稳定；array 与 object 递归渲染；object key 保持 or
 
 | 字段 | 含义 |
 | --- | --- |
-| `compatibility_image` | 仅用于 operation ABI v2、codec 与其余 legacy adapter 的入站暂存。正式 commit 前必须清除，且它绝不是 cache、allocation、readiness 或 revision 权威。 |
+| `compatibility_image` | 仅用于 codec 与其余 Host/legacy adapter 的入站暂存。正式 commit 前必须清除，且它绝不是 cache、allocation、readiness 或 revision 权威；operation ABI v1 使用完整 Value/grant record。 |
 | `named_values` | 按规范顺序保存的 immutable Value。当前 image port 永久命名为 `image`；每个 image 或 generic entry 都是该精确名称唯一的 payload、allocation、readiness 与 revision 权威。 |
 | `data` | 作为 `plugin::ParameterMap` 保存的 named parameter-result 标量或结构；generic Value 绝不进入此字段。 |
 | `space` | 空间变换、尺度和 ROI 元数据。 |
@@ -253,7 +253,7 @@ RT proxy commit 之后。
   `GraphDefinition`、持久 `Node` 字段与 `OutputPort` 也不拥有它。静态/有效参数、output-port
   configuration 与 operation 命名 output 都是 `ParameterValue` tree。逻辑 dirty work 与
   cache validity 使用规范化 `RegionSet`；当前 image extent、physical tile、Host/IPC v2
-  inspection 与 operation ABI v2 使用 checked derived `PixelSize` 和 `PixelRect` value。
+  inspection 与 operation ABI v1 adapter 使用 checked derived `PixelSize` 和 `PixelRect` value。
   在 compute/dirty compatibility path 中，这些 rectangle 是相对于所属 data window 的零基
   storage coordinate，绝不会被保留为逻辑 metadata。逻辑 `ImageRect` 与其互转时，必须通过
   那个精确 `ImageBounds` 做 checked origin translation。只有 OpenCV provider 或算法实现在 matrix slice 或 library call
@@ -332,7 +332,8 @@ immutable normalized `RegionSet`、bounded algebra、typed operation outcome 与
 `Node::hp_region` 是随唯一正式 HP cache authority 一起发布的 validity metadata。Dirty
 source history、per-node state、monolithic work 与 edge mapping 都保留 Region；image-only
 tile rectangle 从其 source Region 派生并与其并存。Core dense invert path 执行精确
-ImageRect 或 TensorSlice selection；RT 拒绝 TensorSlice，operation ABI v2 保持不变。当只有
+ImageRect 或 TensorSlice selection；RT 拒绝 TensorSlice。Operation ABI v1 携带受限且匹配的
+Region record。当只有
 一个 compatible atom 变化且 overlap 从其一侧移除区间时，精确 one-clause difference 会保留
 其他所有相等的 constrained-domain atom；会切分 atom 或同时改变多个 domain 的差集仍返回
 类型化 `TooComplex`。
@@ -449,7 +450,7 @@ exported handshake，以及 mandatory validation、纯 property、纯 Region、�
 canonical-content、owner 和 destroy callback。纯 callback 收到 descriptor/Layout/buffer
 metadata，但所有 payload pointer 都会被清空；V-14 中只有 validation 与 canonical-content
 traversal 这两个 semantic callback 会收到 payload。Access、mapping、transfer、conversion、
-inference、execution、native-device 与 operation ABI v2 authority 均不存在。
+inference、execution、native-device 与 operation-plugin authority 均不存在。
 
 借用的 ABI byte view 只用于输入。每个 callback 都会收到一个 Host 拥有的 output sink；
 diagnostic 与 BYTES-property record 声明 scalar length，provider 会在 callback-local 源 storage

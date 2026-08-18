@@ -361,7 +361,7 @@ byte/range limit、content/descriptor binding 与 expiry/revocation。
 
 ### Plugin Trust 与 Isolation
 
-Operation v2、data-definition-provider v3 与 policy v1 DSO 只要加载到 Host process，就属于
+Operation v1、data-definition-provider v3 与 policy v1 DSO 只要加载到 Host process，就属于
 trusted native code。Pure-C record 与最小化合法 authority 并不能 sandbox native code。
 Server control plane 与 WorkerManager 不加载任何 DSO。当前 operation/policy 候选必须在 native
 mapping 前通过进程不可变的 Ed25519 签名 kind/package/generation/content 决定；获批 DSO 在进程内
@@ -385,14 +385,13 @@ permission、byte size、descriptor/content binding、readiness、ownership、pl
 invocation identity、current worker lease 与 declared resource bound。返回的 descriptor、handle、
 offset、digest、status 与 diagnostic 均为 untrusted data，绝不 mint authority。
 
-当前 Issue #102 切片已经实现首个 CPU shared-memory/FD record，但不迁移 operation ABI
-v2，也不实现仍为目标态的 operation ABI v1。其 callback seam 是 process-local runtime
-code；两个 ABI family 的 pointer-bearing record 都不会被序列化。该实现把 canonical request
-与每个已声明的 physical tensor range 绑定到 invocation identity，只授予声明方向的
-capability，并对 malformed 或已变更的 request、response、descriptor、header、FD 或 content
-state 进行 fail-closed 处理。One-shot process 与 RAII owner 在正常/错误路径提供精确
-transport retirement。直接使用准确命名的 non-supervised adapter 时，永不返回的 callback
-仍没有时间边界。
+Issue #102 在 operation boundary 迁移前实现首个 CPU shared-memory/FD record。其 callback
+seam 是 process-local runtime code，且没有序列化任何 pointer-bearing record。该实现把
+canonical request 与每个已声明的 physical tensor range 绑定到 invocation identity，只授予
+声明方向的 capability，并对 malformed 或已变更的 request、response、descriptor、header、
+FD 或 content state 进行 fail-closed 处理。One-shot process 与 RAII owner 在正常/错误路径
+提供精确 transport retirement。直接使用准确命名的 non-supervised adapter 时，永不返回的
+callback 仍没有时间边界。
 
 这些 source-private Issue #102 object 会编入 installable product archive，并由真实 exec
 fixture 从该 archive 加以验证。Issue #103 增加 product-archive 中的
@@ -404,10 +403,10 @@ response、TERM、KILL 与 reap bound；保留类型化可观测 failure fact；
 
 长期 integration 还会从真实 `ExecutionService` ready callback 调用该 executor。原始
 `PluginRuntimeFault` 会到达 request boundary，该 boundary 把 owning Run 发布为 Failed，固定
-service worker 随后会执行无关 Run。这是链接产品的 Run-failure composition proof，不是最终
-用户路径：当前没有 `ExecutionService`、`WorkerManager`、embedded Host/CLI、
-`photospider-worker` 或 operation loader 会从 Graph operation 构造 isolated request。接入当前
-ABI v2，或实现、shim 仍为目标态的 ABI v1，均不属于 #102 或 #103。
+service worker 随后会执行无关 Run。DI-3 后续让纯 C operation ABI v1 supervised descriptor 通过
+该精确 executor 与 isolation protocol v2 路由，且没有 direct callback fallback。Public
+`ExecutionService`、`WorkerManager`、embedded Host/CLI 与 `photospider-worker` 仍不暴露最终用户
+runtime selector。
 
 Issue #104 现在通过 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`、
 `PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE` 与

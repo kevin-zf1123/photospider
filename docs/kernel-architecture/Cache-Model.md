@@ -302,7 +302,7 @@ entire staged state atomically.
 
 A fresh partial publication remains formal state but cannot satisfy
 whole-output reuse or current disk persistence. Normal Whole computation
-replaces it and derives complete validity. Generic ABI v2 monolithic callbacks
+replaces it and derives complete validity. Generic operation ABI v1 monolithic callbacks
 continue to replace complete outputs; selected-byte merging is limited to the
 source-private exact core Region implementation.
 

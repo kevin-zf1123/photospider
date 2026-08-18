@@ -3,10 +3,11 @@
 ## Status
 
 Accepted for GitHub Issue #129 / DI-1 on 2026-08-17. This decision governs the
-ordinary built-in DenseImage metadata baseline. It does not retire operation
-ABI v2 or `ImageBuffer`, migrate Host/IPC/worker/durable/CLI formats, implement
-automatic color conversion, or reinterpret provider-defined OpenEXR Deep
-metadata as ordinary-image authority.
+ordinary built-in DenseImage metadata baseline. DI-3 now projects the complete
+metadata through pure-C operation ABI v1; DI-4 still owns final `ImageBuffer`
+and Host/IPC/worker/durable/CLI migration. This ADR does not implement automatic
+color conversion or reinterpret provider-defined OpenEXR Deep metadata as
+ordinary-image authority.
 
 English architecture and OpenSpec documents are authoritative. Live remote
 delivery, CI, and review state remain in Project 6, issue #129, the active

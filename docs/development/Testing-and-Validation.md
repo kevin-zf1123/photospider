@@ -171,8 +171,8 @@ names, lowercase `OpenCV::opencv_*` targets, and component-specific CamelCase
 targets such as `OpenCV::Core`; partial-name matches remain rejected. This is
 validated through the real exported package/consumer behavior rather than a
 synthetic verifier self-test. With OpenCV discovery disabled, a consumer
-requesting `COMPONENTS operation_sdk OPTIONAL_COMPONENTS operation_opencv`
-must keep the package and `operation_sdk` found, mark `operation_opencv` not
+requesting `COMPONENTS operation_plugin_sdk OPTIONAL_COMPONENTS operation_opencv`
+must keep the package and `operation_plugin_sdk` found, mark `operation_opencv` not
 found, import the dependency-free SDK/runtime targets, and omit
 `Photospider::operation_opencv`. Requiring `operation_opencv` under the same
 condition must fail package discovery. With OpenCV available, the adapter
@@ -259,7 +259,7 @@ capability profile, and already-built dense integration target are validated.
 The same external project requests `data_provider_sdk`, verifies that its
 interface has no link dependency, builds separate exact-name C11 and C++17 v3
 definition producers from the installed header, and links each into a separate
-C++ Host consumer through `Photospider::operation_sdk`. Each consumer derives a
+C++ Host consumer through `Photospider::operation_runtime`. Each consumer derives a
 three-field Schema/Facet/Layout manifest from the active snapshots, publishes
 bounded three-buffer provider-defined Values in compact and repacked forms,
 compiles output-sink/diagnostic/property layout assertions, and exercises pure
@@ -689,7 +689,7 @@ Public non-expansion remains part of existing durable contracts:
 snapshot; `test_policy_registry` locks transactional ABI-v1 load rejection,
 binding-held DSO lifetime, and first-fault stability; and
 `StaticProductConsumerSmoke` compiles and runs the installed 58-virtual Host,
-60-call Client, operation ABI v2, and pure-C policy ABI v1 consumers. These
+60-call Client, pure-C operation ABI v1, and pure-C policy ABI v1 consumers. These
 tests must not gain a compatibility cancellation shim for this private change.
 
 Run the focused cancellation boundary with:
@@ -854,15 +854,16 @@ without waiting for its producer, and typed stale failure that never releases
 dependent work. These cases use gates and futures and contain no timing sleep.
 
 `test_cli_policy_execution_config` locks transactional policy/execution config
-parsing and exact Host application. `test_host_adapter` loads real operation
-ABI-v2 and pure-C policy ABI-v1 fixtures, configures both extensions, validates
-their snapshots, and computes through the private CPU route.
+parsing and exact Host application. `test_host_adapter` loads real pure-C
+operation ABI-v1 and pure-C policy ABI-v1 fixtures, configures both extensions,
+validates their snapshots, and computes through the private CPU route.
 `GraphCliPluginComputeSmoke` repeats that vertical slice through the real REPL.
 `test_ipc_protocol` and `test_ipc_daemon` own protocol-v2 routing, process-owned
 policy state, generation-changing replacement, scan, and shared execution
-defaults. `StaticProductConsumerSmoke` independently builds the installed C11
-policy DSO and C++ operation DSO before executing the same external-consumer
-path.
+defaults. `StaticProductConsumerSmoke` independently builds installed C11 and
+C++17 operation ABI consumers plus the C11 policy DSO before executing the
+same external-consumer path. The operation consumers assert every exact v1
+record layout and export only numeric/root pure-C discovery.
 
 The installed Host, CLI, and IPC protocol-v2 surfaces still expose no
 cancellation command. IPC continues to reject `compute.cancel` and publish
@@ -1415,7 +1416,7 @@ a native device SDK.
 binary built against both provider configurations. In the normal configuration
 it seeds the repository OpenCV provider, executes its real resize callback,
 proves an invalid OpenCV matrix shape is translated to host-owned
-`GraphErrc::ComputeError`, loads a stdlib-only v2 provider that takes complete
+`GraphErrc::ComputeError`, loads a stdlib-only ABI-v1 provider that takes complete
 ownership of the resize execution/dirty/forward slots, executes the replacement
 sentinel output, unloads it, and executes the restored OpenCV predecessor.
 

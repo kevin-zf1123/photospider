@@ -17,7 +17,7 @@ OpenCV adapter 或标准库实现，因此 compute/runtime 代码不会直接声
 
 **Dirty Region** 是由 `RegionSet` 表示的规范化逻辑 affected/demanded work。V-4 的 HP 支持
 精确 ImageRect 与 rank-general TensorSlice；RT 只接受精确 ImageRect。当前 Host/IPC v2
-inspection、operation ABI v2、ImageBuffer processing 与 physical image tile 使用 checked
+inspection、operation ABI v1 adapter、ImageBuffer processing 与 physical image tile 使用 checked
 derived `PixelRect`/`PixelSize`。这些 compatibility rectangle 在各自 HP 或 RT storage
 allocation 中都是零基坐标，不继承有符号逻辑原点。只有 provider 或算法在真实 matrix 或 algorithm call 处才会
 局部创建 OpenCV rectangle 与 size。
@@ -256,7 +256,7 @@ whole grant seed 其 binding，随后 update grant 只替换 selected coordinate
 unselected coordinate 保持不变。若 prior output 为 complete，即使 full ImageRect proof 与
 TensorSlice update 使用不同 Region domain，其 complete validity 仍保持为 true。fresh
 partial output 只有 partial validity，因此 whole-output dependency resolution 与当前
-regionless disk persistence 会拒绝它，直到 normal Whole commit 将其替换。Generic ABI v2
+regionless disk persistence 会拒绝它，直到 normal Whole commit 将其替换。Generic operation ABI v1
 monolithic callback 保持 complete-output replacement behavior。
 
 Task pruner 会把 active selected-task flag 之外的 dependency 视为已经满足。对于非空 mapping，
@@ -301,7 +301,7 @@ resolution 与短暂 staging 临界区会被串行化；不同节点与 operatio
 当前逻辑 dirty authority 在 propagation、planning、source history、per-node state、edge
 mapping、HP validity、staging 与 Region-aware core dense operation 中使用规范化 `RegionSet`。
 Checked derived `PixelRect` 与 `PixelSize` 只保留在 image tile/task、ImageBuffer、Host/IPC v2
-与 operation ABI v2 边缘。Region endpoint 与 tensor-shape arithmetic 都受检查；image adapter
+与 operation ABI v1 adapter 边缘。Region endpoint 与 tensor-shape arithmetic 都受检查；image adapter
 拒绝 uncertainty、TensorSlice、custom domain、multi-atom clause 与 narrowing overflow。只有
 provider 或 adapter 实现在真实调用处才会创建 OpenCV rectangle 与 size。
 

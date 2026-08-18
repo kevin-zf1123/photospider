@@ -41,13 +41,13 @@ Observed build targets in the current root `CMakeLists.txt`:
 | --- | --- | --- |
 | `photospider_core_internal` | Build-only core values, private conversion, and registry helper. | Role-owned sources are also folded into the static product. |
 | `photospider_graph_internal` | Build-only `GraphModel` and graph-service helper. | `GraphModel` remains private under `src/lib/graph`. |
-| `photospider_plugin_host_internal` | Build-only host-side operation v2 loader, adapter, and lifetime helper. | It is not exported. |
+| `photospider_plugin_host_internal` | Build-only host-side pure-C operation ABI v1 loader, adapter, runtime router, and generation-lifetime helper. | It is not exported. |
 | `photospider_policy_internal` | Build-only pure-C policy DSO registry/loader, built-in types, bindings, contexts, faults, and DSO leases. | It owns ordering contexts only; it owns no worker, queue, grant, Run, Graph, or execution route. |
 | `photospider_execution_internal` | Build-only private physical-execution resources and accounting primitives. | `ResourceLedger`, the fixed `DeviceExecutorRegistry`, and platform executor factories are compiled here; each composition-root `ExecutionService` owns its sole Host-and-per-device authoritative ledger and registry. |
 | `photospider_compute_internal` | Build-only compute, request-owned HP/RT `ComputeRun`, policy-aware ready store, reserved-start transaction, private route execution, runtime, and dirty-region helpers. | Runs and physical route mechanisms remain private. |
 | `photospider_host_internal` | Build-only embedded Host adapter and Kernel facade closure. | It is not exported and exposes no private execution owner to consumers. |
 | `photospider_operation_runtime` | Installable shared image-buffer, DenseTensor/provider-defined Value, Region, extension-digest, and data-definition registry implementation. | It owns the sole process-wide allocation/revision minting authority plus dependency-neutral registry/Region logic, with no external package or back-link to the operation SDK. |
-| `photospider_operation_sdk` | Installable operation v2 interface SDK. | It transitively carries `operation_runtime`, so it is the sole ordinary plugin link target. |
+| `photospider_operation_plugin_sdk` | Installable dependency-neutral pure-C operation ABI v1 interface SDK. | It exposes the C11 contract and header-only C++17 helper without a runtime link dependency. |
 | `photospider_data_provider_sdk` | Installable dependency-neutral pure-C data-definition ABI v3 SDK. | It carries one C11/C++17-compatible header and no runtime, registry, loader, or optional dependency. |
 | `photospider_openexr_deep_provider` | Optional installable OpenEXR deep data-definition provider module. | It is built and exported only when enabled, links the data-provider SDK plus OpenEXR 3, and keeps OpenEXR out of neutral package surfaces. |
 | `photospider_openexr_deep_adapter` | Build-only source-private Host codec adapter. | It is a non-exported static target available only in the enabled build and links `operation_runtime` plus OpenEXR 3. |
@@ -138,14 +138,14 @@ Resolved seam tightening in the current branch:
   Maintained test translation units are classified under `tests/unit/` and
   `tests/integration/`, with explicit fixture, support, and manual-verification
   roles. Obsolete issue replay/result orchestration has been removed.
-- Operation plugins compile against public `ps::plugin` v2 snapshots and a
-  host registrar without `Node`, `GraphModel`, `OpRegistry`, YAML, or private
-  cache ownership. Policy plugins compile against the self-contained C11
-  `policy_plugin_api.h`; exact ABI v1 records expose immutable bounded scalar
-  candidates and no executor, allocation service, resource grant, Run, Graph,
-  completion route, or logger. Both are trusted in-process contracts rather
-  than isolation boundaries, but only the operation interface remains a
-  provisional C++ ABI.
+- Operation plugins compile against the exact pure-C operation ABI v1 records
+  and may use the header-only C++ authoring helper. Neither surface exposes
+  `Node`, `GraphModel`, `OpRegistry`, YAML, private cache ownership, or a C++
+  callback object across the DSO boundary. Policy plugins compile against the
+  self-contained C11 `policy_plugin_api.h`; exact ABI v1 records expose
+  immutable bounded scalar candidates and no executor, allocation service,
+  resource grant, Run, Graph, completion route, or logger. Both are trusted
+  in-process contracts rather than isolation boundaries.
 
 ## External Interface Rule
 
@@ -217,6 +217,7 @@ include/photospider/data/
   extension.hpp
   image_view.hpp
   packed_dense_tensor_view.hpp
+  parameter_value.hpp
   region.hpp
 
 include/photospider/memory/
@@ -229,9 +230,8 @@ include/photospider/memory/
 include/photospider/plugin/
   data_definition_registry.hpp
   data_provider_api.h
-  plugin_api.hpp
-  op_contract.hpp
-  node_view.hpp
+  operation_plugin_api.h
+  operation_plugin.hpp
   opencv_adapter.hpp
 
 include/photospider/policy/
@@ -370,7 +370,7 @@ Current target shape:
 | `photospider_execution_internal` | Static | No | Private `DeviceExecutorRegistry`, platform executor factories, physical-execution accounting, and `ResourceLedger` implementation. |
 | `photospider_host_internal` | Static | No | Embedded Host adapter and Kernel facade closure. |
 | `photospider_operation_runtime` | Shared | Yes | Public image-buffer, DenseTensor/provider-defined Value, Region, canonical extension metadata, and injected data-definition registry implementation plus sole process-wide allocation/revision minting authority, with no external-package dependency or SDK back-link. |
-| `photospider_operation_sdk` | Interface | Yes | Operation v2 headers and transitive `operation_runtime` link. |
+| `photospider_operation_plugin_sdk` | Interface | Yes | Dependency-neutral operation ABI v1 C11 header and header-only C++17 helper. |
 | `photospider_data_provider_sdk` | Interface | Yes | One dependency-neutral pure-C ABI v3 header with C11/C++17 usage requirements and no link interface. |
 | `photospider_openexr_deep_provider` | Module | Optional | Installed/exported as `Photospider::openexr_deep_provider`; this OpenEXR deep data-definition provider DSO is available only when explicitly enabled. |
 | `photospider_openexr_deep_adapter` | Static | No | Source-private Host codec adapter for enabled OpenEXR builds; it is never installed or exported. |
@@ -396,11 +396,11 @@ graph TD
     plugin_host["photospider_plugin_host_internal"] --> libphotospider
     policy["photospider_policy_internal"] --> libphotospider
     execution["photospider_execution_internal"] --> libphotospider
-    operation_sdk["Photospider::operation_sdk"] --> operation_runtime["Photospider::operation_runtime"]
+    operation_plugin_sdk["Photospider::operation_plugin_sdk"] --> operation_plugins["operation plugins"]
+    operation_runtime["Photospider::operation_runtime"] --> value_consumers["Value/runtime consumers"]
     data_provider_sdk["Photospider::data_provider_sdk"] --> data_providers["data-definition providers"]
-    operation_opencv["Photospider::operation_opencv"] --> operation_sdk
+    operation_opencv["Photospider::operation_opencv"] --> operation_runtime
     policy_sdk["Photospider::policy_sdk"] --> policy_plugins["policy plugins"]
-    operation_sdk --> operation_plugins["operation plugins"]
     ipc_client["photospider_ipc_client STATIC"] --> future_frontend["future daemon frontend"]
     libphotospider --> graph_cli
     libphotospider --> photospiderd
@@ -438,11 +438,15 @@ CMake rules:
   for local build organization but are not exported to package consumers.
 - A shared library can be added later as an explicit compatibility product, not
   as the primary backend.
-- Current operation plugins export `register_photospider_ops_v2` and receive
-  `ps::plugin::OperationPluginRegistrar` from the host. They do not link
-  `photospider` merely to share `OpRegistry`; an ordinary plugin links only
-  `Photospider::operation_sdk`, while an OpenCV-adapter user also links
-  `Photospider::operation_opencv` and declares any algorithm-specific modules.
+- Current operation plugins export only
+  `ps_operation_plugin_get_abi_version` and
+  `ps_operation_plugin_get_api_v1`. The Host supplies exact prepared root and
+  suite records, deep-copies validated metadata, and keeps `OpRegistry`
+  private. Pure-C/header-only authors link
+  `Photospider::operation_plugin_sdk`; users of public Value/runtime helpers
+  link `Photospider::operation_runtime` explicitly, while an OpenCV-adapter
+  user also links `Photospider::operation_opencv` and declares any
+  algorithm-specific modules.
 - OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`), `yaml-cpp`, and `Threads`
   are link-only implementation dependencies for the static archive. The
   installed `Photospider::photospider` target records them as
@@ -452,10 +456,10 @@ CMake rules:
   `yaml-cpp` types. `${CMAKE_DL_LIBS}` adds the platform dynamic-loader library
   only where CMake requires one.
 - Package components are `embedded`, `ipc_client`, `data_provider_sdk`,
-  `operation_sdk`, `operation_runtime`, `operation_opencv`,
+  `operation_plugin_sdk`, `operation_runtime`, `operation_opencv`,
   `openexr_deep_provider`, and `policy_sdk`. Omitting components uses
   `embedded`, preserves the dependency behavior above, and does not discover
-  OpenEXR. `data_provider_sdk`, `policy_sdk`, `operation_sdk`, and
+  OpenEXR. `data_provider_sdk`, `policy_sdk`, `operation_plugin_sdk`, and
   `operation_runtime` resolve no external package; `operation_opencv` resolves
   only OpenCV `core`. `openexr_deep_provider` is available only in an install
   built with that provider and is the sole component that requests OpenEXR 3:
@@ -493,10 +497,11 @@ CMake rules:
   owns one embedded `ps::Host`. The installed client target contains its codec
   objects directly and exports no dependency on the backend, JSON target, or
   server-internal target.
-- Operation plugins should not link to a broad shared backend merely to reach
-  registry symbols. The current implementation uses host-provided
-  `ps::plugin::OperationPluginRegistrar` callbacks and the versioned
-  `register_photospider_ops_v2` entry; this remains a provisional C++ ABI.
+- Operation plugins do not link to a broad shared backend merely to reach
+  registry symbols. The current operation ABI is a separately versioned,
+  exact-layout C11 contract. The Host stages each complete generation, then
+  atomically publishes private callbacks retaining the exact DSO lease; no
+  C++ callback, registry object, exception, or owner crosses the DSO boundary.
   Policy plugins link only `Photospider::policy_sdk` and export exactly
   `ps_policy_plugin_get_abi_version` plus `ps_policy_plugin_get_api_v1`.
   Their exact natural-layout records and callbacks form a C11 pure-C ABI;
@@ -911,10 +916,12 @@ dependency table is in the
    Public Host/CLI/IPC cancellation remains unavailable; the current private
    backend cancellation source and cooperative Run control do not enter this
    installed surface.
-8. **Completed extension-boundary work:** Issue #38 tightened the operation SDK,
-   and issue #75 replaced the scheduler SDK with the policy SDK.
-   - Operation plugins use v2 host-independent snapshots and a host-provided
-     registrar. Policy plugins use exact natural-layout C ABI v1 records with
+8. **Completed extension-boundary work:** Issue #38 first narrowed the operation
+   SDK, issue #75 replaced the scheduler SDK with the policy SDK, and issue
+   #132 replaced the provisional operation surface with pure-C ABI v1.
+   - Operation plugins use exact root/suite/semantic records plus Host-owned
+     sinks and grants; the optional C++ helper emits only that C ABI. Policy
+     plugins use exact natural-layout C ABI v1 records with
      metadata/create/select/destroy callbacks and receive no execution resource.
    - The eight old headers and five old internal helper target names are absent
      without compatibility wrappers or aliases. Installed external consumers
@@ -946,8 +953,8 @@ For any implementation change following this document:
   `photospiderd`, and focused IPC tests when the daemon boundary changes;
   `graph_cli` remains an embedded/local regression target.
 - Keep the embedded Host, real daemon IPC, and `GraphCliPluginComputeSmoke`
-  paths as long-lived runtime tests. Each loads the lifecycle operation v2 DSO
-  and pure-C policy DSO, binds both policy classes to the external type, selects
+  paths as long-lived runtime tests. Each loads the lifecycle pure-C operation
+  ABI v1 DSO and pure-C policy DSO, binds both policy classes to the external type, selects
   a private CPU route, and runs parallel compute. The paths inspect the resulting
   `11x7` absolute ROI and copied policy/route state. The CLI smoke additionally
   requires its printed binding generations, active execution route, and

@@ -227,7 +227,7 @@ update 作为安全 under-approximation，而不是发布错误的 bounding supe
 revision/current-generation predicate 会原子地发布或丢弃完整 staged state。
 
 Fresh partial publication 仍是 formal state，但不能满足 whole-output reuse 或当前 disk
-persistence。Normal Whole computation 会替换它并派生 complete validity。Generic ABI v2
+persistence。Normal Whole computation 会替换它并派生 complete validity。Generic operation ABI v1
 monolithic callback 继续替换 complete output；selected-byte merge 只用于 source-private
 exact core Region implementation。
 

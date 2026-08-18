@@ -422,7 +422,7 @@ ImageFacet、descriptor/content identity 或正式 cache validity。
 
 **`ImageBuffer`**
 当前图像 payload 契约：二维 extent、通道数、单一 scalar type、device、row stride、共享数据
-所有权和可选 backend context。它仍位于显式 ABI v2、codec、Host 与 product compatibility
+所有权和可选 backend context。它在 DI-4 前仍位于 codec、Host 与 product compatibility
 edge，但私有正式 CPU image cache entry 只包含规范 named Value。ImageBuffer projection 仅限
 use scope，且绝不是 allocation、readiness、revision 或 cache authority。它不是通用 Tensor、
 Deep Image 或 vector-scene 模型。
@@ -435,7 +435,7 @@ complexity budget、typed algebra outcome 与 containment。它不是 physical t
 cache owner、Value revision 或 uncertainty placeholder。
 
 **`PixelRect` / `PixelSize`**
-当前 Host/IPC v2 inspection、operation ABI v2、ImageBuffer processing 与 physical image
+当前 Host/IPC v2 inspection、operation ABI v1 adapter、ImageBuffer processing 与 physical image
 tile/task record 使用的不依赖外部 library 的二维整数 geometry。在需要逻辑 Region authority
 的位置，它只能从一个精确内建 ImageRect 派生。它无法表示 TensorSlice、Whole、custom domain、
 multi-atom clause 或 uncertainty。只能在 OpenCV adapter 或 provider 实际调用 matrix/library

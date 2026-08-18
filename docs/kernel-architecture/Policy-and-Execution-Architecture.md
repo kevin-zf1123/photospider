@@ -966,7 +966,7 @@ residency, and worker execution compile from the matching
 source-private run-state, ready-store, and pool headers share the exact nested
 types without creating a forwarding or installed contract.
 
-- `include/photospider/plugin/op_contract.hpp`
+- `include/photospider/plugin/operation_plugin_api.h`
 - `src/lib/core/ps_types.hpp` and `.cpp`
 - `src/lib/compute/dispatch/task_graph_planning.hpp` and `.cpp`
 - `src/lib/compute/dispatch/compute_task_submission.hpp` and `.cpp`

@@ -443,7 +443,7 @@ digest, and runtime identities never substitute for `ArtifactId` or a receipt.
 
 ### Plugin trust and isolation
 
-Operation v2, data-definition-provider v3, and policy v1 DSOs are trusted
+Operation v1, data-definition-provider v3, and policy v1 DSOs are trusted
 native code whenever loaded in a Host process. Pure-C records and minimized
 legitimate authority do not sandbox native code. The server control plane and
 WorkerManager load none. Current operation and policy candidates require a
@@ -474,16 +474,15 @@ identity, current worker lease, and declared resource bounds. Returned
 descriptors, handles, offsets, digests, statuses, and diagnostics are untrusted
 data and never mint authority.
 
-The current Issue #102 slice implements the first CPU shared-memory/FD record
-without migrating operation ABI v2 or implementing the target-only operation
-ABI v1. Its callback seam is process-local runtime code; neither ABI family's
-pointer-bearing records are serialized. It binds the canonical request and
-every declared physical tensor range to the invocation identity, grants only
-declared directional capabilities, and fails closed on malformed or mutated
-request, response, descriptor, header, FD, or content state. The one-shot
-process and RAII owners provide exact normal/error-path transport retirement.
-Direct use of the accurately named non-supervised adapter still does not bound a
-callback that never returns.
+Issue #102 implemented the first CPU shared-memory/FD record before the
+operation boundary migration. Its callback seam was process-local runtime
+code, and no pointer-bearing record was serialized. It binds the canonical
+request and every declared physical tensor range to the invocation identity,
+grants only declared directional capabilities, and fails closed on malformed
+or mutated request, response, descriptor, header, FD, or content state. The
+one-shot process and RAII owners provide exact normal/error-path transport
+retirement. Direct use of the accurately named non-supervised adapter still
+does not bound a callback that never returns.
 
 Those source-private Issue #102 objects are compiled into the installable
 product archive and exercised from that archive by a real-exec fixture. Issue
@@ -498,12 +497,11 @@ later invocation in a fresh process instead of falling back in-process.
 Maintained integration also invokes that executor from a real
 `ExecutionService` ready callback. The original `PluginRuntimeFault` reaches
 the request boundary, that boundary publishes the owning Run as Failed, and the
-fixed service worker executes a later unrelated Run. This is a product-linked
-Run-failure composition proof, not an end-user route: no current
-`ExecutionService`, `WorkerManager`, embedded Host/CLI,
-`photospider-worker`, or operation loader constructs an isolated request from a
-Graph operation. Wiring current ABI v2 or implementing or shimming target-only
-ABI v1 remains outside #102 and #103.
+fixed service worker executes a later unrelated Run. DI-3 subsequently routes
+pure-C operation ABI v1 supervised descriptors through this exact executor and
+isolation protocol v2, with no direct callback fallback. Public
+`ExecutionService`, `WorkerManager`, embedded Host/CLI, and
+`photospider-worker` still expose no end-user runtime selector.
 
 Issue #104 now configures one process-immutable trust policy through
 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`,

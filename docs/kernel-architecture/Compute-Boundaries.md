@@ -19,7 +19,7 @@ an optional positive `maximum_parallelism` Run ceiling; it cannot resize or
 select the process executor. Logical dirty work and cache validity remain
 normalized `RegionSet` through planning, staging, and the Region-aware core
 dense path. Current image tile shapes, Host/IPC v2 inspection, ImageBuffer
-helpers, and operation ABI v2 use checked derived `PixelRect`/`PixelSize`.
+helpers, and operation ABI v1 adapters use checked derived `PixelRect`/`PixelSize`.
 Private dirty/tile PixelRects are zero-based storage geometry; logical Regions
 and Host grants use the signed data-window domain. Crossing that boundary
 requires containment plus checked origin subtraction/addition.
@@ -27,9 +27,8 @@ OpenCV geometry exists only inside a provider or algorithm implementation at
 the library call that consumes it.
 
 [ADR 0012](../adr/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md)
-also freezes the accepted operation-plugin ABI v1 target. Target paragraphs in
-this document are explicitly labeled and do not override the current v2 facts
-above or imply an installed v1 loader.
+defines the implemented pure-C operation ABI v1, its Host-owned output grants,
+and its trusted/supervised routing boundary.
 
 ## Ownership Map
 
@@ -168,11 +167,11 @@ not form an installable API. The only installed extension contract in this
 area is the pure-C policy ABI declared by
 `include/photospider/policy/policy_plugin_api.h`.
 
-V-4 kept the public monolithic registry slot, registrar entry, and callback
-signatures unchanged while one source-private core lookup bridge recognizes
-only the exact selected core dense callback. V-5 retains those entry/callback
-shapes but intentionally extends the provisional C++ v2 metadata layout; an
-operation DSO therefore requires a matching-SDK rebuild. Each scalar HP/RT
+V-4 and V-5 established the private monolithic registry slots and the
+source-private lookup bridge that recognizes only the exact selected core
+dense callback. DI-3 now projects validated pure-C operation ABI v1 suites into
+those private slots; every operation DSO therefore requires the current SDK
+and no C++ registrar or callback object crosses the boundary. Each scalar HP/RT
 registry slot now owns callback, metadata, and nonzero identity as one atomic
 implementation value; registering another callback shape cannot overwrite its
 sibling's scheduling declarations. The private core runner requires the
@@ -184,10 +183,11 @@ with the same configuration, checked ImageViews, and inferred descriptor, and
 validates the complete Value result. It also receives the normalized Region
 from planning/`NodeExecutor`, copies unselected logical coordinates, and
 inverts exact ImageRect or rank-general TensorSlice coordinates through
-checked strides. A same-key plugin override cannot inherit this private
-contract; generic v2 monolithic callbacks retain complete-output behavior.
-Publication preserves the exact sealed result allocation/revision; only an
-explicit current ABI adapter may derive a use-scoped ImageBuffer snapshot.
+checked strides. A same-key plugin override uses its own validated operation
+ABI v1 descriptor, Region, plan, and grant contract rather than inheriting this
+private core contract. Publication preserves the exact sealed result
+allocation/revision; only an explicit Host/codec adapter may derive a
+use-scoped ImageBuffer snapshot.
 
 DI-2 makes HP compute-service, result-committer, dirty-write, RT, and disk-load
 boundaries Value-only before formal publication. One immutable
@@ -196,8 +196,8 @@ alignment, and Region before one Host binding allocation. Whole/tile producer
 entry uses checked move-only grants over that binding; all executable grants
 must retire successfully before one seal. A validation, overlap, range,
 alignment, overflow, exception, cancellation, duplicate, or omitted-retirement
-failure is sticky and prevents publication. ABI v2/codec staging is normalized
-and cleared at its inbound adapter; formal commit never synthesizes a missing
+failure is sticky and prevents publication. Operation ABI v1 and codec staging
+are normalized at their inbound adapters; formal commit never synthesizes a missing
 Value. V-5 adds no new callback slot or general planner inference. It does add
 a callback-free implementation identity/metadata route to planned work and
 requires exact identity re-resolution before provider entry.
@@ -595,13 +595,12 @@ independent Host checks. They neither establish a syscall/network sandbox nor
 turn `SIGKILL` into proof of OOM.
 
 The adapter, runtime endpoint, supervisor, and executor are compiled into the
-installable product archive, but this remains an internal composition proof,
-not an end-user route. No current `ExecutionService`, `WorkerManager`, embedded
-Host/CLI, `photospider-worker`, or operation loader constructs an isolated
-request from a Graph operation. Current operation ABI v2 cannot cross this
-wire, target-only operation ABI v1 is neither implemented nor shimmed here, and
-atomic operation-ABI migration, end-user selection, and stronger platform
-sandbox profiles remain separate work. Issue #106 now owns narrow long-lived
+installable product archive. Operation ABI v1 supervised descriptors now route
+through the matching signed-package `PluginInvocationExecutor`; request and
+response use isolation protocol v2 and no direct callback fallback. Public
+`ExecutionService`, `WorkerManager`, embedded Host/CLI, and
+`photospider-worker` still expose no end-user runtime selector, and stronger
+platform sandbox profiles remain separate work. Issue #106 owns narrow long-lived
 codec evidence through two manual opt-in production-decoder harnesses and owns
 the execution observation join `(page session, GraphRevision, RunId,
 RunLocalTaskId)`. The tuple is optional per event, fixed-size, copied from a
@@ -734,7 +733,7 @@ cancellation, retry choice, settlement, quota, artifact, or commit authority.
   selected same-key device replacement is Unsupported, without scalar
   fallback.
 - Current image tiling, ImageBuffer processing, Host/IPC v2 inspection, and
-  operation ABI v2 carry checked derived `PixelRect`/`PixelSize`, never OpenCV
+  operation ABI v1 adapters carry checked derived `PixelRect`/`PixelSize`, never OpenCV
   geometry. Dirty/tile rectangles are zero-based storage projections; signed
   logical Region metadata is translated through the owning data window.
   TensorSlice is HP-only monolithic work and never gets a rectangle.
@@ -1168,10 +1167,10 @@ parallelism layer, while OpenCV internal CPU parallelism remains disabled.
 
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` omits this provider's
 callbacks but leaves dependency-neutral core operations registered. The
-registry and v2 registrar do not depend on OpenCV: another provider can publish
-the absent operation, or replace an enabled OpenCV operation through the same
-slots. Manager-driven unload retires the replacement and restores the captured
-predecessor.
+registry and pure-C ABI v1 publication transaction do not depend on OpenCV:
+another provider can publish the absent operation, or replace an enabled
+OpenCV operation through the same slots. Manager-driven unload retires the
+replacement and restores the captured predecessor.
 
 Synchronization around genuine backend state remains backend-owned. The
 process Metal executor serializes access to its command queue, invocation

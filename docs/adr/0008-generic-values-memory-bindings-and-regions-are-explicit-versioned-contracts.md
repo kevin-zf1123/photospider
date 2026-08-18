@@ -13,10 +13,10 @@ runs the repository Metal Perlin operation through its owned queue, invocation
 allocator, and pipeline cache. V-8 adds explicit device/binding facts,
 nonblocking access plans, revision-preserving CPU/Metal transfers, exact
 process residency, Run-scoped pending-Value continuations, and stale native
-completion rejection before destination readiness. `ImageBuffer`, `DataType`, `Device`,
-`ParameterMap`, and operation plugin ABI v2 remain compatibility contracts at
-their role-specific edges; the unimplemented portions of this ADR remain
-evolution targets.
+completion rejection before destination readiness. `ImageBuffer`, `DataType`,
+`Device`, and `ParameterMap` remain compatibility contracts at their
+role-specific edges; operation plugins now use the complete pure-C ABI v1.
+The unimplemented portions of this ADR remain evolution targets.
 
 V-9 adds source-private per-device memory/scratch plans, native actual-byte
 reconciliation, and leases following native Value and completion ownership
@@ -42,7 +42,7 @@ injected `DataDefinitionRegistry`, the exact pure-C definition-suite ABI v3,
 pure property/DataSpec/Region evaluation, canonical descriptor/content/layout
 SHA-256 identities, artifact-envelope round-trip, and generation-retaining
 replacement/unload. It intentionally adds no access, conversion, inference,
-execution, codec, OpenEXR, or operation-ABI-v2 replacement suite.
+execution, codec, OpenEXR, or operation-plugin replacement suite.
 
 V-15 adds the optional repository OpenEXR single-part deep-scanline
 provider/codec vertical. It maps explicitly identified, unit-sampled FP32
@@ -54,7 +54,8 @@ validated this bounded slice. Deep tiled, multipart, mixed shallow/deep parts,
 sampled or non-FP32 channels, streaming decode/encode, broader import mapping,
 and public Host/frontend provider selection remain future work. V-15 does not
 add the remaining access/conversion/inference/execution suites, generic
-graph/cache persistence, or operation ABI v2/Host migration.
+graph/cache persistence, or operation-plugin/Host migration; DI-3 later
+implemented the separately scoped operation boundary.
 
 Issue #78 ratified this contract. Issues #79 through #90 delivered the bounded
 V-2 through V-13 implementation and decision slices. Issue #117 implemented the
@@ -473,7 +474,7 @@ intervals, rank-general unsigned 64-bit `TensorSlice` intervals, a hard limit
 of eight atoms in the single nonempty clause, and explicit caller budgets.
 Dirty source facts, per-node affected work, edge mappings, HP/RT validity, and
 the core dense operation retain normalized `RegionSet`. Current image tiling,
-ImageBuffer helpers, Host/IPC inspection, and operation ABI v2 retain checked
+ImageBuffer helpers, Host/IPC inspection, and operation ABI v1 adapters retain checked
 derived `PixelRect` projections. RT is image-only; TensorSlice is HP
 monolithic work and is never reinterpreted as two-dimensional geometry.
 
@@ -648,19 +649,19 @@ The final replacement is:
 ImageBuffer     -> Value + ImageFacet + ImageView
 PixelRect       -> RegionSet atom ImageRect
 Device          -> DeviceBackend + DeviceId + MemoryDomain
-OperationOutput -> named Value outputs
+Operation result -> named Value outputs
 ParameterMap    -> configuration only, never a data payload
 ```
 
-Repository-owned operations and providers migrate first. Owned adapters,
-cache, graph documents, Host values, CLI/IPC translation, tests, installed
-consumers, and documentation then migrate in dependency order. Only after all
-owned operation plugins and consumers have the separately versioned pure-C
-operation-plugin ABI v1 replacement accepted by ADR 0012 is operation ABI v2,
-its entry point, SDK, fixtures, and package surface deleted.
+Repository-owned operations and providers migrated first. Owned adapters,
+tests, installed consumers, and documentation then migrated in dependency
+order. DI-3 installed the separately versioned pure-C operation-plugin ABI v1
+accepted by ADR 0012 and deleted the predecessor entry point, SDK, fixtures,
+and package surface in the same breaking change. DI-4 still owns final public
+Host/IPC/worker/durable/codec/CLI ImageBuffer migration.
 
 The final state has no permanent compatibility wrapper, alias class, duplicate
-old/new API, forwarding header, dual loader, v2-to-v1 shim, or dual
+old/new API, forwarding header, dual loader, predecessor shim, or dual
 descriptor/cache/ABI authority. Temporary edge adaptation may exist only
 inside an explicitly bounded implementation slice and must be deleted by that
 slice's completion boundary.
@@ -740,7 +741,7 @@ visibility, and actual consumer access are different facts.
 Rejected because it loses tensor and sparse logical domains and conceals
 approximation from callers.
 
-### Reuse operation ABI v2 with new C++ Value objects
+### Reuse the provisional C++ operation registration generation with new Value objects
 
 Rejected because a C-linkage entry symbol does not stabilize C++ layout,
 allocators, exceptions, RTTI, standard-library ownership, or toolchain ABI.

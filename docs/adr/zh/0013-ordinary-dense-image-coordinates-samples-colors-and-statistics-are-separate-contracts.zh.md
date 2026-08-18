@@ -2,10 +2,10 @@
 
 ## 状态
 
-本决策于 2026-08-17 为 GitHub Issue #129 / DI-1 接受，约束内建普通
-DenseImage 元数据基线。它不退役 operation ABI v2 或 `ImageBuffer`，不迁移
-Host/IPC/worker/durable/CLI 格式，不实现自动颜色转换，也不把提供方定义的
-OpenEXR Deep 元数据重新解释为普通图像权威。
+本决策于 2026-08-17 为 GitHub Issue #129 / DI-1 接受，约束内建普通 DenseImage metadata
+基线。DI-3 现在通过纯 C operation ABI v1 投影完整 metadata；DI-4 仍负责最终 `ImageBuffer` 与
+Host/IPC/worker/durable/CLI 迁移。本 ADR 不实现自动颜色转换，也不把 provider-defined OpenEXR
+Deep metadata 重新解释为普通图像权威。
 
 英文架构与 OpenSpec 文档是权威来源。实时远端交付、CI 与 review 状态仍由
 Project 6、issue #129、active OpenSpec change 与 `development_tracking.md` 维护。

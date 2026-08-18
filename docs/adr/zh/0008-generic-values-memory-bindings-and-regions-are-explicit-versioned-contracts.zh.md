@@ -10,9 +10,9 @@ Value-copy 证明也已成为当前行为。V-7 新增一套 source-private 的�
 registry，并让仓库 Metal Perlin operation 经过其自有 queue、invocation allocator 与 pipeline
 cache。V-8 新增显式 device/binding 事实、非阻塞 access plan、保留 revision 的 CPU/Metal
 transfer、精确的进程级 residency、Run-scoped pending-Value continuation，以及在 destination
-Ready 前拒绝 stale native completion。`ImageBuffer`、`DataType`、`Device`、`ParameterMap`
-与 operation plugin ABI v2 仍是各自
-角色边缘上的兼容契约；本 ADR 中尚未实现的部分仍是演进目标。
+Ready 前拒绝 stale native completion。`ImageBuffer`、`DataType`、`Device` 与 `ParameterMap`
+仍是各自角色边缘上的兼容契约；operation plugin 现在使用完整纯 C ABI v1。本 ADR 中尚未实现的
+部分仍是演进目标。
 
 V-9 新增 source-private 的 per-device memory/scratch plan、native actual-byte 校准，以及随
 native Value 与 completion ownership 延续的 lease，而不改变上述 public contract。
@@ -32,7 +32,7 @@ provider-defined `Value` 纵向路径：保留字节的 Schema/Facet/Layout enve
 buffer、一个注入的 `DataDefinitionRegistry`、精确的纯 C definition-suite ABI v3、纯
 property/DataSpec/Region 求值、canonical descriptor/content/layout SHA-256 identity、artifact
 envelope round-trip，以及保留 generation 的 replacement/unload。它有意不加入 access、
-conversion、inference、execution、codec、OpenEXR 或 operation ABI v2 replacement suite。
+conversion、inference、execution、codec、OpenEXR 或 operation-plugin replacement suite。
 
 V-15 新增仓库可选的 OpenEXR single-part deep-scanline provider/codec 纵向路径。它把具有
 显式 identity、unit-sampled 的 FP32 channel 映射为
@@ -42,7 +42,7 @@ dependency 限定在默认关闭的 component 后。Issue #118 已实现并独�
 Deep tiled、multipart、mixed shallow/deep part、sampled 或 non-FP32 channel、streaming
 decode/encode、更宽泛的 import mapping 与公开 Host/frontend provider selection 仍属未来工作。
 V-15 不新增余下 access/conversion/inference/execution suite、generic graph/cache persistence，
-也不迁移 operation ABI v2/Host。
+也不迁移 operation-plugin/Host；DI-3 后续实现了单独范围的 operation 边界。
 
 Issue #78 批准了本契约。Issue #79 至 #90 交付了有界的 V-2 至 V-13 实现与决策切片。
 Issue #117 已实现独立的合成 `VariableSampleField` V-14 证明，不依赖可选 codec。Issue #118
@@ -388,7 +388,7 @@ key、signed 64-bit `ImageRect` interval、rank-general unsigned 64-bit `TensorS
 interval、单个 nonempty clause 最多八个 atom 的硬上限，以及显式 caller budget。Dirty
 source fact、per-node affected work、edge mapping、HP/RT validity 和 core dense operation
 都保留规范化 `RegionSet`。当前 image tiling、ImageBuffer helper、Host/IPC inspection 与
-operation ABI v2 仍保留 checked derived `PixelRect` projection。RT 只支持 image；
+operation ABI v1 adapter 仍保留 checked derived `PixelRect` projection。RT 只支持 image；
 TensorSlice 是 HP monolithic work，绝不被重新解释成二维 geometry。
 
 ### DataSpec、capability、property 与 output inference
@@ -534,18 +534,17 @@ include/photospider/plugin/
 ImageBuffer     -> Value + ImageFacet + ImageView
 PixelRect       -> RegionSet atom ImageRect
 Device          -> DeviceBackend + DeviceId + MemoryDomain
-OperationOutput -> named Value outputs
+Operation result -> named Value outputs
 ParameterMap    -> configuration only, never a data payload
 ```
 
-仓库自有 operation 与 provider 首先迁移。随后按依赖顺序迁移自有 adapter、cache、graph
-document、Host value、CLI/IPC translation、test、installed consumer 与文档。只有全部自有
-operation plugin 与 consumer 都迁移到 ADR 0012 接受的独立版本化 pure-C operation-plugin
-ABI v1 replacement 后，才删除 operation ABI v2、其 entry point、SDK、fixture 与 package
-surface。
+仓库自有 operation 与 provider 已首先迁移，随后按依赖顺序迁移自有 adapter、test、installed
+consumer 与文档。DI-3 安装 ADR 0012 接受的独立版本化 pure-C operation-plugin ABI v1，并在同一
+breaking change 中删除 predecessor entry point、SDK、fixture 与 package surface。DI-4 仍负责
+最终 public Host/IPC/worker/durable/codec/CLI ImageBuffer 迁移。
 
 最终状态不存在永久 compatibility wrapper、alias class、重复 old/new API、forwarding header、
-dual loader、v2-to-v1 shim 或双重 descriptor/cache/ABI authority。Temporary edge adaptation
+dual loader、predecessor shim 或双重 descriptor/cache/ABI authority。Temporary edge adaptation
 只能存在于显式限定的实现切片内，并且必须在该切片的 completion boundary 删除。
 
 ### 验证边界
@@ -608,7 +607,7 @@ payload 无法忠实保留。
 
 拒绝，因为这会丢失 Tensor 和稀疏逻辑 domain，并向 caller 隐藏 approximation。
 
-### 复用 operation ABI v2 并传递新的 C++ Value object
+### 复用临时 C++ operation registration generation 并传递新的 Value object
 
 拒绝，因为 C-linkage entry symbol 不能稳定 C++ layout、allocator、exception、RTTI、
 standard-library ownership 或 toolchain ABI。

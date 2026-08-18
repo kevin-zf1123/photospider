@@ -21,7 +21,7 @@ it as an upstream root of the selected dependency cone.
 **Dirty Region** is normalized logical affected or demanded work represented
 by `RegionSet`. V-4 supports exact ImageRect and rank-general TensorSlice for
 HP; RT accepts only exact ImageRect. Current Host/IPC v2 inspection, operation
-ABI v2, ImageBuffer processing, and physical image tiles use checked derived
+ABI v1 adapters, ImageBuffer processing, and physical image tiles use checked derived
 `PixelRect`/`PixelSize`. Those compatibility rectangles are zero-based within
 their HP or RT storage allocation and do not inherit a signed logical origin.
 OpenCV rectangles and sizes are created only locally
@@ -318,7 +318,7 @@ the prior output was complete, its complete validity remains true even when a
 full ImageRect proof and TensorSlice update use different Region domains. A
 fresh partial output has only partial validity, so whole-output dependency
 resolution and current regionless disk persistence reject it until a normal
-Whole commit replaces it. Generic ABI v2 monolithic callbacks retain
+Whole commit replaces it. Generic operation ABI v1 monolithic callbacks retain
 complete-output replacement behavior.
 
 The task pruner treats dependencies outside the active selected task flags as
@@ -376,7 +376,7 @@ Current logical dirty authority uses normalized `RegionSet` across propagation,
 planning, source history, per-node state, edge mappings, HP validity, staging,
 and the Region-aware core dense operation. Checked derived `PixelRect` and
 `PixelSize` remain only at image tile/task, ImageBuffer, Host/IPC v2, and
-operation ABI v2 edges. Region endpoint and tensor-shape arithmetic is checked;
+operation ABI v1 adapter edges. Region endpoint and tensor-shape arithmetic is checked;
 the image adapter rejects uncertainty, TensorSlice, custom domains,
 multi-atom clauses, and narrowing overflow. OpenCV rectangles and sizes are
 created only inside provider or adapter implementations at actual calls.

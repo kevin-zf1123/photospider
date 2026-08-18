@@ -763,7 +763,7 @@ residency 与 worker execution 分别由对应的
 `execution_service_state.cpp` 负责 retained value lifetime；源码私有的 run-state、ready-store 与
 pool header 共享完全相同的嵌套类型，但不会形成 forwarding contract 或 installed contract。
 
-- `include/photospider/plugin/op_contract.hpp`
+- `include/photospider/plugin/operation_plugin_api.h`
 - `src/lib/core/ps_types.hpp` 与 `.cpp`
 - `src/lib/compute/dispatch/task_graph_planning.hpp` 与 `.cpp`
 - `src/lib/compute/dispatch/compute_task_submission.hpp` 与 `.cpp`

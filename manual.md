@@ -175,8 +175,8 @@ or install its header.
 Extension DSOs use separate installed components:
 
 ```cmake
-find_package(Photospider CONFIG REQUIRED COMPONENTS operation_sdk)
-target_link_libraries(my_operation PRIVATE Photospider::operation_sdk)
+find_package(Photospider CONFIG REQUIRED COMPONENTS operation_plugin_sdk)
+target_link_libraries(my_operation PRIVATE Photospider::operation_plugin_sdk)
 
 find_package(Photospider CONFIG REQUIRED COMPONENTS data_provider_sdk)
 target_link_libraries(my_data_provider PRIVATE Photospider::data_provider_sdk)
@@ -185,10 +185,14 @@ find_package(Photospider CONFIG REQUIRED COMPONENTS policy_sdk)
 target_link_libraries(my_policy PRIVATE Photospider::policy_sdk)
 ```
 
-`operation_sdk` contains the v2 `ps::plugin` contracts and transitively links
-the no-external-dependency `operation_runtime` image factories. An adapter user
-requests `operation_opencv`, which discovers only OpenCV `core`; algorithm-
-specific modules remain the plugin's responsibility. `data_provider_sdk` is a
+`operation_plugin_sdk` contains the dependency-neutral C11 operation ABI v1
+header and its header-only C++17 authoring helper. Operation DSOs export only
+`ps_operation_plugin_get_abi_version` and `ps_operation_plugin_get_api_v1`;
+no C++ callback, exception, allocator, registry, or ownership object crosses
+the DSO boundary. A plugin needing public Value/runtime helpers links
+`Photospider::operation_runtime` explicitly. An adapter user requests
+`operation_opencv`, which discovers only OpenCV `core`; algorithm-specific
+modules remain the plugin's responsibility. `data_provider_sdk` is a
 dependency-neutral C11/C++17 header-only contract for immutable
 Schema/Facet/Layout definition bundles. Providers export
 `ps_data_provider_get_abi_version` and `ps_data_provider_get_api_v3`; the v3
@@ -203,7 +207,8 @@ dependency-neutral C11/C++17 header-only contract. Policy DSOs export
 receive only bounded immutable ranking snapshots and return one candidate id or
 an abstention. They receive no worker, queue, resource grant, Graph, Run, or
 lifecycle capability. The operation SDK likewise exposes no mutable backend
-owner, and old source-tree extension includes have no forwarding compatibility.
+owner. The retired C++ operation registration headers, component, symbols,
+aliases, and source-tree extension includes have no forwarding compatibility.
 
 The IPC Host implements all 58 current non-destructor Host virtuals through
 short-lived typed connections. Compute submits once, polls immediately and then

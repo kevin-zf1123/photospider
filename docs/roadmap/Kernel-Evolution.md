@@ -30,7 +30,7 @@ multi-session server runtime.
 | Run and process execution domain | [compute-run-execution-domain](https://github.com/users/kevin-zf1123/projects/3) | [#64](https://github.com/kevin-zf1123/photospider/issues/64) | Request-owned `ComputeRun`, process-owned CPU execution, resource accounting, graph revisions, cancellation, and supersession. |
 | General data and heterogeneous execution | [generic-data-heterogeneous-execution](https://github.com/users/kevin-zf1123/projects/4) | [#77](https://github.com/kevin-zf1123/photospider/issues/77) | `Value`, `DataDescriptor`, `BufferHandle`, `Region`, device queues, fences, transfers, and bounded compute I/O. |
 | Execution profiles and secure services | [execution-profiles-server-isolation](https://github.com/users/kevin-zf1123/projects/5) | [#91](https://github.com/kevin-zf1123/photospider/issues/91) | Interactive and throughput profiles, an independent server control plane, constrained workers, and isolated plugin execution. |
-| Dense image Value migration | [dense-image-value-migration](https://github.com/users/kevin-zf1123/projects/6) | [#128](https://github.com/kevin-zf1123/photospider/issues/128) | Ordinary images use complete `Value` metadata and Host-owned output authority before the transitional `ImageBuffer` and operation ABI v2 boundaries are removed. |
+| Dense image Value migration | [dense-image-value-migration](https://github.com/users/kevin-zf1123/projects/6) | [#128](https://github.com/kevin-zf1123/photospider/issues/128) | Ordinary images use complete `Value` metadata and Host-owned output authority; operation plugins use pure-C ABI v1, while DI-4 owns final public `ImageBuffer` removal. |
 
 The merge gates for the current refactor remain in
 [codebase-refactor](https://github.com/users/kevin-zf1123/projects/1), aggregated
@@ -588,8 +588,8 @@ one before publication, leaves outer parallelism to Host-admitted execution
 starts, and keeps genuine shared backend synchronization provider-local. The
 repository-owned operation algorithms, their OpenCV initialization, and their
 exception translation now live in a separately switchable provider module;
-the provider-disabled profile proves a stdlib-only v2 provider can supply and
-execute an absent operation. Issue #63 makes image processing, codecs, public
+the provider-disabled profile proves a stdlib-only ABI-v1 provider can supply
+and execute an absent operation. Issue #63 makes image processing, codecs, public
 adapters, provider/plugin defaults, and the embedded product capability
 selected. The dependency-disabled profile discovers no OpenCV and builds the
 real kernel aggregate and Host product with standard-library or explicit
@@ -613,8 +613,8 @@ leakage, and runs an external Host consumer.
 ## General Data and Regions
 
 Current baseline: `ImageBuffer`, `DataType`, `Device`, `PixelRect`,
-`ParameterMap`, operation ABI v2, and the existing cache/execution ownership
-remain implemented compatibility contracts. V-2 implemented a bounded
+`ParameterMap`, and the existing cache/execution ownership remain implemented
+compatibility contracts. Operation plugins use pure-C ABI v1. V-2 implemented a bounded
 dependency-neutral CPU DenseTensor `Value`/`ImageView` subset and one built-in
 operation. V-3 now adds checked BufferHandle ownership, lease-controlled
 construction, process-local allocation/revision identity, bounded signed
@@ -790,7 +790,7 @@ The implemented V-2 through V-15 and DI-1 subset is deliberately narrower:
   Exact/ConservativeSuperset/Unknown/Unsupported/TooComplex outcomes;
 - dirty source, per-node, edge, monolithic, and HP validity records retain
   normalized Region, while current image tiles, ImageBuffer helpers, Host/IPC
-  v2 inspection, and operation ABI v2 use checked derived PixelRect; and
+  v2 inspection, and operation ABI v1 adapters use checked derived PixelRect; and
 - the exact selected core `invert_dense` callback executes ImageRect or
   TensorSlice through checked strides; TensorSlice is HP-only monolithic work,
   and same-key plugin replacement cannot inherit that source-private contract.
@@ -873,9 +873,10 @@ cache Value persistence, manifests/chunks, deep-tiled/multipart/mixed-part
 OpenEXR, or general named graph Value outputs. Its native executor, transfer
 submission, mutable producer, completion admission, and residency owner remain
 source-private.
-ImageBuffer remains the
-compatibility representation for operation ABI v2, tiled writes, existing
-image codecs, and Host surfaces; V-15 does not adapt its deep Value through it.
+ImageBuffer remains the compatibility representation for private tiled writes,
+existing image codecs, and public Host surfaces until DI-4; operation ABI v1
+uses complete Value/grant records, and V-15 does not adapt its deep Value
+through ImageBuffer.
 
 `ElementSemantics`, `StorageEncoding`, and `QuantizationSchema` are independent.
 Describable, executable, and convertible support are also independent, and
@@ -919,14 +920,14 @@ The public migration is complete rather than permanently dual:
 ImageBuffer     -> Value + ImageFacet + ImageView
 PixelRect       -> RegionSet atom ImageRect
 Device          -> DeviceBackend + DeviceId + MemoryDomain
-OperationOutput -> named Value outputs
+Operation result -> named Value outputs
 ParameterMap    -> configuration only
 ```
 
-Operation plugins migrate from provisional C++ ABI v2 to the separately
-versioned pure-C operation-plugin ABI v1 accepted by ADR 0012 only after exact
-records and owned consumers exist. The completion boundary deletes v2 without
-a permanent wrapper, alias, forwarding header, dual loader, or v2-to-v1 shim.
+Operation plugins have migrated from the provisional C++ registration
+generation to the separately versioned pure-C operation-plugin ABI v1 accepted
+by ADR 0012. The completion boundary deleted the predecessor without a
+permanent wrapper, alias, forwarding header, dual loader, or compatibility shim.
 Data-definition provider v3 and policy ABI v1 remain independent families.
 
 ### Project 4 implementation dependency contract
@@ -989,9 +990,9 @@ DI-1 is the first dependency slice. It makes the immutable data window,
 optional display window, and dynamic `RegionSet` three separate authorities;
 keeps storage representability, quantization, declared sample domain, color,
 and observed statistics independent; and freezes bounded records needed by
-later output-plan, wire, artifact, and codec work. It deliberately does not
-remove operation ABI v2 or `ImageBuffer`, migrate Host/IPC/worker/durable/CLI
-surfaces, define automatic color conversion, or reuse OpenEXR Deep
+later output-plan, wire, artifact, and codec work. DI-1 deliberately did not
+remove the then-current operation boundary or `ImageBuffer`, migrate
+Host/IPC/worker/durable/CLI surfaces, define automatic color conversion, or reuse OpenEXR Deep
 provider-defined windows as ordinary dense-image authority. DI-2 implements the
 next internal slice; DI-3 and DI-4 remain downstream delivery slices.
 
@@ -1009,9 +1010,9 @@ Private `NodeOutput`, full/dirty HP, RT proxy, formal/disk cache, extent,
 inspection, metrics, and the bounded statistics producer/cache now derive image
 facts from canonical named Values. `image` is the permanent current port;
 compatibility ImageBuffer staging is cleared at inbound adapters and rejected
-by formal commit. Current ABI v2, isolated execution, Host/IPC/worker, durable,
-CLI, codec, and final ImageBuffer removal remain DI-3/DI-4 work. DI-2 publishes
-no pure-C ABI record and removes no v1/v2 loader.
+by formal commit. DI-3 subsequently delivered pure-C operation ABI v1 and
+isolation protocol v2. Host/IPC/worker, durable, CLI, codec, and final
+ImageBuffer removal remain DI-4 work; DI-2 itself published no ABI record.
 
 ## Heterogeneous Executors
 
@@ -1646,64 +1647,42 @@ in-process.
 ### Issue #101 accepted operation ABI decision
 
 [ADR 0012](../adr/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md)
-accepts an independent operation-plugin ABI v1 target. It is neither a
-data-provider-v3 suite nor policy-v1 evolution. The current installed boundary
-remains operation C++ ABI v2 until one later implementation migrates every
-repository plugin and installed consumer and deletes v2 completely, with no
-wrapper, alias, dual loader, forwarding header, or v2-to-v1 shim.
+accepted an independent operation-plugin ABI v1. DI-3 now implements that
+decision as the sole installed/loaded operation contract; it remains separate
+from data-provider v3 and policy v1.
 
-The future self-contained C11/C++17 contract has a numeric ABI-one handshake,
-one exact 96-byte root API, and separate exact 64-byte v1 Definition,
-Configuration, Inference, Region, Dependency, and Execution suites. Definition,
-Configuration, Inference, Region, and Execution are required; Dependency is
-required when copied implementation metadata declares data dependence. Exactly
-20 semantic record kinds have exact size/kind/version/flags. Plain identities,
-handles, byte views, digests, array references, configuration values, and axis
-ranges have no record header; root and suites use their own prefixes. Reserved
-storage, pointer/count/stride framing, and all exact offsets are checked.
-Unknown tails and partial-prefix compatibility are rejected.
+The self-contained C11/C++17 surface has a numeric ABI-one handshake, one exact
+96-byte root API, exact 64-byte Definition, Configuration, Inference, Region,
+Dependency, and Execution suites, and 30 exact semantic record kinds. It
+round-trips complete DI-1 descriptor/facet/layout metadata and DI-2 immutable
+output plans plus callback-scoped Host grants. Reserved storage,
+pointer/count/stride framing, bounds, identities, enums, and all exact offsets
+are checked; unknown tails and partial prefixes are rejected.
 
-Permanent 128-bit plugin/operation/implementation identities remain distinct
-from Host-minted process-local generation and invocation handles. Opaque plugin
-contexts only round-trip to the defining generation. Inputs are borrowed for
-one synchronous call; metadata and sink output are validated and copied; the
-Host owns output buffers and provides no allocator callback. Successful root
-and configured contexts receive one destroy attempt under the exact DSO lease.
-Statuses 0 through 8 freeze success, caller error, allocation failure,
-unsupported request, invalid descriptor, excessive complexity, cancellation,
-failed precondition, and internal failure. Exceptions never cross the DSO.
+Permanent plugin/operation/implementation identities remain distinct from
+Host-minted generation, invocation, plan, binding, and grant identities.
+Borrowed pointers are callback-local. The Host validates and copies sink output,
+owns allocation/seal/publication, and retains exact callback/context DSO leases.
+Replacement preserves atomic visibility, revision/predecessor restoration,
+middle-generation splice, reverse unload, in-flight lifetime, and exactly-once
+context/generation destruction.
 
-V1 execution is deliberately synchronous and CPU-addressable. It carries no
-native device handle, device-resident buffer, fence, completion owner, delayed
-sink, Graph/Run/scheduler/cache/resource authority, or wire representation. A
-private device implementation must stage into Host CPU output before return or
-remain behind a Host-private adapter. Future native/async execution uses a new
-suite/ABI decision.
+Trusted implementations call the pure-C suite in process. Supervised
+implementations carry only a signed runtime-package identity and route through
+the existing `PluginInvocationExecutor` using isolation protocol v2, with no
+direct fallback or serialized process pointer. Pure C does not sandbox trusted
+native code, and `SIGKILL` remains only memory-pressure-compatible evidence.
 
-Publication preserves the current shadow transaction, atomic immutable slot
-visibility, per-slot revision/predecessor restoration, middle-generation
-splice, reverse retirement, and exact callback/context DSO leases. A callback
-that never returns may retain those owners forever; pure C does not add bounded
-termination. Issue #102 now implements its pointer-free shared-memory/FD
-invocation record, Issue #103 implements authenticated private-session
-supervision and factual crash/hang/signal/bad-output containment, and Issue #104
-implements signed admission for current operation/policy DSOs plus package and
-resource admission for the private isolated runtime. These controls neither
-complete the operation-ABI migration nor add a general sandbox. A `SIGKILL`
-observation is only memory-pressure-compatible and does not prove OOM.
-
-Issue #101 is complete as a decision when these bilingual artifacts pass local
-validation, fresh independent diff review, authorized exact-head PR
-Integration, fresh Codex exact-head review with findings adjudicated, zero
-unresolved review threads, and Issue/Project administration. Archiving that
-decision and closing #101 do not wait for the later header/loader/plugin
-migration or v2 deletion; those remain one independent breaking implementation
-change while v2 stays current and v1 target-only.
+The breaking migration also deleted the predecessor headers, symbols,
+registrar/callback surface, loader lookup, component assertions, fixtures, and
+active documentation. No wrapper, alias, dual loader, forwarding header, or
+compatibility shim remains.
 
 ### Issue #102 current isolated CPU invocation slice
 
-Issue #102 now supplies a source-private Darwin/Linux protocol-v1 CPU
-invocation adapter and one-call runtime endpoint. A bounded framed Unix stream
+Issue #102 supplied the source-private Darwin/Linux CPU invocation adapter and
+one-call runtime endpoint. DI-3 advanced its independent wire to protocol v2.
+A bounded framed Unix stream
 carries the canonical request/response; ordered `SCM_RIGHTS` descriptors grant
 unlinked POSIX shared-memory capabilities. The wire includes the exact
 tenant/Job/attempt/worker-lease/plugin-generation/invocation identity tuple,
@@ -1731,9 +1710,9 @@ that real-exec integration test links the product archive on both sides. This is
 the complete #102 product inclusion vertical, not a selected end-user path: no
 `ExecutionService`, `WorkerManager`, embedded Host/CLI,
 `photospider-worker`, or other composition root calls it. The narrower
-`NonSupervisedIsolatedCpuInvocationExecutor` remains a pre-supervisor transport
-sub-role rather than the target private `PluginInvocationExecutor`, whose
-composition through `PluginRuntimeSupervisor` belongs to #103.
+`NonSupervisedIsolatedCpuInvocationExecutor` remains the transport sub-role
+inside the private `PluginInvocationExecutor`/
+`PluginRuntimeSupervisor` composition delivered by #103.
 
 Every call uses a fresh native exec with an empty environment and, besides
 stdio, only its fixed control/status/executable descriptors retained. Issue
@@ -1743,10 +1722,9 @@ deliberately non-supervised when called directly: there is no deadline,
 heartbeat, restart policy, bounded hang recovery, or general syscall/network
 sandbox, and a callback can hang indefinitely. Issue #103 composes the separate
 supervised path described below; the non-supervised adapter is never its
-fallback. The process-local callback seam neither calls nor migrates current
-operation ABI v2 or target-only operation ABI v1; it adds no compatibility
-wrapper, shim, ABI adapter, or dual loader. Cross-process GPU/native-handle
-support remains later work.
+fallback. DI-3 maps only operation ABI v1 supervised CPU records onto that
+composition and adds no compatibility wrapper or native-handle transport.
+Cross-process GPU/native-handle support remains later work.
 
 ### Issue #103 current plugin runtime supervision slice
 
@@ -1795,12 +1773,12 @@ output rejection, exact FD/PID retirement, later healthy recovery, and a real
 `PluginRuntimeFault` reaches the request owner, only the owning Run is published
 Failed, and the fixed service worker executes a later unrelated Run.
 
-This is not yet an end-user selected operation path. No current
-`ExecutionService`, `WorkerManager`, embedded Host/CLI, `photospider-worker`, or
-operation loader constructs the isolated invocation from a Graph operation.
-Operation ABI v2 cannot cross this wire and target-only ABI v1 is not
-implemented or shimmed. Issue #104 now supplies package trust and enforceable
-quota for this private composition; stronger sandbox profiles remain separate.
+DI-3 now lets the operation loader construct this isolated invocation from a
+supervised pure-C ABI v1 descriptor. A signed runtime-package route is required
+and direct trusted fallback is forbidden. Public `ExecutionService`,
+`WorkerManager`, embedded Host/CLI, and `photospider-worker` still expose no
+end-user selector. Issue #104 supplies package trust and enforceable quota for
+this private composition; stronger sandbox profiles remain separate.
 Issue #105 owns the network/artifact planes. Issue #106 now maintains two
 manual opt-in production-decoder harnesses for bounded worker metadata and
 isolated invocation packets/descriptors, plus deterministic registered codec
@@ -1857,8 +1835,8 @@ code executes.
 This completes package and resource admission for the private Linux runtime
 composition, signed immutable-snapshot admission plus mapping/capability
 lifetime consistency for Linux operation/policy loaders, and typed pre-access
-Darwin rejection for every native role. It does
-not select an end-user Graph operation, implement target operation ABI v1,
+Darwin rejection for every native role. At that Issue #104 boundary it did not
+select an end-user Graph operation, implement the then-target operation ABI v1,
 isolate approved in-process DSOs, provide a general syscall/network sandbox,
 or prove OOM from `SIGKILL`.
 

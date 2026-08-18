@@ -535,8 +535,9 @@ ImageFacet, descriptor/content identity, or formal cache validity.
 **`ImageBuffer`**
 The current image payload contract: two-dimensional extent, channel count,
 one scalar type, device, row stride, shared data ownership, and optional
-backend context. It remains at explicit ABI v2, codec, Host, and product
-compatibility edges, but private formal CPU image cache entries contain only
+backend context. It remains at codec, Host, and product compatibility edges
+until DI-4, but operation ABI v1 carries complete Value/grant records and
+private formal CPU image cache entries contain only
 canonical named Values. An ImageBuffer projection is use-scoped and is never
 allocation, readiness, revision, or cache authority. It is not a general
 Tensor, Deep Image, or vector-scene model.
@@ -552,7 +553,7 @@ placeholder.
 
 **`PixelRect` / `PixelSize`**
 External-library-neutral two-dimensional integer geometry used by current
-Host/IPC v2 inspection, operation ABI v2, ImageBuffer processing, and physical
+Host/IPC v2 inspection, operation ABI v1 adapters, ImageBuffer processing, and physical
 image tile/task records. It is derived from one exact built-in ImageRect where
 logical Region authority is required. It cannot represent TensorSlice, Whole,
 custom domains, multi-atom clauses, or uncertainty. OpenCV geometry may be
