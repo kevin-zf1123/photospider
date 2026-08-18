@@ -84,10 +84,13 @@ ExtensionIdentity dense_image_extension_identity(
 }
 
 /**
- * @brief Builds immutable Value metadata from one validated output plan.
- * @param plan Exact high-level plan retained before process execution.
+ * @brief Builds immutable DenseImage metadata from one validated image plan.
+ * @param plan Exact high-level image plan retained before process execution.
  * @return Equivalent identities, versions, and opaque digest words.
  * @throws Nothing.
+ * @note The caller invokes this helper only when `image_facet` and its matching
+ * nonzero Facet identity passed protocol validation. Generic DenseTensor plans
+ * retain their descriptor and Layout without DenseImage-only metadata.
  */
 DenseImageValueDescriptorMetadata dense_image_value_metadata(
     const IsolatedCpuDenseTensorOutputPlan& plan) noexcept {
@@ -3735,8 +3738,10 @@ std::vector<Value> publish_host_outputs(
     }
     ValueBuilder builder = ValueBuilder::allocate_cpu_dense_tensor(
         plan.descriptor, plan.image_facet, plan.layout, plan.storage_size);
-    DenseImageValueDescriptorMetadataAccess::attach(
-        &builder, dense_image_value_metadata(plan));
+    if (plan.image_facet.has_value()) {
+      DenseImageValueDescriptorMetadataAccess::attach(
+          &builder, dense_image_value_metadata(plan));
+    }
     {
       WriteLease lease = builder.acquire_write();
       if (lease.size() != plan.storage_size) {

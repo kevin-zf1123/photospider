@@ -2238,9 +2238,24 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     target_link_libraries(test_operation_plugin_abi PRIVATE ${CMAKE_DL_LIBS})
     target_compile_definitions(test_operation_plugin_abi PRIVATE
         PS_TEST_LIFECYCLE_OPERATION_PLUGIN="$<TARGET_FILE:lifecycle_op_plugin>"
+        PS_TEST_OVERRIDE_OPERATION_PLUGIN="$<TARGET_FILE:override_lifecycle_op_plugin>"
         PS_TEST_CONFORMANCE_OPERATION_PLUGIN="$<TARGET_FILE:conformance_operation_abi_plugin>")
     add_dependencies(test_operation_plugin_abi lifecycle_op_plugin
-        conformance_operation_abi_plugin)
+        override_lifecycle_op_plugin conformance_operation_abi_plugin)
+    photospider_enable_plugin_trust_test_environment(
+        test_operation_plugin_abi)
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.29)
+        get_property(PHOTOSPIDER_OPERATION_ABI_TRUST_LAUNCHER_SET
+            TARGET test_operation_plugin_abi PROPERTY TEST_LAUNCHER SET)
+    else()
+        get_property(PHOTOSPIDER_OPERATION_ABI_TRUST_LAUNCHER_SET
+            TARGET test_operation_plugin_abi
+            PROPERTY CROSSCOMPILING_EMULATOR SET)
+    endif()
+    if(NOT PHOTOSPIDER_OPERATION_ABI_TRUST_LAUNCHER_SET)
+        message(FATAL_ERROR
+            "test_operation_plugin_abi requires its trust launcher before GoogleTest discovery")
+    endif()
     gtest_discover_tests(test_operation_plugin_abi
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES RUN_SERIAL TRUE TIMEOUT 20)
@@ -2285,8 +2300,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 PS_TEST_ISOLATED_CPU_FIXTURE_PATH="$<TARGET_FILE:test_isolated_cpu_plugin_fixture>")
             add_dependencies(test_operation_plugin_abi
                 test_isolated_cpu_plugin_fixture)
-            photospider_enable_plugin_trust_test_environment(
-                test_operation_plugin_abi)
         endif()
 
         # Compile deterministic startup-fault variants from the same real

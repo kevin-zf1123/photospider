@@ -32,8 +32,23 @@
 namespace ps::plugin_host {
 namespace {
 
-/** @brief Permanent built-in Layout identity used by signed Strided storage. */
+/** @brief Permanent Host-published Schema identity for ordinary DenseTensor. */
+constexpr ps_operation_identity_v1 kDenseTensorSchemaIdentity{
+    0x50534449U,
+    0x1001U,
+};  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Permanent Host-published Facet identity for ordinary ImageFacet. */
+constexpr ps_operation_identity_v1 kImageFacetIdentity{0x50534449U, 0x1002U};
+
+/** @brief Permanent Host-published Layout identity for Strided storage. */
 constexpr ps_operation_identity_v1 kStridedLayoutIdentity{0x50534449U, 0x1003U};
+
+/** @brief Structural version of the Host built-in DenseImage projection. */
+constexpr std::uint64_t kDenseImageDescriptorVersion = 1U;
+
+/** @brief Structural version of the Host built-in Strided projection. */
+constexpr std::uint64_t kStridedLayoutVersion = 1U;
 
 /**
  * @brief Reports whether one 128-bit ABI identity is absent.
@@ -1868,13 +1883,16 @@ class DescriptorProjection final {
  * @brief Selects and validates exact representation metadata for one input.
  * @param value Immutable input whose publication metadata has priority.
  * @param port Exact declared destination input port.
- * @return Value-retained facts, or the legacy port-selected version-one and
- * unavailable-digest projection when the Value predates operation metadata.
+ * @return Value-retained facts, or the permanent Host built-in DenseTensor,
+ * ImageFacet, and Strided identities with their frozen version-one spelling
+ * and unavailable digests when the Value predates operation metadata.
  * @throws std::invalid_argument when retained identities conflict with the
- * destination port or the image route has no explicit Facet.
+ * destination port, the image route has no explicit Facet, or an ordinary
+ * Value is consumed through identities that only its consumer declared.
  * @note A zero port Layout leaves the retained Strided identity unconstrained.
- * The fallback exists only for Values published outside the operation ABI; it
- * never overwrites metadata retained from an operation output plan.
+ * The compatibility projection exists only for Values published outside the
+ * operation ABI. Its identity/version tuple belongs to the Host publisher,
+ * never to the destination port, and it never overwrites operation metadata.
  */
 DescriptorMetadata input_descriptor_metadata(const Value& value,
                                              const PortDefinition& port) {
@@ -1895,14 +1913,19 @@ DescriptorMetadata input_descriptor_metadata(const Value& value,
     }
     return metadata;
   }
+  if (!identities_equal(port.schema_identity, kDenseTensorSchemaIdentity) ||
+      !identities_equal(port.facet_identity, kImageFacetIdentity) ||
+      (!identity_is_zero(port.layout_identity) &&
+       !identities_equal(port.layout_identity, kStridedLayoutIdentity))) {
+    throw std::invalid_argument(
+        "operation ABI ordinary input requires built-in publisher identity");
+  }
   DescriptorMetadata metadata;
-  metadata.schema_identity = port.schema_identity;
-  metadata.facet_identity = port.facet_identity;
-  metadata.layout_identity = identity_is_zero(port.layout_identity)
-                                 ? kStridedLayoutIdentity
-                                 : port.layout_identity;
-  metadata.descriptor_version = 1U;
-  metadata.layout_version = 1U;
+  metadata.schema_identity = kDenseTensorSchemaIdentity;
+  metadata.facet_identity = kImageFacetIdentity;
+  metadata.layout_identity = kStridedLayoutIdentity;
+  metadata.descriptor_version = kDenseImageDescriptorVersion;
+  metadata.layout_version = kStridedLayoutVersion;
   return metadata;
 }
 
@@ -5049,8 +5072,8 @@ void OperationPluginGeneration::register_into(OpRegistry& registry) {
           make_private_metadata(operation, implementation);
       if ((implementation.execution_shape_mask &
            PS_OPERATION_EXECUTION_MONOLITHIC_V1) != 0U) {
-        registry.register_impl(
-            operation.type, operation.subtype, Device::CPU,
+        registry.register_op_hp_monolithic(
+            operation.type, operation.subtype,
             MonolithicOpFunc([generation, implementation_state, operation_index,
                               implementation_index](
                                  const Node& node,
@@ -5068,8 +5091,8 @@ void OperationPluginGeneration::register_into(OpRegistry& registry) {
           throw std::invalid_argument(
               "operation ABI tiled bridge requires exactly image output");
         }
-        registry.register_impl(
-            operation.type, operation.subtype, Device::CPU,
+        registry.register_op_hp_tiled(
+            operation.type, operation.subtype,
             TileOpFunc([generation, implementation_state, operation_index,
                         implementation_index](
                            const Node& node, const OutputTile& output,

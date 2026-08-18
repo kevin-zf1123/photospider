@@ -62,7 +62,8 @@ class OperationPluginGeneration final
       delete;
 
   /**
-   * @brief Registers every copied implementation into a shadow registry.
+   * @brief Registers every copied executable contribution into replacement
+   * slots of a shadow registry.
    * @param registry Transaction-local registry receiving complete callbacks,
    * metadata, Region/dependency hooks, and generation leases.
    * @return Nothing.
@@ -70,7 +71,9 @@ class OperationPluginGeneration final
    * current CPU execution model.
    * @throws std::bad_alloc or registry storage exceptions unchanged.
    * @note The caller wraps this method in `OpRegistry::capture_registration`;
-   * this function never publishes the process singleton directly.
+   * scalar executable slots replace their active predecessor so generation
+   * unload can restore or splice it. This function never publishes the process
+   * singleton directly and never appends a cross-generation device candidate.
    */
   void register_into(OpRegistry& registry);
 

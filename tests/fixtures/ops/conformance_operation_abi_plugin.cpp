@@ -462,6 +462,9 @@ ps_operation_port_descriptor_v1 make_input_port() noexcept {
   port.schema_identity = make_identity(0x50534449U, 0x1001U);
   port.facet_identity = make_identity(0x50534449U, 0x1002U);
   port.layout_identity = make_identity(0x50534449U, 0x1003U);
+  if (mode_contains("custom_input_identity")) {
+    port.schema_identity = make_identity(0x5053435553544F4DULL, 0x1001U);
+  }
   return port;
 }
 

@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -328,6 +329,26 @@ std::shared_ptr<plugin_host::OperationPluginGeneration> load_generation(
 }
 
 /**
+ * @brief Invokes the active lifecycle callback in one private registry.
+ * @param registry Registry containing exactly one selected lifecycle slot.
+ * @return Diagnostic marker emitted by the selected fixture generation.
+ * @throws std::runtime_error when no monolithic lifecycle callback is active.
+ * @throws Callback or allocation failures unchanged.
+ */
+std::string invoke_lifecycle_marker(OpRegistry& registry) {
+  auto resolved = registry.resolve_for_intent(
+      "plugin_lifecycle", "op", ComputeIntent::GlobalHighPrecision);
+  if (!resolved || !std::holds_alternative<MonolithicOpFunc>(*resolved)) {
+    throw std::runtime_error("lifecycle generation is not monolithic");
+  }
+  Node node;
+  node.id = 1;
+  node.type = "plugin_lifecycle";
+  node.subtype = "op";
+  return std::get<MonolithicOpFunc>(*resolved)(node, {}).debug.compute_device;
+}
+
+/**
  * @brief Builds one 2-by-2 single-channel UINT8 output plan for tile routing.
  * @return Complete validated immutable plan named `image`.
  * @throws Plan metadata validation or allocation failures unchanged.
@@ -597,6 +618,31 @@ TEST(OperationPluginAbi, InFlightCallbackRetainsDsoAndDestroysOnce) {
 }
 
 /**
+ * @brief Proves a later pure-C generation replaces one executable slot.
+ * @throws Discovery, capture, callback, or restoration failures unchanged.
+ * @note The direct seam is portable and bypasses production trust. Process-
+ * owner middle-generation splice and lease retirement remain covered by the
+ * Linux PluginManager integration suite.
+ */
+TEST(OperationPluginAbi, LaterGenerationReplacesAndRestoresExecutableSlot) {
+  auto predecessor = load_generation(PS_TEST_LIFECYCLE_OPERATION_PLUGIN);
+  auto replacement = load_generation(PS_TEST_OVERRIDE_OPERATION_PLUGIN);
+  OpRegistry registry;
+  OpRegistry::RegistrationCapture predecessor_capture;
+  registry.capture_registration([&]() { predecessor->register_into(registry); },
+                                predecessor_capture);
+  EXPECT_EQ(invoke_lifecycle_marker(registry), "PLUGIN_LIFECYCLE_TEST");
+
+  OpRegistry::RegistrationCapture replacement_capture;
+  registry.capture_registration([&]() { replacement->register_into(registry); },
+                                replacement_capture);
+  EXPECT_EQ(invoke_lifecycle_marker(registry), "PLUGIN_OVERRIDE_TEST");
+
+  registry.restore_registration_capture(replacement_capture);
+  EXPECT_EQ(invoke_lifecycle_marker(registry), "PLUGIN_LIFECYCLE_TEST");
+}
+
+/**
  * @brief Proves a supervised operation has no direct-execution fallback.
  * @throws Nothing when the unavailable exact package route is rejected.
  * @note Route lookup precedes request validation deliberately: an absent
@@ -670,6 +716,36 @@ TEST(OperationPluginAbi, TrustedExecutionEchoesExactDescriptorMetadata) {
   EXPECT_NO_THROW(
       (void)execute_conformance_monolithic("trusted_monolithic_metadata"));
   EXPECT_NO_THROW(execute_conformance_tiled("trusted_tiled_metadata"));
+}
+
+/**
+ * @brief Rejects consumer-declared custom publisher identity for ordinary
+ * Values in every execution mode and shape.
+ * @throws Nothing when all four routes fail at the shared input projection.
+ * @note A Value with retained operation metadata may carry a matching custom
+ * identity; this test deliberately supplies an ordinary Host-built image with
+ * no retained publisher record.
+ */
+TEST(OperationPluginAbi,
+     OrdinaryValuesRejectConsumerDeclaredIdentityInEveryRouteAndShape) {
+  constexpr const char* kModes[]{
+      "trusted_monolithic_custom_input_identity",
+      "trusted_tiled_custom_input_identity",
+      "supervised_monolithic_custom_input_identity",
+      "supervised_tiled_custom_input_identity",
+  };
+  for (const char* mode : kModes) {
+    SCOPED_TRACE(mode);
+    const std::string diagnostic = invalid_argument_message([&]() {
+      if (std::string_view(mode).find("monolithic") != std::string_view::npos) {
+        (void)execute_conformance_monolithic(mode);
+      } else {
+        execute_conformance_tiled(mode);
+      }
+    });
+    EXPECT_NE(diagnostic.find("built-in publisher identity"),
+              std::string::npos);
+  }
 }
 
 /**

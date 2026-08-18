@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/value_descriptor_metadata.hpp"
 #include "execution/isolation/isolated_cpu_invocation.hpp"  // NOLINT(build/include_subdir)
 #include "execution/isolation/isolated_cpu_invocation_test_probe.hpp"  // NOLINT(build/include_subdir)
 
@@ -732,6 +733,12 @@ void expect_one_child_reaped(
   EXPECT_EQ(errno, ECHILD);
 }
 
+/**
+ * @brief Proves a generic DenseTensor survives fresh-process publication.
+ * @throws Standard trust, protocol, execution, and assertion failures.
+ * @note Generic output retains its Schema descriptor and Strided layout while
+ * carrying neither ImageFacet nor DenseImage-only retained metadata.
+ */
 TEST(IsolatedCpuInvocation, CopiesThroughFreshProcessAndPublishesFreshValue) {
   const std::array<std::byte, 6U> source{std::byte{0},   std::byte{1},
                                          std::byte{2},   std::byte{253},
@@ -746,6 +753,12 @@ TEST(IsolatedCpuInvocation, CopiesThroughFreshProcessAndPublishesFreshValue) {
   ASSERT_EQ(result.outcome, IsolatedCpuInvocationOutcome::Succeeded);
   ASSERT_EQ(result.outputs.size(), 1U);
   EXPECT_TRUE(result.diagnostic.empty());
+  EXPECT_EQ(result.outputs[0].dense_tensor_descriptor(),
+            invocation.outputs[0].descriptor);
+  EXPECT_EQ(result.outputs[0].strided_layout(), invocation.outputs[0].layout);
+  EXPECT_FALSE(result.outputs[0].image_facet().has_value());
+  EXPECT_EQ(DenseImageValueDescriptorMetadataAccess::get(result.outputs[0]),
+            nullptr);
   EXPECT_NE(result.outputs[0].allocation_identity(),
             input.allocation_identity());
   const std::array<std::byte, 6U> expected{std::byte{1},   std::byte{2},
@@ -754,6 +767,10 @@ TEST(IsolatedCpuInvocation, CopiesThroughFreshProcessAndPublishesFreshValue) {
   EXPECT_EQ(integration_bytes(result.outputs[0]), expected);
 }
 
+/**
+ * @brief Proves a zero-input generic output retains its exact non-image plan.
+ * @throws Standard trust, protocol, execution, and assertion failures.
+ */
 TEST(IsolatedCpuInvocation, SupportsZeroInputAndExactOutputPlan) {
   IsolatedCpuHostInvocation invocation =
       integration_invocation("fixture.fill_sequence", 113U);
@@ -762,6 +779,12 @@ TEST(IsolatedCpuInvocation, SupportsZeroInputAndExactOutputPlan) {
 
   ASSERT_EQ(result.outcome, IsolatedCpuInvocationOutcome::Succeeded);
   ASSERT_EQ(result.outputs.size(), 1U);
+  EXPECT_EQ(result.outputs[0].dense_tensor_descriptor(),
+            invocation.outputs[0].descriptor);
+  EXPECT_EQ(result.outputs[0].strided_layout(), invocation.outputs[0].layout);
+  EXPECT_FALSE(result.outputs[0].image_facet().has_value());
+  EXPECT_EQ(DenseImageValueDescriptorMetadataAccess::get(result.outputs[0]),
+            nullptr);
   const std::array<std::byte, 6U> expected{std::byte{0}, std::byte{1},
                                            std::byte{2}, std::byte{3},
                                            std::byte{4}, std::byte{5}};
