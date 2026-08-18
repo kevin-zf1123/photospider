@@ -58,6 +58,14 @@ void register_cli_command_ops() {
           output.debug.compute_device = "cli-dirty-test-source";
           return output;
         }));
+    const DirtyRoiPropFunc offset_dirty(
+        [](const Node&, const PixelRect& roi, const GraphModel&,
+           const PixelSize&, const std::vector<PixelSize>&,
+           const plugin::ParameterMap&,
+           const std::vector<const NodeOutput*>* available_inputs) {
+          (void)available_inputs;
+          return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
+        });
     OpRegistry::instance().register_op_hp_monolithic(
         "cli_dirty_test", "offset_identity",
         MonolithicOpFunc(
@@ -80,17 +88,10 @@ void register_cli_command_ops() {
               output.space.absolute_roi = input.space.absolute_roi;
               output.debug.compute_device = "cli-dirty-test-offset-identity";
               return output;
-            }));
+            }),
+        {}, OpPlanningCallbacks{offset_dirty, {}, {}});
     OpRegistry::instance().register_dirty_propagator(
-        "cli_dirty_test", "offset_identity",
-        DirtyRoiPropFunc(
-            [](const Node&, const PixelRect& roi, const GraphModel&,
-               const PixelSize&, const std::vector<PixelSize>&,
-               const plugin::ParameterMap&,
-               const std::vector<const NodeOutput*>* available_inputs) {
-              (void)available_inputs;
-              return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
-            }));
+        "cli_dirty_test", "offset_identity", offset_dirty);
     OpMetadata empty_output_metadata;
     empty_output_metadata.produces_image = false;
     OpRegistry::instance().register_op_hp_monolithic(

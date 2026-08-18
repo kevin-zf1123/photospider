@@ -16,8 +16,9 @@
 #include <utility>
 #include <vector>
 
-#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "graph/node.hpp"     // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"      // NOLINT(build/include_subdir)
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "graph/node.hpp"         // NOLINT(build/include_subdir)
 
 namespace ps {
 namespace {
@@ -90,7 +91,9 @@ void expect_execution_metadata(const OpImplementation& implementation,
  * @throws Registry allocation or callback-copy exceptions unchanged.
  * @note Ordinary HP selection must choose the monolithic slot after both
  * registrations, while a tiled-only filter must choose the tiled slot. The
- * first slot's identity must survive publication of the second slot.
+ * first slot's identity must survive publication of the second slot. Each slot
+ * also retains distinct dirty, forward, and dependency callbacks so selection
+ * cannot borrow planning semantics from its sibling.
  */
 void verify_atomic_scalar_slots(const std::string& subtype,
                                 bool monolithic_first) {
@@ -122,6 +125,7 @@ void verify_atomic_scalar_slots(const std::string& subtype,
   monolithic_metadata.scratch_bytes = 202U;
   monolithic_metadata.exclusive_key = "atomic-monolithic-context";
   monolithic_metadata.cost_score = 11;
+  monolithic_metadata.data_dependent = true;
   monolithic_metadata.tile_preference = TileSizePreference::UNDEFINED;
   monolithic_metadata.access_pattern =
       OpMetadata::InputAccessPattern::SpatialAligned;
@@ -134,15 +138,55 @@ void verify_atomic_scalar_slots(const std::string& subtype,
   tiled_metadata.scratch_bytes = 404U;
   tiled_metadata.exclusive_key = "atomic-tiled-context";
   tiled_metadata.cost_score = 22;
+  tiled_metadata.data_dependent = true;
   tiled_metadata.tile_preference = TileSizePreference::MACRO;
   tiled_metadata.access_pattern = OpMetadata::InputAccessPattern::RandomAccess;
 
+  OpPlanningCallbacks monolithic_planning;
+  monolithic_planning.dirty_propagator = DirtyRoiPropFunc(
+      [](const Node&, const PixelRect&, const GraphModel&, const PixelSize&,
+         const std::vector<PixelSize>&, const plugin::ParameterMap&,
+         const std::vector<const NodeOutput*>*) {
+        return PixelRect{101, 1, 1, 1};
+      });
+  monolithic_planning.forward_propagator = ForwardRoiPropFunc(
+      [](const Node&, const PixelRect&, const GraphModel&, const PixelSize&,
+         const PixelSize&, std::size_t, const std::vector<PixelSize>&,
+         const plugin::ParameterMap&) { return PixelRect{201, 1, 1, 1}; });
+  monolithic_planning.dependency_builder = DependencyLutBuilder(
+      [](const Node&, const GraphModel&, const std::vector<PixelSize>&,
+         const PixelSize&, const plugin::ParameterMap&) {
+        SpatialDependencyMap map;
+        map.upstream_input_index = 301U;
+        return map;
+      });
+
+  OpPlanningCallbacks tiled_planning;
+  tiled_planning.dirty_propagator = DirtyRoiPropFunc(
+      [](const Node&, const PixelRect&, const GraphModel&, const PixelSize&,
+         const std::vector<PixelSize>&, const plugin::ParameterMap&,
+         const std::vector<const NodeOutput*>*) {
+        return PixelRect{102, 1, 1, 1};
+      });
+  tiled_planning.forward_propagator = ForwardRoiPropFunc(
+      [](const Node&, const PixelRect&, const GraphModel&, const PixelSize&,
+         const PixelSize&, std::size_t, const std::vector<PixelSize>&,
+         const plugin::ParameterMap&) { return PixelRect{202, 1, 1, 1}; });
+  tiled_planning.dependency_builder = DependencyLutBuilder(
+      [](const Node&, const GraphModel&, const std::vector<PixelSize>&,
+         const PixelSize&, const plugin::ParameterMap&) {
+        SpatialDependencyMap map;
+        map.upstream_input_index = 302U;
+        return map;
+      });
+
   const auto register_monolithic = [&]() {
-    registry.register_op_hp_monolithic(kType, subtype, monolithic,
-                                       monolithic_metadata);
+    registry.register_op_hp_monolithic(
+        kType, subtype, monolithic, monolithic_metadata, monolithic_planning);
   };
   const auto register_tiled = [&]() {
-    registry.register_op_hp_tiled(kType, subtype, tiled, tiled_metadata);
+    registry.register_op_hp_tiled(kType, subtype, tiled, tiled_metadata,
+                                  tiled_planning);
   };
   if (monolithic_first) {
     register_monolithic();
@@ -191,7 +235,39 @@ void verify_atomic_scalar_slots(const std::string& subtype,
   EXPECT_EQ(selected_tiled->metadata.access_pattern,
             OpMetadata::InputAccessPattern::RandomAccess);
 
-  Node node;
+  ASSERT_TRUE(selected_monolithic->dirty_propagator.has_value());
+  ASSERT_TRUE(selected_monolithic->forward_propagator.has_value());
+  ASSERT_TRUE(selected_monolithic->dependency_builder.has_value());
+  ASSERT_TRUE(selected_tiled->dirty_propagator.has_value());
+  ASSERT_TRUE(selected_tiled->forward_propagator.has_value());
+  ASSERT_TRUE(selected_tiled->dependency_builder.has_value());
+  GraphModel graph("");
+  const Node node;
+  const PixelRect roi{1, 2, 3, 4};
+  const PixelSize extent{8, 8};
+  const std::vector<PixelSize> extents;
+  const plugin::ParameterMap parameters;
+  EXPECT_EQ((*selected_monolithic->dirty_propagator)(
+                node, roi, graph, extent, extents, parameters, nullptr),
+            (PixelRect{101, 1, 1, 1}));
+  EXPECT_EQ((*selected_monolithic->forward_propagator)(
+                node, roi, graph, extent, extent, 0U, extents, parameters),
+            (PixelRect{201, 1, 1, 1}));
+  EXPECT_EQ((*selected_monolithic->dependency_builder)(node, graph, extents,
+                                                       extent, parameters)
+                .upstream_input_index,
+            301U);
+  EXPECT_EQ((*selected_tiled->dirty_propagator)(node, roi, graph, extent,
+                                                extents, parameters, nullptr),
+            (PixelRect{102, 1, 1, 1}));
+  EXPECT_EQ((*selected_tiled->forward_propagator)(
+                node, roi, graph, extent, extent, 0U, extents, parameters),
+            (PixelRect{202, 1, 1, 1}));
+  EXPECT_EQ((*selected_tiled->dependency_builder)(node, graph, extents, extent,
+                                                  parameters)
+                .upstream_input_index,
+            302U);
+
   const NodeOutput monolithic_output =
       std::get<MonolithicOpFunc>(selected_monolithic->func)(node, {});
   const OutputTile output_tile;

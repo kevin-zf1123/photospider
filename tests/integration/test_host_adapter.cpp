@@ -882,6 +882,19 @@ void register_host_adapter_ops() {
         "host_adapter_test", "resource_exhausted",
         MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&)
                              -> NodeOutput { throw std::bad_alloc{}; }));
+    const DirtyRoiPropFunc identity_dirty(
+        [](const Node&, const PixelRect& roi, const GraphModel&,
+           const PixelSize&, const std::vector<PixelSize>&,
+           const plugin::ParameterMap&,
+           const std::vector<const NodeOutput*>*) { return roi; });
+    const ForwardRoiPropFunc identity_forward(
+        [](const Node&, const PixelRect& roi, const GraphModel&,
+           const PixelSize&, const PixelSize&, size_t,
+           const std::vector<PixelSize>&,
+           const plugin::ParameterMap&) { return roi; });
+    const OpPlanningCallbacks identity_planning{identity_dirty,
+                                                identity_forward,
+                                                {}};
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "identity",
         MonolithicOpFunc(
@@ -896,21 +909,19 @@ void register_host_adapter_ops() {
               output.debug.compute_device = "host-adapter-identity-test";
               (void)node;
               return output;
-            }));
+            }),
+        {}, identity_planning);
     OpRegistry::instance().register_dirty_propagator(
-        "host_adapter_test", "identity",
-        DirtyRoiPropFunc(
-            [](const Node&, const PixelRect& roi, const GraphModel&,
-               const PixelSize&, const std::vector<PixelSize>&,
-               const plugin::ParameterMap&,
-               const std::vector<const NodeOutput*>*) { return roi; }));
+        "host_adapter_test", "identity", identity_dirty);
     OpRegistry::instance().register_forward_propagator(
-        "host_adapter_test", "identity",
-        ForwardRoiPropFunc([](const Node&, const PixelRect& roi,
-                              const GraphModel&, const PixelSize&,
-                              const PixelSize&, size_t,
-                              const std::vector<PixelSize>&,
-                              const plugin::ParameterMap&) { return roi; }));
+        "host_adapter_test", "identity", identity_forward);
+    const DirtyRoiPropFunc offset_dirty(
+        [](const Node&, const PixelRect& roi, const GraphModel&,
+           const PixelSize&, const std::vector<PixelSize>&,
+           const plugin::ParameterMap&, const std::vector<const NodeOutput*>*) {
+          return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
+        });
+    const OpPlanningCallbacks offset_planning{offset_dirty, {}, {}};
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "offset_identity",
         MonolithicOpFunc([](const Node& node,
@@ -925,16 +936,10 @@ void register_host_adapter_ops() {
           output.debug.compute_device = "host-adapter-offset-identity-test";
           (void)node;
           return output;
-        }));
+        }),
+        {}, offset_planning);
     OpRegistry::instance().register_dirty_propagator(
-        "host_adapter_test", "offset_identity",
-        DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
-                            const GraphModel&, const PixelSize&,
-                            const std::vector<PixelSize>&,
-                            const plugin::ParameterMap&,
-                            const std::vector<const NodeOutput*>*) {
-          return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
-        }));
+        "host_adapter_test", "offset_identity", offset_dirty);
     OpMetadata offset_tiled_metadata;
     offset_tiled_metadata.tile_preference = TileSizePreference::MICRO;
     OpRegistry::instance().register_op_hp_tiled(
@@ -952,16 +957,9 @@ void register_host_adapter_ops() {
               g_offset_tiled_output_value.load(std::memory_order_relaxed));
           toCvMat(output_tile).setTo(output_value);
         }),
-        offset_tiled_metadata);
+        offset_tiled_metadata, offset_planning);
     OpRegistry::instance().register_dirty_propagator(
-        "host_adapter_test", "offset_tiled_identity",
-        DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
-                            const GraphModel&, const PixelSize&,
-                            const std::vector<PixelSize>&,
-                            const plugin::ParameterMap&,
-                            const std::vector<const NodeOutput*>*) {
-          return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
-        }));
+        "host_adapter_test", "offset_tiled_identity", offset_dirty);
   });
 }
 
@@ -4918,7 +4916,9 @@ TEST(EmbeddedHostAdapter, PolicyScanAndOperationPluginUseStatusValues) {
  *         GoogleTest records any mismatch.
  * @note The lifecycle operation and pure-C policy fixture are both loaded
  *       through public Host methods. Parallel HP compute crosses the real v2
- *       operation adapter and the Host-owned execution service.
+ *       operation adapter and the Host-owned execution service. The operation
+ *       intentionally declares zero ports and produces an empty output, so a
+ *       successful cache entry retains the canonical zero spatial snapshot.
  */
 TEST(EmbeddedHostAdapter,
      ExternalOperationAndPolicyPluginsDriveParallelCompute) {
@@ -4937,6 +4937,12 @@ TEST(EmbeddedHostAdapter,
   ASSERT_TRUE(operation_report.status.ok) << operation_report.status.message;
   ASSERT_TRUE(contains_string(operation_report.value.new_op_keys,
                               "plugin_lifecycle:op"));
+  const auto operation_sources = host->ops_sources();
+  ASSERT_TRUE(operation_sources.status.ok) << operation_sources.status.message;
+  ASSERT_EQ(operation_sources.value.count("plugin_lifecycle:op"), 1U);
+  EXPECT_NE(operation_sources.value.at("plugin_lifecycle:op")
+                .find(operation_dir.string()),
+            std::string::npos);
   const VoidResult policy_load = host->policy_load(policy_path.string());
   ASSERT_TRUE(policy_load.status.ok) << policy_load.status.message;
 
@@ -4984,9 +4990,9 @@ TEST(EmbeddedHostAdapter,
 
   const auto node = host->inspect_node(load.session, NodeId{1});
   ASSERT_TRUE(node.status.ok) << node.status.message;
+  EXPECT_TRUE(node.value.has_cached_output);
   ASSERT_TRUE(node.value.space.has_value());
-  EXPECT_EQ(node.value.space->absolute_roi.width, 11);
-  EXPECT_EQ(node.value.space->absolute_roi.height, 7);
+  EXPECT_EQ(node.value.space->absolute_roi, (PixelRect{0, 0, 0, 0}));
 
   const VoidResult closed = host->close_graph(load.session);
   EXPECT_TRUE(closed.status.ok) << closed.status.message;
@@ -4998,7 +5004,9 @@ TEST(EmbeddedHostAdapter,
  * @throws Nothing when public Host status mapping and fixture IO succeed.
  * @note One Host loads P1, another loads P2 and executes it, both loading Hosts
  *       are destroyed, and a third Host performs the global unload. The
- *       surviving and newly created Hosts must observe the same state.
+ *       surviving and newly created Hosts must observe the same state. Both
+ *       generations are zero-port lifecycle fixtures, so every successful
+ *       empty cached output has the canonical zero spatial snapshot.
  */
 TEST(EmbeddedHostAdapter,
      OperationPluginsAreProcessGlobalAcrossHostDestructionAndUnload) {
@@ -5022,6 +5030,9 @@ TEST(EmbeddedHostAdapter,
   auto observer_sources = observer->ops_sources();
   ASSERT_TRUE(observer_sources.status.ok) << observer_sources.status.message;
   ASSERT_EQ(observer_sources.value.count("plugin_lifecycle:op"), 1u);
+  EXPECT_NE(observer_sources.value.at("plugin_lifecycle:op")
+                .find(original_dir.string()),
+            std::string::npos);
 
   GraphLoadRequest load_request;
   load_request.session = GraphSessionId{"process_plugin_graph"};
@@ -5038,9 +5049,9 @@ TEST(EmbeddedHostAdapter,
   ASSERT_TRUE(computed.status.ok) << computed.status.message;
   auto original_view = observer->inspect_node(load_request.session, NodeId{1});
   ASSERT_TRUE(original_view.status.ok) << original_view.status.message;
+  EXPECT_TRUE(original_view.value.has_cached_output);
   ASSERT_TRUE(original_view.value.space.has_value());
-  EXPECT_EQ(original_view.value.space->absolute_roi.width, 11);
-  EXPECT_EQ(original_view.value.space->absolute_roi.height, 7);
+  EXPECT_EQ(original_view.value.space->absolute_roi, (PixelRect{0, 0, 0, 0}));
 
   auto replacement_loader = create_embedded_host();
   ASSERT_NE(replacement_loader, nullptr);
@@ -5049,6 +5060,12 @@ TEST(EmbeddedHostAdapter,
   ASSERT_TRUE(replacement_report.status.ok)
       << replacement_report.status.message;
   ASSERT_EQ(replacement_report.value.loaded, 1);
+  observer_sources = observer->ops_sources();
+  ASSERT_TRUE(observer_sources.status.ok) << observer_sources.status.message;
+  ASSERT_EQ(observer_sources.value.count("plugin_lifecycle:op"), 1U);
+  EXPECT_NE(observer_sources.value.at("plugin_lifecycle:op")
+                .find(replacement_dir.string()),
+            std::string::npos);
 
   const auto repeated_seed = observer->seed_builtin_ops();
   ASSERT_TRUE(repeated_seed.status.ok) << repeated_seed.status.message;
@@ -5057,21 +5074,29 @@ TEST(EmbeddedHostAdapter,
   auto replacement_view =
       observer->inspect_node(load_request.session, NodeId{1});
   ASSERT_TRUE(replacement_view.status.ok) << replacement_view.status.message;
+  EXPECT_TRUE(replacement_view.value.has_cached_output);
   ASSERT_TRUE(replacement_view.value.space.has_value());
-  EXPECT_EQ(replacement_view.value.space->absolute_roi.width, 22);
-  EXPECT_EQ(replacement_view.value.space->absolute_roi.height, 9);
+  EXPECT_EQ(replacement_view.value.space->absolute_roi,
+            (PixelRect{0, 0, 0, 0}));
 
   original_loader.reset();
   replacement_loader.reset();
+  observer_sources = observer->ops_sources();
+  ASSERT_TRUE(observer_sources.status.ok) << observer_sources.status.message;
+  ASSERT_EQ(observer_sources.value.count("plugin_lifecycle:op"), 1U);
+  EXPECT_NE(observer_sources.value.at("plugin_lifecycle:op")
+                .find(replacement_dir.string()),
+            std::string::npos);
   computed = observer->compute(request);
   ASSERT_TRUE(computed.status.ok) << computed.status.message;
   auto after_loader_destruction =
       observer->inspect_node(load_request.session, NodeId{1});
   ASSERT_TRUE(after_loader_destruction.status.ok)
       << after_loader_destruction.status.message;
+  EXPECT_TRUE(after_loader_destruction.value.has_cached_output);
   ASSERT_TRUE(after_loader_destruction.value.space.has_value());
-  EXPECT_EQ(after_loader_destruction.value.space->absolute_roi.width, 22);
-  EXPECT_EQ(after_loader_destruction.value.space->absolute_roi.height, 9);
+  EXPECT_EQ(after_loader_destruction.value.space->absolute_roi,
+            (PixelRect{0, 0, 0, 0}));
 
   auto unloading_host = create_embedded_host();
   ASSERT_NE(unloading_host, nullptr);

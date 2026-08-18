@@ -3964,6 +3964,8 @@ class ConfigurationStorage final {
    * @param callback Initializer called for each preallocated child slot.
    * @throws std::length_error or std::bad_alloc when the node bound is
    * exceeded.
+   * @note Empty containers retain their parent node but use the canonical
+   *       zero `first_child` offset required by both ABI v1 and isolation v2.
    */
   template <typename Callback>
   void append_children(std::size_t parent, std::size_t count,
@@ -3971,8 +3973,9 @@ class ConfigurationStorage final {
     if (count > PS_OPERATION_MAX_CONFIGURATION_NODES_V1 - nodes_.size()) {
       throw std::length_error("operation configuration nodes exceed ABI bound");
     }
-    const std::size_t first = nodes_.size();
-    nodes_.resize(first + count);
+    const std::size_t existing_size = nodes_.size();
+    const std::size_t first = count == 0U ? 0U : existing_size;
+    nodes_.resize(existing_size + count);
     nodes_[parent].first_child = static_cast<std::uint32_t>(first);
     nodes_[parent].child_count = static_cast<std::uint32_t>(count);
     for (std::size_t ordinal = 0; ordinal < count; ++ordinal) {

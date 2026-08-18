@@ -987,6 +987,30 @@ enum class PropagationContractStatus {
 };
 
 /**
+ * @brief Owns optional planning callbacks paired with one exact implementation.
+ *
+ * Scalar registration entry points move this record into the same
+ * `OpImplementation` snapshot as the execution callback and scheduling
+ * metadata. This preserves one selected revision across execution, backward
+ * propagation, forward propagation, and data-dependent dependency planning.
+ *
+ * @throws std::bad_alloc or callback-defined copy exceptions when copied.
+ * @note An absent callback selects the exact implementation's documented
+ *       identity/absence fallback. Consumers must never fill an absent field
+ *       from an operation-level sibling registration.
+ */
+struct OpPlanningCallbacks {
+  /** @brief Optional backward Region callback for the exact implementation. */
+  std::optional<DirtyRoiPropFunc> dirty_propagator;
+
+  /** @brief Optional forward Region callback for the exact implementation. */
+  std::optional<ForwardRoiPropFunc> forward_propagator;
+
+  /** @brief Optional dependency-LUT builder for the exact implementation. */
+  std::optional<DependencyLutBuilder> dependency_builder;
+};
+
+/**
  * @brief Owns one callable implementation and its scheduling metadata.
  *
  * The registry stores these values in per-operation device lists and returns
@@ -1506,20 +1530,25 @@ class OpRegistry {
    * @param subtype Operation subtype.
    * @param fn Monolithic callback moved into the HP slot.
    * @param meta HP metadata associated with the callback.
+   * @param planning_callbacks Optional callbacks moved into the same exact HP
+   *        implementation snapshot.
    * @return Nothing.
    * @throws std::invalid_argument when the exclusive key or either output-name
    * declaration is malformed, duplicated, over its count/byte limit, reserved
-   * as `image`, or overlaps the other output category.
+   * as `image`, overlaps the other output category, or a present planning
+   * callback is empty.
    * @throws std::bad_alloc if key, capture, or table storage cannot allocate.
    * @throws Any exception raised while copying metadata or captured callbacks.
    * @note Metadata validation/canonicalization precedes key construction and
    * every observable mutation. Successful replacement is lock-serialized and
    * captures the predecessor before assigning one new revision; copied
-   * snapshots retain callback and plugin lifetime after replacement.
+   * snapshots retain callback and plugin lifetime after replacement. Execution
+   * and planning callbacks remain paired with that exact revision.
    */
   void register_op_hp_monolithic(const std::string& type,
                                  const std::string& subtype,
-                                 MonolithicOpFunc fn, OpMetadata meta = {});
+                                 MonolithicOpFunc fn, OpMetadata meta = {},
+                                 OpPlanningCallbacks planning_callbacks = {});
 
   /**
    * @brief Registers a high-precision tiled implementation.
@@ -1528,19 +1557,24 @@ class OpRegistry {
    * @param subtype Operation subtype.
    * @param fn Tiled callback moved into the HP tiled slot.
    * @param meta HP tiled metadata associated with the callback.
+   * @param planning_callbacks Optional callbacks moved into the same exact HP
+   *        tiled implementation snapshot.
    * @return Nothing.
    * @throws std::invalid_argument for malformed, duplicate, over-limit,
    * reserved, or cross-category-overlapping output declarations, or when the
-   * schema is not exactly the canonical image.
+   * schema is not exactly the canonical image, or a present planning callback
+   * is empty.
    * @throws std::bad_alloc if key, capture, or table storage cannot allocate.
    * @throws Any exception raised while copying metadata or captured callbacks.
    * @note Validation precedes key construction, generation/revision changes,
    * capture, and slot replacement. Rejection therefore preserves the complete
    * predecessor atomically. Successful replacement is lock-serialized;
    * snapshots retain callable/plugin lifetime and may execute concurrently.
+   * Execution and planning callbacks remain paired with that exact revision.
    */
   void register_op_hp_tiled(const std::string& type, const std::string& subtype,
-                            TileOpFunc fn, OpMetadata meta);
+                            TileOpFunc fn, OpMetadata meta,
+                            OpPlanningCallbacks planning_callbacks = {});
 
   /**
    * @brief Registers a real-time tiled implementation.
@@ -1549,19 +1583,24 @@ class OpRegistry {
    * @param subtype Operation subtype.
    * @param fn Tiled callback moved into the RT slot.
    * @param meta RT metadata associated with the callback.
+   * @param planning_callbacks Optional callbacks moved into the same exact RT
+   *        implementation snapshot.
    * @return Nothing.
    * @throws std::invalid_argument for malformed, duplicate, over-limit,
    * reserved, or cross-category-overlapping output declarations, or when the
-   * schema is not exactly the canonical image.
+   * schema is not exactly the canonical image, or a present planning callback
+   * is empty.
    * @throws std::bad_alloc if key, capture, or table storage cannot allocate.
    * @throws Any exception raised while copying metadata or captured callbacks.
    * @note Validation precedes key construction, generation/revision changes,
    * capture, and replacement, so rejection leaves the RT predecessor intact.
    * Successful mutation is lock-serialized and updates only the RT callback/
-   * metadata slot; snapshots retain callable/plugin lifetime independently.
+   * metadata/planning slot; snapshots retain callable/plugin lifetime
+   * independently.
    */
   void register_op_rt_tiled(const std::string& type, const std::string& subtype,
-                            TileOpFunc fn, OpMetadata meta);
+                            TileOpFunc fn, OpMetadata meta,
+                            OpPlanningCallbacks planning_callbacks = {});
 
   /**
    * @brief Registers an explicit backward dirty-ROI propagator.

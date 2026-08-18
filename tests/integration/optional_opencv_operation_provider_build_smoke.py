@@ -614,6 +614,14 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "ImageRectHpPlanRejectsRouteSwitchBeforeTaskPopulation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ImageRectRtPlanRejectsRouteSwitchBeforeTaskPopulation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "TensorAllExternallySatisfiedPlanIgnoresDeviceInventoryMutation"
         ),
         (

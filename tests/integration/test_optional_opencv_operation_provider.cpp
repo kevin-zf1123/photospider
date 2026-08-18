@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -189,7 +191,9 @@ void execute_invalid_opencv_constant() {
  * @throws Nothing when all GTest assertions pass.
  * @note The same source is built twice: the normal profile proves replacement
  *       of the OpenCV provider; the provider-disabled profile proves a
- *       stdlib-only provider can supply and execute the absent operation.
+ *       stdlib-only provider can supply and execute the absent operation. The
+ *       enabled profile also requires every exact OpenCV scalar candidate to
+ *       retain its own backward and forward planning callbacks.
  */
 TEST(OptionalOpenCvOperationProvider, ReplacementExecutesAndRestores) {
   constexpr bool kExpectOpenCvProvider =
@@ -209,6 +213,64 @@ TEST(OptionalOpenCvOperationProvider, ReplacementExecutesAndRestores) {
   EXPECT_EQ(registry_contains(kCoordinatePatternKey), kExpectOpenCvProvider);
 
   if (kExpectOpenCvProvider) {
+    constexpr std::array<std::pair<const char*, const char*>, 12U>
+        kMonolithicCandidates{{
+            {"image_source", "path"},
+            {"image_generator", "constant"},
+            {"image_generator", "coordinate_pattern"},
+            {"image_generator", "perlin_noise"},
+            {"image_process", "convolve"},
+            {"image_process", "resize"},
+            {"image_process", "crop"},
+            {"image_process", "extract_channel"},
+            {"image_process", "gaussian_blur"},
+            {"image_mixing", "add_weighted"},
+            {"image_mixing", "diff"},
+            {"image_mixing", "multiply"},
+        }};
+    constexpr std::array<std::pair<const char*, const char*>, 5U>
+        kHighPrecisionTiledCandidates{{
+            {"image_process", "gaussian_blur"},
+            {"image_process", "curve_transform"},
+            {"image_mixing", "add_weighted"},
+            {"image_mixing", "diff"},
+            {"image_mixing", "multiply"},
+        }};
+    constexpr std::array<std::pair<const char*, const char*>, 2U>
+        kRealtimeTiledCandidates{{
+            {"image_process", "gaussian_blur"},
+            {"image_mixing", "add_weighted"},
+        }};
+
+    for (const auto& [type, subtype] : kMonolithicCandidates) {
+      SCOPED_TRACE(make_key(type, subtype));
+      const auto implementations =
+          OpRegistry::instance().get_implementations(type, subtype);
+      ASSERT_TRUE(implementations.has_value());
+      ASSERT_TRUE(implementations->monolithic_hp.has_value());
+      EXPECT_TRUE(implementations->monolithic_hp->dirty_propagator.has_value());
+      EXPECT_TRUE(
+          implementations->monolithic_hp->forward_propagator.has_value());
+    }
+    for (const auto& [type, subtype] : kHighPrecisionTiledCandidates) {
+      SCOPED_TRACE(make_key(type, subtype));
+      const auto implementations =
+          OpRegistry::instance().get_implementations(type, subtype);
+      ASSERT_TRUE(implementations.has_value());
+      ASSERT_TRUE(implementations->tiled_hp.has_value());
+      EXPECT_TRUE(implementations->tiled_hp->dirty_propagator.has_value());
+      EXPECT_TRUE(implementations->tiled_hp->forward_propagator.has_value());
+    }
+    for (const auto& [type, subtype] : kRealtimeTiledCandidates) {
+      SCOPED_TRACE(make_key(type, subtype));
+      const auto implementations =
+          OpRegistry::instance().get_implementations(type, subtype);
+      ASSERT_TRUE(implementations.has_value());
+      ASSERT_TRUE(implementations->tiled_rt.has_value());
+      EXPECT_TRUE(implementations->tiled_rt->dirty_propagator.has_value());
+      EXPECT_TRUE(implementations->tiled_rt->forward_propagator.has_value());
+    }
+
     const NodeOutput original = execute_active_resize();
     const ImageBuffer original_image = snapshot_output_image(original);
     EXPECT_EQ(original_image.width, 4);
@@ -247,7 +309,11 @@ TEST(OptionalOpenCvOperationProvider, ReplacementExecutesAndRestores) {
       << (load_result.errors.empty() ? std::string{}
                                      : load_result.errors.front().message);
   ASSERT_TRUE(load_result.errors.empty());
-  ASSERT_EQ(manager.op_sources().at(kResizeKey), plugin_path.string());
+  const std::string expected_replacement_source =
+      kExpectOpenCvProvider ? "mixed" : plugin_path.string();
+  ASSERT_EQ(manager.op_sources().at(kResizeKey), expected_replacement_source);
+  ASSERT_EQ(manager.combined_sources().at(kResizeKey),
+            expected_replacement_source);
 
   const NodeOutput replacement = execute_active_resize();
   EXPECT_EQ(replacement.debug.compute_device, "STDLIB_RESIZE_REPLACEMENT");
@@ -263,6 +329,7 @@ TEST(OptionalOpenCvOperationProvider, ReplacementExecutesAndRestores) {
   EXPECT_GT(manager.unload_by_plugin_path(plugin_path.string()), 0);
   if (kExpectOpenCvProvider) {
     ASSERT_EQ(manager.op_sources().at(kResizeKey), "built-in");
+    ASSERT_EQ(manager.combined_sources().at(kResizeKey), "built-in");
     const NodeOutput restored = execute_active_resize();
     const ImageBuffer restored_image = snapshot_output_image(restored);
     EXPECT_EQ(restored_image.width, 4);
@@ -270,6 +337,7 @@ TEST(OptionalOpenCvOperationProvider, ReplacementExecutesAndRestores) {
   } else {
     EXPECT_FALSE(registry_contains(kResizeKey));
     EXPECT_EQ(manager.op_sources().count(kResizeKey), 0U);
+    EXPECT_EQ(manager.combined_sources().count(kResizeKey), 0U);
   }
 }
 

@@ -219,6 +219,24 @@ void validate_tiled_operation_metadata(const OpMetadata& metadata) {
 }
 
 /**
+ * @brief Rejects engaged but empty exact-candidate planning callbacks.
+ *
+ * @param callbacks Candidate-owned backward, forward, and dependency callbacks.
+ * @return Nothing when every present `std::function` has a callable target.
+ * @throws std::invalid_argument when any present callback is empty.
+ * @note Scalar registration invokes this before key construction, capture,
+ *       generation advancement, revision allocation, or registry mutation.
+ */
+void validate_planning_callbacks(const OpPlanningCallbacks& callbacks) {
+  if ((callbacks.dirty_propagator && !*callbacks.dirty_propagator) ||
+      (callbacks.forward_propagator && !*callbacks.forward_propagator) ||
+      (callbacks.dependency_builder && !*callbacks.dependency_builder)) {
+    throw std::invalid_argument(
+        "operation implementation planning callback is empty");
+  }
+}
+
+/**
  * @brief Maps one implementation to an intent-specific device priority.
  *
  * @param intent Compute path selecting the HP or RT priority policy.
@@ -1443,19 +1461,18 @@ bool OpRegistry::unregister_key(const std::string& key) {
 // -------------------------
 
 /** @copydoc OpRegistry::register_op_hp_monolithic */
-void OpRegistry::register_op_hp_monolithic(const std::string& type,
-                                           const std::string& subtype,
-                                           MonolithicOpFunc fn,
-                                           OpMetadata meta) {
+void OpRegistry::register_op_hp_monolithic(
+    const std::string& type, const std::string& subtype, MonolithicOpFunc fn,
+    OpMetadata meta, OpPlanningCallbacks planning_callbacks) {
   validate_operation_metadata(&meta);
+  validate_planning_callbacks(planning_callbacks);
   auto key = make_key(type, subtype);
   std::optional<OpImplementation> replacement(
-      std::in_place, OpImplementation{OpVariant{std::move(fn)},
-                                      std::move(meta),
-                                      0U,
-                                      {},
-                                      {},
-                                      {}});
+      std::in_place,
+      OpImplementation{OpVariant{std::move(fn)}, std::move(meta), 0U,
+                       std::move(planning_callbacks.dirty_propagator),
+                       std::move(planning_callbacks.forward_propagator),
+                       std::move(planning_callbacks.dependency_builder)});
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
@@ -1473,17 +1490,18 @@ void OpRegistry::register_op_hp_monolithic(const std::string& type,
 /** @copydoc OpRegistry::register_op_hp_tiled */
 void OpRegistry::register_op_hp_tiled(const std::string& type,
                                       const std::string& subtype, TileOpFunc fn,
-                                      OpMetadata meta) {
+                                      OpMetadata meta,
+                                      OpPlanningCallbacks planning_callbacks) {
   validate_operation_metadata(&meta);
   validate_tiled_operation_metadata(meta);
+  validate_planning_callbacks(planning_callbacks);
   auto key = make_key(type, subtype);
   std::optional<OpImplementation> replacement(
-      std::in_place, OpImplementation{OpVariant{std::move(fn)},
-                                      std::move(meta),
-                                      0U,
-                                      {},
-                                      {},
-                                      {}});
+      std::in_place,
+      OpImplementation{OpVariant{std::move(fn)}, std::move(meta), 0U,
+                       std::move(planning_callbacks.dirty_propagator),
+                       std::move(planning_callbacks.forward_propagator),
+                       std::move(planning_callbacks.dependency_builder)});
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
@@ -1500,17 +1518,18 @@ void OpRegistry::register_op_hp_tiled(const std::string& type,
 /** @copydoc OpRegistry::register_op_rt_tiled */
 void OpRegistry::register_op_rt_tiled(const std::string& type,
                                       const std::string& subtype, TileOpFunc fn,
-                                      OpMetadata meta) {
+                                      OpMetadata meta,
+                                      OpPlanningCallbacks planning_callbacks) {
   validate_operation_metadata(&meta);
   validate_tiled_operation_metadata(meta);
+  validate_planning_callbacks(planning_callbacks);
   auto key = make_key(type, subtype);
   std::optional<OpImplementation> replacement(
-      std::in_place, OpImplementation{OpVariant{std::move(fn)},
-                                      std::move(meta),
-                                      0U,
-                                      {},
-                                      {},
-                                      {}});
+      std::in_place,
+      OpImplementation{OpVariant{std::move(fn)}, std::move(meta), 0U,
+                       std::move(planning_callbacks.dirty_propagator),
+                       std::move(planning_callbacks.forward_propagator),
+                       std::move(planning_callbacks.dependency_builder)});
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);

@@ -563,12 +563,15 @@ void attach_canonical_input_value(Tile* tile, const Value* value) noexcept {
  * @brief Executes one conformance implementation in monolithic shape.
  * @param mode Fixture mode selected before DSO discovery.
  * @param input Optional exact upstream output; null selects a fallback Value.
+ * @param parameters Optional exact effective configuration copied into the
+ * node.
  * @return Fresh output after complete Host retirement and publication.
  * @throws Discovery, inference, callback, validation, or publication failures
  * unchanged.
  */
-NodeOutput execute_conformance_monolithic(const char* mode,
-                                          const NodeOutput* input = nullptr) {
+NodeOutput execute_conformance_monolithic(
+    const char* mode, const NodeOutput* input = nullptr,
+    const plugin::ParameterMap* parameters = nullptr) {
   ScopedEnvironment selected_mode(kConformanceModeEnvironment, mode);
   auto generation = load_generation(PS_TEST_CONFORMANCE_OPERATION_PLUGIN);
   OpRegistry registry;
@@ -584,6 +587,9 @@ NodeOutput execute_conformance_monolithic(const char* mode,
   Node node;
   node.type = "operation_conformance";
   node.subtype = "supervised_tile";
+  if (parameters != nullptr) {
+    node.parameters = *parameters;
+  }
   NodeOutput fallback;
   if (input == nullptr) {
     fallback = conformance_mode_contains(mode, "facet_free_input")
@@ -598,13 +604,16 @@ NodeOutput execute_conformance_monolithic(const char* mode,
  * @brief Executes one conformance implementation against a whole-image tile.
  * @param mode Fixture mode selected before DSO discovery.
  * @param input Optional exact upstream output; null selects a fallback Value.
+ * @param parameters Optional exact effective configuration copied into the
+ * node.
  * @return Fresh sealed output after callback completion and grant retirement.
  * @throws Discovery, inference, callback, or validation failures unchanged.
  * @note Failure cleanup retires the still-active borrowed tile grant before
  * rethrowing so hostile callbacks cannot leak test-owned authority.
  */
-NodeOutput execute_conformance_tiled(const char* mode,
-                                     const NodeOutput* input = nullptr) {
+NodeOutput execute_conformance_tiled(
+    const char* mode, const NodeOutput* input = nullptr,
+    const plugin::ParameterMap* parameters = nullptr) {
   ScopedEnvironment selected_mode(kConformanceModeEnvironment, mode);
   auto generation = load_generation(PS_TEST_CONFORMANCE_OPERATION_PLUGIN);
   OpRegistry registry;
@@ -624,6 +633,9 @@ NodeOutput execute_conformance_tiled(const char* mode,
   Node node;
   node.type = "operation_conformance";
   node.subtype = "supervised_tile";
+  if (parameters != nullptr) {
+    node.parameters = *parameters;
+  }
   NodeOutput fallback;
   if (input == nullptr) {
     fallback = conformance_mode_contains(mode, "facet_free_input")
@@ -1170,6 +1182,8 @@ TEST(OperationPluginAbi, TrustedValuesPreserveExactInputDescriptorMetadata) {
  * @throws Standard trust, routing, protocol, execution, or assertion failures.
  * @note Exact-object positive execution is Linux-only; portable tests still
  * cover pre-route inference rejection and trusted exact echo on other hosts.
+ * The supervised route also serializes both an empty root configuration and
+ * nested empty object/array values, requiring canonical zero child offsets.
  */
 TEST(OperationPluginAbi, SupervisedExecutionEchoesExactDescriptorMetadata) {
 #if defined(__linux__) && defined(PS_TEST_ISOLATED_CPU_FIXTURE_PATH)
@@ -1201,6 +1215,17 @@ TEST(OperationPluginAbi, SupervisedExecutionEchoesExactDescriptorMetadata) {
     expect_conformance_generic_output(generic_consumed);
     EXPECT_NO_THROW(execute_conformance_tiled(
         "supervised_tiled_facet_free_input_input_metadata", &generic));
+
+    plugin::ParameterMap empty_containers;
+    empty_containers.emplace(
+        "empty_array", plugin::ParameterValue(plugin::ParameterValue::Array{}));
+    empty_containers.emplace(
+        "empty_object",
+        plugin::ParameterValue(plugin::ParameterValue::Object{}));
+    EXPECT_NO_THROW((void)execute_conformance_monolithic(
+        "supervised_monolithic_metadata", nullptr, &empty_containers));
+    EXPECT_NO_THROW(execute_conformance_tiled("supervised_tiled_metadata",
+                                              nullptr, &empty_containers));
   } catch (...) {
     static_cast<void>(plugin_host::remove_supervised_operation_runtime_route(
         kConformanceRuntimePackage));

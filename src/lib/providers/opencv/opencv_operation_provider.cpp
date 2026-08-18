@@ -2563,46 +2563,72 @@ void register_provider() {
   initialize_opencv_process_policy();
   OpRegistry& registry = OpRegistry::instance();
 
+  const DirtyRoiPropFunc identity_roi(identity_dirty_roi);
+  const ForwardRoiPropFunc identity_forward(identity_forward_roi);
+  const OpPlanningCallbacks identity_planning{identity_roi,
+                                              identity_forward,
+                                              {}};
+  const OpPlanningCallbacks convolve_planning{
+      DirtyRoiPropFunc(convolve_dirty_roi),
+      ForwardRoiPropFunc(convolve_forward_roi),
+      {}};
+  const OpPlanningCallbacks resize_planning{
+      DirtyRoiPropFunc(resize_dirty_roi),
+      ForwardRoiPropFunc(resize_forward_roi),
+      {}};
+  const OpPlanningCallbacks crop_planning{DirtyRoiPropFunc(crop_dirty_roi),
+                                          ForwardRoiPropFunc(crop_forward_roi),
+                                          {}};
+  const OpPlanningCallbacks gaussian_blur_planning{
+      DirtyRoiPropFunc(gaussian_blur_dirty_roi),
+      ForwardRoiPropFunc(gaussian_blur_forward_roi),
+      {}};
+
   registry.register_op_hp_monolithic(
       "image_source", "path",
       fence_monolithic_operation("image_source:path",
-                                 MonolithicOpFunc(op_image_source_path)));
+                                 MonolithicOpFunc(op_image_source_path)),
+      {}, identity_planning);
   registry.register_op_hp_monolithic(
       "image_generator", "constant",
       fence_monolithic_operation("image_generator:constant",
-                                 MonolithicOpFunc(op_constant_image)));
+                                 MonolithicOpFunc(op_constant_image)),
+      {}, identity_planning);
   registry.register_op_hp_monolithic(
       "image_generator", "coordinate_pattern",
       fence_monolithic_operation("image_generator:coordinate_pattern",
-                                 MonolithicOpFunc(op_coordinate_pattern)));
+                                 MonolithicOpFunc(op_coordinate_pattern)),
+      {}, identity_planning);
   registry.register_op_hp_monolithic(
       "image_generator", "perlin_noise",
       fence_monolithic_operation("image_generator:perlin_noise",
-                                 MonolithicOpFunc(op_perlin_noise)));
+                                 MonolithicOpFunc(op_perlin_noise)),
+      {}, identity_planning);
   registry.register_op_hp_monolithic(
       "image_process", "convolve",
       fence_monolithic_operation("image_process:convolve",
-                                 MonolithicOpFunc(op_convolve)));
+                                 MonolithicOpFunc(op_convolve)),
+      {}, convolve_planning);
   registry.register_op_hp_monolithic(
       "image_process", "resize",
       fence_monolithic_operation("image_process:resize",
-                                 MonolithicOpFunc(op_resize)));
+                                 MonolithicOpFunc(op_resize)),
+      {}, resize_planning);
   registry.register_op_hp_monolithic(
       "image_process", "crop",
       fence_monolithic_operation("image_process:crop",
-                                 MonolithicOpFunc(op_crop)));
+                                 MonolithicOpFunc(op_crop)),
+      {}, crop_planning);
   registry.register_op_hp_monolithic(
       "image_process", "extract_channel",
       fence_monolithic_operation("image_process:extract_channel",
-                                 MonolithicOpFunc(op_extract_channel)));
+                                 MonolithicOpFunc(op_extract_channel)),
+      {}, identity_planning);
 
   OpMetadata tiled_meta;
   tiled_meta.tile_preference = TileSizePreference::MACRO;
   OpMetadata rt_meta;
   rt_meta.tile_preference = TileSizePreference::MICRO;
-
-  const DirtyRoiPropFunc identity_roi(identity_dirty_roi);
-  const ForwardRoiPropFunc identity_forward(identity_forward_roi);
 
   registry.register_dirty_propagator("image_source", "path", identity_roi);
   registry.register_dirty_propagator("image_generator", "constant",
@@ -2653,15 +2679,15 @@ void register_provider() {
 
   registry.register_op_hp_monolithic(
       "image_process", "gaussian_blur",
-      fence_monolithic_operation(
-          "image_process:gaussian_blur",
-          MonolithicOpFunc(op_gaussian_blur_monolithic)));
+      fence_monolithic_operation("image_process:gaussian_blur",
+                                 MonolithicOpFunc(op_gaussian_blur_monolithic)),
+      {}, gaussian_blur_planning);
   const TileOpFunc gaussian_blur = fence_tiled_operation(
       "image_process:gaussian_blur", TileOpFunc(op_gaussian_blur_tiled));
   registry.register_op_hp_tiled("image_process", "gaussian_blur", gaussian_blur,
-                                tiled_meta);
+                                tiled_meta, gaussian_blur_planning);
   registry.register_op_rt_tiled("image_process", "gaussian_blur", gaussian_blur,
-                                rt_meta);
+                                rt_meta, gaussian_blur_planning);
   registry.register_dirty_propagator("image_process", "gaussian_blur",
                                      DirtyRoiPropFunc(gaussian_blur_dirty_roi));
   registry.register_forward_propagator(
@@ -2672,37 +2698,40 @@ void register_provider() {
       "image_process", "curve_transform",
       fence_tiled_operation("image_process:curve_transform",
                             TileOpFunc(op_curve_transform_tiled)),
-      tiled_meta);
+      tiled_meta, identity_planning);
 
   registry.register_op_hp_monolithic(
       "image_mixing", "add_weighted",
       fence_monolithic_operation("image_mixing:add_weighted",
-                                 MonolithicOpFunc(op_add_weighted_monolithic)));
+                                 MonolithicOpFunc(op_add_weighted_monolithic)),
+      {}, identity_planning);
   const TileOpFunc add_weighted = fence_tiled_operation(
       "image_mixing:add_weighted", TileOpFunc(op_add_weighted_tiled));
   registry.register_op_hp_tiled("image_mixing", "add_weighted", add_weighted,
-                                tiled_meta);
+                                tiled_meta, identity_planning);
   registry.register_op_rt_tiled("image_mixing", "add_weighted", add_weighted,
-                                rt_meta);
+                                rt_meta, identity_planning);
 
   registry.register_op_hp_monolithic(
       "image_mixing", "diff",
       fence_monolithic_operation("image_mixing:diff",
-                                 MonolithicOpFunc(op_abs_diff_monolithic)));
+                                 MonolithicOpFunc(op_abs_diff_monolithic)),
+      {}, identity_planning);
   registry.register_op_hp_tiled(
       "image_mixing", "diff",
       fence_tiled_operation("image_mixing:diff", TileOpFunc(op_abs_diff_tiled)),
-      tiled_meta);
+      tiled_meta, identity_planning);
 
   registry.register_op_hp_monolithic(
       "image_mixing", "multiply",
       fence_monolithic_operation("image_mixing:multiply",
-                                 MonolithicOpFunc(op_multiply_monolithic)));
+                                 MonolithicOpFunc(op_multiply_monolithic)),
+      {}, identity_planning);
   registry.register_op_hp_tiled(
       "image_mixing", "multiply",
       fence_tiled_operation("image_mixing:multiply",
                             TileOpFunc(op_multiply_tiled)),
-      tiled_meta);
+      tiled_meta, identity_planning);
 }
 
 #undef PHOTOSPIDER_OBSERVE_OPENCV_OPERATION
