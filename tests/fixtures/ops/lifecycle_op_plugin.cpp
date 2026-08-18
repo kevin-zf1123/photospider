@@ -14,24 +14,30 @@ namespace {
 /** @brief Environment variable selecting the lifecycle trace file. */
 constexpr const char* kTraceEnvironment = "PS_LIFECYCLE_PLUGIN_TRACE";
 /** @brief Environment variable selecting an in-flight callback release file. */
-constexpr const char* kCallbackReleaseEnvironment =
-    "PS_LIFECYCLE_PLUGIN_CALLBACK_RELEASE_FILE";
+constexpr const char* kCallbackReleaseEnvironment{
+    "PS_LIFECYCLE_PLUGIN_CALLBACK_RELEASE_FILE",
+};
 /** @brief Environment variable selecting a plugin-local exception mode. */
-constexpr const char* kCallbackThrowEnvironment =
-    "PS_LIFECYCLE_PLUGIN_CALLBACK_THROW";
+constexpr const char* kCallbackThrowEnvironment{
+    "PS_LIFECYCLE_PLUGIN_CALLBACK_THROW",
+};
 
 /** @brief Permanent lifecycle fixture plugin identity. */
-constexpr auto kPluginIdentity =
-    make_identity(0x50534C4946454359ULL, 0x0001ULL);
+constexpr auto kPluginIdentity{
+    make_identity(0x50534C4946454359ULL, 0x0001ULL),
+};
 /** @brief Permanent lifecycle fixture operation identity. */
-constexpr auto kOperationIdentity =
-    make_identity(0x50534C4946454F50ULL, 0x0001ULL);
+constexpr auto kOperationIdentity{
+    make_identity(0x50534C4946454F50ULL, 0x0001ULL),
+};
 /** @brief Permanent lifecycle fixture implementation identity. */
-constexpr auto kImplementationIdentity =
-    make_identity(0x50534C494645494DULL, 0x0001ULL);
+constexpr auto kImplementationIdentity{
+    make_identity(0x50534C494645494DULL, 0x0001ULL),
+};
 /** @brief Permanent lifecycle fixture configuration identity. */
-constexpr auto kConfigurationIdentity =
-    make_identity(0x50534C4946454346ULL, 0x0001ULL);
+constexpr auto kConfigurationIdentity{
+    make_identity(0x50534C4946454346ULL, 0x0001ULL),
+};
 
 /**
  * @brief Appends one lifecycle event to the test-selected trace file.
@@ -293,13 +299,15 @@ ps_operation_descriptor_v1 make_operation() noexcept {
 }
 
 /** @brief Stable complete lifecycle fixture definition. */
-const Definition kDefinition{kPluginIdentity,
-                             "lifecycle-operation-abi1",
-                             make_operation(),
-                             kImplementations,
-                             1U,
-                             destroy_lifecycle_generation,
-                             nullptr};
+const Definition kDefinition{
+    kPluginIdentity,
+    "lifecycle-operation-abi1",
+    make_operation(),
+    kImplementations,
+    1U,
+    destroy_lifecycle_generation,
+    nullptr,
+};
 
 }  // namespace
 

@@ -10,26 +10,33 @@ namespace ps::operation_plugin {
 namespace {
 
 /** @brief Permanent fixture plugin identity. */
-constexpr auto kPluginIdentity =
-    make_identity(0x50535245504C4143ULL, 0x0001ULL);
+constexpr auto kPluginIdentity{
+    make_identity(0x50535245504C4143ULL, 0x0001ULL),
+};
 /** @brief Permanent resize operation identity. */
-constexpr auto kOperationIdentity =
-    make_identity(0x5053524553495A45ULL, 0x0001ULL);
+constexpr auto kOperationIdentity{
+    make_identity(0x5053524553495A45ULL, 0x0001ULL),
+};
 /** @brief Permanent trusted implementation identity. */
-constexpr auto kImplementationIdentity =
-    make_identity(0x5053524553495A45ULL, 0x1001ULL);
+constexpr auto kImplementationIdentity{
+    make_identity(0x5053524553495A45ULL, 0x1001ULL),
+};
 /** @brief Permanent configuration-schema identity. */
-constexpr auto kConfigurationIdentity =
-    make_identity(0x5053524553495A45ULL, 0x2001ULL);
+constexpr auto kConfigurationIdentity{
+    make_identity(0x5053524553495A45ULL, 0x2001ULL),
+};
 /** @brief Permanent input-port identity. */
-constexpr auto kInputPortIdentity =
-    make_identity(0x5053524553495A45ULL, 0x3001ULL);
+constexpr auto kInputPortIdentity{
+    make_identity(0x5053524553495A45ULL, 0x3001ULL),
+};
 /** @brief Permanent output-port identity. */
-constexpr auto kOutputPortIdentity =
-    make_identity(0x5053524553495A45ULL, 0x3002ULL);
+constexpr auto kOutputPortIdentity{
+    make_identity(0x5053524553495A45ULL, 0x3002ULL),
+};
 /** @brief Stable built-in Image Region-domain identity. */
-constexpr auto kImageRegionDomainIdentity =
-    make_identity(0x50484F544F535049ULL, 0x4445525F494D4731ULL);
+constexpr auto kImageRegionDomainIdentity{
+    make_identity(0x50484F544F535049ULL, 0x4445525F494D4731ULL),
+};
 
 /**
  * @brief Creates one immutable DenseImage port definition.
@@ -57,7 +64,8 @@ ps_operation_port_descriptor_v1 make_port(
 /** @brief Stable input/output port rows. */
 const ps_operation_port_descriptor_v1 kPorts[]{
     make_port(kInputPortIdentity, PS_OPERATION_PORT_INPUT_V1),
-    make_port(kOutputPortIdentity, PS_OPERATION_PORT_OUTPUT_V1)};
+    make_port(kOutputPortIdentity, PS_OPERATION_PORT_OUTPUT_V1),
+};
 
 /**
  * @brief Emits the fixture's fixed 3-by-2 FP32 output plan.
@@ -291,13 +299,15 @@ ps_operation_descriptor_v1 make_operation() noexcept {
 }
 
 /** @brief Stable complete fixture definition. */
-const Definition kDefinition{kPluginIdentity,
-                             "resize-replacement-abi1",
-                             make_operation(),
-                             kImplementations,
-                             1U,
-                             nullptr,
-                             nullptr};
+const Definition kDefinition{
+    kPluginIdentity,
+    "resize-replacement-abi1",
+    make_operation(),
+    kImplementations,
+    1U,
+    nullptr,
+    nullptr,
+};
 
 }  // namespace
 

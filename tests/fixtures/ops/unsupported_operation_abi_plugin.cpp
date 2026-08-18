@@ -7,8 +7,9 @@
 namespace {
 
 /** @brief Environment variable naming the forbidden API-call marker file. */
-constexpr const char* kInvocationMarkerEnvironment =
-    "PS_UNSUPPORTED_OPERATION_ABI_MARKER";
+constexpr const char* kInvocationMarkerEnvironment{
+    "PS_UNSUPPORTED_OPERATION_ABI_MARKER",
+};
 
 /**
  * @brief Records an erroneous attempt to negotiate the unsupported ABI root.

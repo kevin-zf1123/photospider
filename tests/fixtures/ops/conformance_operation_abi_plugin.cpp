@@ -14,23 +14,29 @@ constexpr const char* kModeEnvironment = "PS_OPERATION_CONFORMANCE_MODE";
 constexpr const char* kTraceEnvironment = "PS_OPERATION_CONFORMANCE_TRACE";
 
 /** @brief Permanent conformance fixture plugin identity. */
-constexpr auto kPluginIdentity =
-    make_identity(0x5053434F4E464F52ULL, 0x0001ULL);
+constexpr auto kPluginIdentity{
+    make_identity(0x5053434F4E464F52ULL, 0x0001ULL),
+};
 /** @brief Permanent conformance operation identity. */
-constexpr auto kOperationIdentity =
-    make_identity(0x5053434F4E464F50ULL, 0x0001ULL);
+constexpr auto kOperationIdentity{
+    make_identity(0x5053434F4E464F50ULL, 0x0001ULL),
+};
 /** @brief Permanent conformance implementation identity. */
-constexpr auto kImplementationIdentity =
-    make_identity(0x5053434F4E46494DULL, 0x0001ULL);
+constexpr auto kImplementationIdentity{
+    make_identity(0x5053434F4E46494DULL, 0x0001ULL),
+};
 /** @brief Permanent conformance configuration-Schema identity. */
-constexpr auto kConfigurationIdentity =
-    make_identity(0x5053434F4E464346ULL, 0x0001ULL);
+constexpr auto kConfigurationIdentity{
+    make_identity(0x5053434F4E464346ULL, 0x0001ULL),
+};
 /** @brief Permanent conformance output-port identity. */
-constexpr auto kOutputIdentity =
-    make_identity(0x5053434F4E464F55ULL, 0x0001ULL);
+constexpr auto kOutputIdentity{
+    make_identity(0x5053434F4E464F55ULL, 0x0001ULL),
+};
 /** @brief Permanent signed runtime package identity selected by the fixture. */
-constexpr auto kRuntimePackageIdentity =
-    make_identity(0x5053434F4E465254ULL, 0x0001ULL);
+constexpr auto kRuntimePackageIdentity{
+    make_identity(0x5053434F4E465254ULL, 0x0001ULL),
+};
 
 /**
  * @brief Reports whether the current test selected one exact mutation mode.
@@ -174,13 +180,15 @@ ps_operation_descriptor_v1 make_operation() noexcept {
 }
 
 /** @brief Stable complete conformance definition. */
-const Definition kDefinition{kPluginIdentity,
-                             "operation-conformance-abi1",
-                             make_operation(),
-                             kImplementations,
-                             1U,
-                             nullptr,
-                             nullptr};
+const Definition kDefinition{
+    kPluginIdentity,
+    "operation-conformance-abi1",
+    make_operation(),
+    kImplementations,
+    1U,
+    nullptr,
+    nullptr,
+};
 
 /**
  * @brief Returns the operation count or one deliberately excessive count.

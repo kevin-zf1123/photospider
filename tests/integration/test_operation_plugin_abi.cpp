@@ -33,17 +33,22 @@ namespace {
 /** @brief Environment variable selecting the lifecycle fixture trace file. */
 constexpr const char* kTraceEnvironment = "PS_LIFECYCLE_PLUGIN_TRACE";
 /** @brief Environment variable selecting the callback release file. */
-constexpr const char* kReleaseEnvironment =
-    "PS_LIFECYCLE_PLUGIN_CALLBACK_RELEASE_FILE";
+constexpr const char* kReleaseEnvironment{
+    "PS_LIFECYCLE_PLUGIN_CALLBACK_RELEASE_FILE",
+};
 /** @brief Environment variable selecting one conformance mutation. */
-constexpr const char* kConformanceModeEnvironment =
-    "PS_OPERATION_CONFORMANCE_MODE";
+constexpr const char* kConformanceModeEnvironment{
+    "PS_OPERATION_CONFORMANCE_MODE",
+};
 /** @brief Environment variable tracing forbidden direct execution. */
-constexpr const char* kConformanceTraceEnvironment =
-    "PS_OPERATION_CONFORMANCE_TRACE";
+constexpr const char* kConformanceTraceEnvironment{
+    "PS_OPERATION_CONFORMANCE_TRACE",
+};
 /** @brief Runtime package identity declared by the conformance fixture. */
 constexpr ps_operation_identity_v1 kConformanceRuntimePackage{
-    0x5053434F4E465254ULL, 0x0001ULL};
+    0x5053434F4E465254ULL,
+    0x0001ULL,
+};
 
 /**
  * @brief Restores one process environment variable after a test scope.

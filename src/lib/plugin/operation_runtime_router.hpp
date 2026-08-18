@@ -8,6 +8,9 @@
 
 namespace ps::plugin_host {
 
+/** @brief Exact comparison identity minted for one supervised invocation. */
+using InvocationIdentity = execution::IsolatedCpuInvocationIdentity;
+
 /**
  * @brief Mints caller/worker/invocation comparison identity for one fresh
  * supervised operation call.
@@ -17,8 +20,7 @@ namespace ps::plugin_host {
  * @note The factory must mint a fresh invocation id and current tenant, Job,
  * attempt, worker, and worker-lease facts. It returns no process authority.
  */
-using SupervisedOperationIdentityFactory =
-    std::function<execution::IsolatedCpuInvocationIdentity()>;
+using SupervisedOperationIdentityFactory = std::function<InvocationIdentity()>;
 
 /**
  * @brief Installs or atomically replaces one signed supervised runtime route.

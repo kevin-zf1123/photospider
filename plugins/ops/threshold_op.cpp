@@ -14,22 +14,27 @@ namespace ps::operation_plugin {
 namespace {
 
 /** @brief Permanent threshold plugin identity. */
-constexpr auto kPluginIdentity =
-    make_identity(0x5053544852455348ULL, 0x0001ULL);
+constexpr auto kPluginIdentity{
+    make_identity(0x5053544852455348ULL, 0x0001ULL),
+};
 /** @brief Permanent threshold operation identity. */
-constexpr auto kOperationIdentity =
-    make_identity(0x5053544852455348ULL, 0x1001ULL);
+constexpr auto kOperationIdentity{
+    make_identity(0x5053544852455348ULL, 0x1001ULL),
+};
 /** @brief Permanent trusted CPU implementation identity. */
-constexpr auto kImplementationIdentity =
-    make_identity(0x5053544852455348ULL, 0x2001ULL);
+constexpr auto kImplementationIdentity{
+    make_identity(0x5053544852455348ULL, 0x2001ULL),
+};
 /** @brief Permanent threshold configuration-schema identity. */
-constexpr auto kConfigurationIdentity =
-    make_identity(0x5053544852455348ULL, 0x3001ULL);
+constexpr auto kConfigurationIdentity{
+    make_identity(0x5053544852455348ULL, 0x3001ULL),
+};
 /** @brief Permanent image input-port identity. */
 constexpr auto kInputIdentity = make_identity(0x5053544852455348ULL, 0x4001ULL);
 /** @brief Permanent image output-port identity. */
-constexpr auto kOutputIdentity =
-    make_identity(0x5053544852455348ULL, 0x4002ULL);
+constexpr auto kOutputIdentity{
+    make_identity(0x5053544852455348ULL, 0x4002ULL),
+};
 
 /**
  * @brief Creates one stable ordinary DenseImage port record.
@@ -57,7 +62,8 @@ ps_operation_port_descriptor_v1 make_image_port(
 /** @brief Stable one-input/one-output port records. */
 const ps_operation_port_descriptor_v1 kPorts[]{
     make_image_port(kInputIdentity, PS_OPERATION_PORT_INPUT_V1),
-    make_image_port(kOutputIdentity, PS_OPERATION_PORT_OUTPUT_V1)};
+    make_image_port(kOutputIdentity, PS_OPERATION_PORT_OUTPUT_V1),
+};
 
 /**
  * @brief Computes one signed storage offset for a dense logical ordinal.
@@ -301,13 +307,15 @@ ps_operation_descriptor_v1 make_operation() noexcept {
 }
 
 /** @brief Stable complete threshold plugin definition. */
-const Definition kDefinition{kPluginIdentity,
-                             "repository-threshold-abi1",
-                             make_operation(),
-                             kImplementations,
-                             1U,
-                             nullptr,
-                             nullptr};
+const Definition kDefinition{
+    kPluginIdentity,
+    "repository-threshold-abi1",
+    make_operation(),
+    kImplementations,
+    1U,
+    nullptr,
+    nullptr,
+};
 
 }  // namespace
 

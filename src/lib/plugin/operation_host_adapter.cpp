@@ -33,8 +33,10 @@ namespace ps::plugin_host {
 namespace {
 
 /** @brief Permanent built-in Schema identity used by ordinary DenseTensor. */
-constexpr ps_operation_identity_v1 kDenseTensorSchemaIdentity{0x50534449U,
-                                                              0x1001U};
+constexpr ps_operation_identity_v1 kDenseTensorSchemaIdentity{
+    0x50534449U,
+    0x1001U,
+};
 /** @brief Permanent built-in Facet identity used by ordinary DenseImage. */
 constexpr ps_operation_identity_v1 kImageFacetIdentity{0x50534449U, 0x1002U};
 /** @brief Permanent built-in Layout identity used by signed Strided storage. */

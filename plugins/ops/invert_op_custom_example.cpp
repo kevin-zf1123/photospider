@@ -10,12 +10,18 @@ namespace ps::operation_plugin {
 namespace {
 
 constexpr ps_operation_identity_v1 kPluginIdentity{0x5053494E56455254ULL, 1U};
-constexpr ps_operation_identity_v1 kOperationIdentity{0x50534F50494E5654ULL,
-                                                      1U};
+constexpr ps_operation_identity_v1 kOperationIdentity{
+    0x50534F50494E5654ULL,
+    1U,
+};
 constexpr ps_operation_identity_v1 kImplementationIdentity{
-    0x5053494D50494E56ULL, 1U};
-constexpr ps_operation_identity_v1 kConfigurationIdentity{0x5053434647494E56ULL,
-                                                          1U};
+    0x5053494D50494E56ULL,
+    1U,
+};
+constexpr ps_operation_identity_v1 kConfigurationIdentity{
+    0x5053434647494E56ULL,
+    1U,
+};
 constexpr ps_operation_identity_v1 kInputIdentity{0x5053504F5254494EULL, 1U};
 constexpr ps_operation_identity_v1 kOutputIdentity{0x5053504F52544F55ULL, 1U};
 constexpr ps_operation_identity_v1 kDenseSchema{0x50534449U, 0x1001U};
@@ -48,7 +54,8 @@ ps_operation_port_descriptor_v1 make_image_port(
 /** @brief Stable one-input/one-output port records returned by Definition. */
 const ps_operation_port_descriptor_v1 kPorts[] = {
     make_image_port(kInputIdentity, PS_OPERATION_PORT_INPUT_V1),
-    make_image_port(kOutputIdentity, PS_OPERATION_PORT_OUTPUT_V1)};
+    make_image_port(kOutputIdentity, PS_OPERATION_PORT_OUTPUT_V1),
+};
 
 /**
  * @brief Emits an immutable pass-through plan for pointwise inversion.
@@ -246,13 +253,15 @@ ps_operation_descriptor_v1 make_operation() noexcept {
 }
 
 /** @brief Stable complete plugin definition. */
-const Definition kDefinition{kPluginIdentity,
-                             "repository-invert-abi1",
-                             make_operation(),
-                             kImplementations,
-                             1U,
-                             nullptr,
-                             nullptr};
+const Definition kDefinition{
+    kPluginIdentity,
+    "repository-invert-abi1",
+    make_operation(),
+    kImplementations,
+    1U,
+    nullptr,
+    nullptr,
+};
 
 }  // namespace
 

@@ -9,17 +9,21 @@ namespace {
 /** @brief Environment variable selecting the shared lifecycle trace file. */
 constexpr const char* kTraceEnvironment = "PS_LIFECYCLE_PLUGIN_TRACE";
 /** @brief Permanent replacement plugin identity. */
-constexpr auto kPluginIdentity =
-    make_identity(0x50534F5645525244ULL, 0x0001ULL);
+constexpr auto kPluginIdentity{
+    make_identity(0x50534F5645525244ULL, 0x0001ULL),
+};
 /** @brief Exact operation identity shared with the predecessor generation. */
-constexpr auto kOperationIdentity =
-    make_identity(0x50534C4946454F50ULL, 0x0001ULL);
+constexpr auto kOperationIdentity{
+    make_identity(0x50534C4946454F50ULL, 0x0001ULL),
+};
 /** @brief Permanent replacement implementation identity. */
-constexpr auto kImplementationIdentity =
-    make_identity(0x50534F564552494DULL, 0x0001ULL);
+constexpr auto kImplementationIdentity{
+    make_identity(0x50534F564552494DULL, 0x0001ULL),
+};
 /** @brief Shared operation configuration-schema identity. */
-constexpr auto kConfigurationIdentity =
-    make_identity(0x50534C4946454346ULL, 0x0001ULL);
+constexpr auto kConfigurationIdentity{
+    make_identity(0x50534C4946454346ULL, 0x0001ULL),
+};
 
 /**
  * @brief Appends one replacement-generation lifecycle trace event.
@@ -141,13 +145,15 @@ ps_operation_descriptor_v1 make_operation() noexcept {
 }
 
 /** @brief Stable complete replacement fixture definition. */
-const Definition kDefinition{kPluginIdentity,
-                             "lifecycle-override-abi1",
-                             make_operation(),
-                             kImplementations,
-                             1U,
-                             destroy_override_generation,
-                             nullptr};
+const Definition kDefinition{
+    kPluginIdentity,
+    "lifecycle-override-abi1",
+    make_operation(),
+    kImplementations,
+    1U,
+    destroy_override_generation,
+    nullptr,
+};
 
 }  // namespace
 

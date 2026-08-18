@@ -42,11 +42,13 @@ constexpr const char* kLifecycleSubtype = "op";
 /** @brief Lifecycle trace environment owned by serial integration tests. */
 constexpr const char* kTraceEnvironment = "PS_LIFECYCLE_PLUGIN_TRACE";
 /** @brief In-flight callback release-file environment. */
-constexpr const char* kReleaseEnvironment =
-    "PS_LIFECYCLE_PLUGIN_CALLBACK_RELEASE_FILE";
+constexpr const char* kReleaseEnvironment{
+    "PS_LIFECYCLE_PLUGIN_CALLBACK_RELEASE_FILE",
+};
 /** @brief Unsupported-root invocation marker environment. */
-constexpr const char* kUnsupportedMarkerEnvironment =
-    "PS_UNSUPPORTED_OPERATION_ABI_MARKER";
+constexpr const char* kUnsupportedMarkerEnvironment{
+    "PS_UNSUPPORTED_OPERATION_ABI_MARKER",
+};
 
 /**
  * @brief Restores one process environment variable after a test scope.

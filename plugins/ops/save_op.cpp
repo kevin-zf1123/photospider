@@ -12,17 +12,21 @@ namespace ps::operation_plugin {
 namespace {
 
 /** @brief Permanent save plugin identity. */
-constexpr auto kPluginIdentity =
-    make_identity(0x5053534156454F50ULL, 0x0001ULL);
+constexpr auto kPluginIdentity{
+    make_identity(0x5053534156454F50ULL, 0x0001ULL),
+};
 /** @brief Permanent save operation identity. */
-constexpr auto kOperationIdentity =
-    make_identity(0x5053534156454F50ULL, 0x1001ULL);
+constexpr auto kOperationIdentity{
+    make_identity(0x5053534156454F50ULL, 0x1001ULL),
+};
 /** @brief Permanent trusted CPU implementation identity. */
-constexpr auto kImplementationIdentity =
-    make_identity(0x5053534156454F50ULL, 0x2001ULL);
+constexpr auto kImplementationIdentity{
+    make_identity(0x5053534156454F50ULL, 0x2001ULL),
+};
 /** @brief Permanent save configuration-schema identity. */
-constexpr auto kConfigurationIdentity =
-    make_identity(0x5053534156454F50ULL, 0x3001ULL);
+constexpr auto kConfigurationIdentity{
+    make_identity(0x5053534156454F50ULL, 0x3001ULL),
+};
 /** @brief Permanent input-port identity. */
 constexpr auto kInputIdentity = make_identity(0x5053534156454F50ULL, 0x4001ULL);
 
@@ -249,13 +253,15 @@ ps_operation_descriptor_v1 make_operation() noexcept {
 }
 
 /** @brief Stable complete save plugin definition. */
-const Definition kDefinition{kPluginIdentity,
-                             "repository-save-abi1",
-                             make_operation(),
-                             kImplementations,
-                             1U,
-                             nullptr,
-                             nullptr};
+const Definition kDefinition{
+    kPluginIdentity,
+    "repository-save-abi1",
+    make_operation(),
+    kImplementations,
+    1U,
+    nullptr,
+    nullptr,
+};
 
 }  // namespace
 
