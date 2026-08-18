@@ -34,9 +34,10 @@ namespace {
  * @note The test operations are monolithic and CPU-only. Dirty planning emits
  *       a monolithic dirty-region record for inspect tests, while the
  *       empty-output op lets save-command tests exercise successful computes
- *       with no image. The fixed-offset dirty propagator ignores optional
- *       execution-time inputs because its mapping depends only on the requested
- *       ROI and remains identical during planning and execution.
+ *       with an explicitly declared empty output schema. The fixed-offset
+ *       dirty propagator ignores optional execution-time inputs because its
+ *       mapping depends only on the requested ROI and remains identical during
+ *       planning and execution.
  */
 void register_cli_command_ops() {
   static std::once_flag once;
@@ -90,12 +91,15 @@ void register_cli_command_ops() {
               (void)available_inputs;
               return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
             }));
+    OpMetadata empty_output_metadata;
+    empty_output_metadata.produces_image = false;
     OpRegistry::instance().register_op_hp_monolithic(
         "cli_dirty_test", "empty_output",
         MonolithicOpFunc(
             [](const Node&, const std::vector<const NodeOutput*>&) {
               return NodeOutput{};
-            }));
+            }),
+        empty_output_metadata);
   });
 }
 

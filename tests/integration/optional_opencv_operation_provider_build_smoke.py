@@ -550,6 +550,14 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "FormalCommitPublishesPendingNativeValueAfterReadyUnderExplicitPlan"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "FormalCommitPublishesValidatedOpaqueAbiV2ImportedValue"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "FormalHpCachePreservesAliasesAndResealsDirtyAndReplacementBytes"
         ),
         (

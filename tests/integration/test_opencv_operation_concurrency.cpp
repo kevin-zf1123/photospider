@@ -497,11 +497,14 @@ class ScopedOpenCvObserverPublication final {
  * @return Nothing.
  * @throws std::bad_alloc if registry key or callback storage allocation fails.
  * @note Registration is process-persistent and idempotent; the borrowed gate
- *       controls observation lifetime separately.
+ *       controls observation lifetime separately. Both callbacks explicitly
+ *       declare an empty output schema because they observe scheduling only.
  */
 void ensure_benchmark_probe_registered() {
   static std::once_flag once;
   std::call_once(once, [] {
+    OpMetadata no_output_metadata;
+    no_output_metadata.produces_image = false;
     OpRegistry::instance().register_op_hp_monolithic(
         kBenchmarkProbeType, kBenchmarkProbeSourceSubtype,
         MonolithicOpFunc(
@@ -512,13 +515,15 @@ void ensure_benchmark_probe_registered() {
                 gate->enter_and_wait();
               }
               return NodeOutput{};
-            }));
+            }),
+        no_output_metadata);
     OpRegistry::instance().register_op_hp_monolithic(
         kBenchmarkProbeType, kBenchmarkProbeSinkSubtype,
         MonolithicOpFunc(
             [](const Node&, const std::vector<const NodeOutput*>&) {
               return NodeOutput{};
-            }));
+            }),
+        no_output_metadata);
   });
 }
 
