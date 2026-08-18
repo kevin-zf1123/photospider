@@ -109,8 +109,11 @@ class RoiPropagationService {
    *       All callbacks belong to the selected revision; absence uses identity
    *       or no-dependency behavior and never a sibling callback. The returned
    *       value remains valid across registry mutation and may retain a plugin
-   *       DSO lease. Region planning must immediately copy callback-free route
-   *       fields and release the temporary before returning a plan.
+   *       DSO lease. A caller invoking selected-implementation propagation must
+   *       keep it alive through that synchronous callback. Region planning may
+   *       then retain only callback-free identity, device, callback shape, and
+   *       metadata fields and must release the selected value before returning
+   *       a plan.
    */
   std::optional<OpImplementation> select_route_implementation(
       const Node& node) const;
@@ -217,15 +220,19 @@ class RoiPropagationService {
    * @return Projection retaining dependency input-index routing.
    * @throws GraphError or callback exceptions from extent, parameter, dirty,
    *         spatial, or dependency propagation.
-   * @throws std::bad_alloc when route or request-local snapshots cannot
-   *         allocate.
+   * @throws std::bad_alloc when route selection or request-local snapshots
+   *         cannot allocate.
+   * @throws Any exception raised while copying a selected callback target.
    * @note One exact implementation is selected using this service's intent and
    *       device context, then its coherent dirty/dependency callbacks and
    *       metadata consume one effective parameter and input-extent snapshot.
    *       A selected revision with no dirty callback uses identity propagation;
    *       one with no dependency builder adds no dependency demand. Only when
    *       no implementation is selectable does this compatibility API consult
-   *       operation-level legacy propagation registrations.
+   *       operation-level legacy propagation registrations. The selected
+   *       temporary and any DSO lease remain alive through the synchronous
+   *       propagation callback, then are released; no callback-bearing value
+   *       enters a Region snapshot.
    */
   UpstreamRoiProjection compute_upstream_projection(
       const Node& node, const PixelRect& downstream_roi,
@@ -241,17 +248,22 @@ class RoiPropagationService {
    * @param size_cache Request-local output extent cache.
    * @param selected Exact implementation returned by
    *        select_route_implementation() for this node and service context.
+   *        The caller must keep it alive throughout this synchronous call.
    * @return Projection retaining dependency input-index routing.
    * @throws GraphError or callback exceptions from extent, parameter, dirty,
    *         spatial, or dependency propagation.
-   * @throws std::bad_alloc when request-local snapshots cannot allocate.
+   * @throws std::bad_alloc when request-local snapshots or selected callback
+   *         temporaries cannot allocate.
+   * @throws Any exception raised while copying a selected callback target.
    * @note Dirty and dependency callbacks, their metadata, and the execution
    *       identity all come from `selected`. If that revision omits a dirty
    *       callback, identity propagation is used; if it omits a dependency
    *       builder, no dependency contribution is produced. Neither absence
-   *       may borrow a callback from a sibling revision. The caller may keep
-   *       `selected` only long enough to copy callback-free route fields; the
-   *       value may own a plugin DSO lease and must not enter a long-lived
+   *       may borrow a callback from a sibling revision. The caller must keep
+   *       `selected` and any plugin DSO lease alive through the immediate
+   *       propagation callback. Afterward Region planning may retain only the
+   *       operation key plus callback-free identity, device, callback shape,
+   *       and metadata fields; `selected` must not enter a long-lived plan or
    *       Region snapshot.
    */
   UpstreamRoiProjection compute_upstream_projection_for_selected_implementation(

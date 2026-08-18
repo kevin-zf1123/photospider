@@ -233,7 +233,10 @@ class DirtyRegionPlanner {
    * clipping removes all work, or no executable dirty entries remain.
    * @throws std::invalid_argument or std::overflow_error when retained image
    * metadata cannot translate a storage ROI exactly.
-   * @throws std::bad_alloc when planning or Region storage grows.
+   * @throws std::bad_alloc when route, planning, or Region storage cannot
+   * allocate.
+   * @throws Any exception raised while copying or invoking a selected
+   * propagation callback.
    * @note PixelRect compatibility fields remain zero-based. Region metadata is
    * translated through each node's signed HP data window.
    */
@@ -253,7 +256,9 @@ class DirtyRegionPlanner {
    *         retained image extent exceeds the current PixelSize boundary.
    * @throws std::invalid_argument or std::overflow_error when image
    * coordinates cannot cross the current PixelRect boundary exactly.
-   * @throws std::bad_alloc when planning storage cannot allocate.
+   * @throws std::bad_alloc when route or planning storage cannot allocate.
+   * @throws Any exception raised while copying or invoking a selected
+   * propagation callback.
    * @note ImageRect is clipped to the signed target data window and translated
    * through checked origin subtraction before compatibility planning.
    * TensorSlice selects each executable target/upstream implementation once,
@@ -279,7 +284,10 @@ class DirtyRegionPlanner {
    * executable dirty entries remain.
    * @throws std::invalid_argument or std::overflow_error when retained image
    * metadata cannot translate a storage ROI exactly.
-   * @throws std::bad_alloc when planning or Region storage grows.
+   * @throws std::bad_alloc when route, planning, or Region storage cannot
+   * allocate.
+   * @throws Any exception raised while copying or invoking a selected
+   * propagation callback.
    * @note RT planning never creates HP task dependencies. Signed logical HP
    * coordinates are retained only in Region metadata.
    */
@@ -296,7 +304,10 @@ class DirtyRegionPlanner {
    *         the current image-only RT proxy.
    * @throws std::invalid_argument or std::overflow_error when image
    * coordinates cannot cross the current PixelRect boundary exactly.
-   * @throws std::bad_alloc when planning or Region storage grows.
+   * @throws std::bad_alloc when route, planning, or Region storage cannot
+   * allocate.
+   * @throws Any exception raised while copying or invoking a selected
+   * propagation callback.
    * @note No TensorSlice-to-PixelRect projection is attempted.
    */
   RealTimeDirtyPlan plan_real_time(GraphModel& graph, int node_id,
@@ -331,6 +342,9 @@ class DirtyRegionPlanner {
    * @return Updated graph-scoped dirty snapshot.
    * @throws GraphError when the node/Region/domain contract is invalid or a
    * TensorSlice cannot be clipped to a concrete supported tensor descriptor.
+   * @throws std::bad_alloc when TensorSlice route or Region/snapshot storage
+   * cannot allocate.
+   * @throws Any exception raised while copying a TensorSlice route callback.
    * @note ImageRect remains Region authority and is projected only for current
    * image materialization. TensorSlice is accepted only in HP.
    */
@@ -367,6 +381,9 @@ class DirtyRegionPlanner {
    * @return Updated graph-scoped dirty snapshot.
    * @throws GraphError under the same validation contract as the Region begin
    * overload.
+   * @throws std::bad_alloc when TensorSlice route or Region/snapshot storage
+   * cannot allocate.
+   * @throws Any exception raised while copying a TensorSlice route callback.
    * @note The normalized Region is appended without replacing prior source
    * facts for the generation.
    */
@@ -409,13 +426,21 @@ class DirtyRegionPlanner {
    * @param node_id Target node for the dirty request.
    * @param dirty_roi Incoming zero-based HP storage dirty ROI.
    * @return Domain-specific dirty plan.
-   * @throws GraphError from request validation, route selection, ROI
-   * projection, propagation, or empty plan detection. No eligible operation
-   * route is reported as `GraphErrc::NoOperation`.
+   * @throws GraphError from request validation, a changed frozen route, ROI
+   * projection, propagation, or empty plan detection.
+   * @throws std::bad_alloc when route selection, callback-free snapshot
+   * construction, propagation, or planning storage cannot allocate.
+   * @throws Any exception raised while copying or invoking a selected
+   * propagation callback.
+   * @note Initial route absence does not fail planning. The node route remains
+   * absent so a later fully pruned active view can complete as no-work;
+   * if work remains active, dirty preparation rejects the missing route with
+   * `GraphErrc::NoOperation` before applying ROIs or materializing work.
    * @note The template is defined in the .cpp and instantiated only for the
-   * built-in HP and RT policies. Each executable route is selected before its
-   * propagation behavior is consumed, then reduced to callback-free scalar
-   * identity before the plan escapes.
+   * built-in HP and RT policies. Any callback-bearing selection used for
+   * propagation, including its DSO lease, remains alive through only that
+   * immediate callback. The plan retains only the operation key plus
+   * callback-free identity, device, callback shape, and metadata fields.
    */
   template <typename Policy>
   typename Policy::Plan plan_dirty_domain(GraphModel& graph, int node_id,
@@ -431,11 +456,17 @@ class DirtyRegionPlanner {
    * @param node_id Node id for the requested entry.
    * @param hp_size_cache Shared HP extent cache for the planning request.
    * @return Mutable entry for node_id.
-   * @throws GraphError from extent resolution when graph metadata is invalid.
-   * @note A newly inserted entry selects and freezes its callback-free route
-   * before any later propagation can consume callback behavior. Existing
-   * entries preserve that route and accumulated ROIs; only missing extent or
-   * halo metadata is refreshed.
+   * @throws GraphError from route consistency or extent resolution when graph
+   * metadata is invalid.
+   * @throws std::bad_alloc when route selection, callback-free snapshot
+   * construction, or planning storage cannot allocate.
+   * @throws Any exception raised while copying a selected route callback.
+   * @note A newly inserted entry attempts to select its route and freezes only
+   * callback-free identity, device, callback shape, and metadata when one is
+   * eligible. Initial absence leaves the node route missing for later no-work
+   * or active-work preparation handling. Existing entries preserve any frozen
+   * route and accumulated ROIs; only missing extent or halo metadata is
+   * refreshed.
    */
   template <typename Policy>
   typename Policy::Entry& ensure_plan_entry(
@@ -452,9 +483,17 @@ class DirtyRegionPlanner {
    * @param hp_size_cache Shared HP extent cache for parent entry creation.
    * @throws GraphError from exact route selection, ROI propagation, or extent
    * resolution.
+   * @throws std::bad_alloc when exact route reacquisition, propagation, or
+   * request-local storage cannot allocate.
+   * @throws Any exception raised while copying or invoking the selected dirty
+   * or dependency callbacks.
    * @note The method preserves policy-specific HP and RT clipping order. Dirty
-   * and dependency behavior is invoked through the same selected revision
-   * whose callback-free route is stored in the plan.
+   * and dependency behavior for a frozen route is invoked through that same
+   * selected revision. The callback-bearing temporary and any DSO lease remain
+   * alive through the immediate propagation call, then are released; the plan
+   * stores only callback-free route fields. Initial route absence may use the
+   * compatibility propagation path but remains absent from the plan for later
+   * active-work validation.
    */
   template <typename Policy>
   void propagate_dirty_entries(
