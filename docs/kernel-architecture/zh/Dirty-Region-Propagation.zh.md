@@ -111,13 +111,16 @@ formal output 处停止。缺失或部分有效的 intermediate exact-core dense
 前继续保留在 plan 中，并接收同一 logical demand。uncached leaf source 是分类明确的
 missing dependency。Planner 会记录 direct TensorSlice source Region，而不会从空
 PixelRect compatibility projection 推断 source provenance。
-对于每个 executable target 或 upstream node，通过 exact-core 检查的同一次 route selection
-会立即缩减成 callback-free operation key 与完整 identity/device/shape/metadata record。
-Request plan 只保留这些带 revision 的 record，不保留 callable 或 DSO lease。在
+对于 ImageRect HP、当前所有 ImageRect RT 路径与 TensorSlice HP，每个 executable target 或
+upstream node 都会立即把其精确选中的 revision 缩减成 callback-free operation key 与完整
+identity/device/shape/metadata record。同一个 revision 既提供 ImageRect dirty/dependency 行为，
+也在 TensorSlice 情况下通过 exact-core 检查。Request plan 只保留这些带 revision 的 record，
+不保留 callable 或 DSO lease。在
 dirty/external-satisfaction selection 识别 active task node 后，若 active view 为空，dirty
 preparation 会在比较 intent、device inventory、task id 或 node route 前把它视为成功 no-work。
-否则 preparation 会在应用 ROI 或 materialize work 前，把每条 active task-population route 与这些
-record 比较。因此剩余 active work 的 target 或 upstream replacement 会在取得
+否则，空 route snapshot 或缺失 active-node route 本身就是 fail-closed mismatch；preparation 会在
+应用 ROI 或 materialize work 前，把每条 active task-population route 与保留的 record 比较。因此
+剩余 active work 的 target 或 upstream replacement 会在取得
 provider/gate/grant/reservation/ledger ownership 前以 `NoOperation` 失败；普通 execution
 随后仍会重新解析 callable。
 

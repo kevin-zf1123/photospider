@@ -128,16 +128,20 @@ exact-core dense node remains in the plan before its consumer and receives the
 same logical demand. An uncached leaf source is a categorized missing
 dependency. The planner records direct TensorSlice source Regions; it does not
 infer source provenance from an empty PixelRect compatibility projection.
-For every executable target or upstream node, the same route selection that
-passes the exact-core check is reduced immediately to a callback-free
-operation key and complete identity/device/shape/metadata record. The request
-plan retains these revisioned records, not the callable or DSO lease.
+For ImageRect HP, every current ImageRect RT path, and TensorSlice HP, each
+executable target or upstream node immediately reduces its exact selected
+revision to a callback-free operation key and complete
+identity/device/shape/metadata record. That same revision supplies ImageRect
+dirty/dependency behavior and, for TensorSlice, passes the exact-core check.
+The request plan retains these revisioned records, not the callable or DSO
+lease.
 After dirty/external-satisfaction selection identifies active task nodes, dirty
 preparation treats an empty active view as successful no-work before comparing
-intent, device inventory, task ids, or node routes. Otherwise it compares every
-active task-population route with those records before applying ROIs or
-materializing work. Target or upstream replacement for remaining active work
-therefore fails with `NoOperation` before
+intent, device inventory, task ids, or node routes. Otherwise an empty route
+snapshot or missing active-node route is itself a fail-closed mismatch, and
+preparation compares every active task-population route with the retained
+record before applying ROIs or materializing work. Target or upstream
+replacement for remaining active work therefore fails with `NoOperation` before
 provider/gate/grant/reservation/ledger ownership; ordinary execution still
 re-resolves the callable afterward.
 
