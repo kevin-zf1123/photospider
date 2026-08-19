@@ -148,8 +148,8 @@ EXPECTED_IPC_DIRECT_INCLUDES = {
         "string",
         "utility",
         "vector",
-        "photospider/core/image_buffer.hpp",
         "photospider/core/result_types.hpp",
+        "photospider/data/value_artifact.hpp",
         "photospider/host/compute_request.hpp",
     ),
 }
@@ -242,7 +242,7 @@ EXPECTED_HOST_METHODS = (
     "clear_graph",
     "compute",
     "compute_async",
-    "compute_and_get_image",
+    "compute_and_get_values",
     "timing",
     "last_io_time",
     "last_error",
@@ -913,7 +913,7 @@ int reference_complete_surface(ps::ipc::Client& client, ps::Host& host) {
   (void)host.clear_graph(host_session);
   (void)host.compute(compute_request);
   (void)host.compute_async(compute_request);
-  (void)host.compute_and_get_image(compute_request);
+  (void)host.compute_and_get_values(compute_request);
   (void)host.timing(host_session);
   (void)host.last_io_time(host_session);
   (void)host.last_error(host_session);
@@ -1094,6 +1094,9 @@ def write_consumer_projects(
     @note The explicit adapter link supplies only this consumer's OpenCV usage
       requirements; it must not weaken the product's ``LINK_ONLY`` dependency
       contract or leak OpenCV into the operation/policy SDK consumers.
+      The embedded configure also performs compile-only negative probes for
+      the removed image header, scalar/device enums, and image-only Host
+      result method so a stale installed compatibility surface fails the smoke.
       :func:`main` recreates the surrounding work directory on every run.
     """
 
@@ -1108,6 +1111,37 @@ def write_consumer_projects(
                 "find_package(Photospider CONFIG REQUIRED)",
                 "if(NOT Photospider_embedded_FOUND)",
                 '  message(FATAL_ERROR "default embedded component is absent")',
+                "endif()",
+                "include(CheckCXXSourceCompiles)",
+                "get_target_property(_photospider_public_includes",
+                "    Photospider::photospider INTERFACE_INCLUDE_DIRECTORIES)",
+                "set(CMAKE_REQUIRED_INCLUDES ${_photospider_public_includes})",
+                "set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)",
+                "check_cxx_source_compiles([[",
+                "#include <photospider/core/image_buffer.hpp>",
+                "int main() { return 0; }",
+                "]] PHOTOSPIDER_LEGACY_IMAGE_BUFFER_HEADER_COMPILES)",
+                "check_cxx_source_compiles([[",
+                "#include <photospider/core/device.hpp>",
+                "int main() { (void)sizeof(ps::DataType); return 0; }",
+                "]] PHOTOSPIDER_LEGACY_DATA_TYPE_COMPILES)",
+                "check_cxx_source_compiles([[",
+                "#include <photospider/core/device.hpp>",
+                "int main() { (void)sizeof(ps::Device); return 0; }",
+                "]] PHOTOSPIDER_LEGACY_DEVICE_COMPILES)",
+                "check_cxx_source_compiles([[",
+                "#include <photospider/host/host.hpp>",
+                "int main() {",
+                "  auto method = &ps::Host::compute_and_get_image;",
+                "  (void)method;",
+                "  return 0;",
+                "}",
+                "]] PHOTOSPIDER_LEGACY_IMAGE_RESULT_METHOD_COMPILES)",
+                "if(PHOTOSPIDER_LEGACY_IMAGE_BUFFER_HEADER_COMPILES OR",
+                "   PHOTOSPIDER_LEGACY_DATA_TYPE_COMPILES OR",
+                "   PHOTOSPIDER_LEGACY_DEVICE_COMPILES OR",
+                "   PHOTOSPIDER_LEGACY_IMAGE_RESULT_METHOD_COMPILES)",
+                '  message(FATAL_ERROR "legacy image surface remains compilable")',
                 "endif()",
                 "add_executable(photospider_consumer main.cpp)",
                 "target_link_libraries(photospider_consumer",
@@ -1249,12 +1283,19 @@ def write_consumer_projects(
                 "    std::cerr << computed.status.message << '\\n';",
                 "    return 9;",
                 "  }",
-                "  const std::size_t step = ps::aligned_image_buffer_step(",
-                "      8, 4, ps::DataType::FLOAT32);",
-                "  auto image = ps::make_aligned_cpu_image_buffer(",
-                "      2, 2, 4, ps::DataType::FLOAT32);",
-                "  if (step != 128 || !image.data) {",
+                "  const auto values =",
+                "      host->compute_and_get_values(compute_request);",
+                "  if (!values.status.ok || values.value.values().empty()) {",
                 "    return 10;",
+                "  }",
+                "  const auto inspections = values.value.inspect();",
+                "  if (inspections.empty() ||",
+                "      inspections.front().name != \"image\" ||",
+                "      !inspections.front().dense_descriptor.has_value() ||",
+                "      !inspections.front().image_facet.has_value() ||",
+                "      inspections.front().readiness !=",
+                "          ps::ReadyFenceState::Ready) {",
+                "    return 13;",
                 "  }",
                 "  const auto closed = host->close_graph(loaded.value);",
                 "  if (!closed.status.ok) {",
@@ -2286,7 +2327,6 @@ def write_extension_consumer_projects(
             #include <utility>
             #include <vector>
 
-            #include <photospider/core/image_buffer.hpp>
             #include <photospider/data/image_view.hpp>
             #include <photospider/data/region.hpp>
             #include <photospider/data/value.hpp>
@@ -2306,8 +2346,6 @@ def write_extension_consumer_projects(
              *       without backend package discovery.
              */
             int main() {
-              const auto image = ps::make_aligned_cpu_image_buffer(
-                  3, 2, 1, ps::DataType::UINT8);
               ps::DenseTensorDescriptor descriptor{
                   {2U, 3U, 1U},
                   ps::ElementSemantics::UnsignedInteger,
@@ -2350,8 +2388,7 @@ def write_extension_consumer_projects(
                   view.channels() == 1U &&
                   std::to_integer<unsigned int>(
                       *view.channel_data(2U, 1U, 0U)) == 6U;
-              return image.data && image.width == 3 && image.height == 2 &&
-                             valid_value && valid_region
+              return valid_value && valid_region
                          ? 0
                          : 1;
             }
@@ -2411,13 +2448,30 @@ def write_extension_consumer_projects(
 
             /**
              * @brief Exercises the installed adapter using OpenCV core only.
-             * @return Zero when the wrapped descriptor retains matrix storage.
+             * @return Zero when the Value retains matrix shape and samples.
              * @throws Nothing; adapter failure terminates the smoke process.
              */
             int main() {
               cv::Mat matrix(2, 3, CV_8UC1, cv::Scalar(9));
-              const auto image = ps::plugin::opencv::from_mat(matrix);
-              return image.data && image.width == 3 && image.height == 2 ? 0 : 1;
+              ps::DenseTensorDescriptor descriptor{
+                  {2U, 3U, 1U}, ps::ElementSemantics::UnsignedInteger,
+                  ps::StorageEncoding{8U}};
+              ps::ImageFacet facet =
+                  ps::make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+              facet.sample_domain = ps::SampleDomainFacet{
+                  1U,
+                  ps::SampleEncoding{1U, ps::SampleEncodingKind::CodeValue},
+                  ps::SampleDomain{ps::SampleDomainKind::CodeValue, 0.0, 255.0},
+                  {}};
+              const ps::Value image =
+                  ps::plugin::opencv::from_mat(matrix, facet);
+              const cv::Mat view = ps::plugin::opencv::to_mat(image);
+              return image.valid() &&
+                             image.image_bounds() ==
+                                 ps::ImageBounds{0, 0, 3, 2} &&
+                             view.at<unsigned char>(1, 2) == 9U
+                         ? 0
+                         : 1;
             }
             """
         ).lstrip(),
@@ -3161,8 +3215,9 @@ def inspect_install_tree(
             "raw": ipc_interface_link_raw,
             "entries": ipc_interface_link_entries,
         },
-        "ipc_export_links_only_threads": (
-            ipc_interface_link_entries == ["Threads::Threads"]
+        "ipc_export_links_value_runtime_and_threads": (
+            ipc_interface_link_entries
+            == ["Photospider::operation_runtime", "Threads::Threads"]
         ),
         "ipc_export_omits_backend_dependency": all(
             part not in ipc_interface_link_raw for part in FORBIDDEN_IPC_TARGET_PARTS
@@ -3543,8 +3598,8 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "installed IPC headers omit raw implementation types": install[
             "ipc_headers_omit_raw_implementation_types"
         ],
-        "exported IPC target links only Threads": install[
-            "ipc_export_links_only_threads"
+        "exported IPC target links Value runtime and Threads": install[
+            "ipc_export_links_value_runtime_and_threads"
         ],
         "exported IPC target omits backend dependencies": install[
             "ipc_export_omits_backend_dependency"

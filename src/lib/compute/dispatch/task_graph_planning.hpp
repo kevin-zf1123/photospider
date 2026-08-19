@@ -48,7 +48,7 @@ struct PlannedOperationRoute {
   /** @brief Nonzero registry ownership revision of the selected callback. */
   std::uint64_t implementation_identity = 0U;
   /** @brief Device selected by registry intent/cost policy. */
-  Device device = Device::CPU;
+  DeviceBackend device = DeviceBackend::CPU;
   /** @brief Complete scheduling and resource metadata from the same snapshot.
    */
   OpMetadata metadata;
@@ -126,7 +126,7 @@ struct PlannedOutputAuthority {
   /** @brief Registry revision whose declared output schema was frozen. */
   std::uint64_t implementation_identity = 0U;
   /** @brief Device route associated with the declaration for diagnostics. */
-  Device route_device = Device::CPU;
+  DeviceBackend route_device = DeviceBackend::CPU;
   /** @brief Required canonical image name, or absent for non-image routes. */
   std::optional<std::string> image_output_name;
   /** @brief Sorted exact required generic Value names excluding `image`. */
@@ -487,7 +487,7 @@ struct ComputePlan {
   /** @brief Executable task graph derived from planned work. */
   ComputeTaskGraph task_graph;
   /** @brief Canonical device inventory used for operation route selection. */
-  std::vector<Device> available_devices;
+  std::vector<DeviceBackend> available_devices;
 };
 
 /**
@@ -564,7 +564,7 @@ struct FullTaskGraph {
   /** @brief Full task graph before request pruning. */
   ComputeTaskGraph task_graph;
   /** @brief Canonical device inventory covered by this cached expansion. */
-  std::vector<Device> available_devices;
+  std::vector<DeviceBackend> available_devices;
   /**
    * @brief Expanded work index keyed by graph node id.
    *
@@ -608,8 +608,8 @@ class FullTaskGraphExpander {
    * resolution, op metadata lookup, or allocation.
    */
   FullTaskGraph expand(const GraphModel& graph, ComputeIntent intent,
-                       const std::vector<Device>& available_devices = {
-                           Device::CPU}) const;
+                       const std::vector<DeviceBackend>& available_devices = {
+                           DeviceBackend::CPU}) const;
 };
 
 /**
@@ -774,7 +774,7 @@ class TaskGraphReadyChecker {
  */
 std::string full_task_graph_cache_key(
     const GraphModel& graph, ComputeIntent intent,
-    const std::vector<Device>& available_devices = {Device::CPU});
+    const std::vector<DeviceBackend>& available_devices = {DeviceBackend::CPU});
 
 /**
  * @brief Returns a cached immutable FullTaskGraph or expands and stores one.
@@ -793,7 +793,7 @@ std::string full_task_graph_cache_key(
  */
 std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
     GraphModel& graph, ComputeIntent intent,
-    const std::vector<Device>& available_devices = {Device::CPU});
+    const std::vector<DeviceBackend>& available_devices = {DeviceBackend::CPU});
 
 /**
  * @brief Builds a bounded summary for compute plan inspection.

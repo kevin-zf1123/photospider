@@ -25,13 +25,12 @@
 
 #include "compute/compute_run.hpp"
 #include "compute/execution/execution_service.hpp"
-#include "core/value_image_adapter.hpp"
 #include "execution/device/device_execution_context.hpp"
 #include "execution/device/device_executor_registry.hpp"
 #include "execution/device/metal_device_executor.hpp"
 #include "execution/execution_task_runtime.hpp"
 #include "metal/perlin_noise_metal.hpp"
-#include "photospider/core/image_buffer.hpp"
+#include "photospider/data/image_view.hpp"
 
 namespace ps::compute {
 namespace {
@@ -313,13 +312,13 @@ class NativeAllocationProbeError final : public std::exception {
   (void)::alarm(kExecutorReentryWatchdogSeconds);
   execution::DeviceExecutorRegistry registry =
       execution::make_default_device_executor_registry();
-  if (!registry.contains(Device::GPU_METAL)) {
+  if (!registry.contains(DeviceBackend::Metal)) {
     std::_Exit(2);
   }
 
   const execution::DeviceExecutorDiagnostics before =
-      registry.diagnostics(Device::GPU_METAL);
-  if (before.device != Device::GPU_METAL || !before.queue_ready ||
+      registry.diagnostics(DeviceBackend::Metal);
+  if (before.device != DeviceBackend::Metal || !before.queue_ready ||
       before.submission_count != 0U || before.invocation_count != 0U ||
       before.total_allocations != 0U || before.live_allocations != 0U ||
       before.pipeline_cache_entries != 0U) {
@@ -338,7 +337,7 @@ class NativeAllocationProbeError final : public std::exception {
 
     bool caught_exact_reentry = false;
     try {
-      registry.execute(Device::GPU_METAL, nested);
+      registry.execute(DeviceBackend::Metal, nested);
     } catch (const std::logic_error& error) {
       if (std::strcmp(error.what(), kReentryError) != 0) {
         std::_Exit(5);
@@ -355,7 +354,7 @@ class NativeAllocationProbeError final : public std::exception {
     }
 
     const execution::DeviceExecutorDiagnostics after_rejection =
-        registry.diagnostics(Device::GPU_METAL);
+        registry.diagnostics(DeviceBackend::Metal);
     if (after_rejection.submission_count != 1U ||
         after_rejection.invocation_count != 1U ||
         after_rejection.total_allocations != 0U ||
@@ -366,7 +365,7 @@ class NativeAllocationProbeError final : public std::exception {
   });
 
   try {
-    registry.execute(Device::GPU_METAL, outer);
+    registry.execute(DeviceBackend::Metal, outer);
   } catch (...) {
     std::_Exit(10);
   }
@@ -374,7 +373,7 @@ class NativeAllocationProbeError final : public std::exception {
     std::_Exit(11);
   }
   const execution::DeviceExecutorDiagnostics after_outer =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   if (after_outer.submission_count != 1U ||
       after_outer.invocation_count != 1U ||
       after_outer.total_allocations != 0U ||
@@ -393,7 +392,7 @@ class NativeAllocationProbeError final : public std::exception {
     recovery_ran = true;
   });
   try {
-    registry.execute(Device::GPU_METAL, recovery);
+    registry.execute(DeviceBackend::Metal, recovery);
   } catch (...) {
     std::_Exit(14);
   }
@@ -402,7 +401,7 @@ class NativeAllocationProbeError final : public std::exception {
     std::_Exit(15);
   }
   const execution::DeviceExecutorDiagnostics after_recovery =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   if (after_recovery.submission_count != 2U ||
       after_recovery.invocation_count != 2U ||
       after_recovery.total_allocations != 0U ||
@@ -574,14 +573,14 @@ std::optional<execution::DeviceExecutorDiagnostics> wait_for_submission_count(
       std::chrono::steady_clock::now() + kExecutorProbeTimeout;
   while (std::chrono::steady_clock::now() < deadline) {
     execution::DeviceExecutorDiagnostics diagnostics =
-        registry.diagnostics(Device::GPU_METAL);
+        registry.diagnostics(DeviceBackend::Metal);
     if (diagnostics.submission_count >= expected) {
       return diagnostics;
     }
     std::this_thread::yield();
   }
   execution::DeviceExecutorDiagnostics diagnostics =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   if (diagnostics.submission_count >= expected) {
     return diagnostics;
   }
@@ -608,7 +607,7 @@ ReadyFenceSnapshot wait_for_terminal_value(const Value& value) {
 }
 
 /**
- * @brief Run-owned Perlin input, pending Value, wait, and settled output.
+ * @brief Run-owned Perlin input, pending Value, and completion wait.
  *
  * @throws std::bad_alloc when parameter or node ownership cannot allocate.
  * @note The worker is the only writer and the test reads after execute_run()
@@ -643,9 +642,6 @@ struct PerlinInvocationState final {
 
   /** @brief Immutable effective operation parameters. */
   Node node;
-
-  /** @brief Settled CPU compatibility snapshot owned by the test. */
-  std::optional<ImageBuffer> output;
 
   /** @brief Pending host replica retained through native completion. */
   Value pending_value;
@@ -689,21 +685,26 @@ constexpr std::array<PerlinReferenceSample, 5> kPerlinReferenceSamples{{
 }};
 
 /**
- * @brief Reads one FLOAT32 sample from a validated single-channel image.
- * @param image CPU image whose row stride may exceed its active width.
+ * @brief Reads one FP32 sample from a validated single-channel image.
+ * @param image Retaining checked CPU image view.
  * @param column Zero-based active sample column.
  * @param row Zero-based active sample row.
  * @return Exact stored floating-point value.
  * @throws std::out_of_range when row or column is outside the active image.
- * @note The caller validates buffer shape and type before using this helper.
+ * @throws std::bad_alloc when checked coordinate projection allocates.
+ * @note The caller validates image shape and encoding before using this helper.
  */
-float perlin_sample(const ImageBuffer& image, int column, int row) {
-  if (column < 0 || column >= image.width || row < 0 || row >= image.height) {
+float perlin_sample(const ImageView& image, int column, int row) {
+  if (column < 0 || static_cast<std::size_t>(column) >= image.width() ||
+      row < 0 || static_cast<std::size_t>(row) >= image.height()) {
     throw std::out_of_range("Perlin reference sample is outside the image.");
   }
-  const auto* samples =
-      reinterpret_cast<const float*>(image_buffer_row_data(image, row));
-  return samples[column];
+  float sample = 0.0F;
+  std::memcpy(&sample,
+              image.channel_data(static_cast<std::size_t>(column),
+                                 static_cast<std::size_t>(row), 0U),
+              sizeof(sample));
+  return sample;
 }
 
 /**
@@ -734,7 +735,7 @@ ComputeRunSubmission make_metal_run_submission(std::string label,
  * @param service Configured service with a real Metal executor.
  * @param host Stable observation target.
  * @param identity Unique Run and node identity.
- * @return Shared state containing the Ready Value and settled CPU snapshot.
+ * @return Shared state containing the Ready host-readable Value.
  * @throws Provider, service, allocation, or Run failures unchanged.
  * @note The submission callback and all native handles retire before return.
  */
@@ -770,16 +771,13 @@ std::shared_ptr<PerlinInvocationState> execute_perlin(
                   if (snapshot.state() != ReadyFenceState::Ready) {
                     throw ReadyFenceAccessError(std::move(snapshot));
                   }
-                  state->output =
-                      value_image_adapter::snapshot_cpu_image_buffer(
-                          state->pending_value);
                   runtime->dec_tasks_to_complete();
                 });
         state->wait.emplace(std::move(wait));
         runtime.dec_tasks_to_complete();
       },
       ExecutionTaskPriority::Normal,
-      ReadyTaskSubmission::default_resource_demand(), Device::GPU_METAL);
+      ReadyTaskSubmission::default_resource_demand(), DeviceBackend::Metal);
   service.execute_run(host, "gpu_pipeline", std::move(submissions), 1);
   return state;
 }
@@ -802,25 +800,24 @@ void expect_valid_perlin_output(
   EXPECT_EQ(binding.device, DeviceId(DeviceBackend::CPU));
   EXPECT_EQ(binding.memory_domain, MemoryDomain::HostPinned);
   EXPECT_TRUE(binding.host_visible);
-  ASSERT_TRUE(state->output.has_value());
-  const ImageBuffer& image = *state->output;
-  ASSERT_NO_THROW(validate_image_buffer(image));
-  EXPECT_EQ(image.width, 8);
-  EXPECT_EQ(image.height, 8);
-  EXPECT_EQ(image.channels, 1);
-  EXPECT_EQ(image.type, DataType::FLOAT32);
-  EXPECT_EQ(image.device, Device::CPU);
+  const ImageView image(state->pending_value);
+  EXPECT_EQ(image.width(), 8U);
+  EXPECT_EQ(image.height(), 8U);
+  EXPECT_EQ(image.channels(), 1U);
+  EXPECT_EQ(image.descriptor().element_semantics,
+            ElementSemantics::FloatingPoint);
+  EXPECT_EQ(image.descriptor().storage_encoding.bit_width, 32U);
   float minimum = std::numeric_limits<float>::infinity();
   float maximum = -std::numeric_limits<float>::infinity();
-  for (int row = 0; row < image.height; ++row) {
-    const auto* samples =
-        reinterpret_cast<const float*>(image_buffer_row_data(image, row));
-    for (int column = 0; column < image.width; ++column) {
-      EXPECT_TRUE(std::isfinite(samples[column]));
-      EXPECT_GE(samples[column], 0.0F);
-      EXPECT_LE(samples[column], 1.0F);
-      minimum = std::min(minimum, samples[column]);
-      maximum = std::max(maximum, samples[column]);
+  for (std::size_t row = 0U; row < image.height(); ++row) {
+    for (std::size_t column = 0U; column < image.width(); ++column) {
+      const float sample =
+          perlin_sample(image, static_cast<int>(column), static_cast<int>(row));
+      EXPECT_TRUE(std::isfinite(sample));
+      EXPECT_GE(sample, 0.0F);
+      EXPECT_LE(sample, 1.0F);
+      minimum = std::min(minimum, sample);
+      maximum = std::max(maximum, sample);
     }
   }
   EXPECT_GT(maximum - minimum, kPerlinMinimumDynamicRange);
@@ -846,16 +843,17 @@ void expect_identical_perlin_outputs(
     const std::shared_ptr<PerlinInvocationState>& second) {
   ASSERT_TRUE(first);
   ASSERT_TRUE(second);
-  ASSERT_TRUE(first->output.has_value());
-  ASSERT_TRUE(second->output.has_value());
-  const ImageBuffer& first_image = *first->output;
-  const ImageBuffer& second_image = *second->output;
-  ASSERT_EQ(first_image.width, second_image.width);
-  ASSERT_EQ(first_image.height, second_image.height);
-  ASSERT_EQ(first_image.channels, second_image.channels);
-  ASSERT_EQ(first_image.type, second_image.type);
-  for (int row = 0; row < first_image.height; ++row) {
-    for (int column = 0; column < first_image.width; ++column) {
+  const ImageView first_image(first->pending_value);
+  const ImageView second_image(second->pending_value);
+  ASSERT_EQ(first_image.width(), second_image.width());
+  ASSERT_EQ(first_image.height(), second_image.height());
+  ASSERT_EQ(first_image.channels(), second_image.channels());
+  ASSERT_EQ(first_image.descriptor().element_semantics,
+            second_image.descriptor().element_semantics);
+  ASSERT_EQ(first_image.descriptor().storage_encoding.bit_width,
+            second_image.descriptor().storage_encoding.bit_width);
+  for (std::size_t row = 0U; row < first_image.height(); ++row) {
+    for (std::size_t column = 0U; column < first_image.width(); ++column) {
       EXPECT_FLOAT_EQ(perlin_sample(first_image, column, row),
                       perlin_sample(second_image, column, row))
           << "deterministic coordinate (" << column << ", " << row << ")";
@@ -876,7 +874,7 @@ TEST(MetalDeviceExecutorIntegration,
   {
     execution::DeviceExecutorRegistry availability =
         execution::make_default_device_executor_registry();
-    if (!availability.contains(Device::GPU_METAL)) {
+    if (!availability.contains(DeviceBackend::Metal)) {
       GTEST_SKIP() << "No usable Metal device and command queue on this host";
     }
   }
@@ -901,7 +899,7 @@ TEST(MetalDeviceExecutorIntegration,
      DirectRegistryCallsAreSerializedInsideRealExecutor) {
   execution::DeviceExecutorRegistry registry =
       execution::make_default_device_executor_registry();
-  if (!registry.contains(Device::GPU_METAL)) {
+  if (!registry.contains(DeviceBackend::Metal)) {
     GTEST_SKIP() << "No usable Metal device and command queue on this host";
   }
 
@@ -911,7 +909,7 @@ TEST(MetalDeviceExecutorIntegration,
   bool first_tls_cleared = false;
   bool second_tls_cleared = false;
   const execution::DeviceExecutorDiagnostics before =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   ASSERT_EQ(before.submission_count, 0U);
   ASSERT_EQ(before.invocation_count, 0U);
 
@@ -967,7 +965,7 @@ TEST(MetalDeviceExecutorIntegration,
 
   first_thread = std::thread([&] {
     try {
-      registry.execute(Device::GPU_METAL, first_invocation);
+      registry.execute(DeviceBackend::Metal, first_invocation);
     } catch (...) {
       first_failure = std::current_exception();
     }
@@ -985,11 +983,11 @@ TEST(MetalDeviceExecutorIntegration,
   }
 
   const execution::DeviceExecutorDiagnostics first_active =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
 
   second_thread = std::thread([&] {
     try {
-      registry.execute(Device::GPU_METAL, second_invocation);
+      registry.execute(DeviceBackend::Metal, second_invocation);
     } catch (...) {
       second_failure = std::current_exception();
     }
@@ -1023,8 +1021,8 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_EQ(queued->submission_count - queued->invocation_count, 1U);
 
   const execution::DeviceExecutorDiagnostics diagnostics =
-      registry.diagnostics(Device::GPU_METAL);
-  EXPECT_EQ(diagnostics.device, Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
+  EXPECT_EQ(diagnostics.device, DeviceBackend::Metal);
   EXPECT_TRUE(diagnostics.queue_ready);
   EXPECT_EQ(diagnostics.submission_count, 2U);
   EXPECT_EQ(diagnostics.invocation_count, 2U);
@@ -1047,7 +1045,7 @@ TEST(MetalDeviceExecutorIntegration,
      SerializedAdmissionExpiresBeforeCallbackEntry) {
   execution::DeviceExecutorRegistry registry =
       execution::make_default_device_executor_registry();
-  if (!registry.contains(Device::GPU_METAL)) {
+  if (!registry.contains(DeviceBackend::Metal)) {
     GTEST_SKIP() << "No usable Metal device and command queue on this host";
   }
 
@@ -1057,7 +1055,7 @@ TEST(MetalDeviceExecutorIntegration,
   std::atomic<bool> second_finished{false};
   std::atomic<bool> second_callback_entered{false};
   const execution::DeviceExecutorDiagnostics before =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
 
   CallbackDeviceExecutorInvocation first_invocation([&probe] {
     std::unique_lock<std::mutex> lock(probe.mutex);
@@ -1078,7 +1076,7 @@ TEST(MetalDeviceExecutorIntegration,
   thread_guard.track_second(second_thread);
   first_thread = std::thread([&] {
     try {
-      registry.execute(Device::GPU_METAL, first_invocation);
+      registry.execute(DeviceBackend::Metal, first_invocation);
     } catch (...) {
       first_failure = std::current_exception();
     }
@@ -1101,7 +1099,7 @@ TEST(MetalDeviceExecutorIntegration,
       std::nullopt, deadline);
   second_thread = std::thread([&] {
     try {
-      registry.execute(Device::GPU_METAL, second_invocation);
+      registry.execute(DeviceBackend::Metal, second_invocation);
     } catch (...) {
       second_failure = std::current_exception();
     }
@@ -1119,7 +1117,7 @@ TEST(MetalDeviceExecutorIntegration,
   const bool expired_before_release =
       second_finished.load(std::memory_order_acquire);
   const execution::DeviceExecutorDiagnostics after_deadline =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   thread_guard.release_and_join();
 
   EXPECT_TRUE(expired_before_release);
@@ -1131,7 +1129,7 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_EQ(after_deadline.submission_count, before.submission_count + 2U);
   EXPECT_EQ(after_deadline.invocation_count, before.invocation_count + 1U);
   const execution::DeviceExecutorDiagnostics after =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   EXPECT_EQ(after.submission_count, before.submission_count + 2U);
   EXPECT_EQ(after.invocation_count, before.invocation_count + 1U);
   EXPECT_EQ(after.live_allocations, 0U);
@@ -1156,7 +1154,7 @@ void expect_host_upload_deadline_unwind(
     std::uint64_t expiry_observation, std::uint64_t seed_scalar) {
   execution::DeviceExecutorRegistry registry =
       execution::make_default_device_executor_registry();
-  ASSERT_TRUE(registry.contains(Device::GPU_METAL));
+  ASSERT_TRUE(registry.contains(DeviceBackend::Metal));
   Value source = make_upload_source(static_cast<float>(seed_scalar));
   Value destination;
   const execution::DeviceCompletionSeed seed(
@@ -1188,7 +1186,8 @@ void expect_host_upload_deadline_unwind(
         return deadline - std::chrono::nanoseconds(1);
       });
 
-  EXPECT_THROW(registry.execute(Device::GPU_METAL, upload), std::runtime_error);
+  EXPECT_THROW(registry.execute(DeviceBackend::Metal, upload),
+               std::runtime_error);
   EXPECT_EQ(expired_checkpoint_observations.load(std::memory_order_relaxed),
             expiry_observation);
   EXPECT_FALSE(destination.valid());
@@ -1212,7 +1211,7 @@ void expect_host_upload_deadline_unwind(
   ASSERT_TRUE(resources.has_value());
   EXPECT_EQ(resources->reserved, DeviceResourceVector{});
   const execution::DeviceExecutorDiagnostics diagnostics =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   EXPECT_EQ(diagnostics.submission_count, 1U);
   EXPECT_EQ(diagnostics.invocation_count, 1U);
   EXPECT_EQ(diagnostics.live_allocations, 0U);
@@ -1229,7 +1228,7 @@ TEST(MetalDeviceExecutorIntegration,
      UploadPreparationCopyAndPreCommitExpiryLeaveNoResidue) {
   execution::DeviceExecutorRegistry availability =
       execution::make_default_device_executor_registry();
-  if (!availability.contains(Device::GPU_METAL)) {
+  if (!availability.contains(DeviceBackend::Metal)) {
     GTEST_SKIP() << "No usable Metal device and command queue on this host";
   }
 
@@ -1255,14 +1254,14 @@ TEST(MetalDeviceExecutorIntegration,
      ThrowingDirectInvocationRetiresResourcesAndRestoresExecutor) {
   execution::DeviceExecutorRegistry registry =
       execution::make_default_device_executor_registry();
-  if (!registry.contains(Device::GPU_METAL)) {
+  if (!registry.contains(DeviceBackend::Metal)) {
     GTEST_SKIP() << "No usable Metal device and command queue on this host";
   }
 
   ASSERT_EQ(execution::current_metal_execution_context(), nullptr);
   const execution::DeviceExecutorDiagnostics before =
-      registry.diagnostics(Device::GPU_METAL);
-  ASSERT_EQ(before.device, Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
+  ASSERT_EQ(before.device, DeviceBackend::Metal);
   ASSERT_TRUE(before.queue_ready);
   ASSERT_EQ(before.submission_count, 0U);
   ASSERT_EQ(before.invocation_count, 0U);
@@ -1293,7 +1292,7 @@ TEST(MetalDeviceExecutorIntegration,
 
   bool caught_expected_exception = false;
   try {
-    registry.execute(Device::GPU_METAL, throwing_invocation);
+    registry.execute(DeviceBackend::Metal, throwing_invocation);
   } catch (const NativeAllocationProbeError& error) {
     caught_expected_exception = true;
     EXPECT_STREQ(error.what(), kExpectedFailure);
@@ -1311,8 +1310,8 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_EQ(execution::current_metal_execution_context(), nullptr);
 
   const execution::DeviceExecutorDiagnostics after_throw =
-      registry.diagnostics(Device::GPU_METAL);
-  EXPECT_EQ(after_throw.device, Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
+  EXPECT_EQ(after_throw.device, DeviceBackend::Metal);
   EXPECT_TRUE(after_throw.queue_ready);
   EXPECT_EQ(after_throw.submission_count, before.submission_count + 1U);
   EXPECT_EQ(after_throw.invocation_count, before.invocation_count + 1U);
@@ -1341,15 +1340,15 @@ TEST(MetalDeviceExecutorIntegration,
                                                     sizeof(payload)) != nullptr;
   });
 
-  EXPECT_NO_THROW(registry.execute(Device::GPU_METAL, recovery_invocation));
+  EXPECT_NO_THROW(registry.execute(DeviceBackend::Metal, recovery_invocation));
   EXPECT_TRUE(recovery_context_was_current);
   EXPECT_TRUE(recovery_queue_was_ready);
   EXPECT_TRUE(recovery_buffer_was_allocated);
   EXPECT_EQ(execution::current_metal_execution_context(), nullptr);
 
   const execution::DeviceExecutorDiagnostics after_recovery =
-      registry.diagnostics(Device::GPU_METAL);
-  EXPECT_EQ(after_recovery.device, Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
+  EXPECT_EQ(after_recovery.device, DeviceBackend::Metal);
   EXPECT_TRUE(after_recovery.queue_ready);
   EXPECT_EQ(after_recovery.submission_count, before.submission_count + 2U);
   EXPECT_EQ(after_recovery.invocation_count, before.invocation_count + 2U);
@@ -1379,7 +1378,7 @@ TEST(MetalDeviceExecutorIntegration,
      HostToTexturePublishesRevisionPreservingDeviceReplica) {
   execution::DeviceExecutorRegistry registry =
       execution::make_default_device_executor_registry();
-  if (!registry.contains(Device::GPU_METAL)) {
+  if (!registry.contains(DeviceBackend::Metal)) {
     GTEST_SKIP() << "No usable Metal device and command queue on this host";
   }
 
@@ -1417,7 +1416,7 @@ TEST(MetalDeviceExecutorIntegration,
       },
       seed);
 
-  ASSERT_NO_THROW(registry.execute(Device::GPU_METAL, upload));
+  ASSERT_NO_THROW(registry.execute(DeviceBackend::Metal, upload));
   ASSERT_TRUE(destination.valid());
   EXPECT_EQ(destination.revision_id(), source.revision_id());
   EXPECT_NE(destination.allocation_identity(), source.allocation_identity());
@@ -1446,7 +1445,7 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_EQ(resources.reserved.device_scratch_bytes, 0U);
 
   const execution::DeviceExecutorDiagnostics diagnostics =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   EXPECT_EQ(diagnostics.submission_count, 1U);
   EXPECT_EQ(diagnostics.invocation_count, 1U);
   EXPECT_EQ(diagnostics.total_allocations, 2U);
@@ -1470,7 +1469,7 @@ TEST(MetalDeviceExecutorIntegration,
      HostToTexturePreservesRankThreeHwcValueMetadata) {
   execution::DeviceExecutorRegistry registry =
       execution::make_default_device_executor_registry();
-  if (!registry.contains(Device::GPU_METAL)) {
+  if (!registry.contains(DeviceBackend::Metal)) {
     GTEST_SKIP() << "No usable Metal device and command queue on this host";
   }
 
@@ -1511,7 +1510,7 @@ TEST(MetalDeviceExecutorIntegration,
       },
       seed);
 
-  ASSERT_NO_THROW(registry.execute(Device::GPU_METAL, upload));
+  ASSERT_NO_THROW(registry.execute(DeviceBackend::Metal, upload));
   ASSERT_TRUE(destination.valid());
   EXPECT_EQ(wait_for_terminal_value(destination).state(),
             ReadyFenceState::Ready);
@@ -1573,7 +1572,7 @@ TEST(MetalDeviceExecutorIntegration,
         },
         execution::DeviceCompletionSeed(
             8601U, 8601, ComputeIntent::GlobalHighPrecision, 1U, 8601U, 0U));
-    ASSERT_NO_THROW(registry.execute(Device::GPU_METAL, *first_invocation));
+    ASSERT_NO_THROW(registry.execute(DeviceBackend::Metal, *first_invocation));
     ASSERT_TRUE(first_destination.valid());
     ASSERT_EQ(wait_for_terminal_value(first_destination).state(),
               ReadyFenceState::Ready);
@@ -1592,7 +1591,7 @@ TEST(MetalDeviceExecutorIntegration,
         },
         execution::DeviceCompletionSeed(
             8602U, 8602, ComputeIntent::GlobalHighPrecision, 1U, 8602U, 0U));
-    ASSERT_NO_THROW(registry.execute(Device::GPU_METAL, *second_invocation));
+    ASSERT_NO_THROW(registry.execute(DeviceBackend::Metal, *second_invocation));
     ASSERT_TRUE(second_destination.valid());
     ASSERT_EQ(wait_for_terminal_value(second_destination).state(),
               ReadyFenceState::Ready);
@@ -1632,7 +1631,7 @@ TEST(MetalDeviceExecutorIntegration,
   limits.device_limits = std::vector<DeviceResourceLimit>{DeviceResourceLimit{
       DeviceId(DeviceBackend::Metal), DeviceResourceVector{1U, 1U}}};
   ExecutionService service(std::move(limits));
-  if (!service.has_device_executor(Device::GPU_METAL)) {
+  if (!service.has_device_executor(DeviceBackend::Metal)) {
     GTEST_SKIP() << "No usable Metal device and command queue on this host";
   }
   service.configure_worker_count(1U);
@@ -1652,7 +1651,7 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_TRUE(caught_typed_rejection);
 
   const execution::DeviceExecutorDiagnostics diagnostics =
-      service.device_executor_diagnostics(Device::GPU_METAL);
+      service.device_executor_diagnostics(DeviceBackend::Metal);
   EXPECT_EQ(diagnostics.total_allocations, 0U);
   EXPECT_EQ(diagnostics.live_allocations, 0U);
   const auto resources =
@@ -1672,7 +1671,7 @@ TEST(MetalDeviceExecutorIntegration,
 TEST(MetalDeviceExecutorIntegration,
      PerlinReusesQueueAndPipelineAndRetiresAllocations) {
   ExecutionService service(ExecutionService::default_resource_limits());
-  if (!service.has_device_executor(Device::GPU_METAL)) {
+  if (!service.has_device_executor(DeviceBackend::Metal)) {
     GTEST_SKIP() << "No usable Metal device and command queue on this host";
   }
   service.configure_worker_count(1U);
@@ -1693,8 +1692,8 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_EQ(after_second->reserved, DeviceResourceVector{});
 
   const execution::DeviceExecutorDiagnostics diagnostics =
-      service.device_executor_diagnostics(Device::GPU_METAL);
-  EXPECT_EQ(diagnostics.device, Device::GPU_METAL);
+      service.device_executor_diagnostics(DeviceBackend::Metal);
+  EXPECT_EQ(diagnostics.device, DeviceBackend::Metal);
   EXPECT_TRUE(diagnostics.queue_ready);
   EXPECT_EQ(diagnostics.submission_count, 2U);
   EXPECT_EQ(diagnostics.invocation_count, 2U);

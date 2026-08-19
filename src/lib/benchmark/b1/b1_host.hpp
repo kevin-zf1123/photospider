@@ -71,15 +71,15 @@ class B1Host {
   virtual ~B1Host() noexcept = default;
 
   /**
-   * @brief Computes one B1 image through the real synchronous Host path.
+   * @brief Computes exact B1 named Values through the synchronous Host path.
    * @param request Ordinary request plus exact private QoS/observer.
-   * @return Same typed image/status contract as `Host::compute_and_get_image`.
+   * @return Same typed Value/status contract as `Host::compute_and_get_values`.
    * @throws std::bad_alloc when request/evidence ownership cannot allocate.
    * @note This method reuses Host lifecycle admission, InteractionService,
    * Kernel, ExecutionService, providers, ledger, cache, and Run routes; it
    * creates no benchmark execution authority.
    */
-  virtual Result<ImageBuffer> compute_b1_image(
+  virtual Result<NamedValueResult> compute_b1_values(
       B1HostComputeRequest request) = 0;
 
   /**

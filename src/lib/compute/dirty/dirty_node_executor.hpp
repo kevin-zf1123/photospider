@@ -42,7 +42,7 @@ struct DirtyResolvedOperation {
   OpRegistry::OpVariant operation;
 
   /** @brief Device whose private lane must execute the callable. */
-  Device device = Device::CPU;
+  DeviceBackend device = DeviceBackend::CPU;
 
   /** @brief Nonzero registry revision of the exact selected implementation. */
   std::uint64_t implementation_identity = 0U;
@@ -409,7 +409,7 @@ class RealTimeDirtyNodeExecutor {
    * projection, resize/downsample scratch work, grant issuance, or copy.
    * @throws std::invalid_argument or std::out_of_range when exact factor-four
    * geometry, format, storage separation, or ROI constraints are invalid.
-   * @note Resize/downsample ImageBuffers are callback-local read/scratch
+   * @note Resize/downsample dense Values are callback-local read/scratch
    * projections only. The binding remains the sole mutable RT authority and is
    * sealed by the caller after this function retires its grant.
    */

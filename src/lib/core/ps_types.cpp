@@ -248,22 +248,22 @@ void validate_planning_callbacks(const OpPlanningCallbacks& callbacks) {
  * then CPU. RealTimeUpdate prefers tiled CPU callbacks before GPU backends,
  * preserving the existing low-latency RT policy.
  */
-int implementation_device_priority(ComputeIntent intent, Device device,
+int implementation_device_priority(ComputeIntent intent, DeviceBackend device,
                                    bool is_tiled) {
   switch (intent) {
     case ComputeIntent::GlobalHighPrecision:
-      if (device == Device::GPU_METAL || device == Device::GPU_CUDA) {
+      if (device == DeviceBackend::Metal || device == DeviceBackend::CUDA) {
         return 0;
       }
-      if (device == Device::ASIC_NPU) {
+      if (device == DeviceBackend::NPU) {
         return 1;
       }
       return 2;
     case ComputeIntent::RealTimeUpdate:
-      if (device == Device::CPU && is_tiled) {
+      if (device == DeviceBackend::CPU && is_tiled) {
         return 0;
       }
-      if (device == Device::GPU_METAL || device == Device::GPU_CUDA) {
+      if (device == DeviceBackend::Metal || device == DeviceBackend::CUDA) {
         return 1;
       }
       return 2;
@@ -286,8 +286,8 @@ int implementation_device_priority(ComputeIntent intent, Device device,
 bool implementation_less_for_intent(const OpImplementation* lhs,
                                     const OpImplementation* rhs,
                                     ComputeIntent intent) {
-  const Device lhs_device = lhs->metadata.device_preference;
-  const Device rhs_device = rhs->metadata.device_preference;
+  const DeviceBackend lhs_device = lhs->metadata.device_preference;
+  const DeviceBackend rhs_device = rhs->metadata.device_preference;
   const int lhs_priority =
       implementation_device_priority(intent, lhs_device, lhs->is_tiled());
   const int rhs_priority =
@@ -1606,10 +1606,11 @@ void OpRegistry::register_dependency_builder(const std::string& type,
 std::optional<OpRegistry::OpVariant> OpRegistry::resolve_for_intent(
     const std::string& type, const std::string& subtype,
     ComputeIntent intent) const {
-  const auto selected = select_implementation(
-      type, subtype,
-      {Device::CPU, Device::GPU_METAL, Device::GPU_CUDA, Device::ASIC_NPU},
-      intent);
+  const auto selected =
+      select_implementation(type, subtype,
+                            {DeviceBackend::CPU, DeviceBackend::Metal,
+                             DeviceBackend::CUDA, DeviceBackend::NPU},
+                            intent);
   return selected ? std::optional<OpVariant>{selected->func} : std::nullopt;
 }
 
@@ -1758,7 +1759,7 @@ std::optional<OpRegistry::OpImplementations> OpRegistry::get_implementations(
 
 /** @copydoc OpRegistry::register_impl */
 void OpRegistry::register_impl(const std::string& type,
-                               const std::string& subtype, Device device,
+                               const std::string& subtype, DeviceBackend device,
                                MonolithicOpFunc fn, OpMetadata meta) {
   // 设置元数据中的设备偏好
   meta.device_preference = device;
@@ -1773,7 +1774,7 @@ void OpRegistry::register_impl(const std::string& type,
   std::shared_ptr<const OpImplementation> device_slot =
       std::make_shared<OpImplementation>(std::move(impl));
   std::optional<OpImplementation> cpu_compatibility;
-  if (device == Device::CPU) {
+  if (device == DeviceBackend::CPU) {
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
     maybe_fail_device_registration_for_testing(
         testing::OpRegistryDeviceRegistrationFailpoint::CpuCompatibilityBridge);
@@ -1810,7 +1811,7 @@ void OpRegistry::register_impl(const std::string& type,
     ownership.device_impl_set = 0U;
 
     // 同时更新传统表以保持向后兼容
-    if (device == Device::CPU && !implementations.monolithic_hp) {
+    if (device == DeviceBackend::CPU && !implementations.monolithic_hp) {
       implementations.monolithic_hp.swap(cpu_compatibility);
       record_scalar_ownership(key, ownership, OwnershipSlot::MonolithicHp,
                               revision);
@@ -1820,7 +1821,7 @@ void OpRegistry::register_impl(const std::string& type,
 
 /** @copydoc OpRegistry::register_impl */
 void OpRegistry::register_impl(const std::string& type,
-                               const std::string& subtype, Device device,
+                               const std::string& subtype, DeviceBackend device,
                                TileOpFunc fn, OpMetadata meta) {
   // 设置元数据中的设备偏好
   meta.device_preference = device;
@@ -1836,7 +1837,7 @@ void OpRegistry::register_impl(const std::string& type,
   std::shared_ptr<const OpImplementation> device_slot =
       std::make_shared<OpImplementation>(std::move(impl));
   std::optional<OpImplementation> cpu_compatibility;
-  if (device == Device::CPU) {
+  if (device == DeviceBackend::CPU) {
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
     maybe_fail_device_registration_for_testing(
         testing::OpRegistryDeviceRegistrationFailpoint::CpuCompatibilityBridge);
@@ -1873,7 +1874,7 @@ void OpRegistry::register_impl(const std::string& type,
     ownership.device_impl_set = 0U;
 
     // 同时更新传统表以保持向后兼容
-    if (device == Device::CPU && !implementations.tiled_hp) {
+    if (device == DeviceBackend::CPU && !implementations.tiled_hp) {
       implementations.tiled_hp.swap(cpu_compatibility);
       record_scalar_ownership(key, ownership, OwnershipSlot::TiledHp, revision);
     }
@@ -1956,7 +1957,8 @@ void OpRegistry::replace_implementation_candidates(
 
 /** @copydoc OpRegistry::get_implementations_by_device */
 std::vector<OpImplementation> OpRegistry::get_implementations_by_device(
-    const std::string& type, const std::string& subtype, Device device) const {
+    const std::string& type, const std::string& subtype,
+    DeviceBackend device) const {
   std::vector<std::shared_ptr<const OpImplementation>> slots;
   std::vector<std::uint64_t> revisions;
   {
@@ -2075,7 +2077,7 @@ std::optional<OpImplementation> OpRegistry::get_implementation_by_identity(
 /** @copydoc OpRegistry::select_implementation */
 std::optional<OpImplementation> OpRegistry::select_implementation(
     const std::string& type, const std::string& subtype,
-    const std::vector<Device>& available_devices, ComputeIntent intent,
+    const std::vector<DeviceBackend>& available_devices, ComputeIntent intent,
     const std::function<bool(const OpImplementation&)>& candidate_filter)
     const {  // NOLINT(whitespace/indent_namespace)
   const std::string key = make_key(type, subtype);
@@ -2177,7 +2179,8 @@ std::optional<OpImplementation> OpRegistry::select_implementation(
 /** @copydoc OpRegistry::select_best_implementation */
 std::optional<OpImplementation> OpRegistry::select_best_implementation(
     const std::string& type, const std::string& subtype,
-    const std::vector<Device>& available_devices, ComputeIntent intent) const {
+    const std::vector<DeviceBackend>& available_devices,
+    ComputeIntent intent) const {
   return select_best_implementation(
       type, subtype, available_devices, intent,
       std::function<bool(const OpImplementation&)>{});
@@ -2186,7 +2189,7 @@ std::optional<OpImplementation> OpRegistry::select_best_implementation(
 /** @copydoc OpRegistry::select_best_implementation */
 std::optional<OpImplementation> OpRegistry::select_best_implementation(
     const std::string& type, const std::string& subtype,
-    const std::vector<Device>& available_devices, ComputeIntent intent,
+    const std::vector<DeviceBackend>& available_devices, ComputeIntent intent,
     const std::function<bool(const OpImplementation&)>& candidate_filter)
     const {  // NOLINT(whitespace/indent_namespace)
   const auto implementations = get_all_implementations(type, subtype);
@@ -2197,7 +2200,7 @@ std::optional<OpImplementation> OpRegistry::select_best_implementation(
   std::vector<const OpImplementation*> candidates;
   candidates.reserve(implementations.size());
   for (const auto& impl : implementations) {
-    Device impl_device = impl.metadata.device_preference;
+    DeviceBackend impl_device = impl.metadata.device_preference;
     // 检查实现的设备是否在可用设备列表中
     if (implementation_supports_intent(impl.metadata, intent) &&
         std::find(available_devices.begin(), available_devices.end(),

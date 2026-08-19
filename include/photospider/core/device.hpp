@@ -15,8 +15,8 @@ namespace ps {
  *
  * @throws Nothing for ordinary value operations.
  * @note A backend family grants no native handle, queue, memory access, or
- *       execution capability. `Device` remains the provisional operation ABI
- *       v2 execution preference; new memory contracts use this type.
+ *       execution capability. Operation selection and memory contracts both
+ *       use this family while concrete placement uses `DeviceId`.
  */
 enum class DeviceBackend : std::uint32_t {
   /** @brief Host CPU backend family. */
@@ -130,49 +130,5 @@ class DeviceId final {
   /** @brief Process-local concrete-device ordinal. */
   std::uint32_t ordinal_ = 0U;
 };
-
-/**
- * @brief Identifies a compute or memory device without exposing native handles.
- *
- * @throws Nothing.
- * @note Values and the `uint32_t` representation are part of the public
- *       extension SDK contract. Capability labels do not grant access to a
- *       platform device, command queue, or mutable runtime owner.
- */
-enum class Device : std::uint32_t {
-  /** @brief Host CPU memory and execution. */
-  CPU = 0U,
-
-  /** @brief Apple Metal GPU memory and execution. */
-  GPU_METAL = 1U,
-
-  /** @brief CUDA GPU memory and execution. */
-  GPU_CUDA = 2U,
-
-  /** @brief Neural processing unit or ASIC execution. */
-  ASIC_NPU = 3U,
-};
-
-/**
- * @brief Converts a compatibility ImageBuffer Device label to its backend.
- * @param device Valid provisional execution label.
- * @return Matching stable backend family.
- * @throws std::invalid_argument for an unknown Device enum value.
- * @note The conversion creates no concrete `DeviceId` and grants no runtime
- *       capability.
- */
-inline DeviceBackend device_backend(Device device) {
-  switch (device) {
-    case Device::CPU:
-      return DeviceBackend::CPU;
-    case Device::GPU_METAL:
-      return DeviceBackend::Metal;
-    case Device::GPU_CUDA:
-      return DeviceBackend::CUDA;
-    case Device::ASIC_NPU:
-      return DeviceBackend::NPU;
-  }
-  throw std::invalid_argument("Unknown provisional Device value.");
-}
 
 }  // namespace ps

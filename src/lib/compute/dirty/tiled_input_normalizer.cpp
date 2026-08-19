@@ -1,192 +1,134 @@
 #include "compute/dirty/tiled_input_normalizer.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "core/image_buffer_processing.hpp"
+#include "core/dense_image_processing.hpp"
 #include "core/param_utils.hpp"
-#include "core/value_image_adapter.hpp"
 #include "graph/node.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/core/image_buffer.hpp"
 
 namespace ps::compute {
 namespace {
 
 /**
- * @brief Compact shape description used for image_mixing normalization.
- *
- * The base image's width, height, and channel count are the only properties the
- * tiled image_mixing path normalizes today. Data type is intentionally
- * preserved from each source during channel conversion.
- *
- * @note This is a local value object; it does not borrow image memory.
+ * @brief Compact canonical image shape used by mixing normalization.
+ * @throws Nothing for ordinary value operations.
+ * @note Scalar/sample/color metadata remains on the source Value and is never
+ * projected into this routing-only record.
  */
-struct ImageShape {
-  /** @brief Width in pixels. */
+struct ImageShape final {
+  /** @brief Positive width within PixelSize bounds. */
   int width = 0;
-
-  /** @brief Height in pixels. */
+  /** @brief Positive height within PixelSize bounds. */
   int height = 0;
-
-  /** @brief Number of channels per pixel. */
-  int channels = 0;
+  /** @brief Positive channel count within size_t. */
+  std::size_t channels = 0U;
 };
 
 /**
- * @brief Reports whether the node needs image_mixing secondary normalization.
- *
- * @param node Node being prepared for tiled execution.
- * @param inputs Resolved image inputs.
- * @return True only for image_mixing nodes with at least two inputs.
+ * @brief Reports whether a node needs secondary mixing normalization.
+ * @param node Candidate destination node.
+ * @param inputs Destination-indexed input pointers.
+ * @return True only for image_mixing with at least two input slots.
  * @throws Nothing.
- * @note The first image is the normalization base and is never copied here.
  */
-bool should_normalize_mixing_inputs(
-    const Node& node, const std::vector<const NodeOutput*>& inputs) {
-  return node.type == "image_mixing" && inputs.size() >= 2;
+bool should_normalize(const Node& node,
+                      const std::vector<const NodeOutput*>& inputs) noexcept {
+  return node.type == "image_mixing" && inputs.size() >= 2U;
 }
 
 /**
- * @brief Extracts the current shape of an ImageBuffer.
- *
- * @param buffer Image buffer to inspect.
- * @return Width, height, and channel count.
- * @throws Nothing.
- * @note The helper intentionally ignores data type because legacy behavior did
- * not coerce secondary input depth.
+ * @brief Requires one input to carry a valid ordinary image Value.
+ * @param output Candidate upstream output.
+ * @param node_id Destination node used in diagnostics.
+ * @param role Stable input role label.
+ * @return Borrowed canonical image Value.
+ * @throws GraphError when the input or image Value is absent.
  */
-ImageShape shape_of(const ImageBuffer& buffer) {
-  return {buffer.width, buffer.height, buffer.channels};
-}
-
-/**
- * @brief Checks whether a buffer already matches the base image shape.
- *
- * @param buffer Candidate secondary input buffer.
- * @param base_shape Shape required by the base image.
- * @return True when width, height, and channel count match.
- * @throws Nothing.
- * @note Matching buffers pass through without temporary storage.
- */
-bool matches_shape(const ImageBuffer& buffer, const ImageShape& base_shape) {
-  return buffer.width == base_shape.width &&
-         buffer.height == base_shape.height &&
-         buffer.channels == base_shape.channels;
-}
-
-/**
- * @brief Validates that an image_mixing input exists and has non-zero extent.
- *
- * @param output NodeOutput pointer supplied by dependency resolution.
- * @param projection Exact callback-local projection of output's image Value.
- * @param node_id Node id used in GraphError messages.
- * @param role Human-readable input role, such as "Base" or "Secondary".
- * @return Reference to the validated compatibility projection.
- * @throws GraphError when the pointer is null or the image dimensions/channel
- * count are not positive.
- * @note Payload/device validation occurs only when normalization needs CPU
- * pixel access. Exact-shape pass-through inputs remain provider-owned.
- */
-const ImageBuffer& require_non_empty_image(const NodeOutput* output,
-                                           const ImageBuffer& projection,
-                                           int node_id, const char* role) {
-  if (!output) {
+const Value& require_image(const NodeOutput* output, int node_id,
+                           const char* role) {
+  if (output == nullptr || !output->has_image_value()) {
     throw GraphError(GraphErrc::MissingDependency,
                      std::string(role) + " image for image_mixing node " +
                          std::to_string(node_id) + " is missing.");
   }
-  if (!output->has_image_value() || projection.width <= 0 ||
-      projection.height <= 0 || projection.channels <= 0) {
-    throw GraphError(GraphErrc::InvalidParameter,
-                     std::string(role) + " image for image_mixing node " +
-                         std::to_string(node_id) +
-                         " has invalid dimensions or channels.");
+  return output->image_value();
+}
+
+/**
+ * @brief Extracts a bounded shape from complete immutable image metadata.
+ * @param value Valid ordinary image Value.
+ * @return Positive PixelSize-compatible extent and channel count.
+ * @throws std::invalid_argument for non-image Values.
+ * @throws std::overflow_error when extent exceeds PixelSize.
+ * @note This metadata-only query neither waits on readiness nor requests
+ * payload access; unchanged inputs can remain on provider storage.
+ */
+ImageShape shape_of(const Value& value) {
+  if (!value.valid() ||
+      value.representation_kind() != ValueRepresentationKind::DenseTensor ||
+      !value.image_facet().has_value()) {
+    throw std::invalid_argument(
+        "Tiled image normalization requires an ordinary image Value.");
   }
-  return projection;
-}
-
-/**
- * @brief Resizes a secondary image to the base extent.
- *
- * @param current_buffer Secondary input descriptor.
- * @param base_shape Required output shape.
- * @return CPU descriptor retaining the resized result produced by the
- * selected implementation.
- * @throws std::invalid_argument for a malformed CPU descriptor.
- * @throws std::exception when the selected image-processing implementation
- * cannot resize the image.
- * @throws std::bad_alloc when processing or lifetime retention cannot
- * allocate.
- * @note The configured implementation owns its resize algorithm; descriptor
- * validation and stride semantics remain kernel-owned.
- */
-ImageBuffer resize_to_base(const ImageBuffer& current_buffer,
-                           const ImageShape& base_shape) {
-  return image_processing::resize_cpu_image_buffer(
-      current_buffer, PixelSize{base_shape.width, base_shape.height});
-}
-
-/**
- * @brief Crops and pads a secondary image to the base extent.
- *
- * @param current_buffer Secondary input descriptor.
- * @param base_shape Required output shape.
- * @return Aligned CPU buffer with source pixels copied into the top-left
- * base-sized frame.
- * @throws std::invalid_argument for malformed, non-CPU, or incompatible
- * source/destination descriptors.
- * @throws std::out_of_range if an internally derived ROI violates its extent.
- * @throws std::overflow_error for unrepresentable allocation/copy arithmetic.
- * @throws std::bad_alloc when aligned output or alias-safe copy staging cannot
- * allocate.
- * @note The kernel fill/copy primitives preserve source stride, ignore row
- * padding, and retain the previous zero-padding behavior without relying on
- * backend-specific ROI or copy semantics.
- */
-ImageBuffer crop_to_base(const ImageBuffer& current_buffer,
-                         const ImageShape& base_shape) {
-  ImageBuffer cropped = make_aligned_cpu_image_buffer(
-      base_shape.width, base_shape.height, current_buffer.channels,
-      current_buffer.type);
-  const PixelRect output_roi{0, 0, cropped.width, cropped.height};
-  fill_image_buffer_region(OutputTileView{&cropped, output_roi}, std::byte{0});
-  const PixelRect copy_roi{0, 0,
-                           std::min(current_buffer.width, base_shape.width),
-                           std::min(current_buffer.height, base_shape.height)};
-  copy_image_buffer_region(InputTileView{&current_buffer, copy_roi},
-                           OutputTileView{&cropped, copy_roi});
-  return cropped;
-}
-
-/**
- * @brief Applies the configured image_mixing size strategy.
- *
- * @param current_buffer Secondary input descriptor.
- * @param base_shape Required base extent and channels.
- * @param strategy merge_strategy runtime parameter.
- * @param node_id Node id used in GraphError messages.
- * @return Descriptor with base width and height.
- * @throws GraphError when strategy is unsupported.
- * @throws std::invalid_argument, std::out_of_range, std::overflow_error, or
- * std::bad_alloc from kernel descriptor/copy/allocation primitives.
- * @throws std::exception when the selected resize implementation fails.
- * @note Channel conversion is handled separately after size normalization.
- */
-ImageBuffer normalize_size(const ImageBuffer& current_buffer,
-                           const ImageShape& base_shape,
-                           const std::string& strategy, int node_id) {
-  if (current_buffer.width == base_shape.width &&
-      current_buffer.height == base_shape.height) {
-    return current_buffer;
+  const DenseTensorDescriptor& descriptor = value.dense_tensor_descriptor();
+  const ImageFacet& facet = *value.image_facet();
+  validate_dense_tensor_image_metadata(descriptor, facet);
+  const std::size_t width = image_bounds_width(facet.data_window);
+  const std::size_t height = image_bounds_height(facet.data_window);
+  const std::size_t channels = facet.channel_axis.has_value()
+                                   ? descriptor.shape[*facet.channel_axis]
+                                   : 1U;
+  const std::size_t maximum =
+      static_cast<std::size_t>(std::numeric_limits<int>::max());
+  if (width > maximum || height > maximum) {
+    throw std::overflow_error(
+        "Tiled image normalization extent exceeds PixelSize.");
   }
+  return ImageShape{static_cast<int>(width), static_cast<int>(height),
+                    channels};
+}
+
+/**
+ * @brief Reports exact width/height/channel agreement.
+ * @param value Candidate ordinary image Value.
+ * @param required Required shape.
+ * @return True only when all three logical extents match.
+ * @throws Immutable metadata validation failures unchanged.
+ */
+bool matches_shape(const Value& value, const ImageShape& required) {
+  const ImageShape current = shape_of(value);
+  return current.width == required.width && current.height == required.height &&
+         current.channels == required.channels;
+}
+
+/**
+ * @brief Applies the explicit image_mixing size strategy.
+ * @param value Secondary ordinary image Value.
+ * @param required Required base shape.
+ * @param strategy Exact `resize` or `crop` operation parameter.
+ * @param node_id Destination node used in diagnostics.
+ * @return Fresh Value with the required width and height.
+ * @throws GraphError for unsupported strategy.
+ * @throws Dense-image processing failures unchanged.
+ */
+Value normalize_size(const Value& value, const ImageShape& required,
+                     const std::string& strategy, int node_id) {
+  const ImageShape current = shape_of(value);
+  if (current.width == required.width && current.height == required.height) {
+    return value;
+  }
+  const PixelSize extent{required.width, required.height};
   if (strategy == "resize") {
-    return resize_to_base(current_buffer, base_shape);
+    return dense_image_processing::resize(value, extent);
   }
   if (strategy == "crop") {
-    return crop_to_base(current_buffer, base_shape);
+    return dense_image_processing::crop_or_pad(value, extent);
   }
   throw GraphError(GraphErrc::InvalidParameter,
                    "Unsupported merge_strategy '" + strategy +
@@ -195,140 +137,69 @@ ImageBuffer normalize_size(const ImageBuffer& current_buffer,
 }
 
 /**
- * @brief Converts an already sized secondary image to the base channel count.
- *
- * @param current_buffer Secondary input after size normalization.
- * @param base_shape Required base image shape.
- * @param node_id Node id used in GraphError messages.
- * @return Descriptor with base channel count.
- * @throws GraphError when the channel conversion is unsupported.
- * @throws std::invalid_argument when the descriptor or conversion is invalid.
- * @throws std::exception when the selected channel implementation fails.
- * @throws std::bad_alloc when conversion or lifetime retention cannot
- * allocate.
- * @note Conversion cases exactly mirror the previous tiled image_mixing
- * logic. The selected build-time implementation owns the pixel algorithm.
+ * @brief Normalizes one secondary input into a fresh canonical Value.
+ * @param input Existing upstream output.
+ * @param required Required base shape.
+ * @param strategy Exact size-normalization strategy.
+ * @param node_id Destination node used in diagnostics.
+ * @return Empty when already matching; otherwise copied output with a fresh
+ * image Value and preserved parameter/spatial/debug/plugin-lifetime state.
+ * @throws GraphError or dense-image processing failures unchanged.
  */
-ImageBuffer normalize_channels(const ImageBuffer& current_buffer,
-                               const ImageShape& base_shape, int node_id) {
-  const int current_channels = current_buffer.channels;
-  if (current_channels == base_shape.channels) {
-    return current_buffer;
-  }
-  const bool supported =
-      (current_channels == 1 &&
-       (base_shape.channels == 3 || base_shape.channels == 4)) ||
-      ((current_channels == 3 || current_channels == 4) &&
-       base_shape.channels == 1) ||
-      (current_channels == 4 && base_shape.channels == 3) ||
-      (current_channels == 3 && base_shape.channels == 4);
-  if (supported) {
-    return image_processing::convert_cpu_image_buffer_channels(
-        current_buffer, base_shape.channels);
-  }
-  throw GraphError(GraphErrc::InvalidParameter,
-                   "Unsupported channel conversion for image_mixing node " +
-                       std::to_string(node_id) + ": " +
-                       std::to_string(current_channels) + " -> " +
-                       std::to_string(base_shape.channels));
-}
-
-/**
- * @brief Normalizes one secondary image_mixing input when needed.
- *
- * @param input Secondary NodeOutput supplied by dependency resolution.
- * @param current_buffer Callback-local projection of input's canonical Value.
- * @param base_shape Base image shape.
- * @param strategy merge_strategy runtime parameter.
- * @param node_id Node id used in GraphError messages.
- * @return Normalized NodeOutput, or nullopt when input already matches base.
- * @throws GraphError when the input is invalid or unsupported.
- * @throws std::invalid_argument, std::out_of_range, std::overflow_error, or
- * std::bad_alloc from descriptor, allocation, and copy primitives.
- * @throws std::exception when the selected resize/channel implementation fails.
- * @note Returned NodeOutput preserves named data, spatial/debug metadata, and
- * plugin-library leases from the original input. Its image descriptor changes
- * and its sealed image Value identity is cleared because normalized bytes use
- * a different mutable allocation. Spatial metadata continues to describe
- * upstream provenance even when resize/crop maps pixels into the mixing base
- * extent.
- */
-std::optional<NodeOutput> normalize_secondary_input(
-    const NodeOutput* input, const ImageBuffer& current_buffer,
-    const ImageShape& base_shape, const std::string& strategy, int node_id) {
-  (void)require_non_empty_image(input, current_buffer, node_id, "Secondary");
-  if (matches_shape(current_buffer, base_shape)) {
+std::optional<NodeOutput> normalize_secondary(const NodeOutput* input,
+                                              const ImageShape& required,
+                                              const std::string& strategy,
+                                              int node_id) {
+  const Value& source = require_image(input, node_id, "Secondary");
+  if (matches_shape(source, required)) {
     return std::nullopt;
   }
-  validate_image_buffer(current_buffer);
-  if (current_buffer.device != Device::CPU || !current_buffer.data) {
-    throw std::invalid_argument(
-        "Tiled image_mixing normalization requires owned CPU image data.");
+  Value normalized = normalize_size(source, required, strategy, node_id);
+  const ImageShape sized = shape_of(normalized);
+  if (sized.channels != required.channels) {
+    normalized =
+        dense_image_processing::convert_channels(normalized, required.channels);
   }
-  ImageBuffer normalized_buffer =
-      normalize_size(current_buffer, base_shape, strategy, node_id);
-  normalized_buffer =
-      normalize_channels(normalized_buffer, base_shape, node_id);
-
-  NodeOutput normalized = *input;
-  normalized.clear_image_value();
-  normalized.compatibility_image = std::move(normalized_buffer);
-  value_image_adapter::import_node_output_compatibility_image(&normalized);
-  return normalized;
+  NodeOutput output = *input;
+  output.replace_image_value(std::move(normalized));
+  return output;
 }
 
 /**
- * @brief Stores a normalized input and updates the context pointer table.
- *
- * @param context Context whose storage and pointer table are updated.
- * @param input_index Original input index being replaced.
- * @param normalized Temporary normalized output to store.
- * @throws std::bad_alloc if vector growth fails.
- * @note The caller reserves enough storage for all secondary inputs before the
- * loop, so pointers already written into context.inputs remain stable.
+ * @brief Stores one normalized output and updates its stable pointer slot.
+ * @param context Mutable context with pre-reserved normalized storage.
+ * @param index Destination input index to replace.
+ * @param output Complete temporary result.
+ * @return Nothing.
+ * @throws std::bad_alloc only if the caller's reservation invariant regresses.
  */
-void replace_input_with_normalized_output(TiledInputContext& context,
-                                          size_t input_index,
-                                          NodeOutput normalized) {
-  context.normalized_storage.push_back(std::move(normalized));
-  context.inputs[input_index] = &context.normalized_storage.back();
+void retain_normalized(TiledInputContext* context, std::size_t index,
+                       NodeOutput output) {
+  context->normalized_storage.push_back(std::move(output));
+  context->inputs[index] = &context->normalized_storage.back();
 }
 
 }  // namespace
 
+/** @copydoc TiledInputNormalizer::normalize */
 TiledInputContext TiledInputNormalizer::normalize(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
   TiledInputContext context;
   context.inputs = inputs;
-  context.callback_images.reserve(inputs.size());
-  for (const NodeOutput* input : inputs) {
-    if (input != nullptr && input->has_image_value()) {
-      context.callback_images.push_back(
-          value_image_adapter::project_image_value_for_image_buffer_edge(
-              input->image_value()));
-    } else {
-      context.callback_images.emplace_back();
-    }
-  }
-  if (!should_normalize_mixing_inputs(node, inputs)) {
+  if (!should_normalize(node, inputs)) {
     return context;
   }
 
-  const ImageBuffer& base_buffer = require_non_empty_image(
-      inputs.front(), context.callback_images.front(), node.id, "Base");
-  const ImageShape base_shape = shape_of(base_buffer);
+  const Value& base = require_image(inputs.front(), node.id, "Base");
+  const ImageShape required = shape_of(base);
   const std::string strategy =
       as_str(node.runtime_parameters, "merge_strategy", "resize");
-  context.normalized_storage.reserve(inputs.size() - 1);
-
-  for (size_t i = 1; i < inputs.size(); ++i) {
-    std::optional<NodeOutput> normalized = normalize_secondary_input(
-        inputs[i], context.callback_images[i], base_shape, strategy, node.id);
-    if (normalized) {
-      replace_input_with_normalized_output(context, i, std::move(*normalized));
-      context.callback_images[i] =
-          value_image_adapter::project_image_value_for_image_buffer_edge(
-              context.inputs[i]->image_value());
+  context.normalized_storage.reserve(inputs.size() - 1U);
+  for (std::size_t index = 1U; index < inputs.size(); ++index) {
+    std::optional<NodeOutput> normalized =
+        normalize_secondary(inputs[index], required, strategy, node.id);
+    if (normalized.has_value()) {
+      retain_normalized(&context, index, std::move(*normalized));
     }
   }
   return context;

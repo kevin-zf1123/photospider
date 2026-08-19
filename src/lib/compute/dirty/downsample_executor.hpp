@@ -21,7 +21,7 @@ class ComputeRunLease;
  * dirty execution when a GraphRuntime is present. Each request records the
  * signed logical HP Region and HP version committed for a node. Execution
  * translates that Region through the current HP data-window origin only at the
- * ImageBuffer boundary, skips stale requests, creates a fresh Host binding,
+ * image Value boundary, skips stale requests, creates a fresh Host binding,
  * copies prior immutable RT bytes when valid, downsamples through a checked
  * grant, seals a transient Value, and records the same events used before the
  * dirty executor split.
@@ -150,18 +150,17 @@ class DownsampleExecutor {
   /**
    * @brief Downsamples one HP ROI through a checked RT output grant.
    *
-   * @param hp_buffer Source HP image buffer.
+   * @param hp_value Source HP ordinary image Value.
    * @param output_binding Fresh Host RT output binding.
    * @param roi_hp Zero-based HP storage ROI to resize.
    * @param rt_size Full RT image extent.
    * @return RT-space ROI that received the resized pixels.
    * @throws OpenCV, validation, allocation, or grant exceptions from scratch
    * resize and checked row publication.
-   * @note Empty RT ROI is widened to the full RT extent. ImageBuffer is used
-   * only as callback-local algorithm scratch; the binding is the only mutable
-   * output and the caller seals it after successful retirement.
+   * @note Empty RT ROI is widened to the full RT extent. The binding is the
+   * only mutable output and the caller seals it after successful retirement.
    */
-  PixelRect downsample_roi(const ImageBuffer& hp_buffer,
+  PixelRect downsample_roi(const Value& hp_value,
                            HostOutputBinding& output_binding,
                            const PixelRect& roi_hp,
                            const PixelSize& rt_size) const;

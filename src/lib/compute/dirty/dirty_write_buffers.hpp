@@ -26,7 +26,7 @@ namespace ps::compute {
  * @note Existing sealed Values are retained immutably. Tiled ROI work allocates
  * a fresh Host binding, optionally seeds it from those bytes, and replaces the
  * staged Value only after all grants retire and seal succeeds. No mutable
- * staging ImageBuffer or duplicate revision authority exists.
+ * mutable image staging or duplicate revision authority exists.
  */
 class HighPrecisionDirtyWriteBuffer {
  public:
@@ -221,7 +221,7 @@ class HighPrecisionDirtyWriteBuffer {
    * bytes.
    * @throws GraphError when checked structural arithmetic overflows.
    * @note Image pixels and opaque backend/plugin owners are excluded because
-   * their allocation capacity is unavailable through `ImageBuffer`.
+   * their allocation capacity remains encapsulated by `BufferHandle`.
    */
   std::uint64_t retained_memory_bytes() const;
 

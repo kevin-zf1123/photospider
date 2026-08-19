@@ -354,7 +354,8 @@ void ExecutionService::enqueue_fence_continuation(
         [task = std::move(task)](ComputeRunLease&,
                                  const ComputeRunTaskIdentity&,
                                  ExecutionTaskRuntime&) mutable { task(); },
-        ExecutionTaskPriority::High, gate->run->resource_demand, Device::CPU);
+        ExecutionTaskPriority::High, gate->run->resource_demand,
+        DeviceBackend::CPU);
     enqueue_submission(gate->run, std::move(submission));
   } catch (...) {
     if (gate && gate->run) {

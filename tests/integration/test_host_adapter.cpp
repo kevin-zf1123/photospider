@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -19,15 +21,16 @@
 #include <utility>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/value_adapter_opencv.hpp"
+#include "core/dense_image_processing.hpp"
 #include "core/param_utils.hpp"
-#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "core/value_image_adapter.hpp"
+#include "core/ps_types.hpp"               // NOLINT(build/include_subdir)
 #include "graph/graph_state_executor.hpp"  // NOLINT(build/include_subdir)
 #include "graph/node.hpp"                  // NOLINT(build/include_subdir)
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
 #include "graph/graph_state_executor_test_access.hpp"
 #endif
+#include "photospider/data/image_view.hpp"
 #include "photospider/host/host.hpp"
 #include "runtime/graph_runtime.hpp"  // NOLINT(build/include_subdir)
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING) &&      \
@@ -734,18 +737,28 @@ bool wait_for_host_blocking_source(std::chrono::milliseconds timeout) {
  * @param height Positive output height.
  * @param value Scalar written to every logical sample.
  * @return NodeOutput containing one canonical sealed image Value.
- * @throws Allocation, OpenCV, adapter, or Value publication exceptions
+ * @throws Allocation, overflow, validation, or Value publication exceptions
  * unchanged.
- * @note Mutable ImageBuffer storage exists only inside this helper. The result
- * carries no compatibility staging and owns a fresh Value revision.
+ * @note Samples retain their native FP32 domain. The result owns a fresh Value
+ * revision with no mutable side channel.
  */
 NodeOutput make_host_adapter_image_output(int width, int height, float value) {
-  ImageBuffer buffer =
-      make_aligned_cpu_image_buffer(width, height, 1, DataType::FLOAT32);
-  toCvMat(buffer).setTo(value);
+  const std::size_t image_width = static_cast<std::size_t>(width);
+  const std::size_t image_height = static_cast<std::size_t>(height);
+  std::vector<float> samples(image_width * image_height, value);
+  std::vector<std::byte> storage(samples.size() * sizeof(float));
+  std::memcpy(storage.data(), samples.data(), storage.size());
+  DenseTensorDescriptor descriptor{{image_height, image_width, 1U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
   NodeOutput output;
-  output.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(buffer));
+  output.publish_image_value(Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{{static_cast<std::ptrdiff_t>(image_width * sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float))}},
+      std::move(storage)));
   return output;
 }
 
@@ -756,25 +769,18 @@ NodeOutput make_host_adapter_image_output(int width, int height, float value) {
  * @return NodeOutput with identical logical pixels and a fresh allocation and
  * Value revision.
  * @throws std::invalid_argument when the input has no canonical image.
- * @throws Projection, allocation, OpenCV, or Value publication exceptions
- * unchanged.
- * @note Both ImageBuffer values are callback-local projections; neither is
- * retained as formal output authority.
+ * @throws Clone, allocation, or Value publication exceptions unchanged.
+ * @note The clone preserves logical metadata and samples while publishing a
+ * fresh allocation and revision.
  */
 NodeOutput copy_host_adapter_image_output(const NodeOutput& input) {
   if (!input.has_image_value()) {
     throw std::invalid_argument(
         "Host adapter image copy requires a canonical image Value.");
   }
-  const ImageBuffer input_buffer =
-      value_image_adapter::snapshot_cpu_image_buffer(input.image_value());
-  ImageBuffer output_buffer =
-      make_aligned_cpu_image_buffer(input_buffer.width, input_buffer.height,
-                                    input_buffer.channels, input_buffer.type);
-  toCvMat(input_buffer).copyTo(toCvMat(output_buffer));
   NodeOutput output;
   output.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(output_buffer));
+      dense_image_processing::clone(input.image_value()));
   return output;
 }
 
@@ -2661,7 +2667,7 @@ TEST(GraphStateExecutorLane, KernelCloseJoinsGraphStateLane) {
 #endif
 
 TEST(EmbeddedHostAdapter,
-     CoversInteractionCoreWithPublicSnapshotsAndNoKernelExposure) {
+     CoversInteractionCoreWithNamedValuesAndNoKernelExposure) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_test");
   auto host = create_embedded_host();
@@ -2728,13 +2734,16 @@ TEST(EmbeddedHostAdapter,
   auto compute_status = host->compute(compute_request);
   ASSERT_TRUE(compute_status.status.ok) << compute_status.status.message;
 
-  auto image = host->compute_and_get_image(compute_request);
-  ASSERT_TRUE(image.status.ok) << image.status.message;
-  EXPECT_EQ(image.value.width, 6);
-  EXPECT_EQ(image.value.height, 4);
-  EXPECT_EQ(image.value.channels, 1);
-  EXPECT_EQ(image.value.device, Device::CPU);
-  ASSERT_NE(image.value.data, nullptr);
+  auto values = host->compute_and_get_values(compute_request);
+  ASSERT_TRUE(values.status.ok) << values.status.message;
+  const Value* image_value = values.value.find("image");
+  ASSERT_NE(image_value, nullptr);
+  const ImageView image(*image_value);
+  EXPECT_EQ(image.width(), 6U);
+  EXPECT_EQ(image.height(), 4U);
+  EXPECT_EQ(image.channels(), 1U);
+  EXPECT_EQ(image.value().storage_binding().device,
+            DeviceId(DeviceBackend::CPU));
 
   auto async_compute = host->compute_async(compute_request);
   ASSERT_TRUE(async_compute.status.ok) << async_compute.status.message;
@@ -3738,9 +3747,9 @@ TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {
   auto missing = host->compute(missing_request);
   EXPECT_FALSE(missing.status.ok);
   EXPECT_EQ(checked_graph_error_code(missing.status), GraphErrc::NotFound);
-  auto missing_image = host->compute_and_get_image(missing_request);
-  EXPECT_FALSE(missing_image.status.ok);
-  EXPECT_EQ(checked_graph_error_code(missing_image.status),
+  auto missing_values = host->compute_and_get_values(missing_request);
+  EXPECT_FALSE(missing_values.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_values.status),
             GraphErrc::NotFound);
 
   const GraphSessionId session =
@@ -3755,12 +3764,13 @@ TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {
   auto closed = host->compute(closed_request);
   EXPECT_FALSE(closed.status.ok);
   EXPECT_EQ(checked_graph_error_code(closed.status), GraphErrc::NotFound);
-  auto closed_image = host->compute_and_get_image(closed_request);
-  EXPECT_FALSE(closed_image.status.ok);
-  EXPECT_EQ(checked_graph_error_code(closed_image.status), GraphErrc::NotFound);
+  auto closed_values = host->compute_and_get_values(closed_request);
+  EXPECT_FALSE(closed_values.status.ok);
+  EXPECT_EQ(checked_graph_error_code(closed_values.status),
+            GraphErrc::NotFound);
 }
 
-TEST(EmbeddedHostAdapter, CloseGraphClearsStaleLastErrorBeforeImageCompute) {
+TEST(EmbeddedHostAdapter, CloseGraphClearsStaleLastErrorBeforeValueCompute) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_close_clears_error_test");
   auto host = create_embedded_host();
@@ -3771,9 +3781,9 @@ TEST(EmbeddedHostAdapter, CloseGraphClearsStaleLastErrorBeforeImageCompute) {
   HostComputeRequest missing_node_request = make_compute_request(session);
   missing_node_request.node = NodeId{99};
 
-  auto missing_node_image = host->compute_and_get_image(missing_node_request);
-  ASSERT_FALSE(missing_node_image.status.ok);
-  ASSERT_EQ(checked_graph_error_code(missing_node_image.status),
+  auto missing_node_values = host->compute_and_get_values(missing_node_request);
+  ASSERT_FALSE(missing_node_values.status.ok);
+  ASSERT_EQ(checked_graph_error_code(missing_node_values.status),
             GraphErrc::NotFound);
 
   auto stale_error = host->last_error(session);
@@ -3786,13 +3796,14 @@ TEST(EmbeddedHostAdapter, CloseGraphClearsStaleLastErrorBeforeImageCompute) {
   auto closed_error = host->last_error(session);
   EXPECT_TRUE(closed_error.ok) << closed_error.message;
 
-  auto closed_image =
-      host->compute_and_get_image(make_compute_request(session));
-  EXPECT_FALSE(closed_image.status.ok);
-  EXPECT_EQ(checked_graph_error_code(closed_image.status), GraphErrc::NotFound);
+  auto closed_values =
+      host->compute_and_get_values(make_compute_request(session));
+  EXPECT_FALSE(closed_values.status.ok);
+  EXPECT_EQ(checked_graph_error_code(closed_values.status),
+            GraphErrc::NotFound);
 }
 
-TEST(EmbeddedHostAdapter, ComputeImagePreservesBackendFailureStatus) {
+TEST(EmbeddedHostAdapter, ComputeValuesPreserveBackendFailureStatus) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_image_status_test");
   auto host = create_embedded_host();
@@ -3803,20 +3814,20 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesBackendFailureStatus) {
   HostComputeRequest missing_node_request = make_compute_request(session);
   missing_node_request.node = NodeId{99};
 
-  auto missing_node_image = host->compute_and_get_image(missing_node_request);
-  EXPECT_FALSE(missing_node_image.status.ok);
-  EXPECT_EQ(checked_graph_error_code(missing_node_image.status),
+  auto missing_node_values = host->compute_and_get_values(missing_node_request);
+  EXPECT_FALSE(missing_node_values.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_node_values.status),
             GraphErrc::NotFound);
-  EXPECT_FALSE(missing_node_image.status.message.empty());
+  EXPECT_FALSE(missing_node_values.status.message.empty());
 
   auto missing_node_error = host->last_error(session);
   EXPECT_FALSE(missing_node_error.ok);
   EXPECT_EQ(checked_graph_error_code(missing_node_error), GraphErrc::NotFound);
   EXPECT_FALSE(missing_node_error.message.empty());
 
-  auto recovered_image =
-      host->compute_and_get_image(make_compute_request(session));
-  ASSERT_TRUE(recovered_image.status.ok) << recovered_image.status.message;
+  auto recovered_values =
+      host->compute_and_get_values(make_compute_request(session));
+  ASSERT_TRUE(recovered_values.status.ok) << recovered_values.status.message;
   auto cleared_error = host->last_error(session);
   EXPECT_TRUE(cleared_error.ok) << cleared_error.message;
 
@@ -3830,12 +3841,12 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesBackendFailureStatus) {
   auto loaded_missing_op = host->load_graph(missing_op_load);
   ASSERT_TRUE(loaded_missing_op.status.ok) << loaded_missing_op.status.message;
 
-  auto missing_op_image = host->compute_and_get_image(
+  auto missing_op_values = host->compute_and_get_values(
       make_compute_request(missing_op_load.session));
-  EXPECT_FALSE(missing_op_image.status.ok);
-  EXPECT_EQ(checked_graph_error_code(missing_op_image.status),
+  EXPECT_FALSE(missing_op_values.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_op_values.status),
             GraphErrc::NoOperation);
-  EXPECT_NE(missing_op_image.status.message.find("No op"), std::string::npos);
+  EXPECT_NE(missing_op_values.status.message.find("No op"), std::string::npos);
 
   auto missing_op_error = host->last_error(missing_op_load.session);
   EXPECT_FALSE(missing_op_error.ok);
@@ -3843,7 +3854,7 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesBackendFailureStatus) {
   EXPECT_NE(missing_op_error.message.find("No op"), std::string::npos);
 }
 
-TEST(EmbeddedHostAdapter, ComputeImagePreservesSuccessfulEmptyOutput) {
+TEST(EmbeddedHostAdapter, ComputeValuesPreserveSuccessfulEmptyOutput) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_empty_image_test");
   auto host = create_embedded_host();
@@ -3853,16 +3864,15 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesSuccessfulEmptyOutput) {
       load_test_graph(*host, temp.root(), "empty_image_graph", "no_image");
   HostComputeRequest missing_node_request = make_compute_request(session);
   missing_node_request.node = NodeId{99};
-  auto missing_node_image = host->compute_and_get_image(missing_node_request);
-  ASSERT_FALSE(missing_node_image.status.ok);
-  ASSERT_EQ(checked_graph_error_code(missing_node_image.status),
+  auto missing_node_values = host->compute_and_get_values(missing_node_request);
+  ASSERT_FALSE(missing_node_values.status.ok);
+  ASSERT_EQ(checked_graph_error_code(missing_node_values.status),
             GraphErrc::NotFound);
 
-  auto empty_image = host->compute_and_get_image(make_compute_request(session));
-  ASSERT_TRUE(empty_image.status.ok) << empty_image.status.message;
-  EXPECT_EQ(empty_image.value.width, 0);
-  EXPECT_EQ(empty_image.value.height, 0);
-  EXPECT_EQ(empty_image.value.data, nullptr);
+  auto empty_values =
+      host->compute_and_get_values(make_compute_request(session));
+  ASSERT_TRUE(empty_values.status.ok) << empty_values.status.message;
+  EXPECT_TRUE(empty_values.value.values().empty());
 
   auto cleared_error = host->last_error(session);
   EXPECT_TRUE(cleared_error.ok) << cleared_error.message;
@@ -3870,10 +3880,11 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesSuccessfulEmptyOutput) {
   auto closed = host->close_graph(session);
   ASSERT_TRUE(closed.status.ok) << closed.status.message;
 
-  auto closed_image =
-      host->compute_and_get_image(make_compute_request(session));
-  EXPECT_FALSE(closed_image.status.ok);
-  EXPECT_EQ(checked_graph_error_code(closed_image.status), GraphErrc::NotFound);
+  auto closed_values =
+      host->compute_and_get_values(make_compute_request(session));
+  EXPECT_FALSE(closed_values.status.ok);
+  EXPECT_EQ(checked_graph_error_code(closed_values.status),
+            GraphErrc::NotFound);
 }
 
 /**
@@ -4563,11 +4574,12 @@ TEST(EmbeddedHostAdapter,
   full_request.cache.precision = "fp32";
   g_offset_tiled_output_value.store(3, std::memory_order_relaxed);
   g_offset_tiled_invocation_count.store(0, std::memory_order_relaxed);
-  auto initial_compute = host->compute_and_get_image(full_request);
+  auto initial_compute = host->compute_and_get_values(full_request);
   ASSERT_TRUE(initial_compute.status.ok) << initial_compute.status.message;
-  ASSERT_NE(initial_compute.value.data, nullptr);
+  const Value* initial_value = initial_compute.value.find("image");
+  ASSERT_NE(initial_value, nullptr);
   EXPECT_GT(g_offset_tiled_invocation_count.load(std::memory_order_relaxed), 0);
-  const cv::Mat initial_image = toCvMat(initial_compute.value);
+  const cv::Mat initial_image = toCvMat(*initial_value);
   ASSERT_EQ(initial_image.type(), CV_32FC1);
   EXPECT_FLOAT_EQ(initial_image.at<float>(10, 70), 3.0f);
   auto initial_events =
@@ -4580,12 +4592,13 @@ TEST(EmbeddedHostAdapter,
   dirty_request.execution.parallel = true;
   g_offset_tiled_output_value.store(11, std::memory_order_relaxed);
   g_offset_tiled_invocation_count.store(0, std::memory_order_relaxed);
-  auto dirty_compute = host->compute_and_get_image(dirty_request);
+  auto dirty_compute = host->compute_and_get_values(dirty_request);
   ASSERT_TRUE(dirty_compute.status.ok) << dirty_compute.status.message;
-  ASSERT_NE(dirty_compute.value.data, nullptr);
+  const Value* committed_value = dirty_compute.value.find("image");
+  ASSERT_NE(committed_value, nullptr);
   EXPECT_EQ(g_offset_tiled_invocation_count.load(std::memory_order_relaxed),
             16);
-  const cv::Mat committed_image = toCvMat(dirty_compute.value);
+  const cv::Mat committed_image = toCvMat(*committed_value);
   ASSERT_EQ(committed_image.type(), CV_32FC1);
   EXPECT_FLOAT_EQ(committed_image.at<float>(10, 70), 11.0f);
   EXPECT_FLOAT_EQ(committed_image.at<float>(10, 10), 3.0f);

@@ -28,6 +28,8 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/data/image_view.hpp"
+#include "photospider/data/value_artifact.hpp"
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker/worker_manager_test_access.hpp"  // NOLINT(build/include_subdir)
@@ -107,8 +109,8 @@ JobResourceRequest test_job_resources(std::uint32_t cpu_slots = 2U) {
 }
 
 /**
- * @brief Builds resources that permit one former-frame-sized artifact.
- * @return Valid request whose host/output/staging/retention bounds are 64 MiB.
+ * @brief Builds resources that permit one former-frame-sized Value payload.
+ * @return Valid request with room for the payload and archive metadata.
  * @throws std::bad_alloc when configured-device storage allocation fails.
  * @note This helper proves service authorization is governed by immutable
  * resource admission rather than a private control-frame transport ceiling.
@@ -116,11 +118,14 @@ JobResourceRequest test_job_resources(std::uint32_t cpu_slots = 2U) {
 JobResourceRequest bulk_data_plane_resources() {
   constexpr std::uint64_t kBulkPayloadAboveFormerControlBytes =
       (64U << 20U) + 1U;
+  constexpr std::uint64_t kArchiveOverheadAllowance = 1U << 20U;
   JobResourceRequest request = test_job_resources();
-  request.host_memory_bytes = kBulkPayloadAboveFormerControlBytes;
-  request.output_bytes = kBulkPayloadAboveFormerControlBytes;
-  request.staging_bytes = kBulkPayloadAboveFormerControlBytes;
-  request.retention_bytes = kBulkPayloadAboveFormerControlBytes;
+  const std::uint64_t bounded_archive_bytes =
+      kBulkPayloadAboveFormerControlBytes + kArchiveOverheadAllowance;
+  request.host_memory_bytes = bounded_archive_bytes;
+  request.output_bytes = bounded_archive_bytes;
+  request.staging_bytes = bounded_archive_bytes;
+  request.retention_bytes = bounded_archive_bytes;
   return request;
 }
 
@@ -466,22 +471,54 @@ DurableArtifactCommitRequest make_test_commit_request(std::uint64_t ordinal) {
 }
 
 /**
- * @brief Builds a small valid CPU image with row padding and known active
- * bytes.
- * @return Two-by-two RGB uint8 image using aligned padded rows.
- * @throws Allocation and image-contract failures unchanged.
+ * @brief Builds one rich small named-Value artifact set for durable tests.
+ * @param first_sample Exact first logical sample used for conflict tests.
+ * @return Two-by-two RGB UInt8 image Value with exact canonical payload.
+ * @throws Value publication, artifact capture, or allocation failures
+ *         unchanged.
+ * @note The artifact retains explicit ImageFacet/sample-domain metadata and
+ *       creates no parallel image-payload owner.
  */
-ImageBuffer make_test_image() {
-  ImageBuffer image = make_aligned_cpu_image_buffer(2, 2, 3, DataType::UINT8);
-  auto* bytes = static_cast<std::byte*>(image.data.get());
-  for (std::size_t index = 0U; index < image.step * 2U; ++index) {
-    bytes[index] = std::byte{0xee};
-  }
+NamedValueArtifactSet make_test_values(std::byte first_sample = std::byte{1U}) {
+  DenseTensorDescriptor descriptor{{2U, 2U, 3U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::CodeValue},
+                        SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0},
+                        {}};
+  std::vector<std::byte> payload(12U);
   for (std::size_t index = 0U; index < 6U; ++index) {
-    bytes[index] = static_cast<std::byte>(index + 1U);
-    bytes[image.step + index] = static_cast<std::byte>(index + 11U);
+    payload[index] = static_cast<std::byte>(index + 1U);
+    payload[6U + index] = static_cast<std::byte>(index + 11U);
   }
-  return image;
+  payload.front() = first_sample;
+  Value value = Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet), StridedLayout{{6, 3, 1}},
+      std::move(payload));
+  return NamedValueArtifactSet{{capture_value_artifact("image", value)}};
+}
+
+/**
+ * @brief Builds one large canonical UInt8 named-Value artifact set.
+ * @param payload_bytes Positive DenseTensor payload width.
+ * @return One facet-free Value whose exact payload exceeds old frame bounds.
+ * @throws std::invalid_argument for zero bytes; Value/artifact/allocation
+ *         failures otherwise propagate unchanged.
+ */
+NamedValueArtifactSet make_bulk_test_values(std::size_t payload_bytes) {
+  if (payload_bytes == 0U) {
+    throw std::invalid_argument("bulk Value payload is empty");
+  }
+  DenseTensorDescriptor descriptor{{payload_bytes},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  Value value = Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::nullopt, StridedLayout{{1}},
+      std::vector<std::byte>(payload_bytes, std::byte{0x5a}));
+  return NamedValueArtifactSet{{capture_value_artifact("image", value)}};
 }
 
 /**
@@ -560,10 +597,10 @@ class FunctionWorkerFactory final
 };
 
 /**
- * @brief Builds one successful settled worker report with a small image.
+ * @brief Builds one successful settled worker report with named Values.
  * @param assignment Exact service assignment to echo.
  * @return Complete successful candidate facts.
- * @throws Image allocation failures unchanged.
+ * @throws Value artifact allocation failures unchanged.
  */
 JobAttemptReport successful_report(const JobAssignment& assignment) {
   JobAttemptReport report;
@@ -571,14 +608,14 @@ JobAttemptReport successful_report(const JobAssignment& assignment) {
   report.outcome = JobAttemptOutcome::Succeeded;
   report.settled = true;
   report.failure = JobAttemptFailure::None;
-  report.image = make_test_image();
+  report.values = make_test_values();
   return report;
 }
 
 /**
  * @brief Builds one retryable settled compute-failure report.
  * @param assignment Exact current assignment to echo.
- * @return Valid failed attempt facts without an image.
+ * @return Valid failed attempt facts without candidate Values.
  * @throws Identity/message copies may allocate.
  */
 JobAttemptReport settled_failed_report(const JobAssignment& assignment) {
@@ -599,8 +636,8 @@ enum class MalformedReportShape : std::uint8_t {
   SucceededWithFailure,
   /** @brief Failed outcome without a failure category. */
   FailedWithoutFailure,
-  /** @brief Failed outcome that improperly carries an image. */
-  FailedWithImage,
+  /** @brief Failed outcome that improperly carries named Values. */
+  FailedWithValues,
   /** @brief Failed outcome using the cancellation-only category. */
   FailedWithCancellationFailure,
   /** @brief Failed outcome using the control-plane rejection category. */
@@ -611,8 +648,8 @@ enum class MalformedReportShape : std::uint8_t {
   CancelledUnsettled,
   /** @brief Cancelled outcome using a non-cancellation failure. */
   CancelledWithWorkerFailure,
-  /** @brief Cancelled outcome that improperly carries an image. */
-  CancelledWithImage,
+  /** @brief Cancelled outcome that improperly carries named Values. */
+  CancelledWithValues,
   /** @brief Outcome containing an invalid underlying enum representation. */
   InvalidOutcome,
   /** @brief Failure containing an invalid underlying enum representation. */
@@ -622,10 +659,10 @@ enum class MalformedReportShape : std::uint8_t {
 /**
  * @brief Builds one identity-correct but semantically malformed worker report.
  * @param assignment Exact current assignment to preserve identity fencing.
- * @param shape Malformed outcome/settlement/failure/image combination.
+ * @param shape Malformed outcome/settlement/failure/Values combination.
  * @return Candidate report that the control plane must reject fail closed.
  * @throws std::invalid_argument for an invalid shape enum representation.
- * @throws std::bad_alloc when image or identity construction exhausts memory.
+ * @throws std::bad_alloc when Values or identity construction exhausts memory.
  */
 JobAttemptReport malformed_report(const JobAssignment& assignment,
                                   MalformedReportShape shape) {
@@ -639,39 +676,39 @@ JobAttemptReport malformed_report(const JobAssignment& assignment,
       return report;
     case MalformedReportShape::FailedWithoutFailure:
       report.outcome = JobAttemptOutcome::Failed;
-      report.image.reset();
+      report.values.reset();
       return report;
-    case MalformedReportShape::FailedWithImage:
+    case MalformedReportShape::FailedWithValues:
       report.outcome = JobAttemptOutcome::Failed;
       report.failure = JobAttemptFailure::Compute;
       return report;
     case MalformedReportShape::FailedWithCancellationFailure:
       report.outcome = JobAttemptOutcome::Failed;
       report.failure = JobAttemptFailure::CancellationObserved;
-      report.image.reset();
+      report.values.reset();
       return report;
     case MalformedReportShape::FailedWithReportRejected:
       report.outcome = JobAttemptOutcome::Failed;
       report.failure = JobAttemptFailure::ReportRejected;
-      report.image.reset();
+      report.values.reset();
       return report;
     case MalformedReportShape::FailedWithArtifactCommit:
       report.outcome = JobAttemptOutcome::Failed;
       report.failure = JobAttemptFailure::ArtifactCommit;
-      report.image.reset();
+      report.values.reset();
       return report;
     case MalformedReportShape::CancelledUnsettled:
       report.outcome = JobAttemptOutcome::Cancelled;
       report.settled = false;
       report.failure = JobAttemptFailure::CancellationObserved;
-      report.image.reset();
+      report.values.reset();
       return report;
     case MalformedReportShape::CancelledWithWorkerFailure:
       report.outcome = JobAttemptOutcome::Cancelled;
       report.failure = JobAttemptFailure::Compute;
-      report.image.reset();
+      report.values.reset();
       return report;
-    case MalformedReportShape::CancelledWithImage:
+    case MalformedReportShape::CancelledWithValues:
       report.outcome = JobAttemptOutcome::Cancelled;
       report.failure = JobAttemptFailure::CancellationObserved;
       return report;
@@ -1553,41 +1590,45 @@ TEST(SingleTenantJobContract,
 }
 
 TEST(DurableServerState,
-     CopiesActiveRowsKeepsIdentitySeparateAndRecoversAfterRestart) {
+     CopiesNamedValuesKeepsIdentitySeparateAndRecoversAfterRestart) {
   ScopedTestStateRoot root;
   OutputCommitReceipt first;
   OutputCommitReceipt second;
   {
     DurableServerState store(root.path(), TenantId("tenant.test"));
-    ImageBuffer image = make_test_image();
+    NamedValueArtifactSet values = make_test_values();
     first = store.commit_artifact(
         DurableArtifactCommitRequest{
             make_test_identity(1U), OutputSlotId("image.final"),
             ArtifactId("artifact.test.1"), OutputCommitId("commit.test.1"),
             test_job_resources()},
-        image);
+        values);
 
-    auto* source = static_cast<std::byte*>(image.data.get());
-    source[0] = std::byte{0x7f};
+    values.values.front().payloads.front()[0] = std::byte{0x7f};
     const std::shared_ptr<const ArtifactRecord> record =
         store.find_artifact(first.artifact_id);
     ASSERT_NE(record, nullptr);
-    ASSERT_EQ(record->payload.size(), 12U);
-    EXPECT_EQ(record->payload[0], std::byte{1U});
-    EXPECT_EQ(record->payload[6], std::byte{11U});
-    EXPECT_EQ(record->receipt.descriptor.row_bytes, 6U);
-    EXPECT_EQ(record->receipt.descriptor.payload_bytes, 12U);
+    ASSERT_EQ(record->values.values.size(), 1U);
+    ASSERT_EQ(record->values.values.front().payloads.size(), 1U);
+    ASSERT_EQ(record->values.values.front().payloads.front().size(), 12U);
+    EXPECT_EQ(record->values.values.front().payloads.front()[0], std::byte{1U});
+    EXPECT_EQ(record->values.values.front().payloads.front()[6],
+              std::byte{11U});
+    EXPECT_EQ(record->receipt.descriptor.archive_version,
+              kNamedValueArtifactSetArchiveVersion);
+    EXPECT_EQ(record->receipt.descriptor.value_count, 1U);
+    EXPECT_GT(record->receipt.descriptor.archive_bytes, 12U);
     EXPECT_EQ(record->receipt.achieved_durability,
               ArtifactDurability::CrashDurable);
 
-    source[0] = std::byte{1U};
+    values.values.front().payloads.front()[0] = std::byte{1U};
     second = store.commit_artifact(
         DurableArtifactCommitRequest{
             make_test_identity(2U), OutputSlotId("image.final"),
             ArtifactId("artifact.test.2"), OutputCommitId("commit.test.2"),
             test_job_resources()},
-        image);
-    EXPECT_EQ(first.content_digest, second.content_digest);
+        values);
+    EXPECT_NE(first.content_digest, second.content_digest);
     EXPECT_NE(first.artifact_id, second.artifact_id);
     EXPECT_NE(first.output_commit_id, second.output_commit_id);
     EXPECT_EQ(store.recovered_artifacts().size(), 2U);
@@ -1600,7 +1641,10 @@ TEST(DurableServerState,
   ASSERT_NE(first_record, nullptr);
   EXPECT_EQ(first_record->receipt.artifact_id, first.artifact_id);
   EXPECT_EQ(first_record->receipt.content_digest, first.content_digest);
-  EXPECT_EQ(first_record->payload[0], std::byte{1U});
+  ASSERT_EQ(first_record->values.values.size(), 1U);
+  ASSERT_EQ(first_record->values.values.front().payloads.size(), 1U);
+  EXPECT_EQ(first_record->values.values.front().payloads.front()[0],
+            std::byte{1U});
 }
 
 TEST(DurableServerState,
@@ -1615,15 +1659,15 @@ TEST(DurableServerState,
     };
     DurableServerState store(root.path(), TenantId("tenant.test"), options);
     const DurableArtifactCommitRequest request = make_test_commit_request(3U);
-    ImageBuffer image = make_test_image();
-    EXPECT_THROW(store.commit_artifact(request, image), std::runtime_error);
+    NamedValueArtifactSet values = make_test_values();
+    EXPECT_THROW(store.commit_artifact(request, values), std::runtime_error);
     EXPECT_EQ(store.find_artifact(request.artifact_id), nullptr);
     EXPECT_TRUE(store.recovered_artifacts().empty());
   }
 
   ScopedTestStateRoot root;
   DurableArtifactCommitRequest request = make_test_commit_request(4U);
-  ImageBuffer image = make_test_image();
+  NamedValueArtifactSet values = make_test_values();
   OutputCommitReceipt original;
   {
     DurableServerStateOptions options;
@@ -1633,7 +1677,7 @@ TEST(DurableServerState,
       }
     };
     DurableServerState store(root.path(), TenantId("tenant.test"), options);
-    EXPECT_THROW(store.commit_artifact(request, image), std::runtime_error);
+    EXPECT_THROW(store.commit_artifact(request, values), std::runtime_error);
     const std::shared_ptr<const ArtifactRecord> published =
         store.find_commit(request.output_commit_id);
     ASSERT_NE(published, nullptr);
@@ -1644,14 +1688,14 @@ TEST(DurableServerState,
     retry.attempt.attempt_id = JobAttemptId("attempt.test.retry");
     retry.attempt.worker_instance_id = WorkerInstanceId("worker.test.retry");
     ++retry.attempt.worker_lease_generation.value;
-    const OutputCommitReceipt reconciled = store.commit_artifact(retry, image);
+    const OutputCommitReceipt reconciled = store.commit_artifact(retry, values);
     EXPECT_EQ(reconciled.attempt, original.attempt);
     EXPECT_EQ(reconciled.artifact_id, original.artifact_id);
     EXPECT_EQ(reconciled.output_commit_id, original.output_commit_id);
 
-    auto* source = static_cast<std::byte*>(image.data.get());
-    source[0] = std::byte{0x7f};
-    EXPECT_THROW(store.commit_artifact(retry, image), DurableConflictError);
+    const NamedValueArtifactSet conflicting = make_test_values(std::byte{0x7f});
+    EXPECT_THROW(store.commit_artifact(retry, conflicting),
+                 DurableConflictError);
   }
 
   DurableServerState recovered(root.path(), TenantId("tenant.test"));
@@ -1697,8 +1741,8 @@ TEST(DurableServerState,
     DurableServerState store(root.path(), TenantId("tenant.test"), options);
     const DurableArtifactCommitRequest request =
         make_test_commit_request(90U + return_path);
-    ImageBuffer image = make_test_image();
-    EXPECT_THROW(store.commit_artifact(request, image), std::runtime_error);
+    NamedValueArtifactSet values = make_test_values();
+    EXPECT_THROW(store.commit_artifact(request, values), std::runtime_error);
 
     DurableArtifactCommitRequest retry = request;
     retry.attempt.attempt_id = JobAttemptId("attempt.test.pending-retry");
@@ -1721,7 +1765,7 @@ TEST(DurableServerState,
         }
         return record->receipt;
       }
-      return store.commit_artifact(retry, image);
+      return store.commit_artifact(retry, values);
     };
 
     EXPECT_THROW(static_cast<void>(exercise_return_path()), std::runtime_error);
@@ -1761,9 +1805,9 @@ TEST(DurableServerState,
   };
   DurableServerState store(root.path(), TenantId("tenant.test"), options);
   const DurableArtifactCommitRequest request = make_test_commit_request(94U);
-  ImageBuffer image = make_test_image();
+  NamedValueArtifactSet values = make_test_values();
 
-  EXPECT_THROW(store.commit_artifact(request, image), std::runtime_error);
+  EXPECT_THROW(store.commit_artifact(request, values), std::runtime_error);
   const std::shared_ptr<const ArtifactRecord> confirmed =
       store.find_commit(request.output_commit_id);
   ASSERT_NE(confirmed, nullptr);
@@ -1790,14 +1834,14 @@ TEST(DurableServerState, RollsBackBothAliasesWhenPrivateIndexPreparationFails) {
     DurableServerState store(root.path(), TenantId("tenant.test"), options);
     const DurableArtifactCommitRequest request =
         make_test_commit_request(30U + index);
-    ImageBuffer image = make_test_image();
+    NamedValueArtifactSet values = make_test_values();
 
-    EXPECT_THROW(store.commit_artifact(request, image), std::runtime_error);
+    EXPECT_THROW(store.commit_artifact(request, values), std::runtime_error);
     EXPECT_EQ(store.find_artifact(request.artifact_id), nullptr);
     EXPECT_EQ(store.find_commit(request.output_commit_id), nullptr);
     EXPECT_TRUE(store.recovered_artifacts().empty());
 
-    const OutputCommitReceipt receipt = store.commit_artifact(request, image);
+    const OutputCommitReceipt receipt = store.commit_artifact(request, values);
     const std::shared_ptr<const ArtifactRecord> by_artifact =
         store.find_artifact(request.artifact_id);
     const std::shared_ptr<const ArtifactRecord> by_commit =
@@ -1848,14 +1892,15 @@ TEST(DurableServerState,
     {
       DurableServerState store(root.path(), TenantId("tenant.test"),
                                artifact_erase_failure_options(failure));
-      ImageBuffer image = make_test_image();
-      static_cast<void>(store.commit_artifact(request, image));
+      NamedValueArtifactSet values = make_test_values();
+      const OutputCommitReceipt committed =
+          store.commit_artifact(request, values);
       failure->arm();
 
       const DurableArtifactEraseResult erased =
           store.erase_artifact(request.artifact_id);
       EXPECT_EQ(erased.state, expected_states[index]);
-      EXPECT_EQ(erased.payload_bytes, 12U);
+      EXPECT_EQ(erased.payload_bytes, committed.descriptor.archive_bytes);
       EXPECT_NE(erased.failure, nullptr);
       EXPECT_THROW(erased.rethrow_failure(), std::runtime_error);
       if (stages[index] == DurableArtifactEraseStage::BeforeManifestRemoval) {
@@ -1905,8 +1950,8 @@ TEST(DurableServerState,
   const DurableArtifactCommitRequest request = make_test_commit_request(5U);
   {
     DurableServerState store(corruption_root.path(), TenantId("tenant.test"));
-    ImageBuffer image = make_test_image();
-    static_cast<void>(store.commit_artifact(request, image));
+    NamedValueArtifactSet values = make_test_values();
+    static_cast<void>(store.commit_artifact(request, values));
   }
   {
     std::fstream payload(corruption_root.path() / "artifacts" /
@@ -1946,8 +1991,8 @@ TEST(DurableServerState, RejectsConfiguredRootIdentityReplacement) {
     DurableServerState store(root.path(), TenantId("tenant.test"));
     std::filesystem::rename(root.path(), relocated);
     EXPECT_TRUE(std::filesystem::create_directory(root.path()));
-    ImageBuffer image = make_test_image();
-    EXPECT_THROW(store.commit_artifact(make_test_commit_request(49U), image),
+    NamedValueArtifactSet values = make_test_values();
+    EXPECT_THROW(store.commit_artifact(make_test_commit_request(49U), values),
                  DurableCorruptionError);
   }
 }
@@ -2218,9 +2263,11 @@ TEST(SingleTenantJobService,
       service.wait_for(accepted.job_id, std::chrono::seconds(2));
   ASSERT_TRUE(terminal.has_value());
   ASSERT_EQ(terminal->state, JobState::Succeeded);
+  ASSERT_TRUE(terminal->output_receipt.has_value());
   usage = service.quota_snapshot();
   EXPECT_EQ(usage.active_attempts, 0U);
-  EXPECT_EQ(usage.retention_bytes, 12U);
+  EXPECT_EQ(usage.retention_bytes,
+            terminal->output_receipt->descriptor.archive_bytes);
   EXPECT_EQ(usage.retained_artifacts, 1U);
 }
 
@@ -2270,7 +2317,8 @@ TEST(SingleTenantJobService,
   ASSERT_TRUE(succeeded->output_receipt.has_value());
   EXPECT_EQ(succeeded->output_receipt->attempt, retried->assignment);
   EXPECT_FALSE(service.retry(first.job_id).has_value());
-  EXPECT_EQ(service.quota_snapshot().retention_bytes, 12U);
+  EXPECT_EQ(service.quota_snapshot().retention_bytes,
+            succeeded->output_receipt->descriptor.archive_bytes);
 
   EXPECT_TRUE(service.delete_artifact(succeeded->output_receipt->artifact_id));
   EXPECT_FALSE(service.delete_artifact(succeeded->output_receipt->artifact_id));
@@ -2804,7 +2852,19 @@ TEST(SingleTenantJobService,
         } else {
           EXPECT_NE(assignment.checkpoint, nullptr);
           if (assignment.checkpoint != nullptr) {
-            EXPECT_EQ(assignment.checkpoint->payload.size(), payload_bytes);
+            EXPECT_EQ(assignment.checkpoint->values.values.size(), 1U);
+            if (assignment.checkpoint->values.values.size() == 1U) {
+              EXPECT_EQ(
+                  assignment.checkpoint->values.values.front().payloads.size(),
+                  1U);
+              if (assignment.checkpoint->values.values.front()
+                      .payloads.size() == 1U) {
+                EXPECT_EQ(assignment.checkpoint->values.values.front()
+                              .payloads.front()
+                              .size(),
+                          payload_bytes);
+              }
+            }
           }
         }
         JobAttemptReport report;
@@ -2812,8 +2872,7 @@ TEST(SingleTenantJobService,
         report.outcome = JobAttemptOutcome::Succeeded;
         report.settled = true;
         report.failure = JobAttemptFailure::None;
-        report.image = make_aligned_cpu_image_buffer(
-            static_cast<int>(payload_bytes), 1, 1, DataType::UINT8, 64U);
+        report.values = make_bulk_test_values(payload_bytes);
         return report;
       });
   TestJobService service(TenantId("tenant.test"), factory);
@@ -2830,7 +2889,13 @@ TEST(SingleTenantJobService,
   const std::shared_ptr<const ArtifactRecord> artifact =
       service.find_artifact(checkpoint);
   ASSERT_NE(artifact, nullptr);
-  EXPECT_EQ(artifact->payload.size(), payload_bytes);
+  ASSERT_EQ(artifact->values.values.size(), 1U);
+  ASSERT_EQ(artifact->values.values.front().payloads.size(), 1U);
+  EXPECT_EQ(artifact->values.values.front().payloads.front().size(),
+            payload_bytes);
+  const std::size_t archive_bytes =
+      produced->output_receipt->descriptor.archive_bytes;
+  EXPECT_GT(archive_bytes, payload_bytes);
   ASSERT_TRUE(SingleTenantJobServiceTestAccess::
                   wait_for_owned_worker_thread_count_at_most(
                       service, 0U, std::chrono::seconds(2)));
@@ -2838,7 +2903,7 @@ TEST(SingleTenantJobService,
   const TenantQuotaSnapshot quota_before = service.quota_snapshot();
   ASSERT_EQ(quota_before.active_attempts, 0U);
   ASSERT_EQ(quota_before.retained_artifacts, 1U);
-  ASSERT_EQ(quota_before.retention_bytes, payload_bytes);
+  ASSERT_EQ(quota_before.retention_bytes, archive_bytes);
   const JobSubmission consumer = service.submit(
       JobSpec(GraphArtifactId("graph.test.checkpoint-data-plane"), 8,
               OutputSlotId("image.final"), resources, checkpoint));
@@ -2861,7 +2926,7 @@ TEST(SingleTenantJobService,
   EXPECT_EQ(quota_after.retained_artifacts,
             quota_before.retained_artifacts + 1U);
   EXPECT_EQ(quota_after.retention_bytes,
-            quota_before.retention_bytes + payload_bytes);
+            quota_before.retention_bytes + archive_bytes);
   EXPECT_EQ(quota_after.device_bytes, quota_before.device_bytes);
   EXPECT_EQ(
       SingleTenantJobServiceTestAccess::owned_worker_thread_count(service), 0U);
@@ -2946,7 +3011,8 @@ TEST(SingleTenantJobService,
             nullptr);
   const TenantQuotaSnapshot usage = service.quota_snapshot();
   EXPECT_EQ(usage.active_attempts, 0U);
-  EXPECT_EQ(usage.retention_bytes, 12U);
+  EXPECT_EQ(usage.retention_bytes,
+            terminal->output_receipt->descriptor.archive_bytes);
   EXPECT_EQ(usage.retained_artifacts, 1U);
 }
 
@@ -3031,7 +3097,8 @@ TEST(SingleTenantJobService,
   EXPECT_FALSE(
       SingleTenantJobServiceTestAccess::durable_mutation_faulted(recovered));
   EXPECT_EQ(recovered.quota_snapshot().active_attempts, 0U);
-  EXPECT_EQ(recovered.quota_snapshot().retention_bytes, 12U);
+  EXPECT_EQ(recovered.quota_snapshot().retention_bytes,
+            succeeded->output_receipt->descriptor.archive_bytes);
   EXPECT_EQ(recovered.quota_snapshot().retained_artifacts, 1U);
   EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 1U);
 }
@@ -3098,7 +3165,8 @@ TEST(SingleTenantJobService,
   ASSERT_EQ(succeeded->state, JobState::Succeeded);
   ASSERT_TRUE(succeeded->output_receipt.has_value());
   EXPECT_EQ(recovered.quota_snapshot().active_attempts, 0U);
-  EXPECT_EQ(recovered.quota_snapshot().retention_bytes, 12U);
+  EXPECT_EQ(recovered.quota_snapshot().retention_bytes,
+            succeeded->output_receipt->descriptor.archive_bytes);
   EXPECT_EQ(recovered.quota_snapshot().retained_artifacts, 1U);
   EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 1U);
 }
@@ -3162,10 +3230,15 @@ TEST(SingleTenantJobService,
         SingleTenantJobServiceTestAccess::artifact_reconciliation_faulted(
             service));
     EXPECT_FALSE(SingleTenantJobServiceTestAccess::journal_faulted(service));
+    const std::shared_ptr<const ArtifactRecord> retained =
+        service.find_artifact(pending->output_artifact_id);
+    ASSERT_NE(retained, nullptr);
+    const std::size_t archive_bytes =
+        retained->receipt.descriptor.archive_bytes;
 
     const TenantQuotaSnapshot usage = service.quota_snapshot();
     EXPECT_EQ(usage.active_attempts, 0U);
-    EXPECT_EQ(usage.retention_bytes, 12U);
+    EXPECT_EQ(usage.retention_bytes, archive_bytes);
     EXPECT_EQ(usage.retained_artifacts, 1U);
 
     JobAssignment assignment{pending->assignment, pending->spec, nullptr};
@@ -3173,7 +3246,7 @@ TEST(SingleTenantJobService,
         service, pending->assignment, successful_report(assignment));
     EXPECT_EQ(observed_failures.load(std::memory_order_relaxed), 2U);
     EXPECT_EQ(service.query(submission.job_id)->state, JobState::Running);
-    EXPECT_EQ(service.quota_snapshot().retention_bytes, 12U);
+    EXPECT_EQ(service.quota_snapshot().retention_bytes, archive_bytes);
   }
 
   auto unused_factory = std::make_shared<FunctionWorkerFactory>(
@@ -3190,7 +3263,8 @@ TEST(SingleTenantJobService,
   ASSERT_EQ(succeeded->state, JobState::Succeeded);
   ASSERT_TRUE(succeeded->output_receipt.has_value());
   EXPECT_EQ(recovered.quota_snapshot().active_attempts, 0U);
-  EXPECT_EQ(recovered.quota_snapshot().retention_bytes, 12U);
+  EXPECT_EQ(recovered.quota_snapshot().retention_bytes,
+            succeeded->output_receipt->descriptor.archive_bytes);
   EXPECT_EQ(recovered.quota_snapshot().retained_artifacts, 1U);
   EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 1U);
 }
@@ -3242,7 +3316,8 @@ TEST(SingleTenantJobService,
   EXPECT_EQ(succeeded->output_commit_id, failed->output_commit_id);
   ASSERT_TRUE(succeeded->output_receipt.has_value());
   EXPECT_EQ(succeeded->output_receipt->attempt, retry->assignment);
-  EXPECT_EQ(service.quota_snapshot().retention_bytes, 12U);
+  EXPECT_EQ(service.quota_snapshot().retention_bytes,
+            succeeded->output_receipt->descriptor.archive_bytes);
 }
 
 TEST(SingleTenantJobService,
@@ -3289,7 +3364,8 @@ TEST(SingleTenantJobService,
     ASSERT_TRUE(snapshot->output_receipt.has_value());
     EXPECT_EQ(snapshot->output_receipt->artifact_id, receipt.artifact_id);
     EXPECT_EQ(snapshot->output_receipt->content_digest, receipt.content_digest);
-    EXPECT_EQ(recovered.quota_snapshot().retention_bytes, 12U);
+    EXPECT_EQ(recovered.quota_snapshot().retention_bytes,
+              receipt.descriptor.archive_bytes);
     EXPECT_TRUE(recovered.delete_artifact(receipt.artifact_id));
     EXPECT_EQ(recovered.quota_snapshot().retention_bytes, 0U);
   }
@@ -3364,7 +3440,8 @@ TEST(SingleTenantJobService,
       ASSERT_EQ(terminal->state, JobState::Succeeded);
       ASSERT_TRUE(terminal->output_receipt.has_value());
       receipt = *terminal->output_receipt;
-      ASSERT_EQ(service.quota_snapshot().retention_bytes, 12U);
+      const std::uint64_t archive_bytes = receipt.descriptor.archive_bytes;
+      ASSERT_EQ(service.quota_snapshot().retention_bytes, archive_bytes);
       failure->arm();
 
       if (stages[index] == DurableArtifactEraseStage::BeforeManifestRemoval) {
@@ -3374,7 +3451,7 @@ TEST(SingleTenantJobService,
             SingleTenantJobServiceTestAccess::artifact_erase_faulted(service));
         EXPECT_FALSE(SingleTenantJobServiceTestAccess::durable_mutation_faulted(
             service));
-        EXPECT_EQ(service.quota_snapshot().retention_bytes, 12U);
+        EXPECT_EQ(service.quota_snapshot().retention_bytes, archive_bytes);
         EXPECT_NE(service.find_artifact(receipt.artifact_id), nullptr);
         EXPECT_TRUE(service.delete_artifact(receipt.artifact_id));
         EXPECT_EQ(service.quota_snapshot().retention_bytes, 0U);
@@ -3386,7 +3463,7 @@ TEST(SingleTenantJobService,
           caught = true;
           EXPECT_EQ(error.artifact_id(), receipt.artifact_id);
           EXPECT_EQ(error.state(), expected_states[index]);
-          EXPECT_EQ(error.payload_bytes(), 12U);
+          EXPECT_EQ(error.payload_bytes(), archive_bytes);
           EXPECT_THROW(error.rethrow_cause(), std::runtime_error);
         }
         EXPECT_TRUE(caught);
@@ -3397,7 +3474,8 @@ TEST(SingleTenantJobService,
         EXPECT_FALSE(
             SingleTenantJobServiceTestAccess::journal_faulted(service));
         EXPECT_EQ(service.find_artifact(receipt.artifact_id), nullptr);
-        const std::uint64_t expected_retention = index <= 3U ? 12U : 0U;
+        const std::uint64_t expected_retention =
+            index <= 3U ? archive_bytes : 0U;
         EXPECT_EQ(service.quota_snapshot().retention_bytes, expected_retention);
         EXPECT_THROW(service.submit(JobSpec(GraphArtifactId("graph.test"), 8,
                                             OutputSlotId("image.final"),
@@ -3488,12 +3566,12 @@ TEST(SingleTenantJobService,
   const OutputCommitId stable_commit("commit.test.conflicting-join");
   {
     DurableServerState store(root.path(), TenantId("tenant.test"));
-    ImageBuffer image = make_test_image();
+    NamedValueArtifactSet values = make_test_values();
     static_cast<void>(store.commit_artifact(
         DurableArtifactCommitRequest{
             artifact_identity, OutputSlotId("image.final"), stable_artifact,
             stable_commit, test_job_resources()},
-        image));
+        values));
 
     AttemptIdentity job_identity = make_test_identity(71U);
     job_identity.job_spec_digest = spec->digest();
@@ -4405,7 +4483,7 @@ TEST(SingleTenantJobService, DestructorWaitsForActiveWorkerAndReaperDrain) {
   }
 }
 
-TEST(SingleTenantJobService, MissingRequiredImageFailsClosed) {
+TEST(SingleTenantJobService, MissingRequiredValuesFailClosed) {
   auto factory = std::make_shared<FunctionWorkerFactory>(
       [](const JobAssignment& assignment,
          const std::function<bool()>& cancellation_requested) {
@@ -4436,13 +4514,13 @@ TEST(SingleTenantJobService, MalformedReportShapesFailClosedBeforeFactCopy) {
       MalformedReportShape::SucceededUnsettled,
       MalformedReportShape::SucceededWithFailure,
       MalformedReportShape::FailedWithoutFailure,
-      MalformedReportShape::FailedWithImage,
+      MalformedReportShape::FailedWithValues,
       MalformedReportShape::FailedWithCancellationFailure,
       MalformedReportShape::FailedWithReportRejected,
       MalformedReportShape::FailedWithArtifactCommit,
       MalformedReportShape::CancelledUnsettled,
       MalformedReportShape::CancelledWithWorkerFailure,
-      MalformedReportShape::CancelledWithImage,
+      MalformedReportShape::CancelledWithValues,
       MalformedReportShape::InvalidOutcome,
       MalformedReportShape::InvalidFailure,
   };

@@ -158,7 +158,9 @@ class FakeMetalDeviceExecutor final : public execution::DeviceExecutor {
   }
 
   /** @copydoc execution::DeviceExecutor::device */
-  Device device() const noexcept override { return Device::GPU_METAL; }
+  DeviceBackend device() const noexcept override {
+    return DeviceBackend::Metal;
+  }
 
   /** @copydoc execution::DeviceExecutor::execute_impl */
   void execute_impl(execution::DeviceExecutorInvocation& invocation) override {
@@ -180,7 +182,13 @@ class FakeMetalDeviceExecutor final : public execution::DeviceExecutor {
     const std::uint64_t submission_count =
         state_->submission_count.load(std::memory_order_acquire);
     return execution::DeviceExecutorDiagnostics{
-        Device::GPU_METAL, true, submission_count, invocation_count, 0U, 0U, 0U,
+        DeviceBackend::Metal,
+        true,
+        submission_count,
+        invocation_count,
+        0U,
+        0U,
+        0U,
     };
   }
 

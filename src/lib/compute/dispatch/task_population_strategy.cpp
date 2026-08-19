@@ -302,7 +302,7 @@ class DomainTaskShapeStrategy {
    * @note Both borrowed values remain immutable for this population call.
    */
   DomainTaskShapeStrategy(DirtyDomain domain,
-                          const std::vector<Device>& available_devices)
+                          const std::vector<DeviceBackend>& available_devices)
       : domain_(domain), available_devices_(available_devices) {}
 
   /**
@@ -359,7 +359,7 @@ class DomainTaskShapeStrategy {
    * @brief Borrowed canonical device inventory for coherent route selection.
    * @note The GraphTaskPopulationStrategy call owns this vector.
    */
-  const std::vector<Device>& available_devices_;
+  const std::vector<DeviceBackend>& available_devices_;
 };
 
 /**
@@ -449,7 +449,7 @@ class GraphTaskPopulationStrategy {
   /** @brief Resolves graph extents and emits executable tasks per node. */
   void populate(ComputePlan& result, const DirtyRegionSnapshot* snapshot,
                 DirtyDomain domain, const GraphModel& graph,
-                const std::vector<Device>& available_devices) const {
+                const std::vector<DeviceBackend>& available_devices) const {
     TaskAppender appender(result, snapshot);
     DomainTaskShapeStrategy shape_strategy(domain, available_devices);
     GraphExtentResolver extent_resolver;
@@ -579,7 +579,7 @@ void apply_task_dirty_metadata(PlannedTask& task,
 void TaskPopulationStrategy::populate(
     ComputePlan& result, const DirtyRegionSnapshot* snapshot,
     DirtyDomain domain, const GraphModel* graph,
-    const std::vector<Device>& available_devices) const {
+    const std::vector<DeviceBackend>& available_devices) const {
   if (!graph) {
     NodeOnlyTaskPopulationStrategy{}.populate(result, snapshot, domain);
     return;

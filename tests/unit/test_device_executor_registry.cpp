@@ -131,7 +131,7 @@ class RecordingExecutor final : public DeviceExecutor {
    * @param state Non-null shared observation owner.
    * @throws std::invalid_argument for null state.
    */
-  RecordingExecutor(Device device,
+  RecordingExecutor(DeviceBackend device,
                     std::shared_ptr<RecordingExecutorState> state)
       : device_(device), state_(std::move(state)) {
     if (!state_) {
@@ -140,7 +140,7 @@ class RecordingExecutor final : public DeviceExecutor {
   }
 
   /** @copydoc DeviceExecutor::device */
-  Device device() const noexcept override { return device_; }
+  DeviceBackend device() const noexcept override { return device_; }
 
   /** @copydoc DeviceExecutor::execute_impl */
   void execute_impl(DeviceExecutorInvocation& invocation) override {
@@ -150,7 +150,7 @@ class RecordingExecutor final : public DeviceExecutor {
     increment_recording_counter(
         state_->invocation_count,
         "Recording executor invocation counter exhausted.");
-    if (device_ == Device::GPU_METAL) {
+    if (device_ == DeviceBackend::Metal) {
       TestMetalExecutionContext context;
       ScopedMetalExecutionContext scope(context);
       invocation.run();
@@ -167,7 +167,7 @@ class RecordingExecutor final : public DeviceExecutor {
         state_->submission_count.load(std::memory_order_acquire);
     return DeviceExecutorDiagnostics{
         device_,
-        device_ == Device::GPU_METAL,
+        device_ == DeviceBackend::Metal,
         submission_count,
         invocation_count,
         7U,
@@ -178,7 +178,7 @@ class RecordingExecutor final : public DeviceExecutor {
 
  private:
   /** @brief Fixed device label supplied during composition. */
-  const Device device_;
+  const DeviceBackend device_;
 
   /** @brief Shared observations retained independently of registry ownership.
    */
@@ -313,20 +313,20 @@ TEST(DeviceExecutorRegistry, RejectsNullCpuUnknownAndDuplicateExecutors) {
   EXPECT_THROW(registry.register_executor(nullptr), std::invalid_argument);
 
   auto cpu_state = std::make_shared<RecordingExecutorState>();
-  EXPECT_THROW(registry.register_executor(
-                   std::make_unique<RecordingExecutor>(Device::CPU, cpu_state)),
+  EXPECT_THROW(registry.register_executor(std::make_unique<RecordingExecutor>(
+                   DeviceBackend::CPU, cpu_state)),
                std::invalid_argument);
 
   auto unknown_state = std::make_shared<RecordingExecutorState>();
   EXPECT_THROW(registry.register_executor(std::make_unique<RecordingExecutor>(
-                   static_cast<Device>(99U), unknown_state)),
+                   static_cast<DeviceBackend>(99U), unknown_state)),
                std::invalid_argument);
 
   auto metal_state = std::make_shared<RecordingExecutorState>();
   registry.register_executor(
-      std::make_unique<RecordingExecutor>(Device::GPU_METAL, metal_state));
+      std::make_unique<RecordingExecutor>(DeviceBackend::Metal, metal_state));
   EXPECT_THROW(registry.register_executor(std::make_unique<RecordingExecutor>(
-                   Device::GPU_METAL, metal_state)),
+                   DeviceBackend::Metal, metal_state)),
                std::invalid_argument);
   EXPECT_EQ(registry.size(), 1U);
 }
@@ -338,22 +338,22 @@ TEST(DeviceExecutorRegistry, DispatchesExactlyOnceAndCopiesDiagnostics) {
   DeviceExecutorRegistry registry;
   auto state = std::make_shared<RecordingExecutorState>();
   registry.register_executor(
-      std::make_unique<RecordingExecutor>(Device::GPU_METAL, state));
+      std::make_unique<RecordingExecutor>(DeviceBackend::Metal, state));
 
-  EXPECT_FALSE(registry.contains(Device::CPU));
-  EXPECT_TRUE(registry.contains(Device::GPU_METAL));
+  EXPECT_FALSE(registry.contains(DeviceBackend::CPU));
+  EXPECT_TRUE(registry.contains(DeviceBackend::Metal));
   EXPECT_EQ(registry.available_devices(),
-            (std::vector<Device>{Device::GPU_METAL}));
+            (std::vector<DeviceBackend>{DeviceBackend::Metal}));
 
   ContextRecordingInvocation invocation;
-  registry.execute(Device::GPU_METAL, invocation);
+  registry.execute(DeviceBackend::Metal, invocation);
   EXPECT_EQ(invocation.runs, 1);
   EXPECT_NE(invocation.observed_context, nullptr);
   EXPECT_EQ(current_metal_execution_context(), nullptr);
 
   const DeviceExecutorDiagnostics diagnostics =
-      registry.diagnostics(Device::GPU_METAL);
-  EXPECT_EQ(diagnostics.device, Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
+  EXPECT_EQ(diagnostics.device, DeviceBackend::Metal);
   EXPECT_TRUE(diagnostics.queue_ready);
   EXPECT_EQ(diagnostics.submission_count, 1U);
   EXPECT_EQ(diagnostics.invocation_count, 1U);
@@ -369,17 +369,17 @@ TEST(DeviceExecutorRegistry, PropagatesProviderFailureAndRestoresContext) {
   DeviceExecutorRegistry registry;
   auto state = std::make_shared<RecordingExecutorState>();
   registry.register_executor(
-      std::make_unique<RecordingExecutor>(Device::GPU_METAL, state));
+      std::make_unique<RecordingExecutor>(DeviceBackend::Metal, state));
 
   ThrowingInvocation invocation;
   try {
-    registry.execute(Device::GPU_METAL, invocation);
+    registry.execute(DeviceBackend::Metal, invocation);
     FAIL() << "Expected exact provider failure";
   } catch (const std::runtime_error& error) {
     EXPECT_STREQ(error.what(), "exact provider failure");
   }
   const DeviceExecutorDiagnostics diagnostics =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   EXPECT_EQ(diagnostics.submission_count, 1U);
   EXPECT_EQ(diagnostics.invocation_count, 1U);
   EXPECT_EQ(state->invocation_count.load(std::memory_order_relaxed), 1U);
@@ -397,7 +397,7 @@ TEST(DeviceExecutorRegistry,
   DeviceExecutorRegistry registry;
   auto state = std::make_shared<RecordingExecutorState>();
   registry.register_executor(
-      std::make_unique<RecordingExecutor>(Device::GPU_METAL, state));
+      std::make_unique<RecordingExecutor>(DeviceBackend::Metal, state));
 
   bool outer_context_was_current = false;
   bool outer_context_survived_rejection = false;
@@ -409,7 +409,7 @@ TEST(DeviceExecutorRegistry,
     MetalExecutionContext* outer_context = current_metal_execution_context();
     outer_context_was_current = outer_context != nullptr;
     try {
-      registry.execute(Device::GPU_METAL, nested);
+      registry.execute(DeviceBackend::Metal, nested);
     } catch (const std::logic_error& error) {
       caught_exact_reentry = true;
       EXPECT_STREQ(error.what(), kReentryError);
@@ -418,10 +418,10 @@ TEST(DeviceExecutorRegistry,
     }
     outer_context_survived_rejection =
         current_metal_execution_context() == outer_context;
-    after_nested_rejection = registry.diagnostics(Device::GPU_METAL);
+    after_nested_rejection = registry.diagnostics(DeviceBackend::Metal);
   });
 
-  EXPECT_NO_THROW(registry.execute(Device::GPU_METAL, outer));
+  EXPECT_NO_THROW(registry.execute(DeviceBackend::Metal, outer));
   EXPECT_TRUE(outer_context_was_current);
   EXPECT_TRUE(outer_context_survived_rejection);
   EXPECT_TRUE(caught_exact_reentry);
@@ -431,9 +431,9 @@ TEST(DeviceExecutorRegistry,
   EXPECT_EQ(current_metal_execution_context(), nullptr);
 
   ContextRecordingInvocation recovery;
-  EXPECT_NO_THROW(registry.execute(Device::GPU_METAL, recovery));
+  EXPECT_NO_THROW(registry.execute(DeviceBackend::Metal, recovery));
   const DeviceExecutorDiagnostics after_recovery =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   EXPECT_EQ(recovery.runs, 1);
   EXPECT_EQ(after_recovery.submission_count, 2U);
   EXPECT_EQ(after_recovery.invocation_count, 2U);
@@ -451,11 +451,11 @@ TEST(DeviceExecutorRegistry, AllowsNestedCallbacksThroughDifferentExecutors) {
   DeviceExecutorRegistry outer_registry;
   auto outer_state = std::make_shared<RecordingExecutorState>();
   outer_registry.register_executor(
-      std::make_unique<RecordingExecutor>(Device::GPU_METAL, outer_state));
+      std::make_unique<RecordingExecutor>(DeviceBackend::Metal, outer_state));
   DeviceExecutorRegistry inner_registry;
   auto inner_state = std::make_shared<RecordingExecutorState>();
   inner_registry.register_executor(
-      std::make_unique<RecordingExecutor>(Device::GPU_METAL, inner_state));
+      std::make_unique<RecordingExecutor>(DeviceBackend::Metal, inner_state));
 
   MetalExecutionContext* outer_context = nullptr;
   bool inner_context_was_distinct = false;
@@ -470,20 +470,20 @@ TEST(DeviceExecutorRegistry, AllowsNestedCallbacksThroughDifferentExecutors) {
   CallbackInvocation outer([&] {
     outer_context = current_metal_execution_context();
     ASSERT_NE(outer_context, nullptr);
-    inner_registry.execute(Device::GPU_METAL, inner);
+    inner_registry.execute(DeviceBackend::Metal, inner);
     outer_context_was_restored =
         current_metal_execution_context() == outer_context;
   });
 
-  EXPECT_NO_THROW(outer_registry.execute(Device::GPU_METAL, outer));
+  EXPECT_NO_THROW(outer_registry.execute(DeviceBackend::Metal, outer));
   EXPECT_EQ(inner_runs, 1);
   EXPECT_TRUE(inner_context_was_distinct);
   EXPECT_TRUE(outer_context_was_restored);
   EXPECT_EQ(current_metal_execution_context(), nullptr);
   const DeviceExecutorDiagnostics outer_diagnostics =
-      outer_registry.diagnostics(Device::GPU_METAL);
+      outer_registry.diagnostics(DeviceBackend::Metal);
   const DeviceExecutorDiagnostics inner_diagnostics =
-      inner_registry.diagnostics(Device::GPU_METAL);
+      inner_registry.diagnostics(DeviceBackend::Metal);
   EXPECT_EQ(outer_diagnostics.submission_count, 1U);
   EXPECT_EQ(outer_diagnostics.invocation_count, 1U);
   EXPECT_EQ(inner_diagnostics.submission_count, 1U);
@@ -502,11 +502,11 @@ TEST(DeviceExecutorRegistry,
   DeviceExecutorRegistry registry_a;
   auto state_a = std::make_shared<RecordingExecutorState>();
   registry_a.register_executor(
-      std::make_unique<RecordingExecutor>(Device::GPU_METAL, state_a));
+      std::make_unique<RecordingExecutor>(DeviceBackend::Metal, state_a));
   DeviceExecutorRegistry registry_b;
   auto state_b = std::make_shared<RecordingExecutorState>();
   registry_b.register_executor(
-      std::make_unique<RecordingExecutor>(Device::GPU_METAL, state_b));
+      std::make_unique<RecordingExecutor>(DeviceBackend::Metal, state_b));
 
   MetalExecutionContext* context_a = nullptr;
   bool context_b_was_current_after_rejection = false;
@@ -519,7 +519,7 @@ TEST(DeviceExecutorRegistry,
     EXPECT_NE(context_b, nullptr);
     EXPECT_NE(context_b, context_a);
     try {
-      registry_a.execute(Device::GPU_METAL, repeated_a);
+      registry_a.execute(DeviceBackend::Metal, repeated_a);
     } catch (const std::logic_error& error) {
       caught_exact_reentry = true;
       EXPECT_STREQ(error.what(), kReentryError);
@@ -532,29 +532,29 @@ TEST(DeviceExecutorRegistry,
   CallbackInvocation callback_a([&] {
     context_a = current_metal_execution_context();
     ASSERT_NE(context_a, nullptr);
-    registry_b.execute(Device::GPU_METAL, callback_b);
+    registry_b.execute(DeviceBackend::Metal, callback_b);
     context_a_was_restored = current_metal_execution_context() == context_a;
   });
 
-  EXPECT_NO_THROW(registry_a.execute(Device::GPU_METAL, callback_a));
+  EXPECT_NO_THROW(registry_a.execute(DeviceBackend::Metal, callback_a));
   EXPECT_TRUE(caught_exact_reentry);
   EXPECT_EQ(repeated_a_runs, 0);
   EXPECT_TRUE(context_b_was_current_after_rejection);
   EXPECT_TRUE(context_a_was_restored);
   EXPECT_EQ(current_metal_execution_context(), nullptr);
   const DeviceExecutorDiagnostics diagnostics_a =
-      registry_a.diagnostics(Device::GPU_METAL);
+      registry_a.diagnostics(DeviceBackend::Metal);
   const DeviceExecutorDiagnostics diagnostics_b =
-      registry_b.diagnostics(Device::GPU_METAL);
+      registry_b.diagnostics(DeviceBackend::Metal);
   EXPECT_EQ(diagnostics_a.submission_count, 1U);
   EXPECT_EQ(diagnostics_a.invocation_count, 1U);
   EXPECT_EQ(diagnostics_b.submission_count, 1U);
   EXPECT_EQ(diagnostics_b.invocation_count, 1U);
 
   ContextRecordingInvocation recovery;
-  EXPECT_NO_THROW(registry_a.execute(Device::GPU_METAL, recovery));
+  EXPECT_NO_THROW(registry_a.execute(DeviceBackend::Metal, recovery));
   const DeviceExecutorDiagnostics recovered_a =
-      registry_a.diagnostics(Device::GPU_METAL);
+      registry_a.diagnostics(DeviceBackend::Metal);
   EXPECT_EQ(recovery.runs, 1);
   EXPECT_EQ(recovered_a.submission_count, 2U);
   EXPECT_EQ(recovered_a.invocation_count, 2U);
@@ -569,34 +569,34 @@ TEST(DeviceExecutorRegistry,
   DeviceExecutorRegistry registry;
   auto state = std::make_shared<RecordingExecutorState>();
   registry.register_executor(
-      std::make_unique<RecordingExecutor>(Device::GPU_METAL, state));
+      std::make_unique<RecordingExecutor>(DeviceBackend::Metal, state));
 
   const DeviceExecutorDiagnostics before =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   EXPECT_EQ(before.submission_count, 0U);
   EXPECT_EQ(before.invocation_count, 0U);
 
   ContextRecordingInvocation first;
-  registry.execute(Device::GPU_METAL, first);
+  registry.execute(DeviceBackend::Metal, first);
   const DeviceExecutorDiagnostics after_success =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   EXPECT_EQ(after_success.submission_count, before.submission_count + 1U);
   EXPECT_EQ(after_success.invocation_count, before.invocation_count + 1U);
 
   ThrowingInvocation throwing;
-  EXPECT_THROW(registry.execute(Device::GPU_METAL, throwing),
+  EXPECT_THROW(registry.execute(DeviceBackend::Metal, throwing),
                std::runtime_error);
   const DeviceExecutorDiagnostics after_failure =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   EXPECT_EQ(after_failure.submission_count,
             after_success.submission_count + 1U);
   EXPECT_EQ(after_failure.invocation_count,
             after_success.invocation_count + 1U);
 
   ContextRecordingInvocation recovery;
-  registry.execute(Device::GPU_METAL, recovery);
+  registry.execute(DeviceBackend::Metal, recovery);
   const DeviceExecutorDiagnostics after_recovery =
-      registry.diagnostics(Device::GPU_METAL);
+      registry.diagnostics(DeviceBackend::Metal);
   EXPECT_EQ(after_recovery.submission_count,
             after_failure.submission_count + 1U);
   EXPECT_EQ(after_recovery.invocation_count,
@@ -613,11 +613,11 @@ TEST(DeviceExecutorRegistry,
 TEST(DeviceExecutorRegistry, RejectsMissingDispatchAndDiagnostics) {
   DeviceExecutorRegistry registry;
   ContextRecordingInvocation invocation;
-  EXPECT_THROW(registry.execute(Device::CPU, invocation),
+  EXPECT_THROW(registry.execute(DeviceBackend::CPU, invocation),
                std::invalid_argument);
-  EXPECT_THROW(registry.execute(Device::GPU_METAL, invocation),
+  EXPECT_THROW(registry.execute(DeviceBackend::Metal, invocation),
                std::invalid_argument);
-  EXPECT_THROW((void)registry.diagnostics(Device::GPU_METAL),
+  EXPECT_THROW((void)registry.diagnostics(DeviceBackend::Metal),
                std::invalid_argument);
   EXPECT_EQ(invocation.runs, 0);
 }

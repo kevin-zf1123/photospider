@@ -21,7 +21,7 @@
 #include <variant>
 #include <vector>
 
-#include "compute/image_buffer.hpp"
+#include "compute/tile_task.hpp"
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/geometry.hpp"
 #include "photospider/core/graph_error.hpp"
@@ -136,11 +136,9 @@ struct DebugMeta {
  * Private operation callbacks and compute services exchange this value after
  * the operation Host has validated pure-C output records or source-private
  * providers have produced canonical Values.
- * The canonical named-Value collection is the only image payload, allocation,
- * readiness, and revision authority. A current ImageBuffer may exist only as
- * explicitly named compatibility staging before an inbound legacy edge is
- * normalized; formal cache publication requires that staging member to be
- * empty. Format-neutral named data, spatial, and debug state remain separate.
+ * The canonical named-Value collection is the only payload, allocation,
+ * readiness, and revision authority. Format-neutral parameter data, spatial,
+ * and debug state remain separate.
  * The host may attach a dynamic-library lease so plugin-provided deleters
  * cannot run after their library is unmapped.
  *
@@ -149,7 +147,7 @@ struct DebugMeta {
  * move construction and move assignment transfer complete states only through
  * no-throw swaps. Retired state is always destroyed in reverse member order.
  *
- * @throws std::bad_alloc when copied image, named-Value, parameter, or debug
+ * @throws std::bad_alloc when copied named-Value, parameter, or debug
  * storage cannot allocate.
  * @note `plugin_library_lifetime` is declared first and therefore destroyed
  *       last. Operation plugins must leave it empty; the host registrar wrapper
@@ -247,7 +245,6 @@ struct NodeOutput {
    */
   void swap(NodeOutput& other) noexcept {
     static_assert(std::is_nothrow_swappable_v<std::shared_ptr<void>> &&
-                      std::is_nothrow_swappable_v<ImageBuffer> &&
                       std::is_nothrow_swappable_v<decltype(named_values)> &&
                       std::is_nothrow_swappable_v<decltype(data)> &&
                       std::is_nothrow_swappable_v<SpatialContext> &&
@@ -255,7 +252,6 @@ struct NodeOutput {
                   "NodeOutput assignment requires no-throw member swaps");
     using std::swap;
     plugin_library_lifetime.swap(other.plugin_library_lifetime);
-    swap(compatibility_image, other.compatibility_image);
     named_values.swap(other.named_values);
     data.swap(other.data);
     swap(space, other.space);
@@ -273,33 +269,6 @@ struct NodeOutput {
    *       are destroyed before the final dynamic-library reference is released.
    */
   std::shared_ptr<void> plugin_library_lifetime;
-
-  /**
-   * @brief Callback-local or inbound legacy ImageBuffer staging only.
-   *
-   * @note This member is never an allocation, revision, readiness, Region, or
-   * cache authority. Codec, Host, and remaining product adapters must
-   * normalize a nonempty value into `named_values` and clear it before formal
-   * commit. Provider-defined `data` or `context` deleters execute before the
-   * result's dynamic-library lease is released.
-   */
-  ps::ImageBuffer compatibility_image;
-
-  /**
-   * @brief Reports whether compatibility staging carries observable state.
-   * @return True when dimensions, stride, owner, context, or non-CPU placement
-   * differs from the default empty sentinel.
-   * @throws Nothing.
-   * @note The element-type default is not evidence because an empty
-   * ImageBuffer necessarily retains that enum value.
-   */
-  bool has_compatibility_image() const noexcept {
-    return compatibility_image.width != 0 || compatibility_image.height != 0 ||
-           compatibility_image.channels != 0 ||
-           compatibility_image.step != 0U ||
-           compatibility_image.device != Device::CPU ||
-           compatibility_image.data || compatibility_image.context;
-  }
 
   /**
    * @brief Canonically ordered named immutable Value outputs.
@@ -773,7 +742,7 @@ struct OpMetadata {
   /** @brief Preferred private tile granularity. */
   TileSizePreference tile_preference = TileSizePreference::UNDEFINED;
   /** @brief Preferred execution device. */
-  Device device_preference = Device::CPU;
+  DeviceBackend device_preference = DeviceBackend::CPU;
   /** @brief Relative scheduling cost; lower values are preferred. */
   int cost_score = 100;
   /** @brief Whether this exact candidate may satisfy high-precision intent. */
@@ -868,9 +837,9 @@ using MonolithicOpFunc = std::function<NodeOutput(
  * @return Nothing.
  * @throws Any exception emitted by the callback provider propagates through
  *         invocation.
- * @note InputTile carries const ImageBuffer pointers so tiled operators cannot
- * replace or mutate upstream ImageBuffer metadata through the tile API. Pixel
- * data returned by adapter views must still be treated as read-only by
+ * @note InputTile carries const Value pointers so tiled operators cannot
+ * replace or mutate upstream Value metadata through the tile API. Pixel data
+ * returned by adapter views must still be treated as read-only by
  * convention when sourced from InputTile. Registry locking does not serialize
  * callback execution; providers must make shared callback state reentrant or
  * synchronize it because execution workers and independent snapshots may invoke
@@ -1792,7 +1761,8 @@ class OpRegistry {
    * state; the registry does not serialize calls.
    */
   void register_impl(const std::string& type, const std::string& subtype,
-                     Device device, MonolithicOpFunc fn, OpMetadata meta = {});
+                     DeviceBackend device, MonolithicOpFunc fn,
+                     OpMetadata meta = {});
 
   /**
    * @brief Registers a device-specific tiled implementation candidate.
@@ -1824,7 +1794,7 @@ class OpRegistry {
    * calls.
    */
   void register_impl(const std::string& type, const std::string& subtype,
-                     Device device, TileOpFunc fn, OpMetadata meta);
+                     DeviceBackend device, TileOpFunc fn, OpMetadata meta);
 
   /**
    * @brief Atomically replaces one operation's complete implementation set.
@@ -1864,7 +1834,8 @@ class OpRegistry {
    *       synchronization.
    */
   std::vector<OpImplementation> get_implementations_by_device(
-      const std::string& type, const std::string& subtype, Device device) const;
+      const std::string& type, const std::string& subtype,
+      DeviceBackend device) const;
 
   /**
    * @brief Copies all device implementations for one operation.
@@ -1924,7 +1895,8 @@ class OpRegistry {
    */
   std::optional<OpImplementation> select_best_implementation(
       const std::string& type, const std::string& subtype,
-      const std::vector<Device>& available_devices, ComputeIntent intent) const;
+      const std::vector<DeviceBackend>& available_devices,
+      ComputeIntent intent) const;
 
   /**
    * @brief Selects the best registered implementation after caller filtering.
@@ -1955,7 +1927,7 @@ class OpRegistry {
    */
   std::optional<OpImplementation> select_best_implementation(
       const std::string& type, const std::string& subtype,
-      const std::vector<Device>& available_devices, ComputeIntent intent,
+      const std::vector<DeviceBackend>& available_devices, ComputeIntent intent,
       const std::function<bool(const OpImplementation&)>& candidate_filter)
       const;
 
@@ -2004,7 +1976,7 @@ class OpRegistry {
    */
   std::optional<OpImplementation> select_implementation(
       const std::string& type, const std::string& subtype,
-      const std::vector<Device>& available_devices, ComputeIntent intent,
+      const std::vector<DeviceBackend>& available_devices, ComputeIntent intent,
       const std::function<bool(const OpImplementation&)>& candidate_filter = {})
       const;
 

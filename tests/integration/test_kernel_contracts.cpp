@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -28,14 +29,15 @@
 #include <unistd.h>
 #endif
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/value_adapter_opencv.hpp"
 #include "compute/compute_service.hpp"
 #include "compute/dirty/node_executor.hpp"
 #include "compute/dirty/realtime_proxy_graph.hpp"
 #include "compute/execution/execution_service.hpp"
+#include "core/dense_image_processing.hpp"
 #include "core/param_utils.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "core/value_image_adapter.hpp"
+#include "core/value_region.hpp"
 #include "execution/device/compute_io_executor.hpp"
 #include "graph/graph_cache_service.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
@@ -48,6 +50,7 @@
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_state_executor_test_access.hpp"
 #include "graph/graph_traversal_service.hpp"
+#include "photospider/data/image_view.hpp"
 #include "plugin/operation_host_adapter.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/graph_event_service.hpp"
@@ -83,20 +86,84 @@ static_assert(std::is_same_v<decltype(NodeOutput::data), plugin::ParameterMap>);
  * @param channels Positive interleaved channel count.
  * @param value Scalar assigned to every logical channel element.
  * @return NodeOutput containing exactly one sealed `"image"` Value.
- * @throws Allocation, OpenCV, Value validation, or publication exceptions
+ * @throws Allocation, arithmetic, Value validation, or publication exceptions
  * unchanged.
- * @note Mutable ImageBuffer storage is callback-local. The returned output
- * retains only immutable Value authority and no compatibility staging.
+ * @note The helper uses an aligned padded CPU allocation and retires its only
+ * mutable builder authority before returning.
  */
 NodeOutput make_kernel_contract_image_output(int width, int height,
                                              int channels, float value) {
-  ImageBuffer buffer =
-      make_aligned_cpu_image_buffer(width, height, channels, DataType::FLOAT32);
-  toCvMat(buffer).setTo(value);
+  if (width <= 0 || height <= 0 || channels <= 0) {
+    throw std::invalid_argument(
+        "Kernel contract image dimensions must be positive.");
+  }
+  const std::size_t logical_width = static_cast<std::size_t>(width);
+  const std::size_t logical_height = static_cast<std::size_t>(height);
+  const std::size_t logical_channels = static_cast<std::size_t>(channels);
+  if (logical_width > std::numeric_limits<std::size_t>::max() /
+                          logical_channels / sizeof(float)) {
+    throw std::overflow_error("Kernel contract image row size overflowed.");
+  }
+  const std::size_t row_bytes =
+      logical_width * logical_channels * sizeof(float);
+  constexpr std::size_t kAlignment = 64U;
+  if (row_bytes > std::numeric_limits<std::size_t>::max() - (kAlignment - 1U)) {
+    throw std::overflow_error("Kernel contract image stride overflowed.");
+  }
+  const std::size_t row_stride =
+      (row_bytes + kAlignment - 1U) & ~(kAlignment - 1U);
+  if (logical_height - 1U >
+      (std::numeric_limits<std::size_t>::max() - row_bytes) / row_stride) {
+    throw std::overflow_error("Kernel contract image storage overflowed.");
+  }
+  const std::size_t storage_size =
+      (logical_height - 1U) * row_stride + row_bytes;
+  DenseTensorDescriptor descriptor{
+      {logical_height, logical_width, logical_channels},
+      ElementSemantics::FloatingPoint,
+      StorageEncoding{32U}};
+  ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  image.sample_domain = SampleDomainFacet{
+      1U,
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -65504.0, 65504.0},
+      {}};
+  StridedLayout layout{
+      {static_cast<std::ptrdiff_t>(row_stride),
+       static_cast<std::ptrdiff_t>(logical_channels * sizeof(float)),
+       static_cast<std::ptrdiff_t>(sizeof(float))}};
+  ValueBuilder builder = ValueBuilder::allocate_cpu_dense_tensor(
+      std::move(descriptor), std::move(image), std::move(layout), storage_size,
+      kAlignment);
+  {
+    WriteLease write = builder.acquire_write();
+    std::memset(write.data(), 0, write.size());
+    for (std::size_t row = 0U; row < logical_height; ++row) {
+      float* const samples =
+          reinterpret_cast<float*>(write.data() + row * row_stride);
+      std::fill_n(samples, logical_width * logical_channels, value);
+    }
+  }
   NodeOutput output;
-  output.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(buffer));
+  output.publish_image_value(builder.seal());
   return output;
+}
+
+/**
+ * @brief Creates one deterministic canonical CPU image Value for codec tests.
+ * @param width Positive image width.
+ * @param height Positive image height.
+ * @param channels Positive interleaved channel count.
+ * @param value Scalar assigned to every logical channel element.
+ * @return Ready immutable image Value with padded aligned rows.
+ * @throws Exceptions from `make_kernel_contract_image_output` unchanged.
+ * @note The temporary NodeOutput adds no identity or storage; the returned
+ * Value retains its exact revision and allocation after the wrapper retires.
+ */
+Value make_kernel_contract_image_value(int width, int height, int channels,
+                                       float value) {
+  return make_kernel_contract_image_output(width, height, channels, value)
+      .image_value();
 }
 
 /**
@@ -149,40 +216,36 @@ DenseImageOutputPlan make_offset_kernel_output_plan(
 }
 
 /**
- * @brief Projects one canonical Kernel-test image for callback-local access.
+ * @brief Retains one canonical Kernel-test image for callback-local access.
  *
  * @param output Output containing a Ready host-readable image Value.
- * @return Callback-local, independently allocated ImageBuffer snapshot of the
- * immutable Value bytes.
+ * @return Immutable Value alias retaining the same payload and metadata.
  * @throws std::invalid_argument when the canonical image is absent.
- * @throws ReadyFenceAccessError, BufferAccessError, or metadata conversion
- * exceptions unchanged.
- * @note Callers must treat the returned bytes as read-only. The returned
- * ImageBuffer owns its copied payload and does not retain the source Value;
- * every borrowed adapter view must remain inside the ImageBuffer lifetime.
- * The snapshot is never stored in graph, cache, proxy, or result authority.
+ * @throws std::bad_alloc only if exception diagnostics allocate.
+ * @note Callers must treat all borrowed views as read-only and retain this
+ * alias for their complete lifetime. No copy or second image authority is
+ * created.
  */
-ImageBuffer project_kernel_contract_image(const NodeOutput& output) {
+Value retain_kernel_contract_image(const NodeOutput& output) {
   if (!output.has_image_value()) {
     throw std::invalid_argument(
-        "Kernel contract image projection requires a canonical Value.");
+        "Kernel contract image access requires a canonical Value.");
   }
-  return value_image_adapter::snapshot_cpu_image_buffer(output.image_value());
+  return output.image_value();
 }
 
 /**
  * @brief Publishes one prepared CPU image into a fresh Kernel-test output.
  *
- * @param buffer Complete callback-local CPU image whose bytes are snapshotted.
+ * @param value Complete immutable CPU image retained by the output.
  * @return NodeOutput containing one sealed canonical image Value.
- * @throws Value validation, allocation, or publication exceptions unchanged.
- * @note This helper creates one Value revision and retains no mutable producer
- * authority after return.
+ * @throws Value validation or publication exceptions unchanged.
+ * @note Publication preserves the Value's exact revision, allocation,
+ * descriptor, facet, layout, binding, and readiness.
  */
-NodeOutput publish_kernel_contract_image(const ImageBuffer& buffer) {
+NodeOutput publish_kernel_contract_image(Value value) {
   NodeOutput output;
-  output.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(buffer));
+  output.publish_image_value(std::move(value));
   return output;
 }
 
@@ -879,14 +942,8 @@ void register_contract_ops() {
                 throw GraphError(GraphErrc::MissingDependency,
                                  "process requires an input");
               }
-              const ImageBuffer input =
-                  project_kernel_contract_image(*inputs.front());
-              ImageBuffer output = make_aligned_cpu_image_buffer(
-                  input.width, input.height, input.channels, input.type);
-              cv::Mat src = toCvMat(input);
-              cv::Mat dst = toCvMat(output);
-              src.copyTo(dst);
-              return publish_kernel_contract_image(output);
+              return publish_kernel_contract_image(
+                  dense_image_processing::clone(inputs.front()->image_value()));
             }));
 
     registry.register_op_hp_monolithic(
@@ -927,12 +984,8 @@ void register_contract_ops() {
               if (release.valid()) {
                 release.wait();
               }
-              const ImageBuffer input =
-                  project_kernel_contract_image(*inputs.front());
-              ImageBuffer output = make_aligned_cpu_image_buffer(
-                  input.width, input.height, input.channels, input.type);
-              toCvMat(input).copyTo(toCvMat(output));
-              return publish_kernel_contract_image(output);
+              return publish_kernel_contract_image(
+                  dense_image_processing::clone(inputs.front()->image_value()));
             }));
 
     registry.register_op_rt_tiled(
@@ -1043,12 +1096,8 @@ void register_contract_ops() {
                              "effective parameter contract values differ");
           }
           constexpr int kDefaultHeight = 3;
-          ImageBuffer output = make_aligned_cpu_image_buffer(
-              static_cast<int>(count->as_int64()), kDefaultHeight, 1,
-              DataType::FLOAT32);
-          cv::Mat image = toCvMat(output);
-          image.setTo(2.0f);
-          return publish_kernel_contract_image(output);
+          return make_kernel_contract_image_output(
+              static_cast<int>(count->as_int64()), kDefaultHeight, 1, 2.0F);
         }));
   });
 }
@@ -1881,8 +1930,8 @@ class KernelCodecTeardownScenario final {
 
     auto codec = std::make_shared<testing::FakeImageArtifactCodec>(
         testing::FakeImageArtifactCodec::DecodeCallback{},
-        [this](const std::filesystem::path&, const ImageBuffer&,
-               ImageArtifactPrecision) {
+        [this](const std::filesystem::path&, const Value&,
+               const ImageArtifactEncodeRequest&) {
           codec_alive_during_encode_.store(!weak_codec_.expired(),
                                            std::memory_order_release);
           encode_finished_.store(true, std::memory_order_release);
@@ -1904,7 +1953,7 @@ class KernelCodecTeardownScenario final {
                 state.caches.push_back({"image", "output.png"});
                 state.cached_output_high_precision =
                     make_kernel_contract_image_output(2, 1, 1, 0.0F);
-                state.hp_region = value_image_adapter::full_node_output_region(
+                state.hp_region = value_region::full_node_output_region(
                     *state.cached_output_high_precision);
               });
         })
@@ -2250,22 +2299,25 @@ bool is_complete_concurrent_disk_cache_diagnostic(
 
 }  // namespace
 
-TEST(ImageBufferContract, AlignedCpuRowsAndPaddedStep) {
-  ImageBuffer buffer =
-      make_aligned_cpu_image_buffer(17, 5, 3, DataType::FLOAT32);
-
-  const auto base = reinterpret_cast<std::uintptr_t>(buffer.data.get());
+TEST(DenseImageValueContract, AlignedCpuRowsAndPaddedStride) {
+  const NodeOutput output = make_kernel_contract_image_output(17, 5, 3, 0.0F);
+  const Value value = retain_kernel_contract_image(output);
+  const ImageView view(value);
+  const ReadLease read = value.buffer_handle().acquire_read();
+  const auto base = reinterpret_cast<std::uintptr_t>(read.data());
   EXPECT_EQ(base % 64, 0u);
-  EXPECT_EQ(buffer.step % 64, 0u);
-  EXPECT_GT(buffer.step, 17u * 3u * sizeof(float));
+  ASSERT_GT(view.row_stride(), 0);
+  const auto row_stride = static_cast<std::size_t>(view.row_stride());
+  EXPECT_EQ(row_stride % 64, 0u);
+  EXPECT_GT(row_stride, 17u * 3u * sizeof(float));
 
-  for (int y = 0; y < buffer.height; ++y) {
-    const auto row = base + static_cast<std::uintptr_t>(y) * buffer.step;
+  for (std::size_t y = 0U; y < view.height(); ++y) {
+    const auto row = base + static_cast<std::uintptr_t>(y) * row_stride;
     EXPECT_EQ(row % 64, 0u);
   }
 }
 
-TEST(ImageBufferContract, OpenCvAndTileAccessRespectPaddedStep) {
+TEST(DenseImageValueContract, OpenCvAndTileAccessRespectPaddedStride) {
   NodeOutput initial = make_kernel_contract_image_output(17, 4, 1, 0.0F);
   const std::vector<const NodeOutput*> plan_inputs{&initial};
   HostOutputBinding binding =
@@ -2286,9 +2338,9 @@ TEST(ImageBufferContract, OpenCvAndTileAccessRespectPaddedStep) {
   grant.retire_success();
   NodeOutput published;
   published.publish_image_value(binding.seal());
-  const ImageBuffer buffer = project_kernel_contract_image(published);
+  const Value buffer = retain_kernel_contract_image(published);
   const cv::Mat mat = toCvMat(buffer);
-  ASSERT_EQ(mat.step, buffer.step);
+  ASSERT_EQ(mat.step, static_cast<std::size_t>(ImageView(buffer).row_stride()));
   ASSERT_FALSE(mat.isContinuous());
 
   EXPECT_FLOAT_EQ(mat.at<float>(1, 3), 7.0f);
@@ -2303,7 +2355,7 @@ TEST(ImageBufferContract, OpenCvAndTileAccessRespectPaddedStep) {
  *
  * @return Nothing; GoogleTest reports view, stride, UMat lifetime/write-back,
  * pixel, or fail-closed behavior mismatches.
- * @throws Host plan, allocation, grant, OpenCV, Value, or projection
+ * @throws Host plan, allocation, grant, OpenCV, or Value inspection
  * exceptions when the positive fixture cannot execute.
  * @note The first grant is negative in logical coordinates but writes storage
  * ROI `{3,2,5,3}` through a padded-stride UMat destroyed before grant
@@ -2313,7 +2365,7 @@ TEST(ImageBufferContract, OpenCvAndTileAccessRespectPaddedStep) {
  * INT64_MAX exactly, while an unrepresentable data-window span fails before
  * allocation.
  */
-TEST(ImageBufferContract,
+TEST(DenseImageValueContract,
      OpenCvOutputTileTranslatesSignedOriginAndRejectsMismatch) {
   const ImageBounds bounds{-7, -5, 10, 7};
   HostOutputBinding initial_binding =
@@ -2348,7 +2400,7 @@ TEST(ImageBufferContract,
   grant.retire_success();
   NodeOutput published;
   published.publish_image_value(binding.seal());
-  const ImageBuffer pixels_buffer = project_kernel_contract_image(published);
+  const Value pixels_buffer = retain_kernel_contract_image(published);
   const cv::Mat pixels = toCvMat(pixels_buffer);
   EXPECT_FLOAT_EQ(pixels.at<float>(2, 3), 7.0F);
   EXPECT_FLOAT_EQ(pixels.at<float>(4, 7), 7.0F);
@@ -2528,10 +2580,13 @@ TEST(ParameterValuePath, DocumentGraphAndOperationsStayFormatNeutral) {
             snapshot["consumer_static_count"] = consumer.parameters.at("count");
             snapshot["dynamic_count"] =
                 source.cached_output_high_precision->data.at("dynamic_count");
-            const ImageBuffer final_image = project_kernel_contract_image(
+            const Value final_image = retain_kernel_contract_image(
                 *consumer.cached_output_high_precision);
-            snapshot["final_width"] = final_image.width;
-            snapshot["final_height"] = final_image.height;
+            const ImageView final_view(final_image);
+            snapshot["final_width"] =
+                static_cast<std::int64_t>(final_view.width());
+            snapshot["final_height"] =
+                static_cast<std::int64_t>(final_view.height());
             return snapshot;
           })
           .get();
@@ -2628,14 +2683,16 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
   hp_request.intent = ComputeIntent::GlobalHighPrecision;
   NodeOutput& hp = compute.compute(graph, hp_request);
   EXPECT_TRUE(graph.node(2).cached_output_high_precision.has_value());
-  const ImageBuffer hp_image = project_kernel_contract_image(hp);
-  const ImageBuffer cached_hp_image = project_kernel_contract_image(
-      *graph.node(2).cached_output_high_precision);
-  EXPECT_EQ(hp_image.width, cached_hp_image.width);
+  const Value hp_image = retain_kernel_contract_image(hp);
+  const Value cached_hp_image =
+      retain_kernel_contract_image(*graph.node(2).cached_output_high_precision);
+  const ImageView hp_view(hp_image);
+  const ImageView cached_hp_view(cached_hp_image);
+  EXPECT_EQ(hp_view.width(), cached_hp_view.width());
 
   // Snapshot HP cache dimensions before RT compute
-  const int hp_w_before = cached_hp_image.width;
-  const int hp_h_before = cached_hp_image.height;
+  const std::size_t hp_w_before = cached_hp_view.width();
+  const std::size_t hp_h_before = cached_hp_view.height();
 
   // RT compute returns proxy output; cached_output_high_precision must remain
   // unchanged.
@@ -2646,16 +2703,17 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
 
   // Key contract: RT compute must NOT alter the formal HP cache
   ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
-  const ImageBuffer retained_hp_image = project_kernel_contract_image(
-      *graph.node(2).cached_output_high_precision);
-  EXPECT_EQ(retained_hp_image.width, hp_w_before)
+  const Value retained_hp_image =
+      retain_kernel_contract_image(*graph.node(2).cached_output_high_precision);
+  const ImageView retained_hp_view(retained_hp_image);
+  EXPECT_EQ(retained_hp_view.width(), hp_w_before)
       << "RT compute must not change HP cache width";
-  EXPECT_EQ(retained_hp_image.height, hp_h_before)
+  EXPECT_EQ(retained_hp_view.height(), hp_h_before)
       << "RT compute must not change HP cache height";
 
   // RT output should be downscaled relative to HP
-  const ImageBuffer rt_image = project_kernel_contract_image(rt);
-  EXPECT_LE(rt_image.width, hp_w_before)
+  const Value rt_image = retain_kernel_contract_image(rt);
+  EXPECT_LE(ImageView(rt_image).width(), hp_w_before)
       << "RT output should be <= HP output width";
 }
 
@@ -2795,7 +2853,7 @@ TEST(CacheSemantics, ConfiguredYamlMetadataCodecRoundTripsNamedValues) {
   expected.emplace("answer", plugin::ParameterValue(42));
   expected.emplace("nested", plugin::ParameterValue(std::move(nested)));
   saved.cached_output_high_precision->data = expected;
-  saved.hp_region = value_image_adapter::full_node_output_region(
+  saved.hp_region = value_region::full_node_output_region(
       *saved.cached_output_high_precision);
 
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
@@ -2843,7 +2901,8 @@ TEST(CacheSemantics, DiskCacheInvalidMetadataRecordsErrorDiagnostic) {
 TEST(CacheSemantics, InjectedCodecIoErrorLeavesHpCacheUnchanged) {
   DiskCacheDiagnosticContext ctx(
       "photospider-contract-disk-cache-codec-io", "output.png",
-      [](const std::filesystem::path& path) -> ImageBuffer {
+      [](const std::filesystem::path& path,
+         const ImageArtifactDecodeRequest&) -> Value {
         throw GraphError(
             GraphErrc::Io,
             "fake decode rejected image artifact: " + path.string());
@@ -2873,9 +2932,8 @@ TEST(CacheSemantics, InjectedCodecIoErrorLeavesHpCacheUnchanged) {
 TEST(CacheSemantics, InjectedCodecBadAllocPropagatesWithoutHpMutation) {
   DiskCacheDiagnosticContext ctx(
       "photospider-contract-disk-cache-codec-bad-alloc", "output.png",
-      [](const std::filesystem::path&) -> ImageBuffer {
-        throw std::bad_alloc();
-      });
+      [](const std::filesystem::path&, const ImageArtifactDecodeRequest&)
+          -> Value { throw std::bad_alloc(); });
   write_text(ctx.cache_file(), "fake image bytes");
 
   EXPECT_THROW(
@@ -2899,7 +2957,7 @@ TEST(CacheSemantics,
   saved.cached_output_high_precision = NodeOutput{};
   saved.cached_output_high_precision->data.emplace(
       "written", plugin::ParameterValue("value"));
-  saved.hp_region = value_image_adapter::full_node_output_region(
+  saved.hp_region = value_region::full_node_output_region(
       *saved.cached_output_high_precision);
   const plugin::ParameterMap read_values{
       {"loaded", plugin::ParameterValue(73)}};
@@ -3043,8 +3101,9 @@ TEST(CacheSemantics,
   write_text(metadata_file, "fake metadata presence");
 
   auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
-      [](const std::filesystem::path&) -> ImageBuffer {
-        return make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+      [](const std::filesystem::path&,
+         const ImageArtifactDecodeRequest&) -> Value {
+        return make_kernel_contract_image_value(2, 1, 1, 0.0F);
       });
   auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
       [](const std::filesystem::path&) -> plugin::ParameterMap {
@@ -3104,8 +3163,9 @@ TEST(CacheSemantics,
   write_text(metadata_file, "fake metadata presence");
 
   auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
-      [](const std::filesystem::path&) -> ImageBuffer {
-        return make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+      [](const std::filesystem::path&,
+         const ImageArtifactDecodeRequest&) -> Value {
+        return make_kernel_contract_image_value(2, 1, 1, 0.0F);
       });
   auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
       [](const std::filesystem::path&) -> plugin::ParameterMap { throw 73; });
@@ -3138,14 +3198,14 @@ TEST(CacheSemantics,
   std::filesystem::remove_all(root);
 }
 
-TEST(CacheSemantics, InjectedCodecLifetimeAndPrecisionFollowCacheService) {
+TEST(CacheSemantics, InjectedCodecLifetimeAndPolicyFollowCacheService) {
   const auto root = clean_temp_path("photospider-contract-codec-lifetime");
   GraphModel graph(root);
   Node node = make_cached_process_node("output.png");
   node.cached_output_high_precision =
       make_kernel_contract_image_output(2, 1, 1, 0.0F);
-  node.hp_region = value_image_adapter::full_node_output_region(
-      *node.cached_output_high_precision);
+  node.hp_region =
+      value_region::full_node_output_region(*node.cached_output_high_precision);
   const std::filesystem::path expected_path =
       root / std::to_string(node.id) / node.caches.front().location;
 
@@ -3165,8 +3225,21 @@ TEST(CacheSemantics, InjectedCodecLifetimeAndPrecisionFollowCacheService) {
     EXPECT_EQ(calls.front().kind,
               testing::FakeImageArtifactCodec::Call::Kind::Encode);
     EXPECT_EQ(calls.front().path, expected_path);
-    ASSERT_TRUE(calls.front().precision.has_value());
-    EXPECT_EQ(*calls.front().precision, ImageArtifactPrecision::UInt16);
+    ASSERT_TRUE(calls.front().encode_request.has_value());
+    ASSERT_TRUE(calls.front().encode_request->conversion.has_value());
+    const SampleConversion& conversion =
+        *calls.front().encode_request->conversion;
+    EXPECT_EQ(conversion.destination_element_semantics,
+              ElementSemantics::UnsignedInteger);
+    EXPECT_EQ(conversion.destination_storage_encoding, StorageEncoding{16U});
+    EXPECT_EQ(conversion.destination.encoding.kind,
+              SampleEncodingKind::CodeValue);
+    EXPECT_EQ(conversion.destination.domain,
+              (SampleDomain{SampleDomainKind::CodeValue, 0.0, 65535.0}));
+    EXPECT_EQ(conversion.out_of_domain, OutOfDomainPolicy::Reject);
+    EXPECT_EQ(conversion.rounding, SampleRoundingMode::NearestEven);
+    EXPECT_EQ(conversion.non_finite, NonFinitePolicy::Reject);
+    EXPECT_EQ(conversion.precision_loss, PrecisionLossPolicy::Allow);
   }
 
   EXPECT_TRUE(weak_codec.expired());
@@ -3194,7 +3267,7 @@ TEST(CacheSemantics, SchemaReplacementWriteFailureRetainsPredecessorSibling) {
     node.cached_output_high_precision = NodeOutput{};
     node.cached_output_high_precision->data.emplace("radius",
                                                     plugin::ParameterValue(37));
-    node.hp_region = value_image_adapter::full_node_output_region(
+    node.hp_region = value_region::full_node_output_region(
         *node.cached_output_high_precision);
     const std::filesystem::path image_path =
         root / std::to_string(node.id) / node.caches.front().location;
@@ -3234,7 +3307,7 @@ TEST(CacheSemantics, SchemaReplacementWriteFailureRetainsPredecessorSibling) {
     Node node = make_cached_process_node("output.png");
     node.cached_output_high_precision =
         make_kernel_contract_image_output(2, 1, 1, 41.0F);
-    node.hp_region = value_image_adapter::full_node_output_region(
+    node.hp_region = value_region::full_node_output_region(
         *node.cached_output_high_precision);
     const ValueRevisionId expected_revision =
         node.cached_output_high_precision->image_value().revision_id();
@@ -3246,8 +3319,8 @@ TEST(CacheSemantics, SchemaReplacementWriteFailureRetainsPredecessorSibling) {
 
     auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
         testing::FakeImageArtifactCodec::DecodeCallback{},
-        [](const std::filesystem::path&, const ImageBuffer&,
-           ImageArtifactPrecision) {
+        [](const std::filesystem::path&, const Value&,
+           const ImageArtifactEncodeRequest&) {
           throw GraphError(GraphErrc::Io, "injected image replacement failure");
         });
     auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>();
@@ -3304,8 +3377,8 @@ TEST(CacheSemantics, BlockedExecutorCodecLeavesSingleCpuWorkerAvailable) {
   auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
       testing::FakeImageArtifactCodec::DecodeCallback{},
       [&codec_entered, codec_release](const std::filesystem::path&,
-                                      const ImageBuffer&,
-                                      ImageArtifactPrecision) {
+                                      const Value&,
+                                      const ImageArtifactEncodeRequest&) {
         codec_entered.set_value();
         codec_release.wait();
       });
@@ -3326,7 +3399,7 @@ TEST(CacheSemantics, BlockedExecutorCodecLeavesSingleCpuWorkerAvailable) {
               state.caches.push_back({"image", "output.png"});
               state.cached_output_high_precision =
                   make_kernel_contract_image_output(2, 1, 1, 0.0F);
-              state.hp_region = value_image_adapter::full_node_output_region(
+              state.hp_region = value_region::full_node_output_region(
                   *state.cached_output_high_precision);
             });
       })
@@ -3534,8 +3607,8 @@ TEST(CacheSemantics, ExecutorCodecFailureLeavesLiveGraphUnpublished) {
 
   auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
       testing::FakeImageArtifactCodec::DecodeCallback{},
-      [](const std::filesystem::path&, const ImageBuffer&,
-         ImageArtifactPrecision) {
+      [](const std::filesystem::path&, const Value&,
+         const ImageArtifactEncodeRequest&) {
         throw GraphError(GraphErrc::Io,
                          "injected executor cache codec failure");
       });
@@ -4754,10 +4827,10 @@ TEST(ComputeContracts,
             const auto& output = graph.node(1).cached_output_high_precision;
             const bool has_output = output.has_value();
             return std::pair<bool, float>{
-                has_output,
-                has_output ? toCvMat(project_kernel_contract_image(*output))
-                                 .at<float>(0, 0)
-                           : -1.0F};
+                has_output, has_output
+                                ? toCvMat(retain_kernel_contract_image(*output))
+                                      .at<float>(0, 0)
+                                : -1.0F};
           })
           .get();
   EXPECT_TRUE(visible.first);
@@ -5023,7 +5096,7 @@ TEST(ComputeContracts,
           })
           .get();
   EXPECT_FLOAT_EQ(
-      toCvMat(project_kernel_contract_image(old_visible_proxy)).at<float>(0, 0),
+      toCvMat(retain_kernel_contract_image(old_visible_proxy)).at<float>(0, 0),
       5.0F);
 
   Kernel::ComputeRequest latest_request = old_request;
@@ -5080,8 +5153,7 @@ TEST(ComputeContracts,
           })
           .get();
   EXPECT_FLOAT_EQ(
-      toCvMat(project_kernel_contract_image(final_proxy)).at<float>(0, 0),
-      5.0F);
+      toCvMat(retain_kernel_contract_image(final_proxy)).at<float>(0, 0), 5.0F);
   EXPECT_EQ(testing::KernelTestAccess::runtime(kernel, graph_name)
                 .compute_request_snapshot()
                 .lane_admitted_units,
@@ -5199,7 +5271,7 @@ TEST(ComputeContracts,
           })
           .get();
   EXPECT_FLOAT_EQ(
-      toCvMat(project_kernel_contract_image(proxy_output)).at<float>(0, 0),
+      toCvMat(retain_kernel_contract_image(proxy_output)).at<float>(0, 0),
       5.0F);
   EXPECT_EQ(testing::KernelTestAccess::runtime(kernel, graph_name)
                 .compute_request_snapshot()
@@ -5572,7 +5644,7 @@ TEST(ComputeContracts, CancellationAfterCommitClaimPreservesPublication) {
             return std::tuple<uint64_t, bool, float>{
                 graph.revision().value(),
                 graph.node(1).cached_output_high_precision.has_value(),
-                toCvMat(project_kernel_contract_image(output)).at<float>(0, 0)};
+                toCvMat(retain_kernel_contract_image(output)).at<float>(0, 0)};
           })
           .get();
   EXPECT_EQ(std::get<0>(final_state), initial_revision);
@@ -5671,7 +5743,7 @@ TEST(ComputeContracts,
                 testing::KernelTestAccess::runtime(kernel, graph_name)
                     .realtime_proxy_graph()
                     .require_output(2);
-            return toCvMat(project_kernel_contract_image(output))
+            return toCvMat(retain_kernel_contract_image(output))
                 .at<float>(0, 0);
           })
           .get();
@@ -5702,7 +5774,7 @@ TEST(ComputeContracts,
                 testing::KernelTestAccess::runtime(kernel, graph_name)
                     .realtime_proxy_graph()
                     .require_output(2);
-            return toCvMat(project_kernel_contract_image(output))
+            return toCvMat(retain_kernel_contract_image(output))
                 .at<float>(0, 0);
           })
           .get();
@@ -5823,7 +5895,7 @@ TEST(ComputeContracts, RealtimeCommitSurvivesStaleHighPrecisionSibling) {
             return std::tuple<uint64_t, bool, float>{
                 graph.revision().value(),
                 graph.node(2).cached_output_high_precision.has_value(),
-                toCvMat(project_kernel_contract_image(output)).at<float>(0, 0)};
+                toCvMat(retain_kernel_contract_image(output)).at<float>(0, 0)};
           });
   const auto [final_revision, has_hp_output, rt_pixel] = visible_state.get();
   EXPECT_EQ(final_revision, mutated_revision);

@@ -16,6 +16,7 @@
 
 #include "photospider/data/extension.hpp"
 #include "photospider/data/value.hpp"
+#include "photospider/data/value_artifact.hpp"
 #include "photospider/plugin/data_definition_registry.hpp"
 
 namespace ps {
@@ -1222,6 +1223,75 @@ TEST(VariableSampleFieldExtensions,
   } catch (const ExtensionContractError& error) {
     EXPECT_EQ(error.code(), ExtensionErrorCode::MissingProvider);
   }
+}
+
+TEST(VariableSampleFieldExtensions,
+     PortableValueArtifactRevalidatesMultiBufferProviderValue) {
+  DataDefinitionRegistry registry;
+  SyntheticCandidate fixture = make_candidate(23U);
+  const DataProviderLoadResult loaded =
+      load_candidate(registry, std::move(fixture));
+  ASSERT_TRUE(loaded.ok()) << loaded.diagnostic;
+  const DataDescriptorEnvelope descriptor = make_descriptor(true);
+  SyntheticStorage storage =
+      make_storage({kOffsetsRole, kSamplesRole, kCountsRole}, {2U, 3U, 4U});
+  const Value original = Value::from_provider_defined(
+      registry, descriptor, storage.layout, storage.buffers);
+
+  const ValueArtifact captured = capture_value_artifact("deep", original);
+  const std::vector<std::byte> archive =
+      encode_named_value_artifact_set(NamedValueArtifactSet{{captured}});
+  const NamedValueArtifactSet decoded =
+      decode_named_value_artifact_set(archive);
+
+  ASSERT_EQ(decoded.values.size(), 1U);
+  const ValueArtifact& artifact = decoded.values.front();
+  EXPECT_EQ(artifact.envelope.output_name, "deep");
+  EXPECT_EQ(artifact.envelope.representation,
+            ValueRepresentationKind::ProviderDefined);
+  EXPECT_EQ(artifact.envelope.layout_kind, StorageLayoutKind::ProviderDefined);
+  EXPECT_EQ(artifact.envelope.provider_descriptor,
+            std::optional<DataDescriptorEnvelope>(descriptor));
+  EXPECT_EQ(artifact.envelope.provider_layout,
+            std::optional<ProviderDefinedLayout>(storage.layout));
+  ASSERT_EQ(artifact.envelope.buffers.size(), storage.buffers.size());
+  ASSERT_EQ(artifact.payloads.size(), storage.buffers.size());
+  EXPECT_EQ(artifact.envelope.buffers[0].logical_role, kOffsetsRole);
+  EXPECT_EQ(artifact.envelope.buffers[1].logical_role, kSamplesRole);
+  EXPECT_EQ(artifact.envelope.buffers[2].logical_role, kCountsRole);
+
+  try {
+    (void)reconstruct_value_artifact(artifact);
+    FAIL() << "provider-defined artifact reconstructed without a registry";
+  } catch (const ExtensionContractError& error) {
+    EXPECT_EQ(error.code(), ExtensionErrorCode::MissingProvider);
+  }
+
+  const Value reconstructed = reconstruct_value_artifact(artifact, &registry);
+  EXPECT_NE(reconstructed.revision_id(), original.revision_id());
+  EXPECT_EQ(reconstructed.provider_generation(), loaded.generation);
+  EXPECT_EQ(reconstructed.provider_defined_descriptor(), descriptor);
+  EXPECT_EQ(reconstructed.provider_defined_layout(), storage.layout);
+  EXPECT_EQ(compute_content_digest(reconstructed).digest,
+            compute_content_digest(original).digest);
+  ASSERT_EQ(reconstructed.buffer_count(), original.buffer_count());
+  for (std::size_t index = 0U; index < original.buffer_count(); ++index) {
+    const ProviderReadLease original_read =
+        original.acquire_provider_read(index);
+    const ProviderReadLease reconstructed_read =
+        reconstructed.acquire_provider_read(index);
+    EXPECT_NE(reconstructed_read.allocation_identity(),
+              original_read.allocation_identity());
+    ASSERT_EQ(reconstructed_read.size(), original_read.size());
+    EXPECT_TRUE(std::equal(original_read.data(),
+                           original_read.data() + original_read.size(),
+                           reconstructed_read.data()));
+  }
+
+  ValueArtifact corrupted = artifact;
+  corrupted.payloads[1][0] ^= std::byte{0x01};
+  EXPECT_THROW((void)reconstruct_value_artifact(corrupted, &registry),
+               std::invalid_argument);
 }
 
 TEST(VariableSampleFieldExtensions,

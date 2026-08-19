@@ -1,6 +1,6 @@
 /**
  * @file durable_server_state.hpp
- * @brief Declares Issue #99 durable Job and image-artifact authority.
+ * @brief Declares Issue #99 durable Job and named-Value artifact authority.
  */
 #pragma once
 
@@ -153,7 +153,7 @@ enum class DurableArtifactEraseStage : std::uint8_t {
 struct DurableArtifactEraseResult final {
   /** @brief Furthest irreversible visibility/cleanup state reached. */
   DurableArtifactEraseState state = DurableArtifactEraseState::NotRemoved;
-  /** @brief Exact known tight payload charge, or zero when not recoverable. */
+  /** @brief Exact known archive charge, or zero when not recoverable. */
   std::uint64_t payload_bytes = 0U;
   /** @brief Captured original deletion failure, or null after clean success. */
   std::exception_ptr failure;
@@ -432,7 +432,7 @@ struct DurableServerStateOptions final {
 };
 
 /**
- * @brief Server-owned stable image commit request for one current attempt.
+ * @brief Server-owned stable Value artifact commit request for one attempt.
  * @throws Nothing for default/value operations; copied fields may allocate.
  * @note `artifact_id` and `output_commit_id` are allocated at initial Job
  * acceptance and preserved across retry. Workers never construct this value.
@@ -577,11 +577,11 @@ class DurableServerState final {
   std::vector<DurableJobRecord> recovered_jobs() const;
 
   /**
-   * @brief Publishes or idempotently reconciles one crash-durable image.
+   * @brief Publishes or reconciles one crash-durable named-Value artifact set.
    * @param request Current server-owned stable transaction request.
-   * @param image Valid nonempty CPU image candidate.
+   * @param values Valid nonempty canonical named-Value artifact candidate.
    * @return Original or newly committed identity-complete durable receipt.
-   * @throws std::invalid_argument for invalid request/image/quota bounds.
+   * @throws std::invalid_argument for invalid request/artifact/quota bounds.
    * @throws DurableConflictError for same-id identity/content conflict.
    * @throws DurableCapabilityError when a required primitive is unsupported.
    * @throws DurableCorruptionError for retained namespace/content drift.
@@ -592,7 +592,8 @@ class DurableServerState final {
    * method can return a crash-durable receipt.
    */
   OutputCommitReceipt commit_artifact(
-      const DurableArtifactCommitRequest& request, const ImageBuffer& image);
+      const DurableArtifactCommitRequest& request,
+      const NamedValueArtifactSet& values);
 
   /**
    * @brief Looks up and, when needed, lazily revalidates one durable artifact.

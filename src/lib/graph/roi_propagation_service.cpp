@@ -892,7 +892,7 @@ void enqueue_backward_parent_rois(const GraphModel& graph, int current_id,
 
 /** @copydoc RoiPropagationService::RoiPropagationService */
 RoiPropagationService::RoiPropagationService(
-    std::vector<Device> available_devices, ComputeIntent intent)
+    std::vector<DeviceBackend> available_devices, ComputeIntent intent)
     : available_devices_(std::move(available_devices)), intent_(intent) {}
 
 /** @copydoc RoiPropagationService::select_route_implementation */

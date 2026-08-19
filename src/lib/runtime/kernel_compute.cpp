@@ -6,8 +6,8 @@
  * The adapter-to-Kernel compute boundary remains stable behind `ps::Host`.
  * This file collects the shared runtime-start, ComputeService construction,
  * execution-mode branching, and LastError mapping that used to be duplicated
- * across compute, compute_async, and compute_and_get_image. Frontends construct
- * `HostComputeRequest`; the embedded adapter translates it to
+ * across compute, compute_async, and compute_and_get_values. Frontends
+ * construct `HostComputeRequest`; the embedded adapter translates it to
  * `Kernel::ComputeRequest` before these helpers run.
  */
 #include <atomic>
@@ -20,10 +20,10 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "compute/dirty/realtime_proxy_graph.hpp"
 #include "compute/execution/execution_service.hpp"
-#include "core/value_image_adapter.hpp"
 #include "runtime/kernel.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
 #include "runtime/kernel_compute_test_access.hpp"  // NOLINT(build/include_subdir)
@@ -890,36 +890,36 @@ bool Kernel::compute_request(const ComputeRequest& request) {
 }
 
 /**
- * @brief Delegates image compute to compute_and_get_image_request().
+ * @brief Delegates Value compute to compute_and_get_values_request().
  *
- * @param request Structured internal image compute request.
- * @return Cloned image or nullopt under the internal preview/save contract.
- * @throws std::bad_alloc if compute/image execution or handled-failure
+ * @param request Structured internal Value compute request.
+ * @return Exact named Values or nullopt under the handled-failure contract.
+ * @throws std::bad_alloc if compute/Value execution or handled-failure
  *         LastError construction exhausts memory.
- * @note Other compute and image-cloning failures become nullopt.
+ * @note Other compute and result-construction failures become nullopt.
  */
-std::optional<ImageBuffer> Kernel::compute_and_get_image(
+std::optional<NamedValueResult> Kernel::compute_and_get_values(
     const ComputeRequest& request) {
-  return compute_and_get_image_request(request);
+  return compute_and_get_values_request(request);
 }
 
 /**
- * @brief Computes and clones one committed node image through staged execution.
+ * @brief Computes and retains exact committed named Values through staging.
  *
- * @param request Internal image compute request captured into serialized work.
- * @return Host-boundary image snapshot, or nullopt for missing graph, handled
- *         failure, or an output without a canonical image Value.
- * @throws std::bad_alloc if compute/image execution or catch-path LastError
+ * @param request Internal Value compute request captured into serialized work.
+ * @return Host-boundary named Values, or nullopt for missing graph or handled
+ *         failure. An output without Values returns an engaged empty result.
+ * @throws std::bad_alloc if compute/Value execution or catch-path LastError
  *         construction exhausts memory.
  * @note The same private compute-request lane covers staged execution and the
- * following committed Value projection. Other compute and Value-to-ImageBuffer
- * projection exceptions become nullopt; successful image-less output clears
- * stale LastError state. Native-completion lineage pretracking precedes
+ * following committed Value retention. Result exceptions become nullopt;
+ * successful Value-less output clears stale LastError state.
+ * Native-completion lineage pretracking precedes
  * publication, and accepted current publication assigns the exact managed
  * current generation before physical execution, including coordinate-authorized
  * numeric decreases.
  */
-std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
+std::optional<NamedValueResult> Kernel::compute_and_get_values_request(
     const ComputeRequest& request) {
   auto runtime = acquire_runtime(request.name);
   if (!runtime) {
@@ -963,12 +963,13 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
         });
     NodeOutput output = settled.get();
 
-    if (!output.has_image_value()) {
-      runtime->clear_last_error();
-      return std::nullopt;
+    std::vector<NamedValue> values;
+    values.reserve(output.named_values.size());
+    for (const auto& [name, value] : output.named_values) {
+      values.push_back(NamedValue{name, value});
     }
     runtime->clear_last_error();
-    return value_image_adapter::snapshot_cpu_image_buffer(output.image_value());
+    return NamedValueResult(std::move(values));
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const GraphError& ge) {

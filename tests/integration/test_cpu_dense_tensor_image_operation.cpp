@@ -35,9 +35,10 @@
 #include "compute/request/compute_cache_policy.hpp"
 #include "compute/request/compute_result_committer.hpp"
 #include "core/cpu_dense_image_operation.hpp"
+#include "core/dense_image_processing.hpp"
 #include "core/ops.hpp"
 #include "core/pending_value.hpp"
-#include "core/value_image_adapter.hpp"
+#include "core/value_region.hpp"
 #include "execution/device/compute_io_executor.hpp"
 #include "execution/transfer/value_transfer_task.hpp"
 #include "graph/graph_cache_service.hpp"
@@ -47,7 +48,6 @@
 #include "graph/roi_propagation_service.hpp"
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/graph_error.hpp"
-#include "photospider/core/image_buffer.hpp"
 #include "photospider/data/image_view.hpp"
 #include "plugin/operation_host_adapter.hpp"
 #include "runtime/graph_event_service.hpp"
@@ -111,7 +111,7 @@ std::vector<compute::PlannedNodeWork> make_explicit_image_output_plan(
   work.node_id = node_id;
   compute::PlannedOutputAuthority authority;
   authority.implementation_identity = 1U;
-  authority.route_device = Device::CPU;
+  authority.route_device = DeviceBackend::CPU;
   authority.image_output_name = std::string(NodeOutput::kImageOutputName);
   authority.image_extent = PixelSize{width, height};
   work.output_authority = std::move(authority);
@@ -139,18 +139,21 @@ compute::PlannedOutputAuthority make_dynamic_output_authority(
  * @param height Positive image height.
  * @param channels Positive channel count.
  * @param row_stride Positive row stride at least width times channels.
- * @return Immutable Value whose active bytes increase from one.
+ * @param first_sample First active unsigned sample before deterministic
+ *        incrementing with uint8 wraparound.
+ * @return Immutable Value whose active bytes increase from `first_sample`.
  * @throws std::invalid_argument from Value validation for invalid arguments.
  * @throws std::bad_alloc when shape, layout, or storage allocation fails.
  * @note Inter-row padding is initialized to 0xA5 and is never an active
  *       element.
  */
 Value make_unsigned8_value(std::size_t width, std::size_t height,
-                           std::size_t channels, std::size_t row_stride) {
+                           std::size_t channels, std::size_t row_stride,
+                           std::uint8_t first_sample = 1U) {
   const std::size_t row_bytes = width * channels;
   const std::size_t storage_size = (height - 1U) * row_stride + row_bytes;
   std::vector<std::byte> storage(storage_size, std::byte{0xA5});
-  std::uint8_t next = 1U;
+  std::uint8_t next = first_sample;
   for (std::size_t y = 0U; y < height; ++y) {
     for (std::size_t x = 0U; x < width; ++x) {
       for (std::size_t channel = 0U; channel < channels; ++channel) {
@@ -162,7 +165,12 @@ Value make_unsigned8_value(std::size_t width, std::size_t height,
   DenseTensorDescriptor descriptor{{height, width, channels},
                                    ElementSemantics::UnsignedInteger,
                                    StorageEncoding{8U}};
-  const ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  image.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::CodeValue},
+                        SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0},
+                        {}};
   StridedLayout layout{{static_cast<std::ptrdiff_t>(row_stride),
                         static_cast<std::ptrdiff_t>(channels), 1}};
   return Value::from_cpu_dense_tensor(std::move(descriptor), image,
@@ -866,7 +874,7 @@ struct RectangularRouteProbe final {
 OpImplementation make_rectangular_route_candidate(
     ComputeIntent intent, const std::shared_ptr<RectangularRouteProbe>& probe) {
   OpMetadata metadata;
-  metadata.device_preference = Device::CPU;
+  metadata.device_preference = DeviceBackend::CPU;
   metadata.cost_score = 1;
   metadata.supports_high_precision =
       intent == ComputeIntent::GlobalHighPrecision;
@@ -921,8 +929,9 @@ OpImplementation make_rectangular_route_candidate(
  * slots before the first complete candidate-set publication.
  * @throws Registry validation, callback-copy, or allocation exceptions.
  * @note Compatibility slots keep snapshot tile/monolithic classification
- * representative of ordinary CPU registration. Device-candidate selection
- * still chooses only the complete candidate set and its exact callbacks.
+ * representative of ordinary CPU registration. DeviceBackend-candidate
+ * selection still chooses only the complete candidate set and its exact
+ * callbacks.
  */
 void publish_rectangular_route_generation(
     const std::string& type, const std::string& subtype, ComputeIntent intent,
@@ -936,13 +945,13 @@ void publish_rectangular_route_generation(
     compatibility_metadata.supports_realtime =
         intent == ComputeIntent::RealTimeUpdate;
     registry.register_impl(
-        type, subtype, Device::CPU,
+        type, subtype, DeviceBackend::CPU,
         MonolithicOpFunc(
             [](const Node&, const std::vector<const NodeOutput*>&) {
               return NodeOutput{};
             }),
         compatibility_metadata);
-    registry.register_impl(type, subtype, Device::CPU,
+    registry.register_impl(type, subtype, DeviceBackend::CPU,
                            TileOpFunc([](const Node&, const OutputTile&,
                                          const std::vector<InputTile>&) {}),
                            compatibility_metadata);
@@ -983,7 +992,7 @@ void populate_rectangular_route_graph(GraphModel* graph,
   source.cached_output_high_precision = NodeOutput{};
   source.cached_output_high_precision->publish_image_value(
       make_unsigned8_value(256U, 256U, 1U, 256U));
-  source.hp_region = value_image_adapter::full_node_output_region(
+  source.hp_region = value_region::full_node_output_region(
       *source.cached_output_high_precision);
   source.hp_version = 1;
   graph->add_node(std::move(source));
@@ -1020,8 +1029,8 @@ bool execute_rectangular_target_from_current_route(
   constexpr int kTargetNodeId = 121;
   const Node& target = graph.node(kTargetNodeId);
   const std::optional<OpImplementation> selected =
-      OpRegistry::instance().select_implementation(target.type, target.subtype,
-                                                   {Device::CPU}, intent);
+      OpRegistry::instance().select_implementation(
+          target.type, target.subtype, {DeviceBackend::CPU}, intent);
   if (!selected.has_value()) {
     throw std::logic_error("rectangular target route disappeared");
   }
@@ -1098,7 +1107,7 @@ RectangularRoutePreparationResult prepare_after_rectangular_route_switch(
   try {
     const compute::PreparedDirtyPlan<DirtyPlan> prepared =
         compute::prepare_dirty_execution(graph, std::move(dirty_plan), request,
-                                         {Device::CPU});
+                                         {DeviceBackend::CPU});
     const auto target_work =
         std::find_if(prepared.compute_plan.planned_work.begin(),
                      prepared.compute_plan.planned_work.end(),
@@ -1206,7 +1215,7 @@ TensorRouteMutationPreparationResult prepare_after_tensor_route_mutation(
     GraphModel& graph, compute::HighPrecisionDirtyPlan dirty_plan,
     int target_node_id, std::atomic_int* provider_entries,
     compute::ExecutionService& authority,
-    const std::vector<Device>& task_population_devices,
+    const std::vector<DeviceBackend>& task_population_devices,
     const std::unordered_set<int>* externally_satisfied_node_ids) {
   const Node& target = graph.node(target_node_id);
   const std::string operation_key = make_key(target.type, target.subtype);
@@ -1215,7 +1224,7 @@ TensorRouteMutationPreparationResult prepare_after_tensor_route_mutation(
   registry.capture_registration(
       [&] {
         registry.register_impl(
-            target.type, target.subtype, Device::GPU_METAL,
+            target.type, target.subtype, DeviceBackend::Metal,
             MonolithicOpFunc(
                 [provider_entries](
                     const Node&,
@@ -1401,7 +1410,7 @@ void populate_tensor_no_work_route_graph(GraphModel& graph,
  */
 compute::HighPrecisionDirtyPlan plan_tensor_no_work_route(GraphModel& graph) {
   GraphTraversalService traversal;
-  RoiPropagationService propagation({Device::GPU_METAL, Device::CPU},
+  RoiPropagationService propagation({DeviceBackend::Metal, DeviceBackend::CPU},
                                     ComputeIntent::GlobalHighPrecision);
   compute::DirtyRegionPlanner planner(traversal, propagation);
   return planner.plan_high_precision(
@@ -1411,53 +1420,29 @@ compute::HighPrecisionDirtyPlan plan_tensor_no_work_route(GraphModel& graph) {
 }
 
 /**
- * @brief Fills active bytes of a current ImageBuffer with a known sequence.
- *
- * @param buffer Valid writable unsigned-8 CPU buffer.
- * @return Flat active byte sequence in row-major interleaved order.
- * @throws std::bad_alloc when expected-byte storage allocation fails.
- * @note Every allocation byte is first set to 0xA5 so padding differs from all
- *       expected inverted active bytes.
- */
-std::vector<std::uint8_t> fill_unsigned8_image(ImageBuffer* buffer) {
-  std::memset(buffer->data.get(), 0xA5,
-              buffer->step * static_cast<std::size_t>(buffer->height));
-  std::vector<std::uint8_t> expected;
-  expected.reserve(static_cast<std::size_t>(buffer->width) *
-                   static_cast<std::size_t>(buffer->height) *
-                   static_cast<std::size_t>(buffer->channels));
-  std::uint8_t next = 0U;
-  auto* base = static_cast<std::byte*>(buffer->data.get());
-  for (int y = 0; y < buffer->height; ++y) {
-    for (int x = 0; x < buffer->width; ++x) {
-      for (int channel = 0; channel < buffer->channels; ++channel) {
-        base[static_cast<std::size_t>(y) * buffer->step +
-             static_cast<std::size_t>(x * buffer->channels + channel)] =
-            std::byte{next};
-        expected.push_back(next);
-        next = static_cast<std::uint8_t>(next + 17U);
-      }
-    }
-  }
-  return expected;
-}
-
-/**
- * @brief Reads active unsigned-8 bytes from a validated current ImageBuffer.
- *
- * @param buffer Valid CPU UINT8 image.
+ * @brief Reads active unsigned-8 bytes from one checked immutable image.
+ * @param value Ready host-readable unsigned-8 ordinary image Value.
  * @return Flat active byte sequence in row-major interleaved order.
  * @throws std::bad_alloc when result allocation fails.
- * @note Row padding is skipped through image_buffer_row_data and row_bytes.
+ * @throws ImageView validation or coordinate exceptions unchanged.
+ * @note Physical row padding and arbitrary signed strides are skipped through
+ * checked logical coordinates.
  */
-std::vector<std::uint8_t> read_unsigned8_image(const ImageBuffer& buffer) {
+std::vector<std::uint8_t> read_unsigned8_image(const Value& value) {
+  const ImageView image(value);
+  if (image.element_bytes() != 1U || image.descriptor().element_semantics !=
+                                         ElementSemantics::UnsignedInteger) {
+    throw std::invalid_argument(
+        "unsigned-8 image inspection requires native UINT8 storage");
+  }
   std::vector<std::uint8_t> result;
-  const std::size_t row_bytes = image_buffer_row_bytes(buffer);
-  result.reserve(row_bytes * static_cast<std::size_t>(buffer.height));
-  for (int y = 0; y < buffer.height; ++y) {
-    const std::byte* row = image_buffer_row_data(buffer, y);
-    for (std::size_t index = 0U; index < row_bytes; ++index) {
-      result.push_back(std::to_integer<std::uint8_t>(row[index]));
+  result.reserve(image.width() * image.height() * image.channels());
+  for (std::size_t y = 0U; y < image.height(); ++y) {
+    for (std::size_t x = 0U; x < image.width(); ++x) {
+      for (std::size_t channel = 0U; channel < image.channels(); ++channel) {
+        result.push_back(
+            std::to_integer<std::uint8_t>(*image.channel_data(x, y, channel)));
+      }
     }
   }
   return result;
@@ -2680,15 +2665,14 @@ TEST(CpuDenseTensorImageOperation,
 }
 
 /**
- * @brief Proves the ImageBuffer adapter rejects huge views before narrowing.
- * @return Nothing; GoogleTest reports missing or displaced adapter validation.
- * @throws Value construction exceptions before the expected snapshot failure.
+ * @brief Proves ImageView preserves extents wider than legacy integer ranges.
+ * @return Nothing; GoogleTest reports any narrowing or coordinate mismatch.
+ * @throws Value or ImageView construction exceptions unchanged.
  * @note The non-singleton x axis deliberately uses zero stride over one byte,
- * so allocation size cannot mask the `INT_MAX + 1` logical image extent;
- * core ImageView itself retains the wider `size_t` domain.
+ * so allocation size cannot mask the `INT_MAX + 1` logical image extent.
  */
 TEST(CpuDenseTensorImageOperation,
-     SnapshotRejectsHugeZeroStrideImageBeforeIntNarrowing) {
+     ImageViewPreservesHugeZeroStrideExtentWithoutNarrowing) {
   const std::size_t huge_extent =
       static_cast<std::size_t>(std::numeric_limits<int>::max()) + 1U;
   const Value storage = Value::from_cpu_dense_tensor(
@@ -2706,24 +2690,22 @@ TEST(CpuDenseTensorImageOperation,
                                                    StridedLayout{{0, 0, 0}},
                                                    storage.buffer_handle());
 
-  try {
-    (void)value_image_adapter::snapshot_cpu_image_buffer(alias);
-    FAIL() << "Huge ImageView extent must fail before int conversion";
-  } catch (const std::invalid_argument& error) {
-    EXPECT_STREQ(error.what(),
-                 "ImageBuffer adaptation requires positive-int image extents.");
-  }
+  const ImageView view(alias);
+  EXPECT_EQ(view.width(), huge_extent);
+  EXPECT_EQ(view.height(), 1U);
+  EXPECT_EQ(view.channels(), 1U);
+  EXPECT_EQ(*view.channel_data(huge_extent - 1U, 0U, 0U), std::byte{7U});
 }
 
 /**
- * @brief Proves ImageBuffer snapshots compact every supported signed layout.
+ * @brief Proves explicit clone compacts every supported signed image layout.
  *
  * @return Nothing; GoogleTest reports a descriptor or active-byte mismatch.
- * @throws Value, view, snapshot, or allocation exceptions unchanged.
+ * @throws Value, view, clone, or allocation exceptions unchanged.
  * @note Reverse and broadcast y strides exercise packed-row copies without
  *       assuming positive row progression. The planar channel layout exercises
  *       the reusable-coordinate element fallback. All outputs must remain
- *       independent row-major interleaved ImageBuffer snapshots.
+ *       independent row-major interleaved Values.
  */
 TEST(CpuDenseTensorImageOperation,
      SnapshotCompactsReverseBroadcastAndPlanarImageLayouts) {
@@ -2740,22 +2722,19 @@ TEST(CpuDenseTensorImageOperation,
 
   const Value reverse = Value::from_cpu_dense_tensor(
       descriptor, image, StridedLayout{{-6, 2, 1}, 6U}, base.buffer_handle());
-  EXPECT_EQ(read_unsigned8_image(
-                value_image_adapter::snapshot_cpu_image_buffer(reverse)),
+  EXPECT_EQ(read_unsigned8_image(dense_image_processing::clone(reverse)),
             (std::vector<std::uint8_t>{7U, 8U, 9U, 10U, 11U, 12U, 1U, 2U, 3U,
                                        4U, 5U, 6U}));
 
   const Value broadcast = Value::from_cpu_dense_tensor(
       descriptor, image, StridedLayout{{0, 2, 1}}, base.buffer_handle());
-  EXPECT_EQ(read_unsigned8_image(
-                value_image_adapter::snapshot_cpu_image_buffer(broadcast)),
+  EXPECT_EQ(read_unsigned8_image(dense_image_processing::clone(broadcast)),
             (std::vector<std::uint8_t>{1U, 2U, 3U, 4U, 5U, 6U, 1U, 2U, 3U, 4U,
                                        5U, 6U}));
 
   const Value planar = Value::from_cpu_dense_tensor(
       descriptor, image, StridedLayout{{6, 1, 3}}, base.buffer_handle());
-  EXPECT_EQ(read_unsigned8_image(
-                value_image_adapter::snapshot_cpu_image_buffer(planar)),
+  EXPECT_EQ(read_unsigned8_image(dense_image_processing::clone(planar)),
             (std::vector<std::uint8_t>{1U, 4U, 2U, 5U, 3U, 6U, 7U, 10U, 8U, 11U,
                                        9U, 12U}));
 }
@@ -3122,7 +3101,7 @@ TEST(CpuDenseTensorImageOperation,
 
   NodeOutput tensor_output;
   tensor_output.publish_image_value(value);
-  EXPECT_EQ(value_image_adapter::full_node_output_region(tensor_output),
+  EXPECT_EQ(value_region::full_node_output_region(tensor_output),
             RegionSet::from_tensor_slice(
                 {dense_tensor_region_domain(), {{0U, 2U}, {0U, 3U}}}));
 }
@@ -3169,7 +3148,7 @@ TEST(CpuDenseTensorImageOperation,
  * @brief Verifies the complete V-12 floating generic-Value matrix.
  *
  * The image branch crosses 1/3/4/8/16 channels and FP32/FP64 through padded
- * Values, ImageRect merge, the CPU ImageBuffer bridge, explicit CPU copy,
+ * Values, ImageRect merge, explicit compact clone and CPU copy,
  * injected fake-Metal transfer, and bounded compute I/O. The latent branch
  * crosses rank one through five, FP32/FP64, TensorSlice merge, and the same
  * explicit resource boundaries. Final aliases prove negative and zero strides
@@ -3212,7 +3191,7 @@ TEST(CpuDenseTensorImageOperation,
       NodeOutput existing_output;
       existing_output.publish_image_value(existing);
       EXPECT_EQ(
-          value_image_adapter::full_node_output_region(existing_output),
+          value_region::full_node_output_region(existing_output),
           RegionSet::from_image_rect({image_region_domain(), 0, 3, 0, 2}));
 
       const DenseTensorView existing_view(existing);
@@ -3224,20 +3203,18 @@ TEST(CpuDenseTensorImageOperation,
                   expected_matrix_element(10.0, index));
       }
 
-      const ImageBuffer compatibility =
-          value_image_adapter::snapshot_cpu_image_buffer(existing);
-      EXPECT_EQ(compatibility.width, 3);
-      EXPECT_EQ(compatibility.height, 2);
-      EXPECT_EQ(compatibility.channels, static_cast<int>(channels));
-      EXPECT_EQ(compatibility.type,
-                bit_width == 32U ? DataType::FLOAT32 : DataType::FLOAT64);
-      const Value bridge_round_trip =
-          value_image_adapter::snapshot_cpu_image_value(compatibility);
-      EXPECT_EQ(bridge_round_trip.dense_tensor_descriptor(),
-                expected_descriptor);
-      EXPECT_EQ(bridge_round_trip.image_facet(),
+      const Value compact_clone = dense_image_processing::clone(existing);
+      const ImageView compact_image(compact_clone);
+      EXPECT_EQ(compact_image.width(), 3U);
+      EXPECT_EQ(compact_image.height(), 2U);
+      EXPECT_EQ(compact_image.channels(), channels);
+      EXPECT_EQ(compact_image.element_bytes(), bit_width / 8U);
+      EXPECT_EQ(compact_clone.dense_tensor_descriptor(), expected_descriptor);
+      EXPECT_EQ(compact_clone.image_facet(),
                 std::optional<ImageFacet>(image_facet));
-      const DenseTensorView round_trip_view(bridge_round_trip);
+      EXPECT_NE(compact_clone.allocation_identity(),
+                existing.allocation_identity());
+      const DenseTensorView round_trip_view(compact_clone);
       for (std::size_t index = 0U; index < element_count; ++index) {
         const std::vector<std::size_t> coordinates =
             matrix_coordinates(index, shape);
@@ -3250,8 +3227,8 @@ TEST(CpuDenseTensorImageOperation,
       const RegionSet image_update =
           RegionSet::from_image_rect({image_region_domain(), 1, 3, 0, 1});
       const std::optional<NodeOutput> merged =
-          value_image_adapter::merge_node_output_region(
-              existing_output, update_output, image_update);
+          value_region::merge_node_output_region(existing_output, update_output,
+                                                 image_update);
       ASSERT_TRUE(merged.has_value());
       ASSERT_TRUE(merged->image_value().valid());
       EXPECT_EQ(merged->image_value().dense_tensor_descriptor(),
@@ -3302,7 +3279,7 @@ TEST(CpuDenseTensorImageOperation,
       }
       NodeOutput existing_output;
       existing_output.publish_image_value(existing);
-      EXPECT_EQ(value_image_adapter::full_node_output_region(existing_output),
+      EXPECT_EQ(value_region::full_node_output_region(existing_output),
                 RegionSet::from_tensor_slice(
                     {dense_tensor_region_domain(), full_axes}));
 
@@ -3320,8 +3297,8 @@ TEST(CpuDenseTensorImageOperation,
       const RegionSet tensor_update = RegionSet::from_tensor_slice(
           {dense_tensor_region_domain(), selected_axes});
       const std::optional<NodeOutput> merged =
-          value_image_adapter::merge_node_output_region(
-              existing_output, update_output, tensor_update);
+          value_region::merge_node_output_region(existing_output, update_output,
+                                                 tensor_update);
       ASSERT_TRUE(merged.has_value());
       ASSERT_TRUE(merged->image_value().valid());
       EXPECT_EQ(merged->image_value().dense_tensor_descriptor(),
@@ -3382,8 +3359,8 @@ TEST(CpuDenseTensorImageOperation,
   const RegionSet alias_update = RegionSet::from_tensor_slice(
       {dense_tensor_region_domain(), {{1U, 2U}, {1U, 3U}}});
   const std::optional<NodeOutput> alias_merged =
-      value_image_adapter::merge_node_output_region(
-          broadcast_output, reverse_output, alias_update);
+      value_region::merge_node_output_region(broadcast_output, reverse_output,
+                                             alias_update);
   ASSERT_TRUE(alias_merged.has_value());
   const DenseTensorView alias_merged_view(alias_merged->image_value());
   for (std::size_t row = 0U; row < 2U; ++row) {
@@ -3429,13 +3406,8 @@ TEST(CpuDenseTensorImageOperation,
 
   std::vector<std::optional<NodeOutput>> results(1U);
   results[0].emplace();
-  results[0]->compatibility_image =
-      make_aligned_cpu_image_buffer(3, 2, 1, DataType::UINT8);
-  (void)fill_unsigned8_image(&results[0]->compatibility_image);
-  ASSERT_FALSE(results[0]->has_image_value());
-  value_image_adapter::import_node_output_compatibility_image(&*results[0]);
+  results[0]->publish_image_value(make_unsigned8_value(3U, 2U, 1U, 3U));
   ASSERT_TRUE(results[0]->has_image_value());
-  EXPECT_FALSE(results[0]->has_compatibility_image());
   const std::vector<compute::PlannedNodeWork> output_plan =
       make_explicit_image_output_plan(80, 3, 2);
   committer.commit(graph, {80}, output_plan, results);
@@ -3457,12 +3429,8 @@ TEST(CpuDenseTensorImageOperation,
   compute::HighPrecisionDirtyWriteBuffer dirty;
   NodeOutput& staged = dirty.ensure_output(graph.node(80));
   ASSERT_TRUE(staged.has_image_value());
-  ImageBuffer mutable_update =
-      value_image_adapter::snapshot_cpu_image_buffer(staged.image_value());
-  static_cast<std::byte*>(mutable_update.data.get())[0] = std::byte{99U};
   NodeOutput dirty_update;
-  dirty_update.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(mutable_update));
+  dirty_update.publish_image_value(make_unsigned8_value(3U, 2U, 1U, 3U, 99U));
   const RegionSet dirty_region =
       RegionSet::from_image_rect({image_region_domain(), 0, 1, 0, 1});
   dirty.stage_region_output(graph.node(80), std::move(dirty_update),
@@ -3478,16 +3446,13 @@ TEST(CpuDenseTensorImageOperation,
             RegionSet::from_image_rect({image_region_domain(), 0, 3, 0, 2}));
   EXPECT_NE(dirty_value.allocation_identity(), first.allocation_identity());
   EXPECT_NE(dirty_value.revision_id(), first.revision_id());
-  EXPECT_EQ(std::to_integer<std::uint8_t>(first_read.data()[0]), 0U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(first_read.data()[0]), 1U);
   EXPECT_EQ(std::to_integer<std::uint8_t>(
                 *ImageView(dirty_value).channel_data(0U, 0U, 0U)),
             99U);
 
   results[0] = NodeOutput{};
-  results[0]->compatibility_image =
-      make_aligned_cpu_image_buffer(3, 2, 1, DataType::UINT8);
-  (void)fill_unsigned8_image(&results[0]->compatibility_image);
-  value_image_adapter::import_node_output_compatibility_image(&*results[0]);
+  results[0]->publish_image_value(make_unsigned8_value(3U, 2U, 1U, 3U));
   committer.commit(graph, {80}, output_plan, results);
 
   const Value replacement =
@@ -3592,7 +3557,6 @@ TEST(CpuDenseTensorImageOperation,
   ASSERT_TRUE(graph.node(89).cached_output_high_precision.has_value());
   const NodeOutput& committed = *graph.node(89).cached_output_high_precision;
   ASSERT_TRUE(committed.has_image_value());
-  EXPECT_FALSE(committed.has_compatibility_image());
   const Value& committed_value = committed.image_value();
   EXPECT_EQ(committed_value.dense_tensor_descriptor(), descriptor);
   EXPECT_EQ(committed_value.image_facet(), image_facet);
@@ -3618,22 +3582,20 @@ TEST(CpuDenseTensorImageOperation,
 }
 
 /**
- * @brief Proves one validated opaque private compatibility image enters HP
- * cache.
+ * @brief Proves one validated opaque native image Value enters HP cache.
  *
  * @return Nothing; GoogleTest reports staging, identity, Region, readiness,
  * binding, projection, or DSO-lifetime failures.
- * @throws Compatibility import, Value publication, Region derivation,
- * graph mutation, and cache-service exceptions unchanged to the test runner.
- * @note The remaining private inbound edge freezes the staged descriptor,
- * retains its opaque backend context and explicit library lease in one imported
- * binding, and clears compatibility staging. Formal commit must preserve that
- * exact Value without a Host copy or second image authority. The node has no
- * disk-cache entry because non-host-visible persistence is a separate
- * fail-closed contract.
+ * @throws Native Value publication, Region derivation, graph mutation, and
+ * cache-service exceptions unchanged to the test runner.
+ * @note The operation freezes its descriptor and retains both opaque backend
+ * owner and explicit library lease in the published binding. Formal commit
+ * must preserve that exact Value without a Host copy or second image
+ * authority. The node has no disk-cache entry because non-host-visible
+ * persistence is a separate fail-closed contract.
  */
 TEST(CpuDenseTensorImageOperation,
-     FormalCommitPublishesValidatedOpaqueCompatibilityImageValue) {
+     FormalCommitPreservesValidatedOpaqueNativeImageValue) {
   GraphModel graph("cache/imported-formal-publication");
   Node node;
   node.id = 81;
@@ -3646,19 +3608,31 @@ TEST(CpuDenseTensorImageOperation,
   std::weak_ptr<void> library_observer = library_lifetime;
   auto backend_context = std::make_shared<int>(131);
   std::weak_ptr<void> context_observer = backend_context;
-  void* const expected_context = backend_context.get();
   MonolithicOpFunc operation =
       [backend_context = std::move(backend_context), library_lifetime](
           const Node&, const std::vector<const NodeOutput*>&) mutable {
+        DenseTensorDescriptor descriptor{{7U, 11U, 4U},
+                                         ElementSemantics::UnsignedInteger,
+                                         StorageEncoding{8U}};
+        ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+        image.sample_domain = SampleDomainFacet{
+            1U,
+            SampleEncoding{1U, SampleEncodingKind::CodeValue},
+            SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0},
+            {}};
+        const StridedLayout layout{{44, 4, 1}};
+        PendingDeviceValuePublication publication =
+            PendingDeviceValuePublisher::publish_dense_tensor(
+                std::move(descriptor), std::move(image), layout,
+                backend_context, backend_context.get(), nullptr, 308U,
+                DeviceId(DeviceBackend::CUDA), MemoryDomain::Imported);
+        if (!publication.producer.complete_ready()) {
+          throw std::logic_error(
+              "opaque native fixture failed to publish Ready");
+        }
         NodeOutput output;
         output.plugin_library_lifetime = library_lifetime;
-        output.compatibility_image.width = 11;
-        output.compatibility_image.height = 7;
-        output.compatibility_image.channels = 4;
-        output.compatibility_image.type = DataType::UINT8;
-        output.compatibility_image.device = Device::GPU_CUDA;
-        output.compatibility_image.context = std::move(backend_context);
-        value_image_adapter::import_node_output_compatibility_image(&output);
+        output.publish_image_value(std::move(publication.value));
         return output;
       };
   library_lifetime.reset();
@@ -3666,7 +3640,6 @@ TEST(CpuDenseTensorImageOperation,
   NodeOutput imported = operation(graph.node(81), {});
   operation = MonolithicOpFunc{};
   ASSERT_TRUE(imported.has_image_value());
-  EXPECT_FALSE(imported.has_compatibility_image());
   const Value& imported_value = imported.image_value();
   const DenseTensorDescriptor expected_descriptor =
       imported_value.dense_tensor_descriptor();
@@ -3696,7 +3669,6 @@ TEST(CpuDenseTensorImageOperation,
   ASSERT_TRUE(graph.node(81).cached_output_high_precision.has_value());
   const NodeOutput& committed = *graph.node(81).cached_output_high_precision;
   ASSERT_TRUE(committed.has_image_value());
-  EXPECT_FALSE(committed.has_compatibility_image());
   const Value& committed_value = committed.image_value();
   EXPECT_EQ(committed_value.dense_tensor_descriptor(), expected_descriptor);
   EXPECT_EQ(committed_value.image_facet(), expected_image_facet);
@@ -3713,15 +3685,10 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_EQ(*graph.node(81).hp_region,
             RegionSet::from_image_rect({image_region_domain(), 0, 11, 0, 7}));
 
-  const ImageBuffer projected =
-      value_image_adapter::project_image_value_for_image_buffer_edge(
-          committed_value);
-  EXPECT_EQ(projected.width, 11);
-  EXPECT_EQ(projected.height, 7);
-  EXPECT_EQ(projected.channels, 4);
-  EXPECT_EQ(projected.type, DataType::UINT8);
-  EXPECT_EQ(projected.device, Device::GPU_CUDA);
-  EXPECT_EQ(projected.context.get(), expected_context);
+  const ImageFacet& committed_image = *committed_value.image_facet();
+  EXPECT_EQ(committed_image.data_window, (ImageBounds{0, 0, 11, 7}));
+  EXPECT_EQ(committed_value.dense_tensor_descriptor().shape,
+            (std::vector<std::size_t>{7U, 11U, 4U}));
 }
 
 /**
@@ -3798,12 +3765,11 @@ TEST(CpuDenseTensorImageOperation,
   }
 
   auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
-      [](const std::filesystem::path& path) {
+      [](const std::filesystem::path& path,
+         const ImageArtifactDecodeRequest& request) {
         (void)path;
-        ImageBuffer decoded =
-            make_aligned_cpu_image_buffer(2, 2, 1, DataType::UINT8);
-        (void)fill_unsigned8_image(&decoded);
-        return decoded;
+        EXPECT_EQ(request.rules.size(), 2U);
+        return make_unsigned8_value(2U, 2U, 1U, 2U);
       });
   auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>();
   GraphCacheService cache(image_codec, metadata_codec);
@@ -3838,19 +3804,23 @@ TEST(CpuDenseTensorImageOperation,
   ASSERT_EQ(calls.size(), 2U);
   EXPECT_EQ(calls[0].path, artifact);
   EXPECT_EQ(calls[1].path, artifact);
+  ASSERT_TRUE(calls[0].decode_request.has_value());
+  ASSERT_TRUE(calls[1].decode_request.has_value());
+  EXPECT_FALSE(calls[0].encode_request.has_value());
+  EXPECT_FALSE(calls[1].encode_request.has_value());
 }
 
 TEST(CpuDenseTensorImageOperation,
-     DiskSaveRejectsCompatibilityStagingBesideSealedValue) {
+     DiskSaveUsesSealedValueAsSoleImageAuthority) {
   ScopedTestDirectory directory("photospider-v3-disk-authority");
   std::optional<std::uint8_t> encoded_first_byte;
   auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
       testing::FakeImageArtifactCodec::DecodeCallback{},
       [&encoded_first_byte](const std::filesystem::path& path,
-                            const ImageBuffer& image,
-                            ImageArtifactPrecision precision) {
+                            const Value& image,
+                            const ImageArtifactEncodeRequest& request) {
         (void)path;
-        (void)precision;
+        EXPECT_TRUE(request.conversion.has_value());
         encoded_first_byte = read_unsigned8_image(image).front();
       });
   auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>();
@@ -3864,25 +3834,30 @@ TEST(CpuDenseTensorImageOperation,
   node.caches.push_back(CacheEntry{"image", "image.fake"});
   NodeOutput output;
   output.publish_image_value(make_unsigned8_value(2U, 2U, 1U, 2U));
-  output.compatibility_image =
-      make_aligned_cpu_image_buffer(2, 2, 1, DataType::UINT8);
-  std::memset(output.compatibility_image.data.get(), 77,
-              output.compatibility_image.step *
-                  static_cast<std::size_t>(output.compatibility_image.height));
   node.cached_output_high_precision = std::move(output);
   node.hp_region =
       RegionSet::from_image_rect({image_region_domain(), 0, 2, 0, 2});
   graph.add_node(std::move(node));
 
-  try {
-    cache.save_cache_if_configured(graph, graph.node(82), "int8");
-    FAIL() << "formal disk save must reject compatibility staging";
-  } catch (const GraphError& error) {
-    EXPECT_EQ(error.code(), GraphErrc::InvalidParameter);
-  }
-  EXPECT_FALSE(encoded_first_byte.has_value());
+  cache.save_cache_if_configured(graph, graph.node(82), "int8");
+  ASSERT_TRUE(encoded_first_byte.has_value());
+  EXPECT_EQ(*encoded_first_byte, 1U);
   const auto calls = image_codec->calls();
-  EXPECT_TRUE(calls.empty());
+  ASSERT_EQ(calls.size(), 1U);
+  EXPECT_EQ(calls[0].kind, testing::FakeImageArtifactCodec::Call::Kind::Encode);
+  EXPECT_FALSE(calls[0].decode_request.has_value());
+  ASSERT_TRUE(calls[0].encode_request.has_value());
+  ASSERT_TRUE(calls[0].encode_request->conversion.has_value());
+  const SampleConversion& conversion = *calls[0].encode_request->conversion;
+  EXPECT_EQ(conversion.source.encoding.kind, SampleEncodingKind::CodeValue);
+  EXPECT_EQ(conversion.source.domain.kind, SampleDomainKind::CodeValue);
+  EXPECT_EQ(conversion.destination.encoding.kind,
+            SampleEncodingKind::CodeValue);
+  EXPECT_EQ(conversion.destination.domain.kind, SampleDomainKind::CodeValue);
+  EXPECT_EQ(conversion.out_of_domain, OutOfDomainPolicy::Reject);
+  EXPECT_EQ(conversion.rounding, SampleRoundingMode::NearestEven);
+  EXPECT_EQ(conversion.non_finite, NonFinitePolicy::Reject);
+  EXPECT_EQ(conversion.precision_loss, PrecisionLossPolicy::Allow);
 }
 
 /**
@@ -3993,7 +3968,6 @@ TEST(CpuDenseTensorImageOperation,
      DenseRunnerConsumesSealedValueAndPublishesExactResultRevision) {
   NodeOutput input;
   input.publish_image_value(make_unsigned8_value(3U, 2U, 2U, 8U));
-  EXPECT_FALSE(input.has_compatibility_image());
 
   Node node;
   const ops::CpuDenseImageOperation operation =
@@ -4012,13 +3986,10 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_EQ(std::to_integer<std::uint8_t>(*value_view.channel_data(2U, 1U, 1U)),
             243U);
 
-  EXPECT_FALSE(output.has_compatibility_image());
-  const ImageBuffer projected_output =
-      value_image_adapter::snapshot_cpu_image_buffer(output.image_value());
-  ASSERT_EQ(projected_output.width, 3);
-  ASSERT_EQ(projected_output.height, 2);
-  ASSERT_EQ(projected_output.channels, 2);
-  EXPECT_EQ(read_unsigned8_image(projected_output).front(), 254U);
+  const std::vector<std::uint8_t> active_output =
+      read_unsigned8_image(output.image_value());
+  ASSERT_EQ(active_output.size(), 12U);
+  EXPECT_EQ(active_output.front(), 254U);
 }
 
 TEST(CpuDenseTensorImageOperation,
@@ -4042,14 +4013,11 @@ TEST(CpuDenseTensorImageOperation,
                    .has_value());
 
   NodeOutput input;
-  ImageBuffer input_buffer =
-      make_aligned_cpu_image_buffer(5, 3, 3, DataType::UINT8);
-  const std::size_t input_row_bytes = image_buffer_row_bytes(input_buffer);
-  ASSERT_GT(input_buffer.step, input_row_bytes);
+  const Value input_value = make_unsigned8_value(5U, 3U, 3U, 16U);
+  ASSERT_GT(input_value.strided_layout().byte_strides.at(0), 15);
   const std::vector<std::uint8_t> active_input =
-      fill_unsigned8_image(&input_buffer);
-  input.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(input_buffer));
+      read_unsigned8_image(input_value);
+  input.publish_image_value(input_value);
 
   GraphModel graph("cache/cpu-dense-tensor-image-operation");
   Node node;
@@ -4062,19 +4030,20 @@ TEST(CpuDenseTensorImageOperation,
 
   ASSERT_TRUE(output.image_value().valid());
   EXPECT_TRUE(output.image_value().revision_id().valid());
-  EXPECT_FALSE(output.has_compatibility_image());
-  const ImageBuffer output_buffer =
-      value_image_adapter::snapshot_cpu_image_buffer(output.image_value());
-  EXPECT_EQ(output_buffer.width, input_buffer.width);
-  EXPECT_EQ(output_buffer.height, input_buffer.height);
-  EXPECT_EQ(output_buffer.channels, input_buffer.channels);
-  EXPECT_EQ(output_buffer.type, DataType::UINT8);
-  EXPECT_EQ(output_buffer.device, Device::CPU);
-  EXPECT_GT(output_buffer.step, image_buffer_row_bytes(output_buffer));
-  validate_image_buffer(output_buffer);
+  const ImageView output_view(output.image_value());
+  EXPECT_EQ(output_view.width(), 5U);
+  EXPECT_EQ(output_view.height(), 3U);
+  EXPECT_EQ(output_view.channels(), 3U);
+  EXPECT_EQ(output.image_value().dense_tensor_descriptor().element_semantics,
+            ElementSemantics::UnsignedInteger);
+  EXPECT_EQ(output.image_value().dense_tensor_descriptor().storage_encoding,
+            StorageEncoding{8U});
+  EXPECT_EQ(output.image_value().storage_binding().device,
+            DeviceId(DeviceBackend::CPU));
+  EXPECT_GT(output.image_value().strided_layout().byte_strides.at(0), 15);
 
   const std::vector<std::uint8_t> active_output =
-      read_unsigned8_image(output_buffer);
+      read_unsigned8_image(output.image_value());
   ASSERT_EQ(active_output.size(), active_input.size());
   for (std::size_t index = 0U; index < active_input.size(); ++index) {
     EXPECT_EQ(active_output[index],
@@ -4125,16 +4094,16 @@ TEST(CpuDenseTensorImageOperation,
 }
 
 /**
- * @brief Proves signed ImageRect execution, rejection, and bridge projection.
+ * @brief Proves signed ImageRect execution and rejection on native Values.
  * @throws GraphError when registry resolution or an expected-valid execution
  *         phase fails.
  * @throws std::invalid_argument, std::out_of_range, std::overflow_error, or
- *         std::length_error from Region, Value, ImageView, or ImageBuffer
- *         adapter validation unchanged.
+ *         std::length_error from Region, Value, or ImageView validation
+ *         unchanged.
  * @throws ReadyFenceAccessError or BufferAccessError when a fixture Value is
  *         unexpectedly non-Ready or not host-readable.
  * @throws std::bad_alloc when rich ImageFacet strings/vectors, Region, Value,
- *         execution, projection, or GoogleTest diagnostic storage cannot
+ *         execution, or GoogleTest diagnostic storage cannot
  *         allocate.
  * @note The expected out-of-window GraphError is consumed by the test.
  */
@@ -4180,20 +4149,17 @@ TEST(CpuDenseTensorImageOperation,
       compute::NodeExecutor::execute(graph, node, *resolved, {&input}, config);
   ASSERT_TRUE(output.image_value().image_facet().has_value());
   EXPECT_EQ(*output.image_value().image_facet(), signed_facet);
-  EXPECT_EQ(value_image_adapter::full_node_output_region(output),
+  EXPECT_EQ(value_region::full_node_output_region(output),
             RegionSet::from_image_rect({image_region_domain(), -2, 3, 5, 9}));
-  const ImageBuffer projected_buffer =
-      value_image_adapter::snapshot_cpu_image_buffer(output.image_value());
-  const Value projected_value =
-      value_image_adapter::snapshot_cpu_image_value(projected_buffer);
-  ASSERT_TRUE(projected_value.image_facet().has_value());
-  EXPECT_EQ(projected_value.image_bounds(), (ImageBounds{0, 0, 5, 4}));
-  EXPECT_FALSE(projected_value.image_facet()->display_window.has_value());
-  EXPECT_FALSE(projected_value.image_facet()->channel_schema.has_value());
-  EXPECT_FALSE(projected_value.image_facet()->sample_domain.has_value());
-  EXPECT_FALSE(projected_value.image_facet()->color.has_value());
   const ImageView output_view(output.image_value());
-  const ImageView projected_view(projected_value);
+  EXPECT_EQ(output.image_value().image_bounds(), (ImageBounds{-2, 5, 3, 9}));
+  EXPECT_EQ(output.image_value().image_facet()->display_window,
+            signed_facet.display_window);
+  EXPECT_EQ(output.image_value().image_facet()->channel_schema,
+            signed_facet.channel_schema);
+  EXPECT_EQ(output.image_value().image_facet()->sample_domain,
+            signed_facet.sample_domain);
+  EXPECT_EQ(output.image_value().image_facet()->color, signed_facet.color);
   for (std::size_t y = 0U; y < input_view.height(); ++y) {
     for (std::size_t x = 0U; x < input_view.width(); ++x) {
       for (std::size_t channel = 0U; channel < input_view.channels();
@@ -4208,9 +4174,6 @@ TEST(CpuDenseTensorImageOperation,
             selected ? static_cast<std::uint8_t>(255U - source) : source;
         EXPECT_EQ(std::to_integer<std::uint8_t>(
                       *output_view.channel_data(x, y, channel)),
-                  expected);
-        EXPECT_EQ(std::to_integer<std::uint8_t>(
-                      *projected_view.channel_data(x, y, channel)),
                   expected);
       }
     }
@@ -4347,12 +4310,12 @@ TEST(CpuDenseTensorImageOperation,
       type, subtype, ComputeIntent::GlobalHighPrecision, route_a, true);
 
   const auto selected_a = OpRegistry::instance().select_implementation(
-      type, subtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+      type, subtype, {DeviceBackend::CPU}, ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(selected_a.has_value());
   GraphModel graph("cache/rectangular-route-freeze-hp");
   populate_rectangular_route_graph(&graph, type, subtype);
   GraphTraversalService traversal;
-  RoiPropagationService propagation({Device::CPU},
+  RoiPropagationService propagation({DeviceBackend::CPU},
                                     ComputeIntent::GlobalHighPrecision);
   compute::DirtyRegionPlanner planner(traversal, propagation);
   const PixelRect requested{16, 16, 8, 8};
@@ -4372,7 +4335,7 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_EQ(stable_plan.operation_routes.intent,
             ComputeIntent::GlobalHighPrecision);
   EXPECT_EQ(stable_plan.operation_routes.available_devices,
-            (std::vector<Device>{Device::CPU}));
+            (std::vector<DeviceBackend>{DeviceBackend::CPU}));
   EXPECT_EQ(stable_plan.operation_routes.node_routes.size(), 2U);
   const auto stable_frozen = stable_plan.operation_routes.node_routes.find(121);
   if (stable_frozen != stable_plan.operation_routes.node_routes.end()) {
@@ -4388,7 +4351,7 @@ TEST(CpuDenseTensorImageOperation,
   const compute::PreparedDirtyPlan<compute::HighPrecisionDirtyPlan> stable =
       compute::prepare_dirty_execution(
           graph, compute::HighPrecisionDirtyPlan(stable_plan), request,
-          {Device::CPU});
+          {DeviceBackend::CPU});
   const auto stable_work = std::find_if(
       stable.compute_plan.planned_work.begin(),
       stable.compute_plan.planned_work.end(),
@@ -4419,7 +4382,7 @@ TEST(CpuDenseTensorImageOperation,
   publish_rectangular_route_generation(
       type, subtype, ComputeIntent::GlobalHighPrecision, route_b, false);
   const auto selected_b = OpRegistry::instance().select_implementation(
-      type, subtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+      type, subtype, {DeviceBackend::CPU}, ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(selected_b.has_value());
   EXPECT_NE(selected_b->implementation_identity,
             selected_a->implementation_identity);
@@ -4468,12 +4431,12 @@ TEST(CpuDenseTensorImageOperation,
       type, subtype, ComputeIntent::RealTimeUpdate, route_a, true);
 
   const auto selected_a = OpRegistry::instance().select_implementation(
-      type, subtype, {Device::CPU}, ComputeIntent::RealTimeUpdate);
+      type, subtype, {DeviceBackend::CPU}, ComputeIntent::RealTimeUpdate);
   ASSERT_TRUE(selected_a.has_value());
   GraphModel graph("cache/rectangular-route-freeze-rt");
   populate_rectangular_route_graph(&graph, type, subtype);
   GraphTraversalService traversal;
-  RoiPropagationService propagation({Device::CPU},
+  RoiPropagationService propagation({DeviceBackend::CPU},
                                     ComputeIntent::RealTimeUpdate);
   compute::DirtyRegionPlanner planner(traversal, propagation);
   const PixelRect requested{16, 16, 8, 8};
@@ -4492,7 +4455,7 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_EQ(a_mapping->from_roi, (PixelRect{64, 64, 128, 64}));
   EXPECT_EQ(stable_plan.operation_routes.intent, ComputeIntent::RealTimeUpdate);
   EXPECT_EQ(stable_plan.operation_routes.available_devices,
-            (std::vector<Device>{Device::CPU}));
+            (std::vector<DeviceBackend>{DeviceBackend::CPU}));
   EXPECT_EQ(stable_plan.operation_routes.node_routes.size(), 2U);
   const auto stable_frozen = stable_plan.operation_routes.node_routes.find(121);
   if (stable_frozen != stable_plan.operation_routes.node_routes.end()) {
@@ -4508,7 +4471,7 @@ TEST(CpuDenseTensorImageOperation,
   const compute::PreparedDirtyPlan<compute::RealTimeDirtyPlan> stable =
       compute::prepare_dirty_execution(graph,
                                        compute::RealTimeDirtyPlan(stable_plan),
-                                       request, {Device::CPU});
+                                       request, {DeviceBackend::CPU});
   const auto stable_work = std::find_if(
       stable.compute_plan.planned_work.begin(),
       stable.compute_plan.planned_work.end(),
@@ -4528,7 +4491,7 @@ TEST(CpuDenseTensorImageOperation,
   publish_rectangular_route_generation(
       type, subtype, ComputeIntent::RealTimeUpdate, route_b, false);
   const auto selected_b = OpRegistry::instance().select_implementation(
-      type, subtype, {Device::CPU}, ComputeIntent::RealTimeUpdate);
+      type, subtype, {DeviceBackend::CPU}, ComputeIntent::RealTimeUpdate);
   ASSERT_TRUE(selected_b.has_value());
   EXPECT_NE(selected_b->implementation_identity,
             selected_a->implementation_identity);
@@ -4585,7 +4548,7 @@ TEST(CpuDenseTensorImageOperation,
   graph.validate_topology();
 
   GraphTraversalService traversal;
-  RoiPropagationService propagation({Device::GPU_METAL, Device::CPU},
+  RoiPropagationService propagation({DeviceBackend::Metal, DeviceBackend::CPU},
                                     ComputeIntent::GlobalHighPrecision);
   compute::DirtyRegionPlanner planner(traversal, propagation);
   const RegionSet requested = RegionSet::from_tensor_slice(
@@ -4594,13 +4557,14 @@ TEST(CpuDenseTensorImageOperation,
       planner.plan_high_precision(graph, 88, requested);
   ASSERT_EQ(plan.operation_routes.node_routes.size(), 1U);
   EXPECT_EQ(plan.operation_routes.intent, ComputeIntent::GlobalHighPrecision);
-  EXPECT_EQ(plan.operation_routes.available_devices,
-            (std::vector<Device>{Device::CPU, Device::GPU_METAL}));
+  EXPECT_EQ(
+      plan.operation_routes.available_devices,
+      (std::vector<DeviceBackend>{DeviceBackend::CPU, DeviceBackend::Metal}));
   const compute::DirtyRegionPlannedOperationRoute& region_route =
       plan.operation_routes.node_routes.at(88);
   EXPECT_EQ(region_route.operation_key,
             make_key("image_process", "invert_dense"));
-  EXPECT_EQ(region_route.route.device, Device::CPU);
+  EXPECT_EQ(region_route.route.device, DeviceBackend::CPU);
   compute::HighPrecisionDirtyPlan retained_plan = plan;
   const std::uint64_t retained_bytes =
       compute::high_precision_dirty_plan_retained_memory_bytes(retained_plan);
@@ -4615,18 +4579,18 @@ TEST(CpuDenseTensorImageOperation,
   const compute::PreparedDirtyPlan<compute::HighPrecisionDirtyPlan> prepared =
       compute::prepare_dirty_execution(
           graph, compute::HighPrecisionDirtyPlan(plan), request,
-          {Device::GPU_METAL, Device::CPU});
+          {DeviceBackend::Metal, DeviceBackend::CPU});
   const auto planned_work = std::find_if(
       prepared.compute_plan.planned_work.begin(),
       prepared.compute_plan.planned_work.end(),
       [](const compute::PlannedNodeWork& work) { return work.node_id == 88; });
   ASSERT_NE(planned_work, prepared.compute_plan.planned_work.end());
   ASSERT_TRUE(planned_work->operation_route.has_value());
-  EXPECT_EQ(planned_work->operation_route->device, Device::CPU);
+  EXPECT_EQ(planned_work->operation_route->device, DeviceBackend::CPU);
   EXPECT_TRUE(compute::planned_operation_routes_equal(
       region_route.route, *planned_work->operation_route));
   const auto resolved = OpRegistry::instance().select_implementation(
-      "image_process", "invert_dense", {Device::CPU},
+      "image_process", "invert_dense", {DeviceBackend::CPU},
       ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(resolved.has_value());
   const compute::DirtyResolvedOperationMap operations{{
@@ -4713,7 +4677,7 @@ TEST(CpuDenseTensorImageOperation,
   graph.validate_topology();
 
   GraphTraversalService traversal;
-  RoiPropagationService propagation({Device::GPU_METAL, Device::CPU},
+  RoiPropagationService propagation({DeviceBackend::Metal, DeviceBackend::CPU},
                                     ComputeIntent::GlobalHighPrecision);
   compute::DirtyRegionPlanner planner(traversal, propagation);
   const compute::HighPrecisionDirtyPlan plan = planner.plan_high_precision(
@@ -4726,7 +4690,7 @@ TEST(CpuDenseTensorImageOperation,
   const TensorRouteMutationPreparationResult result =
       prepare_after_tensor_route_mutation(
           graph, plan, 88, &provider_entries, authority,
-          {Device::GPU_METAL, Device::CPU}, nullptr);
+          {DeviceBackend::Metal, DeviceBackend::CPU}, nullptr);
 
   EXPECT_TRUE(result.restored);
   EXPECT_TRUE(result.rejected);
@@ -4763,7 +4727,7 @@ TEST(CpuDenseTensorImageOperation,
   const TensorRouteMutationPreparationResult result =
       prepare_after_tensor_route_mutation(
           graph, plan, kTensorNoWorkTargetId, &provider_entries, authority,
-          {Device::GPU_METAL}, &externally_satisfied);
+          {DeviceBackend::Metal}, &externally_satisfied);
 
   EXPECT_TRUE(result.restored);
   EXPECT_FALSE(result.rejected);
@@ -4810,7 +4774,7 @@ TEST(CpuDenseTensorImageOperation,
   const TensorRouteMutationPreparationResult result =
       prepare_after_tensor_route_mutation(
           graph, std::move(plan), kTensorNoWorkTargetId, &provider_entries,
-          authority, {Device::GPU_METAL}, nullptr);
+          authority, {DeviceBackend::Metal}, nullptr);
 
   EXPECT_TRUE(result.restored);
   EXPECT_TRUE(result.rejected);
@@ -4847,7 +4811,7 @@ TEST(CpuDenseTensorImageOperation,
   const TensorRouteMutationPreparationResult result =
       prepare_after_tensor_route_mutation(
           graph, plan, kTensorNoWorkTargetId, &provider_entries, authority,
-          {Device::GPU_METAL}, &externally_satisfied);
+          {DeviceBackend::Metal}, &externally_satisfied);
 
   EXPECT_TRUE(result.restored);
   EXPECT_TRUE(result.rejected);
@@ -4929,7 +4893,7 @@ TEST(CpuDenseTensorImageOperation,
               requested);
 
     const auto resolved = OpRegistry::instance().select_implementation(
-        "image_process", "invert_dense", {Device::CPU},
+        "image_process", "invert_dense", {DeviceBackend::CPU},
         ComputeIntent::GlobalHighPrecision);
     ASSERT_TRUE(resolved.has_value());
     const compute::DirtyResolvedOperationMap operations{
@@ -5018,7 +4982,7 @@ TEST(CpuDenseTensorImageOperation,
   graph.validate_topology();
 
   GraphTraversalService traversal;
-  RoiPropagationService propagation({Device::GPU_METAL, Device::CPU},
+  RoiPropagationService propagation({DeviceBackend::Metal, DeviceBackend::CPU},
                                     ComputeIntent::GlobalHighPrecision);
   compute::DirtyRegionPlanner planner(traversal, propagation);
   const compute::HighPrecisionDirtyPlan plan = planner.plan_high_precision(
@@ -5033,7 +4997,7 @@ TEST(CpuDenseTensorImageOperation,
   const TensorRouteMutationPreparationResult result =
       prepare_after_tensor_route_mutation(
           graph, plan, 92, &provider_entries, authority,
-          {Device::GPU_METAL, Device::CPU}, nullptr);
+          {DeviceBackend::Metal, DeviceBackend::CPU}, nullptr);
 
   EXPECT_TRUE(result.restored);
   EXPECT_TRUE(result.rejected);
@@ -5077,7 +5041,7 @@ TEST(CpuDenseTensorImageOperation,
   graph.validate_topology();
 
   const auto resolved = OpRegistry::instance().select_implementation(
-      "image_process", "invert_dense", {Device::CPU},
+      "image_process", "invert_dense", {DeviceBackend::CPU},
       ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(resolved.has_value());
   NodeOutput old_source;
@@ -5088,7 +5052,7 @@ TEST(CpuDenseTensorImageOperation,
       graph, execution_target, resolved->func, {&old_source});
   const Value old_target_value = old_target.image_value();
   const RegionSet complete_target_region =
-      value_image_adapter::full_node_output_region(old_target);
+      value_region::full_node_output_region(old_target);
   graph.mutate_node_runtime_state(94, [&](GraphModel::NodeRuntimeState& state) {
     state.cached_output_high_precision = std::move(old_target);
     state.hp_region = complete_target_region;
@@ -5192,7 +5156,7 @@ TEST(CpuDenseTensorImageOperation,
   const compute::HighPrecisionDirtyPlan plan =
       planner.plan_high_precision(graph, 96, requested);
   const auto resolved = OpRegistry::instance().select_implementation(
-      "image_process", "invert_dense", {Device::CPU},
+      "image_process", "invert_dense", {DeviceBackend::CPU},
       ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(resolved.has_value());
   const compute::DirtyResolvedOperationMap operations{{
@@ -5237,7 +5201,7 @@ TEST(CpuDenseTensorImageOperation,
 
   EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(96)));
   EXPECT_EQ(graph.node(96).hp_region,
-            value_image_adapter::full_node_output_region(
+            value_region::full_node_output_region(
                 *graph.node(96).cached_output_high_precision));
   const ImageView source_view(source_output->image_value());
   const ImageView result_view(
@@ -5259,11 +5223,7 @@ TEST(CpuDenseTensorImageOperation,
 TEST(CpuDenseTensorImageOperation,
      RunnerRejectsExecuteAccessBeyondFrozenGrantAsComputeError) {
   NodeOutput input;
-  ImageBuffer input_buffer =
-      make_aligned_cpu_image_buffer(2, 2, 1, DataType::UINT8);
-  (void)fill_unsigned8_image(&input_buffer);
-  input.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(input_buffer));
+  input.publish_image_value(make_unsigned8_value(2U, 2U, 1U, 2U));
 
   ops::CpuDenseImageOperation operation;
   operation.infer = [](const ops::CpuDenseImageConfiguration& configuration,

@@ -19,11 +19,11 @@
 #include <optional>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "compute/execution/progressive_compute.hpp"
-#include "core/image_buffer_processing.hpp"
-#include "photospider/core/image_buffer.hpp"
-#include "photospider/data/value.hpp"
+#include "core/dense_image_processing.hpp"
+#include "photospider/data/image_view.hpp"
 
 namespace ps::testing {
 namespace {
@@ -326,45 +326,50 @@ class TestFloatingEnvironment final {
 };
 
 /**
- * @brief Writes one FP32 scalar into an owned CPU ImageBuffer.
- * @param buffer Valid writable FP32 buffer.
- * @param x Pixel column.
- * @param y Pixel row.
- * @param channel Channel index.
- * @param value Binary32 value to write.
- * @return Nothing.
- * @throws Nothing for valid test coordinates.
+ * @brief Publishes one tightly packed Ready CPU FP32 image Value.
+ * @param width Positive image width.
+ * @param height Positive image height.
+ * @param channels Positive channel count.
+ * @param samples Exact row-major interleaved sample payload.
+ * @return Fresh zero-origin ordinary-image Value.
+ * @throws std::invalid_argument for shape/payload mismatch; Value and
+ *         allocation failures otherwise propagate unchanged.
  */
-void write_float(const ImageBuffer& buffer, int x, int y, int channel,
-                 float value) noexcept {
-  const std::size_t offset =
-      static_cast<std::size_t>(y) * buffer.step +
-      (static_cast<std::size_t>(x) * static_cast<std::size_t>(buffer.channels) +
-       static_cast<std::size_t>(channel)) *
-          sizeof(float);
-  std::memcpy(static_cast<std::byte*>(buffer.data.get()) + offset, &value,
-              sizeof(value));
+Value make_float_image(std::size_t width, std::size_t height,
+                       std::size_t channels,
+                       const std::vector<float>& samples) {
+  if (width == 0U || height == 0U || channels == 0U ||
+      samples.size() != width * height * channels) {
+    throw std::invalid_argument("progressive image fixture shape is invalid");
+  }
+  DenseTensorDescriptor descriptor{{height, width, channels},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  std::vector<std::byte> bytes(samples.size() * sizeof(float));
+  std::memcpy(bytes.data(), samples.data(), bytes.size());
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{
+          {static_cast<std::ptrdiff_t>(width * channels * sizeof(float)),
+           static_cast<std::ptrdiff_t>(channels * sizeof(float)),
+           static_cast<std::ptrdiff_t>(sizeof(float))}},
+      std::move(bytes));
 }
 
 /**
- * @brief Reads one FP32 scalar from an owned CPU ImageBuffer.
- * @param buffer Valid readable FP32 buffer.
- * @param x Pixel column.
- * @param y Pixel row.
+ * @brief Reads one FP32 scalar through a checked immutable image view.
+ * @param image Valid retaining FP32 image view.
+ * @param x Zero-based pixel column.
+ * @param y Zero-based pixel row.
  * @param channel Channel index.
  * @return Stored binary32 value.
  * @throws Nothing for valid test coordinates.
  */
-float read_float(const ImageBuffer& buffer, int x, int y,
-                 int channel) noexcept {
-  const std::size_t offset =
-      static_cast<std::size_t>(y) * buffer.step +
-      (static_cast<std::size_t>(x) * static_cast<std::size_t>(buffer.channels) +
-       static_cast<std::size_t>(channel)) *
-          sizeof(float);
+float read_float(const ImageView& image, std::size_t x, std::size_t y,
+                 std::size_t channel) noexcept {
   float value = 0.0F;
-  std::memcpy(&value, static_cast<const std::byte*>(buffer.data.get()) + offset,
-              sizeof(value));
+  std::memcpy(&value, image.channel_data(x, y, channel), sizeof(value));
   return value;
 }
 
@@ -595,115 +600,48 @@ TEST(ProgressiveFinalGate,
 
 TEST(ExactBoxAverageFactorFour, RoundsOnceToNearestAndRestoresEnvironment) {
   TestFloatingEnvironment restore_environment;
-  ImageBuffer source =
-      make_aligned_cpu_image_buffer(8, 8, 4, DataType::FLOAT32);
-  ImageBuffer destination =
-      make_aligned_cpu_image_buffer(2, 2, 4, DataType::FLOAT32);
   const float lower = std::nextafter(1.0F, 2.0F);
   const float upper = std::nextafter(lower, 2.0F);
-  for (int y = 0; y < source.height; ++y) {
-    for (int x = 0; x < source.width; ++x) {
-      for (int channel = 0; channel < source.channels; ++channel) {
-        write_float(source, x, y, channel,
-                    ((x + y * source.width) % 2 == 0) ? lower : upper);
+  std::vector<float> samples(8U * 8U * 4U);
+  for (std::size_t y = 0U; y < 8U; ++y) {
+    for (std::size_t x = 0U; x < 8U; ++x) {
+      for (std::size_t channel = 0U; channel < 4U; ++channel) {
+        samples[(y * 8U + x) * 4U + channel] =
+            ((x + y * 8U) % 2U == 0U) ? lower : upper;
       }
     }
   }
-  for (int y = 0; y < destination.height; ++y) {
-    for (int x = 0; x < destination.width; ++x) {
-      for (int channel = 0; channel < destination.channels; ++channel) {
-        write_float(destination, x, y, channel, -7.0F);
-      }
-    }
-  }
+  const Value source = make_float_image(8U, 8U, 4U, samples);
 
   ASSERT_EQ(fesetround(FE_DOWNWARD), 0);
   ASSERT_EQ(feclearexcept(FE_ALL_EXCEPT), 0);
   ASSERT_EQ(feraiseexcept(FE_INVALID), 0);
-  image_processing::exact_box_average_factor_four_region(source, destination,
-                                                         PixelRect{1, 0, 1, 1});
+  const Value destination =
+      dense_image_processing::exact_box_average_factor_four(
+          source, PixelRect{1, 0, 1, 1});
+  const ImageView destination_view(destination);
 
   EXPECT_EQ(fegetround(), FE_DOWNWARD);
   EXPECT_NE(fetestexcept(FE_INVALID), 0);
-  for (int channel = 0; channel < destination.channels; ++channel) {
-    EXPECT_EQ(read_float(destination, 1, 0, channel), upper);
-    EXPECT_EQ(read_float(destination, 0, 0, channel), -7.0F);
-    EXPECT_EQ(read_float(destination, 0, 1, channel), -7.0F);
-    EXPECT_EQ(read_float(destination, 1, 1, channel), -7.0F);
+  for (std::size_t channel = 0U; channel < 4U; ++channel) {
+    EXPECT_EQ(read_float(destination_view, 1U, 0U, channel), upper);
+    EXPECT_EQ(read_float(destination_view, 0U, 0U, channel), 0.0F);
+    EXPECT_EQ(read_float(destination_view, 0U, 1U, channel), 0.0F);
+    EXPECT_EQ(read_float(destination_view, 1U, 1U, channel), 0.0F);
   }
 }
 
-TEST(ExactBoxAverageFactorFour, RejectsWrongGeometryAndAliasing) {
-  ImageBuffer source =
-      make_aligned_cpu_image_buffer(8, 8, 4, DataType::FLOAT32);
-  ImageBuffer wrong_destination =
-      make_aligned_cpu_image_buffer(3, 2, 4, DataType::FLOAT32);
-  EXPECT_THROW(image_processing::exact_box_average_factor_four_region(
-                   source, wrong_destination, PixelRect{0, 0, 1, 1}),
+TEST(ExactBoxAverageFactorFour, RejectsWrongGeometryAndOutOfRangeRegion) {
+  const Value source =
+      make_float_image(8U, 8U, 4U, std::vector<float>(8U * 8U * 4U));
+  const Value wrong_source =
+      make_float_image(7U, 8U, 4U, std::vector<float>(7U * 8U * 4U));
+  EXPECT_THROW(dense_image_processing::exact_box_average_factor_four(
+                   wrong_source, PixelRect{0, 0, 1, 1}),
                std::invalid_argument);
-  EXPECT_THROW(image_processing::exact_box_average_factor_four_region(
-                   source, source, PixelRect{0, 0, 1, 1}),
-               std::invalid_argument);
-  ImageBuffer destination =
-      make_aligned_cpu_image_buffer(2, 2, 4, DataType::FLOAT32);
-  EXPECT_THROW(image_processing::exact_box_average_factor_four_region(
-                   source, destination, PixelRect{2, 0, 1, 1}),
+  EXPECT_THROW(dense_image_processing::exact_box_average_factor_four(
+                   source, PixelRect{2, 0, 1, 1}),
                std::out_of_range);
-}
-
-/**
- * @brief Proves valid factor-four geometry cannot hide overlapping envelopes.
- * @throws Allocation failures are reported by GoogleTest.
- * @note Both cases use different starting addresses, so the test cannot pass
- * through the former start-pointer equality check.
- */
-TEST(ExactBoxAverageFactorFour,
-     RejectsGeometricallyValidOverlappingStorageEnvelopes) {
-  auto shared_storage = std::make_shared<std::array<std::byte, 68U>>();
-  std::shared_ptr<void> shared_source_owner(shared_storage,
-                                            shared_storage->data());
-  std::shared_ptr<void> shared_destination_owner(
-      shared_storage, shared_storage->data() + sizeof(float));
-  ImageBuffer shared_source{
-      4, 4, 1, DataType::FLOAT32, Device::CPU, 16U, shared_source_owner, {}};
-  ImageBuffer shared_destination{
-      1, 1, 1, DataType::FLOAT32, Device::CPU, 4U, shared_destination_owner,
-      {}};
-  ASSERT_NE(shared_source.data.get(), shared_destination.data.get());
-  ASSERT_FALSE(shared_source.data.owner_before(shared_destination.data));
-  ASSERT_FALSE(shared_destination.data.owner_before(shared_source.data));
-  EXPECT_THROW(image_processing::exact_box_average_factor_four_region(
-                   shared_source, shared_destination, PixelRect{0, 0, 1, 1}),
-               std::invalid_argument);
-
-  std::array<std::byte, 68U> distinct_storage{};
-  /**
-   * @brief Suppresses deletion for stack-owned test storage.
-   * @param storage Borrowed address whose lifetime is owned by the test scope.
-   * @return Nothing.
-   * @throws Nothing.
-   * @note Both independent control blocks are destroyed before the underlying
-   * lexical storage leaves scope.
-   */
-  const auto retain_external_storage = [](void* storage) noexcept {
-    static_cast<void>(storage);
-  };
-  std::shared_ptr<void> distinct_source_owner(distinct_storage.data(),
-                                              retain_external_storage);
-  std::shared_ptr<void> distinct_destination_owner(
-      distinct_storage.data() + sizeof(float), retain_external_storage);
-  ImageBuffer distinct_source{
-      4, 4, 1, DataType::FLOAT32, Device::CPU, 16U, distinct_source_owner, {}};
-  ImageBuffer distinct_destination{
-      1, 1, 1, DataType::FLOAT32, Device::CPU, 4U, distinct_destination_owner,
-      {}};
-  ASSERT_NE(distinct_source.data.get(), distinct_destination.data.get());
-  ASSERT_TRUE(distinct_source.data.owner_before(distinct_destination.data) ||
-              distinct_destination.data.owner_before(distinct_source.data));
-  EXPECT_THROW(
-      image_processing::exact_box_average_factor_four_region(
-          distinct_source, distinct_destination, PixelRect{0, 0, 1, 1}),
-      std::invalid_argument);
 }
 
 }  // namespace

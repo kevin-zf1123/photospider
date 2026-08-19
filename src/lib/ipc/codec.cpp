@@ -411,36 +411,6 @@ constexpr std::array<std::pair<HostExecutionTraceAction, std::string_view>, 9>
     }};  // NOLINT(whitespace/indent_namespace)
 
 /**
- * @brief Complete current image data-type label table.
- *
- * @throws Nothing; this is immutable compile-time metadata.
- * @note New public enum values require an atomic codec and contract-test
- * update.
- */
-constexpr std::array<std::pair<DataType, std::string_view>, 6> kDataTypeLabels{{
-    {DataType::UINT8, "uint8"},
-    {DataType::INT8, "int8"},
-    {DataType::UINT16, "uint16"},
-    {DataType::INT16, "int16"},
-    {DataType::FLOAT32, "float32"},
-    {DataType::FLOAT64, "float64"},
-}};
-
-/**
- * @brief Complete current image-device label table.
- *
- * @throws Nothing; this is immutable compile-time metadata.
- * @note New public enum values require an atomic codec and contract-test
- * update.
- */
-constexpr std::array<std::pair<Device, std::string_view>, 4> kDeviceLabels{{
-    {Device::CPU, "cpu"},
-    {Device::GPU_METAL, "gpu_metal"},
-    {Device::GPU_CUDA, "gpu_cuda"},
-    {Device::ASIC_NPU, "asic_npu"},
-}};
-
-/**
  * @brief Rejects a returned string that cannot enter a version 2 value.
  *
  * @param value Public value bytes to validate before JSON construction.
@@ -2142,26 +2112,6 @@ bool encode_enum(HostExecutionTraceAction value, Json* output) {
 /** @copydoc decode_enum(const Json&,HostExecutionTraceAction*) */
 bool decode_enum(const Json& value, HostExecutionTraceAction* output) noexcept {
   return decode_enum_from_table(value, kExecutionTraceActionLabels, output);
-}
-
-/** @copydoc encode_enum(DataType,Json*) */
-bool encode_enum(DataType value, Json* output) {
-  return encode_enum_from_table(value, kDataTypeLabels, output);
-}
-
-/** @copydoc decode_enum(const Json&,DataType*) */
-bool decode_enum(const Json& value, DataType* output) noexcept {
-  return decode_enum_from_table(value, kDataTypeLabels, output);
-}
-
-/** @copydoc encode_enum(Device,Json*) */
-bool encode_enum(Device value, Json* output) {
-  return encode_enum_from_table(value, kDeviceLabels, output);
-}
-
-/** @copydoc decode_enum(const Json&,Device*) */
-bool decode_enum(const Json& value, Device* output) noexcept {
-  return decode_enum_from_table(value, kDeviceLabels, output);
 }
 
 /** @copydoc parse_json */

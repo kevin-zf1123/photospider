@@ -639,18 +639,19 @@ TEST_F(RegionRouteSelection,
   OpMetadata gpu_metadata;
   gpu_metadata.cost_score = 1;
   OpRegistry::instance().register_impl(
-      "image_process", "invert_dense", Device::GPU_METAL,
+      "image_process", "invert_dense", DeviceBackend::Metal,
       MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&) {
         return NodeOutput{};
       }),
       gpu_metadata);
-  const std::vector<Device> routed_devices{Device::GPU_METAL, Device::CPU};
+  const std::vector<DeviceBackend> routed_devices{DeviceBackend::Metal,
+                                                  DeviceBackend::CPU};
   const auto selected = OpRegistry::instance().select_implementation(
       "image_process", "invert_dense", routed_devices,
       ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(selected.has_value());
   ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(selected->func));
-  EXPECT_EQ(selected->metadata.device_preference, Device::GPU_METAL);
+  EXPECT_EQ(selected->metadata.device_preference, DeviceBackend::Metal);
   EXPECT_FALSE(ops::find_core_region_monolithic_operation(
                    "image_process", "invert_dense",
                    std::get<MonolithicOpFunc>(selected->func))
@@ -705,17 +706,18 @@ TEST_F(RegionRouteSelection, UsesRequestIntentWhenSelectingTensorIdentity) {
   OpMetadata cpu_metadata;
   cpu_metadata.cost_score = 1;
   OpRegistry::instance().register_impl("image_process", "invert_dense",
-                                       Device::CPU, core_operation_,
+                                       DeviceBackend::CPU, core_operation_,
                                        cpu_metadata);
   OpMetadata accelerator_metadata;
   accelerator_metadata.cost_score = 100;
   OpRegistry::instance().register_impl(
-      "image_process", "invert_dense", Device::ASIC_NPU,
+      "image_process", "invert_dense", DeviceBackend::NPU,
       MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&) {
         return NodeOutput{};
       }),
       accelerator_metadata);
-  const std::vector<Device> routed_devices{Device::CPU, Device::ASIC_NPU};
+  const std::vector<DeviceBackend> routed_devices{DeviceBackend::CPU,
+                                                  DeviceBackend::NPU};
   const auto hp_selected = OpRegistry::instance().select_implementation(
       "image_process", "invert_dense", routed_devices,
       ComputeIntent::GlobalHighPrecision);
@@ -726,8 +728,8 @@ TEST_F(RegionRouteSelection, UsesRequestIntentWhenSelectingTensorIdentity) {
   ASSERT_TRUE(rt_selected.has_value());
   ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(hp_selected->func));
   ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(rt_selected->func));
-  EXPECT_EQ(hp_selected->metadata.device_preference, Device::ASIC_NPU);
-  EXPECT_EQ(rt_selected->metadata.device_preference, Device::CPU);
+  EXPECT_EQ(hp_selected->metadata.device_preference, DeviceBackend::NPU);
+  EXPECT_EQ(rt_selected->metadata.device_preference, DeviceBackend::CPU);
   EXPECT_FALSE(ops::find_core_region_monolithic_operation(
                    "image_process", "invert_dense",
                    std::get<MonolithicOpFunc>(hp_selected->func))

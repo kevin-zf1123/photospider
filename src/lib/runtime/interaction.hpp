@@ -442,22 +442,21 @@ class InteractionService {
     return kernel_.end_dirty_source_control(graph, node_id, domain);
   }
   /**
-   * @brief Computes an image from an adapter-translated Kernel request.
+   * @brief Computes exact named Values from an adapter-translated request.
    *
    * @param request Internal graph, target, cache, execution, telemetry, and
    * optional dirty/intent controls produced by the embedded Host adapter from
    * a public HostComputeRequest.
-   * @return Cloned CPU image descriptor, or nullopt when compute or image
-   * extraction fails.
-   * @throws std::bad_alloc if Kernel compute/image execution or handled-
+   * @return Canonically ordered named Values, or nullopt when compute fails.
+   * @throws std::bad_alloc if Kernel compute/Value execution or handled-
    *         failure LastError construction exhausts memory.
    * @note Frontends submit HostComputeRequest to ps::Host and never construct
    * this Kernel::ComputeRequest directly. The request is not retained after
-   * image extraction completes.
+   * Value result construction completes.
    */
-  std::optional<ImageBuffer> cmd_compute_and_get_image(
+  std::optional<NamedValueResult> cmd_compute_and_get_values(
       const Kernel::ComputeRequest& request) {
-    return kernel_.compute_and_get_image(request);
+    return kernel_.compute_and_get_values(request);
   }
   std::optional<std::vector<int>> cmd_trees_containing_node(
       const std::string& graph, int node_id) {

@@ -120,7 +120,7 @@ I2MetalAcquisitionEvidence make_i2_metal_acquisition(
       false};
 
   execution::DeviceExecutorDiagnostics before;
-  before.device = Device::GPU_METAL;
+  before.device = DeviceBackend::Metal;
   before.queue_ready = true;
   execution::DeviceExecutorDiagnostics after_first = before;
   after_first.submission_count = 1U;

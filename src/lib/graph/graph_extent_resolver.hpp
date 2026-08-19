@@ -36,7 +36,7 @@ class GraphExtentResolver {
    * values from typed parameter maps. A missing or incompatible request-local
    * value falls back to the static parameter; an absent or nonpositive
    * effective extent then falls through to image-parent resolution without
-   * document-format conversion. Compatibility ImageBuffer staging is never
+   * document-format conversion. Mutable producer staging is never
    * consulted. Callers must keep graph topology and effective parameter state
    * stable for the lifetime of cache.
    */

@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -15,12 +17,10 @@
 #include <utility>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "benchmark/benchmark_service.hpp"
 #include "compute/dirty/dirty_update_executor.hpp"
 #include "compute/dirty/realtime_proxy_graph.hpp"
 #include "core/param_utils.hpp"
-#include "core/value_image_adapter.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "graph/node.hpp"            // NOLINT(build/include_subdir)
@@ -28,6 +28,7 @@
 #include "graph_cli/command/commands.hpp"
 #include "graph_cli/process_command.hpp"
 #include "metal/metal_exception_boundary.hpp"
+#include "photospider/data/image_view.hpp"
 #include "photospider/host/host.hpp"
 #include "runtime/graph_event_service.hpp"
 
@@ -449,18 +450,33 @@ void register_bad_alloc_boundary_operations() {
                              -> NodeOutput { throw std::bad_alloc{}; }));
     registry.register_op_hp_monolithic(
         "bad_alloc_boundary_test", "dirty_source",
-        MonolithicOpFunc(
-            [](const Node& node, const std::vector<const NodeOutput*>&) {
-              const int width = as_int_flexible(node.parameters, "width", 16);
-              const int height = as_int_flexible(node.parameters, "height", 16);
-              ImageBuffer image = make_aligned_cpu_image_buffer(
-                  width, height, 1, DataType::FLOAT32);
-              toCvMat(image).setTo(1.0f);
-              NodeOutput output;
-              output.publish_image_value(
-                  value_image_adapter::snapshot_cpu_image_value(image));
-              return output;
-            }));
+        MonolithicOpFunc([](const Node& node,
+                            const std::vector<const NodeOutput*>&) {
+          const int width = as_int_flexible(node.parameters, "width", 16);
+          const int height = as_int_flexible(node.parameters, "height", 16);
+          DenseTensorDescriptor descriptor{
+              {static_cast<std::size_t>(height),
+               static_cast<std::size_t>(width), 1U},
+              ElementSemantics::FloatingPoint,
+              StorageEncoding{32U}};
+          ImageFacet facet =
+              make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+          std::vector<float> samples(static_cast<std::size_t>(width) *
+                                         static_cast<std::size_t>(height),
+                                     1.0F);
+          std::vector<std::byte> bytes(samples.size() * sizeof(float));
+          std::memcpy(bytes.data(), samples.data(), bytes.size());
+          NodeOutput output;
+          output.publish_image_value(Value::from_cpu_dense_tensor(
+              std::move(descriptor), std::move(facet),
+              StridedLayout{
+                  {static_cast<std::ptrdiff_t>(static_cast<std::size_t>(width) *
+                                               sizeof(float)),
+                   static_cast<std::ptrdiff_t>(sizeof(float)),
+                   static_cast<std::ptrdiff_t>(sizeof(float))}},
+              std::move(bytes)));
+          return output;
+        }));
     OpMetadata tile_metadata;
     tile_metadata.tile_preference = TileSizePreference::MICRO;
     registry.register_op_hp_tiled("bad_alloc_boundary_test",
@@ -472,9 +488,28 @@ void register_bad_alloc_boundary_operations() {
                                   tile_metadata);
     registry.register_op_hp_tiled(
         "bad_alloc_boundary_test", "rt_dirty_resource_exhausted",
-        TileOpFunc(
-            [](const Node&, const OutputTile& output,
-               const std::vector<InputTile>&) { toCvMat(output).setTo(1.0f); }),
+        TileOpFunc([](const Node&, const OutputTile& output,
+                      const std::vector<InputTile>&) {
+          if (output.grant == nullptr) {
+            throw std::invalid_argument(
+                "rt dirty boundary output grant is absent");
+          }
+          constexpr float kOne = 1.0F;
+          for (std::size_t span_index = 0U;
+               span_index < output.grant->span_count(); ++span_index) {
+            const std::size_t byte_size =
+                output.grant->span(span_index).byte_size;
+            if (byte_size % sizeof(float) != 0U) {
+              throw std::invalid_argument(
+                  "rt dirty boundary output span is not FP32 aligned");
+            }
+            std::byte* const destination = output.grant->data(span_index);
+            for (std::size_t offset = 0U; offset < byte_size;
+                 offset += sizeof(float)) {
+              std::memcpy(destination + offset, &kOne, sizeof(kOne));
+            }
+          }
+        }),
         tile_metadata);
     registry.register_op_rt_tiled("bad_alloc_boundary_test",
                                   "rt_dirty_resource_exhausted",

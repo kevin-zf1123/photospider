@@ -3,7 +3,7 @@
 #include <limits>
 #include <stdexcept>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/value_adapter_opencv.hpp"
 
 namespace ps {
 namespace {
@@ -16,7 +16,7 @@ namespace {
  * @throws std::invalid_argument when the element combination or channel count
  * cannot be represented by the OpenCV adapter.
  * @note The plan remains metadata authority; this callback-local projection
- * creates no ImageBuffer descriptor or allocation identity.
+ * creates no alternate descriptor or allocation identity.
  */
 int to_cv_type(const DenseImageOutputPlan& plan) {
   if (plan.channels() > static_cast<std::size_t>(CV_CN_MAX)) {

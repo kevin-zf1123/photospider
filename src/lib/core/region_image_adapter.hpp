@@ -14,7 +14,7 @@ namespace ps::region_image_adapter {
  * @return Canonical Empty for zero area, otherwise one exact ImageRect clause.
  * @throws std::invalid_argument for a negative extent or invalid domain.
  * @throws std::bad_alloc when Region storage cannot allocate.
- * @note Conversion occurs once at a current private ImageBuffer edge. The
+ * @note Conversion occurs once at a callback-local pixel-geometry edge. The
  *       PixelRect is not retained as logical authority.
  */
 RegionSet from_pixel_rect(const PixelRect& rect,

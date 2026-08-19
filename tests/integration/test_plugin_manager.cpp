@@ -225,7 +225,7 @@ std::uint64_t register_direct_predecessor() {
       },
       metadata);
   const auto selected = OpRegistry::instance().select_implementation(
-      kLifecycleType, kLifecycleSubtype, {Device::CPU},
+      kLifecycleType, kLifecycleSubtype, {DeviceBackend::CPU},
       ComputeIntent::GlobalHighPrecision);
   if (!selected || selected->implementation_identity == 0U) {
     throw std::runtime_error("direct predecessor revision was not published");
@@ -243,7 +243,7 @@ std::pair<std::string, std::uint64_t> active_lifecycle_generation() {
   const auto callback = OpRegistry::instance().resolve_for_intent(
       kLifecycleType, kLifecycleSubtype, ComputeIntent::GlobalHighPrecision);
   const auto selected = OpRegistry::instance().select_implementation(
-      kLifecycleType, kLifecycleSubtype, {Device::CPU},
+      kLifecycleType, kLifecycleSubtype, {DeviceBackend::CPU},
       ComputeIntent::GlobalHighPrecision);
   if (!callback || !std::holds_alternative<MonolithicOpFunc>(*callback) ||
       !selected || selected->implementation_identity == 0U) {

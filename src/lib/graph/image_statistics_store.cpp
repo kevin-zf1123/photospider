@@ -486,7 +486,8 @@ ImageStatisticsResult finish_statistics_result(
  * @return Complete validated result carrying the exact key.
  * @throws ImageView, query support, cancellation, overflow, validation, or
  * allocation exceptions unchanged.
- * @note The function reads no ImageBuffer, graph generation, HP/RT version,
+ * @note The function reads no alternate image representation, graph
+ * generation, HP/RT version,
  * allocation identity, or descriptor digest.
  */
 ImageStatisticsResult scan_image_statistics(

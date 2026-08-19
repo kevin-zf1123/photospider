@@ -506,7 +506,7 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
-            "SnapshotRejectsHugeZeroStrideImageBeforeIntNarrowing"
+            "ImageViewPreservesHugeZeroStrideExtentWithoutNarrowing"
         ),
         (
             "CpuDenseTensorImageOperation."
@@ -554,7 +554,7 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
-            "FormalCommitPublishesValidatedOpaqueCompatibilityImageValue"
+            "FormalCommitPreservesValidatedOpaqueNativeImageValue"
         ),
         (
             "CpuDenseTensorImageOperation."
@@ -574,7 +574,7 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
-            "DiskSaveRejectsCompatibilityStagingBesideSealedValue"
+            "DiskSaveUsesSealedValueAsSoleImageAuthority"
         ),
         (
             "CpuDenseTensorImageOperation."

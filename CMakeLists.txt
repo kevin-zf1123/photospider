@@ -33,7 +33,7 @@ option(PHOTOSPIDER_ENABLE_OPENCV
 option(PHOTOSPIDER_ENABLE_YAML
     "Enable YAML graph-document and cache-metadata persistence" ON)
 option(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER
-    "Build the optional single-part deep-scanline OpenEXR provider"
+    "Build the optional ordinary codec and deep-scanline OpenEXR provider"
     OFF)
 set(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER_DEFAULT
     ${PHOTOSPIDER_ENABLE_OPENCV})
@@ -168,7 +168,6 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     core/export.hpp
     core/geometry.hpp
     core/graph_error.hpp
-    core/image_buffer.hpp
     core/inspection_types.hpp
     core/result_types.hpp
     data/image_metadata.hpp
@@ -178,11 +177,15 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     data/extension.hpp
     data/packed_dense_tensor_view.hpp
     data/region.hpp
+    data/sample_conversion.hpp
     data/value.hpp
+    data/value_artifact.hpp
     host/compute_request.hpp
     host/event_stream.hpp
     host/graph_session.hpp
     host/host.hpp
+    host/value_artifact_result.hpp
+    host/value_result.hpp
     memory/access_plan.hpp
     memory/blocked_layout.hpp
     memory/buffer_handle.hpp
@@ -206,7 +209,7 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
         plugin/opencv_adapter.hpp)
 endif()
-set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 31)
+set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 34)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
         "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 1")
@@ -278,7 +281,7 @@ set(PHOTOSPIDER_INSTALL_CMAKEDIR
     "${CMAKE_INSTALL_LIBDIR}/cmake/Photospider"
     CACHE STRING "Install directory for Photospider CMake package files")
 
-# Public image-buffer factory, ReadyFence, process-wide Value identity,
+# Public ReadyFence, process-wide Value identity,
 # provider-defined data contracts, and shared private device-invocation
 # context implementation.
 # Host products and Value-using operation DSOs dynamically depend on this one
@@ -289,12 +292,15 @@ set(PHOTOSPIDER_INSTALL_CMAKEDIR
 add_library(photospider_operation_runtime SHARED
     src/lib/core/dense_tensor_content_digest.cpp
     src/lib/core/extension.cpp
-    src/lib/core/image_buffer.cpp
     src/lib/core/image_statistics.cpp
     src/lib/core/ready_fence.cpp
     src/lib/core/region.cpp
+    src/lib/core/sample_conversion.cpp
     src/lib/core/value.cpp
+    src/lib/core/value_artifact.cpp
     src/lib/core/packed_dense_tensor.cpp
+    src/lib/host/value_artifact_result.cpp
+    src/lib/host/value_result.cpp
     src/lib/plugin/data_definition_registry.cpp
     src/lib/execution/device/device_execution_context.cpp)
 add_library(Photospider::operation_runtime ALIAS
@@ -311,6 +317,7 @@ target_include_directories(photospider_operation_runtime
         "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     PRIVATE
         "${PROJECT_SOURCE_DIR}/src/lib")
+target_link_libraries(photospider_operation_runtime PRIVATE OpenSSL::Crypto)
 
 # Public pure-C operation-plugin SDK. C11 and C++17 producers receive only the
 # generated/installed include root; Host registry and runtime authority never
@@ -422,7 +429,7 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     # Optional public OpenCV adapter. Consumers requesting only neutral
     # components do not inherit or discover OpenCV.
     add_library(photospider_operation_opencv STATIC
-        src/lib/adapters/opencv/buffer_adapter_opencv.cpp)
+        src/lib/adapters/opencv/value_adapter_opencv.cpp)
     add_library(Photospider::operation_opencv ALIAS
         photospider_operation_opencv)
     set_target_properties(photospider_operation_opencv PROPERTIES
@@ -435,11 +442,11 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
         ${PHOTOSPIDER_OPENCV_CORE_TARGET})
 endif()
 
-# Optional V-15 definition provider and source-private Host codec adapter.
-# Neither target participates in the dependency-neutral product, operation
-# runtime, or provider SDK. The DSO publishes only the frozen v3 candidate
-# entry points; the adapter is a private C++ seam used by Host composition and
-# long-lived product tests.
+# Optional OpenEXR definition provider and private codec adapters. The Deep DSO
+# publishes only the frozen v3 candidate entry points; the Deep adapter remains
+# a source-private Host seam. When enabled, the ordinary dense codec is also
+# compiled into the core/product closure below and makes OpenEXR an explicit
+# package dependency of the embedded component.
 if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
     add_library(photospider_openexr_deep_provider MODULE
         plugins/data/openexr_deep_scanline_provider.cpp)
@@ -519,7 +526,7 @@ endif()
 # Module: dependency-neutral private core values, display formatting, and the
 # build-selected image-processing/image-artifact implementations.
 set(PHOTOSPIDER_CORE_INTERNAL_SOURCES
-    src/lib/core/exact_box_downsample.cpp
+    src/lib/core/dense_image_processing.cpp
     src/lib/core/host_output_authorization.cpp
     src/lib/core/ps_types.cpp
     src/lib/core/parameter_value_text.cpp
@@ -528,21 +535,18 @@ set(PHOTOSPIDER_CORE_INTERNAL_SOURCES
 set(PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES
     src/lib/providers/configured_image_artifact_codec.cpp
 )
-set(PHOTOSPIDER_IMAGE_PROCESSING_SOURCES "")
 if(PHOTOSPIDER_ENABLE_OPENCV)
     list(APPEND PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES
         src/lib/adapters/opencv/image_artifact_codec_opencv.cpp)
-    list(APPEND PHOTOSPIDER_IMAGE_PROCESSING_SOURCES
-        src/lib/adapters/opencv/image_buffer_processing_opencv.cpp)
-else()
-    list(APPEND PHOTOSPIDER_IMAGE_PROCESSING_SOURCES
-        src/lib/core/image_buffer_processing.cpp)
+endif()
+if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+    list(APPEND PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES
+        src/lib/adapters/openexr/openexr_dense_image_codec.cpp)
 endif()
 
 add_library(photospider_core_internal STATIC
     ${PHOTOSPIDER_CORE_INTERNAL_SOURCES}
-    ${PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES}
-    ${PHOTOSPIDER_IMAGE_PROCESSING_SOURCES})
+    ${PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES})
 target_include_directories(photospider_core_internal PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(photospider_core_internal PRIVATE
@@ -557,6 +561,11 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
         ${PHOTOSPIDER_OPENCV_IMGPROC_TARGET}
         ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET})
 endif()
+if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+    target_compile_definitions(photospider_core_internal PRIVATE
+        PHOTOSPIDER_HAS_OPENEXR_DENSE)
+    target_link_libraries(photospider_core_internal PRIVATE OpenEXR::OpenEXR)
+endif()
 
 # Module: private graph model, registry behavior, dependency-neutral cache
 # coordination, and format-neutral graph services.
@@ -564,7 +573,7 @@ set(PHOTOSPIDER_GRAPH_INTERNAL_SOURCES
     src/lib/core/cpu_dense_image_operation.cpp
     src/lib/core/ops.cpp
     src/lib/core/region_image_adapter.cpp
-    src/lib/core/value_image_adapter.cpp
+    src/lib/core/value_region.cpp
     src/lib/graph/in_memory_graph_document_adapter.cpp
     src/lib/graph/graph_model.cpp
     src/lib/graph/graph_state_executor.cpp
@@ -978,6 +987,11 @@ function(configure_photospider_product_objects TARGET_NAME)
             Photospider::operation_opencv
             ${OpenCV_LIBS})
     endif()
+    if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+        target_compile_definitions(${TARGET_NAME} PRIVATE
+            PHOTOSPIDER_HAS_OPENEXR_DENSE)
+        target_link_libraries(${TARGET_NAME} PRIVATE OpenEXR::OpenEXR)
+    endif()
     if(PHOTOSPIDER_ENABLE_YAML)
         target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_HAS_YAML)
         target_link_libraries(${TARGET_NAME} PRIVATE yaml-cpp::yaml-cpp)
@@ -1005,6 +1019,9 @@ function(configure_photospider_product_archive TARGET_NAME)
         target_link_libraries(${TARGET_NAME} PRIVATE
             Photospider::operation_opencv
             ${OpenCV_LIBS})
+    endif()
+    if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+        target_link_libraries(${TARGET_NAME} PRIVATE OpenEXR::OpenEXR)
     endif()
     if(PHOTOSPIDER_ENABLE_YAML)
         target_link_libraries(${TARGET_NAME} PRIVATE yaml-cpp::yaml-cpp)
@@ -1380,7 +1397,13 @@ if(PHOTOSPIDER_BUILD_IPC)
             "$<BUILD_INTERFACE:${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}>"
             "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     )
-    target_link_libraries(photospider_ipc_client PUBLIC Threads::Threads)
+    # IPC result decoding reconstructs named Value artifacts through the
+    # process-wide Value identity and validation implementation. Export the
+    # dependency so static IPC clients cannot omit the shared runtime that
+    # owns those symbols and identities.
+    target_link_libraries(photospider_ipc_client PUBLIC
+        Photospider::operation_runtime
+        Threads::Threads)
 
     add_library(photospider_ipc_server_internal STATIC
         src/lib/ipc/collection_snapshot_registry.cpp
@@ -1544,12 +1567,18 @@ install(EXPORT PhotospiderEmbeddedTargets
 if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
     set(PHOTOSPIDER_OPENEXR_COMPONENT_DISCOVERY [=[
 if(_Photospider_need_openexr)
-  if(Photospider_FIND_REQUIRED_openexr_deep_provider)
+  if(Photospider_FIND_REQUIRED_openexr_deep_provider OR
+     (_Photospider_need_embedded AND
+      (NOT Photospider_FIND_COMPONENTS OR
+       Photospider_FIND_REQUIRED_embedded)))
     find_dependency(OpenEXR 3 CONFIG)
   else()
     find_package(OpenEXR 3 QUIET CONFIG)
     if(NOT TARGET OpenEXR::OpenEXR)
       set(Photospider_openexr_deep_provider_FOUND FALSE)
+      if(_Photospider_need_embedded)
+        set(Photospider_embedded_FOUND FALSE)
+      endif()
     endif()
   endif()
 endif()
@@ -2024,6 +2053,27 @@ if(BUILD_TESTING)
             TIMEOUT 30)
 
     if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+        add_executable(test_openexr_dense_image_codec
+            tests/integration/test_openexr_dense_image_codec.cpp)
+        set_target_properties(test_openexr_dense_image_codec PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_include_directories(test_openexr_dense_image_codec PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests")
+        target_link_libraries(test_openexr_dense_image_codec PRIVATE
+            photospider_core_internal
+            Photospider::operation_runtime
+            OpenEXR::OpenEXR
+            GTest::gtest
+            GTest::gtest_main)
+        gtest_discover_tests(test_openexr_dense_image_codec
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS openexr-provider
+                TIMEOUT 30)
+
         add_executable(test_openexr_deep_scanline_provider
             tests/integration/test_openexr_deep_scanline_provider.cpp)
         set_target_properties(test_openexr_deep_scanline_provider PROPERTIES
@@ -2575,26 +2625,20 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         tests/unit/test_graph_topology_boundaries.cpp)
     add_ps_test(test_graph_document_adapter
         tests/unit/test_graph_document_adapter.cpp)
-    add_ps_test(test_image_buffer_contracts
-        tests/unit/test_image_buffer_contracts.cpp)
+    add_ps_test(test_dense_image_value_contracts
+        tests/unit/test_dense_image_value_contracts.cpp)
+    add_ps_test(test_sample_conversion
+        tests/unit/test_sample_conversion.cpp)
+    add_ps_test(test_value_artifact
+        tests/unit/test_value_artifact.cpp)
     add_ps_test(test_host_output_authorization
         tests/unit/test_host_output_authorization.cpp)
     add_ps_test(test_image_statistics_store
         tests/unit/test_image_statistics_store.cpp)
     add_ps_test(test_host_compute_request_contracts
         tests/unit/test_host_compute_request_contracts.cpp)
-    add_executable(test_stdlib_image_buffer_processing
-        tests/unit/test_stdlib_image_buffer_processing.cpp
-        src/lib/core/image_buffer_processing.cpp)
-    set_target_properties(test_stdlib_image_buffer_processing PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
-    target_include_directories(test_stdlib_image_buffer_processing PRIVATE
-        "${PROJECT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/src/lib")
-    target_link_libraries(test_stdlib_image_buffer_processing PRIVATE
-        Photospider::operation_runtime
-        GTest::gtest
-        GTest::gtest_main)
+    add_ps_test(test_dense_image_processing
+        tests/unit/test_dense_image_processing.cpp)
     add_ps_test(test_event_stream_boundaries
         tests/unit/test_event_stream_boundaries.cpp)
     add_ps_test(test_cli_compute_event_paging
@@ -3184,7 +3228,12 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_kernel_contracts
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_image_buffer_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_dense_image_value_contracts
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_sample_conversion
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_value_artifact
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_host_output_authorization
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
@@ -3193,7 +3242,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_host_compute_request_contracts
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_stdlib_image_buffer_processing
+    gtest_discover_tests(test_dense_image_processing
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_event_stream_boundaries
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})

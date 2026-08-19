@@ -199,7 +199,7 @@ struct DirtySourceFirstRunRequest {
    * value to enter the matching private CPU or GPU lane; inline execution
    * retains the same immutable planning snapshot without queue routing.
    */
-  const std::vector<Device>* task_devices = nullptr;
+  const std::vector<DeviceBackend>* task_devices = nullptr;
 
   /**
    * @brief Operation start constraints aligned with planned task ids.
@@ -421,7 +421,7 @@ class DirtyReadyTaskContext final
       const ComputePlan& compute_plan,
       const DirtyTaskSelectionOverlay* selection,
       const std::vector<int>& active_task_ids,
-      const std::vector<Device>& task_devices,
+      const std::vector<DeviceBackend>& task_devices,
       const std::vector<OperationExecutionConstraints>& task_constraints,
       ReadyTaskResourceDemand task_operation_resource_demand,
       std::function<void(int)> run_task,
@@ -606,7 +606,7 @@ class DirtyReadyTaskContext final
   std::vector<int> active_task_ids_;
 
   /** @brief Selected devices aligned with dense compute-plan task ids. */
-  std::vector<Device> task_devices_;
+  std::vector<DeviceBackend> task_devices_;
 
   /**
    * @brief Operation gates aligned with dense compute-plan task ids.
@@ -708,7 +708,7 @@ void remember_compute_plan(
 ComputePlan prune_node_cache_task_graph(
     GraphModel& graph, const ComputeRequest& request,
     const std::vector<int>& execution_order,
-    const std::vector<Device>& available_devices = {Device::CPU});
+    const std::vector<DeviceBackend>& available_devices = {DeviceBackend::CPU});
 
 /**
  * @brief Applies dirty snapshot selection to a request-scoped plan.
@@ -795,24 +795,6 @@ void log_dirty_node_execution(GraphRuntime* runtime, int node_id,
 bool should_skip_stale_dirty_source(GraphRuntime* runtime, int node_id,
                                     uint64_t committed_generation,
                                     uint64_t dirty_generation);
-
-/**
- * @brief Infers image channels and data type for a new output plan.
- *
- * @param preferred Existing output preferred for the target intent.
- * @param image_inputs Ready image inputs for the node.
- * @param fallback Optional secondary output used as a final shape hint.
- * @return Pair of channel count and data type.
- * @throws std::invalid_argument when canonical Value element facts or channel
- * counts cannot cross the current tiled compatibility boundary.
- * @note Defaults to one FLOAT32 channel when neither output nor input carries
- * concrete image metadata, matching the pre-split dirty update behavior. No
- * compatibility ImageBuffer is inspected or retained.
- */
-std::pair<int, DataType> infer_output_spec(
-    const std::optional<NodeOutput>& preferred,
-    const std::vector<const NodeOutput*>& image_inputs,
-    const std::optional<NodeOutput>* fallback = nullptr);
 
 /**
  * @brief Applies dirty-pruned HP ROI overrides back to HP plan entries.
@@ -902,7 +884,7 @@ void validate_dirty_region_operation_routes(
 template <typename DirtyPlan>
 PreparedDirtyPlan<DirtyPlan> prepare_dirty_execution(
     GraphModel& graph, DirtyPlan&& dirty_plan, const ComputeRequest& request,
-    const std::vector<Device>& available_devices = {Device::CPU},
+    const std::vector<DeviceBackend>& available_devices = {DeviceBackend::CPU},
     const std::unordered_set<int>* externally_satisfied_node_ids = nullptr) {
   ComputeRequest dirty_selection_request = request;
   dirty_selection_request.defer_reusable_cache_pruning = true;

@@ -185,7 +185,7 @@ class NodeExecutor {
    * @param graph Graph used by random-access dirty propagators.
    * @param node Node whose operator metadata defines access behavior.
    * @param output_roi Output tile ROI being computed.
-   * @param input_buffer Input buffer whose bounds clip the mapped ROI.
+   * @param input_size Immutable input Value extent clipping the mapped ROI.
    * @param config Tiled execution metadata, exact implementation callback,
    * and halo overrides.
    * @param known_input_extents Request-local image-input extents by destination
@@ -194,14 +194,14 @@ class NodeExecutor {
    *        snapshot. Null uses execution-local runtime/static parameters.
    * @param available_inputs Optional destination-indexed inputs from the
    *        current execution batch. Null selects planning snapshots.
-   * @return Input ROI clipped to input_buffer bounds.
+   * @return Input ROI clipped to input_size bounds.
    * @throws GraphError or propagator exceptions from random-access ROI mapping.
    * @note Empty propagated ROIs fall back to clipped output_roi, matching
    * legacy tiled execution behavior.
    */
   static PixelRect input_roi_for_tile(
       GraphModel& graph, const Node& node, const PixelRect& output_roi,
-      const ImageBuffer& input_buffer, const TiledExecutionConfig& config,
+      const PixelSize& input_size, const TiledExecutionConfig& config,
       const std::vector<PixelSize>& known_input_extents = {},
       const plugin::ParameterMap* known_effective_parameters = nullptr,
       const std::vector<const NodeOutput*>* available_inputs = nullptr);

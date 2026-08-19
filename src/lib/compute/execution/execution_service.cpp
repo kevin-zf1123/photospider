@@ -40,7 +40,7 @@ ReadyTaskResourceDemand owned_callback_resource_demand(
 /** @copydoc ReadyTaskMetadata::ReadyTaskMetadata */
 ReadyTaskMetadata::ReadyTaskMetadata(const ComputeRunDescriptor& descriptor,
                                      int trace_node_id, bool is_initial_ready,
-                                     Device device)
+                                     DeviceBackend device)
     : run_id_(descriptor.id()),
       graph_identity_(descriptor.graph_identity()),
       graph_instance_id_(descriptor.graph_instance_id()),
@@ -60,7 +60,7 @@ ReadyTaskSubmission::ReadyTaskSubmission(
     ComputeRunLease lease, ComputeRunTaskIdentity identity, int trace_node_id,
     bool is_initial_ready, Executable executable,
     ExecutionTaskPriority priority, ReadyTaskResourceDemand resource_demand,
-    Device device, OperationExecutionConstraints operation_constraints)
+    DeviceBackend device, OperationExecutionConstraints operation_constraints)
     : metadata_(lease.descriptor(), trace_node_id, is_initial_ready, device),
       identity_(identity),
       lease_(std::move(lease)),

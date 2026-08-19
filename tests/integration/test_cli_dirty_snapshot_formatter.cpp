@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -8,19 +10,52 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "core/dense_image_processing.hpp"
 #include "core/param_utils.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "core/value_image_adapter.hpp"
-#include "graph/node.hpp"  // NOLINT(build/include_subdir)
+#include "graph/node.hpp"     // NOLINT(build/include_subdir)
 #include "graph_cli/command/commands.hpp"
 #include "graph_cli/command/help_utils.hpp"
 #include "graph_cli/dependency_tree_formatter.hpp"
 
 namespace ps::cli {
 namespace {
+
+/**
+ * @brief Publishes one constant tightly packed FP32 ordinary image Value.
+ * @param width Positive image width.
+ * @param height Positive image height.
+ * @param sample Scalar copied to every channel element.
+ * @return Fresh immutable single-channel CPU image Value.
+ * @throws std::invalid_argument or std::overflow_error when the requested
+ * image cannot be represented.
+ * @throws std::bad_alloc when metadata or payload allocation fails.
+ * @note The helper performs no implicit sample-domain conversion.
+ */
+Value make_cli_float_image(std::size_t width, std::size_t height,
+                           float sample) {
+  std::vector<float> samples(width * height, sample);
+  std::vector<std::byte> storage(samples.size() * sizeof(float));
+  std::memcpy(storage.data(), samples.data(), storage.size());
+  DenseTensorDescriptor descriptor{{height, width, 1U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        {}};
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{{static_cast<std::ptrdiff_t>(width * sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float))}},
+      std::move(storage));
+}
 
 /**
  * @brief Registers deterministic operations used by CLI command tests.
@@ -48,12 +83,10 @@ void register_cli_command_ops() {
                             const std::vector<const NodeOutput*>&) {
           const int width = as_int_flexible(node.parameters, "width", 256);
           const int height = as_int_flexible(node.parameters, "height", 128);
-          ImageBuffer image = make_aligned_cpu_image_buffer(width, height, 1,
-                                                            DataType::FLOAT32);
-          toCvMat(image).setTo(3.0f);
           NodeOutput output;
           output.publish_image_value(
-              value_image_adapter::snapshot_cpu_image_value(image));
+              make_cli_float_image(static_cast<std::size_t>(width),
+                                   static_cast<std::size_t>(height), 3.0F));
           output.space.absolute_roi = PixelRect{0, 0, width, height};
           output.debug.compute_device = "cli-dirty-test-source";
           return output;
@@ -75,16 +108,9 @@ void register_cli_command_ops() {
                                  "cli dirty inspect requires one input");
               }
               const NodeOutput& input = *inputs.front();
-              const ImageBuffer input_image =
-                  value_image_adapter::snapshot_cpu_image_buffer(
-                      input.image_value());
-              ImageBuffer image = make_aligned_cpu_image_buffer(
-                  input_image.width, input_image.height, input_image.channels,
-                  input_image.type);
-              toCvMat(input_image).copyTo(toCvMat(image));
               NodeOutput output;
               output.publish_image_value(
-                  value_image_adapter::snapshot_cpu_image_value(image));
+                  dense_image_processing::clone(input.image_value()));
               output.space.absolute_roi = input.space.absolute_roi;
               output.debug.compute_device = "cli-dirty-test-offset-identity";
               return output;
@@ -244,8 +270,8 @@ void write_dirty_inspect_graph(const std::filesystem::path& path) {
  * @param path YAML file path to create.
  * @throws std::filesystem::filesystem_error or std::ios_base::failure if file
  *         creation fails.
- * @note The graph exercises the Host image-compute path where Kernel returns
- *       nullopt without LastError to represent successful no-image output.
+ * @note The graph exercises the Host named-Value compute path where Kernel
+ *       returns an empty output set without LastError.
  */
 void write_empty_output_graph(const std::filesystem::path& path) {
   std::filesystem::create_directories(path.parent_path());
@@ -405,7 +431,9 @@ TEST(CliSaveCommand, ReportsSuccessfulEmptyImageOutputs) {
   auto loaded = host->load_graph(request);
   ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
 
-  std::istringstream args("1 /tmp/photospider_empty_output.png");
+  std::istringstream args(
+      "1 image /tmp/photospider_empty_output.png uint8 code code 0 255 clamp "
+      "nearest-even reject allow");
   std::string current_graph = request.session.value;
   bool modified = false;
   CliConfig config;
@@ -417,18 +445,57 @@ TEST(CliSaveCommand, ReportsSuccessfulEmptyImageOutputs) {
 
   const std::string text = captured.str();
   EXPECT_TRUE(handled);
-  EXPECT_NE(text.find("No image to save (node produced no CPU image)."),
+  EXPECT_NE(text.find("Named output 'image' is absent or is not an ordinary "
+                      "image."),
             std::string::npos);
-  EXPECT_EQ(text.find("Failed to compute image for node 1."),
-            std::string::npos);
+  EXPECT_EQ(text.find("Failed to compute node 1."), std::string::npos);
   EXPECT_EQ(text.find("Reason:"), std::string::npos);
+}
+
+TEST(CliSaveCommand, SavesWithExplicitDestinationSampleSemantics) {
+  register_cli_command_ops();
+  ScopedTempDir temp("photospider_cli_save_explicit_sample_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const auto yaml_path = temp.root() / "source" / "save_graph.yaml";
+  const auto output_path = temp.root() / "saved.png";
+  write_dirty_inspect_graph(yaml_path);
+
+  GraphLoadRequest request;
+  request.session = GraphSessionId{"cli_save_explicit_sample"};
+  request.root_dir = (temp.root() / "sessions").string();
+  request.yaml_path = yaml_path.string();
+  request.cache_root_dir = (temp.root() / "cache").string();
+  auto loaded = host->load_graph(request);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  std::istringstream args(
+      "1 image " + output_path.string() +
+      " uint8 code code 0 255 clamp nearest-even reject allow");
+  std::string current_graph = request.session.value;
+  bool modified = false;
+  CliConfig config;
+  std::ostringstream captured;
+  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
+  const bool handled =
+      ::handle_save(args, *host, current_graph, modified, config);
+  std::cout.rdbuf(original_buffer);
+
+  const std::string text = captured.str();
+  EXPECT_TRUE(handled);
+  EXPECT_NE(text.find("Saved named output 'image'"), std::string::npos) << text;
+  ASSERT_TRUE(std::filesystem::is_regular_file(output_path)) << text;
+  EXPECT_GT(std::filesystem::file_size(output_path), 0U);
 }
 
 TEST(CliSaveCommand, ReportsImageComputeFailures) {
   auto host = create_embedded_host();
   ASSERT_NE(host, nullptr);
 
-  std::istringstream args("1 /tmp/photospider_missing_output.png");
+  std::istringstream args(
+      "1 image /tmp/photospider_missing_output.png uint8 code code 0 255 "
+      "clamp nearest-even reject allow");
   std::string current_graph = "missing_cli_graph";
   bool modified = false;
   CliConfig config;
@@ -440,11 +507,34 @@ TEST(CliSaveCommand, ReportsImageComputeFailures) {
 
   const std::string text = captured.str();
   EXPECT_TRUE(handled);
-  EXPECT_NE(text.find("Failed to compute image for node 1."),
-            std::string::npos);
+  EXPECT_NE(text.find("Failed to compute node 1."), std::string::npos);
   EXPECT_NE(text.find("Reason:"), std::string::npos);
-  EXPECT_EQ(text.find("No image to save (node produced no image)."),
+  EXPECT_EQ(text.find("Named output 'image' is absent or is not an ordinary "
+                      "image."),
             std::string::npos);
+}
+
+TEST(CliSaveCommand, RejectsImplicitDestinationSampleSemantics) {
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  std::istringstream args(
+      "1 image /tmp/photospider_implicit_output.png uint8 clamp nearest-even "
+      "reject allow");
+  std::string current_graph = "missing_cli_graph";
+  bool modified = false;
+  CliConfig config;
+  std::ostringstream captured;
+  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
+  const bool handled =
+      ::handle_save(args, *host, current_graph, modified, config);
+  std::cout.rdbuf(original_buffer);
+
+  const std::string text = captured.str();
+  EXPECT_TRUE(handled);
+  EXPECT_NE(text.find("Usage: save <id> <output> <file> <uint8|uint16>"),
+            std::string::npos);
+  EXPECT_EQ(text.find("Failed to compute node 1."), std::string::npos);
 }
 
 }  // namespace

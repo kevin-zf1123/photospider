@@ -53,8 +53,8 @@ class TaskPopulationStrategy {
    */
   void populate(ComputePlan& result, const DirtyRegionSnapshot* snapshot,
                 DirtyDomain domain, const GraphModel* graph,
-                const std::vector<Device>& available_devices = {
-                    Device::CPU}) const;
+                const std::vector<DeviceBackend>& available_devices = {
+                    DeviceBackend::CPU}) const;
 };
 
 }  // namespace ps::compute

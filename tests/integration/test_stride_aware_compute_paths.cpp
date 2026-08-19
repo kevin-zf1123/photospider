@@ -7,17 +7,85 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "compute/dirty/node_executor.hpp"
 #include "compute/request/compute_metrics_recorder.hpp"
-#include "core/value_image_adapter.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/node.hpp"         // NOLINT(build/include_subdir)
-#include "photospider/core/image_buffer.hpp"
+#include "photospider/data/image_view.hpp"
 
 namespace ps {
 namespace {
+
+/**
+ * @brief Publishes one padded zero-origin ordinary image Value.
+ * @tparam Sample Trivially copyable scalar matching `semantics` and
+ * `bit_width`.
+ * @param width Positive image width.
+ * @param height Positive image height.
+ * @param channels Positive channel count.
+ * @param row_stride Positive row stride no smaller than the active row.
+ * @param semantics Exact stored-element semantics.
+ * @param bit_width Exact stored-element bit width.
+ * @param samples Exact row-major interleaved active samples.
+ * @param padding Byte copied into every inactive row-padding position.
+ * @return Fresh immutable CPU DenseTensor image Value.
+ * @throws std::invalid_argument for inconsistent shape, encoding, or payload.
+ * @throws std::overflow_error when size arithmetic overflows in Value
+ * validation.
+ * @throws std::bad_alloc when metadata or payload allocation fails.
+ * @note Padding is retained in the immutable allocation but is not a logical
+ * image element and therefore must not affect metrics.
+ */
+template <typename Sample>
+Value make_padded_image_value(std::size_t width, std::size_t height,
+                              std::size_t channels, std::size_t row_stride,
+                              ElementSemantics semantics,
+                              std::uint16_t bit_width,
+                              const std::vector<Sample>& samples,
+                              std::byte padding = std::byte{0xFF}) {
+  const std::size_t row_bytes = width * channels * sizeof(Sample);
+  if (width == 0U || height == 0U || channels == 0U || row_stride < row_bytes ||
+      samples.size() != width * height * channels ||
+      bit_width != sizeof(Sample) * 8U) {
+    throw std::invalid_argument("padded image fixture is inconsistent");
+  }
+  std::vector<std::byte> storage((height - 1U) * row_stride + row_bytes,
+                                 padding);
+  for (std::size_t row = 0U; row < height; ++row) {
+    std::memcpy(storage.data() + row * row_stride,
+                samples.data() + row * width * channels, row_bytes);
+  }
+  DenseTensorDescriptor descriptor{{height, width, channels},
+                                   semantics,
+                                   StorageEncoding{bit_width}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{{static_cast<std::ptrdiff_t>(row_stride),
+                     static_cast<std::ptrdiff_t>(channels * sizeof(Sample)),
+                     static_cast<std::ptrdiff_t>(sizeof(Sample))}},
+      std::move(storage));
+}
+
+/**
+ * @brief Reads one FP32 channel through a checked immutable image view.
+ * @param view Valid FP32 image view.
+ * @param x Zero-based column.
+ * @param y Zero-based row.
+ * @param channel Zero-based channel.
+ * @return Stored binary32 sample.
+ * @throws std::out_of_range when a coordinate is invalid.
+ * @throws std::bad_alloc when checked address calculation allocates.
+ */
+float read_float(const ImageView& view, std::size_t x, std::size_t y,
+                 std::size_t channel = 0U) {
+  float value = 0.0F;
+  std::memcpy(&value, view.channel_data(x, y, channel), sizeof(value));
+  return value;
+}
 
 TEST(StrideAwareComputePaths,
      TiledCropNormalizationAndMetricsIgnorePaddedRows) {
@@ -30,62 +98,48 @@ TEST(StrideAwareComputePaths,
   node.runtime_parameters["merge_strategy"] = std::string("crop");
 
   NodeOutput base;
-  ImageBuffer base_buffer =
-      make_aligned_cpu_image_buffer(5, 4, 1, DataType::FLOAT32);
-  ASSERT_GT(base_buffer.step, image_buffer_row_bytes(base_buffer));
-  base.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(base_buffer));
+  constexpr std::size_t kBaseRowStride = 64U;
+  base.publish_image_value(make_padded_image_value<float>(
+      5U, 4U, 1U, kBaseRowStride, ElementSemantics::FloatingPoint, 32U,
+      std::vector<float>(20U, 0.0F)));
 
   NodeOutput secondary;
-  ImageBuffer secondary_buffer =
-      make_aligned_cpu_image_buffer(3, 2, 1, DataType::FLOAT32);
-  const std::size_t secondary_row_bytes =
-      image_buffer_row_bytes(secondary_buffer);
-  ASSERT_GT(secondary_buffer.step, secondary_row_bytes);
-  std::memset(secondary_buffer.data.get(), 0xFF,
-              secondary_buffer.step * secondary_buffer.height);
-  const float secondary_pixels[2][3] = {{1.0F, 2.0F, 3.0F}, {4.0F, 5.0F, 6.0F}};
-  auto* secondary_base = static_cast<std::byte*>(secondary_buffer.data.get());
-  for (int row = 0; row < secondary_buffer.height; ++row) {
-    std::memcpy(
-        secondary_base + static_cast<std::size_t>(row) * secondary_buffer.step,
-        secondary_pixels[row], secondary_row_bytes);
-  }
-  secondary.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(secondary_buffer));
+  constexpr std::size_t kSecondaryRowStride = 32U;
+  secondary.publish_image_value(make_padded_image_value<float>(
+      3U, 2U, 1U, kSecondaryRowStride, ElementSemantics::FloatingPoint, 32U,
+      std::vector<float>{1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F}));
 
   int tile_calls = 0;
-  bool saw_normalized_padded_input = false;
+  bool saw_normalized_fresh_input = false;
   OpRegistry::OpVariant operation =
       TileOpFunc([&](const Node&, const OutputTile& output_tile,
                      const std::vector<InputTile>& input_tiles) {
         ASSERT_EQ(input_tiles.size(), 2U);
-        ASSERT_NE(input_tiles[1].buffer, nullptr);
+        ASSERT_NE(input_tiles[1].value, nullptr);
         ASSERT_NE(output_tile.plan, nullptr);
         ASSERT_NE(output_tile.grant, nullptr);
         ASSERT_EQ(output_tile.grant->span_count(),
                   static_cast<std::size_t>(output_tile.roi.height));
         ++tile_calls;
-        const ImageBuffer& normalized = *input_tiles[1].buffer;
-        saw_normalized_padded_input =
-            saw_normalized_padded_input ||
-            (normalized.width == base_buffer.width &&
-             normalized.height == base_buffer.height &&
-             normalized.step > image_buffer_row_bytes(normalized) &&
-             input_tiles[1].buffer != &secondary_buffer);
+        const ImageView normalized(*input_tiles[1].value);
+        saw_normalized_fresh_input =
+            saw_normalized_fresh_input ||
+            (normalized.width() == 5U && normalized.height() == 4U &&
+             input_tiles[1].value != &secondary.image_value());
         EXPECT_EQ(input_tiles[1].roi, output_tile.roi);
         for (int row = 0; row < output_tile.roi.height; ++row) {
-          const std::byte* input_row =
-              image_buffer_row_data(normalized, output_tile.roi.y + row);
-          const std::size_t input_offset =
-              static_cast<std::size_t>(output_tile.roi.x) * sizeof(float);
           ASSERT_EQ(
               output_tile.grant->span(static_cast<std::size_t>(row)).byte_size,
               static_cast<std::size_t>(output_tile.roi.width) * sizeof(float));
-          std::memcpy(
-              output_tile.grant->data(static_cast<std::size_t>(row)),
-              input_row + input_offset,
-              static_cast<std::size_t>(output_tile.roi.width) * sizeof(float));
+          for (int column = 0; column < output_tile.roi.width; ++column) {
+            const float sample =
+                read_float(normalized,
+                           static_cast<std::size_t>(output_tile.roi.x + column),
+                           static_cast<std::size_t>(output_tile.roi.y + row));
+            std::memcpy(output_tile.grant->data(static_cast<std::size_t>(row)) +
+                            static_cast<std::size_t>(column) * sizeof(float),
+                        &sample, sizeof(sample));
+          }
         }
       });
 
@@ -95,16 +149,14 @@ TEST(StrideAwareComputePaths,
       graph, node, operation, {&base, &secondary}, config);
 
   EXPECT_EQ(tile_calls, 6);
-  EXPECT_TRUE(saw_normalized_padded_input);
+  EXPECT_TRUE(saw_normalized_fresh_input);
   EXPECT_TRUE(output.has_image_value());
-  EXPECT_FALSE(output.has_compatibility_image());
-  ImageBuffer output_buffer =
-      value_image_adapter::snapshot_cpu_image_buffer(output.image_value());
-  EXPECT_EQ(output_buffer.width, 5);
-  EXPECT_EQ(output_buffer.height, 4);
-  EXPECT_EQ(output_buffer.channels, 1);
-  const std::size_t output_row_bytes = image_buffer_row_bytes(output_buffer);
-  ASSERT_GT(output_buffer.step, output_row_bytes);
+  const ImageView output_view(output.image_value());
+  EXPECT_EQ(output_view.width(), 5U);
+  EXPECT_EQ(output_view.height(), 4U);
+  EXPECT_EQ(output_view.channels(), 1U);
+  ASSERT_GT(output_view.row_stride(),
+            static_cast<std::ptrdiff_t>(output_view.width() * sizeof(float)));
 
   const float expected[4][5] = {
       {1.0F, 2.0F, 3.0F, 0.0F, 0.0F},
@@ -112,25 +164,19 @@ TEST(StrideAwareComputePaths,
       {0.0F, 0.0F, 0.0F, 0.0F, 0.0F},
       {0.0F, 0.0F, 0.0F, 0.0F, 0.0F},
   };
-  auto* output_base = static_cast<std::byte*>(output_buffer.data.get());
-  for (int row = 0; row < output_buffer.height; ++row) {
-    const std::byte* active = image_buffer_row_data(output_buffer, row);
-    for (int column = 0; column < output_buffer.width; ++column) {
-      float value = 0.0F;
-      std::memcpy(&value,
-                  active + static_cast<std::size_t>(column) * sizeof(float),
-                  sizeof(value));
+  std::vector<float> output_samples;
+  output_samples.reserve(20U);
+  for (std::size_t row = 0U; row < output_view.height(); ++row) {
+    for (std::size_t column = 0U; column < output_view.width(); ++column) {
+      const float value = read_float(output_view, column, row);
+      output_samples.push_back(value);
       EXPECT_FLOAT_EQ(value, expected[row][column]);
     }
-    std::memset(output_base +
-                    static_cast<std::size_t>(row) * output_buffer.step +
-                    output_row_bytes,
-                0xFF, output_buffer.step - output_row_bytes);
   }
 
   NodeOutput metrics_output;
-  metrics_output.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(output_buffer));
+  metrics_output.publish_image_value(make_padded_image_value<float>(
+      5U, 4U, 1U, 64U, ElementSemantics::FloatingPoint, 32U, output_samples));
   compute::ComputeMetricsRecorder::finalize_output_metadata(
       metrics_output, {&base, &secondary}, true, 2.4);
   EXPECT_DOUBLE_EQ(metrics_output.debug.min_val, 0.0);
@@ -140,10 +186,10 @@ TEST(StrideAwareComputePaths,
   EXPECT_EQ(metrics_output.debug.compute_device, "CPU");
 
   const float active_nan = std::numeric_limits<float>::quiet_NaN();
-  std::memcpy(output_base, &active_nan, sizeof(active_nan));
+  output_samples.front() = active_nan;
   NodeOutput nan_output;
-  nan_output.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(output_buffer));
+  nan_output.publish_image_value(make_padded_image_value<float>(
+      5U, 4U, 1U, 64U, ElementSemantics::FloatingPoint, 32U, output_samples));
   compute::ComputeMetricsRecorder::finalize_output_metadata(
       nan_output, {&base, &secondary}, true, 2.4);
   EXPECT_TRUE(nan_output.debug.has_nan);
@@ -154,23 +200,10 @@ TEST(StrideAwareComputePaths,
 TEST(StrideAwareComputePaths,
      MetricsScanMultiChannelIntegerRowsWithoutPaddingBytes) {
   NodeOutput output;
-  ImageBuffer output_buffer =
-      make_aligned_cpu_image_buffer(2, 2, 3, DataType::UINT16);
-  const std::size_t row_bytes = image_buffer_row_bytes(output_buffer);
-  ASSERT_GT(output_buffer.step, row_bytes);
-  std::memset(output_buffer.data.get(), 0xFF,
-              output_buffer.step * output_buffer.height);
-  const std::uint16_t pixels[2][6] = {
-      {1U, 2U, 3U, 4U, 5U, 6U},
-      {7U, 8U, 9U, 10U, 11U, 12U},
-  };
-  auto* base = static_cast<std::byte*>(output_buffer.data.get());
-  for (int row = 0; row < output_buffer.height; ++row) {
-    std::memcpy(base + static_cast<std::size_t>(row) * output_buffer.step,
-                pixels[row], row_bytes);
-  }
-  output.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(output_buffer));
+  output.publish_image_value(make_padded_image_value<std::uint16_t>(
+      2U, 2U, 3U, 32U, ElementSemantics::UnsignedInteger, 16U,
+      std::vector<std::uint16_t>{1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 9U, 10U, 11U,
+                                 12U}));
 
   compute::ComputeMetricsRecorder::finalize_output_metadata(output, {}, true,
                                                             0.0);
@@ -181,12 +214,10 @@ TEST(StrideAwareComputePaths,
 
 TEST(StrideAwareComputePaths, MetricsRetainAllNanEmptyRangeSentinels) {
   NodeOutput output;
-  ImageBuffer output_buffer =
-      make_aligned_cpu_image_buffer(1, 1, 1, DataType::FLOAT32);
   const float active_nan = std::numeric_limits<float>::quiet_NaN();
-  std::memcpy(output_buffer.data.get(), &active_nan, sizeof(active_nan));
-  output.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(output_buffer));
+  output.publish_image_value(make_padded_image_value<float>(
+      1U, 1U, 1U, 16U, ElementSemantics::FloatingPoint, 32U,
+      std::vector<float>{active_nan}));
 
   compute::ComputeMetricsRecorder::finalize_output_metadata(output, {}, true,
                                                             0.0);
@@ -195,13 +226,8 @@ TEST(StrideAwareComputePaths, MetricsRetainAllNanEmptyRangeSentinels) {
   EXPECT_EQ(output.debug.max_val, -std::numeric_limits<double>::infinity());
 }
 
-TEST(StrideAwareComputePaths,
-     MetricsSkipCompatibilityStagingBeforePixelInspection) {
+TEST(StrideAwareComputePaths, MetricsSkipAbsentImageBeforePixelInspection) {
   NodeOutput output;
-  output.compatibility_image.width = 2;
-  output.compatibility_image.height = 2;
-  output.compatibility_image.channels = 1;
-  output.compatibility_image.context = std::make_shared<int>(57);
   output.debug.min_val = 123.0;
   output.debug.max_val = 456.0;
   output.debug.has_nan = true;

@@ -127,7 +127,7 @@ TEST(DenseImageMetadataContracts, SignedBoundsAndLogicalCoordinatesAreExact) {
 }
 
 /**
- * @brief Proves core image views do not inherit ImageBuffer's int extents.
+ * @brief Proves core image views preserve size_t logical extents.
  * @throws std::invalid_argument, std::out_of_range, std::overflow_error, or
  *         std::length_error from zero-origin facet construction and Value
  *         publication unchanged.

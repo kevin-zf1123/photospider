@@ -1,6 +1,6 @@
 /**
  * @file durable_server_state.cpp
- * @brief Implements Issue #99 durable Job and image-artifact authority.
+ * @brief Implements Issue #99 durable Job and named-Value artifact authority.
  */
 #include "server/state/durable_server_state.hpp"
 
@@ -35,7 +35,7 @@ constexpr char kControlDirectory[] = "control";
 constexpr char kJobsDirectory[] = "jobs";
 /** @brief Fixed artifact namespace below the trusted state root. */
 constexpr char kArtifactsDirectory[] = "artifacts";
-/** @brief Fixed tight image-payload leaf within one artifact directory. */
+/** @brief Fixed canonical Value-archive leaf within one artifact directory. */
 constexpr char kPayloadName[] = "payload.bin";
 /** @brief Fixed authoritative manifest-last artifact publication leaf. */
 constexpr char kManifestName[] = "manifest";
@@ -44,7 +44,7 @@ constexpr char kPrivateManifestName[] = ".manifest.private";
 /** @brief Fixed suffix identifying authoritative durable Job records. */
 constexpr char kJobRecordSuffix[] = ".record";
 /** @brief Exact canonical version prefix for artifact manifests. */
-constexpr char kArtifactManifestVersion[] = "photospider-artifact-manifest-v1";
+constexpr char kArtifactManifestVersion[] = "photospider-artifact-manifest-v2";
 /** @brief Exact canonical version prefix for durable Job records. */
 constexpr char kJobRecordVersion[] = "photospider-job-record-v1";
 
@@ -633,14 +633,9 @@ std::string serialize_artifact_manifest(const OutputCommitReceipt& receipt) {
   append_frame(receipt.output_slot_id.value(), &output);
   append_frame(receipt.artifact_id.value(), &output);
   append_frame(receipt.output_commit_id.value(), &output);
-  append_frame(std::to_string(receipt.descriptor.width), &output);
-  append_frame(std::to_string(receipt.descriptor.height), &output);
-  append_frame(std::to_string(receipt.descriptor.channels), &output);
-  append_frame(
-      std::to_string(static_cast<std::uint32_t>(receipt.descriptor.type)),
-      &output);
-  append_frame(std::to_string(receipt.descriptor.row_bytes), &output);
-  append_frame(std::to_string(receipt.descriptor.payload_bytes), &output);
+  append_frame(std::to_string(receipt.descriptor.archive_version), &output);
+  append_frame(std::to_string(receipt.descriptor.value_count), &output);
+  append_frame(std::to_string(receipt.descriptor.archive_bytes), &output);
   append_frame(receipt.content_digest.hex(), &output);
   append_frame("crash-durable", &output);
   return output;
@@ -669,16 +664,11 @@ OutputCommitReceipt parse_artifact_manifest(std::string_view bytes) {
     receipt.output_slot_id = OutputSlotId(std::string(reader.next()));
     receipt.artifact_id = ArtifactId(std::string(reader.next()));
     receipt.output_commit_id = OutputCommitId(std::string(reader.next()));
-    receipt.descriptor.width = parse_nonnegative_int(reader.next());
-    receipt.descriptor.height = parse_nonnegative_int(reader.next());
-    receipt.descriptor.channels = parse_nonnegative_int(reader.next());
-    const std::uint32_t type = parse_unsigned<std::uint32_t>(reader.next());
-    if (type > static_cast<std::uint32_t>(DataType::FLOAT64)) {
-      throw DurableCorruptionError("artifact manifest data type is invalid");
-    }
-    receipt.descriptor.type = static_cast<DataType>(type);
-    receipt.descriptor.row_bytes = parse_unsigned<std::size_t>(reader.next());
-    receipt.descriptor.payload_bytes =
+    receipt.descriptor.archive_version =
+        parse_unsigned<std::uint32_t>(reader.next());
+    receipt.descriptor.value_count =
+        parse_unsigned<std::uint32_t>(reader.next());
+    receipt.descriptor.archive_bytes =
         parse_unsigned<std::size_t>(reader.next());
     receipt.content_digest = parse_digest<ArtifactContentDigest>(reader.next());
     if (reader.next() != "crash-durable") {
@@ -688,33 +678,20 @@ OutputCommitReceipt parse_artifact_manifest(std::string_view bytes) {
     receipt.achieved_durability = ArtifactDurability::CrashDurable;
     validate_attempt_identity(receipt.attempt);
     if (!receipt.output_slot_id.valid() || !receipt.artifact_id.valid() ||
-        !receipt.output_commit_id.valid() || receipt.descriptor.width <= 0 ||
-        receipt.descriptor.height <= 0 || receipt.descriptor.channels <= 0 ||
-        receipt.descriptor.row_bytes == 0U ||
-        receipt.descriptor.payload_bytes == 0U) {
+        !receipt.output_commit_id.valid() ||
+        receipt.descriptor.archive_version !=
+            kNamedValueArtifactSetArchiveVersion ||
+        receipt.descriptor.value_count == 0U ||
+        receipt.descriptor.value_count > kMaximumNamedValueArtifacts ||
+        receipt.descriptor.archive_bytes == 0U) {
       throw DurableCorruptionError("artifact manifest has an invalid field");
     }
-    const std::size_t channel_bytes =
-        image_buffer_bytes_per_channel(receipt.descriptor.type);
-    const std::uint64_t width =
-        static_cast<std::uint64_t>(receipt.descriptor.width);
-    const std::uint64_t channels =
-        static_cast<std::uint64_t>(receipt.descriptor.channels);
-    if (width > std::numeric_limits<std::uint64_t>::max() / channels ||
-        width * channels >
-            std::numeric_limits<std::uint64_t>::max() / channel_bytes) {
-      throw DurableCorruptionError("artifact manifest row size overflowed");
-    }
-    const std::uint64_t expected_row = width * channels * channel_bytes;
-    if (expected_row != receipt.descriptor.row_bytes ||
-        receipt.descriptor.row_bytes >
-            std::numeric_limits<std::size_t>::max() /
-                static_cast<std::size_t>(receipt.descriptor.height) ||
-        receipt.descriptor.row_bytes *
-                static_cast<std::size_t>(receipt.descriptor.height) !=
-            receipt.descriptor.payload_bytes) {
+    const std::uint64_t maximum_archive_bytes =
+        kMaximumValueArtifactPayloadBytes +
+        static_cast<std::uint64_t>(kMaximumValueArtifactMetadataBytes);
+    if (receipt.descriptor.archive_bytes > maximum_archive_bytes) {
       throw DurableCorruptionError(
-          "artifact manifest descriptor is inconsistent");
+          "artifact manifest archive length exceeds its frozen bound");
     }
     return receipt;
   } catch (const DurableCorruptionError&) {
@@ -755,6 +732,66 @@ int open_artifact_directory(int artifacts_descriptor,
     throw;
   }
   return descriptor;
+}
+
+/**
+ * @brief Verifies decoded Values against one durable receipt's owner joins.
+ * @param receipt Identity-complete authoritative receipt.
+ * @param values Decoded canonical named-Value artifact set.
+ * @return Nothing after count and every artifact/commit/slot join agree.
+ * @throws DurableCorruptionError for missing, foreign, or inconsistent joins.
+ * @note Descriptor, Facet, Layout, buffer digest, and content validation has
+ * already completed in the portable archive decoder before this join check.
+ */
+void validate_durable_value_joins(const OutputCommitReceipt& receipt,
+                                  const NamedValueArtifactSet& values) {
+  if (values.values.empty() ||
+      values.values.size() != receipt.descriptor.value_count) {
+    throw DurableCorruptionError(
+        "durable Value archive count differs from its receipt");
+  }
+  for (const ValueArtifact& value : values.values) {
+    const ValueArtifactJoin& joins = value.envelope.joins;
+    if (!joins.artifact_identity.has_value() ||
+        *joins.artifact_identity != receipt.artifact_id.value() ||
+        !joins.commit_identity.has_value() ||
+        *joins.commit_identity != receipt.output_commit_id.value() ||
+        !joins.slot_identity.has_value() ||
+        *joins.slot_identity != receipt.output_slot_id.value()) {
+      throw DurableCorruptionError(
+          "durable Value archive has an invalid owner identity join");
+    }
+  }
+}
+
+/**
+ * @brief Decodes and locally validates one authoritative durable archive.
+ * @param archive Exact bytes read through the retained artifact directory.
+ * @param receipt Parsed authoritative manifest receipt.
+ * @return Detached canonical named Values after digest and join validation.
+ * @throws DurableCorruptionError for malformed archive bytes or receipt drift.
+ * @throws std::bad_alloc when decoded ownership cannot allocate.
+ */
+NamedValueArtifactSet decode_durable_value_archive(
+    const std::vector<std::byte>& archive, const OutputCommitReceipt& receipt) {
+  if (archive.size() != receipt.descriptor.archive_bytes ||
+      hash_artifact_content(archive.data(), archive.size()) !=
+          receipt.content_digest) {
+    throw DurableCorruptionError(
+        "durable Value archive length or digest mismatches");
+  }
+  try {
+    NamedValueArtifactSet values = decode_named_value_artifact_set(archive);
+    validate_durable_value_joins(receipt, values);
+    return values;
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const DurableCorruptionError&) {
+    throw;
+  } catch (const std::exception& error) {
+    throw DurableCorruptionError(
+        std::string("invalid durable Value archive: ") + error.what());
+  }
 }
 
 /**
@@ -806,13 +843,9 @@ std::shared_ptr<const ArtifactRecord> load_artifact(
     throw DurableCorruptionError(
         "artifact manifest identity does not match root");
   }
-  std::vector<std::byte> payload = read_file_at(directory.get(), kPayloadName);
-  if (payload.size() != receipt.descriptor.payload_bytes ||
-      hash_artifact_content(payload.data(), payload.size()) !=
-          receipt.content_digest) {
-    throw DurableCorruptionError(
-        "artifact payload length or digest mismatches");
-  }
+  const std::vector<std::byte> archive =
+      read_file_at(directory.get(), kPayloadName);
+  NamedValueArtifactSet values = decode_durable_value_archive(archive, receipt);
   if (has_private_manifest) {
     const std::vector<std::byte> private_manifest =
         read_file_at(directory.get(), kPrivateManifestName);
@@ -843,7 +876,7 @@ std::shared_ptr<const ArtifactRecord> load_artifact(
   synchronize_descriptor(root_descriptor, "durability root directory");
   auto record = std::make_shared<ArtifactRecord>();
   record->receipt = receipt;
-  record->payload = std::move(payload);
+  record->values = std::move(values);
   return record;
 }
 
@@ -920,6 +953,7 @@ bool child_exists(int parent, const std::string& name) {
  * @param existing Original committed occurrence.
  * @return Nothing for one idempotent retry.
  * @throws DurableConflictError for any stable-identity/content mismatch.
+ * @throws Portable artifact encoding/allocation failures unchanged.
  */
 void validate_idempotent_retry(const DurableArtifactCommitRequest& request,
                                const ArtifactRecord& candidate,
@@ -934,7 +968,8 @@ void validate_idempotent_retry(const DurableArtifactCommitRequest& request,
       retained.output_commit_id != request.output_commit_id ||
       !(retained.descriptor == current.descriptor) ||
       retained.content_digest != current.content_digest ||
-      existing.payload != candidate.payload ||
+      encode_named_value_artifact_set(existing.values) !=
+          encode_named_value_artifact_set(candidate.values) ||
       retained.achieved_durability != ArtifactDurability::CrashDurable) {
     throw DurableConflictError(
         "stable output commit identity conflicts with retained artifact");
@@ -979,10 +1014,10 @@ void validate_artifact_durability_index(
  * @param left First immutable artifact occurrence.
  * @param right Second immutable artifact occurrence.
  * @return True only for one exact durable occurrence.
- * @throws Nothing.
+ * @throws Portable artifact encoding/allocation failures unchanged.
  */
 bool same_artifact_record(const ArtifactRecord& left,
-                          const ArtifactRecord& right) noexcept {
+                          const ArtifactRecord& right) {
   return left.receipt.attempt == right.receipt.attempt &&
          left.receipt.output_slot_id == right.receipt.output_slot_id &&
          left.receipt.artifact_id == right.receipt.artifact_id &&
@@ -991,7 +1026,8 @@ bool same_artifact_record(const ArtifactRecord& left,
          left.receipt.content_digest == right.receipt.content_digest &&
          left.receipt.achieved_durability ==
              right.receipt.achieved_durability &&
-         left.payload == right.payload;
+         encode_named_value_artifact_set(left.values) ==
+             encode_named_value_artifact_set(right.values);
 }
 
 /**
@@ -1261,7 +1297,7 @@ class StagedArtifactIndexRemoval final {
   std::uint64_t payload_bytes() const noexcept {
     return record_ == nullptr ? 0U
                               : static_cast<std::uint64_t>(
-                                    record_->receipt.descriptor.payload_bytes);
+                                    record_->receipt.descriptor.archive_bytes);
   }
 
  private:
@@ -1461,44 +1497,34 @@ bool is_persistable_manager_failure(JobAttemptFailure failure) noexcept {
 }
 
 /**
- * @brief Validates one embedded durable receipt descriptor and quota bounds.
+ * @brief Validates one embedded Value-archive descriptor and quota bounds.
  * @param receipt Candidate identity-joined durable receipt.
  * @param spec Exact accepted JobSpec that owns its output transaction.
- * @return Nothing after descriptor shape and payload bounds are consistent.
+ * @return Nothing after archive version, count, and bounds are consistent.
  * @throws std::invalid_argument for invalid attempt/descriptor/quota facts.
  */
 void validate_durable_receipt(const OutputCommitReceipt& receipt,
                               const JobSpec& spec) {
   validate_attempt_identity(receipt.attempt);
-  const ArtifactImageDescriptor& descriptor = receipt.descriptor;
-  if (descriptor.width <= 0 || descriptor.height <= 0 ||
-      descriptor.channels <= 0 || descriptor.row_bytes == 0U ||
-      descriptor.payload_bytes == 0U) {
+  const ValueArtifactSetDescriptor& descriptor = receipt.descriptor;
+  if (descriptor.archive_version != kNamedValueArtifactSetArchiveVersion ||
+      descriptor.value_count == 0U ||
+      descriptor.value_count > kMaximumNamedValueArtifacts ||
+      descriptor.archive_bytes == 0U) {
     throw std::invalid_argument("durable Job receipt descriptor is empty");
   }
-  const std::uint64_t width = static_cast<std::uint64_t>(descriptor.width);
-  const std::uint64_t channels =
-      static_cast<std::uint64_t>(descriptor.channels);
-  const std::uint64_t channel_bytes =
-      image_buffer_bytes_per_channel(descriptor.type);
-  if (width > std::numeric_limits<std::uint64_t>::max() / channels ||
-      width * channels >
-          std::numeric_limits<std::uint64_t>::max() / channel_bytes) {
-    throw std::invalid_argument("durable Job receipt row size overflowed");
-  }
-  const std::uint64_t expected_row = width * channels * channel_bytes;
-  if (expected_row != descriptor.row_bytes ||
-      descriptor.row_bytes > std::numeric_limits<std::size_t>::max() /
-                                 static_cast<std::size_t>(descriptor.height) ||
-      descriptor.row_bytes * static_cast<std::size_t>(descriptor.height) !=
-          descriptor.payload_bytes) {
+  const std::uint64_t archive_bytes =
+      static_cast<std::uint64_t>(descriptor.archive_bytes);
+  if (archive_bytes >
+      kMaximumValueArtifactPayloadBytes +
+          static_cast<std::uint64_t>(kMaximumValueArtifactMetadataBytes)) {
     throw std::invalid_argument(
-        "durable Job receipt descriptor is inconsistent");
+        "durable Job receipt archive exceeds its frozen bound");
   }
   const JobResourceRequest& request = spec.resource_request();
-  if (descriptor.payload_bytes > request.output_bytes ||
-      descriptor.payload_bytes > request.staging_bytes ||
-      descriptor.payload_bytes > request.retention_bytes) {
+  if (archive_bytes > request.output_bytes ||
+      archive_bytes > request.staging_bytes ||
+      archive_bytes > request.retention_bytes) {
     throw std::invalid_argument(
         "durable Job receipt exceeds accepted resource bounds");
   }
@@ -2037,50 +2063,60 @@ std::vector<DurableJobRecord> DurableServerState::recovered_jobs() const {
 
 /** @copydoc ps::server::DurableServerState::commit_artifact */
 OutputCommitReceipt DurableServerState::commit_artifact(
-    const DurableArtifactCommitRequest& request, const ImageBuffer& image) {
+    const DurableArtifactCommitRequest& request,
+    const NamedValueArtifactSet& values) {
   validate_attempt_identity(request.attempt);
   if (!request.output_slot_id.valid() || !request.artifact_id.valid() ||
       !request.output_commit_id.valid()) {
     throw std::invalid_argument("durable artifact commit identity is invalid");
   }
   validate_job_resource_request(request.reserved_resources);
-  validate_image_buffer(image);
-  if (image.width <= 0 || image.height <= 0 || image.channels <= 0 ||
-      image.device != Device::CPU || image.data == nullptr) {
+  if (values.values.empty()) {
     throw std::invalid_argument(
-        "durable artifact commit requires a nonempty CPU image");
+        "durable artifact commit requires nonempty named Values");
   }
-  const std::size_t row_bytes = image_buffer_row_bytes(image);
-  if (row_bytes > std::numeric_limits<std::size_t>::max() /
-                      static_cast<std::size_t>(image.height)) {
-    throw std::overflow_error("durable artifact payload size overflowed");
-  }
-  const std::size_t payload_bytes =
-      row_bytes * static_cast<std::size_t>(image.height);
-  if (payload_bytes == 0U ||
-      payload_bytes > request.reserved_resources.output_bytes ||
-      payload_bytes > request.reserved_resources.staging_bytes ||
-      payload_bytes > request.reserved_resources.retention_bytes) {
-    throw std::invalid_argument(
-        "durable artifact payload exceeds reserved output/staging/retention");
-  }
+
   ArtifactRecord candidate;
+  candidate.values = values;
+  for (ValueArtifact& value : candidate.values.values) {
+    ValueArtifactJoin& joins = value.envelope.joins;
+    if ((joins.artifact_identity.has_value() &&
+         *joins.artifact_identity != request.artifact_id.value()) ||
+        (joins.commit_identity.has_value() &&
+         *joins.commit_identity != request.output_commit_id.value()) ||
+        (joins.slot_identity.has_value() &&
+         *joins.slot_identity != request.output_slot_id.value())) {
+      throw std::invalid_argument(
+          "durable artifact candidate has a foreign identity join");
+    }
+    joins.artifact_identity = request.artifact_id.value();
+    joins.commit_identity = request.output_commit_id.value();
+    joins.slot_identity = request.output_slot_id.value();
+  }
+  const std::vector<std::byte> archive =
+      encode_named_value_artifact_set(candidate.values);
+  const std::uint64_t archive_bytes =
+      static_cast<std::uint64_t>(archive.size());
+  if (archive.empty() ||
+      archive_bytes > request.reserved_resources.output_bytes ||
+      archive_bytes > request.reserved_resources.staging_bytes ||
+      archive_bytes > request.reserved_resources.retention_bytes) {
+    throw std::invalid_argument(
+        "durable artifact archive exceeds reserved output/staging/retention");
+  }
   candidate.receipt.attempt = request.attempt;
   candidate.receipt.output_slot_id = request.output_slot_id;
   candidate.receipt.artifact_id = request.artifact_id;
   candidate.receipt.output_commit_id = request.output_commit_id;
-  candidate.receipt.descriptor =
-      ArtifactImageDescriptor{image.width, image.height, image.channels,
-                              image.type,  row_bytes,    payload_bytes};
+  candidate.receipt.descriptor = ValueArtifactSetDescriptor{
+      kNamedValueArtifactSetArchiveVersion,
+      static_cast<std::uint32_t>(candidate.values.values.size()),
+      archive.size()};
   candidate.receipt.achieved_durability = ArtifactDurability::CrashDurable;
-  candidate.payload.resize(payload_bytes);
-  for (int row = 0; row < image.height; ++row) {
-    std::memcpy(
-        candidate.payload.data() + static_cast<std::size_t>(row) * row_bytes,
-        image_buffer_row_data(image, row), row_bytes);
-  }
   candidate.receipt.content_digest =
-      hash_artifact_content(candidate.payload.data(), candidate.payload.size());
+      hash_artifact_content(archive.data(), archive.size());
+  candidate.values = decode_named_value_artifact_set(archive);
+  validate_durable_value_joins(candidate.receipt, candidate.values);
   const std::string manifest = serialize_artifact_manifest(candidate.receipt);
   auto candidate_record =
       std::make_shared<const ArtifactRecord>(std::move(candidate));
@@ -2154,24 +2190,24 @@ OutputCommitReceipt DurableServerState::commit_artifact(
     }
     {
       ScopedDescriptor payload(payload_raw);
-      write_all(payload.get(), candidate_record->payload.data(),
-                candidate_record->payload.size());
-      synchronize_descriptor(payload.get(), "artifact payload file");
+      write_all(payload.get(), archive.data(), archive.size());
+      synchronize_descriptor(payload.get(), "artifact archive file");
       const struct stat value =
-          regular_file_stat(payload.get(), "fstat durable artifact payload");
-      if (static_cast<std::uintmax_t>(value.st_size) !=
-          candidate_record->payload.size()) {
-        throw DurableCorruptionError("durable artifact payload length drifted");
+          regular_file_stat(payload.get(), "fstat durable artifact archive");
+      if (static_cast<std::uintmax_t>(value.st_size) != archive.size()) {
+        throw DurableCorruptionError("durable artifact archive length drifted");
       }
     }
     const std::vector<std::byte> reopened =
         read_file_at(directory.get(), kPayloadName);
-    if (reopened != candidate_record->payload ||
+    if (reopened != archive ||
         hash_artifact_content(reopened.data(), reopened.size()) !=
             candidate_record->receipt.content_digest) {
       throw DurableCorruptionError(
-          "durable artifact payload revalidation failed");
+          "durable artifact archive revalidation failed");
     }
+    static_cast<void>(
+        decode_durable_value_archive(reopened, candidate_record->receipt));
     if (options_.artifact_commit_observer) {
       options_.artifact_commit_observer(
           DurableArtifactCommitStage::PayloadSynchronized);

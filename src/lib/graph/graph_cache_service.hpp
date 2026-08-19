@@ -102,7 +102,7 @@ class GraphCacheService {
    * @return Move-only request providing explicit cancellation and one future.
    * @throws Validation, scheduling, synchronization, future, or allocation
    * exceptions from the owned statistics store.
-   * @note No compatibility ImageBuffer, allocation identity, graph revision,
+   * @note No mutable image staging, allocation identity, graph revision,
    * HP/RT generation, descriptor digest, or disk path participates in the key.
    */
   ScheduledImageStatistics schedule_image_statistics(
@@ -253,7 +253,7 @@ class GraphCacheService {
    * artifact for that node is removed so a later load cannot relabel stale
    * bytes as complete.
    * A valid sealed CPU image Value is the sole serialization authority and is
-   * copied into a callback-local codec-compatible ImageBuffer. Nonempty
+   * passed as an immutable Value to the selected codec. Nonempty
    * compatibility staging is rejected instead of serving as a fallback.
    * Named ParameterValue outputs cross the metadata codec; a future device
    * adapter may add explicit download. After all required writes succeed, an

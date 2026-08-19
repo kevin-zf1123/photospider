@@ -90,7 +90,7 @@ class RoiPropagationService {
    *       executors inject their request's actual route inventory and intent.
    */
   explicit RoiPropagationService(
-      std::vector<Device> available_devices = {Device::CPU},
+      std::vector<DeviceBackend> available_devices = {DeviceBackend::CPU},
       ComputeIntent intent = ComputeIntent::GlobalHighPrecision);
 
   /**
@@ -126,7 +126,7 @@ class RoiPropagationService {
    * @note The inventory preserves caller order; consumers comparing route
    * contexts should canonicalize it as a set.
    */
-  const std::vector<Device>& available_devices() const noexcept {
+  const std::vector<DeviceBackend>& available_devices() const noexcept {
     return available_devices_;
   }
 
@@ -336,7 +336,7 @@ class RoiPropagationService {
 
  private:
   /** @brief Owned route-visible devices for implementation selection. */
-  std::vector<Device> available_devices_;
+  std::vector<DeviceBackend> available_devices_;
   /** @brief Request compute intent controlling registry candidate ordering. */
   ComputeIntent intent_;
   /** @brief Stateless graph extent resolver for rectangular propagation. */

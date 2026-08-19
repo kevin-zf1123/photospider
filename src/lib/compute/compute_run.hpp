@@ -360,7 +360,7 @@ struct ComputeRunTaskReadyObservation final {
   int output_height = 0;
 
   /** @brief Device selected with the retained operation implementation. */
-  Device device = Device::CPU;
+  DeviceBackend device = DeviceBackend::CPU;
 
   /** @brief Actual ready submission's declared logical work units. */
   std::uint64_t work_units = 0U;
@@ -2139,7 +2139,7 @@ class ComputeRun {
    */
   TaskSubmissionPlan& emplace_submission_plan(
       GraphModel& graph, GraphTraversalService& traversal, int node_id,
-      std::vector<Device> available_devices,
+      std::vector<DeviceBackend> available_devices,
       bool publish_plan_inspection = true, bool allow_reusable_cache = true);
 
   /**

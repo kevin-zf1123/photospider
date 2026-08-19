@@ -27,8 +27,8 @@ namespace ps {
  *         host-readable binding.
  * @throws std::bad_alloc when owned image metadata cannot be copied.
  * @note Logical extents follow the validated tensor and signed data window;
- *       narrower ImageBuffer or provider limits are enforced only by those
- *       explicit adapters. No mutable access or semantic conversion is
+ *       narrower provider limits are enforced only by those explicit
+ *       adapters. No mutable access or semantic conversion is
  *       implied.
  */
 class ImageView final {

@@ -9,9 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/value_image_adapter.hpp"
 #include "photospider/core/graph_error.hpp"
-#include "photospider/core/image_buffer.hpp"
 
 namespace ps::ops {
 namespace {

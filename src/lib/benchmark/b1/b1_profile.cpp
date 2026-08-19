@@ -20,7 +20,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/value_image_adapter.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/data/image_view.hpp"
 
 namespace ps::benchmark {
 namespace {
@@ -1097,7 +1097,7 @@ std::vector<B1SemanticRecord> parse_b1_semantic_trace(std::string_view bytes) {
   return records;
 }
 
-ImageBuffer generate_b1_oracle_image(std::uint64_t job_index) {
+Value generate_b1_oracle_image(std::uint64_t job_index) {
   if (job_index > 255U) {
     throw std::out_of_range("B1 job index is outside [0,255].");
   }
@@ -1112,47 +1112,52 @@ ImageBuffer generate_b1_oracle_image(std::uint64_t job_index) {
     }
     transformed_samples[numerator] = sample;
   }
-  const std::size_t bytes = static_cast<std::size_t>(kB1PayloadBytes);
-  std::shared_ptr<void> storage(
-      ::operator new(bytes), [](void* pointer) { ::operator delete(pointer); });
-  float* const samples = static_cast<float*>(storage.get());
-  std::size_t offset = 0U;
-  for (std::uint64_t y = 0U; y < kB1ImageEdge; ++y) {
-    for (std::uint64_t x = 0U; x < kB1ImageEdge; ++x) {
-      for (std::uint64_t channel = 0U; channel < kB1ChannelCount; ++channel) {
-        const std::uint8_t numerator = static_cast<std::uint8_t>(
-            (17U * x + 31U * y + 47U * channel + job_index) & 255U);
-        samples[offset++] = transformed_samples[numerator];
+  DenseTensorDescriptor descriptor{{static_cast<std::size_t>(kB1ImageEdge),
+                                    static_cast<std::size_t>(kB1ImageEdge),
+                                    static_cast<std::size_t>(kB1ChannelCount)},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  StridedLayout layout{
+      {static_cast<std::ptrdiff_t>(kB1PayloadRowBytes),
+       static_cast<std::ptrdiff_t>(kB1ChannelCount * sizeof(float)),
+       static_cast<std::ptrdiff_t>(sizeof(float))}};
+  ValueBuilder builder = ValueBuilder::allocate_cpu_dense_tensor(
+      descriptor, facet, layout, static_cast<std::size_t>(kB1PayloadBytes));
+  {
+    WriteLease write = builder.acquire_write();
+    float* const samples = reinterpret_cast<float*>(write.data());
+    std::size_t offset = 0U;
+    for (std::uint64_t y = 0U; y < kB1ImageEdge; ++y) {
+      for (std::uint64_t x = 0U; x < kB1ImageEdge; ++x) {
+        for (std::uint64_t channel = 0U; channel < kB1ChannelCount; ++channel) {
+          const std::uint8_t numerator = static_cast<std::uint8_t>(
+              (17U * x + 31U * y + 47U * channel + job_index) & 255U);
+          samples[offset++] = transformed_samples[numerator];
+        }
       }
     }
   }
-  return ImageBuffer{static_cast<int>(kB1ImageEdge),
-                     static_cast<int>(kB1ImageEdge),
-                     static_cast<int>(kB1ChannelCount),
-                     DataType::FLOAT32,
-                     Device::CPU,
-                     static_cast<std::size_t>(kB1PayloadRowBytes),
-                     std::move(storage),
-                     nullptr};
+  return builder.seal();
 }
 
 B1JobGolden compute_b1_job_golden(std::uint64_t job_index) {
-  const ImageBuffer image = generate_b1_oracle_image(job_index);
-  const Value value = value_image_adapter::snapshot_cpu_image_value(image);
-  const ContentDigestResult logical = compute_content_digest(value);
+  const Value image = generate_b1_oracle_image(job_index);
+  const ContentDigestResult logical = compute_content_digest(image);
   if (logical.state != ContentDigestState::Available ||
       !logical.digest.has_value()) {
     throw std::runtime_error("B1 oracle logical digest is unavailable: " +
                              logical.diagnostic);
   }
+  const ImageView view(image);
   B1Sha256 raw_hash;
-  for (int y = 0; y < image.height; ++y) {
-    const float* const row =
-        reinterpret_cast<const float*>(image_buffer_row_data(image, y));
-    const std::size_t samples = static_cast<std::size_t>(image.width) *
-                                static_cast<std::size_t>(image.channels);
-    for (std::size_t index = 0U; index < samples; ++index) {
-      hash_little_endian_float(row[index], &raw_hash);
+  for (std::size_t y = 0U; y < view.height(); ++y) {
+    for (std::size_t x = 0U; x < view.width(); ++x) {
+      for (std::size_t channel = 0U; channel < view.channels(); ++channel) {
+        float sample = 0.0F;
+        std::memcpy(&sample, view.channel_data(x, y, channel), sizeof(sample));
+        hash_little_endian_float(sample, &raw_hash);
+      }
     }
   }
   return B1JobGolden{job_index, *logical.digest, raw_hash.finish()};

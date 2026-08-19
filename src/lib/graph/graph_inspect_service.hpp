@@ -162,7 +162,7 @@ class GraphInspectService {
    * @throws std::bad_alloc if strings, recursive parameter values, or metadata
    * copy allocates.
    * @note No Node or NodeOutput reference escapes through the result;
-   * compatibility ImageBuffer staging is never inspected.
+   * mutable producer staging is never inspected.
    */
   GraphNodeInspectInfo inspect_node(const Node& node,
                                     bool include_metadata = true) const;

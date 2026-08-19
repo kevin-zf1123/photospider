@@ -273,8 +273,8 @@ class ExecutionTaskRuntime {
    * @throws std::bad_alloc if result storage cannot be allocated.
    * @note The default CPU-only value preserves simple private routes.
    */
-  virtual std::vector<Device> available_devices() const {
-    return {Device::CPU};
+  virtual std::vector<DeviceBackend> available_devices() const {
+    return {DeviceBackend::CPU};
   }
 
   /**

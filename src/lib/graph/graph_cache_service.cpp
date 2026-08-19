@@ -16,10 +16,11 @@
 #include <utility>
 #include <vector>
 
-#include "core/value_image_adapter.hpp"
+#include "core/value_region.hpp"
 #include "execution/device/compute_io_executor.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "photospider/core/graph_error.hpp"
+#include "photospider/data/image_view.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
 #include "graph/graph_cache_service_test_access.hpp"  // NOLINT(build/include_subdir)
 #endif
@@ -51,16 +52,79 @@ struct DiskCacheReadAttempt {
 };
 
 /**
- * @brief Converts the legacy cache precision label to codec precision.
- * @param precision Cache configuration string used by existing compute paths.
- * @return UInt16 for the exact `int16` label; UInt8 for every other label.
- * @throws Nothing.
- * @note The fallback preserves the existing default-to-int8 cache behavior.
+ * @brief Builds the explicit code-value endpoint selected by cache policy.
+ * @param precision Exact `int8` or `int16` cache precision label.
+ * @return Unsigned code-value endpoint with inclusive physical range.
+ * @throws std::invalid_argument for every unknown label.
  */
-ImageArtifactPrecision artifact_precision(
-    const std::string& precision) noexcept {
-  return precision == "int16" ? ImageArtifactPrecision::UInt16
-                              : ImageArtifactPrecision::UInt8;
+SampleEndpoint cache_code_endpoint(const std::string& precision) {
+  if (precision == "int8") {
+    return SampleEndpoint{
+        SampleEncoding{1U, SampleEncodingKind::CodeValue},
+        SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0}};
+  }
+  if (precision == "int16") {
+    return SampleEndpoint{
+        SampleEncoding{1U, SampleEncodingKind::CodeValue},
+        SampleDomain{SampleDomainKind::CodeValue, 0.0, 65535.0}};
+  }
+  throw std::invalid_argument("Unknown image cache precision: " + precision);
+}
+
+/**
+ * @brief Builds explicit storage-preserving decode plus normalized FP32 rules.
+ * @return Complete deterministic decode request.
+ * @throws std::bad_alloc when rule storage cannot allocate.
+ */
+ImageArtifactDecodeRequest cache_decode_request() {
+  ImageArtifactDecodeRequest request;
+  for (const char* precision : {"int8", "int16"}) {
+    const SampleEndpoint code = cache_code_endpoint(precision);
+    SampleConversion conversion;
+    conversion.source = code;
+    conversion.destination =
+        SampleEndpoint{SampleEncoding{1U, SampleEncodingKind::Normalized},
+                       SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}};
+    conversion.destination_element_semantics = ElementSemantics::FloatingPoint;
+    conversion.destination_storage_encoding = StorageEncoding{32U};
+    conversion.out_of_domain = OutOfDomainPolicy::Reject;
+    conversion.rounding = SampleRoundingMode::NearestEven;
+    conversion.non_finite = NonFinitePolicy::Reject;
+    conversion.precision_loss = PrecisionLossPolicy::Allow;
+    request.rules.push_back(ImageArtifactDecodeRule{
+        ElementSemantics::UnsignedInteger,
+        StorageEncoding{precision[3] == '8' ? 8U : 16U}, code, conversion});
+  }
+  return request;
+}
+
+/**
+ * @brief Builds explicit Value-to-cache code conversion from Value metadata.
+ * @param value Ready ordinary image carrying one default sample endpoint.
+ * @param precision Exact cache precision label.
+ * @return Complete deterministic encode request.
+ * @throws std::invalid_argument for missing/per-channel metadata or label.
+ */
+ImageArtifactEncodeRequest cache_encode_request(const Value& value,
+                                                const std::string& precision) {
+  if (!value.image_facet().has_value() ||
+      !value.image_facet()->sample_domain.has_value() ||
+      !value.image_facet()->sample_domain->per_channel.empty()) {
+    throw std::invalid_argument(
+        "Image cache encode requires one explicit default sample endpoint.");
+  }
+  const SampleDomainFacet& samples = *value.image_facet()->sample_domain;
+  SampleConversion conversion;
+  conversion.source = SampleEndpoint{samples.encoding, samples.default_domain};
+  conversion.destination = cache_code_endpoint(precision);
+  conversion.destination_element_semantics = ElementSemantics::UnsignedInteger;
+  conversion.destination_storage_encoding =
+      StorageEncoding{precision == "int16" ? 16U : 8U};
+  conversion.out_of_domain = OutOfDomainPolicy::Reject;
+  conversion.rounding = SampleRoundingMode::NearestEven;
+  conversion.non_finite = NonFinitePolicy::Reject;
+  conversion.precision_loss = PrecisionLossPolicy::Allow;
+  return ImageArtifactEncodeRequest{conversion};
 }
 
 /**
@@ -86,7 +150,7 @@ const NodeOutput* hp_cache_ptr(const Node& node) {
  * @return True when at least one image entry has a nonempty location.
  * @throws Nothing for current string and vector read operations.
  * @note Unsupported or empty cache entries retain their historical no-op
- *       behavior and do not trigger Value/ImageBuffer compatibility checks.
+ *       behavior and do not trigger Value validation.
  */
 bool has_image_disk_cache_entry(const Node& node) {
   return std::any_of(
@@ -103,22 +167,16 @@ bool has_image_disk_cache_entry(const Node& node) {
  * non-host-readable, pending, or otherwise unsupported Value facts.
  * @throws std::bad_alloc when validation state or diagnostic allocation fails.
  * @note This helper performs no planned-byte admission, filesystem operation,
- * codec call, ImageBuffer allocation, payload read, or persistent identity
+ * codec call, payload read, or persistent identity
  * creation. Callers first bypass outputs containing generic named Values;
  * metadata-only parameter results with no formal Value remain supported.
  */
 void validate_image_disk_cache_output(const NodeOutput& output) {
-  if (output.has_compatibility_image()) {
-    throw GraphError(
-        GraphErrc::InvalidParameter,
-        "Image disk cache rejects unnormalized compatibility staging.");
-  }
   if (!output.has_image_value()) {
     return;
   }
   try {
-    value_image_adapter::validate_image_buffer_compatible_value(
-        output.image_value());
+    (void)ImageView(output.image_value());
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const std::exception& error) {
@@ -141,8 +199,7 @@ void validate_image_disk_cache_output(const NodeOutput& output) {
 bool has_complete_hp_cache(const Node& node) {
   const NodeOutput* output = hp_cache_ptr(node);
   return output != nullptr && node.hp_region.has_value() &&
-         value_image_adapter::node_output_region_is_complete(*output,
-                                                             *node.hp_region);
+         value_region::node_output_region_is_complete(*output, *node.hp_region);
 }
 
 /**
@@ -257,7 +314,7 @@ std::uint64_t image_planned_bytes(const NodeOutput& output) {
  * @param cache_precision Precision label retained by the lazy callback.
  * @return Positive estimate when a supported save/removal task is eligible;
  * `std::nullopt` when current policy requires no task.
- * @throws Graph, Value, ImageBuffer, allocation, or checked arithmetic
+ * @throws Graph, Value, image-view, allocation, or checked arithmetic
  * exceptions from read-only inspection.
  * @note Pixels, named values, codec owners, paths, and callback payload are not
  * copied. Filesystem and codec APIs are not entered. The output payload is
@@ -574,7 +631,8 @@ DiskCacheReadAttempt read_cache_entry(
 
     DiskCacheReadAttempt attempt;
     if (has_cache_file) {
-      attempt.output.compatibility_image = image_codec.decode(cache_file);
+      attempt.output.publish_image_value(
+          image_codec.decode(cache_file, cache_decode_request()));
     }
     if (has_metadata_file) {
       attempt.output.data = metadata_codec.read(metadata_file);
@@ -586,8 +644,6 @@ DiskCacheReadAttempt read_cache_entry(
             "parameter-output schema.");
       }
     }
-    value_image_adapter::import_node_output_compatibility_image(
-        &attempt.output);
     attempt.result =
         make_load_result(node.id, &cache_entry, cache_file, metadata_file,
                          DiskCacheLoadStatus::Hit, GraphErrc::Unknown,
@@ -810,10 +866,9 @@ void save_cache_mechanism(const GraphModel& graph, const Node& node,
 
     const auto start_io = std::chrono::high_resolution_clock::now();
     if (retain_image) {
-      const ImageBuffer image =
-          value_image_adapter::snapshot_cpu_image_buffer(output->image_value());
-      image_codec.encode(final_path, image,
-                         artifact_precision(cache_precision));
+      image_codec.encode(
+          final_path, output->image_value(),
+          cache_encode_request(output->image_value(), cache_precision));
     }
     if (retain_metadata) {
       metadata_codec.write(metadata_path, output->data);
@@ -994,8 +1049,7 @@ bool GraphCacheService::try_load_from_disk_cache(
       graph, node, output_schema, *image_codec_, *metadata_codec_);
   return finalize_disk_cache_load(
       graph, std::move(attempt), start_io, [&](NodeOutput output) {
-        RegionSet full_region =
-            value_image_adapter::full_node_output_region(output);
+        RegionSet full_region = value_region::full_node_output_region(output);
         node.cached_output_high_precision = std::move(output);
         node.hp_region = std::move(full_region);
         node.hp_version++;

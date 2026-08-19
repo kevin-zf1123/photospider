@@ -142,7 +142,7 @@ class ScheduledImageStatistics final {
  * @throws std::bad_alloc when request, view, result, promise, task, or cache
  * storage cannot allocate.
  * @note The store owns no Value payload, Graph, HP/RT generation, scheduler,
- * worker, allocation identity, compatibility ImageBuffer, or persistent cache.
+ * worker, allocation identity, mutable staging, or persistent cache.
  * Result lookup, eviction, invalidation, failure, and cancellation never mutate
  * the referenced Value or any formal cache authority.
  */

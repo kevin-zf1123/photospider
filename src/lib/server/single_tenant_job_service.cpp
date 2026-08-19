@@ -208,7 +208,7 @@ bool is_worker_owned_failure(JobAttemptFailure failure) noexcept {
 }
 
 /**
- * @brief Validates the closed outcome/settlement/failure/image report shape.
+ * @brief Validates the closed outcome/settlement/failure/Value report shape.
  * @param report Identity-fenced candidate report.
  * @return True only for one complete supported worker report shape.
  * @throws Nothing.
@@ -217,14 +217,14 @@ bool has_valid_worker_report_shape(const JobAttemptReport& report) noexcept {
   switch (report.outcome) {
     case JobAttemptOutcome::Succeeded:
       return report.settled && report.failure == JobAttemptFailure::None &&
-             report.image.has_value();
+             report.values.has_value();
     case JobAttemptOutcome::Failed:
       return is_worker_owned_failure(report.failure) &&
-             !report.image.has_value();
+             !report.values.has_value();
     case JobAttemptOutcome::Cancelled:
       return report.settled &&
              report.failure == JobAttemptFailure::CancellationObserved &&
-             !report.image.has_value();
+             !report.values.has_value();
     case JobAttemptOutcome::None:
       return false;
   }
@@ -287,14 +287,17 @@ bool checkpoint_is_authorized(const TenantId& tenant_id,
                               const ArtifactRecord& artifact,
                               const JobResourceRequest& resource_request) {
   const OutputCommitReceipt& receipt = artifact.receipt;
+  const std::vector<std::byte> archive =
+      encode_named_value_artifact_set(artifact.values);
   return receipt.attempt.tenant_id == tenant_id &&
          receipt.artifact_id == artifact_id &&
          receipt.achieved_durability == ArtifactDurability::CrashDurable &&
-         receipt.descriptor.payload_bytes == artifact.payload.size() &&
-         artifact.payload.size() <= resource_request.host_memory_bytes &&
+         receipt.descriptor.archive_version == kValueArtifactEnvelopeVersion &&
+         receipt.descriptor.value_count == artifact.values.values.size() &&
+         receipt.descriptor.archive_bytes == archive.size() &&
+         archive.size() <= resource_request.host_memory_bytes &&
          receipt.content_digest ==
-             hash_artifact_content(artifact.payload.data(),
-                                   artifact.payload.size());
+             hash_artifact_content(archive.data(), archive.size());
 }
 
 }  // namespace
@@ -431,7 +434,7 @@ SingleTenantJobService::SingleTenantJobService(
   for (const auto& artifact : durable_state_->recovered_artifacts()) {
     quota_authority_->recover_retained_artifact(
         artifact->receipt.artifact_id,
-        static_cast<std::uint64_t>(artifact->receipt.descriptor.payload_bytes));
+        static_cast<std::uint64_t>(artifact->receipt.descriptor.archive_bytes));
   }
   for (DurableJobRecord recovered : durable_state_->recovered_jobs()) {
     JobSnapshot snapshot;
@@ -1050,7 +1053,7 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
             candidate.assignment, candidate.spec->output_slot_id(),
             candidate.output_artifact_id, candidate.output_commit_id,
             candidate.spec->resource_request()},
-        *report.image);
+        *report.values);
     if (receipt.attempt.tenant_id != candidate.tenant_id ||
         receipt.attempt.job_id != candidate.job_id ||
         receipt.attempt.job_spec_digest != candidate.spec->digest() ||
@@ -1063,7 +1066,7 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
     }
     quota_authority_->commit_retained_artifact(
         control.reservation->id, receipt.artifact_id,
-        static_cast<std::uint64_t>(receipt.descriptor.payload_bytes));
+        static_cast<std::uint64_t>(receipt.descriptor.archive_bytes));
     control.reservation.reset();
     candidate.output_receipt = receipt;
     candidate.state = JobState::Succeeded;
@@ -1189,7 +1192,7 @@ bool SingleTenantJobService::reconcile_published_artifact_locked(
       quota_authority_->commit_retained_artifact(
           control.reservation->id, artifact->receipt.artifact_id,
           static_cast<std::uint64_t>(
-              artifact->receipt.descriptor.payload_bytes));
+              artifact->receipt.descriptor.archive_bytes));
       control.reservation.reset();
     }
     JobSnapshot succeeded = control.snapshot;

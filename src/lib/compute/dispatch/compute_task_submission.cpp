@@ -150,12 +150,10 @@ const Value* first_pending_named_value(const NodeOutput& output) {
  * satisfy nodes before task population.
  * @throws GraphError or standard exceptions from planning and allocation.
  */
-TaskSubmissionPlan::TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
-                                       GraphTraversalService& traversal,
-                                       int node_id,
-                                       std::vector<Device> available_devices,
-                                       bool publish_plan_inspection,
-                                       bool allow_reusable_cache)
+TaskSubmissionPlan::TaskSubmissionPlan(
+    ComputeRunId run_id, GraphModel& graph, GraphTraversalService& traversal,
+    int node_id, std::vector<DeviceBackend> available_devices,
+    bool publish_plan_inspection, bool allow_reusable_cache)
     : run_id_(run_id),
       graph_(graph),
       compute_plan_(
@@ -229,9 +227,9 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
   estimate.add_bytes(compute_plan_dynamic_retained_memory_bytes(compute_plan_));
   estimate.add_objects<int>(
       static_cast<std::uint64_t>(execution_order_.capacity()));
-  estimate.add_objects<Device>(
+  estimate.add_objects<DeviceBackend>(
       static_cast<std::uint64_t>(available_devices_.capacity()));
-  estimate.add_objects<Device>(
+  estimate.add_objects<DeviceBackend>(
       static_cast<std::uint64_t>(execution_devices_.capacity()));
   estimate.add_bytes(dependency_state_.dynamic_retained_memory_bytes());
   estimate.add_objects<void*>(
@@ -361,7 +359,7 @@ ReadyTaskSubmission TaskSubmissionPlan::make_ready_submission(
   const int trace_node_id = task.node_id;
   const std::size_t execution_index =
       static_cast<std::size_t>(dependency_state_.id_to_idx().at(trace_node_id));
-  const Device device = execution_devices_.at(execution_index);
+  const DeviceBackend device = execution_devices_.at(execution_index);
   ReadyTaskSubmission submission(
       lease, identity, trace_node_id, is_initial_ready,
       [](ComputeRunLease& ready_lease,
@@ -378,7 +376,7 @@ ReadyTaskSubmission TaskSubmissionPlan::make_ready_submission(
 /** @copydoc TaskSubmissionPlan::observe_task_ready */
 void TaskSubmissionPlan::observe_task_ready(
     const ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
-    const PlannedTask& task, Device device) const noexcept {
+    const PlannedTask& task, DeviceBackend device) const noexcept {
   const ComputeRunDescriptor& descriptor = lease.descriptor();
   const std::shared_ptr<ComputeRunObservationSink>& sink =
       descriptor.observation_sink();
@@ -809,7 +807,7 @@ void TaskSubmissionPlan::release_tiled_node_dependents(
 /** @copydoc TaskSubmissionPlan::resolve_operations */
 void TaskSubmissionPlan::resolve_operations() {
   resolved_ops_.resize(execution_order_.size());
-  execution_devices_.assign(execution_order_.size(), Device::CPU);
+  execution_devices_.assign(execution_order_.size(), DeviceBackend::CPU);
   operation_constraints_.resize(compute_plan_.task_graph.tasks.size());
   task_resource_demand_ = ReadyTaskSubmission::default_resource_demand();
   for (std::size_t i = 0; i < execution_order_.size(); ++i) {

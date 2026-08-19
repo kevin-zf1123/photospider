@@ -10,7 +10,7 @@
 
 #include "compute/compute_geometry.hpp"
 #include "compute/execution/resource_demand_estimator.hpp"
-#include "core/value_image_adapter.hpp"
+#include "core/value_region.hpp"
 
 namespace ps::compute {
 namespace {
@@ -22,17 +22,13 @@ namespace {
  * @param label Human-readable buffer domain used in error messages.
  * @return Independent metadata container retaining the same immutable Values.
  * @throws std::bad_alloc when output or metadata copying exhausts memory.
- * @throws GraphError when source still carries compatibility staging.
  * @note Named Values are immutable and safe to retain until a fresh binding is
  * allocated for an update. No mutable clone, second allocation authority, or
  * synthetic revision is created by this staging copy.
  */
 NodeOutput copy_node_output_for_staging(const NodeOutput& source,
                                         const std::string& label) {
-  if (source.has_compatibility_image()) {
-    throw GraphError(GraphErrc::ComputeError,
-                     label + " dirty staging rejects compatibility images.");
-  }
+  (void)label;
   return source;
 }
 
@@ -86,7 +82,7 @@ bool seed_tiled_binding(const NodeOutput& output, HostOutputBinding& binding) {
 
 /**
  * @brief Publishes one sealed binding Value into existing staged metadata.
- * @param output Mutable request-local output with no compatibility staging.
+ * @param output Mutable request-local output.
  * @param binding Sole drained binding to seal exactly once.
  * @return Nothing after canonical image replacement or first publication.
  * @throws std::invalid_argument, std::logic_error, std::overflow_error,
@@ -95,8 +91,7 @@ bool seed_tiled_binding(const NodeOutput& output, HostOutputBinding& binding) {
  * graph/proxy visibility. It creates one Value revision and no cache revision.
  */
 void seal_tiled_binding(NodeOutput* output, HostOutputBinding* binding) {
-  if (output == nullptr || binding == nullptr ||
-      output->has_compatibility_image()) {
+  if (output == nullptr || binding == nullptr) {
     throw std::invalid_argument(
         "Dirty tiled seal requires canonical staged output and binding.");
   }
@@ -112,17 +107,13 @@ void seal_tiled_binding(NodeOutput* output, HostOutputBinding* binding) {
  * @brief Validates one staged output before HP or RT publication.
  * @param output Request-local result selected for publication.
  * @return Nothing after every named Value is valid and Ready.
- * @throws GraphError when compatibility staging, an invalid name/Value, or a
- * non-Ready producer is observed.
+ * @throws GraphError when an invalid name/Value or non-Ready producer is
+ * observed.
  * @throws std::logic_error when a retained readiness observer is invalid.
  * @note Validation polls only immutable state and never imports a fallback,
  * maps storage, mints a revision, or mutates graph/proxy cache state.
  */
 void validate_staged_output(const NodeOutput& output) {
-  if (output.has_compatibility_image()) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "Dirty commit rejects compatibility image staging.");
-  }
   for (const auto& [name, value] : output.named_values) {
     if (name.empty() || !value.valid() || !value.ready_fence().poll().ready()) {
       throw GraphError(
@@ -270,9 +261,8 @@ void HighPrecisionDirtyWriteBuffer::stage_region_output(
         entry.hp_version == node.hp_version) {
       merge_base = &*node.cached_output_high_precision;
     }
-    std::optional<NodeOutput> merged =
-        value_image_adapter::merge_node_output_region(*merge_base, output,
-                                                      updated_region);
+    std::optional<NodeOutput> merged = value_region::merge_node_output_region(
+        *merge_base, output, updated_region);
     if (merged.has_value()) {
       entry.output = std::move(*merged);
       preserved_existing_validity = true;
@@ -314,10 +304,10 @@ int HighPrecisionDirtyWriteBuffer::mark_updated(const Node& node,
         entry.hp_version == node.hp_version) {
       validity_output = &*node.cached_output_high_precision;
     }
-    const bool already_complete =
-        entry.has_output && entry.hp_region.has_value() &&
-        value_image_adapter::node_output_region_is_complete(*validity_output,
-                                                            *entry.hp_region);
+    const bool already_complete = entry.has_output &&
+                                  entry.hp_region.has_value() &&
+                                  value_region::node_output_region_is_complete(
+                                      *validity_output, *entry.hp_region);
     if (!already_complete) {
       entry.hp_region = merge_valid_regions(entry.hp_region, region_hp);
     }

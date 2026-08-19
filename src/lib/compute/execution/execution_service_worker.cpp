@@ -180,7 +180,7 @@ void ExecutionService::retire_worker_entry(
     std::shared_ptr<QueueEntry>& entry,
     const std::shared_ptr<RunState>& run) noexcept {
   try {
-    const Device device = entry->submission.metadata().device();
+    const DeviceBackend device = entry->submission.metadata().device();
     {
       std::lock_guard<std::mutex> pool_lock(pool_->mutex);
       std::lock_guard<std::mutex> run_lock(run->mutex);
@@ -522,7 +522,7 @@ void ExecutionService::worker_loop(
         log_event(ExecutionTraceAction::AssignInitial,
                   entry->submission.metadata().trace_node_id());
       }
-      if (entry->submission.metadata().device() == Device::CPU) {
+      if (entry->submission.metadata().device() == DeviceBackend::CPU) {
         entry->submission.execute(*this);
       } else {
         ReadySubmissionDeviceInvocation invocation(entry->submission, *this,

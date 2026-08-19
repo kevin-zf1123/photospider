@@ -10,8 +10,10 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "photospider/host/host.hpp"
+#include "photospider/host/value_artifact_result.hpp"
 
 namespace ps::server {
 namespace {
@@ -23,7 +25,7 @@ namespace {
  * @param settled Whether Host/graph ownership has settled.
  * @param failure Typed failure category.
  * @param message Human-readable diagnostic.
- * @return Complete report without a candidate image.
+ * @return Complete report without candidate Values.
  * @throws std::bad_alloc when copied values exhaust memory.
  */
 JobAttemptReport make_report(const AttemptIdentity& identity,
@@ -42,7 +44,7 @@ JobAttemptReport make_report(const AttemptIdentity& identity,
  * @brief Creates one settled cooperative-cancellation attempt fact.
  * @param identity Exact assignment tuple.
  * @param stage Stable stage at which cancellation was observed.
- * @return Settled cancelled report without an image.
+ * @return Settled cancelled report without Values.
  * @throws std::bad_alloc when diagnostic construction exhausts memory.
  */
 JobAttemptReport cancelled_report(const AttemptIdentity& identity,
@@ -166,16 +168,18 @@ JobAttemptReport EmbeddedHostJobWorker::execute(
     }
     if (assignment.checkpoint != nullptr) {
       const ArtifactRecord& checkpoint = *assignment.checkpoint;
+      const std::vector<std::byte> checkpoint_archive =
+          encode_named_value_artifact_set(checkpoint.values);
       if (checkpoint.receipt.attempt.tenant_id !=
               assignment.identity.tenant_id ||
           checkpoint.receipt.artifact_id !=
               *assignment.spec->checkpoint_artifact_id() ||
           checkpoint.receipt.achieved_durability !=
               ArtifactDurability::CrashDurable ||
-          checkpoint.payload.size() !=
-              checkpoint.receipt.descriptor.payload_bytes ||
-          hash_artifact_content(checkpoint.payload.data(),
-                                checkpoint.payload.size()) !=
+          checkpoint_archive.size() !=
+              checkpoint.receipt.descriptor.archive_bytes ||
+          hash_artifact_content(checkpoint_archive.data(),
+                                checkpoint_archive.size()) !=
               checkpoint.receipt.content_digest) {
         return make_report(assignment.identity, JobAttemptOutcome::Failed, true,
                            JobAttemptFailure::InvalidAssignment,
@@ -266,7 +270,7 @@ JobAttemptReport EmbeddedHostJobWorker::execute(
   }
 
   bool cancellation_observed = cancellation_requested();
-  std::optional<ImageBuffer> candidate_image;
+  std::optional<NamedValueArtifactSet> candidate_values;
   JobAttemptFailure compute_failure = JobAttemptFailure::None;
   std::string compute_message;
 
@@ -285,20 +289,16 @@ JobAttemptReport EmbeddedHostJobWorker::execute(
       request.execution.maximum_parallelism =
           assignment.spec->resource_request().cpu_slots;
 
-      Result<ImageBuffer> computed = host->compute_and_get_image(request);
+      Result<NamedValueResult> computed = host->compute_and_get_values(request);
       if (!computed.status.ok) {
         compute_failure = JobAttemptFailure::Compute;
         compute_message =
             host_failure_message("graph compute", computed.status);
       } else {
-        validate_image_buffer(computed.value);
-        if (computed.value.width <= 0 || computed.value.height <= 0 ||
-            computed.value.channels <= 0 || computed.value.data == nullptr ||
-            computed.value.device != Device::CPU) {
-          throw std::invalid_argument(
-              "graph compute returned no nonempty CPU image");
+        if (computed.value.values().empty()) {
+          throw std::invalid_argument("graph compute returned no named Values");
         }
-        candidate_image = std::move(computed.value);
+        candidate_values = capture_named_value_artifact_set(computed.value);
       }
     } catch (const std::exception& error) {
       compute_failure = JobAttemptFailure::Compute;
@@ -336,16 +336,16 @@ JobAttemptReport EmbeddedHostJobWorker::execute(
   if (cancellation_observed) {
     return cancelled_report(assignment.identity, "before artifact commit");
   }
-  if (!candidate_image.has_value()) {
+  if (!candidate_values.has_value()) {
     return make_report(assignment.identity, JobAttemptOutcome::Failed, true,
                        JobAttemptFailure::Compute,
-                       "graph compute produced no required image");
+                       "graph compute produced no required Values");
   }
 
   JobAttemptReport report =
       make_report(assignment.identity, JobAttemptOutcome::Succeeded, true,
                   JobAttemptFailure::None, {});
-  report.image = std::move(candidate_image);
+  report.values = std::move(candidate_values);
   return report;
 }
 

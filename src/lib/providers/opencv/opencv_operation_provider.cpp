@@ -25,7 +25,7 @@
 #include <utility>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/value_adapter_opencv.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
@@ -33,8 +33,7 @@
 #include "compute/compute_geometry.hpp"  // NOLINT(build/include_subdir)
 #include "core/ops.hpp"
 #include "core/param_utils.hpp"
-#include "core/value_image_adapter.hpp"  // NOLINT(build/include_subdir)
-#include "graph/graph_model.hpp"         // NOLINT(build/include_subdir)
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/data/image_view.hpp"
 
 namespace ps::providers::opencv {
@@ -183,57 +182,141 @@ static MonolithicOpFunc fence_monolithic_operation(const char* operation_key,
 }
 
 /**
- * @brief Creates one callback-local compatibility image from a canonical input.
+ * @brief Requires the canonical ordinary-image Value from one input.
  *
  * @param output Private runtime output whose permanent `image` Value is read.
  * @param missing_message Operation-specific missing-input diagnostic.
- * @return Independently owned CPU projection valid for the current legacy
- * OpenCV callback only.
+ * @return Borrowed immutable Value retained by `output`.
  * @throws GraphError with `GraphErrc::MissingDependency` when the canonical
  * image output is absent.
- * @throws std::invalid_argument when the Value cannot be projected through the
- * current ImageBuffer/OpenCV boundary.
- * @throws std::overflow_error when image arithmetic is unrepresentable.
- * @throws std::bad_alloc when projection storage cannot allocate.
- * @note The returned ImageBuffer is never stored in NodeOutput, formal cache,
- * dirty state, or RT state and therefore cannot become allocation or revision
- * authority.
+ * @note OpenCV view validation remains at `toCvMat`; this helper performs no
+ * readiness wait, payload access, copy, transfer, or metadata projection.
  */
-static ImageBuffer project_legacy_input_image(const NodeOutput& output,
-                                              const char* missing_message) {
+static const Value& require_input_image(const NodeOutput& output,
+                                        const char* missing_message) {
   if (!output.has_image_value()) {
     throw GraphError(GraphErrc::MissingDependency, missing_message);
   }
-  return value_image_adapter::snapshot_cpu_image_buffer(output.image_value());
+  return output.image_value();
 }
 
 /**
- * @brief Imports one legacy OpenCV result through the Host output lifecycle.
- *
- * @param output Mutable private result that must not already contain an image.
- * @param image Callback-owned CPU compatibility descriptor to consume.
- * @return Nothing after publishing one canonical named Value and clearing the
- * compatibility owner.
- * @throws std::invalid_argument for a malformed image or destination.
- * @throws std::logic_error when output already carries image authority.
- * @throws std::overflow_error when output-plan arithmetic is unrepresentable.
- * @throws std::bad_alloc when the frozen plan, aligned Host allocation, or
- * publication metadata cannot allocate.
- * @note This is the explicit DI-2 legacy-operation edge. The callback-owned
- * allocation exists only until the bytes are copied into a Host binding; the
- * returned NodeOutput contains no compatibility allocation.
+ * @brief Derives explicit HWC metadata for one OpenCV result matrix.
+ * @param matrix Nonempty two-dimensional result.
+ * @param source Optional ordinary-image source whose semantic metadata is
+ * retained when channel cardinality remains compatible.
+ * @return Complete HWC ImageFacet with resized signed data window and an
+ * independent unchanged display window.
+ * @throws std::invalid_argument when a channel-changing operation would make
+ * channel/schema/sample/color meaning ambiguous.
+ * @throws std::overflow_error when a signed data-window endpoint overflows.
+ * @throws std::bad_alloc when copied semantic metadata allocates.
+ * @note Generated results use zero-origin data windows and absent display,
+ * channel, sample, and color facts instead of guessing their meaning.
  */
-static void publish_legacy_output_image(NodeOutput* output, ImageBuffer image) {
+static ImageFacet result_image_facet(const cv::Mat& matrix,
+                                     const Value* source) {
+  if (matrix.empty() || matrix.rows <= 0 || matrix.cols <= 0 ||
+      matrix.channels() <= 0) {
+    throw std::invalid_argument(
+        "OpenCV result publication requires a nonempty matrix.");
+  }
+  ImageFacet facet;
+  facet.x_axis = 1U;
+  facet.y_axis = 0U;
+  facet.channel_axis = 2U;
+  if (source != nullptr) {
+    if (!source->image_facet().has_value()) {
+      throw std::invalid_argument(
+          "OpenCV result source lacks ordinary-image metadata.");
+    }
+    facet = *source->image_facet();
+    const DenseTensorDescriptor& descriptor = source->dense_tensor_descriptor();
+    const std::size_t source_channels =
+        facet.channel_axis.has_value() ? descriptor.shape[*facet.channel_axis]
+                                       : 1U;
+    if (source_channels != static_cast<std::size_t>(matrix.channels()) &&
+        (facet.channel_schema.has_value() || facet.color.has_value() ||
+         (facet.sample_domain.has_value() &&
+          !facet.sample_domain->per_channel.empty()))) {
+      throw std::invalid_argument(
+          "OpenCV channel-changing result needs an explicit semantic map.");
+    }
+  }
+  facet.x_axis = 1U;
+  facet.y_axis = 0U;
+  facet.channel_axis = 2U;
+  const std::int64_t width = static_cast<std::int64_t>(matrix.cols);
+  const std::int64_t height = static_cast<std::int64_t>(matrix.rows);
+  if (facet.data_window.x_begin >
+          std::numeric_limits<std::int64_t>::max() - width ||
+      facet.data_window.y_begin >
+          std::numeric_limits<std::int64_t>::max() - height) {
+    throw std::overflow_error("OpenCV result data window overflows int64.");
+  }
+  facet.data_window.x_end = facet.data_window.x_begin + width;
+  facet.data_window.y_end = facet.data_window.y_begin + height;
+  return facet;
+}
+
+/**
+ * @brief Publishes one OpenCV result directly as canonical named Value.
+ *
+ * @param output Mutable private result without an existing image output.
+ * @param matrix Callback-local OpenCV result copied during publication.
+ * @param source Optional semantic source for window/channel/sample/color facts.
+ * @return Nothing after publishing a fresh Ready image Value.
+ * @throws std::invalid_argument for malformed matrix, metadata, or destination.
+ * @throws std::logic_error when output already carries image authority.
+ * @throws std::overflow_error or std::bad_alloc from Value publication.
+ * @note Matrix scalar storage is preserved exactly. No normalization, clamp,
+ * rounding, color transform, or compatibility allocation is introduced.
+ */
+static void publish_opencv_output(NodeOutput* output, const cv::Mat& matrix,
+                                  const Value* source = nullptr) {
   if (output == nullptr) {
     throw std::invalid_argument(
         "OpenCV output publication requires a destination");
   }
-  if (output->has_image_value() || output->has_compatibility_image()) {
+  if (output->has_image_value()) {
     throw std::logic_error(
         "OpenCV output publication requires an empty image destination");
   }
-  output->compatibility_image = std::move(image);
-  value_image_adapter::import_node_output_compatibility_image(output);
+  output->publish_image_value(
+      fromCvMat(matrix, result_image_facet(matrix, source)));
+}
+
+/**
+ * @brief Builds the explicit file-code to normalized FP32 source policy.
+ * @return Ordered unsigned 8/16-bit decode rules with deterministic affine
+ * conversion into normalized `[0,1]` samples.
+ * @throws std::bad_alloc when rule storage cannot allocate.
+ * @note This preserves the documented built-in source semantics while making
+ * storage, domain, exceptional-value, rounding, and precision policy explicit.
+ */
+static ImageArtifactDecodeRequest normalized_source_decode_request() {
+  ImageArtifactDecodeRequest request;
+  for (const std::uint32_t bits : {8U, 16U}) {
+    const double maximum = bits == 8U ? 255.0 : 65535.0;
+    const SampleEndpoint code{
+        SampleEncoding{1U, SampleEncodingKind::CodeValue},
+        SampleDomain{SampleDomainKind::CodeValue, 0.0, maximum}};
+    SampleConversion conversion;
+    conversion.source = code;
+    conversion.destination =
+        SampleEndpoint{SampleEncoding{1U, SampleEncodingKind::Normalized},
+                       SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}};
+    conversion.destination_element_semantics = ElementSemantics::FloatingPoint;
+    conversion.destination_storage_encoding = StorageEncoding{32U};
+    conversion.out_of_domain = OutOfDomainPolicy::Reject;
+    conversion.rounding = SampleRoundingMode::NearestEven;
+    conversion.non_finite = NonFinitePolicy::Reject;
+    conversion.precision_loss = PrecisionLossPolicy::Allow;
+    request.rules.push_back(
+        ImageArtifactDecodeRule{ElementSemantics::UnsignedInteger,
+                                StorageEncoding{bits}, code, conversion});
+  }
+  return request;
 }
 
 /**
@@ -1363,7 +1446,7 @@ static NodeOutput op_coordinate_pattern(
   }
 
   NodeOutput result;
-  publish_legacy_output_image(&result, fromCvMat(output));
+  publish_opencv_output(&result, output);
   return result;
 }
 
@@ -1379,8 +1462,8 @@ static NodeOutput op_coordinate_pattern(
  * cannot decode or convert the image artifact.
  * @throws std::bad_alloc for codec or output ownership allocation failure.
  * @note The operation owns no filesystem codec implementation. It obtains the
- * configured artifact codec from the product composition boundary and returns
- * the codec-owned ImageBuffer unchanged.
+ * configured artifact codec from the product composition boundary and
+ * publishes its canonical image Value unchanged.
  */
 static NodeOutput op_image_source_path(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -1393,7 +1476,8 @@ static NodeOutput op_image_source_path(
 
   const auto codec = providers::make_configured_image_artifact_codec();
   NodeOutput result;
-  publish_legacy_output_image(&result, codec->decode(path));
+  result.publish_image_value(
+      codec->decode(path, normalized_source_decode_request()));
   return result;
 }
 
@@ -1423,7 +1507,7 @@ static NodeOutput op_constant_image(
   cv::Mat out_mat(height, width, CV_MAKETYPE(CV_32F, channels), fill_value);
 
   NodeOutput result;
-  publish_legacy_output_image(&result, fromCvMat(out_mat));
+  publish_opencv_output(&result, out_mat);
   return result;
 }
 
@@ -1508,7 +1592,7 @@ static NodeOutput op_perlin_noise(
   }
 
   NodeOutput result;
-  publish_legacy_output_image(&result, fromCvMat(noise_image));
+  publish_opencv_output(&result, noise_image);
   return result;
 }
 
@@ -1535,12 +1619,10 @@ static NodeOutput op_convolve(const Node& node,
         "Convolve requires two non-empty input images (src and kernel).");
   }
 
-  ImageBuffer source_projection = project_legacy_input_image(
-      *inputs[0], "Convolve requires a non-empty source image.");
-  ImageBuffer kernel_projection = project_legacy_input_image(
-      *inputs[1], "Convolve requires a non-empty kernel image.");
-  cv::Mat src = toCvMat(source_projection);
-  cv::Mat kernel = toCvMat(kernel_projection);
+  cv::Mat src = toCvMat(require_input_image(
+      *inputs[0], "Convolve requires a non-empty source image."));
+  cv::Mat kernel = toCvMat(require_input_image(
+      *inputs[1], "Convolve requires a non-empty kernel image."));
 
   if (src.empty())
     throw GraphError(GraphErrc::MissingDependency,
@@ -1589,7 +1671,7 @@ static NodeOutput op_convolve(const Node& node,
   }
 
   NodeOutput result;
-  publish_legacy_output_image(&result, fromCvMat(out_f32));
+  publish_opencv_output(&result, out_f32, &inputs[0]->image_value());
   return result;
 }
 
@@ -1611,9 +1693,8 @@ static NodeOutput op_resize(const Node& node,
     throw GraphError(GraphErrc::MissingDependency,
                      "Resize requires an input image.");
 
-  ImageBuffer input_projection =
-      project_legacy_input_image(*inputs[0], "Resize requires an input image.");
-  cv::Mat input = toCvMat(input_projection);
+  cv::Mat input = toCvMat(
+      require_input_image(*inputs[0], "Resize requires an input image."));
 
   const auto& P = node.runtime_parameters;
   int width = as_int_flexible(P, "width", 0),
@@ -1629,11 +1710,11 @@ static NodeOutput op_resize(const Node& node,
   cv::Mat output;
   cv::resize(input, output, cv::Size(width, height), 0, 0, flag);
   NodeOutput result;
-  publish_legacy_output_image(&result, fromCvMat(output));
+  publish_opencv_output(&result, output, &inputs[0]->image_value());
   const auto& in_space = inputs[0]->space;
   result.space = in_space;
-  const int in_w = input_projection.width;
-  const int in_h = input_projection.height;
+  const int in_w = input.cols;
+  const int in_h = input.rows;
   double scale_x =
       (in_w > 0) ? static_cast<double>(width) / static_cast<double>(in_w) : 1.0;
   double scale_y = (in_h > 0)
@@ -1677,9 +1758,8 @@ static NodeOutput op_crop(const Node& node,
     throw GraphError(GraphErrc::MissingDependency,
                      "Crop requires an input image.");
 
-  ImageBuffer input_projection =
-      project_legacy_input_image(*inputs[0], "Crop requires an input image.");
-  cv::Mat src = toCvMat(input_projection);
+  cv::Mat src =
+      toCvMat(require_input_image(*inputs[0], "Crop requires an input image."));
 
   const auto& P = node.runtime_parameters;
   int x, y, w, h;
@@ -1713,7 +1793,7 @@ static NodeOutput op_crop(const Node& node,
   if (intersect.width > 0 && intersect.height > 0)
     src(intersect).copyTo(canvas(dst_roi));
   NodeOutput result;
-  publish_legacy_output_image(&result, fromCvMat(canvas));
+  publish_opencv_output(&result, canvas, &inputs[0]->image_value());
   const auto& in_space = inputs[0]->space;
   result.space = in_space;
   auto translation =
@@ -1766,9 +1846,8 @@ static NodeOutput op_extract_channel(
     throw GraphError(GraphErrc::MissingDependency,
                      "Extract channel requires an input image.");
 
-  ImageBuffer input_projection = project_legacy_input_image(
-      *inputs[0], "Extract channel requires an input image.");
-  cv::Mat input = toCvMat(input_projection);
+  cv::Mat input = toCvMat(require_input_image(
+      *inputs[0], "Extract channel requires an input image."));
 
   std::string ch_str = as_str(node.runtime_parameters, "channel", "a");
   int ch_idx = -1;
@@ -1786,7 +1865,7 @@ static NodeOutput op_extract_channel(
   std::vector<cv::Mat> channels;
   cv::split(input, channels);
   NodeOutput result;
-  publish_legacy_output_image(&result, fromCvMat(channels[ch_idx]));
+  publish_opencv_output(&result, channels[ch_idx], &inputs[0]->image_value());
   return result;
 }
 
@@ -2012,9 +2091,8 @@ static NodeOutput op_gaussian_blur_monolithic(
     throw GraphError(GraphErrc::MissingDependency,
                      "gaussian_blur requires one input image.");
   }
-  ImageBuffer input_projection = project_legacy_input_image(
-      *inputs[0], "gaussian_blur requires one input image.");
-  cv::Mat input_mat = toCvMat(input_projection);
+  cv::Mat input_mat = toCvMat(require_input_image(
+      *inputs[0], "gaussian_blur requires one input image."));
 
   const auto& P = node.runtime_parameters;
   int k = as_int_flexible(P, "ksize", 3);
@@ -2029,7 +2107,7 @@ static NodeOutput op_gaussian_blur_monolithic(
                    cv::BORDER_REPLICATE);
 
   NodeOutput result;
-  publish_legacy_output_image(&result, fromCvMat(output_mat));
+  publish_opencv_output(&result, output_mat, &inputs[0]->image_value());
   return result;
 }
 
@@ -2359,12 +2437,10 @@ static NodeOutput op_add_weighted_monolithic(
     throw GraphError(GraphErrc::MissingDependency,
                      "add_weighted requires two input images.");
 
-  ImageBuffer input_a_projection = project_legacy_input_image(
-      *inputs[0], "add_weighted requires a first input image.");
-  ImageBuffer input_b_projection = project_legacy_input_image(
-      *inputs[1], "add_weighted requires a second input image.");
-  cv::Mat input_a = toCvMat(input_a_projection);
-  cv::Mat input_b = toCvMat(input_b_projection);
+  cv::Mat input_a = toCvMat(require_input_image(
+      *inputs[0], "add_weighted requires a first input image."));
+  cv::Mat input_b = toCvMat(require_input_image(
+      *inputs[1], "add_weighted requires a second input image."));
   if (input_a.empty() || input_b.empty())
     throw GraphError(GraphErrc::MissingDependency,
                      "add_weighted inputs must be non-empty.");
@@ -2447,7 +2523,7 @@ static NodeOutput op_add_weighted_monolithic(
   }
 
   NodeOutput out;
-  publish_legacy_output_image(&out, fromCvMat(output));
+  publish_opencv_output(&out, output, &inputs[0]->image_value());
   return out;
 }
 
@@ -2468,12 +2544,10 @@ static NodeOutput op_abs_diff_monolithic(
   if (inputs.size() < 2)
     throw GraphError(GraphErrc::MissingDependency,
                      "diff requires two input images.");
-  ImageBuffer input_a_projection = project_legacy_input_image(
-      *inputs[0], "diff requires a first input image.");
-  ImageBuffer input_b_projection = project_legacy_input_image(
-      *inputs[1], "diff requires a second input image.");
-  cv::Mat input_a = toCvMat(input_a_projection);
-  cv::Mat input_b = toCvMat(input_b_projection);
+  cv::Mat input_a = toCvMat(
+      require_input_image(*inputs[0], "diff requires a first input image."));
+  cv::Mat input_b = toCvMat(
+      require_input_image(*inputs[1], "diff requires a second input image."));
   if (input_a.empty() || input_b.empty())
     throw GraphError(GraphErrc::MissingDependency,
                      "diff inputs must be non-empty.");
@@ -2516,7 +2590,7 @@ static NodeOutput op_abs_diff_monolithic(
     cv::merge(Oo, output);
   }
   NodeOutput out;
-  publish_legacy_output_image(&out, fromCvMat(output));
+  publish_opencv_output(&out, output, &inputs[0]->image_value());
   return out;
 }
 
@@ -2537,12 +2611,10 @@ static NodeOutput op_multiply_monolithic(
   if (inputs.size() < 2)
     throw GraphError(GraphErrc::MissingDependency,
                      "multiply requires two input images.");
-  ImageBuffer input_a_projection = project_legacy_input_image(
-      *inputs[0], "multiply requires a first input image.");
-  ImageBuffer input_b_projection = project_legacy_input_image(
-      *inputs[1], "multiply requires a second input image.");
-  cv::Mat input_a = toCvMat(input_a_projection);
-  cv::Mat input_b = toCvMat(input_b_projection);
+  cv::Mat input_a = toCvMat(require_input_image(
+      *inputs[0], "multiply requires a first input image."));
+  cv::Mat input_b = toCvMat(require_input_image(
+      *inputs[1], "multiply requires a second input image."));
   if (input_a.empty() || input_b.empty())
     throw GraphError(GraphErrc::MissingDependency,
                      "multiply inputs must be non-empty.");
@@ -2554,7 +2626,7 @@ static NodeOutput op_multiply_monolithic(
   cv::Mat output;
   cv::multiply(input_a, input_b, output, scale);
   NodeOutput out;
-  publish_legacy_output_image(&out, fromCvMat(output));
+  publish_opencv_output(&out, output, &inputs[0]->image_value());
   return out;
 }
 

@@ -35,6 +35,7 @@
 #include "benchmark/common/observation_fanout.hpp"  // NOLINT(build/include_subdir)
 #include "benchmark/m1/m1_canonical.hpp"  // NOLINT(build/include_subdir)
 #include "benchmark/m1/m1_evidence.hpp"   // NOLINT(build/include_subdir)
+#include "photospider/data/image_view.hpp"
 #include "photospider/host/host.hpp"
 #include "verification/b1_evidence_json.hpp"
 #include "verification/i1_evidence_json.hpp"
@@ -943,19 +944,32 @@ void execute_batch_job(Host& host, B1Host& b1_host, B1OutputStore& output_store,
   evidence.execution_before = capture_b1_snapshot(b1_host, lifecycle_cursor);
   B1RunObservationCollector workload_collector(evidence.job);
   const auto mixed_sink = m1_collector.make_sink(occurrence->tag);
-  const Result<ImageBuffer> computed =
-      b1_host.compute_b1_image(B1HostComputeRequest{
+  const Result<NamedValueResult> computed =
+      b1_host.compute_b1_values(B1HostComputeRequest{
           make_b1_host_compute_request(session, 8U),
           compute::ComputeRunQos{compute::ComputeRunQosClass::Throughput,
                                  std::nullopt, 1U, 8U},
           make_compute_run_observation_fanout(mixed_sink,
                                               workload_collector.sink())});
   evidence.physical_trace = workload_collector.snapshot();
-  evidence.run_succeeded = computed.status.ok && computed.value.width == 4096 &&
-                           computed.value.height == 4096 &&
-                           computed.value.channels == 4 &&
-                           computed.value.type == DataType::FLOAT32 &&
-                           computed.value.device == Device::CPU;
+  const Value* candidate =
+      computed.status.ok ? computed.value.find("image") : nullptr;
+  bool candidate_valid = false;
+  if (candidate != nullptr) {
+    try {
+      const ImageView view(*candidate);
+      candidate_valid =
+          view.width() == 4096U && view.height() == 4096U &&
+          view.channels() == 4U &&
+          view.descriptor().element_semantics ==
+              ElementSemantics::FloatingPoint &&
+          view.descriptor().storage_encoding == StorageEncoding{32U} &&
+          candidate->storage_binding().device.backend() == DeviceBackend::CPU;
+    } catch (const std::exception&) {
+      candidate_valid = false;
+    }
+  }
+  evidence.run_succeeded = computed.status.ok && candidate_valid;
   if (evidence.run_succeeded) {
     try {
       evidence.semantic_trace = encode_b1_semantic_trace(
@@ -963,7 +977,7 @@ void execute_batch_job(Host& host, B1Host& b1_host, B1OutputStore& output_store,
     } catch (...) {
       evidence.semantic_trace.clear();
     }
-    evidence.output = output_store.commit(evidence.job, computed.value);
+    evidence.output = output_store.commit(evidence.job, *candidate);
   } else {
     evidence.output.status = B1OutputCommitStatus::TaskFailed;
     evidence.output.diagnostic = computed.status.message;

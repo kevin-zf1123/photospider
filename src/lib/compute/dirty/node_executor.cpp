@@ -13,7 +13,6 @@
 #include "compute/compute_geometry.hpp"
 #include "core/ops.hpp"
 #include "core/param_utils.hpp"
-#include "core/value_image_adapter.hpp"
 
 namespace ps::compute {
 namespace {
@@ -81,36 +80,27 @@ std::int64_t checked_image_coordinate(std::int64_t origin, int offset) {
 }
 
 /**
- * @brief Maps one current tiled compatibility type to dense element facts.
- * @param type Declared current scalar type.
- * @return Logical semantics and whole-byte storage encoding.
- * @throws std::invalid_argument for an undeclared enum value.
+ * @brief Complete immutable logical format selected for tiled output planning.
+ * @throws std::bad_alloc when copied image metadata storage cannot allocate.
+ * @note Physical layout, allocation, revision, and readiness are absent.
  */
-std::pair<ElementSemantics, StorageEncoding> tiled_dense_element(
-    DataType type) {
-  switch (type) {
-    case DataType::UINT8:
-      return {ElementSemantics::UnsignedInteger, StorageEncoding{8U}};
-    case DataType::INT8:
-      return {ElementSemantics::SignedInteger, StorageEncoding{8U}};
-    case DataType::UINT16:
-      return {ElementSemantics::UnsignedInteger, StorageEncoding{16U}};
-    case DataType::INT16:
-      return {ElementSemantics::SignedInteger, StorageEncoding{16U}};
-    case DataType::FLOAT32:
-      return {ElementSemantics::FloatingPoint, StorageEncoding{32U}};
-    case DataType::FLOAT64:
-      return {ElementSemantics::FloatingPoint, StorageEncoding{64U}};
-  }
-  throw std::invalid_argument("Tiled output DataType is undeclared.");
-}
+struct TiledOutputFormat final {
+  /** @brief Exact logical scalar semantics. */
+  ElementSemantics semantics = ElementSemantics::FloatingPoint;
+  /** @brief Exact whole-byte native scalar encoding. */
+  StorageEncoding encoding{32U};
+  /** @brief Positive output channel count. */
+  std::size_t channels = 1U;
+  /** @brief Optional complete interpretation copied from the source image. */
+  std::optional<ImageFacet> source_facet;
+};
 
 /**
  * @brief Freezes the current zero-origin interleaved tiled output plan.
  * @param output_size Positive planned image extent.
  * @param channels Positive channel count.
- * @param type Current compatibility scalar type inferred from canonical input
- * Value facts or the generator default.
+ * @param format Complete scalar/channel/image meaning inferred from canonical
+ * input Value facts or the generator default.
  * @return Complete immutable 64-byte-aligned Host output plan.
  * @throws std::invalid_argument for invalid extents/type or unrepresentable
  * signed strides.
@@ -120,16 +110,20 @@ std::pair<ElementSemantics, StorageEncoding> tiled_dense_element(
  * cannot be replaced by callback-returned metadata.
  */
 DenseImageOutputPlan freeze_tiled_output_plan_impl(const PixelSize& output_size,
-                                                   int channels,
-                                                   DataType type) {
-  if (output_size.width <= 0 || output_size.height <= 0 || channels <= 0) {
+                                                   TiledOutputFormat format) {
+  if (output_size.width <= 0 || output_size.height <= 0 ||
+      format.channels == 0U || format.channels > kMaximumImageChannels) {
     throw std::invalid_argument(
         "Tiled output plan requires positive image dimensions.");
   }
-  const auto [semantics, encoding] = tiled_dense_element(type);
-  const std::size_t element_bytes = image_buffer_bytes_per_channel(type);
-  const std::size_t pixel_bytes = checked_output_multiply(
-      static_cast<std::size_t>(channels), element_bytes);
+  DenseTensorDescriptor descriptor{
+      {static_cast<std::size_t>(output_size.height),
+       static_cast<std::size_t>(output_size.width), format.channels},
+      format.semantics,
+      format.encoding};
+  const std::size_t element_bytes = dense_tensor_element_bytes(descriptor);
+  const std::size_t pixel_bytes =
+      checked_output_multiply(format.channels, element_bytes);
   const std::size_t row_bytes = checked_output_multiply(
       static_cast<std::size_t>(output_size.width), pixel_bytes);
   constexpr std::size_t kAlignment = 64U;
@@ -147,13 +141,21 @@ DenseImageOutputPlan freeze_tiled_output_plan_impl(const PixelSize& output_size,
       checked_output_multiply(static_cast<std::size_t>(output_size.height - 1),
                               row_stride),
       row_bytes);
-  DenseTensorDescriptor descriptor{
-      {static_cast<std::size_t>(output_size.height),
-       static_cast<std::size_t>(output_size.width),
-       static_cast<std::size_t>(channels)},
-      semantics,
-      encoding};
   ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  if (format.source_facet.has_value()) {
+    const ImageFacet& source = *format.source_facet;
+    facet.data_window.x_begin = source.data_window.x_begin;
+    facet.data_window.y_begin = source.data_window.y_begin;
+    facet.data_window.x_end =
+        checked_image_coordinate(facet.data_window.x_begin, output_size.width);
+    facet.data_window.y_end =
+        checked_image_coordinate(facet.data_window.y_begin, output_size.height);
+    facet.display_window = source.display_window;
+    facet.channel_schema = source.channel_schema;
+    facet.sample_domain = source.sample_domain;
+    facet.color = source.color;
+    validate_dense_tensor_image_metadata(descriptor, facet);
+  }
   StridedLayout layout{{static_cast<std::ptrdiff_t>(row_stride),
                         static_cast<std::ptrdiff_t>(pixel_bytes),
                         static_cast<std::ptrdiff_t>(element_bytes)}};
@@ -163,20 +165,21 @@ DenseImageOutputPlan freeze_tiled_output_plan_impl(const PixelSize& output_size,
 }
 
 /**
- * @brief Infers the output channel count and data type for tiled allocation.
+ * @brief Infers the complete logical output format for tiled allocation.
  *
  * @param inputs Normalized tiled inputs in execution order.
- * @return Channel count and DataType copied from the first connected input, or
- * the legacy FLOAT32 single-channel default when every slot is disconnected.
- * @throws Nothing.
+ * @return Source scalar/channel/image meaning, or FP32 one-channel format when
+ * every slot is disconnected.
+ * @throws std::invalid_argument for unsupported representation or storage.
+ * @throws std::bad_alloc when complete image metadata copying allocates.
  * @note Slot identity remains unchanged; this helper only skips null entries
  * while choosing an allocation hint.
  */
-std::pair<int, DataType> infer_channels_and_type(
+TiledOutputFormat infer_output_format(
     const std::vector<const NodeOutput*>& inputs) {
   const NodeOutput* input = first_connected_input(inputs);
   if (input == nullptr) {
-    return {1, DataType::FLOAT32};
+    return TiledOutputFormat{};
   }
   if (!input->has_image_value() ||
       !input->image_value().image_facet().has_value()) {
@@ -184,50 +187,27 @@ std::pair<int, DataType> infer_channels_and_type(
         "Tiled format inference requires a canonical image Value.");
   }
   const Value& value = input->image_value();
+  if (value.representation_kind() != ValueRepresentationKind::DenseTensor ||
+      value.storage_layout_kind() != StorageLayoutKind::Strided) {
+    throw std::invalid_argument(
+        "Tiled format inference requires a Strided DenseTensor Value.");
+  }
   const DenseTensorDescriptor& descriptor = value.dense_tensor_descriptor();
+  if (descriptor.quantization.has_value() ||
+      descriptor.storage_encoding.kind != StorageEncodingKind::NativeScalar) {
+    throw std::invalid_argument(
+        "Tiled format inference requires unquantized native storage.");
+  }
+  static_cast<void>(dense_tensor_element_bytes(descriptor));
   const ImageFacet& facet = *value.image_facet();
   const std::size_t channels = facet.channel_axis.has_value()
                                    ? descriptor.shape[*facet.channel_axis]
                                    : 1U;
-  if (channels > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    throw std::invalid_argument(
-        "Tiled input channel count exceeds ImageBuffer compatibility.");
+  if (channels > kMaximumImageChannels) {
+    throw std::invalid_argument("Tiled input channel count exceeds its bound.");
   }
-  const std::uint32_t bits = descriptor.storage_encoding.bit_width;
-  DataType type;
-  switch (descriptor.element_semantics) {
-    case ElementSemantics::UnsignedInteger:
-      if (bits == 8U) {
-        type = DataType::UINT8;
-      } else if (bits == 16U) {
-        type = DataType::UINT16;
-      } else {
-        throw std::invalid_argument(
-            "Tiled input unsigned element width is unsupported.");
-      }
-      break;
-    case ElementSemantics::SignedInteger:
-      if (bits == 8U) {
-        type = DataType::INT8;
-      } else if (bits == 16U) {
-        type = DataType::INT16;
-      } else {
-        throw std::invalid_argument(
-            "Tiled input signed element width is unsupported.");
-      }
-      break;
-    case ElementSemantics::FloatingPoint:
-      if (bits == 32U) {
-        type = DataType::FLOAT32;
-      } else if (bits == 64U) {
-        type = DataType::FLOAT64;
-      } else {
-        throw std::invalid_argument(
-            "Tiled input floating element width is unsupported.");
-      }
-      break;
-  }
-  return {static_cast<int>(channels), type};
+  return TiledOutputFormat{descriptor.element_semantics,
+                           descriptor.storage_encoding, channels, facet};
 }
 
 /**
@@ -260,8 +240,7 @@ PixelSize infer_output_size(const Node& node,
     const std::size_t maximum_extent =
         static_cast<std::size_t>(std::numeric_limits<int>::max());
     if (width > maximum_extent || height > maximum_extent) {
-      throw std::invalid_argument(
-          "Tiled input extent exceeds PixelSize compatibility.");
+      throw std::invalid_argument("Tiled input extent exceeds PixelSize.");
     }
     return PixelSize{static_cast<int>(width), static_cast<int>(height)};
   }
@@ -270,7 +249,7 @@ PixelSize infer_output_size(const Node& node,
 }
 
 /**
- * @brief Detects legacy gaussian blur operators that need implicit halo.
+ * @brief Detects built-in gaussian blur operators that need implicit halo.
  *
  * @param node Node whose type/subtype identify the operation.
  * @return True for image_process gaussian_blur variants.
@@ -472,14 +451,12 @@ void populate_input_tiles(GraphModel& graph, const Node& node,
       input_tiles->emplace_back();
       continue;
     }
-    const ImageBuffer& input_buffer =
-        input_context.callback_images.at(input_index);
-    input_tiles->push_back(InputTile{
-        &input_buffer,
-        NodeExecutor::input_roi_for_tile(graph, node, output_roi, input_buffer,
-                                         config, input_extents, nullptr,
-                                         &input_context.inputs),
-        &input->space, &input->image_value()});
+    input_tiles->push_back(
+        InputTile{&input->image_value(),
+                  NodeExecutor::input_roi_for_tile(
+                      graph, node, output_roi, input_extents.at(input_index),
+                      config, input_extents, nullptr, &input_context.inputs),
+                  &input->space});
   }
 }
 
@@ -651,8 +628,8 @@ void NodeExecutor::execute_tiled_into_binding(
 DenseImageOutputPlan NodeExecutor::freeze_tiled_output_plan(
     const std::vector<const NodeOutput*>& inputs,
     const PixelSize& output_size) {
-  auto [channels, type] = infer_channels_and_type(inputs);
-  return freeze_tiled_output_plan_impl(output_size, channels, type);
+  return freeze_tiled_output_plan_impl(output_size,
+                                       infer_output_format(inputs));
 }
 
 /** @copydoc NodeExecutor::allocate_tiled_output_binding */
@@ -666,7 +643,7 @@ HostOutputBinding NodeExecutor::allocate_tiled_output_binding(
 /** @copydoc NodeExecutor::input_roi_for_tile */
 PixelRect NodeExecutor::input_roi_for_tile(
     GraphModel& graph, const Node& node, const PixelRect& output_roi,
-    const ImageBuffer& input_buffer, const TiledExecutionConfig& config,
+    const PixelSize& input_size, const TiledExecutionConfig& config,
     const std::vector<PixelSize>& known_input_extents,
     const plugin::ParameterMap* known_effective_parameters,
     const std::vector<const NodeOutput*>* available_inputs) {
@@ -713,8 +690,7 @@ PixelRect NodeExecutor::input_roi_for_tile(
       input_extents.resize(node.image_inputs.size());
     }
     if (input_extents.size() == 1) {
-      input_extents.front() =
-          PixelSize{input_buffer.width, input_buffer.height};
+      input_extents.front() = input_size;
     }
     if (!known_effective_parameters) {
       known_effective_parameters = node.runtime_parameters.empty()
@@ -731,7 +707,6 @@ PixelRect NodeExecutor::input_roi_for_tile(
     input_roi = output_roi;
   }
 
-  const PixelSize input_size{input_buffer.width, input_buffer.height};
   input_roi = clip_rect(input_roi, input_size);
   if (is_rect_empty(input_roi)) {
     input_roi = clip_rect(output_roi, input_size);

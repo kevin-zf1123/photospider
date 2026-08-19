@@ -452,7 +452,7 @@ class ExecutionService::BoundedReadyStore final {
             pin.entry->submission.operation_constraints())) {
       return StartResult::Obsolete;
     }
-    const Device device = pin.entry->submission.metadata().device();
+    const DeviceBackend device = pin.entry->submission.metadata().device();
     /**
      * @brief Carries borrowed operands through synchronous Run arbitration.
      * @throws Nothing for aggregate initialization.
@@ -464,7 +464,7 @@ class ExecutionService::BoundedReadyStore final {
       /** @brief Borrowed immutable route name retained by RunState. */
       const std::string* route = nullptr;
       /** @brief Immutable selected device for this callback. */
-      Device device = Device::CPU;
+      DeviceBackend device = DeviceBackend::CPU;
     } route_context{&routes, &run.route, device};
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
     notify_service_start_arbitration_for_testing(
@@ -1127,7 +1127,7 @@ class ExecutionService::BoundedReadyStore final {
     if (!operation_gate_.can_start(entry.submission.operation_constraints())) {
       return false;
     }
-    const Device device = entry.submission.metadata().device();
+    const DeviceBackend device = entry.submission.metadata().device();
     if (!run.exposes_device(device)) {
       return false;
     }

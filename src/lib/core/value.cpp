@@ -966,14 +966,6 @@ struct BufferHandle::ControlBlock final {
    */
   std::shared_ptr<void> external_owner;
 
-  /**
-   * @brief Optional immutable source-private callback-edge metadata.
-   * @note This metadata is co-owned by the allocation control block and grants
-   * no payload, native-handle, revision, readiness, cache, or runtime
-   * authority.
-   */
-  std::shared_ptr<const void> compatibility_projection;
-
   /** @brief Opaque native handle, or null for ordinary CPU storage. */
   void* native = nullptr;
 
@@ -1017,19 +1009,15 @@ struct BufferHandle::ControlBlock final {
    * @param size Positive complete allocation byte size.
    * @param device_in Concrete device binding.
    * @param memory_domain_in Explicit allocation domain.
-   * @param compatibility_projection_in Optional source-private callback-edge
-   * metadata.
    * @throws Nothing under shared ownership movement.
    */
   ControlBlock(AllocationIdentity identity_in, std::shared_ptr<void> owner_in,
                void* native_in, std::byte* host_data_in, std::size_t size,
-               DeviceId device_in, MemoryDomain memory_domain_in,
-               std::shared_ptr<const void> compatibility_projection_in) noexcept
+               DeviceId device_in, MemoryDomain memory_domain_in) noexcept
       : identity(identity_in),
         device(device_in),
         memory_domain(memory_domain_in),
         external_owner(std::move(owner_in)),
-        compatibility_projection(std::move(compatibility_projection_in)),
         native(native_in),
         host_data(host_data_in),
         byte_size(size) {}
@@ -1060,8 +1048,7 @@ BufferHandle BufferHandle::allocate_for_builder(std::size_t size,
 /** @copydoc BufferHandle::retain_external_binding */
 BufferHandle BufferHandle::retain_external_binding(
     std::shared_ptr<void> owner, void* native_handle, std::byte* host_pointer,
-    std::size_t size, DeviceId device, MemoryDomain memory_domain,
-    std::shared_ptr<const void> compatibility_projection) {
+    std::size_t size, DeviceId device, MemoryDomain memory_domain) {
   if (!owner || native_handle == nullptr || size == 0U) {
     throw std::invalid_argument(
         "External BufferHandle requires owner, native handle, and bytes.");
@@ -1076,16 +1063,8 @@ BufferHandle BufferHandle::retain_external_binding(
       process_identity_authority().mint_allocation_identity());
   return BufferHandle(
       std::make_shared<ControlBlock>(identity, std::move(owner), native_handle,
-                                     host_pointer, size, device, memory_domain,
-                                     std::move(compatibility_projection)),
+                                     host_pointer, size, device, memory_domain),
       0U, size);
-}
-
-/** @copydoc BufferHandle::retained_compatibility_projection */
-std::shared_ptr<const void> BufferHandle::retained_compatibility_projection()
-    const noexcept {
-  return control_ ? control_->compatibility_projection
-                  : std::shared_ptr<const void>{};
 }
 
 /** @copydoc BufferHandle::valid */
@@ -1536,7 +1515,9 @@ std::size_t dense_tensor_element_bits(const DenseTensorDescriptor& descriptor) {
       if (descriptor.storage_encoding.kind ==
               StorageEncodingKind::NativeScalar &&
           (descriptor.storage_encoding.bit_width == 8U ||
-           descriptor.storage_encoding.bit_width == 16U)) {
+           descriptor.storage_encoding.bit_width == 16U ||
+           descriptor.storage_encoding.bit_width == 32U ||
+           descriptor.storage_encoding.bit_width == 64U)) {
         return descriptor.storage_encoding.bit_width;
       }
       break;
@@ -1578,12 +1559,16 @@ StorageRepresentableRange storage_representable_range(
   }
   switch (descriptor.element_semantics) {
     case ElementSemantics::UnsignedInteger: {
-      const std::uint64_t maximum = (std::uint64_t{1U} << bits) - 1U;
+      const std::uint64_t maximum =
+          bits == 64U ? std::numeric_limits<std::uint64_t>::max()
+                      : (std::uint64_t{1U} << bits) - 1U;
       return StorageRepresentableRange{0.0, static_cast<double>(maximum), false,
                                        false, false};
     }
     case ElementSemantics::SignedInteger: {
-      const std::int64_t maximum = (std::int64_t{1} << (bits - 1U)) - 1;
+      const std::int64_t maximum =
+          bits == 64U ? std::numeric_limits<std::int64_t>::max()
+                      : (std::int64_t{1} << (bits - 1U)) - 1;
       const std::int64_t minimum = -maximum - 1;
       return StorageRepresentableRange{static_cast<double>(minimum),
                                        static_cast<double>(maximum), false,
@@ -1954,9 +1939,8 @@ PendingDeviceValuePublication PendingDeviceValuePublisher::publish_dense_tensor(
     DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
     StridedLayout layout, std::shared_ptr<void> owner, void* native_handle,
     std::byte* host_pointer, std::size_t storage_size, DeviceId device,
-    MemoryDomain memory_domain, std::optional<ValueRevisionId> replica_revision,
-    std::shared_ptr<const ExternalBindingCompatibilityProjection>
-        compatibility_projection) {
+    MemoryDomain memory_domain,
+    std::optional<ValueRevisionId> replica_revision) {
   const std::size_t element_bytes =
       validate_descriptor_and_facet(descriptor, image_facet);
   const AddressEnvelope envelope =
@@ -1972,7 +1956,7 @@ PendingDeviceValuePublication PendingDeviceValuePublisher::publish_dense_tensor(
 
   BufferHandle buffer = BufferHandle::retain_external_binding(
       std::move(owner), native_handle, host_pointer, storage_size, device,
-      memory_domain, std::move(compatibility_projection));
+      memory_domain);
   PendingReadyFence pending_fence = make_pending_ready_fence();
   ValueRevisionId revision;
   if (replica_revision.has_value()) {
@@ -1988,14 +1972,6 @@ PendingDeviceValuePublication PendingDeviceValuePublisher::publish_dense_tensor(
       std::move(buffer), pending_fence.fence, revision, producer);
   return {Value(std::move(published)),
           PendingDeviceValueProducer(std::move(pending_fence.completer))};
-}
-
-/** @copydoc PendingDeviceValuePublisher::retained_compatibility_projection */
-std::shared_ptr<const ExternalBindingCompatibilityProjection>
-PendingDeviceValuePublisher::retained_compatibility_projection(
-    const Value& value) {
-  return std::static_pointer_cast<const ExternalBindingCompatibilityProjection>(
-      value.buffer_handle().retained_compatibility_projection());
 }
 
 /** @copydoc PendingDeviceValuePublisher::publish_blocked_dense_tensor */
@@ -2157,6 +2133,27 @@ Value Value::from_provider_defined(DataDefinitionRegistry& registry,
       std::move(descriptor), std::move(layout), std::move(buffers),
       std::move(provider_lease), ReadyFence::already_ready(), revision,
       producer));
+}
+
+/** @copydoc Value::from_provider_defined_payloads */
+Value Value::from_provider_defined_payloads(
+    DataDefinitionRegistry& registry, DataDescriptorEnvelope descriptor,
+    ProviderDefinedLayout layout,
+    std::vector<std::vector<std::byte>> payloads) {
+  std::vector<BufferHandle> buffers;
+  buffers.reserve(payloads.size());
+  for (const std::vector<std::byte>& payload : payloads) {
+    if (payload.empty()) {
+      throw std::invalid_argument(
+          "Provider-defined artifact payloads must be nonempty.");
+    }
+    BufferHandle buffer = BufferHandle::allocate_for_builder(
+        payload.size(), alignof(std::max_align_t));
+    std::memcpy(buffer.write_pointer(), payload.data(), payload.size());
+    buffers.push_back(std::move(buffer));
+  }
+  return from_provider_defined(registry, std::move(descriptor),
+                               std::move(layout), std::move(buffers));
 }
 
 /** @copydoc Value::valid */

@@ -177,7 +177,7 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
-        "SnapshotRejectsHugeZeroStrideImageBeforeIntNarrowing"
+        "ImageViewPreservesHugeZeroStrideExtentWithoutNarrowing"
     ),
     (
         "CpuDenseTensorImageOperation."
@@ -225,7 +225,7 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
-        "FormalCommitPublishesValidatedOpaqueCompatibilityImageValue"
+        "FormalCommitPreservesValidatedOpaqueNativeImageValue"
     ),
     (
         "CpuDenseTensorImageOperation."
@@ -245,7 +245,7 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
-        "DiskSaveRejectsCompatibilityStagingBesideSealedValue"
+        "DiskSaveUsesSealedValueAsSoleImageAuthority"
     ),
     (
         "CpuDenseTensorImageOperation."

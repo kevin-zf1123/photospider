@@ -16,7 +16,6 @@
 #include <string>
 #include <string_view>
 #include <thread>
-#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -30,7 +29,6 @@
 
 #include "core/host_output_authorization.hpp"  // NOLINT(build/include_subdir)
 #include "core/ps_types.hpp"                   // NOLINT(build/include_subdir)
-#include "core/value_image_adapter.hpp"        // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"               // NOLINT(build/include_subdir)
 #include "graph/node.hpp"                      // NOLINT(build/include_subdir)
 #include "graph/roi_propagation_service.hpp"   // NOLINT(build/include_subdir)
@@ -528,37 +526,6 @@ void expect_conformance_generic_output(const NodeOutput& output) {
   }
 }
 
-/** @brief Detects the post-DI-3 canonical Value pointer on InputTile. */
-template <typename Tile, typename = void>
-struct HasCanonicalInputValue : std::false_type {};
-
-/** @brief True when InputTile exposes its canonical immutable Value pointer. */
-template <typename Tile>
-struct HasCanonicalInputValue<
-    Tile, std::void_t<decltype(std::declval<Tile&>().value)>> : std::true_type {
-};
-
-/**
- * @brief Attaches canonical input authority when the production type supports
- * it.
- * @tparam Tile InputTile revision compiled by the production tree.
- * @param tile Nonnull tile to update.
- * @param value Nonnull immutable image Value that outlives callback dispatch.
- * @return Nothing.
- * @throws Nothing.
- * @note The detection keeps the final regression buildable against the old
- * production snapshot, where the missing member yields the expected RED.
- */
-template <typename Tile>
-void attach_canonical_input_value(Tile* tile, const Value* value) noexcept {
-  if constexpr (HasCanonicalInputValue<Tile>::value) {
-    tile->value = value;
-  } else {
-    static_cast<void>(tile);
-    static_cast<void>(value);
-  }
-}
-
 /**
  * @brief Executes one conformance implementation in monolithic shape.
  * @param mode Fixture mode selected before DSO discovery.
@@ -643,7 +610,6 @@ NodeOutput execute_conformance_tiled(
                    : conformance_fallback_input();
     input = &fallback;
   }
-  ImageBuffer input_buffer;
   const Value* input_value = nullptr;
   PixelRect input_roi{};
   if (conformance_mode_contains(mode, "facet_free_input")) {
@@ -654,14 +620,9 @@ NodeOutput execute_conformance_tiled(
     input_value = &found->second;
   } else {
     input_value = &input->image_value();
-    input_buffer =
-        value_image_adapter::project_image_value_for_image_buffer_edge(
-            *input_value);
     input_roi = PixelRect{0, 0, 2, 2};
   }
-  InputTile input_tile{input_value->image_facet() ? &input_buffer : nullptr,
-                       input_roi, nullptr};
-  attach_canonical_input_value(&input_tile, input_value);
+  InputTile input_tile{input_value, input_roi, nullptr};
   try {
     std::get<TileOpFunc> (*selected)(node, output, {input_tile});
     grant.retire_success();
@@ -973,10 +934,10 @@ TEST(OperationPluginAbi, CompleteCandidateSetDrivesIntentCostAndPlanning) {
             4);
 
   const auto hp = registry.select_implementation(
-      "operation_conformance", "supervised_tile", {Device::CPU},
+      "operation_conformance", "supervised_tile", {DeviceBackend::CPU},
       ComputeIntent::GlobalHighPrecision);
   const auto rt = registry.select_implementation(
-      "operation_conformance", "supervised_tile", {Device::CPU},
+      "operation_conformance", "supervised_tile", {DeviceBackend::CPU},
       ComputeIntent::RealTimeUpdate);
   ASSERT_TRUE(hp.has_value());
   ASSERT_TRUE(rt.has_value());
@@ -1007,7 +968,7 @@ TEST(OperationPluginAbi, CompleteCandidateSetDrivesIntentCostAndPlanning) {
   graph.validate_topology();
 
   std::unordered_map<int, PixelSize> hp_sizes;
-  RoiPropagationService hp_propagation({Device::CPU},
+  RoiPropagationService hp_propagation({DeviceBackend::CPU},
                                        ComputeIntent::GlobalHighPrecision);
   const UpstreamRoiProjection hp_upstream =
       hp_propagation.compute_upstream_projection(
@@ -1022,7 +983,7 @@ TEST(OperationPluginAbi, CompleteCandidateSetDrivesIntentCostAndPlanning) {
   EXPECT_EQ(*hp_forward, (PixelRect{1, 0, 1, 1}));
 
   std::unordered_map<int, PixelSize> rt_sizes;
-  RoiPropagationService rt_propagation({Device::CPU},
+  RoiPropagationService rt_propagation({DeviceBackend::CPU},
                                        ComputeIntent::RealTimeUpdate);
   const UpstreamRoiProjection rt_upstream =
       rt_propagation.compute_upstream_projection(
@@ -1300,11 +1261,7 @@ TEST(OperationPluginAbi, SupervisedTiledSelectionFailsClosedWithoutFallback) {
   node.type = "operation_conformance";
   node.subtype = "supervised_tile";
   NodeOutput input = conformance_fallback_input();
-  ImageBuffer input_buffer =
-      value_image_adapter::project_image_value_for_image_buffer_edge(
-          input.image_value());
-  InputTile input_tile{&input_buffer, PixelRect{0, 0, 2, 2}, nullptr};
-  attach_canonical_input_value(&input_tile, &input.image_value());
+  InputTile input_tile{&input.image_value(), PixelRect{0, 0, 2, 2}, nullptr};
   EXPECT_THROW(std::get<TileOpFunc>(*selected)(node, output, {input_tile}),
                std::invalid_argument);
   ASSERT_TRUE(grant.active());

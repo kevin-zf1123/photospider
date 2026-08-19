@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/data/value_artifact.hpp"
 #include "server/worker/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker/worker_protocol.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker/worker_protocol_test_access.hpp"  // NOLINT(build/include_subdir)
@@ -161,6 +162,62 @@ JobResourceRequest frame_bound_resources() {
 }
 
 /**
+ * @brief Builds one canonical named-Value artifact set with exact u8 storage.
+ * @param payload_bytes Positive DenseTensor payload width.
+ * @param fill Exact byte copied into every logical element.
+ * @param output_name Exact canonical output name.
+ * @return One named output retaining independently owned canonical bytes.
+ * @throws std::invalid_argument for a zero payload width.
+ * @throws Value publication, artifact capture, overflow, or allocation
+ *         failures unchanged.
+ * @note The fixture exercises the production Value artifact contract directly;
+ *       it does not recreate an alternate image transport surface.
+ */
+NamedValueArtifactSet make_u8_artifact_set(std::size_t payload_bytes,
+                                           std::byte fill = std::byte{0x5a},
+                                           std::string output_name = "image") {
+  if (payload_bytes == 0U) {
+    throw std::invalid_argument("worker artifact payload is empty");
+  }
+  DenseTensorDescriptor descriptor{{payload_bytes},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  Value value = Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::nullopt, StridedLayout{{1}},
+      std::vector<std::byte>(payload_bytes, fill));
+  return NamedValueArtifactSet{
+      {capture_value_artifact(std::move(output_name), value)}};
+}
+
+/**
+ * @brief Builds two canonical named outputs for aggregate worker transfer.
+ * @param payload_bytes Positive payload width used by both Values.
+ * @return Name-sorted two-Value artifact set with distinct owned payloads.
+ * @throws All Value publication, artifact capture, overflow, and allocation
+ *         failures unchanged.
+ * @note The helper proves worker framing treats the archive as one transaction
+ *       without collapsing or special-casing its canonical `image` member.
+ */
+NamedValueArtifactSet make_two_u8_artifact_set(std::size_t payload_bytes) {
+  NamedValueArtifactSet auxiliary =
+      make_u8_artifact_set(payload_bytes, std::byte{0x17}, "auxiliary");
+  NamedValueArtifactSet image =
+      make_u8_artifact_set(payload_bytes, std::byte{0x2a});
+  auxiliary.values.push_back(std::move(image.values.front()));
+  return auxiliary;
+}
+
+/**
+ * @brief Encodes one durable test record through the production archive codec.
+ * @param record Complete record whose Values are encoded.
+ * @return Exact canonical archive bytes.
+ * @throws Artifact validation, overflow, or allocation failures unchanged.
+ */
+std::vector<std::byte> encode_record_archive(const ArtifactRecord& record) {
+  return encode_named_value_artifact_set(record.values);
+}
+
+/**
  * @brief Builds one exact maximum-length valid opaque field.
  * @param prefix Nonempty valid opaque prefix shorter than the field maximum.
  * @param padding Valid alphanumeric byte used to fill the remaining width.
@@ -229,7 +286,7 @@ AttemptIdentity maximum_assignment_identity(const JobSpec& spec, char domain) {
 }
 
 /**
- * @brief Builds a valid checkpoint with caller-selected tight payload bytes.
+ * @brief Builds a valid checkpoint with caller-selected logical Value bytes.
  * @param spec JobSpec that names the checkpoint ArtifactId.
  * @param payload_bytes Positive payload width no larger than `INT_MAX`.
  * @return Complete digest-consistent crash-durable artifact record.
@@ -243,7 +300,7 @@ ArtifactRecord maximum_assignment_checkpoint(const JobSpec& spec,
     throw std::invalid_argument("maximum checkpoint test payload is invalid");
   }
   ArtifactRecord artifact;
-  artifact.payload.assign(payload_bytes, std::byte{0x5a});
+  artifact.values = make_u8_artifact_set(payload_bytes);
   artifact.receipt.attempt = maximum_assignment_identity(spec, 'r');
   artifact.receipt.attempt.tenant_id = TenantId("tenant.protocol");
   artifact.receipt.output_slot_id =
@@ -251,14 +308,14 @@ ArtifactRecord maximum_assignment_checkpoint(const JobSpec& spec,
   artifact.receipt.artifact_id = *spec.checkpoint_artifact_id();
   artifact.receipt.output_commit_id =
       OutputCommitId(maximum_opaque_field("checkpoint-commit-", 'c'));
-  artifact.receipt.descriptor.width = static_cast<int>(payload_bytes);
-  artifact.receipt.descriptor.height = 1;
-  artifact.receipt.descriptor.channels = 1;
-  artifact.receipt.descriptor.type = DataType::UINT8;
-  artifact.receipt.descriptor.row_bytes = payload_bytes;
-  artifact.receipt.descriptor.payload_bytes = payload_bytes;
+  const std::vector<std::byte> archive = encode_record_archive(artifact);
+  artifact.receipt.descriptor.archive_version =
+      kNamedValueArtifactSetArchiveVersion;
+  artifact.receipt.descriptor.value_count =
+      static_cast<std::uint32_t>(artifact.values.values.size());
+  artifact.receipt.descriptor.archive_bytes = archive.size();
   artifact.receipt.content_digest =
-      hash_artifact_content(artifact.payload.data(), artifact.payload.size());
+      hash_artifact_content(archive.data(), archive.size());
   artifact.receipt.achieved_durability = ArtifactDurability::CrashDurable;
   return artifact;
 }
@@ -342,12 +399,12 @@ AttemptIdentity protocol_identity(const JobSpec& spec) {
 }
 
 /**
- * @brief Builds one settled success report with a tight one-row CPU image.
+ * @brief Builds one settled success report with one named Value artifact.
  * @param identity Exact report identity.
  * @param diagnostic Variable bounded success diagnostic.
- * @param payload_bytes Positive one-row image payload size.
+ * @param payload_bytes Positive DenseTensor payload size.
  * @return Complete successful candidate report.
- * @throws Image, string, or allocation failures unchanged.
+ * @throws Value artifact, string, or allocation failures unchanged.
  */
 JobAttemptReport frame_bound_success_report(AttemptIdentity identity,
                                             std::string diagnostic,
@@ -363,8 +420,7 @@ JobAttemptReport frame_bound_success_report(AttemptIdentity identity,
   report.settled = true;
   report.failure = JobAttemptFailure::None;
   report.message = std::move(diagnostic);
-  report.image = make_aligned_cpu_image_buffer(static_cast<int>(payload_bytes),
-                                               1, 1, DataType::UINT8, 64U);
+  report.values = make_u8_artifact_set(payload_bytes);
   return report;
 }
 
@@ -459,10 +515,10 @@ bool is_direction_rejection_error(int error) noexcept {
 struct CollectedWorkerOutput final {
   /** @brief Metadata emitted by the worker-side staging operation. */
   std::optional<WorkerOutputDataReference> reference;
-  /** @brief Exact final manager image populated directly by bounded receives.
+  /** @brief Exact final manager archive populated directly by bounded receives.
    */
-  std::optional<ImageBuffer> image;
-  /** @brief Exact bytes written directly into `image`. */
+  std::optional<std::vector<std::byte>> archive;
+  /** @brief Exact bytes written directly into archive. */
   std::size_t received_bytes = 0U;
   /** @brief Independently accumulated digest of the drained bytes. */
   ArtifactContentDigest digest;
@@ -490,11 +546,11 @@ CollectedWorkerOutput stage_and_collect_output(
   PreparedWorkerOutputTransfer transfer =
       prepare_worker_output_transfer(spec, output_stage, report);
   collected.reference = transfer.reference;
-  collected.image =
-      data_plane->prepare_output_image(*report, collected.reference);
+  collected.archive =
+      data_plane->prepare_output_archive(*report, collected.reference);
   const std::size_t expected_bytes =
       collected.reference.has_value()
-          ? collected.reference->descriptor.payload_bytes
+          ? collected.reference->descriptor.archive_bytes
           : 0U;
   ArtifactContentHasher hasher;
   std::exception_ptr sender_failure;
@@ -514,9 +570,7 @@ CollectedWorkerOutput stage_and_collect_output(
     while (!eof) {
       const std::size_t prior_size = collected.received_bytes;
       std::byte* destination =
-          collected.image.has_value()
-              ? static_cast<std::byte*>(collected.image->data.get())
-              : nullptr;
+          collected.archive.has_value() ? collected.archive->data() : nullptr;
       const WorkerDataPlaneIoStatus status = data_plane->receive_output_chunk(
           destination, expected_bytes, &collected.received_bytes);
       if (status == WorkerDataPlaneIoStatus::Progress) {
@@ -843,8 +897,8 @@ struct AssignmentWireLayout final {
   EncodedWorkerString output_reference;
   /** @brief Checkpoint receipt ArtifactId bytes when present. */
   std::optional<EncodedWorkerString> checkpoint_receipt_artifact_id;
-  /** @brief Checkpoint receipt descriptor width when present. */
-  std::optional<EncodedWorkerField> checkpoint_descriptor_width;
+  /** @brief Checkpoint receipt archive version when present. */
+  std::optional<EncodedWorkerField> checkpoint_descriptor_version;
   /** @brief Checkpoint receipt durability enum when present. */
   std::optional<EncodedWorkerField> checkpoint_receipt_durability;
   /** @brief Length prefix for the first transported graph text field. */
@@ -902,11 +956,8 @@ struct AssignmentWireLayout final {
       static_cast<void>(cursor.take_string());
       layout.checkpoint_receipt_artifact_id = cursor.take_string();
       static_cast<void>(cursor.take_string());
-      layout.checkpoint_descriptor_width = cursor.take(sizeof(std::uint32_t));
+      layout.checkpoint_descriptor_version = cursor.take(sizeof(std::uint32_t));
       static_cast<void>(cursor.take(sizeof(std::uint32_t)));
-      static_cast<void>(cursor.take(sizeof(std::uint32_t)));
-      static_cast<void>(cursor.take(1U));
-      static_cast<void>(cursor.take(sizeof(std::uint64_t)));
       static_cast<void>(cursor.take(sizeof(std::uint64_t)));
       static_cast<void>(cursor.take(ArtifactContentDigest{}.bytes.size()));
       layout.checkpoint_receipt_durability = cursor.take(1U);
@@ -1190,7 +1241,7 @@ TEST(WorkerProtocol, PureAssignmentDecoderRejectsStructuredFieldMutations) {
   const AssignmentWireLayout checkpoint_layout =
       AssignmentWireLayout::parse(checkpoint_canonical.payload);
   ASSERT_TRUE(checkpoint_layout.checkpoint_receipt_artifact_id.has_value());
-  ASSERT_TRUE(checkpoint_layout.checkpoint_descriptor_width.has_value());
+  ASSERT_TRUE(checkpoint_layout.checkpoint_descriptor_version.has_value());
   ASSERT_TRUE(checkpoint_layout.checkpoint_receipt_durability.has_value());
 
   WorkerProtocolFrame mismatched_receipt = checkpoint_canonical;
@@ -1204,10 +1255,11 @@ TEST(WorkerProtocol, PureAssignmentDecoderRejectsStructuredFieldMutations) {
 
   WorkerProtocolFrame inconsistent_checkpoint_descriptor = checkpoint_canonical;
   overwrite_worker_integer(&inconsistent_checkpoint_descriptor.payload,
-                           *checkpoint_layout.checkpoint_descriptor_width, 31U);
+                           *checkpoint_layout.checkpoint_descriptor_version,
+                           2U);
   expect_assignment_rejection(inconsistent_checkpoint_descriptor,
-                              "worker artifact descriptor is inconsistent",
-                              "checkpoint receipt tight descriptor width");
+                              "worker artifact descriptor is invalid",
+                              "checkpoint receipt archive version");
 
   WorkerProtocolFrame invalid_receipt_durability = checkpoint_canonical;
   overwrite_worker_integer(&invalid_receipt_durability.payload,
@@ -1430,7 +1482,7 @@ TEST(WorkerProtocol, StatefulDecoderPreservesHeaderAndPayloadAcrossTimeouts) {
   ScopedSocketPair sockets;
   const std::array<std::byte, 18U> frame_bytes{
       std::byte{0x50}, std::byte{0x53}, std::byte{0x57}, std::byte{0x31},
-      std::byte{0x00}, std::byte{0x02}, std::byte{0x00}, std::byte{0x03},
+      std::byte{0x00}, std::byte{0x03}, std::byte{0x00}, std::byte{0x03},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x06},
       std::byte{0x10}, std::byte{0x20}, std::byte{0x30}, std::byte{0x40},
       std::byte{0x50}, std::byte{0x60}};
@@ -1585,7 +1637,7 @@ TEST(WorkerProtocol, ZeroBudgetProbeRetainsPartialFrameForNextBulkSlice) {
   ScopedSocketPair sockets;
   const std::array<std::byte, 18U> frame_bytes{
       std::byte{0x50}, std::byte{0x53}, std::byte{0x57}, std::byte{0x31},
-      std::byte{0x00}, std::byte{0x02}, std::byte{0x00}, std::byte{0x03},
+      std::byte{0x00}, std::byte{0x03}, std::byte{0x00}, std::byte{0x03},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x06},
       std::byte{0x10}, std::byte{0x20}, std::byte{0x30}, std::byte{0x40},
       std::byte{0x50}, std::byte{0x60}};
@@ -1668,7 +1720,7 @@ TEST(WorkerProtocol, RoundTripsCompletionReadyAcknowledgementIdentity) {
             identity);
 }
 
-TEST(WorkerProtocol, RebuildsTightImageIntoIndependentCpuOwner) {
+TEST(WorkerProtocol, RebuildsNamedValueArchiveIntoIndependentOwners) {
   ScopedSocketPair sockets;
   auto spec = std::make_shared<const JobSpec>(GraphArtifactId("graph.protocol"),
                                               7, OutputSlotId("image.final"),
@@ -1679,15 +1731,8 @@ TEST(WorkerProtocol, RebuildsTightImageIntoIndependentCpuOwner) {
   sent.outcome = JobAttemptOutcome::Succeeded;
   sent.settled = true;
   sent.failure = JobAttemptFailure::None;
-  sent.image = make_aligned_cpu_image_buffer(2, 2, 3, DataType::UINT8, 64U);
-  const ImageBuffer source = *sent.image;
-  auto* sent_bytes = static_cast<std::byte*>(sent.image->data.get());
-  for (std::size_t row = 0U; row < 2U; ++row) {
-    for (std::size_t column = 0U; column < 6U; ++column) {
-      sent_bytes[row * sent.image->step + column] =
-          static_cast<std::byte>(row * 10U + column);
-    }
-  }
+  sent.values = make_two_u8_artifact_set(12U);
+  const NamedValueArtifactSet source = *sent.values;
 
   CollectedWorkerOutput staged = stage_and_collect_output(
       &assignment_and_plane.second, *spec,
@@ -1704,17 +1749,19 @@ TEST(WorkerProtocol, RebuildsTightImageIntoIndependentCpuOwner) {
   const JobAttemptReport received =
       assignment_and_plane.second.materialize_report(
           std::move(received_metadata.report), received_metadata.output,
-          std::move(staged.image), staged.received_bytes, staged.digest);
+          std::move(staged.archive), staged.received_bytes, staged.digest);
 
-  ASSERT_TRUE(received.image.has_value());
-  EXPECT_NE(received.image->data.get(), source.data.get());
-  EXPECT_EQ(image_buffer_row_bytes(*received.image), 6U);
-  for (std::size_t row = 0U; row < 2U; ++row) {
-    EXPECT_EQ(std::memcmp(
-                  image_buffer_row_data(*received.image, static_cast<int>(row)),
-                  image_buffer_row_data(source, static_cast<int>(row)), 6U),
-              0);
+  ASSERT_TRUE(received.values.has_value());
+  ASSERT_EQ(received.values->values.size(), 2U);
+  ASSERT_EQ(source.values.size(), 2U);
+  for (std::size_t index = 0U; index < source.values.size(); ++index) {
+    ASSERT_EQ(received.values->values[index].payloads.size(), 1U);
+    ASSERT_EQ(source.values[index].payloads.size(), 1U);
+    EXPECT_NE(received.values->values[index].payloads[0].data(),
+              source.values[index].payloads[0].data());
   }
+  EXPECT_EQ(encode_named_value_artifact_set(*received.values),
+            encode_named_value_artifact_set(source));
 }
 
 TEST(WorkerProtocol, MaterializesCheckpointLargerThanControlBound) {
@@ -1737,19 +1784,27 @@ TEST(WorkerProtocol, MaterializesCheckpointLargerThanControlBound) {
   PreparedWorkerAssignment decoded =
       receive_worker_assignment(sockets.at(1U), protocol_deadline());
   ASSERT_EQ(decoded.assignment.checkpoint, nullptr);
+  const std::vector<std::byte> checkpoint_archive =
+      encode_record_archive(*assignment_and_plane.first.assignment.checkpoint);
   decoded.assignment.checkpoint = transfer_checkpoint_for_test(
       &assignment_and_plane.second, decoded.assignment, decoded.data_plane,
-      assignment_and_plane.first.assignment.checkpoint->payload);
+      checkpoint_archive);
 
   ASSERT_NE(decoded.assignment.checkpoint, nullptr);
-  EXPECT_EQ(decoded.assignment.checkpoint->payload.size(), kCheckpointBytes);
+  ASSERT_EQ(decoded.assignment.checkpoint->values.values.size(), 1U);
+  ASSERT_EQ(decoded.assignment.checkpoint->values.values[0].payloads.size(),
+            1U);
+  EXPECT_EQ(decoded.assignment.checkpoint->values.values[0].payloads[0].size(),
+            kCheckpointBytes);
+  EXPECT_EQ(encode_record_archive(*decoded.assignment.checkpoint),
+            checkpoint_archive);
   EXPECT_EQ(
       decoded.assignment.checkpoint->receipt.content_digest,
       assignment_and_plane.first.assignment.checkpoint->receipt.content_digest);
 }
 
-TEST(WorkerProtocol, RejectsImageBytesAtControlEncoder) {
-  const JobSpec spec(GraphArtifactId("graph.protocol.image-rejected"), 7,
+TEST(WorkerProtocol, RejectsValueBytesAtControlEncoder) {
+  const JobSpec spec(GraphArtifactId("graph.protocol.values-rejected"), 7,
                      OutputSlotId("image.final"), protocol_resources());
   JobAttemptReport report = frame_bound_success_report(protocol_identity(spec),
                                                        "must stage first", 8U);
@@ -1790,9 +1845,9 @@ TEST(WorkerProtocol, SuccessfulCandidateAboveResourcesBecomesTypedFailure) {
   EXPECT_TRUE(decoded.report.settled);
   EXPECT_EQ(decoded.report.failure, JobAttemptFailure::Compute);
   EXPECT_EQ(decoded.report.message,
-            "worker candidate image exceeds accepted artifact data-plane "
+            "worker candidate Values exceed accepted artifact data-plane "
             "bounds");
-  EXPECT_FALSE(decoded.report.image.has_value());
+  EXPECT_FALSE(decoded.report.values.has_value());
   EXPECT_FALSE(decoded.output.has_value());
 }
 
@@ -1811,7 +1866,7 @@ TEST(WorkerProtocol, RejectsOutputDigestThatDoesNotMatchStagedBytes) {
   output->content_digest.bytes.at(0U) ^= std::byte{0x01};
 
   EXPECT_THROW(assignment_and_plane.second.materialize_report(
-                   std::move(report), output, std::move(staged.image),
+                   std::move(report), output, std::move(staged.archive),
                    staged.received_bytes, staged.digest),
                WorkerArtifactDataPlaneError);
 }
@@ -1852,7 +1907,8 @@ TEST(WorkerProtocol,
       maximum_assignment_checkpoint(*spec, 32U));
   auto assignment_and_plane =
       prepared_assignment_with_data_plane(spec, checkpoint);
-  checkpoint->payload.at(0U) ^= std::byte{0x01};
+  std::vector<std::byte> corrupted_archive = encode_record_archive(*checkpoint);
+  corrupted_archive.at(0U) ^= std::byte{0x01};
 
   EXPECT_NO_THROW(encode_worker_assignment(assignment_and_plane.first));
   JobAssignment worker_assignment = assignment_and_plane.first.assignment;
@@ -1860,7 +1916,7 @@ TEST(WorkerProtocol,
   try {
     static_cast<void>(transfer_checkpoint_for_test(
         &assignment_and_plane.second, worker_assignment,
-        assignment_and_plane.first.data_plane, checkpoint->payload));
+        assignment_and_plane.first.data_plane, corrupted_archive));
     FAIL() << "checkpoint content mismatch was accepted";
   } catch (const WorkerArtifactDataPlaneError& error) {
     EXPECT_EQ(std::string(error.what()),
@@ -1884,7 +1940,7 @@ TEST(WorkerProtocol, RejectsRealOutputReferenceMismatchAtExactStageJoin) {
 
   try {
     static_cast<void>(assignment_and_plane.second.materialize_report(
-        std::move(report), staged.reference, std::move(staged.image),
+        std::move(report), staged.reference, std::move(staged.archive),
         staged.received_bytes, staged.digest));
     FAIL() << "output reference mismatch was accepted";
   } catch (const WorkerArtifactDataPlaneError& error) {
@@ -1905,11 +1961,11 @@ TEST(WorkerProtocol, RejectsRealOutputDescriptorMismatchAfterReferenceJoin) {
       &assignment_and_plane.second, *spec,
       assignment_and_plane.first.data_plane.output, &report);
   ASSERT_TRUE(staged.reference.has_value());
-  ++staged.reference->descriptor.width;
+  ++staged.reference->descriptor.archive_version;
 
   try {
     static_cast<void>(assignment_and_plane.second.materialize_report(
-        std::move(report), staged.reference, std::move(staged.image),
+        std::move(report), staged.reference, std::move(staged.archive),
         staged.received_bytes, staged.digest));
     FAIL() << "output descriptor mismatch was accepted";
   } catch (const WorkerArtifactDataPlaneError& error) {
@@ -1934,14 +1990,14 @@ TEST(WorkerProtocol, RejectsOversizedDeclaredPayloadBeforeRead) {
   ScopedSocketPair sockets;
   const std::array<std::byte, 12U> header{
       std::byte{0x50}, std::byte{0x53}, std::byte{0x57}, std::byte{0x31},
-      std::byte{0x00}, std::byte{0x02}, std::byte{0x00}, std::byte{0x03},
+      std::byte{0x00}, std::byte{0x03}, std::byte{0x00}, std::byte{0x03},
       std::byte{0x00}, std::byte{0x02}, std::byte{0x00}, std::byte{0x01}};
   write_raw(sockets.at(0U), header);
   EXPECT_THROW(read_worker_frame(sockets.at(1U), protocol_deadline()),
                WorkerProtocolError);
 }
 
-TEST(WorkerProtocol, RejectsWorkerControlledImageShapeBeyondJobBounds) {
+TEST(WorkerProtocol, RejectsWorkerControlledArchiveSizeBeyondJobBounds) {
   ScopedSocketPair sockets;
   auto spec = std::make_shared<const JobSpec>(GraphArtifactId("graph.protocol"),
                                               7, OutputSlotId("image.final"),
@@ -1952,7 +2008,7 @@ TEST(WorkerProtocol, RejectsWorkerControlledImageShapeBeyondJobBounds) {
   sent.outcome = JobAttemptOutcome::Succeeded;
   sent.settled = true;
   sent.failure = JobAttemptFailure::None;
-  sent.image = make_aligned_cpu_image_buffer(1, 1, 1, DataType::UINT8, 64U);
+  sent.values = make_u8_artifact_set(1U);
   const CollectedWorkerOutput staged = stage_and_collect_output(
       &assignment_and_plane.second, *spec,
       assignment_and_plane.first.data_plane.output, &sent);
@@ -1966,14 +2022,14 @@ TEST(WorkerProtocol, RejectsWorkerControlledImageShapeBeyondJobBounds) {
       read_worker_frame(sockets.at(1U), protocol_deadline());
 
   const AttemptIdentity& identity = sent.identity;
-  const std::size_t dimension_offset =
+  const std::size_t descriptor_offset =
       4U + identity.tenant_id.value().size() + 4U +
       identity.job_id.value().size() + identity.job_spec_digest.bytes.size() +
       4U + identity.attempt_id.value().size() + 4U +
       identity.worker_instance_id.value().size() + sizeof(std::uint64_t) + 3U +
       4U + sent.message.size() + 1U + 4U + output->reference_id.size() + 4U +
       output->output_slot_id.value().size();
-  overwrite_u32(&frame.payload, dimension_offset, 2U << 20U);
+  overwrite_u32(&frame.payload, descriptor_offset + 8U, 1U);
   EXPECT_THROW(decode_worker_report(
                    frame, *spec, assignment_and_plane.first.data_plane.output),
                WorkerProtocolError);

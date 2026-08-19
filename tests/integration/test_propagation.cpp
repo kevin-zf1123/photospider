@@ -87,7 +87,7 @@ bool drain_compute_event_pages(ps::InteractionService& svc,
 std::optional<ps::OpImplementation> select_tiled_implementation(
     const ps::Node& node, ps::ComputeIntent intent) {
   return ps::OpRegistry::instance().select_implementation(
-      node.type, node.subtype, {ps::Device::CPU}, intent,
+      node.type, node.subtype, {ps::DeviceBackend::CPU}, intent,
       [](const ps::OpImplementation& candidate) {
         return candidate.is_tiled();
       });

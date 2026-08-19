@@ -1418,15 +1418,15 @@ class B1RunObservationCollector::Impl final
       }
       logical_ready_bytes = width * height * kBytesPerB1Pixel;
     }
-    ready.resources =
-        B1SemanticResourceVector{observation.work_units,
-                                 1U,
-                                 logical_ready_bytes,
-                                 observation.device == Device::CPU ? 1U : 0U,
-                                 observation.retained_memory_bytes,
-                                 observation.scratch_bytes,
-                                 0U,
-                                 0U};
+    ready.resources = B1SemanticResourceVector{
+        observation.work_units,
+        1U,
+        logical_ready_bytes,
+        observation.device == DeviceBackend::CPU ? 1U : 0U,
+        observation.retained_memory_bytes,
+        observation.scratch_bytes,
+        0U,
+        0U};
     publish(task_readies_, next_task_ready_, std::move(ready));
   }
 

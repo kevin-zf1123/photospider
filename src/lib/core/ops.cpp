@@ -239,7 +239,7 @@ NodeOutput op_divide(const Node& node,
  * @throws GraphError for input, inference, execution, or output failures.
  * @throws std::bad_alloc unchanged for resource exhaustion.
  * @note The static operation definition is immutable and reentrant; the runner
- *       performs all current ImageBuffer edge adaptation.
+ *       performs all checked Value and Host-grant adaptation.
  */
 NodeOutput op_invert_dense(const Node& node,
                            const std::vector<const NodeOutput*>& inputs) {

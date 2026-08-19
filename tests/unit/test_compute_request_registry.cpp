@@ -325,7 +325,7 @@ ComputeRequestSnapshot wait_for_terminal(ComputeRequestRegistry* registry,
  * @throws std::bad_alloc if function storage cannot be allocated.
  */
 ComputeRequestRegistry::OutputPublisher empty_output_publisher() {
-  return [](const ComputeRequestId&, ImageBuffer) {
+  return [](const ComputeRequestId&, NamedValueResult) {
     return ComputeOutputPublication{ok_status(), {}};
   };
 }
@@ -337,7 +337,7 @@ TEST(ComputeRequestRegistryConstruction, RejectsInvalidPolicyAndCallbacks) {
     return ok_status();
   };
   const auto image_executor = [](const HostComputeRequest&) {
-    return Result<ImageBuffer>{ok_status(), {}};
+    return Result<NamedValueResult>{ok_status(), {}};
   };
 
   ComputeRequestRegistryLimits zero_active;
@@ -378,7 +378,7 @@ TEST(ComputeRequestRegistrySubmission, PublishesQueuedCommitSnapshot) {
         return ok_status();
       },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), {}, {}, [&] { return compute_ids.next(); });
 
@@ -451,7 +451,7 @@ TEST(ComputeRequestRegistryExecution, UsesOneWorkerFifoAndMatchingExecutors) {
         ++image_calls;
         record_entry(request.node.value);
         --in_flight;
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), {}, {}, [&] { return compute_ids.next(); });
   ASSERT_TRUE(registry.start().ok);
@@ -463,7 +463,7 @@ TEST(ComputeRequestRegistryExecution, UsesOneWorkerFifoAndMatchingExecutors) {
   const auto second =
       registry.submit(session, request_for(2), ComputeResultMode::Status);
   const auto third =
-      registry.submit(session, request_for(3), ComputeResultMode::Image);
+      registry.submit(session, request_for(3), ComputeResultMode::Values);
   ASSERT_TRUE(second.status.ok);
   ASSERT_TRUE(third.status.ok);
   EXPECT_EQ(registry.status(second.value.compute_id).value.state,
@@ -510,7 +510,7 @@ TEST(ComputeRequestRegistryExecution,
         return ok_status();
       },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), {}, {}, [&] { return compute_ids.next(); });
   ASSERT_TRUE(registry.start().ok);
@@ -557,11 +557,9 @@ TEST(ComputeRequestRegistryExecution,
   ComputeRequestRegistry registry(
       sessions, [](const HostComputeRequest&) { return ok_status(); },
       [](const HostComputeRequest&) {
-        ImageBuffer image;
-        image.width = 1;
-        return Result<ImageBuffer>{ok_status(), std::move(image)};
+        return Result<NamedValueResult>{ok_status(), NamedValueResult{}};
       },
-      [&](const ComputeRequestId&, ImageBuffer) {
+      [&](const ComputeRequestId&, NamedValueResult) {
         const int publication = ++publications;
         if (publication == 1) {
           return ComputeOutputPublication{
@@ -581,7 +579,7 @@ TEST(ComputeRequestRegistryExecution,
   std::vector<ComputeRequestId> ids;
   for (int node = 1; node <= 3; ++node) {
     const auto submitted =
-        registry.submit(session, request_for(node), ComputeResultMode::Image);
+        registry.submit(session, request_for(node), ComputeResultMode::Values);
     ASSERT_TRUE(submitted.status.ok);
     ids.push_back(submitted.value.compute_id);
   }
@@ -627,7 +625,7 @@ TEST(ComputeRequestRegistryCapacity, EnforcesGlobalActiveLimitBeforeExecution) {
         return ok_status();
       },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), limits, {}, [&] { return compute_ids.next(); });
   ASSERT_TRUE(registry.start().ok);
@@ -668,7 +666,7 @@ TEST(ComputeRequestRegistryCapacity, ConcurrentSubmitSharesTheLastSlot) {
         return ok_status();
       },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), limits, {}, [&] { return compute_ids.next(); });
   ASSERT_TRUE(registry.start().ok);
@@ -707,7 +705,7 @@ TEST(ComputeRequestRegistryRetention, EvictsOnlyOldestTerminalRecord) {
   ComputeRequestRegistry registry(
       sessions, [](const HostComputeRequest&) { return ok_status(); },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), limits, {}, [&] { return compute_ids.next(); });
   ASSERT_TRUE(registry.start().ok);
@@ -745,7 +743,7 @@ TEST(ComputeRequestRegistryLookup, ResultAndReleasePreserveImmutableTerminal) {
             "immutable diagnostic");
       },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), {}, {}, [&] { return compute_ids.next(); });
   ASSERT_TRUE(registry.start().ok);
@@ -789,7 +787,7 @@ TEST(ComputeRequestRegistryRetention, UsesTerminalTimeAndDoesNotRefreshTtl) {
   ComputeRequestRegistry registry(
       sessions, [](const HostComputeRequest&) { return ok_status(); },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), limits, [clock] { return clock->now(); },
       [&] { return compute_ids.next(); });
@@ -825,7 +823,7 @@ TEST(ComputeRequestRegistryRetention, NeverExpiresActiveWork) {
         return ok_status();
       },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), limits, [clock] { return clock->now(); },
       [&] { return compute_ids.next(); });
@@ -875,11 +873,9 @@ TEST(ComputeRequestRegistryOutput,
         if (request.node.value == 2) {
           replacement_executor_gate.enter_and_wait();
         }
-        ImageBuffer image;
-        image.width = 1;
-        return Result<ImageBuffer>{ok_status(), std::move(image)};
+        return Result<NamedValueResult>{ok_status(), NamedValueResult{}};
       },
-      [&](const ComputeRequestId&, ImageBuffer) {
+      [&](const ComputeRequestId&, NamedValueResult) {
         const int sequence = ++published;
         return ComputeOutputPublication{
             ok_status(),
@@ -916,14 +912,14 @@ TEST(ComputeRequestRegistryOutput,
   ASSERT_TRUE(registry.start().ok);
 
   const auto first =
-      registry.submit(session, request_for(1), ComputeResultMode::Image);
+      registry.submit(session, request_for(1), ComputeResultMode::Values);
   ASSERT_TRUE(first.status.ok);
   evicted_id = first.value.compute_id;
   ASSERT_EQ(wait_for_terminal(&registry, evicted_id).state,
             ComputeRequestState::Succeeded);
 
   const auto second =
-      registry.submit(session, request_for(2), ComputeResultMode::Image);
+      registry.submit(session, request_for(2), ComputeResultMode::Values);
   ASSERT_TRUE(second.status.ok);
   replacement_id = second.value.compute_id;
   const bool replacement_entered =
@@ -973,11 +969,9 @@ TEST(ComputeRequestRegistryOutput,
   ComputeRequestRegistry registry(
       sessions, [](const HostComputeRequest&) { return ok_status(); },
       [](const HostComputeRequest&) {
-        ImageBuffer image;
-        image.width = 1;
-        return Result<ImageBuffer>{ok_status(), std::move(image)};
+        return Result<NamedValueResult>{ok_status(), NamedValueResult{}};
       },
-      [&](const ComputeRequestId&, ImageBuffer) {
+      [&](const ComputeRequestId&, NamedValueResult) {
         const int sequence = ++published;
         return ComputeOutputPublication{
             ok_status(),
@@ -990,12 +984,12 @@ TEST(ComputeRequestRegistryOutput,
   ASSERT_TRUE(registry.start().ok);
 
   const auto first =
-      registry.submit(session, request_for(1), ComputeResultMode::Image);
+      registry.submit(session, request_for(1), ComputeResultMode::Values);
   ASSERT_TRUE(first.status.ok);
   ASSERT_EQ(wait_for_terminal(&registry, first.value.compute_id).state,
             ComputeRequestState::Succeeded);
   const auto second =
-      registry.submit(session, request_for(2), ComputeResultMode::Image);
+      registry.submit(session, request_for(2), ComputeResultMode::Values);
   ASSERT_TRUE(second.status.ok);
   ASSERT_EQ(wait_for_terminal(&registry, second.value.compute_id).state,
             ComputeRequestState::Succeeded);
@@ -1004,7 +998,7 @@ TEST(ComputeRequestRegistryOutput,
   EXPECT_EQ(cleaned.load(), 2);
 
   const auto third =
-      registry.submit(session, request_for(3), ComputeResultMode::Image);
+      registry.submit(session, request_for(3), ComputeResultMode::Values);
   ASSERT_TRUE(third.status.ok);
   ASSERT_EQ(wait_for_terminal(&registry, third.value.compute_id).state,
             ComputeRequestState::Succeeded);
@@ -1013,7 +1007,7 @@ TEST(ComputeRequestRegistryOutput,
   EXPECT_EQ(cleaned.load(), 3);
 
   const auto fourth =
-      registry.submit(session, request_for(4), ComputeResultMode::Image);
+      registry.submit(session, request_for(4), ComputeResultMode::Values);
   ASSERT_TRUE(fourth.status.ok);
   ASSERT_EQ(wait_for_terminal(&registry, fourth.value.compute_id).state,
             ComputeRequestState::Succeeded);
@@ -1207,7 +1201,7 @@ TEST(ComputeRequestRegistryLifecycle, CloseWaitsQueuedJobWithoutHostDeadlock) {
         return ok_status();
       },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), {}, {}, [&] { return compute_ids.next(); });
   ASSERT_TRUE(registry.start().ok);
@@ -1271,7 +1265,7 @@ TEST(ComputeRequestRegistryLifecycle,
         return ok_status();
       },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), {}, {}, [&] { return compute_ids.next(); });
   ASSERT_TRUE(registry.start().ok);
@@ -1335,7 +1329,7 @@ TEST(ComputeRequestRegistryLifecycle,
         return ok_status();
       },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), {}, {}, [&] { return compute_ids.next(); });
   ASSERT_TRUE(registry.start().ok);
@@ -1389,7 +1383,7 @@ TEST(ComputeRequestRegistryLifecycle, ConcurrentShutdownSharesOneWorkerJoin) {
         return ok_status();
       },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), {}, {}, [&] { return compute_ids.next(); });
   ASSERT_TRUE(registry.start().ok);
@@ -1440,7 +1434,7 @@ TEST(ComputeRequestRegistryIdentity,
   ComputeRequestRegistry registry(
       sessions, [](const HostComputeRequest&) { return ok_status(); },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
       empty_output_publisher(), {}, {}, [&] { return compute_ids.next(); });
   ASSERT_TRUE(registry.start().ok);
@@ -1482,9 +1476,9 @@ TEST(ComputeRequestRegistryRace, ReleaseAndExpiryCleanOutputOnce) {
   ComputeRequestRegistry registry(
       sessions, [](const HostComputeRequest&) { return ok_status(); },
       [](const HostComputeRequest&) {
-        return Result<ImageBuffer>{ok_status(), {}};
+        return Result<NamedValueResult>{ok_status(), {}};
       },
-      [&](const ComputeRequestId&, ImageBuffer) {
+      [&](const ComputeRequestId&, NamedValueResult) {
         return ComputeOutputPublication{
             ok_status(),
             ComputeOutputOwnership(
@@ -1495,7 +1489,7 @@ TEST(ComputeRequestRegistryRace, ReleaseAndExpiryCleanOutputOnce) {
       [&] { return compute_ids.next(); });
   ASSERT_TRUE(registry.start().ok);
   const auto submitted =
-      registry.submit(session, request_for(1), ComputeResultMode::Image);
+      registry.submit(session, request_for(1), ComputeResultMode::Values);
   ASSERT_TRUE(submitted.status.ok);
   ASSERT_EQ(wait_for_terminal(&registry, submitted.value.compute_id).state,
             ComputeRequestState::Succeeded);

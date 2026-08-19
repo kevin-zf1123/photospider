@@ -442,7 +442,7 @@ struct DirtyReadyTaskContext::DeferredValueWait final {
 DirtyReadyTaskContext::DirtyReadyTaskContext(
     const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay* selection,
     const std::vector<int>& active_task_ids,
-    const std::vector<Device>& task_devices,
+    const std::vector<DeviceBackend>& task_devices,
     const std::vector<OperationExecutionConstraints>& task_constraints,
     ReadyTaskResourceDemand task_operation_resource_demand,
     std::function<void(int)> run_task,
@@ -537,7 +537,7 @@ std::uint64_t DirtyReadyTaskContext::retained_memory_bytes() const {
   }
   estimate.add_objects<int>(
       static_cast<std::uint64_t>(active_task_ids_.capacity()));
-  estimate.add_objects<Device>(
+  estimate.add_objects<DeviceBackend>(
       static_cast<std::uint64_t>(task_devices_.capacity()));
   estimate.add_objects<OperationExecutionConstraints>(
       static_cast<std::uint64_t>(task_constraints_.capacity()));
@@ -1047,7 +1047,7 @@ void remember_compute_plan(GraphModel& graph, const ComputePlan& compute_plan,
 ComputePlan prune_node_cache_task_graph(
     GraphModel& graph, const ComputeRequest& request,
     const std::vector<int>& execution_order,
-    const std::vector<Device>& available_devices) {
+    const std::vector<DeviceBackend>& available_devices) {
   NodeCacheTaskGraphPruner node_cache_pruner;
   const std::shared_ptr<const FullTaskGraph> full_graph =
       get_or_expand_full_task_graph(graph, request.intent, available_devices);
@@ -1130,94 +1130,6 @@ bool should_skip_stale_dirty_source(GraphRuntime* runtime, int node_id,
                        node_id);
   }
   return true;
-}
-
-/**
- * @brief Resolves the output format for a dirty-domain staging buffer.
- * @param preferred Existing staged output preferred when it has a valid image.
- * @param image_inputs Destination-indexed image inputs, including null slots.
- * @param fallback Optional committed output used after staged/input candidates.
- * @return Channel count and data type from the first usable candidate, or the
- * single-channel FLOAT32 default.
- * @throws Nothing.
- * @note Disconnected input placeholders are skipped only for format inference;
- * their slot identity remains intact for operation execution.
- */
-std::pair<int, DataType> infer_output_spec(
-    const std::optional<NodeOutput>& preferred,
-    const std::vector<const NodeOutput*>& image_inputs,
-    const std::optional<NodeOutput>* fallback) {
-  const auto value_spec =
-      [](const NodeOutput& output) -> std::optional<std::pair<int, DataType>> {
-    if (!output.has_image_value() ||
-        !output.image_value().image_facet().has_value()) {
-      return std::nullopt;
-    }
-    const Value& value = output.image_value();
-    const DenseTensorDescriptor& descriptor = value.dense_tensor_descriptor();
-    const ImageFacet& facet = *value.image_facet();
-    const std::size_t channels = facet.channel_axis.has_value()
-                                     ? descriptor.shape[*facet.channel_axis]
-                                     : 1U;
-    if (channels > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-      throw std::invalid_argument(
-          "Dirty output channel count exceeds int compatibility.");
-    }
-    const std::uint32_t bits = descriptor.storage_encoding.bit_width;
-    DataType type;
-    switch (descriptor.element_semantics) {
-      case ElementSemantics::UnsignedInteger:
-        if (bits == 8U) {
-          type = DataType::UINT8;
-        } else if (bits == 16U) {
-          type = DataType::UINT16;
-        } else {
-          throw std::invalid_argument(
-              "Dirty output unsigned element width is unsupported.");
-        }
-        break;
-      case ElementSemantics::SignedInteger:
-        if (bits == 8U) {
-          type = DataType::INT8;
-        } else if (bits == 16U) {
-          type = DataType::INT16;
-        } else {
-          throw std::invalid_argument(
-              "Dirty output signed element width is unsupported.");
-        }
-        break;
-      case ElementSemantics::FloatingPoint:
-        if (bits == 32U) {
-          type = DataType::FLOAT32;
-        } else if (bits == 64U) {
-          type = DataType::FLOAT64;
-        } else {
-          throw std::invalid_argument(
-              "Dirty output floating element width is unsupported.");
-        }
-        break;
-    }
-    return std::pair<int, DataType>{static_cast<int>(channels), type};
-  };
-  if (preferred) {
-    if (const auto spec = value_spec(*preferred)) {
-      return *spec;
-    }
-  }
-  for (const auto* input : image_inputs) {
-    if (!input) {
-      continue;
-    }
-    if (const auto spec = value_spec(*input)) {
-      return *spec;
-    }
-  }
-  if (fallback && *fallback) {
-    if (const auto spec = value_spec(**fallback)) {
-      return *spec;
-    }
-  }
-  return {1, DataType::FLOAT32};
 }
 
 /** @copydoc validate_dirty_region_operation_routes */

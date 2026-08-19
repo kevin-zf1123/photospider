@@ -1007,42 +1007,6 @@ bool encode_enum(HostExecutionTraceAction value, Json* output);
 bool decode_enum(const Json& value, HostExecutionTraceAction* output) noexcept;
 
 /**
- * @brief Encodes one image channel data type as its stable lowercase label.
- * @param value Public enum value.
- * @param output Receives the label only for a recognized enum value.
- * @return True on success; false without modifying `output` otherwise.
- * @throws std::bad_alloc if JSON string storage cannot be allocated.
- */
-bool encode_enum(DataType value, Json* output);
-
-/**
- * @brief Decodes one stable image data-type label.
- * @param value Candidate JSON string.
- * @param output Receives the enum only after exact label validation.
- * @return True on success; false without modifying `output` otherwise.
- * @throws Nothing.
- */
-bool decode_enum(const Json& value, DataType* output) noexcept;
-
-/**
- * @brief Encodes one image device as its stable lowercase label.
- * @param value Public enum value.
- * @param output Receives the label only for a recognized enum value.
- * @return True on success; false without modifying `output` otherwise.
- * @throws std::bad_alloc if JSON string storage cannot be allocated.
- */
-bool encode_enum(Device value, Json* output);
-
-/**
- * @brief Decodes one stable image-device label.
- * @param value Candidate JSON string.
- * @param output Receives the enum only after exact label validation.
- * @return True on success; false without modifying `output` otherwise.
- * @throws Nothing.
- */
-bool decode_enum(const Json& value, Device* output) noexcept;
-
-/**
  * @brief Result of parsing one JSON payload with duplicate-key rejection.
  *
  * @throws std::bad_alloc when parsed storage or diagnostics cannot be

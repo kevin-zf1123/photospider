@@ -33,6 +33,7 @@
 #include "graph/graph_io_service.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
+#include "photospider/host/value_result.hpp"
 #include "plugin/plugin_manager.hpp"
 #include "runtime/graph_runtime.hpp"
 
@@ -830,19 +831,19 @@ class Kernel {
   std::optional<compute::DirtyControlLaneResult> end_dirty_source_control(
       const std::string& name, int node_id, compute::DirtyDomain domain);
   /**
-   * @brief Computes a node and returns its output image from a request object.
+   * @brief Computes a node and returns its exact named immutable Values.
    *
    * @param request Graph name, target node, cache, execution, telemetry, and
    * optional intent/dirty ROI controls.
-   * @return Cloned output descriptor, or nullopt when graph lookup, compute, or
-   * image cloning fails.
-   * @throws std::bad_alloc if compute/image execution or handled-failure
+   * @return Canonically ordered named Values, or nullopt when graph lookup or
+   *         compute fails. A successful output without Values is engaged and
+   *         empty.
+   * @throws std::bad_alloc if compute/Value execution or handled-failure
    *         LastError construction exhausts memory.
-   * @note The image is cloned out of graph-owned storage before returning.
-   *       Other compute and image-cloning exceptions preserve the historical
-   *       nullopt preview/save contract.
+   * @note Returned Value handles retain immutable publications; no mutable
+   *       graph, cache, or runtime owner is exposed.
    */
-  std::optional<ImageBuffer> compute_and_get_image(
+  std::optional<NamedValueResult> compute_and_get_values(
       const ComputeRequest& request);
 
   std::optional<std::vector<int>> list_node_ids(const std::string& name);
@@ -1420,18 +1421,18 @@ class Kernel {
       ComputeRequest request);
 
   /**
-   * @brief Runs compute and returns an owned target image descriptor.
+   * @brief Runs compute and returns an owned exact named-Value result.
    *
    * @param request Internal compute request with image-returning arguments.
-   * @return Cloned CPU ImageBuffer target image, or nullopt on missing graph,
-   * compute failure, or empty output.
-   * @throws std::bad_alloc if compute/image execution or handled-failure
+   * @return Canonically ordered named Values, or nullopt on missing graph or
+   *         compute failure. Empty successful output remains engaged.
+   * @throws std::bad_alloc if compute/Value execution or handled-failure
    *         LastError construction exhausts memory.
    * @note Missing graphs return nullopt before LastError state is touched.
-   * Successful compute paths clear stale LastError state, including the
-   * no-image-output case. Other compute/image exceptions become nullopt.
+   * Successful compute paths clear stale LastError state. Other compute/Value
+   * exceptions become nullopt.
    */
-  std::optional<ImageBuffer> compute_and_get_image_request(
+  std::optional<NamedValueResult> compute_and_get_values_request(
       const ComputeRequest& request);
 
   /**

@@ -90,7 +90,7 @@ using CpuDenseImageInferFunc = std::function<DenseImageDescriptor(
  * @return Nothing; the Host retires the grant and seals the binding only after
  * the callback returns successfully.
  * @throws Any exception emitted by the operation definition.
- * @note The callback receives no allocator, ImageBuffer owner, registry,
+ * @note The callback receives no allocator, storage owner, registry,
  * graph, provider, or descriptor replacement authority. It may request
  * mutable addresses only through the checked active grant and must not retire
  * or retain them after callback return.
@@ -119,7 +119,7 @@ struct CpuDenseImageOperation {
 };
 
 /**
- * @brief Runs a private dense operation behind the current ImageBuffer edge.
+ * @brief Runs a private dense operation over canonical image Values.
  *
  * The runner requires each canonical NodeOutput image Value, invokes
  * descriptor-only inference, freezes one immutable output plan, allocates one
@@ -139,10 +139,9 @@ struct CpuDenseImageOperation {
  *         inferred descriptor, execute failure, mismatched result, or
  *         unadaptable result.
  * @throws std::bad_alloc unchanged for resource exhaustion in any phase.
- * @note Explicit legacy adapters import compatibility bytes before this
- * runner. Value inputs preserve allocation/revision identity without a second
+ * @note Value inputs preserve allocation/revision identity without a second
  * copy. Producer exceptions fail the binding closed; no partially validated
- * output or compatibility snapshot is published.
+ * output or alternate image snapshot is published.
  */
 NodeOutput execute_cpu_dense_image_operation(
     const Node& node, const std::vector<const NodeOutput*>& inputs,

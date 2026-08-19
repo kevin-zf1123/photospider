@@ -13,11 +13,12 @@
 #include <vector>
 
 #include "compute/request/compute_cache_policy.hpp"  // NOLINT(build/include_subdir)
-#include "core/value_image_adapter.hpp"  // NOLINT(build/include_subdir)
+#include "core/value_region.hpp"  // NOLINT(build/include_subdir)
 #include "execution/device/compute_io_executor.hpp"  // NOLINT(build/include_subdir)
 #include "execution/transfer/value_transfer_task.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_cache_service.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/graph_error.hpp"
+#include "photospider/data/image_view.hpp"
 #include "photospider/data/packed_dense_tensor_view.hpp"
 #include "support/fake_cache_metadata_codec.hpp"
 #include "support/fake_image_artifact_codec.hpp"
@@ -204,8 +205,7 @@ TEST(PackedFp4DenseTensor, ReadsBothBitOrdersAndCopiesAlignedSlice) {
         (void)dense_tensor_element_bytes(source.dense_tensor_descriptor()),
         std::invalid_argument);
     EXPECT_THROW((void)DenseTensorView(source), std::invalid_argument);
-    EXPECT_THROW((void)value_image_adapter::snapshot_cpu_image_buffer(source),
-                 std::invalid_argument);
+    EXPECT_THROW((void)ImageView(source), std::invalid_argument);
 
     const PackedDenseTensorView view(source);
     EXPECT_EQ(view.encoded_element({0U, 0U}), 0U);
@@ -414,8 +414,8 @@ TEST(PackedFp4DenseTensor, MemoryCacheRetainsAndDiskCacheRejectsBeforeEffects) {
   node.cached_output_high_precision = NodeOutput{};
   node.cached_output_high_precision->publish_image_value(source);
   node.cached_output_high_precision->data["tag"] = std::string("packed");
-  node.hp_region = value_image_adapter::full_node_output_region(
-      *node.cached_output_high_precision);
+  node.hp_region =
+      value_region::full_node_output_region(*node.cached_output_high_precision);
   ASSERT_TRUE(compute::ComputeCachePolicy::has_reusable_output(node));
   const NodeOutput* cached = compute::ComputeCachePolicy::reusable_output(node);
   ASSERT_NE(cached, nullptr);

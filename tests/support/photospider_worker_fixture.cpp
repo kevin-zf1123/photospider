@@ -27,7 +27,9 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
+#include "photospider/data/value_artifact.hpp"
 #include "server/worker/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker/worker_protocol.hpp"  // NOLINT(build/include_subdir)
 
@@ -106,10 +108,45 @@ std::optional<int> parse_closed_descriptor_mode(std::string_view mode) {
 }
 
 /**
- * @brief Creates one settled success report whose pixels encode the child PID.
+ * @brief Builds one named u8 DenseTensor artifact from exact source bytes.
+ * @param bytes Nonempty exact logical tensor storage consumed by publication.
+ * @return One canonical image-named artifact with independently owned bytes.
+ * @throws std::invalid_argument for an empty byte sequence.
+ * @throws Value publication, artifact capture, overflow, or allocation
+ *         failures unchanged.
+ * @note This fixture uses the production Value/artifact contracts directly and
+ *       retains no alternate mutable image surface.
+ */
+NamedValueArtifactSet make_fixture_artifacts(std::vector<std::byte> bytes) {
+  if (bytes.empty()) {
+    throw std::invalid_argument("worker fixture artifact bytes are empty");
+  }
+  DenseTensorDescriptor descriptor{{bytes.size()},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  Value value =
+      Value::from_cpu_dense_tensor(std::move(descriptor), std::nullopt,
+                                   StridedLayout{{1}}, std::move(bytes));
+  return NamedValueArtifactSet{{capture_value_artifact("image", value)}};
+}
+
+/**
+ * @brief Builds one named u8 DenseTensor artifact with repeated bytes.
+ * @param payload_bytes Positive logical tensor byte count.
+ * @param fill Exact byte copied into every logical element.
+ * @return One canonical image-named artifact set.
+ * @throws Fixture artifact creation failures unchanged.
+ */
+NamedValueArtifactSet make_repeated_fixture_artifacts(
+    std::size_t payload_bytes, std::byte fill = std::byte{0}) {
+  return make_fixture_artifacts(std::vector<std::byte>(payload_bytes, fill));
+}
+
+/**
+ * @brief Creates one settled success report whose Value encodes the child PID.
  * @param assignment Exact current assignment.
- * @return One-by-one four-channel CPU result.
- * @throws Image allocation failures unchanged.
+ * @return One four-byte named Value result.
+ * @throws Value artifact allocation failures unchanged.
  */
 JobAttemptReport success_report(const JobAssignment& assignment) {
   JobAttemptReport report;
@@ -117,9 +154,10 @@ JobAttemptReport success_report(const JobAssignment& assignment) {
   report.outcome = JobAttemptOutcome::Succeeded;
   report.settled = true;
   report.failure = JobAttemptFailure::None;
-  report.image = make_aligned_cpu_image_buffer(1, 1, 4, DataType::UINT8, 64U);
+  std::vector<std::byte> bytes(sizeof(std::uint32_t));
   const std::uint32_t pid = static_cast<std::uint32_t>(::getpid());
-  std::memcpy(report.image->data.get(), &pid, sizeof(pid));
+  std::memcpy(bytes.data(), &pid, sizeof(pid));
+  report.values = make_fixture_artifacts(std::move(bytes));
   return report;
 }
 
@@ -127,34 +165,27 @@ JobAttemptReport success_report(const JobAssignment& assignment) {
  * @brief Creates a successful candidate above the former control-frame cap.
  * @param assignment Exact current assignment.
  * @return Settled success candidate that must use only the artifact data plane.
- * @throws std::overflow_error if the historical cap cannot fit one image
- * dimension; image allocation failures propagate unchanged.
+ * @throws Value artifact publication and allocation failures unchanged.
  * @note The staged payload is one byte above the old 64-MiB aggregate frame
  * cap, while the Report control frame remains bounded metadata only.
  */
 JobAttemptReport former_control_bound_output_report(
     const JobAssignment& assignment) {
   const std::size_t payload_bytes = kBulkPayloadAboveFormerControlBytes;
-  if (payload_bytes >
-      static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    throw std::overflow_error(
-        "worker fixture checkpoint payload exceeds image width");
-  }
   JobAttemptReport report;
   report.identity = assignment.identity;
   report.outcome = JobAttemptOutcome::Succeeded;
   report.settled = true;
   report.failure = JobAttemptFailure::None;
-  report.image = make_aligned_cpu_image_buffer(static_cast<int>(payload_bytes),
-                                               1, 1, DataType::UINT8, 64U);
+  report.values = make_repeated_fixture_artifacts(payload_bytes);
   return report;
 }
 
 /**
  * @brief Creates one finite success candidate for heartbeat arbitration.
  * @param assignment Exact current assignment.
- * @return One tight one-MiB CPU image whose staged transfer lasts 480 ms.
- * @throws Image allocation failures unchanged.
+ * @return One one-MiB named Value whose staged archive lasts at least 480 ms.
+ * @throws Value artifact allocation failures unchanged.
  * @note The fixed transfer duration exceeds the integration test's heartbeat
  * deadline but remains far below its runtime and observer bounds. This is not
  * a permanent stall fixture.
@@ -165,39 +196,39 @@ JobAttemptReport heartbeatless_output_report(const JobAssignment& assignment) {
   report.outcome = JobAttemptOutcome::Succeeded;
   report.settled = true;
   report.failure = JobAttemptFailure::None;
-  report.image = make_aligned_cpu_image_buffer(
-      static_cast<int>(kHeartbeatlessOutputBytes), 1, 1, DataType::UINT8, 64U);
+  report.values = make_repeated_fixture_artifacts(kHeartbeatlessOutputBytes);
   return report;
 }
 
 /**
  * @brief Owns metadata-first fixture output and its retained byte source.
  * @throws Nothing for value operations; members may allocate beforehand.
- * @note `prepared.report.image` is empty while `image` retains the exact
- * worker-side source until the paced data-plane send completes.
+ * @note The prepared report carries no Values while output retains the exact
+ * worker-side archive until the paced data-plane send completes.
  */
 struct HeartbeatlessPreparedOutput final {
   /** @brief Metadata-only Report sent before any output bytes. */
   PreparedWorkerReport prepared;
-  /** @brief Exact worker-owned source retained outside control metadata. */
-  ImageBuffer image;
+  /** @brief Exact worker-owned transfer retained outside control metadata. */
+  PreparedWorkerOutputTransfer output;
 };
 
 /**
  * @brief Prepares exact metadata for one heartbeatless fixture candidate.
- * @param report Settled successful report with one tight CPU image.
+ * @param report Settled successful report with one named Value artifact.
+ * @param spec Exact immutable assignment JobSpec.
  * @param output_stage Exact manager-assigned stage reference and bound.
- * @return Image-free Report metadata plus retained worker source bytes.
- * @throws std::invalid_argument for a malformed report, image, or stage.
- * @throws std::overflow_error when tight payload arithmetic overflows.
- * @throws Hashing and allocation failures unchanged.
+ * @return Values-free Report metadata plus retained worker archive bytes.
+ * @throws std::invalid_argument for a malformed report, artifact, or stage.
+ * @throws Hashing, validation, overflow, and allocation failures unchanged.
  * @note This fixture-only helper deliberately mirrors the metadata-first
  * protocol contract so the RED case does not depend on a permanent stall or
  * control-frame payload bytes.
  */
 HeartbeatlessPreparedOutput prepare_heartbeatless_output(
-    JobAttemptReport report, const WorkerOutputStageReference& output_stage) {
-  if (!report.image.has_value() ||
+    JobAttemptReport report, const JobSpec& spec,
+    const WorkerOutputStageReference& output_stage) {
+  if (!report.values.has_value() ||
       report.outcome != JobAttemptOutcome::Succeeded || !report.settled ||
       report.failure != JobAttemptFailure::None ||
       output_stage.reference_id.empty() ||
@@ -205,35 +236,22 @@ HeartbeatlessPreparedOutput prepare_heartbeatless_output(
     throw std::invalid_argument(
         "heartbeatless fixture output metadata is invalid");
   }
-  validate_image_buffer(*report.image);
-  ImageBuffer image = *report.image;
-  const std::size_t row_bytes = image_buffer_row_bytes(image);
-  if (row_bytes > std::numeric_limits<std::size_t>::max() /
-                      static_cast<std::size_t>(image.height)) {
-    throw std::overflow_error("heartbeatless fixture output size overflowed");
-  }
-  const std::size_t payload_bytes =
-      row_bytes * static_cast<std::size_t>(image.height);
-  if (payload_bytes != kHeartbeatlessOutputBytes ||
-      payload_bytes > output_stage.maximum_payload_bytes) {
+  if (report.values->values.size() != 1U ||
+      report.values->values[0].payloads.size() != 1U ||
+      report.values->values[0].payloads[0].size() !=
+          kHeartbeatlessOutputBytes) {
     throw std::invalid_argument(
-        "heartbeatless fixture output exceeds its assigned stage");
+        "heartbeatless fixture Value payload is inconsistent");
   }
-  WorkerOutputDataReference reference;
-  reference.reference_id = output_stage.reference_id;
-  reference.output_slot_id = output_stage.output_slot_id;
-  reference.descriptor.width = image.width;
-  reference.descriptor.height = image.height;
-  reference.descriptor.channels = image.channels;
-  reference.descriptor.type = image.type;
-  reference.descriptor.row_bytes = row_bytes;
-  reference.descriptor.payload_bytes = payload_bytes;
-  reference.content_digest = hash_image_artifact_content(image);
-  report.image.reset();
+  PreparedWorkerOutputTransfer transfer =
+      prepare_worker_output_transfer(spec, output_stage, &report);
+  if (!transfer.reference.has_value() || !transfer.source.has_value()) {
+    throw std::invalid_argument(
+        "heartbeatless fixture archive preparation failed");
+  }
   HeartbeatlessPreparedOutput output;
-  output.prepared =
-      PreparedWorkerReport{std::move(report), std::move(reference)};
-  output.image = std::move(image);
+  output.prepared = PreparedWorkerReport{std::move(report), transfer.reference};
+  output.output = std::move(transfer);
   return output;
 }
 
@@ -352,7 +370,7 @@ class FixtureDataDescriptor final {
  * manager-side exact joins are exercised against real streamed bytes.
  */
 struct PreparedFixtureReportTransfer final {
-  /** @brief Image-free control Report sent before the data-plane source. */
+  /** @brief Values-free control Report sent before the data-plane source. */
   PreparedWorkerReport report;
   /** @brief Original candidate metadata and retained worker byte source. */
   PreparedWorkerOutputTransfer output;
@@ -360,12 +378,12 @@ struct PreparedFixtureReportTransfer final {
 
 /**
  * @brief Prepares one fixture candidate without sending output bytes.
- * @param report Complete fixture report whose image, if any, is consumed.
+ * @param report Complete fixture report whose Values, if any, are consumed.
  * @param spec Exact immutable assignment JobSpec.
  * @param output_stage Exact manager-assigned private stage metadata.
  * @return Metadata-first Report plus retained tight worker source.
  * @throws Validation, hashing, allocation, and overflow failures unchanged.
- * @note The returned Report contains no image bytes. Its caller sends this
+ * @note The returned Report contains no Value bytes. Its caller sends this
  * metadata first and retains a killable worker during later bulk transfer.
  */
 PreparedFixtureReportTransfer prepare_fixture_report(
@@ -427,7 +445,7 @@ void await_fixture_completion_ready(
  * @brief Sends prepared metadata and awaits completion readiness when enabled.
  * @param fd Connected manager control socket.
  * @param output_data Non-null exact inherited output-stage descriptor owner.
- * @param prepared Complete image-free report and retained output source.
+ * @param prepared Complete Values-free report and retained output source.
  * @param spec Exact immutable assignment JobSpec.
  * @param output_stage Exact stage metadata expected by the encoder.
  * @param io_timeout Positive shared send/acknowledgement bound.
@@ -484,7 +502,7 @@ void send_heartbeat(int fd, const AttemptIdentity& identity,
  * @brief Sends one metadata-first candidate with real concurrent heartbeats.
  * @param fd Connected manager control socket.
  * @param output_data Non-null exact inherited output-stage descriptor owner.
- * @param prepared Complete image-free report and retained output source.
+ * @param prepared Complete Values-free report and retained output source.
  * @param spec Exact immutable assignment JobSpec.
  * @param output_stage Exact stage metadata expected by the encoder.
  * @param io_timeout Positive shared control deadline bound.
@@ -566,7 +584,7 @@ void send_prepared_fixture_report_with_heartbeats(
  * @brief Stages and sends one fixture report over metadata-only control.
  * @param fd Connected manager control socket.
  * @param output_data Non-null exact inherited output-stage owner.
- * @param report Complete fixture report whose image, if any, is consumed.
+ * @param report Complete fixture report whose Values, if any, are consumed.
  * @param spec Exact immutable assignment JobSpec.
  * @param output_stage Exact manager-assigned private stage metadata.
  * @param io_timeout Positive manager-selected write bound.
@@ -667,26 +685,23 @@ void write_exact_fixture_bytes(int fd, const std::byte* source,
 /**
  * @brief Sends one finite output through fixed delayed stream slices.
  * @param fd Exact worker-side output descriptor.
- * @param image Valid tight one-row CPU image retained outside the Report.
+ * @param archive Valid canonical named-Value archive retained outside Report.
  * @return Nothing after all bytes are sent in fixed slices.
- * @throws std::invalid_argument for an invalid descriptor or image shape.
+ * @throws std::invalid_argument for an invalid descriptor or empty archive.
  * @throws std::system_error for a non-retryable stream send failure.
  * @note Linux uses `MSG_NOSIGNAL`; Darwin inherits `SO_NOSIGPIPE` from the
  * product lane creator. Each 64-KiB slice is followed by a finite 30-ms gap,
  * so old manager code cannot claim a permanent-stall failure as RED evidence.
  */
-void send_heartbeatless_output(int fd, const ImageBuffer& image) {
-  validate_image_buffer(image);
-  if (fd < 0 || image.height != 1 ||
-      image_buffer_row_bytes(image) != kHeartbeatlessOutputBytes) {
+void send_heartbeatless_output(int fd, const std::vector<std::byte>& archive) {
+  if (fd < 0 || archive.empty()) {
     throw std::invalid_argument(
         "heartbeatless fixture output source is invalid");
   }
-  const std::byte* bytes = image_buffer_row_data(image, 0);
   std::size_t offset = 0U;
-  while (offset != kHeartbeatlessOutputBytes) {
-    const std::size_t slice = std::min(kHeartbeatlessOutputChunkBytes,
-                                       kHeartbeatlessOutputBytes - offset);
+  while (offset != archive.size()) {
+    const std::size_t slice =
+        std::min(kHeartbeatlessOutputChunkBytes, archive.size() - offset);
     std::size_t sent_offset = 0U;
     while (sent_offset != slice) {
 #ifdef MSG_NOSIGNAL
@@ -694,7 +709,7 @@ void send_heartbeatless_output(int fd, const ImageBuffer& image) {
 #else
       constexpr int kSendFlags = 0;
 #endif
-      const ssize_t sent = ::send(fd, bytes + offset + sent_offset,
+      const ssize_t sent = ::send(fd, archive.data() + offset + sent_offset,
                                   slice - sent_offset, kSendFlags);
       if (sent < 0 && errno == EINTR) {
         continue;
@@ -1299,12 +1314,13 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
   }
   if (mode == "fixture.output.no-heartbeat") {
     HeartbeatlessPreparedOutput output = prepare_heartbeatless_output(
-        heartbeatless_output_report(assignment), prepared.data_plane.output);
+        heartbeatless_output_report(assignment), *assignment.spec,
+        prepared.data_plane.output);
     send_worker_report(launch.control_fd, output.prepared, *assignment.spec,
                        prepared.data_plane.output,
                        checked_worker_deadline(std::chrono::steady_clock::now(),
                                                launch.io_timeout));
-    send_heartbeatless_output(output_data.get(), output.image);
+    send_heartbeatless_output(output_data.get(), *output.output.source);
     output_data.reset();
     await_fixture_completion_ready(
         launch.control_fd, output.prepared,
@@ -1364,9 +1380,7 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     if (!prepared_report.report.output.has_value()) {
       return 40;
     }
-    prepared_report.report.output->descriptor.width = 2;
-    prepared_report.report.output->descriptor.row_bytes = 8U;
-    prepared_report.report.output->descriptor.payload_bytes = 8U;
+    ++prepared_report.report.output->descriptor.value_count;
     send_prepared_fixture_report(launch.control_fd, &output_data,
                                  prepared_report, *assignment.spec,
                                  prepared.data_plane.output, launch.io_timeout);

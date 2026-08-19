@@ -20,9 +20,9 @@
 #include "compute/dirty/node_executor.hpp"
 #include "compute/execution/execution_service.hpp"
 #include "compute/request/compute_cache_policy.hpp"
-#include "core/image_buffer_processing.hpp"
+#include "core/dense_image_processing.hpp"
 #include "core/ops.hpp"
-#include "core/value_image_adapter.hpp"
+#include "photospider/data/image_view.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 
@@ -31,18 +31,17 @@ namespace {
 
 /**
  * @brief Replaces or first-publishes one canonical image Value in staging.
- * @param output Mutable request-local result with no compatibility staging.
+ * @param output Mutable request-local result.
  * @param value Valid sealed image Value to publish.
  * @return Nothing.
- * @throws std::invalid_argument for compatibility staging or an invalid Value.
+ * @throws std::invalid_argument for a null destination or invalid Value.
  * @throws std::logic_error only from an inconsistent replacement state.
  * @throws std::bad_alloc when first publication allocates map/name storage.
  * @note The helper changes no Region, graph revision, HP/RT generation, or
  * formal cache state; those facts remain at the enclosing commit boundary.
  */
 void publish_staged_image_value(NodeOutput* output, Value value) {
-  if (output == nullptr || output->has_compatibility_image() ||
-      !value.valid()) {
+  if (output == nullptr || !value.valid()) {
     throw std::invalid_argument(
         "Dirty image staging requires a destination and sealed Value.");
   }
@@ -126,67 +125,32 @@ std::size_t frozen_tiled_task_count(
 }
 
 /**
- * @brief Converts one validated Host output plan to current ImageBuffer type.
- * @param plan Immutable plan whose whole-byte element facts are inspected.
- * @return Equivalent current DataType.
- * @throws std::invalid_argument when the combination is unsupported.
- * @note This conversion is used only to validate callback-local RT scratch
- * projections and never becomes plan or Value identity authority.
- */
-DataType output_plan_data_type(const DenseImageOutputPlan& plan) {
-  const DenseTensorDescriptor& descriptor = plan.descriptor();
-  const std::uint32_t bits = descriptor.storage_encoding.bit_width;
-  switch (descriptor.element_semantics) {
-    case ElementSemantics::UnsignedInteger:
-      if (bits == 8U)
-        return DataType::UINT8;
-      if (bits == 16U)
-        return DataType::UINT16;
-      break;
-    case ElementSemantics::SignedInteger:
-      if (bits == 8U)
-        return DataType::INT8;
-      if (bits == 16U)
-        return DataType::INT16;
-      break;
-    case ElementSemantics::FloatingPoint:
-      if (bits == 32U)
-        return DataType::FLOAT32;
-      if (bits == 64U)
-        return DataType::FLOAT64;
-      break;
-  }
-  throw std::invalid_argument(
-      "Dirty output plan element type has no ImageBuffer projection.");
-}
-
-/**
- * @brief Copies one compatibility scratch ROI into a checked Host tile grant.
- * @param source Read-only callback-local CPU image with full planned extent.
+ * @brief Copies one immutable Value ROI into a checked Host tile grant.
+ * @param source Ready host-readable image with full planned extent.
  * @param roi Nonempty zero-origin PixelRect selected for publication.
  * @param binding Open Host output binding.
  * @return Nothing after exact row spans retire successfully.
- * @throws std::invalid_argument when source facts or ROI disagree with plan.
+ * @throws std::invalid_argument when Value facts or ROI disagree with plan.
+ * @throws ReadyFenceAccessError or BufferAccessError for inaccessible bytes.
  * @throws std::overflow_error when row arithmetic is unrepresentable.
  * @throws std::logic_error or std::system_error from grant lifecycle failure.
- * @note The source is algorithm scratch only. The binding remains the sole
- * mutable output allocation and any exception fails it closed.
+ * @note The binding remains the sole mutable output allocation. Source strides
+ * may be arbitrary validated Strided layout; active scalars are copied through
+ * ImageView and any exception fails the binding closed.
  */
-void copy_scratch_roi_to_binding(const ImageBuffer& source,
-                                 const PixelRect& roi,
-                                 HostOutputBinding& binding) {
+void copy_value_roi_to_binding(const Value& source, const PixelRect& roi,
+                               HostOutputBinding& binding) {
+  const ImageView view(source);
   const DenseImageOutputPlan& plan = binding.plan();
   const PixelSize planned_size{static_cast<int>(plan.width()),
                                static_cast<int>(plan.height())};
   if (roi.width <= 0 || roi.height <= 0 ||
-      !(clip_rect(roi, planned_size) == roi) ||
-      source.width != planned_size.width ||
-      source.height != planned_size.height ||
-      source.channels != static_cast<int>(plan.channels()) ||
-      source.type != output_plan_data_type(plan) ||
-      source.device != Device::CPU || !source.data) {
+      !(clip_rect(roi, planned_size) == roi) || view.width() != plan.width() ||
+      view.height() != plan.height() || view.channels() != plan.channels() ||
+      !(view.descriptor() == plan.descriptor()) ||
+      !(view.image_facet() == plan.image_facet())) {
     throw std::invalid_argument(
-        "Dirty RT scratch image disagrees with the Host output plan.");
+        "Dirty RT Value disagrees with the Host output plan.");
   }
   const ImageBounds& bounds = plan.image_facet().data_window;
   const std::int64_t x_begin =
@@ -201,8 +165,6 @@ void copy_scratch_roi_to_binding(const ImageBuffer& source,
   try {
     const std::size_t row_bytes =
         static_cast<std::size_t>(roi.width) * plan.pixel_bytes();
-    const std::size_t x_offset =
-        static_cast<std::size_t>(roi.x) * plan.pixel_bytes();
     for (int row = 0; row < roi.height; ++row) {
       const HostOutputWriteSpan& span =
           grant.span(static_cast<std::size_t>(row));
@@ -210,9 +172,19 @@ void copy_scratch_roi_to_binding(const ImageBuffer& source,
         throw std::logic_error(
             "Dirty RT grant span disagrees with planned row width.");
       }
-      std::memcpy(grant.data(static_cast<std::size_t>(row)),
-                  image_buffer_row_data(source, roi.y + row) + x_offset,
-                  row_bytes);
+      std::byte* destination = grant.data(static_cast<std::size_t>(row));
+      for (int column = 0; column < roi.width; ++column) {
+        for (std::size_t channel = 0U; channel < plan.channels(); ++channel) {
+          const std::size_t offset =
+              static_cast<std::size_t>(column) * plan.pixel_bytes() +
+              channel * plan.element_bytes();
+          std::memcpy(
+              destination + offset,
+              view.channel_data(static_cast<std::size_t>(roi.x + column),
+                                static_cast<std::size_t>(roi.y + row), channel),
+              plan.element_bytes());
+        }
+      }
     }
     grant.retire_success();
   } catch (...) {
@@ -630,24 +602,24 @@ void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
     throw GraphError(GraphErrc::ComputeError,
                      "RT image copy requires a canonical image Value.");
   }
-  const ImageBuffer source =
-      value_image_adapter::snapshot_cpu_image_buffer(result.image_value());
-  std::optional<ImageBuffer> normalized_result;
-  const ImageBuffer* selected = &source;
+  const Value& source = result.image_value();
+  std::optional<Value> normalized_result;
+  const Value* selected = &source;
   if (exact_factor_four_source) {
-    normalized_result =
-        make_aligned_cpu_image_buffer(entry.rt_size.width, entry.rt_size.height,
-                                      source.channels, source.type);
-    image_processing::exact_box_average_factor_four_region(
-        source, *normalized_result, entry.roi_rt);
+    normalized_result = dense_image_processing::exact_box_average_factor_four(
+        source, entry.roi_rt);
     selected = &*normalized_result;
-  } else if (source.width != entry.rt_size.width ||
-             source.height != entry.rt_size.height) {
-    normalized_result =
-        image_processing::resize_cpu_image_buffer(source, entry.rt_size);
-    selected = &*normalized_result;
+  } else {
+    const ImageBounds& source_bounds = source.image_bounds();
+    const std::size_t source_width = image_bounds_width(source_bounds);
+    const std::size_t source_height = image_bounds_height(source_bounds);
+    if (source_width != static_cast<std::size_t>(entry.rt_size.width) ||
+        source_height != static_cast<std::size_t>(entry.rt_size.height)) {
+      normalized_result = dense_image_processing::resize(source, entry.rt_size);
+      selected = &*normalized_result;
+    }
   }
-  copy_scratch_roi_to_binding(*selected, entry.roi_rt, output_binding);
+  copy_value_roi_to_binding(*selected, entry.roi_rt, output_binding);
 }
 
 /** @copydoc RealTimeDirtyNodeExecutor::execute_tiled */

@@ -19,7 +19,7 @@ namespace ps::server {
 
 /**
  * @brief Maximum metadata payload accepted in one private worker control frame.
- * @note Protocol v2 carries no artifact, image, blob, or Value bytes. The
+ * @note Protocol v3 carries no artifact, blob, or Value bytes. The
  * 128-KiB limit covers the complete worst-case bounded Assignment metadata.
  */
 inline constexpr std::size_t kMaximumWorkerControlPayloadBytes = 128U << 10U;
@@ -29,7 +29,7 @@ inline constexpr std::size_t kMaximumWorkerControlPayloadBytes = 128U << 10U;
  * configuration text, and diagnostics. The exact boundary is accepted.
  */
 inline constexpr std::size_t kMaximumWorkerTextFieldBytes = 16U << 10U;
-/** @brief Fixed v2 private worker control-frame header width. */
+/** @brief Fixed v3 private worker control-frame header width. */
 inline constexpr std::size_t kWorkerFrameHeaderBytes = 12U;
 
 /**
@@ -270,7 +270,7 @@ struct PreparedWorkerAssignment final {
 /**
  * @brief One metadata-first worker report plus optional output reference.
  * @throws Nothing for default construction; retained values may allocate.
- * @note `report.image` MUST be empty. A successful worker sends this metadata
+ * @note `report.values` MUST be empty. A successful worker sends this metadata
  * before streaming bytes through its separate output descriptor. WorkerManager
  * creates one exact lazy final owner only for the live identity-current worker,
  * then directly receives and incrementally hashes one fixed slice per deadline
@@ -497,16 +497,16 @@ AttemptIdentity decode_worker_identity(const WorkerProtocolFrame& frame,
 
 /**
  * @brief Encodes one bounded metadata-only worker attempt report.
- * @param report Complete image-free attempt facts and optional output-stage
+ * @param report Complete Values-free attempt facts and optional output-stage
  * descriptor/digest/reference metadata.
  * @param spec Immutable JobSpec used for exact digest/output joins.
  * @param output_stage Exact Assignment output reference and byte maximum.
  * @return Complete private Report control frame ready for bounded transport.
  * @throws Contract, metadata, allocation, or control-bound failures.
- * @note Image bytes must not be serialized here. The worker sends this frame
- * before its separately retained source bytes, and the encoder rejects an
- * `ImageBuffer` or mismatched output reference. `send_worker_report()` is the
- * sole wrapper.
+ * @note Value bytes are not serialized here. The worker sends this frame
+ * before its separately retained archive bytes, and the encoder rejects an
+ * absent/mismatched output reference. `send_worker_report()` is the sole
+ * wrapper.
  */
 WorkerProtocolFrame encode_worker_report(
     const PreparedWorkerReport& report, const JobSpec& spec,
@@ -515,7 +515,7 @@ WorkerProtocolFrame encode_worker_report(
 /**
  * @brief Sends one bounded worker attempt report.
  * @param fd Connected worker socket.
- * @param report Complete image-free attempt facts and optional output metadata.
+ * @param report Complete Values-free facts and optional output metadata.
  * @param spec Immutable JobSpec used for exact joins.
  * @param output_stage Exact assigned output reference and maximum.
  * @param deadline Absolute monotonic I/O deadline.
@@ -532,9 +532,9 @@ void send_worker_report(int fd, const PreparedWorkerReport& report,
  * @param frame Valid bounded frame expected to contain Report.
  * @param spec Immutable JobSpec used for digest and output-slot joins.
  * @param output_stage Exact Assignment output reference and maximum.
- * @return Image-free attempt facts plus optional exact output metadata.
+ * @return Values-free attempt facts plus optional exact output metadata.
  * @throws WorkerProtocolError for malformed, inconsistent, oversized, or
- * trailing metadata, or for any encoded image-bearing report shape.
+ * trailing metadata, or for any encoded Value-bearing report shape.
  * @throws std::bad_alloc when bounded metadata reconstruction exhausts memory.
  * @note WorkerManager validates this metadata while the exact PID remains
  * owned, creates the exact final owner, and separately drains one nonblocking

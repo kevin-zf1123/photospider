@@ -1539,7 +1539,7 @@ bool ComputeRun::is_terminal() const {
  */
 TaskSubmissionPlan& ComputeRun::emplace_submission_plan(
     GraphModel& graph, GraphTraversalService& traversal, int node_id,
-    std::vector<Device> available_devices, bool publish_plan_inspection,
+    std::vector<DeviceBackend> available_devices, bool publish_plan_inspection,
     bool allow_reusable_cache) {
   std::lock_guard<std::mutex> lock(control_->mutex);
   if (control_->arbiter_state != ComputeRunArbiterState::Open) {

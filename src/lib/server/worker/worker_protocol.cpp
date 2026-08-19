@@ -82,7 +82,7 @@ void require_worker_protocol_before(
 /** @brief Fixed big-endian frame magic spelling ASCII `PSW1`. */
 constexpr std::uint32_t kWorkerProtocolMagic = 0x50535731U;
 /** @brief Sole supported metadata-only private worker protocol version. */
-constexpr std::uint16_t kWorkerProtocolVersion = 2U;
+constexpr std::uint16_t kWorkerProtocolVersion = 3U;
 /** @brief Encoded width of one closed boolean, enum, or scalar byte. */
 constexpr std::size_t kWorkerU8Bytes = sizeof(std::uint8_t);
 /** @brief Encoded width of one length prefix or 32-bit scalar. */
@@ -121,8 +121,8 @@ constexpr std::size_t kMaximumEncodedJobSpecBytes =
 /** @brief Maximum encoded width of one complete artifact receipt. */
 constexpr std::size_t kMaximumEncodedArtifactReceiptBytes =
     kMaximumEncodedAttemptIdentityBytes +
-    3U * kMaximumEncodedOpaqueIdentityBytes + 3U * kWorkerU32Bytes +
-    kWorkerU8Bytes + 2U * kWorkerU64Bytes + kWorkerDigestBytes + kWorkerU8Bytes;
+    3U * kMaximumEncodedOpaqueIdentityBytes + 2U * kWorkerU32Bytes +
+    kWorkerU64Bytes + kWorkerDigestBytes + kWorkerU8Bytes;
 /** @brief Maximum encoded checkpoint/output data-plane metadata. */
 constexpr std::size_t kMaximumEncodedDataPlaneAssignmentBytes =
     kWorkerU8Bytes +
@@ -146,8 +146,8 @@ constexpr std::size_t kMaximumEncodedReportEnvelopeBytes =
     kMaximumEncodedAttemptIdentityBytes + 4U * kWorkerU8Bytes +
     maximum_prefixed_field_bytes(kMaximumWorkerTextFieldBytes) +
     maximum_prefixed_field_bytes(kMaximumWorkerDataPlaneReferenceBytes) +
-    kMaximumEncodedOpaqueIdentityBytes + 3U * kWorkerU32Bytes + kWorkerU8Bytes +
-    2U * kWorkerU64Bytes + kWorkerDigestBytes;
+    kMaximumEncodedOpaqueIdentityBytes + 2U * kWorkerU32Bytes +
+    kWorkerU64Bytes + kWorkerDigestBytes;
 
 static_assert(kWorkerDigestBytes == sizeof(ArtifactContentDigest{}.bytes));
 static_assert(kMaximumEncodedAssignmentEnvelopeBytes <
@@ -746,130 +746,46 @@ std::shared_ptr<const JobSpec> read_job_spec(ByteReader* reader) {
 }
 
 /**
- * @brief Validates one closed DataType transport value.
- * @param value Numeric representation.
- * @return Typed DataType.
- * @throws WorkerProtocolError for an unknown value.
- */
-DataType parse_data_type(std::uint8_t value) {
-  const auto type = static_cast<DataType>(value);
-  switch (type) {
-    case DataType::UINT8:
-    case DataType::INT8:
-    case DataType::UINT16:
-    case DataType::INT16:
-    case DataType::FLOAT32:
-    case DataType::FLOAT64:
-      return type;
-  }
-  throw WorkerProtocolError("worker image data type is invalid");
-}
-
-/**
- * @brief Computes one tight worker image size before any allocation.
- * @param width Positive transport width.
- * @param height Positive transport height.
- * @param channels Positive transport channel count.
- * @param type Valid closed scalar type.
- * @param row_bytes Non-null output receiving the exact tight row size.
- * @return Exact tight payload size.
- * @throws std::invalid_argument when `row_bytes` is null.
- * @throws WorkerProtocolError when shape arithmetic exceeds `std::size_t`.
- * @note This check runs before trusting worker-controlled dimensions for a
- * control-plane allocation.
- */
-std::size_t checked_tight_image_payload(std::uint32_t width,
-                                        std::uint32_t height,
-                                        std::uint32_t channels, DataType type,
-                                        std::size_t* row_bytes) {
-  if (row_bytes == nullptr) {
-    throw std::invalid_argument("worker image row-size output is null");
-  }
-  const std::size_t width_size = width;
-  const std::size_t height_size = height;
-  const std::size_t channel_count = channels;
-  const std::size_t channel_bytes = image_buffer_bytes_per_channel(type);
-  if (width_size > std::numeric_limits<std::size_t>::max() / channel_count ||
-      width_size * channel_count >
-          std::numeric_limits<std::size_t>::max() / channel_bytes) {
-    throw WorkerProtocolError("worker report image row size overflowed");
-  }
-  const std::size_t checked_row = width_size * channel_count * channel_bytes;
-  if (checked_row > std::numeric_limits<std::size_t>::max() / height_size) {
-    throw WorkerProtocolError("worker report image size overflowed");
-  }
-  *row_bytes = checked_row;
-  return checked_row * height_size;
-}
-
-/**
- * @brief Encodes one tight image descriptor without any image bytes.
- * @param descriptor Valid positive tight image descriptor.
+ * @brief Encodes one named-Value archive descriptor without payload bytes.
+ * @param descriptor Valid positive canonical archive descriptor.
  * @param writer Non-null metadata payload owner.
  * @return Nothing after all scalar fields are appended.
  * @throws std::invalid_argument for null writer or inconsistent descriptor.
  * @throws Length, type, or allocation failures unchanged.
  */
-void encode_artifact_descriptor(const ArtifactImageDescriptor& descriptor,
+void encode_artifact_descriptor(const ValueArtifactSetDescriptor& descriptor,
                                 ByteWriter* writer) {
   if (writer == nullptr) {
     throw std::invalid_argument("worker artifact descriptor writer is null");
   }
-  if (descriptor.width <= 0 || descriptor.height <= 0 ||
-      descriptor.channels <= 0) {
-    throw std::invalid_argument("worker artifact descriptor is empty");
-  }
-  std::size_t expected_row_bytes = 0U;
-  const std::size_t expected_payload = checked_tight_image_payload(
-      static_cast<std::uint32_t>(descriptor.width),
-      static_cast<std::uint32_t>(descriptor.height),
-      static_cast<std::uint32_t>(descriptor.channels), descriptor.type,
-      &expected_row_bytes);
-  if (descriptor.row_bytes != expected_row_bytes ||
-      descriptor.payload_bytes != expected_payload) {
+  if (descriptor.archive_version != 1U || descriptor.value_count == 0U ||
+      descriptor.value_count > kMaximumNamedValueArtifacts ||
+      descriptor.archive_bytes == 0U) {
     throw std::invalid_argument("worker artifact descriptor is inconsistent");
   }
-  writer->put_u32(static_cast<std::uint32_t>(descriptor.width));
-  writer->put_u32(static_cast<std::uint32_t>(descriptor.height));
-  writer->put_u32(static_cast<std::uint32_t>(descriptor.channels));
-  static_cast<void>(image_buffer_bytes_per_channel(descriptor.type));
-  writer->put_u8(static_cast<std::uint8_t>(descriptor.type));
-  writer->put_u64(size_to_u64(descriptor.row_bytes));
-  writer->put_u64(size_to_u64(descriptor.payload_bytes));
+  writer->put_u32(descriptor.archive_version);
+  writer->put_u32(descriptor.value_count);
+  writer->put_u64(size_to_u64(descriptor.archive_bytes));
 }
 
 /**
- * @brief Decodes one tight image descriptor before any data-plane allocation.
+ * @brief Decodes one archive descriptor before any data-plane allocation.
  * @param reader Non-null current metadata reader.
  * @return Exact validated positive tight descriptor.
- * @throws WorkerProtocolError for invalid dimensions, type, or arithmetic.
+ * @throws WorkerProtocolError for invalid version, count, or size.
  */
-ArtifactImageDescriptor read_artifact_descriptor(ByteReader* reader) {
+ValueArtifactSetDescriptor read_artifact_descriptor(ByteReader* reader) {
   if (reader == nullptr) {
     throw std::invalid_argument("worker artifact descriptor reader is null");
   }
-  const std::uint32_t width = reader->get_u32();
-  const std::uint32_t height = reader->get_u32();
-  const std::uint32_t channels = reader->get_u32();
-  if (width == 0U || height == 0U || channels == 0U ||
-      width > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
-      height > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
-      channels > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+  ValueArtifactSetDescriptor descriptor;
+  descriptor.archive_version = reader->get_u32();
+  descriptor.value_count = reader->get_u32();
+  descriptor.archive_bytes = u64_to_size(reader->get_u64());
+  if (descriptor.archive_version != 1U || descriptor.value_count == 0U ||
+      descriptor.value_count > kMaximumNamedValueArtifacts ||
+      descriptor.archive_bytes == 0U) {
     throw WorkerProtocolError("worker artifact descriptor is invalid");
-  }
-  ArtifactImageDescriptor descriptor;
-  descriptor.width = static_cast<int>(width);
-  descriptor.height = static_cast<int>(height);
-  descriptor.channels = static_cast<int>(channels);
-  descriptor.type = parse_data_type(reader->get_u8());
-  descriptor.row_bytes = u64_to_size(reader->get_u64());
-  descriptor.payload_bytes = u64_to_size(reader->get_u64());
-  std::size_t expected_row_bytes = 0U;
-  const std::size_t expected_payload = checked_tight_image_payload(
-      width, height, channels, descriptor.type, &expected_row_bytes);
-  if (descriptor.row_bytes != expected_row_bytes ||
-      descriptor.payload_bytes != expected_payload) {
-    throw WorkerProtocolError("worker artifact descriptor is inconsistent");
   }
   return descriptor;
 }
@@ -1005,7 +921,7 @@ WorkerDataPlaneAssignment read_data_plane_assignment(ByteReader* reader) {
 }
 
 /**
- * @brief Encodes one candidate output-stage reference without image bytes.
+ * @brief Encodes one candidate output-stage reference without Value bytes.
  * @param output Exact worker-produced staged-output metadata.
  * @param writer Non-null control payload owner.
  * @return Nothing after bounded metadata is appended.
@@ -1026,7 +942,7 @@ void encode_output_reference(const WorkerOutputDataReference& output,
 }
 
 /**
- * @brief Decodes one candidate output-stage reference without image bytes.
+ * @brief Decodes one candidate output-stage reference without Value bytes.
  * @param reader Non-null current control payload reader.
  * @return Independently owned bounded staged-output metadata.
  * @throws WorkerProtocolError for malformed/truncated fields.
@@ -1323,9 +1239,12 @@ WorkerProtocolFrame encode_worker_assignment(
     }
     const OutputCommitReceipt& metadata =
         assignment.data_plane.checkpoint->receipt;
+    const std::vector<std::byte> archive =
+        encode_named_value_artifact_set(checkpoint.values);
     if (!artifact_receipts_equal(checkpoint.receipt, metadata) ||
-        checkpoint.receipt.descriptor.payload_bytes !=
-            checkpoint.payload.size()) {
+        checkpoint.receipt.descriptor.archive_bytes != archive.size() ||
+        checkpoint.receipt.content_digest !=
+            hash_artifact_content(archive.data(), archive.size())) {
       throw std::invalid_argument(
           "prepared worker checkpoint metadata or size is inconsistent");
     }
@@ -1465,7 +1384,7 @@ WorkerProtocolFrame encode_worker_report(
   validate_attempt_identity(report.identity);
   validate_job_spec(spec);
   if (report.identity.job_spec_digest != spec.digest() ||
-      report.image.has_value() ||
+      report.values.has_value() ||
       output_stage.output_slot_id != spec.output_slot_id() ||
       output_stage.maximum_payload_bytes !=
           std::min({u64_to_size(spec.resource_request().output_bytes),
@@ -1483,7 +1402,7 @@ WorkerProtocolFrame encode_worker_report(
   if (prepared.output.has_value() &&
       (prepared.output->reference_id != output_stage.reference_id ||
        prepared.output->output_slot_id != output_stage.output_slot_id ||
-       prepared.output->descriptor.payload_bytes >
+       prepared.output->descriptor.archive_bytes >
            output_stage.maximum_payload_bytes)) {
     throw std::invalid_argument(
         "worker metadata report output reference is invalid");
@@ -1545,7 +1464,7 @@ PreparedWorkerReport decode_worker_report(
     if (prepared.output.has_value() &&
         (prepared.output->reference_id != output_stage.reference_id ||
          prepared.output->output_slot_id != output_stage.output_slot_id ||
-         prepared.output->descriptor.payload_bytes >
+         prepared.output->descriptor.archive_bytes >
              output_stage.maximum_payload_bytes)) {
       throw WorkerProtocolError(
           "worker report output metadata exceeds its assigned stage");

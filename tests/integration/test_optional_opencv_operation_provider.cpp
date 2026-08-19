@@ -12,10 +12,9 @@
 #include <vector>
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "core/value_image_adapter.hpp"
-#include "graph/node.hpp"  // NOLINT(build/include_subdir)
+#include "graph/node.hpp"     // NOLINT(build/include_subdir)
 #include "photospider/core/graph_error.hpp"
-#include "photospider/core/image_buffer.hpp"
+#include "photospider/data/image_view.hpp"
 #include "plugin/plugin_manager.hpp"
 
 #ifndef PS_RESIZE_REPLACEMENT_PLUGIN_PATH
@@ -40,6 +39,36 @@ namespace {
 bool registry_contains(const std::string& key) {
   const std::vector<std::string> keys = OpRegistry::instance().get_keys();
   return std::binary_search(keys.begin(), keys.end(), key);
+}
+
+/**
+ * @brief Publishes one tightly packed constant FP32 ordinary image Value.
+ * @param width Positive image width.
+ * @param height Positive image height.
+ * @param channels Positive channel count.
+ * @param sample Scalar copied to every channel element.
+ * @return Fresh immutable CPU DenseTensor image Value.
+ * @throws std::invalid_argument or std::overflow_error when the image envelope
+ * is invalid.
+ * @throws std::bad_alloc when metadata or payload allocation fails.
+ * @note No numeric conversion is performed; the stored domain is native FP32.
+ */
+Value make_constant_float_image(std::size_t width, std::size_t height,
+                                std::size_t channels, float sample) {
+  std::vector<float> samples(width * height * channels, sample);
+  std::vector<std::byte> storage(samples.size() * sizeof(float));
+  std::memcpy(storage.data(), samples.data(), storage.size());
+  DenseTensorDescriptor descriptor{{height, width, channels},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{
+          {static_cast<std::ptrdiff_t>(width * channels * sizeof(float)),
+           static_cast<std::ptrdiff_t>(channels * sizeof(float)),
+           static_cast<std::ptrdiff_t>(sizeof(float))}},
+      std::move(storage));
 }
 
 /**
@@ -69,35 +98,26 @@ NodeOutput execute_active_resize() {
   node.runtime_parameters["height"] = 3;
   node.runtime_parameters["interpolation"] = "nearest";
 
-  ImageBuffer input_image =
-      make_aligned_cpu_image_buffer(2, 2, 1, DataType::FLOAT32);
-  auto* base = static_cast<std::byte*>(input_image.data.get());
-  for (int row_index = 0; row_index < input_image.height; ++row_index) {
-    auto* row = reinterpret_cast<float*>(
-        base + static_cast<std::size_t>(row_index) * input_image.step);
-    std::fill(row, row + input_image.width, 0.25F);
-  }
   NodeOutput input;
-  input.publish_image_value(
-      value_image_adapter::snapshot_cpu_image_value(input_image));
+  input.publish_image_value(make_constant_float_image(2U, 2U, 1U, 0.25F));
   const std::vector<const NodeOutput*> inputs{&input};
   return std::get<MonolithicOpFunc>(resolved.value())(node, inputs);
 }
 
 /**
- * @brief Projects one canonical provider output to a callback-compatible CPU
- * snapshot for exact test inspection.
+ * @brief Opens one canonical provider output for exact immutable inspection.
  *
  * @param output Provider result carrying the required image Value.
- * @return Independent CPU ImageBuffer snapshot.
+ * @return Retaining checked CPU image view.
  * @throws std::logic_error when the canonical image output is absent.
- * @throws Adapter validation, overflow, access, and allocation exceptions
- * unchanged.
- * @note The snapshot is read-only test observation and never becomes runtime,
- * revision, allocation, or cache authority.
+ * @throws ImageView validation, access, and allocation exceptions unchanged.
+ * @note The view retains the canonical Value without copying its payload.
  */
-ImageBuffer snapshot_output_image(const NodeOutput& output) {
-  return value_image_adapter::snapshot_cpu_image_buffer(output.image_value());
+ImageView inspect_output_image(const NodeOutput& output) {
+  if (!output.has_image_value()) {
+    throw std::logic_error("provider output has no canonical image Value");
+  }
+  return ImageView(output.image_value());
 }
 
 /**
@@ -134,23 +154,19 @@ NodeOutput execute_coordinate_pattern() {
 /**
  * @brief Reads one FP32 image sample as its exact IEEE 754 bit pattern.
  *
- * @param image Provider output with CPU-backed FLOAT32 storage.
+ * @param image Provider output with CPU-backed FP32 storage.
  * @param x Zero-based horizontal coordinate.
  * @param y Zero-based vertical coordinate.
  * @param channel Zero-based interleaved channel coordinate.
  * @return Raw 32-bit encoding of the selected sample.
- * @throws Nothing.
- * @note The caller owns bounds and image-format validation. `memcpy` avoids
+ * @throws std::out_of_range when a coordinate is invalid.
+ * @throws std::bad_alloc when checked address calculation allocates.
+ * @note The caller owns image-format validation. `memcpy` avoids
  *       aliasing undefined behavior and preserves signed-zero distinctions.
  */
-std::uint32_t sample_bits(const ImageBuffer& image, int x, int y,
-                          int channel) noexcept {
-  const auto* base = static_cast<const std::byte*>(image.data.get());
-  const auto* sample =
-      base + static_cast<std::size_t>(y) * image.step +
-      (static_cast<std::size_t>(x) * static_cast<std::size_t>(image.channels) +
-       static_cast<std::size_t>(channel)) *
-          sizeof(float);
+std::uint32_t sample_bits(const ImageView& image, std::size_t x, std::size_t y,
+                          std::size_t channel) {
+  const std::byte* sample = image.channel_data(x, y, channel);
   std::uint32_t bits = 0U;
   std::memcpy(&bits, sample, sizeof(bits));
   return bits;
@@ -272,18 +288,19 @@ TEST(OptionalOpenCvOperationProvider, ReplacementExecutesAndRestores) {
     }
 
     const NodeOutput original = execute_active_resize();
-    const ImageBuffer original_image = snapshot_output_image(original);
-    EXPECT_EQ(original_image.width, 4);
-    EXPECT_EQ(original_image.height, 3);
-    EXPECT_EQ(original_image.channels, 1);
+    const ImageView original_image = inspect_output_image(original);
+    EXPECT_EQ(original_image.width(), 4U);
+    EXPECT_EQ(original_image.height(), 3U);
+    EXPECT_EQ(original_image.channels(), 1U);
 
     const NodeOutput pattern = execute_coordinate_pattern();
-    const ImageBuffer pattern_image = snapshot_output_image(pattern);
-    ASSERT_EQ(pattern_image.width, 2);
-    ASSERT_EQ(pattern_image.height, 2);
-    ASSERT_EQ(pattern_image.channels, 4);
-    ASSERT_EQ(pattern_image.type, DataType::FLOAT32);
-    ASSERT_NE(pattern_image.data, nullptr);
+    const ImageView pattern_image = inspect_output_image(pattern);
+    ASSERT_EQ(pattern_image.width(), 2U);
+    ASSERT_EQ(pattern_image.height(), 2U);
+    ASSERT_EQ(pattern_image.channels(), 4U);
+    ASSERT_EQ(pattern_image.descriptor().element_semantics,
+              ElementSemantics::FloatingPoint);
+    ASSERT_EQ(pattern_image.descriptor().storage_encoding.bit_width, 32U);
     EXPECT_EQ(sample_bits(pattern_image, 0, 0, 0), 0x00000000U);
     EXPECT_EQ(sample_bits(pattern_image, 0, 0, 1), 0x3e3cbcbdU);
     EXPECT_EQ(sample_bits(pattern_image, 1, 0, 0), 0x3d888889U);
@@ -317,23 +334,23 @@ TEST(OptionalOpenCvOperationProvider, ReplacementExecutesAndRestores) {
 
   const NodeOutput replacement = execute_active_resize();
   EXPECT_EQ(replacement.debug.compute_device, "STDLIB_RESIZE_REPLACEMENT");
-  const ImageBuffer replacement_image = snapshot_output_image(replacement);
-  ASSERT_EQ(replacement_image.width, 3);
-  ASSERT_EQ(replacement_image.height, 2);
-  ASSERT_EQ(replacement_image.channels, 1);
-  const auto* replacement_pixel =
-      static_cast<const float*>(replacement_image.data.get());
-  ASSERT_NE(replacement_pixel, nullptr);
-  EXPECT_FLOAT_EQ(*replacement_pixel, 0.625F);
+  const ImageView replacement_image = inspect_output_image(replacement);
+  ASSERT_EQ(replacement_image.width(), 3U);
+  ASSERT_EQ(replacement_image.height(), 2U);
+  ASSERT_EQ(replacement_image.channels(), 1U);
+  float replacement_pixel = 0.0F;
+  std::memcpy(&replacement_pixel, replacement_image.channel_data(0U, 0U, 0U),
+              sizeof(replacement_pixel));
+  EXPECT_FLOAT_EQ(replacement_pixel, 0.625F);
 
   EXPECT_GT(manager.unload_by_plugin_path(plugin_path.string()), 0);
   if (kExpectOpenCvProvider) {
     ASSERT_EQ(manager.op_sources().at(kResizeKey), "built-in");
     ASSERT_EQ(manager.combined_sources().at(kResizeKey), "built-in");
     const NodeOutput restored = execute_active_resize();
-    const ImageBuffer restored_image = snapshot_output_image(restored);
-    EXPECT_EQ(restored_image.width, 4);
-    EXPECT_EQ(restored_image.height, 3);
+    const ImageView restored_image = inspect_output_image(restored);
+    EXPECT_EQ(restored_image.width(), 4U);
+    EXPECT_EQ(restored_image.height(), 3U);
   } else {
     EXPECT_FALSE(registry_contains(kResizeKey));
     EXPECT_EQ(manager.op_sources().count(kResizeKey), 0U);

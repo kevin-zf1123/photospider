@@ -15,21 +15,21 @@
 #include <utility>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "adapters/yaml/parameter_value_yaml.hpp"
 #include "compute/compute_geometry.hpp"
 #include "compute/dirty/dirty_region_planner.hpp"
 #include "compute/dirty/dirty_region_snapshot_builder.hpp"
 #include "compute/dirty/tiled_input_normalizer.hpp"
 #include "compute/dispatch/task_graph_planning.hpp"
-#include "compute/image_buffer.hpp"
+#include "compute/tile_task.hpp"
 #include "core/parameter_value_text.hpp"
 #include "core/pending_value.hpp"
-#include "core/value_image_adapter.hpp"
+#include "core/value_region.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
 #include "photospider/core/inspection_types.hpp"
+#include "photospider/data/image_view.hpp"
 #include "photospider/host/compute_request.hpp"
 #include "photospider/plugin/opencv_adapter.hpp"
 #include "providers/configured_operation_providers.hpp"
@@ -38,14 +38,14 @@ namespace ps {
 namespace {
 
 static_assert(sizeof(plugin::ParameterKind) == sizeof(std::uint32_t));
-static_assert(sizeof(DataType) == sizeof(std::uint32_t));
-static_assert(static_cast<std::uint32_t>(DataType::UINT8) == 0U);
-static_assert(static_cast<std::uint32_t>(DataType::FLOAT64) == 5U);
+static_assert(sizeof(ElementSemantics) == sizeof(std::uint32_t));
+static_assert(static_cast<std::uint32_t>(ElementSemantics::UnsignedInteger) ==
+              0U);
+static_assert(static_cast<std::uint32_t>(ElementSemantics::FloatingPoint) ==
+              2U);
 static_assert(static_cast<std::uint32_t>(plugin::ParameterKind::Null) == 0U);
 static_assert(static_cast<std::uint32_t>(plugin::ParameterKind::Object) == 6U);
 
-static_assert(std::is_same_v<decltype(InputTileView::roi), PixelRect>);
-static_assert(std::is_same_v<decltype(OutputTileView::roi), PixelRect>);
 static_assert(std::is_same_v<decltype(InputTile::roi), PixelRect>);
 static_assert(std::is_same_v<decltype(OutputTile::roi), PixelRect>);
 static_assert(
@@ -197,11 +197,22 @@ GraphModel make_graph() {
 void seed_hp_extent(GraphModel& graph, int node_id, int width, int height) {
   graph.mutate_node_runtime_state(node_id, [&](auto& state) {
     state.cached_output_high_precision = NodeOutput{};
-    const ImageBuffer buffer =
-        make_aligned_cpu_image_buffer(width, height, 1, DataType::FLOAT32);
+    DenseTensorDescriptor descriptor{
+        {static_cast<std::size_t>(height), static_cast<std::size_t>(width), 1U},
+        ElementSemantics::FloatingPoint,
+        StorageEncoding{32U}};
+    ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+    const std::size_t row_bytes =
+        static_cast<std::size_t>(width) * sizeof(float);
     state.cached_output_high_precision->publish_image_value(
-        value_image_adapter::snapshot_cpu_image_value(buffer));
-    state.hp_region = value_image_adapter::full_node_output_region(
+        Value::from_cpu_dense_tensor(
+            std::move(descriptor), std::move(facet),
+            StridedLayout{{static_cast<std::ptrdiff_t>(row_bytes),
+                           static_cast<std::ptrdiff_t>(sizeof(float)),
+                           static_cast<std::ptrdiff_t>(sizeof(float))}},
+            std::vector<std::byte>(row_bytes *
+                                   static_cast<std::size_t>(height))));
+    state.hp_region = value_region::full_node_output_region(
         *state.cached_output_high_precision);
   });
 }
@@ -1070,7 +1081,7 @@ TEST(OperationRegistryContract,
   registry.register_dependency_builder(type, subtype, builder, false);
   OpMetadata device_metadata;
   device_metadata.data_dependent = true;
-  registry.register_impl(type, subtype, Device::GPU_METAL, operation,
+  registry.register_impl(type, subtype, DeviceBackend::Metal, operation,
                          device_metadata);
   snapshot = registry.get_dependency_builder_snapshot(type, subtype);
   ASSERT_TRUE(snapshot.has_value());

@@ -29,6 +29,8 @@ namespace ps::ipc {
  * typed Client call; the wire contract remains absolute-path-only.
  *
  * @param socket_path Absolute Unix-domain socket path of `photospiderd`.
+ * @param data_definitions Optional local provider registry used only to
+ *        reconstruct provider-defined Values. Built-in Values require none.
  * @return Unique complete IPC Host implementation.
  * @throws std::bad_alloc if adapter state, path, polling policy, or worker
  *         tracking allocation fails.
@@ -40,6 +42,7 @@ namespace ps::ipc {
  *       plugins, or falls back to an embedded Host.
  */
 PHOTOSPIDER_API std::unique_ptr<Host> create_ipc_host(
-    const std::string& socket_path);
+    const std::string& socket_path,
+    DataDefinitionRegistry* data_definitions = nullptr);
 
 }  // namespace ps::ipc

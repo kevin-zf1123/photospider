@@ -21,9 +21,8 @@
 #include <utility>
 #include <vector>
 
-#include "compute/image_buffer.hpp"       // NOLINT(build/include_subdir)
+#include "compute/tile_task.hpp"          // NOLINT(build/include_subdir)
 #include "core/region_image_adapter.hpp"  // NOLINT(build/include_subdir)
-#include "core/value_image_adapter.hpp"   // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"
 #include "graph/node.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/data/value.hpp"
@@ -4468,7 +4467,7 @@ OpMetadata make_private_metadata(const OperationDefinition& operation,
                                  const ImplementationDefinition& implementation,
                                  ps_operation_intent_mask_v1 intent) {
   OpMetadata metadata;
-  metadata.device_preference = Device::CPU;
+  metadata.device_preference = DeviceBackend::CPU;
   const double scaled_cost = implementation.relative_cost * 100.0;
   if (scaled_cost > static_cast<double>(std::numeric_limits<int>::max())) {
     throw std::overflow_error(
@@ -5284,17 +5283,14 @@ class TileProjection final {
 /**
  * @brief Projects current private input tiles through canonical Values.
  * @param operation Exact operation definition controlling destination arity.
- * @param input_tiles Destination-indexed borrowed tile buffers.
+ * @param input_tiles Destination-indexed borrowed Value tiles.
  * @param storage Destination NodeOutput owners.
  * @param views Destination pointer sequence into `storage`.
  * @return Nothing after exact destination-index preservation.
- * @throws Input validation, fallback snapshot, Value publication, or
- * allocation failures.
- * @note Production tiles retain the normalized canonical Value so operation
- * descriptor identities, versions, and digests survive compatibility image
- * staging. Geometry-only focused callers may omit it and receive the legacy
- * callback-local snapshot with unavailable operation metadata. No
- * `ImageBuffer` or private pointer enters the public operation ABI graph.
+ * @throws Input validation, Value publication, or allocation failures.
+ * @note Every connected tile retains its canonical Value so operation
+ * descriptor identities, versions, and digests survive exact projection. No
+ * private pointer enters the public operation ABI graph.
  */
 void snapshot_tiled_inputs(const OperationDefinition& operation,
                            const std::vector<InputTile>& input_tiles,
@@ -5304,19 +5300,12 @@ void snapshot_tiled_inputs(const OperationDefinition& operation,
   views->reserve(operation.inputs.size());
   for (std::size_t index = 0; index < operation.inputs.size(); ++index) {
     storage->emplace_back();
-    if (index >= input_tiles.size() || (input_tiles[index].buffer == nullptr &&
-                                        input_tiles[index].value == nullptr)) {
+    if (index >= input_tiles.size() || input_tiles[index].value == nullptr) {
       views->push_back(nullptr);
       continue;
     }
-    if (input_tiles[index].value != nullptr) {
-      storage->back().publish_named_value(operation.inputs[index].name,
-                                          *input_tiles[index].value);
-    } else {
-      storage->back().publish_image_value(
-          value_image_adapter::snapshot_cpu_image_value(
-              *input_tiles[index].buffer));
-    }
+    storage->back().publish_named_value(operation.inputs[index].name,
+                                        *input_tiles[index].value);
     views->push_back(&storage->back());
   }
 }
@@ -5389,10 +5378,6 @@ void execute_supervised_tiled(
         to_isolated_digest(metadata.content_digest);
     binding.layout_digest = to_isolated_digest(metadata.layout_digest);
     if (value.image_facet()) {
-      if (input_tiles[index].buffer == nullptr) {
-        throw GraphError(GraphErrc::ComputeError,
-                         "supervised tiled image input requires tile geometry");
-      }
       binding.region = region_image_adapter::from_storage_pixel_rect(
           input_tiles[index].roi, value.image_bounds());
     } else {

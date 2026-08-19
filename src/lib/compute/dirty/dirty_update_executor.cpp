@@ -34,7 +34,7 @@
 #if defined(PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING)
 #include "compute/dirty/dirty_update_executor_test_access.hpp"
 #endif
-#include "core/value_image_adapter.hpp"
+#include "core/value_region.hpp"
 #include "graph/graph_extent_resolver.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
@@ -222,7 +222,7 @@ RtPlanEntry entry_for_task(const RtPlanEntry& entry, const PlannedTask& task) {
  * changing it.
  */
 std::optional<DirtyResolvedOperation> select_dirty_operation(
-    const Node& node, const std::vector<Device>& available_devices,
+    const Node& node, const std::vector<DeviceBackend>& available_devices,
     ComputeIntent intent, bool require_tiled,
     const PlannedOperationRoute* planned_route = nullptr,
     const PlannedOutputAuthority* planned_output_authority = nullptr) {
@@ -357,7 +357,7 @@ void freeze_rt_plan_output_extents(
 DirtyResolvedOperationMap resolve_dirty_operations(
     const GraphModel& graph, const ComputePlan& compute_plan,
     const DirtyTaskSelectionOverlay& selection,
-    const std::vector<Device>& available_devices, ComputeIntent intent) {
+    const std::vector<DeviceBackend>& available_devices, ComputeIntent intent) {
   std::vector<int> active_node_ids;
   active_node_ids.reserve(selection.active_task_ids.size());
   std::unordered_set<int> active_nodes;
@@ -419,11 +419,11 @@ DirtyResolvedOperationMap resolve_dirty_operations(
  * @note Inactive tasks retain the CPU default. Every active task has already
  * passed exact operation revalidation before this helper is called.
  */
-std::vector<Device> dirty_task_devices(
+std::vector<DeviceBackend> dirty_task_devices(
     const ComputePlan& compute_plan,
     const DirtyResolvedOperationMap& resolved_operations) {
-  std::vector<Device> devices(compute_plan.task_graph.tasks.size(),
-                              Device::CPU);
+  std::vector<DeviceBackend> devices(compute_plan.task_graph.tasks.size(),
+                                     DeviceBackend::CPU);
   for (const PlannedTask& task : compute_plan.task_graph.tasks) {
     const auto operation_it = resolved_operations.find(task.node_id);
     if (operation_it != resolved_operations.end()) {
@@ -925,11 +925,6 @@ std::unique_ptr<GraphModel> make_stabilized_planning_graph(
                                                 std::to_string(node_id) +
                                                 " is missing.");
     }
-    if (staged.output.has_compatibility_image()) {
-      throw GraphError(
-          GraphErrc::ComputeError,
-          "Stabilized planning rejects compatibility image staging.");
-    }
     for (const auto& [name, value] : staged.output.named_values) {
       if (name.empty() || !value.valid() ||
           !value.ready_fence().poll().ready()) {
@@ -1179,7 +1174,7 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     ExecutionTaskRuntime* task_runtime, ExecutionService* execution_service,
     ExecutionHostContext* host, ComputeRun* run,
     const ComputeRunLease* run_lease, const std::string& execution_type,
-    const std::vector<Device>* available_devices_override,
+    const std::vector<DeviceBackend>* available_devices_override,
     ExecutionService* direct_execution_service) {
   observe_dirty_run_or_throw(run, run_lease);
   if (execution_service != nullptr && direct_execution_service != nullptr) {
@@ -1240,13 +1235,14 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     return PreparedConnectedDirtyParameters(std::move(state));
   }
 
-  const std::vector<Device> available_devices =
+  const std::vector<DeviceBackend> available_devices =
       available_devices_override != nullptr
           ? *available_devices_override
           : (execution_service
                  ? execution_service->available_devices(execution_type)
-                 : (task_runtime ? task_runtime->available_devices()
-                                 : std::vector<Device>{Device::CPU}));
+                 : (task_runtime
+                        ? task_runtime->available_devices()
+                        : std::vector<DeviceBackend>{DeviceBackend::CPU}));
 
   std::vector<int> closure_stack(result->parameter_producer_node_ids_.begin(),
                                  result->parameter_producer_node_ids_.end());
@@ -1323,7 +1319,7 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     freeze_dirty_output_extent(&selected_operation->output_authority,
                                preflight_extent_resolver.resolve_output_extent(
                                    graph, node_id, preflight_extent_cache));
-    const Device selected_device = selected_operation->device;
+    const DeviceBackend selected_device = selected_operation->device;
     OperationExecutionConstraints operation_constraints{
         selected_operation->implementation_identity,
         selected_operation->metadata.reentrant,
@@ -1427,8 +1423,7 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
       observe_dirty_run_or_throw(state_ptr->run, active_lease);
       validate_planned_output(output, output_authority,
                               PlannedOutputReadiness::RequireReady);
-      const RegionSet hp_region =
-          value_image_adapter::full_node_output_region(output);
+      const RegionSet hp_region = value_region::full_node_output_region(output);
       result->staged_outputs_.emplace(
           node_id,
           StabilizedDirtyNodeOutput{
@@ -1616,7 +1611,7 @@ struct PreparedHighPrecisionDirtyRunState final {
       ComputeRun* active_run, const ComputeRunLease* lifecycle_lease,
       GraphEventService& event_service,
       PreparedDirtyPlan<HighPrecisionDirtyPlan> prepared_plan,
-      DirtyResolvedOperationMap operations, std::vector<Device> devices,
+      DirtyResolvedOperationMap operations, std::vector<DeviceBackend> devices,
       std::shared_ptr<DirtyNodeSynchronization> synchronization,
       std::string route_type)
       : graph(&active_graph),
@@ -1665,7 +1660,7 @@ struct PreparedHighPrecisionDirtyRunState final {
   /** @brief Pre-resolved operation variants. */
   DirtyResolvedOperationMap resolved_operations;
   /** @brief Per-task immutable device choices. */
-  std::vector<Device> task_devices;
+  std::vector<DeviceBackend> task_devices;
   /** @brief Per-task exact-identity concurrency and exclusion constraints. */
   std::vector<OperationExecutionConstraints> task_constraints;
   /** @brief Uniform maximum operation retained/scratch demand for this Run. */
@@ -1717,7 +1712,7 @@ struct PreparedRealTimeDirtyRunState final {
       ComputeRun* active_run, const ComputeRunLease* lifecycle_lease,
       GraphEventService& event_service,
       PreparedDirtyPlan<RealTimeDirtyPlan> prepared_plan,
-      DirtyResolvedOperationMap operations, std::vector<Device> devices,
+      DirtyResolvedOperationMap operations, std::vector<DeviceBackend> devices,
       std::shared_ptr<DirtyNodeSynchronization> synchronization,
       std::string route_type)
       : graph(&active_graph),
@@ -1759,7 +1754,7 @@ struct PreparedRealTimeDirtyRunState final {
   /** @brief Pre-resolved operation variants. */
   DirtyResolvedOperationMap resolved_operations;
   /** @brief Per-task immutable device choices. */
-  std::vector<Device> task_devices;
+  std::vector<DeviceBackend> task_devices;
   /** @brief Per-task exact-identity concurrency and exclusion constraints. */
   std::vector<OperationExecutionConstraints> task_constraints;
   /** @brief Uniform maximum operation retained/scratch demand for this Run. */
@@ -1958,10 +1953,10 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
           ? runtime->execution_route(ComputeIntent::GlobalHighPrecision)
                 .execution_type
           : "cpu";
-  const std::vector<Device> available_devices =
+  const std::vector<DeviceBackend> available_devices =
       execution_service != nullptr
           ? execution_service->available_devices(execution_type)
-          : std::vector<Device>{Device::CPU};
+          : std::vector<DeviceBackend>{DeviceBackend::CPU};
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
   if (request.stabilized_parameters &&
@@ -2022,7 +2017,7 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
   DirtyResolvedOperationMap resolved_operations = resolve_dirty_operations(
       graph, prepared.compute_plan, prepared.selection, available_devices,
       ComputeIntent::GlobalHighPrecision);
-  std::vector<Device> task_devices =
+  std::vector<DeviceBackend> task_devices =
       dirty_task_devices(prepared.compute_plan, resolved_operations);
   std::vector<OperationExecutionConstraints> task_constraints =
       dirty_task_constraints(prepared.compute_plan, resolved_operations);
@@ -2135,7 +2130,7 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
       state->node_synchronization->retained_memory_bytes());
   hp_shared_demand.add_bytes(
       dirty_operation_retained_memory_bytes(state->resolved_operations));
-  hp_shared_demand.add_objects<Device>(
+  hp_shared_demand.add_objects<DeviceBackend>(
       static_cast<std::uint64_t>(state->task_devices.capacity()));
   hp_shared_demand.add_objects<OperationExecutionConstraints>(
       static_cast<std::uint64_t>(state->task_constraints.capacity()));
@@ -2341,10 +2336,10 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
           ? runtime->execution_route(ComputeIntent::RealTimeUpdate)
                 .execution_type
           : "cpu";
-  const std::vector<Device> available_devices =
+  const std::vector<DeviceBackend> available_devices =
       execution_service != nullptr
           ? execution_service->available_devices(execution_type)
-          : std::vector<Device>{Device::CPU};
+          : std::vector<DeviceBackend>{DeviceBackend::CPU};
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
   if (request.stabilized_parameters &&
@@ -2407,7 +2402,7 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
   DirtyResolvedOperationMap resolved_operations = resolve_dirty_operations(
       graph, prepared.compute_plan, prepared.selection, available_devices,
       ComputeIntent::RealTimeUpdate);
-  std::vector<Device> task_devices =
+  std::vector<DeviceBackend> task_devices =
       dirty_task_devices(prepared.compute_plan, resolved_operations);
   std::vector<OperationExecutionConstraints> task_constraints =
       dirty_task_constraints(prepared.compute_plan, resolved_operations);
@@ -2506,7 +2501,7 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
       state->node_synchronization->retained_memory_bytes());
   rt_shared_demand.add_bytes(
       dirty_operation_retained_memory_bytes(state->resolved_operations));
-  rt_shared_demand.add_objects<Device>(
+  rt_shared_demand.add_objects<DeviceBackend>(
       static_cast<std::uint64_t>(state->task_devices.capacity()));
   rt_shared_demand.add_objects<OperationExecutionConstraints>(
       static_cast<std::uint64_t>(state->task_constraints.capacity()));

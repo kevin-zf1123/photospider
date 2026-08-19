@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/data/value_artifact.hpp"
 #include "server/worker/embedded_job_worker.hpp"  // NOLINT(build/include_subdir)
 
 #ifndef PS_PHOTOSPIDER_WORKER_PATH
@@ -452,19 +453,32 @@ TEST(SingleTenantJobProductPath,
     EXPECT_EQ(receipt.attempt, submission.assignment);
     EXPECT_EQ(receipt.output_slot_id, OutputSlotId("image.final"));
     EXPECT_EQ(receipt.achieved_durability, ArtifactDurability::CrashDurable);
-    EXPECT_EQ(receipt.descriptor.width, 8);
-    EXPECT_EQ(receipt.descriptor.height, 6);
-    EXPECT_EQ(receipt.descriptor.channels, 4);
-    EXPECT_EQ(receipt.descriptor.type, DataType::FLOAT32);
-    EXPECT_EQ(receipt.descriptor.row_bytes, 8U * 4U * sizeof(float));
-    EXPECT_EQ(receipt.descriptor.payload_bytes, 8U * 6U * 4U * sizeof(float));
+    EXPECT_EQ(receipt.descriptor.archive_version,
+              kNamedValueArtifactSetArchiveVersion);
+    EXPECT_EQ(receipt.descriptor.value_count, 1U);
+    EXPECT_GT(receipt.descriptor.archive_bytes, 8U * 6U * 4U * sizeof(float));
 
     const std::shared_ptr<const ArtifactRecord> artifact =
         service.find_artifact(receipt.artifact_id);
     ASSERT_NE(artifact, nullptr);
     EXPECT_EQ(artifact->receipt.artifact_id, receipt.artifact_id);
     EXPECT_EQ(artifact->receipt.content_digest, receipt.content_digest);
-    EXPECT_EQ(artifact->payload.size(), receipt.descriptor.payload_bytes);
+    ASSERT_EQ(artifact->values.values.size(), 1U);
+    const ValueArtifact& output = artifact->values.values.front();
+    EXPECT_EQ(output.envelope.output_name, "image");
+    ASSERT_TRUE(output.envelope.dense_descriptor.has_value());
+    EXPECT_EQ(output.envelope.dense_descriptor->shape,
+              (std::vector<std::size_t>{6U, 8U, 4U}));
+    EXPECT_EQ(output.envelope.dense_descriptor->element_semantics,
+              ElementSemantics::FloatingPoint);
+    EXPECT_EQ(output.envelope.dense_descriptor->storage_encoding,
+              (StorageEncoding{32U}));
+    ASSERT_TRUE(output.envelope.image_facet.has_value());
+    EXPECT_EQ(output.envelope.image_facet->data_window,
+              (ImageBounds{0, 0, 8, 6}));
+    EXPECT_FALSE(output.envelope.image_facet->display_window.has_value());
+    ASSERT_EQ(output.payloads.size(), 1U);
+    EXPECT_EQ(output.payloads.front().size(), 8U * 6U * 4U * sizeof(float));
 
     const JobSubmission consumer =
         service.submit(JobSpec(graph_id, 0, OutputSlotId("image.final"),
@@ -539,7 +553,7 @@ TEST(SingleTenantJobProductPath,
   ASSERT_EQ(baseline.failure, JobAttemptFailure::Compute);
   ASSERT_EQ(baseline.message,
             "graph compute failed [not_found]: Node 99 not found in graph.");
-  ASSERT_FALSE(baseline.image.has_value());
+  ASSERT_FALSE(baseline.values.has_value());
 
   EmbeddedHostJobWorker racing_worker(resolver);
   CancellationObservationGate gate(kAfterComputeCancellationObservation);
@@ -557,7 +571,7 @@ TEST(SingleTenantJobProductPath,
   EXPECT_TRUE(report.settled);
   EXPECT_EQ(report.failure, JobAttemptFailure::Compute);
   EXPECT_EQ(report.message, baseline.message);
-  EXPECT_FALSE(report.image.has_value());
+  EXPECT_FALSE(report.values.has_value());
 }
 
 TEST(SingleTenantJobProductPath,
@@ -588,7 +602,7 @@ TEST(SingleTenantJobProductPath,
   EXPECT_TRUE(report.settled);
   EXPECT_EQ(report.failure, JobAttemptFailure::CancellationObserved);
   EXPECT_EQ(report.message, "cancellation observed before artifact commit");
-  EXPECT_FALSE(report.image.has_value());
+  EXPECT_FALSE(report.values.has_value());
 }
 
 TEST(SingleTenantJobProductPath, MutatedAssignmentDigestFailsBeforeResolution) {

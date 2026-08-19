@@ -196,7 +196,7 @@ class WorkerManager::Impl final {
   /**
    * @brief Performs one fixed nonblocking receive into final output storage.
    * @param process Non-null child/data-plane owner.
-   * @param image Optional exact final image owner for a successful Report.
+   * @param archive Optional exact final archive owner for a successful Report.
    * @param expected_bytes Metadata-declared payload length, possibly zero.
    * @param received_bytes Non-null exact direct-receive offset.
    * @param hasher Non-null allocation-free incremental integrity owner.
@@ -209,7 +209,7 @@ class WorkerManager::Impl final {
    * before any second bulk operation.
    */
   WorkerDataPlaneIoStatus drain_output_slice(
-      ChildProcess* process, const std::optional<ImageBuffer>& image,
+      ChildProcess* process, std::optional<std::vector<std::byte>>& archive,
       std::size_t expected_bytes, std::size_t* received_bytes,
       ArtifactContentHasher* hasher, bool* output_eof,
       std::optional<ArtifactContentDigest>* output_digest);

@@ -206,12 +206,13 @@ ProjectedNodeImageRegion project_node_image_region(
  * @note Registry selection tests membership rather than caller order, so this
  * representation is the stable context compared with task population.
  */
-std::vector<Device> canonicalize_route_devices(
-    const std::vector<Device>& available_devices) {
-  std::vector<Device> result = available_devices;
-  std::sort(result.begin(), result.end(), [](Device lhs, Device rhs) {
-    return static_cast<int>(lhs) < static_cast<int>(rhs);
-  });
+std::vector<DeviceBackend> canonicalize_route_devices(
+    const std::vector<DeviceBackend>& available_devices) {
+  std::vector<DeviceBackend> result = available_devices;
+  std::sort(result.begin(), result.end(),
+            [](DeviceBackend lhs, DeviceBackend rhs) {
+              return static_cast<int>(lhs) < static_cast<int>(rhs);
+            });
   result.erase(std::unique(result.begin(), result.end()), result.end());
   return result;
 }

@@ -42,7 +42,7 @@
 #include "compute/request/compute_cache_policy.hpp"
 #include "compute/request/compute_metrics_recorder.hpp"
 #include "core/param_utils.hpp"
-#include "core/value_image_adapter.hpp"
+#include "core/value_region.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "runtime/graph_event_service.hpp"
@@ -979,7 +979,7 @@ NodeOutput& ComputeService::compute_internal(
           disk_output, output_authority,
           compute::PlannedOutputReadiness::RequireReady);
       RegionSet disk_region =
-          value_image_adapter::full_node_output_region(disk_output);
+          value_region::full_node_output_region(disk_output);
       target_node.cached_output_high_precision = std::move(disk_output);
       target_node.hp_region = std::move(disk_region);
       target_node.hp_version++;
@@ -1049,7 +1049,7 @@ NodeOutput& ComputeService::compute_internal(
         computed_output, output_authority,
         compute::PlannedOutputReadiness::RequireReady);
     RegionSet computed_region =
-        value_image_adapter::full_node_output_region(computed_output);
+        value_region::full_node_output_region(computed_output);
     target_node.cached_output_high_precision = std::move(computed_output);
     target_node.hp_region = std::move(computed_region);
 
@@ -1405,8 +1405,8 @@ ComputeService::prepare_intent_update(
                 graph.node_ids());
       }
     }
-    std::vector<Device> preflight_devices;
-    const std::vector<Device>* preflight_devices_override = nullptr;
+    std::vector<DeviceBackend> preflight_devices;
+    const std::vector<DeviceBackend>* preflight_devices_override = nullptr;
     if (uses_process_service) {
       preflight_devices =
           execution_service_.available_devices(state->hp_execution_type);
@@ -1748,7 +1748,7 @@ ComputeService::prepare_sequential_compute(
     const Node& node = graph.node(node_id);
     std::optional<OpImplementation> operation =
         OpRegistry::instance().select_implementation(
-            node.type, node.subtype, {Device::CPU},
+            node.type, node.subtype, {DeviceBackend::CPU},
             ComputeIntent::GlobalHighPrecision);
     if (!operation.has_value()) {
       throw GraphError(GraphErrc::NoOperation,

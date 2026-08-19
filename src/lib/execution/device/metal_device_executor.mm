@@ -577,7 +577,9 @@ class MetalDeviceExecutor final : public DeviceExecutor {
   }
 
   /** @copydoc DeviceExecutor::device */
-  Device device() const noexcept override { return Device::GPU_METAL; }
+  DeviceBackend device() const noexcept override {
+    return DeviceBackend::Metal;
+  }
 
   /** @copydoc DeviceExecutor::execute_impl */
   void execute_impl(DeviceExecutorInvocation& invocation) override {
@@ -597,7 +599,7 @@ class MetalDeviceExecutor final : public DeviceExecutor {
   DeviceExecutorDiagnostics diagnostics() const override {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return DeviceExecutorDiagnostics{
-        Device::GPU_METAL,       command_queue_ != nil, submission_count_,
+        DeviceBackend::Metal,    command_queue_ != nil, submission_count_,
         invocation_count_,       total_allocations_,    live_allocations_,
         pipeline_cache_entries_,
     };

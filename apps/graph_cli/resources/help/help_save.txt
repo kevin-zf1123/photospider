@@ -1,4 +1,10 @@
-save <id> <file>
+save <id> <output> <file> <uint8|uint16> <value|normalized|code> <normalized|legal|code> <min> <max> <reject|clamp> <nearest-even|toward-zero|floor|ceil> <reject|preserve> <reject|allow>
 
-Compute node <id> and save its floating point image output to <file>.
+Compute node <id>, select the exact named ordinary-image <output>, and encode it
+to <file>. The Value must declare one default SampleEncoding/SampleDomain.
 
+The remaining arguments explicitly select destination storage, sample
+encoding, sample-domain kind and finite inclusive endpoints, out-of-domain
+policy, integral rounding, NaN/infinity policy, and precision-loss policy. The
+command never infers these from the file extension or storage width and never
+applies an implicit 255 or 65535 scale.

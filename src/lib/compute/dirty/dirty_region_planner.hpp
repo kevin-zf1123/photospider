@@ -121,7 +121,7 @@ struct DirtyRegionOperationRouteSnapshot {
   /** @brief Intent used for every frozen registry selection. */
   ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
   /** @brief Canonical route-visible device inventory. */
-  std::vector<Device> available_devices;
+  std::vector<DeviceBackend> available_devices;
   /** @brief Frozen route records keyed by executable graph node id. */
   std::unordered_map<int, DirtyRegionPlannedOperationRoute> node_routes;
 };

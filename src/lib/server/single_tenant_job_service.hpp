@@ -155,10 +155,11 @@ class PreparedExternalGraphCatalog final {
  * @brief Immutable attempt facts returned by one worker execution.
  * @throws Nothing for default construction; values may allocate on mutation.
  * @note The semantic shape is closed. `Succeeded` requires `settled=true`,
- * `failure=None`, and one image. `Cancelled` requires `settled=true`,
- * `failure=CancellationObserved`, and no image. `Failed` requires a
- * worker-owned non-None failure and no image; `settled` records actual cleanup.
- * A successful image remains only a candidate, never artifact authority.
+ * `failure=None`, and one complete named-Value artifact set. `Cancelled`
+ * requires `settled=true`, `failure=CancellationObserved`, and no Values.
+ * `Failed` requires a worker-owned non-None failure and no Values; `settled`
+ * records actual cleanup. A successful set remains only a candidate, never
+ * durable artifact authority.
  */
 struct JobAttemptReport final {
   /** @brief Full assignment identity echoed by the reporting worker. */
@@ -172,8 +173,9 @@ struct JobAttemptReport final {
   JobAttemptFailure failure = JobAttemptFailure::Unexpected;
   /** @brief Human-readable worker diagnostic. */
   std::string message;
-  /** @brief Candidate image present only for a successful output fact. */
-  std::optional<ImageBuffer> image;
+  /** @brief Candidate named Values present only for a successful output fact.
+   */
+  std::optional<NamedValueArtifactSet> values;
 };
 
 /**
@@ -199,7 +201,7 @@ class JobAttemptWorker {
    * @brief Executes one immutable assignment and returns settlement evidence.
    * @param assignment Exact current assignment.
    * @param cancellation_requested Read-only monotonic control-plane observer.
-   * @return Immutable worker facts and optional candidate image.
+   * @return Immutable worker facts and optional candidate Values.
    * @throws std::bad_alloc or std::system_error when unavoidable process-local
    * setup or synchronization failure cannot be represented safely.
    * @note The worker cannot commit an artifact or publish Job state. An
@@ -807,7 +809,7 @@ class SingleTenantJobService final {
   /**
    * @brief Validates and applies one worker report under the Job mutex.
    * @param expected Exact assignment owned by the invoking manager callback.
-   * @param report Immutable attempt facts and candidate image.
+   * @param report Immutable attempt facts and candidate named Values.
    * @return Nothing after terminal state derivation and observer notification.
    * @throws Nothing; an unambiguous pre-manifest artifact exception becomes a
    * typed failed Job. Manifest-visible ambiguity or any failure after an exact
@@ -816,7 +818,7 @@ class SingleTenantJobService final {
    * and enters quota-release fail-stop without rewriting terminal truth.
    * @note A prior attempt whose `expected` identity is no longer current is
    * fenced without mutating the replacement attempt. For the current attempt,
-   * full report identity, enum, outcome/failure/settlement/image shape, and
+   * full report identity, enum, outcome/failure/settlement/Value shape, and
    * cancellation-context validation precede copying any report fact or
    * cancellation adjudication. An accepted `Failed` report takes precedence
    * over cancellation intent and retains its exact settlement, failure, and

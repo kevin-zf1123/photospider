@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/value_image_adapter.hpp"
+#include "core/value_region.hpp"
 #include "graph/graph_cache_service.hpp"
 
 namespace ps::compute {
@@ -71,8 +71,7 @@ void ComputeResultCommitter::commit(
           *temp_results[i],
           authority_for_node(planned_work, execution_order[i]),
           PlannedOutputReadiness::RequireReady);
-      full_regions[i] =
-          value_image_adapter::full_node_output_region(*temp_results[i]);
+      full_regions[i] = value_region::full_node_output_region(*temp_results[i]);
     }
   }
 

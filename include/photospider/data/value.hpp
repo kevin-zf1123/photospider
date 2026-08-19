@@ -512,7 +512,7 @@ class ValueBuilder final {
    *         overflows.
    * @throws std::bad_alloc when validation state or CPU storage cannot
    * allocate.
-   * @note No ImageBuffer or byte-addressed element view is implied.
+   * @note No ordinary-image facet or byte-addressed element view is implied.
    */
   static ValueBuilder allocate_cpu_blocked_dense_tensor(
       DenseTensorDescriptor descriptor, BlockedLayout layout,
@@ -733,6 +733,27 @@ class Value final {
                                      DataDescriptorEnvelope descriptor,
                                      ProviderDefinedLayout layout,
                                      std::vector<BufferHandle> buffers);
+
+  /**
+   * @brief Reconstructs one provider-defined Value from owned CPU payloads.
+   *
+   * @param registry Injected provider-definition authority.
+   * @param descriptor Versioned Schema and ordered Facet records.
+   * @param layout Versioned provider Layout and generic buffer envelopes.
+   * @param payloads One nonempty exact byte vector per provider buffer.
+   * @return Fresh Ready provider-defined Value with isolated CPU allocations.
+   * @throws ExtensionContractError for malformed metadata, unavailable
+   *         provider definitions, or provider semantic rejection.
+   * @throws std::invalid_argument when a payload is empty.
+   * @throws std::overflow_error when allocation/publication identity exhausts.
+   * @throws std::bad_alloc when allocation or immutable state cannot allocate.
+   * @note Every payload is copied into a fresh Host allocation before provider
+   *       validation. No partial Value or BufferHandle escapes on failure.
+   */
+  static Value from_provider_defined_payloads(
+      DataDefinitionRegistry& registry, DataDescriptorEnvelope descriptor,
+      ProviderDefinedLayout layout,
+      std::vector<std::vector<std::byte>> payloads);
 
   /**
    * @brief Reports whether this handle owns a published generic Value.

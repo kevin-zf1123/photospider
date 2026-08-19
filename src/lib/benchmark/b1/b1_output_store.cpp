@@ -39,7 +39,7 @@
 #endif
 #endif
 
-#include "core/value_image_adapter.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/data/image_view.hpp"
 
 namespace ps::benchmark {
 namespace {
@@ -116,16 +116,26 @@ class B1SlotExistsError final : public std::runtime_error {
 /**
  * @brief Validates the exact frozen candidate descriptor.
  * @param image Candidate image.
- * @return Nothing for exact CPU FP32 RGBA B1 state.
+ * @return Nothing for exact Ready CPU FP32 RGBA B1 state.
  * @throws std::invalid_argument for descriptor drift.
+ * @throws ReadyFenceAccessError or BufferAccessError when payload access is
+ * unavailable.
  */
-void validate_b1_candidate_image(const ImageBuffer& image) {
-  validate_image_buffer(image);
-  if (image.width != static_cast<int>(kB1ImageEdge) ||
-      image.height != static_cast<int>(kB1ImageEdge) ||
-      image.channels != static_cast<int>(kB1ChannelCount) ||
-      image.type != DataType::FLOAT32 || image.device != Device::CPU ||
-      image_buffer_row_bytes(image) != kB1PayloadRowBytes) {
+void validate_b1_candidate_image(const Value& image) {
+  const ImageView view(image);
+  const DenseTensorDescriptor expected_descriptor{
+      {static_cast<std::size_t>(kB1ImageEdge),
+       static_cast<std::size_t>(kB1ImageEdge),
+       static_cast<std::size_t>(kB1ChannelCount)},
+      ElementSemantics::FloatingPoint,
+      StorageEncoding{32U}};
+  const ImageFacet expected_facet =
+      make_zero_origin_image_facet(expected_descriptor, 1U, 0U, 2U);
+  const StorageBinding binding = image.storage_binding();
+  if (!(view.descriptor() == expected_descriptor) ||
+      !(view.image_facet() == expected_facet) ||
+      image.storage_layout_kind() != StorageLayoutKind::Strided ||
+      binding.device.backend() != DeviceBackend::CPU || !binding.host_visible) {
     throw std::invalid_argument("B1 candidate image descriptor drifted.");
   }
 }
@@ -406,6 +416,44 @@ bool native_little_endian() noexcept {
 }
 
 /**
+ * @brief Packs one logical B1 row into canonical little-endian RGBA32 bytes.
+ * @param image Validated exact B1 image Value.
+ * @param row_index Zero-based row smaller than `kB1ImageEdge`.
+ * @param output Mutable row buffer replaced with exactly
+ * `kB1PayloadRowBytes` bytes.
+ * @return Nothing after every logical sample is copied.
+ * @throws std::out_of_range or BufferAccessError from checked Value access.
+ * @throws std::bad_alloc when row storage cannot allocate.
+ * @note Source padding and physical stride never enter the durable payload.
+ */
+void pack_b1_payload_row(const Value& image, std::size_t row_index,
+                         std::vector<std::byte>* output) {
+  if (output == nullptr) {
+    throw std::invalid_argument("B1 row packing requires an output buffer.");
+  }
+  const ImageView view(image);
+  output->resize(static_cast<std::size_t>(kB1PayloadRowBytes));
+  std::size_t offset = 0U;
+  for (std::size_t x = 0U; x < view.width(); ++x) {
+    for (std::size_t channel = 0U; channel < view.channels(); ++channel) {
+      const std::byte* source = view.channel_data(x, row_index, channel);
+      if (native_little_endian()) {
+        std::memcpy(output->data() + offset, source, sizeof(float));
+      } else {
+        output->at(offset) = source[3U];
+        output->at(offset + 1U) = source[2U];
+        output->at(offset + 2U) = source[1U];
+        output->at(offset + 3U) = source[0U];
+      }
+      offset += sizeof(float);
+    }
+  }
+  if (offset != output->size()) {
+    throw std::logic_error("B1 packed row length drifted.");
+  }
+}
+
+/**
  * @brief Hashes one exact candidate as tight little-endian B1 payload bytes.
  * @param image Validated CPU FP32 RGBA B1 candidate.
  * @return SHA-256 matching bytes written by `write_and_validate_payload`.
@@ -414,25 +462,13 @@ bool native_little_endian() noexcept {
  * @note The function performs no filesystem mutation and is used to identify a
  * same-commit public occurrence before any reconciliation barrier is attempted.
  */
-B1Sha256Digest digest_b1_payload_image(const ImageBuffer& image) {
+B1Sha256Digest digest_b1_payload_image(const Value& image) {
   B1Sha256 hash;
-  std::vector<std::byte> converted;
-  if (!native_little_endian()) {
-    converted.resize(static_cast<std::size_t>(kB1PayloadRowBytes));
-  }
-  for (int row_index = 0; row_index < image.height; ++row_index) {
-    const std::byte* row = image_buffer_row_data(image, row_index);
-    if (native_little_endian()) {
-      hash.update(row, static_cast<std::size_t>(kB1PayloadRowBytes));
-      continue;
-    }
-    for (std::size_t offset = 0U; offset < converted.size(); offset += 4U) {
-      converted[offset] = row[offset + 3U];
-      converted[offset + 1U] = row[offset + 2U];
-      converted[offset + 2U] = row[offset + 1U];
-      converted[offset + 3U] = row[offset];
-    }
-    hash.update(converted.data(), converted.size());
+  std::vector<std::byte> row;
+  for (std::size_t row_index = 0U;
+       row_index < static_cast<std::size_t>(kB1ImageEdge); ++row_index) {
+    pack_b1_payload_row(image, row_index, &row);
+    hash.update(row.data(), row.size());
   }
   return hash.finish();
 }
@@ -444,9 +480,8 @@ B1Sha256Digest digest_b1_payload_image(const ImageBuffer& image) {
  * @throws B1RevalidationError when the digest is unavailable.
  * @throws Adapter, digest, or allocation failures unchanged.
  */
-ContentDigest compute_b1_logical_digest(const ImageBuffer& image) {
-  const Value candidate = value_image_adapter::snapshot_cpu_image_value(image);
-  const ContentDigestResult logical = compute_content_digest(candidate);
+ContentDigest compute_b1_logical_digest(const Value& image) {
+  const ContentDigestResult logical = compute_content_digest(image);
   if (logical.state != ContentDigestState::Available ||
       !logical.digest.has_value()) {
     throw B1RevalidationError("B1 candidate logical digest is unavailable: " +
@@ -563,7 +598,7 @@ struct B1CommitTaskState final {
   /** @brief Borrowed held occurrence-slot directory descriptor. */
   int slot_descriptor = -1;
   /** @brief Candidate descriptor retained through payload completion. */
-  ImageBuffer image;
+  Value image;
   /** @brief Canonical manifest constructed after payload settlement. */
   std::string manifest;
   /** @brief Verified payload digest written by the payload task. */
@@ -602,25 +637,12 @@ void write_and_validate_payload(B1CommitTaskState* state) {
       file_identity(regular_file_stat(owner.get(), "fstat new B1 payload"));
   state->payload_identity = created_identity;
   B1Sha256 write_hash;
-  std::vector<std::byte> converted;
-  if (!native_little_endian()) {
-    converted.resize(static_cast<std::size_t>(kB1PayloadRowBytes));
-  }
-  for (int row_index = 0; row_index < state->image.height; ++row_index) {
-    const std::byte* row = image_buffer_row_data(state->image, row_index);
-    if (native_little_endian()) {
-      write_all(owner.get(), row, static_cast<std::size_t>(kB1PayloadRowBytes));
-      write_hash.update(row, static_cast<std::size_t>(kB1PayloadRowBytes));
-      continue;
-    }
-    for (std::size_t offset = 0U; offset < converted.size(); offset += 4U) {
-      converted[offset] = row[offset + 3U];
-      converted[offset + 1U] = row[offset + 2U];
-      converted[offset + 2U] = row[offset + 1U];
-      converted[offset + 3U] = row[offset];
-    }
-    write_all(owner.get(), converted.data(), converted.size());
-    write_hash.update(converted.data(), converted.size());
+  std::vector<std::byte> row;
+  for (std::size_t row_index = 0U;
+       row_index < static_cast<std::size_t>(kB1ImageEdge); ++row_index) {
+    pack_b1_payload_row(state->image, row_index, &row);
+    write_all(owner.get(), row.data(), row.size());
+    write_hash.update(row.data(), row.size());
   }
   synchronize_descriptor(owner.get(), "file");
   const struct stat written_stat =
@@ -1741,7 +1763,7 @@ B1OutputStoreRootAuthority B1OutputStore::retain_root_authority() const {
 }
 
 B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
-                                           const ImageBuffer& image) {
+                                           const Value& image) {
   B1OutputCommitResult result;
   try {
     validate_b1_job_instance(job);

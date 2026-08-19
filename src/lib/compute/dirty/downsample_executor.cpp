@@ -14,9 +14,9 @@
 #include "compute/compute_geometry.hpp"
 #include "compute/compute_run.hpp"
 #include "compute/dirty/node_executor.hpp"
-#include "core/image_buffer_processing.hpp"
+#include "core/dense_image_processing.hpp"
 #include "core/region_image_adapter.hpp"
-#include "core/value_image_adapter.hpp"
+#include "photospider/data/image_view.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 
@@ -29,7 +29,6 @@ namespace {
  * @param state Committed proxy state to copy.
  * @return Independent metadata state retaining any immutable output Value.
  * @throws std::bad_alloc when output or Region metadata copying allocates.
- * @throws GraphError when forbidden compatibility staging is present.
  * @note ROI mutation never touches the retained Value. A fresh Host binding is
  * seeded from it later and replaces it only after successful seal.
  */
@@ -40,11 +39,6 @@ RealtimeProxyGraph::NodeState clone_proxy_state(
   cloned.version = state.version;
   cloned.dirty_source_generation = state.dirty_source_generation;
   if (state.output) {
-    if (state.output->has_compatibility_image()) {
-      throw GraphError(
-          GraphErrc::ComputeError,
-          "Downsample staging rejects compatibility image authority.");
-    }
     cloned.output = *state.output;
   }
   return cloned;
@@ -75,67 +69,31 @@ bool seed_downsample_binding(const RealtimeProxyGraph::NodeState& state,
 }
 
 /**
- * @brief Tests exact current scalar-type equivalence with one output plan.
- * @param type Scratch ImageBuffer channel type.
- * @param plan Immutable dense output plan.
- * @return True only for the same signedness/float semantics and bit width.
- * @throws Nothing.
- * @note This is validation for a transient algorithm projection, not a second
- * source of output metadata.
- */
-bool scratch_type_matches_plan(DataType type,
-                               const DenseImageOutputPlan& plan) noexcept {
-  const DenseTensorDescriptor& descriptor = plan.descriptor();
-  const std::uint32_t bits = descriptor.storage_encoding.bit_width;
-  switch (type) {
-    case DataType::UINT8:
-      return descriptor.element_semantics ==
-                 ElementSemantics::UnsignedInteger &&
-             bits == 8U;
-    case DataType::INT8:
-      return descriptor.element_semantics == ElementSemantics::SignedInteger &&
-             bits == 8U;
-    case DataType::UINT16:
-      return descriptor.element_semantics ==
-                 ElementSemantics::UnsignedInteger &&
-             bits == 16U;
-    case DataType::INT16:
-      return descriptor.element_semantics == ElementSemantics::SignedInteger &&
-             bits == 16U;
-    case DataType::FLOAT32:
-      return descriptor.element_semantics == ElementSemantics::FloatingPoint &&
-             bits == 32U;
-    case DataType::FLOAT64:
-      return descriptor.element_semantics == ElementSemantics::FloatingPoint &&
-             bits == 64U;
-  }
-  return false;
-}
-
-/**
- * @brief Copies one scratch ImageBuffer ROI into an active RT binding.
- * @param source Full-extent CPU scratch result.
+ * @brief Copies one immutable Value ROI into an active RT binding.
+ * @param source Full-extent Ready host-readable image Value.
  * @param roi Nonempty zero-origin RT selection.
  * @param binding Open RT output binding.
  * @return Nothing after exact row spans retire successfully.
- * @throws std::invalid_argument when source shape/storage or ROI disagrees.
+ * @throws std::invalid_argument when Value facts or ROI disagree with plan.
+ * @throws ReadyFenceAccessError or BufferAccessError for inaccessible bytes.
+ * @throws std::overflow_error when row arithmetic is unrepresentable.
  * @throws std::logic_error or std::system_error from grant lifecycle failure.
  * @note Any exception after issuance retires the grant as failure, preventing
- * partial RT Value publication.
+ * partial RT Value publication. Source row padding is never copied.
  */
-void copy_downsample_scratch(const ImageBuffer& source, const PixelRect& roi,
-                             HostOutputBinding& binding) {
+void copy_downsample_value(const Value& source, const PixelRect& roi,
+                           HostOutputBinding& binding) {
+  const ImageView view(source);
   const DenseImageOutputPlan& plan = binding.plan();
   const PixelSize planned_size{static_cast<int>(plan.width()),
                                static_cast<int>(plan.height())};
-  if (source.width != planned_size.width ||
-      source.height != planned_size.height || source.device != Device::CPU ||
-      source.channels != static_cast<int>(plan.channels()) ||
-      !scratch_type_matches_plan(source.type, plan) || !source.data ||
-      roi.width <= 0 || roi.height <= 0 ||
-      !(clip_rect(roi, planned_size) == roi)) {
+  if (view.width() != plan.width() || view.height() != plan.height() ||
+      view.channels() != plan.channels() ||
+      !(view.descriptor() == plan.descriptor()) ||
+      !(view.image_facet() == plan.image_facet()) || roi.width <= 0 ||
+      roi.height <= 0 || !(clip_rect(roi, planned_size) == roi)) {
     throw std::invalid_argument(
-        "Downsample scratch image disagrees with the RT output plan.");
+        "Downsample Value disagrees with the RT output plan.");
   }
   const RegionSet logical_region =
       region_image_adapter::from_storage_pixel_rect(
@@ -146,22 +104,30 @@ void copy_downsample_scratch(const ImageBuffer& source, const PixelRect& roi,
   try {
     const std::size_t row_bytes =
         static_cast<std::size_t>(roi.width) * plan.pixel_bytes();
-    const std::size_t source_x =
-        static_cast<std::size_t>(roi.x) * plan.pixel_bytes();
     for (int row = 0; row < roi.height; ++row) {
       if (grant.span(static_cast<std::size_t>(row)).byte_size != row_bytes) {
         throw std::logic_error(
             "Downsample grant span disagrees with planned row width.");
       }
-      std::memcpy(grant.data(static_cast<std::size_t>(row)),
-                  image_buffer_row_data(source, roi.y + row) + source_x,
-                  row_bytes);
+      std::byte* destination = grant.data(static_cast<std::size_t>(row));
+      for (int column = 0; column < roi.width; ++column) {
+        for (std::size_t channel = 0U; channel < plan.channels(); ++channel) {
+          const std::size_t offset =
+              static_cast<std::size_t>(column) * plan.pixel_bytes() +
+              channel * plan.element_bytes();
+          std::memcpy(
+              destination + offset,
+              view.channel_data(static_cast<std::size_t>(roi.x + column),
+                                static_cast<std::size_t>(roi.y + row), channel),
+              plan.element_bytes());
+        }
+      }
     }
     grant.retire_success();
   } catch (...) {
     try {
       if (grant.active()) {
-        grant.retire_failure("Downsample scratch copy failed.");
+        grant.retire_failure("Downsample Value copy failed.");
       }
     } catch (...) {
     }
@@ -177,8 +143,8 @@ void copy_downsample_scratch(const ImageBuffer& source, const PixelRect& roi,
  * @throws GraphError after accepted cancellation to suppress later proxy work.
  * @throws std::system_error when Run-state synchronization fails.
  * @note The Run retains the exact reason for outer service translation. One
- * OpenCV resize remains non-preemptible, but its result is checked before proxy
- * publication.
+ * One dense resize remains non-preemptible, but its result is checked before
+ * proxy publication.
  */
 void observe_downsample_cancellation(const ComputeRunLease* run_lease) {
   if (run_lease != nullptr && run_lease->observe_cancellation().has_value()) {
@@ -272,14 +238,12 @@ void DownsampleExecutor::execute_one(const Request& request) {
     return;
   }
 
-  const ImageBuffer hp_buffer =
-      value_image_adapter::snapshot_cpu_image_buffer(hp_value);
   const std::vector<const NodeOutput*> plan_inputs{&hp_output};
   HostOutputBinding output_binding =
       NodeExecutor::allocate_tiled_output_binding(plan_inputs, rt_size);
   const bool preserved_existing_bytes =
       seed_downsample_binding(proxy_state, output_binding);
-  downsample_roi(hp_buffer, output_binding, roi_hp, rt_size);
+  downsample_roi(hp_value, output_binding, roi_hp, rt_size);
   if (!proxy_state.output.has_value()) {
     proxy_state.output = NodeOutput{};
   }
@@ -338,7 +302,7 @@ void DownsampleExecutor::apply_passthrough(
 }
 
 /** @copydoc DownsampleExecutor::downsample_roi */
-PixelRect DownsampleExecutor::downsample_roi(const ImageBuffer& hp_buffer,
+PixelRect DownsampleExecutor::downsample_roi(const Value& hp_value,
                                              HostOutputBinding& output_binding,
                                              const PixelRect& roi_hp,
                                              const PixelSize& rt_size) const {
@@ -348,11 +312,9 @@ PixelRect DownsampleExecutor::downsample_roi(const ImageBuffer& hp_buffer,
     roi_rt = PixelRect{0, 0, rt_size.width, rt_size.height};
   }
 
-  ImageBuffer scratch = make_aligned_cpu_image_buffer(
-      rt_size.width, rt_size.height, hp_buffer.channels, hp_buffer.type);
-  image_processing::resize_cpu_image_buffer_region(hp_buffer, roi_hp, scratch,
-                                                   roi_rt);
-  copy_downsample_scratch(scratch, roi_rt, output_binding);
+  const Value resized =
+      dense_image_processing::resize_region(hp_value, roi_hp, rt_size, roi_rt);
+  copy_downsample_value(resized, roi_rt, output_binding);
   return roi_rt;
 }
 

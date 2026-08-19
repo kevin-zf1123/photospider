@@ -3015,46 +3015,46 @@ class EmbeddedHost final : public Host,
             after_cursor, static_cast<std::uint32_t>(limit))};
   }
 
-  /** @copydoc benchmark::B1Host::compute_b1_image */
-  Result<ImageBuffer> compute_b1_image(
+  /** @copydoc benchmark::B1Host::compute_b1_values */
+  Result<NamedValueResult> compute_b1_values(
       benchmark::B1HostComputeRequest request) override {
-    return guarded_result<ImageBuffer>(
-        "compute_b1_image", GraphErrc::ComputeError, [&] {
+    return guarded_result<NamedValueResult>(
+        "compute_b1_values", GraphErrc::ComputeError, [&] {
           if (!valid_compute_execution_options(request.request.execution) ||
               !valid_private_b1_qos(request.qos, request.request.execution) ||
               request.observation_sink == nullptr) {
-            return failure_result<ImageBuffer>(
+            return failure_result<NamedValueResult>(
                 GraphErrc::InvalidParameter,
                 "B1 compute requires matching Throughput QoS, cap, and sink");
           }
           auto admission =
               state_->try_admit_session_operation(request.request.session);
           if (!admission) {
-            return failure_result<ImageBuffer>(
+            return failure_result<NamedValueResult>(
                 GraphErrc::NotFound,
                 "graph session is closing: " + request.request.session.value);
           }
           if (!session_exists(*state_, request.request.session)) {
-            return failure_result<ImageBuffer>(
+            return failure_result<NamedValueResult>(
                 GraphErrc::NotFound,
                 "graph session not found: " + request.request.session.value);
           }
           auto kernel_request = to_kernel_compute_request(request.request);
           kernel_request.run_qos = request.qos;
           kernel_request.observation_sink = std::move(request.observation_sink);
-          auto image =
-              state_->interaction.cmd_compute_and_get_image(kernel_request);
-          if (!image) {
+          auto values =
+              state_->interaction.cmd_compute_and_get_values(kernel_request);
+          if (!values) {
             const auto error = state_->interaction.cmd_last_error(
                 request.request.session.value);
             if (!error) {
-              return success_result(ImageBuffer{});
+              return success_result(NamedValueResult{});
             }
-            Result<ImageBuffer> result;
+            Result<NamedValueResult> result;
             result.status = failure_status(error->code, error->message);
             return result;
           }
-          return success_result(std::move(*image));
+          return success_result(std::move(*values));
         });
   }
 
@@ -3157,7 +3157,7 @@ class EmbeddedHost final : public Host,
 
     if (!i2_metal_available_for_acquisition(
             state_->execution_service->has_device_executor(
-                Device::GPU_METAL))) {
+                DeviceBackend::Metal))) {
       evidence.metal.available = false;
       evidence.metal.unavailable_reason =
           "not-applicable: process Metal executor unavailable";
@@ -3177,7 +3177,7 @@ class EmbeddedHost final : public Host,
     evidence.metal.available = true;
     evidence.metal.before =
         state_->execution_service->device_executor_diagnostics(
-            Device::GPU_METAL);
+            DeviceBackend::Metal);
     const DeviceId metal_device(DeviceBackend::Metal);
     evidence.metal.resources_before =
         state_->execution_service->device_resource_snapshot(metal_device);
@@ -3223,7 +3223,7 @@ class EmbeddedHost final : public Host,
                                          first.executor_submitted};
     evidence.metal.after_first =
         state_->execution_service->device_executor_diagnostics(
-            Device::GPU_METAL);
+            DeviceBackend::Metal);
     evidence.metal.resources_after_first =
         state_->execution_service->device_resource_snapshot(metal_device);
 
@@ -3251,7 +3251,7 @@ class EmbeddedHost final : public Host,
                                          second.executor_submitted};
     evidence.metal.after_second =
         state_->execution_service->device_executor_diagnostics(
-            Device::GPU_METAL);
+            DeviceBackend::Metal);
     evidence.metal.resources_after_second =
         state_->execution_service->device_resource_snapshot(metal_device);
     evidence.io_after =
@@ -3268,53 +3268,52 @@ class EmbeddedHost final : public Host,
   }
 
   /**
-   * @brief Computes a node and returns a copied image descriptor.
+   * @brief Computes a node and returns exact named immutable Values.
    *
    * @param request Public compute request.
-   * @return ImageBuffer value, a successful empty ImageBuffer when compute
-   *         completes without image output, NotFound for a missing or closed
+   * @return Named Values, an engaged empty collection when compute completes
+   *         without Value output, NotFound for a missing or closed
    *         session, InvalidParameter for a present zero Run cap, or a compute
    *         failure status for existing sessions.
    * @throws std::bad_alloc on allocation failure.
    * @note One lifecycle admission protects session lookup, compute, empty/error
-   *       classification, and public image construction against close. Backend
-   *       LastError distinguishes handled failure from successful no-image
-   *       output, and backend image memory is cloned before public conversion.
+   *       classification, and public result construction against close. Backend
+   *       LastError distinguishes handled failure from successful empty output.
    */
-  Result<ImageBuffer> compute_and_get_image(
+  Result<NamedValueResult> compute_and_get_values(
       const HostComputeRequest& request) override {
-    return guarded_result<ImageBuffer>(
-        "compute_and_get_image", GraphErrc::ComputeError, [&] {
+    return guarded_result<NamedValueResult>(
+        "compute_and_get_values", GraphErrc::ComputeError, [&] {
           if (!valid_compute_execution_options(request.execution)) {
-            return failure_result<ImageBuffer>(
+            return failure_result<NamedValueResult>(
                 GraphErrc::InvalidParameter,
                 "compute maximum_parallelism must be positive when present");
           }
           auto admission = state_->try_admit_session_operation(request.session);
           if (!admission) {
-            return failure_result<ImageBuffer>(
+            return failure_result<NamedValueResult>(
                 GraphErrc::NotFound,
                 "graph session is closing: " + request.session.value);
           }
           if (!session_exists(*state_, request.session)) {
-            return failure_result<ImageBuffer>(
+            return failure_result<NamedValueResult>(
                 GraphErrc::NotFound,
                 "graph session not found: " + request.session.value);
           }
           const auto kernel_request = to_kernel_compute_request(request);
-          auto image =
-              state_->interaction.cmd_compute_and_get_image(kernel_request);
-          if (!image) {
+          auto values =
+              state_->interaction.cmd_compute_and_get_values(kernel_request);
+          if (!values) {
             const auto error =
                 state_->interaction.cmd_last_error(request.session.value);
             if (!error) {
-              return success_result(ImageBuffer{});
+              return success_result(NamedValueResult{});
             }
-            Result<ImageBuffer> result;
+            Result<NamedValueResult> result;
             result.status = failure_status(error->code, error->message);
             return result;
           }
-          return success_result(std::move(*image));
+          return success_result(std::move(*values));
         });
   }
 

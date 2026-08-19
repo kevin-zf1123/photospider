@@ -63,7 +63,7 @@ class TaskSubmissionPlan {
    */
   TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
                      GraphTraversalService& traversal, int node_id,
-                     std::vector<Device> available_devices,
+                     std::vector<DeviceBackend> available_devices,
                      bool publish_plan_inspection = true,
                      bool allow_reusable_cache = true);
 
@@ -596,7 +596,7 @@ class TaskSubmissionPlan {
   void observe_task_ready(const ComputeRunLease& lease,
                           const ComputeRunTaskIdentity& identity,
                           const PlannedTask& task,
-                          Device device) const noexcept;
+                          DeviceBackend device) const noexcept;
 
   /**
    * @brief Publishes one opted-in task-local terminal observation.
@@ -666,10 +666,10 @@ class TaskSubmissionPlan {
   std::vector<int> execution_order_;
 
   /** @brief Devices available for operation implementation selection. */
-  std::vector<Device> available_devices_;
+  std::vector<DeviceBackend> available_devices_;
 
   /** @brief Selected operation devices aligned with execution_order_. */
-  std::vector<Device> execution_devices_;
+  std::vector<DeviceBackend> execution_devices_;
 
   /** @brief Runtime dependency counters and dense node-id mapping. */
   TaskDependencyState dependency_state_;

@@ -35,6 +35,7 @@
 
 #include "benchmark/b1/b1_evidence.hpp"  // NOLINT(build/include_subdir)
 #include "benchmark/common/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/data/image_view.hpp"
 #include "photospider/host/host.hpp"
 #include "verification/b1_evidence_json.hpp"
 
@@ -642,21 +643,32 @@ B1JobEvidence run_b1_job(Host& host, B1Host& b1_host,
       capture_b1_execution_snapshot(b1_host, lifecycle_cursor);
   B1RunObservationCollector collector(job);
   evidence.offered_at = std::chrono::steady_clock::now();
-  const Result<ImageBuffer> computed =
-      b1_host.compute_b1_image(B1HostComputeRequest{
+  const Result<NamedValueResult> computed =
+      b1_host.compute_b1_values(B1HostComputeRequest{
           make_b1_host_compute_request(session, job.run_cap),
           compute::ComputeRunQos{compute::ComputeRunQosClass::Throughput,
                                  std::nullopt, 1U,
                                  static_cast<std::uint32_t>(job.run_cap)},
           collector.sink()});
   evidence.physical_trace = collector.snapshot();
-  evidence.run_succeeded =
-      computed.status.ok &&
-      computed.value.width == static_cast<int>(kB1ImageEdge) &&
-      computed.value.height == static_cast<int>(kB1ImageEdge) &&
-      computed.value.channels == static_cast<int>(kB1ChannelCount) &&
-      computed.value.type == DataType::FLOAT32 &&
-      computed.value.device == Device::CPU;
+  const Value* candidate =
+      computed.status.ok ? computed.value.find("image") : nullptr;
+  bool candidate_valid = false;
+  if (candidate != nullptr) {
+    try {
+      const ImageView view(*candidate);
+      candidate_valid =
+          view.width() == kB1ImageEdge && view.height() == kB1ImageEdge &&
+          view.channels() == kB1ChannelCount &&
+          view.descriptor().element_semantics ==
+              ElementSemantics::FloatingPoint &&
+          view.descriptor().storage_encoding == StorageEncoding{32U} &&
+          candidate->storage_binding().device.backend() == DeviceBackend::CPU;
+    } catch (const std::exception&) {
+      candidate_valid = false;
+    }
+  }
+  evidence.run_succeeded = computed.status.ok && candidate_valid;
   if (evidence.run_succeeded) {
     try {
       evidence.semantic_trace = encode_b1_semantic_trace(
@@ -664,7 +676,7 @@ B1JobEvidence run_b1_job(Host& host, B1Host& b1_host,
     } catch (const std::exception&) {
       evidence.semantic_trace.clear();
     }
-    evidence.output = output_store.commit(job, computed.value);
+    evidence.output = output_store.commit(job, *candidate);
   } else {
     evidence.output.status = B1OutputCommitStatus::TaskFailed;
     evidence.output.diagnostic =

@@ -231,12 +231,6 @@ void validate_planned_output(const NodeOutput& output,
                      "Execution received a malformed planned output "
                      "authority.");
   }
-  if (output.has_compatibility_image()) {
-    throw GraphError(
-        GraphErrc::ComputeError,
-        "Planned output rejects compatibility ImageBuffer staging.");
-  }
-
   const std::size_t expected_named_values =
       authority.named_value_output_names.size() +
       (authority.image_output_name.has_value() ? 1U : 0U);
@@ -346,12 +340,12 @@ constexpr int kMaxRegistryStableExpansionAttempts = 8;
 std::string make_full_task_graph_cache_key(
     const GraphModel& graph, ComputeIntent intent,
     std::uint64_t registry_generation,
-    const std::vector<Device>& available_devices) {
+    const std::vector<DeviceBackend>& available_devices) {
   std::string key = std::to_string(graph.topology_generation()) + ":" +
                     std::to_string(static_cast<int>(intent)) + ":" +
                     std::to_string(registry_generation) + ":" +
                     kTaskShapeConfigVersion + ":devices";
-  for (Device device : available_devices) {
+  for (DeviceBackend device : available_devices) {
     key += ":" + std::to_string(static_cast<int>(device));
   }
   return key;
@@ -366,12 +360,13 @@ std::string make_full_task_graph_cache_key(
  * @note An empty inventory remains empty and therefore selects no operation;
  * the helper never fabricates CPU availability.
  */
-std::vector<Device> canonicalize_available_devices(
-    const std::vector<Device>& available_devices) {
-  std::vector<Device> result = available_devices;
-  std::sort(result.begin(), result.end(), [](Device lhs, Device rhs) {
-    return static_cast<int>(lhs) < static_cast<int>(rhs);
-  });
+std::vector<DeviceBackend> canonicalize_available_devices(
+    const std::vector<DeviceBackend>& available_devices) {
+  std::vector<DeviceBackend> result = available_devices;
+  std::sort(result.begin(), result.end(),
+            [](DeviceBackend lhs, DeviceBackend rhs) {
+              return static_cast<int>(lhs) < static_cast<int>(rhs);
+            });
   result.erase(std::unique(result.begin(), result.end()), result.end());
   return result;
 }
@@ -838,12 +833,6 @@ PixelRect required_upstream_roi_for_task(
     const PixelSize upstream_extent = resolve_planned_extent(
         *graph, dependency.from_node_id, resolver, extent_cache);
     if (upstream_extent.width > 0 && upstream_extent.height > 0) {
-      ImageBuffer input_buffer;
-      input_buffer.width = upstream_extent.width;
-      input_buffer.height = upstream_extent.height;
-      input_buffer.channels = 1;
-      input_buffer.type = DataType::FLOAT32;
-
       TiledExecutionConfig config;
       config.tile_size = to_task.tile_size > 0 ? to_task.tile_size : 256;
       config.output_roi = to_task.output_roi;
@@ -881,7 +870,7 @@ PixelRect required_upstream_roi_for_task(
       }
       const PixelRect execution_mapped_roi = NodeExecutor::input_roi_for_tile(
           const_cast<GraphModel&>(*graph), downstream_node, to_task.output_roi,
-          input_buffer, config, input_extents,
+          upstream_extent, config, input_extents,
           effective_parameters ? &*effective_parameters : nullptr);
       const PixelRect snapshot_lower_bound =
           clip_rect(dependency.from_roi, upstream_extent);
@@ -1188,7 +1177,7 @@ void clear_dirty_work_metadata(ComputePlan& result) {
 ComputePlan build_plan_from_nodes(
     const ComputeRequest& request, const std::vector<int>& planned_nodes,
     const DirtyRegionSnapshot* snapshot, const GraphModel* graph,
-    const std::vector<Device>& available_devices) {
+    const std::vector<DeviceBackend>& available_devices) {
   ComputePlan result;
   result.intent = request.intent;
   result.target_node_id = request.target_node_id;
@@ -1491,8 +1480,8 @@ std::unordered_set<int> required_nodes_before_satisfied_boundaries(
 
 std::string full_task_graph_cache_key(
     const GraphModel& graph, ComputeIntent intent,
-    const std::vector<Device>& available_devices) {
-  const std::vector<Device> canonical_devices =
+    const std::vector<DeviceBackend>& available_devices) {
+  const std::vector<DeviceBackend> canonical_devices =
       canonicalize_available_devices(available_devices);
   return make_full_task_graph_cache_key(
       graph, intent, OpRegistry::instance().task_shape_generation(),
@@ -1501,9 +1490,9 @@ std::string full_task_graph_cache_key(
 
 std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
     GraphModel& graph, ComputeIntent intent,
-    const std::vector<Device>& available_devices) {
+    const std::vector<DeviceBackend>& available_devices) {
   auto& registry = OpRegistry::instance();
-  const std::vector<Device> canonical_devices =
+  const std::vector<DeviceBackend> canonical_devices =
       canonicalize_available_devices(available_devices);
   for (int attempt = 0; attempt < kMaxRegistryStableExpansionAttempts;
        ++attempt) {
@@ -1626,8 +1615,8 @@ void populate_full_task_graph_indexes(FullTaskGraph& expanded) {
 
 FullTaskGraph FullTaskGraphExpander::expand(
     const GraphModel& graph, ComputeIntent intent,
-    const std::vector<Device>& available_devices) const {
-  const std::vector<Device> canonical_devices =
+    const std::vector<DeviceBackend>& available_devices) const {
+  const std::vector<DeviceBackend> canonical_devices =
       canonicalize_available_devices(available_devices);
   ComputeRequest request;
   request.intent = intent;

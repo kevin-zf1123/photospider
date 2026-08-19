@@ -5,7 +5,6 @@
 #include "server/worker/worker_artifact_data_plane.hpp"
 
 #include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -398,56 +397,20 @@ std::string data_plane_reference(const AttemptIdentity& identity,
 }
 
 /**
- * @brief Validates one tight artifact descriptor without allocation.
+ * @brief Validates one named-Value archive descriptor without allocation.
  * @param descriptor Candidate descriptor.
- * @return Nothing when dimensions, type, row bytes, and payload agree.
- * @throws std::invalid_argument for invalid shape or checked overflow.
+ * @return Nothing when version, count, and archive size are supported.
+ * @throws std::invalid_argument for an invalid descriptor.
  */
-void validate_tight_descriptor(const ArtifactImageDescriptor& descriptor) {
-  if (descriptor.width <= 0 || descriptor.height <= 0 ||
-      descriptor.channels <= 0) {
-    throw std::invalid_argument("worker artifact descriptor is empty");
-  }
-  const std::size_t width = static_cast<std::size_t>(descriptor.width);
-  const std::size_t height = static_cast<std::size_t>(descriptor.height);
-  const std::size_t channels = static_cast<std::size_t>(descriptor.channels);
-  const std::size_t channel_bytes =
-      image_buffer_bytes_per_channel(descriptor.type);
-  if (width > std::numeric_limits<std::size_t>::max() / channels ||
-      width * channels >
-          std::numeric_limits<std::size_t>::max() / channel_bytes) {
-    throw std::invalid_argument("worker artifact row size overflowed");
-  }
-  const std::size_t row_bytes = width * channels * channel_bytes;
-  if (row_bytes > std::numeric_limits<std::size_t>::max() / height ||
-      descriptor.row_bytes != row_bytes ||
-      descriptor.payload_bytes != row_bytes * height) {
-    throw std::invalid_argument("worker artifact descriptor is inconsistent");
+void validate_artifact_descriptor(
+    const ValueArtifactSetDescriptor& descriptor) {
+  if (descriptor.archive_version != 1U || descriptor.value_count == 0U ||
+      descriptor.value_count > kMaximumNamedValueArtifacts ||
+      descriptor.archive_bytes == 0U) {
+    throw std::invalid_argument(
+        "worker Value artifact descriptor is inconsistent");
   }
 }
-
-/**
- * @brief Releases one exact anonymous candidate mapping at final owner death.
- * @throws Nothing; `munmap` failure cannot be recovered during destruction.
- * @note `mapped_bytes` is the exact logical candidate length supplied to
- * `mmap`; the kernel may internally round its virtual mapping to page size.
- */
-struct AnonymousOutputMappingDeleter final {
-  /** @brief Exact byte length originally passed to `mmap`. */
-  std::size_t mapped_bytes = 0U;
-
-  /**
-   * @brief Releases the retained mapping once.
-   * @param mapping Exact mapping base, or null after an empty move.
-   * @return Nothing.
-   * @throws Nothing.
-   */
-  void operator()(void* mapping) const noexcept {
-    if (mapping != nullptr && mapped_bytes != 0U) {
-      static_cast<void>(::munmap(mapping, mapped_bytes));
-    }
-  }
-};
 
 /**
  * @brief Validates one metadata-first candidate before mapping or hydration.
@@ -466,7 +429,7 @@ void validate_output_report_metadata(
   const bool successful_shape =
       report.outcome == JobAttemptOutcome::Succeeded && report.settled &&
       report.failure == JobAttemptFailure::None;
-  if (report.image.has_value() || successful_shape != output.has_value()) {
+  if (report.values.has_value() || successful_shape != output.has_value()) {
     throw WorkerArtifactDataPlaneError(
         "worker output metadata does not match its report shape");
   }
@@ -479,47 +442,15 @@ void validate_output_report_metadata(
         "worker output metadata does not join its assigned stage");
   }
   try {
-    validate_tight_descriptor(output->descriptor);
+    validate_artifact_descriptor(output->descriptor);
   } catch (const std::exception& error) {
     throw WorkerArtifactDataPlaneError(
         std::string("worker output descriptor is invalid: ") + error.what());
   }
-  if (output->descriptor.payload_bytes > assignment.maximum_payload_bytes) {
+  if (output->descriptor.archive_bytes > assignment.maximum_payload_bytes) {
     throw WorkerArtifactDataPlaneError(
         "worker output-stage size exceeds its assigned stage");
   }
-}
-
-/**
- * @brief Creates one lazy pathless exact-length tight CPU mapping.
- * @param descriptor Valid positive tight output descriptor.
- * @return `ImageBuffer` whose logical capacity is exactly payload bytes.
- * @throws WorkerArtifactDataPlaneError when anonymous mapping fails.
- * @throws std::bad_alloc when the shared owner control block cannot allocate.
- * @note `mmap` reserves the contiguous virtual range without a bytewise
- * initialization pass; manager receives later populate it in fixed slices.
- */
-ImageBuffer make_anonymous_output_image(
-    const ArtifactImageDescriptor& descriptor) {
-  void* mapping =
-      ::mmap(nullptr, descriptor.payload_bytes, PROT_READ | PROT_WRITE,
-             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (mapping == MAP_FAILED) {
-    throw WorkerArtifactDataPlaneError(
-        std::string("worker output anonymous mapping failed: ") +
-        std::strerror(errno));
-  }
-  std::shared_ptr<void> owner(
-      mapping, AnonymousOutputMappingDeleter{descriptor.payload_bytes});
-  ImageBuffer image;
-  image.width = descriptor.width;
-  image.height = descriptor.height;
-  image.channels = descriptor.channels;
-  image.type = descriptor.type;
-  image.device = Device::CPU;
-  image.step = descriptor.row_bytes;
-  image.data = std::move(owner);
-  return image;
 }
 
 /**
@@ -536,7 +467,7 @@ void validate_artifact_receipt_metadata(const OutputCommitReceipt& receipt) {
     throw std::invalid_argument(
         "worker artifact receipt identity or durability is invalid");
   }
-  validate_tight_descriptor(receipt.descriptor);
+  validate_artifact_descriptor(receipt.descriptor);
 }
 
 }  // namespace
@@ -564,14 +495,19 @@ WorkerDataPlaneAssignment make_worker_data_plane_assignment(
   if (assignment.checkpoint != nullptr) {
     const ArtifactRecord& checkpoint = *assignment.checkpoint;
     validate_artifact_receipt_metadata(checkpoint.receipt);
+    const std::vector<std::byte> checkpoint_archive =
+        encode_named_value_artifact_set(checkpoint.values);
     if (checkpoint.receipt.attempt.tenant_id != assignment.identity.tenant_id ||
         checkpoint.receipt.artifact_id !=
             *assignment.spec->checkpoint_artifact_id() ||
-        checkpoint.receipt.descriptor.payload_bytes !=
-            checkpoint.payload.size() ||
-        checkpoint.payload.size() >
+        checkpoint.receipt.descriptor.archive_bytes !=
+            checkpoint_archive.size() ||
+        checkpoint_archive.size() >
             resource_size(
-                assignment.spec->resource_request().host_memory_bytes)) {
+                assignment.spec->resource_request().host_memory_bytes) ||
+        checkpoint.receipt.content_digest !=
+            hash_artifact_content(checkpoint_archive.data(),
+                                  checkpoint_archive.size())) {
       throw std::invalid_argument(
           "worker data-plane checkpoint does not match durable authority");
     }
@@ -635,7 +571,7 @@ void validate_worker_data_plane_assignment(
       checkpoint.reference_id.size() > kMaximumWorkerDataPlaneReferenceBytes ||
       receipt.attempt.tenant_id != identity.tenant_id ||
       receipt.artifact_id != *spec.checkpoint_artifact_id() ||
-      receipt.descriptor.payload_bytes >
+      receipt.descriptor.archive_bytes >
           resource_size(spec.resource_request().host_memory_bytes)) {
     throw std::invalid_argument(
         "worker checkpoint data-plane metadata is inconsistent");
@@ -798,47 +734,38 @@ void WorkerArtifactDataPlane::close_manager_output_descriptor() noexcept {
   close_once(&manager_output_descriptor_);
 }
 
-/** @copydoc ps::server::WorkerArtifactDataPlane::prepare_output_image */
-std::optional<ImageBuffer> WorkerArtifactDataPlane::prepare_output_image(
+/** @copydoc ps::server::WorkerArtifactDataPlane::prepare_output_archive */
+std::optional<std::vector<std::byte>>
+WorkerArtifactDataPlane::prepare_output_archive(
     const JobAttemptReport& report,
     const std::optional<WorkerOutputDataReference>& output) const {
   validate_output_report_metadata(assignment_metadata_.output, report, output);
   if (!output.has_value()) {
     return std::nullopt;
   }
-  return make_anonymous_output_image(output->descriptor);
+  return std::vector<std::byte>(output->descriptor.archive_bytes);
 }
 
 /** @copydoc ps::server::WorkerArtifactDataPlane::materialize_report */
 JobAttemptReport WorkerArtifactDataPlane::materialize_report(
     JobAttemptReport report,
     const std::optional<WorkerOutputDataReference>& output,
-    std::optional<ImageBuffer> image, std::size_t payload_size,
+    std::optional<std::vector<std::byte>> archive, std::size_t payload_size,
     const ArtifactContentDigest& payload_digest) const {
   validate_output_report_metadata(assignment_metadata_.output, report, output);
   if (!output.has_value()) {
-    if (image.has_value() || payload_size != 0U) {
+    if (archive.has_value() || payload_size != 0U) {
       throw WorkerArtifactDataPlaneError(
-          "image-free worker report sent output-stage bytes");
+          "Values-free worker report sent output-stage bytes");
     }
     return report;
   }
-  if (!image.has_value()) {
+  if (!archive.has_value()) {
     throw WorkerArtifactDataPlaneError(
         "worker output-stage final owner is missing");
   }
-  try {
-    validate_image_buffer(*image);
-  } catch (const std::exception& error) {
-    throw WorkerArtifactDataPlaneError(
-        std::string("worker output final image is invalid: ") + error.what());
-  }
-  if (image->width != output->descriptor.width ||
-      image->height != output->descriptor.height ||
-      image->channels != output->descriptor.channels ||
-      image->type != output->descriptor.type || image->device != Device::CPU ||
-      image->step != output->descriptor.row_bytes ||
-      output->descriptor.payload_bytes != payload_size) {
+  if (archive->size() != output->descriptor.archive_bytes ||
+      output->descriptor.archive_bytes != payload_size) {
     throw WorkerArtifactDataPlaneError(
         "worker output-stage size exceeds or differs from metadata");
   }
@@ -846,7 +773,19 @@ JobAttemptReport WorkerArtifactDataPlane::materialize_report(
     throw WorkerArtifactDataPlaneError(
         "worker output-stage content digest is inconsistent");
   }
-  report.image = std::move(*image);
+  try {
+    NamedValueArtifactSet values = decode_named_value_artifact_set(*archive);
+    if (values.values.size() != output->descriptor.value_count) {
+      throw WorkerArtifactDataPlaneError(
+          "worker output-stage Value count is inconsistent");
+    }
+    report.values = std::move(values);
+  } catch (const WorkerArtifactDataPlaneError&) {
+    throw;
+  } catch (const std::exception& error) {
+    throw WorkerArtifactDataPlaneError(
+        std::string("worker output archive is invalid: ") + error.what());
+  }
   return report;
 }
 
@@ -868,7 +807,7 @@ std::shared_ptr<const ArtifactRecord> materialize_worker_checkpoint(
   require_stream_socket(checkpoint_descriptor);
   const std::size_t expected_size =
       data_plane.checkpoint.has_value()
-          ? data_plane.checkpoint->receipt.descriptor.payload_bytes
+          ? data_plane.checkpoint->receipt.descriptor.archive_bytes
           : 0U;
   std::vector<std::byte> payload =
       receive_exact_checkpoint(checkpoint_descriptor, expected_size);
@@ -883,7 +822,16 @@ std::shared_ptr<const ArtifactRecord> materialize_worker_checkpoint(
   }
   ArtifactRecord record;
   record.receipt = receipt;
-  record.payload = std::move(payload);
+  try {
+    record.values = decode_named_value_artifact_set(payload);
+  } catch (const std::exception& error) {
+    throw WorkerArtifactDataPlaneError(
+        std::string("worker checkpoint archive is invalid: ") + error.what());
+  }
+  if (record.values.values.size() != receipt.descriptor.value_count) {
+    throw WorkerArtifactDataPlaneError(
+        "worker checkpoint Value count is inconsistent");
+  }
   return std::make_shared<const ArtifactRecord>(std::move(record));
 }
 
@@ -905,51 +853,39 @@ PreparedWorkerOutputTransfer prepare_worker_output_transfer(
           output_payload_maximum(spec.resource_request())) {
     throw std::invalid_argument("worker output stage does not join assignment");
   }
-  if (!report->image.has_value()) {
+  if (!report->values.has_value()) {
     return {};
   }
   if (report->outcome != JobAttemptOutcome::Succeeded || !report->settled ||
       report->failure != JobAttemptFailure::None) {
     throw std::invalid_argument(
-        "only a settled successful report may stage an image");
+        "only a settled successful report may stage Values");
   }
-  const ImageBuffer& image = *report->image;
-  validate_image_buffer(image);
-  if (image.device != Device::CPU || image.width <= 0 || image.height <= 0 ||
-      image.channels <= 0 || image.data == nullptr) {
-    throw std::invalid_argument("worker output image is not nonempty CPU data");
-  }
-  const std::size_t row_bytes = image_buffer_row_bytes(image);
-  if (row_bytes > std::numeric_limits<std::size_t>::max() /
-                      static_cast<std::size_t>(image.height)) {
-    throw std::overflow_error("worker output image size overflowed");
-  }
-  const std::size_t payload_bytes =
-      row_bytes * static_cast<std::size_t>(image.height);
+  std::vector<std::byte> archive =
+      encode_named_value_artifact_set(*report->values);
+  const std::size_t payload_bytes = archive.size();
   if (payload_bytes > output_stage.maximum_payload_bytes) {
     report->outcome = JobAttemptOutcome::Failed;
     report->settled = true;
     report->failure = JobAttemptFailure::Compute;
     report->message =
-        "worker candidate image exceeds accepted artifact data-plane bounds";
-    report->image.reset();
+        "worker candidate Values exceed accepted artifact data-plane bounds";
+    report->values.reset();
     return {};
   }
 
   WorkerOutputDataReference output;
   output.reference_id = output_stage.reference_id;
   output.output_slot_id = output_stage.output_slot_id;
-  output.descriptor.width = image.width;
-  output.descriptor.height = image.height;
-  output.descriptor.channels = image.channels;
-  output.descriptor.type = image.type;
-  output.descriptor.row_bytes = row_bytes;
-  output.descriptor.payload_bytes = payload_bytes;
-  output.content_digest = hash_image_artifact_content(image);
+  output.descriptor.archive_version = 1U;
+  output.descriptor.value_count =
+      static_cast<std::uint32_t>(report->values->values.size());
+  output.descriptor.archive_bytes = payload_bytes;
+  output.content_digest = hash_artifact_content(archive.data(), archive.size());
   PreparedWorkerOutputTransfer transfer;
   transfer.reference = std::move(output);
-  transfer.source = image;
-  report->image.reset();
+  transfer.source = std::move(archive);
+  report->values.reset();
   return transfer;
 }
 
@@ -964,25 +900,13 @@ void send_worker_output_transfer(int output_descriptor,
     return;
   }
   const WorkerOutputDataReference& output = *transfer.reference;
-  const ImageBuffer& image = *transfer.source;
-  validate_image_buffer(image);
-  if (image.device != Device::CPU || image.width != output.descriptor.width ||
-      image.height != output.descriptor.height ||
-      image.channels != output.descriptor.channels ||
-      image.type != output.descriptor.type ||
-      image_buffer_row_bytes(image) != output.descriptor.row_bytes ||
-      output.descriptor.row_bytes >
-          std::numeric_limits<std::size_t>::max() /
-              static_cast<std::size_t>(image.height) ||
-      output.descriptor.row_bytes * static_cast<std::size_t>(image.height) !=
-          output.descriptor.payload_bytes) {
+  const std::vector<std::byte>& archive = *transfer.source;
+  if (archive.size() != output.descriptor.archive_bytes ||
+      hash_artifact_content(archive.data(), archive.size()) !=
+          output.content_digest) {
     throw std::invalid_argument("worker output transfer source is invalid");
   }
-  for (int row = 0; row < image.height; ++row) {
-    send_complete_from_worker(output_descriptor,
-                              image_buffer_row_data(image, row),
-                              output.descriptor.row_bytes);
-  }
+  send_complete_from_worker(output_descriptor, archive.data(), archive.size());
 }
 
 }  // namespace ps::server

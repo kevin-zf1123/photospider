@@ -22,7 +22,7 @@ namespace {
  * @throws Validation, overflow, length, or allocation exceptions from Value
  * publication.
  * @note Physical samples are `[(1,9),(2,8);(3,7),(4,6)]`, where each tuple
- * follows physical schema order. The helper creates no ImageBuffer.
+ * follows physical schema order. The helper creates no alternate image view.
  */
 Value make_statistics_value() {
   DenseTensorDescriptor descriptor{{2U, 2U, 2U},
