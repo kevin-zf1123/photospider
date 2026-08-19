@@ -444,7 +444,7 @@ HP 脏区更新是一等的 dirty-ROI 消费方，而不只是完整重算 fallb
 
 HP-to-RT downsample request 携带已提交的 logical HP `RegionSet`，而不是 storage rectangle。
 `DownsampleExecutor` 会读取已提交 HP Value 的有符号 data window，把 request 翻译成经过 clip 的
-零基 `ImageBuffer` ROI 来选择像素，再把翻译回逻辑域的 Region 提交到
+零基 dense-Value storage ROI 来选择像素，再把翻译回逻辑域的 Region 提交到
 `RealtimeProxyGraph::NodeState::region_hp`。直接 Empty request 保留既有 full-frame
 fallback，Whole 映射到显式有限 data window，而 stale/failure/cancellation path 不发布
 staged proxy state。
@@ -716,7 +716,7 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `src/lib/compute/dispatch/compute_task_dispatcher.*`
 - `src/lib/compute/dirty/intent_update_coordinator.*`
 - `src/lib/compute/dirty/dirty_update_executor.*`
-- `src/lib/core/exact_box_downsample.cpp`
+- `src/lib/core/dense_image_processing.*`
 - `src/lib/runtime/graph_event_service.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/unit/test_compute_io_executor.cpp`

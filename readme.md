@@ -87,7 +87,7 @@ saving are REPL commands, not top-level flags.
 | Load a graph | `read <file>` or `load <name> [yaml]` |
 | Inspect a graph | `print all full`, `inspect <id>`, `inspect all`, or `inspect dirty` |
 | Compute output | `compute <id> [flags]` or `compute all [flags]` |
-| Save an image | `save <id> <file>` |
+| Save an image | `save <id> <output> <file> <uint8|uint16> <destination-encoding> <destination-domain> <min> <max> <domain-policy> <rounding> <non-finite-policy> <precision-policy>` |
 | Discover commands | `help` or `help <command>` |
 | Leave the REPL | `exit` |
 

@@ -251,7 +251,7 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 | `Kernel` | 多图 facade、服务 owner、运行时 bootstrapper、顶层图/缓存/计算 API。 |
 | `ps::Host` | `include/photospider/host` 下的 public frontend interface；返回复制的 request/result/snapshot value，并隐藏 Kernel、GraphModel 和 GraphRuntime。 |
 | `embedded Host adapter` | 由每 adapter 独立的 `Kernel` 和 `InteractionService` 状态支撑的 in-process Host 实现；所有 adapter 共享进程级 operation plugin owner。 |
-| `IPC Host adapter` | 完整的 installed Host 实现，只由 typed short-lived Client call 支撑。它组合 polling compute、join async worker、保留精确 status domain，并把 protected image artifact 映射为只读。 |
+| `IPC Host adapter` | 完整的 installed Host 实现，只由 typed short-lived Client call 支撑。它组合 polling compute、join async worker、保留精确 status domain，临时 mapping 并 detach protected named-Value archive，随后重建全新 local Values。 |
 | `ps::ipc::Client` | Move-only direct client，为精确排序的 60-method version 2 inventory 提供 owned value；它验证 correlated result shape，且不暴露 raw JSON call。 |
 | `photospiderd` | Foreground local service，拥有一个 embedded Host 并串行化全部 Host call，同时独立服务 metadata 与 job polling。 |
 | daemon registry | 对 opaque session、compute job、stable collection snapshot、protected output 与 delivery lease 的 private bounded ownership；它们都不是 public backend handle。 |
@@ -344,8 +344,9 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
    保留精确 Graph 或 Daemon 语义，RPC、admission 与 lookup failure 则保持独立。在 public Host
    boundary 上，唯一 status vocabulary 能区分 `none`、`transport`、`protocol`、`graph` 与
    `daemon`，transport 绝不会变成 graph IO。
-5. Image mode 在 delivery lease 下验证 same-user mode-`0600` artifact，把 tight row 映射为只读，
-   随后尝试匹配的 job/lease release。最后一个 shared image owner 恰好 unmap/close 一次。
+5. Values mode 在 delivery lease 下验证 same-user mode-`0600` named-Value archive，将其临时
+   mapping 为只读，验证并 detach 精确 bytes，恰好执行一次 unmap/close，重建全新 local Values，
+   随后尝试匹配的 job/lease release。
 6. Async adapter destruction 会发出 stop、唤醒 wait、interrupt active descriptor、用 Transport
    `client_stopped` (5) 完成 unfinished future，并 join worker；它不会 resubmit，也不会关闭
    daemon-owned session。
@@ -450,56 +451,61 @@ worker 写入会先通过 `RealtimeProxyWriteBuffer` stage，再提交到 proxy�
 负责 YAML syntax、filesystem metadata IO，并把 parser/emitter failure 翻译为现有 graph error
 taxonomy。
 
-### ImageBuffer 契约
+### 稠密图像 Value 契约
 
-`ImageBuffer` 是公共内核契约，不是内部实现细节。算子、执行器、插件、适配器和缓存代码可以依赖其文档化字段和不变量。
+普通稠密图像是一个不可变 `Value`，由 `DenseTensorDescriptor`、完整
+`ImageFacet`、显式 `StridedLayout`、一个或多个受检查的 `BufferHandle`
+binding，以及一个 `ReadyFence` 组成。系统不存在第二种图像 Value、兼容 snapshot、
+storage enum 或 native-context carrier。内核拥有的 CPU 输出行至少提供 64 字节
+alignment；更大的 alignment 仍是优化，而不是可移植要求。
 
-内核拥有的 CPU 缓冲区必须提供 64 字节对齐的行起点。`step` 是字节单位的行步长，可以大于紧凑行大小以保持对齐。ARM Mac 高性能路径可能需要或受益于 128 字节对齐，但 128 字节对齐是优化目标，而不是可移植最低要求。
+V-2 安装了不可变 CPU DenseTensor `Value`、`DenseTensorView` 与显式轴
+`ImageView` 契约。V-3 新增 `BufferHandle`、保留所有权的读写 lease、
+`ValueBuilder`、受检查的 byte offset 与有符号坐标，以及进程本地的 allocation/revision
+identity。shared operation runtime 持有唯一的进程级 minting authority。内建
+`image_process:invert_dense` operation 通过正常的 core seeding、`OpRegistry`
+resolution 与 `NodeExecutor` invocation 使用这些契约。其 callback bridge 把纯
+descriptor inference 与 stride-aware execution 分开，校验返回的完整
+descriptor/facet/layout，并保留精确的 result Value。Operation ABI v1 携带完整 Value
+和 Host-owned output grant。
 
-V-2 安装 immutable CPU DenseTensor `Value`、`DenseTensorView` 与 explicit-axis
-`ImageView` contract。V-3 新增 `BufferHandle`、read/write lease、`ValueBuilder`、byte offset、
-受界限约束的 signed immutable view，以及 process-local allocation/revision identity。Shared
-operation runtime 持有唯一进程级 minting authority；非零 identity token 只记录已签发状态，
-不会查询其 allocation 是否仍存活。内建
-`image_process:invert_dense` operation 会经过正常 core seeding、`OpRegistry` resolution 与
-`NodeExecutor` monolithic invocation 抵达这些 type。其 private callback bridge 会读取规范的
-named input Value，把 descriptor-only inference 与 stride-aware execution 分开，校验返回的
-完整 descriptor/facet/layout，并保留精确 result Value。Operation ABI v1 投影完整 Value 与
-Host-owned output grant；其余 public Host edge 在 DI-4 前仍可派生 use-scoped ImageBuffer projection。
+DI-2 把正式 HP、dirty、tiled、real-time、extent、metrics 与 cache path 迁移到
+同一种 Value 表示。`NodeOutput` 按规范顺序携带 named Value，`image` 是约定的
+image port。`DenseImageOutputPlan` 在一次 Host allocation 前冻结完整 image fact、
+精确 storage、alignment 与 Region。move-only whole/tile grant 会预留经过检查且互不
+重叠的 span，并且必须全部 retirement 后才进行一次 seal 与一次 publication。
+sticky validation、retirement、exception 或 cancellation failure 会撤销所有 grant，
+且不发布任何内容。
 
-DI-2 使私有正式 HP、dirty、tiled、RT、extent、metrics 与 cache path 全部只使用 Value。
-`NodeOutput` 按规范顺序携带 named Value，并将 `image` 作为永久 image port；
-`compatibility_image` 是正式 commit 前必须清除的入站暂存。`DenseImageOutputPlan` 在一次 Host
-allocation 前冻结完整 image fact、精确 storage、alignment 与 Region。Move-only whole/tile
-grant 预留经过检查且互不重叠的 span，并且必须全部 retirement 后才可完成一次 seal 和一次
-publication。sticky validation、retirement、exception 或 cancellation failure 会撤销所有
-grant，且不发布任何内容。Operation ABI v1 现在携带同一套不可变 plan 与 callback-scoped Host
-grant。DI-4 仍负责其余 public Host/IPC/worker/durable/codec/CLI ImageBuffer surface；
-compatibility object 不会进入正式 cache state。
+V-8 新增经过检查的 `DeviceId`、`MemoryDomain`、`StorageBinding`、保留所有权的
+native allocation、producer identity 与显式 `AccessPlan`。transfer 创建不同的物理
+replica，同时保留相同的逻辑 `ValueRevisionId`；device-local binding 不会被伪造出
+Host pointer。`ResidencyManager` 持有精确合格 replica，并在同一个经过 freshness
+检查的 transaction 中发布 destination readiness 与 residency。Pending Value 通过
+Run-scoped continuation 重新进入既有 `ExecutionService` ready store，因此 CPU worker
+不会等待 device completion。Operation ABI v1 仍是同步且仅支持 CPU。
 
-V-8 新增经过检查的 `DeviceId`、`MemoryDomain`、`StorageBinding`、native-allocation retention、
-producer identity 与显式 `AccessPlan`。Transfer 会创建不同的物理 replica，同时保留同一个逻辑
-`ValueRevisionId`；device-local binding 不会被伪造出 host pointer。`ResidencyManager` 是精确
-合格 replica 的唯一进程 owner，并在同一个 freshness-checked transaction 中发布 destination
-readiness 与 residency。Kernel 会在可失败的 coordinator publication 前预跟踪 lineage，
-但不指派 managed current identity。Accepted current-generation callback 会按
-coordinator-to-manager 顺序，在 currentness 可观察前把精确发布的 generation 指派给该行，
-包括 coordinate 授权的数值下降。之后的 stale Run observation 与 transfer admission
-不能替换这个 exact managed identity；standalone lineage 保持 numeric-maximum ordering。Pending Value
-通过 Run-scoped continuation 重新进入既有
-`ExecutionService` ready store，因此 CPU worker 不会等待 Metal completion。Metal Perlin route
-会产生 pending native Value，并在下游 CPU access 前执行显式 asynchronous
-texture-to-buffer readback。Operation ABI v1 只支持同步 CPU，不暴露 native-device context 或
-asynchronous owner。其余 Host surface 在 DI-4 前仍可使用 ImageBuffer compatibility value；
-两条路径都不会把 ImageBuffer identity 提升为 runtime authority。
+V-14 新增 provider-defined multi-buffer Value 契约。一个注入式
+`DataDefinitionRegistry` 会把完整 typed Schema/Facet/Layout bundle 解析成不可变
+generation。通用 bounds check 先于 provider validation 与 revision minting；带 index
+的读取会保留选中的 `BufferHandle` 及对应 generation。纯 property、DataSpec 与 Region
+callback 能看到 metadata，但看不到 payload。规范的 descriptor/content/layout identity
+与保留 byte 的 artifact envelope 支持这些 Value，且不会把它们压平成普通稠密图像。
 
-V-14 在不改变 `ImageBuffer` 的前提下新增 provider-defined multi-buffer `Value` contract。
-一个注入式 `DataDefinitionRegistry` 会把完整 typed Schema/Facet/Layout bundle 解析为不可变
-generation。通用 bounds check 先于 provider validation 和 revision minting；带 index 的 read 会
-保留选中的 `BufferHandle` 及该 generation。纯 property、DataSpec 与 Region callback 能看到
-metadata，但看不到 payload。系统安装 canonical descriptor/content/layout SHA-256 identity 与
-保留 byte 的 artifact envelope，但不会增加 provider-defined graph operation、cache policy、codec、
-OpenEXR path、operation ABI extension slot 或 Host command。
+DI-4 完成剩余外部边界迁移。Embedded 与 IPC Host 返回按规范排序的 named Value，
+并提供 metadata-only inspection，不等待也不映射 payload。IPC OutputStore、worker
+protocol v3、worker data-plane reference 与 durable manifest 携带规范的 named Value
+artifact set；每次 decode 都会在 publication 前校验 framing、version、identity join、
+digest、payload bounds 与本地 data definition。replay 保留可移植 artifact identity，
+但会创建全新的本地 allocation、revision、producer、fence 与 binding identity。
+
+OpenCV 只适配普通的 Ready、Host-readable 稠密 Value。普通 OpenEXR codec 保留彼此
+独立的有符号 data window 与 display window，保留 UINT32/FLOAT32 storage，并把 HALF
+精确提升为 FP32。OpenEXR Deep 仍是 provider-defined variable-sample Value，绝不会填充
+成 dense tensor。Codec 与 CLI conversion 要求显式 source/destination
+`SampleEncoding`、`SampleDomain`、out-of-domain、clamp、rounding、non-finite 与
+precision-loss policy；storage width 不会隐含 255 或 65535 scaling。完整专门化契约见
+[稠密图像 Value 内存契约](Dense-Image-Value-Memory-Contract.zh.md)。
 
 ### 脏区传播
 
@@ -623,13 +629,17 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/core/cache_metadata_codec.hpp`
-- `src/lib/core/image_buffer_processing.*`
+- `src/lib/core/dense_image_processing.*`
+- `src/lib/core/sample_conversion.cpp`
+- `src/lib/core/value_artifact.cpp`
 - `src/lib/core/value.cpp`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`
-- `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
+- `src/lib/adapters/opencv/value_adapter_opencv.*`
+- `src/lib/adapters/opencv/image_artifact_codec_opencv.*`
+- `src/lib/adapters/openexr/openexr_dense_image_codec.*`
 - `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/providers/configured_persistence_adapters.*`
 - `src/lib/graph/graph_io_service.*`
@@ -657,4 +667,7 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_device_residency.cpp`
 - `tests/integration/test_metal_device_executor.cpp`
-- `tests/unit/test_stdlib_image_buffer_processing.cpp`
+- `tests/unit/test_dense_image_processing.cpp`
+- `tests/unit/test_dense_image_value_contracts.cpp`
+- `tests/unit/test_sample_conversion.cpp`
+- `tests/unit/test_value_artifact.cpp`

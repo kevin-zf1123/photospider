@@ -17,8 +17,8 @@ OpenCV adapter 或标准库实现，因此 compute/runtime 代码不会直接声
 
 **Dirty Region** 是由 `RegionSet` 表示的规范化逻辑 affected/demanded work。V-4 的 HP 支持
 精确 ImageRect 与 rank-general TensorSlice；RT 只接受精确 ImageRect。当前 Host/IPC v2
-inspection、operation ABI v1 adapter、ImageBuffer processing 与 physical image tile 使用 checked
-derived `PixelRect`/`PixelSize`。这些 compatibility rectangle 在各自 HP 或 RT storage
+inspection、operation ABI v1 adapter、dense Value processing 与 physical image tile 使用 checked
+derived `PixelRect`/`PixelSize`。这些 physical rectangle 在各自 HP 或 RT storage
 allocation 中都是零基坐标，不继承有符号逻辑原点。只有 provider 或算法在真实 matrix 或 algorithm call 处才会
 局部创建 OpenCV rectangle 与 size。
 
@@ -305,7 +305,7 @@ resolution 与短暂 staging 临界区会被串行化；不同节点与 operatio
 
 当前逻辑 dirty authority 在 propagation、planning、source history、per-node state、edge
 mapping、HP validity、staging 与 Region-aware core dense operation 中使用规范化 `RegionSet`。
-Checked derived `PixelRect` 与 `PixelSize` 只保留在 image tile/task、ImageBuffer、Host/IPC v2
+Checked derived `PixelRect` 与 `PixelSize` 只保留在 image tile/task、dense Value processing、Host/IPC v2
 与 operation ABI v1 adapter 边缘。Region endpoint 与 tensor-shape arithmetic 都受检查；image adapter
 拒绝 uncertainty、TensorSlice、custom domain、multi-atom clause 与 narrowing overflow。只有
 provider 或 adapter 实现在真实调用处才会创建 OpenCV rectangle 与 size。
@@ -334,10 +334,10 @@ route。上述明确限制界定了当前 generation 与 epoch check 能够保�
 - `include/photospider/data/region.hpp`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
-- `src/lib/core/image_buffer_processing.*`
-- `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
+- `src/lib/core/{dense_image_processing,value_region}.*`
+- `src/lib/adapters/opencv/value_adapter_opencv.*`
 - `src/lib/compute/dirty/dirty_region_snapshot.hpp`
-- `tests/unit/test_stdlib_image_buffer_processing.cpp`
+- `tests/unit/test_dense_image_processing.cpp`
 - `src/lib/compute/dirty/dirty_region_snapshot_builder.cpp`
 - `src/lib/compute/dirty/dirty_region_planner.cpp`
 - `src/lib/compute/dirty/dirty_region_planning_policy.hpp`

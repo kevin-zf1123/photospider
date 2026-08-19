@@ -1244,7 +1244,7 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor, Packed FP4, Provider Extensions, Region, ReadyFence, and Transfer Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
-binary for the implemented V-2 through V-12 and DI-1/DI-2 boundaries. Its 54
+binary for the implemented V-2 through V-12 and DI-1 through DI-4 boundaries. Its 54
 durable cases
 verify:
 
@@ -1275,9 +1275,9 @@ verify:
   lifetime, BufferHandle subranges, process-local identities, and the
   non-liveness meaning of a nonzero `AllocationIdentity`;
 - bounded positive, zero, and negative immutable strides over shared
-  allocations, with distinct Value revisions, plus independent row-major
-  interleaved ImageBuffer snapshots for reverse-y, broadcast-y, and
-  planar-channel layouts;
+  allocations, with distinct Value revisions, plus direct `ImageView`
+  coordinate access and independent dense-Value clones for reverse-y,
+  broadcast-y, and planar-channel layouts;
 - immutable Value copy sharing, copy-like DenseTensorView/ImageView moves, and
   allocation-isolated lvalue/rvalue descriptor, layout, and payload inputs;
 - authorized pending-native and validated opaque-imported formal publication,
@@ -1319,13 +1319,23 @@ lifecycle.
 cases. They verify both nibble orders and a nonzero bit offset, exact encoded
 and scale-dequantized E2M1 access, strict descriptor/quantization/layout/
 envelope rejection, block-aligned TensorSlice scale/code projection with fresh
-identities, byte-view and ImageBuffer fail-closed behavior, representation-
+identities, byte-view and ordinary-image-view fail-closed behavior, representation-
 preserving CPU and injected fake-device transfer, exact formal memory-cache
 retention, and typed image disk-cache rejection before executor, filesystem,
 or codec effects. The malformed matrix includes wrong quantization rank/count,
 zero or non-divisible blocks, nonfinite/nonpositive scales, bad layout version/
 alignment/overlap/size, quantized Strided publication, and oversized blocked
 transfer aliases.
+
+DI-4 also has dedicated `test_dense_image_value_contracts`,
+`test_sample_conversion`, `test_value_artifact`, and
+`test_dense_image_processing` unit suites. IPC, Host, worker, durable, static
+package-consumer, OpenCV, and ordinary OpenEXR integration tests cover named
+Value delivery, metadata-only inspection, transactional reconstruction,
+artifact identity joins, adapter lifetime, independent data/display windows,
+exact HALF promotion, UINT32 code values, and fail-closed unsupported shapes or
+implicit conversions. OpenEXR Deep remains covered separately by its provider-
+defined variable-sample suite.
 
 `test_variable_sample_field_extensions` owns seventeen standard-library-only V-14
 integration cases. A synthetic pure-C definition suite publishes versioned
@@ -1392,9 +1402,13 @@ cmake --build build --target test_region_contracts \
   test_cpu_dense_tensor_image_operation \
   test_packed_fp4_dense_tensor \
   test_variable_sample_field_extensions \
+  test_dense_image_value_contracts \
+  test_sample_conversion \
+  test_value_artifact \
+  test_dense_image_processing \
   public_header_self_containment -j 2
 ctest --test-dir build --output-on-failure \
-  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor|VariableSampleFieldExtensions)\.'
+  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor|VariableSampleFieldExtensions|DenseImageValueContracts|SampleConversion|ValueArtifact|DenseImageProcessing)\.'
 ```
 
 `DependencyDisabledInstallSmoke` builds and runs all 54 dense cases plus all
@@ -3142,7 +3156,7 @@ covers `test_propagation`; run the exact manual command separately when needed.
 The provider-dependent default full test suite is registered only when
 `BUILD_TESTING`, OpenCV, YAML, graph CLI, the repository OpenCV operation
 provider, and repository OpenCV operation plugins are all enabled. It registers
-`test_stdlib_image_buffer_processing` and compiles the standard-library
+`test_dense_image_processing` and compiles the dependency-neutral
 implementation directly even though that producer uses OpenCV. The test
 verifies clone independence, stride-safe deterministic bilinear border
 behavior, channel conversions, and ROI copying. The default CTest inventory

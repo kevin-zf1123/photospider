@@ -146,9 +146,9 @@ deleted in the same migration.
 
 ## Scope boundary
 
-This decision migrates only the operation plugin and isolated-invocation
-boundary. DI-4 still owns the final removal or migration of public Host,
-IPC/worker, durable, codec, CLI, and remaining `ImageBuffer` surfaces. Policy
+This decision migrated only the operation plugin and isolated-invocation
+boundary. DI-4 subsequently migrated public Host, IPC/worker, durable, codec,
+and CLI boundaries and removed the former image compatibility surface. Policy
 ABI v1 and data-definition provider ABI v3 remain independently versioned and
 unchanged.
 

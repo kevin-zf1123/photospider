@@ -14,7 +14,7 @@ transport 或进程级 operation plugin
 也不暴露物理 executor/policy pointer。Public compute request 可以携带一个可选正值
 `maximum_parallelism` 作为 Run 上限；它不能调整进程 executor 的大小，也不能选择该 executor。
 逻辑 dirty work 与 cache validity 在 planning、staging 和 Region-aware core dense path 中
-保持为规范化 `RegionSet`。当前 image tile shape、Host/IPC v2 inspection、ImageBuffer helper
+保持为规范化 `RegionSet`。当前 image tile shape、Host/IPC v2 inspection、dense Value helper
 与 operation ABI v1 adapter 使用 checked derived `PixelRect`/`PixelSize`。私有 dirty/tile
 PixelRect 是零基 storage geometry；逻辑 Region 与 Host grant 使用有符号 data-window domain。
 跨越这条边界必须先做 containment，再进行 checked origin subtraction/addition。OpenCV geometry 只存在于
@@ -125,7 +125,7 @@ Host-owned reserved-start transaction 提交的每个 Run 执行权。
 | `IntentUpdateCoordinator` | HP-only 或 HP/RT sibling 语义 | 物理优先级或 worker 所有权 |
 | `ComputeTaskDispatcher` | Dependency counter、ready release、temporary-result indexing、completion、exception、full HP commit 与 dirty source-first submission helper | Run storage、Graph topology derivation、dirty staged commit、policy ranking 或物理执行 |
 | `TaskSubmissionPlan` | 一个 full HP request 的 Run-owned dense index、依赖状态、exact-once task state、冻结的 implementation/device snapshot、结果槽、callback owner 与 pending-Value fence wait cancellation owner | execution-route worker、Run terminal state、native completion freshness 或 dirty-path execution |
-| `ReadyTaskSubmission` | 一个 dependency-ready task 的 move-only 不可变 metadata、selected `Device`、精确 operation constraint、复合 task identity、匹配 Run lease 与 owned executable | Planning、dependency derivation、Graph/cache authority 或 commit |
+| `ReadyTaskSubmission` | 一个 dependency-ready task 的 move-only 不可变 metadata、selected `DeviceBackend`、精确 operation constraint、复合 task identity、匹配 Run lease 与 owned executable | Planning、dependency derivation、Graph/cache authority 或 commit |
 | `ExecutionService` | 一个 Host-owned 固定 CPU pool、一个由 service 拥有的 Metal lane、一个带 process-owned native resource 与共享精确 `ResidencyManager` 的固定 `DeviceExecutorRegistry`、私有 `serial_debug`/`gpu_pipeline` route、一个 Host/device 权威 `ResourceLedger`、一个 process-domain operation gate、一个私有 lifecycle-admission registry、policy-aware 有界 ready storage、Run-scoped ReadyFence continuation routing、进程级 policy binding、reserved-start transaction、精确 Run queued purge/running drainage，以及按 Run 隔离的 completion/failure/trace settlement | Planning、dependency、Graph/cache state、cancellation authority、visible commit、access-plan selection、residency eviction 或 resource ordering/fairness |
 | `NodeExecutor` | 一致的 monolithic/tiled operation 调用 | 图变更策略 |
 | `ComputeMetricsRecorder` | compute event、timing、benchmark event 和 debug metadata | execution trace 所有权 |
@@ -152,8 +152,8 @@ result。它还从
 planning/`NodeExecutor` 接收规范化 Region，复制未选中的逻辑 coordinate，并通过 checked
 stride 对精确 ImageRect 或 rank-general TensorSlice coordinate 执行 invert。同 key plugin
 override 使用自身经过验证的 operation ABI v1 descriptor、Region、plan 与 grant contract，而不
-继承这份 private core contract。Publication 会保留该精确 sealed result allocation/revision；
-只有显式 Host/codec adapter 才可派生 use-scoped ImageBuffer snapshot。
+继承这份 private core contract。Publication 会保留该精确 sealed result allocation/revision。
+Host 与 codec adapter 保留该精确 Value 或捕获 portable artifact；它们不会派生替代 image snapshot。
 
 DI-2 使 HP compute-service、result-committer、dirty-write、RT 与 disk-load boundary 在正式
 publication 前只使用 Value。一个 immutable `DenseImageOutputPlan` 会在单次 Host binding
@@ -214,7 +214,7 @@ nibble-aligned bit offset/stride、互不重叠的完整 block span，以及精�
 order/offset、unused nibble bit 与逻辑 revision，同时取得 fresh binding/producer identity。
 Oversized immutable BufferHandle alias 仍可作为有效 bounded view，但不是精确 transfer producer；
 preparation 会在 destination publication 或 provider effect 前拒绝它。Transfer 不执行
-dequantization、requantization、ImageBuffer adaptation 或 implicit wait。
+dequantization、requantization、替代 image adaptation 或 implicit wait。
 
 Registry 共享的 `ResidencyManager` 会在 native commit 前准入完整
 Graph/target/intent/generation/Run/task/producer/revision/binding identity。Current-generation
@@ -566,7 +566,7 @@ retry choice、settlement、quota、artifact 或 commit authority。
   inventory 与 compute-domain intent，选择实际的 revisioned implementation 后再判断
   TensorSlice eligibility。只有选中的精确 core dense monolithic callback 具有 private tensor
   contract；选中的 same-key device replacement 会返回 Unsupported，不会回退到 scalar。
-- 当前 image tiling、ImageBuffer processing、Host/IPC v2 inspection 与 operation ABI v1 adapter
+- 当前 image tiling、dense Value processing、Host/IPC v2 inspection 与 operation ABI v1 adapter
   携带 checked derived `PixelRect`/`PixelSize`，绝不携带 OpenCV geometry。Dirty/tile
   rectangle 是零基 storage projection；有符号 logical Region metadata 通过所属 data window
   翻译。TensorSlice 是 HP-only monolithic work，绝不会获得 rectangle。
@@ -948,8 +948,8 @@ Run-owned commit contender。该 claim 之前被接受的 cancellation 会使 Ru
 publication 使用 no-throw state swap，并保留 revision。Contender 会在 publication 后解析为
 `Succeeded`，或在 work item 返回前把精确 predicate/persistence failure 保留为 `Failed`。
 
-正式 output validation 只接受精确 declared canonical-image-plus-generic 集合中的 Ready Value，
-并拒绝任何非空 `compatibility_image`。Parameter result 会作为独立精确集合校验。Image-free
+正式 output validation 只接受精确 declared canonical-image-plus-generic 集合中的 Ready Value。
+Parameter result 会作为独立精确集合校验。Image-free
 successful target 保持有效，且不会发布伪造的 image identity。
 tiled/dirty task 共享一个 per-node binding；最后一个 executable tile retirement 并 seal 它，
 而 planning 保留精确覆盖 ROI 的 task dependency。非最终 tile 不释放其原始 edge。只有唯一的
@@ -990,13 +990,13 @@ V-12 通用数据矩阵还会提交已准入的 observation work，并直接保�
 `Value`。在非空 lifetime token 与精确 planned-byte charge 下，I/O worker 会观察相同的
 descriptor、可选 Image Facet、layout、binding、allocation、逻辑 revision 与完整 storage
 envelope，随后在 typed settlement 时归还两个 budget。这证明有界 execution mechanism 本身
-不会窄化 FP64、channel、rank 或 stride。它不定义通用 serialization：当前 product cache
-仍会穿过 image-only `ImageBuffer`/selected-precision codec 边界，而 latent Value 没有这条
-artifact path。
+不会窄化 FP64、channel、rank 或 stride。它不定义通用 serialization。共享 portable Value
+artifact 契约拥有通用 serialization；configured image codec 仍是 ordinary-image-only 路径，
+而 worker 与 durable artifact 路径可以保留受支持的 latent Value。
 
 V-13 不会放宽该 persistence boundary。正式 HP memory-cache state 可以保留 packed Value 与
 精确 TensorSlice validity，但已配置 image disk save 会在估算或准入 `ComputeIoExecutor` task
-前校验 ImageBuffer compatibility。Packed、quantized 或 latent 正式 Value 会在 filesystem path
+前校验显式 ordinary-image codec compatibility。Packed、quantized 或 latent 正式 Value 会在 filesystem path
 或 codec 被触碰前抛出 `GraphError{InvalidParameter}`。这项 fail-closed 结果是类型化 boundary
 observation，不是通用 artifact format、digest、manifest 或 durable-output completion state。
 
@@ -1017,7 +1017,8 @@ daemon job terminal state、result delivery、cache save、Graph 文档保存与
 
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
 接受一个目标：可选 cache 持久化与 durable output commit 在 Run publication 后拥有独立
-结果。源码私有 Issue #99 Job 纵向路径现在实现了一条窄的跨重启 image-output 路径：稳定
+结果。源码私有 Issue #99 Job 纵向路径现在实现了一条窄的跨重启 named-Value artifact-set
+output 路径：稳定
 artifact/commit identity、manifest-last filesystem publication、idempotent reconciliation、
 retained quota、durable Job record 与 restart recovery。这不会把 cache save、daemon
 delivery、Graph-document save 或任意 runtime Value 变成该 artifact authority。有界
@@ -1221,7 +1222,7 @@ owner。
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
-- `src/lib/core/exact_box_downsample.cpp`
+- `src/lib/core/dense_image_processing.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/ipc/output_store.*`
 - `plugins/ops/save_op.cpp`

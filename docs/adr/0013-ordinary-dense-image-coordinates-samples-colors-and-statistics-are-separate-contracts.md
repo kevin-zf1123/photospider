@@ -4,8 +4,9 @@
 
 Accepted for GitHub Issue #129 / DI-1 on 2026-08-17. This decision governs the
 ordinary built-in DenseImage metadata baseline. DI-3 now projects the complete
-metadata through pure-C operation ABI v1; DI-4 still owns final `ImageBuffer`
-and Host/IPC/worker/durable/CLI migration. This ADR does not implement automatic
+metadata through pure-C operation ABI v1; DI-4 completed the Host, IPC, worker,
+durable, codec, and CLI migration and removed the former compatibility image
+type. This ADR does not implement automatic
 color conversion or reinterpret provider-defined OpenEXR Deep metadata as
 ordinary-image authority.
 
@@ -117,10 +118,11 @@ There is no structural-version-1 fallback, compatibility alias, or missing-tail
 guess. A later decoder must select an exact supported version and reject any
 other shape.
 
-The transitional `ImageBuffer -> Value` bridge creates an explicit zero-origin
-data window and no display/channel-schema/sample/color facts. Reverse projection
-copies active elements and knowingly loses richer metadata because ImageBuffer
-cannot represent it. Isolated CPU protocol v2 instead encodes the complete
+During the DI-1 transition, the former image-to-Value bridge created an
+explicit zero-origin data window and no display/channel-schema/sample/color
+facts. Reverse projection copied active elements and knowingly lost richer
+metadata because the predecessor type could not represent it. DI-4 removed
+both directions of that bridge. Isolated CPU protocol v2 instead encodes the complete
 optional ImageFacet record. Image outputs preserve axes, signed windows,
 channels, sample domains, and color facts; generic DenseTensor outputs omit the
 facet entirely. Presence/identity mismatches fail closed rather than being
@@ -136,11 +138,11 @@ silently synthesized or dropped.
 - Canonical golden digests change deliberately with structural version 2.
 - Diagnostic spelling and derived statistics do not perturb semantic identity.
 - DI-2 schedules derived statistics against the complete frozen facet and
-  Value revision; an `ImageBuffer` compatibility projection is never a
-  statistics identity or cache-key authority.
-- Remaining product wire/artifact migrations must encode the frozen records
-  exactly or reject them; operation ABI v1 and isolated CPU protocol v2 already
-  do so for their implemented DenseImage routes.
+  Value revision; the compatibility projection that existed during that slice
+  never became statistics identity or cache-key authority and is now removed.
+- Product wire/artifact boundaries encode the frozen records exactly or reject
+  them. Operation ABI v1, isolated CPU protocol v2, IPC named artifacts, worker
+  protocol v3, and durable manifests all preserve their implemented records.
 - OpenEXR Deep provider windows remain provider-defined metadata and are not
   reused as built-in ordinary DenseImage authority.
 
@@ -148,9 +150,9 @@ silently synthesized or dropped.
 
 - [ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 - [Kernel Data Model](../kernel-architecture/Data-Model.md)
-- [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md)
+- [Dense Image Value Memory Contract](../kernel-architecture/Dense-Image-Value-Memory-Contract.md)
 - [Kernel Cache Model](../kernel-architecture/Cache-Model.md)
 - [Dense Image Value Migration](../roadmap/Kernel-Evolution.md#dense-image-value-migration)
-- GitHub Project 6 / parent issue #128 / issues #129 and #130
+- GitHub Project 6 / parent issue #128 / issues #129, #130, and #131
 - OpenSpec change `define-dense-image-coordinate-sample-statistics-contracts`
 - OpenSpec change `add-host-owned-output-authorization`

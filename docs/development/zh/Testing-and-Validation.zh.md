@@ -981,7 +981,7 @@ ctest --test-dir build --output-on-failure \
 
 ## CPU DenseTensor、Packed FP4、Provider Extension、Region、ReadyFence 与 Transfer 验证
 
-`test_cpu_dense_tensor_image_operation` 是覆盖已实现 V-2 至 V-12 与 DI-1/DI-2 边界的
+`test_cpu_dense_tensor_image_operation` 是覆盖已实现 V-2 至 V-12 与 DI-1 至 DI-4 边界的
 provider-independent integration binary。它的 54 个长期用例验证：
 
 - copyable ReadyFence poll、queued non-inline wait、observer-local waiter cancellation、
@@ -1007,8 +1007,8 @@ provider-independent integration binary。它的 54 个长期用例验证：
   BufferHandle subrange、process-local identity，以及非零 `AllocationIdentity` 不表示
   allocation liveness；
 - 在 shared allocation 上受界限约束的正、零与负 immutable stride、彼此不同的 Value
-  revision，以及从 reverse-y、broadcast-y 与 planar-channel layout 得到的独立
-  row-major interleaved ImageBuffer snapshot；
+  revision，以及对 reverse-y、broadcast-y 与 planar-channel layout 的直接 `ImageView`
+  坐标访问和独立 dense-Value clone；
 - immutable Value copy sharing、copy-like DenseTensorView/ImageView move，以及 lvalue/rvalue
   descriptor、layout 与 payload input 的 allocation 隔离；
 - 已授权 pending-native 与已校验 opaque-imported Value 的正式发布、正式 HP cache alias
@@ -1042,11 +1042,19 @@ selection/edge mapping 与 Region dirty lifecycle。
 `test_packed_fp4_dense_tensor` 拥有 4 个 dependency-neutral V-13 integration case。它们验证
 两种 nibble order 与 nonzero bit offset、精确 encoded/scale-dequantized E2M1 access、严格
 descriptor/quantization/layout/envelope rejection、block-aligned TensorSlice 对 scale/code 的
-投影与 fresh identity、byte-view 与 ImageBuffer fail-closed 行为、保留表示的 CPU 与注入式
+投影与 fresh identity、byte-view 与 ordinary-image-view fail-closed 行为、保留表示的 CPU 与注入式
 fake-device transfer、精确正式 memory-cache retention，以及在 executor、filesystem 或 codec
 副作用前发生的 typed image disk-cache rejection。Malformed matrix 包括错误 quantization
 rank/count、zero 或 non-divisible block、nonfinite/nonpositive scale、错误 layout version/
 alignment/overlap/size、quantized Strided publication 与 oversized blocked transfer alias。
+
+DI-4 另有专门的 `test_dense_image_value_contracts`、`test_sample_conversion`、
+`test_value_artifact` 与 `test_dense_image_processing` unit suite。IPC、Host、worker、durable、
+static package-consumer、OpenCV 与普通 OpenEXR integration test 覆盖 named Value delivery、
+metadata-only inspection、transactional reconstruction、artifact identity join、adapter lifetime、
+彼此独立的 data/display window、精确 HALF promotion、UINT32 code value，以及对不支持 shape 或
+隐式 conversion 的 fail-closed 行为。OpenEXR Deep 继续由独立的 provider-defined
+variable-sample suite 覆盖。
 
 `test_variable_sample_field_extensions` 拥有 17 个只使用标准库的 V-14 integration case。
 一个合成纯 C definition suite 会发布带版本的 VariableSampleField Schema、Facet 和 Layout record，
@@ -1103,9 +1111,13 @@ cmake --build build --target test_region_contracts \
   test_cpu_dense_tensor_image_operation \
   test_packed_fp4_dense_tensor \
   test_variable_sample_field_extensions \
+  test_dense_image_value_contracts \
+  test_sample_conversion \
+  test_value_artifact \
+  test_dense_image_processing \
   public_header_self_containment -j 2
 ctest --test-dir build --output-on-failure \
-  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor|VariableSampleFieldExtensions)\.'
+  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor|VariableSampleFieldExtensions|DenseImageValueContracts|SampleConversion|ValueArtifact|DenseImageProcessing)\.'
 ```
 
 `DependencyDisabledInstallSmoke` 会在真实禁用 OpenCV/YAML/OpenEXR discovery 的 product 中构建并
@@ -2555,7 +2567,7 @@ CTest，因此它们可见；但在后续 pass 将前两类重写为更窄、更
 
 只有 `BUILD_TESTING`、OpenCV、YAML、graph CLI、仓库 OpenCV operation provider 与仓库 OpenCV
 operation plugin 全部启用时，才会注册依赖 provider 的默认完整 test suite。该 suite 会注册
-`test_stdlib_image_buffer_processing`；即使该 producer 使用 OpenCV，它仍会直接编译标准库实现。
+`test_dense_image_processing`；即使该 producer 使用 OpenCV，它仍会直接编译 dependency-neutral 实现。
 该测试验证 clone independence、stride-safe 且确定性的 bilinear border 行为、channel
 conversion 与 ROI copy。默认 CTest inventory 也包含 `DependencyDisabledInstallSmoke`。
 

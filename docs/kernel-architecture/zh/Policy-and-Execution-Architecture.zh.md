@@ -226,8 +226,8 @@ terminator overflow 与少一个 byte 的 retained limit 都会在 provider entr
 与同一会话的活动请求串行化，并发布新的非零代次。同名替换同样推进代次。
 失败时保留旧路由。
 
-操作选择会在 Run 准入前冻结一份 coherent callback、metadata、`Device` 与非零 implementation
-revision。Planning 只保留 callback-free identity/metadata/shape；submission 必须重新解析同一个
+操作选择会在 Run 准入前冻结一份 coherent callback、metadata、`DeviceBackend` 与非零
+implementation revision。Planning 只保留 callback-free identity/metadata/shape；submission 必须重新解析同一个
 identity，之后才能保留 callable/DSO lease。完整 HP、dirty HP/RT 和连接参数预检都使用同一份
 规范化 route-aware inventory；full-task cache identity 会包含该 inventory 与 registry generation。
 Region propagation 与 dirty TensorSlice eligibility 也会使用该 request inventory 和匹配的
@@ -789,7 +789,7 @@ pool header 共享完全相同的嵌套类型，但不会形成 forwarding contr
 - `src/lib/benchmark/m1/m1_canonical.*`
 - `src/lib/benchmark/common/evidence_envelope.*`
 - `src/lib/compute/execution/progressive_compute.*`
-- `src/lib/core/exact_box_downsample.cpp`
+- `src/lib/core/dense_image_processing.*`
 - `src/lib/runtime/resource_ledger.*`
 - `src/lib/execution/device/compute_io_executor.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`

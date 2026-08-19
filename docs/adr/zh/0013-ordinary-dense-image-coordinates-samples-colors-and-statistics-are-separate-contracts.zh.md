@@ -3,8 +3,8 @@
 ## 状态
 
 本决策于 2026-08-17 为 GitHub Issue #129 / DI-1 接受，约束内建普通 DenseImage metadata
-基线。DI-3 现在通过纯 C operation ABI v1 投影完整 metadata；DI-4 仍负责最终 `ImageBuffer` 与
-Host/IPC/worker/durable/CLI 迁移。本 ADR 不实现自动颜色转换，也不把 provider-defined OpenEXR
+基线。DI-3 现在通过纯 C operation ABI v1 投影完整 metadata；DI-4 已完成 Host、IPC、worker、
+durable、codec 与 CLI 迁移，并删除此前的兼容图像类型。本 ADR 不实现自动颜色转换，也不把 provider-defined OpenEXR
 Deep metadata 重新解释为普通图像权威。
 
 英文架构与 OpenSpec 文档是权威来源。实时远端交付、CI 与 review 状态仍由
@@ -96,9 +96,9 @@ Image Facet 升级到结构版本 2，编码 axes、有符号 data/display windo
 不存在结构版本 1 fallback、兼容别名或 missing-tail 猜测。后续 decoder 必须
 选择精确受支持版本，并拒绝任何其他结构。
 
-过渡期 `ImageBuffer -> Value` bridge 创建显式零原点数据窗口，且不携带
-display/channel-schema/sample/color 事实。反向投影复制活跃元素，并因为
-ImageBuffer 无法表示丰富元数据而有意识地丢失它们。Isolated CPU protocol v2
+在 DI-1 过渡期间，此前的 image-to-Value bridge 会创建显式零原点数据窗口，且不携带
+display/channel-schema/sample/color 事实。反向投影会复制活跃元素，并因为前身类型无法表示
+丰富元数据而有意识地丢失它们。DI-4 已删除该 bridge 的两个方向。Isolated CPU protocol v2
 则编码完整的可选 ImageFacet 记录。图像 output 会保留 axes、有符号 window、channel、
 sample domain 与 color 事实；generic DenseTensor output 完全不携带 facet。任何
 presence/identity 不匹配都会 fail closed，而不会被静默合成或丢弃。
@@ -112,10 +112,10 @@ presence/identity 不匹配都会 fail closed，而不会被静默合成或丢�
   ImageFacet。
 - 规范 golden digest 随结构版本 2 有意改变。
 - 诊断拼写与派生统计不会扰动语义身份。
-- DI-2 针对完整 frozen facet 与 Value revision 调度派生统计；`ImageBuffer`
-  compatibility projection 绝不是 statistics identity 或 cache-key authority。
-- 余下产品 wire/artifact migration 必须精确编码冻结记录或拒绝它们；operation ABI v1 与
-  isolated CPU protocol v2 已在各自实现的 DenseImage 路径上做到这一点。
+- DI-2 针对完整 frozen facet 与 Value revision 调度派生统计；该切片当时存在的 compatibility
+  projection 从未成为 statistics identity 或 cache-key authority，并且现已删除。
+- 产品 wire/artifact 边界会精确编码冻结记录，否则拒绝它们。Operation ABI v1、isolated CPU
+  protocol v2、IPC named artifact、worker protocol v3 与 durable manifest 都保留各自实现记录。
 - OpenEXR Deep provider 窗口仍是 provider-defined 元数据，不会复用为内建普通
   DenseImage 权威。
 
@@ -123,9 +123,9 @@ presence/identity 不匹配都会 fail closed，而不会被静默合成或丢�
 
 - [ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 - [Kernel 数据模型](../../kernel-architecture/zh/Data-Model.zh.md)
-- [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)
+- [稠密图像 Value 内存契约](../../kernel-architecture/zh/Dense-Image-Value-Memory-Contract.zh.md)
 - [Kernel 缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)
 - [普通图像 Value 迁移](../../roadmap/zh/Kernel-Evolution.zh.md#普通图像-value-迁移)
-- GitHub Project 6 / parent issue #128 / issues #129 and #130
+- GitHub Project 6 / parent issue #128 / issues #129、#130 与 #131
 - OpenSpec change `define-dense-image-coordinate-sample-statistics-contracts`
 - OpenSpec change `add-host-owned-output-authorization`

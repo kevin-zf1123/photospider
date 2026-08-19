@@ -21,8 +21,8 @@ it as an upstream root of the selected dependency cone.
 **Dirty Region** is normalized logical affected or demanded work represented
 by `RegionSet`. V-4 supports exact ImageRect and rank-general TensorSlice for
 HP; RT accepts only exact ImageRect. Current Host/IPC v2 inspection, operation
-ABI v1 adapters, ImageBuffer processing, and physical image tiles use checked derived
-`PixelRect`/`PixelSize`. Those compatibility rectangles are zero-based within
+ABI v1 adapters, dense Value processing, and physical image tiles use checked derived
+`PixelRect`/`PixelSize`. Those physical rectangles are zero-based within
 their HP or RT storage allocation and do not inherit a signed logical origin.
 OpenCV rectangles and sizes are created only locally
 inside providers or algorithms at actual matrix or algorithm calls.
@@ -381,7 +381,7 @@ The current implementation does not provide:
 Current logical dirty authority uses normalized `RegionSet` across propagation,
 planning, source history, per-node state, edge mappings, HP validity, staging,
 and the Region-aware core dense operation. Checked derived `PixelRect` and
-`PixelSize` remain only at image tile/task, ImageBuffer, Host/IPC v2, and
+`PixelSize` remain only at image tile/task, dense Value processing, Host/IPC v2, and
 operation ABI v1 adapter edges. Region endpoint and tensor-shape arithmetic is checked;
 the image adapter rejects uncertainty, TensorSlice, custom domains,
 multi-atom clauses, and narrowing overflow. OpenCV rectangles and sizes are
@@ -417,10 +417,10 @@ can currently guarantee.
 - `include/photospider/data/region.hpp`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
-- `src/lib/core/image_buffer_processing.*`
-- `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
+- `src/lib/core/{dense_image_processing,value_region}.*`
+- `src/lib/adapters/opencv/value_adapter_opencv.*`
 - `src/lib/compute/dirty/dirty_region_snapshot.hpp`
-- `tests/unit/test_stdlib_image_buffer_processing.cpp`
+- `tests/unit/test_dense_image_processing.cpp`
 - `src/lib/compute/dirty/dirty_region_snapshot_builder.cpp`
 - `src/lib/compute/dirty/dirty_region_planner.cpp`
 - `src/lib/compute/dirty/dirty_region_planning_policy.hpp`

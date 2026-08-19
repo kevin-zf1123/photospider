@@ -167,7 +167,6 @@ Graph state.
 
 | Field | Meaning |
 | --- | --- |
-| `compatibility_image` | Inbound-only staging for codecs and remaining Host/legacy adapters. It must be cleared before formal commit and is never cache, allocation, readiness, or revision authority; operation ABI v1 uses complete Value/grant records. |
 | `named_values` | Canonically ordered immutable Values. The current image port is permanently named `image`; every image or generic entry is the sole payload, allocation, readiness, and revision authority for that exact name. |
 | `data` | Named parameter-result scalars or structures stored as a `plugin::ParameterMap`; generic Values never enter this field. |
 | `space` | Spatial transform, scale, and ROI metadata. |
@@ -707,7 +706,8 @@ neither document changes the current fields described above.
 - `src/lib/core/dense_tensor_content_digest.*`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/packed_dense_tensor.cpp`
-- `src/lib/core/value_image_adapter.*`
+- `src/lib/core/{value_region,dense_image_processing}.*`
+- `src/lib/adapters/{opencv,openexr}/`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/cpu_dense_image_operation.*`

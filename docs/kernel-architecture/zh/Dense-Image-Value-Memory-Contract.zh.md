@@ -1,0 +1,146 @@
+# 稠密图像 Value 内存契约
+
+本文档定义普通稠密图像当前的内存、metadata、发布和外部 artifact 契约。一个稠密图像就是一个
+内置 `Value`：它具备 `DenseTensorDescriptor`、完整 `ImageFacet`、显式 Layout、一个或多个
+受检 `BufferHandle` binding 以及一个 `ReadyFence`。不存在第二种图像值、兼容 snapshot、
+存储枚举或 native-context carrier。
+
+[Data Model](../Data-Model.md) 中的通用契约仍是权威来源。本文档将其专门化到普通图像及其
+Host、codec、cache、IPC、worker 和 durable 边界。OpenEXR Deep 仍是独立的 provider-defined
+variable-sample 契约。
+
+## 逻辑 descriptor 与图像解释
+
+`DenseTensorDescriptor` 拥有 rank、正的具体 shape、`ElementSemantics`、`StorageEncoding`
+和可选 quantization。它不拥有坐标、物理 stride、device placement、readiness、sample 含义、
+color 含义或观测 statistics。
+
+每个普通图像都有一个 `ImageFacet`，其中 x/y axis 显式且互异，并可带一个同样互异的 channel
+axis。在当前内置 image view 中，未分配给 x、y 或 channel 的 axis 必须为 singleton。该 Facet
+包含：
+
+- 必需的 signed half-open data window，其 span 与 descriptor 的 x/y extent 精确相等；
+- 可选且独立的 signed half-open display window；
+- 可选的稳定 channel/group schema；
+- 可选的版本化 sample encoding/domain 声明；
+- 可选的版本化 color 解释。
+
+data window 是逻辑 pixel-coordinate 权威。display window 是 presentation metadata，不授予
+payload 访问。`ImageView` 同时提供 zero-based storage coordinate 和受检的 signed logical
+coordinate；逻辑访问仅在完成 containment 检查后才减去 data-window origin。
+
+诊断性的 channel/group 名称从不选择 semantic role，也不进入 semantic equality。稳定的
+`ChannelId` 和 `ChannelGroupId` record 承担该职责。观测 extrema、histogram、NaN/Inf count
+及其他 statistics 永远不会成为 descriptor、Facet 或 content identity。
+
+## Layout、binding 与所有权
+
+普通内置图像使用经过验证的 whole-byte `StridedLayout`。descriptor shape 和 element width
+与 byte stride/offset 相互独立。immutable Value 可以保留受检的正、零或负 stride；可写 producer
+builder 则要求 non-overlapping positive layout 和精确的 storage envelope。
+
+`BufferHandle` 是一个受检 immutable byte range，位于一个显式 `StorageBinding` 上。它不暴露
+raw pointer 或任意 context payload。Host 只能通过 retaining read lease 或独占 producer/grant
+write lease 访问。source-private device Value 保留显式 `DeviceBackend`、`DeviceId`、
+`MemoryDomain`、native owner 和 byte range；device-to-Host transfer 会创建不同的物理 binding，
+但不改变逻辑 descriptor。
+
+`ValueBuilder` 在唯一 write lease 被释放且 `seal()` 成功前拥有 mutable CPU storage。seal 会在
+发布具有全新 immutable Value revision 的结果前验证 descriptor、Facet、Layout、binding、
+storage envelope 和 producer state。`PendingValuePublisher` 与 device publication 遵循相同的
+single-authority 规则：terminal failure 会清除 private producer access，成功的 Ready publication
+之后不可再修改。
+
+## Readiness 与 metadata-only inspection
+
+readiness 属于 `ReadyFence`，而不属于图像 descriptor 或 artifact。Pending、Ready、Failed 和
+ProducerCancelled 是封闭状态。payload view、buffer lease、codec read 和 content digest 计算
+要求 Ready。
+
+Host metadata inspection 会复制 descriptor、Facet、Layout summary、buffer envelope、readiness
+snapshot、producer identity、可选 canonical digest 以及有界且 identity-independent 的 statistics
+reference。它不会取得 payload lease、map device、等待 fence、计算 digest 或调度 statistics。
+因此 non-Ready output 仍可 inspection，同时不会放宽 payload 访问规则。
+
+## 命名 Host output
+
+Embedded 和 IPC Host 返回 canonical ordered named Value。output name 有界、非空、唯一并已排序；
+`image` 是普通图像 output 的约定名称，但不是独立 result type。成功 result delivery 要求每个已
+声明 output 都存在且 Ready。failure 拥有一个有界 `OperationStatus`，并且不发布 partial Value set。
+
+formal、dirty、tiled 与 real-time 路径发布相同形态的 named Value。dirty execution 可以从 signed
+data window 派生受检、storage-relative 的 `PixelRect` work，但 commit 保留原始 logical window
+和 Value authority。resize/downsample scratch Value 仅属于 callback-local，永远不会作为替代
+snapshot 进入 formal cache state。
+
+## 可移植 Value artifact
+
+外部和 durable 边界使用 `ValueArtifactEnvelope` version 1 与 canonical named artifact set。
+envelope 保留完整内置 descriptor、ImageFacet、Layout、有序 buffer role/span/alignment、payload
+digest、可选 content digest 和有界 statistics reference。store owner 用自身的 artifact、commit、
+slot、attempt、lease、quota 与 path authority 包装它；这些事实不会成为 Value identity。
+
+payload byte 留在 JSON 和 control frame 之外。IPC OutputStore 私下 stage 所有 buffer，并最后发布
+完整 metadata manifest。worker protocol v3 传输 metadata 和 data-plane reference，而不在 control
+frame 内放置 bulk byte。durable manifest 把相同 record 绑定到稳定 artifact/commit identity，同时
+保留 manifest-last、barrier、replay、deletion 和 fail-stop 顺序。
+
+每次 decode 都是 transactional。只有 framing、version、bound、canonical ordering、descriptor/
+Layout digest、owner join、精确 payload length、SHA-256 以及本地内置或 provider validation 均通过，
+才会发布任何内容。reconstruction 会创建全新的 allocation、Value revision、producer、fence 和
+local binding identity。失败不会留下 partial result、formal cache mutation、receipt、quota credit
+或 dependent release。
+
+## Cache 与持久化
+
+memory cache 保留精确 immutable Value 与 validity fact。符合条件的 disk-cache/save 操作直接捕获
+portable Value artifact，不会派生第二种图像表示。不受支持的 packed、quantized、device-only、
+provider-missing 或 non-Ready input 会按显式 codec/artifact 契约 fail closed。
+
+artifact identity、logical content digest、Value revision、allocation identity、graph revision 和
+statistics-cache identity 相互独立。replay 可以保留同一 artifact/content identity，但必然创建全新
+runtime identity。
+
+## OpenCV 与普通 OpenEXR adapter
+
+public OpenCV adapter 只接受 Ready、Host-readable、whole-byte、unquantized、Strided 的普通 image
+Value。borrowed read-only matrix 会保留 source Value；mutable matrix 被限制在独占 Host output grant
+内。OpenCV decode 保留受支持的 8/16-bit code value，并分配显式 zero-origin data window，因为普通
+OpenCV metadata 不具备 signed-window authority。它从不处理 `.exr` path。
+
+可选的普通 OpenEXR codec 只接受单 part scanline image。它独立保留 signed data/display window。
+uniform UINT/FLOAT channel 保留 32-bit storage；HALF sample 会精确提升到 FP32，因为内置 tensor
+契约没有 binary16 storage encoding。mixed channel storage、sampled channel、tiled/deep/multipart
+input、缺少显式 encode display window 以及隐式 numeric conversion 都会被拒绝。
+
+OpenEXR Deep 不使用该普通路径。它仍是一个 provider-defined multi-buffer `VariableSampleField`
+Value，组合 ImageFacet、DeepSampleFacet、count、prefix offset 和每个显式映射 channel 的 sample
+stream。零个或可变数量的 sample 永远不会被 padding 成 DenseTensor。
+
+## 显式 sample conversion
+
+storage 从不隐含 sample 含义。codec 和 CLI conversion 使用一个 `SampleConversion`，其中包含显式
+source/destination `SampleEncoding`、有限 inclusive `SampleDomain`、destination semantics/storage，
+以及 out-of-domain input、clamp、integer rounding、NaN/Inf 和 precision loss 的封闭策略。
+
+identity conversion 不执行 scaling。semantic conversion 仅在完成 source-domain reject/clamp 后应用
+已声明 affine mapping，再应用所选 rounding、representability、non-finite 和 precision 规则。不存在
+隐藏的 255/65535 算术、color transform、channel-role inference 或 missing-metadata fallback。
+
+## 实现与验证映射
+
+主要契约和实现：
+
+- `include/photospider/data/{value,image_metadata,image_view}.hpp`
+- `include/photospider/data/{sample_conversion,value_artifact}.hpp`
+- `include/photospider/host/{host,value_result,value_artifact_result}.hpp`
+- `src/lib/core/{value,sample_conversion,value_artifact}.cpp`
+- `src/lib/adapters/opencv/{value_adapter_opencv,image_artifact_codec_opencv}.*`
+- `src/lib/adapters/openexr/openexr_dense_image_codec.*`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
+- `src/lib/ipc/`、`src/lib/server/worker/` 与 `src/lib/server/state/`
+
+长期测试覆盖 Value construction、signed coordinate、sample conversion、artifact reconstruction、
+Host result、IPC lease、worker/durable replay、OpenCV lifetime、普通 OpenEXR round trip 和
+provider-defined Deep 行为。source-residue search 仅是 migration evidence，不注册为 CTest 或 CI
+behavior test。

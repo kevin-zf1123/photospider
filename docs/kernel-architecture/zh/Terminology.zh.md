@@ -67,18 +67,18 @@ directory synchronization 或 crash-durability receipt。
 user output。
 
 **`OutputStore` 发布（`OutputStore` publication）**
-当前 image-daemon 的观察：受保护进程级 artifact 通过 identity check，并在 file
-synchronization 后通过 no-replace rename 发布。其 index 位于内存，retention 基于 lease/TTL；
-不声称支持 directory synchronization 或 crash-recoverable index。
+当前 daemon 的观察：受保护进程级 canonical named-Value archive 通过 identity check，并在
+file synchronization 后通过 no-replace rename 发布。其 index 位于内存，retention 基于
+lease/TTL；不声称支持 directory synchronization 或 crash-recoverable index。
 
 **Daemon 计算作业终态（Daemon compute-job terminal）**
-进程内 job registry 在 queued/running work 失败，或完成 Host compute 以及 image result 的
+进程内 job registry 在 queued/running work 失败，或完成 Host compute 以及 nonempty Values result 的
 `OutputStore` publication 后到达的状态。它不是 durable acknowledgement，并会随进程丢失。
 
-**源码私有单租户耐久图像 Job 纵向路径（当前 Issue #99/#100 子集）**
-当前 `src/lib/server/` 纵切把一个紧密 CPU 图像绑定到稳定的 `ArtifactId` 与
-`OutputCommitId` identity，以 manifest-last 方式发布 canonical manifest，并且只有在精确
-校验 payload/manifest 且完成从 artifact directory 到 root 的完整屏障链后，才返回
+**源码私有单租户耐久 named-Value Job 纵向路径（当前 Issue #99/#100/#105/#131 子集）**
+当前 `src/lib/server/` 纵切把一个 canonical nonempty named-Value archive 绑定到稳定的
+`ArtifactId` 与 `OutputCommitId` identity，以 manifest-last 方式发布 canonical manifest，
+并且只有在精确校验 archive/manifest 且完成从 artifact directory 到 root 的完整屏障链后，才返回
 crash-durable receipt。Manifest publication 会让两个 alias 都可在内部识别；但 barrier
 尚未确认的 alias 不能返回 artifact 或 crash-durable receipt：`ArtifactId` lookup、
 `OutputCommitId` lookup、same-commit retry 与 Job reconciliation 都必须先重新校验精确
@@ -87,7 +87,8 @@ occurrence 并重放完整 barrier chain。一个源码私有 WorkerManager 还�
 runtime deadline、cancellation escalation 与精确 reaping。参见
 [单租户 Job 纵切](Single-Tenant-Job-Vertical.zh.md)。
 
-这是一个狭窄的源码私有、本地单租户图像输出与 trusted-worker-process 子集。它不是 daemon
+这是一个狭窄的源码私有、本地单租户 named-Value artifact-set output 与
+trusted-worker-process 子集。它不是 daemon
 `OutputStore`，不是通用 `Value`/checkpoint `OutputStore` 或 bulk data plane，不是多租户
 授权，也不是独立部署的 WorkerManager、syscall/device isolation 或 untrusted-plugin
 security domain。
@@ -420,12 +421,12 @@ color 事实。
 digest、RegionSet、稳定 channel/group 选择、算法与版本。Result 永远不成为 Value、
 ImageFacet、descriptor/content identity 或正式 cache validity。
 
-**`ImageBuffer`**
-当前图像 payload 契约：二维 extent、通道数、单一 scalar type、device、row stride、共享数据
-所有权和可选 backend context。它在 DI-4 前仍位于 codec、Host 与 product compatibility
-edge，但私有正式 CPU image cache entry 只包含规范 named Value。ImageBuffer projection 仅限
-use scope，且绝不是 allocation、readiness、revision 或 cache authority。它不是通用 Tensor、
-Deep Image 或 vector-scene 模型。
+**普通稠密图像 `Value`**
+唯一的现行普通图像 payload 契约：一个不可变 DenseTensor `Value`，具有完整
+`ImageFacet`、显式 Layout 与 binding，以及一个 `ReadyFence`。Host、IPC、worker、durable、
+codec、CLI、operation ABI 与 cache 边界会保留该 Value metadata 或其可移植 artifact 形式。
+它不是 provider-defined variable-sample Deep image、vector-scene 模型或 rank-free 通用 Tensor
+解释。DI-4 删除了此前的二维兼容图像对象，而不是保留双表面。
 
 **`RegionDomainKey` / `RegionSet`**
 `RegionDomainKey` 是永久的 128-bit 逻辑 coordinate-domain identity。`RegionSet` 是 immutable
@@ -435,7 +436,7 @@ complexity budget、typed algebra outcome 与 containment。它不是 physical t
 cache owner、Value revision 或 uncertainty placeholder。
 
 **`PixelRect` / `PixelSize`**
-当前 Host/IPC v2 inspection、operation ABI v1 adapter、ImageBuffer processing 与 physical image
+当前 Host/IPC inspection、operation ABI v1 adapter、dense-Value processing 与 physical image
 tile/task record 使用的不依赖外部 library 的二维整数 geometry。在需要逻辑 Region authority
 的位置，它只能从一个精确内建 ImageRect 派生。它无法表示 TensorSlice、Whole、custom domain、
 multi-atom clause 或 uncertainty。只能在 OpenCV adapter 或 provider 实际调用 matrix/library
@@ -461,12 +462,13 @@ cache、policy 或物理 execution 语义的所有者。
 - ready task 不是任务图。
 - HP cache 不是 RT proxy state。
 - `AllocationIdentity` 不是 `ValueRevisionId`；二者都不是持久 content/cache identity。
-- `ImageBuffer` 不是[目标通用数据模型](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)。
+- 普通稠密图像 `Value` 不是 provider-defined 或 rank-general 的
+  [通用数据模型](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)。
 - Operation return 不是 `Value` readiness，二者也都不是 Run terminal publication。
 - Run success 不是 cache persistence、Graph 文档保存、durable output commit、daemon terminal
   state 或 result delivery。
 - 当前 `OutputStore` publication 不是 crash-durable output commit。
-- 当前 Issue #99/#100 耐久图像子集不是未来通用 `OutputStore`/bulk data plane、network
+- 当前 single-tenant named-Value artifact 纵向路径不是通用 `OutputStore`/bulk data plane、network
   control plane 或 untrusted-plugin security domain。
 - Daemon job terminal state 或 acknowledgement 不是 durable receipt。
 - `RegionSet` 不是 `PixelRect`；后者是 checked image-edge projection，绝不是 TensorSlice
@@ -490,7 +492,8 @@ cache、policy 或物理 execution 语义的所有者。
 - `include/photospider/data/value.hpp`
 - `include/photospider/host/host.hpp`
 - `include/photospider/core/compute_intent.hpp`
-- `include/photospider/core/image_buffer.hpp`
+- `include/photospider/data/image_view.hpp`
+- `include/photospider/data/value_artifact.hpp`
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/runtime/graph_runtime.hpp`
 - `src/lib/graph/graph_model.hpp`

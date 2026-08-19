@@ -214,11 +214,11 @@ The IPC Host implements all 58 current non-destructor Host virtuals through
 short-lived typed connections. Compute submits once, polls immediately and then
 at a 10/20/40/80/160/320/500-ms cadence without a synchronous total timeout;
 owned async workers are stopped, woken, interrupted, completed as Transport
-`client_stopped` (5), and joined during adapter destruction. Image mode
+`client_stopped` (5), and joined during adapter destruction. Values mode
 performs strict same-user artifact validation while the delivery lease is
-active, creates a shared read-only mapping, and then releases the matching
-job/lease. The final image reference unmaps and closes the retained descriptor
-exactly once.
+active, creates a temporary read-only archive mapping, verifies and detaches
+the exact bytes, unmaps and closes exactly once, reconstructs fresh local
+Values, and then releases the matching job/lease.
 
 Every accepted compute reports `cancellable:false` and advances only through
 `queued`, `running`, `succeeded`, or `failed`. A terminal failure is a normal
@@ -227,7 +227,7 @@ Daemon-domain `OperationStatus`; RPC/admission/lookup failures remain separate.
 Across embedded and IPC calls, the sole status vocabulary distinguishes
 `none`, `transport`, `protocol`, `graph`, and `daemon`, and callers must branch
 on domain/code/name rather than diagnostic text. The
-daemon retains at most 64 active jobs, 256 terminal jobs, 64 image artifacts,
+daemon retains at most 64 active jobs, 256 terminal jobs, 64 named-Value archives,
 one GiB of artifact bytes with a 512-MiB per-artifact ceiling, 8,192 compute
 events per session, and 65,536 execution-trace entries per session. Event
 drains are destructive pages of at most 1,024 entries; trace pages are
@@ -304,7 +304,7 @@ compute from the CLI.
 | Command | Description |
 | --- | --- |
 | `compute <id|all> [flags]` | Compute one node or all ending nodes. |
-| `save <id> <file>` | Compute a node and save its floating-point image output. |
+| `save <id> <output> <file> <uint8|uint16> <destination-encoding> <destination-domain> <min> <max> <domain-policy> <rounding> <non-finite-policy> <precision-policy>` | Compute a node and encode one named ordinary-image output with an explicit sample conversion. |
 | `clear-cache [m|d|md]` or `cc [m|d|md]` | Clear memory cache, disk cache, or both. |
 | `free` | Free memory used by non-essential intermediate nodes. |
 
@@ -325,8 +325,18 @@ Examples:
 ```text
 compute 7 parallel t
 compute all force tl out/timer.yaml
-save 7 out/result.png
+save 7 image out/result.png uint8 code code 0 255 reject nearest-even reject allow
 ```
+
+`save` reads the explicit source `SampleEncoding` and `SampleDomain` from the
+selected Value. The destination is also explicit: encoding is `value`,
+`normalized`, or `code`; domain kind is `normalized`, `legal`, or `code`; and
+the next two finite numbers are the inclusive destination endpoints. Domain
+policy is `reject` or `clamp`; rounding is `nearest-even`, `toward-zero`,
+`floor`, or `ceil`; non-finite policy is `reject` or `preserve`; and
+precision-loss policy is `reject` or `allow`. The CLI never derives conversion
+semantics from the file extension or storage width and does not hide a `255`
+or `65535` multiplier.
 
 The CLI and REPL compute surface is permanently batch-oriented. It does not
 expose RT intent commands, dirty ROI creation, or dirty source lifecycle

@@ -424,7 +424,7 @@ graph-state 提交中制造过期文档覆盖或存储延迟。
 当前行为继续由下列文档作为权威来源：
 
 - [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)；
-- [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)；
+- [稠密图像 Value 内存契约](../../kernel-architecture/zh/Dense-Image-Value-Memory-Contract.zh.md)；
 - [Compute 边界](../../kernel-architecture/zh/Compute-Boundaries.zh.md)；
 - [Compute 流程](../../kernel-architecture/zh/Compute-Flow.zh.md)；
 - [策略与执行架构](../../kernel-architecture/zh/Policy-and-Execution-Architecture.zh.md)；

@@ -22,18 +22,19 @@ The current repository now has the public Host seam, installable static
 product, migrated CLI application tree, role-owned backend source tree,
 explicit production-plugin homes, unit/integration test ownership, and the
 macOS/Linux version 2 daemon/IPC graph, inspection, polling-compute, protected
-image-output, bounded event/trace observation, and process-global operation-
+named-Value output, bounded event/trace observation, and process-global operation-
 plugin router behavior. The installed typed IPC Client now exposes owned calls
 for the exact 60-method surface, validates every typed result, and aggregates
 stable cursor pages into complete Host-shaped values. The installed IPC-backed
 Host now implements all 58 current non-destructor Host virtuals through typed
 short-lived connections, joined asynchronous polling, and deterministic stop
-ordering. Image mode currently performs strict same-user regular-file
+ordering. Values mode currently performs strict same-user regular-file
 revalidation while its delivery lease protects result-to-open, creates a
-shared read-only mapping, and then releases the matching job/lease. The final
-mapping owner unmaps and closes exactly once. The installed IPC-only package
-consumer now closes the complete symbol/export/header contract; the plugin SDK
-follows the extension contracts documented below.
+temporary read-only archive mapping, verifies and detaches exact bytes, then
+unmaps and closes exactly once before reconstructing fresh local Values and
+releasing the matching job/lease. The installed IPC-only package consumer now
+closes the complete symbol/export/header contract; the plugin SDK follows the
+extension contracts documented below.
 
 Observed build targets in the current root `CMakeLists.txt`:
 
@@ -179,7 +180,7 @@ External code may depend on stable value contracts:
 - graph and node inspection snapshots
 - policy binding and execution trace snapshots
 - dirty-region inspection views
-- image and tile buffer contracts
+- dense-image Value and tile contracts
 - plugin operation registration contracts
 
 This keeps `InteractionService` as a deeper backend module behind the public
@@ -200,7 +201,6 @@ include/photospider/core/
   export.hpp
   geometry.hpp
   device.hpp
-  image_buffer.hpp
   graph_error.hpp
   compute_intent.hpp
   result_types.hpp
@@ -211,14 +211,20 @@ include/photospider/host/
   graph_session.hpp
   compute_request.hpp
   event_stream.hpp
+  value_result.hpp
+  value_artifact_result.hpp
 
 include/photospider/data/
   value.hpp
   extension.hpp
+  image_metadata.hpp
+  image_statistics.hpp
   image_view.hpp
   packed_dense_tensor_view.hpp
   parameter_value.hpp
   region.hpp
+  sample_conversion.hpp
+  value_artifact.hpp
 
 include/photospider/memory/
   access_plan.hpp
@@ -256,9 +262,9 @@ Header rules:
   and request/result structs.
 - OpenCV appears only in the opt-in `plugin/opencv_adapter.hpp` contract;
   operation SDK, policy SDK, Host, core, and IPC headers do not require it.
-  No public header exposes yaml-cpp. `ImageBuffer` remains a public value
-  compatibility contract; generic CPU Value ownership is exposed through the
-  dependency-neutral `data/` and `memory/` headers.
+  No public header exposes yaml-cpp. Ordinary images use the dependency-neutral
+  `Value`, `ImageView`, sample, artifact, and memory contracts; no second image
+  compatibility type is installed.
 - CLI, benchmark, and test-only headers are not public install headers.
 
 ## Current and Target Source Layout
@@ -619,8 +625,8 @@ Process responsibilities:
 - accept the documented typed graph reload/save/clear, node YAML, node-list,
   cache, dirty lifecycle, ROI, timing, last-IO, and last-error requests and
   route each through exactly one matching Host call
-- own bounded polling compute jobs and materialize successful nonempty image
-  results as protected metadata-only artifacts with stable delivery leases
+- own bounded polling compute jobs and materialize successful nonempty named-
+  Value results as protected archive metadata with stable delivery leases
 - route bounded destructive compute-event drains and non-destructive execution
   trace pages directly through the matching Host observation APIs
 - enforce per-user directory/socket permissions and safe live/stale handling
@@ -711,32 +717,32 @@ Method groups and current wire availability:
 | inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward`, `inspect.dirty_region`, `inspect.compute_planning`, `inspect.recent_compute_planning`, `inspect.traversal_orders`, `inspect.traversal_details`, `inspect.trees_containing_node` | Implemented through copied Host values. Full-value collections use stable bounded cursor pages; node/ROI/dirty/current-planning values remain indivisible direct results. Host order and duplicates are preserved. |
 | dirty | `dirty.begin`, `dirty.update`, `dirty.end` | Implemented through one matching Host lifecycle mutation and return the copied dirty-region snapshot; the complete compact response size is preflighted before result-DOM allocation. |
 | cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | Implemented as status-only Host calls; no backend cache handle or path enters a result. |
-| compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling jobs and diagnostics are routed. Submit/status/result use stable `{compute_id,session_id,state,cancellable,status,output}` values; states are exactly `queued`, `running`, `succeeded`, and `failed`, and every job reports `cancellable:false`. Submit, status, status-mode result, empty-image result, and failed result keep `output` null. A terminal nonempty image result revalidates the protected artifact, refreshes one stable 60-second delivery lease, and returns the specified metadata object. Terminal release atomically returns `{compute_id,released:true}`, accepts an optional exact `delivery_id`, and can release its matching orphaned lease after normal job removal. Timing preflights its aggregate compact response size; last error is nested diagnostic data. |
+| compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling jobs and diagnostics are routed. Submit/status/result use stable `{compute_id,session_id,state,cancellable,status,output}` values; states are exactly `queued`, `running`, `succeeded`, and `failed`, and every job reports `cancellable:false`. Submit, status, status-mode result, empty-Values result, and failed result keep `output` null. A terminal nonempty Values result revalidates the protected named-Value archive, refreshes one stable 60-second delivery lease, and returns the specified metadata object. Terminal release atomically returns `{compute_id,released:true}`, accepts an optional exact `delivery_id`, and can release its matching orphaned lease after normal job removal. Timing preflights its aggregate compact response size; last error is nested diagnostic data. |
 | policy | `policy.types`, `policy.description`, `policy.scan`, `policy.load`, `policy.loaded_plugins`, `policy.configure_defaults`, `policy.info`, `policy.replace` | Process-scoped pure-C type discovery/loading and Interactive/Throughput bindings. The Client aggregates stable type/plugin pages and validates copied binding/fault snapshots; disconnecting a Client does not retire process-owned DSO state. |
 | execution | `execution.types`, `execution.description`, `execution.configure_defaults`, `execution.info`, `execution.replace`, `execution.trace` | Closed-vocabulary private route control. Defaults accept `worker_count` in `[0,8]`; info/replacement is session-scoped and serialized with same-Graph compute/close. Trace remains bounded and non-destructive. No route plugin or physical owner crosses IPC. |
 | plugins | `plugins.load_report`, `plugins.unload_all`, `plugins.seed_builtins`, `plugins.ops_sources`, `plugins.ops_combined_keys`, `plugins.ops_combined_sources` | Operation-plugin control is implemented only through matching Host calls and advertised in the exact 60-method inventory. The installed typed Client exposes every route, decodes exact reports, and aggregates key-sorted stable views; disconnecting a Client does not unload a successful process-owned DSO. |
 | events | `events.drain` | Bounded destructive event draining is routed through Host and exposed by the installed typed Client as one strictly validated, non-retried Host event batch. |
 
-Image payload rule:
+Named-Value archive rule:
 
-- Image bytes do not enter JSON.
-- The private OutputStore materializes validated CPU images as exact tight-row
-  mode-`0600` artifacts below a same-owner mode-`0700`
+- Value payload bytes do not enter JSON.
+- The private OutputStore materializes each validated canonical named-Value
+  archive as one exact mode-`0600` artifact below a same-owner mode-`0700`
   `<socket>.outputs/instance-<server_instance_id>` directory. Publication is
   quota-bounded and atomic; live access and cleanup revalidate filesystem
   identity without following symlinks.
 - The private compute registry retains move-only OutputStore ownership whose
   exact-once cleanup runs outside the registry mutex on optional lease-aware
   release, eviction, TTL expiry, or shutdown. A stable delivery id protects at
-  most one refreshed 60-second lease after each successful image result.
-- Submit/status and non-image, empty-image, or failed results keep the stable
-  nullable `output` field null. A terminal nonempty image result returns only
-  `output_id`, `delivery_id`, the protected absolute artifact path, width,
-  height, channels, data type, CPU device, tight row step, byte size,
-  filesystem device, and inode. The registry's opaque reference appears only
-  as that normalized `output_id`; no extra `output_reference` field, backend
-  handle, pixel bytes, backend cache path, image-library object, or
-  caller-selected result path enters JSON.
+  most one refreshed 60-second lease after each successful Values result.
+- Submit/status, status-mode, empty-Values, or failed results keep the stable
+  nullable `output` field null. A terminal nonempty Values result returns only
+  `output_id`, `delivery_id`, the protected absolute archive path,
+  `byte_size`, `digest_sha256`, `archive_version`, `value_count`, filesystem
+  device, and inode. The registry's opaque reference appears only as that
+  normalized `output_id`; no extra `output_reference` field, backend handle,
+  payload byte, backend cache path, image-library object, or caller-selected
+  result path enters JSON.
 - `compute.release` validates an optional stable delivery id before mutation.
   A matching id releases job ownership and the lease together; if normal job
   release, terminal eviction, or job TTL already removed the record, the same
@@ -898,11 +904,12 @@ dependency table is in the
    timeout. Destruction publishes stop, wakes waiters, shuts down active worker
    descriptors, resolves unfinished futures as Transport code 5
    `client_stopped`, and joins every worker without resubmission, session close,
-   plugin unload, or embedded fallback. The image consumer opens the artifact
+   plugin unload, or embedded fallback. The Values consumer opens the artifact
    without following symlinks while its delivery lease is active, validates
-   same-user regular type, exact mode, one link, device/inode/size, and tight
-   layout, then creates a shared read-only mapping before matching lease-aware
-   release. Its final owner unmaps and closes exactly once. The installed
+   same-user regular type, exact mode, one link, device/inode/size, and archive
+   digest, then creates a temporary read-only mapping, detaches and decodes the
+   exact archive, and unmaps/closes exactly once before fresh Value
+   reconstruction and matching lease-aware release. The installed
    package gate compiles every public header, then independently configures an
    IPC-only external consumer with `COMPONENTS ipc_client` and backend package
    discovery disabled. That consumer covers every Client lifecycle symbol,

@@ -128,7 +128,6 @@ Scalar 拼写保持稳定；array 与 object 递归渲染；object key 保持 or
 
 | 字段 | 含义 |
 | --- | --- |
-| `compatibility_image` | 仅用于 codec 与其余 Host/legacy adapter 的入站暂存。正式 commit 前必须清除，且它绝不是 cache、allocation、readiness 或 revision 权威；operation ABI v1 使用完整 Value/grant record。 |
 | `named_values` | 按规范顺序保存的 immutable Value。当前 image port 永久命名为 `image`；每个 image 或 generic entry 都是该精确名称唯一的 payload、allocation、readiness 与 revision 权威。 |
 | `data` | 作为 `plugin::ParameterMap` 保存的 named parameter-result 标量或结构；generic Value 绝不进入此字段。 |
 | `space` | 空间变换、尺度和 ROI 元数据。 |
@@ -573,7 +572,8 @@ dependency 工作由
 - `src/lib/core/dense_tensor_content_digest.*`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/packed_dense_tensor.cpp`
-- `src/lib/core/value_image_adapter.*`
+- `src/lib/core/{value_region,dense_image_processing}.*`
+- `src/lib/adapters/{opencv,openexr}/`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/cpu_dense_image_operation.*`

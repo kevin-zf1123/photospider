@@ -13,9 +13,10 @@ runs the repository Metal Perlin operation through its owned queue, invocation
 allocator, and pipeline cache. V-8 adds explicit device/binding facts,
 nonblocking access plans, revision-preserving CPU/Metal transfers, exact
 process residency, Run-scoped pending-Value continuations, and stale native
-completion rejection before destination readiness. `ImageBuffer`, `DataType`,
-`Device`, and `ParameterMap` remain compatibility contracts at their
-role-specific edges; operation plugins now use the complete pure-C ABI v1.
+completion rejection before destination readiness. DI-4 removed the former
+`ImageBuffer`, `DataType`, and `Device` compatibility contracts from every
+active edge; `ParameterMap` remains configuration only. Operation plugins use
+the complete pure-C ABI v1.
 The unimplemented portions of this ADR remain evolution targets.
 
 V-9 adds source-private per-device memory/scratch plans, native actual-byte
@@ -68,7 +69,8 @@ records remain the delivery-status authority; this ADR does not claim that PR
 
 ## Context
 
-The current `ImageBuffer` contract is a useful two-dimensional image payload,
+At this decision's starting point, the `ImageBuffer` contract was a useful
+two-dimensional image payload,
 but it cannot be extended into the general graph value model by appending
 fields. Logical meaning, physical storage, device access, readiness, cache
 identity, and region reasoning have different owners and version lifetimes.
@@ -473,9 +475,11 @@ built-in image and dense-tensor domain keys, signed 64-bit `ImageRect`
 intervals, rank-general unsigned 64-bit `TensorSlice` intervals, a hard limit
 of eight atoms in the single nonempty clause, and explicit caller budgets.
 Dirty source facts, per-node affected work, edge mappings, HP/RT validity, and
-the core dense operation retain normalized `RegionSet`. Current image tiling,
-ImageBuffer helpers, Host/IPC inspection, and operation ABI v1 adapters retain checked
-derived `PixelRect` projections. RT is image-only; TensorSlice is HP
+the core dense operation retain normalized `RegionSet`. At the V-4 delivery
+boundary, image tiling, predecessor image helpers, Host/IPC inspection, and
+operation adapters retained checked derived `PixelRect` projections. DI-4
+removed the predecessor image helpers without changing `PixelRect`'s physical-
+geometry role. RT is image-only; TensorSlice is HP
 monolithic work and is never reinterpreted as two-dimensional geometry.
 
 ### DataSpec, capabilities, properties, and output inference
@@ -657,8 +661,9 @@ Repository-owned operations and providers migrated first. Owned adapters,
 tests, installed consumers, and documentation then migrated in dependency
 order. DI-3 installed the separately versioned pure-C operation-plugin ABI v1
 accepted by ADR 0012 and deleted the predecessor entry point, SDK, fixtures,
-and package surface in the same breaking change. DI-4 still owns final public
-Host/IPC/worker/durable/codec/CLI ImageBuffer migration.
+and package surface in the same breaking change. DI-4 subsequently completed
+the public Host, IPC, worker, durable, codec, and CLI migration and removed the
+former image compatibility type.
 
 The final state has no permanent compatibility wrapper, alias class, duplicate
 old/new API, forwarding header, dual loader, predecessor shim, or dual
@@ -756,7 +761,7 @@ and memory-envelope flaws and would violate the dependency-neutral foundation.
 The following maintained documents remain authoritative for current behavior:
 
 - [Kernel Data Model](../kernel-architecture/Data-Model.md);
-- [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md);
+- [Dense Image Value Memory Contract](../kernel-architecture/Dense-Image-Value-Memory-Contract.md);
 - [Plugin ABI](../kernel-architecture/Plugin-ABI.md); and
 - [Kernel Cache Model](../kernel-architecture/Cache-Model.md).
 

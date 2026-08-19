@@ -83,21 +83,22 @@ individual save success is neither an atomic cache-entry commit nor durable
 user output.
 
 **`OutputStore` publication**
-The current image-daemon observation that a protected process-scoped artifact
-passed identity checks and was published by no-replace rename after file
-synchronization. Its index is in memory and retention is lease/TTL based; no
-directory synchronization or crash-recoverable index is claimed.
+The current daemon observation that a protected process-scoped canonical
+named-Value archive passed identity checks and was published by no-replace
+rename after file synchronization. Its index is in memory and retention is
+lease/TTL based; no directory synchronization or crash-recoverable index is
+claimed.
 
 **Daemon compute-job terminal**
 The process-local job-registry state reached after queued/running work either
-fails or completes Host compute and, for image results, `OutputStore`
+fails or completes Host compute and, for nonempty Values results, `OutputStore`
 publication. It is not a durable acknowledgement and is lost with the process.
 
-**Source-private single-tenant durable image Job vertical (current Issue #99/#100 subset)**
-The current `src/lib/server/` vertical binds one tight CPU image to stable
-`ArtifactId` and `OutputCommitId` identities, publishes a canonical manifest
-last, and returns a crash-durable receipt only after exact payload/manifest
-validation and the complete artifact-directory-to-root barrier chain. Manifest
+**Source-private single-tenant durable named-Value Job vertical (current Issue #99/#100/#105/#131 subset)**
+The current `src/lib/server/` vertical binds one canonical nonempty named-Value
+archive to stable `ArtifactId` and `OutputCommitId` identities, publishes a
+canonical manifest last, and returns a crash-durable receipt only after exact
+archive/manifest validation and the complete artifact-directory-to-root barrier chain. Manifest
 publication makes both aliases internally recognizable, but an alias whose
 barriers are not yet confirmed cannot return an artifact or crash-durable
 receipt: `ArtifactId` lookup, `OutputCommitId` lookup, same-commit retry, and
@@ -108,11 +109,11 @@ heartbeat/runtime deadlines, cancellation escalation, and exact reaping per
 attempt. See the
 [Single-Tenant Job Vertical](Single-Tenant-Job-Vertical.md).
 
-This is a narrow source-private local single-tenant image-output and trusted-
-worker-process subset. It is not the daemon `OutputStore`, a general `Value`/
-checkpoint `OutputStore` or bulk data plane, multi-tenant authorization, a
-separately deployed WorkerManager, syscall/device isolation, or an untrusted-
-plugin security domain.
+This is a narrow source-private local single-tenant named-Value artifact-set
+output and trusted-worker-process subset. It is not the daemon `OutputStore`,
+a general `Value`/checkpoint `OutputStore` or bulk data plane, multi-tenant
+authorization, a separately deployed WorkerManager, syscall/device isolation,
+or an untrusted-plugin security domain.
 
 Product WorkerManager construction requires waitable `SIGCHLD` semantics and
 rejects `SIG_IGN` or `SA_NOCLDWAIT`. It revalidates that policy immediately
@@ -532,15 +533,14 @@ includes Value revision, optional content digest, RegionSet, stable channel or
 group selection, algorithm, and version. Results never become Value,
 ImageFacet, descriptor/content identity, or formal cache validity.
 
-**`ImageBuffer`**
-The current image payload contract: two-dimensional extent, channel count,
-one scalar type, device, row stride, shared data ownership, and optional
-backend context. It remains at codec, Host, and product compatibility edges
-until DI-4, but operation ABI v1 carries complete Value/grant records and
-private formal CPU image cache entries contain only
-canonical named Values. An ImageBuffer projection is use-scoped and is never
-allocation, readiness, revision, or cache authority. It is not a general
-Tensor, Deep Image, or vector-scene model.
+**Ordinary dense image `Value`**
+The sole current ordinary-image payload contract: one immutable DenseTensor
+`Value` with complete `ImageFacet`, explicit Layout and bindings, and a
+`ReadyFence`. Host, IPC, worker, durable, codec, CLI, operation ABI, and cache
+boundaries preserve that Value metadata or its portable artifact form. It is
+not a provider-defined variable-sample Deep image, vector-scene model, or
+general rank-free Tensor interpretation. DI-4 removed the former two-
+dimensional compatibility image object rather than retaining a dual surface.
 
 **`RegionDomainKey` / `RegionSet`**
 `RegionDomainKey` is a permanent 128-bit logical coordinate-domain identity.
@@ -553,8 +553,8 @@ placeholder.
 
 **`PixelRect` / `PixelSize`**
 External-library-neutral two-dimensional integer geometry used by current
-Host/IPC v2 inspection, operation ABI v1 adapters, ImageBuffer processing, and physical
-image tile/task records. It is derived from one exact built-in ImageRect where
+Host/IPC inspection, operation ABI v1 adapters, dense-Value processing, and
+physical image tile/task records. It is derived from one exact built-in ImageRect where
 logical Region authority is required. It cannot represent TensorSlice, Whole,
 custom domains, multi-atom clauses, or uncertainty. OpenCV geometry may be
 constructed only locally in an OpenCV adapter or provider at the actual
@@ -587,14 +587,14 @@ planning, cache, policy, or physical-execution semantics.
 - HP cache is not RT proxy state.
 - `AllocationIdentity` is not `ValueRevisionId`; neither is a persistent
   content/cache identity.
-- `ImageBuffer` is not the
-  [target general data model](../roadmap/Kernel-Evolution.md#general-data-and-regions).
+- An ordinary dense image `Value` is not the provider-defined or rank-general
+  [general data model](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 - Operation return is not `Value` readiness, and neither is Run terminal
   publication.
 - Run success is not cache persistence, Graph-document save, durable output
   commit, daemon terminal state, or result delivery.
 - Current `OutputStore` publication is not crash-durable output commit.
-- The current Issue #99/#100 durable-image subset is not the future general
+- The current single-tenant named-Value artifact vertical is not the general
   `OutputStore`/bulk data plane, network control plane, or untrusted-plugin
   security domain.
 - Daemon job terminal state or acknowledgement is not a durable receipt.
@@ -621,7 +621,8 @@ planning, cache, policy, or physical-execution semantics.
 - `include/photospider/data/value.hpp`
 - `include/photospider/host/host.hpp`
 - `include/photospider/core/compute_intent.hpp`
-- `include/photospider/core/image_buffer.hpp`
+- `include/photospider/data/image_view.hpp`
+- `include/photospider/data/value_artifact.hpp`
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/runtime/graph_runtime.hpp`
 - `src/lib/graph/graph_model.hpp`

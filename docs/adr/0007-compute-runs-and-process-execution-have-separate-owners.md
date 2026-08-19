@@ -86,8 +86,8 @@ move-only `ReadyTaskSubmission` values so no stack `TaskExecutor*` crosses the
 service boundary. All three private routes use the same ready-store, policy,
 reserved-start, Run-lease, and completion path.
 
-Route-aware planning freezes the selected implementation and `Device` before
-admission. `cpu` and `serial_debug` expose CPU only; `gpu_pipeline` exposes
+Route-aware planning freezes the selected implementation and `DeviceBackend`
+before admission. `cpu` and `serial_debug` expose CPU only; `gpu_pipeline` exposes
 Metal then CPU when the fixed registry contains a Metal executor, otherwise
 CPU only. CPU and Metal submissions enter distinct fixed lanes but share the
 Run grant and maximum-parallelism ceiling. After reserved start, a Metal

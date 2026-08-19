@@ -354,9 +354,9 @@ registry lock after all holders release.
   ABI version changes.
 - Process-local pointers may exist only during an authorized in-process
   callback. They never cross the isolation wire or become durable identity.
-- DI-4 still owns final migration of public Host, IPC/worker, durable, codec,
-  CLI, and remaining `ImageBuffer` surfaces outside the operation/isolation
-  boundary.
+- DI-4 completed migration of public Host, IPC/worker, durable, codec, and CLI
+  boundaries to named Values and portable Value artifacts. No legacy image
+  compatibility surface remains outside the operation/isolation boundary.
 
 ## Implementation and Validation Entry Points
 

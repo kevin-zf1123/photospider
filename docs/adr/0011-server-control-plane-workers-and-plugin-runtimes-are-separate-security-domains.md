@@ -15,7 +15,7 @@ operation descriptor admitted from a signed package select its trusted in-
 process or supervised isolated CPU route. Data-definition and policy loaders
 remain separate versioned contracts. Issues #99, #100, and #105 now implement
 a source-private local JobSpec vertical with complete-envelope tenant quota
-accounting, durable Job/image artifact recovery,
+accounting, durable Job/named-Value archive recovery,
 explicit retry/checkpoint identity, and one freshly execed Embedded Host worker
 process per attempt. One same-process `WorkerManager` object owns the private
 socket, PID, heartbeat, cancellation escalation, exact reaping, and supervision

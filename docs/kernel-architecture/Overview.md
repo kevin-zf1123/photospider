@@ -297,7 +297,7 @@ defined in `../codebase-structure/IPC-Protocol-v2.md`.
 | `Kernel` | Multi-graph facade, service owner, runtime bootstrapper, top-level graph/cache/compute API. |
 | `ps::Host` | Public frontend interface under `include/photospider/host`; returns copied request/result/snapshot values and hides Kernel, GraphModel, and GraphRuntime. |
 | `embedded Host adapter` | In-process Host implementation backed by per-adapter `Kernel` and `InteractionService` state; all adapters share the process operation plugin owner. |
-| `IPC Host adapter` | Complete installed Host implementation backed only by typed short-lived Client calls. It composes polling compute, joins async workers, preserves exact status domains, and maps protected image artifacts read-only. |
+| `IPC Host adapter` | Complete installed Host implementation backed only by typed short-lived Client calls. It composes polling compute, joins async workers, preserves exact status domains, temporarily maps and detaches protected named-Value archives, then reconstructs fresh local Values. |
 | `ps::ipc::Client` | Move-only direct client with owned values for the exact sorted 60-method version 2 inventory; it validates correlated result shapes and exposes no raw JSON call. |
 | `photospiderd` | Foreground local service that owns one embedded Host and serializes all Host calls while independently serving metadata and job polling. |
 | daemon registries | Private bounded ownership for opaque sessions, compute jobs, stable collection snapshots, protected outputs, and delivery leases; none are public backend handles. |
@@ -411,10 +411,10 @@ Typical IPC Host compute flow:
    admission, and lookup failures remain separate. Across the public Host
    boundary the sole status vocabulary distinguishes `none`, `transport`,
    `protocol`, `graph`, and `daemon`, and transport never becomes graph IO.
-5. Image mode validates a same-user mode-`0600` artifact under its delivery
-   lease, maps its tight rows read-only, and then attempts matching
-   job/lease release. The final shared image owner unmaps and closes exactly
-   once.
+5. Values mode validates a same-user mode-`0600` named-Value archive under its
+   delivery lease, maps it read-only, verifies and detaches the exact bytes,
+   unmaps/closes exactly once, reconstructs fresh local Values, and then
+   attempts matching job/lease release.
 6. Async adapter destruction signals stop, wakes waits, interrupts active
    descriptors, completes unfinished futures as Transport
    `client_stopped` (5), and joins workers without resubmitting or closing
@@ -543,76 +543,73 @@ constructs or declares a YAML value. The configured
 for YAML syntax, filesystem metadata IO, and translating parser/emitter
 failures into the existing graph error taxonomy.
 
-### ImageBuffer Contract
+### Dense Image Value Contract
 
-`ImageBuffer` is a public kernel contract, not an internal implementation
-detail. Operators, executors, plugins, adapters, and cache code may depend on
-its documented fields and invariants.
+An ordinary dense image is one immutable `Value` with a
+`DenseTensorDescriptor`, complete `ImageFacet`, explicit `StridedLayout`, one
+or more checked `BufferHandle` bindings, and a `ReadyFence`. There is no second
+image value, compatibility snapshot, storage enum, or native-context carrier.
+Kernel-owned CPU output rows provide at least 64-byte alignment; larger
+alignment remains an optimization rather than a portable requirement.
 
-CPU buffers owned by the kernel must provide 64-byte aligned row starts. `step`
-is the row stride in bytes and may be larger than the packed row size to
-preserve alignment. ARM Mac high-performance paths may need or benefit from
-128-byte alignment, but 128-byte alignment is an optimization target rather than
-the portable minimum.
+V-2 installed immutable CPU DenseTensor `Value`, `DenseTensorView`, and
+explicit-axis `ImageView` contracts. V-3 added `BufferHandle`, retaining
+read/write leases, `ValueBuilder`, checked byte offsets and signed coordinates,
+and process-local allocation/revision identity. The shared operation runtime
+owns the sole process-wide minting authority. The built-in
+`image_process:invert_dense` operation reaches these contracts through normal
+core seeding, `OpRegistry` resolution, and `NodeExecutor` invocation. Its
+callback bridge separates descriptor-only inference from stride-aware
+execution, validates the complete returned descriptor/facet/layout, and
+preserves the exact result Value. Operation ABI v1 carries complete Values and
+Host-owned output grants.
 
-V-2 installs immutable CPU DenseTensor `Value`, `DenseTensorView`, and
-explicit-axis `ImageView` contracts. V-3 adds `BufferHandle`, read/write leases,
-`ValueBuilder`, byte offsets, bounded signed immutable views, and process-local
-allocation/revision identity. The shared operation runtime owns the only
-process-wide minting authority; a nonzero identity token records issuance and
-does not query whether its allocation is still alive. The built-in
-`image_process:invert_dense`
-operation reaches those types through normal core seeding, `OpRegistry`
-resolution, and `NodeExecutor` monolithic invocation. Its private callback
-bridge reads the canonical named input Value, separates descriptor-only
-inference from stride-aware execution, validates the complete returned
-descriptor/facet/layout, and preserves the exact result Value. Operation ABI
-v1 projects complete Values and Host-owned output grants; remaining public Host
-edges may still derive use-scoped ImageBuffer projections until DI-4.
+DI-2 moved formal HP, dirty, tiled, real-time, extent, metrics, and cache paths
+to the same Value representation. `NodeOutput` carries canonical ordered named
+Values, with `image` as the conventional image port. `DenseImageOutputPlan`
+freezes complete image facts, exact storage, alignment, and Region before one
+Host allocation. Move-only whole/tile grants reserve checked non-overlapping
+spans and must all retire before one seal and one publication. Sticky
+validation, retirement, exception, or cancellation failure revokes every grant
+and publishes nothing.
 
-DI-2 makes private formal HP, dirty, tiled, RT, extent, metrics, and cache paths
-Value-only. `NodeOutput` carries canonical ordered named Values with `image` as
-the permanent image port; `compatibility_image` is inbound staging that must be
-cleared before formal commit. `DenseImageOutputPlan` freezes complete image
-facts, exact storage, alignment, and Region before one Host allocation.
-Move-only whole/tile grants reserve checked non-overlapping spans and must all
-retire before one seal and one publication. Sticky validation, retirement,
-exception, or cancellation failure revokes every grant and publishes nothing.
-Operation ABI v1 now carries the same immutable plans and callback-scoped Host
-grants. DI-4 still owns the remaining public Host/IPC/worker/durable/codec/CLI
-ImageBuffer surfaces, and no compatibility object enters formal cache state.
+V-8 added checked `DeviceId`, `MemoryDomain`, `StorageBinding`, retained native
+allocations, producer identity, and explicit `AccessPlan`. A transfer creates a
+distinct physical replica while preserving the same logical
+`ValueRevisionId`; no Host pointer is invented for a device-local binding.
+`ResidencyManager` owns exact eligible replicas and publishes destination
+readiness and residency in one freshness-checked transaction. Pending Values
+re-enter the existing `ExecutionService` ready store through Run-scoped
+continuations, so CPU workers do not wait for device completion. Operation ABI
+v1 remains synchronous and CPU-only.
 
-V-8 adds checked `DeviceId`, `MemoryDomain`, `StorageBinding`, native-allocation
-retention, producer identity, and an explicit `AccessPlan`. A transfer creates
-a distinct physical replica while preserving the same logical
-`ValueRevisionId`; no host pointer is invented for a device-local binding.
-`ResidencyManager` is the single process owner of exact eligible replicas and
-publishes destination readiness and residency in one freshness-checked
-transaction. Kernel pretracks a lineage before fallible coordinator
-publication without assigning a managed current identity. Under
-coordinator-to-manager ordering, an accepted current-generation callback
-assigns the exact published generation, including a coordinate-authorized
-numeric decrease, immediately before currentness becomes observable. Later
-stale Run observations and transfer admissions cannot replace that exact
-managed identity; standalone lineages retain numeric-maximum ordering. Pending Values
-re-enter the existing `ExecutionService` ready
-store through Run-scoped continuations, so CPU workers do not wait for Metal
-completion. The Metal Perlin route produces a pending native Value and uses
-explicit asynchronous texture-to-buffer readback before downstream CPU access.
-Operation ABI v1 is synchronous CPU-only and exposes no native-device context
-or asynchronous owner. Remaining Host surfaces may still use ImageBuffer
-compatibility values until DI-4; neither path promotes ImageBuffer identity to
-runtime authority.
+V-14 added provider-defined multi-buffer Value contracts. One injected
+`DataDefinitionRegistry` resolves complete typed Schema/Facet/Layout bundles
+to an immutable generation. Generic bounds checks precede provider validation
+and revision minting; indexed reads retain the selected `BufferHandle` plus
+that generation. Pure property, DataSpec, and Region callbacks see metadata
+but no payload. Canonical descriptor/content/layout identities and a
+byte-preserving artifact envelope support those Values without flattening
+them into ordinary dense images.
 
-V-14 adds provider-defined multi-buffer `Value` contracts without changing
-`ImageBuffer`. One injected `DataDefinitionRegistry` resolves complete typed
-Schema/Facet/Layout bundles to an immutable generation. Generic bounds checks
-precede provider validation and revision minting; indexed reads retain the
-selected `BufferHandle` plus that generation. Pure property, DataSpec, and
-Region callbacks see metadata but no payload. Canonical descriptor/content/
-layout SHA-256 identities and a byte-preserving artifact envelope are installed,
-but no provider-defined graph operation, cache policy, codec, OpenEXR path,
-operation ABI extension slot, or Host command is added.
+DI-4 completed the remaining external migration. Embedded and IPC Hosts return
+canonical ordered named Values and expose metadata-only inspection without
+waiting for or mapping payload. IPC OutputStore, worker protocol v3, worker
+data-plane references, and durable manifests carry canonical named Value
+artifact sets; every decode validates framing, versions, identity joins,
+digests, payload bounds, and the local data definition before publication.
+Replay preserves portable artifact identity but creates fresh local allocation,
+revision, producer, fence, and binding identities.
+
+OpenCV adapts only ordinary Ready Host-readable dense Values. The ordinary
+OpenEXR codec preserves independent signed data and display windows and keeps
+UINT32/FLOAT32 storage while exactly promoting HALF to FP32. OpenEXR Deep stays
+a provider-defined variable-sample Value and is never padded into a dense
+tensor. Codec and CLI conversions require explicit source/destination
+`SampleEncoding`, `SampleDomain`, out-of-domain, clamp, rounding, non-finite,
+and precision-loss policies; storage width never implies hidden 255 or 65535
+scaling. The complete specialization is defined by
+[Dense Image Value Memory Contract](Dense-Image-Value-Memory-Contract.md).
 
 ### Dirty Region Propagation
 
@@ -767,13 +764,17 @@ this current-state document.
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/core/cache_metadata_codec.hpp`
-- `src/lib/core/image_buffer_processing.*`
+- `src/lib/core/dense_image_processing.*`
+- `src/lib/core/sample_conversion.cpp`
+- `src/lib/core/value_artifact.cpp`
 - `src/lib/core/value.cpp`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`
-- `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
+- `src/lib/adapters/opencv/value_adapter_opencv.*`
+- `src/lib/adapters/opencv/image_artifact_codec_opencv.*`
+- `src/lib/adapters/openexr/openexr_dense_image_codec.*`
 - `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/providers/configured_persistence_adapters.*`
 - `src/lib/graph/graph_io_service.*`
@@ -801,4 +802,7 @@ this current-state document.
 - `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_device_residency.cpp`
 - `tests/integration/test_metal_device_executor.cpp`
-- `tests/unit/test_stdlib_image_buffer_processing.cpp`
+- `tests/unit/test_dense_image_processing.cpp`
+- `tests/unit/test_dense_image_value_contracts.cpp`
+- `tests/unit/test_sample_conversion.cpp`
+- `tests/unit/test_value_artifact.cpp`

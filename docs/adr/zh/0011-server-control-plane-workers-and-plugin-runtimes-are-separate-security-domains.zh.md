@@ -12,7 +12,7 @@ server、worker-manager、独立 artifact data plane、sandbox 或 isolated-plug
 in-process 或 supervised isolated CPU 路径。Data-definition 与 policy loader 仍是彼此独立的
 版本化契约。Issues #99、#100 和 #105 现在实现了源码私有的本地 JobSpec 纵向路径，其中包含
 complete-envelope tenant quota accounting、durable
-Job/image artifact recovery、显式 retry/checkpoint identity，以及每个 attempt 一个全新 exec
+Job/named-Value archive recovery、显式 retry/checkpoint identity，以及每个 attempt 一个全新 exec
 的 Embedded Host worker process。一个同进程 `WorkerManager` object 拥有 private socket、
 PID、heartbeat、cancellation escalation、精确 reaping 与 supervision handle；control-plane
 Job service 仍是唯一 durable/quota/artifact/retry authority。Host memory 以 POSIX

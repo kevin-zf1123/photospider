@@ -30,12 +30,12 @@ Issues #99、#100 与 #105 现在通过独立的源码私有
 实现 canonical JobSpec、tenant quota、durable Job/artifact recovery、显式 retry/checkpoint
 identity、每 attempt 一个全新 process，以及分离的 worker control/data transport。它只通过
 internal CMake target 链接，没有 daemon route 或 installed codec，也不组合进
-`photospiderd`。其 private worker protocol v2 与本 local IPC v2 不同：128-KiB control socket
-只传 attempt/Job/receipt/reference/descriptor/digest metadata，而 checkpoint 与 candidate image
-byte 通过 inherited descriptor 使用 manager-created direction-reduced
+`photospiderd`。其 private worker protocol v3 与本 local IPC v2 不同：128-KiB control socket
+只传 attempt/Job/receipt/reference/artifact-set-descriptor/digest metadata，而 checkpoint 与
+candidate named-Value archive byte 通过 inherited descriptor 使用 manager-created direction-reduced
 `AF_UNIX SOCK_STREAM` lane。Manager endpoint 是 nonblocking；只有在精确 PID 仍受 absolute
 lifecycle deadline 与 TERM/KILL/reap ownership 约束时，worker 才可能阻塞。Checkpoint digest
-在 worker 内校验；output hydration 从 metadata-first descriptor/exact-size/digest 开始。对尚未
+在 worker 内校验；output hydration 从 metadata-first descriptor/digest join 开始。对尚未
 reap 的当前 PID，manager 创建一份精确、惰性的匿名最终 owner，并在绝对 lifecycle 检查之间
 最多把一个 64-KiB slice 直接接收到该 owner；不存在累计 accumulator 扩容或 whole-payload
 copy。只有合法 Heartbeat frame 能续期 liveness，连续或预缓冲 output 绝不能。worker 在 stream
@@ -152,8 +152,9 @@ call。其余 54 个 method 要么把 direct/first-page request 路由到匹配�
 提供 daemon metadata；stable collection continuation 只读取其 frozen snapshot registry record。
 
 版本 2 在 router boundary 暴露 daemon-owned compute-job submit、polling、terminal result、
-release 与 protected metadata-only image delivery。Image byte 保留在 private artifact 中；
-terminal nonempty image result 只在一个 stable delivery lease 下返回规定的 artifact metadata。
+release 与 protected metadata-only named-Value delivery。规范 archive byte 保留在 private
+artifact 中；terminal nonempty Values result 只在一个 stable delivery lease 下返回规定的 artifact
+metadata。
 版本 2 不暴露 compute cancellation、`daemon.shutdown`、TCP、Windows named pipe、remote 或
 multi-user access mode，也不暴露 `graph_cli --connect`。Issue #74 的每个 Graph
 latest-wins supersession 仍只存在于私有 embedded Kernel path；它不增加 wire method/field，
@@ -181,7 +182,7 @@ load report 后再丢弃它。这两种组合都不会增加额外 wire method�
 | 6 | `clear_graph` | `Client::clear_graph` | `graph.clear` |
 | 7 | `compute` | status mode 下 submit、poll、result、best-effort release | `compute.submit`、`compute.status`、`compute.result`、`compute.release` |
 | 8 | `compute_async` | joined worker 执行 status-mode 组合 | `compute.submit`、`compute.status`、`compute.result`、`compute.release` |
-| 9 | `compute_and_get_image` | image-mode 组合、protected mapping、lease-aware release | `compute.submit`、`compute.status`、`compute.result`、`compute.release` |
+| 9 | `compute_and_get_values` | Values-mode 组合、protected archive mapping/reconstruction、lease-aware release | `compute.submit`、`compute.status`、`compute.result`、`compute.release` |
 | 10 | `timing` | `Client::timing` | `compute.timing` |
 | 11 | `last_io_time` | `Client::last_io_time` | `compute.last_io_time` |
 | 12 | `last_error` | `Client::last_error` | `compute.last_error` |
@@ -708,21 +709,22 @@ status；通过校验的 terminal nested status 会原样返回，不改写 doma
 或 message。
 
 一旦已知 terminal status，即使 result 获取或 cross-RPC validation 失败，cleanup 也会尽力尝试
-一次 `compute.release`。只有成功校验的 image result 才会提供 delivery id。Cleanup failure 绝不
-替换已经取得的 status 或 image。在 terminal publication 前发生 status poll failure，或者
-adapter stop 时，不会 release 未完成 daemon job。Production image consumer 会在 delivery lease
+一次 `compute.release`。只有成功校验的 named-Value result 才会提供 delivery id。Cleanup failure 绝不
+替换已经取得的 status 或 Values。在 terminal publication 前发生 status poll failure，或者
+adapter stop 时，不会 release 未完成 daemon job。Production artifact consumer 会在 delivery lease
 保护 result-to-open 的期间使用 `O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK` 打开文件，校验相同 uid、
-regular type、精确 `0600`、单链接、device/inode/size 与 tight layout，以
-`PROT_READ|MAP_PRIVATE` 映射完整文件，并在暴露字节前再次校验 descriptor。Metadata 的
-512-MiB 上限会在 mapping 前强制执行。Adapter 随后发送 lease-aware release；复制出来的
-`ImageBuffer` 会共享 mapping，最后一个引用会且只会调用一次 `munmap` 与 `close`。
+regular type、精确 `0600`、单链接与 device/inode/size，以 `PROT_READ|MAP_PRIVATE` 映射完整
+archive，并在 decode 字节前再次校验 file identity。Metadata 的 512-MiB 上限会在 mapping 前
+强制执行。Adapter 随后发送 lease-aware release。临时 mapping 会在 digest verification 与 byte
+detachment 后恰好一次调用 `munmap` 和 `close`；artifact reconstruction 随后创建通过本地校验的
+全新 Value 与 runtime identity。
 
 `compute_async` 会在远端 submission 前创建其 joined worker。Adapter 析构会发布 stop、唤醒全部
 waiter、shutdown 活动 worker descriptor、以 local Transport code 5 `client_stopped` 完成每个
 未完成 future，然后 join 全部 worker。Stop 后竞态到达的 worker result 会被丢弃。析构绝不重新
 提交、release 未完成 job、关闭 daemon session、卸载 plugin 或启动 embedded execution。
 
-`compute.submit` 要求 `session_id`、非负 `node_id`，以及值为 `status` 或 `image` 的
+`compute.submit` 要求 `session_id`、非负 `node_id`，以及值为 `status` 或 `values` 的
 `result_mode`。它通过以下 nested value 接收现有 Host request：
 
 ```json
@@ -758,9 +760,9 @@ router 也会在 Host access 前执行相同校验。
 Queue commit 之前，submission 会 admit active session，执行全局最多 64 个 queued/running record
 的限制，验证并 collision-check 一个 daemon-generated 32-lowercase-hex compute id，并预留全部
 queue/terminal bookkeeping。成功 commit 的 snapshot 始终是 `queued` 且
-`cancellable: false`。唯一 FIFO worker 会把 record 推进到 `running`，按 `status` 或 `image`
+`cancellable: false`。唯一 FIFO worker 会把 record 推进到 `running`，按 `status` 或 `values`
 mode 精确调用一次匹配的 synchronous Host callback，然后发布恰好一个 immutable
-`succeeded` 或 `failed` terminal status。Host call 使用同一个 daemon Host mutex；image
+`succeeded` 或 `failed` terminal status。Host call 使用同一个 daemon Host mutex；artifact
 publication 在 callback 释放 Host mutex 后执行。
 
 Submit、status 与 result 使用同一份 stable result schema：
@@ -777,8 +779,8 @@ Submit、status 与 result 使用同一份 stable result schema：
 ```
 
 Queued/running 时 `status` 为 null；terminal publication 后，它是 canonical、精确的 nested
-`OperationStatus`。Submit、status、status-mode result、empty-image result 与 failed result 的
-`output` 保持 null。只有 terminal successful nonempty image 的 `compute.result` 才会在
+`OperationStatus`。Submit、status、status-mode result、empty-Values result 与 failed result 的
+`output` 保持 null。只有 terminal successful nonempty named-Value set 的 `compute.result` 才会在
 `output` 中返回以下精确 object：
 
 ```json
@@ -786,13 +788,10 @@ Queued/running 时 `status` 为 null；terminal publication 后，它是 canonic
   "output_id": "32-lowercase-hex",
   "delivery_id": "32-lowercase-hex",
   "path": "/protected/socket.outputs/instance-id/output-id.bin",
-  "width": 2,
-  "height": 2,
-  "channels": 1,
-  "data_type": "uint8",
-  "device": "cpu",
-  "row_step": 2,
-  "byte_size": 4,
+  "byte_size": 8192,
+  "digest_sha256": "64-lowercase-hex",
+  "archive_version": 1,
+  "value_count": 2,
   "filesystem_device": 16777234,
   "inode": 12345
 }
@@ -809,7 +808,7 @@ Status read 是 non-destructive，且不获取 Host mutex。Result 与 release �
 release 会通过一次 registry operation 检查并删除 record。格式正确但 absent、expired、released
 或 evicted 的 id 映射为 daemon `job_not_found`；对 queued/running job 执行 result 或 release 则
 映射为 daemon `job_not_ready`。Host failure 保留为精确 nested terminal status。每个 accepted
-Host failure、invalid image、output quota denial 或 publication failure 都会在 successful
+Host failure、invalid Value set、output quota denial 或 publication failure 都会在 successful
 status/result envelope 中保持为 immutable failed job；quota denial 使用 nested daemon
 `artifact_limit_exceeded`，unexpected worker/publication failure 使用 nested daemon
 `internal_error`。只有 malformed params、submit/admission failure、absent job、premature
@@ -827,18 +826,20 @@ move-only reference，其 optional lease-aware exact-once cleanup 在 registry m
 release 只删除 job ownership；带 matching id 的 release 会在同一个 OutputStore critical section
 中删除 job ownership 与 active lease。
 
-## Protected Output Store 与 Image Result
+## Protected Output Store 与 Named-Value Result
 
-Wire surface 只从 terminal `compute.result` 暴露 image metadata，并使用 optional lease-aware
+Wire surface 只从 terminal `compute.result` 暴露 named-Value artifact metadata，并使用 optional lease-aware
 `compute.release`；不会新增独立 delivery method。Router 背后有一个 private `OutputStore`，并与
 joined compute publisher 和 socket lifecycle 绑定。它会在 Unix socket 与持久 lifecycle lock
 已归属之后、session/compute/client admission 之前启动；因此 startup failure 不会放入任何
 request。
 
-Canonical empty CPU image 不发布 artifact。Nonempty result 必须是合法 CPU `ImageBuffer`：具有
-defined data type、正 dimensions/channels、non-null data、至少等于 checked tight row 的 source
-step，并且 row/total byte count 不溢出。Store 只复制 tight row；source padding 与 backend
-context 不会进入 artifact。Validation、allocation、write、rename 或 identity failure 会通过已接受
+Canonical empty named-Value result 不发布 artifact。Nonempty result 必须具有有界、非空、唯一且
+规范的 output name，以及完整合法的 Value。Store 会把每个 output 捕获为版本化
+`ValueArtifactEnvelope`，并在一个规范 named archive 中保留 descriptor、Facet、Layout、buffer
+role/span/alignment、payload digest、可选 content digest 与有界 statistics reference。Runtime
+binding、device handle、path、lease 与 allocation/revision identity 都不会进入 artifact。
+Validation、allocation、write、rename 或 identity failure 会通过已接受
 compute job 成为 nested daemon `internal_error`；quota denial 则成为 nested daemon
 `artifact_limit_exceeded`。
 
@@ -853,8 +854,8 @@ ancestry 与 artifact identity，最后才允许 record 可见。
 Store base 是 socket-specific、same-owner、exact-mode `0700` 的 `<socket>.outputs`；每个 process
 只写 exact-mode `0700` 的 `instance-<server_instance_id>` child。Artifact 是使用
 `O_NOFOLLOW|O_CLOEXEC` 打开的 same-owner regular file，mode 精确为 `0600` 且只有一个 link。
-Metadata 只保留 output id、absolute path、dimensions、data type、CPU device、tight row step、byte
-size、filesystem device 与 inode。Live access 会通过持有的 directory descriptor 重新验证
+Metadata 只保留 output id、absolute path、archive byte size 与 digest、archive version、Value
+count、filesystem device 与 inode。Live access 会通过持有的 directory descriptor 重新验证
 base/instance ancestry，以及 file owner、type、exact mode、link count、device、inode 与 size。
 Record/file 缺失或不匹配时，`compute.result` 返回 top-level daemon `artifact_not_found`，
 terminal compute record 仍可 release；unsafe replacement 绝不会被 follow 或 remove。
@@ -883,7 +884,7 @@ removal 前，都会立即通过 held fd 与 path identity 重新验证。这是
 replacement 防护边界：观察到 mismatch 或无法确定的 system error 时会保留 entry；但 same-uid
 hostile process 在 platform 层仍可能竞态最终 validation 与 `unlinkat` 两条指令。
 
-Shutdown 会立即停止新建或刷新的 delivery lease，同时 accepted image job 在 compute drain 期间仍可
+Shutdown 会立即停止新建或刷新的 delivery lease，同时 accepted Values job 在 compute drain 期间仍可
 publish。Joined compute worker 退出后，terminal cleanup 删除 job ownership，store 停止
 publication，等待 active lease 被显式 release 或达到 injected monotonic TTL，按 identity 清理
 unowned artifact，并在关闭 Host session 前关闭自己的 directory。Quota、两类 TTL、clock 与 id

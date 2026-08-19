@@ -65,7 +65,7 @@ connected-parameter preflight 会具化 heap-owned context 和 move-only
 `ReadyTaskSubmission`，因此没有 stack `TaskExecutor*` 跨越 service 边界。三条私有 route 都使用
 同一条 ready-store、policy、reserved-start、Run-lease 与 completion path。
 
-Route-aware planning 会在准入前冻结选中的 implementation 与 `Device`。`cpu` 和
+Route-aware planning 会在准入前冻结选中的 implementation 与 `DeviceBackend`。`cpu` 和
 `serial_debug` 只暴露 CPU；固定 registry 包含 Metal executor 时，`gpu_pipeline` 依次暴露
 Metal、CPU，否则只暴露 CPU。CPU 与 Metal submission 进入彼此独立的固定 lane，但共用 Run grant
 与 maximum-parallelism ceiling。Reserved start 后，Metal submission 会同步进入该 registry

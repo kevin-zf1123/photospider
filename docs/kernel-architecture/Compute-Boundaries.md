@@ -18,7 +18,7 @@ graph, or physical executor/policy pointer. A public compute request may carry
 an optional positive `maximum_parallelism` Run ceiling; it cannot resize or
 select the process executor. Logical dirty work and cache validity remain
 normalized `RegionSet` through planning, staging, and the Region-aware core
-dense path. Current image tile shapes, Host/IPC v2 inspection, ImageBuffer
+dense path. Current image tile shapes, Host/IPC v2 inspection, dense Value
 helpers, and operation ABI v1 adapters use checked derived `PixelRect`/`PixelSize`.
 Private dirty/tile PixelRects are zero-based storage geometry; logical Regions
 and Host grants use the signed data-window domain. Crossing that boundary
@@ -151,7 +151,7 @@ reserved-start transaction.
 | `IntentUpdateCoordinator` | HP-only or HP/RT sibling semantics | Physical priority or worker ownership |
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, policy ranking, or physical execution |
 | `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, frozen implementation/device snapshots, result slots, callback owner, and cancellation owner for pending-Value fence waits for one full HP request | Execution-route workers, Run terminal state, native completion freshness, or dirty-path execution |
-| `ReadyTaskSubmission` | Move-only immutable metadata, selected `Device`, exact operation constraints, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
+| `ReadyTaskSubmission` | Move-only immutable metadata, selected `DeviceBackend`, exact operation constraints, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
 | `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, one fixed `DeviceExecutorRegistry` with process-owned native resources and shared exact `ResidencyManager`, private `serial_debug` and `gpu_pipeline` routes, one Host/device-authoritative `ResourceLedger`, one process-domain operation gate, one private lifecycle-admission registry, policy-aware bounded ready storage, Run-scoped ReadyFence continuation routing, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, visible commit, access-plan selection, residency eviction, or resource ordering/fairness |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Execution-trace ownership |
@@ -186,8 +186,8 @@ inverts exact ImageRect or rank-general TensorSlice coordinates through
 checked strides. A same-key plugin override uses its own validated operation
 ABI v1 descriptor, Region, plan, and grant contract rather than inheriting this
 private core contract. Publication preserves the exact sealed result
-allocation/revision; only an explicit Host/codec adapter may derive a
-use-scoped ImageBuffer snapshot.
+allocation/revision. Host and codec adapters retain that exact Value or capture
+a portable artifact; they do not derive an alternate image snapshot.
 
 DI-2 makes HP compute-service, result-committer, dirty-write, RT, and disk-load
 boundaries Value-only before formal publication. One immutable
@@ -268,7 +268,7 @@ nibble bits, and logical revision while receiving fresh binding/producer
 identity. An oversized immutable BufferHandle alias remains a valid bounded
 view but is not an exact transfer producer; preparation rejects it before
 destination publication or provider effects. The transfer performs no
-dequantization, requantization, ImageBuffer adaptation, or implicit wait.
+dequantization, requantization, alternate image adaptation, or implicit wait.
 
 The registry's shared `ResidencyManager` admits complete Graph/target/intent/
 generation/Run/task/producer/revision/binding identity before native commit.
@@ -736,7 +736,7 @@ cancellation, retry choice, settlement, quota, artifact, or commit authority.
   selected core dense monolithic callback has the private tensor contract; a
   selected same-key device replacement is Unsupported, without scalar
   fallback.
-- Current image tiling, ImageBuffer processing, Host/IPC v2 inspection, and
+- Current image tiling, dense Value processing, Host/IPC v2 inspection, and
   operation ABI v1 adapters carry checked derived `PixelRect`/`PixelSize`, never OpenCV
   geometry. Dirty/tile rectangles are zero-based storage projections; signed
   logical Region metadata is translated through the owning data window.
@@ -1233,8 +1233,8 @@ The contender resolves `Succeeded` after publication or preserves the exact
 predicate/persistence failure as `Failed` before the work item returns.
 
 Formal output validation accepts only Ready Values across the exact declared
-canonical-image-plus-generic set and rejects any nonempty
-`compatibility_image`. Parameter results are checked as a separate exact set.
+canonical-image-plus-generic set. Parameter results are checked as a separate
+exact set.
 Image-free successful targets remain valid and publish no fabricated image
 identity. Tiled/dirty tasks share one
 per-node binding; the last executable tile retires and seals it, while planning
@@ -1290,13 +1290,13 @@ descriptor, optional Image Facet, layout, binding, allocation, logical
 revision, and complete storage envelope, then returns both budgets at typed
 settlement. This proves that the bounded execution mechanism does not itself
 narrow FP64, channels, rank, or strides. It does not define generic
-serialization: the current product cache still crosses an image-only
-`ImageBuffer`/selected-precision codec boundary, and latent Values have no such
-artifact path.
+serialization. The shared portable Value artifact contract owns generic
+serialization; the configured image codec remains an ordinary-image-only path,
+while worker and durable artifact paths can retain supported latent Values.
 
 V-13 does not widen that persistence boundary. Formal HP memory-cache state may
 retain a packed Value and exact TensorSlice validity, but configured image disk
-save validates ImageBuffer compatibility before estimating or admitting a
+save validates explicit ordinary-image codec compatibility before estimating or admitting a
 `ComputeIoExecutor` task. Packed, quantized, or latent formal Values raise
 `GraphError{InvalidParameter}` before filesystem paths or codecs are touched.
 This fail-closed result is a typed boundary observation, not a generic artifact
@@ -1326,7 +1326,8 @@ particular:
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
 accepts a target in which optional cache persistence and durable output commit
 have independent outcomes after Run publication. The source-private Issue #99
-Job vertical now implements one narrow restart-persistent image-output path:
+Job vertical now implements one narrow restart-persistent named-Value
+artifact-set output path:
 stable artifact/commit identity, manifest-last filesystem publication,
 idempotent reconciliation, retained quota, durable Job records, and restart
 recovery. This does not turn cache save, daemon delivery, Graph-document save,
@@ -1590,7 +1591,7 @@ Host method, Run identity, scheduler contract, or installed ABI.
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
-- `src/lib/core/exact_box_downsample.cpp`
+- `src/lib/core/dense_image_processing.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/ipc/output_store.*`
 - `plugins/ops/save_op.cpp`

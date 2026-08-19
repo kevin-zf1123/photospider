@@ -10,8 +10,9 @@ Value-copy 证明也已成为当前行为。V-7 新增一套 source-private 的�
 registry，并让仓库 Metal Perlin operation 经过其自有 queue、invocation allocator 与 pipeline
 cache。V-8 新增显式 device/binding 事实、非阻塞 access plan、保留 revision 的 CPU/Metal
 transfer、精确的进程级 residency、Run-scoped pending-Value continuation，以及在 destination
-Ready 前拒绝 stale native completion。`ImageBuffer`、`DataType`、`Device` 与 `ParameterMap`
-仍是各自角色边缘上的兼容契约；operation plugin 现在使用完整纯 C ABI v1。本 ADR 中尚未实现的
+Ready 前拒绝 stale native completion。DI-4 已从所有 active edge 删除此前的 `ImageBuffer`、
+`DataType` 与 `Device` 兼容契约；`ParameterMap` 只保留为 configuration。Operation plugin
+现在使用完整纯 C ABI v1。本 ADR 中尚未实现的
 部分仍是演进目标。
 
 V-9 新增 source-private 的 per-device memory/scratch plan、native actual-byte 校准，以及随
@@ -52,7 +53,7 @@ Issue #117 已实现独立的合成 `VariableSampleField` V-14 证明，不依�
 
 ## 背景
 
-当前 `ImageBuffer` 契约是有用的二维图像 payload，但不能通过持续追加字段而扩展成通用图
+在本决策的起始时点，`ImageBuffer` 契约是有用的二维图像 payload，但不能通过持续追加字段而扩展成通用图
 value model。逻辑含义、物理存储、设备访问、就绪状态、缓存身份与 Region 推理具有不同的
 owner 和版本生命周期。混合这些事实会让存储搬移改变逻辑身份、让单个 device enum 暗示
 可访问性、把 padding 变成内容身份的一部分，并强迫未来数据族进入一个封闭枚举。
@@ -387,8 +388,9 @@ invalidation 或 execution。
 key、signed 64-bit `ImageRect` interval、rank-general unsigned 64-bit `TensorSlice`
 interval、单个 nonempty clause 最多八个 atom 的硬上限，以及显式 caller budget。Dirty
 source fact、per-node affected work、edge mapping、HP/RT validity 和 core dense operation
-都保留规范化 `RegionSet`。当前 image tiling、ImageBuffer helper、Host/IPC inspection 与
-operation ABI v1 adapter 仍保留 checked derived `PixelRect` projection。RT 只支持 image；
+都保留规范化 `RegionSet`。在 V-4 交付边界，image tiling、前身图像 helper、Host/IPC inspection
+与 operation adapter 仍保留 checked derived `PixelRect` projection。DI-4 删除前身图像 helper，
+但不改变 `PixelRect` 的 physical-geometry 角色。RT 只支持 image；
 TensorSlice 是 HP monolithic work，绝不被重新解释成二维 geometry。
 
 ### DataSpec、capability、property 与 output inference
@@ -540,8 +542,8 @@ ParameterMap    -> configuration only, never a data payload
 
 仓库自有 operation 与 provider 已首先迁移，随后按依赖顺序迁移自有 adapter、test、installed
 consumer 与文档。DI-3 安装 ADR 0012 接受的独立版本化 pure-C operation-plugin ABI v1，并在同一
-breaking change 中删除 predecessor entry point、SDK、fixture 与 package surface。DI-4 仍负责
-最终 public Host/IPC/worker/durable/codec/CLI ImageBuffer 迁移。
+breaking change 中删除 predecessor entry point、SDK、fixture 与 package surface。DI-4 随后
+完成 public Host、IPC、worker、durable、codec 与 CLI 迁移，并删除此前的图像兼容类型。
 
 最终状态不存在永久 compatibility wrapper、alias class、重复 old/new API、forwarding header、
 dual loader、predecessor shim 或双重 descriptor/cache/ABI authority。Temporary edge adaptation
@@ -622,7 +624,7 @@ standard-library ownership 或 toolchain ABI。
 下列维护中文档仍是当前行为的权威来源：
 
 - [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)；
-- [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)；
+- [稠密图像 Value 内存契约](../../kernel-architecture/zh/Dense-Image-Value-Memory-Contract.zh.md)；
 - [插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)；以及
 - [内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)。
 

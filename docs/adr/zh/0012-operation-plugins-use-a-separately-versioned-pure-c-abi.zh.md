@@ -123,9 +123,9 @@ documentation 都在同一迁移中删除。
 
 ## 范围边界
 
-本决策只迁移 operation plugin 与 isolated-invocation boundary。DI-4 仍负责最终删除或迁移
-operation/isolation 边界之外的 public Host、IPC/worker、durable、codec、CLI 与其余
-`ImageBuffer` surface。Policy ABI v1 与 data-definition provider ABI v3 继续独立版本化且不变。
+本决策只迁移了 operation plugin 与 isolated-invocation boundary。DI-4 随后迁移 public Host、
+IPC/worker、durable、codec 与 CLI 边界，并删除此前的图像兼容表面。Policy ABI v1 与
+data-definition provider ABI v3 继续独立版本化且不变。
 
 ## 验证
 

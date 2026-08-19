@@ -523,7 +523,7 @@ unsupported-capability failure.
 Current behavior remains authoritative in:
 
 - [Kernel Data Model](../kernel-architecture/Data-Model.md);
-- [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md);
+- [Dense Image Value Memory Contract](../kernel-architecture/Dense-Image-Value-Memory-Contract.md);
 - [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md);
 - [Compute Flow](../kernel-architecture/Compute-Flow.md);
 - [Policy and Execution Architecture](../kernel-architecture/Policy-and-Execution-Architecture.md);

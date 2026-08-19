@@ -64,10 +64,11 @@ configured image/YAML artifact，而不是编码 partial byte。成功 disk load
 decoded output 派生 complete validity。
 
 图像字节通过私有、依赖中立的 `ImageArtifactCodec` 契约。`Kernel` 从产品组合根取得一个配置好的
-共享 codec，并将其注入 `GraphCacheService`；Graph/cache 代码只提供 path、`ImageBuffer` 与
-规范化整数精度。OpenCV 启用时，已配置 adapter 使用 OpenCV imgcodecs，并把 provider failure
-翻译为 `GraphErrc::Io`，同时让 OpenCV `StsNoMem` 保持为 `std::bad_alloc`。OpenCV 禁用时，
-已配置 unavailable codec 会在不发现或导出 OpenCV 的情况下返回 `GraphErrc::Io`。测试会注入确定性 fake，
+共享 codec，并将其注入 `GraphCacheService`；Graph/cache 代码只提供 path、精确的普通 image Value
+以及显式 decode/encode sample request。OpenCV 启用时，已配置 adapter 对非 OpenEXR format 使用
+OpenCV imgcodecs，并把 provider failure 翻译为 `GraphErrc::Io`，同时让 OpenCV `StsNoMem` 保持为
+`std::bad_alloc`。可选的普通 OpenEXR codec 保留独立 signed data/display window。两种 codec 都禁用时，
+已配置 unavailable codec 会在不发现或导出它们的情况下返回 `GraphErrc::Io`。测试会注入确定性 fake，
 在不读取或写入真实图像格式的情况下验证调用顺序、生命周期保持、精度选择、可恢复错误与资源耗尽。
 
 Named value 独立通过私有、依赖中立的 `CacheMetadataCodec` contract，只交换 path 和脱离
@@ -176,8 +177,8 @@ document boundary。
 
 正式 HP `NodeOutput` 携带按规范顺序保存的 named Value。永久 `image` entry 是唯一 image
 payload/allocation/readiness/revision authority；每个 declared generic entry 都是对应 non-image
-Value authority，并与 `NodeOutput::data` 保持分离。正式 cache 不包含 ImageBuffer peer，并拒绝
-非空 compatibility staging。复制正式 cache entry 会保留每个 Value 的 revision、producer、
+Value authority，并与 `NodeOutput::data` 保持分离。正式 cache 只包含这些 named Value authority，
+没有 compatibility peer 或 staging field。复制正式 cache entry 会保留每个 Value 的 revision、producer、
 representation、indexed storage binding 与 Ready state；provider-defined multi-buffer Value 不会
 被折叠成单一 image allocation identity。
 
@@ -192,8 +193,8 @@ Replacement output 与 disk decode 同样创建新 identity。RT proxy output �
 projection version 的全新 sealed Value；它继续保持 transient，不会成为正式 cache identity
 source。
 
-Disk save 要求 sealed Value，并从其 checked image view 派生临时 ImageBuffer snapshot。现有 image
-与 YAML format 仍只持久化 representation byte 与 named metadata：
+Disk save 要求 sealed Value，并通过显式 codec 或 portable artifact 边界直接捕获 checked Value。
+现有 image 与 YAML format 仍只持久化 representation byte 与 named metadata：
 `AllocationIdentity` 和 `ValueRevisionId` 都不会被序列化、从 path 重建或用作持久 cache/task
 key。两类 token 都是 opaque、process-local runtime identity；disk reload 必然铸造新 token。
 这项 image-only mechanism 不会静默序列化 generic named Value，也不会把 parameter metadata
@@ -257,13 +258,13 @@ downsample request。Region value 与 Tensor axis 会计入 retained-memory acco
 正式 HP `NodeOutput` 可以通过既有 Value authority 保留完整 immutable packed FP4 Value。
 普通 cache copy 会保留 descriptor、block-scale quantization、Blocked layout、精确 byte
 envelope、allocation、逻辑 revision 与 Ready state。`Node::hp_region` 会独立保留精确
-TensorSlice validity；两类事实都不会从 ImageBuffer 重建。这是 runtime memory-cache retention，
+TensorSlice validity；两类事实都不会从缩减图像 snapshot 重建，也不会从 storage 推断。这是 runtime memory-cache retention，
 不是新的 persistent identity 或 cache format。
 
 已配置 disk mechanism 继续明确保持 image-only。在 planned byte 被 `ComputeIoExecutor` 准入、
 executor callback 被创建，以及 filesystem 或 codec 工作发生前，`GraphCacheService` 要求正式
-Value 为 Ready、host-readable、image-faceted、Strided、unquantized，并与 whole-byte
-ImageBuffer element set 兼容。Packed、quantized 或 latent 正式 Value 会以
+Value 为 Ready、host-readable、image-faceted、Strided、unquantized，并与所选 codec 的显式
+whole-byte storage set 兼容。Packed、quantized 或 latent 正式 Value 会以
 `GraphError{InvalidParameter}` 失败。没有有效 nonempty image cache entry 的节点会保留历史
 no-op 行为，不会进入这条 validation boundary。
 
@@ -290,7 +291,7 @@ eviction、精确 revision invalidation 与显式 clear 只影响 derived data�
 Statistics 不是 `Value`、`ImageFacet`、正式 HP cache entry、descriptor/content identity、
 disk-cache path 或 artifact manifest 的字段。创建、重新计算或驱逐 result 不能修改 Value
 revision、canonical digest、HP validity 或持久表示。store 使用完整 key；allocation identity、
-graph revision、HP/RT generation、descriptor digest 或 ImageBuffer identity 本身都不充分。
+graph revision、HP/RT generation 或 descriptor digest 本身都不充分。
 Content digest 是可选的，因为有效 runtime revision 可能在请求 content traversal 前就被观测。
 
 ### 当前有界机制与未来持久化关系
@@ -335,7 +336,8 @@ eligibility、path、output commit policy、Graph 文档 transaction、daemon st
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/providers/configured_persistence_adapters.*`
-- `src/lib/core/value_image_adapter.*`
+- `src/lib/core/{sample_conversion,value_artifact}.*`
+- `src/lib/adapters/{opencv,openexr}/`
 - `include/photospider/data/packed_dense_tensor_view.hpp`
 - `include/photospider/memory/blocked_layout.hpp`
 - `include/photospider/data/region.hpp`

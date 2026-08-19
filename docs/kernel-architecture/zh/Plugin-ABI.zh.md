@@ -300,8 +300,8 @@ destruction 在 registry lock 外执行。
 - 任何 owning ABI version 变化后，插件都必须针对 matching installed SDK 重新构建。
 - Process-local pointer 只能在授权的 in-process callback 内存在，绝不跨 isolation wire，也不成为
   durable identity。
-- DI-4 仍负责最终迁移 operation/isolation 边界以外的 public Host、IPC/worker、durable、codec、
-  CLI 与其余 `ImageBuffer` surface。
+- DI-4 已完成 public Host、IPC/worker、durable、codec 与 CLI 边界向 named Value 和可移植
+  Value artifact 的迁移。operation/isolation 边界之外不再保留旧图像兼容表面。
 
 ## 实现与验证入口
 

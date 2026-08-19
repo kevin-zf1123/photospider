@@ -17,14 +17,15 @@
 
 当前仓库已经具备 public Host seam、可安装静态产品、迁移后的 CLI application tree、按角色归属的
 backend source tree、明确的 production plugin 目录、unit/integration 测试归属，以及 macOS/Linux
-version 2 daemon/IPC graph、inspection、polling-compute、protected image-output 与 bounded
+version 2 daemon/IPC graph、inspection、polling-compute、protected named-Value output 与 bounded
 event/trace observation 以及 process-global operation-plugin router 行为。Installed typed IPC
 Client 现在为精确 60-method surface 全部提供 owned call，会验证每个 typed result，并把 stable
 cursor page 聚合为完整的 Host-shaped value。Installed IPC-backed Host 现在会通过 typed
 short-lived connection、会等待结束的异步轮询和确定性的停止顺序，实现当前全部 58 个非析构
-Host virtual。Image mode 当前会在 delivery lease 保护 result-to-open 的期间严格重新校验同用户
-regular file，创建共享 read-only mapping，再释放匹配的 job/lease。最后一个 mapping owner 会且只会
-执行一次 unmap 和 close。Installed IPC-only package consumer 现在已经闭合完整的
+Host virtual。Values mode 当前会在 delivery lease 保护 result-to-open 的期间严格重新校验同用户
+regular file，创建临时 read-only archive mapping，验证并 detach 精确 bytes，随后恰好执行一次
+unmap/close，再重建全新 local Values 并释放匹配的 job/lease。Installed IPC-only package consumer
+现在已经闭合完整的
 symbol/export/header contract；plugin SDK 遵循下文记录的 extension contract。
 
 当前根 `CMakeLists.txt` 中观察到的构建目标：
@@ -147,7 +148,7 @@ external frontend
 - graph 和 node inspect snapshot
 - policy binding 与 execution trace snapshot
 - dirty-region inspect view
-- image 和 tile buffer 契约
+- dense-image Value 与 tile 契约
 - plugin operation 注册契约
 
 这样 `InteractionService` 会作为 public `ps::Host` seam 背后的深层 backend 模块：前端可以获得
@@ -165,7 +166,6 @@ include/photospider/core/
   export.hpp
   geometry.hpp
   device.hpp
-  image_buffer.hpp
   graph_error.hpp
   compute_intent.hpp
   result_types.hpp
@@ -176,14 +176,20 @@ include/photospider/host/
   graph_session.hpp
   compute_request.hpp
   event_stream.hpp
+  value_result.hpp
+  value_artifact_result.hpp
 
 include/photospider/data/
   value.hpp
   extension.hpp
+  image_metadata.hpp
+  image_statistics.hpp
   image_view.hpp
   packed_dense_tensor_view.hpp
   parameter_value.hpp
   region.hpp
+  sample_conversion.hpp
+  value_artifact.hpp
 
 include/photospider/memory/
   access_plan.hpp
@@ -218,9 +224,9 @@ include/photospider/
 - 公开头不得暴露 `GraphModel`、`GraphRuntime` 或 `ComputeService` 拥有的可变实现状态。
 - 公开头应优先使用值对象、不透明 handle、小引用和 request/result 结构。
 - OpenCV 只出现在显式 opt-in 的 `plugin/opencv_adapter.hpp` 契约；operation SDK、policy SDK、
-  Host、core 与 IPC header 都不需要它。任何 public header 都不暴露 yaml-cpp；`ImageBuffer` 继续作为
-  public value compatibility contract；通用 CPU Value ownership 通过 dependency-neutral 的
-  `data/` 与 `memory/` header 暴露。
+  Host、core 与 IPC header 都不需要它。任何 public header 都不暴露 yaml-cpp。普通图像使用
+  dependency-neutral 的 `Value`、`ImageView`、sample、artifact 与 memory 契约；不会安装第二种
+  图像兼容类型。
 - CLI、benchmark 和 test-only 头不是 public install header。
 
 ## 当前与目标源码布局
@@ -522,8 +528,8 @@ identity、authorization、isolation 与 lifecycle 设计。
 - 接受文档定义的 typed graph reload/save/clear、node YAML、node-list、cache、dirty
   lifecycle、ROI、timing、last-IO 与 last-error request，并把每个 request 路由到恰好一次匹配的
   Host call
-- 拥有 bounded polling compute job，并把成功的 nonempty image result materialize 为带 stable
-  delivery lease 的 protected metadata-only artifact
+- 拥有 bounded polling compute job，并把成功的 nonempty named-Value result materialize 为带
+  stable delivery lease 的 protected archive metadata
 - 通过匹配的 Host observation API 直接路由 bounded destructive compute-event drain 与
   non-destructive execution trace page
 - 强制 per-user directory/socket permission 与安全 live/stale handling
@@ -603,28 +609,28 @@ Method group 与当前 wire availability：
 | inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward`, `inspect.dirty_region`, `inspect.compute_planning`, `inspect.recent_compute_planning`, `inspect.traversal_orders`, `inspect.traversal_details`, `inspect.trees_containing_node` | 已通过 copied Host value 实现。Full-value collection 使用 stable bounded cursor page；node/ROI/dirty/current-planning value 保持 indivisible direct result。Host order 与 duplicate 均保留。 |
 | dirty | `dirty.begin`, `dirty.update`, `dirty.end` | 已通过一次匹配的 Host lifecycle mutation 实现，并返回 copied dirty-region snapshot；完整 compact response size 会在 result-DOM 分配前完成 preflight。 |
 | cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | 已作为 status-only Host call 实现；result 不包含 backend cache handle 或 path。 |
-| compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling job 与 diagnostic 已路由。Submit/status/result 使用 stable `{compute_id,session_id,state,cancellable,status,output}` value；state 精确为 `queued`、`running`、`succeeded` 与 `failed`，每个 job 都报告 `cancellable:false`。Submit、status、status-mode result、empty-image result 与 failed result 的 `output` 保持 null。Terminal nonempty image result 会重新验证 protected artifact、刷新一个 stable 60-second delivery lease，并返回规定的 metadata object。Terminal release 原子返回 `{compute_id,released:true}`，接受 optional exact `delivery_id`，并且在 normal job removal 后仍能释放 matching orphaned lease。Timing 会对 aggregate compact response size 做 preflight；last error 是 nested diagnostic data。 |
+| compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling job 与 diagnostic 已路由。Submit/status/result 使用 stable `{compute_id,session_id,state,cancellable,status,output}` value；state 精确为 `queued`、`running`、`succeeded` 与 `failed`，每个 job 都报告 `cancellable:false`。Submit、status、status-mode result、empty-Values result 与 failed result 的 `output` 保持 null。Terminal nonempty Values result 会重新验证 protected named-Value archive、刷新一个 stable 60-second delivery lease，并返回规定的 metadata object。Terminal release 原子返回 `{compute_id,released:true}`，接受 optional exact `delivery_id`，并且在 normal job removal 后仍能释放 matching orphaned lease。Timing 会对 aggregate compact response size 做 preflight；last error 是 nested diagnostic data。 |
 | policy | `policy.types`、`policy.description`、`policy.scan`、`policy.load`、`policy.loaded_plugins`、`policy.configure_defaults`、`policy.info`、`policy.replace` | 进程级纯 C type discovery/loading 与 Interactive/Throughput binding。Client 会聚合 stable type/plugin page，并验证复制的 binding/fault snapshot；Client 断开不会 retire process-owned DSO state。 |
 | execution | `execution.types`、`execution.description`、`execution.configure_defaults`、`execution.info`、`execution.replace`、`execution.trace` | 封闭词汇的私有 route control。Default 接受 `[0,8]` 中的 `worker_count`；info/replacement 以 session 为作用域，并与同 Graph compute/close 串行化。Trace 保持 bounded、non-destructive；不会有 route plugin 或物理 owner 跨过 IPC。 |
 | plugins | `plugins.load_report`、`plugins.unload_all`、`plugins.seed_builtins`、`plugins.ops_sources`、`plugins.ops_combined_keys`、`plugins.ops_combined_sources` | Operation-plugin control 只通过匹配 Host call 实现，并已在精确 60-method inventory 中公布。Installed typed Client 暴露全部 route、解码 exact report，并聚合按 key 排序的 stable view；Client 断开不会 unload 成功的 process-owned DSO。 |
 | events | `events.drain` | Bounded destructive event drain 已通过 Host 路由；installed typed Client 将其暴露为一次严格验证且不重试的 Host event batch。 |
 
-图像 payload 规则：
+Named-Value archive 规则：
 
-- Image byte 不进入 JSON。
-- Private OutputStore 会把通过验证的 CPU image materialize 为 exact tight-row mode-`0600`
-  artifact，存放在 same-owner mode-`0700`
+- Value payload byte 不进入 JSON。
+- Private OutputStore 会把每份 validated canonical named-Value archive materialize 为一个 exact
+  mode-`0600` artifact，存放在 same-owner mode-`0700`
   `<socket>.outputs/instance-<server_instance_id>` directory 下。Publication 受 quota 限制且
   atomic；live access 与 cleanup 会在不跟随 symlink 的前提下重新验证 filesystem identity。
 - Private compute registry 保留 move-only OutputStore ownership；optional lease-aware release、
   eviction、TTL expiry 或 shutdown 时，其 exact-once cleanup 会在 registry mutex 外执行。
-  每次 image result 成功后，一个 stable delivery id 最多保护一个会被刷新为 60 秒的 lease。
-- Submit/status，以及 non-image、empty-image 或 failed result 的 stable nullable `output` field
-  保持 null。Terminal nonempty image result 只返回 `output_id`、`delivery_id`、protected
-  absolute artifact path、width、height、channels、data type、CPU device、tight row step、byte
-  size、filesystem device 与 inode。Registry 的 opaque reference 只会作为该规范化 `output_id`
-  出现；JSON 中不会出现额外 `output_reference` field、backend handle、pixel byte、backend cache
-  path、image-library object 或 caller-selected result path。
+  每次 Values result 成功后，一个 stable delivery id 最多保护一个会被刷新为 60 秒的 lease。
+- Submit/status、status-mode、empty-Values 或 failed result 的 stable nullable `output` field
+  保持 null。Terminal nonempty Values result 只返回 `output_id`、`delivery_id`、protected
+  absolute archive path、`byte_size`、`digest_sha256`、`archive_version`、`value_count`、
+  filesystem device 与 inode。Registry 的 opaque reference 只会作为该规范化 `output_id`
+  出现；JSON 中不会出现额外 `output_reference` field、backend handle、payload byte、backend
+  cache path、image-library object 或 caller-selected result path。
 - `compute.release` 会在 mutation 前验证 optional stable delivery id。Matching id 会一起释放
   job ownership 与 lease；如果 normal job release、terminal eviction 或 job TTL 已经删除 record，
   同一 `(compute_id, delivery_id)` 仍可释放幸存的 orphan lease。
@@ -746,10 +752,10 @@ scratch 字节。权威的无环依赖表位于
    10/20/40/80/160/320/500 ms 等待，并以 500 ms 为上限；同步调用没有总超时。析构会发布
    stop、唤醒 waiter、shutdown 活动 worker descriptor、把未完成 future 解析为 Transport code 5
    `client_stopped`，再等待每个 worker 结束；不会重新提交、关闭 session、卸载 plugin 或回退到
-   embedded execution。Image consumer 会在 delivery lease 有效期间以不跟随符号链接的方式打开
-   制品，校验同用户 regular type、精确 mode、单链接、device/inode/size 与 tight layout，再创建
-   共享 read-only mapping，随后执行匹配的 lease-aware release。最后一个 owner 会且只会执行一次
-   unmap 和 close。Installed package 门禁会编译每个 public header，再使用
+   embedded execution。Values consumer 会在 delivery lease 有效期间以不跟随符号链接的方式打开
+   制品，校验同用户 regular type、精确 mode、单链接、device/inode/size 与 archive digest，再创建
+   临时 read-only mapping，detach/decode 精确 archive，并恰好执行一次 unmap/close，随后重建全新
+   Value 并执行匹配的 lease-aware release。Installed package 门禁会编译每个 public header，再使用
    `COMPONENTS ipc_client` 且禁用 backend package discovery，独立 configure 一个 IPC-only
    external consumer。该 consumer 覆盖每个 Client lifecycle symbol、精确且唯一的全部 60 个
    typed Client call、`create_ipc_host` 与全部 58 个 Host virtual 引用；export 只允许

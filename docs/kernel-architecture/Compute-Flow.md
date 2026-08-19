@@ -571,8 +571,8 @@ records `intent_coordinator_global_dirty_update`.
 
 HP-to-RT downsample requests carry the committed logical HP `RegionSet`, not a
 storage rectangle. `DownsampleExecutor` observes the committed HP Value's
-signed data window, translates the request to a clipped zero-based
-`ImageBuffer` ROI for pixel selection, and commits the translated-back logical
+signed data window, translates the request to a clipped zero-based dense-Value
+storage ROI for pixel selection, and commits the translated-back logical
 Region to `RealtimeProxyGraph::NodeState::region_hp`. Empty direct requests
 retain the legacy full-frame fallback, Whole maps to the explicit finite data window, and
 stale/failure/cancellation paths publish no staged proxy state.
@@ -906,7 +906,7 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/compute/dispatch/compute_task_dispatcher.*`
 - `src/lib/compute/dirty/intent_update_coordinator.*`
 - `src/lib/compute/dirty/dirty_update_executor.*`
-- `src/lib/core/exact_box_downsample.cpp`
+- `src/lib/core/dense_image_processing.*`
 - `src/lib/runtime/graph_event_service.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/unit/test_compute_io_executor.cpp`

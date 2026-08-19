@@ -270,8 +270,8 @@ ownerless binding, serializes against active same-session requests, and
 publishes a new nonzero generation. A same-name replacement also advances the
 generation. Failure preserves the old route.
 
-Operation selection freezes one coherent callback, metadata, `Device`, and
-nonzero implementation revision before Run admission. Planning retains only
+Operation selection freezes one coherent callback, metadata, `DeviceBackend`,
+and nonzero implementation revision before Run admission. Planning retains only
 the callback-free identity/metadata/shape, and submission must re-resolve the
 same identity before it may retain the callable/DSO lease. Full HP, dirty HP/RT,
 and connected-parameter preflight all consume the same canonical route-aware
@@ -992,7 +992,7 @@ types without creating a forwarding or installed contract.
 - `src/lib/benchmark/m1/m1_canonical.*`
 - `src/lib/benchmark/common/evidence_envelope.*`
 - `src/lib/compute/execution/progressive_compute.*`
-- `src/lib/core/exact_box_downsample.cpp`
+- `src/lib/core/dense_image_processing.*`
 - `src/lib/runtime/resource_ledger.*`
 - `src/lib/execution/device/compute_io_executor.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`

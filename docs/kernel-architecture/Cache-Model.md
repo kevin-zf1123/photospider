@@ -88,11 +88,13 @@ disk load derives complete validity for the freshly decoded output.
 Image bytes cross the private, dependency-neutral `ImageArtifactCodec` contract.
 `Kernel` obtains one configured shared codec from the product composition root
 and injects it into `GraphCacheService`; Graph/cache code supplies only paths,
-`ImageBuffer`, and normalized integer precision. With OpenCV enabled, the
-configured adapter uses OpenCV imgcodecs and translates provider failures to
-`GraphErrc::Io`, while OpenCV `StsNoMem` remains `std::bad_alloc`. With OpenCV
-disabled, the configured unavailable codec returns `GraphErrc::Io` without
-discovering or exporting OpenCV. Tests inject a deterministic fake to
+exact ordinary-image Values, and explicit decode/encode sample requests. With
+OpenCV enabled, the configured adapter uses OpenCV imgcodecs for non-OpenEXR
+formats and translates provider failures to `GraphErrc::Io`, while OpenCV
+`StsNoMem` remains `std::bad_alloc`. The optional ordinary OpenEXR codec
+preserves independent signed data/display windows. With both codecs disabled,
+the configured unavailable codec returns `GraphErrc::Io` without discovering
+or exporting them. Tests inject a deterministic fake to
 verify call order, lifetime retention, precision selection, recoverable errors,
 and resource exhaustion without reading or writing a real image format.
 
@@ -237,9 +239,9 @@ describe the final adapter and document boundary.
 A formal HP `NodeOutput` carries canonical ordered named Values. The permanent
 `image` entry is the sole image payload/allocation/readiness/revision authority;
 every declared generic entry is the corresponding non-image Value authority
-and remains distinct from `NodeOutput::data`. Formal cache contains no
-ImageBuffer peer and rejects nonempty compatibility staging. Copying a formal
-cache entry preserves each Value's revision, producer, representation, indexed
+and remains distinct from `NodeOutput::data`. Formal cache contains only those
+named Value authorities and has no compatibility peer or staging field.
+Copying a formal cache entry preserves each Value's revision, producer, representation, indexed
 storage bindings, and Ready state; provider-defined multi-buffer Values are not
 collapsed to one image allocation identity.
 
@@ -256,9 +258,9 @@ and disk decode likewise create fresh identities. RT proxy output is a fresh
 sealed Value with a separate HP-generation projection version; it remains
 transient and does not become a formal cache identity source.
 
-Disk save requires the sealed Value and derives a temporary ImageBuffer
-snapshot from its checked image view. The existing image
-and YAML formats still persist only representation bytes and named metadata:
+Disk save requires the sealed Value and captures the checked Value directly
+through the explicit codec or portable artifact boundary. The existing image
+and YAML formats persist representation bytes and named metadata:
 neither `AllocationIdentity` nor `ValueRevisionId` is serialized, reconstructed
 from a path, or used as a persistent cache/task key. Both tokens are opaque,
 process-local runtime identities; a disk reload necessarily mints new ones.
@@ -337,7 +339,8 @@ A formal HP `NodeOutput` may retain the complete immutable packed FP4 Value in
 its existing Value authority. Ordinary cache copies preserve descriptor,
 block-scale quantization, Blocked layout, exact byte envelope, allocation,
 logical revision, and Ready state. `Node::hp_region` independently retains the
-exact TensorSlice validity; neither fact is reconstructed from an ImageBuffer.
+exact TensorSlice validity; neither fact is reconstructed from a reduced image
+snapshot or inferred from storage.
 This is runtime memory-cache retention, not a new persistent identity or cache
 format.
 
@@ -345,7 +348,7 @@ The configured disk mechanism remains explicitly image-only. Before planned
 bytes are admitted to `ComputeIoExecutor`, before the executor callback is
 created, and before filesystem or codec work, `GraphCacheService` requires a
 formal Value to be Ready, host-readable, image-faceted, Strided, unquantized,
-and compatible with the whole-byte ImageBuffer element set. Packed, quantized,
+and compatible with the selected codec's explicit whole-byte storage set. Packed, quantized,
 or latent formal Values fail with `GraphError{InvalidParameter}`. A node with no
 effective nonempty image cache entry retains its historical no-op behavior and
 does not enter this validation boundary.
@@ -380,8 +383,8 @@ Statistics are not fields of `Value`, `ImageFacet`, formal HP cache entries,
 descriptor/content identity, disk-cache paths, or artifact manifests. Creating,
 recomputing, or evicting a result cannot modify Value revision, canonical
 digest, HP validity, or persisted representation. The store uses the complete
-key; allocation identity, graph revision, HP/RT generation, descriptor digest,
-or ImageBuffer identity alone is insufficient. Content digest is optional
+key; allocation identity, graph revision, HP/RT generation, or descriptor
+digest alone is insufficient. Content digest is optional
 because a valid runtime revision may be observed before content traversal is
 requested.
 
@@ -433,7 +436,8 @@ receipts, or durability. The future post-publication cache outcome and
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/providers/configured_persistence_adapters.*`
-- `src/lib/core/value_image_adapter.*`
+- `src/lib/core/{sample_conversion,value_artifact}.*`
+- `src/lib/adapters/{opencv,openexr}/`
 - `include/photospider/data/packed_dense_tensor_view.hpp`
 - `include/photospider/memory/blocked_layout.hpp`
 - `include/photospider/data/region.hpp`
