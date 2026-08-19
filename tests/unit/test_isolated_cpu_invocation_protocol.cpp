@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "execution/isolation/isolated_cpu_invocation_protocol.hpp"  // NOLINT(build/include_subdir)
+#include "support/isolated_cpu_conformance_fixture.hpp"
 
 namespace ps::execution {
 namespace {
@@ -143,6 +144,139 @@ IsolatedCpuInvocationRequest test_request() {
   request.resources.cpu_slots = 1U;
   validate_isolated_cpu_invocation_request(request, {});
   return request;
+}
+
+/**
+ * @brief Encodes two operation-ABI identity words into protocol byte order.
+ * @param word0 First opaque 64-bit identity word.
+ * @param word1 Second opaque 64-bit identity word.
+ * @return Exact network-order protocol identity.
+ * @throws Nothing.
+ */
+IsolatedCpuOpaqueId opaque_id_from_words(std::uint64_t word0,
+                                         std::uint64_t word1) noexcept {
+  IsolatedCpuOpaqueId result;
+  const std::array<std::uint64_t, 2U> words{word0, word1};
+  for (std::size_t word = 0U; word < words.size(); ++word) {
+    for (std::size_t byte = 0U; byte < 8U; ++byte) {
+      result.bytes[word * 8U + byte] =
+          static_cast<std::byte>((words[word] >> ((7U - byte) * 8U)) & 0xffU);
+    }
+  }
+  return result;
+}
+
+/**
+ * @brief Creates one exact conformance callback-local tensor.
+ * @param facet_free True for the two-by-three facet-free representation;
+ * false for the two-by-two single-channel Image representation.
+ * @param access Callback direction and authority state to encode.
+ * @param fixture_metadata True for the fixture's non-default versions and
+ * digests; false for the ordinary built-in fallback metadata.
+ * @return Complete synthetic mapped tensor suitable for pure fixture checks.
+ * @throws Region validation or allocation failures unchanged.
+ * @note Static backing bytes outlive every returned borrowed pointer. They are
+ * never inspected or mutated by the pure conformance validator.
+ */
+IsolatedCpuRuntimeTensor conformance_runtime_tensor(
+    bool facet_free, IsolatedCpuTensorAccess access,
+    bool fixture_metadata = true) {
+  static const std::array<std::byte, 6U> kInputBytes{};
+  static std::array<std::byte, 6U> output_bytes{};
+  IsolatedCpuRuntimeTensor tensor;
+  IsolatedCpuTensorDescriptor& descriptor = tensor.descriptor;
+  descriptor.access = access;
+  descriptor.readiness = access == IsolatedCpuTensorAccess::InputReadOnly
+                             ? IsolatedCpuTensorReadiness::ReadyInput
+                             : IsolatedCpuTensorReadiness::WritableOutput;
+  descriptor.ownership = access == IsolatedCpuTensorAccess::InputReadOnly
+                             ? IsolatedCpuTensorOwnership::HostInput
+                             : IsolatedCpuTensorOwnership::RuntimeOutput;
+  descriptor.port_identity =
+      access == IsolatedCpuTensorAccess::InputReadOnly
+          ? opaque_id_from_words(0x5053434F4E46494EULL, 0x0001ULL)
+          : opaque_id_from_words(0x5053434F4E464F55ULL, 0x0001ULL);
+  descriptor.binding_identity = test_opaque_id(
+      access == IsolatedCpuTensorAccess::InputReadOnly ? 201U : 217U);
+  descriptor.schema_identity = opaque_id_from_words(
+      PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD0_V1,
+      PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD1_V1);
+  descriptor.facet_identity =
+      facet_free ? IsolatedCpuOpaqueId{}
+                 : opaque_id_from_words(
+                       PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD0_V1,
+                       PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD1_V1);
+  descriptor.layout_identity = opaque_id_from_words(
+      PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD0_V1,
+      PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD1_V1);
+  if (fixture_metadata) {
+    descriptor.schema_version = 7U;
+    descriptor.layout_version = 11U;
+    descriptor.descriptor_digest.words = {0x0102030405060708ULL, 0U, 0U,
+                                          0x1112131415161718ULL};
+    descriptor.logical_content_digest.words = {0U, 0x2122232425262728ULL, 0U,
+                                               0U};
+    descriptor.layout_digest.words = {0U, 0U, 0x3132333435363738ULL, 0U};
+  } else {
+    descriptor.schema_version =
+        PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_VERSION_V1;
+    descriptor.layout_version = PS_OPERATION_BUILTIN_STRIDED_LAYOUT_VERSION_V1;
+  }
+  descriptor.capability_id =
+      access == IsolatedCpuTensorAccess::InputReadOnly ? 1U : 2U;
+  descriptor.capability_offset = 40U;
+  descriptor.capability_length = facet_free ? 6U : 4U;
+  descriptor.element_semantics = IsolatedCpuElementSemantics::UnsignedInteger;
+  descriptor.storage_encoding = IsolatedCpuStorageEncoding::NativeScalar;
+  descriptor.bit_width = 8U;
+  descriptor.extents = facet_free ? std::vector<std::uint64_t>{2U, 3U}
+                                  : std::vector<std::uint64_t>{2U, 2U, 1U};
+  descriptor.byte_strides = facet_free ? std::vector<std::int64_t>{3, 1}
+                                       : std::vector<std::int64_t>{2, 1, 1};
+  if (facet_free) {
+    descriptor.region = RegionSet::from_tensor_slice(
+        TensorSlice{dense_tensor_region_domain(), {{0U, 2U}, {0U, 3U}}});
+  } else {
+    IsolatedCpuImageFacet facet;
+    facet.x_axis = 1U;
+    facet.y_axis = 0U;
+    facet.channel_axis = 2U;
+    facet.data_window = ImageBounds{0, 0, 2, 2};
+    descriptor.image_facet = facet;
+    descriptor.region = RegionSet::from_image_rect(
+        ImageRect{image_region_domain(), 0, 2, 0, 2});
+  }
+  if (access == IsolatedCpuTensorAccess::InputReadOnly) {
+    descriptor.content_binding = ContentDigest{};
+    tensor.input_data = kInputBytes.data();
+  } else {
+    descriptor.allocation_alignment = 64U;
+    tensor.output_data = output_bytes.data();
+  }
+  tensor.size = static_cast<std::size_t>(descriptor.capability_length);
+  return tensor;
+}
+
+/**
+ * @brief Creates one exact one-input/one-output conformance invocation.
+ * @param facet_free_input Whether the input is a generic DenseTensor.
+ * @param facet_free_output Whether the output plan is a generic DenseTensor.
+ * @param fixture_input_metadata Whether the input retains prior fixture
+ * publisher metadata instead of ordinary built-in fallback metadata.
+ * @return Complete callback-local synthetic invocation.
+ * @throws Region validation or allocation failures unchanged.
+ */
+IsolatedCpuRuntimeInvocation conformance_runtime_invocation(
+    bool facet_free_input, bool facet_free_output,
+    bool fixture_input_metadata = false) {
+  IsolatedCpuRuntimeInvocation invocation;
+  invocation.operation = "operation_conformance:supervised_tile";
+  invocation.inputs.push_back(conformance_runtime_tensor(
+      facet_free_input, IsolatedCpuTensorAccess::InputReadOnly,
+      fixture_input_metadata));
+  invocation.outputs.push_back(conformance_runtime_tensor(
+      facet_free_output, IsolatedCpuTensorAccess::OutputWriteOnly));
+  return invocation;
 }
 
 /**
@@ -411,6 +545,141 @@ RequestWireOffsets locate_request_wire_offsets(
   offsets.first_stride_sign_offset = cursor;
   require_wire_range(packet, offsets.first_stride_sign_offset, 9U);
   return offsets;
+}
+
+/**
+ * @brief Proves a zero-Facet request row selects the six-byte generic profile.
+ * @throws Region or allocation failures unchanged.
+ */
+TEST(IsolatedCpuInvocationProtocol,
+     ConformanceFixtureDerivesFacetFreeOutputFromRuntimeDescriptor) {
+  const IsolatedCpuRuntimeInvocation invocation =
+      conformance_runtime_invocation(false, true);
+  const auto profile = test_support::classify_isolated_cpu_conformance_tensor(
+      invocation.outputs[0]);
+  ASSERT_TRUE(profile.has_value());
+  EXPECT_EQ(
+      profile->representation,
+      test_support::IsolatedCpuConformanceRepresentation::FacetFreeDenseTensor);
+  EXPECT_EQ(profile->metadata,
+            test_support::IsolatedCpuConformanceMetadataProfile::Fixture);
+  EXPECT_EQ(profile->storage_size, 6U);
+  EXPECT_FALSE(invocation.outputs[0].descriptor.facet_identity.valid());
+  EXPECT_FALSE(invocation.outputs[0].descriptor.image_facet.has_value());
+  EXPECT_TRUE(
+      test_support::conformance_runtime_invocation_is_exact(invocation));
+}
+
+/**
+ * @brief Proves a built-in Image Facet selects the four-byte image profile.
+ * @throws Region or allocation failures unchanged.
+ */
+TEST(IsolatedCpuInvocationProtocol,
+     ConformanceFixtureAcceptsImageOutputFromRuntimeDescriptor) {
+  const IsolatedCpuRuntimeInvocation invocation =
+      conformance_runtime_invocation(false, false);
+  const auto profile = test_support::classify_isolated_cpu_conformance_tensor(
+      invocation.outputs[0]);
+  ASSERT_TRUE(profile.has_value());
+  EXPECT_EQ(profile->representation,
+            test_support::IsolatedCpuConformanceRepresentation::Image);
+  EXPECT_EQ(profile->metadata,
+            test_support::IsolatedCpuConformanceMetadataProfile::Fixture);
+  EXPECT_EQ(profile->storage_size, 4U);
+  EXPECT_TRUE(invocation.outputs[0].descriptor.facet_identity.valid());
+  EXPECT_TRUE(invocation.outputs[0].descriptor.image_facet.has_value());
+  EXPECT_TRUE(
+      test_support::conformance_runtime_invocation_is_exact(invocation));
+}
+
+/**
+ * @brief Proves every input/output representation and metadata source is
+ * derived without monolithic/tiled mode state.
+ * @throws Region or allocation failures unchanged.
+ * @note A nested configuration is retained on every synthetic request to show
+ * that configuration shape cannot select or corrupt the tensor profile.
+ */
+TEST(IsolatedCpuInvocationProtocol,
+     ConformanceFixtureAcceptsEveryRequestDerivedProfileCombination) {
+  for (const bool facet_free_input : {false, true}) {
+    for (const bool facet_free_output : {false, true}) {
+      for (const bool fixture_input_metadata : {false, true}) {
+        SCOPED_TRACE(::testing::Message()
+                     << "facet_free_input=" << facet_free_input
+                     << " facet_free_output=" << facet_free_output
+                     << " fixture_input_metadata=" << fixture_input_metadata);
+        IsolatedCpuRuntimeInvocation invocation =
+            conformance_runtime_invocation(facet_free_input, facet_free_output,
+                                           fixture_input_metadata);
+        IsolatedCpuConfigurationNode root;
+        root.kind = IsolatedCpuConfigurationKind::Object;
+        root.first_child = 1U;
+        root.child_count = 1U;
+        IsolatedCpuConfigurationNode empty_array;
+        empty_array.kind = IsolatedCpuConfigurationKind::Array;
+        empty_array.key = "items";
+        empty_array.first_child = 0U;
+        invocation.configuration = {root, empty_array};
+        EXPECT_TRUE(
+            test_support::conformance_runtime_invocation_is_exact(invocation));
+      }
+    }
+  }
+}
+
+/**
+ * @brief Proves exact range, Facet, Region, version, digest, and output-source
+ * checks remain fail closed.
+ * @throws Region or allocation failures unchanged.
+ */
+TEST(IsolatedCpuInvocationProtocol,
+     ConformanceFixtureRejectsChangedDescriptorFacts) {
+  const IsolatedCpuRuntimeInvocation facet_free =
+      conformance_runtime_invocation(false, true);
+
+  IsolatedCpuRuntimeTensor changed = facet_free.outputs[0];
+  changed.size = 4U;
+  EXPECT_FALSE(test_support::classify_isolated_cpu_conformance_tensor(changed)
+                   .has_value());
+
+  changed = facet_free.outputs[0];
+  changed.descriptor.capability_length = 4U;
+  EXPECT_FALSE(test_support::classify_isolated_cpu_conformance_tensor(changed)
+                   .has_value());
+
+  changed = facet_free.outputs[0];
+  changed.descriptor.facet_identity =
+      opaque_id_from_words(PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD0_V1,
+                           PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD1_V1);
+  EXPECT_FALSE(test_support::classify_isolated_cpu_conformance_tensor(changed)
+                   .has_value());
+
+  changed = facet_free.outputs[0];
+  changed.descriptor.schema_version += 1U;
+  EXPECT_FALSE(test_support::classify_isolated_cpu_conformance_tensor(changed)
+                   .has_value());
+
+  changed = facet_free.outputs[0];
+  changed.descriptor.layout_digest.words[2] ^= 1U;
+  EXPECT_FALSE(test_support::classify_isolated_cpu_conformance_tensor(changed)
+                   .has_value());
+
+  changed = facet_free.outputs[0];
+  changed.descriptor.region = RegionSet::whole();
+  EXPECT_FALSE(test_support::classify_isolated_cpu_conformance_tensor(changed)
+                   .has_value());
+
+  IsolatedCpuRuntimeInvocation fallback_output = facet_free;
+  IsolatedCpuTensorDescriptor& descriptor =
+      fallback_output.outputs[0].descriptor;
+  descriptor.schema_version =
+      PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_VERSION_V1;
+  descriptor.layout_version = PS_OPERATION_BUILTIN_STRIDED_LAYOUT_VERSION_V1;
+  descriptor.descriptor_digest = {};
+  descriptor.logical_content_digest = {};
+  descriptor.layout_digest = {};
+  EXPECT_FALSE(
+      test_support::conformance_runtime_invocation_is_exact(fallback_output));
 }
 
 TEST(IsolatedCpuInvocationProtocol, RequestAndResponseRoundTripExactly) {

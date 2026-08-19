@@ -8,7 +8,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -23,76 +22,11 @@
 
 #include "execution/device/plugin_runtime_supervisor.hpp"  // NOLINT(build/include_subdir)
 #include "execution/isolation/isolated_cpu_invocation.hpp"  // NOLINT(build/include_subdir)
+#include "isolated_cpu_conformance_fixture.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/plugin/operation_plugin_api.h"
 
 namespace ps::execution {
 namespace {
-
-/**
- * @brief Compares one canonical opaque identity with two operation-ABI words.
- * @param observed Pointer-free big-endian identity bytes.
- * @param word0 First opaque 64-bit word.
- * @param word1 Second opaque 64-bit word.
- * @return True only when all sixteen bytes preserve the two words exactly.
- * @throws Nothing.
- */
-bool identity_matches_words(const IsolatedCpuOpaqueId& observed,
-                            std::uint64_t word0, std::uint64_t word1) noexcept {
-  const std::array<std::uint64_t, 2U> expected_words{word0, word1};
-  for (std::size_t word = 0U; word < expected_words.size(); ++word) {
-    for (std::size_t byte = 0U; byte < 8U; ++byte) {
-      const std::byte expected = static_cast<std::byte>(
-          (expected_words[word] >> ((7U - byte) * 8U)) & 0xffU);
-      if (observed.bytes[word * 8U + byte] != expected) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-/**
- * @brief Validates exact non-default operation metadata on one tensor.
- * @param tensor Child-local mapped input or output descriptor.
- * @param facet_free True when the expected DenseTensor has no Image Facet.
- * @return True only when identities, versions, and all digest words match the
- * conformance operation's inference proposal.
- * @throws Nothing.
- * @note This is a real fresh-exec observation of protocol-v2 fields; it does
- * not reconstruct or substitute metadata inside the fixture.
- */
-bool conformance_metadata_is_exact(const IsolatedCpuRuntimeTensor& tensor,
-                                   bool facet_free) noexcept {
-  const IsolatedCpuTensorDescriptor& descriptor = tensor.descriptor;
-  const std::array<std::uint64_t, 4U> descriptor_digest{
-      0x0102030405060708ULL, 0U, 0U, 0x1112131415161718ULL};
-  const std::array<std::uint64_t, 4U> content_digest{0U, 0x2122232425262728ULL,
-                                                     0U, 0U};
-  const std::array<std::uint64_t, 4U> layout_digest{0U, 0U,
-                                                    0x3132333435363738ULL, 0U};
-  const bool facet_identity_exact =
-      facet_free
-          ? std::all_of(descriptor.facet_identity.bytes.begin(),
-                        descriptor.facet_identity.bytes.end(),
-                        [](std::byte value) { return value == std::byte{0}; })
-          : identity_matches_words(
-                descriptor.facet_identity,
-                PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD0_V1,
-                PS_OPERATION_BUILTIN_IMAGE_FACET_IDENTITY_WORD1_V1);
-  return identity_matches_words(
-             descriptor.schema_identity,
-             PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD0_V1,
-             PS_OPERATION_BUILTIN_DENSE_TENSOR_SCHEMA_IDENTITY_WORD1_V1) &&
-         facet_identity_exact &&
-         identity_matches_words(
-             descriptor.layout_identity,
-             PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD0_V1,
-             PS_OPERATION_BUILTIN_STRIDED_LAYOUT_IDENTITY_WORD1_V1) &&
-         descriptor.schema_version == 7U && descriptor.layout_version == 11U &&
-         descriptor.descriptor_digest.words == descriptor_digest &&
-         descriptor.logical_content_digest.words == content_digest &&
-         descriptor.layout_digest.words == layout_digest;
-}
 
 /**
  * @brief Sends a malformed response whose rights arrive after prior bytes.
@@ -288,23 +222,7 @@ IsolatedCpuRuntimeCallbackResult run_fixture_operation(
         "fixture callback observed cooperative cancellation"};
   }
   if (invocation.operation == "operation_conformance:supervised_tile") {
-    const char* mode = std::getenv("PS_OPERATION_CONFORMANCE_MODE");
-    const bool require_input_metadata =
-        mode != nullptr && std::strstr(mode, "input_metadata") != nullptr;
-    const bool facet_free_input =
-        mode != nullptr && std::strstr(mode, "facet_free_input") != nullptr;
-    const bool facet_free_output =
-        mode != nullptr && std::strstr(mode, "facet_free_output") != nullptr;
-    const std::size_t expected_input_size = facet_free_input ? 6U : 4U;
-    const std::size_t expected_output_size = facet_free_output ? 6U : 4U;
-    if (invocation.inputs.size() != 1U || invocation.outputs.size() != 1U ||
-        invocation.inputs[0].size != expected_input_size ||
-        invocation.outputs[0].size != expected_output_size ||
-        !conformance_metadata_is_exact(invocation.outputs[0],
-                                       facet_free_output) ||
-        (require_input_metadata &&
-         !conformance_metadata_is_exact(invocation.inputs[0],
-                                        facet_free_input))) {
+    if (!test_support::conformance_runtime_invocation_is_exact(invocation)) {
       return IsolatedCpuRuntimeCallbackResult{
           IsolatedCpuInvocationOutcome::PluginFailed,
           "operation conformance descriptor metadata changed in isolation"};
