@@ -79,10 +79,14 @@ closed its destination without a reported error. It is separate from a
 replacement, directory synchronization, or crash-durability receipt.
 
 **Disk-cache artifact**
-Discardable acceleration state owned by the graph cache path. The current
-image payload and metadata are written as separate direct files, so their
-individual save success is neither an atomic cache-entry commit nor durable
-user output.
+Discardable acceleration state owned by one safe configured leaf below a
+numeric node cache directory. The current entry has four controlled siblings:
+an optional image-codec inspection projection, optional detached parameter
+metadata, the canonical named-Value archive that is the sole replay authority,
+and a versioned manifest written last. The manifest binds archive/metadata
+facts to one random writer generation, and replay publishes all Values or none.
+This process-serialized, manifest-last mechanism is neither an atomic
+filesystem transaction nor crash-durable user output.
 
 **`OutputStore` publication**
 The current daemon observation that a protected process-scoped canonical

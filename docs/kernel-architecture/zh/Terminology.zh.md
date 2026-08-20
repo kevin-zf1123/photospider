@@ -63,9 +63,12 @@ ready dispatch 分离；其 worker 是不计费的基础设施，不是 Run exec
 directory synchronization 或 crash-durability receipt。
 
 **磁盘缓存制品（Disk-cache artifact）**
-由 graph cache path 拥有、可丢弃的 acceleration state。当前 image payload 与 metadata 会作为
-两个独立文件直接写入，因此各自 save success 既不是 atomic cache-entry commit，也不是 durable
-user output。
+由 numeric node cache directory 下一个安全 configured leaf 拥有、可丢弃的 acceleration state。
+当前 entry 有四个受控 sibling：可选 image-codec inspection projection、可选 detached parameter
+metadata、作为唯一 replay authority 的 canonical named-Value archive，以及最后写入的 versioned
+manifest。Manifest 会把 archive/metadata fact 绑定到同一个随机 writer generation，replay 要么
+发布全部 Value，要么一个也不发布。这套进程内串行化、manifest-last mechanism 既不是 atomic
+filesystem transaction，也不是 crash-durable user output。
 
 **`OutputStore` 发布（`OutputStore` publication）**
 当前 daemon 的观察：受保护进程级 canonical named-Value archive 通过 identity check，并在

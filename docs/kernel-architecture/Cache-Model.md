@@ -72,7 +72,21 @@ location now names one portable named-Value transaction:
 | configured location | Optional image-codec projection for external inspection; never replay authority. |
 | `<location>.yml` | Optional detached `NodeOutput::data` parameter metadata. |
 | `<location>.values` | Canonical public `NamedValueArtifactSet` archive containing every formal named Value. |
-| `<location>.manifest` | Versioned transaction record that binds archive/metadata counts, byte sizes, and SHA-256 digests. |
+| `<location>.manifest` | Versioned transaction record written last; it binds archive/metadata counts, byte sizes, generation-derived SHA-256 digests, and one random writer generation. |
+
+The graph-document location is untrusted path input. It must be one nonempty
+portable leaf: absolute/rooted or multi-component paths, `.`/`..`, separators,
+control or Windows-illegal characters, reserved device basenames, trailing
+dot/space, self-aliasing derived siblings, and aliases across configured image
+entries are rejected before capture, codec, or filesystem effects. On POSIX,
+the cache owner retains no-follow root/node directory descriptors and performs
+archive/manifest reads, writes, and controlled deletion through `*at`
+operations; every accepted leaf is an owned, regular, single-link file.
+Symlink, directory, device, FIFO, hard-link alias, and sparse replay files are
+rejected. The current dependency-neutral image/metadata codec interfaces still
+accept paths, so their calls are bracketed by directory/leaf identity checks;
+this narrows but does not claim to eliminate a malicious same-uid replacement
+race inside an external path-only codec.
 
 The archive is the sole persisted Value authority. It preserves exact ordered
 names, descriptor and Facet records, layout and binding facts, buffer roles and
@@ -81,6 +95,15 @@ identities. It excludes process-local allocation, Value revision, producer,
 fence, mapping, device, and lease identity. In-memory parameter data remains a
 detached `plugin::ParameterMap`; `GraphCacheService` never constructs YAML
 values.
+
+Every `GraphCacheService` instance resolving the same normalized cache root
+shares one weakly retained process coordinator. Save, load, stale cleanup,
+synchronization, and drive clear are serialized under that root. Each logical
+mutation advances a checked epoch: an admitted asynchronous writer prepared
+before a later save, partial cleanup, synchronization, or clear observes that
+it was superseded and performs no filesystem work. The weak registry retains
+no root after the last operation, same-root callback reentry fails before lock
+acquisition, and different roots may proceed independently.
 
 For CLI-loaded graphs, `GraphModel::cache_root` is configured from
 `cache_root_dir` before graph load and resolves to
@@ -99,6 +122,13 @@ relabelled as complete. Saving or synchronizing a partial node removes the
 older projection, metadata, archive, and manifest instead of encoding partial
 bytes. A successful disk load derives complete validity for the freshly
 reconstructed output.
+
+Explicit Empty/Whole validity is classified before interpreting the formal
+Value. A partial packed, quantized, or provider-incompatible canonical image
+therefore runs only controlled predecessor cleanup: it constructs no
+`ImageView`, captures no artifact, consults no provider, invokes no codec, and
+cannot become a restart hit. Unsupported capability preflight runs only after
+complete validity has been established.
 
 An optional ordinary-image projection crosses the private, dependency-neutral
 `ImageArtifactCodec` contract.
@@ -143,9 +173,18 @@ transaction is an incompatible miss before publication. The reader validates
 manifest version/flags/counts, archive byte size and digest, canonical archive
 framing, exact planned names, every descriptor/Facet/layout/binding fact and
 payload digest, and provider generation before reconstructing a local
-candidate. Provider-defined multi-buffer Values use the borrowed process
-`DataDefinitionRegistry`; a missing or incompatible provider is a typed error.
+candidate. `Kernel` owns one process-domain `DataDefinitionRegistry`, injects
+that exact borrowed authority into `GraphCacheService`, and declares it before
+the cache service so it outlives every replay. The registry's existing
+generation/lease synchronization remains the provider thread-safety and DSO
+lifetime boundary. Provider-defined multi-buffer Values therefore replay
+through the real embedded/CLI Kernel and GraphRuntime composition; a missing
+or incompatible provider is a typed error.
 
+One unpredictable 128-bit writer generation is repeated in every archive
+envelope's owner-supplied commit join. Both archive and metadata manifest
+records use `SHA256(generation || canonical_byte_size || raw_file_digest)`, so
+otherwise valid raw files from different writers cannot form one generation.
 When parameter outputs are planned, the manifest also binds the exact metadata
 bytes. The reader verifies those bytes before and after codec decode, compares
 the exact decoded key set, and finally rereads the manifest. A manifest/payload
@@ -183,6 +222,19 @@ archive bytes before planned-byte admission, task construction, filesystem
 mutation, or codec invocation. Unsupported Values fail with typed
 `InvalidParameter`; `skip_save_cache` and absent/unsupported cache entries keep
 their existing no-op policy before that validation.
+
+Construction freezes GraphCache-specific resource limits independently of the
+wider public artifact framing ceiling. Current defaults admit at most 512 MiB
+for the canonical archive, 16 MiB for detached metadata, 512 MiB for the
+auxiliary projection, and 528 MiB for archive-plus-metadata replay. Manifest
+facts and checked aggregate arithmetic are validated first; no-follow regular
+file type, single-link ownership, physical non-sparse storage, exact size, and
+the service limit are checked before archive allocation or digest traversal.
+The archive read hashes while filling its sole file-byte owner. That owner is
+released after public decode, and artifact payload owners are released one at
+a time after reconstruction, bounding overlap instead of retaining an 8 GiB
+archive plus duplicate payload sets. `std::bad_alloc` continues to propagate
+unchanged.
 
 A complete save writes the optional image projection, optional parameter
 metadata, canonical archive, removes excluded projection/metadata predecessors,
@@ -434,8 +486,9 @@ replicas never enter persistent logical content identity.
 The current V-3 process-local `ValueRevisionId` is runtime publication identity,
 not any future canonical descriptor, content, layout, or artifact digest.
 
-DI-4 changes the current disk representation to the public named-Value archive
-and versioned manifest described above without changing formal cache authority.
+DI-4 defines, and the current implementation uses, the public named-Value
+archive and versioned manifest described above without changing formal cache
+authority.
 HP output remains the only formal reusable memory cache, RT proxy output remains
 transient, and injected image/metadata codecs remain optional projection and
 detached-parameter implementation boundaries. No residency replica, projection,

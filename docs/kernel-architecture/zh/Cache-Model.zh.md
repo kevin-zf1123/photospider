@@ -54,13 +54,30 @@ Dirty RT execution 不会写 graph-owned RT 字段。Worker task 会先把代理
 | configured location | 供外部检查使用的可选 image-codec projection；绝不是 replay authority。 |
 | `<location>.yml` | 可选、脱离 Value 的 `NodeOutput::data` parameter metadata。 |
 | `<location>.values` | 包含全部正式 named Value 的 canonical public `NamedValueArtifactSet` archive。 |
-| `<location>.manifest` | 绑定 archive/metadata 数量、byte size 与 SHA-256 digest 的 versioned transaction record。 |
+| `<location>.manifest` | 最后写入的 versioned transaction record；它绑定 archive/metadata 数量、byte size、generation-derived SHA-256 digest 与一个随机 writer generation。 |
+
+Graph-document location 是不受信任的 path input，必须是单个非空 portable leaf。Absolute/rooted
+或 multi-component path、`.`/`..`、separator、control/Windows-illegal character、reserved device
+basename、trailing dot/space、自身 derived-sibling alias，以及不同 configured image entry 之间的
+alias，都会在 capture、codec 或 filesystem effect 前被拒绝。在 POSIX 上，cache owner 会保留
+no-follow root/node directory descriptor，并通过 `*at` operation 执行 archive/manifest read、write
+与受控 delete；每个 accepted leaf 都必须是当前用户拥有的 regular single-link file。Symlink、
+directory、device、FIFO、hard-link alias 与 sparse replay file 都会被拒绝。当前 dependency-neutral
+image/metadata codec interface 仍按 path 调用，因此其前后会校验 directory/leaf identity；这会收窄
+外部 path-only codec 内恶意 same-uid replacement race，但不声称彻底消除该竞态。
 
 Archive 是唯一持久化 Value authority。它保留精确有序名称、descriptor 与 Facet record、layout 与
 binding fact、buffer role 与 envelope、payload byte/digest，以及适用的 descriptor/content/layout
 identity；不保留 process-local allocation、Value revision、producer、fence、mapping、device 或
 lease identity。内存中的 parameter data 仍是脱离 adapter 的 `plugin::ParameterMap`；
 `GraphCacheService` 绝不构造 YAML value。
+
+解析到同一个 normalized cache root 的每个 `GraphCacheService` instance 会共享一个弱保留的进程
+coordinator。Save、load、stale cleanup、synchronization 与 drive clear 都在该 root 下串行执行。
+每次逻辑 mutation 都推进 checked epoch：在较新的 save、partial cleanup、synchronization 或 clear
+之前已 prepare 并 admitted 的 asynchronous writer 会观察到自己已被 supersede，且不执行 filesystem
+work。最后一项 operation 结束后，weak registry 不保留 root；同 root callback reentry 会在取锁前
+失败，不同 root 则可独立推进。
 
 对于 CLI 加载的 graph，`GraphModel::cache_root` 会在 graph load 前由 `cache_root_dir`
 配置决定，并解析为 `<cache_root_dir>/<graph_name>`。相对 `cache_root_dir` 按进程当前工作目录解析。
@@ -74,6 +91,11 @@ lease identity。内存中的 parameter data 仍是脱离 adapter 的 `plugin::P
 disk load 覆盖，也绝不会被重新标记为 complete。保存或同步 partial node 时，会移除较旧的
 projection、metadata、archive 与 manifest，而不是编码 partial byte。成功 disk load 会为 fresh
 reconstructed output 派生 complete validity。
+
+显式 Empty/Whole validity 会在解释 formal Value 前完成分类。因此 partial packed、quantized 或
+provider-incompatible canonical image 只会运行受控 predecessor cleanup：不会构造 `ImageView`、
+捕获 artifact、查询 provider、调用 codec，也不可能在 restart 后命中。只有确认 complete validity
+后才会执行 unsupported capability preflight。
 
 可选 ordinary-image projection 通过私有、依赖中立的 `ImageArtifactCodec` 契约。`Kernel` 从产品组合根取得一个配置好的
 共享 codec，并将其注入 `GraphCacheService`；Graph/cache 代码只提供 path、精确的普通 image Value
@@ -105,10 +127,16 @@ generic named-Value 名称。Transaction 必须同时具备 archive 与 manifest
 或任何 partial transaction 都会在 publication 前成为 incompatible miss。Reader 会先校验 manifest
 version/flag/count、archive byte size 与 digest、canonical archive framing、精确 planned name、每项
 descriptor/Facet/layout/binding fact 与 payload digest，以及 provider generation，再重建本地 candidate。
-Provider-defined multi-buffer Value 使用借用的 process `DataDefinitionRegistry`；缺失或不兼容 provider
-属于 typed error。
+`Kernel` 拥有一个 process-domain `DataDefinitionRegistry`，把同一个 borrowed authority 注入
+`GraphCacheService`，并在 cache service 之前声明它，从而让 registry 存活时间覆盖每次 replay。
+Registry 现有 generation/lease synchronization 继续作为 provider thread-safety 与 DSO lifetime
+boundary。因此 provider-defined multi-buffer Value 可沿真实 embedded/CLI Kernel 与 GraphRuntime
+composition replay；缺失或不兼容 provider 属于 typed error。
 
-计划 parameter output 时，manifest 还会绑定精确 metadata byte。Reader 会在 codec decode 前后验证
+每个 writer 会生成一个不可预测的 128-bit generation，并把它重复写入每个 archive envelope 的
+owner-supplied commit join。Archive 与 metadata 的 manifest record 都使用
+`SHA256(generation || canonical_byte_size || raw_file_digest)`，所以来自不同 writer、raw digest 各自
+有效的 file 也无法组成同一 generation。计划 parameter output 时，manifest 还会绑定精确 metadata byte。Reader 会在 codec decode 前后验证
 这些 byte、比较精确 decoded key set，并在最后重新读取 manifest。Manifest/payload race、tamper、
 mixed generation、stale name、missing file 或任一 Value 失败，都不会发布 candidate 的任何部分。Hit
 只会整体 move 一次完整 `NodeOutput`，并为每个重建 Value 铸造 fresh runtime identity。可选 image
@@ -133,6 +161,15 @@ atomic filesystem transaction。`GraphCacheService` 会先把每个 named Value 
 的 archive byte，随后才进行 planned-byte admission、task construction、filesystem mutation 或 codec
 invocation。不受支持的 Value 会以 typed `InvalidParameter` 失败；`skip_save_cache` 以及 absent/
 unsupported cache entry 则会在该 validation 前保留既有 no-op policy。
+
+构造会冻结 GraphCache-specific resource limit，且这些 limit 独立于更宽的 public artifact framing
+ceiling。当前默认值至多允许 512 MiB canonical archive、16 MiB detached metadata、512 MiB
+auxiliary projection，以及 528 MiB archive-plus-metadata replay。实现会先校验 manifest fact 与 checked
+aggregate arithmetic；随后在 archive allocation 或 digest traversal 前校验 no-follow regular-file
+type、single-link ownership、physical non-sparse storage、精确 size 与 service limit。Archive read 会
+一边填充唯一 file-byte owner 一边 hash；public decode 后释放该 owner，并在每个 Value 重建后逐项
+释放 artifact payload owner，以限制重叠，而不是同时保留 8 GiB archive 与多份 payload set。
+`std::bad_alloc` 继续原样传播。
 
 一次 complete save 会依次写入可选 image projection、可选 parameter metadata、canonical archive，
 移除被排除的 projection/metadata predecessor，捕获精确 archive/metadata record，验证 metadata codec
@@ -332,8 +369,8 @@ logical content identity。
 当前 V-3 的 process-local `ValueRevisionId` 是 runtime publication identity，不是任何未来
 canonical descriptor、content、layout 或 artifact digest。
 
-DI-4 会把当前 disk representation 改为上文描述的 public named-Value archive 与 versioned
-manifest，但不会改变正式 cache authority。HP output 仍是唯一正式可复用 memory cache，RT proxy
+DI-4 定义、当前实现也已使用上文描述的 public named-Value archive 与 versioned manifest，且不会
+改变正式 cache authority。HP output 仍是唯一正式可复用 memory cache，RT proxy
 output 继续保持 transient；注入的 image/metadata codec 仍分别是 optional projection 与 detached-
 parameter implementation boundary。Residency replica、projection、manifest path 或 persisted runtime
 identity 都不会成为第二个 cache authority。
