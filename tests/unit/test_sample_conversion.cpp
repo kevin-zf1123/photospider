@@ -339,6 +339,115 @@ TEST(SampleConversion, RejectsForbiddenNonFiniteAndPrecisionLoss) {
                   0.1F);
 }
 
+TEST(SampleConversion,
+     MapsFullFiniteDomainExactlyWithoutWiderFloatingArithmetic) {
+  const double maximum = std::numeric_limits<double>::max();
+  const double denormal = std::numeric_limits<double>::denorm_min();
+  const SampleDomain full_domain{SampleDomainKind::Legal, -maximum, maximum};
+  const SampleEndpoint source_endpoint{
+      SampleEncoding{1U, SampleEncodingKind::Value}, full_domain};
+  const SampleEndpoint destination_endpoint{
+      SampleEncoding{1U, SampleEncodingKind::CodeValue}, full_domain};
+  const std::vector<double> samples{
+      -maximum, -maximum / 2.0, -1.0, -denormal,     -0.0,
+      0.0,      denormal,       1.0,  maximum / 2.0, maximum};
+  const Value source = make_sample_image(samples, source_endpoint);
+  SampleConversion conversion =
+      make_conversion(source_endpoint, destination_endpoint,
+                      ElementSemantics::FloatingPoint, 64U);
+  conversion.precision_loss = PrecisionLossPolicy::Reject;
+
+  const Value converted = convert_dense_image_samples(source, conversion);
+
+  EXPECT_EQ(read_samples<double>(converted), samples);
+}
+
+TEST(SampleConversion,
+     MapsExtremeFiniteRangesWithoutOverflowUnderflowOrNanIntermediates) {
+  const double maximum = std::numeric_limits<double>::max();
+  const double denormal = std::numeric_limits<double>::denorm_min();
+  const SampleEndpoint full_endpoint{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -maximum, maximum}};
+  const SampleEndpoint unit_endpoint{
+      SampleEncoding{1U, SampleEncodingKind::Normalized},
+      SampleDomain{SampleDomainKind::Normalized, -1.0, 1.0}};
+  const std::vector<double> full_samples{
+      -maximum, -maximum / 2.0, -1.0,   -denormal, 0.0, denormal,
+      1.0,      maximum / 2.0,  maximum};
+  SampleConversion to_unit = make_conversion(
+      full_endpoint, unit_endpoint, ElementSemantics::FloatingPoint, 64U);
+
+  const std::vector<double> unit_samples =
+      read_samples<double>(convert_dense_image_samples(
+          make_sample_image(full_samples, full_endpoint), to_unit));
+
+  ASSERT_EQ(unit_samples.size(), full_samples.size());
+  EXPECT_EQ(unit_samples.front(), -1.0);
+  EXPECT_DOUBLE_EQ(unit_samples[1], -0.5);
+  EXPECT_LT(unit_samples[2], 0.0);
+  EXPECT_TRUE(std::isfinite(unit_samples[3]));
+  EXPECT_EQ(unit_samples[4], 0.0);
+  EXPECT_TRUE(std::isfinite(unit_samples[5]));
+  EXPECT_GT(unit_samples[6], 0.0);
+  EXPECT_DOUBLE_EQ(unit_samples[7], 0.5);
+  EXPECT_EQ(unit_samples.back(), 1.0);
+  EXPECT_TRUE(std::is_sorted(unit_samples.begin(), unit_samples.end()));
+
+  SampleConversion to_full = make_conversion(
+      unit_endpoint, full_endpoint, ElementSemantics::FloatingPoint, 64U);
+  const std::vector<double> normalized{-1.0,     -0.5, -denormal, 0.0,
+                                       denormal, 0.5,  1.0};
+  const std::vector<double> expanded =
+      read_samples<double>(convert_dense_image_samples(
+          make_sample_image(normalized, unit_endpoint), to_full));
+  ASSERT_EQ(expanded.size(), normalized.size());
+  EXPECT_EQ(expanded.front(), -maximum);
+  EXPECT_EQ(expanded[1], -maximum / 2.0);
+  EXPECT_TRUE(std::isfinite(expanded[2]));
+  EXPECT_LT(expanded[2], 0.0);
+  EXPECT_EQ(expanded[3], 0.0);
+  EXPECT_TRUE(std::isfinite(expanded[4]));
+  EXPECT_GT(expanded[4], 0.0);
+  EXPECT_EQ(expanded[5], maximum / 2.0);
+  EXPECT_EQ(expanded.back(), maximum);
+  EXPECT_TRUE(std::is_sorted(expanded.begin(), expanded.end()));
+
+  SampleConversion exact_to_full = to_full;
+  exact_to_full.precision_loss = PrecisionLossPolicy::Reject;
+  EXPECT_EQ(
+      read_samples<double>(convert_dense_image_samples(
+          make_sample_image(std::vector<double>{-1.0, 0.0, 1.0}, unit_endpoint),
+          exact_to_full)),
+      (std::vector<double>{-maximum, 0.0, maximum}));
+
+  const SampleEndpoint positive_extreme_endpoint{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, maximum / 2.0, maximum}};
+  const double positive_midpoint = maximum / 2.0 + maximum / 4.0;
+  const std::vector<double> positive_extreme{maximum / 2.0, positive_midpoint,
+                                             maximum};
+  const std::vector<double> positive_mapped =
+      read_samples<double>(convert_dense_image_samples(
+          make_sample_image(positive_extreme, positive_extreme_endpoint),
+          make_conversion(positive_extreme_endpoint, unit_endpoint,
+                          ElementSemantics::FloatingPoint, 64U)));
+  EXPECT_EQ(positive_mapped, (std::vector<double>{-1.0, 0.0, 1.0}));
+
+  const SampleEndpoint negative_extreme_endpoint{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -maximum, -maximum / 2.0}};
+  const double negative_midpoint = -maximum + maximum / 4.0;
+  const std::vector<double> negative_extreme{-maximum, negative_midpoint,
+                                             -maximum / 2.0};
+  const std::vector<double> negative_mapped =
+      read_samples<double>(convert_dense_image_samples(
+          make_sample_image(negative_extreme, negative_extreme_endpoint),
+          make_conversion(negative_extreme_endpoint, unit_endpoint,
+                          ElementSemantics::FloatingPoint, 64U)));
+  EXPECT_EQ(negative_mapped, (std::vector<double>{-1.0, 0.0, 1.0}));
+}
+
 TEST(SampleConversion, DegenerateDomainRequiresExactIdentity) {
   const SampleEndpoint degenerate{
       SampleEncoding{1U, SampleEncodingKind::Value},

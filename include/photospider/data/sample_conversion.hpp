@@ -92,10 +92,11 @@ struct SampleConversion final {
  * The operation validates complete endpoint facts. Equal endpoint and storage
  * identity transfers inspect domains with type-aware comparisons and copy
  * in-domain native scalars without any floating-point promotion. Other
- * conversions perform the affine mapping only when the source integer is
- * exactly representable by the platform arithmetic, apply the selected
- * exceptional/out-of-domain/rounding/loss policies, and publish one fresh
- * interleaved CPU Value only after every sample succeeds.
+ * conversions perform one centered overflow-safe affine mapping only when the
+ * source integer is exactly representable by the platform arithmetic. The
+ * mapping does not require `long double` to be wider than binary64 and is
+ * reused for reverse precision validation before the selected exceptional/
+ * out-of-domain/rounding/loss policies publish one fresh interleaved CPU Value.
  *
  * @param source Valid built-in Strided Value with complete ImageFacet and one
  *        default sample-domain record without per-channel overrides.

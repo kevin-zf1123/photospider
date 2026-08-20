@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <new>
 #include <sstream>
@@ -29,6 +30,8 @@
 #include "graph_cli/process_command.hpp"
 #include "metal/metal_exception_boundary.hpp"
 #include "photospider/data/image_view.hpp"
+#include "photospider/data/sample_conversion.hpp"
+#include "photospider/data/value_artifact.hpp"
 #include "photospider/host/host.hpp"
 #include "runtime/graph_event_service.hpp"
 
@@ -272,6 +275,99 @@ AllocationFailureObservation observe_allocation_failure(
     observation.fired = allocation_probe::did_fire();
   }
   return observation;
+}
+
+/**
+ * @brief Creates one aligned portable DenseImage artifact for allocation tests.
+ * @return Complete valid artifact requesting the maximum portable alignment.
+ * @throws Value/artifact validation and allocation failures unchanged.
+ * @note Fixture construction finishes before the allocation probe is armed.
+ */
+ValueArtifact make_aligned_bad_alloc_artifact() {
+  DenseTensorDescriptor descriptor{{1U, 1U, 1U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  Value value =
+      Value::from_cpu_dense_tensor(std::move(descriptor), std::move(facet),
+                                   StridedLayout{{1, 1, 1}}, {std::byte{0x5a}});
+  ValueArtifact artifact = capture_value_artifact("image", value);
+  artifact.envelope.buffers[0].required_alignment =
+      kMaximumValueArtifactAlignment;
+  return artifact;
+}
+
+/**
+ * @brief Creates one full-range floating SampleConversion source fixture.
+ * @return Ready ordinary image with one finite zero sample.
+ * @throws Value validation and allocation failures unchanged.
+ */
+Value make_full_range_bad_alloc_sample() {
+  const double maximum = std::numeric_limits<double>::max();
+  DenseTensorDescriptor descriptor{{1U, 1U, 1U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{64U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain = SampleDomainFacet{
+      1U,
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -maximum, maximum},
+      {}};
+  std::vector<std::byte> storage(sizeof(double));
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{{static_cast<std::ptrdiff_t>(sizeof(double)),
+                     static_cast<std::ptrdiff_t>(sizeof(double)),
+                     static_cast<std::ptrdiff_t>(sizeof(double))}},
+      std::move(storage));
+}
+
+TEST(ValueArtifactBadAllocBoundary,
+     ReconstructionPropagatesAndRecoversWithoutMutatingInput) {
+  const ValueArtifact artifact = make_aligned_bad_alloc_artifact();
+  const ArtifactPayloadDigest digest_before =
+      artifact.envelope.buffers[0].digest;
+
+  const AllocationFailureObservation failed = observe_allocation_failure(
+      0, [&] { (void)reconstruct_value_artifact(artifact); });
+
+  EXPECT_TRUE(failed.fired);
+  EXPECT_TRUE(failed.propagated);
+  EXPECT_EQ(artifact.envelope.buffers[0].digest, digest_before);
+  EXPECT_EQ(artifact.envelope.buffers[0].required_alignment,
+            kMaximumValueArtifactAlignment);
+  const Value recovered = reconstruct_value_artifact(artifact);
+  const ReadLease read = recovered.buffer_handle().acquire_read();
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(read.data()) %
+                kMaximumValueArtifactAlignment,
+            0U);
+}
+
+TEST(SampleConversionBadAllocBoundary,
+     ConversionPropagatesAndLaterPublishesOneCompleteValue) {
+  const Value source = make_full_range_bad_alloc_sample();
+  const double maximum = std::numeric_limits<double>::max();
+  SampleConversion conversion;
+  conversion.source = {
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -maximum, maximum}};
+  conversion.destination = {
+      SampleEncoding{1U, SampleEncodingKind::Normalized},
+      SampleDomain{SampleDomainKind::Normalized, -1.0, 1.0}};
+  conversion.destination_element_semantics = ElementSemantics::FloatingPoint;
+  conversion.destination_storage_encoding = StorageEncoding{64U};
+  conversion.precision_loss = PrecisionLossPolicy::Allow;
+
+  const AllocationFailureObservation failed = observe_allocation_failure(
+      0, [&] { (void)convert_dense_image_samples(source, conversion); });
+
+  EXPECT_TRUE(failed.fired);
+  EXPECT_TRUE(failed.propagated);
+  const Value recovered = convert_dense_image_samples(source, conversion);
+  double sample = 1.0;
+  const ImageView view(recovered);
+  std::memcpy(&sample, view.channel_data(0U, 0U, 0U), sizeof(sample));
+  EXPECT_EQ(sample, 0.0);
 }
 
 TEST(GraphEventDrainBadAllocBoundary,

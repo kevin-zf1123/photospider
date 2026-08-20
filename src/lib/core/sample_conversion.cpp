@@ -321,6 +321,138 @@ long double round_integral(long double value, SampleRoundingMode mode) {
 }
 
 /**
+ * @brief Midpoint/radius form of one finite ordered interval.
+ * @throws Nothing for ordinary value operations.
+ * @note The form keeps a cross-zero full binary range finite without relying
+ *       on a wider floating-point type.
+ */
+struct CenteredInterval final {
+  /** @brief Finite midpoint rounded in the active working type. */
+  long double midpoint = 0.0L;
+  /** @brief Finite nonnegative half-span. */
+  long double radius = 0.0L;
+};
+
+/**
+ * @brief Centers one finite ordered interval without overflowing its span.
+ * @param minimum Finite inclusive lower endpoint.
+ * @param maximum Finite inclusive upper endpoint.
+ * @return Finite midpoint and nonnegative radius.
+ * @throws std::logic_error when validated interval preconditions are broken.
+ * @note A finite direct span preserves narrow/subnormal intervals. Only an
+ *       overflowing span uses separately halved endpoints.
+ */
+CenteredInterval center_interval(long double minimum, long double maximum) {
+  const long double span = maximum - minimum;
+  CenteredInterval result;
+  if (std::isfinite(span)) {
+    result.radius = span / 2.0L;
+    result.midpoint = minimum + result.radius;
+  } else {
+    result.midpoint = minimum / 2.0L + maximum / 2.0L;
+    result.radius = maximum / 2.0L - minimum / 2.0L;
+  }
+  if (!std::isfinite(result.midpoint) || !std::isfinite(result.radius) ||
+      result.radius < 0.0L) {
+    throw std::logic_error("Finite sample interval could not be centered.");
+  }
+  return result;
+}
+
+/**
+ * @brief Interpolates finite endpoints without an overflowing endpoint span.
+ * @param minimum Finite lower endpoint.
+ * @param maximum Finite upper endpoint.
+ * @param position Clamped affine position in `[0, 1]`.
+ * @return Finite rounded value between the endpoints.
+ * @throws Nothing for validated inputs.
+ * @note Opposite-sign endpoints use a weighted sum; same-sign subtraction is
+ *       finite. Exact endpoints bypass arithmetic.
+ */
+long double interpolate_finite(long double minimum, long double maximum,
+                               long double position) noexcept {
+  if (position <= 0.0L) {
+    return minimum;
+  }
+  if (position >= 1.0L) {
+    return maximum;
+  }
+  if ((minimum <= 0.0L && maximum >= 0.0L) ||
+      (minimum >= 0.0L && maximum <= 0.0L)) {
+    return (1.0L - position) * minimum + position * maximum;
+  }
+  return minimum + position * (maximum - minimum);
+}
+
+/**
+ * @brief Maps one in-domain finite value through an overflow-safe affine core.
+ * @param value Finite source value inside the inclusive source interval.
+ * @param source_minimum Finite source lower endpoint.
+ * @param source_maximum Finite source upper endpoint greater than minimum.
+ * @param destination_minimum Finite destination lower endpoint.
+ * @param destination_maximum Finite destination upper endpoint.
+ * @return Finite destination value rounded by the active working type.
+ * @throws std::domain_error when finite validated inputs unexpectedly produce
+ *         a non-finite result.
+ * @throws std::logic_error when interval preconditions are broken.
+ * @note Exact endpoints and equal numeric domains avoid arithmetic. Otherwise
+ *       centered scale plus `fma` avoids overflowing interval differences and
+ *       preserves representable near-midpoint values even when `long double`
+ *       has only binary64 range and precision. The same helper is used for
+ *       forward conversion and reverse precision validation.
+ */
+long double map_finite_affine(long double value, long double source_minimum,
+                              long double source_maximum,
+                              long double destination_minimum,
+                              long double destination_maximum) {
+  if (value == source_minimum) {
+    return destination_minimum;
+  }
+  if (value == source_maximum) {
+    return destination_maximum;
+  }
+  if (source_minimum == destination_minimum &&
+      source_maximum == destination_maximum) {
+    return value;
+  }
+
+  const CenteredInterval source =
+      center_interval(source_minimum, source_maximum);
+  const CenteredInterval destination =
+      center_interval(destination_minimum, destination_maximum);
+  if (source.radius == 0.0L) {
+    const long double span = source_maximum - source_minimum;
+    const long double position =
+        std::clamp((value - source_minimum) / span, 0.0L, 1.0L);
+    return interpolate_finite(destination_minimum, destination_maximum,
+                              position);
+  }
+
+  const long double displacement = value - source.midpoint;
+  const long double centered_position =
+      std::clamp(displacement / source.radius, -1.0L, 1.0L);
+  const long double scale = destination.radius / source.radius;
+  long double mapped = 0.0L;
+  if (destination.radius != 0.0L && scale != 0.0L && std::isfinite(scale)) {
+    mapped = std::fma(displacement, scale, destination.midpoint);
+  } else {
+    mapped =
+        std::fma(centered_position, destination.radius, destination.midpoint);
+  }
+  if (!std::isfinite(mapped)) {
+    const long double position =
+        std::clamp((centered_position + 1.0L) / 2.0L, 0.0L, 1.0L);
+    mapped =
+        interpolate_finite(destination_minimum, destination_maximum, position);
+  }
+  if (!std::isfinite(mapped)) {
+    throw std::domain_error(
+        "Finite sample affine mapping produced a non-finite result.");
+  }
+  return std::clamp(mapped, destination_minimum, destination_maximum);
+}
+
+/**
  * @brief Stores one converted scalar under the complete loss policy.
  * @param address Borrowed destination bytes.
  * @param descriptor Valid destination descriptor.
@@ -420,10 +552,9 @@ void store_scalar(std::byte* address, const DenseTensorDescriptor& descriptor,
     const long double reversed =
         destination_maximum == destination_minimum
             ? stored
-            : source_minimum +
-                  (stored - destination_minimum) *
-                      ((source_maximum - source_minimum) /
-                       (destination_maximum - destination_minimum));
+            : map_finite_affine(stored, destination_minimum,
+                                destination_maximum, source_minimum,
+                                source_maximum);
     exact_reverse = reversed == source_after_policy;
   }
   if ((!exact_destination || !exact_reverse) &&
@@ -703,7 +834,7 @@ std::byte* destination_address(std::byte* base,
 }
 
 /**
- * @brief Applies source-domain policy and exact affine endpoint mapping.
+ * @brief Applies source-domain policy and overflow-safe affine endpoint map.
  * @param source Numeric source sample.
  * @param conversion Complete explicit policy.
  * @return Effective source value and mapped numeric destination sample.
@@ -731,10 +862,8 @@ std::pair<long double, long double> map_sample(
   if (source_maximum == source_minimum) {
     return {source, source};
   }
-  return {source, destination_minimum +
-                      (source - source_minimum) *
-                          ((destination_maximum - destination_minimum) /
-                           (source_maximum - source_minimum))};
+  return {source, map_finite_affine(source, source_minimum, source_maximum,
+                                    destination_minimum, destination_maximum)};
 }
 
 }  // namespace
