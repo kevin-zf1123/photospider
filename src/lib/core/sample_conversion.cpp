@@ -423,6 +423,36 @@ long double interpolate_finite_from_endpoint(long double minimum,
 }
 
 /**
+ * @brief Applies one finite affine scale from the corresponding endpoints.
+ * @param minimum Finite destination lower endpoint.
+ * @param maximum Finite destination upper endpoint greater than minimum.
+ * @param distance Nonnegative source distance from the matching endpoint.
+ * @param scale Positive finite destination-span/source-span ratio.
+ * @param from_minimum True to add from the lower endpoints; false to subtract
+ *        from the upper endpoints.
+ * @return Finite destination value rounded once by fused multiply-add.
+ * @throws std::domain_error when validated finite inputs unexpectedly produce
+ *         a non-finite result.
+ * @note The scale is used only after both spans and their ratio are proven
+ *       finite and nonzero. Fusing the distance product with the destination
+ *       endpoint preserves a representable final result even when computing
+ *       the source fraction first would underflow.
+ */
+long double interpolate_finite_from_endpoint_scale(long double minimum,
+                                                   long double maximum,
+                                                   long double distance,
+                                                   long double scale,
+                                                   bool from_minimum) {
+  const long double mapped = from_minimum ? std::fma(distance, scale, minimum)
+                                          : std::fma(-distance, scale, maximum);
+  if (!std::isfinite(mapped)) {
+    throw std::domain_error(
+        "Finite sample affine scale produced a non-finite result.");
+  }
+  return std::clamp(mapped, minimum, maximum);
+}
+
+/**
  * @brief Interpolates a destination from a centered position.
  * @param minimum Finite destination lower endpoint.
  * @param maximum Finite destination upper endpoint greater than minimum.
@@ -433,9 +463,10 @@ long double interpolate_finite_from_endpoint(long double minimum,
  * @throws std::logic_error when interval preconditions are broken.
  * @note Equal-magnitude endpoints multiply the centered position by the
  *       positive endpoint directly, retaining a representable near-midpoint
- *       sign without adding the displacement to one-half. Other intervals are
- *       power-of-two scaled because this helper is reached for them only after
- *       an overflowing source span has already been normalized.
+ *       sign without adding the displacement to one-half. Other intervals
+ *       form the nearer endpoint fraction with one `fma` and delegate to the
+ *       endpoint interpolator, so destination exponent scaling occurs only
+ *       when its span actually overflows.
  */
 long double interpolate_finite_centered(long double minimum,
                                         long double maximum,
@@ -451,23 +482,12 @@ long double interpolate_finite_centered(long double minimum,
     }
     return std::clamp(mapped, minimum, maximum);
   }
-
-  const ScaledInterval destination = scale_finite_interval(minimum, maximum);
-  const long double destination_span =
-      destination.maximum - destination.minimum;
-  const long double destination_radius = destination_span / 2.0L;
-  const long double destination_midpoint =
-      std::fma(0.5L, destination_span, destination.minimum);
-  long double scaled_mapped =
-      std::fma(bounded_position, destination_radius, destination_midpoint);
-  scaled_mapped =
-      std::clamp(scaled_mapped, destination.minimum, destination.maximum);
-  const long double mapped = std::scalbn(scaled_mapped, destination.exponent);
-  if (!std::isfinite(mapped)) {
-    throw std::domain_error(
-        "Finite centered affine interpolation produced a non-finite result.");
-  }
-  return std::clamp(mapped, minimum, maximum);
+  const bool from_minimum = bounded_position <= 0.0L;
+  const long double endpoint_fraction =
+      from_minimum ? std::fma(0.5L, bounded_position, 0.5L)
+                   : std::fma(-0.5L, bounded_position, 0.5L);
+  return interpolate_finite_from_endpoint(minimum, maximum, endpoint_fraction,
+                                          from_minimum);
 }
 
 /**
@@ -518,19 +538,18 @@ long double map_scaled_centered(long double value, long double source_minimum,
  * @throws std::domain_error when finite validated inputs unexpectedly produce
  *         a non-finite result.
  * @throws std::logic_error when interval preconditions are broken.
- * @note Exact endpoints and equal numeric domains avoid arithmetic. A finite
- *       source span computes an endpoint-relative fraction toward the
- *       destination endpoint closest to zero, avoiding destination
- *       cancellation while narrow subnormal intervals never halve their span
- *       or subtract an unverified rounded midpoint. Equal-magnitude
- *       destination endpoints use a centered source coordinate only when the
- *       span is normal and halving/restoring it is exact; otherwise their two
- *       endpoint-relative distances form the centered position directly. Only
- *       an overflowing source span requires a scaled source-centered form.
- *       Finite destination spans use one fused endpoint interpolation; only an
- *       overflowing destination span is exponent-scaled before one final
- *       restore. The same helper is used for forward conversion and reverse
- *       precision validation.
+ * @note Exact endpoints and equal numeric domains avoid arithmetic. For finite
+ *       spans, a finite nonzero destination/source scale is preferred and one
+ *       endpoint-relative distance is fused directly with the destination
+ *       endpoint closest to zero. Equal-magnitude destinations use a stable
+ *       source midpoint when available so cross-zero near-center displacement
+ *       is retained. If the scale underflows or overflows, the core falls back
+ *       to endpoint-relative fraction plus fused interpolation; narrow
+ *       subnormal intervals therefore never halve their span or subtract an
+ *       unverified rounded midpoint. Only an overflowing source span requires
+ *       a scaled source-centered form, and only an overflowing destination
+ *       span is exponent-scaled before one final restore. The same helper is
+ *       used for forward conversion and reverse precision validation.
  */
 long double map_finite_affine(long double value, long double source_minimum,
                               long double source_maximum,
@@ -555,6 +574,38 @@ long double map_finite_affine(long double value, long double source_minimum,
         std::fabs(destination_minimum);
     const long double destination_maximum_magnitude =
         std::fabs(destination_maximum);
+    const long double destination_span =
+        destination_maximum - destination_minimum;
+    if (std::isfinite(destination_span) && destination_span > 0.0L) {
+      const long double scale = destination_span / source_span;
+      if (std::isfinite(scale) && scale > 0.0L) {
+        if (destination_minimum_magnitude == destination_maximum_magnitude &&
+            std::isnormal(source_span)) {
+          const long double source_radius = source_span / 2.0L;
+          const long double source_midpoint =
+              std::fma(0.5L, source_span, source_minimum);
+          if (source_radius > 0.0L && std::isfinite(source_midpoint) &&
+              source_radius + source_radius == source_span) {
+            const long double mapped =
+                std::fma(value - source_midpoint, scale, 0.0L);
+            if (!std::isfinite(mapped)) {
+              throw std::domain_error(
+                  "Finite centered affine scale produced a non-finite "
+                  "result.");
+            }
+            return std::clamp(mapped, destination_minimum, destination_maximum);
+          }
+        }
+        if (destination_minimum_magnitude <= destination_maximum_magnitude) {
+          return interpolate_finite_from_endpoint_scale(
+              destination_minimum, destination_maximum, from_minimum, scale,
+              true);
+        }
+        return interpolate_finite_from_endpoint_scale(
+            destination_minimum, destination_maximum, from_maximum, scale,
+            false);
+      }
+    }
     if (destination_minimum_magnitude < destination_maximum_magnitude) {
       return interpolate_finite_from_endpoint(destination_minimum,
                                               destination_maximum,

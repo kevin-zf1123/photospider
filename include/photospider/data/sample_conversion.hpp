@@ -92,14 +92,17 @@ struct SampleConversion final {
  * The operation validates complete endpoint facts. Equal endpoint and storage
  * identity transfers inspect domains with type-aware comparisons and copy
  * in-domain native scalars without any floating-point promotion. Other
- * conversions use endpoint-relative finite positions plus fused destination
- * interpolation; only overflowing spans require power-of-two scaling, while
- * symmetric destinations use a centered coordinate. Arithmetic begins only
- * when the source integer is exactly representable by the platform. The
- * shared forward/reverse core does not require `long double` to be wider than
- * binary64 and preserves finite same-sign, cross-zero, and subnormal intervals
- * before the selected exceptional/out-of-domain/rounding/loss policies publish
- * one fresh interleaved CPU Value.
+ * conversions prefer one endpoint-relative distance multiplied by a finite
+ * nonzero destination/source span scale and fused with the destination
+ * endpoint. A zero or infinite scale falls back to an endpoint fraction plus
+ * fused destination interpolation; only genuinely overflowing spans require
+ * power-of-two scaling, while symmetric destinations use a stable centered
+ * coordinate. Arithmetic begins only when the source integer is exactly
+ * representable by the platform. The shared forward/reverse core does not
+ * require `long double` to be wider than binary64 and preserves finite
+ * same-sign, cross-zero, subnormal, and ratio-underflow intervals before the
+ * selected exceptional/out-of-domain/rounding/loss policies publish one fresh
+ * interleaved CPU Value.
  *
  * @param source Valid built-in Strided Value with complete ImageFacet and one
  *        default sample-domain record without per-channel overrides.
