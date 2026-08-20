@@ -2217,6 +2217,15 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
         target_compile_definitions(test_kernel_contracts PRIVATE
             PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
     endif()
+    if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+        target_compile_definitions(test_kernel_contracts PRIVATE
+            "PS_KERNEL_TEST_DATA_PROVIDER_PATH=\"$<TARGET_FILE:photospider_openexr_deep_provider>\"")
+        target_link_libraries(test_kernel_contracts PRIVATE
+            photospider_openexr_deep_adapter
+            ${CMAKE_DL_LIBS})
+        add_dependencies(test_kernel_contracts
+            photospider_openexr_deep_provider)
+    endif()
 
     add_ps_test(test_compute_io_executor
         tests/unit/test_compute_io_executor.cpp

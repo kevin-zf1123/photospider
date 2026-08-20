@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -169,6 +171,31 @@ Value make_packed_value(PackedBitOrder order) {
   }
   return Value::from_cpu_blocked_dense_tensor(
       packed_descriptor(), packed_layout(order), std::move(storage));
+}
+
+/**
+ * @brief Publishes one ordinary whole-byte image for predecessor setup.
+ * @return Ready 1x2 FP32 DenseImage with explicit sample semantics.
+ * @throws Value validation or allocation exceptions unchanged.
+ * @note The value is cache-projection compatible and exists only to create a
+ * complete four-sibling transaction before partial packed cleanup is tested.
+ */
+Value make_ordinary_predecessor_image() {
+  DenseTensorDescriptor descriptor{{1U, 2U, 1U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        {}};
+  std::vector<std::byte> bytes(2U * sizeof(float));
+  const std::array<float, 2U> samples{0.25F, 0.75F};
+  std::memcpy(bytes.data(), samples.data(), bytes.size());
+  return Value::from_cpu_dense_tensor(std::move(descriptor), std::move(facet),
+                                      StridedLayout{{8, 4, 4}},
+                                      std::move(bytes));
 }
 
 /**
@@ -466,6 +493,92 @@ TEST(PackedFp4DenseTensor, MemoryCacheRetainsAndDiskCacheRejectsBeforeEffects) {
   EXPECT_TRUE(image_codec->calls().empty());
   EXPECT_TRUE(metadata_codec->calls().empty());
   executor.shutdown();
+  std::filesystem::remove_all(root, ignored);
+}
+
+/**
+ * @brief Cleans an older complete transaction for partial packed validity.
+ * @return Nothing; GoogleTest reports validation, cleanup, or restart hits.
+ * @throws Cache, filesystem, Value, Region, or allocation exceptions.
+ * @note Partial validity is tested before ImageView or artifact capture. The
+ * packed/quantized Value is intentionally incompatible with image projection,
+ * yet it authorizes only controlled removal of the four older siblings and no
+ * codec/provider work.
+ */
+TEST(PackedFp4DenseTensor,
+     PartialPackedValidityPurgesCompleteTransactionWithoutProjection) {
+  const std::filesystem::path root = cache_root("partial-cleanup");
+  std::error_code ignored;
+  std::filesystem::remove_all(root, ignored);
+  GraphModel graph(root);
+  Node node;
+  node.id = 17;
+  node.caches.push_back({"image", "packed.png"});
+
+  NodeOutput predecessor;
+  predecessor.publish_image_value(make_ordinary_predecessor_image());
+  predecessor.data.emplace("tag", plugin::ParameterValue("complete"));
+  node.cached_output_high_precision = std::move(predecessor);
+  node.hp_region =
+      value_region::full_node_output_region(*node.cached_output_high_precision);
+
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
+      testing::FakeImageArtifactCodec::DecodeCallback{},
+      [](const std::filesystem::path& path, const Value&,
+         const ImageArtifactEncodeRequest&) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << "projection";
+      });
+  const plugin::ParameterMap predecessor_metadata{
+      {"tag", plugin::ParameterValue("complete")}};
+  auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
+      [predecessor_metadata](const std::filesystem::path&) {
+        return predecessor_metadata;
+      },
+      [](const std::filesystem::path& path, const plugin::ParameterMap&) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << "tag: complete\n";
+      });
+  GraphCacheService cache(image_codec, metadata_codec);
+  cache.save_cache_if_configured(graph, node, "int16");
+
+  const std::filesystem::path projection =
+      cache.node_cache_dir(graph, node.id) / node.caches.front().location;
+  std::filesystem::path metadata = projection;
+  metadata.replace_extension(".yml");
+  std::filesystem::path archive = projection;
+  archive += ".values";
+  std::filesystem::path manifest = projection;
+  manifest += ".manifest";
+  for (const auto& path : {projection, metadata, archive, manifest}) {
+    ASSERT_TRUE(std::filesystem::exists(path)) << path;
+  }
+  const std::size_t image_calls_before = image_codec->calls().size();
+  const std::size_t metadata_calls_before = metadata_codec->calls().size();
+
+  NodeOutput partial;
+  partial.publish_image_value(
+      make_packed_value(PackedBitOrder::LeastSignificantFirst));
+  partial.data.emplace("tag", plugin::ParameterValue("partial-packed"));
+  node.cached_output_high_precision = std::move(partial);
+  node.hp_region = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 1U}, {0U, 4U}}});
+  ASSERT_FALSE(value_region::node_output_region_is_complete(
+      *node.cached_output_high_precision, *node.hp_region));
+
+  EXPECT_NO_THROW(cache.save_cache_if_configured(graph, node, "int16"));
+  EXPECT_EQ(image_codec->calls().size(), image_calls_before);
+  EXPECT_EQ(metadata_codec->calls().size(), metadata_calls_before);
+  for (const auto& path : {projection, metadata, archive, manifest}) {
+    EXPECT_FALSE(std::filesystem::exists(path)) << path;
+  }
+
+  Node restarted;
+  restarted.id = node.id;
+  restarted.caches = node.caches;
+  EXPECT_FALSE(cache.try_load_from_disk_cache(
+      graph, restarted, ValueDiskCacheOutputSchema{true, {"tag"}, {}}));
+  EXPECT_FALSE(restarted.cached_output_high_precision.has_value());
   std::filesystem::remove_all(root, ignored);
 }
 

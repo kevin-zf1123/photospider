@@ -15,6 +15,10 @@ enum class GraphCacheServiceTestEvent {
   DriveCacheRootRemoved,
   /** @brief A validated manifest was detached before payload acquisition. */
   ManifestReadBeforePayload,
+  /** @brief Archive stat/type/sparse/limit checks passed before allocation. */
+  ArchiveAllocationApproved,
+  /** @brief An admitted async writer is about to acquire root coordination. */
+  AsyncWriterBeforeRootLock,
 };
 
 /**

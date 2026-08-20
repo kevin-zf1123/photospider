@@ -1,23 +1,38 @@
 #include "graph/graph_cache_service.hpp"
 
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
 #include <atomic>
 #endif
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#if !defined(_WIN32)
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include "core/value_region.hpp"
 #include "execution/device/compute_io_executor.hpp"
@@ -57,7 +72,7 @@ struct DiskCacheReadAttempt {
 };
 
 /** @brief Private graph-cache transaction manifest structural version. */
-constexpr std::uint32_t kGraphCacheManifestVersion = 1U;
+constexpr std::uint32_t kGraphCacheManifestVersion = 2U;
 
 /** @brief Bit indicating one digest-bound parameter metadata payload. */
 constexpr std::uint32_t kGraphCacheManifestHasMetadata = 1U;
@@ -70,6 +85,16 @@ constexpr std::array<std::byte, 8U> kGraphCacheManifestMagic{
 
 /** @brief Frozen maximum encoded parameter metadata bytes per cache entry. */
 constexpr auto kMaximumGraphCacheMetadataBytes = 16ULL * 1024ULL * 1024ULL;
+
+/** @brief Cryptographically random cache-generation byte count. */
+constexpr std::size_t kGraphCacheGenerationBytes = 16U;
+
+/** @brief Portable configured leaf-byte bound including its original suffix. */
+constexpr std::size_t kMaximumGraphCacheLocationBytes = 192U;
+
+/** @brief Exact owner-defined cache generation joined across transaction data.
+ */
+using GraphCacheGeneration = std::array<std::byte, kGraphCacheGenerationBytes>;
 
 /**
  * @brief Identifies one exact immutable cache transaction payload file.
@@ -102,6 +127,8 @@ struct GraphCacheManifest final {
   std::uint32_t value_count = 0U;
   /** @brief Number of exact parameter outputs in the metadata payload. */
   std::uint32_t parameter_count = 0U;
+  /** @brief Random writer generation repeated by every archive envelope. */
+  GraphCacheGeneration generation;
   /** @brief Complete named-Value archive file identity. */
   CacheArtifactFileRecord archive;
   /** @brief Optional encoded parameter metadata file identity. */
@@ -125,7 +152,261 @@ struct GraphCacheArtifactPaths final {
   fs::path value_archive;
   /** @brief Versioned manifest written last. */
   fs::path manifest;
+  /** @brief Safe single-leaf image projection name. */
+  std::string image_leaf;
+  /** @brief Safe single-leaf detached metadata name. */
+  std::string metadata_leaf;
+  /** @brief Safe single-leaf portable archive name. */
+  std::string archive_leaf;
+  /** @brief Safe single-leaf manifest name. */
+  std::string manifest_leaf;
 };
+
+/**
+ * @brief Process-shared serialization state for one normalized cache root.
+ * @throws Nothing for ordinary construction.
+ * @note The mutex covers reads, writes, cleanup, synchronize, and clear across
+ * every GraphCacheService instance in this process. `mutation_epoch`
+ * invalidates an asynchronous writer prepared before any later save, partial
+ * cleanup, synchronization, or drive-clear linearization point.
+ */
+struct GraphCacheRootCoordination final {
+  /** @brief Serializes every transaction under this exact root. */
+  std::mutex mutex;
+  /** @brief Monotonic cache-mutation generation protected by `mutex`. */
+  std::uint64_t mutation_epoch = 0U;
+};
+
+/** @brief Serializes the weak process registry of root coordinators. */
+std::mutex g_graph_cache_coordination_mutex;
+
+/**
+ * @brief Weak process registry avoiding permanent cache-root retention.
+ * @note Access requires `g_graph_cache_coordination_mutex`; expired entries are
+ * erased opportunistically whenever another root is acquired.
+ */
+std::unordered_map<std::string, std::weak_ptr<GraphCacheRootCoordination>>
+    g_graph_cache_coordinators;  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Active root guards on the current thread for reentry detection.
+ * @note Different roots may nest; attempting the same root throws before
+ * mutex acquisition instead of deadlocking through a codec or test hook.
+ */
+thread_local std::vector<const GraphCacheRootCoordination*>
+    g_active_graph_cache_roots;  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Returns the process coordinator for one lexical cache-root identity.
+ * @param root Nonempty configured graph cache root.
+ * @return Shared coordinator retained through the complete caller operation.
+ * @throws std::invalid_argument when `root` is empty.
+ * @throws Filesystem or allocation exceptions from key normalization/registry.
+ * @note Weak canonicalization coalesces lexical and intermediate-symlink
+ * aliases for serialization only; it grants no filesystem authority.
+ * Directory capabilities independently reject a final-root symlink and bind
+ * exact filesystem identities for every operation.
+ */
+std::shared_ptr<GraphCacheRootCoordination> graph_cache_root_coordination(
+    const fs::path& root) {
+  if (root.empty()) {
+    throw std::invalid_argument(
+        "Graph cache coordination requires a nonempty root.");
+  }
+  std::string key = fs::weakly_canonical(fs::absolute(root)).generic_string();
+  std::transform(key.begin(), key.end(), key.begin(), [](char character) {
+    const unsigned char byte = static_cast<unsigned char>(character);
+    if (byte >= static_cast<unsigned char>('A') &&
+        byte <= static_cast<unsigned char>('Z')) {
+      return static_cast<char>(byte - static_cast<unsigned char>('A') +
+                               static_cast<unsigned char>('a'));
+    }
+    return character;
+  });
+  std::lock_guard<std::mutex> lock(g_graph_cache_coordination_mutex);
+  for (auto iterator = g_graph_cache_coordinators.begin();
+       iterator != g_graph_cache_coordinators.end();) {
+    if (iterator->second.expired()) {
+      iterator = g_graph_cache_coordinators.erase(iterator);
+    } else {
+      ++iterator;
+    }
+  }
+  const auto found = g_graph_cache_coordinators.find(key);
+  if (found != g_graph_cache_coordinators.end()) {
+    if (std::shared_ptr<GraphCacheRootCoordination> retained =
+            found->second.lock()) {
+      return retained;
+    }
+  }
+  auto created = std::make_shared<GraphCacheRootCoordination>();
+  g_graph_cache_coordinators[key] = created;
+  return created;
+}
+
+/**
+ * @brief Holds one root transaction mutex and rejects same-thread reentry.
+ * @throws std::logic_error when the same root is already active on this thread.
+ * @throws std::bad_alloc when active-root tracking cannot grow.
+ * @throws std::system_error when mutex acquisition fails.
+ * @note Codec callbacks and test hooks execute under this guard. Reentry is a
+ * contract error, never a recursive cache transaction or hidden deadlock.
+ */
+class GraphCacheRootGuard final {
+ public:
+  /**
+   * @brief Acquires one retained root coordinator.
+   * @param coordination Non-null process coordinator.
+   * @throws std::invalid_argument for an empty owner.
+   * @throws std::logic_error, std::bad_alloc, or std::system_error as above.
+   */
+  explicit GraphCacheRootGuard(
+      std::shared_ptr<GraphCacheRootCoordination> coordination)
+      : coordination_(std::move(coordination)) {
+    if (!coordination_) {
+      throw std::invalid_argument(
+          "Graph cache root guard requires retained coordination.");
+    }
+    if (std::find(g_active_graph_cache_roots.begin(),
+                  g_active_graph_cache_roots.end(),
+                  coordination_.get()) != g_active_graph_cache_roots.end()) {
+      throw std::logic_error(
+          "Graph cache operation cannot re-enter the same cache root.");
+    }
+    lock_ = std::unique_lock<std::mutex>(coordination_->mutex);
+    g_active_graph_cache_roots.push_back(coordination_.get());
+    active_ = true;
+  }
+
+  /** @brief Releases current-thread tracking before the mutex. @throws Nothing.
+   */
+  ~GraphCacheRootGuard() noexcept {
+    if (active_) {
+      if (g_active_graph_cache_roots.empty() ||
+          g_active_graph_cache_roots.back() != coordination_.get()) {
+        std::terminate();
+      }
+      g_active_graph_cache_roots.pop_back();
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate root-lock and tracking ownership.
+   * @param other Unused source because construction is forbidden.
+   * @throws Nothing; this operation is deleted.
+   */
+  GraphCacheRootGuard(const GraphCacheRootGuard& other) = delete;
+
+  /**
+   * @brief Prevents duplicate root-lock and tracking assignment.
+   * @param other Unused source because assignment is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; this operation is deleted.
+   */
+  GraphCacheRootGuard& operator=(const GraphCacheRootGuard& other) = delete;
+
+  /** @brief Returns the protected mutation epoch. @return Current epoch. */
+  std::uint64_t mutation_epoch() const noexcept {
+    return coordination_->mutation_epoch;
+  }
+
+  /**
+   * @brief Advances the protected cache-mutation epoch.
+   * @return New nonzero epoch.
+   * @throws std::overflow_error when the process epoch is exhausted.
+   */
+  std::uint64_t advance_mutation_epoch() {
+    if (coordination_->mutation_epoch ==
+        std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("Graph cache mutation epoch exhausted.");
+    }
+    return ++coordination_->mutation_epoch;
+  }
+
+ private:
+  /** @brief Retains the exact weak-registry entry through unlock. */
+  std::shared_ptr<GraphCacheRootCoordination> coordination_;
+  /** @brief Root mutex released after current-thread tracking is removed. */
+  std::unique_lock<std::mutex> lock_;
+  /** @brief True only after active-root tracking succeeds. */
+  bool active_ = false;
+};
+
+/**
+ * @brief Produces a conservative cross-platform cache-leaf collision key.
+ * @param leaf Validated single-leaf bytes.
+ * @return ASCII-case-folded key used only for authority-alias rejection.
+ * @throws std::bad_alloc when key ownership cannot allocate.
+ * @note Windows and common macOS volumes are case-insensitive while POSIX may
+ * not be. Treating ASCII case aliases as collisions everywhere keeps one graph
+ * definition from gaining different transaction authority after migration.
+ */
+std::string portable_graph_cache_leaf_key(std::string leaf) {
+  std::transform(leaf.begin(), leaf.end(), leaf.begin(), [](char character) {
+    const unsigned char byte = static_cast<unsigned char>(character);
+    if (byte >= static_cast<unsigned char>('A') &&
+        byte <= static_cast<unsigned char>('Z')) {
+      return static_cast<char>(byte - static_cast<unsigned char>('A') +
+                               static_cast<unsigned char>('a'));
+    }
+    return character;
+  });
+  return leaf;
+}
+
+/**
+ * @brief Reports whether a leaf uses a reserved Windows device basename.
+ * @param location Candidate portable leaf bytes.
+ * @return True for CON, PRN, AUX, NUL, COM1-9, or LPT1-9 before extension.
+ * @throws std::bad_alloc when folded basename ownership cannot allocate.
+ */
+bool graph_cache_leaf_has_reserved_device_name(const std::string& location) {
+  const std::size_t dot = location.find('.');
+  const std::string basename =
+      portable_graph_cache_leaf_key(location.substr(0U, dot));
+  if (basename == "con" || basename == "prn" || basename == "aux" ||
+      basename == "nul") {
+    return true;
+  }
+  return basename.size() == 4U &&
+         (basename.compare(0U, 3U, "com") == 0 ||
+          basename.compare(0U, 3U, "lpt") == 0) &&
+         basename[3] >= '1' && basename[3] <= '9';
+}
+
+/**
+ * @brief Requires one graph-document cache location to be a safe leaf.
+ * @param location Untrusted configured location bytes.
+ * @return Validated filesystem leaf.
+ * @throws GraphError with `InvalidParameter` for empty, oversized, rooted,
+ * traversing, multi-component, control-character, Windows-root-like, reserved,
+ * or ambiguous names.
+ * @throws std::bad_alloc when path ownership cannot allocate.
+ * @note Backslash and colon are rejected even on POSIX so a graph has the same
+ * authority when moved to a Windows product build.
+ */
+fs::path validate_graph_cache_location(const std::string& location) {
+  const fs::path candidate(location);
+  const bool invalid_character =
+      std::any_of(location.begin(), location.end(), [](char character) {
+        const unsigned char byte = static_cast<unsigned char>(character);
+        return byte == 0U || byte < 0x20U || byte == 0x7fU ||
+               character == '/' || character == '\\' || character == ':' ||
+               character == '*' || character == '?' || character == '"' ||
+               character == '<' || character == '>' || character == '|';
+      });
+  if (location.empty() || location.size() > kMaximumGraphCacheLocationBytes ||
+      invalid_character || candidate.is_absolute() ||
+      candidate.has_root_name() || candidate.has_root_directory() ||
+      !candidate.has_filename() || candidate.filename() != candidate ||
+      candidate == "." || candidate == ".." || location.back() == ' ' ||
+      location.back() == '.' ||
+      graph_cache_leaf_has_reserved_device_name(location)) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Graph cache location must be one safe file leaf.");
+  }
+  return candidate;
+}
 
 /**
  * @brief Derives one cache entry's controlled transaction paths.
@@ -138,16 +419,100 @@ struct GraphCacheArtifactPaths final {
 GraphCacheArtifactPaths graph_cache_artifact_paths(const GraphModel& graph,
                                                    const Node& node,
                                                    const CacheEntry& entry) {
+  const fs::path location = validate_graph_cache_location(entry.location);
   GraphCacheArtifactPaths paths;
   paths.directory = graph.cache_root / std::to_string(node.id);
-  paths.image_projection = paths.directory / entry.location;
+  paths.image_projection = paths.directory / location;
   paths.metadata = paths.image_projection;
   paths.metadata.replace_extension(".yml");
   paths.value_archive = paths.image_projection;
   paths.value_archive += ".values";
   paths.manifest = paths.image_projection;
   paths.manifest += ".manifest";
+  paths.image_leaf = paths.image_projection.filename().string();
+  paths.metadata_leaf = paths.metadata.filename().string();
+  paths.archive_leaf = paths.value_archive.filename().string();
+  paths.manifest_leaf = paths.manifest.filename().string();
+  const std::array<std::string, 4U> leaves{
+      paths.image_leaf, paths.metadata_leaf, paths.archive_leaf,
+      paths.manifest_leaf};
+  for (std::size_t left = 0U; left < leaves.size(); ++left) {
+    for (std::size_t right = left + 1U; right < leaves.size(); ++right) {
+      if (leaves[left] == leaves[right]) {
+        throw GraphError(GraphErrc::InvalidParameter,
+                         "Graph cache transaction paths alias one another.");
+      }
+    }
+  }
   return paths;
+}
+
+/**
+ * @brief Creates one unpredictable graph-cache writer generation.
+ * @return Nonzero 128-bit generation owned by one prepared transaction.
+ * @throws std::runtime_error when the platform cryptographic generator fails.
+ * @note The generation is persistent join metadata, not a runtime Value,
+ * allocation, revision, path, durability receipt, or security capability.
+ */
+GraphCacheGeneration make_graph_cache_generation() {
+  GraphCacheGeneration generation;
+  if (RAND_bytes(reinterpret_cast<unsigned char*>(generation.data()),
+                 static_cast<int>(generation.size())) != 1) {
+    throw std::runtime_error("Graph cache generation randomization failed.");
+  }
+  if (std::all_of(generation.begin(), generation.end(),
+                  [](std::byte byte) { return byte == std::byte{0}; })) {
+    throw std::runtime_error("Graph cache generation was invalid.");
+  }
+  return generation;
+}
+
+/**
+ * @brief Encodes one binary cache generation as canonical lowercase hex.
+ * @param generation Exact nonzero binary generation.
+ * @return Fixed 32-byte owner join carried by every archive envelope.
+ * @throws std::bad_alloc when string ownership cannot allocate.
+ */
+std::string graph_cache_generation_text(
+    const GraphCacheGeneration& generation) {
+  constexpr std::array<char, 16U> kHex{'0', '1', '2', '3', '4', '5', '6', '7',
+                                       '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+  std::string result(generation.size() * 2U, '\0');
+  for (std::size_t index = 0U; index < generation.size(); ++index) {
+    const unsigned int byte = std::to_integer<unsigned int>(generation[index]);
+    result[index * 2U] = kHex[byte >> 4U];
+    result[index * 2U + 1U] = kHex[byte & 0x0fU];
+  }
+  return result;
+}
+
+/**
+ * @brief Validates one immutable GraphCache-specific resource configuration.
+ * @param limits Candidate constructor limits.
+ * @return Nothing after individual and aggregate bounds agree.
+ * @throws std::invalid_argument for zero, excessive, or incoherent limits.
+ * @note The public artifact bound remains only a framing ceiling; product
+ * GraphCache always applies these lower frozen allocation and disk limits.
+ */
+void validate_graph_cache_resource_limits(
+    const GraphCacheResourceLimits& limits) {
+  constexpr std::uint64_t kMaximumPublicArchiveBytes =
+      kMaximumValueArtifactPayloadBytes +
+      static_cast<std::uint64_t>(kMaximumValueArtifactMetadataBytes);
+  if (limits.maximum_archive_bytes == 0U ||
+      limits.maximum_archive_bytes > kMaximumPublicArchiveBytes ||
+      limits.maximum_metadata_bytes == 0U ||
+      limits.maximum_metadata_bytes > kMaximumGraphCacheMetadataBytes ||
+      limits.maximum_projection_bytes == 0U ||
+      limits.maximum_projection_bytes > kMaximumPublicArchiveBytes ||
+      limits.maximum_transaction_bytes == 0U ||
+      limits.maximum_transaction_bytes < limits.maximum_archive_bytes ||
+      limits.maximum_transaction_bytes < limits.maximum_metadata_bytes ||
+      limits.maximum_transaction_bytes >
+          kMaximumPublicArchiveBytes + kMaximumGraphCacheMetadataBytes) {
+    throw std::invalid_argument(
+        "GraphCacheService resource limits are invalid.");
+  }
 }
 
 /**
@@ -223,44 +588,59 @@ std::uint64_t read_cache_u64(const std::vector<std::byte>& bytes,
 /**
  * @brief Requires one manifest's closed versions, flags, counts, and sizes.
  * @param manifest Candidate detached record.
+ * @param limits Frozen GraphCache-specific resource boundaries.
  * @return Nothing after complete validation.
  * @throws GraphError with `InvalidParameter` for malformed facts.
  */
-void validate_graph_cache_manifest(const GraphCacheManifest& manifest) {
+void validate_graph_cache_manifest(const GraphCacheManifest& manifest,
+                                   const GraphCacheResourceLimits& limits) {
   const bool has_metadata =
       (manifest.flags & kGraphCacheManifestHasMetadata) != 0U;
   const ArtifactPayloadDigest empty_digest;
+  const bool zero_generation =
+      std::all_of(manifest.generation.begin(), manifest.generation.end(),
+                  [](std::byte byte) { return byte == std::byte{0}; });
+  const bool transaction_overflow =
+      manifest.metadata.byte_size >
+      std::numeric_limits<std::uint64_t>::max() - manifest.archive.byte_size;
+  const std::uint64_t transaction_bytes =
+      transaction_overflow
+          ? std::numeric_limits<std::uint64_t>::max()
+          : manifest.archive.byte_size + manifest.metadata.byte_size;
   if (manifest.structural_version != kGraphCacheManifestVersion ||
       manifest.archive_version != kNamedValueArtifactSetArchiveVersion ||
       (manifest.flags & ~kGraphCacheManifestHasMetadata) != 0U ||
       manifest.value_count > kMaximumNamedValueArtifacts ||
       manifest.parameter_count > kMaximumNamedValueArtifacts ||
-      manifest.archive.byte_size == 0U ||
-      manifest.archive.byte_size >
-          kMaximumValueArtifactPayloadBytes +
-              static_cast<std::uint64_t>(kMaximumValueArtifactMetadataBytes) ||
+      zero_generation || manifest.archive.byte_size == 0U ||
+      manifest.archive.byte_size > limits.maximum_archive_bytes ||
+      transaction_overflow ||
+      transaction_bytes > limits.maximum_transaction_bytes ||
       (has_metadata &&
        (manifest.parameter_count == 0U || manifest.metadata.byte_size == 0U ||
-        manifest.metadata.byte_size > kMaximumGraphCacheMetadataBytes)) ||
+        manifest.metadata.byte_size > limits.maximum_metadata_bytes)) ||
       (!has_metadata &&
        (manifest.parameter_count != 0U || manifest.metadata.byte_size != 0U ||
         !(manifest.metadata.digest == empty_digest)))) {
     throw GraphError(GraphErrc::InvalidParameter,
-                     "Graph cache manifest facts are invalid.");
+                     "Graph cache manifest facts or resource limits are "
+                     "invalid.");
   }
 }
 
 /**
  * @brief Encodes one validated graph-cache manifest canonically.
  * @param manifest Complete detached transaction record.
- * @return Exact fixed-length version-one bytes.
+ * @param limits Frozen GraphCache-specific resource boundaries.
+ * @return Exact fixed-length version-two bytes.
  * @throws GraphError for malformed facts and std::bad_alloc for allocation.
  */
 std::vector<std::byte> encode_graph_cache_manifest(
-    const GraphCacheManifest& manifest) {
-  validate_graph_cache_manifest(manifest);
+    const GraphCacheManifest& manifest,
+    const GraphCacheResourceLimits& limits) {
+  validate_graph_cache_manifest(manifest, limits);
   std::vector<std::byte> bytes;
-  bytes.reserve(8U + 5U * 4U + 2U * 8U + 2U * 32U);
+  bytes.reserve(8U + 5U * 4U + kGraphCacheGenerationBytes + 2U * 8U + 2U * 32U);
   bytes.insert(bytes.end(), kGraphCacheManifestMagic.begin(),
                kGraphCacheManifestMagic.end());
   append_cache_u32(&bytes, manifest.structural_version);
@@ -268,6 +648,8 @@ std::vector<std::byte> encode_graph_cache_manifest(
   append_cache_u32(&bytes, manifest.flags);
   append_cache_u32(&bytes, manifest.value_count);
   append_cache_u32(&bytes, manifest.parameter_count);
+  bytes.insert(bytes.end(), manifest.generation.begin(),
+               manifest.generation.end());
   append_cache_u64(&bytes, manifest.archive.byte_size);
   append_cache_u64(&bytes, manifest.metadata.byte_size);
   bytes.insert(bytes.end(), manifest.archive.digest.bytes.begin(),
@@ -280,12 +662,15 @@ std::vector<std::byte> encode_graph_cache_manifest(
 /**
  * @brief Decodes one exact versioned graph-cache manifest.
  * @param bytes Complete fixed-length manifest bytes.
+ * @param limits Frozen GraphCache-specific resource boundaries.
  * @return Detached validated transaction record.
  * @throws GraphError with `InvalidParameter` for malformed framing or facts.
  */
 GraphCacheManifest decode_graph_cache_manifest(
-    const std::vector<std::byte>& bytes) {
-  constexpr std::size_t kEncodedSize = 8U + 5U * 4U + 2U * 8U + 2U * 32U;
+    const std::vector<std::byte>& bytes,
+    const GraphCacheResourceLimits& limits) {
+  constexpr std::size_t kEncodedSize =
+      8U + 5U * 4U + kGraphCacheGenerationBytes + 2U * 8U + 2U * 32U;
   if (bytes.size() != kEncodedSize ||
       !std::equal(kGraphCacheManifestMagic.begin(),
                   kGraphCacheManifestMagic.end(), bytes.begin())) {
@@ -299,6 +684,9 @@ GraphCacheManifest decode_graph_cache_manifest(
   manifest.flags = read_cache_u32(bytes, &offset);
   manifest.value_count = read_cache_u32(bytes, &offset);
   manifest.parameter_count = read_cache_u32(bytes, &offset);
+  std::memcpy(manifest.generation.data(), bytes.data() + offset,
+              manifest.generation.size());
+  offset += manifest.generation.size();
   manifest.archive.byte_size = read_cache_u64(bytes, &offset);
   manifest.metadata.byte_size = read_cache_u64(bytes, &offset);
   std::memcpy(manifest.archive.digest.bytes.data(), bytes.data() + offset,
@@ -311,101 +699,857 @@ GraphCacheManifest decode_graph_cache_manifest(
     throw GraphError(GraphErrc::InvalidParameter,
                      "Graph cache manifest has trailing bytes.");
   }
-  validate_graph_cache_manifest(manifest);
+  validate_graph_cache_manifest(manifest, limits);
   return manifest;
 }
 
 /**
- * @brief Reads one exact bounded regular cache payload into detached bytes.
- * @param path Controlled cache sibling path.
- * @param maximum_bytes Frozen maximum accepted byte count.
- * @param expected_bytes Optional exact manifest-declared byte count.
- * @return Complete detached file bytes.
- * @throws Filesystem, stream, length, overflow, or allocation failures.
- * @note File size is checked before allocation and again after read. A racing
- * writer can therefore cause rejection but cannot publish partial bytes.
+ * @brief Incremental SHA-256 owner used by bounded descriptor reads.
+ * @throws std::bad_alloc when OpenSSL context allocation fails.
+ * @throws std::runtime_error when digest initialization fails.
+ * @note The helper retains no payload bytes and therefore allows manifest
+ * capture and codec-file validation to stream with constant memory.
  */
-std::vector<std::byte> read_cache_file_bytes(
-    const fs::path& path, std::uint64_t maximum_bytes,
-    std::optional<std::uint64_t> expected_bytes = std::nullopt) {
-  const std::uintmax_t physical_size = fs::file_size(path);
-  if (physical_size > maximum_bytes ||
-      (expected_bytes.has_value() && physical_size != *expected_bytes) ||
-      physical_size > std::numeric_limits<std::size_t>::max() ||
-      physical_size > static_cast<std::uintmax_t>(
-                          std::numeric_limits<std::streamsize>::max())) {
-    throw GraphError(GraphErrc::InvalidParameter,
-                     "Graph cache payload size is invalid.");
+class GraphCacheDigestBuilder final {
+ public:
+  /** @brief Allocates and initializes one SHA-256 context. */
+  GraphCacheDigestBuilder() : context_(EVP_MD_CTX_new(), &EVP_MD_CTX_free) {
+    if (!context_) {
+      throw std::bad_alloc();
+    }
+    if (EVP_DigestInit_ex(context_.get(), EVP_sha256(), nullptr) != 1) {
+      throw std::runtime_error("Graph cache SHA-256 initialization failed.");
+    }
   }
-  const std::size_t size = static_cast<std::size_t>(physical_size);
-  std::ifstream stream(path, std::ios::binary);
-  if (!stream.is_open()) {
-    throw fs::filesystem_error("Could not open graph cache payload", path,
-                               std::make_error_code(std::errc::io_error));
+
+  /**
+   * @brief Prevents copying one mutable one-use digest context.
+   * @param other Unused source because construction is forbidden.
+   * @throws Nothing; this operation is deleted.
+   */
+  GraphCacheDigestBuilder(const GraphCacheDigestBuilder& other) = delete;
+
+  /**
+   * @brief Prevents assigning one mutable one-use digest context.
+   * @param other Unused source because assignment is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; this operation is deleted.
+   */
+  GraphCacheDigestBuilder& operator=(const GraphCacheDigestBuilder& other) =
+      delete;
+
+  /**
+   * @brief Extends the digest with one exact byte span.
+   * @param bytes Span start, null only when `size` is zero.
+   * @param size Exact byte count.
+   * @return Nothing.
+   * @throws std::runtime_error when OpenSSL update fails.
+   */
+  void update(const std::byte* bytes, std::size_t size) {
+    if (size == 0U) {
+      return;
+    }
+    if (EVP_DigestUpdate(context_.get(), bytes, size) != 1) {
+      throw std::runtime_error("Graph cache SHA-256 update failed.");
+    }
   }
-  std::vector<std::byte> bytes(size);
-  if (size != 0U) {
-    stream.read(reinterpret_cast<char*>(bytes.data()),
-                static_cast<std::streamsize>(size));
+
+  /**
+   * @brief Finalizes this one-use digest builder.
+   * @return Exact SHA-256 digest.
+   * @throws std::runtime_error when OpenSSL finalization fails.
+   */
+  ArtifactPayloadDigest finish() {
+    ArtifactPayloadDigest digest;
+    unsigned int size = 0U;
+    if (EVP_DigestFinal_ex(
+            context_.get(),
+            reinterpret_cast<unsigned char*>(digest.bytes.data()),
+            &size) != 1 ||
+        size != digest.bytes.size()) {
+      throw std::runtime_error("Graph cache SHA-256 finalization failed.");
+    }
+    return digest;
   }
-  if (!stream || fs::file_size(path) != physical_size) {
-    throw GraphError(GraphErrc::Io,
-                     "Graph cache payload changed during detached read.");
+
+ private:
+  /** @brief Unique OpenSSL context owner. */
+  std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context_;
+};
+
+/**
+ * @brief Detached bytes plus the identity computed during the same read.
+ * @throws std::bad_alloc when byte ownership allocates.
+ * @note Digesting occurs while the one final byte owner is filled; no second
+ * payload-proportional buffer or post-read hash copy is created.
+ */
+struct GraphCacheFileRead final {
+  /** @brief Exact bounded detached bytes. */
+  std::vector<std::byte> bytes;
+  /** @brief Size and SHA-256 computed from those exact bytes. */
+  CacheArtifactFileRecord record;
+};
+
+/**
+ * @brief Binds one raw file identity to an exact writer generation.
+ * @param record Raw size and SHA-256 over file bytes.
+ * @param generation Random generation repeated by the archive envelopes.
+ * @return Same size plus SHA-256 over generation, canonical size, and raw
+ * digest.
+ * @throws std::runtime_error when incremental hashing fails.
+ * @note Both archive and metadata manifest records cross this function. The
+ * metadata codec therefore needs no reserved business key, while a mixed
+ * generation cannot reuse either file's otherwise valid raw digest.
+ */
+CacheArtifactFileRecord bind_graph_cache_file_record(
+    const CacheArtifactFileRecord& record,
+    const GraphCacheGeneration& generation) {
+  std::array<std::byte, 8U> encoded_size{};
+  for (unsigned int shift = 0U; shift < 64U; shift += 8U) {
+    encoded_size[shift / 8U] =
+        std::byte{static_cast<unsigned char>(record.byte_size >> shift)};
   }
-  return bytes;
+  GraphCacheDigestBuilder digest;
+  digest.update(generation.data(), generation.size());
+  digest.update(encoded_size.data(), encoded_size.size());
+  digest.update(record.digest.bytes.data(), record.digest.bytes.size());
+  return {record.byte_size, digest.finish()};
+}
+
+#if !defined(_WIN32)
+/**
+ * @brief Unique POSIX descriptor used by graph-cache directory capabilities.
+ * @throws Nothing for construction, movement, and destruction.
+ */
+class GraphCacheDescriptor final {
+ public:
+  /** @brief Takes one descriptor or the invalid sentinel. */
+  explicit GraphCacheDescriptor(int descriptor = -1) noexcept
+      : descriptor_(descriptor) {}
+  /** @brief Closes the exact owned descriptor. */
+  ~GraphCacheDescriptor() noexcept {
+    if (descriptor_ >= 0) {
+      (void)::close(descriptor_);
+    }
+  }
+  /**
+   * @brief Prevents duplicate native descriptor ownership.
+   * @param other Unused source because construction is forbidden.
+   * @throws Nothing; this operation is deleted.
+   */
+  GraphCacheDescriptor(const GraphCacheDescriptor& other) = delete;
+  /**
+   * @brief Prevents duplicate native descriptor assignment.
+   * @param other Unused source because assignment is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; this operation is deleted.
+   */
+  GraphCacheDescriptor& operator=(const GraphCacheDescriptor& other) = delete;
+  /**
+   * @brief Moves exact native descriptor ownership.
+   * @param other Source invalidated after transfer.
+   * @throws Nothing.
+   */
+  GraphCacheDescriptor(GraphCacheDescriptor&& other) noexcept
+      : descriptor_(std::exchange(other.descriptor_, -1)) {}
+  /** @brief Returns the borrowed native descriptor. */
+  int get() const noexcept { return descriptor_; }
+
+ private:
+  /** @brief Owned descriptor, or -1. */
+  int descriptor_ = -1;
+};
+
+/**
+ * @brief Throws one path-attributed filesystem error for current errno.
+ * @param operation Human-readable failing operation.
+ * @param path Controlled path associated with the descriptor operation.
+ * @throws std::filesystem::filesystem_error unconditionally.
+ */
+[[noreturn]] void throw_graph_cache_errno(const char* operation,
+                                          const fs::path& path) {
+  throw fs::filesystem_error(operation, path,
+                             std::error_code(errno, std::generic_category()));
 }
 
 /**
- * @brief Writes one complete cache payload to its controlled final sibling.
- * @param path Existing-parent destination path.
- * @param bytes Complete bytes to truncate and write.
- * @return Nothing after checked close.
- * @throws std::runtime_error when open, write, or close fails.
- * @note Graph cache is discardable and retains its existing non-durable
- * failure semantics; the separate manifest remains the final hit authority.
+ * @brief Requires a no-follow descriptor to be one private regular file.
+ * @param descriptor Open candidate descriptor.
+ * @param path Diagnostic controlled path.
+ * @return Exact stat snapshot.
+ * @throws GraphError for nonregular, linked, invalid-size, or foreign-owner
+ * files; filesystem_error when fstat fails.
+ * @note One-link ownership prevents a graph cache write from truncating an
+ * outside hard-link alias. Current effective uid owns every accepted leaf.
  */
-void write_cache_file_bytes(const fs::path& path,
-                            const std::vector<std::byte>& bytes) {
-  std::ofstream stream(path, std::ios::binary | std::ios::trunc);
-  if (!stream.is_open()) {
-    throw std::runtime_error("Could not open graph cache payload for writing.");
+struct stat graph_cache_regular_stat(int descriptor, const fs::path& path) {
+  struct stat value{};
+  if (::fstat(descriptor, &value) != 0) {
+    throw_graph_cache_errno("Could not stat graph cache leaf", path);
   }
-  if (!bytes.empty()) {
-    stream.write(reinterpret_cast<const char*>(bytes.data()),
-                 static_cast<std::streamsize>(bytes.size()));
+  if (!S_ISREG(value.st_mode) || value.st_nlink != 1 || value.st_size < 0 ||
+      value.st_uid != ::geteuid()) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "Graph cache leaf must be one owned regular non-aliased file.");
   }
-  stream.close();
-  if (!stream) {
-    throw std::runtime_error("Could not write complete graph cache payload.");
-  }
+  return value;
 }
+#endif
 
 /**
- * @brief Captures one exact detached file identity for a manifest.
- * @param path Existing cache payload path.
- * @param maximum_bytes Frozen maximum accepted payload size.
- * @return Exact size and SHA-256 content digest.
- * @throws File-read, hashing, or allocation exceptions unchanged.
+ * @brief Holds one verified numeric node directory below a cache root.
+ *
+ * @throws Filesystem, validation, and allocation exceptions from `open`.
+ * @note POSIX builds retain root/node directory descriptors and perform every
+ * owned archive/manifest read, write, and delete with no-follow `*at` calls.
+ * Codec path calls are bracketed by directory/leaf identity validation because
+ * those dependency-neutral interfaces currently accept paths rather than fds.
  */
-CacheArtifactFileRecord capture_cache_file_record(const fs::path& path,
-                                                  std::uint64_t maximum_bytes) {
-  const std::vector<std::byte> bytes =
-      read_cache_file_bytes(path, maximum_bytes);
-  return {static_cast<std::uint64_t>(bytes.size()),
-          compute_artifact_payload_digest(bytes)};
-}
+class GraphCacheNodeDirectory final {
+ public:
+  /**
+   * @brief Opens or creates one verified numeric node directory.
+   * @param root Configured graph cache root.
+   * @param node_id Stable graph node id.
+   * @param create Whether absent root/node directories may be created.
+   * @return Held directory, or nullopt when absent and creation is disabled.
+   * @throws GraphError for a symlink or non-directory authority boundary.
+   * @throws Filesystem or allocation exceptions unchanged.
+   */
+  static std::optional<GraphCacheNodeDirectory> open(const fs::path& root,
+                                                     int node_id, bool create) {
+    if (root.empty()) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Graph cache root must be nonempty.");
+    }
+    if (create) {
+      fs::create_directories(root);
+    } else if (!fs::exists(root)) {
+      return std::nullopt;
+    }
+    const std::string node_leaf = std::to_string(node_id);
+#if !defined(_WIN32)
+    const int raw_root =
+        ::open(root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (raw_root < 0) {
+      if (errno == ELOOP || errno == ENOTDIR) {
+        throw GraphError(GraphErrc::InvalidParameter,
+                         "Graph cache root must not be a symlink.");
+      }
+      throw_graph_cache_errno("Could not open graph cache root", root);
+    }
+    GraphCacheDescriptor root_descriptor(raw_root);
+    struct stat root_stat{};
+    if (::fstat(root_descriptor.get(), &root_stat) != 0) {
+      throw_graph_cache_errno("Could not stat graph cache root", root);
+    }
+    if (!S_ISDIR(root_stat.st_mode)) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Graph cache root must be a directory.");
+    }
+    if (create &&
+        ::mkdirat(root_descriptor.get(), node_leaf.c_str(), 0700) != 0 &&
+        errno != EEXIST) {
+      throw_graph_cache_errno("Could not create graph cache node directory",
+                              root / node_leaf);
+    }
+    const int raw_node =
+        ::openat(root_descriptor.get(), node_leaf.c_str(),
+                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (raw_node < 0) {
+      if (!create && errno == ENOENT) {
+        return std::nullopt;
+      }
+      if (errno == ELOOP || errno == ENOTDIR) {
+        throw GraphError(
+            GraphErrc::InvalidParameter,
+            "Graph cache node path must be a real child directory.");
+      }
+      throw_graph_cache_errno("Could not open graph cache node directory",
+                              root / node_leaf);
+    }
+    GraphCacheDescriptor node_descriptor(raw_node);
+    struct stat node_stat{};
+    if (::fstat(node_descriptor.get(), &node_stat) != 0) {
+      throw_graph_cache_errno("Could not stat graph cache node directory",
+                              root / node_leaf);
+    }
+    if (!S_ISDIR(node_stat.st_mode)) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Graph cache node authority is not a directory.");
+    }
+    return GraphCacheNodeDirectory(root, node_leaf, std::move(root_descriptor),
+                                   std::move(node_descriptor), root_stat,
+                                   node_stat);
+#else
+    const fs::file_status root_status = fs::symlink_status(root);
+    if (fs::is_symlink(root_status) || !fs::is_directory(root_status)) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Graph cache root must be a real directory.");
+    }
+    const fs::path node_path = root / node_leaf;
+    if (create) {
+      fs::create_directories(node_path);
+    } else if (!fs::exists(node_path)) {
+      return std::nullopt;
+    }
+    const fs::file_status node_status = fs::symlink_status(node_path);
+    if (fs::is_symlink(node_status) || !fs::is_directory(node_status)) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Graph cache node path must be a real directory.");
+    }
+    return GraphCacheNodeDirectory(root, node_leaf);
+#endif
+  }
+
+  /**
+   * @brief Prevents duplicate directory-capability ownership.
+   * @param other Unused source because construction is forbidden.
+   * @throws Nothing; this operation is deleted.
+   */
+  GraphCacheNodeDirectory(const GraphCacheNodeDirectory& other) = delete;
+  /**
+   * @brief Prevents duplicate directory-capability assignment.
+   * @param other Unused source because assignment is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; this operation is deleted.
+   */
+  GraphCacheNodeDirectory& operator=(const GraphCacheNodeDirectory& other) =
+      delete;
+  /**
+   * @brief Moves the complete verified directory capability.
+   * @param other Source invalidated after transfer.
+   * @throws Nothing.
+   */
+  GraphCacheNodeDirectory(GraphCacheNodeDirectory&& other) noexcept = default;
+
+  /** @brief Returns the lexical path supplied to codec interfaces. */
+  const fs::path& path() const noexcept { return path_; }
+
+  /**
+   * @brief Returns a controlled codec path for one already validated leaf.
+   * @param leaf Single safe sibling filename.
+   * @return Lexical node-directory child path.
+   * @throws std::bad_alloc when path ownership cannot allocate.
+   */
+  fs::path leaf_path(const std::string& leaf) const { return path_ / leaf; }
+
+  /**
+   * @brief Reports whether one leaf exists while rejecting unsafe types.
+   * @param leaf Single safe sibling filename.
+   * @return True only for one current owned regular one-link file.
+   * @throws GraphError for symlink, directory, device, fifo, or hard-link
+   * alias; filesystem errors unchanged.
+   */
+  bool leaf_exists(const std::string& leaf) const {
+#if !defined(_WIN32)
+    struct stat value{};
+    if (::fstatat(node_descriptor_.get(), leaf.c_str(), &value,
+                  AT_SYMLINK_NOFOLLOW) != 0) {
+      if (errno == ENOENT) {
+        return false;
+      }
+      throw_graph_cache_errno("Could not observe graph cache leaf",
+                              leaf_path(leaf));
+    }
+    if (!S_ISREG(value.st_mode) || value.st_nlink != 1 ||
+        value.st_uid != ::geteuid()) {
+      throw GraphError(
+          GraphErrc::InvalidParameter,
+          "Graph cache leaf must be one owned regular non-aliased file.");
+    }
+    return true;
+#else
+    const fs::path candidate = leaf_path(leaf);
+    const fs::file_status status = fs::symlink_status(candidate);
+    if (status.type() == fs::file_type::not_found) {
+      return false;
+    }
+    if (fs::is_symlink(status) || !fs::is_regular_file(status)) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Graph cache leaf must be a regular file.");
+    }
+    return true;
+#endif
+  }
+
+  /**
+   * @brief Reads one bounded leaf into its only payload-proportional owner.
+   * @param leaf Single safe sibling filename.
+   * @param maximum_bytes Frozen per-file maximum checked before allocation.
+   * @param expected_bytes Optional exact manifest-declared length.
+   * @param reject_sparse Whether sparse physical storage is forbidden.
+   * @param allocation_event Whether to publish the test-only archive
+   * preallocation checkpoint after every stat check succeeds.
+   * @return Exact bytes and digest computed during the same descriptor read.
+   * @throws GraphError for type, identity, size, sparse, or digest-boundary
+   * drift; filesystem, allocation, and hashing exceptions unchanged.
+   */
+  GraphCacheFileRead read_leaf(
+      const std::string& leaf, std::uint64_t maximum_bytes,
+      std::optional<std::uint64_t> expected_bytes = std::nullopt,
+      bool reject_sparse = true, bool allocation_event = false) const {
+#if !defined(_WIN32)
+    const fs::path diagnostic_path = leaf_path(leaf);
+    const int raw = ::openat(node_descriptor_.get(), leaf.c_str(),
+                             O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (raw < 0) {
+      if (errno == ELOOP || errno == ENOTDIR) {
+        throw GraphError(GraphErrc::InvalidParameter,
+                         "Graph cache read refuses a symlink leaf.");
+      }
+      throw_graph_cache_errno("Could not open graph cache leaf",
+                              diagnostic_path);
+    }
+    GraphCacheDescriptor descriptor(raw);
+    const struct stat before =
+        graph_cache_regular_stat(descriptor.get(), diagnostic_path);
+    const std::uintmax_t size = static_cast<std::uintmax_t>(before.st_size);
+    if (size > maximum_bytes ||
+        (expected_bytes.has_value() && size != *expected_bytes) ||
+        size > std::numeric_limits<std::size_t>::max()) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Graph cache payload size exceeds its frozen limit.");
+    }
+    constexpr std::uintmax_t kStatBlockBytes = 512U;
+    if (reject_sparse && size != 0U && before.st_blocks >= 0) {
+      const std::uintmax_t blocks =
+          static_cast<std::uintmax_t>(before.st_blocks);
+      if (blocks <=
+              std::numeric_limits<std::uintmax_t>::max() / kStatBlockBytes &&
+          blocks * kStatBlockBytes < size) {
+        throw GraphError(GraphErrc::InvalidParameter,
+                         "Graph cache payload contains sparse storage.");
+      }
+    }
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
+    if (allocation_event) {
+      testing::notify_graph_cache_service_test_hook(
+          testing::GraphCacheServiceTestEvent::ArchiveAllocationApproved,
+          path_);
+    }
+#else
+    (void)allocation_event;
+#endif
+    GraphCacheFileRead result;
+    result.bytes.resize(static_cast<std::size_t>(size));
+    GraphCacheDigestBuilder digest;
+    std::size_t offset = 0U;
+    while (offset < result.bytes.size()) {
+      const std::size_t chunk = std::min(
+          result.bytes.size() - offset,
+          static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+      const ssize_t count =
+          ::read(descriptor.get(), result.bytes.data() + offset, chunk);
+      if (count < 0 && errno == EINTR) {
+        continue;
+      }
+      if (count <= 0) {
+        throw GraphError(GraphErrc::Io,
+                         "Graph cache payload shortened during read.");
+      }
+      digest.update(result.bytes.data() + offset,
+                    static_cast<std::size_t>(count));
+      offset += static_cast<std::size_t>(count);
+    }
+    const struct stat after =
+        graph_cache_regular_stat(descriptor.get(), diagnostic_path);
+    struct stat named{};
+    if (::fstatat(node_descriptor_.get(), leaf.c_str(), &named,
+                  AT_SYMLINK_NOFOLLOW) != 0 ||
+        after.st_dev != before.st_dev || after.st_ino != before.st_ino ||
+        after.st_size != before.st_size || named.st_dev != before.st_dev ||
+        named.st_ino != before.st_ino || named.st_size != before.st_size) {
+      throw GraphError(GraphErrc::Io,
+                       "Graph cache payload identity changed during read.");
+    }
+    result.record = {static_cast<std::uint64_t>(result.bytes.size()),
+                     digest.finish()};
+    return result;
+#else
+    const fs::path candidate = leaf_path(leaf);
+    if (!leaf_exists(leaf)) {
+      throw fs::filesystem_error(
+          "Graph cache leaf is absent", candidate,
+          std::make_error_code(std::errc::no_such_file_or_directory));
+    }
+    const std::uintmax_t size = fs::file_size(candidate);
+    if (size > maximum_bytes ||
+        (expected_bytes.has_value() && size != *expected_bytes) ||
+        size > std::numeric_limits<std::size_t>::max()) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Graph cache payload size exceeds its frozen limit.");
+    }
+    (void)reject_sparse;
+    (void)allocation_event;
+    GraphCacheFileRead result;
+    result.bytes.resize(static_cast<std::size_t>(size));
+    std::ifstream stream(candidate, std::ios::binary);
+    if (!result.bytes.empty()) {
+      stream.read(reinterpret_cast<char*>(result.bytes.data()),
+                  static_cast<std::streamsize>(result.bytes.size()));
+    }
+    if (!stream) {
+      throw GraphError(GraphErrc::Io,
+                       "Graph cache payload could not be read completely.");
+    }
+    result.record = {static_cast<std::uint64_t>(result.bytes.size()),
+                     compute_artifact_payload_digest(result.bytes)};
+    return result;
+#endif
+  }
+
+  /**
+   * @brief Streams one existing leaf into a size/digest record.
+   * @param leaf Single safe sibling filename.
+   * @param maximum_bytes Frozen maximum accepted length.
+   * @param expected_bytes Optional exact expected length.
+   * @param reject_sparse Whether physical holes are forbidden.
+   * @return Exact constant-memory record.
+   * @throws The same validation/filesystem/hash exceptions as `read_leaf`.
+   */
+  CacheArtifactFileRecord capture_leaf_record(
+      const std::string& leaf, std::uint64_t maximum_bytes,
+      std::optional<std::uint64_t> expected_bytes = std::nullopt,
+      bool reject_sparse = true) const {
+#if !defined(_WIN32)
+    const fs::path diagnostic_path = leaf_path(leaf);
+    const int raw = ::openat(node_descriptor_.get(), leaf.c_str(),
+                             O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (raw < 0) {
+      if (errno == ELOOP || errno == ENOTDIR) {
+        throw GraphError(GraphErrc::InvalidParameter,
+                         "Graph cache capture refuses a symlink leaf.");
+      }
+      throw_graph_cache_errno("Could not open graph cache leaf",
+                              diagnostic_path);
+    }
+    GraphCacheDescriptor descriptor(raw);
+    const struct stat before =
+        graph_cache_regular_stat(descriptor.get(), diagnostic_path);
+    const std::uintmax_t size = static_cast<std::uintmax_t>(before.st_size);
+    if (size > maximum_bytes ||
+        (expected_bytes.has_value() && size != *expected_bytes)) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Graph cache payload size exceeds its frozen limit.");
+    }
+    constexpr std::uintmax_t kStatBlockBytes = 512U;
+    if (reject_sparse && size != 0U && before.st_blocks >= 0) {
+      const std::uintmax_t blocks =
+          static_cast<std::uintmax_t>(before.st_blocks);
+      if (blocks <=
+              std::numeric_limits<std::uintmax_t>::max() / kStatBlockBytes &&
+          blocks * kStatBlockBytes < size) {
+        throw GraphError(GraphErrc::InvalidParameter,
+                         "Graph cache payload contains sparse storage.");
+      }
+    }
+    GraphCacheDigestBuilder digest;
+    std::array<std::byte, 64U * 1024U> buffer;
+    std::uint64_t total = 0U;
+    while (true) {
+      const ssize_t count = ::read(descriptor.get(), buffer.data(),
+                                   static_cast<std::size_t>(buffer.size()));
+      if (count < 0 && errno == EINTR) {
+        continue;
+      }
+      if (count < 0) {
+        throw_graph_cache_errno("Could not read graph cache leaf",
+                                diagnostic_path);
+      }
+      if (count == 0) {
+        break;
+      }
+      digest.update(buffer.data(), static_cast<std::size_t>(count));
+      total += static_cast<std::uint64_t>(count);
+    }
+    const struct stat after =
+        graph_cache_regular_stat(descriptor.get(), diagnostic_path);
+    struct stat named{};
+    if (::fstatat(node_descriptor_.get(), leaf.c_str(), &named,
+                  AT_SYMLINK_NOFOLLOW) != 0 ||
+        total != size || after.st_dev != before.st_dev ||
+        after.st_ino != before.st_ino || after.st_size != before.st_size ||
+        named.st_dev != before.st_dev || named.st_ino != before.st_ino ||
+        named.st_size != before.st_size) {
+      throw GraphError(GraphErrc::Io,
+                       "Graph cache payload identity changed during capture.");
+    }
+    return {total, digest.finish()};
+#else
+    const GraphCacheFileRead read =
+        read_leaf(leaf, maximum_bytes, expected_bytes, reject_sparse);
+    return read.record;
+#endif
+  }
+
+  /**
+   * @brief Writes one owned archive/manifest leaf without following aliases.
+   * @param leaf Single safe sibling filename.
+   * @param bytes Complete bounded bytes.
+   * @return Exact persisted record after identity revalidation.
+   * @throws GraphError for symlink, nonregular, hard-linked, or identity drift.
+   * @throws Filesystem, allocation, or hashing exceptions unchanged.
+   * @note Existing files are opened without truncation, validated by fd, then
+   * truncated. The method remains non-durable and performs no fsync/rename.
+   */
+  CacheArtifactFileRecord write_leaf(
+      const std::string& leaf, const std::vector<std::byte>& bytes) const {
+#if !defined(_WIN32)
+    const fs::path diagnostic_path = leaf_path(leaf);
+    const int raw = ::openat(node_descriptor_.get(), leaf.c_str(),
+                             O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (raw < 0) {
+      if (errno == ELOOP || errno == ENOTDIR) {
+        throw GraphError(GraphErrc::InvalidParameter,
+                         "Graph cache write refuses a symlink leaf.");
+      }
+      throw_graph_cache_errno("Could not open graph cache leaf for writing",
+                              diagnostic_path);
+    }
+    GraphCacheDescriptor descriptor(raw);
+    const struct stat before =
+        graph_cache_regular_stat(descriptor.get(), diagnostic_path);
+    if (::ftruncate(descriptor.get(), 0) != 0) {
+      throw_graph_cache_errno("Could not truncate graph cache leaf",
+                              diagnostic_path);
+    }
+    std::size_t offset = 0U;
+    while (offset < bytes.size()) {
+      const std::size_t chunk = std::min(
+          bytes.size() - offset,
+          static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+      const ssize_t count =
+          ::write(descriptor.get(), bytes.data() + offset, chunk);
+      if (count < 0 && errno == EINTR) {
+        continue;
+      }
+      if (count < 0) {
+        throw_graph_cache_errno("Could not write graph cache leaf",
+                                diagnostic_path);
+      }
+      if (count == 0) {
+        throw GraphError(GraphErrc::Io,
+                         "Graph cache leaf write made no progress.");
+      }
+      offset += static_cast<std::size_t>(count);
+    }
+    const struct stat after =
+        graph_cache_regular_stat(descriptor.get(), diagnostic_path);
+    struct stat named{};
+    if (after.st_dev != before.st_dev || after.st_ino != before.st_ino ||
+        static_cast<std::uintmax_t>(after.st_size) != bytes.size() ||
+        ::fstatat(node_descriptor_.get(), leaf.c_str(), &named,
+                  AT_SYMLINK_NOFOLLOW) != 0 ||
+        named.st_dev != after.st_dev || named.st_ino != after.st_ino ||
+        named.st_size != after.st_size) {
+      throw GraphError(GraphErrc::Io,
+                       "Graph cache written leaf identity changed.");
+    }
+    return {static_cast<std::uint64_t>(bytes.size()),
+            compute_artifact_payload_digest(bytes)};
+#else
+    if (leaf_exists(leaf)) {
+      (void)leaf_exists(leaf);
+    }
+    const fs::path candidate = leaf_path(leaf);
+    std::ofstream stream(candidate, std::ios::binary | std::ios::trunc);
+    if (!bytes.empty()) {
+      stream.write(reinterpret_cast<const char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+    }
+    stream.close();
+    if (!stream) {
+      throw GraphError(GraphErrc::Io,
+                       "Could not write complete graph cache leaf.");
+    }
+    return {static_cast<std::uint64_t>(bytes.size()),
+            compute_artifact_payload_digest(bytes)};
+#endif
+  }
+
+  /**
+   * @brief Removes one existing regular one-link leaf without following it.
+   * @param leaf Single safe sibling filename.
+   * @return True when removed; false when absent.
+   * @throws GraphError for symlink, nonregular, or hard-link alias.
+   * @throws Filesystem errors unchanged.
+   */
+  bool remove_leaf_if_present(const std::string& leaf) const {
+    if (!leaf_exists(leaf)) {
+      return false;
+    }
+#if !defined(_WIN32)
+    if (::unlinkat(node_descriptor_.get(), leaf.c_str(), 0) != 0) {
+      throw_graph_cache_errno("Could not remove graph cache leaf",
+                              leaf_path(leaf));
+    }
+    return true;
+#else
+    return fs::remove(leaf_path(leaf));
+#endif
+  }
+
+  /**
+   * @brief Removes the held numeric node directory only when exactly empty.
+   * @return True when the directory was removed; false when nonempty/already
+   * absent.
+   * @throws GraphError for directory identity replacement.
+   * @throws Filesystem or allocation exceptions unchanged.
+   */
+  bool remove_if_empty() const {
+#if !defined(_WIN32)
+    const int duplicate = ::dup(node_descriptor_.get());
+    if (duplicate < 0) {
+      throw_graph_cache_errno("Could not duplicate graph cache directory",
+                              path_);
+    }
+    DIR* stream = ::fdopendir(duplicate);
+    if (stream == nullptr) {
+      (void)::close(duplicate);
+      throw_graph_cache_errno("Could not enumerate graph cache directory",
+                              path_);
+    }
+    bool empty = true;
+    errno = 0;
+    while (const dirent* entry = ::readdir(stream)) {
+      const std::string_view name(entry->d_name);
+      if (name != "." && name != "..") {
+        empty = false;
+        break;
+      }
+    }
+    const int enumeration_error = errno;
+    (void)::closedir(stream);
+    if (enumeration_error != 0) {
+      errno = enumeration_error;
+      throw_graph_cache_errno("Could not enumerate graph cache directory",
+                              path_);
+    }
+    if (!empty) {
+      return false;
+    }
+    validate_binding();
+    if (::unlinkat(root_descriptor_.get(), node_leaf_.c_str(), AT_REMOVEDIR) !=
+        0) {
+      if (errno == ENOTEMPTY || errno == EEXIST || errno == ENOENT) {
+        return false;
+      }
+      throw_graph_cache_errno("Could not remove graph cache node directory",
+                              path_);
+    }
+    return true;
+#else
+    if (!fs::is_empty(path_)) {
+      return false;
+    }
+    return fs::remove(path_);
+#endif
+  }
+
+  /**
+   * @brief Revalidates root and numeric child paths against held descriptors.
+   * @return Nothing after exact identity agreement.
+   * @throws GraphError when either lexical path was replaced.
+   * @throws Filesystem errors unchanged.
+   * @note Called immediately before and after path-only codec invocations to
+   * narrow their unavoidable same-uid POSIX compare/use race.
+   */
+  void validate_binding() const {
+#if !defined(_WIN32)
+    struct stat root_named{};
+    if (::lstat(root_.c_str(), &root_named) != 0) {
+      throw_graph_cache_errno("Could not revalidate graph cache root", root_);
+    }
+    struct stat node_named{};
+    if (::fstatat(root_descriptor_.get(), node_leaf_.c_str(), &node_named,
+                  AT_SYMLINK_NOFOLLOW) != 0) {
+      throw_graph_cache_errno("Could not revalidate graph cache node", path_);
+    }
+    if (!S_ISDIR(root_named.st_mode) || !S_ISDIR(node_named.st_mode) ||
+        root_named.st_dev != root_stat_.st_dev ||
+        root_named.st_ino != root_stat_.st_ino ||
+        node_named.st_dev != node_stat_.st_dev ||
+        node_named.st_ino != node_stat_.st_ino) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Graph cache directory identity was replaced.");
+    }
+#else
+    const fs::file_status root_status = fs::symlink_status(root_);
+    const fs::file_status node_status = fs::symlink_status(path_);
+    if (fs::is_symlink(root_status) || !fs::is_directory(root_status) ||
+        fs::is_symlink(node_status) || !fs::is_directory(node_status)) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Graph cache directory identity was replaced.");
+    }
+#endif
+  }
+
+ private:
+#if !defined(_WIN32)
+  /**
+   * @brief Constructs one fully validated POSIX directory capability.
+   * @param root Lexical configured root.
+   * @param node_leaf Numeric child name.
+   * @param root_descriptor Held root descriptor.
+   * @param node_descriptor Held node descriptor.
+   * @param root_stat Root identity snapshot.
+   * @param node_stat Node identity snapshot.
+   * @throws std::bad_alloc from path/string ownership.
+   */
+  GraphCacheNodeDirectory(fs::path root, std::string node_leaf,
+                          GraphCacheDescriptor root_descriptor,
+                          GraphCacheDescriptor node_descriptor,
+                          struct stat root_stat, struct stat node_stat)
+      : root_(std::move(root)),
+        path_(root_ / node_leaf),
+        node_leaf_(std::move(node_leaf)),
+        root_descriptor_(std::move(root_descriptor)),
+        node_descriptor_(std::move(node_descriptor)),
+        root_stat_(root_stat),
+        node_stat_(node_stat) {}
+#else
+  /**
+   * @brief Constructs one validated portable fallback directory.
+   * @param root Lexical configured root.
+   * @param node_leaf Numeric child name.
+   */
+  GraphCacheNodeDirectory(fs::path root, std::string node_leaf)
+      : root_(std::move(root)),
+        path_(root_ / node_leaf),
+        node_leaf_(std::move(node_leaf)) {}
+#endif
+
+  /** @brief Lexical configured cache root used by codec paths. */
+  fs::path root_;
+  /** @brief Lexical numeric node path used by codec paths. */
+  fs::path path_;
+  /** @brief Stable numeric child leaf below the held root. */
+  std::string node_leaf_;
+#if !defined(_WIN32)
+  /** @brief Held no-follow root directory capability. */
+  GraphCacheDescriptor root_descriptor_;
+  /** @brief Held no-follow numeric node directory capability. */
+  GraphCacheDescriptor node_descriptor_;
+  /** @brief Root identity bound at open. */
+  struct stat root_stat_{};
+  /** @brief Numeric child identity bound at open. */
+  struct stat node_stat_{};
+#endif
+};
 
 /**
- * @brief Requires detached bytes to match one manifest-bound file record.
- * @param bytes Exact candidate file bytes.
- * @param record Manifest-declared size and digest.
+ * @brief Requires one observed file record to match a manifest-bound record.
+ * @param actual Exact descriptor-read size and digest.
+ * @param expected Manifest-declared size and digest.
  * @return Nothing after complete agreement.
  * @throws GraphError with `InvalidParameter` for mismatch.
  */
-void validate_cache_file_record(const std::vector<std::byte>& bytes,
-                                const CacheArtifactFileRecord& record) {
-  if (static_cast<std::uint64_t>(bytes.size()) != record.byte_size ||
-      !(compute_artifact_payload_digest(bytes) == record.digest)) {
+void validate_cache_file_record(const CacheArtifactFileRecord& actual,
+                                const CacheArtifactFileRecord& expected) {
+  if (actual.byte_size != expected.byte_size ||
+      !(actual.digest == expected.digest)) {
     throw GraphError(GraphErrc::InvalidParameter,
                      "Graph cache payload size or digest disagrees.");
   }
@@ -509,17 +1653,37 @@ const NodeOutput* hp_cache_ptr(const Node& node) {
 /**
  * @brief Reports whether a node configures one executable image cache entry.
  *
+ * @param graph Graph whose root participates in deterministic path derivation.
  * @param node Node whose cache destinations are inspected without mutation.
  * @return True when at least one image entry has a nonempty location.
- * @throws Nothing for current string and vector read operations.
- * @note Unsupported or empty cache entries retain their historical no-op
- *       behavior and do not trigger Value validation.
+ * @throws GraphError with `InvalidParameter` when any image entry location is
+ * empty, rooted, traversing, aliased, or otherwise unsafe.
+ * @throws std::bad_alloc when path validation cannot allocate.
+ * @note Unsupported cache-entry types retain their historical no-op behavior.
+ * Every image entry is validated before Value capture or filesystem effects.
  */
-bool has_image_disk_cache_entry(const Node& node) {
-  return std::any_of(
-      node.caches.begin(), node.caches.end(), [](const CacheEntry& entry) {
-        return entry.cache_type == "image" && !entry.location.empty();
-      });
+bool has_image_disk_cache_entry(const GraphModel& graph, const Node& node) {
+  bool found = false;
+  std::unordered_set<std::string> controlled_leaves;
+  for (const CacheEntry& entry : node.caches) {
+    if (entry.cache_type != "image") {
+      continue;
+    }
+    const GraphCacheArtifactPaths paths =
+        graph_cache_artifact_paths(graph, node, entry);
+    for (const std::string* leaf :
+         {&paths.image_leaf, &paths.metadata_leaf, &paths.archive_leaf,
+          &paths.manifest_leaf}) {
+      if (!controlled_leaves.insert(portable_graph_cache_leaf_key(*leaf))
+               .second) {
+        throw GraphError(
+            GraphErrc::InvalidParameter,
+            "Graph cache entries alias one controlled transaction leaf.");
+      }
+    }
+    found = true;
+  }
+  return found;
 }
 
 /**
@@ -559,11 +1723,20 @@ void validate_image_disk_cache_output(const NodeOutput& output) {
  * std::bad_alloc when retained output facts cannot be validated.
  * @note Partial validity must not protect or produce a regionless disk cache
  * artifact because disk load initializes current artifacts as complete.
+ * Explicit empty/whole validity is classified before interpreting the Value,
+ * so provider-incompatible partial output can authorize predecessor cleanup
+ * without constructing an ImageView or consulting a provider.
  */
 bool has_complete_hp_cache(const Node& node) {
   const NodeOutput* output = hp_cache_ptr(node);
-  return output != nullptr && node.hp_region.has_value() &&
-         value_region::node_output_region_is_complete(*output, *node.hp_region);
+  if (output == nullptr || !node.hp_region.has_value() ||
+      node.hp_region->is_empty()) {
+    return false;
+  }
+  if (node.hp_region->is_whole()) {
+    return true;
+  }
+  return value_region::node_output_region_is_complete(*output, *node.hp_region);
 }
 
 /**
@@ -671,6 +1844,8 @@ struct PreparedGraphCacheSave final {
   std::vector<std::byte> value_archive;
   /** @brief Number of Values encoded into `value_archive`. */
   std::uint32_t value_count = 0U;
+  /** @brief Random writer generation joined by archive and manifest. */
+  GraphCacheGeneration generation;
   /** @brief Detached parameter outputs written through the metadata codec. */
   plugin::ParameterMap parameters;
   /** @brief Optional exact canonical image retained for codec projection. */
@@ -684,21 +1859,25 @@ struct PreparedGraphCacheSave final {
 /**
  * @brief Captures every formal named Value into one canonical portable set.
  * @param output Exact validated formal HP output.
+ * @param generation Random writer generation applied to every envelope.
  * @return Encoded public archive after every payload and digest validates.
  * @throws All capture, digest, provider, bounds, and allocation failures.
  * @note The map is already canonical name order. No archive escapes until all
  * Values have been synchronously copied through checked read leases.
  */
 std::vector<std::byte> capture_graph_cache_value_archive(
-    const NodeOutput& output) {
+    const NodeOutput& output, const GraphCacheGeneration& generation) {
   if (output.named_values.size() > kMaximumNamedValueArtifacts) {
     throw GraphError(GraphErrc::InvalidParameter,
                      "Graph cache Value count exceeds the portable bound.");
   }
   NamedValueArtifactSet artifacts;
   artifacts.values.reserve(output.named_values.size());
+  const std::string generation_text = graph_cache_generation_text(generation);
   for (const auto& [name, value] : output.named_values) {
-    artifacts.values.push_back(capture_value_artifact(name, value));
+    ValueArtifact artifact = capture_value_artifact(name, value);
+    artifact.envelope.joins.commit_identity = generation_text;
+    artifacts.values.push_back(std::move(artifact));
   }
   return encode_named_value_artifact_set(artifacts);
 }
@@ -708,6 +1887,7 @@ std::vector<std::byte> capture_graph_cache_value_archive(
  * @param graph Graph providing current cache policy and root.
  * @param node Node providing entries and formal HP output.
  * @param cache_precision Precision label retained by image projection policy.
+ * @param limits Frozen GraphCache-specific resource boundaries.
  * @return Complete detached save, or nullopt when policy requires no task.
  * @throws GraphError with `InvalidParameter` when any formal Value cannot be
  * captured as a complete portable artifact or image projection policy is
@@ -720,21 +1900,22 @@ std::vector<std::byte> capture_graph_cache_value_archive(
  */
 std::optional<PreparedGraphCacheSave> prepare_graph_cache_save(
     const GraphModel& graph, const Node& node,
-    const std::string& cache_precision) {
+    const std::string& cache_precision,
+    const GraphCacheResourceLimits& limits) {
   if (graph.skip_save_cache() || graph.cache_root.empty() ||
       node.caches.empty() || hp_cache_ptr(node) == nullptr) {
     return std::nullopt;
   }
-  if (!has_image_disk_cache_entry(node)) {
+  if (!has_image_disk_cache_entry(graph, node)) {
     return std::nullopt;
   }
 
   PreparedGraphCacheSave prepared;
   const NodeOutput& output = *hp_cache_ptr(node);
   try {
-    validate_image_disk_cache_output(output);
     prepared.complete_output = has_complete_hp_cache(node);
     if (prepared.complete_output) {
+      validate_image_disk_cache_output(output);
       if (output.data.size() > kMaximumNamedValueArtifacts) {
         throw GraphError(
             GraphErrc::InvalidParameter,
@@ -742,7 +1923,16 @@ std::optional<PreparedGraphCacheSave> prepare_graph_cache_save(
       }
       prepared.value_count =
           static_cast<std::uint32_t>(output.named_values.size());
-      prepared.value_archive = capture_graph_cache_value_archive(output);
+      prepared.generation = make_graph_cache_generation();
+      prepared.value_archive =
+          capture_graph_cache_value_archive(output, prepared.generation);
+      if (prepared.value_archive.empty() ||
+          prepared.value_archive.size() > limits.maximum_archive_bytes ||
+          prepared.value_archive.size() > limits.maximum_transaction_bytes) {
+        throw GraphError(
+            GraphErrc::InvalidParameter,
+            "Graph cache archive exceeds its frozen resource limit.");
+      }
       prepared.parameters = output.data;
       if (output.has_image_value()) {
         prepared.image_projection = output.image_value();
@@ -793,7 +1983,7 @@ std::optional<PreparedGraphCacheSave> prepare_graph_cache_save(
 
   std::uint64_t supported_entries = 0U;
   for (const CacheEntry& entry : node.caches) {
-    if (entry.cache_type != "image" || entry.location.empty()) {
+    if (entry.cache_type != "image") {
       continue;
     }
     ++supported_entries;
@@ -1006,6 +2196,7 @@ DiskCacheReadAttempt make_error_attempt(int node_id,
  * @param output_schema Complete frozen image/parameter output shape.
  * @param metadata_codec Injected codec used to decode named-value metadata.
  * @param data_definitions Optional provider registry used for reconstruction.
+ * @param limits Frozen GraphCache-specific resource boundaries.
  * @return Hit, Miss, or Error attempt with diagnostic details.
  * @throws std::bad_alloc from result/message allocation.
  * @note The versioned manifest binds the archive and optional metadata bytes.
@@ -1017,15 +2208,26 @@ DiskCacheReadAttempt read_cache_entry(
     const GraphModel& graph, const Node& node, const CacheEntry& cache_entry,
     const ValueDiskCacheOutputSchema& output_schema,
     const CacheMetadataCodec& metadata_codec,
-    DataDefinitionRegistry* data_definitions) {
+    DataDefinitionRegistry* data_definitions,
+    const GraphCacheResourceLimits& limits) {
   const GraphCacheArtifactPaths paths =
       graph_cache_artifact_paths(graph, node, cache_entry);
 
   try {
-    const bool has_image_projection = fs::exists(paths.image_projection);
-    const bool has_metadata_file = fs::exists(paths.metadata);
-    const bool has_archive_file = fs::exists(paths.value_archive);
-    const bool has_manifest_file = fs::exists(paths.manifest);
+    std::optional<GraphCacheNodeDirectory> directory =
+        GraphCacheNodeDirectory::open(graph.cache_root, node.id, false);
+    if (!directory.has_value()) {
+      DiskCacheReadAttempt attempt;
+      attempt.result = make_load_result(
+          node.id, &cache_entry, paths.image_projection, paths.metadata,
+          DiskCacheLoadStatus::Miss, GraphErrc::Unknown,
+          "No disk cache transaction exists for configured entry.");
+      return attempt;
+    }
+    const bool has_image_projection = directory->leaf_exists(paths.image_leaf);
+    const bool has_metadata_file = directory->leaf_exists(paths.metadata_leaf);
+    const bool has_archive_file = directory->leaf_exists(paths.archive_leaf);
+    const bool has_manifest_file = directory->leaf_exists(paths.manifest_leaf);
     if (!has_image_projection && !has_metadata_file && !has_archive_file &&
         !has_manifest_file) {
       DiskCacheReadAttempt attempt;
@@ -1043,10 +2245,12 @@ DiskCacheReadAttempt read_cache_entry(
     }
 
     constexpr std::uint64_t kMaximumManifestBytes = 1024U;
-    const std::vector<std::byte> initial_manifest_bytes =
-        read_cache_file_bytes(paths.manifest, kMaximumManifestBytes);
+    const GraphCacheFileRead initial_manifest = directory->read_leaf(
+        paths.manifest_leaf, kMaximumManifestBytes, std::nullopt, true, false);
+    const std::vector<std::byte>& initial_manifest_bytes =
+        initial_manifest.bytes;
     const GraphCacheManifest manifest =
-        decode_graph_cache_manifest(initial_manifest_bytes);
+        decode_graph_cache_manifest(initial_manifest_bytes, limits);
     const std::vector<std::string> expected_names =
         expected_cache_value_names(output_schema);
     const bool expects_metadata_file =
@@ -1070,21 +2274,30 @@ DiskCacheReadAttempt read_cache_entry(
         paths.directory);
 #endif
 
-    const std::vector<std::byte> archive_bytes = read_cache_file_bytes(
-        paths.value_archive,
-        kMaximumValueArtifactPayloadBytes +
-            static_cast<std::uint64_t>(kMaximumValueArtifactMetadataBytes),
-        manifest.archive.byte_size);
-    validate_cache_file_record(archive_bytes, manifest.archive);
-    const NamedValueArtifactSet artifacts =
-        decode_named_value_artifact_set(archive_bytes);
+    GraphCacheFileRead archive =
+        directory->read_leaf(paths.archive_leaf, limits.maximum_archive_bytes,
+                             manifest.archive.byte_size, true, true);
+    validate_cache_file_record(
+        bind_graph_cache_file_record(archive.record, manifest.generation),
+        manifest.archive);
+    NamedValueArtifactSet artifacts =
+        decode_named_value_artifact_set(archive.bytes);
     if (artifacts.values.size() != manifest.value_count) {
       throw GraphError(GraphErrc::InvalidParameter,
                        "Graph cache archive count disagrees with manifest.");
     }
     std::vector<std::string> actual_names;
     actual_names.reserve(artifacts.values.size());
+    const std::string generation_text =
+        graph_cache_generation_text(manifest.generation);
     for (const ValueArtifact& artifact : artifacts.values) {
+      if (artifact.envelope.joins.commit_identity != generation_text ||
+          artifact.envelope.joins.artifact_identity.has_value() ||
+          artifact.envelope.joins.slot_identity.has_value()) {
+        throw GraphError(
+            GraphErrc::InvalidParameter,
+            "Graph cache archive generation disagrees with its manifest.");
+      }
       actual_names.push_back(artifact.envelope.output_name);
     }
     if (actual_names != expected_names) {
@@ -1093,25 +2306,39 @@ DiskCacheReadAttempt read_cache_entry(
           "Disk-cache archive names do not match the frozen planned Value "
           "schema.");
     }
+    std::vector<std::byte>().swap(archive.bytes);
 
     NodeOutput candidate;
-    for (const ValueArtifact& artifact : artifacts.values) {
-      candidate.publish_named_value(
-          artifact.envelope.output_name,
-          reconstruct_value_artifact(artifact, data_definitions));
+    for (ValueArtifact& artifact : artifacts.values) {
+      Value reconstructed =
+          reconstruct_value_artifact(artifact, data_definitions);
+      candidate.publish_named_value(artifact.envelope.output_name,
+                                    std::move(reconstructed));
+      for (std::vector<std::byte>& payload : artifact.payloads) {
+        std::vector<std::byte>().swap(payload);
+      }
     }
 
     if (manifest_has_metadata) {
-      const std::vector<std::byte> metadata_before =
-          read_cache_file_bytes(paths.metadata, kMaximumGraphCacheMetadataBytes,
-                                manifest.metadata.byte_size);
-      validate_cache_file_record(metadata_before, manifest.metadata);
+      const CacheArtifactFileRecord metadata_before =
+          directory->capture_leaf_record(paths.metadata_leaf,
+                                         limits.maximum_metadata_bytes,
+                                         manifest.metadata.byte_size, true);
+      validate_cache_file_record(
+          bind_graph_cache_file_record(metadata_before, manifest.generation),
+          manifest.metadata);
+      directory->validate_binding();
       candidate.data = metadata_codec.read(paths.metadata);
-      const std::vector<std::byte> metadata_after =
-          read_cache_file_bytes(paths.metadata, kMaximumGraphCacheMetadataBytes,
-                                manifest.metadata.byte_size);
-      validate_cache_file_record(metadata_after, manifest.metadata);
-      if (metadata_after != metadata_before) {
+      directory->validate_binding();
+      const CacheArtifactFileRecord metadata_after =
+          directory->capture_leaf_record(paths.metadata_leaf,
+                                         limits.maximum_metadata_bytes,
+                                         manifest.metadata.byte_size, true);
+      validate_cache_file_record(
+          bind_graph_cache_file_record(metadata_after, manifest.generation),
+          manifest.metadata);
+      if (metadata_after.byte_size != metadata_before.byte_size ||
+          !(metadata_after.digest == metadata_before.digest)) {
         throw GraphError(
             GraphErrc::InvalidParameter,
             "Graph cache metadata changed during transactional replay.");
@@ -1125,9 +2352,11 @@ DiskCacheReadAttempt read_cache_entry(
           "parameter-output schema.");
     }
 
-    const std::vector<std::byte> final_manifest_bytes =
-        read_cache_file_bytes(paths.manifest, kMaximumManifestBytes);
-    if (final_manifest_bytes != initial_manifest_bytes) {
+    const GraphCacheFileRead final_manifest =
+        directory->read_leaf(paths.manifest_leaf, kMaximumManifestBytes,
+                             initial_manifest.record.byte_size, true, false);
+    if (final_manifest.bytes != initial_manifest_bytes ||
+        !(final_manifest.record.digest == initial_manifest.record.digest)) {
       throw GraphError(
           GraphErrc::InvalidParameter,
           "Graph cache manifest changed during transactional replay.");
@@ -1192,6 +2421,7 @@ DiskCacheReadAttempt read_cache_entry(
  * @param output_schema Complete frozen image/parameter output shape.
  * @param metadata_codec Injected codec used for every existing metadata file.
  * @param data_definitions Optional provider registry used for reconstruction.
+ * @param limits Frozen GraphCache-specific resource boundaries.
  * @return Hit/Error for the first existing or failing entry, Miss when all
  * supported entries are absent, or Skipped when no load should be attempted.
  * @throws std::bad_alloc from diagnostic construction.
@@ -1203,7 +2433,8 @@ DiskCacheReadAttempt read_first_disk_cache_entry(
     const GraphModel& graph, const Node& node,
     const ValueDiskCacheOutputSchema& output_schema,
     const CacheMetadataCodec& metadata_codec,
-    DataDefinitionRegistry* data_definitions) {
+    DataDefinitionRegistry* data_definitions,
+    const GraphCacheResourceLimits& limits) {
   if (graph.cache_root.empty()) {
     return make_skipped_attempt(node.id, "Graph has no disk cache root.");
   }
@@ -1211,19 +2442,37 @@ DiskCacheReadAttempt read_first_disk_cache_entry(
     return make_skipped_attempt(node.id, "Node has no configured cache entry.");
   }
 
+  try {
+    if (!has_image_disk_cache_entry(graph, node)) {
+      return make_skipped_attempt(node.id,
+                                  "No supported image cache entry found.");
+    }
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const GraphError& error) {
+    const auto invalid_entry = std::find_if(
+        node.caches.begin(), node.caches.end(),
+        [](const CacheEntry& entry) { return entry.cache_type == "image"; });
+    if (invalid_entry == node.caches.end()) {
+      throw;
+    }
+    return make_error_attempt(node.id, *invalid_entry, {}, {}, error.code(),
+                              error.what());
+  }
+
   bool saw_supported_entry = false;
   DiskCacheReadAttempt last_miss =
       make_skipped_attempt(node.id, "No supported image cache entry found.");
   std::optional<DiskCacheReadAttempt> last_incompatible_miss;
   for (const auto& cache_entry : node.caches) {
-    if (cache_entry.cache_type != "image" || cache_entry.location.empty()) {
+    if (cache_entry.cache_type != "image") {
       continue;
     }
 
     saw_supported_entry = true;
     DiskCacheReadAttempt attempt =
         read_cache_entry(graph, node, cache_entry, output_schema,
-                         metadata_codec, data_definitions);
+                         metadata_codec, data_definitions, limits);
     if (attempt.result.status != DiskCacheLoadStatus::Miss) {
       return attempt;
     }
@@ -1302,24 +2551,23 @@ bool finalize_disk_cache_load(
  * before a later removal fails. Replay still requires a digest-valid archive
  * and manifest pair, so residual mixed generations cannot publish output.
  */
-void remove_cache_siblings_not_retained(const GraphCacheArtifactPaths& paths,
+void remove_cache_siblings_not_retained(GraphCacheNodeDirectory& directory,
+                                        const GraphCacheArtifactPaths& paths,
                                         bool retain_image, bool retain_metadata,
                                         bool retain_transaction) {
-  if (!retain_image && fs::exists(paths.image_projection)) {
-    (void)fs::remove(paths.image_projection);
+  if (!retain_image) {
+    (void)directory.remove_leaf_if_present(paths.image_leaf);
   }
-  if (!retain_metadata && fs::exists(paths.metadata)) {
-    (void)fs::remove(paths.metadata);
+  if (!retain_metadata) {
+    (void)directory.remove_leaf_if_present(paths.metadata_leaf);
   }
-  if (!retain_transaction && fs::exists(paths.value_archive)) {
-    (void)fs::remove(paths.value_archive);
+  if (!retain_transaction) {
+    (void)directory.remove_leaf_if_present(paths.archive_leaf);
   }
-  if (!retain_transaction && fs::exists(paths.manifest)) {
-    (void)fs::remove(paths.manifest);
+  if (!retain_transaction) {
+    (void)directory.remove_leaf_if_present(paths.manifest_leaf);
   }
-  if (fs::exists(paths.directory) && fs::is_empty(paths.directory)) {
-    (void)fs::remove(paths.directory);
-  }
+  (void)directory.remove_if_empty();
 }
 
 /**
@@ -1330,6 +2578,7 @@ void remove_cache_siblings_not_retained(const GraphCacheArtifactPaths& paths,
  * estimate captured before side effects.
  * @param image_codec Codec selected and retained by GraphCacheService.
  * @param metadata_codec Named-value codec retained by GraphCacheService.
+ * @param limits Frozen GraphCache-specific resource boundaries.
  * @param timing_graph Optional graph-state-only timing sink; null on the
  * independent I/O worker.
  * @throws Codec, filesystem, Graph, Value, or allocation exceptions unchanged.
@@ -1344,59 +2593,103 @@ void save_cache_mechanism(const GraphModel& graph, const Node& node,
                           const PreparedGraphCacheSave& prepared,
                           const ImageArtifactCodec& image_codec,
                           const CacheMetadataCodec& metadata_codec,
+                          const GraphCacheResourceLimits& limits,
                           GraphModel* timing_graph) {
   for (const CacheEntry& cache_entry : node.caches) {
-    if (cache_entry.cache_type != "image" || cache_entry.location.empty()) {
+    if (cache_entry.cache_type != "image") {
       continue;
     }
 
     const GraphCacheArtifactPaths paths =
         graph_cache_artifact_paths(graph, node, cache_entry);
     if (!prepared.complete_output) {
-      remove_cache_siblings_not_retained(paths, false, false, false);
+      std::optional<GraphCacheNodeDirectory> directory =
+          GraphCacheNodeDirectory::open(graph.cache_root, node.id, false);
+      if (directory.has_value()) {
+        remove_cache_siblings_not_retained(*directory, paths, false, false,
+                                           false);
+      }
       continue;
     }
 
     const bool retain_image = prepared.image_projection.has_value();
     const bool retain_metadata = !prepared.parameters.empty();
-    fs::create_directories(paths.directory);
+    std::optional<GraphCacheNodeDirectory> directory =
+        GraphCacheNodeDirectory::open(graph.cache_root, node.id, true);
+    if (!directory.has_value()) {
+      throw GraphError(GraphErrc::Io,
+                       "Graph cache node directory could not be created.");
+    }
 
     const auto start_io = std::chrono::high_resolution_clock::now();
     if (retain_image) {
+      (void)directory->leaf_exists(paths.image_leaf);
+      directory->validate_binding();
       image_codec.encode(paths.image_projection, *prepared.image_projection,
                          *prepared.image_request);
+      directory->validate_binding();
+      if (directory->leaf_exists(paths.image_leaf)) {
+        (void)directory->capture_leaf_record(paths.image_leaf,
+                                             limits.maximum_projection_bytes,
+                                             std::nullopt, true);
+      }
     }
+    CacheArtifactFileRecord metadata_record;
     if (retain_metadata) {
+      (void)directory->leaf_exists(paths.metadata_leaf);
+      directory->validate_binding();
       metadata_codec.write(paths.metadata, prepared.parameters);
+      directory->validate_binding();
+      metadata_record = directory->capture_leaf_record(
+          paths.metadata_leaf, limits.maximum_metadata_bytes, std::nullopt,
+          true);
     }
-    write_cache_file_bytes(paths.value_archive, prepared.value_archive);
-    remove_cache_siblings_not_retained(paths, retain_image, retain_metadata,
-                                       true);
+    const CacheArtifactFileRecord archive_record =
+        directory->write_leaf(paths.archive_leaf, prepared.value_archive);
+    const CacheArtifactFileRecord expected_archive{
+        static_cast<std::uint64_t>(prepared.value_archive.size()),
+        compute_artifact_payload_digest(prepared.value_archive)};
+    validate_cache_file_record(archive_record, expected_archive);
+    remove_cache_siblings_not_retained(*directory, paths, retain_image,
+                                       retain_metadata, true);
 
     GraphCacheManifest manifest;
     manifest.value_count = prepared.value_count;
-    manifest.archive = capture_cache_file_record(
-        paths.value_archive,
-        kMaximumValueArtifactPayloadBytes +
-            static_cast<std::uint64_t>(kMaximumValueArtifactMetadataBytes));
+    manifest.generation = prepared.generation;
+    const CacheArtifactFileRecord captured_archive =
+        directory->capture_leaf_record(paths.archive_leaf,
+                                       limits.maximum_archive_bytes,
+                                       expected_archive.byte_size, true);
+    validate_cache_file_record(captured_archive, expected_archive);
+    manifest.archive =
+        bind_graph_cache_file_record(captured_archive, prepared.generation);
     if (retain_metadata) {
       manifest.flags |= kGraphCacheManifestHasMetadata;
       manifest.parameter_count =
           static_cast<std::uint32_t>(prepared.parameters.size());
-      manifest.metadata = capture_cache_file_record(
-          paths.metadata, kMaximumGraphCacheMetadataBytes);
+      directory->validate_binding();
       if (metadata_codec.read(paths.metadata) != prepared.parameters) {
         throw GraphError(
             GraphErrc::InvalidParameter,
             "Graph cache metadata codec round-trip changed parameter facts.");
       }
+      directory->validate_binding();
+      const CacheArtifactFileRecord metadata_after =
+          directory->capture_leaf_record(paths.metadata_leaf,
+                                         limits.maximum_metadata_bytes,
+                                         metadata_record.byte_size, true);
+      validate_cache_file_record(metadata_after, metadata_record);
+      manifest.metadata =
+          bind_graph_cache_file_record(metadata_after, prepared.generation);
     }
     const std::vector<std::byte> manifest_bytes =
-        encode_graph_cache_manifest(manifest);
-    write_cache_file_bytes(paths.manifest, manifest_bytes);
-    const std::vector<std::byte> persisted_manifest =
-        read_cache_file_bytes(paths.manifest, 1024U, manifest_bytes.size());
-    if (persisted_manifest != manifest_bytes) {
+        encode_graph_cache_manifest(manifest, limits);
+    const CacheArtifactFileRecord manifest_record =
+        directory->write_leaf(paths.manifest_leaf, manifest_bytes);
+    const GraphCacheFileRead persisted_manifest = directory->read_leaf(
+        paths.manifest_leaf, 1024U, manifest_record.byte_size, true, false);
+    if (persisted_manifest.bytes != manifest_bytes ||
+        !(persisted_manifest.record.digest == manifest_record.digest)) {
       throw GraphError(GraphErrc::Io,
                        "Graph cache manifest write did not round-trip.");
     }
@@ -1450,9 +2743,11 @@ GraphCacheService::GraphCacheService(
     std::shared_ptr<const ImageArtifactCodec> image_codec,
     std::shared_ptr<const CacheMetadataCodec> metadata_codec,
     std::size_t maximum_statistics_entries,
-    DataDefinitionRegistry* data_definitions)
+    DataDefinitionRegistry* data_definitions,
+    GraphCacheResourceLimits resource_limits)
     : image_codec_(std::move(image_codec)),
       metadata_codec_(std::move(metadata_codec)),
+      resource_limits_(resource_limits),
       data_definitions_(data_definitions),
       image_statistics_store_(maximum_statistics_entries) {
   if (!image_codec_) {
@@ -1463,6 +2758,7 @@ GraphCacheService::GraphCacheService(
     throw std::invalid_argument(
         "GraphCacheService requires a cache metadata codec");
   }
+  validate_graph_cache_resource_limits(resource_limits_);
 }
 
 /** @copydoc GraphCacheService::schedule_image_statistics */
@@ -1496,21 +2792,30 @@ std::size_t GraphCacheService::image_statistics_size() const {
   return image_statistics_store_.size();
 }
 
+/** @copydoc GraphCacheService::node_cache_dir */
 std::filesystem::path GraphCacheService::node_cache_dir(const GraphModel& graph,
                                                         int node_id) const {
   return graph.cache_root / std::to_string(node_id);
 }
 
+/** @copydoc GraphCacheService::save_cache_if_configured */
 void GraphCacheService::save_cache_if_configured(
     GraphModel& graph, const Node& node,
     const std::string& cache_precision) const {
+  if (graph.skip_save_cache() || graph.cache_root.empty()) {
+    return;
+  }
+  const std::shared_ptr<GraphCacheRootCoordination> coordination =
+      graph_cache_root_coordination(graph.cache_root);
+  GraphCacheRootGuard guard(coordination);
   const std::optional<PreparedGraphCacheSave> prepared =
-      prepare_graph_cache_save(graph, node, cache_precision);
+      prepare_graph_cache_save(graph, node, cache_precision, resource_limits_);
   if (!prepared.has_value()) {
     return;
   }
+  (void)guard.advance_mutation_epoch();
   save_cache_mechanism(graph, node, *prepared, *image_codec_, *metadata_codec_,
-                       &graph);
+                       resource_limits_, &graph);
 }
 
 /** @copydoc GraphCacheService::save_cache_if_configured_via_executor */
@@ -1518,27 +2823,53 @@ void GraphCacheService::save_cache_if_configured_via_executor(
     execution::ComputeIoExecutor& executor,
     const std::shared_ptr<const void>& lifetime_token, GraphModel& graph,
     const Node& node, const std::string& cache_precision) const {
-  std::optional<PreparedGraphCacheSave> prepared =
-      prepare_graph_cache_save(graph, node, cache_precision);
-  if (!prepared.has_value()) {
+  if (graph.skip_save_cache() || graph.cache_root.empty()) {
     return;
+  }
+  const std::shared_ptr<GraphCacheRootCoordination> coordination =
+      graph_cache_root_coordination(graph.cache_root);
+  std::optional<PreparedGraphCacheSave> prepared;
+  std::uint64_t prepared_epoch = 0U;
+  {
+    GraphCacheRootGuard guard(coordination);
+    prepared = prepare_graph_cache_save(graph, node, cache_precision,
+                                        resource_limits_);
+    if (!prepared.has_value()) {
+      return;
+    }
+    prepared_epoch = guard.advance_mutation_epoch();
+    if (!prepared->complete_output) {
+      save_cache_mechanism(graph, node, *prepared, *image_codec_,
+                           *metadata_codec_, resource_limits_, &graph);
+      return;
+    }
   }
   const auto retained_prepared =
       std::make_shared<const PreparedGraphCacheSave>(std::move(*prepared));
 
   const execution::ComputeIoSubmission submission = executor.try_submit(
       retained_prepared->planned_bytes, lifetime_token,
-      [&graph, &node, retained_prepared,
+      [&graph, &node, retained_prepared, coordination, prepared_epoch,
        this]() -> execution::ComputeIoExecutor::Task {
         const std::shared_ptr<const ImageArtifactCodec> image_codec =
             image_codec_;
         const std::shared_ptr<const CacheMetadataCodec> metadata_codec =
             metadata_codec_;
-        return
-            [&graph, &node, retained_prepared, image_codec, metadata_codec]() {
-              save_cache_mechanism(graph, node, *retained_prepared,
-                                   *image_codec, *metadata_codec, nullptr);
-            };
+        const GraphCacheResourceLimits resource_limits = resource_limits_;
+        return [&graph, &node, retained_prepared, image_codec, metadata_codec,
+                coordination, prepared_epoch, resource_limits]() {
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
+          testing::notify_graph_cache_service_test_hook(
+              testing::GraphCacheServiceTestEvent::AsyncWriterBeforeRootLock,
+              graph.cache_root);
+#endif
+          GraphCacheRootGuard guard(coordination);
+          if (guard.mutation_epoch() != prepared_epoch) {
+            return;
+          }
+          save_cache_mechanism(graph, node, *retained_prepared, *image_codec,
+                               *metadata_codec, resource_limits, nullptr);
+        };
       });
   if (!submission.accepted()) {
     throw GraphError(GraphErrc::ComputeError,
@@ -1556,6 +2887,7 @@ void GraphCacheService::save_cache_if_configured_via_executor(
   result.rethrow_if_failed();
 }
 
+/** @copydoc GraphCacheService::try_load_from_disk_cache */
 bool GraphCacheService::try_load_from_disk_cache(
     GraphModel& graph, Node& node,
     ValueDiskCacheOutputSchema output_schema) const {
@@ -1571,18 +2903,29 @@ bool GraphCacheService::try_load_from_disk_cache(
                    .result);
     return complete_output;
   }
-  auto start_io = std::chrono::high_resolution_clock::now();
-  DiskCacheReadAttempt attempt = read_first_disk_cache_entry(
-      graph, node, output_schema, *metadata_codec_, data_definitions_);
-  return finalize_disk_cache_load(
-      graph, std::move(attempt), start_io, [&](NodeOutput output) {
-        RegionSet full_region = value_region::full_node_output_region(output);
-        node.cached_output_high_precision = std::move(output);
-        node.hp_region = std::move(full_region);
-        node.hp_version++;
-      });
+  const auto load = [&]() {
+    auto start_io = std::chrono::high_resolution_clock::now();
+    DiskCacheReadAttempt attempt = read_first_disk_cache_entry(
+        graph, node, output_schema, *metadata_codec_, data_definitions_,
+        resource_limits_);
+    return finalize_disk_cache_load(
+        graph, std::move(attempt), start_io, [&](NodeOutput output) {
+          RegionSet full_region = value_region::full_node_output_region(output);
+          node.cached_output_high_precision = std::move(output);
+          node.hp_region = std::move(full_region);
+          node.hp_version++;
+        });
+  };
+  if (graph.cache_root.empty()) {
+    return load();
+  }
+  const std::shared_ptr<GraphCacheRootCoordination> coordination =
+      graph_cache_root_coordination(graph.cache_root);
+  GraphCacheRootGuard guard(coordination);
+  return load();
 }
 
+/** @copydoc GraphCacheService::try_load_from_disk_cache_into */
 bool GraphCacheService::try_load_from_disk_cache_into(
     GraphModel& graph, const Node& node, NodeOutput& out,
     ValueDiskCacheOutputSchema output_schema) const {
@@ -1595,19 +2938,42 @@ bool GraphCacheService::try_load_from_disk_cache_into(
                    .result);
     return false;
   }
-  auto start_io = std::chrono::high_resolution_clock::now();
-  DiskCacheReadAttempt attempt = read_first_disk_cache_entry(
-      graph, node, output_schema, *metadata_codec_, data_definitions_);
-  return finalize_disk_cache_load(
-      graph, std::move(attempt), start_io,
-      [&](NodeOutput output) { out = std::move(output); });
+  const auto load = [&]() {
+    auto start_io = std::chrono::high_resolution_clock::now();
+    DiskCacheReadAttempt attempt = read_first_disk_cache_entry(
+        graph, node, output_schema, *metadata_codec_, data_definitions_,
+        resource_limits_);
+    return finalize_disk_cache_load(
+        graph, std::move(attempt), start_io,
+        [&](NodeOutput output) { out = std::move(output); });
+  };
+  if (graph.cache_root.empty()) {
+    return load();
+  }
+  const std::shared_ptr<GraphCacheRootCoordination> coordination =
+      graph_cache_root_coordination(graph.cache_root);
+  GraphCacheRootGuard guard(coordination);
+  return load();
 }
 
 /** @copydoc GraphCacheService::clear_drive_cache */
 GraphModel::DriveClearResult GraphCacheService::clear_drive_cache(
     GraphModel& graph) const {
   GraphModel::DriveClearResult result;
-  if (!graph.cache_root.empty() && fs::exists(graph.cache_root)) {
+  if (graph.cache_root.empty()) {
+    return result;
+  }
+  const std::shared_ptr<GraphCacheRootCoordination> coordination =
+      graph_cache_root_coordination(graph.cache_root);
+  GraphCacheRootGuard guard(coordination);
+  (void)guard.advance_mutation_epoch();
+  const fs::file_status status = fs::symlink_status(graph.cache_root);
+  if (status.type() != fs::file_type::not_found) {
+    if (fs::is_symlink(status) || !fs::is_directory(status)) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Graph cache clear refuses a symlink or non-directory "
+                       "root.");
+    }
     result.removed_entries = fs::remove_all(graph.cache_root);
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
     testing::notify_graph_cache_service_test_hook(
@@ -1637,13 +3003,32 @@ void GraphCacheService::clear_cache(GraphModel& graph) const {
   (void)clear_memory_cache(graph);
 }
 
+/** @copydoc GraphCacheService::cache_all_nodes */
 GraphModel::CacheSaveResult GraphCacheService::cache_all_nodes(
     GraphModel& graph, const std::string& cache_precision) const {
   GraphModel::CacheSaveResult result;
+  if (graph.cache_root.empty()) {
+    for (int node_id : graph.node_ids()) {
+      if (hp_cache_ptr(graph.node(node_id))) {
+        result.saved_nodes++;
+      }
+    }
+    return result;
+  }
+  const std::shared_ptr<GraphCacheRootCoordination> coordination =
+      graph_cache_root_coordination(graph.cache_root);
+  GraphCacheRootGuard guard(coordination);
+  (void)guard.advance_mutation_epoch();
   for (int node_id : graph.node_ids()) {
     const Node& node = graph.node(node_id);
     if (hp_cache_ptr(node)) {
-      save_cache_if_configured(graph, node, cache_precision);
+      const std::optional<PreparedGraphCacheSave> prepared =
+          prepare_graph_cache_save(graph, node, cache_precision,
+                                   resource_limits_);
+      if (prepared.has_value()) {
+        save_cache_mechanism(graph, node, *prepared, *image_codec_,
+                             *metadata_codec_, resource_limits_, &graph);
+      }
       result.saved_nodes++;
     }
   }
@@ -1667,10 +3052,37 @@ GraphModel::MemoryClearResult GraphCacheService::free_transient_memory(
   return result;
 }
 
+/** @copydoc GraphCacheService::synchronize_disk_cache */
 GraphModel::DiskSyncResult GraphCacheService::synchronize_disk_cache(
     GraphModel& graph, const std::string& cache_precision) const {
   GraphModel::DiskSyncResult result;
-  result.saved_nodes = cache_all_nodes(graph, cache_precision).saved_nodes;
+  if (graph.cache_root.empty()) {
+    for (int node_id : graph.node_ids()) {
+      if (hp_cache_ptr(graph.node(node_id))) {
+        result.saved_nodes++;
+      }
+    }
+    return result;
+  }
+  const std::shared_ptr<GraphCacheRootCoordination> coordination =
+      graph_cache_root_coordination(graph.cache_root);
+  GraphCacheRootGuard guard(coordination);
+  (void)guard.advance_mutation_epoch();
+
+  for (int node_id : graph.node_ids()) {
+    const Node& node = graph.node(node_id);
+    if (!hp_cache_ptr(node)) {
+      continue;
+    }
+    const std::optional<PreparedGraphCacheSave> prepared =
+        prepare_graph_cache_save(graph, node, cache_precision,
+                                 resource_limits_);
+    if (prepared.has_value()) {
+      save_cache_mechanism(graph, node, *prepared, *image_codec_,
+                           *metadata_codec_, resource_limits_, &graph);
+    }
+    result.saved_nodes++;
+  }
 
   for (int node_id : graph.node_ids()) {
     const Node& node = graph.node(node_id);
@@ -1678,36 +3090,33 @@ GraphModel::DiskSyncResult GraphCacheService::synchronize_disk_cache(
       continue;
     }
 
-    auto dir_path = node_cache_dir(graph, node.id);
-    if (!fs::exists(dir_path)) {
+    if (!has_image_disk_cache_entry(graph, node)) {
+      continue;
+    }
+
+    std::optional<GraphCacheNodeDirectory> directory =
+        GraphCacheNodeDirectory::open(graph.cache_root, node.id, false);
+    if (!directory.has_value()) {
       continue;
     }
 
     for (const auto& cache_entry : node.caches) {
-      if (cache_entry.location.empty()) {
+      if (cache_entry.cache_type != "image") {
         continue;
       }
-      auto cache_file = dir_path / cache_entry.location;
-      auto meta_file = cache_file;
-      meta_file.replace_extension(".yml");
-      auto archive_file = cache_file;
-      archive_file += ".values";
-      auto manifest_file = cache_file;
-      manifest_file += ".manifest";
-
-      for (const fs::path& file :
-           {cache_file, meta_file, archive_file, manifest_file}) {
-        if (fs::exists(file) && fs::remove(file)) {
+      const GraphCacheArtifactPaths paths =
+          graph_cache_artifact_paths(graph, node, cache_entry);
+      for (const std::string& leaf :
+           {paths.image_leaf, paths.metadata_leaf, paths.archive_leaf,
+            paths.manifest_leaf}) {
+        if (directory->remove_leaf_if_present(leaf)) {
           result.removed_files++;
         }
       }
     }
 
-    if (fs::is_empty(dir_path)) {
-      const bool removed_dir = fs::remove(dir_path);
-      if (removed_dir) {
-        result.removed_dirs++;
-      }
+    if (directory->remove_if_empty()) {
+      result.removed_dirs++;
     }
   }
 

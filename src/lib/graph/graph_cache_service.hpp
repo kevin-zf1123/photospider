@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -39,6 +40,45 @@ struct ValueDiskCacheOutputSchema final {
   std::vector<std::string> generic_named_value_output_names;
 };
 
+/** @brief Default maximum canonical graph-cache archive bytes per entry. */
+inline constexpr std::uint64_t kDefaultGraphCacheMaximumArchiveBytes =
+    512ULL * 1024ULL * 1024ULL;  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Default maximum detached parameter-metadata bytes per entry. */
+inline constexpr std::uint64_t kDefaultGraphCacheMaximumMetadataBytes =
+    16ULL * 1024ULL * 1024ULL;  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Default maximum auxiliary image-projection bytes per entry. */
+inline constexpr std::uint64_t kDefaultGraphCacheMaximumProjectionBytes =
+    512ULL * 1024ULL * 1024ULL;  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Default aggregate replay allocation quota for one transaction. */
+inline constexpr std::uint64_t kDefaultGraphCacheMaximumTransactionBytes =
+    kDefaultGraphCacheMaximumArchiveBytes +  // NOLINT(whitespace/indent_namespace)
+    kDefaultGraphCacheMaximumMetadataBytes;  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Freezes GraphCache-specific disk and replay resource boundaries.
+ *
+ * @throws Nothing for aggregate construction and comparison.
+ * @note These limits are independent from the wider public portable-artifact
+ * framing bounds. `maximum_transaction_bytes` is the aggregate archive plus
+ * detached-metadata replay quota; the auxiliary projection is separately
+ * bounded because it never enters replay or Value reconstruction.
+ */
+struct GraphCacheResourceLimits final {
+  /** @brief Positive maximum canonical archive bytes accepted or written. */
+  std::uint64_t maximum_archive_bytes = kDefaultGraphCacheMaximumArchiveBytes;
+  /** @brief Positive maximum detached metadata bytes accepted or written. */
+  std::uint64_t maximum_metadata_bytes = kDefaultGraphCacheMaximumMetadataBytes;
+  /** @brief Positive maximum auxiliary projection file size. */
+  std::uint64_t maximum_projection_bytes =
+      kDefaultGraphCacheMaximumProjectionBytes;
+  /** @brief Positive checked archive-plus-metadata replay quota. */
+  std::uint64_t maximum_transaction_bytes =
+      kDefaultGraphCacheMaximumTransactionBytes;
+};
+
 /**
  * @class GraphCacheService
  * @brief Coordinates graph memory-cache cleanup and HP disk-cache persistence.
@@ -63,7 +103,13 @@ struct ValueDiskCacheOutputSchema final {
  * otherwise unsupported Values fail with a typed invalid-parameter error
  * before executor admission, filesystem mutation, or codec invocation.
  * Partial, tampered, mixed-generation, or retired image/YAML pairs cannot
- * publish any output. This service contains no OpenCV/YAML calls or
+ * publish any output. Graph-document locations are restricted to one safe
+ * cross-platform leaf below the numeric node directory. Root-scoped process
+ * coordination serializes readers, writers, cleanup, synchronization, and
+ * clear across independent service instances; a cryptographically random
+ * generation joins each archive to its manifest. No-follow regular-file,
+ * one-link, non-sparse, stat-before-allocation, and frozen service quota checks
+ * precede replay allocation. This service contains no OpenCV/YAML calls or
  * provider-library types. Staged HP commit may submit the const cache-save
  * mechanism to the
  * process compute-I/O executor while the graph-state policy owner retains path,
@@ -83,9 +129,13 @@ class GraphCacheService {
    * result capacity owned by this cache service.
    * @param data_definitions Borrowed process registry used to reconstruct
    * provider-defined artifacts; null permits built-in replay only.
+   * @param resource_limits Immutable GraphCache-specific archive, metadata,
+   * projection, and aggregate replay bounds.
    * @throws std::invalid_argument when either codec owner is empty.
    * @throws std::invalid_argument when the statistics bound is zero or exceeds
    * its source-private frozen maximum.
+   * @throws std::invalid_argument when resource limits are zero, exceed public
+   * artifact bounds, or cannot admit either individually bounded replay file.
    * @throws std::bad_alloc when statistics store ownership cannot allocate.
    * @note Both immutable codec owners are retained for the complete service
    * lifetime and may be shared by independent graph services. They own no graph
@@ -95,7 +145,8 @@ class GraphCacheService {
                     std::shared_ptr<const CacheMetadataCodec> metadata_codec,
                     std::size_t maximum_statistics_entries =
                         kDefaultImageStatisticsCacheEntries,
-                    DataDefinitionRegistry* data_definitions = nullptr);
+                    DataDefinitionRegistry* data_definitions = nullptr,
+                    GraphCacheResourceLimits resource_limits = {});
 
   /**
    * @brief Schedules or reuses one Value-backed derived statistics request.
@@ -177,7 +228,9 @@ class GraphCacheService {
    *       not an atomic filesystem transaction: removal may succeed before
    *       recreation fails. The serialized facade therefore publishes its
    *       prepared successor revision before calling this method and never
-   *       rolls that invalidation back.
+   *       rolls that invalidation back. Process-root coordination also
+   *       supersedes every earlier admitted asynchronous cache writer before
+   *       removal begins.
    */
   GraphModel::DriveClearResult clear_drive_cache(GraphModel& graph) const;
 
@@ -211,6 +264,8 @@ class GraphCacheService {
    * @return Number of nodes for which a save attempt was issued.
    * @throws Codec, filesystem, graph, or allocation exceptions from saving.
    * @note RT-only state is ignored because disk cache authority is HP-only.
+   * One root-scoped mutation epoch supersedes earlier admitted writers before
+   * the batch begins.
    */
   GraphModel::CacheSaveResult cache_all_nodes(
       GraphModel& graph, const std::string& cache_precision) const;
@@ -234,6 +289,8 @@ class GraphCacheService {
    * @return Counts for saved HP nodes and removed stale files/directories.
    * @throws Filesystem, codec, or graph access exceptions.
    * @note Nodes with only RT state do not protect existing disk cache files.
+   * The complete save/cleanup pass is root-serialized and supersedes earlier
+   * admitted asynchronous writers before its first filesystem effect.
    */
   GraphModel::DiskSyncResult synchronize_disk_cache(
       GraphModel& graph, const std::string& cache_precision) const;
@@ -247,16 +304,22 @@ class GraphCacheService {
    * @param cache_precision Precision label used for image serialization.
    * @throws Codec, filesystem, graph, or allocation exceptions from saving.
    * @note The method is a no-op for disabled saving, missing cache roots,
-   * unsupported cache-entry types, empty locations, or nodes without HP
-   * output. Every complete formal Value, including provider-defined
+   * unsupported cache-entry types, or nodes without HP output. An image entry
+   * with an empty, absolute, parent-traversing, multi-component, aliased, or
+   * otherwise unsafe location is rejected before filesystem or codec work.
+   * Every complete formal Value, including provider-defined
    * multi-buffer Values, must enter one public named-Value archive; unsupported
    * facts throw `GraphError{InvalidParameter}` before executor admission,
-   * filesystem work, or codec effects. Partial hp_region validity removes the
-   * older complete transaction so a later load cannot relabel stale bytes as
-   * complete. A canonical CPU image may additionally cross the selected image
+   * filesystem work, or codec effects. Partial hp_region validity is
+   * classified before ImageView, artifact capture, provider validation, or
+   * executor admission and directly removes the older complete transaction so
+   * a later load cannot relabel stale bytes as complete. A canonical CPU image
+   * may additionally cross the selected image
    * codec as an auxiliary projection, but replay reconstructs only from the
    * archive. Named ParameterValue outputs cross the metadata codec. The archive
    * and metadata byte sizes/digests are bound by a manifest written last;
+   * one random generation is repeated by every archive envelope and binds
+   * both archive and metadata manifest records;
    * failures or concurrent replacement yield a non-reusable transaction and
    * never authorize partial publication. Runtime allocation and Value revision
    * identities are never persisted.
@@ -289,7 +352,9 @@ class GraphCacheService {
    * @note The I/O callback receives only const Graph/Node access and therefore
    * cannot mutate Graph state. This preserves the current pre-publication
    * cache failure ordering; it grants no Graph-document, daemon, OutputStore,
-   * retry, receipt, or durability authority.
+   * retry, receipt, or durability authority. A later root mutation supersedes
+   * an admitted but not-yet-authoritative callback, which then settles as a
+   * successful no-op without recreating a removed transaction.
    */
   void save_cache_if_configured_via_executor(
       execution::ComputeIoExecutor& executor,
@@ -312,9 +377,11 @@ class GraphCacheService {
    * errors distinguishable from misses through graph diagnostics. Successful
    * archive reconstruction mints fresh process-local allocation/revision
    * identities for every Value. Replay validates the versioned manifest,
-   * detached archive digest, exact planned Value names, complete artifact
-   * facts, optional metadata digest and exact parameter keys, then rereads the
-   * manifest before returning Hit. Any mismatch publishes nothing.
+   * generation-bound detached archive/metadata records, exact planned Value
+   * names, complete artifact facts, and exact parameter keys, then rereads the
+   * manifest before returning Hit. Unsafe paths, symlink/nonregular/sparse
+   * leaves, and frozen resource-limit violations fail before archive
+   * allocation. Any mismatch publishes nothing.
    * A hit publishes the output, incremented HP content version, and derived
    * full-validity Region together on the supplied Node.
    */
@@ -337,8 +404,9 @@ class GraphCacheService {
    * formal HP cache before committing. Existing complete or partial formal
    * memory state prevents disk load so regionless artifacts cannot override
    * current runtime validity. Replay validates the complete manifest-bound
-   * named-Value transaction and exact frozen Value/parameter names before one
-   * move publishes the candidate; mismatches and errors leave `out` unchanged.
+   * named-Value transaction, safe descriptor-backed files, resource limits,
+   * and exact frozen Value/parameter names before one move publishes the
+   * candidate; mismatches and errors leave `out` unchanged.
    */
   bool try_load_from_disk_cache_into(
       GraphModel& graph, const Node& node, NodeOutput& out,
@@ -360,6 +428,14 @@ class GraphCacheService {
    * diagnostic state.
    */
   std::shared_ptr<const CacheMetadataCodec> metadata_codec_;
+
+  /**
+   * @brief Immutable GraphCache-specific allocation and disk-file boundaries.
+   * @note Construction validates the complete aggregate. Every save/load
+   * observes this frozen copy; no graph document or portable envelope may
+   * widen it at runtime.
+   */
+  const GraphCacheResourceLimits resource_limits_;
 
   /**
    * @brief Borrowed provider-definition authority for executable replay.

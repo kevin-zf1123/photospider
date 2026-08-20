@@ -34,6 +34,7 @@
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
 #include "photospider/host/value_result.hpp"
+#include "photospider/plugin/data_definition_registry.hpp"
 #include "plugin/plugin_manager.hpp"
 #include "runtime/graph_runtime.hpp"
 
@@ -99,8 +100,10 @@ class Kernel {
    * @param execution_service Explicit process CPU execution owner.
    * @throws std::invalid_argument when any required owner is empty.
    * @note The embedded product composition root selects concrete
-   *       implementations. Kernel retains them through its cache and graph IO
-   *       services for the complete lifetime of every admitted operation.
+   *       implementations. Kernel creates one process-domain
+   *       `DataDefinitionRegistry`, injects that exact authority into graph
+   *       cache replay, and retains all collaborators for the complete
+   *       lifetime of every admitted operation.
    */
   Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec,
          std::shared_ptr<const CacheMetadataCodec> metadata_codec,
@@ -1545,6 +1548,13 @@ class Kernel {
 
   GraphTraversalService traversal_service_;
   GraphInspectService inspect_service_;
+  /**
+   * @brief Process-domain provider-definition authority used by cache replay.
+   * @note Declaration order makes this registry outlive `cache_service_`.
+   * Kernel destruction drains every GraphRuntime before either member is
+   * destroyed, while provider-generation leases remain independently safe.
+   */
+  DataDefinitionRegistry data_definitions_;
   /**
    * @brief Cache service retaining the Kernel-injected artifact codecs.
    * @note `Kernel::~Kernel()` drains and destroys every `GraphRuntime` before
