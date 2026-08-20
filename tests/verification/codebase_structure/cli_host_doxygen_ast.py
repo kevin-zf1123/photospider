@@ -64,11 +64,11 @@ REQUIRED_BLOCK_COMMANDS = {"brief", "return", "throws", "note"}
 CALLABLE_DECL_KINDS = {"FunctionDecl", "CXXMethodDecl"}
 CLI_TARGET_NAMES = ("photospider_cli_common", "graph_cli")
 EXPECTED_CLI_TARGET_SOURCE_COUNTS = {
-    "photospider_cli_common": 60,
+    "photospider_cli_common": 59,
     "graph_cli": 1,
 }
-EXPECTED_CLI_TARGET_CLOSURE_SOURCE_COUNT = 61
-EXPECTED_AUDITED_SOURCE_COUNT = 61
+EXPECTED_CLI_TARGET_CLOSURE_SOURCE_COUNT = 60
+EXPECTED_AUDITED_SOURCE_COUNT = 60
 REQUIRED_EXTENDED_DOXYGEN_SOURCES = (
     "apps/graph_cli/src/dependency_tree_formatter.cpp",
     "apps/graph_cli/src/do_traversal.cpp",
@@ -530,6 +530,7 @@ GUARD_DEFINITIONS = (
     ),
     ("apps/graph_cli/src/command/command_bench.cpp", "handle_bench", 1),
     ("apps/graph_cli/src/command/command_inspect.cpp", "handle_inspect", 1),
+    ("apps/graph_cli/src/command/command_save.cpp", "handle_save", 1),
     ("apps/graph_cli/src/command/command_node.cpp", "handle_node", 1),
     ("apps/graph_cli/src/command/command_print.cpp", "handle_print", 1),
     ("apps/graph_cli/src/command/command_switch.cpp", "handle_switch", 2),
@@ -1792,7 +1793,7 @@ def inspect_semantics(repo: Path) -> dict[str, Any]:
             and "@throws std::bad_alloc"
             in commands_header[
                 commands_header.find(
-                    "@brief Computes a node image"
+                    "@brief Computes named Values and encodes one ordinary image"
                 ) : commands_header.find("void print_help_save")
             ]
         ),
@@ -1897,10 +1898,10 @@ def make_expected() -> dict[str, Any]:
             "passes": True,
         },
         "guard_definitions": {
-            "expected_count": 16,
-            "observed_count": 16,
-            "expected_broad_catch_count": 22,
-            "actual_broad_catch_count": 22,
+            "expected_count": 17,
+            "observed_count": 17,
+            "expected_broad_catch_count": 23,
+            "actual_broad_catch_count": 23,
             "missing": [],
             "invalid": [],
             "target_source_counts": EXPECTED_CLI_TARGET_SOURCE_COUNTS,
