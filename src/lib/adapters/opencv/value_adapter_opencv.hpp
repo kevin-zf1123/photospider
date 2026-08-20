@@ -11,8 +11,10 @@ namespace ps {
  * @brief Creates a zero-copy read-only OpenCV matrix over one image Value.
  * @param value Ready host-readable interleaved ordinary DenseImage Value.
  * @return Matrix borrowing `value` payload.
- * @throws std::invalid_argument, ReadyFenceAccessError, BufferAccessError, or
- *         cv::Exception as documented by the public adapter.
+ * @throws std::invalid_argument for an unsupported Value or a logical width or
+ *         height above OpenCV's `int` extent domain.
+ * @throws ReadyFenceAccessError, BufferAccessError, or cv::Exception as
+ *         documented by the public adapter.
  * @note The caller keeps `value` alive and treats the matrix as read-only.
  */
 cv::Mat toCvMat(const Value& value);
@@ -26,7 +28,11 @@ cv::Mat toCvMat(const Value& value);
  *         ROI facts.
  * @throws ReadyFenceAccessError, BufferAccessError, or cv::Exception from the
  *         underlying Value adapter.
- * @note OpenCV cannot enforce pixel constness; callers must not mutate it.
+ * @note The matrix header is constructed directly from the validated ROI,
+ *       original row stride, and exact ROI start. A representable tile may
+ *       therefore view a Value whose complete logical extent exceeds OpenCV's
+ *       matrix limit. OpenCV cannot enforce pixel constness; callers must not
+ *       mutate it or outlive `tile.value`.
  */
 cv::Mat toCvMat(const InputTile& tile);
 

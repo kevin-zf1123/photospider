@@ -104,28 +104,31 @@ std::pair<ElementSemantics, StorageEncoding> from_cv_type(int matrix_type) {
 /**
  * @brief Validates OpenCV-compatible interleaving and returns its matrix type.
  * @param view Retaining validated ordinary-image view.
+ * @param width Local matrix width whose active x-stride is exposed.
+ * @param height Local matrix height whose row stride is exposed.
  * @return Complete OpenCV type including channel count.
  * @throws std::invalid_argument for unsupported channels or physical layout.
  * @throws std::overflow_error when active row bytes are unrepresentable.
  */
-int validate_cv_image_view(const ImageView& view) {
+int validate_cv_image_view(const ImageView& view, std::size_t width,
+                           std::size_t height) {
   if (view.channels() == 0U ||
       view.channels() > static_cast<std::size_t>(CV_CN_MAX)) {
     throw std::invalid_argument("OpenCV channel count is unsupported.");
   }
   const std::size_t pixel_bytes =
       checked_multiply(view.channels(), view.element_bytes());
-  const std::size_t row_bytes = checked_multiply(view.width(), pixel_bytes);
+  const std::size_t row_bytes = checked_multiply(width, pixel_bytes);
   const ImageFacet& facet = view.image_facet();
   const std::vector<std::ptrdiff_t>& strides = view.layout().byte_strides;
-  if ((view.width() > 1U &&
+  if ((width > 1U &&
        (strides[facet.x_axis] <= 0 ||
         static_cast<std::size_t>(strides[facet.x_axis]) != pixel_bytes)) ||
       (facet.channel_axis.has_value() && view.channels() > 1U &&
        (strides[*facet.channel_axis] <= 0 ||
         static_cast<std::size_t>(strides[*facet.channel_axis]) !=
             view.element_bytes())) ||
-      (view.height() > 1U &&
+      (height > 1U &&
        (view.row_stride() <= 0 ||
         static_cast<std::size_t>(view.row_stride()) < row_bytes))) {
     throw std::invalid_argument(
@@ -133,6 +136,47 @@ int validate_cv_image_view(const ImageView& view) {
   }
   return CV_MAKETYPE(to_cv_depth(view.descriptor()),
                      static_cast<int>(view.channels()));
+}
+
+/**
+ * @brief Converts one OpenCV matrix extent without narrowing.
+ * @param width Positive or empty matrix width.
+ * @param height Positive or empty matrix height.
+ * @return Exact `{rows, columns}` pair in OpenCV's signed extent domain.
+ * @throws std::invalid_argument when either extent exceeds `INT_MAX`.
+ * @note The check runs before layout validation, pointer derivation, or any
+ *       OpenCV matrix construction so the failure is stable and fail-closed.
+ */
+std::pair<int, int> checked_cv_dimensions(std::size_t width,
+                                          std::size_t height) {
+  const std::size_t maximum =
+      static_cast<std::size_t>(std::numeric_limits<int>::max());
+  if (width > maximum || height > maximum) {
+    throw std::invalid_argument(
+        "OpenCV matrix dimensions exceed the supported int range.");
+  }
+  return {static_cast<int>(height), static_cast<int>(width)};
+}
+
+/**
+ * @brief Resolves one OpenCV matrix step for a validated local image extent.
+ * @param view Retaining validated ordinary-image view.
+ * @param width Local matrix width used to compute active row bytes.
+ * @param height Local matrix height governing row-stride relevance.
+ * @return Original nonnegative row stride, or active row bytes for a one-row
+ *         view whose retained y stride is negative.
+ * @throws std::overflow_error when active row bytes are unrepresentable.
+ * @note Multi-row positivity and minimum row width are already checked by
+ *       `validate_cv_image_view`; this helper never narrows a stride. OpenCV
+ *       interprets an original zero step as its automatic active-row step.
+ */
+std::size_t cv_row_stride(const ImageView& view, std::size_t width,
+                          std::size_t height) {
+  const std::size_t row_bytes = checked_multiply(
+      checked_multiply(width, view.channels()), view.element_bytes());
+  return height == 1U && view.row_stride() < 0
+             ? row_bytes
+             : static_cast<std::size_t>(view.row_stride());
 }
 
 /**
@@ -154,32 +198,18 @@ void validate_roi(const PixelRect& roi, const ImageView& view) {
   }
 }
 
-/**
- * @brief Converts kernel geometry into the provider-local rectangle type.
- * @param roi Validated zero-based ROI.
- * @return Equivalent OpenCV rectangle.
- * @throws Nothing.
- */
-cv::Rect to_cv_rect(const PixelRect& roi) noexcept {
-  return cv::Rect(roi.x, roi.y, roi.width, roi.height);
-}
-
 }  // namespace
 
 /** @copydoc toCvMat(const Value&) */
 cv::Mat toCvMat(const Value& value) {
   ImageView view(value);
-  const int matrix_type = validate_cv_image_view(view);
-  const std::size_t row_bytes = checked_multiply(
-      checked_multiply(view.width(), view.channels()), view.element_bytes());
-  const std::size_t row_stride =
-      view.height() == 1U && view.row_stride() <= 0
-          ? row_bytes
-          : static_cast<std::size_t>(view.row_stride());
-  return cv::Mat(static_cast<int>(view.height()),
-                 static_cast<int>(view.width()), matrix_type,
+  const auto [rows, columns] =
+      checked_cv_dimensions(view.width(), view.height());
+  const int matrix_type =
+      validate_cv_image_view(view, view.width(), view.height());
+  return cv::Mat(rows, columns, matrix_type,
                  const_cast<std::byte*>(view.channel_data(0U, 0U, 0U)),
-                 row_stride);
+                 cv_row_stride(view, view.width(), view.height()));
 }
 
 /** @copydoc toCvMat(const InputTile&) */
@@ -189,7 +219,18 @@ cv::Mat toCvMat(const InputTile& tile) {
   }
   ImageView view(*tile.value);
   validate_roi(tile.roi, view);
-  return toCvMat(*tile.value)(to_cv_rect(tile.roi));
+  const std::size_t width = static_cast<std::size_t>(tile.roi.width);
+  const std::size_t height = static_cast<std::size_t>(tile.roi.height);
+  const auto [rows, columns] = checked_cv_dimensions(width, height);
+  const int matrix_type = validate_cv_image_view(view, width, height);
+  if (tile.roi.width == 0 || tile.roi.height == 0) {
+    return cv::Mat{};
+  }
+  return cv::Mat(rows, columns, matrix_type,
+                 const_cast<std::byte*>(view.channel_data(
+                     static_cast<std::size_t>(tile.roi.x),
+                     static_cast<std::size_t>(tile.roi.y), 0U)),
+                 cv_row_stride(view, width, height));
 }
 
 /** @copydoc toCvUMat(const Value&) */

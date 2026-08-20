@@ -17,12 +17,15 @@ namespace ps::plugin::opencv {
  *        ImageFacet and OpenCV-compatible interleaved whole-byte storage.
  * @return Matrix borrowing the Value payload with data-window dimensions.
  * @throws std::invalid_argument for unsupported representation, axes, layout,
- *         element encoding, channel count, or negative/non-interleaved stride.
+ *         element encoding, channel count, logical width/height above
+ *         `INT_MAX`, or negative/non-interleaved stride.
  * @throws ReadyFenceAccessError or BufferAccessError when the Value is not
  *         synchronously host-readable.
  * @throws cv::Exception when OpenCV rejects the validated matrix header.
  * @note The returned matrix must be treated as read-only and must not outlive
  *       `value`. No sample/color conversion, transfer, mapping, or copy occurs.
+ *       Complete logical extents are checked before any OpenCV header
+ *       construction or signed narrowing.
  */
 cv::Mat to_mat(const Value& value);
 
