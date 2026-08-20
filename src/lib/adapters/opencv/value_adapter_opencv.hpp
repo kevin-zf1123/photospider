@@ -63,18 +63,50 @@ cv::Mat toCvMat(const InputTile& tile);
 cv::Mat toCvMat(const OutputTile& tile);
 
 /**
- * @brief Uploads one image Value to an OpenCV unified matrix.
+ * @brief Creates a borrowed read-only unified view of one image Value.
  * @param value Value accepted by `toCvMat`.
- * @return Read-only-by-contract unified matrix.
- * @throws Validation, access, allocation, and cv::Exception failures unchanged.
+ * @return Read-only-by-contract UMat borrowing the Value payload.
+ * @throws std::invalid_argument for an unsupported Value or a logical width or
+ *         height above OpenCV's `int` extent domain.
+ * @throws ReadyFenceAccessError or BufferAccessError when the Value is not
+ *         synchronously host-readable.
+ * @throws std::overflow_error when checked active-row byte arithmetic is
+ *         unrepresentable.
+ * @throws std::bad_alloc when owned ImageView facet metadata, temporary
+ *         channel-data coordinate storage, or OpenCV UMatData, bookkeeping,
+ *         or backend-provider resources cannot be allocated.
+ * @throws cv::Exception when OpenCV rejects the validated matrix header or
+ *         `getUMat(cv::ACCESS_READ)` fails.
+ * @note The complete `toCvMat` path runs first, and no exception is translated.
+ *       The external-data `getUMat` path creates `USER_ALLOCATED` UMatData over
+ *       the host payload; it copies no payload and retains neither the Value
+ *       nor a ReadLease. The caller keeps `value` alive for every UMat access
+ *       and treats the UMat as read-only.
  */
 cv::UMat toCvUMat(const Value& value);
 
 /**
- * @brief Uploads one input tile to an ROI-scoped unified matrix.
+ * @brief Creates a borrowed read-only unified view of one input tile ROI.
  * @param tile Tile accepted by `toCvMat(InputTile)`.
- * @return Read-only-by-contract unified ROI.
- * @throws Validation, access, allocation, and cv::Exception failures unchanged.
+ * @return Read-only-by-contract UMat borrowing exactly `tile.roi`.
+ * @throws std::runtime_error for a disconnected tile.
+ * @throws std::invalid_argument or std::out_of_range for an unsupported Value
+ *         or invalid ROI facts.
+ * @throws ReadyFenceAccessError or BufferAccessError when the Value is not
+ *         synchronously host-readable.
+ * @throws std::overflow_error when checked active-row byte arithmetic is
+ *         unrepresentable.
+ * @throws std::bad_alloc when owned ImageView facet metadata, temporary
+ *         channel-data coordinate storage, or OpenCV UMatData, bookkeeping,
+ *         or backend-provider resources cannot be allocated.
+ * @throws cv::Exception when OpenCV rejects the validated matrix header or
+ *         `getUMat(cv::ACCESS_READ)` fails.
+ * @note The complete `toCvMat(InputTile)` path runs first, and no exception is
+ *       translated. The external-data `getUMat` path creates `USER_ALLOCATED`
+ *       UMatData over the host payload; it copies no payload and retains
+ *       neither the Value nor a ReadLease. Use the read-only UMat only
+ *       synchronously within the tile callback while the borrowed Value owner
+ *       remains alive.
  */
 cv::UMat toCvUMat(const InputTile& tile);
 

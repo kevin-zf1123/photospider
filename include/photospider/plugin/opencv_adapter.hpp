@@ -35,22 +35,26 @@ namespace ps::plugin::opencv {
 cv::Mat to_mat(const Value& value);
 
 /**
- * @brief Uploads one ordinary DenseImage Value to an OpenCV unified matrix.
+ * @brief Creates a borrowed read-only OpenCV unified view of one image Value.
  * @param value Ready host-readable Value accepted by `to_mat`.
- * @return Read-only-by-contract UMat initialized from the borrowed matrix.
+ * @return Read-only-by-contract UMat borrowing the Value payload.
  * @throws std::invalid_argument for the same representation, axes, layout,
  *         element, channel, extent, or stride rejection as `to_mat`.
  * @throws ReadyFenceAccessError or BufferAccessError when the Value is not
  *         synchronously host-readable.
  * @throws std::overflow_error when checked active-row byte arithmetic is
  *         unrepresentable.
- * @throws std::bad_alloc when owned ImageView facet metadata or temporary
- *         channel-data coordinate storage cannot be allocated.
+ * @throws std::bad_alloc when owned ImageView facet metadata, temporary
+ *         channel-data coordinate storage, or OpenCV UMatData, bookkeeping,
+ *         or backend-provider resources cannot be allocated.
  * @throws cv::Exception when matrix-header construction or
  *         `getUMat(cv::ACCESS_READ)` fails.
- * @note The returned UMat may own provider storage after upload; this function
- *       first follows the complete `to_mat` path and translates no exception.
- *       It still performs no sample-domain or color conversion.
+ * @note This function first follows the complete `to_mat` path and translates
+ *       no exception. The external-data `getUMat` path creates
+ *       `USER_ALLOCATED` UMatData over the host payload; it copies no payload
+ *       and retains neither the Value nor a ReadLease. The returned UMat must
+ *       be treated as read-only and must not outlive `value`. No sample-domain
+ *       or color conversion occurs.
  */
 cv::UMat to_umat(const Value& value);
 
