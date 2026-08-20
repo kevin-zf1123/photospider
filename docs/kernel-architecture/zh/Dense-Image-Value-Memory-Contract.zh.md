@@ -40,7 +40,9 @@ coordinate；逻辑访问仅在完成 containment 检查后才减去 data-window
 builder 则要求 non-overlapping positive layout 和精确的 storage envelope。
 
 `BufferHandle` 是一个受检 immutable byte range，位于一个显式 `StorageBinding` 上。它不暴露
-raw pointer 或任意 context payload。Host 只能通过 retaining read lease 或独占 producer/grant
+raw pointer 或任意 context payload。CPU binding 会保留 selected range 所保证的正二次幂
+alignment；checked subrange 会在 offset 无法维持原保证时降低该值。alignment 是 physical
+reconstruction fact，绝不是 descriptor 或 content identity。Host 只能通过 retaining read lease 或独占 producer/grant
 write lease 访问。source-private device Value 保留显式 `DeviceBackend`、`DeviceId`、
 `MemoryDomain`、native owner 和 byte range；device-to-Host transfer 会创建不同的物理 binding，
 但不改变逻辑 descriptor。
@@ -79,6 +81,9 @@ snapshot 进入 formal cache state。
 envelope 保留完整内置 descriptor、ImageFacet、Layout、有序 buffer role/span/alignment、payload
 digest、可选 content digest 和有界 statistics reference。store owner 用自身的 artifact、commit、
 slot、attempt、lease、quota 与 path authority 包装它；这些事实不会成为 Value identity。
+capture 会记录每个 CPU binding 所保证的 alignment。version 1 接受不超过 4096 byte 的正二次幂
+要求，分别对齐 archive 中的每个 span，并按对应的精确要求重建每个 Strided、Blocked 或
+provider-defined buffer。
 
 payload byte 留在 JSON 和 control frame 之外。IPC OutputStore 私下 stage 所有 buffer，并最后发布
 完整 metadata manifest。worker protocol v3 传输 metadata 和 data-plane reference，而不在 control
@@ -90,8 +95,10 @@ manifest 声明的精确长度、物理长度与 non-sparse storage 检查每个
 每次 decode 都是 transactional。只有 framing、version、bound、canonical ordering、descriptor/
 Layout digest、owner join、精确 payload length、SHA-256 以及本地内置或 provider validation 均通过，
 才会发布任何内容。reconstruction 会创建全新的 allocation、Value revision、producer、fence 和
-local binding identity。失败不会留下 partial result、formal cache mutation、receipt、quota credit
-或 dependent release。
+local binding identity。aligned CPU deleter 会保留匹配的 delete alignment；provider Value 与 indexed
+lease 则保留完成验证的精确 generation/module 生命周期。包括后续 buffer allocation 中
+`std::bad_alloc` 在内的任何失败，都会展开并释放此前所有本地 owner，不留下 partial result、formal
+cache mutation、receipt、quota credit 或 dependent release。
 
 ## Cache 与持久化
 
@@ -131,7 +138,10 @@ source/destination `SampleEncoding`、有限 inclusive `SampleDomain`、destinat
 
 identity conversion 不执行 scaling。semantic conversion 仅在完成 source-domain reject/clamp 后应用
 已声明 affine mapping，再应用所选 rounding、representability、non-finite 和 precision 规则。不存在
-隐藏的 255/65535 算术、color transform、channel-role inference 或 missing-metadata fallback。
+对 finite endpoint、midpoint/radius、scale 与 fused operation 的处理，会使 forward map 和
+precision-reverse map 在不要求 `long double` 比 binary64 更宽的情况下保持有限；完整 finite
+cross-zero domain 因而不会产生可避免的 infinity、NaN 或 zero scale。不存在隐藏的 255/65535
+算术、color transform、channel-role inference 或 missing-metadata fallback。
 equal endpoint/storage identity 通过 type-aware 比较读取 integer domain，并在不做 floating promotion
 的情况下复制每个 in-domain native sample，从而保留 `int64_t`/`uint64_t` 在 `2^53` 附近及其极值的
 精确值。若平台 `long double` 无法证明 source promotion 精确，non-identity wide-integer conversion

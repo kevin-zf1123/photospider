@@ -360,7 +360,10 @@ identity:
   and color facet;
 - `BufferHandle` is a checked immutable nonempty range over one explicit
   storage binding, exposes no raw or native pointer, and creates checked
-  identity-preserving subranges; CPU builders own host bytes, while
+  identity-preserving subranges; a CPU binding records the positive
+  power-of-two alignment guaranteed for that retained range so portable
+  capture can reproduce it without making alignment logical identity; CPU
+  builders own host bytes, while
   source-private device publication may retain an opaque native owner and
   independently record host visibility;
 - `ValueBuilder` owns the only move-only `WriteLease`, refuses seal while a

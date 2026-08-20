@@ -50,6 +50,10 @@ and exact storage envelope.
 
 `BufferHandle` is a checked immutable byte range over one explicit
 `StorageBinding`. It exposes no raw pointer or arbitrary context payload.
+CPU bindings retain the positive power-of-two alignment guaranteed for the
+selected range; checked subranges reduce that guarantee when their offset
+requires it. Alignment is a physical reconstruction fact, never descriptor or
+content identity.
 Host access occurs only through retaining read leases or an exclusive
 producer/grant write lease. Source-private device Values retain explicit
 `DeviceBackend`, `DeviceId`, `MemoryDomain`, native owner, and byte range;
@@ -98,6 +102,10 @@ descriptor, ImageFacet, Layout, ordered buffer roles/spans/alignment, payload
 digests, optional content digest, and bounded statistics references. Store
 owners wrap it with their own artifact, commit, slot, attempt, lease, quota,
 and path authority; those facts do not become Value identity.
+Capture records each CPU binding's guaranteed alignment. Version 1 accepts
+positive power-of-two requirements through 4096 bytes, aligns every archive
+span independently, and reconstructs each Strided, Blocked, or
+provider-defined buffer with that exact requirement.
 
 Payload bytes stay outside JSON and control frames. IPC OutputStore stages all
 buffers privately and publishes the complete metadata manifest last. Worker
@@ -113,8 +121,12 @@ Every decode is transactional. It checks framing, versions, bounds, canonical
 ordering, descriptor/Layout digests, owner joins, exact payload lengths,
 SHA-256, and local built-in or provider validation before publishing anything.
 Reconstruction creates fresh allocation, Value revision, producer, fence, and
-local binding identities. A failure leaves no partial result, formal cache
-mutation, receipt, quota credit, or dependent release.
+local binding identities. Aligned CPU deleters retain the matching delete
+alignment, while provider Values and indexed leases retain the exact validating
+generation and module lifetime. A failure, including `std::bad_alloc` during a
+later buffer allocation, unwinds every earlier local owner and leaves no
+partial result, formal cache mutation, receipt, quota credit, or dependent
+release.
 
 ## Cache and persistence
 
@@ -166,7 +178,11 @@ precision loss.
 Identity conversion performs no scaling. Semantic conversion applies the
 declared affine mapping only after source-domain rejection or clamp, then
 applies the selected rounding, representability, non-finite, and precision
-rules. There is no hidden 255/65535 arithmetic, color transform, channel-role
+rules. Finite endpoint, midpoint/radius, scaled, and fused operations keep the
+forward map and precision-reverse map finite without requiring `long double`
+to be wider than binary64; full finite cross-zero domains therefore never
+create an avoidable infinity, NaN, or zero scale. There is no hidden 255/65535
+arithmetic, color transform, channel-role
 inference, or missing-metadata fallback. Equal endpoint/storage identity reads
 integer domains with type-aware comparison and copies each in-domain native
 sample without floating promotion, preserving `int64_t`/`uint64_t` values

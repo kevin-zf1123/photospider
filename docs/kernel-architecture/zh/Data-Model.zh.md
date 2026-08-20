@@ -291,7 +291,9 @@ physical ownership 与正式 HP cache identity：
   要求有符号半开 data window，并可保留独立 display window、稳定 channel/group
   schema、声明 sample-domain facet 与 color facet；
 - `BufferHandle` 是同一显式 storage binding 上受检、不可变、非空的 range；它不暴露 raw
-  或 native pointer，并创建保留 identity 的 checked subrange；CPU builder 拥有 host byte，
+  或 native pointer，并创建保留 identity 的 checked subrange；CPU binding 会记录该 retained
+  range 所保证的正二次幂 alignment，使 portable capture 能精确重建它，同时不把 alignment
+  变成 logical identity；CPU builder 拥有 host byte，
   而 source-private device publication 可以保留 opaque native owner，并独立记录 host
   visibility；
 - `ValueBuilder` 拥有唯一 move-only `WriteLease`，live lease 存在时拒绝 seal，并以全新
