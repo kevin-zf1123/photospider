@@ -13,9 +13,18 @@ namespace ps {
  * @return Matrix borrowing `value` payload.
  * @throws std::invalid_argument for an unsupported Value or a logical width or
  *         height above OpenCV's `int` extent domain.
- * @throws ReadyFenceAccessError, BufferAccessError, or cv::Exception as
- *         documented by the public adapter.
- * @note The caller keeps `value` alive and treats the matrix as read-only.
+ * @throws ReadyFenceAccessError or BufferAccessError when the Value is not
+ *         synchronously host-readable.
+ * @throws std::overflow_error when checked active-row byte arithmetic is
+ *         unrepresentable.
+ * @throws std::bad_alloc when owned ImageView facet metadata or temporary
+ *         channel-data coordinate storage cannot be allocated.
+ * @throws cv::Exception when OpenCV rejects the validated matrix header.
+ * @note The caller keeps `value` alive and treats the matrix as read-only; the
+ *       matrix header retains neither the Value nor a ReadLease. For an
+ *       otherwise valid one-row matrix, a zero row stride becomes OpenCV
+ *       `AUTO_STEP` and a negative stride becomes the active row byte count;
+ *       only a positive padded stride retains a distinct source-step value.
  */
 cv::Mat toCvMat(const Value& value);
 
@@ -26,13 +35,21 @@ cv::Mat toCvMat(const Value& value);
  * @throws std::runtime_error for a disconnected tile.
  * @throws std::invalid_argument or std::out_of_range for unsupported Value or
  *         ROI facts.
- * @throws ReadyFenceAccessError, BufferAccessError, or cv::Exception from the
- *         underlying Value adapter.
+ * @throws ReadyFenceAccessError or BufferAccessError when the Value is not
+ *         synchronously host-readable.
+ * @throws std::overflow_error when checked active-row byte arithmetic is
+ *         unrepresentable.
+ * @throws std::bad_alloc when owned ImageView facet metadata or temporary
+ *         channel-data coordinate storage cannot be allocated.
+ * @throws cv::Exception when OpenCV rejects the validated matrix header.
  * @note The matrix header is constructed directly from the validated ROI,
- *       original row stride, and exact ROI start. A representable tile may
- *       therefore view a Value whose complete logical extent exceeds OpenCV's
- *       matrix limit. OpenCV cannot enforce pixel constness; callers must not
- *       mutate it or outlive `tile.value`.
+ *       exact ROI start, and the applicable OpenCV row step. For an otherwise
+ *       valid one-row matrix, a zero row stride becomes `AUTO_STEP` and a
+ *       negative stride becomes the active row byte count; only a positive
+ *       padded stride retains a distinct source-step value. The header retains
+ *       neither the Value nor a ReadLease; callers must not mutate it and may
+ *       use it only synchronously within the tile callback while the borrowed
+ *       Value owner remains alive.
  */
 cv::Mat toCvMat(const InputTile& tile);
 

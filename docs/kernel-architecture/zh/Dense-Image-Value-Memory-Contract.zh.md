@@ -119,13 +119,18 @@ runtime identity。
 public OpenCV adapter 只接受 Ready、Host-readable、whole-byte、unquantized、Strided 的普通 image
 Value。whole-Value view 会在任何 narrowing、address lookup 或 matrix-header construction 前，拒绝
 超出 OpenCV `int` 范围的 width/height。`InputTile` view 则验证 source Value、ROI containment 与
-ROI 自身的可表示 extent，然后直接使用 ROI size、原 row stride 和精确的 first-channel address
-构造局部 zero-copy matrix，不会先构造 full matrix。因此，可表示的小 tile 可以查看 oversized
-zero-stride logical image，同时保留精确 `step` 与 address。padded stride、zero-based OpenCV
-metadata 与 signed Value origin 仍是彼此独立的关注点。borrowed read-only matrix 会保留 source
-Value；mutable matrix 被限制在独占 Host output grant 内。OpenCV decode 保留受支持的 8/16-bit
-code value，并分配显式 zero-origin data window，因为普通 OpenCV metadata 不具备 signed-window
-authority。它从不处理 `.exr` path。
+ROI 自身的可表示 extent，然后直接使用 ROI size 和精确的 first-channel address 构造局部
+zero-copy matrix，不会先构造 full matrix。对于其他条件均有效的单行 matrix，zero row stride 会以
+OpenCV `AUTO_STEP` 传入，因此 matrix 使用 active row byte count；negative stride 同样会映射为
+该 byte count。只有 positive padded stride 的独立 source-step 数值会保留为 `cv::Mat::step`；
+positive tight stride 已经等于 active row byte count。因此，可表示的小 tile 可以用精确 ROI
+address 查看 oversized zero-stride logical image，但 matrix step 是 active row byte count。padded
+stride、zero-based OpenCV metadata 与 signed Value origin 仍是彼此独立的关注点。external-data
+`cv::Mat` header 只借用 payload，不持有 Value 或 ReadLease。whole-Value 调用方必须在每次 matrix
+访问期间保持传入 Value 存活；InputTile matrix 只能在 borrowed Value owner 存活时于 callback
+同步范围内使用。mutable matrix 仍被限制在独占 Host output grant 内。OpenCV decode 保留受支持的
+8/16-bit code value，并分配显式 zero-origin data window，因为普通 OpenCV metadata 不具备
+signed-window authority。它从不处理 `.exr` path。
 encode 使用封闭的 extension/depth/channel matrix：JPEG 只允许一或三 channel 的 unsigned 8-bit；
 PNG/TIFF/JPEG 2000 接受声明的一/三/四 channel unsigned 8/16-bit 组合；BMP/WebP/Netpbm 保留各自
 更窄的声明子集。signed 与 floating matrix 会在 `cv::imwrite` 前被拒绝，因此 OpenCV 无法静默

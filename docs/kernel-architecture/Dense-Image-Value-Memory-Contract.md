@@ -154,15 +154,24 @@ unquantized, Strided ordinary image Values. A whole-Value view rejects width
 or height outside OpenCV's `int` extent before any narrowing, address lookup,
 or matrix-header construction. An `InputTile` view instead validates the
 source Value, ROI containment, and the ROI's own representable extent, then
-constructs the local zero-copy matrix from the ROI size, original row stride,
-and exact first-channel address without constructing the full matrix. Thus a
-small representable tile can view an oversized zero-stride logical image while
-retaining the exact `step` and address. Padded stride, zero-based OpenCV
-metadata, and signed Value origins remain distinct concerns. Borrowed
-read-only matrices retain the source Value; mutable matrices are scoped to an
-exclusive Host output grant. OpenCV decode preserves supported 8/16-bit code
-values and assigns an explicit zero-origin data window because common OpenCV
-metadata has no signed-window authority. Encode uses a closed
+constructs the local zero-copy matrix from the ROI size and exact first-channel
+address without constructing the full matrix. For an otherwise valid one-row
+matrix, a zero row stride is passed as OpenCV `AUTO_STEP`, so the matrix uses
+its active row byte count; a negative stride is likewise mapped to that count.
+Only a positive padded stride preserves a distinct source-step value as
+`cv::Mat::step`; a positive tight stride already equals the active row byte
+count.
+Thus a small representable tile can view an oversized zero-stride logical image
+with the exact ROI address, but its matrix step is the active row byte count.
+Padded stride, zero-based OpenCV metadata, and signed Value origins remain
+distinct concerns. An external-data `cv::Mat` header borrows the payload and
+retains neither the Value nor a ReadLease. Whole-Value callers must keep the
+supplied Value alive for every matrix access; an InputTile matrix may be used
+only synchronously within its callback while the borrowed Value owner is
+alive. Mutable matrices remain scoped to an exclusive Host output grant.
+OpenCV decode preserves supported 8/16-bit code values and assigns an explicit
+zero-origin data window because common OpenCV metadata has no signed-window
+authority. Encode uses a closed
 extension/depth/channel matrix: JPEG is
 unsigned 8-bit with one or three channels; PNG/TIFF/JPEG 2000 accept declared
 unsigned 8/16-bit one/three/four-channel combinations; BMP/WebP/Netpbm retain
