@@ -137,6 +137,126 @@ TEST(SampleConversion, IdentityCodeValuesDoNotScale) {
             source.image_facet()->display_window);
 }
 
+TEST(SampleConversion, IdentityPreservesExactUint64CodeValues) {
+  constexpr std::uint64_t kTwoTo53 = std::uint64_t{1U} << 53U;
+  const SampleEndpoint code64{
+      SampleEncoding{1U, SampleEncodingKind::CodeValue},
+      SampleDomain{
+          SampleDomainKind::CodeValue, 0.0,
+          static_cast<double>(std::numeric_limits<std::uint64_t>::max())}};
+  const std::vector<std::uint64_t> samples{
+      kTwoTo53 - 1U, kTwoTo53, kTwoTo53 + 1U,
+      std::numeric_limits<std::uint64_t>::max()};
+  const Value source = make_sample_image(samples, code64);
+  SampleConversion conversion =
+      make_conversion(code64, code64, ElementSemantics::UnsignedInteger, 64U);
+  conversion.precision_loss = PrecisionLossPolicy::Reject;
+
+  const Value converted = convert_dense_image_samples(source, conversion);
+
+  EXPECT_EQ(read_samples<std::uint64_t>(converted), samples);
+}
+
+TEST(SampleConversion, IdentityPreservesExactInt64CodeValues) {
+  constexpr std::int64_t kTwoTo53 = std::int64_t{1} << 53U;
+  const SampleEndpoint code64{
+      SampleEncoding{1U, SampleEncodingKind::CodeValue},
+      SampleDomain{
+          SampleDomainKind::CodeValue,
+          static_cast<double>(std::numeric_limits<std::int64_t>::min()),
+          static_cast<double>(std::numeric_limits<std::int64_t>::max())}};
+  const std::vector<std::int64_t> samples{
+      std::numeric_limits<std::int64_t>::min(),
+      -kTwoTo53 - 1,
+      -kTwoTo53,
+      kTwoTo53,
+      kTwoTo53 + 1,
+      std::numeric_limits<std::int64_t>::max()};
+  const Value source = make_sample_image(samples, code64);
+  SampleConversion conversion =
+      make_conversion(code64, code64, ElementSemantics::SignedInteger, 64U);
+  conversion.precision_loss = PrecisionLossPolicy::Reject;
+
+  const Value converted = convert_dense_image_samples(source, conversion);
+
+  EXPECT_EQ(read_samples<std::int64_t>(converted), samples);
+}
+
+TEST(SampleConversion, IdentityPoliciesInspectExactUint64Values) {
+  constexpr std::uint64_t kTwoTo53 = std::uint64_t{1U} << 53U;
+  const SampleEndpoint bounded{
+      SampleEncoding{1U, SampleEncodingKind::CodeValue},
+      SampleDomain{SampleDomainKind::CodeValue, 0.0,
+                   static_cast<double>(kTwoTo53)}};
+  const Value source =
+      make_sample_image<std::uint64_t>({kTwoTo53 + 1U}, bounded);
+  SampleConversion conversion =
+      make_conversion(bounded, bounded, ElementSemantics::UnsignedInteger, 64U);
+  conversion.precision_loss = PrecisionLossPolicy::Reject;
+
+  EXPECT_THROW((void)convert_dense_image_samples(source, conversion),
+               std::domain_error);
+
+  conversion.out_of_domain = OutOfDomainPolicy::Clamp;
+  EXPECT_EQ(read_samples<std::uint64_t>(
+                convert_dense_image_samples(source, conversion)),
+            (std::vector<std::uint64_t>{kTwoTo53}));
+}
+
+TEST(SampleConversion, RejectsUnprovableWideIntegerAffineInput) {
+  if (std::numeric_limits<long double>::digits >= 64) {
+    GTEST_SKIP() << "long double exactly represents every uint64 source";
+  }
+  constexpr std::uint64_t kTwoTo53 = std::uint64_t{1U} << 53U;
+  const SampleEndpoint code64{
+      SampleEncoding{1U, SampleEncodingKind::CodeValue},
+      SampleDomain{
+          SampleDomainKind::CodeValue, 0.0,
+          static_cast<double>(std::numeric_limits<std::uint64_t>::max())}};
+  const Value source =
+      make_sample_image<std::uint64_t>({kTwoTo53 + 1U}, code64);
+  SampleConversion conversion =
+      make_conversion(code64, kCode16, ElementSemantics::UnsignedInteger, 16U);
+  conversion.precision_loss = PrecisionLossPolicy::Allow;
+
+  EXPECT_THROW((void)convert_dense_image_samples(source, conversion),
+               std::domain_error);
+}
+
+TEST(SampleConversion, RejectsRoundedWideIntegerUpperEndpointsBeforeCast) {
+  const SampleEndpoint unit{SampleEncoding{1U, SampleEncodingKind::Value},
+                            SampleDomain{SampleDomainKind::Legal, 0.0, 1.0}};
+
+  const SampleEndpoint unsigned64{
+      SampleEncoding{1U, SampleEncodingKind::CodeValue},
+      SampleDomain{
+          SampleDomainKind::CodeValue, 0.0,
+          static_cast<double>(std::numeric_limits<std::uint64_t>::max())}};
+  SampleConversion unsigned_conversion =
+      make_conversion(unit, unsigned64, ElementSemantics::UnsignedInteger, 64U);
+  EXPECT_THROW(
+      (void)convert_dense_image_samples(
+          make_sample_image<std::uint8_t>({1U}, unit), unsigned_conversion),
+      std::domain_error);
+
+  const SampleEndpoint signed64{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{
+          SampleDomainKind::Legal,
+          static_cast<double>(std::numeric_limits<std::int64_t>::min()),
+          static_cast<double>(std::numeric_limits<std::int64_t>::max())}};
+  SampleConversion signed_conversion =
+      make_conversion(unit, signed64, ElementSemantics::SignedInteger, 64U);
+  EXPECT_EQ(
+      read_samples<std::int64_t>(convert_dense_image_samples(
+          make_sample_image<std::uint8_t>({0U}, unit), signed_conversion)),
+      (std::vector<std::int64_t>{std::numeric_limits<std::int64_t>::min()}));
+  EXPECT_THROW(
+      (void)convert_dense_image_samples(
+          make_sample_image<std::uint8_t>({1U}, unit), signed_conversion),
+      std::domain_error);
+}
+
 TEST(SampleConversion, AppliesRejectAndClampBeforeAffineMapping) {
   const Value source =
       make_sample_image<float>({-0.25F, 0.5F, 1.25F}, kNormalized);

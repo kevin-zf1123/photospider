@@ -115,16 +115,71 @@ void validate_endpoint(const SampleEndpoint& endpoint) {
 }
 
 /**
- * @brief Loads one native scalar without alignment assumptions.
+ * @brief Copies one native scalar from possibly unaligned storage.
  * @tparam Scalar Native scalar type.
  * @param address Borrowed readable bytes.
- * @return Exact scalar promoted to long double.
+ * @return Exact native scalar.
  * @throws Nothing.
  */
 template <typename Scalar>
-long double load_native(const std::byte* address) noexcept {
+Scalar read_native(const std::byte* address) noexcept {
   Scalar scalar{};
   std::memcpy(&scalar, address, sizeof(scalar));
+  return scalar;
+}
+
+/**
+ * @brief Reports whether one integer is exactly promotable to `long double`.
+ * @tparam Scalar Supported native integer type.
+ * @param value Exact integer sample.
+ * @return True when every value bit is preserved by the promotion.
+ * @throws Nothing.
+ * @note The conservative magnitude proof avoids a lossy trial conversion and
+ * handles the signed minimum without signed overflow.
+ */
+template <typename Scalar>
+bool exactly_promotable_integer(Scalar value) noexcept {
+  static_assert(std::is_integral_v<Scalar>,
+                "integer promotion proof requires an integer type");
+  using Unsigned = std::make_unsigned_t<Scalar>;
+  constexpr int kScalarDigits = std::numeric_limits<Unsigned>::digits;
+  constexpr int kLongDoubleDigits = std::numeric_limits<long double>::digits;
+  if constexpr (kLongDoubleDigits >= kScalarDigits) {
+    return true;
+  } else {
+    const Unsigned magnitude = [&]() noexcept {
+      if constexpr (std::is_signed_v<Scalar>) {
+        if (value < 0) {
+          return static_cast<Unsigned>(0U) - static_cast<Unsigned>(value);
+        }
+      }
+      return static_cast<Unsigned>(value);
+    }();
+    const Unsigned exact_limit = Unsigned{1U} << kLongDoubleDigits;
+    return magnitude <= exact_limit;
+  }
+}
+
+/**
+ * @brief Promotes one native scalar only when the conversion is provably exact.
+ * @tparam Scalar Supported native scalar type.
+ * @param address Borrowed readable scalar bytes.
+ * @return Exact `long double` representation.
+ * @throws std::domain_error when a wide integer cannot be represented exactly
+ * by this platform's `long double` arithmetic.
+ * @note Floating-point input is already no wider than the supported binary64
+ * source storage and therefore converts without losing its source value.
+ */
+template <typename Scalar>
+long double load_native_for_affine(const std::byte* address) {
+  const Scalar scalar = read_native<Scalar>(address);
+  if constexpr (std::is_integral_v<Scalar>) {
+    if (!exactly_promotable_integer(scalar)) {
+      throw std::domain_error(
+          "Wide integer sample cannot enter exact affine arithmetic on this "
+          "platform.");
+    }
+  }
   return static_cast<long double>(scalar);
 }
 
@@ -134,6 +189,8 @@ long double load_native(const std::byte* address) noexcept {
  * @param descriptor Valid native-scalar descriptor.
  * @return Numeric value promoted to long double.
  * @throws std::invalid_argument for an unsupported semantic/width pair.
+ * @throws std::domain_error when a wide integer cannot be promoted exactly on
+ * this platform for non-identity affine arithmetic.
  */
 long double load_scalar(const std::byte* address,
                         const DenseTensorDescriptor& descriptor) {
@@ -146,13 +203,13 @@ long double load_scalar(const std::byte* address,
     case ElementSemantics::UnsignedInteger:
       switch (width) {
         case 8U:
-          return load_native<std::uint8_t>(address);
+          return load_native_for_affine<std::uint8_t>(address);
         case 16U:
-          return load_native<std::uint16_t>(address);
+          return load_native_for_affine<std::uint16_t>(address);
         case 32U:
-          return load_native<std::uint32_t>(address);
+          return load_native_for_affine<std::uint32_t>(address);
         case 64U:
-          return load_native<std::uint64_t>(address);
+          return load_native_for_affine<std::uint64_t>(address);
         default:
           break;
       }
@@ -160,23 +217,23 @@ long double load_scalar(const std::byte* address,
     case ElementSemantics::SignedInteger:
       switch (width) {
         case 8U:
-          return load_native<std::int8_t>(address);
+          return load_native_for_affine<std::int8_t>(address);
         case 16U:
-          return load_native<std::int16_t>(address);
+          return load_native_for_affine<std::int16_t>(address);
         case 32U:
-          return load_native<std::int32_t>(address);
+          return load_native_for_affine<std::int32_t>(address);
         case 64U:
-          return load_native<std::int64_t>(address);
+          return load_native_for_affine<std::int64_t>(address);
         default:
           break;
       }
       break;
     case ElementSemantics::FloatingPoint:
       if (width == 32U) {
-        return load_native<float>(address);
+        return load_native_for_affine<float>(address);
       }
       if (width == 64U) {
-        return load_native<double>(address);
+        return load_native_for_affine<double>(address);
       }
       break;
   }
@@ -196,6 +253,38 @@ long double store_native(std::byte* address, long double value) noexcept {
   const Scalar scalar = static_cast<Scalar>(value);
   std::memcpy(address, &scalar, sizeof(scalar));
   return static_cast<long double>(scalar);
+}
+
+/**
+ * @brief Stores one finite integral-valued sample after exact open-bound
+ * checks.
+ * @tparam Scalar Native integer destination type.
+ * @param address Borrowed writable scalar bytes.
+ * @param value Finite integral-valued sample after deterministic rounding.
+ * @return Exact stored integer promoted to `long double`.
+ * @throws std::domain_error when the value is outside the integer range.
+ * @note The upper bound is exclusive, avoiding a rounded binary floating
+ * representation of `UINT64_MAX` or `INT64_MAX` and guaranteeing the final
+ * floating-to-integer cast is defined.
+ */
+template <typename Scalar>
+long double store_integral_native(std::byte* address, long double value) {
+  static_assert(std::is_integral_v<Scalar>,
+                "integral storage requires an integer type");
+  constexpr int kValueBits = std::numeric_limits<Scalar>::digits;
+  const long double upper_exclusive = std::ldexp(1.0L, kValueBits);
+  if constexpr (std::is_unsigned_v<Scalar>) {
+    if (value < 0.0L || value >= upper_exclusive) {
+      throw std::domain_error(
+          "Converted sample exceeds destination storage range.");
+    }
+  } else {
+    if (value < -upper_exclusive || value >= upper_exclusive) {
+      throw std::domain_error(
+          "Converted sample exceeds destination storage range.");
+    }
+  }
+  return store_native<Scalar>(address, value);
 }
 
 /**
@@ -264,6 +353,7 @@ void store_scalar(std::byte* address, const DenseTensorDescriptor& descriptor,
     stored = round_integral(mapped, conversion.rounding);
   }
   if (std::isfinite(stored) &&
+      descriptor.element_semantics == ElementSemantics::FloatingPoint &&
       (stored < static_cast<long double>(range.finite_minimum) ||
        stored > static_cast<long double>(range.finite_maximum))) {
     throw std::domain_error(
@@ -274,16 +364,16 @@ void store_scalar(std::byte* address, const DenseTensorDescriptor& descriptor,
     case ElementSemantics::UnsignedInteger:
       switch (width) {
         case 8U:
-          stored = store_native<std::uint8_t>(address, stored);
+          stored = store_integral_native<std::uint8_t>(address, stored);
           break;
         case 16U:
-          stored = store_native<std::uint16_t>(address, stored);
+          stored = store_integral_native<std::uint16_t>(address, stored);
           break;
         case 32U:
-          stored = store_native<std::uint32_t>(address, stored);
+          stored = store_integral_native<std::uint32_t>(address, stored);
           break;
         case 64U:
-          stored = store_native<std::uint64_t>(address, stored);
+          stored = store_integral_native<std::uint64_t>(address, stored);
           break;
         default:
           throw std::invalid_argument("Unsupported unsigned destination.");
@@ -292,16 +382,16 @@ void store_scalar(std::byte* address, const DenseTensorDescriptor& descriptor,
     case ElementSemantics::SignedInteger:
       switch (width) {
         case 8U:
-          stored = store_native<std::int8_t>(address, stored);
+          stored = store_integral_native<std::int8_t>(address, stored);
           break;
         case 16U:
-          stored = store_native<std::int16_t>(address, stored);
+          stored = store_integral_native<std::int16_t>(address, stored);
           break;
         case 32U:
-          stored = store_native<std::int32_t>(address, stored);
+          stored = store_integral_native<std::int32_t>(address, stored);
           break;
         case 64U:
-          stored = store_native<std::int64_t>(address, stored);
+          stored = store_integral_native<std::int64_t>(address, stored);
           break;
         default:
           throw std::invalid_argument("Unsupported signed destination.");
@@ -340,6 +430,179 @@ void store_scalar(std::byte* address, const DenseTensorDescriptor& descriptor,
       conversion.precision_loss == PrecisionLossPolicy::Reject) {
     throw std::domain_error("Sample conversion would lose numeric precision.");
   }
+}
+
+/**
+ * @brief Compares an exact native integer with one finite binary64 endpoint.
+ * @tparam Scalar Supported native integer type.
+ * @param integer Exact integer sample.
+ * @param endpoint Finite declared-domain endpoint.
+ * @return Negative, zero, or positive when `integer` is respectively less
+ * than, equal to, or greater than `endpoint`.
+ * @throws Nothing.
+ * @note Conversion is performed only after endpoint range checks make the
+ * integer cast defined; this prevents binary64 rounding from hiding
+ * `2^53 +/- 1` distinctions.
+ */
+template <typename Scalar>
+int compare_integral_to_double(Scalar integer, double endpoint) noexcept {
+  static_assert(std::is_integral_v<Scalar>,
+                "domain comparison requires an integer type");
+  if constexpr (std::is_unsigned_v<Scalar>) {
+    if (endpoint < 0.0) {
+      return 1;
+    }
+    constexpr double kUpperExclusive = 18446744073709551616.0;
+    if (endpoint >= kUpperExclusive) {
+      return -1;
+    }
+    const std::uint64_t truncated = static_cast<std::uint64_t>(endpoint);
+    const std::uint64_t promoted = static_cast<std::uint64_t>(integer);
+    if (promoted < truncated) {
+      return -1;
+    }
+    if (promoted > truncated) {
+      return 1;
+    }
+    return std::trunc(endpoint) == endpoint ? 0 : -1;
+  } else {
+    constexpr double kLowerInclusive = -9223372036854775808.0;
+    constexpr double kUpperExclusive = 9223372036854775808.0;
+    if (endpoint < kLowerInclusive) {
+      return 1;
+    }
+    if (endpoint >= kUpperExclusive) {
+      return -1;
+    }
+    const std::int64_t truncated = static_cast<std::int64_t>(endpoint);
+    const std::int64_t promoted = static_cast<std::int64_t>(integer);
+    if (promoted < truncated) {
+      return -1;
+    }
+    if (promoted > truncated) {
+      return 1;
+    }
+    if (std::trunc(endpoint) == endpoint) {
+      return 0;
+    }
+    return endpoint < 0.0 ? 1 : -1;
+  }
+}
+
+/**
+ * @brief Executes one same-storage, equal-endpoint scalar transfer exactly.
+ * @tparam Scalar Exact source and destination native scalar type.
+ * @param source Borrowed readable source bytes.
+ * @param destination Borrowed writable destination bytes.
+ * @param descriptor Matching source/destination descriptor.
+ * @param conversion Equal-endpoint identity conversion and closed policies.
+ * @return Nothing after exact copy or explicit endpoint clamp.
+ * @throws std::domain_error for rejected out-of-domain/non-finite input or a
+ * forbidden clamp precision loss.
+ * @note In-domain values are copied byte-for-byte without promotion. A clamp
+ * uses the declared binary64 endpoint directly, never the out-of-domain wide
+ * integer, before checked destination storage.
+ */
+template <typename Scalar>
+void transfer_identity_native(const std::byte* source, std::byte* destination,
+                              const DenseTensorDescriptor& descriptor,
+                              const SampleConversion& conversion) {
+  const Scalar scalar = read_native<Scalar>(source);
+  bool below = false;
+  bool above = false;
+  if constexpr (std::is_floating_point_v<Scalar>) {
+    if (!std::isfinite(scalar)) {
+      if (conversion.non_finite != NonFinitePolicy::Preserve) {
+        throw std::domain_error(
+            "Sample conversion rejected a non-finite value.");
+      }
+      std::memcpy(destination, source, sizeof(Scalar));
+      return;
+    }
+    below = scalar < conversion.source.domain.minimum;
+    above = scalar > conversion.source.domain.maximum;
+  } else {
+    below = compare_integral_to_double(scalar,
+                                       conversion.source.domain.minimum) < 0;
+    above = compare_integral_to_double(scalar,
+                                       conversion.source.domain.maximum) > 0;
+  }
+  if (!below && !above) {
+    std::memcpy(destination, source, sizeof(Scalar));
+    return;
+  }
+  if (conversion.out_of_domain == OutOfDomainPolicy::Reject) {
+    throw std::domain_error(
+        "Sample conversion rejected an out-of-domain value.");
+  }
+  const long double clamped = below ? conversion.source.domain.minimum
+                                    : conversion.source.domain.maximum;
+  store_scalar(destination, descriptor, clamped, clamped, conversion);
+}
+
+/**
+ * @brief Dispatches exact identity transfer for one supported native scalar.
+ * @param source Borrowed readable source scalar.
+ * @param destination Borrowed writable destination scalar.
+ * @param descriptor Matching source/destination native descriptor.
+ * @param conversion Equal-endpoint identity request.
+ * @return Nothing after exact transfer.
+ * @throws std::invalid_argument for unsupported storage.
+ * @throws std::domain_error from explicit identity policies.
+ */
+void transfer_identity_scalar(const std::byte* source, std::byte* destination,
+                              const DenseTensorDescriptor& descriptor,
+                              const SampleConversion& conversion) {
+  const std::uint32_t width = descriptor.storage_encoding.bit_width;
+  switch (descriptor.element_semantics) {
+    case ElementSemantics::UnsignedInteger:
+      if (width == 8U) {
+        return transfer_identity_native<std::uint8_t>(source, destination,
+                                                      descriptor, conversion);
+      }
+      if (width == 16U) {
+        return transfer_identity_native<std::uint16_t>(source, destination,
+                                                       descriptor, conversion);
+      }
+      if (width == 32U) {
+        return transfer_identity_native<std::uint32_t>(source, destination,
+                                                       descriptor, conversion);
+      }
+      if (width == 64U) {
+        return transfer_identity_native<std::uint64_t>(source, destination,
+                                                       descriptor, conversion);
+      }
+      break;
+    case ElementSemantics::SignedInteger:
+      if (width == 8U) {
+        return transfer_identity_native<std::int8_t>(source, destination,
+                                                     descriptor, conversion);
+      }
+      if (width == 16U) {
+        return transfer_identity_native<std::int16_t>(source, destination,
+                                                      descriptor, conversion);
+      }
+      if (width == 32U) {
+        return transfer_identity_native<std::int32_t>(source, destination,
+                                                      descriptor, conversion);
+      }
+      if (width == 64U) {
+        return transfer_identity_native<std::int64_t>(source, destination,
+                                                      descriptor, conversion);
+      }
+      break;
+    case ElementSemantics::FloatingPoint:
+      if (width == 32U) {
+        return transfer_identity_native<float>(source, destination, descriptor,
+                                               conversion);
+      }
+      if (width == 64U) {
+        return transfer_identity_native<double>(source, destination, descriptor,
+                                                conversion);
+      }
+      break;
+  }
+  throw std::invalid_argument("Unsupported sample identity storage.");
 }
 
 /**
@@ -499,6 +762,10 @@ Value convert_dense_image_samples(const Value& source,
     throw std::invalid_argument(
         "Sample conversion requires a Strided ordinary DenseImage Value.");
   }
+  if (source.dense_tensor_descriptor().quantization.has_value()) {
+    throw std::invalid_argument(
+        "Sample conversion requires unquantized source storage.");
+  }
   const ImageFacet& source_facet = *source.image_facet();
   if (!source_facet.sample_domain.has_value() ||
       !source_facet.sample_domain->per_channel.empty() ||
@@ -516,6 +783,18 @@ Value convert_dense_image_samples(const Value& source,
       conversion.destination_storage_encoding;
   destination_descriptor.quantization.reset();
   (void)dense_tensor_element_bytes(destination_descriptor);
+  const DenseTensorDescriptor& source_descriptor =
+      source.dense_tensor_descriptor();
+  const bool exact_storage_identity =
+      !source_descriptor.quantization.has_value() &&
+      source_descriptor.storage_encoding.kind ==
+          StorageEncodingKind::NativeScalar &&
+      source_descriptor.element_semantics ==
+          destination_descriptor.element_semantics &&
+      source_descriptor.storage_encoding ==
+          destination_descriptor.storage_encoding &&
+      conversion.source.encoding == conversion.destination.encoding &&
+      conversion.source.domain == conversion.destination.domain;
   ImageFacet destination_facet = source_facet;
   destination_facet.sample_domain =
       SampleDomainFacet{1U,
@@ -541,13 +820,19 @@ Value convert_dense_image_samples(const Value& source,
     std::vector<std::size_t> coordinates(destination_descriptor.shape.size(),
                                          0U);
     do {
-      const long double input =
-          load_scalar(source_tensor.element_data(coordinates),
-                      source.dense_tensor_descriptor());
-      const auto [source_after_policy, mapped] = map_sample(input, conversion);
-      store_scalar(
-          destination_address(write.data(), coordinates, destination_layout),
-          destination_descriptor, mapped, source_after_policy, conversion);
+      std::byte* output =
+          destination_address(write.data(), coordinates, destination_layout);
+      const std::byte* input = source_tensor.element_data(coordinates);
+      if (exact_storage_identity) {
+        transfer_identity_scalar(input, output, destination_descriptor,
+                                 conversion);
+      } else {
+        const long double source_sample = load_scalar(input, source_descriptor);
+        const auto [source_after_policy, mapped] =
+            map_sample(source_sample, conversion);
+        store_scalar(output, destination_descriptor, mapped,
+                     source_after_policy, conversion);
+      }
     } while (advance_coordinate(&coordinates, destination_descriptor.shape));
   }
   return builder.seal();

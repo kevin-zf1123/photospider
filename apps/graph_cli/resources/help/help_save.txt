@@ -1,4 +1,4 @@
-save <id> <output> <file> <uint8|uint16> <value|normalized|code> <normalized|legal|code> <min> <max> <reject|clamp> <nearest-even|toward-zero|floor|ceil> <reject|preserve> <reject|allow>
+save <id> <output> <file> <uint8|uint16|uint32|fp32> <value|normalized|code> <normalized|legal|code> <min> <max> <reject|clamp> <nearest-even|toward-zero|floor|ceil> <reject|preserve> <reject|allow>
 
 Compute node <id>, select the exact named ordinary-image <output>, and encode it
 to <file>. The Value must declare one default SampleEncoding/SampleDomain.
@@ -8,3 +8,10 @@ encoding, sample-domain kind and finite inclusive endpoints, out-of-domain
 policy, integral rounding, NaN/infinity policy, and precision-loss policy. The
 command never infers these from the file extension or storage width and never
 applies an implicit 255 or 65535 scale.
+
+Configured ordinary OpenEXR `.exr` output accepts explicit `uint32` or `fp32`
+storage and preserves independent data/display windows. OpenCV-backed output
+accepts only its declared unsigned `uint8`/`uint16` extension-depth-channel
+matrix; for example JPEG is `uint8` only while PNG and TIFF accept both. A
+mismatched extension/storage/channel combination is rejected before file
+mutation instead of invoking an implicit OpenCV fallback.

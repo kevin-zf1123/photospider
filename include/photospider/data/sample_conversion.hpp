@@ -89,10 +89,13 @@ struct SampleConversion final {
 /**
  * @brief Converts one Ready host-readable Strided ordinary DenseImage Value.
  *
- * The operation validates complete endpoint facts, performs the exact affine
- * domain mapping, applies the selected exceptional/out-of-domain/rounding/loss
- * policies, and publishes one fresh interleaved CPU Value only after every
- * sample succeeds.
+ * The operation validates complete endpoint facts. Equal endpoint and storage
+ * identity transfers inspect domains with type-aware comparisons and copy
+ * in-domain native scalars without any floating-point promotion. Other
+ * conversions perform the affine mapping only when the source integer is
+ * exactly representable by the platform arithmetic, apply the selected
+ * exceptional/out-of-domain/rounding/loss policies, and publish one fresh
+ * interleaved CPU Value only after every sample succeeds.
  *
  * @param source Valid built-in Strided Value with complete ImageFacet and one
  *        default sample-domain record without per-channel overrides.
@@ -111,6 +114,10 @@ struct SampleConversion final {
  * @throws std::bad_alloc when output metadata or storage cannot allocate.
  * @note Failure publishes no partial Value and performs no implicit clamp,
  *       normalization, transfer function, channel-role, or file-type inference.
+ *       A non-identity wide-integer conversion fails before arithmetic when
+ *       exact source promotion cannot be proved; callers must select a
+ *       representation-specific exact converter rather than accepting a
+ *       platform-dependent rounded intermediate.
  */
 Value convert_dense_image_samples(const Value& source,
                                   const SampleConversion& conversion);

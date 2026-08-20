@@ -1606,7 +1606,7 @@ install(FILES
 )
 
 # ==============================================================================
-# 3. CLI Static Library (The Frontend Logic)
+# 3. CLI Object Library (The Frontend Logic)
 # ==============================================================================
 
 if(PHOTOSPIDER_BUILD_GRAPH_CLI)
@@ -1616,7 +1616,7 @@ if(PHOTOSPIDER_BUILD_GRAPH_CLI)
         src/lib/benchmark/benchmark_service.cpp
         src/lib/benchmark/benchmark_yaml_generator.cpp)
 
-    add_library(photospider_cli_common STATIC
+    add_library(photospider_cli_common OBJECT
         ${CLI_LOGIC_SOURCES}
         ${PHOTOSPIDER_CLI_BENCHMARK_SOURCES})
 
@@ -1640,6 +1640,7 @@ if(PHOTOSPIDER_BUILD_GRAPH_CLI)
         yaml-cpp::yaml-cpp
         ${OpenCV_LIBS}
     )
+
 endif()
 
 # ==============================================================================
@@ -1691,10 +1692,6 @@ if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
 
         target_link_libraries(${PLUGIN_NAME} PRIVATE
             Photospider::operation_plugin_sdk)
-        if(PLUGIN_NAME STREQUAL "save_op")
-            target_link_libraries(${PLUGIN_NAME} PRIVATE
-                ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET})
-        endif()
     endforeach()
 endif()
 
@@ -2943,6 +2940,10 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         tests/integration/test_cli_dirty_snapshot_formatter.cpp)
     target_include_directories(test_cli_dirty_snapshot_formatter PRIVATE
         "${PROJECT_SOURCE_DIR}/apps/graph_cli/include")
+    if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+        target_compile_definitions(test_cli_dirty_snapshot_formatter PRIVATE
+            PHOTOSPIDER_TEST_HAS_OPENEXR_DENSE)
+    endif()
     target_link_libraries(test_cli_dirty_snapshot_formatter PRIVATE
         photospider_cli_common)
     add_ps_test(test_compute_service_split

@@ -16,20 +16,82 @@ namespace ps::adapters::opencv {
 namespace {
 
 /**
- * @brief Reports whether a path selects the dedicated OpenEXR boundary.
+ * @brief Returns one normalized filename extension for codec policy lookup.
  * @param path Caller-selected artifact path.
- * @return True for a case-insensitive `.exr` extension.
+ * @return Case-folded extension including its leading dot, or empty.
  * @throws std::bad_alloc when native path-string conversion allocates.
- * @note OpenCV must not consume these paths because it cannot expose signed
- *       data/display-window metadata independently.
  */
-bool is_openexr_path(const std::filesystem::path& path) {
+std::string normalized_extension(const std::filesystem::path& path) {
   std::string extension = path.extension().string();
   std::transform(extension.begin(), extension.end(), extension.begin(),
                  [](unsigned char value) {
                    return static_cast<char>(std::tolower(value));
                  });
-  return extension == ".exr";
+  return extension;
+}
+
+/**
+ * @brief Reports whether a path selects the dedicated OpenEXR boundary.
+ * @param path Caller-selected artifact path.
+ * @return True for a case-insensitive `.exr` extension.
+ * @throws std::bad_alloc when native path-string conversion allocates.
+ * @note OpenCV must not consume these paths because it cannot expose signed
+ * data/display-window metadata independently.
+ */
+bool is_openexr_path(const std::filesystem::path& path) {
+  return normalized_extension(path) == ".exr";
+}
+
+/**
+ * @brief Validates the closed OpenCV file-format encoding matrix.
+ * @param path Caller-selected output path whose extension selects one format.
+ * @param matrix Nonempty exact matrix that would be passed to `cv::imwrite`.
+ * @return Nothing when depth and channel count are explicitly supported.
+ * @throws std::invalid_argument for unknown extensions or unsupported depth/
+ * channel combinations.
+ * @throws std::bad_alloc when extension normalization allocates.
+ * @note This preflight intentionally exposes only ordinary unsigned 8/16-bit
+ * formats: JPEG uses UINT8 with one or three channels; PNG/TIFF/JPEG2000 use
+ * UINT8/UINT16 with one, three, or four channels; BMP/WebP use UINT8 with one,
+ * three, or four channels; and Netpbm variants use their declared one/three/
+ * four-channel forms. Signed and floating matrices are rejected rather than
+ * allowing OpenCV to fall back to CV_8U implicitly.
+ */
+void validate_encode_matrix(const std::filesystem::path& path,
+                            const cv::Mat& matrix) {
+  const std::string extension = normalized_extension(path);
+  const int depth = matrix.depth();
+  const int channels = matrix.channels();
+  const bool unsigned8 = depth == CV_8U;
+  const bool unsigned16 = depth == CV_16U;
+  const bool one = channels == 1;
+  const bool three = channels == 3;
+  const bool four = channels == 4;
+
+  bool supported = false;
+  if (extension == ".jpg" || extension == ".jpeg") {
+    supported = unsigned8 && (one || three);
+  } else if (extension == ".png" || extension == ".tif" ||
+             extension == ".tiff" || extension == ".jp2") {
+    supported = (unsigned8 || unsigned16) && (one || three || four);
+  } else if (extension == ".bmp" || extension == ".webp") {
+    supported = unsigned8 && (one || three || four);
+  } else if (extension == ".pbm") {
+    supported = unsigned8 && one;
+  } else if (extension == ".pgm") {
+    supported = (unsigned8 || unsigned16) && one;
+  } else if (extension == ".ppm") {
+    supported = (unsigned8 || unsigned16) && three;
+  } else if (extension == ".pnm") {
+    supported = (unsigned8 || unsigned16) && (one || three);
+  } else if (extension == ".pam") {
+    supported = (unsigned8 || unsigned16) && (one || three || four);
+  }
+  if (!supported) {
+    throw std::invalid_argument(
+        "OpenCV output extension, sample depth, and channel count are not in "
+        "the explicit encode support matrix.");
+  }
 }
 
 /**
@@ -225,6 +287,7 @@ void OpenCvImageArtifactCodec::encode(
     if (encoded.empty()) {
       throw std::invalid_argument("Cannot encode an empty image Value.");
     }
+    validate_encode_matrix(path, encoded);
     if (!cv::imwrite(path.string(), encoded)) {
       throw GraphError(GraphErrc::Io,
                        "OpenCV rejected image artifact path: " + path.string());

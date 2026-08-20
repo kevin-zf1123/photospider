@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -20,6 +21,8 @@
 #include "graph_cli/command/commands.hpp"
 #include "graph_cli/command/help_utils.hpp"
 #include "graph_cli/dependency_tree_formatter.hpp"
+#include "photospider/data/image_view.hpp"
+#include "providers/configured_image_artifact_codec.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::cli {
 namespace {
@@ -44,6 +47,7 @@ Value make_cli_float_image(std::size_t width, std::size_t height,
                                    ElementSemantics::FloatingPoint,
                                    StorageEncoding{32U}};
   ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.display_window = facet.data_window;
   facet.sample_domain =
       SampleDomainFacet{1U,
                         SampleEncoding{1U, SampleEncodingKind::Normalized},
@@ -86,7 +90,7 @@ void register_cli_command_ops() {
           NodeOutput output;
           output.publish_image_value(
               make_cli_float_image(static_cast<std::size_t>(width),
-                                   static_cast<std::size_t>(height), 3.0F));
+                                   static_cast<std::size_t>(height), 0.25F));
           output.space.absolute_roi = PixelRect{0, 0, width, height};
           output.debug.compute_device = "cli-dirty-test-source";
           return output;
@@ -489,6 +493,89 @@ TEST(CliSaveCommand, SavesWithExplicitDestinationSampleSemantics) {
   EXPECT_GT(std::filesystem::file_size(output_path), 0U);
 }
 
+#if defined(PHOTOSPIDER_TEST_HAS_OPENEXR_DENSE)
+TEST(CliSaveCommand, SavesOrdinaryOpenExrWithExplicitUint32AndFp32Policies) {
+  register_cli_command_ops();
+  ScopedTempDir temp("photospider_cli_save_openexr_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const auto yaml_path = temp.root() / "source" / "save_openexr_graph.yaml";
+  const auto output_path = temp.root() / "saved.exr";
+  const auto uint_output_path = temp.root() / "saved-uint.exr";
+  write_dirty_inspect_graph(yaml_path);
+
+  GraphLoadRequest request;
+  request.session = GraphSessionId{"cli_save_openexr"};
+  request.root_dir = (temp.root() / "sessions").string();
+  request.yaml_path = yaml_path.string();
+  request.cache_root_dir = (temp.root() / "cache").string();
+  auto loaded = host->load_graph(request);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  std::istringstream args(
+      "1 image " + output_path.string() +
+      " fp32 normalized normalized 0 1 reject nearest-even reject reject");
+  std::string current_graph = request.session.value;
+  bool modified = false;
+  CliConfig config;
+  std::ostringstream captured;
+  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
+  const bool handled =
+      ::handle_save(args, *host, current_graph, modified, config);
+  std::cout.rdbuf(original_buffer);
+
+  const std::string text = captured.str();
+  EXPECT_TRUE(handled);
+  EXPECT_NE(text.find("Saved named output 'image'"), std::string::npos) << text;
+  ASSERT_TRUE(std::filesystem::is_regular_file(output_path)) << text;
+
+  const SampleEndpoint samples{
+      SampleEncoding{1U, SampleEncodingKind::Normalized},
+      SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}};
+  const Value decoded =
+      providers::make_configured_image_artifact_codec()->decode(
+          output_path, {{ImageArtifactDecodeRule{
+                           ElementSemantics::FloatingPoint,
+                           StorageEncoding{32U}, samples, std::nullopt}}});
+  const ImageView view(decoded);
+  float sample = 0.0F;
+  std::memcpy(&sample, view.channel_data(0U, 0U, 0U), sizeof(sample));
+  EXPECT_FLOAT_EQ(sample, 0.25F);
+  EXPECT_EQ(decoded.image_facet()->data_window,
+            *decoded.image_facet()->display_window);
+
+  std::istringstream uint_args(
+      "1 image " + uint_output_path.string() +
+      " uint32 code code 0 4294967295 reject nearest-even reject allow");
+  std::ostringstream uint_captured;
+  original_buffer = std::cout.rdbuf(uint_captured.rdbuf());
+  const bool uint_handled =
+      ::handle_save(uint_args, *host, current_graph, modified, config);
+  std::cout.rdbuf(original_buffer);
+  EXPECT_TRUE(uint_handled);
+  EXPECT_NE(uint_captured.str().find("Saved named output 'image'"),
+            std::string::npos)
+      << uint_captured.str();
+  ASSERT_TRUE(std::filesystem::is_regular_file(uint_output_path));
+
+  const SampleEndpoint uint_samples{
+      SampleEncoding{1U, SampleEncodingKind::CodeValue},
+      SampleDomain{SampleDomainKind::CodeValue, 0.0, 4294967295.0}};
+  const Value uint_decoded =
+      providers::make_configured_image_artifact_codec()->decode(
+          uint_output_path,
+          {{ImageArtifactDecodeRule{ElementSemantics::UnsignedInteger,
+                                    StorageEncoding{32U}, uint_samples,
+                                    std::nullopt}}});
+  const ImageView uint_view(uint_decoded);
+  std::uint32_t uint_sample = 0U;
+  std::memcpy(&uint_sample, uint_view.channel_data(0U, 0U, 0U),
+              sizeof(uint_sample));
+  EXPECT_EQ(uint_sample, 1073741824U);
+}
+#endif
+
 TEST(CliSaveCommand, ReportsImageComputeFailures) {
   auto host = create_embedded_host();
   ASSERT_NE(host, nullptr);
@@ -532,7 +619,8 @@ TEST(CliSaveCommand, RejectsImplicitDestinationSampleSemantics) {
 
   const std::string text = captured.str();
   EXPECT_TRUE(handled);
-  EXPECT_NE(text.find("Usage: save <id> <output> <file> <uint8|uint16>"),
+  EXPECT_NE(text.find("Usage: save <id> <output> <file> "
+                      "<uint8|uint16|uint32|fp32>"),
             std::string::npos);
   EXPECT_EQ(text.find("Failed to compute node 1."), std::string::npos);
 }

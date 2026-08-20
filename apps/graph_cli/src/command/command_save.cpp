@@ -1,6 +1,7 @@
 // FILE: apps/graph_cli/src/command/command_save.cpp
 #include <cmath>
 #include <iostream>
+#include <new>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -127,7 +128,8 @@ double parse_finite_endpoint(const std::string& token,
 /**
  * @brief Builds one explicit Value-to-file code conversion request.
  * @param value Ready ordinary image with one default sample endpoint.
- * @param storage Exact `uint8` or `uint16` destination selection.
+ * @param storage Exact `uint8`, `uint16`, `uint32`, or `fp32` destination
+ * selection. The configured codec validates format compatibility.
  * @param destination_encoding Explicit destination sample encoding.
  * @param destination_domain Explicit destination sample-domain kind.
  * @param destination_minimum Finite inclusive destination lower endpoint.
@@ -154,11 +156,15 @@ ps::ImageArtifactEncodeRequest make_encode_request(
     throw std::invalid_argument(
         "selected image needs one explicit default sample domain");
   }
+  const bool floating = storage == "fp32";
   const std::uint32_t bits = storage == "uint8"    ? 8U
                              : storage == "uint16" ? 16U
+                             : storage == "uint32" ? 32U
+                             : floating            ? 32U
                                                    : 0U;
   if (bits == 0U) {
-    throw std::invalid_argument("destination storage must be uint8 or uint16");
+    throw std::invalid_argument(
+        "destination storage must be uint8, uint16, uint32, or fp32");
   }
   const ps::SampleDomainFacet& samples = *value.image_facet()->sample_domain;
   ps::SampleConversion conversion;
@@ -169,7 +175,8 @@ ps::ImageArtifactEncodeRequest make_encode_request(
       ps::SampleDomain{destination_domain, destination_minimum,
                        destination_maximum}};
   conversion.destination_element_semantics =
-      ps::ElementSemantics::UnsignedInteger;
+      floating ? ps::ElementSemantics::FloatingPoint
+               : ps::ElementSemantics::UnsignedInteger;
   conversion.destination_storage_encoding = ps::StorageEncoding{bits};
   conversion.out_of_domain = domain_policy;
   conversion.rounding = rounding;
@@ -180,7 +187,7 @@ ps::ImageArtifactEncodeRequest make_encode_request(
 
 /** @brief Stable CLI usage for the explicit image-save contract. */
 constexpr char kSaveUsage[] =
-    "Usage: save <id> <output> <file> <uint8|uint16> "              // NOLINT
+    "Usage: save <id> <output> <file> <uint8|uint16|uint32|fp32> "  // NOLINT
     "<value|normalized|code> <normalized|legal|code> <min> <max> "  // NOLINT
     "<reject|clamp> <nearest-even|toward-zero|floor|ceil> "         // NOLINT
     "<reject|preserve> <reject|allow>";                             // NOLINT
@@ -258,6 +265,8 @@ bool handle_save(std::istringstream& iss, ps::Host& svc,
     codec->encode(path, *value, encode_request);
     std::cout << "Saved named output '" << output_name << "' to " << path
               << "\n";
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const std::exception& error) {
     std::cout << "Failed to save image: " << error.what() << "\n";
   }

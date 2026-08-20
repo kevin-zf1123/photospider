@@ -9,8 +9,10 @@ namespace ps::adapters::opencv {
  * @throws As documented by `ImageArtifactCodec`.
  * @note The adapter preserves decoded 8/16-bit code-value storage and applies
  *       conversion only through an explicit `SampleConversion` request.
- *       OpenEXR paths are rejected because only the dedicated OpenEXR codec
- *       can preserve independent signed data and display windows.
+ *       Encode validates a closed extension/depth/channel support matrix
+ *       before `cv::imwrite`; it never accepts OpenCV's implicit CV_8U
+ *       fallback. OpenEXR paths are rejected because only the dedicated
+ *       OpenEXR codec can preserve independent signed data and display windows.
  */
 class OpenCvImageArtifactCodec final : public ImageArtifactCodec {
  public:
