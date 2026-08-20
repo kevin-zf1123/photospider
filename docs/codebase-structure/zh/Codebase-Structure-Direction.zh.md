@@ -852,8 +852,8 @@ scratch 字节。权威的无环依赖表位于
 - 将 non-installed `ipc_output_fixture_daemon` 只作为该 integration test 的 dependency，而不为
   它单独注册 CTest entry。它会在独立进程中使用 deterministic test Host 运行真实 internal
   Server/router/OutputStore/Unix-socket/worker stack，从而在不改变 `photospiderd` startup、也不
-  在 fixture 中 seed plugin 的前提下，覆盖 protected image delivery、bounded observation
-  multiclient behavior 与 restart cleanup。Real product daemon test 另行通过 Host-only plugin route
+  在 fixture 中 seed plugin 的前提下，覆盖 protected named-Value artifact archive delivery、
+  bounded observation multiclient behavior 与 restart cleanup。Real product daemon test 另行通过 Host-only plugin route
   加载仓库 lifecycle operation DSO，并检查 cross-client visibility。它的
   fixture-only CLI 接受 protected fixed-width monotonic-clock control file，并通过 private internal
   Server overload 注入较小的既有 snapshot/job/output limit、clock 与 id generator；这些 control

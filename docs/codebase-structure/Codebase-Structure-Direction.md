@@ -1046,8 +1046,8 @@ For any implementation change following this document:
 - Keep the non-installed `ipc_output_fixture_daemon` only as a dependency of
   that integration test, not as its own CTest entry. It runs the real internal
   Server/router/OutputStore/Unix-socket/worker stack in a separate process with
-  a deterministic test Host, so protected image delivery, bounded observation
-  multiclient behavior, and restart cleanup are covered without changing
+  a deterministic test Host, so protected named-Value artifact archive
+  delivery, bounded observation multiclient behavior, and restart cleanup are covered without changing
   `photospiderd` startup or seeding plugins in the fixture. The real product
   daemon test separately loads the repository lifecycle operation DSO through
   the Host-only plugin routes and checks cross-client visibility. Its

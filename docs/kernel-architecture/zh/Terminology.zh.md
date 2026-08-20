@@ -17,7 +17,8 @@ plugin owner。
 
 **IPC Host adapter**
 已安装的 client-side `ps::Host` 实现。它把 Host 调用转换为版本化本地 IPC 协议，并拥有
-client polling 和映射图像生命周期，不拥有 daemon session 或后端运行时对象。
+client polling 以及临时 mapped named-Value archive delivery 生命周期。返回的 Value 使用 fresh、
+detached runtime storage；该 adapter 不拥有 daemon session 或后端 runtime object。
 
 **`Kernel`**
 内部多图 facade，也是 graph、compute、cache、traversal、inspection 和 persistence service

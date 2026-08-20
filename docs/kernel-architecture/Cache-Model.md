@@ -64,10 +64,23 @@ Associated fields:
 ## Disk Cache
 
 `GraphCacheService` handles disk cache files under `GraphModel::cache_root`.
-Node cache entries describe cache type and location. Image cache files are saved
-as image files, and named `NodeOutput::data` entries are saved as YAML metadata
-next to the image file. In-memory named data remains a detached
-`plugin::ParameterMap`; `GraphCacheService` never constructs YAML values.
+Node cache entries describe cache type and location. Each supported configured
+location now names one portable named-Value transaction:
+
+| Path | Current role |
+| --- | --- |
+| configured location | Optional image-codec projection for external inspection; never replay authority. |
+| `<location>.yml` | Optional detached `NodeOutput::data` parameter metadata. |
+| `<location>.values` | Canonical public `NamedValueArtifactSet` archive containing every formal named Value. |
+| `<location>.manifest` | Versioned transaction record that binds archive/metadata counts, byte sizes, and SHA-256 digests. |
+
+The archive is the sole persisted Value authority. It preserves exact ordered
+names, descriptor and Facet records, layout and binding facts, buffer roles and
+envelopes, payload bytes/digests, and applicable descriptor/content/layout
+identities. It excludes process-local allocation, Value revision, producer,
+fence, mapping, device, and lease identity. In-memory parameter data remains a
+detached `plugin::ParameterMap`; `GraphCacheService` never constructs YAML
+values.
 
 For CLI-loaded graphs, `GraphModel::cache_root` is configured from
 `cache_root_dir` before graph load and resolves to
@@ -75,31 +88,41 @@ For CLI-loaded graphs, `GraphModel::cache_root` is configured from
 to the process working directory. Direct `Kernel::load_graph` callers that do
 not provide a cache root continue to use `<root_dir>/<graph_name>/cache`.
 
-Disk cache precision currently supports `int8` and `int16` save paths. Loaded
-image cache data is converted into float image buffers.
+Disk cache image projection precision currently supports `int8` and `int16`
+save paths. That explicit conversion affects only the auxiliary image file;
+portable replay reconstructs the exact archived Value representation.
 
 The current disk format does not persist Region metadata, so only a complete HP
 output may be saved or protect configured disk artifacts during
 synchronization. A partial formal output is not loaded over and is never
-relabelled as complete. Saving or synchronizing a partial node removes older
-configured image/YAML artifacts instead of encoding partial bytes. A successful
-disk load derives complete validity for the freshly decoded output.
+relabelled as complete. Saving or synchronizing a partial node removes the
+older projection, metadata, archive, and manifest instead of encoding partial
+bytes. A successful disk load derives complete validity for the freshly
+reconstructed output.
 
-Image bytes cross the private, dependency-neutral `ImageArtifactCodec` contract.
+An optional ordinary-image projection crosses the private, dependency-neutral
+`ImageArtifactCodec` contract.
 `Kernel` obtains one configured shared codec from the product composition root
 and injects it into `GraphCacheService`; Graph/cache code supplies only paths,
 exact ordinary-image Values, and explicit decode/encode sample requests. With
 OpenCV enabled, the configured adapter uses OpenCV imgcodecs for non-OpenEXR
 formats and translates provider failures to `GraphErrc::Io`, while OpenCV
-`StsNoMem` remains `std::bad_alloc`. The optional ordinary OpenEXR codec
-preserves independent signed data/display windows. With both codecs disabled,
-the configured unavailable codec returns `GraphErrc::Io` without discovering
-or exporting them. Tests inject a deterministic fake to
-verify call order, lifetime retention, precision selection, recoverable errors,
-and resource exhaustion without reading or writing a real image format.
+`StsNoMem` remains `std::bad_alloc`. Its closed write matrix accepts JPEG UINT8
+1/3-channel; PNG/TIFF/JPEG2000 UINT8/UINT16 1/3/4-channel; BMP UINT8
+1/3-channel; WebP UINT8 3/4-channel; PGM UINT8/UINT16 1-channel; PPM
+UINT8/UINT16 3-channel; PNM UINT8/UINT16 1/3-channel; and PAM UINT8
+1/3-channel. In particular WebP grayscale, BMP alpha, PBM, PAM alpha, and PAM
+UINT16 are rejected before destination mutation. The optional ordinary OpenEXR
+codec preserves independent signed data/display windows. With both codecs
+disabled, the configured unavailable codec returns `GraphErrc::Io` without
+discovering or exporting them. Tests inject a deterministic fake to verify call
+order, lifetime retention, precision selection, recoverable errors, and
+resource exhaustion without reading or writing a real image format. Real codec
+tests encode and decode every allowed OpenCV tuple and verify depth, channels,
+and shape.
 
-Named values independently cross the private, dependency-neutral
-`CacheMetadataCodec` contract as paths and detached `ParameterMap` values.
+Detached parameters independently cross the private, dependency-neutral
+`CacheMetadataCodec` contract as paths and `ParameterMap` values.
 `Kernel` injects and `GraphCacheService` retains this second immutable shared
 owner for the same service lifetime. Cache policy still derives the sibling
 `.yml` path, creates directories, selects entries, records timing and
@@ -112,16 +135,25 @@ unchanged. A deterministic fake verifies exact paths, values, retained
 lifetime, error categories, and resource exhaustion without declaring YAML
 types in cache code.
 
-Every load receives an `ImageDiskCacheOutputSchema` copied from the frozen
+Every load receives a `ValueDiskCacheOutputSchema` copied from the frozen
 `PlannedOutputAuthority`: whether the canonical image is planned, the exact
-parameter-result names, and whether any generic named Value is planned. A
-generic schema is an incompatible miss before filesystem inspection. For a
-representable schema, any existing image/YAML sibling set must exactly match
-the planned image/parameter presence before either codec is entered. Expected
-metadata is then decoded and its key set must exactly equal the frozen
-parameter names before the attempt can return Hit. A presence or key mismatch
-is a miss that routes to provider recomputation; it is never a partial Hit
-deferred to strict output validation. Missing siblings remain ordinary misses.
+parameter-result names, and the exact generic named-Value names. A transaction
+requires both archive and manifest; a retired image/YAML pair or any partial
+transaction is an incompatible miss before publication. The reader validates
+manifest version/flags/counts, archive byte size and digest, canonical archive
+framing, exact planned names, every descriptor/Facet/layout/binding fact and
+payload digest, and provider generation before reconstructing a local
+candidate. Provider-defined multi-buffer Values use the borrowed process
+`DataDefinitionRegistry`; a missing or incompatible provider is a typed error.
+
+When parameter outputs are planned, the manifest also binds the exact metadata
+bytes. The reader verifies those bytes before and after codec decode, compares
+the exact decoded key set, and finally rereads the manifest. A manifest/payload
+race, tamper, mixed generation, stale name, missing file, or one failed Value
+publishes none of the candidate. A hit moves the complete `NodeOutput` once and
+mints fresh runtime identities for every reconstructed Value. The optional
+image projection is never read by replay and therefore cannot become a second
+Value authority.
 
 Disk cache load attempts preserve the existing try-load bool contract while also
 recording the latest diagnostic through GraphModel's private disk-cache
@@ -137,29 +169,32 @@ graph-state work, and scheduler workers that can reach it must be drained and
 joined before that owning model is destroyed; access may not race member
 teardown. Callers inspect independent snapshots instead of mutable storage.
 The diagnostic result distinguishes skipped attempts, true misses, hits, and
-read/parse errors. Bad image files, invalid YAML metadata, and filesystem
-failures are recorded as errors with an error code and message instead of being
-indistinguishable from a normal cache miss.
+read/parse errors. Invalid manifests, archive/metadata digest mismatch, missing
+providers, invalid YAML metadata, and filesystem failures are recorded with an
+error code and message instead of being indistinguishable from a normal cache
+miss.
 
 ## Current Durability and Failure Boundary
 
-Current cache save is not an atomic cache-entry transaction.
-`GraphCacheService` creates directories and invokes the configured image and
-metadata codecs against their final sibling paths. After exact formal-output
-validation, generic named Values skip persistence before planned-byte
-admission. A complete representable output writes every required sibling
-before removing only the configured sibling excluded by its actual shape:
-data-only writes YAML and then removes an old image; image-only encodes the
-image and then removes old YAML; image-plus-parameter retains both; empty and
-partial output retain neither. Required-write failure propagates before stale
-sibling cleanup, while cleanup failure propagates after successful writes and
-may leave a shape-mismatched pair that the next load rejects before codec
-entry. The image payload, YAML metadata, and cleanup can therefore succeed or
-fail independently. The service provides no entry-level staging rename,
-rollback, manifest-last publication, file or directory synchronization
-receipt, retry protocol, or crash recovery. Sequential save, parallel
-committer, compute-I/O executor, cache-all, and synchronization all converge on
-this same mechanism.
+Current cache save provides manifest-last publication and all-or-nothing replay,
+but it is not a crash-durable or atomic filesystem transaction.
+`GraphCacheService` first captures and validates every named Value into detached
+archive bytes before planned-byte admission, task construction, filesystem
+mutation, or codec invocation. Unsupported Values fail with typed
+`InvalidParameter`; `skip_save_cache` and absent/unsupported cache entries keep
+their existing no-op policy before that validation.
+
+A complete save writes the optional image projection, optional parameter
+metadata, canonical archive, removes excluded projection/metadata predecessors,
+captures exact archive/metadata records, verifies metadata codec round-trip,
+and writes/readbacks the versioned manifest last. A partial output removes all
+four files. A failure may leave a partial or mixed generation, but replay cannot
+publish it because the manifest-bound sizes/digests, stable generation, exact
+names, and complete artifact set must all validate first. The service does not
+provide temporary-file rename, rollback, file/directory synchronization
+barriers, a durability receipt, retry protocol, or crash recovery. Sequential
+save, parallel committer, compute-I/O executor, cache-all, and synchronization
+all converge on this same mechanism.
 
 `cache_all_nodes` counts nodes with present HP output for which the save path
 was attempted; the count is not proof that each node had a configured artifact
@@ -258,29 +293,24 @@ and disk decode likewise create fresh identities. RT proxy output is a fresh
 sealed Value with a separate HP-generation projection version; it remains
 transient and does not become a formal cache identity source.
 
-Disk save requires the sealed Value and captures the checked Value directly
-through the explicit codec or portable artifact boundary. The existing image
-and YAML formats persist representation bytes and named metadata:
-neither `AllocationIdentity` nor `ValueRevisionId` is serialized, reconstructed
-from a path, or used as a persistent cache/task key. Both tokens are opaque,
-process-local runtime identities; a disk reload necessarily mints new ones.
-This image-only mechanism does not silently serialize generic named Values or
-turn parameter metadata into generic Value storage.
+Disk save requires every sealed named Value and captures it through the public
+portable artifact boundary. One canonical archive persists ordinary rich images,
+generic built-in Values, and compatible provider-defined multi-buffer Values;
+the optional image codec projection and detached parameter metadata are not
+parallel Value authorities. Neither `AllocationIdentity` nor `ValueRevisionId`
+is serialized, reconstructed from a path, or used as a persistent cache/task
+key. Both tokens are opaque process-local runtime identities; every replay of
+every archived Value necessarily mints new ones.
 
 The configured artifact path remains `cache_root/node_id/location` and contains
 no revisioned output-schema component. Consequently, each read carries the
 complete frozen image/parameter/generic shape rather than trusting the path.
-Generic named Values classify every configured artifact as an incompatible
-miss before filesystem inspection. For representable shapes, existing image
-and YAML sibling presence is checked before codecs, and decoded metadata keys
-must exactly match the frozen parameter-result names before Hit. Thus an old
-image beside a data-only plan, old YAML beside an image-only plan, a partial
-image-plus-parameter pair, or replaced parameter names all become misses and
-provider recomputation rather than authority-validation failures. After exact
-formal output validation, generic output skips persistence; representable save
-writes required siblings and then removes excluded predecessors according to
-the common non-transactional failure boundary above. This closes schema
-replacement without adding a generic durable format or persistent schema key.
+The versioned sibling manifest and public archive must match that shape exactly;
+generic named Values are ordinary archive members, not an incompatible miss.
+Old image/YAML-only entries, partial transactions, changed names, tampered
+payloads, mixed generations, and missing providers cannot become hits. This
+closes schema replacement through one portable transaction without making the
+path, auxiliary projection, or detached metadata a second Value identity.
 
 ## V-4 Region Validity
 
@@ -333,7 +363,7 @@ Region; the downscaled proxy payload and `roi_rt` remain zero-based RT storage. 
 and Whole staged validity do not create partial downsample requests. Region
 values and Tensor axes are included in retained-memory accounting.
 
-## V-13 Packed Memory Cache and Image Disk Boundary
+## V-13 Packed Memory Cache and Portable Disk Boundary
 
 A formal HP `NodeOutput` may retain the complete immutable packed FP4 Value in
 its existing Value authority. Ordinary cache copies preserve descriptor,
@@ -344,19 +374,23 @@ snapshot or inferred from storage.
 This is runtime memory-cache retention, not a new persistent identity or cache
 format.
 
-The configured disk mechanism remains explicitly image-only. Before planned
-bytes are admitted to `ComputeIoExecutor`, before the executor callback is
-created, and before filesystem or codec work, `GraphCacheService` requires a
-formal Value to be Ready, host-readable, image-faceted, Strided, unquantized,
-and compatible with the selected codec's explicit whole-byte storage set. Packed, quantized,
-or latent formal Values fail with `GraphError{InvalidParameter}`. A node with no
-effective nonempty image cache entry retains its historical no-op behavior and
-does not enter this validation boundary.
+The configured disk mechanism now captures every supported named Value through
+the public artifact archive, but the reserved canonical `image` slot still has
+to produce the configured ordinary-image projection. Before planned bytes are
+admitted to `ComputeIoExecutor`, before the executor callback is created, and
+before filesystem or codec work, that image must be Ready, host-readable,
+image-faceted, Strided, unquantized, and compatible with the selected codec's
+explicit whole-byte storage set. A packed FP4 canonical image therefore fails
+with `GraphError{InvalidParameter}`. Generic and provider-defined multi-buffer
+Values outside the image slot are accepted only when public artifact capture
+and the active provider generation validate every descriptor, layout, binding,
+and payload fact. A node with no effective nonempty image cache entry retains
+its historical no-op behavior and does not enter this validation boundary.
 
-The rejection does not drop named metadata, widen FP4 bytes, invent an image
-facet, persist scales separately, or mint descriptor/content/layout/artifact
-digests. Supporting those behaviors requires a later generic artifact and
-manifest contract; the current `ImageArtifactCodec` ABI is unchanged.
+Rejection never drops metadata, widens packed bytes, invents an image facet, or
+silently skips a named Value. The current `ImageArtifactCodec` ABI remains an
+auxiliary projection boundary; the public archive and versioned cache manifest
+own portable replay.
 
 ## DI-1/DI-2 Observed Statistics Cache Boundary
 
@@ -400,11 +434,12 @@ replicas never enter persistent logical content identity.
 The current V-3 process-local `ValueRevisionId` is runtime publication identity,
 not any future canonical descriptor, content, layout, or artifact digest.
 
-This target does not change the current cache format or authority described
-above. HP output remains the only formal reusable cache, RT proxy output
-remains transient, and the current injected artifact/metadata codecs remain
-the implementation boundary until later slices migrate cache manifests and
-payloads. No future residency replica becomes a second cache authority.
+DI-4 changes the current disk representation to the public named-Value archive
+and versioned manifest described above without changing formal cache authority.
+HP output remains the only formal reusable memory cache, RT proxy output remains
+transient, and injected image/metadata codecs remain optional projection and
+detached-parameter implementation boundaries. No residency replica, projection,
+manifest path, or persisted runtime identity becomes a second cache authority.
 
 V-15 does not change this cache format or authority. Its optional OpenEXR deep
 adapter can read or write one provider-defined Value at a caller-selected path,

@@ -149,9 +149,9 @@ stable inode.
 The installed C++17 target `Photospider::photospider_ipc_client` exposes the
 move-only `ps::ipc::Client` and complete `create_ipc_host(socket_path)` adapter.
 The Client provides the exact 60 typed version 2 methods for daemon identity,
-graph/inspection, polling compute and protected image metadata, bounded
-events/traces, cache, operation plugins, process policy, and private execution
-routes. Graph loads retain the caller's safe Host session name as request
+graph/inspection, polling compute and protected named-Value artifact archive
+delivery, bounded events/traces, cache, operation plugins, process policy, and
+private execution routes. Graph loads retain the caller's safe Host session name as request
 metadata but return a separate opaque daemon session id; disconnecting the
 client does not close that session.
 

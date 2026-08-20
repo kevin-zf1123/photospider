@@ -20,8 +20,10 @@ interaction state while sharing the process-wide operation plugin owner.
 
 **IPC Host adapter**
 The installed client-side implementation of `ps::Host`. It translates Host
-calls into the versioned local IPC protocol and owns client polling and mapped
-image lifetimes, not daemon sessions or backend runtime objects.
+calls into the versioned local IPC protocol and owns client polling plus
+temporary mapped named-Value archive delivery lifetimes. Returned Values use
+fresh detached runtime storage; the adapter owns neither daemon sessions nor
+backend runtime objects.
 
 **`Kernel`**
 The internal multi-graph facade and composition owner for graph, compute,

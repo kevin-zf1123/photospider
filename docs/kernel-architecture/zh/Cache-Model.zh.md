@@ -47,32 +47,50 @@ Dirty RT execution 不会写 graph-owned RT 字段。Worker task 会先把代理
 ## 磁盘缓存
 
 `GraphCacheService` 处理 `GraphModel::cache_root` 下的磁盘缓存文件。节点缓存条目描述缓存类型和位置。
-图像缓存文件保存为图像文件，命名的 `NodeOutput::data` 条目保存为图像文件旁边的 YAML 元数据。
-内存中的命名 data 始终是脱离 adapter 的 `plugin::ParameterMap`；
+现在，每个受支持的 configured location 都命名一个 portable named-Value transaction：
+
+| 路径 | 当前职责 |
+| --- | --- |
+| configured location | 供外部检查使用的可选 image-codec projection；绝不是 replay authority。 |
+| `<location>.yml` | 可选、脱离 Value 的 `NodeOutput::data` parameter metadata。 |
+| `<location>.values` | 包含全部正式 named Value 的 canonical public `NamedValueArtifactSet` archive。 |
+| `<location>.manifest` | 绑定 archive/metadata 数量、byte size 与 SHA-256 digest 的 versioned transaction record。 |
+
+Archive 是唯一持久化 Value authority。它保留精确有序名称、descriptor 与 Facet record、layout 与
+binding fact、buffer role 与 envelope、payload byte/digest，以及适用的 descriptor/content/layout
+identity；不保留 process-local allocation、Value revision、producer、fence、mapping、device 或
+lease identity。内存中的 parameter data 仍是脱离 adapter 的 `plugin::ParameterMap`；
 `GraphCacheService` 绝不构造 YAML value。
 
 对于 CLI 加载的 graph，`GraphModel::cache_root` 会在 graph load 前由 `cache_root_dir`
 配置决定，并解析为 `<cache_root_dir>/<graph_name>`。相对 `cache_root_dir` 按进程当前工作目录解析。
 未提供 cache root 的直接 `Kernel::load_graph` 调用继续使用 `<root_dir>/<graph_name>/cache`。
 
-磁盘缓存精度当前支持 `int8` 和 `int16` 保存路径。加载的图像缓存数据会转换为浮点图像缓冲区。
+磁盘缓存的 image projection precision 当前支持 `int8` 与 `int16` 保存路径。该显式 conversion
+只影响辅助 image file；portable replay 会重建 archive 中的精确 Value representation。
 
 当前 disk format 不持久化 Region metadata，因此只有 complete HP output 可以被保存，
 或在 synchronization 时保护 configured disk artifact。Partial formal output 不会被
 disk load 覆盖，也绝不会被重新标记为 complete。保存或同步 partial node 时，会移除较旧的
-configured image/YAML artifact，而不是编码 partial byte。成功 disk load 会为 fresh
-decoded output 派生 complete validity。
+projection、metadata、archive 与 manifest，而不是编码 partial byte。成功 disk load 会为 fresh
+reconstructed output 派生 complete validity。
 
-图像字节通过私有、依赖中立的 `ImageArtifactCodec` 契约。`Kernel` 从产品组合根取得一个配置好的
+可选 ordinary-image projection 通过私有、依赖中立的 `ImageArtifactCodec` 契约。`Kernel` 从产品组合根取得一个配置好的
 共享 codec，并将其注入 `GraphCacheService`；Graph/cache 代码只提供 path、精确的普通 image Value
 以及显式 decode/encode sample request。OpenCV 启用时，已配置 adapter 对非 OpenEXR format 使用
 OpenCV imgcodecs，并把 provider failure 翻译为 `GraphErrc::Io`，同时让 OpenCV `StsNoMem` 保持为
-`std::bad_alloc`。可选的普通 OpenEXR codec 保留独立 signed data/display window。两种 codec 都禁用时，
-已配置 unavailable codec 会在不发现或导出它们的情况下返回 `GraphErrc::Io`。测试会注入确定性 fake，
-在不读取或写入真实图像格式的情况下验证调用顺序、生命周期保持、精度选择、可恢复错误与资源耗尽。
+`std::bad_alloc`。其封闭 write matrix 接受：JPEG UINT8 1/3-channel；PNG/TIFF/JPEG2000
+UINT8/UINT16 1/3/4-channel；BMP UINT8 1/3-channel；WebP UINT8 3/4-channel；PGM
+UINT8/UINT16 1-channel；PPM UINT8/UINT16 3-channel；PNM UINT8/UINT16 1/3-channel；
+以及 PAM UINT8 1/3-channel。尤其是 WebP grayscale、BMP alpha、PBM、PAM alpha 与 PAM
+UINT16 都会在 destination mutation 前被拒绝。可选的普通 OpenEXR codec 保留独立 signed
+data/display window。两种 codec 都禁用时，已配置 unavailable codec 会在不发现或导出它们的
+情况下返回 `GraphErrc::Io`。测试会注入确定性 fake，在不读取或写入真实图像格式的情况下验证
+调用顺序、生命周期保持、精度选择、可恢复错误与资源耗尽。真实 codec 测试会 encode/decode
+每个允许的 OpenCV tuple，并验证 depth、channel 与 shape。
 
-Named value 独立通过私有、依赖中立的 `CacheMetadataCodec` contract，只交换 path 和脱离
-adapter 的 `ParameterMap` value。`Kernel` 注入、`GraphCacheService` 保留第二个不可变 shared
+脱离 Value 的 parameter 独立通过私有、依赖中立的 `CacheMetadataCodec` contract，只交换 path 与
+`ParameterMap` value。`Kernel` 注入、`GraphCacheService` 保留第二个不可变 shared
 owner，且其 service lifetime 与 image codec 相同。Cache policy 仍负责推导同级 `.yml` path、
 创建目录、选择 entry、记录计时和诊断、保持 HP 权威性，以及移除陈旧文件。只有已配置的
 `YamlCacheMetadataCodec` 拥有 YAML node、递归 value conversion、stream IO 与 provider
@@ -82,13 +100,19 @@ exception translation。Null document 解码为空 map；无效 representation �
 与资源耗尽，而 cache code 不声明 YAML type。
 
 每次 load 都会收到从 frozen `PlannedOutputAuthority` 复制而来的
-`ImageDiskCacheOutputSchema`：是否计划 canonical image、精确 parameter-result 名称，以及是否
-计划任意 generic named Value。Generic schema 会在 filesystem inspection 之前成为
-incompatible miss。对于可表示 schema，任何既存 image/YAML sibling 集合都必须在进入任一 codec
-之前与计划的 image/parameter presence 精确一致。随后会解码预期 metadata；只有其 key set 与
-frozen parameter name 精确相等，该次尝试才能返回 Hit。Presence 或 key 不匹配会成为通往
-provider recomputation 的 miss；它绝不会成为被推迟到 strict output validation 的 partial Hit。
-缺失 sibling 仍是普通 miss。
+`ValueDiskCacheOutputSchema`：是否计划 canonical image、精确 parameter-result 名称，以及精确的
+generic named-Value 名称。Transaction 必须同时具备 archive 与 manifest；退役的 image/YAML pair
+或任何 partial transaction 都会在 publication 前成为 incompatible miss。Reader 会先校验 manifest
+version/flag/count、archive byte size 与 digest、canonical archive framing、精确 planned name、每项
+descriptor/Facet/layout/binding fact 与 payload digest，以及 provider generation，再重建本地 candidate。
+Provider-defined multi-buffer Value 使用借用的 process `DataDefinitionRegistry`；缺失或不兼容 provider
+属于 typed error。
+
+计划 parameter output 时，manifest 还会绑定精确 metadata byte。Reader 会在 codec decode 前后验证
+这些 byte、比较精确 decoded key set，并在最后重新读取 manifest。Manifest/payload race、tamper、
+mixed generation、stale name、missing file 或任一 Value 失败，都不会发布 candidate 的任何部分。Hit
+只会整体 move 一次完整 `NodeOutput`，并为每个重建 Value 铸造 fresh runtime identity。可选 image
+projection 从不参与 replay，因此不会成为第二个 Value authority。
 
 磁盘缓存加载尝试会保留既有 try-load 布尔返回契约，同时通过 GraphModel 私有的 disk-cache
 diagnostic store 记录最新诊断。该 store 独占 optional value 与 no-throw mutex，因此 worker
@@ -99,22 +123,25 @@ stack unwinding 中释放锁，双 store publication 则按 `std::less` 地址�
 lifetime。凡是可能访问该 store 的 runtime compute-request work、graph-state work 与 scheduler
 worker，都必须在所属 model 销毁前排空并 join；任何访问都不得与 member teardown 竞态。调用方检查
 独立 snapshot，而不直接读取可变 storage。该诊断结果会区分跳过的尝试、真实 miss、命中以及读取/
-解析错误。损坏的图像文件、无效的 YAML 元数据和文件系统失败会被记录为带错误码和消息的错误，而不
-是与普通 cache miss 混在一起。
+解析错误。无效 manifest、archive/metadata digest mismatch、missing provider、无效 YAML metadata 与
+filesystem failure 都会被记录为带 error code 和 message 的错误，而不是与普通 cache miss 混在一起。
 
 ## 当前耐久性与失败边界
 
-当前 cache save 不是 atomic cache-entry transaction。`GraphCacheService` 会创建目录，并针对
-最终的两个同级 path 调用已配置 image 与 metadata codec。完成 exact formal-output validation
-之后，generic named Value 会在 planned-byte admission 之前跳过 persistence。Complete 且可表示的
-output 会先写入全部 required sibling，再仅移除其实际 shape 排除的 configured sibling：data-only
-先写 YAML，再移除旧 image；image-only 先编码 image，再移除旧 YAML；image-plus-parameter 保留
-两者；empty 与 partial output 两者都不保留。Required write 失败会在 stale sibling cleanup 前传播；
-cleanup 失败则在成功 write 后传播，并可能留下 shape 不匹配的 pair，下一次 load 会在 codec entry
-前拒绝它。因此 image payload、YAML metadata 与 cleanup 可以分别成功或失败。该 service 不提供
-entry-level staging rename、rollback、manifest-last publication、file 或 directory
-synchronization receipt、retry protocol 或 crash recovery。Sequential save、parallel committer、
-compute-I/O executor、cache-all 与 synchronization 全部汇聚到同一 mechanism。
+当前 cache save 提供 manifest-last publication 与 all-or-nothing replay，但不是 crash-durable 或
+atomic filesystem transaction。`GraphCacheService` 会先把每个 named Value 捕获并验证为脱离 runtime
+的 archive byte，随后才进行 planned-byte admission、task construction、filesystem mutation 或 codec
+invocation。不受支持的 Value 会以 typed `InvalidParameter` 失败；`skip_save_cache` 以及 absent/
+unsupported cache entry 则会在该 validation 前保留既有 no-op policy。
+
+一次 complete save 会依次写入可选 image projection、可选 parameter metadata、canonical archive，
+移除被排除的 projection/metadata predecessor，捕获精确 archive/metadata record，验证 metadata codec
+round-trip，并在最后写入和回读 versioned manifest。Partial output 会移除全部四个文件。Failure 可能
+留下 partial 或 mixed generation，但 replay 只有在 manifest-bound size/digest、stable generation、
+精确 name 与完整 artifact set 全部通过验证后才可发布，因此这些残留不可复用。该 service 不提供
+temporary-file rename、rollback、file/directory synchronization barrier、durability receipt、retry
+protocol 或 crash recovery。Sequential save、parallel committer、compute-I/O executor、cache-all 与
+synchronization 全部汇聚到同一 mechanism。
 
 `cache_all_nodes` 统计存在 HP output、因而尝试过 save path 的 node；该计数并不证明每个 node
 都配置了 artifact，也不证明存在 durable cache entry。Cache load diagnostic 是进程内关于最近
@@ -193,23 +220,20 @@ Replacement output 与 disk decode 同样创建新 identity。RT proxy output �
 projection version 的全新 sealed Value；它继续保持 transient，不会成为正式 cache identity
 source。
 
-Disk save 要求 sealed Value，并通过显式 codec 或 portable artifact 边界直接捕获 checked Value。
-现有 image 与 YAML format 仍只持久化 representation byte 与 named metadata：
-`AllocationIdentity` 和 `ValueRevisionId` 都不会被序列化、从 path 重建或用作持久 cache/task
-key。两类 token 都是 opaque、process-local runtime identity；disk reload 必然铸造新 token。
-这项 image-only mechanism 不会静默序列化 generic named Value，也不会把 parameter metadata
-转成 generic Value storage。
+Disk save 要求每个 sealed named Value，并通过 public portable artifact boundary 捕获它们。一份
+canonical archive 会持久化 ordinary rich image、generic built-in Value，以及兼容的
+provider-defined multi-buffer Value；可选 image-codec projection 与脱离 Value 的 parameter metadata
+都不是并行 Value authority。`AllocationIdentity` 与 `ValueRevisionId` 都不会被序列化、从 path
+重建或用作 persistent cache/task key。这两类 token 都是 opaque process-local runtime identity；
+每次 replay 每个 archived Value 时都必然铸造新 token。
 
 已配置 artifact path 仍为 `cache_root/node_id/location`，其中不包含带 revision 的 output-schema
 component。因此，每次 read 都会携带完整 frozen image/parameter/generic shape，而不是信任 path。
-Generic named Value 会在 filesystem inspection 前把所有 configured artifact 归类为
-incompatible miss。对于可表示 shape，会在 codec 前检查既存 image 与 YAML sibling presence，且
-decoded metadata key 必须在 Hit 前与 frozen parameter-result name 精确匹配。因此，data-only plan
-旁的旧 image、image-only plan 旁的旧 YAML、不完整的 image-plus-parameter pair，或被替换的
-parameter name，都会成为 miss 并触发 provider recomputation，而不是导致 authority-validation
-failure。Exact formal output validation 之后，generic output 会跳过 persistence；可表示 save 会先
-写 required sibling，再依照上面的共同非事务 failure boundary 移除被排除的 predecessor。这样无需
-新增 generic durable format 或 persistent schema key，即可闭合 schema replacement。
+Versioned sibling manifest 与 public archive 必须精确匹配该 shape；generic named Value 是普通
+archive member，不再是 incompatible miss。旧 image/YAML-only entry、partial transaction、名称变更、
+tampered payload、mixed generation 与 missing provider 都无法成为 hit。这样便通过一个 portable
+transaction 闭合 schema replacement，同时不会让 path、auxiliary projection 或 detached metadata
+成为第二个 Value identity。
 
 ## V-4 Region Validity
 
@@ -253,7 +277,7 @@ pixel ROI。`RealtimeProxyGraph::NodeState::region_hp` 保留 logical Region；d
 proxy payload 与 `roi_rt` 保持为零基 RT storage。TensorSlice 与 Whole staged validity 不会创建 partial
 downsample request。Region value 与 Tensor axis 会计入 retained-memory accounting。
 
-## V-13 Packed Memory Cache 与 Image Disk Boundary
+## V-13 Packed Memory Cache 与 Portable Disk Boundary
 
 正式 HP `NodeOutput` 可以通过既有 Value authority 保留完整 immutable packed FP4 Value。
 普通 cache copy 会保留 descriptor、block-scale quantization、Blocked layout、精确 byte
@@ -261,16 +285,19 @@ envelope、allocation、逻辑 revision 与 Ready state。`Node::hp_region` 会�
 TensorSlice validity；两类事实都不会从缩减图像 snapshot 重建，也不会从 storage 推断。这是 runtime memory-cache retention，
 不是新的 persistent identity 或 cache format。
 
-已配置 disk mechanism 继续明确保持 image-only。在 planned byte 被 `ComputeIoExecutor` 准入、
-executor callback 被创建，以及 filesystem 或 codec 工作发生前，`GraphCacheService` 要求正式
-Value 为 Ready、host-readable、image-faceted、Strided、unquantized，并与所选 codec 的显式
-whole-byte storage set 兼容。Packed、quantized 或 latent 正式 Value 会以
-`GraphError{InvalidParameter}` 失败。没有有效 nonempty image cache entry 的节点会保留历史
-no-op 行为，不会进入这条 validation boundary。
+已配置 disk mechanism 现在会通过 public artifact archive 捕获每个受支持的 named Value，但保留的
+canonical `image` slot 仍必须生成已配置 ordinary-image projection。在 planned byte 被
+`ComputeIoExecutor` 准入、executor callback 被创建，以及 filesystem 或 codec 工作发生前，该 image
+必须为 Ready、host-readable、image-faceted、Strided、unquantized，并与所选 codec 的显式
+whole-byte storage set 兼容。因此 packed FP4 canonical image 会以
+`GraphError{InvalidParameter}` 失败。只有 public artifact capture 与 active provider generation
+验证了每项 descriptor、layout、binding 与 payload fact，image slot 之外的 generic 或
+provider-defined multi-buffer Value 才会被接受。没有有效 nonempty image cache entry 的节点会保留
+历史 no-op 行为，不会进入这条 validation boundary。
 
-这项拒绝不会丢弃 named metadata、widen FP4 byte、伪造 image facet、单独持久化 scale，或生成
-descriptor/content/layout/artifact digest。支持这些行为需要后续通用 artifact 与 manifest
-contract；当前 `ImageArtifactCodec` ABI 保持不变。
+拒绝绝不会丢弃 metadata、widen packed byte、伪造 image facet 或静默跳过 named Value。当前
+`ImageArtifactCodec` ABI 仍是 auxiliary projection boundary；public archive 与 versioned cache
+manifest 拥有 portable replay。
 
 ## DI-1/DI-2 观测 Statistics Cache 边界
 
@@ -305,10 +332,11 @@ logical content identity。
 当前 V-3 的 process-local `ValueRevisionId` 是 runtime publication identity，不是任何未来
 canonical descriptor、content、layout 或 artifact digest。
 
-该目标不会改变上文描述的当前 cache format 或 authority。HP output 仍是唯一正式可复用 cache，
-RT proxy output 继续保持 transient，当前注入的 artifact/metadata codec 继续作为实现边界，
-直到后续切片迁移 cache manifest 与 payload。未来 residency replica 也不会成为第二个 cache
-authority。
+DI-4 会把当前 disk representation 改为上文描述的 public named-Value archive 与 versioned
+manifest，但不会改变正式 cache authority。HP output 仍是唯一正式可复用 memory cache，RT proxy
+output 继续保持 transient；注入的 image/metadata codec 仍分别是 optional projection 与 detached-
+parameter implementation boundary。Residency replica、projection、manifest path 或 persisted runtime
+identity 都不会成为第二个 cache authority。
 
 V-15 不会改变这套 cache format 或 authority。其可选 OpenEXR deep adapter 可以在 caller 选择的
 path 读取或写入一个 provider-defined Value，但两项操作都不是 graph-cache load/save、
