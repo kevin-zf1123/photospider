@@ -172,6 +172,39 @@ NodeOutput make_kernel_contract_image_output(int width, int height,
 }
 
 /**
+ * @brief Publishes a huge logical image over one immutable broadcast byte.
+ *
+ * @param width Positive logical width that may exceed an adapter's extent.
+ * @param height Positive logical height that may exceed an adapter's extent.
+ * @return Ready UINT8 ordinary image whose three immutable strides are zero.
+ * @throws Value validation, signed-window, allocation, or identity failures
+ *         unchanged.
+ * @note The one-byte seed first creates a public sealed `BufferHandle`; the
+ *       returned Value then republishes a read-only broadcast view over that
+ *       same allocation. This proves adapter extent handling without a
+ *       payload-sized allocation or mutable alias.
+ */
+Value make_broadcast_kernel_contract_image(std::size_t width,
+                                           std::size_t height) {
+  DenseTensorDescriptor seed_descriptor{{1U, 1U, 1U},
+                                        ElementSemantics::UnsignedInteger,
+                                        StorageEncoding{8U}};
+  const ImageFacet seed_facet =
+      make_zero_origin_image_facet(seed_descriptor, 1U, 0U, 2U);
+  const Value seed = Value::from_cpu_dense_tensor(
+      seed_descriptor, seed_facet, StridedLayout{{1, 1, 1}},
+      std::vector<std::byte>{std::byte{0x2a}});
+
+  DenseTensorDescriptor descriptor{{height, width, 1U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  return Value::from_cpu_dense_tensor(std::move(descriptor), std::move(facet),
+                                      StridedLayout{{0, 0, 0}},
+                                      seed.buffer_handle());
+}
+
+/**
  * @brief Builds one rich signed-window image for portable cache replay tests.
  * @return Ready padded FP32 RGBA Value with explicit channels, sample meaning,
  *         color interpretation, and independent data/display windows.
@@ -3133,6 +3166,52 @@ TEST(DenseImageValueContract, OpenCvAndTileAccessRespectPaddedStride) {
   EXPECT_FLOAT_EQ(mat.at<float>(2, 7), 7.0f);
   EXPECT_FLOAT_EQ(mat.at<float>(0, 3), 0.0f);
   EXPECT_FLOAT_EQ(mat.at<float>(1, 8), 0.0f);
+}
+
+/**
+ * @brief Proves OpenCV full extents fail closed while tiny tiles remain
+ *        directly representable.
+ *
+ * @return Nothing; GoogleTest reports extent, ROI, stride, address, or typed
+ *         rejection mismatches.
+ * @throws Value construction or unexpected OpenCV failures when the positive
+ *         tile path cannot execute.
+ * @note The logical width and height are both `INT_MAX + 1`, but the immutable
+ *       zero-stride Value owns only one byte. The full adapter must reject
+ *       before narrowing or matrix construction. A one-pixel ROI at
+ *       `(INT_MAX, INT_MAX)` is itself representable by `PixelRect` and must
+ *       become a direct zero-copy matrix using the original row semantics.
+ */
+TEST(DenseImageValueContract,
+     OpenCvRejectsUnrepresentableFullExtentButViewsTinyTileDirectly) {
+  const std::size_t oversized_extent =
+      static_cast<std::size_t>(std::numeric_limits<int>::max()) + 1U;
+  const Value image =
+      make_broadcast_kernel_contract_image(oversized_extent, oversized_extent);
+
+  try {
+    (void)toCvMat(image);
+    FAIL() << "OpenCV accepted a full Value extent above INT_MAX.";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_STREQ(error.what(),
+                 "OpenCV matrix dimensions exceed the supported int range.");
+  }
+
+  const int maximum = std::numeric_limits<int>::max();
+  const InputTile tile{&image, PixelRect{maximum, maximum, 1, 1}, nullptr};
+  const ReadLease read = image.buffer_handle().acquire_read();
+  const cv::Mat matrix = toCvMat(tile);
+  EXPECT_EQ(matrix.rows, 1);
+  EXPECT_EQ(matrix.cols, 1);
+  EXPECT_EQ(matrix.type(), CV_8UC1);
+  EXPECT_EQ(matrix.step[0], 1U);
+  EXPECT_EQ(reinterpret_cast<const void*>(matrix.data),
+            reinterpret_cast<const void*>(read.data()));
+  EXPECT_EQ(matrix.at<std::uint8_t>(0, 0), 0x2aU);
+
+  const InputTile invalid_roi{&image, PixelRect{maximum, maximum, -1, 1},
+                              nullptr};
+  EXPECT_THROW((void)toCvMat(invalid_roi), std::out_of_range);
 }
 
 /**
