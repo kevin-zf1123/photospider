@@ -178,19 +178,25 @@ precision loss.
 Identity conversion performs no scaling. Semantic conversion applies the
 declared affine mapping only after source-domain rejection or clamp, then
 applies the selected rounding, representability, non-finite, and precision
-rules. Exact endpoints and equal domains bypass arithmetic. A finite source
-and destination span first form their quotient. When it is finite and nonzero,
-one endpoint-relative source distance is fused directly with the destination
-endpoint closest to zero; a symmetric destination uses a stable source
-midpoint when available. A zero or infinite quotient falls back to an
-endpoint-relative fraction plus fused destination interpolation. Only an
-actually overflowing source or destination span is power-of-two scaled. The
-forward and precision-reverse maps therefore preserve same-sign, cross-zero,
-narrow-subnormal, and ratio-underflow cases without requiring `long double` to
-be wider than binary64 or creating an avoidable infinity, NaN, zero radius,
-rounded midpoint ratio, or premature zero. Precision Reject still compares the
-working affine result with exact destination storage and exact reverse mapping;
-it does not pre-round a wider `1/3` to make FP64 narrowing appear exact.
+rules. Exact endpoints and equal domains bypass arithmetic. Finite direct spans
+first form their quotient. When it is finite and nonzero, one endpoint-relative
+source distance is fused directly with the destination endpoint closest to
+zero; a symmetric destination uses a stable source midpoint when available. If
+either direct span overflows, the source and destination endpoints are
+independently power-of-two normalized. Their bounded span quotient plus exact
+exponent difference derives a candidate scale without forming either original
+span. A normal derived scale multiplies an original, unscaled finite endpoint
+or midpoint distance directly. A zero, subnormal, or infinite derived scale
+falls back to an endpoint-relative fraction plus fused destination
+interpolation. On the normal-derived-scale path, only interval endpoints are
+normalized; the representable small input displacement remains unscaled until
+the fused map. Forward and precision-reverse maps preserve
+same-sign, cross-zero, narrow-subnormal, ratio-underflow, and cross-zero
+overflow-span cases without requiring `long double` to be wider than binary64
+or creating an avoidable infinity, NaN, zero radius, rounded midpoint ratio, or
+premature zero. Precision Reject still compares the working affine result with
+exact destination storage and exact reverse mapping; it does not pre-round a
+wider `1/3` to make FP64 narrowing appear exact.
 There is no hidden 255/65535 arithmetic, color transform, channel-role
 inference, or missing-metadata fallback. Equal endpoint/storage identity reads
 integer domains with type-aware comparison and copies each in-domain native
@@ -223,3 +229,8 @@ The later-buffer artifact regression uses a BUILD_TESTING-only source-private
 runtime failpoint immediately before the selected `BufferHandle::ControlBlock`
 allocation. Production builds compile no test-access seam, and the test does
 not replace process or shared-library global allocation symbols.
+The cross-zero overflow-span regression likewise uses a BUILD_TESTING-only,
+source-private, thread-local scope to select binary64 affine working arithmetic
+while still calling public `convert_dense_image_samples`. Nested scopes restore
+their prior mode, concurrent threads remain independent, the header is not
+installed, and production builds compile neither the selector nor its branch.

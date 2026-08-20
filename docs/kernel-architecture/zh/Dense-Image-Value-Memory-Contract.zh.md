@@ -138,15 +138,20 @@ source/destination `SampleEncoding`、有限 inclusive `SampleDomain`、destinat
 
 identity conversion 不执行 scaling。semantic conversion 仅在完成 source-domain reject/clamp 后应用
 已声明 affine mapping，再应用所选 rounding、representability、non-finite 和 precision 规则。精确
-endpoint 与 equal domain 会绕过 arithmetic。finite source/destination span 会先计算两者 quotient；
-quotient finite 且非零时，一个 endpoint-relative source distance 会直接与更接近零的 destination
-endpoint 做 fused 运算，symmetric destination 则在可用时采用稳定 source midpoint。quotient 为零
-或 infinity 时，回退到 endpoint-relative fraction 加 fused destination interpolation。只有真正
-overflowing 的 source 或 destination span 才进行二次幂缩放。因此 forward map 与 precision-reverse
-map 在不要求 `long double` 比 binary64 更宽的情况下，仍能保留同号、跨零、窄 subnormal 与
-ratio-underflow case，且不会产生可避免的 infinity、NaN、zero radius、rounded-midpoint ratio 或
-premature zero。precision Reject 仍会用 exact destination storage 和 exact reverse mapping 比较
-working affine result；它不会预先舍入更宽的 `1/3` 来把 FP64 narrowing 伪装成精确。
+endpoint 与 equal domain 会绕过 arithmetic。finite direct span 会先计算 quotient；quotient finite 且
+非零时，一个 endpoint-relative source distance 会直接与更接近零的 destination endpoint 做 fused
+运算，symmetric destination 则在可用时采用稳定 source midpoint。若任一 direct span overflow，
+source 与 destination endpoint 会分别做二次幂 normalization；有界 span quotient 加精确 exponent
+difference 会在不构造任一原始 span 的情况下推导 candidate scale。normal derived scale 会直接乘以
+原始、未缩放的 finite endpoint/midpoint distance；derived scale 为 zero、subnormal 或 infinity 时，
+回退到 endpoint-relative fraction 加 fused destination interpolation。因此只有 interval endpoint 会
+在 normal-derived-scale path 中做 normalization；可表示的小 input displacement 会保持未缩放，
+直到进入 fused map。forward map 与 precision-reverse map 在
+不要求 `long double` 比 binary64 更宽的情况下，仍能保留同号、跨零、窄 subnormal、ratio-underflow
+与 cross-zero overflow-span case，且不会产生可避免的 infinity、NaN、zero radius、
+rounded-midpoint ratio 或 premature zero。precision Reject 仍会用 exact destination storage 和 exact
+reverse mapping 比较 working affine result；它不会预先舍入更宽的 `1/3` 来把 FP64 narrowing
+伪装成精确。
 不存在隐藏的 255/65535 算术、color transform、channel-role inference 或 missing-metadata fallback。
 equal endpoint/storage identity 通过 type-aware 比较读取 integer domain，并在不做 floating promotion
 的情况下复制每个 in-domain native sample，从而保留 `int64_t`/`uint64_t` 在 `2^53` 附近及其极值的
@@ -174,3 +179,7 @@ behavior test。
 later-buffer artifact 回归使用仅在 BUILD_TESTING 中编译的 source-private runtime failpoint，并在
 选定的 `BufferHandle::ControlBlock` allocation 之前立即触发。production build 不编译 test-access
 seam，测试也不替换 process 或 shared-library 的 global allocation 符号。
+cross-zero overflow-span 回归同样使用一个仅 BUILD_TESTING、source-private、thread-local 的
+scope，在仍调用 public `convert_dense_image_samples` 的情况下选择 binary64 affine working
+arithmetic。嵌套 scope 会恢复此前 mode，并发线程彼此独立，header 不安装，production build
+既不编译 selector，也不编译对应 branch。
