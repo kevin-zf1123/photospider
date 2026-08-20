@@ -111,6 +111,32 @@ SampleConversion make_conversion(SampleEndpoint source,
   return conversion;
 }
 
+/**
+ * @brief Computes the nearest FP64 centered result in the production working
+ *        type for one same-sign extreme interval.
+ * @param value Binary64 source value already inside the interval.
+ * @param minimum Finite source lower endpoint.
+ * @param maximum Finite source upper endpoint greater than minimum.
+ * @return Nearest binary64 storage for the centered `[-1, 1]` mapping.
+ * @throws Nothing for the finite ordered test vectors.
+ * @note Binary64 may pre-round the mathematical midpoint before promotion.
+ *       The public contract observes the platform `long double` affine result
+ *       before destination narrowing, so the transparent reference performs
+ *       the centered fused map in that same working type. This is not a
+ *       platform skip: equal-width Darwin and wider GNU profiles both assert
+ *       their contract-defined nearest storage.
+ */
+double nearest_centered_extreme_storage(double value, double minimum,
+                                        double maximum) noexcept {
+  const long double working_minimum = minimum;
+  const long double working_maximum = maximum;
+  const long double span = working_maximum - working_minimum;
+  const long double midpoint = std::fma(0.5L, span, working_minimum);
+  const long double scale = 2.0L / span;
+  return static_cast<double>(
+      std::fma(static_cast<long double>(value) - midpoint, scale, 0.0L));
+}
+
 constexpr SampleEndpoint kNormalized{
     SampleEncoding{1U, SampleEncodingKind::Normalized},
     SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}};  // NOLINT
@@ -363,6 +389,19 @@ TEST(SampleConversion,
   EXPECT_EQ(read_samples<double>(converted), samples);
 }
 
+/**
+ * @brief Exercises finite extreme-domain mapping without unstable
+ *        intermediates or platform-dependent precision oracles.
+ * @return Nothing; GoogleTest reports affine, nearest-storage, exact-Reject,
+ *         ordering, or finite-result mismatches.
+ * @throws Unexpected conversion failures from vectors whose selected policy
+ *         permits the contract-defined result.
+ * @note Binary64 pre-rounded extreme midpoints use Allow and assert the
+ *       nearest destination storage in the production working type. Reject
+ *       success uses only exact and reversible endpoints; the separate
+ *       binary64 seam below retains its positive/negative, bidirectional,
+ *       Allow, and Reject coverage.
+ */
 TEST(SampleConversion,
      MapsExtremeFiniteRangesWithoutOverflowUnderflowOrNanIntermediates) {
   const double maximum = std::numeric_limits<double>::max();
@@ -456,12 +495,39 @@ TEST(SampleConversion,
   SampleConversion positive_extreme_to_unit =
       make_conversion(positive_extreme_endpoint, unit_endpoint,
                       ElementSemantics::FloatingPoint, 64U);
-  positive_extreme_to_unit.precision_loss = PrecisionLossPolicy::Reject;
+  positive_extreme_to_unit.precision_loss = PrecisionLossPolicy::Allow;
   const std::vector<double> positive_mapped =
       read_samples<double>(convert_dense_image_samples(
           make_sample_image(positive_extreme, positive_extreme_endpoint),
           positive_extreme_to_unit));
-  EXPECT_EQ(positive_mapped, (std::vector<double>{-1.0, 0.0, 1.0}));
+  EXPECT_EQ(positive_mapped,
+            (std::vector<double>{-1.0,
+                                 nearest_centered_extreme_storage(
+                                     positive_midpoint, maximum / 2.0, maximum),
+                                 1.0}));
+
+  SampleConversion unit_to_positive_extreme =
+      make_conversion(unit_endpoint, positive_extreme_endpoint,
+                      ElementSemantics::FloatingPoint, 64U);
+  unit_to_positive_extreme.precision_loss = PrecisionLossPolicy::Allow;
+  EXPECT_EQ(
+      read_samples<double>(convert_dense_image_samples(
+          make_sample_image(std::vector<double>{-1.0, 0.0, 1.0}, unit_endpoint),
+          unit_to_positive_extreme)),
+      positive_extreme);
+
+  positive_extreme_to_unit.precision_loss = PrecisionLossPolicy::Reject;
+  EXPECT_EQ(read_samples<double>(convert_dense_image_samples(
+                make_sample_image(std::vector<double>{maximum / 2.0, maximum},
+                                  positive_extreme_endpoint),
+                positive_extreme_to_unit)),
+            (std::vector<double>{-1.0, 1.0}));
+  unit_to_positive_extreme.precision_loss = PrecisionLossPolicy::Reject;
+  EXPECT_EQ(
+      read_samples<double>(convert_dense_image_samples(
+          make_sample_image(std::vector<double>{-1.0, 1.0}, unit_endpoint),
+          unit_to_positive_extreme)),
+      (std::vector<double>{maximum / 2.0, maximum}));
 
   const SampleEndpoint negative_extreme_endpoint{
       SampleEncoding{1U, SampleEncodingKind::Value},
@@ -472,12 +538,40 @@ TEST(SampleConversion,
   SampleConversion negative_extreme_to_unit =
       make_conversion(negative_extreme_endpoint, unit_endpoint,
                       ElementSemantics::FloatingPoint, 64U);
-  negative_extreme_to_unit.precision_loss = PrecisionLossPolicy::Reject;
+  negative_extreme_to_unit.precision_loss = PrecisionLossPolicy::Allow;
   const std::vector<double> negative_mapped =
       read_samples<double>(convert_dense_image_samples(
           make_sample_image(negative_extreme, negative_extreme_endpoint),
           negative_extreme_to_unit));
-  EXPECT_EQ(negative_mapped, (std::vector<double>{-1.0, 0.0, 1.0}));
+  EXPECT_EQ(
+      negative_mapped,
+      (std::vector<double>{-1.0,
+                           nearest_centered_extreme_storage(
+                               negative_midpoint, -maximum, -maximum / 2.0),
+                           1.0}));
+
+  SampleConversion unit_to_negative_extreme =
+      make_conversion(unit_endpoint, negative_extreme_endpoint,
+                      ElementSemantics::FloatingPoint, 64U);
+  unit_to_negative_extreme.precision_loss = PrecisionLossPolicy::Allow;
+  EXPECT_EQ(
+      read_samples<double>(convert_dense_image_samples(
+          make_sample_image(std::vector<double>{-1.0, 0.0, 1.0}, unit_endpoint),
+          unit_to_negative_extreme)),
+      negative_extreme);
+
+  negative_extreme_to_unit.precision_loss = PrecisionLossPolicy::Reject;
+  EXPECT_EQ(read_samples<double>(convert_dense_image_samples(
+                make_sample_image(std::vector<double>{-maximum, -maximum / 2.0},
+                                  negative_extreme_endpoint),
+                negative_extreme_to_unit)),
+            (std::vector<double>{-1.0, 1.0}));
+  unit_to_negative_extreme.precision_loss = PrecisionLossPolicy::Reject;
+  EXPECT_EQ(
+      read_samples<double>(convert_dense_image_samples(
+          make_sample_image(std::vector<double>{-1.0, 1.0}, unit_endpoint),
+          unit_to_negative_extreme)),
+      (std::vector<double>{-maximum, -maximum / 2.0}));
 }
 
 TEST(SampleConversion,
