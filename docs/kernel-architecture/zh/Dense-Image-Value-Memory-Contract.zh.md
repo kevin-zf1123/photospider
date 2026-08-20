@@ -137,11 +137,14 @@ source/destination `SampleEncoding`、有限 inclusive `SampleDomain`、destinat
 以及 out-of-domain input、clamp、integer rounding、NaN/Inf 和 precision loss 的封闭策略。
 
 identity conversion 不执行 scaling。semantic conversion 仅在完成 source-domain reject/clamp 后应用
-已声明 affine mapping，再应用所选 rounding、representability、non-finite 和 precision 规则。不存在
-对 finite endpoint、midpoint/radius、scale 与 fused operation 的处理，会使 forward map 和
-precision-reverse map 在不要求 `long double` 比 binary64 更宽的情况下保持有限；完整 finite
-cross-zero domain 因而不会产生可避免的 infinity、NaN 或 zero scale。不存在隐藏的 255/65535
-算术、color transform、channel-role inference 或 missing-metadata fallback。
+已声明 affine mapping，再应用所选 rounding、representability、non-finite 和 precision 规则。精确
+endpoint 与 equal domain 会绕过 arithmetic。finite source span 会相对于更接近零的 destination
+endpoint 计算 endpoint-relative position。symmetric destination 使用 centered coordinate；只有
+overflowing source 或 destination span 才进行二次幂缩放。finite destination span 使用一次 fused
+endpoint interpolation，因此 subnormal 结果只会在 affine operation 结束后舍入。因此 forward map
+与 precision-reverse map 在不要求 `long double` 比 binary64 更宽的情况下，仍能保留同号、跨零与窄
+subnormal interval，且不会产生可避免的 infinity、NaN、zero radius 或 rounded-midpoint ratio。
+不存在隐藏的 255/65535 算术、color transform、channel-role inference 或 missing-metadata fallback。
 equal endpoint/storage identity 通过 type-aware 比较读取 integer domain，并在不做 floating promotion
 的情况下复制每个 in-domain native sample，从而保留 `int64_t`/`uint64_t` 在 `2^53` 附近及其极值的
 精确值。若平台 `long double` 无法证明 source promotion 精确，non-identity wide-integer conversion

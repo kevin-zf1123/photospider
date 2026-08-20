@@ -178,11 +178,16 @@ precision loss.
 Identity conversion performs no scaling. Semantic conversion applies the
 declared affine mapping only after source-domain rejection or clamp, then
 applies the selected rounding, representability, non-finite, and precision
-rules. Finite endpoint, midpoint/radius, scaled, and fused operations keep the
-forward map and precision-reverse map finite without requiring `long double`
-to be wider than binary64; full finite cross-zero domains therefore never
-create an avoidable infinity, NaN, or zero scale. There is no hidden 255/65535
-arithmetic, color transform, channel-role
+rules. Exact endpoints and equal domains bypass arithmetic. A finite source
+span computes an endpoint-relative position toward the destination endpoint
+closest to zero. A symmetric destination uses a centered coordinate, while
+only an overflowing source or destination span is power-of-two scaled. A
+finite destination span uses one fused endpoint interpolation, so a subnormal
+result is rounded only after the affine operation. The forward map and
+precision-reverse map therefore preserve same-sign, cross-zero, and narrow
+subnormal intervals without requiring `long double` to be wider than binary64
+or creating an avoidable infinity, NaN, zero radius, or rounded midpoint ratio.
+There is no hidden 255/65535 arithmetic, color transform, channel-role
 inference, or missing-metadata fallback. Equal endpoint/storage identity reads
 integer domains with type-aware comparison and copies each in-domain native
 sample without floating promotion, preserving `int64_t`/`uint64_t` values
