@@ -975,6 +975,9 @@ struct BufferHandle::ControlBlock final {
   /** @brief Positive complete allocation byte size. */
   std::size_t byte_size = 0U;
 
+  /** @brief Positive power-of-two allocation-base alignment guarantee. */
+  std::size_t required_alignment = 1U;
+
   /**
    * @brief Allocates one zero-initialized CPU byte range.
    *
@@ -984,12 +987,16 @@ struct BufferHandle::ControlBlock final {
    * @throws std::bad_alloc when byte allocation fails.
    * @throws std::invalid_argument when alignment cannot be represented by the
    * aligned allocation contract.
+   * @note The physical allocation is elevated to at least max_align_t while
+   *       `required_alignment` retains the caller's exact portable contract;
+   *       the owner deleter captures the elevated allocation argument.
    */
   ControlBlock(AllocationIdentity identity_in, std::size_t size,
                std::size_t alignment)
       : identity(identity_in), byte_size(size) {
     const std::size_t effective_alignment =
         std::max(alignment, alignof(std::max_align_t));
+    required_alignment = alignment;
     void* allocation =
         ::operator new(size, std::align_val_t(effective_alignment));
     owned_cpu_storage = std::shared_ptr<void>(
@@ -1101,9 +1108,13 @@ StorageBinding BufferHandle::storage_binding() const {
   if (!valid()) {
     throw std::logic_error("Invalid BufferHandle has no storage binding.");
   }
-  return StorageBinding{control_->identity, control_->device,
-                        control_->memory_domain, control_->byte_size,
-                        control_->host_data != nullptr};
+  std::size_t retained_alignment = control_->required_alignment;
+  while (retained_alignment > 1U && offset_ % retained_alignment != 0U) {
+    retained_alignment /= 2U;
+  }
+  return StorageBinding{
+      control_->identity,  control_->device,   control_->memory_domain,
+      control_->byte_size, retained_alignment, control_->host_data != nullptr};
 }
 
 /** @copydoc BufferHandle::host_visible */
@@ -1662,13 +1673,13 @@ ValueBuilder ValueBuilder::allocate_cpu_dense_tensor(
 /** @copydoc ValueBuilder::allocate_cpu_blocked_dense_tensor */
 ValueBuilder ValueBuilder::allocate_cpu_blocked_dense_tensor(
     DenseTensorDescriptor descriptor, BlockedLayout layout,
-    std::size_t storage_size) {
+    std::size_t storage_size, std::size_t alignment) {
   validate_dense_tensor_producer_envelope(descriptor, layout, storage_size);
 
   DenseTensorDescriptor isolated_descriptor = descriptor;
   BlockedLayout isolated_layout = layout;
-  BufferHandle buffer = BufferHandle::allocate_for_builder(
-      storage_size, alignof(std::max_align_t));
+  BufferHandle buffer =
+      BufferHandle::allocate_for_builder(storage_size, alignment);
   auto authority = std::make_shared<WriteLease::Authority>();
   return ValueBuilder(
       std::make_unique<Impl>(std::move(isolated_descriptor), std::nullopt,
@@ -2012,10 +2023,11 @@ Value::Value(std::shared_ptr<const Impl> impl) noexcept
 Value Value::from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
                                    std::optional<ImageFacet> image_facet,
                                    StridedLayout layout,
-                                   std::vector<std::byte> storage) {
+                                   std::vector<std::byte> storage,
+                                   std::size_t alignment) {
   ValueBuilder builder = ValueBuilder::allocate_cpu_dense_tensor(
       std::move(descriptor), std::move(image_facet), std::move(layout),
-      storage.size());
+      storage.size(), alignment);
   {
     WriteLease lease = builder.acquire_write();
     std::memcpy(lease.data(), storage.data(), storage.size());
@@ -2056,9 +2068,10 @@ Value Value::from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
 /** @copydoc Value::from_cpu_blocked_dense_tensor */
 Value Value::from_cpu_blocked_dense_tensor(DenseTensorDescriptor descriptor,
                                            BlockedLayout layout,
-                                           std::vector<std::byte> storage) {
+                                           std::vector<std::byte> storage,
+                                           std::size_t alignment) {
   ValueBuilder builder = ValueBuilder::allocate_cpu_blocked_dense_tensor(
-      std::move(descriptor), std::move(layout), storage.size());
+      std::move(descriptor), std::move(layout), storage.size(), alignment);
   {
     WriteLease lease = builder.acquire_write();
     std::memcpy(lease.data(), storage.data(), storage.size());
@@ -2138,17 +2151,29 @@ Value Value::from_provider_defined(DataDefinitionRegistry& registry,
 /** @copydoc Value::from_provider_defined_payloads */
 Value Value::from_provider_defined_payloads(
     DataDefinitionRegistry& registry, DataDescriptorEnvelope descriptor,
-    ProviderDefinedLayout layout,
-    std::vector<std::vector<std::byte>> payloads) {
-  std::vector<BufferHandle> buffers;
-  buffers.reserve(payloads.size());
-  for (const std::vector<std::byte>& payload : payloads) {
-    if (payload.empty()) {
+    ProviderDefinedLayout layout, std::vector<std::vector<std::byte>> payloads,
+    std::vector<std::size_t> required_alignments) {
+  if (payloads.size() != required_alignments.size()) {
+    throw std::invalid_argument(
+        "Provider-defined payload alignment cardinality must match bytes.");
+  }
+  for (std::size_t index = 0U; index < payloads.size(); ++index) {
+    if (payloads[index].empty()) {
       throw std::invalid_argument(
           "Provider-defined artifact payloads must be nonempty.");
     }
+    const std::size_t alignment = required_alignments[index];
+    if (alignment == 0U || (alignment & (alignment - 1U)) != 0U) {
+      throw std::invalid_argument(
+          "Provider-defined artifact alignment must be a power of two.");
+    }
+  }
+  std::vector<BufferHandle> buffers;
+  buffers.reserve(payloads.size());
+  for (std::size_t index = 0U; index < payloads.size(); ++index) {
+    const std::vector<std::byte>& payload = payloads[index];
     BufferHandle buffer = BufferHandle::allocate_for_builder(
-        payload.size(), alignof(std::max_align_t));
+        payload.size(), required_alignments[index]);
     std::memcpy(buffer.write_pointer(), payload.data(), payload.size());
     buffers.push_back(std::move(buffer));
   }

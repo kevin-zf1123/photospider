@@ -34,9 +34,6 @@ constexpr std::array<std::byte, 8U> kArtifactSetMagic{
 /** @brief Frozen maximum tensor rank accepted by the portable codec. */
 constexpr std::size_t kMaximumArtifactRank = 64U;
 
-/** @brief Frozen maximum required portable payload alignment. */
-constexpr std::uint64_t kMaximumArtifactAlignment = 4096U;
-
 /**
  * @brief Throws one uniform malformed-artifact exception.
  * @param message Reader-facing diagnostic.
@@ -564,7 +561,7 @@ void validate_envelope(const ValueArtifactEnvelope& envelope) {
     const ValueArtifactBuffer& buffer = envelope.buffers[index];
     if (buffer.index != index || buffer.byte_size == 0U ||
         buffer.required_alignment == 0U ||
-        buffer.required_alignment > kMaximumArtifactAlignment ||
+        buffer.required_alignment > kMaximumValueArtifactAlignment ||
         (buffer.required_alignment & (buffer.required_alignment - 1U)) != 0U ||
         buffer.artifact_offset % buffer.required_alignment != 0U ||
         buffer.artifact_offset < previous_end) {
@@ -1054,14 +1051,17 @@ StorageLayoutDigest canonical_layout_digest(
  */
 Value reconstruct_builtin(const ValueArtifact& artifact) {
   const ValueArtifactEnvelope& envelope = artifact.envelope;
+  const std::size_t required_alignment =
+      u64_to_size(envelope.buffers.front().required_alignment);
   if (envelope.layout_kind == StorageLayoutKind::Strided) {
     return Value::from_cpu_dense_tensor(
         *envelope.dense_descriptor, envelope.image_facet,
-        *envelope.strided_layout, artifact.payloads.front());
+        *envelope.strided_layout, artifact.payloads.front(),
+        required_alignment);
   }
-  return Value::from_cpu_blocked_dense_tensor(*envelope.dense_descriptor,
-                                              *envelope.blocked_layout,
-                                              artifact.payloads.front());
+  return Value::from_cpu_blocked_dense_tensor(
+      *envelope.dense_descriptor, *envelope.blocked_layout,
+      artifact.payloads.front(), required_alignment);
 }
 
 /**
@@ -1230,6 +1230,8 @@ ValueArtifact capture_value_artifact(std::string output_name,
     artifact.payloads.emplace_back(read.data(), read.data() + read.size());
     ValueArtifactBuffer buffer;
     buffer.byte_size = size_to_u64(read.size());
+    buffer.required_alignment =
+        size_to_u64(value.storage_binding().required_alignment);
     buffer.digest = payload_digest(artifact.payloads.back());
     artifact.envelope.buffers.push_back(buffer);
   } else if (value.representation_kind() ==
@@ -1245,11 +1247,15 @@ ValueArtifact capture_value_artifact(std::string output_name,
       buffer.index = size_to_u32(index);
       buffer.logical_role = provider_buffer_role(
           value.provider_defined_layout(), size_to_u32(index));
-      buffer.artifact_offset =
+      buffer.required_alignment =
+          size_to_u64(value.storage_binding(index).required_alignment);
+      const std::uint64_t previous_end =
           index == 0U ? 0U
                       : checked_u64_add(
                             artifact.envelope.buffers.back().artifact_offset,
                             artifact.envelope.buffers.back().byte_size);
+      buffer.artifact_offset =
+          align_artifact_offset(previous_end, buffer.required_alignment);
       buffer.byte_size = size_to_u64(read.size());
       buffer.digest = payload_digest(artifact.payloads.back());
       artifact.envelope.buffers.push_back(buffer);
@@ -1302,9 +1308,15 @@ Value reconstruct_value_artifact(const ValueArtifact& artifact,
           ExtensionErrorCode::MissingProvider,
           "Provider-defined artifact reconstruction requires a registry.");
     }
+    std::vector<std::size_t> required_alignments;
+    required_alignments.reserve(artifact.envelope.buffers.size());
+    for (const ValueArtifactBuffer& buffer : artifact.envelope.buffers) {
+      required_alignments.push_back(u64_to_size(buffer.required_alignment));
+    }
     value = Value::from_provider_defined_payloads(
         *registry, *artifact.envelope.provider_descriptor,
-        *artifact.envelope.provider_layout, artifact.payloads);
+        *artifact.envelope.provider_layout, artifact.payloads,
+        std::move(required_alignments));
   }
   validate_content(value, artifact.envelope.content_digest);
   return value;

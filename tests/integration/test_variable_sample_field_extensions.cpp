@@ -826,17 +826,19 @@ std::vector<std::byte> make_samples_payload() {
  * @brief Publishes one exact immutable byte vector and returns its sealed
  * range.
  * @param bytes Nonempty payload plus optional padding.
+ * @param alignment Positive power-of-two allocation alignment.
  * @return Copyable BufferHandle retaining the fresh CPU allocation.
  * @throws The same exceptions as Value::from_cpu_dense_tensor.
  */
-BufferHandle make_buffer(std::vector<std::byte> bytes) {
+BufferHandle make_buffer(std::vector<std::byte> bytes,
+                         std::size_t alignment = alignof(std::max_align_t)) {
   DenseTensorDescriptor descriptor;
   descriptor.shape = {bytes.size()};
   descriptor.element_semantics = ElementSemantics::UnsignedInteger;
   descriptor.storage_encoding = {8U, StorageEncodingKind::NativeScalar};
-  Value owner =
-      Value::from_cpu_dense_tensor(std::move(descriptor), std::nullopt,
-                                   StridedLayout{{1}, 0U}, std::move(bytes));
+  Value owner = Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::nullopt, StridedLayout{{1}, 0U},
+      std::move(bytes), alignment);
   return owner.buffer_handle();
 }
 
@@ -875,6 +877,7 @@ struct SyntheticStorage final {
  * @param malformed_offsets Whether to encode nonmonotonic offsets.
  * @param include_unknown_trailing_bytes Whether Layout payload has unknown
  * trailing bytes.
+ * @param alignments Physical allocation alignment per dense buffer index.
  * @return Complete three-buffer fixture.
  * @throws std::invalid_argument when roles are not the supported three values.
  * @throws std::bad_alloc when fixture storage cannot allocate.
@@ -884,8 +887,10 @@ SyntheticStorage make_storage(
         {kCountsRole, kOffsetsRole,
          kSamplesRole},  // NOLINT(whitespace/indent_namespace)
     std::array<std::size_t, 3U> prefixes = {0U, 0U, 0U},
-    bool malformed_offsets = false,
-    bool include_unknown_trailing_bytes = true) {
+    bool malformed_offsets = false, bool include_unknown_trailing_bytes = true,
+    std::array<std::size_t, 3U> alignments = {alignof(std::max_align_t),
+                                              alignof(std::max_align_t),
+                                              alignof(std::max_align_t)}) {
   const std::vector<std::byte> counts = make_counts_payload();
   const std::vector<std::byte> offsets =
       make_offsets_payload(malformed_offsets);
@@ -914,8 +919,8 @@ SyntheticStorage make_storage(
       default:
         throw std::invalid_argument("Unknown synthetic Layout role.");
     }
-    storage.buffers.push_back(
-        make_buffer(pad_payload(*payload, prefixes[index], index + 1U)));
+    storage.buffers.push_back(make_buffer(
+        pad_payload(*payload, prefixes[index], index + 1U), alignments[index]));
     storage.layout.buffers.push_back({static_cast<std::uint32_t>(index),
                                       roles[index], prefixes[index],
                                       payload->size()});
@@ -1229,16 +1234,24 @@ TEST(VariableSampleFieldExtensions,
      PortableValueArtifactRevalidatesMultiBufferProviderValue) {
   DataDefinitionRegistry registry;
   SyntheticCandidate fixture = make_candidate(23U);
+  const std::shared_ptr<SyntheticCounters> counters = fixture.counters;
   const DataProviderLoadResult loaded =
       load_candidate(registry, std::move(fixture));
   ASSERT_TRUE(loaded.ok()) << loaded.diagnostic;
   const DataDescriptorEnvelope descriptor = make_descriptor(true);
+  const std::array<std::size_t, 3U> required_alignments{64U, 256U, 4096U};
   SyntheticStorage storage =
-      make_storage({kOffsetsRole, kSamplesRole, kCountsRole}, {2U, 3U, 4U});
-  const Value original = Value::from_provider_defined(
+      make_storage({kOffsetsRole, kSamplesRole, kCountsRole}, {2U, 3U, 4U},
+                   false, true, required_alignments);
+  std::optional<Value> original = Value::from_provider_defined(
       registry, descriptor, storage.layout, storage.buffers);
 
-  const ValueArtifact captured = capture_value_artifact("deep", original);
+  const ValueArtifact captured = capture_value_artifact("deep", *original);
+  ASSERT_EQ(captured.envelope.buffers.size(), required_alignments.size());
+  for (std::size_t index = 0U; index < required_alignments.size(); ++index) {
+    EXPECT_EQ(captured.envelope.buffers[index].required_alignment,
+              required_alignments[index]);
+  }
   const std::vector<std::byte> archive =
       encode_named_value_artifact_set(NamedValueArtifactSet{{captured}});
   const NamedValueArtifactSet decoded =
@@ -1259,6 +1272,13 @@ TEST(VariableSampleFieldExtensions,
   EXPECT_EQ(artifact.envelope.buffers[0].logical_role, kOffsetsRole);
   EXPECT_EQ(artifact.envelope.buffers[1].logical_role, kSamplesRole);
   EXPECT_EQ(artifact.envelope.buffers[2].logical_role, kCountsRole);
+  for (std::size_t index = 0U; index < required_alignments.size(); ++index) {
+    EXPECT_EQ(artifact.envelope.buffers[index].required_alignment,
+              required_alignments[index]);
+    EXPECT_EQ(artifact.envelope.buffers[index].artifact_offset %
+                  required_alignments[index],
+              0U);
+  }
 
   try {
     (void)reconstruct_value_artifact(artifact);
@@ -1267,21 +1287,27 @@ TEST(VariableSampleFieldExtensions,
     EXPECT_EQ(error.code(), ExtensionErrorCode::MissingProvider);
   }
 
-  const Value reconstructed = reconstruct_value_artifact(artifact, &registry);
-  EXPECT_NE(reconstructed.revision_id(), original.revision_id());
-  EXPECT_EQ(reconstructed.provider_generation(), loaded.generation);
-  EXPECT_EQ(reconstructed.provider_defined_descriptor(), descriptor);
-  EXPECT_EQ(reconstructed.provider_defined_layout(), storage.layout);
-  EXPECT_EQ(compute_content_digest(reconstructed).digest,
-            compute_content_digest(original).digest);
-  ASSERT_EQ(reconstructed.buffer_count(), original.buffer_count());
-  for (std::size_t index = 0U; index < original.buffer_count(); ++index) {
+  std::optional<Value> reconstructed =
+      reconstruct_value_artifact(artifact, &registry);
+  EXPECT_NE(reconstructed->revision_id(), original->revision_id());
+  EXPECT_EQ(reconstructed->provider_generation(), loaded.generation);
+  EXPECT_EQ(reconstructed->provider_defined_descriptor(), descriptor);
+  EXPECT_EQ(reconstructed->provider_defined_layout(), storage.layout);
+  EXPECT_EQ(compute_content_digest(*reconstructed).digest,
+            compute_content_digest(*original).digest);
+  ASSERT_EQ(reconstructed->buffer_count(), original->buffer_count());
+  for (std::size_t index = 0U; index < original->buffer_count(); ++index) {
     const ProviderReadLease original_read =
-        original.acquire_provider_read(index);
+        original->acquire_provider_read(index);
     const ProviderReadLease reconstructed_read =
-        reconstructed.acquire_provider_read(index);
+        reconstructed->acquire_provider_read(index);
     EXPECT_NE(reconstructed_read.allocation_identity(),
               original_read.allocation_identity());
+    EXPECT_EQ(reconstructed->storage_binding(index).required_alignment,
+              required_alignments[index]);
+    EXPECT_EQ(reinterpret_cast<std::uintptr_t>(reconstructed_read.data()) %
+                  required_alignments[index],
+              0U);
     ASSERT_EQ(reconstructed_read.size(), original_read.size());
     EXPECT_TRUE(std::equal(original_read.data(),
                            original_read.data() + original_read.size(),
@@ -1292,6 +1318,27 @@ TEST(VariableSampleFieldExtensions,
   corrupted.payloads[1][0] ^= std::byte{0x01};
   EXPECT_THROW((void)reconstruct_value_artifact(corrupted, &registry),
                std::invalid_argument);
+
+  std::optional<ProviderReadLease> retained_read =
+      reconstructed->acquire_provider_read(0U);
+  std::optional<ProviderOwner> retained_owner =
+      reconstructed->create_provider_owner();
+  original.reset();
+  EXPECT_TRUE(registry.unload(kProviderIdentity));
+  EXPECT_EQ(counters->provider_destroys.load(), 0U);
+  EXPECT_EQ(reconstructed->query_property({kGenerationProperty}).unsigned_value,
+            23U);
+  reconstructed.reset();
+  EXPECT_EQ(counters->provider_destroys.load(), 0U);
+  retained_read.reset();
+  EXPECT_EQ(counters->provider_destroys.load(), 0U);
+  retained_owner.reset();
+  EXPECT_EQ(counters->owner_creates.load(), 1U);
+  EXPECT_EQ(counters->owner_destroys.load(), 1U);
+  EXPECT_EQ(counters->provider_destroys.load(), 1U);
+  EXPECT_EQ(counters->module_releases.load(), 1U);
+  EXPECT_LT(counters->provider_destroy_order.load(),
+            counters->module_release_order.load());
 }
 
 TEST(VariableSampleFieldExtensions,

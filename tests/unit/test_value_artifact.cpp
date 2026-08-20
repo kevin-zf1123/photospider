@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -159,6 +160,67 @@ TEST(ValueArtifact, RejectsVersionPayloadDigestAndTrailingByteTampering) {
   std::vector<std::byte> archive =
       encode_named_value_artifact_set(NamedValueArtifactSet{{artifact}});
   archive.push_back(std::byte{0x00});
+  EXPECT_THROW((void)decode_named_value_artifact_set(archive),
+               std::invalid_argument);
+}
+
+TEST(ValueArtifact,
+     RejectsInvalidAlignmentAndNonzeroArchivePaddingBeforePublication) {
+  const Value value = make_rich_artifact_image();
+  const ValueArtifact artifact = capture_value_artifact("image", value);
+
+  const std::array<std::uint64_t, 3U> invalid_alignments{
+      0U, 3U, kMaximumValueArtifactAlignment * 2U};
+  for (const std::uint64_t invalid_alignment : invalid_alignments) {
+    ValueArtifact malformed = artifact;
+    malformed.envelope.buffers[0].required_alignment = invalid_alignment;
+    EXPECT_THROW(validate_value_artifact(malformed), std::invalid_argument);
+  }
+  ValueArtifact misaligned = artifact;
+  misaligned.envelope.buffers[0].required_alignment = 64U;
+  misaligned.envelope.buffers[0].artifact_offset = 1U;
+  EXPECT_THROW(validate_value_artifact(misaligned), std::invalid_argument);
+
+  const std::array<std::uint64_t, 6U> valid_alignments{
+      1U, 2U, 4U, 8U, 64U, kMaximumValueArtifactAlignment};
+  for (const std::uint64_t valid_alignment : valid_alignments) {
+    ValueArtifact allowed = artifact;
+    allowed.envelope.buffers[0].required_alignment = valid_alignment;
+    const Value rebuilt = reconstruct_value_artifact(allowed);
+    EXPECT_EQ(rebuilt.storage_binding().required_alignment, valid_alignment);
+    const ValueArtifact recaptured = capture_value_artifact("image", rebuilt);
+    EXPECT_EQ(recaptured.envelope.buffers[0].required_alignment,
+              valid_alignment);
+  }
+
+  ValueArtifact aligned = artifact;
+  aligned.envelope.buffers[0].required_alignment =
+      kMaximumValueArtifactAlignment;
+  std::vector<std::byte> archive =
+      encode_named_value_artifact_set(NamedValueArtifactSet{{aligned}});
+  const NamedValueArtifactSet decoded =
+      decode_named_value_artifact_set(archive);
+  ASSERT_EQ(decoded.values.size(), 1U);
+  ASSERT_EQ(decoded.values[0].envelope.buffers.size(), 1U);
+  const ValueArtifactBuffer& decoded_buffer =
+      decoded.values[0].envelope.buffers[0];
+  EXPECT_EQ(decoded_buffer.required_alignment, kMaximumValueArtifactAlignment);
+  EXPECT_EQ(decoded_buffer.artifact_offset % decoded_buffer.required_alignment,
+            0U);
+
+  const Value reconstructed = reconstruct_value_artifact(decoded.values[0]);
+  const ReadLease read = reconstructed.buffer_handle().acquire_read();
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(read.data()) %
+                kMaximumValueArtifactAlignment,
+            0U);
+  EXPECT_EQ(reconstructed.storage_binding().required_alignment,
+            kMaximumValueArtifactAlignment);
+
+  const std::size_t payload_offset =
+      static_cast<std::size_t>(decoded_buffer.artifact_offset);
+  ASSERT_GT(payload_offset, 0U);
+  ASSERT_EQ(archive[payload_offset - 1U], std::byte{0U});
+  archive[payload_offset - 1U] = std::byte{0x01};
   EXPECT_THROW((void)decode_named_value_artifact_set(archive),
                std::invalid_argument);
 }

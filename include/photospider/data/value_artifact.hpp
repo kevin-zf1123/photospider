@@ -34,6 +34,9 @@ inline constexpr std::size_t kMaximumValueArtifactNameBytes = 128U;
 inline constexpr std::uint64_t kMaximumValueArtifactPayloadBytes =
     8ULL * 1024ULL * 1024ULL * 1024ULL;  // NOLINT
 
+/** @brief Frozen maximum portable payload reconstruction alignment. */
+inline constexpr std::uint64_t kMaximumValueArtifactAlignment = 4096U;
+
 /** @brief Frozen maximum named Values retained by one portable artifact set. */
 inline constexpr std::size_t kMaximumNamedValueArtifacts = 4096U;
 
@@ -206,7 +209,9 @@ ArtifactPayloadDigest compute_artifact_payload_digest(
  * @throws std::overflow_error or std::length_error when frozen bounds fail.
  * @throws std::bad_alloc when owned artifact storage cannot allocate.
  * @note Capture retains no runtime identity and reads bytes only through exact
- *       Ready host leases retained for each synchronous copy.
+ *       Ready host leases retained for each synchronous copy. Each retained
+ *       range's physical alignment guarantee becomes its portable
+ *       reconstruction requirement.
  */
 ValueArtifact capture_value_artifact(std::string output_name,
                                      const Value& value);

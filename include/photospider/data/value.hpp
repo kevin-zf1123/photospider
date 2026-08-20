@@ -484,8 +484,8 @@ class ValueBuilder final {
    *         allocation cannot be created.
    * @note No caller allocation is retained. Descriptor shape/quantization and
    *       ImageFacet diagnostic/channel/group/sample storage are deep-copied.
-   *       Alignment affects physical allocation only and is not a logical
-   *       Value identity or persistence fact.
+   *       Alignment affects physical allocation and portable reconstruction
+   *       only; it is never logical Value or content identity.
    */
   static ValueBuilder allocate_cpu_dense_tensor(
       DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
@@ -504,6 +504,7 @@ class ValueBuilder final {
    * @param layout Physical Blocked layout copied into private state.
    * @param storage_size Exact positive allocation byte length, including any
    *        unused leading or trailing nibble.
+   * @param alignment Requested positive power-of-two base alignment.
    * @return Move-only exclusive builder ready to issue one WriteLease over the
    *         complete byte envelope.
    * @throws std::invalid_argument for malformed descriptor, quantization,
@@ -516,7 +517,8 @@ class ValueBuilder final {
    */
   static ValueBuilder allocate_cpu_blocked_dense_tensor(
       DenseTensorDescriptor descriptor, BlockedLayout layout,
-      std::size_t storage_size);
+      std::size_t storage_size,
+      std::size_t alignment = alignof(std::max_align_t));
 
   /**
    * @brief Acquires the builder's sole active exclusive write lease.
@@ -614,6 +616,7 @@ class Value final {
    *        state after validation.
    * @param storage Exclusively owned input bytes consumed as the source for an
    *        isolated immutable allocation.
+   * @param alignment Requested positive power-of-two base alignment.
    * @return Valid immutable Value whose shape, strides, and payload allocations
    *         are distinct from every caller-owned input allocation.
    * @throws std::invalid_argument for malformed descriptors, facets, layouts,
@@ -627,12 +630,13 @@ class Value final {
    * @note Validation finishes before the immutable PImpl is published. The
    *       published state deep-copies descriptor shape/quantization, complete
    *       ImageFacet metadata, strides, and payload so pointers retained before
-   *       an lvalue or rvalue call never alias the Value.
+   *       an lvalue or rvalue call never alias the Value. Alignment is a
+   *       physical binding/artifact reconstruction fact, not logical identity.
    */
-  static Value from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
-                                     std::optional<ImageFacet> image_facet,
-                                     StridedLayout layout,
-                                     std::vector<std::byte> storage);
+  static Value from_cpu_dense_tensor(
+      DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
+      StridedLayout layout, std::vector<std::byte> storage,
+      std::size_t alignment = alignof(std::max_align_t));
 
   /**
    * @brief Publishes an immutable logical view over a sealed buffer binding.
@@ -670,6 +674,7 @@ class Value final {
    * @param descriptor Valid V-13 FP4 descriptor with block-scale quantization.
    * @param layout Valid version-1 bit-addressed Blocked layout.
    * @param storage Exclusively owned complete byte envelope.
+   * @param alignment Requested positive power-of-two base alignment.
    * @return Fresh immutable Ready CPU Value with Blocked layout identity.
    * @throws std::invalid_argument for malformed descriptor, quantization,
    *         layout, overlap, alignment, or exact-envelope mismatch.
@@ -679,9 +684,10 @@ class Value final {
    * @note Input bytes are copied into isolated builder storage. Padding and
    *       unused nibble bits become immutable and remain transfer-visible.
    */
-  static Value from_cpu_blocked_dense_tensor(DenseTensorDescriptor descriptor,
-                                             BlockedLayout layout,
-                                             std::vector<std::byte> storage);
+  static Value from_cpu_blocked_dense_tensor(
+      DenseTensorDescriptor descriptor, BlockedLayout layout,
+      std::vector<std::byte> storage,
+      std::size_t alignment = alignof(std::max_align_t));
 
   /**
    * @brief Publishes an immutable FP4 Blocked view over a sealed CPU buffer.
@@ -741,19 +747,25 @@ class Value final {
    * @param descriptor Versioned Schema and ordered Facet records.
    * @param layout Versioned provider Layout and generic buffer envelopes.
    * @param payloads One nonempty exact byte vector per provider buffer.
+   * @param required_alignments One positive power-of-two allocation alignment
+   *        per payload in the same dense buffer-index order.
    * @return Fresh Ready provider-defined Value with isolated CPU allocations.
    * @throws ExtensionContractError for malformed metadata, unavailable
    *         provider definitions, or provider semantic rejection.
-   * @throws std::invalid_argument when a payload is empty.
+   * @throws std::invalid_argument when a payload is empty, alignment count
+   *         differs, or an alignment is not a positive power of two.
    * @throws std::overflow_error when allocation/publication identity exhausts.
    * @throws std::bad_alloc when allocation or immutable state cannot allocate.
-   * @note Every payload is copied into a fresh Host allocation before provider
-   *       validation. No partial Value or BufferHandle escapes on failure.
+   * @note Every payload is copied into a fresh independently aligned Host
+   *       allocation before provider validation. Local owners and prior
+   *       allocations unwind on failure; no partial Value or BufferHandle
+   *       escapes.
    */
   static Value from_provider_defined_payloads(
       DataDefinitionRegistry& registry, DataDescriptorEnvelope descriptor,
       ProviderDefinedLayout layout,
-      std::vector<std::vector<std::byte>> payloads);
+      std::vector<std::vector<std::byte>> payloads,
+      std::vector<std::size_t> required_alignments);
 
   /**
    * @brief Reports whether this handle owns a published generic Value.
@@ -877,7 +889,8 @@ class Value final {
 
   /**
    * @brief Returns immutable facts for this Value's current storage binding.
-   * @return Allocation, concrete device, memory domain, size, and visibility.
+   * @return Allocation, concrete device, memory domain, size, retained-range
+   *         alignment requirement, and visibility.
    * @throws std::logic_error when the handle is invalid or provider-defined.
    * @note Binding observation grants no pointer, mapping, transfer, cache, or
    *       persistence authority.
@@ -887,7 +900,8 @@ class Value final {
   /**
    * @brief Returns immutable facts for one indexed storage binding.
    * @param buffer_index Dense zero-based buffer index.
-   * @return Allocation, device, memory domain, size, and visibility facts.
+   * @return Allocation, device, memory domain, size, retained-range alignment
+   *         requirement, and visibility facts.
    * @throws std::logic_error when the handle is invalid.
    * @throws std::out_of_range when the index is outside buffer_count().
    * @note Metadata inspection grants no pointer or provider callback authority.
