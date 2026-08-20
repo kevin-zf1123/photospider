@@ -19,18 +19,20 @@ Job service 仍是唯一 durable/quota/artifact/retry authority。Host memory �
 `RLIMIT_AS` 执行；configured device capacity 仍仅用于 admission。Private closed protocol 与
 精确 lease fencing 会把 startup、exit、signal、channel、protocol、heartbeat、runtime 与
 forced-cancellation failure 隔离到拥有它的 attempt。
-Private worker protocol v2 把 control frame 限制为 128 KiB 的 attempt/Job/artifact-reference
-metadata。Checkpoint 与 candidate image bytes 改用 manager 创建且方向被裁剪的本地 Unix
+Private worker protocol v3 把 control frame 限制为 128 KiB 的 attempt/Job/aggregate-archive
+metadata。Checkpoint 与 canonical named-Value archive bytes 改用 manager 创建且方向被裁剪的本地 Unix
 stream descriptor。注册 supervisor 只会在 record/thread ownership 建立后、service mutex 外创建
 它们；manager endpoint 为 nonblocking，而阻塞 transfer 保留在可杀 worker 内。Manager 只有在
-clean-reap completion handoff 前完成 reference、descriptor、stream EOF/size、resource 与
-SHA-256 精确复核后才接受 candidate。worker 先发送精确且只含 metadata 的 Report，在 stream
+clean-reap completion handoff 前完成 reference、archive version/Value count、stream EOF/size、
+resource、whole-archive SHA-256 与每个嵌入 Value artifact 精确复核后才接受 candidate。worker 先发送精确且只含 metadata 的 Report，在 stream
 期间保持已认证 heartbeat 活跃，并且只在精确 bytes 后关闭 output lane。manager 为尚未 reap 的
 当前 PID 创建一份精确、惰性的匿名最终 owner，在 lifecycle 检查之间直接接收一个不超过
 64-KiB 的 slice，且绝不把 output progress 当作 heartbeat。worker 会保持存活且可被终止，直到
 manager 完成该关联并返回一次只含 identity 的
 `CompletionReady`；该确认不授予 Job、quota、artifact、commit 或 publication authority。
-reap 后绝不再读取 bulk lane，也不执行 data-plane filesystem I/O。
+reap 后绝不再读取 bulk lane，也不执行 data-plane filesystem I/O。durable restart 还会在 payload
+allocation 前约束 manifest/Job control file，并证明 frozen/archive/quota/exact-length/non-sparse
+事实。
 
 该本地切片保留本决策的身份与权威顺序，并提供真实的 quota admission、crash durability、
 process-crash containment 与 bounded cancellation/shutdown。它保留共享的
@@ -276,19 +278,21 @@ drain 保留 parent socket 与 stateful decoder，而不是虚构 channel loss �
 authentication、syscall sandbox、device isolation，也不是 Issues #101-#104 分配的 isolated
 tenant-plugin runtime。
 
-Issue #105 以 private protocol v2 取代了上述历史 bulk-control transport。每份完整 Report
-都限制为不超过 128 KiB 的 identity、outcome、diagnostic、image descriptor、reference、size
-与 digest metadata，并且不包含 tight image bytes。Checkpoint 与 candidate bytes 只经 manager
+Issue #105 引入 bulk-control separation；DI-4 把当前 worker contract 推进到 private protocol v3。
+每份完整 Report 都限制为不超过 128 KiB 的 identity、outcome、diagnostic、aggregate archive
+version/Value count/reference/size/digest metadata，并且不包含 archive bytes。Checkpoint 与
+candidate archive bytes 只经 manager
 创建且方向被裁剪的本地 Unix stream 传输。manager endpoint 为 nonblocking，并在 attempt
 绝对 lifecycle deadline 下按有界 slice 推进；阻塞 receive/send 保留在受精确拥有的 worker 内。超过
 accepted output/staging/retention envelope 的 candidate 会变成一个有界、保留 identity 且没有
-image 的 `Failed/Compute` Report；若有限 hard `RLIMIT_FSIZE` 低于 accepted output-stage
+archive 的 `Failed/Compute` Report；若有限 hard `RLIMIT_FSIZE` 低于 accepted output-stage
 maximum，则所属 attempt 会在 `fork` 前以 `WorkerStartup` 失败，而不是静默缩窄该 envelope。
 不存在 64-MiB compatibility 或 transport-size fallback。worker 会发送一份只含 metadata 的
 Report，在 stream 期间保留 source 与真实 heartbeat loop，只在精确 bytes 后关闭 output lane，
 并在同一精确 process lifecycle 下等待匹配的、只含 identity 的
-`CompletionReady`。WorkerManager 只有在 EOF、size/hash/reference/descriptor/resource 校验与独立
-image owner 的精确匿名最终形态 O(1) 转移完成后才发送该确认。manager 每次 receive 都是一个
+`CompletionReady`。WorkerManager 只有在 EOF、size/hash/reference/archive/resource 校验、
+每个 named Value artifact 的严格 decode，以及 already-final exact
+anonymous archive owner 的 O(1) 转移完成后才发送该确认。manager 每次 receive 都是一个
 不超过 64-KiB 的直接 slice，随后执行绝对 runtime/heartbeat/cancel/shutdown 仲裁；连续或预缓冲
 output 都不会续期或复活 heartbeat。若已经失败的 cancellation channel 使回复不可能，一份已经完整
 关联的 Report 可以保留其普通分类，但精确 reap 会终止所有 bulk-lane 访问。在已经尝试

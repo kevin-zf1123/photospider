@@ -545,6 +545,14 @@ consumer 与文档。DI-3 安装 ADR 0012 接受的独立版本化 pure-C operat
 breaking change 中删除 predecessor entry point、SDK、fixture 与 package surface。DI-4 随后
 完成 public Host、IPC、worker、durable、codec 与 CLI 迁移，并删除此前的图像兼容类型。
 
+已交付 conversion engine 通过 type-aware domain check 与 native sample copy 保留 same-storage/
+equal-endpoint 的 64-bit integer identity。若平台无法证明 source promotion 精确，non-identity
+wide-integer affine work 会在 arithmetic 前失败；destination cast 使用精确的 open integer upper
+bound。OpenCV encode 会在文件 mutation 前使用封闭的 unsigned 8/16-bit extension/depth/channel
+matrix；普通 OpenEXR 使用独立 UINT32/FP32 路径。durable restart 在 payload allocation 前约束
+control record，并验证 frozen/archive/quota/exact-length/non-sparse 事实。原 direct side-effecting
+`io:save` operation 已不存在；CLI/cache save 通过显式策略复用 configured codec boundary。
+
 最终状态不存在永久 compatibility wrapper、alias class、重复 old/new API、forwarding header、
 dual loader、predecessor shim 或双重 descriptor/cache/ABI authority。Temporary edge adaptation
 只能存在于显式限定的实现切片内，并且必须在该切片的 completion boundary 删除。
@@ -632,4 +640,5 @@ standard-library ownership 或 toolchain ABI。
 目标和实现依赖顺序的权威来源。Live Issue 与 Project state 仍是交付状态的权威来源。本 ADR
 和路线图都不会把未实现的目标对象提升成当前 runtime 文档中的事实。上述 DI-2 output plan、
 binding、grant 与 publication authority，以及 DI-3 pure-C operation ABI v1 投影，均已是
-当前实现行为。只有余下 Host/IPC/worker/durable/CLI boundary migration 仍属于后续切片。
+当前实现行为。DI-4 的 Host/IPC/worker/durable/cache/codec/CLI Value boundary 也已是当前实现
+行为。只有独立范围的未来 provider suite、更广泛 import policy 与未支持 Deep shape 仍属于后续切片。

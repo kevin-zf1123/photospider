@@ -386,8 +386,8 @@ cancellation。Commit policy 在概念上仍与 `ComputeIntent` 分离，因为 
 
 因此，`ComputeRun` 成功表示已验证 Graph/RT result 已发布，或一个已准入 no-op 到达其合法终态。
 它不承诺 disk-cache persistence、Graph 文档保存、daemon acknowledgement、result delivery 或
-durable user-output commit。旧 `io/save` operation 可以在包围它的 staged Run 提交前暴露文件
-副作用；这种 callback-owned 行为不是 Run commit protocol。
+durable user-output commit。原 callback-owned `io/save` 副作用已删除；显式 CLI/codec output
+拥有独立 outcome，并不是 Run commit protocol。
 
 当前 product transaction 仍会在 no-throw live Graph swap 前执行符合条件的延迟 HP cache write。
 既有 live predicate 通过后，graph-state policy 会把每个 staged cache-save codec/filesystem
@@ -703,7 +703,6 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `src/lib/ipc/output_store.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/execution/device/compute_io_executor.*`
-- `plugins/ops/save_op.cpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/execution/progressive_compute.*`
 - `src/lib/compute/execution/run_lifecycle_registry.*`

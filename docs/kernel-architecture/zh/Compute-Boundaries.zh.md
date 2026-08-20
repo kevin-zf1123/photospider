@@ -306,10 +306,9 @@ context 通过 move 接收该外层 callable。由于 C++17 不要求 moved-from
 构造与外层释放变成不可拆分的操作：factory 必须先成功返回 owned context，随后
 helper 会在任何 submission 构造、phase retained-demand 计算或准入运行之前显式
 清空外层 holder。构造失败时，外层 owner 与 factory 临时对象仍通过正常栈展开
-释放。因此 downstream demand 只覆盖 context-owned target，不依赖标准库的
-moved-from 表示。一个长期回归会用 move 后仍保留 source target 的对抗性 holder
-调用同一个 production helper，因此删除显式 release 时，无论当前使用哪一种标准库，
-该回归都会失败。
+释放。因此 downstream demand 只覆盖 context-owned target，不依赖 moved-from
+implementation detail。一个长期回归会用 move 后仍保留 source target 的对抗性 holder
+调用同一个 production helper，因此删除显式 release 时，该回归都会失败。
 
 原已安装的 `kSchedulerWorkerProcessMax` 常量与拥有 worker 的 scheduler ABI 均已删除。
 源码 consumer 不会获得 compatibility alias 或已安装 replacement。组合 limit 使用 source tree
@@ -1005,12 +1004,13 @@ daemon job terminal state、result delivery、cache save、Graph 文档保存与
 副作用是不同观察。特别是：
 
 - pending producer 可以先返回，随后才 `ValueReady`；
-- 旧 `io/save` 等 operation callback 可以在包围它的 staged Run 提交前暴露外部副作用；
+- 显式 CLI save command 可以独立于生成 input Value 的 Run 报告 codec/output failure；已删除的
+  `io:save` plugin 不再从 operation callback 内暴露文件；
 - 协议 v2 `compute.submit` 只报告已接受 queued work；
-- image daemon job 在 Host compute 与受保护 artifact publication 后终态，但该 artifact
+- values-mode daemon job 在 Host compute 与受保护 named-Value archive publication 后终态，但该 artifact
   由进程级 lease/TTL 保留，而不是 crash durable；以及
 - 源码私有 Issue #99/#105 Job 只有在新的 Embedded Host 关闭、metadata-only worker Report 与
-  独立 attempt-local output stage 在精确 reap 后完成复核、durable artifact authority 返回完整
+  独立 attempt-local canonical archive 在精确 reap 后完成复核、durable artifact authority 返回完整
   绑定的 crash-durable receipt、retained quota 完成结算且 durable Job truth 已发布后，才成为
   `Succeeded`；该 receipt 既不是 daemon delivery，也不是 cache persistence；以及
 - Graph 文档保存是不同的 graph-state operation，绝不是 Run phase。
@@ -1087,8 +1087,9 @@ Issue #99 的 durable Job/quota/artifact/retry authority，以及 Issue #100 的
 WorkerManager。每个产品 attempt 都在一个全新、绝不复用的 `photospider-worker` 进程中运行；
 该进程拥有本文所述 process execution domain 的一个 attempt-local instance。WorkerManager
 拥有其私有有界协议、heartbeat/runtime deadline、精确 lease/PID fencing、cooperative
-cancellation、TERM/KILL escalation 与精确非阻塞 `waitpid` reaping。Issue #105 使该 private
-protocol v2 在 128-KiB control bound 下只传 metadata：checkpoint 与 candidate byte 使用独立的
+cancellation、TERM/KILL escalation 与精确非阻塞 `waitpid` reaping。DI-4 把该 private protocol
+推进到 v3 aggregate named-Value metadata，并保留 128-KiB control bound：checkpoint 与 canonical
+named-Value archive byte 使用独立的
 manager-created direction-reduced stream descriptor。Manager endpoint 是 nonblocking；worker
 endpoint 只有在其精确 PID 仍受 lifecycle deadline 与 TERM/KILL/reap ownership 约束时才可能
 阻塞。Checkpoint size/EOF/SHA-256 在该 worker 内校验。worker 先发送精确 output metadata，
@@ -1096,7 +1097,8 @@ endpoint 只有在其精确 PID 仍受 lifecycle deadline 与 TERM/KILL/reap own
 owner，并在每次 lifecycle 仲裁中最多把一个 64-KiB slice 直接接收到该 owner；不存在累计
 reallocation 或 whole-payload reconstruction copy。只有合法 Heartbeat frame 能续期 heartbeat，
 连续或预缓冲 output 绝不能。Manager 只有在 stream EOF、clean reap，并对 reference、slot、
-descriptor、size、resource 与 SHA-256 做精确复核后才接受 output。worker 只在精确 bytes 后
+archive version/Value count、size、resource、SHA-256 与每个嵌入 Value artifact 做精确复核后才接受
+完整 output。worker 只在精确 bytes 后
 关闭 output lane，并保持存活且可被终止，直到 manager 完成校验与 O(1) owner transfer，再返回
 一次只含 identity、且不授予 service 或 artifact authority 的 `CompletionReady`。Post-reap
 processing 绝不读取 bulk lane，也不执行 filesystem I/O、blocking bulk transfer、bulk allocation
@@ -1187,7 +1189,7 @@ owner。
 物理 compute 布局采用与本文 contract 相同的所有权词汇：request arbitration 位于
 `compute/request/`，task population 与 release 位于 `compute/dispatch/`，dirty-region 工作位于
 `compute/dirty/`，Run admission/execution lifecycle 位于 `compute/execution/`。`compute/` 根目录
-只保留核心 `ComputeService`、`ComputeRun`、geometry 与 image-buffer composition 边界。这只是
+只保留核心 `ComputeService`、`ComputeRun`、geometry 与 Value composition 边界。这只是
 源码所有权拆分，不改变 Host method、Run identity、scheduler contract 或 installed ABI。
 
 - `include/photospider/data/value.hpp`
@@ -1225,7 +1227,6 @@ owner。
 - `src/lib/core/dense_image_processing.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/ipc/output_store.*`
-- `plugins/ops/save_op.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/execution/device/device_completion.*`
 - `src/lib/execution/device/residency_manager.*`

@@ -39,7 +39,7 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 | `photospider_execution_internal` | 仅用于构建的私有物理执行资源与 accounting primitive。 | `ResourceLedger`、固定 `DeviceExecutorRegistry` 和平台 executor factory 在这里编译；每个 composition-root `ExecutionService` 拥有唯一 Host 与逐设备权威 ledger 及 registry。 |
 | `photospider_compute_internal` | 仅用于构建的 compute、request-owned HP/RT `ComputeRun`、policy-aware ready store、reserved-start transaction、私有 route execution、runtime 与 dirty-region helper。 | Run 与物理 route mechanism 保持私有。 |
 | `photospider_host_internal` | 仅用于构建的 embedded Host adapter 与 Kernel facade closure。 | 不导出，也不会向 consumer 暴露私有 execution owner。 |
-| `photospider_operation_runtime` | 可安装的 shared image-buffer、DenseTensor/provider-defined Value、Region、extension-digest 与 data-definition registry 实现。 | 持有唯一的进程级 allocation/revision minting authority 以及 dependency-neutral registry/Region 逻辑；没有外部 package，也不反向链接 operation SDK。 |
+| `photospider_operation_runtime` | 可安装的 shared DenseTensor/ImageFacet/ImageView、provider-defined Value、portable-artifact、sample-conversion、Region、extension-digest 与 data-definition registry 实现。 | 持有唯一的进程级 allocation/revision minting authority 以及 dependency-neutral registry/Region 逻辑；没有外部 package，也不反向链接 operation SDK。 |
 | `photospider_operation_plugin_sdk` | 可安装、dependency-neutral 的纯 C operation ABI v1 interface SDK。 | 暴露 C11 contract 与 header-only C++17 helper，不带 runtime link dependency。 |
 | `photospider_data_provider_sdk` | 可安装、dependency-neutral 的纯 C data-definition ABI v3 SDK。 | 只携带一个兼容 C11/C++17 的 header，不带 runtime、registry、loader 或可选依赖。 |
 | `photospider_openexr_deep_provider` | 可选安装的 OpenEXR deep data-definition provider module。 | 只在显式启用时构建并导出，链接 data-provider SDK 与 OpenEXR 3，并使中立 package surface 不依赖 OpenEXR。 |
@@ -49,7 +49,7 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 | `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`。 | 已符合目标静态产品和 public Host 形态，同时把按角色归属的后端源码折叠进单一归档。 |
 | `photospider_single_tenant_job_internal` | 不安装的 Issue #99/#100 canonical JobSpec、tenant quota、durable Job/artifact、显式 retry/checkpoint、private worker protocol 与 WorkerManager authority。 | 独立 gate 只在 Darwin/Linux 默认启用，其他系统不存在 internal/worker/unit/integration target inventory；它不导出 package/API，且仍不进入 `photospiderd`。 |
 | `photospider-worker` | 源码私有 single-tenant Job 纵向路径的不安装、单 assignment process composition root。 | 每个 attempt 都会全新 exec；它链接 internal Job/Embedded Host closure，不暴露 network listener 或第二个 assignment，也不获得 durable Job/quota/artifact authority。 |
-| `photospider_cli_common` | `apps/graph_cli/` 下的静态 CLI 命令、TUI、自动补全代码、可复用 `run_graph_cli` 边界，以及两个按角色归属的 benchmark service 翻译单元。 | Benchmark 源只属于这个不可安装的 helper 与完整 CLI closure，不会进入可安装的 `photospider` 静态产品。 |
+| `photospider_cli_common` | `apps/graph_cli/` 下的 object-library CLI 命令、TUI、自动补全代码、可复用 `run_graph_cli` 边界，以及两个按角色归属的 benchmark service 翻译单元。 | Object 注入让所有 CLI reference 在 single-pass static linker 上位于所选 product archive 之前；benchmark 源仍只属于这个不可安装的 helper/完整 CLI closure，不会进入可安装产品。 |
 | `graph_cli` | 位于 `apps/graph_cli/main.cpp`、只负责 process policy 的入口。 | 禁用 OpenCL，拥有不依赖分配的 fatal exit policy，创建 embedded `Host` adapter，尚无 daemon-client 模式。 |
 | `photospider_ipc_client` | 可安装 static typed Unix IPC client 与完整 Host adapter。 | 为 version 2 全部 60 个方法实现 typed owned call，并通过 `create_ipc_host` 实现当前全部 58 个非析构 Host virtual；不链接 backend，也不暴露 JSON/POSIX type。 |
 | `photospider_ipc_server_internal` | 不安装的 router、registry 与 bounded Unix listener。 | 串行化每个 Host call，并且刻意不进入 package export。 |
@@ -322,14 +322,14 @@ implementation owner 都不会成为 public Host 或 IPC type。
 
 | Target | 类型 | 是否安装 | 角色 |
 | --- | --- | --- | --- |
-| `photospider_core_internal` | Static | 否 | 核心值、image buffer、graph error、低层 helper。 |
+| `photospider_core_internal` | Static | 否 | 核心 Value、sample/artifact codec、graph error 与低层 helper。 |
 | `photospider_graph_internal` | Static | 否 | `GraphModel`、graph IO、traversal、cache、inspect 实现。 |
 | `photospider_compute_internal` | Static | 否 | Compute planning、dirty-region state、dispatcher、policy-aware ready store、reserved start 与私有 route execution。 |
 | `photospider_plugin_host_internal` | Static | 否 | Host 侧动态插件加载和生命周期所有权。 |
 | `photospider_policy_internal` | Static | 否 | 纯 C policy registry/loader、built-in、binding、context、fault 与 DSO lease。 |
 | `photospider_execution_internal` | Static | 否 | 私有 `DeviceExecutorRegistry`、平台 executor factory、物理 execution accounting 与 `ResourceLedger` 实现。 |
 | `photospider_host_internal` | Static | 否 | Embedded Host adapter 与 Kernel facade closure。 |
-| `photospider_operation_runtime` | Shared | 是 | Public image-buffer、DenseTensor/provider-defined Value、Region、canonical extension metadata 与注入式 data-definition registry 实现及唯一进程级 allocation/revision minting authority；无外部 package dependency，也无 SDK 反向链接。 |
+| `photospider_operation_runtime` | Shared | 是 | Public DenseTensor/ImageFacet/ImageView、provider-defined Value、portable-artifact/sample-conversion、Region、canonical extension metadata 与注入式 data-definition registry 实现及唯一进程级 allocation/revision minting authority；无外部 package dependency，也无 SDK 反向链接。 |
 | `photospider_operation_plugin_sdk` | Interface | 是 | Dependency-neutral 的 operation ABI v1 C11 header 与 header-only C++17 helper。 |
 | `photospider_data_provider_sdk` | Interface | 是 | 一个 dependency-neutral 的纯 C ABI v3 header，携带 C11/C++17 usage requirement 且没有 link interface。 |
 | `photospider_openexr_deep_provider` | Module | 可选 | 会安装并导出为 `Photospider::openexr_deep_provider`；该 OpenEXR deep data-definition provider DSO 仅在显式启用时可用。 |
@@ -338,7 +338,7 @@ implementation owner 都不会成为 public Host 或 IPC type。
 | `photospider_policy_sdk` | Interface | 是 | 一个 dependency-neutral 的纯 C ABI v1 header，携带 C11/C++17 usage requirement。 |
 | `photospider` / `libphotospider` | Static | 是 | 面向进程内前端的公共静态库。 |
 | `photospider_ipc_client` | Static | 是 | 面向 daemon 前端的客户端 IPC adapter。 |
-| `photospider_cli_common` | Static | 否 | CLI 命令解析、REPL、TUI、自动补全，以及两个仅供 CLI 使用的 benchmark service 翻译单元；它们都不会进入可安装静态产品。 |
+| `photospider_cli_common` | Object | 否 | CLI 命令解析、REPL、TUI、自动补全，以及两个仅供 CLI 使用的 benchmark service 翻译单元；object 注入位于所选 product archive 之前，且都不会进入可安装静态产品。 |
 | `graph_cli` | Executable | 否 | 基础交互式前端。 |
 | `photospider_ipc_server_internal` | Static | 否 | Version 2 router、session/admission registry、joined compute-request registry、protected listener 与 worker lifecycle。 |
 | `photospiderd` | Executable | 是 | 拥有一个 embedded `ps::Host` 与 IPC server 的 foreground daemon。 |
@@ -361,7 +361,7 @@ graph TD
     data_provider_sdk["Photospider::data_provider_sdk"] --> data_providers["data-definition providers"]
     operation_opencv["Photospider::operation_opencv"] --> operation_runtime
     policy_sdk["Photospider::policy_sdk"] --> policy_plugins["policy plugins"]
-    ipc_client["photospider_ipc_client STATIC"] --> future_frontend["future daemon frontend"]
+    ipc_client["photospider_ipc_client STATIC"] --> ipc_frontend["explicit IPC frontend"]
     libphotospider --> graph_cli
     libphotospider --> photospiderd
     ipc_server["daemon IPC server implementation"] --> photospiderd
@@ -429,7 +429,8 @@ CMake 规则：
 - `apps/graph_cli/include/graph_cli/**` 是 private application include tree。CMake 只把它暴露给
   `photospider_cli_common`、`graph_cli` 和聚焦 CLI 测试；install rule 仍只复制
   `include/photospider/**`。
-- `graph_cli` 当前只链接 `libphotospider`，保持 local/embedded；remote CLI mode 属后续工作。
+- `graph_cli` 当前先链接 `photospider_cli_common` object，再链接 `libphotospider`，保持
+  local/embedded；remote CLI mode 属后续工作。
 - `photospiderd` 链接 `libphotospider` 与不安装的 IPC server，并拥有一个 embedded
   `ps::Host`。Installed client target 直接包含 codec object，不导出 backend、JSON target 或
   server-internal target dependency。
@@ -719,7 +720,7 @@ scratch 字节。权威的无环依赖表位于
      稳定值契约位于 `include/photospider/core/` 下。
 2. **已完成：** 引入 `include/photospider/*`。
    - 先移动稳定值契约：error、result/status 值、compute intent、无 OpenCV 依赖的
-     image/tile buffer 值和 inspect snapshot。
+     Value/image/tile contract 与 inspect snapshot。
    - 保持 `GraphModel`、`GraphRuntime` 和 compute planning 头为内部实现。
 3. **已完成：** 创建 host interface。
    - 将 `InteractionService` 保持在稳定 public `ps::Host` 模块背后。
@@ -774,7 +775,13 @@ scratch 字节。权威的无环依赖表位于
    - 长期 integration coverage 还会通过仓库内 embedded Host、真实 `photospiderd` IPC 进程与真实
      `graph_cli` 进程分别运行一条 external operation、external policy 与 compute 链路。
      Operation 产生的 ROI 与复制的 policy binding/generation 会证明实际调用与配置，而不只是发现。
-9. **已实现 V-14 data-definition 边界：** Issue #117 新增自包含纯 C definition-suite ABI v3、
+9. **已完成 DI-4 外部 Value 边界：** Issue #131 删除最终 ImageBuffer/DataType/Device 与
+   side-effecting `io:save` surface；Host、cache、IPC、worker protocol v3、durable recovery、
+   OpenCV/OpenEXR codec 与 CLI save 现在保留精确 Value 或 canonical portable archive。Identity
+   conversion 不经 floating promotion 即保留 64-bit integer；OpenCV encode 会 preflight 封闭
+   matrix；普通 OpenEXR 接受 UINT32/FP32；durable restart 在 allocation 前检查 control/archive/
+   quota/length/sparse bound。
+10. **已实现 V-14 data-definition 边界：** Issue #117 新增自包含纯 C definition-suite ABI v3、
    已安装 `data_provider_sdk`、保留 byte 的公共 extension/registry contract 与 runtime 实现，
    但不增加第二个 product 或 loader。Dependency-disabled install smoke 会从已安装 SDK 构建采用
    精确名称的 C11 与 C++17 provider，通过真实 registry 分别加载它们，并运行 dependency-neutral

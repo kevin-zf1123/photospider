@@ -497,9 +497,9 @@ Current compute I/O has several separately observable completion layers:
 A successful `ComputeRun` therefore means that the validated Graph/RT result
 was published, or that an admitted no-op reached its valid terminal path. It
 does not promise disk-cache persistence, Graph-document save, daemon
-acknowledgement, result delivery, or durable user-output commit. The legacy
-`io/save` operation can expose a file side effect before its enclosing staged
-Run commits; that callback-owned behavior is not a Run commit protocol.
+acknowledgement, result delivery, or durable user-output commit. The former
+callback-owned `io/save` side effect is removed; explicit CLI/codec output has
+its own outcome and is not a Run commit protocol.
 
 The current product transaction still performs eligible deferred HP cache
 writes before the no-throw live Graph swap. After the existing live predicates
@@ -893,7 +893,6 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/ipc/output_store.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/execution/device/compute_io_executor.*`
-- `plugins/ops/save_op.cpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/execution/progressive_compute.*`
 - `src/lib/compute/execution/run_lifecycle_registry.*`

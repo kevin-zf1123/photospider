@@ -852,7 +852,8 @@ CPU-heavy phase 送回 CPU executor。同步 cache administration/load、daemon 
 output store。Deferred HP cache write 仍发生在 live Graph publication 前，并可能使 Run
 失败；Graph 文档保存会直接写入 destination；daemon job state 与 acknowledgement 都是
 process-local；私有 IPC `OutputStore` 使用内存 lease/TTL index，提供受保护、no-replace 的
-进程级 delivery。旧 `io/save` callback 也可以在包围它的 staged Run 提交前暴露文件。
+进程级 delivery。DI-4 已删除旧 `io/save` callback；显式 CLI/codec output 与生成 input Value 的
+Run 仍是彼此独立的 observation。
 
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
 接受以下 typed partial order 目标：

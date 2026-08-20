@@ -12,14 +12,15 @@ Issue #87 以决策与文档变更的形式接受本 ADR。Issue #88 现在只�
 垂直路径。它不修改协议 v2 或已安装 ABI，不让当前 Graph/cache writer 变成原子
 事务，不把 cache failure 移到 Run publication 之后，也不把当前私有 IPC
 `OutputStore` 变成 crash-durable store。后续专项变更必须实现 Run publication
-之后的 cache outcome、durable 输出提交、Graph 文档事务和旧输出副作用迁移。
+之后的 cache outcome、durable 输出提交与 Graph 文档事务。DI-4 后来删除了旧的
+direct output-side-effect plugin。
 
 Issue #95 现在实现了一条有意收窄的 source-private B1 手工/release 输出所有者。
 `B1OutputStore` 把 Issue #88 executor 与面向精确不可变 B1 artifact 的 rooted fresh-
 occurrence、manifest-last/no-replace 事务、类型化 crash-durable receipt 及 leaf-to-root
 barrier 组合起来；receipt 只能私有签发，并且 store 可以保留不透明 root-descriptor
 capability。它不替代私有 IPC delivery store，不新增已安装输出 API，也不完成
-本 ADR 中通用 recovery、post-publication cache、Graph 文档与旧输出副作用目标。
+本 ADR 中通用 recovery、post-publication cache、Graph 文档与其他 output 目标。
 
 在 Primary head `c99c94b56065aee6d456337af8ee0aa45c12e0a1` 上对 Issue #118
 进行的后期审核，在其复用的 Issue #88 executor 依赖中发现两条死锁：同一 worker
@@ -47,8 +48,10 @@ PhotoSpider 已经有若干有效的完成与持久化机制，但每个机制�
   `fsync`，执行禁止覆盖的原子 rename，校验 identity，然后发布内存 lease
   记录。它不同步包含目录，也不持久化记录/索引；TTL/lease 清理还会有意删除
   制品。
-- 旧 `io/save` 操作在 provider 执行期间调用 `cv::imwrite`。其用户选择路径可能
-  在包围它的 Run 提交前可见；若取消或其他终态竞争者随后获胜，也无法回滚。
+- 在本决策被接受时，旧 `io/save` 操作会在 provider 执行期间调用 `cv::imwrite`，
+  因而用户选择路径可能在包围它的 Run 提交前可见。DI-4 后来删除了该 plugin；
+  当前 CLI output 在显式 conversion request 下委托 configured codec，并不是 graph
+  operation callback。
 
 如果把所有这些状态都称为“完成”或“已保存”，worker pool 的选择就会意外定义
 事务所有权。因此 Issue #87 在 Issue #88 引入有界 compute-I/O 执行之前冻结了
@@ -150,9 +153,9 @@ cache/codec 和 response 事实；不能把聚合结果反投射回 Run state。
 当前 product 与目标不同：延迟缓存持久化可能在可见 Graph 发布前失败。这是记录
 在案的迁移缺口，不是缓存具有输出权威的证据。
 
-旧 `io/save` provider callback 是另一个迁移例外。目标 provider 工作产生暂存
-output intent/value；只有 `OutputStore` 编排能在 Run 结果已知后发布调用方可见
-输出。不得扩大直接副作用路径，也不得把它当作 durable commit 表面。
+原 `io/save` provider callback 是另一个迁移例外。DI-4 删除了它，而不是把它扩大
+成 durable commit surface。目标 provider 工作仍产生 staged output intent/value；
+只有 `OutputStore` 编排能在 Run 结果已知后发布调用方可见输出。
 
 ### OutputStore 使用 manifest-last 幂等提交
 
@@ -380,9 +383,9 @@ descriptor binding，并统计 in-flight 与 retained quota。不受信任的 pl
   不再是 IPC 副作用。
 - Graph 文档保存获得乐观版本控制与类型化 durability 结果，但继续与 compute
   频率和 runtime 状态独立。
-- 现有 `io/save` 操作、同步 cache administration/load、直接 YAML writer 和私有
-  IPC store 仍是当前事实与记录在案的迁移缺口。Staged HP cache-save 垂直路径
-  现已使用有界 executor，但这没有让它变成 atomic 或 durable。
+- 原 `io/save` operation 已删除。同步 cache administration/load、直接 YAML writer
+  和私有 IPC store 仍是彼此独立的当前事实与记录在案的迁移缺口。Staged HP
+  cache-save 垂直路径现已使用有界 executor，但这没有让它变成 atomic 或 durable。
 - 长期测试会验证有界准入、精确 cancellation/shutdown settlement、failure 保留，
   以及 cache codec 阻塞期间的 CPU progress。后续 durability 工作还必须验证
   manifest-last visibility、幂等歧义恢复、recovery、durability 能力与过期文档

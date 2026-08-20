@@ -395,7 +395,7 @@ temporaries normally. Downstream demand consequently covers only the
 context-owned target without relying on a standard-library moved-from
 representation. A durable regression invokes that same production helper with
 an adversarial holder whose move preserves its source target, so deleting the
-explicit release fails independently of the active standard library.
+explicit release fails independently of moved-from implementation details.
 
 The former installed `kSchedulerWorkerProcessMax` constant and worker-owning
 scheduler ABI are removed. Source consumers receive no compatibility alias or
@@ -1308,15 +1308,16 @@ save, and user-visible file side effects are separate observations. In
 particular:
 
 - a pending producer can return before `ValueReady`;
-- an operation callback such as legacy `io/save` can expose an external side
-  effect before the enclosing staged Run commits;
+- the explicit CLI save command can report codec/output failure independently
+  of the Run that produced its input Value; the removed `io:save` plugin no
+  longer exposes a file from inside an operation callback;
 - protocol-v2 `compute.submit` reports only accepted queued work;
-- an image daemon job becomes terminal after Host compute and protected
-  artifact publication, but that artifact is process-scoped and lease/TTL
+- a values-mode daemon job becomes terminal after Host compute and protected
+  named-Value archive publication, but that artifact is process-scoped and lease/TTL
   retained rather than crash durable; and
 - the source-private Issue #99/#105 Job becomes `Succeeded` only after its
   fresh Embedded Host closes, its metadata-only worker Report and separate
-  attempt-local output stage are revalidated after exact reap, the durable
+  attempt-local canonical archive are revalidated after exact reap, the durable
   artifact authority returns a fully bound crash-durable receipt, retained
   quota is settled, and durable Job truth is published; this receipt is neither
   daemon delivery nor cache persistence; and
@@ -1420,9 +1421,10 @@ attempt runs in one fresh, never-reused `photospider-worker` process that owns
 one attempt-local instance of the process execution domain described here.
 WorkerManager owns its private bounded protocol, heartbeat/runtime deadlines,
 exact lease/PID fencing, cooperative cancellation, TERM/KILL escalation, and
-exact nonblocking `waitpid` reaping. Issue #105 makes that private protocol v2
-metadata-only under a 128-KiB control bound: checkpoint and candidate bytes use
-separate manager-created direction-reduced stream descriptors. Their manager
+exact nonblocking `waitpid` reaping. DI-4 advances that private protocol to v3
+aggregate named-Value metadata under the existing 128-KiB control bound:
+checkpoint and canonical named-Value archive bytes use separate manager-created
+direction-reduced stream descriptors. Their manager
 endpoints are nonblocking, and a worker endpoint may block only while its exact
 PID remains under lifecycle deadlines and TERM/KILL/reap ownership. Checkpoint
 size/EOF/SHA-256 validation occurs inside that worker. The worker sends exact
@@ -1437,6 +1439,9 @@ SHA-256 validation. The worker closes its output lane only after exact bytes and
 remains alive and terminable until the manager completes validation and O(1)
 owner transfer, then returns one
 identity-only `CompletionReady` that grants no service or artifact authority.
+Archive hydration verifies exact size/digest/EOF and every embedded Value
+artifact before atomic handoff; no single-image descriptor or compatibility
+payload remains.
 Post-reap processing never reads the bulk lane and performs no filesystem I/O,
 blocking bulk transfer, bulk allocation, or content hash. The worker receives no
 artifact root, stable output transaction, quota, retry, or publication
@@ -1555,7 +1560,7 @@ The physical compute layout follows the same ownership vocabulary as this
 contract: request arbitration lives in `compute/request/`, task population and
 release in `compute/dispatch/`, dirty-region work in `compute/dirty/`, and Run
 admission/execution lifecycle in `compute/execution/`. The `compute/` root is
-reserved for the core `ComputeService`, `ComputeRun`, geometry, and image-buffer
+reserved for the core `ComputeService`, `ComputeRun`, geometry, and Value
 composition boundaries. This is a source ownership split only; it changes no
 Host method, Run identity, scheduler contract, or installed ABI.
 
@@ -1594,7 +1599,6 @@ Host method, Run identity, scheduler contract, or installed ABI.
 - `src/lib/core/dense_image_processing.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/ipc/output_store.*`
-- `plugins/ops/save_op.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/execution/device/device_completion.*`
 - `src/lib/execution/device/residency_manager.*`

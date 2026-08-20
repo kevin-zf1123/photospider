@@ -304,7 +304,7 @@ compute from the CLI.
 | Command | Description |
 | --- | --- |
 | `compute <id|all> [flags]` | Compute one node or all ending nodes. |
-| `save <id> <output> <file> <uint8|uint16> <destination-encoding> <destination-domain> <min> <max> <domain-policy> <rounding> <non-finite-policy> <precision-policy>` | Compute a node and encode one named ordinary-image output with an explicit sample conversion. |
+| `save <id> <output> <file> <uint8|uint16|uint32|fp32> <destination-encoding> <destination-domain> <min> <max> <domain-policy> <rounding> <non-finite-policy> <precision-policy>` | Compute a node and encode one named ordinary-image output with an explicit sample conversion. |
 | `clear-cache [m|d|md]` or `cc [m|d|md]` | Clear memory cache, disk cache, or both. |
 | `free` | Free memory used by non-essential intermediate nodes. |
 
@@ -337,6 +337,16 @@ policy is `reject` or `clamp`; rounding is `nearest-even`, `toward-zero`,
 precision-loss policy is `reject` or `allow`. The CLI never derives conversion
 semantics from the file extension or storage width and does not hide a `255`
 or `65535` multiplier.
+
+The configured codec still validates representation capability explicitly.
+OpenCV-backed JPEG output accepts only unsigned `uint8` with one or three
+channels; PNG, TIFF, and JPEG 2000 accept the declared unsigned
+`uint8`/`uint16` one/three/four-channel combinations, with the documented
+BMP/WebP/Netpbm subsets. Signed and floating OpenCV matrices are rejected
+before file mutation. Ordinary `.exr` output instead uses the configured
+OpenEXR codec and accepts explicit `uint32` or `fp32`, preserving independent
+data and display windows. A mismatched extension, storage, or channel count is
+an error rather than permission for an image library to narrow implicitly.
 
 The CLI and REPL compute surface is permanently batch-oriented. It does not
 expose RT intent commands, dirty ROI creation, or dirty source lifecycle
@@ -521,8 +531,10 @@ OpenCV-backed entries are provided by the optional
 | `image_mixing` | `diff` | Absolute difference of two images. |
 | `image_mixing` | `multiply` | Pixel-wise multiplication. |
 
-Plugin examples from `plugins/ops/` add `image_process:invert`,
-`image_process:threshold`, and `io:save`. On macOS, Metal builds also produce
+Plugin examples from `plugins/ops/` add `image_process:invert` and
+`image_process:threshold`. File output belongs to the explicit `save` CLI/
+codec path; the former side-effecting `io:save` plugin has been removed. On
+macOS, Metal builds also produce
 `image_generator:perlin_noise_metal`, but it is only scanned when
 `build/high_performance/metal` is manually present in `plugin_dirs`.
 

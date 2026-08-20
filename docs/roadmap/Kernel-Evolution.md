@@ -1071,9 +1071,9 @@ described above, but no crash-durable output store. Deferred HP cache writes
 still occur before live Graph publication and can fail the Run; Graph-document
 save writes its destination directly; daemon job state and acknowledgement are
 process-local; and the private IPC `OutputStore` provides protected,
-no-replace process-scoped delivery with in-memory lease/TTL indexing. The
-legacy `io/save` callback can also expose a file before its enclosing staged
-Run commits.
+no-replace process-scoped delivery with in-memory lease/TTL indexing. DI-4
+removed the legacy `io/save` callback; explicit CLI/codec output remains a
+separate observation from the Run that produced its input Value.
 
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
 accepts a target typed partial order:

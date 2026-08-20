@@ -665,6 +665,17 @@ and package surface in the same breaking change. DI-4 subsequently completed
 the public Host, IPC, worker, durable, codec, and CLI migration and removed the
 former image compatibility type.
 
+The delivered conversion engine preserves same-storage/equal-endpoint 64-bit
+integer identity through type-aware domain checks and native sample copies.
+Non-identity wide-integer affine work fails before arithmetic when the
+platform cannot prove exact source promotion, and destination casts use exact
+open integer bounds. OpenCV encode uses a closed unsigned 8/16-bit
+extension/depth/channel matrix before file mutation; ordinary OpenEXR uses the
+separate UINT32/FP32 path. Durable restart bounds control records and validates
+frozen/archive/quota/exact-length/non-sparse facts before payload allocation.
+The former direct side-effecting `io:save` operation is absent; CLI/cache save
+reuse the configured codec boundary with explicit policy.
+
 The final state has no permanent compatibility wrapper, alias class, duplicate
 old/new API, forwarding header, dual loader, predecessor shim, or dual
 descriptor/cache/ABI authority. Temporary edge adaptation may exist only
@@ -771,5 +782,7 @@ Live issue and Project state remain authoritative for delivery status. Neither
 this ADR nor the roadmap promotes an unimplemented target object into current
 runtime documentation. The DI-2 output plan, binding, grant, and publication
 authority described above and the DI-3 pure-C operation ABI v1 projection are
-implemented current behavior. Only the remaining Host/IPC/worker/durable/CLI
-boundary migrations remain later slices.
+implemented current behavior. DI-4's Host/IPC/worker/durable/cache/codec/CLI
+Value boundaries are also implemented current behavior. Only separately
+scoped future provider suites, broader import policy, and unsupported Deep
+shapes remain later slices.

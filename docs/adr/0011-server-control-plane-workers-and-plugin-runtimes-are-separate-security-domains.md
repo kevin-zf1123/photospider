@@ -24,13 +24,14 @@ retry authority. Host memory is enforced as POSIX `RLIMIT_AS`; configured device
 capacity remains admission-only. The private closed protocol and exact lease
 fencing isolate startup, exit, signal, channel, protocol, heartbeat, runtime,
 and forced-cancellation failures to the owning attempt. Private worker protocol
-v2 limits control frames to 128 KiB of attempt/Job/artifact-reference metadata.
-Checkpoint and candidate image bytes instead use manager-created,
+v3 limits control frames to 128 KiB of attempt/Job/aggregate-archive metadata.
+Checkpoint and canonical named-Value archive bytes instead use manager-created,
 direction-reduced local Unix stream descriptors. The registered supervisor
 creates them only after record/thread ownership and outside the service mutex;
 manager endpoints are nonblocking, while blocking transfer remains in the
-killable worker. Manager acceptance requires exact reference, descriptor,
-stream EOF/size, resource, and SHA-256 revalidation before clean-reap
+killable worker. Manager acceptance requires exact reference, archive version/
+Value count, stream EOF/size, resource, whole-archive SHA-256, and every
+embedded Value-artifact revalidation before clean-reap
 completion handoff. The worker sends exact metadata-only Report first, keeps
 authenticated heartbeats active while streaming, and closes the output lane
 only after exact bytes. The manager creates one exact lazy anonymous final
@@ -40,7 +41,9 @@ worker remains alive and terminable until the manager completes that join and
 replies with one identity-only `CompletionReady`; the
 acknowledgement grants no Job, quota, artifact, commit, or publication
 authority. Post-reap processing never reads the bulk lane and performs no data-
-plane filesystem I/O.
+plane filesystem I/O. Durable restart additionally bounds manifest/Job control
+files and proves frozen/archive/quota/exact-length/non-sparse facts before
+payload allocation.
 
 That local slice preserves this decision's identity and authority ordering and
 provides real quota admission, crash durability, process-crash containment, and
@@ -332,15 +335,16 @@ for the trusted Embedded worker composition; it is not network peer
 authentication, a syscall sandbox, device isolation, or the isolated tenant-
 plugin runtime assigned to Issues #101-#104.
 
-Issue #105 replaces that historical bulk-control transport with private
-protocol v2. Every complete Report is bounded to 128 KiB of identity, outcome,
-diagnostic, image-descriptor, reference, size, and digest metadata; it contains
-no tight image bytes. Checkpoint and candidate bytes move only through exact
+Issue #105 introduced bulk-control separation; DI-4 advances the current
+worker contract to private protocol v3. Every complete Report is bounded to
+128 KiB of identity, outcome, diagnostic, aggregate archive version/Value
+count/reference/size/digest metadata; it contains no archive bytes. Checkpoint
+and candidate archive bytes move only through exact
 manager-created, direction-reduced local Unix streams. Manager endpoints are
 nonblocking and advance in bounded slices under the attempt's absolute
 lifecycle deadlines; blocking receive/send remains in the exactly owned
 worker. A candidate above the accepted output/staging/retention envelope
-becomes one bounded identity-preserving `Failed/Compute` Report with no image,
+becomes one bounded identity-preserving `Failed/Compute` Report with no archive,
 while a finite hard `RLIMIT_FSIZE` below the accepted output-stage maximum
 fails the owning attempt as `WorkerStartup` before `fork` instead of silently
 narrowing that envelope. There is no 64-MiB compatibility or transport-size
@@ -348,8 +352,8 @@ fallback. The worker sends one metadata-only Report, retains its source and
 real heartbeat loop while streaming, closes its output lane only after exact
 bytes, and waits under the same exact process lifecycle for a matching identity-only
 `CompletionReady`. WorkerManager sends it only after EOF, size/hash/reference/
-descriptor/resource validation, and O(1) transfer of the already-final exact
-anonymous CPU owner. Each manager receive is one at-most-64-KiB direct slice
+archive/resource validation, strict decode of every named Value artifact, and
+O(1) transfer of the already-final exact anonymous archive owner. Each manager receive is one at-most-64-KiB direct slice
 followed by absolute runtime/heartbeat/cancel/shutdown arbitration; neither
 continuous nor prebuffered output renews or revives heartbeat. If an
 already failed cancellation channel makes the reply impossible, a completely

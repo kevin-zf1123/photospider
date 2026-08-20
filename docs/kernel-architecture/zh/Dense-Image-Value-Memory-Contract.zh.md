@@ -83,7 +83,9 @@ slot、attempt、lease、quota 与 path authority 包装它；这些事实不会
 payload byte 留在 JSON 和 control frame 之外。IPC OutputStore 私下 stage 所有 buffer，并最后发布
 完整 metadata manifest。worker protocol v3 传输 metadata 和 data-plane reference，而不在 control
 frame 内放置 bulk byte。durable manifest 把相同 record 绑定到稳定 artifact/commit identity，同时
-保留 manifest-last、barrier、replay、deletion 和 fail-stop 顺序。
+保留 manifest-last、barrier、replay、deletion 和 fail-stop 顺序。durable restart 会在分配前应用较小
+且固定的 manifest 与 Job-record 上限；随后再依据 frozen archive 上限、剩余 tenant-retention quota、
+manifest 声明的精确长度、物理长度与 non-sparse storage 检查每个 archive，之后才会分配或读取 payload。
 
 每次 decode 都是 transactional。只有 framing、version、bound、canonical ordering、descriptor/
 Layout digest、owner join、精确 payload length、SHA-256 以及本地内置或 provider validation 均通过，
@@ -107,6 +109,10 @@ public OpenCV adapter 只接受 Ready、Host-readable、whole-byte、unquantized
 Value。borrowed read-only matrix 会保留 source Value；mutable matrix 被限制在独占 Host output grant
 内。OpenCV decode 保留受支持的 8/16-bit code value，并分配显式 zero-origin data window，因为普通
 OpenCV metadata 不具备 signed-window authority。它从不处理 `.exr` path。
+encode 使用封闭的 extension/depth/channel matrix：JPEG 只允许一或三 channel 的 unsigned 8-bit；
+PNG/TIFF/JPEG 2000 接受声明的一/三/四 channel unsigned 8/16-bit 组合；BMP/WebP/Netpbm 保留各自
+更窄的声明子集。signed 与 floating matrix 会在 `cv::imwrite` 前被拒绝，因此 OpenCV 无法静默
+fallback 到 CV_8U。OpenCV 路径仍从不处理 `.exr`。
 
 可选的普通 OpenEXR codec 只接受单 part scanline image。它独立保留 signed data/display window。
 uniform UINT/FLOAT channel 保留 32-bit storage；HALF sample 会精确提升到 FP32，因为内置 tensor
@@ -126,6 +132,11 @@ source/destination `SampleEncoding`、有限 inclusive `SampleDomain`、destinat
 identity conversion 不执行 scaling。semantic conversion 仅在完成 source-domain reject/clamp 后应用
 已声明 affine mapping，再应用所选 rounding、representability、non-finite 和 precision 规则。不存在
 隐藏的 255/65535 算术、color transform、channel-role inference 或 missing-metadata fallback。
+equal endpoint/storage identity 通过 type-aware 比较读取 integer domain，并在不做 floating promotion
+的情况下复制每个 in-domain native sample，从而保留 `int64_t`/`uint64_t` 在 `2^53` 附近及其极值的
+精确值。若平台 `long double` 无法证明 source promotion 精确，non-identity wide-integer conversion
+会在 affine arithmetic 前被拒绝；最终 floating-to-integer cast 还使用开区间上界，确保被向上舍入的
+`INT64_MAX`/`UINT64_MAX` endpoint 绝不会授权越界 cast。
 
 ## 实现与验证映射
 

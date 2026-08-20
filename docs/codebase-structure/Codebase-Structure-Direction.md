@@ -47,7 +47,7 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider_execution_internal` | Build-only private physical-execution resources and accounting primitives. | `ResourceLedger`, the fixed `DeviceExecutorRegistry`, and platform executor factories are compiled here; each composition-root `ExecutionService` owns its sole Host-and-per-device authoritative ledger and registry. |
 | `photospider_compute_internal` | Build-only compute, request-owned HP/RT `ComputeRun`, policy-aware ready store, reserved-start transaction, private route execution, runtime, and dirty-region helpers. | Runs and physical route mechanisms remain private. |
 | `photospider_host_internal` | Build-only embedded Host adapter and Kernel facade closure. | It is not exported and exposes no private execution owner to consumers. |
-| `photospider_operation_runtime` | Installable shared image-buffer, DenseTensor/provider-defined Value, Region, extension-digest, and data-definition registry implementation. | It owns the sole process-wide allocation/revision minting authority plus dependency-neutral registry/Region logic, with no external package or back-link to the operation SDK. |
+| `photospider_operation_runtime` | Installable shared DenseTensor/ImageFacet/ImageView, provider-defined Value, portable-artifact, sample-conversion, Region, extension-digest, and data-definition registry implementation. | It owns the sole process-wide allocation/revision minting authority plus dependency-neutral registry/Region logic, with no external package or back-link to the operation SDK. |
 | `photospider_operation_plugin_sdk` | Installable dependency-neutral pure-C operation ABI v1 interface SDK. | It exposes the C11 contract and header-only C++17 helper without a runtime link dependency. |
 | `photospider_data_provider_sdk` | Installable dependency-neutral pure-C data-definition ABI v3 SDK. | It carries one C11/C++17-compatible header and no runtime, registry, loader, or optional dependency. |
 | `photospider_openexr_deep_provider` | Optional installable OpenEXR deep data-definition provider module. | It is built and exported only when enabled, links the data-provider SDK plus OpenEXR 3, and keeps OpenEXR out of neutral package surfaces. |
@@ -57,7 +57,7 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider` | Static installable backend product with archive name `libphotospider`. | Matches the desired static product and public Host shape while folding role-owned backend sources into one archive. |
 | `photospider_single_tenant_job_internal` | Non-installed Issue #99/#100 canonical JobSpec, tenant quota, durable Job/artifact, explicit retry/checkpoint, private worker protocol, and WorkerManager authority. | Its independent gate defaults on only for Darwin/Linux, and its internal/worker/unit/integration target inventory is absent elsewhere; it exports no package/API and remains outside `photospiderd`. |
 | `photospider-worker` | Non-installed one-assignment process composition root for the source-private single-tenant Job vertical. | It is freshly execed per attempt, links the internal Job/Embedded Host closure, exposes no network listener or second assignment, and grants no durable Job/quota/artifact authority. |
-| `photospider_cli_common` | Static CLI command/TUI/autocomplete code plus the reusable `run_graph_cli` boundary under `apps/graph_cli/` and two role-owned benchmark service translation units. | The benchmark sources belong only to this non-installable helper and the complete CLI closure; they are absent from the installable `photospider` static product. |
+| `photospider_cli_common` | Object-library CLI command/TUI/autocomplete code plus the reusable `run_graph_cli` boundary under `apps/graph_cli/` and two role-owned benchmark service translation units. | Object injection places all CLI references before the selected product archive on single-pass static linkers; the benchmark sources remain exclusive to this non-installable helper/complete CLI closure and absent from the installable product. |
 | `graph_cli` | Process-policy-only entry point at `apps/graph_cli/main.cpp`. | Disables OpenCL, owns allocation-independent fatal exit policy, creates the embedded `Host` adapter, and has no daemon-client mode yet. |
 | `photospider_ipc_client` | Installable static typed Unix IPC client and complete Host adapter. | Implements typed owned calls for all 60 version 2 methods plus `create_ipc_host` for all 58 current non-destructor Host virtuals; it does not link the backend or expose JSON/POSIX types. |
 | `photospider_ipc_server_internal` | Non-installable router, registry, and bounded Unix listener. | Serializes every Host call and intentionally remains outside the package export. |
@@ -368,14 +368,14 @@ Current target shape:
 
 | Target | Kind | Installs? | Role |
 | --- | --- | --- | --- |
-| `photospider_core_internal` | Static | No | Core values, image buffer, graph errors, low-level helpers. |
+| `photospider_core_internal` | Static | No | Core Values, sample/artifact codecs, graph errors, and low-level helpers. |
 | `photospider_graph_internal` | Static | No | `GraphModel`, graph IO, traversal, cache, inspection implementation. |
 | `photospider_compute_internal` | Static | No | Compute planning, dirty-region state, dispatcher, policy-aware ready store, reserved start, and private-route execution. |
 | `photospider_plugin_host_internal` | Static | No | Host-side dynamic plugin loading and lifetime ownership. |
 | `photospider_policy_internal` | Static | No | Pure-C policy registry/loader, built-ins, bindings, contexts, faults, and DSO leases. |
 | `photospider_execution_internal` | Static | No | Private `DeviceExecutorRegistry`, platform executor factories, physical-execution accounting, and `ResourceLedger` implementation. |
 | `photospider_host_internal` | Static | No | Embedded Host adapter and Kernel facade closure. |
-| `photospider_operation_runtime` | Shared | Yes | Public image-buffer, DenseTensor/provider-defined Value, Region, canonical extension metadata, and injected data-definition registry implementation plus sole process-wide allocation/revision minting authority, with no external-package dependency or SDK back-link. |
+| `photospider_operation_runtime` | Shared | Yes | Public DenseTensor/ImageFacet/ImageView and provider-defined Value, portable-artifact/sample-conversion, Region, canonical extension metadata, and injected data-definition registry implementation plus sole process-wide allocation/revision minting authority, with no external-package dependency or SDK back-link. |
 | `photospider_operation_plugin_sdk` | Interface | Yes | Dependency-neutral operation ABI v1 C11 header and header-only C++17 helper. |
 | `photospider_data_provider_sdk` | Interface | Yes | One dependency-neutral pure-C ABI v3 header with C11/C++17 usage requirements and no link interface. |
 | `photospider_openexr_deep_provider` | Module | Optional | Installed/exported as `Photospider::openexr_deep_provider`; this OpenEXR deep data-definition provider DSO is available only when explicitly enabled. |
@@ -384,7 +384,7 @@ Current target shape:
 | `photospider_policy_sdk` | Interface | Yes | One dependency-neutral pure-C ABI v1 header with C11/C++17 usage requirements. |
 | `photospider` / `libphotospider` | Static | Yes | Public static library for in-process frontends. |
 | `photospider_ipc_client` | Static | Yes | Client-side IPC adapter for daemon frontends. |
-| `photospider_cli_common` | Static | No | CLI command parser, REPL, TUI, autocomplete, and the two CLI-only benchmark service translation units; none enter the installable static product. |
+| `photospider_cli_common` | Object | No | CLI command parser, REPL, TUI, autocomplete, and the two CLI-only benchmark service translation units; object injection precedes the selected product archive and none enter the installable static product. |
 | `graph_cli` | Executable | No | Basic interactive frontend. |
 | `photospider_ipc_server_internal` | Static | No | Version 2 router, session/admission registry, joined compute-request registry, protected listener, and worker lifecycle. |
 | `photospiderd` | Executable | Yes | Foreground daemon that owns one embedded `ps::Host` and the IPC server. |
@@ -407,7 +407,7 @@ graph TD
     data_provider_sdk["Photospider::data_provider_sdk"] --> data_providers["data-definition providers"]
     operation_opencv["Photospider::operation_opencv"] --> operation_runtime
     policy_sdk["Photospider::policy_sdk"] --> policy_plugins["policy plugins"]
-    ipc_client["photospider_ipc_client STATIC"] --> future_frontend["future daemon frontend"]
+    ipc_client["photospider_ipc_client STATIC"] --> ipc_frontend["explicit IPC frontend"]
     libphotospider --> graph_cli
     libphotospider --> photospiderd
     ipc_server["daemon IPC server implementation"] --> photospiderd
@@ -497,8 +497,8 @@ CMake rules:
 - `apps/graph_cli/include/graph_cli/**` is a private application include tree.
   CMake exposes it only to `photospider_cli_common`, `graph_cli`, and focused
   CLI tests; install rules continue to copy only `include/photospider/**`.
-- `graph_cli` currently links only `libphotospider` and remains local/embedded;
-  remote CLI mode is later work.
+- `graph_cli` currently links the `photospider_cli_common` objects before
+  `libphotospider` and remains local/embedded; remote CLI mode is later work.
 - `photospiderd` links `libphotospider` plus the non-installed IPC server and
   owns one embedded `ps::Host`. The installed client target contains its codec
   objects directly and exports no dependency on the backend, JSON target, or
@@ -857,7 +857,7 @@ dependency table is in the
      `include/photospider/core/`.
 2. **Completed:** Introduce `include/photospider/*`.
    - Move stable value contracts first: errors, result/status values,
-     compute intent, OpenCV-free image/tile buffer values, and inspection
+     compute intent, dependency-neutral Value/image/tile contracts, and inspection
      snapshots.
    - Keep `GraphModel`, `GraphRuntime`, and compute planning headers internal.
 3. **Completed:** Create the host interface.
@@ -938,7 +938,15 @@ dependency table is in the
      the real `photospiderd` IPC process, and a real `graph_cli` process. The
      operation-produced ROI plus copied policy binding/generation prove
      invocation and configuration rather than discovery alone.
-9. **Implemented V-14 data-definition boundary:** Issue #117 adds the
+9. **Completed DI-4 external Value boundary:** Issue #131 removes the final
+   ImageBuffer/DataType/Device and side-effecting `io:save` surfaces; Host,
+   cache, IPC, worker protocol v3, durable recovery, OpenCV/OpenEXR codecs, and
+   CLI save now retain exact Values or canonical portable archives. Identity
+   conversion preserves 64-bit integers without floating promotion, OpenCV
+   encode preflights its closed matrix, ordinary OpenEXR accepts UINT32/FP32,
+   and durable restart checks control/archive/quota/length/sparse bounds before
+   allocation.
+10. **Implemented V-14 data-definition boundary:** Issue #117 adds the
    self-contained pure-C definition-suite ABI v3, the installed
    `data_provider_sdk`, public byte-preserving extension/registry contracts,
    and the runtime implementation without adding a second product or loader.

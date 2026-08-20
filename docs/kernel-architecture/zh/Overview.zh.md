@@ -32,7 +32,7 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 
 | Target | 角色 |
 | --- | --- |
-| `photospider_core_internal` | 仅用于构建的依赖中立 core value 与中立 parameter formatting，并包含构建所选的 image-processing 与 image-artifact 实现。`PHOTOSPIDER_ENABLE_OPENCV=ON` 选择 OpenCV processing/codec adapter；`OFF` 选择标准库 processing 实现与 unavailable codec，且不发现 OpenCV。 |
+| `photospider_core_internal` | 仅用于构建的依赖中立 core value 与中立 parameter formatting，并包含构建所选的 image-processing 与 image-artifact 实现。`PHOTOSPIDER_ENABLE_OPENCV=ON` 选择 OpenCV processing/codec adapter；`OFF` 保留 dependency-neutral Value processing 与 unavailable codec，且不发现 OpenCV。 |
 | `photospider_graph_internal` | 仅用于构建的依赖中立 core operation source、`GraphModel`、registry behavior、graph IO、遍历、缓存、传播与 inspect 服务。 |
 | `photospider_yaml_adapter_internal` | 仅在 `PHOTOSPIDER_ENABLE_YAML=ON` 时存在的构建期 YAML adapter。它拥有共享 parameter-value translation、graph-document parsing/emission、cache-metadata parsing/emission 及其直接 filesystem 行为；格式中立的 GraphIO、Kernel、runtime 与 cache contract 不声明 parser value。 |
 | `photospider_opencv_operation_provider_internal` | 仅用于构建、可选的仓库 OpenCV CPU operation provider。它拥有 operation algorithm、OpenCV 进程初始化与 OpenCV 异常翻译，并且只在 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON` 时存在。 |
@@ -42,7 +42,7 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 | `photospider_compute_internal` | 仅用于构建的 compute、dirty-region、runtime、interaction、event、固定 worker service、reserved-start 与私有 route 实现；它单向依赖 policy 和 execution internal。 |
 | `photospider_host_internal` | 仅用于构建的 Kernel/Interaction facade 与 embedded Host composition root。它根据 producer capability 选择真实 YAML persistence adapter 或显式 unavailable adapter。 |
 | `photospider_kernel` | 可构建的聚合 target，编译实际选中的 core、graph、operation-plugin、policy、execution、compute、Host 以及可选 provider/adapter 模块；它不是安装 artifact，也不是占位 library。 |
-| `photospider_operation_runtime` | 可安装的 public image-buffer factory、DenseTensor 与 provider-defined Value contract、Region algebra、ReadyFence、canonical extension metadata/digest 及注入式 data-definition registry 共享实现。它持有静态 Host 与每个 Value-using DSO 共用的唯一进程级 allocation/revision minting authority；不依赖 OpenCV、yaml-cpp、Graph、policy registry、native-device SDK 或 embedded product。 |
+| `photospider_operation_runtime` | 可安装的 public DenseTensor/ImageFacet/ImageView 与 provider-defined Value contract、portable artifact、sample conversion、Region algebra、ReadyFence、canonical extension metadata/digest 及注入式 data-definition registry 共享实现。它持有静态 Host 与每个 Value-using DSO 共用的唯一进程级 allocation/revision minting authority；不依赖 OpenCV、yaml-cpp、Graph、policy registry、native-device SDK 或 embedded product。 |
 | `photospider_operation_plugin_sdk` | 携带纯 C operation ABI v1 C11 header 与 header-only C++17 helper 的可安装、dependency-neutral interface target。 |
 | `photospider_data_provider_sdk` | 只携带自包含纯 C data-definition provider ABI v3 头文件与 C11/C++17 requirement 的可安装、dependency-neutral interface target。 |
 | `photospider_openexr_deep_provider` | 仅在 `PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER=ON` 时构建的可选、可安装 MODULE provider。它实现 data-definition provider ABI v3 的 single-part deep-scanline OpenEXR candidate，链接 `data_provider_sdk` 与 `OpenEXR::OpenEXR`，并导出为 `Photospider::openexr_deep_provider`。 |
@@ -53,7 +53,7 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 | `photospider_ipc_client` | 已安装的 static typed Unix IPC client 与完整 IPC Host adapter。它导出 `Photospider::photospider_ipc_client`，实现全部 60 个 direct Client method 和当前全部 58 个 Host virtual，且不链接 backend，也不暴露 JSON/POSIX implementation type。 |
 | `photospider_ipc_server_internal` | 不安装的 bounded Unix listener、typed router，以及 private session/job/snapshot/output registry。它让所有 backend access 经由一个 daemon-owned Host 串行执行。 |
 | `photospiderd` | 已安装的 foreground macOS/Linux daemon，拥有一个 embedded Host、protected per-user socket/output store 与确定性的 joined shutdown。 |
-| `photospider_cli_common` | 仅在 `PHOTOSPIDER_BUILD_GRAPH_CLI=ON` 时存在、不可安装的 application helper，从 `apps/graph_cli/src/`、`src/lib/benchmark/benchmark_service.cpp` 与 `src/lib/benchmark/benchmark_yaml_generator.cpp` 构建：REPL 命令、TUI 编辑器、自动补全、CLI 配置与 CLI benchmark service。 |
+| `photospider_cli_common` | 仅在 `PHOTOSPIDER_BUILD_GRAPH_CLI=ON` 时存在、不可安装的 application OBJECT helper，从 `apps/graph_cli/src/`、`src/lib/benchmark/benchmark_service.cpp` 与 `src/lib/benchmark/benchmark_yaml_generator.cpp` 构建：REPL 命令、TUI 编辑器、自动补全、CLI 配置与 CLI benchmark service。object 注入让 CLI reference 在 single-pass linker 上位于所选静态 product archive 之前。 |
 | `graph_cli` | 进程入口位于 `apps/graph_cli/main.cpp` 的终端用户可执行文件；只有 OpenCV 与 YAML capability 均启用时，其派生默认值才为 `ON`。 |
 
 CLI 自有的 application surface 对 `apps/graph_cli/` 私有，包括其中的 `include/graph_cli/` header
@@ -238,7 +238,7 @@ callback 与返回值 lease 会在 registry 移除后继续保持插件代码映
 generation；`cpu`、`serial_debug` 和 `gpu_pipeline` 是私有进程 execution route。
 Reserved-start transaction 在进入 route 前恰好一次把 ready grant 交换为 execution grant。
 
-IPC Host 只拥有 client-side connection、interruptible polling worker 与 mapped image lifetime。
+IPC Host 只拥有 client-side connection、interruptible polling worker 与临时 mapped named-Value archive lifetime。
 Daemon session、accepted job、snapshot、output lease 与 backend Host 仍归 daemon 所有。销毁
 adapter 会唤醒并 join 自有 poller，但不会关闭 session、卸载 plugin 或重复 mutation。精确的
 socket、protocol、status、quota 与 artifact lifecycle 定义在
@@ -504,7 +504,13 @@ OpenCV 只适配普通的 Ready、Host-readable 稠密 Value。普通 OpenEXR co
 精确提升为 FP32。OpenEXR Deep 仍是 provider-defined variable-sample Value，绝不会填充
 成 dense tensor。Codec 与 CLI conversion 要求显式 source/destination
 `SampleEncoding`、`SampleDomain`、out-of-domain、clamp、rounding、non-finite 与
-precision-loss policy；storage width 不会隐含 255 或 65535 scaling。完整专门化契约见
+precision-loss policy；storage width 不会隐含 255 或 65535 scaling。
+same-storage identity 不经 floating promotion 即保留精确 64-bit integer sample；若无法证明
+promotion 精确，non-identity wide-integer arithmetic 会 fail closed。OpenCV encode 会在文件
+mutation 前验证封闭的 unsigned 8/16-bit extension/depth/channel matrix，普通 OpenEXR 则接受显式
+UINT32/FP32。side-effecting `io:save` operation plugin 已不存在；`graph_cli save` 只委托一次给
+configured codec。durable recovery 会在 payload allocation 前验证 small control-file bound、aggregate
+retention quota、精确 archive length 与 sparse storage。完整专门化契约见
 [稠密图像 Value 内存契约](Dense-Image-Value-Memory-Contract.zh.md)。
 
 ### 脏区传播
@@ -599,14 +605,15 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   新增纯 C definition-suite ABI、注入式 typed registry、provider-defined multi-buffer Value、
   pure query、canonical digest 以及 generation-safe replacement/unload。V-15 新增可选的
   single-part deep-scanline OpenEXR provider/codec，同时保持 v3 ABI 与中立 package surface
-  不变。其余 provider suite、graph migration、deep-tiled/multipart 支持与更广泛 import policy
+  不变。DI-4 已完成 Host/cache/IPC/worker/durable/codec/CLI Value 迁移。其余 provider suite、deep-tiled/multipart 支持与更广泛 import policy
   仍是未来工作。
 - [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
   把当前 Run、readiness、cache、Graph 文档、daemon delivery 与 output publication observation
   同已接受 durability target 分离。Issue #88 现已提供 source-private、process-owned、按
   task/estimated-byte 有界的 `ComputeIoExecutor`，并在既有 Graph publication 之前让 staged
-  HP cache save 经过该 executor。CPU worker 不能同步等待其 completion。Crash-durable output
-  commit 与 Run publication 之后的 cache outcome 仍是未来工作。
+  HP cache save 经过该 executor。CPU worker 不能同步等待其 completion。source-private single-tenant
+  Job vertical 现已实现一个有界、manifest-last 的 crash-durable named-Value archive transaction；
+  通用 installed output API 与 Run publication 之后的 cache outcome 仍是未来工作。
 
 [内核演进 roadmap](../../roadmap/zh/Kernel-Evolution.zh.md) 把目标决策组合成长远方向，但不会改变
 本文档所记录的当前状态。

@@ -82,6 +82,11 @@ Visibility 尚未确认的失败会保留 charge；visibility 已确认时，即
 payload/directory cleanup 失败也会释放 charge。启动时会从已校验 artifact 重建 retained
 charge；如果 configured retention 低于 recovered data，则 fail closed。Active attempt
 reservation 永不重建。
+任何 recovery allocation 前，authoritative/private manifest 与 Job record 都必须通过 small fixed
+byte limit。每个 archive 随后还必须符合 frozen representation ceiling 与剩余 aggregate retention
+quota；其 physical file 必须精确匹配 manifest `archive_bytes`，且不得为 sparse。oversize、sparse、
+short、long 或 digest-inconsistent state 都是 typed durable corruption，不能触发 speculative
+payload-proportional allocation。
 
 Active-attempt release 会在首次 mutation 前校验完整 subtraction，并提供强异常保证。如果
 release 抛出异常，service 会把精确 reservation owner 保留在 terminal Job control 上；若

@@ -104,7 +104,10 @@ buffers privately and publishes the complete metadata manifest last. Worker
 protocol v3 transports metadata and data-plane references, not bulk bytes in
 control frames. Durable manifests bind the same records to stable artifact and
 commit identities while preserving manifest-last, barrier, replay, deletion,
-and fail-stop ordering.
+and fail-stop ordering. Durable restart applies small fixed manifest and Job-
+record limits before allocation; it checks each archive's frozen bound,
+remaining tenant-retention quota, manifest-declared exact length, physical
+length, and non-sparse storage before allocating or reading payload bytes.
 
 Every decode is transactional. It checks framing, versions, bounds, canonical
 ordering, descriptor/Layout digests, owner joins, exact payload lengths,
@@ -133,7 +136,12 @@ unquantized, Strided ordinary image Values. Borrowed read-only matrices retain
 the source Value; mutable matrices are scoped to an exclusive Host output
 grant. OpenCV decode preserves supported 8/16-bit code values and assigns an
 explicit zero-origin data window because common OpenCV metadata has no signed
-window authority. It never handles `.exr` paths.
+window authority. Encode uses a closed extension/depth/channel matrix: JPEG is
+unsigned 8-bit with one or three channels; PNG/TIFF/JPEG 2000 accept declared
+unsigned 8/16-bit one/three/four-channel combinations; BMP/WebP/Netpbm retain
+their narrower declared subsets. Signed and floating matrices are rejected
+before `cv::imwrite`, so OpenCV cannot silently fall back to CV_8U. The OpenCV
+path never handles `.exr`.
 
 The optional ordinary OpenEXR codec accepts one single-part scanline image.
 It preserves independent signed data and display windows. Uniform UINT and
@@ -159,7 +167,14 @@ Identity conversion performs no scaling. Semantic conversion applies the
 declared affine mapping only after source-domain rejection or clamp, then
 applies the selected rounding, representability, non-finite, and precision
 rules. There is no hidden 255/65535 arithmetic, color transform, channel-role
-inference, or missing-metadata fallback.
+inference, or missing-metadata fallback. Equal endpoint/storage identity reads
+integer domains with type-aware comparison and copies each in-domain native
+sample without floating promotion, preserving `int64_t`/`uint64_t` values
+around `2^53` and at their extrema. A non-identity wide-integer conversion is
+rejected before affine arithmetic on platforms whose `long double` cannot
+prove exact source promotion; the final floating-to-integer cast also uses
+open upper bounds so rounded `INT64_MAX`/`UINT64_MAX` endpoints can never
+authorize an out-of-range cast.
 
 ## Implementation and verification map
 

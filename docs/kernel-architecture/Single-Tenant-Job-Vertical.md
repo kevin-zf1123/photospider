@@ -97,6 +97,12 @@ confirmed visibility removal releases it even when private payload/directory
 cleanup later fails. Startup reconstructs retained charges from validated
 artifacts and fails closed if configured retention is below recovered data;
 active attempt reservations are never reconstructed.
+Before any recovery allocation, authoritative/private manifests and Job
+records pass small fixed byte limits. Each archive must then fit the frozen
+representation ceiling and remaining aggregate retention quota, and its
+physical file must match manifest `archive_bytes` exactly and be non-sparse.
+Oversize, sparse, short, long, or digest-inconsistent state is typed durable
+corruption; it cannot trigger speculative payload-proportional allocation.
 
 Active-attempt release validates the complete subtraction before its first
 mutation and has a strong exception guarantee. If release raises, the service
