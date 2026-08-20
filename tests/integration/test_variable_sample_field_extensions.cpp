@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <new>
@@ -18,6 +19,163 @@
 #include "photospider/data/value.hpp"
 #include "photospider/data/value_artifact.hpp"
 #include "photospider/plugin/data_definition_registry.hpp"
+
+namespace provider_reconstruction_allocation_probe {
+
+/** @brief Disabled ordinary-allocation failure index. */
+constexpr std::int64_t kDisabled = -1;
+
+/** @brief Current thread's zero-based ordinary-allocation countdown. */
+thread_local std::int64_t countdown = kDisabled;
+
+/** @brief Whether the current probe injected `std::bad_alloc`. */
+thread_local bool fired = false;
+
+/** @brief Whether releases belong to the active observation window. */
+thread_local bool observing = false;
+
+/** @brief Successful allocations inside the observation window. */
+thread_local std::size_t successful_allocations = 0U;
+
+/** @brief Releases inside the observation window. */
+thread_local std::size_t released_allocations = 0U;
+
+/** @brief Process-wide live ordinary allocations owned by this test binary. */
+std::atomic<std::int64_t> live_allocations{0};
+
+/**
+ * @brief Arms one deterministic ordinary-allocation failure.
+ * @param allocation_index Zero-based allocation to fail.
+ * @throws Nothing.
+ * @note Fixture and artifact allocations finish before this probe is armed.
+ */
+void arm(std::int64_t allocation_index) noexcept {
+  countdown = allocation_index;
+  fired = false;
+  observing = true;
+  successful_allocations = 0U;
+  released_allocations = 0U;
+}
+
+/**
+ * @brief Disarms the current thread's allocation observation.
+ * @throws Nothing.
+ */
+void disarm() noexcept {
+  countdown = kDisabled;
+  observing = false;
+}
+
+/**
+ * @brief Injects the armed failure before one physical allocation.
+ * @throws std::bad_alloc when the selected countdown reaches zero.
+ * @note The countdown disarms itself before throwing so cleanup may allocate.
+ */
+void maybe_fail() {
+  if (countdown < 0) {
+    return;
+  }
+  if (countdown == 0) {
+    countdown = kDisabled;
+    fired = true;
+    throw std::bad_alloc{};
+  }
+  --countdown;
+}
+
+/**
+ * @brief Records one successful allocation.
+ * @throws Nothing.
+ */
+void record_allocation() noexcept {
+  live_allocations.fetch_add(1, std::memory_order_relaxed);
+  if (observing) {
+    ++successful_allocations;
+  }
+}
+
+/**
+ * @brief Records one allocation release.
+ * @throws Nothing.
+ */
+void record_release() noexcept {
+  live_allocations.fetch_sub(1, std::memory_order_relaxed);
+  if (observing) {
+    ++released_allocations;
+  }
+}
+
+}  // namespace provider_reconstruction_allocation_probe
+
+/**
+ * @brief Test-executable ordinary allocation with deterministic injection.
+ * @param size Requested byte count, with zero promoted to one byte.
+ * @return Fresh storage compatible with `free`.
+ * @throws std::bad_alloc when injected or when `malloc` fails.
+ * @note The shared runtime's control-block allocations resolve this process
+ *       replacement on supported ELF and Mach-O test builds.
+ */
+void* operator new(std::size_t size) {
+  provider_reconstruction_allocation_probe::maybe_fail();
+  if (void* memory = std::malloc(size == 0U ? 1U : size)) {
+    provider_reconstruction_allocation_probe::record_allocation();
+    return memory;
+  }
+  throw std::bad_alloc{};
+}
+
+/**
+ * @brief Array counterpart to the ordinary allocation probe.
+ * @param size Requested byte count.
+ * @return Fresh storage compatible with `free`.
+ * @throws std::bad_alloc from the scalar override.
+ */
+void* operator new[](std::size_t size) {
+  return ::operator new(size);
+}
+
+/**
+ * @brief Releases storage from the ordinary allocation probe.
+ * @param memory Storage to release, or null.
+ * @throws Nothing.
+ */
+void operator delete(void* memory) noexcept {
+  if (memory != nullptr) {
+    provider_reconstruction_allocation_probe::record_release();
+  }
+  std::free(memory);
+}
+
+/**
+ * @brief Releases array storage from the ordinary allocation probe.
+ * @param memory Storage to release, or null.
+ * @throws Nothing.
+ */
+void operator delete[](void* memory) noexcept {
+  ::operator delete(memory);
+}
+
+/**
+ * @brief Sized scalar release counterpart required by C++17 runtimes.
+ * @param memory Storage to release, or null.
+ * @param size Original byte count; unused by `free`.
+ * @throws Nothing.
+ */
+void operator delete(void* memory, std::size_t size) noexcept {
+  (void)size;
+  ::operator delete(memory);
+}
+
+/**
+ * @brief Sized array release counterpart required by C++17 runtimes.
+ * @param memory Storage to release, or null.
+ * @param size Original byte count; unused by `free`.
+ * @throws Nothing.
+ */
+void operator delete[](void* memory, std::size_t size) noexcept {
+  (void)size;
+  ::operator delete(memory);
+}
 
 namespace ps {
 namespace {
@@ -871,6 +1029,115 @@ struct SyntheticStorage final {
 };
 
 /**
+ * @brief Result of one provider reconstruction allocation injection.
+ * @throws Nothing for ordinary aggregate operations.
+ */
+struct ProviderAllocationFailureObservation final {
+  /** @brief Whether the selected ordinary allocation threw. */
+  bool fired = false;
+  /** @brief Whether reconstruction propagated `std::bad_alloc`. */
+  bool propagated = false;
+  /** @brief Whether a complete Value reached the caller. */
+  bool published = false;
+  /** @brief Ordinary allocations completed before the selected failure. */
+  std::size_t successful_allocations = 0U;
+  /** @brief Earlier ordinary allocations released during stack unwinding. */
+  std::size_t released_allocations = 0U;
+  /** @brief Zero-based injected ordinary allocation index. */
+  std::int64_t allocation_index = 0;
+  /** @brief Buffer allocation identities minted before the failure. */
+  std::size_t attempted_buffer_allocations = 0U;
+  /** @brief Process live ordinary allocations immediately before invocation. */
+  std::int64_t live_before = 0;
+  /** @brief Process live ordinary allocations after complete unwinding. */
+  std::int64_t live_after = 0;
+};
+
+/**
+ * @brief Runs one callable with a selected ordinary allocation failed.
+ * @tparam Fn Nullary callable under test.
+ * @param allocation_index Zero-based ordinary allocation to fail.
+ * @param fn Callable invoked exactly once while the probe observes cleanup.
+ * @return Complete failure, propagation, allocation, and release observation.
+ * @throws Any non-`std::bad_alloc` exception from `fn` after disarming.
+ * @note GoogleTest assertions execute only after the probe is disarmed.
+ */
+template <typename Fn>
+ProviderAllocationFailureObservation observe_provider_allocation_failure(
+    std::int64_t allocation_index, Fn&& fn) {
+  ProviderAllocationFailureObservation observation;
+  observation.allocation_index = allocation_index;
+  observation.live_before =
+      provider_reconstruction_allocation_probe::live_allocations.load(
+          std::memory_order_relaxed);
+  provider_reconstruction_allocation_probe::arm(allocation_index);
+  try {
+    std::forward<Fn>(fn)();
+  } catch (const std::bad_alloc&) {
+    observation.propagated = true;
+  } catch (...) {
+    provider_reconstruction_allocation_probe::disarm();
+    throw;
+  }
+  observation.fired = provider_reconstruction_allocation_probe::fired;
+  observation.successful_allocations =
+      provider_reconstruction_allocation_probe::successful_allocations;
+  observation.released_allocations =
+      provider_reconstruction_allocation_probe::released_allocations;
+  provider_reconstruction_allocation_probe::disarm();
+  observation.live_after =
+      provider_reconstruction_allocation_probe::live_allocations.load(
+          std::memory_order_relaxed);
+  return observation;
+}
+
+/**
+ * @brief Locates and injects the allocation that begins one selected provider
+ *        reconstruction buffer owner.
+ * @param target_buffer One-based reconstruction buffer allocation number.
+ * @param artifact Immutable three-buffer provider artifact.
+ * @param registry Loaded provider registry used for reconstruction.
+ * @return Failure observation whose allocation-identity delta proves the
+ *         selected second or third buffer allocation had begun.
+ * @throws std::logic_error when no deterministic injection is found within
+ *         the bounded allocation search.
+ * @note The first ordinary allocation after each BufferHandle identity mint is
+ *       its `ControlBlock` owner. Selecting the first failure with a target
+ *       identity delta therefore targets that exact later buffer owner rather
+ *       than a provider callback or post-publication allocation.
+ */
+ProviderAllocationFailureObservation find_provider_buffer_allocation_failure(
+    std::size_t target_buffer, const ValueArtifact& artifact,
+    DataDefinitionRegistry* registry) {
+  constexpr std::int64_t kMaximumAllocationSearch = 256;
+  for (std::int64_t allocation_index = 0;
+       allocation_index < kMaximumAllocationSearch; ++allocation_index) {
+    const std::uint64_t identity_before =
+        make_buffer({std::byte{0x11}}).allocation_identity().value();
+    std::optional<Value> publication;
+    ProviderAllocationFailureObservation observation =
+        observe_provider_allocation_failure(allocation_index, [&] {
+          publication = reconstruct_value_artifact(artifact, registry);
+        });
+    observation.published = publication.has_value();
+    const std::uint64_t identity_after =
+        make_buffer({std::byte{0x22}}).allocation_identity().value();
+    if (identity_after <= identity_before) {
+      throw std::logic_error(
+          "Provider allocation identity observation is not monotonic.");
+    }
+    observation.attempted_buffer_allocations =
+        static_cast<std::size_t>(identity_after - identity_before - 1U);
+    if (observation.fired && observation.propagated &&
+        observation.attempted_buffer_allocations == target_buffer) {
+      return observation;
+    }
+  }
+  throw std::logic_error(
+      "Provider reconstruction allocation injection was not found.");
+}
+
+/**
  * @brief Creates one logically fixed storage with arbitrary physical ordering.
  * @param roles One permutation of counts, offsets, and samples roles.
  * @param prefixes Ignored prefix length for each physical buffer index.
@@ -1339,6 +1606,90 @@ TEST(VariableSampleFieldExtensions,
   EXPECT_EQ(counters->module_releases.load(), 1U);
   EXPECT_LT(counters->provider_destroy_order.load(),
             counters->module_release_order.load());
+}
+
+TEST(VariableSampleFieldExtensions,
+     LaterArtifactAllocationsUnwindBeforeTransactionalRetryPublication) {
+  for (const std::size_t target_buffer : {2U, 3U}) {
+    DataDefinitionRegistry registry;
+    SyntheticCandidate fixture = make_candidate(24U + target_buffer);
+    const std::shared_ptr<SyntheticCounters> counters = fixture.counters;
+    const DataProviderLoadResult loaded =
+        load_candidate(registry, std::move(fixture));
+    ASSERT_TRUE(loaded.ok()) << loaded.diagnostic;
+
+    const DataDescriptorEnvelope descriptor = make_descriptor(true);
+    const std::array<std::size_t, 3U> required_alignments{64U, 256U, 4096U};
+    SyntheticStorage storage =
+        make_storage({kOffsetsRole, kSamplesRole, kCountsRole}, {2U, 3U, 4U},
+                     false, true, required_alignments);
+    std::optional<Value> original = Value::from_provider_defined(
+        registry, descriptor, storage.layout, storage.buffers);
+    const ValueArtifact captured = capture_value_artifact("deep", *original);
+    const std::vector<std::byte> archive =
+        encode_named_value_artifact_set(NamedValueArtifactSet{{captured}});
+    const NamedValueArtifactSet decoded =
+        decode_named_value_artifact_set(archive);
+    ASSERT_EQ(decoded.values.size(), 1U);
+    const ValueArtifact artifact = decoded.values.front();
+    const std::vector<std::byte> envelope_before =
+        encode_value_artifact_envelope(artifact.envelope);
+    const std::vector<std::vector<std::byte>> payloads_before =
+        artifact.payloads;
+    const std::uint64_t validation_before = counters->validate_calls.load();
+
+    original.reset();
+    storage.buffers.clear();
+    const ProviderAllocationFailureObservation failed =
+        find_provider_buffer_allocation_failure(target_buffer, artifact,
+                                                &registry);
+
+    EXPECT_TRUE(failed.fired);
+    EXPECT_TRUE(failed.propagated);
+    EXPECT_FALSE(failed.published);
+    EXPECT_EQ(failed.attempted_buffer_allocations, target_buffer);
+    EXPECT_EQ(failed.successful_allocations,
+              static_cast<std::size_t>(failed.allocation_index));
+    EXPECT_EQ(failed.released_allocations, failed.successful_allocations);
+    EXPECT_EQ(failed.live_after, failed.live_before);
+    EXPECT_EQ(counters->validate_calls.load(), validation_before);
+    EXPECT_EQ(counters->provider_destroys.load(), 0U);
+    EXPECT_EQ(counters->module_releases.load(), 0U);
+    EXPECT_EQ(encode_value_artifact_envelope(artifact.envelope),
+              envelope_before);
+    EXPECT_EQ(artifact.payloads, payloads_before);
+
+    std::optional<Value> reconstructed =
+        reconstruct_value_artifact(artifact, &registry);
+    ASSERT_EQ(reconstructed->buffer_count(), required_alignments.size());
+    for (std::size_t index = 0U; index < required_alignments.size(); ++index) {
+      const ProviderReadLease read =
+          reconstructed->acquire_provider_read(index);
+      EXPECT_EQ(reconstructed->storage_binding(index).required_alignment,
+                required_alignments[index]);
+      EXPECT_EQ(reinterpret_cast<std::uintptr_t>(read.data()) %
+                    required_alignments[index],
+                0U);
+      EXPECT_EQ(std::vector<std::byte>(read.data(), read.data() + read.size()),
+                artifact.payloads[index]);
+    }
+    std::optional<ProviderReadLease> retained_read =
+        reconstructed->acquire_provider_read(0U);
+    std::optional<ProviderOwner> retained_owner =
+        reconstructed->create_provider_owner();
+    EXPECT_TRUE(registry.unload(kProviderIdentity));
+    reconstructed.reset();
+    EXPECT_EQ(counters->provider_destroys.load(), 0U);
+    retained_read.reset();
+    EXPECT_EQ(counters->provider_destroys.load(), 0U);
+    retained_owner.reset();
+    EXPECT_EQ(counters->owner_creates.load(), 1U);
+    EXPECT_EQ(counters->owner_destroys.load(), 1U);
+    EXPECT_EQ(counters->provider_destroys.load(), 1U);
+    EXPECT_EQ(counters->module_releases.load(), 1U);
+    EXPECT_LT(counters->provider_destroy_order.load(),
+              counters->module_release_order.load());
+  }
 }
 
 TEST(VariableSampleFieldExtensions,

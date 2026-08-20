@@ -60,6 +60,34 @@ Value make_rich_artifact_image() {
                                       layout, std::move(storage));
 }
 
+/**
+ * @brief Publishes one padded, aligned built-in FP4 Blocked artifact fixture.
+ * @return Ready Blocked DenseTensor with nonzero bit offset and exact 4096-byte
+ *         reconstruction alignment.
+ * @throws Value validation and allocation failures unchanged.
+ * @note Sentinel nibbles outside the addressed elements make full-payload
+ *       preservation independently observable after recapture.
+ */
+Value make_blocked_artifact_value() {
+  DenseTensorDescriptor descriptor{
+      {2U, 8U},
+      ElementSemantics::FloatingPoint,
+      StorageEncoding{4U, StorageEncodingKind::Fp4E2M1},
+      QuantizationSchema{{1U, 4U}, {1.0F, 2.0F, 3.0F, 4.0F}}};
+  BlockedLayout layout{1U,
+                       {1U, 4U},
+                       {32U, 16U},
+                       4U,
+                       PackedBitOrder::MostSignificantFirst};
+  const std::vector<std::byte> storage{
+      std::byte{0xa0}, std::byte{0x12}, std::byte{0x34},
+      std::byte{0x56}, std::byte{0x78}, std::byte{0x9a},
+      std::byte{0xbc}, std::byte{0xde}, std::byte{0xfa}};
+  return Value::from_cpu_blocked_dense_tensor(std::move(descriptor),
+                                              std::move(layout), storage,
+                                              kMaximumValueArtifactAlignment);
+}
+
 TEST(ValueArtifact, RichDenseImageArchiveRoundTripsExactPortableFacts) {
   const Value original = make_rich_artifact_image();
   ValueArtifact artifact = capture_value_artifact("image", original);
@@ -223,6 +251,77 @@ TEST(ValueArtifact,
   archive[payload_offset - 1U] = std::byte{0x01};
   EXPECT_THROW((void)decode_named_value_artifact_set(archive),
                std::invalid_argument);
+}
+
+TEST(ValueArtifact,
+     BlockedArchiveRoundTripPreservesPaddingAlignmentAndFreshIdentity) {
+  const Value original = make_blocked_artifact_value();
+  const ValueArtifact captured = capture_value_artifact("packed", original);
+  ASSERT_EQ(captured.envelope.buffers.size(), 1U);
+  ASSERT_EQ(captured.payloads.size(), 1U);
+  EXPECT_EQ(captured.envelope.layout_kind, StorageLayoutKind::Blocked);
+  EXPECT_EQ(captured.envelope.buffers[0].required_alignment,
+            kMaximumValueArtifactAlignment);
+
+  const std::vector<std::byte> local_envelope =
+      encode_value_artifact_envelope(captured.envelope);
+  const std::size_t metadata_end = 8U + 4U + 4U + 4U + local_envelope.size();
+  const std::vector<std::byte> archive =
+      encode_named_value_artifact_set(NamedValueArtifactSet{{captured}});
+  const NamedValueArtifactSet decoded =
+      decode_named_value_artifact_set(archive);
+  ASSERT_EQ(decoded.values.size(), 1U);
+  const ValueArtifact& artifact = decoded.values[0];
+  ASSERT_EQ(artifact.envelope.buffers.size(), 1U);
+  const std::size_t payload_offset =
+      static_cast<std::size_t>(artifact.envelope.buffers[0].artifact_offset);
+  EXPECT_GT(payload_offset, metadata_end);
+  EXPECT_EQ(payload_offset % kMaximumValueArtifactAlignment, 0U);
+  EXPECT_TRUE(
+      std::all_of(archive.begin() + static_cast<std::ptrdiff_t>(metadata_end),
+                  archive.begin() + static_cast<std::ptrdiff_t>(payload_offset),
+                  [](std::byte value) { return value == std::byte{0U}; }));
+
+  EXPECT_EQ(
+      artifact.envelope.dense_descriptor,
+      std::optional<DenseTensorDescriptor>(original.dense_tensor_descriptor()));
+  EXPECT_EQ(artifact.envelope.blocked_layout,
+            std::optional<BlockedLayout>(original.blocked_layout()));
+  EXPECT_EQ(artifact.payloads, captured.payloads);
+  EXPECT_EQ(artifact.envelope.content_digest, captured.envelope.content_digest);
+  EXPECT_EQ(artifact.envelope.descriptor_digest,
+            captured.envelope.descriptor_digest);
+  EXPECT_EQ(artifact.envelope.storage_layout_digest,
+            captured.envelope.storage_layout_digest);
+
+  const Value reconstructed = reconstruct_value_artifact(artifact);
+  EXPECT_NE(reconstructed.allocation_identity(),
+            original.allocation_identity());
+  EXPECT_NE(reconstructed.revision_id(), original.revision_id());
+  EXPECT_EQ(reconstructed.storage_binding().required_alignment,
+            kMaximumValueArtifactAlignment);
+  const ReadLease read = reconstructed.buffer_handle().acquire_read();
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(read.data()) %
+                kMaximumValueArtifactAlignment,
+            0U);
+
+  const ValueArtifact recaptured =
+      capture_value_artifact("packed", reconstructed);
+  EXPECT_EQ(recaptured.envelope.dense_descriptor,
+            captured.envelope.dense_descriptor);
+  EXPECT_EQ(recaptured.envelope.blocked_layout,
+            captured.envelope.blocked_layout);
+  EXPECT_EQ(recaptured.envelope.content_digest,
+            captured.envelope.content_digest);
+  EXPECT_EQ(recaptured.envelope.descriptor_digest,
+            captured.envelope.descriptor_digest);
+  EXPECT_EQ(recaptured.envelope.storage_layout_digest,
+            captured.envelope.storage_layout_digest);
+  EXPECT_EQ(recaptured.envelope.buffers[0].required_alignment,
+            kMaximumValueArtifactAlignment);
+  EXPECT_EQ(recaptured.envelope.buffers[0].digest,
+            captured.envelope.buffers[0].digest);
+  EXPECT_EQ(recaptured.payloads, captured.payloads);
 }
 
 TEST(ValueArtifact, RejectsNoncanonicalNamesAndPartialNamedSets) {
