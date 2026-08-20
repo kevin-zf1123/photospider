@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/sample_conversion_test_access.hpp"
 #include "photospider/data/image_view.hpp"
 #include "photospider/data/sample_conversion.hpp"
 
@@ -541,6 +542,49 @@ TEST(SampleConversion,
                               negative_destination),
             negative_reverse))[0],
         -source_sample);
+  }
+}
+
+TEST(SampleConversion,
+     PreservesCrossZeroOverflowSpanResultsInBinary64WorkingArithmetic) {
+  testing::ScopedBinary64AffineForTesting binary64_affine;
+  const double maximum = std::numeric_limits<double>::max();
+  const double half_maximum = maximum / 2.0;
+  const double source_sample = std::ldexp(1.0, -52);
+  const double destination_sample = std::ldexp(1.0, -53);
+  const SampleEndpoint source_endpoint{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -maximum, maximum}};
+  const SampleEndpoint destination_endpoint{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -half_maximum, half_maximum}};
+  const Value forward_source = make_sample_image(
+      std::vector<double>{-source_sample, source_sample}, source_endpoint);
+  const Value reverse_source = make_sample_image(
+      std::vector<double>{-destination_sample, destination_sample},
+      destination_endpoint);
+
+  for (const PrecisionLossPolicy precision :
+       {PrecisionLossPolicy::Allow, PrecisionLossPolicy::Reject}) {
+    SampleConversion forward =
+        make_conversion(source_endpoint, destination_endpoint,
+                        ElementSemantics::FloatingPoint, 64U);
+    forward.precision_loss = precision;
+    std::vector<double> forward_samples;
+    EXPECT_NO_THROW(forward_samples = read_samples<double>(
+                        convert_dense_image_samples(forward_source, forward)));
+    EXPECT_EQ(forward_samples,
+              (std::vector<double>{-destination_sample, destination_sample}));
+
+    SampleConversion reverse =
+        make_conversion(destination_endpoint, source_endpoint,
+                        ElementSemantics::FloatingPoint, 64U);
+    reverse.precision_loss = precision;
+    std::vector<double> reverse_samples;
+    EXPECT_NO_THROW(reverse_samples = read_samples<double>(
+                        convert_dense_image_samples(reverse_source, reverse)));
+    EXPECT_EQ(reverse_samples,
+              (std::vector<double>{-source_sample, source_sample}));
   }
 }
 

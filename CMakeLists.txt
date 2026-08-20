@@ -319,11 +319,12 @@ target_include_directories(photospider_operation_runtime
         "${PROJECT_SOURCE_DIR}/src/lib")
 target_link_libraries(photospider_operation_runtime PRIVATE OpenSSL::Crypto)
 if(BUILD_TESTING)
-    # The source-private Value allocation failpoint is compiled only into test
-    # runtime images. Installed/production builds expose no test symbol or
-    # failpoint branch, and the test-access header is never installed.
+    # Source-private Value-allocation and sample-arithmetic seams are compiled
+    # only into test runtime images. Installed/production builds expose no test
+    # symbol or seam branch, and the test-access headers are never installed.
     target_compile_definitions(photospider_operation_runtime PRIVATE
-        PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+        PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING
+        PHOTOSPIDER_INTERNAL_SAMPLE_CONVERSION_TESTING)
 endif()
 
 # Public pure-C operation-plugin SDK. C11 and C++17 producers receive only the
@@ -2643,6 +2644,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         tests/unit/test_dense_image_value_contracts.cpp)
     add_ps_test(test_sample_conversion
         tests/unit/test_sample_conversion.cpp)
+    target_compile_definitions(test_sample_conversion PRIVATE
+        PHOTOSPIDER_INTERNAL_SAMPLE_CONVERSION_TESTING)
     add_ps_test(test_value_artifact
         tests/unit/test_value_artifact.cpp)
     add_ps_test(test_host_output_authorization
