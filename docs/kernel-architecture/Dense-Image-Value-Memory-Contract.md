@@ -106,6 +106,12 @@ Capture records each CPU binding's guaranteed alignment. Version 1 accepts
 positive power-of-two requirements through 4096 bytes, aligns every archive
 span independently, and reconstructs each Strided, Blocked, or
 provider-defined buffer with that exact requirement.
+Finite binary32 and binary64 metadata is encoded from its numeric IEEE-754
+sign, exponent, and fraction into canonical little-endian words rather than
+from native object bytes or word order. Signed zero has the single `+0` wire
+spelling. Decode rejects negative-zero and non-finite spellings, and the codec
+fails at compile time when the host does not provide the exact supported
+IEC 559 profiles, including subnormals.
 
 Payload bytes stay outside JSON and control frames. IPC OutputStore stages all
 buffers privately and publishes the complete metadata manifest last. Worker
@@ -144,11 +150,20 @@ runtime identities.
 ## OpenCV and ordinary OpenEXR adapters
 
 The public OpenCV adapter accepts only Ready, Host-readable, whole-byte,
-unquantized, Strided ordinary image Values. Borrowed read-only matrices retain
-the source Value; mutable matrices are scoped to an exclusive Host output
-grant. OpenCV decode preserves supported 8/16-bit code values and assigns an
-explicit zero-origin data window because common OpenCV metadata has no signed
-window authority. Encode uses a closed extension/depth/channel matrix: JPEG is
+unquantized, Strided ordinary image Values. A whole-Value view rejects width
+or height outside OpenCV's `int` extent before any narrowing, address lookup,
+or matrix-header construction. An `InputTile` view instead validates the
+source Value, ROI containment, and the ROI's own representable extent, then
+constructs the local zero-copy matrix from the ROI size, original row stride,
+and exact first-channel address without constructing the full matrix. Thus a
+small representable tile can view an oversized zero-stride logical image while
+retaining the exact `step` and address. Padded stride, zero-based OpenCV
+metadata, and signed Value origins remain distinct concerns. Borrowed
+read-only matrices retain the source Value; mutable matrices are scoped to an
+exclusive Host output grant. OpenCV decode preserves supported 8/16-bit code
+values and assigns an explicit zero-origin data window because common OpenCV
+metadata has no signed-window authority. Encode uses a closed
+extension/depth/channel matrix: JPEG is
 unsigned 8-bit with one or three channels; PNG/TIFF/JPEG 2000 accept declared
 unsigned 8/16-bit one/three/four-channel combinations; BMP/WebP/Netpbm retain
 their narrower declared subsets. Signed and floating matrices are rejected
@@ -197,6 +212,11 @@ or creating an avoidable infinity, NaN, zero radius, rounded midpoint ratio, or
 premature zero. Precision Reject still compares the working affine result with
 exact destination storage and exact reverse mapping; it does not pre-round a
 wider `1/3` to make FP64 narrowing appear exact.
+A binary64 spelling constructed as an extreme midpoint may already be rounded
+before the working-type calculation. Its portable oracle therefore uses Allow
+to assert the nearest destination storage; Reject success vectors use provably
+exact and reversible positions such as endpoints and `0.5`, without assuming
+that `long double` is or is not wider than binary64.
 There is no hidden 255/65535 arithmetic, color transform, channel-role
 inference, or missing-metadata fallback. Equal endpoint/storage identity reads
 integer domains with type-aware comparison and copies each in-domain native

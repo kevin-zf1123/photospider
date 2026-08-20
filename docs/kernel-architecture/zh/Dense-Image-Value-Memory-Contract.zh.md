@@ -84,6 +84,10 @@ slot、attempt、lease、quota 与 path authority 包装它；这些事实不会
 capture 会记录每个 CPU binding 所保证的 alignment。version 1 接受不超过 4096 byte 的正二次幂
 要求，分别对齐 archive 中的每个 span，并按对应的精确要求重建每个 Strided、Blocked 或
 provider-defined buffer。
+finite binary32/binary64 metadata 会从数值的 IEEE-754 sign、exponent 与 fraction 编码为 canonical
+little-endian word，而不依赖 native object byte 或 word order。signed zero 只有 `+0` 这一种 wire
+spelling。decode 拒绝 negative-zero 与 non-finite spelling；若 host 不具备精确支持的 IEC 559
+profile（包括 subnormal），codec 会在 compile time fail closed。
 
 payload byte 留在 JSON 和 control frame 之外。IPC OutputStore 私下 stage 所有 buffer，并最后发布
 完整 metadata manifest。worker protocol v3 传输 metadata 和 data-plane reference，而不在 control
@@ -113,9 +117,15 @@ runtime identity。
 ## OpenCV 与普通 OpenEXR adapter
 
 public OpenCV adapter 只接受 Ready、Host-readable、whole-byte、unquantized、Strided 的普通 image
-Value。borrowed read-only matrix 会保留 source Value；mutable matrix 被限制在独占 Host output grant
-内。OpenCV decode 保留受支持的 8/16-bit code value，并分配显式 zero-origin data window，因为普通
-OpenCV metadata 不具备 signed-window authority。它从不处理 `.exr` path。
+Value。whole-Value view 会在任何 narrowing、address lookup 或 matrix-header construction 前，拒绝
+超出 OpenCV `int` 范围的 width/height。`InputTile` view 则验证 source Value、ROI containment 与
+ROI 自身的可表示 extent，然后直接使用 ROI size、原 row stride 和精确的 first-channel address
+构造局部 zero-copy matrix，不会先构造 full matrix。因此，可表示的小 tile 可以查看 oversized
+zero-stride logical image，同时保留精确 `step` 与 address。padded stride、zero-based OpenCV
+metadata 与 signed Value origin 仍是彼此独立的关注点。borrowed read-only matrix 会保留 source
+Value；mutable matrix 被限制在独占 Host output grant 内。OpenCV decode 保留受支持的 8/16-bit
+code value，并分配显式 zero-origin data window，因为普通 OpenCV metadata 不具备 signed-window
+authority。它从不处理 `.exr` path。
 encode 使用封闭的 extension/depth/channel matrix：JPEG 只允许一或三 channel 的 unsigned 8-bit；
 PNG/TIFF/JPEG 2000 接受声明的一/三/四 channel unsigned 8/16-bit 组合；BMP/WebP/Netpbm 保留各自
 更窄的声明子集。signed 与 floating matrix 会在 `cv::imwrite` 前被拒绝，因此 OpenCV 无法静默
@@ -152,6 +162,9 @@ difference 会在不构造任一原始 span 的情况下推导 candidate scale�
 rounded-midpoint ratio 或 premature zero。precision Reject 仍会用 exact destination storage 和 exact
 reverse mapping 比较 working affine result；它不会预先舍入更宽的 `1/3` 来把 FP64 narrowing
 伪装成精确。
+作为 extreme midpoint 构造的 binary64 spelling 可能已在 working-type calculation 前完成舍入。
+因此，其 portable oracle 会用 Allow 断言 nearest destination storage；Reject 成功向量只使用
+endpoint 与 `0.5` 等可证明精确且可逆的位置，不假定 `long double` 是否比 binary64 更宽。
 不存在隐藏的 255/65535 算术、color transform、channel-role inference 或 missing-metadata fallback。
 equal endpoint/storage identity 通过 type-aware 比较读取 integer domain，并在不做 floating promotion
 的情况下复制每个 in-domain native sample，从而保留 `int64_t`/`uint64_t` 在 `2^53` 附近及其极值的
