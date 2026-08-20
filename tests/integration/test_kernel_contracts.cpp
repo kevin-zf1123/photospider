@@ -26,16 +26,21 @@
 #include <utility>
 #include <vector>
 
-#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING) && !defined(_WIN32)
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
 
 #if defined(PS_KERNEL_TEST_DATA_PROVIDER_PATH)
-#if defined(_WIN32)
-#include <windows.h>
-#else
+#if !defined(_WIN32)
 #include <dlfcn.h>
 #endif
 #include "adapters/openexr/openexr_deep_scanline_adapter.hpp"
@@ -89,6 +94,11 @@ static_assert(std::is_same_v<decltype(Node::parameters), plugin::ParameterMap>);
 static_assert(
     std::is_same_v<decltype(Node::runtime_parameters), plugin::ParameterMap>);
 static_assert(std::is_same_v<decltype(NodeOutput::data), plugin::ParameterMap>);
+#if defined(_WIN32)
+static_assert(!GraphCacheService::kDiskPersistenceSupported);
+#else
+static_assert(GraphCacheService::kDiskPersistenceSupported);
+#endif
 
 /**
  * @brief Publishes one deterministic canonical CPU image for Kernel tests.
@@ -1376,7 +1386,7 @@ void write_sparse_test_file_bytes(const std::filesystem::path& path,
     throw std::invalid_argument("Sparse test artifact must be nonempty.");
   }
   std::filesystem::remove(path);
-#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING) && !defined(_WIN32)
   const int descriptor =
       ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
   if (descriptor < 0) {
@@ -1485,9 +1495,9 @@ void write_sparse_test_file_bytes(const std::filesystem::path& path,
 /**
  * @brief Coordinates one deterministic cache-writer interleaving.
  * @throws Standard synchronization errors from explicit operations.
- * @note The first writer enters after writing metadata and waits until the
- * test releases it. A second writer reports metadata entry independently,
- * allowing the test to distinguish root serialization from mixed generation.
+ * @note The first writer enters after provider work begins and waits until the
+ * test releases it. Root-lock arrival is observed through the separate
+ * GraphCacheService test seam rather than a timing-based second callback.
  */
 class CacheWriterGate final {
  public:
@@ -1504,17 +1514,6 @@ class CacheWriterGate final {
   }
 
   /**
-   * @brief Publishes that the second writer reached its metadata callback.
-   * @return Nothing.
-   * @throws std::system_error from synchronization operations.
-   */
-  void enter_second() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    second_entered_ = true;
-    changed_.notify_all();
-  }
-
-  /**
    * @brief Waits for first-writer entry within one bounded deadline.
    * @param timeout Maximum deterministic wait.
    * @return True when the first writer entered.
@@ -1524,18 +1523,6 @@ class CacheWriterGate final {
     std::unique_lock<std::mutex> lock(mutex_);
     return changed_.wait_for(lock, timeout,
                              [this]() { return first_entered_; });
-  }
-
-  /**
-   * @brief Waits for second-writer entry within one bounded deadline.
-   * @param timeout Maximum deterministic wait.
-   * @return True when the second writer entered.
-   * @throws std::system_error from synchronization operations.
-   */
-  bool wait_for_second(std::chrono::milliseconds timeout) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, timeout,
-                             [this]() { return second_entered_; });
   }
 
   /**
@@ -1556,8 +1543,6 @@ class CacheWriterGate final {
   std::condition_variable changed_;
   /** @brief Whether the first metadata writer is blocked. */
   bool first_entered_ = false;
-  /** @brief Whether the second metadata writer entered. */
-  bool second_entered_ = false;
   /** @brief Whether the first writer may proceed. */
   bool released_ = false;
 };
@@ -1782,6 +1767,31 @@ bool wait_for_atomic_true(const std::atomic<bool>& value,
   }
   return value.load(std::memory_order_acquire);
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+/**
+ * @brief Arms or clears one death-test child watchdog across test platforms.
+ * @param seconds Positive termination delay, or zero to clear where supported.
+ * @return Nothing.
+ * @throws std::system_error on Win32 watchdog-thread construction failure.
+ * @note POSIX delegates to `alarm`. Win32 death-test children use a detached
+ * sleeper that terminates only that child; zero needs no cancellation because
+ * every armed path exits the child immediately after its final assertion.
+ */
+void set_kernel_contract_process_watchdog(unsigned int seconds) {
+#if defined(_WIN32)
+  if (seconds == 0U) {
+    return;
+  }
+  std::thread([seconds]() {
+    ::Sleep(static_cast<DWORD>(seconds) * 1000U);
+    (void)::TerminateProcess(::GetCurrentProcess(), 124U);
+  }).detach();
+#else
+  (void)::alarm(seconds);
+#endif
+}
+#endif
 
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
 /**
@@ -2240,6 +2250,147 @@ class ScopedGraphCacheAsyncWriterHook final {
    */
   ScopedGraphCacheAsyncWriterHook& operator=(
       const ScopedGraphCacheAsyncWriterHook&) = delete;
+
+ private:
+  /** @brief Borrowed process-local hook record. */
+  testing::GraphCacheServiceTestHook hook_;
+};
+
+/** @brief Closed result from one armed root-lock acquisition attempt. */
+enum class CacheRootLockProbeResult {
+  /** @brief The armed operation has not classified its lock attempt. */
+  Pending,
+  /** @brief The operation observed the already-owned shared root mutex. */
+  Contended,
+  /** @brief The operation acquired immediately instead of sharing the mutex. */
+  AcquiredWithoutContention,
+};
+
+/**
+ * @brief Converts root-lock checkpoints into one positive arrival/result latch.
+ * @throws Standard synchronization errors from explicit methods and callback.
+ * @note Tests arm this probe only after a first provider callback proves it
+ * owns the root mutex. The next operation must publish arrival and either
+ * contention or an incorrect uncontended acquisition; no elapsed-time absence
+ * is used as correctness evidence.
+ */
+class CacheRootLockProbe final {
+ public:
+  /**
+   * @brief Arms the single next root-operation observation.
+   * @return Nothing.
+   * @throws std::system_error when mutex acquisition fails.
+   * @note The probe is one-use and must be armed only after the first writer
+   * has entered its blocking provider callback.
+   */
+  void arm() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    armed_ = true;
+  }
+
+  /**
+   * @brief Waits for one positive lock-attempt classification.
+   * @param timeout Bounded test-startup deadline, not a negative assertion.
+   * @return Classified result, or Pending when no checkpoint arrived.
+   */
+  CacheRootLockProbeResult wait_for_result(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    (void)changed_.wait_for(lock, timeout, [this]() {
+      return result_ != CacheRootLockProbeResult::Pending;
+    });
+    return result_;
+  }
+
+  /**
+   * @brief Observes the armed operation's pre-lock and try-lock checkpoints.
+   * @param context Borrowed CacheRootLockProbe retained by the test scope.
+   * @param event Exact cache-service checkpoint.
+   * @param cache_root Root supplied only for provenance.
+   * @return Nothing.
+   * @throws Standard synchronization errors from mutex notification.
+   */
+  static void notify(void* context, testing::GraphCacheServiceTestEvent event,
+                     const std::filesystem::path& cache_root) {
+    auto* probe = static_cast<CacheRootLockProbe*>(context);
+    std::lock_guard<std::mutex> lock(probe->mutex_);
+    if (!probe->armed_) {
+      return;
+    }
+    (void)cache_root;
+    if (event == testing::GraphCacheServiceTestEvent::RootOperationBeforeLock) {
+      probe->arrived_ = true;
+      return;
+    }
+    if (!probe->arrived_ ||
+        probe->result_ != CacheRootLockProbeResult::Pending) {
+      return;
+    }
+    if (event ==
+        testing::GraphCacheServiceTestEvent::RootOperationLockContended) {
+      probe->result_ = CacheRootLockProbeResult::Contended;
+    } else if (event == testing::GraphCacheServiceTestEvent::
+                            RootOperationLockAcquiredWithoutContention) {
+      probe->result_ = CacheRootLockProbeResult::AcquiredWithoutContention;
+    } else {
+      return;
+    }
+    probe->changed_.notify_all();
+  }
+
+ private:
+  /** @brief Serializes the borrowed callback and waiting test thread. */
+  std::mutex mutex_;
+  /** @brief Wakes the test after one positive classification. */
+  std::condition_variable changed_;
+  /** @brief True only after the first operation proved root ownership. */
+  bool armed_ = false;
+  /** @brief True after the next operation published its pre-lock arrival. */
+  bool arrived_ = false;
+  /** @brief Single terminal classification for the armed operation. */
+  CacheRootLockProbeResult result_ = CacheRootLockProbeResult::Pending;
+};
+
+/**
+ * @brief Installs one root-lock probe and clears it before context teardown.
+ * @param probe Borrowed probe retained through every affected operation.
+ * @throws Nothing.
+ */
+class ScopedGraphCacheRootLockProbe final {
+ public:
+  /**
+   * @brief Installs the borrowed positive lock-attempt observer.
+   * @param probe Context that outlives this guard and affected operations.
+   * @throws Nothing.
+   */
+  explicit ScopedGraphCacheRootLockProbe(CacheRootLockProbe& probe)
+      : hook_{&probe, &CacheRootLockProbe::notify} {
+    testing::set_graph_cache_service_test_hook(&hook_);
+  }
+
+  /**
+   * @brief Clears the process-local hook before probe destruction.
+   * @throws Nothing.
+   */
+  ~ScopedGraphCacheRootLockProbe() noexcept {
+    testing::set_graph_cache_service_test_hook(nullptr);
+  }
+
+  /**
+   * @brief Prevents duplicate process-hook ownership.
+   * @param other Unused source because construction is forbidden.
+   * @throws Nothing; this operation is deleted.
+   */
+  ScopedGraphCacheRootLockProbe(const ScopedGraphCacheRootLockProbe& other) =
+      delete;
+
+  /**
+   * @brief Prevents duplicate process-hook assignment.
+   * @param other Unused source because assignment is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; this operation is deleted.
+   */
+  ScopedGraphCacheRootLockProbe& operator=(
+      const ScopedGraphCacheRootLockProbe& other) = delete;
 
  private:
   /** @brief Borrowed process-local hook record. */
@@ -3352,6 +3503,87 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
       << "RT output should be <= HP output width";
 }
 
+/**
+ * @brief Preserves established no-disk behavior before platform admission.
+ * @return Nothing; GoogleTest reports codec, executor, filesystem, memory, or
+ * statistics-policy drift.
+ * @throws Value, Graph, allocation, or executor exceptions from fixture setup.
+ * @note Empty roots keep load diagnostics, HP-node counts, and combined memory
+ * clear behavior. `skip_save_cache` remains an enabled-root no-op. Neither
+ * case is a disk-persistence request on any platform.
+ */
+TEST(CacheSemantics, EmptyRootAndDisabledSaveRemainNoDiskIntent) {
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>();
+  auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>();
+  GraphCacheService cache{image_codec, metadata_codec};
+  execution::ComputeIoExecutor executor({1U, 4U * 1024U * 1024U});
+  const std::shared_ptr<const void> lifetime = std::make_shared<const int>(1);
+
+  GraphModel empty_root_graph{std::filesystem::path{}};
+  empty_root_graph.add_node(make_contract_node());
+  Node memory_node = make_cached_process_node("output.png");
+  memory_node.cached_output_high_precision =
+      make_kernel_contract_image_output(2, 1, 1, 0.25F);
+  memory_node.hp_region = value_region::full_node_output_region(
+      *memory_node.cached_output_high_precision);
+  const int memory_node_id = memory_node.id;
+  empty_root_graph.add_node(memory_node);
+
+  EXPECT_NO_THROW(cache.save_cache_if_configured(
+      empty_root_graph, empty_root_graph.node(memory_node_id), "int8"));
+  EXPECT_NO_THROW(cache.save_cache_if_configured_via_executor(
+      executor, lifetime, empty_root_graph,
+      empty_root_graph.node(memory_node_id), "int8"));
+  Node load_node = make_cached_process_node("output.png");
+  NodeOutput detached;
+  EXPECT_FALSE(cache.try_load_from_disk_cache(
+      empty_root_graph, load_node, ValueDiskCacheOutputSchema{true, {}, {}}));
+  EXPECT_FALSE(cache.try_load_from_disk_cache_into(
+      empty_root_graph, load_node, detached,
+      ValueDiskCacheOutputSchema{true, {}, {}}));
+  const auto diagnostic =
+      empty_root_graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(diagnostic.has_value());
+  EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Skipped);
+  EXPECT_EQ(cache.clear_drive_cache(empty_root_graph).removed_entries, 0U);
+  EXPECT_EQ(cache.cache_all_nodes(empty_root_graph, "int8").saved_nodes, 1);
+  const GraphModel::DiskSyncResult sync =
+      cache.synchronize_disk_cache(empty_root_graph, "int8");
+  EXPECT_EQ(sync.saved_nodes, 1);
+  EXPECT_EQ(sync.removed_files, 0);
+  EXPECT_EQ(sync.removed_dirs, 0);
+  cache.clear_cache(empty_root_graph);
+  EXPECT_FALSE(empty_root_graph.node(memory_node_id)
+                   .cached_output_high_precision.has_value());
+
+  const std::filesystem::path disabled_root =
+      clean_temp_path("photospider-disabled-save-no-disk-intent");
+  GraphModel disabled_save_graph(disabled_root);
+  disabled_save_graph.set_skip_save_cache(true);
+  Node disabled_node = make_cached_process_node("output.png");
+  disabled_node.cached_output_high_precision =
+      make_kernel_contract_image_output(2, 1, 1, 0.5F);
+  disabled_node.hp_region = value_region::full_node_output_region(
+      *disabled_node.cached_output_high_precision);
+  EXPECT_NO_THROW(cache.save_cache_if_configured(disabled_save_graph,
+                                                 disabled_node, "int8"));
+  EXPECT_NO_THROW(cache.save_cache_if_configured_via_executor(
+      executor, lifetime, disabled_save_graph, disabled_node, "int8"));
+
+  EXPECT_TRUE(image_codec->calls().empty());
+  EXPECT_TRUE(metadata_codec->calls().empty());
+  EXPECT_TRUE(std::filesystem::is_empty(disabled_root));
+  EXPECT_FALSE(std::filesystem::exists(disabled_root /
+                                       std::to_string(disabled_node.id)));
+  const execution::ComputeIoExecutorSnapshot executor_state =
+      executor.snapshot();
+  EXPECT_EQ(executor_state.active_tasks, 0U);
+  EXPECT_EQ(executor_state.active_planned_bytes, 0U);
+  executor.shutdown();
+  std::filesystem::remove_all(disabled_root);
+}
+
+#if !defined(_WIN32)
 TEST(CacheSemantics, DiskSaveAndSyncIgnoreNodesWithoutHpState) {
   register_contract_ops();
   GraphTraversalService traversal;
@@ -3462,6 +3694,14 @@ TEST(CacheSemantics, HostileCacheLocationsCannotEscapeOrAliasNodeDirectory) {
       clean_temp_path("photospider-hostile-cache-location-out");
   std::filesystem::create_directories(outside);
   std::vector<std::string> locations{
+      "COM\xc2\xb9.txt",
+      "COM\xc2\xb2.txt",
+      "COM\xc2\xb3.txt",
+      "LPT\xc2\xb9.png",
+      "LPT\xc2\xb2.png",
+      "LPT\xc2\xb3.png",
+      "COM1.txt",
+      "lPt9.bin",
       (outside / "absolute.png").string(),
       "../../photospider-hostile-cache-location-out/traversal.png",
       "",
@@ -3555,6 +3795,7 @@ TEST(CacheSemantics, CrossEntrySiblingAliasRejectedBeforePersistence) {
   std::filesystem::remove_all(root);
 }
 
+#if !defined(_WIN32)
 /**
  * @brief Rejects symlinked cache directories and leaves outside files intact.
  * @return Nothing; GoogleTest reports codec entry or outside mutation.
@@ -3562,6 +3803,8 @@ TEST(CacheSemantics, CrossEntrySiblingAliasRejectedBeforePersistence) {
  * @note A graph-controlled numeric node path must be a real directory below
  * the configured cache root; following a replacement directory would grant
  * projection, archive, manifest, and cleanup authority outside that root.
+ * @note This is POSIX descriptor-relative persistence coverage. Windows rejects
+ * every nonempty-root disk request at the earlier platform boundary.
  */
 TEST(CacheSemantics, SymlinkedNodeCacheDirectoryHasNoOutsideSideEffect) {
   const auto root = clean_temp_path("photospider-symlink-cache-node-root");
@@ -3576,8 +3819,10 @@ TEST(CacheSemantics, SymlinkedNodeCacheDirectoryHasNoOutsideSideEffect) {
       make_kernel_contract_image_output(2, 1, 1, 0.25F);
   node.hp_region =
       value_region::full_node_output_region(*node.cached_output_high_precision);
-  std::filesystem::create_directory_symlink(outside,
-                                            root / std::to_string(node.id));
+  std::error_code symlink_error;
+  std::filesystem::create_directory_symlink(
+      outside, root / std::to_string(node.id), symlink_error);
+  ASSERT_FALSE(symlink_error) << symlink_error.message();
   auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
       testing::FakeImageArtifactCodec::DecodeCallback{},
       [](const std::filesystem::path& path, const Value&,
@@ -3610,6 +3855,8 @@ TEST(CacheSemantics, SymlinkedNodeCacheDirectoryHasNoOutsideSideEffect) {
  * @throws Filesystem, Value, Region, or allocation exceptions from setup.
  * @note Cleanup is a cache authority operation, so even unlinking the symlink
  * itself is rejected rather than accepting an ambiguous replacement entry.
+ * @note This is POSIX descriptor-relative cleanup coverage. Windows rejects
+ * every nonempty-root disk request at the earlier platform boundary.
  */
 TEST(CacheSemantics, PartialCleanupRejectsSymlinkLeafAndPreservesTarget) {
   const auto root = clean_temp_path("photospider-symlink-cache-leaf-root");
@@ -3625,7 +3872,9 @@ TEST(CacheSemantics, PartialCleanupRejectsSymlinkLeafAndPreservesTarget) {
   std::filesystem::create_directories(node_directory);
   const std::filesystem::path archive =
       cache_transaction_sibling(node_directory / "output.png", ".values");
-  std::filesystem::create_symlink(outside, archive);
+  std::error_code symlink_error;
+  std::filesystem::create_symlink(outside, archive, symlink_error);
+  ASSERT_FALSE(symlink_error) << symlink_error.message();
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
 
@@ -3647,6 +3896,145 @@ TEST(CacheSemantics, PartialCleanupRejectsSymlinkLeafAndPreservesTarget) {
   std::filesystem::remove(outside);
 }
 
+/**
+ * @brief Refuses hard-linked predecessor cleanup before deleting its target.
+ * @return Nothing; GoogleTest reports typed rejection or target mutation.
+ * @throws Filesystem, Value, Region, or allocation exceptions from setup.
+ * @note The controlled archive name and outside sentinel identify one object
+ * with two links. POSIX `st_nlink` rejects it before descriptor-relative
+ * deletion receives authority. Windows fails at the platform boundary.
+ */
+TEST(CacheSemantics, PartialCleanupRejectsHardLinkedLeafAndPreservesTarget) {
+  const auto root = clean_temp_path("photospider-hardlink-cache-leaf-root");
+  const auto outside = temp_path("photospider-hardlink-cache-leaf-target");
+  write_text(outside, "outside-hardlink-sentinel");
+  GraphModel graph(root);
+  Node node = make_cached_process_node("output.png");
+  node.cached_output_high_precision =
+      make_kernel_contract_image_output(2, 1, 1, 0.25F);
+  node.hp_region =
+      RegionSet::from_image_rect(ImageRect{image_region_domain(), 0, 1, 0, 1});
+  const std::filesystem::path node_directory = root / std::to_string(node.id);
+  std::filesystem::create_directories(node_directory);
+  const std::filesystem::path archive =
+      cache_transaction_sibling(node_directory / "output.png", ".values");
+  std::filesystem::create_hard_link(outside, archive);
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+
+  try {
+    cache.save_cache_if_configured(graph, node, "int8");
+    FAIL() << "Partial cleanup unexpectedly deleted a hard-linked leaf";
+  } catch (const GraphError& error) {
+    EXPECT_EQ(error.code(), GraphErrc::InvalidParameter);
+  }
+  EXPECT_TRUE(std::filesystem::exists(archive));
+  EXPECT_EQ(std::filesystem::hard_link_count(archive), 2U);
+  EXPECT_EQ(read_test_file_bytes(outside),
+            (std::vector<std::byte>{
+                std::byte{'o'}, std::byte{'u'}, std::byte{'t'}, std::byte{'s'},
+                std::byte{'i'}, std::byte{'d'}, std::byte{'e'}, std::byte{'-'},
+                std::byte{'h'}, std::byte{'a'}, std::byte{'r'}, std::byte{'d'},
+                std::byte{'l'}, std::byte{'i'}, std::byte{'n'}, std::byte{'k'},
+                std::byte{'-'}, std::byte{'s'}, std::byte{'e'}, std::byte{'n'},
+                std::byte{'t'}, std::byte{'i'}, std::byte{'n'}, std::byte{'e'},
+                std::byte{'l'}}));
+  std::filesystem::remove_all(root);
+  std::filesystem::remove(outside);
+}
+#endif
+#endif
+
+#if defined(_WIN32)
+/**
+ * @brief Proves every Windows GraphCache disk API fails before side effects.
+ * @return Nothing; GoogleTest reports typing, codec, executor, filesystem,
+ * cache, timing, diagnostic, or memory mutation drift.
+ * @throws Value, Region, allocation, or executor exceptions from setup.
+ * @note This contract is compiled for Windows-capable builds. The current
+ * Darwin verification does not execute or claim a Windows runtime result.
+ */
+TEST(CacheSemantics, Win32DiskPersistenceApisFailClosedBeforeSideEffects) {
+  const auto root = clean_temp_path("photospider-win32-disk-fail-closed");
+  GraphModel graph{std::filesystem::path{}};
+  graph.cache_root = root;
+  Node saved = make_cached_process_node("output.png");
+  saved.cached_output_high_precision =
+      make_kernel_contract_image_output(2, 1, 1, 0.25F);
+  saved.hp_region = value_region::full_node_output_region(
+      *saved.cached_output_high_precision);
+  const int saved_id = saved.id;
+  graph.add_node(saved);
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>();
+  auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>();
+  GraphCacheService cache{image_codec, metadata_codec};
+  execution::ComputeIoExecutor executor({1U, 4U * 1024U * 1024U});
+  const std::shared_ptr<const void> lifetime = std::make_shared<const int>(1);
+  const GraphRevision initial_revision = graph.revision();
+  const double initial_io_time = graph.total_io_time_ms.load();
+
+  const auto expect_unsupported = [](const char* operation_name,
+                                     auto&& operation) {
+    SCOPED_TRACE(operation_name);
+    try {
+      operation();
+      FAIL() << "Windows GraphCache disk API unexpectedly succeeded";
+    } catch (const GraphError& error) {
+      EXPECT_EQ(error.code(), GraphErrc::InvalidParameter);
+      EXPECT_STREQ(error.what(),
+                   "Graph cache disk persistence is unsupported on Windows.");
+    }
+  };
+
+  expect_unsupported("platform gate", []() {
+    GraphCacheService::require_disk_persistence_supported();
+  });
+  expect_unsupported("synchronous save", [&]() {
+    cache.save_cache_if_configured(graph, graph.node(saved_id), "int8");
+  });
+  expect_unsupported("executor save", [&]() {
+    cache.save_cache_if_configured_via_executor(executor, lifetime, graph,
+                                                graph.node(saved_id), "int8");
+  });
+
+  Node load_node = make_cached_process_node("output.png");
+  NodeOutput detached;
+  detached.data.emplace("sentinel", plugin::ParameterValue(17));
+  expect_unsupported("formal load", [&]() {
+    (void)cache.try_load_from_disk_cache(
+        graph, load_node, ValueDiskCacheOutputSchema{true, {}, {}});
+  });
+  expect_unsupported("detached load", [&]() {
+    (void)cache.try_load_from_disk_cache_into(
+        graph, load_node, detached, ValueDiskCacheOutputSchema{true, {}, {}});
+  });
+  expect_unsupported("drive clear",
+                     [&]() { (void)cache.clear_drive_cache(graph); });
+  expect_unsupported("combined clear", [&]() { cache.clear_cache(graph); });
+  expect_unsupported("cache all",
+                     [&]() { (void)cache.cache_all_nodes(graph, "int8"); });
+  expect_unsupported("synchronize", [&]() {
+    (void)cache.synchronize_disk_cache(graph, "int8");
+  });
+
+  EXPECT_TRUE(image_codec->calls().empty());
+  EXPECT_TRUE(metadata_codec->calls().empty());
+  EXPECT_FALSE(std::filesystem::exists(root));
+  EXPECT_EQ(graph.revision(), initial_revision);
+  EXPECT_EQ(graph.total_io_time_ms.load(), initial_io_time);
+  EXPECT_FALSE(graph.last_disk_cache_load_result_snapshot().has_value());
+  EXPECT_TRUE(graph.node(saved_id).cached_output_high_precision.has_value());
+  ASSERT_NE(detached.data.find("sentinel"), detached.data.end());
+  EXPECT_EQ(detached.data.at("sentinel").as_int64(), 17);
+  const execution::ComputeIoExecutorSnapshot executor_state =
+      executor.snapshot();
+  EXPECT_EQ(executor_state.active_tasks, 0U);
+  EXPECT_EQ(executor_state.active_planned_bytes, 0U);
+  executor.shutdown();
+}
+#endif
+
+#if !defined(_WIN32)
 TEST(CacheSemantics, DiskCacheMetadataHitPreservesTryLoadBehavior) {
   DiskCacheDiagnosticContext ctx("photospider-contract-disk-cache-hit",
                                  "output.png");
@@ -3933,10 +4321,11 @@ TEST(CacheSemantics,
  * @brief Cleans a predecessor when partial provider output is not an image.
  * @return Nothing; GoogleTest reports validation, cleanup, or restart hits.
  * @throws DSO, provider, Kernel, graph-state, cache, or allocation exceptions.
- * @note The partial Value is published in the canonical image slot even
- * though its provider-defined VariableSampleField layout cannot construct an
- * ImageView. Classification must therefore precede image projection
- * validation and remove the complete predecessor without provider dispatch.
+ * @note The same provider-defined Value first proves Whole validity still
+ * reaches unsupported-image preflight without mutating the predecessor. Its
+ * later finite ImageRect is cleanup-only even though deriving DenseTensor
+ * bounds would invoke an invalid representation accessor; cleanup removes the
+ * complete predecessor without provider dispatch.
  */
 TEST(CacheSemantics,
      KernelProductRegistryCleansPartialProviderIncompatibleImage) {
@@ -3999,10 +4388,34 @@ TEST(CacheSemantics,
       [source](GraphModel& graph) {
         graph.mutate_node_runtime_state(
             1, [source](GraphModel::NodeRuntimeState& state) {
+              NodeOutput complete_incompatible;
+              complete_incompatible.publish_image_value(source);
+              state.cached_output_high_precision =
+                  std::move(complete_incompatible);
+              state.hp_region = RegionSet::whole();
+            });
+      })
+      .get();
+  try {
+    testing::KernelTestAccess::submit_cache_save(kernel, graph_name, 1, "int8")
+        .get();
+    FAIL() << "Complete provider-defined canonical image bypassed preflight";
+  } catch (const GraphError& error) {
+    EXPECT_EQ(error.code(), GraphErrc::InvalidParameter);
+  }
+  EXPECT_TRUE(std::filesystem::exists(archive));
+  EXPECT_TRUE(std::filesystem::exists(manifest));
+
+  testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name,
+      [source](GraphModel& graph) {
+        graph.mutate_node_runtime_state(
+            1, [source](GraphModel::NodeRuntimeState& state) {
               NodeOutput partial;
               partial.publish_image_value(source);
               state.cached_output_high_precision = std::move(partial);
-              state.hp_region = RegionSet::empty();
+              state.hp_region = RegionSet::from_image_rect(
+                  ImageRect{image_region_domain(), -2, -1, 1, 2});
             });
       })
       .get();
@@ -4277,6 +4690,7 @@ TEST(CacheSemantics, ManifestPayloadRacePublishesNoNamedValue) {
  * a digest-valid A-archive/B-metadata manifest. The final load must instead be
  * one complete writer generation.
  */
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING) && !defined(_WIN32)
 TEST(CacheSemantics, ConcurrentWritersCannotPublishDigestValidMixedGeneration) {
   const auto container =
       clean_temp_path("photospider-cache-concurrent-writer-aliases");
@@ -4315,14 +4729,15 @@ TEST(CacheSemantics, ConcurrentWritersCannotPublishDigestValidMixedGeneration) {
       });
   auto codec_b = std::make_shared<testing::FakeCacheMetadataCodec>(
       [metadata_b](const std::filesystem::path&) { return metadata_b; },
-      [&gate](const std::filesystem::path& path, const plugin::ParameterMap&) {
+      [](const std::filesystem::path& path, const plugin::ParameterMap&) {
         write_text(path, "writer: B\n");
-        gate.enter_second();
       });
   GraphCacheService cache_a{std::make_shared<testing::FakeImageArtifactCodec>(),
                             codec_a};
   GraphCacheService cache_b{std::make_shared<testing::FakeImageArtifactCodec>(),
                             codec_b};
+  CacheRootLockProbe lock_probe;
+  ScopedGraphCacheRootLockProbe lock_hook(lock_probe);
 
   std::future<void> first = std::async(std::launch::async, [&]() {
     cache_a.save_cache_if_configured(graph_a, writer_a, "int8");
@@ -4333,15 +4748,16 @@ TEST(CacheSemantics, ConcurrentWritersCannotPublishDigestValidMixedGeneration) {
     first.wait();
   }
   ASSERT_TRUE(first_entered);
+  lock_probe.arm();
   std::future<void> second = std::async(std::launch::async, [&]() {
     cache_b.save_cache_if_configured(graph_b, writer_b, "int8");
   });
-  const bool second_entered_before_release =
-      gate.wait_for_second(std::chrono::milliseconds(100));
+  const CacheRootLockProbeResult lock_result =
+      lock_probe.wait_for_result(std::chrono::seconds(2));
   gate.release();
   first.get();
   second.get();
-  EXPECT_FALSE(second_entered_before_release);
+  EXPECT_EQ(lock_result, CacheRootLockProbeResult::Contended);
 
   GraphCacheService reader{providers::make_configured_image_artifact_codec(),
                            testing::make_yaml_cache_metadata_codec()};
@@ -4387,6 +4803,8 @@ TEST(CacheSemantics, DriveClearCannotBeUndoneByEarlierInflightWriter) {
                            testing::make_yaml_cache_metadata_codec()};
   GraphCacheService clearer{providers::make_configured_image_artifact_codec(),
                             testing::make_yaml_cache_metadata_codec()};
+  CacheRootLockProbe lock_probe;
+  ScopedGraphCacheRootLockProbe lock_hook(lock_probe);
 
   std::future<void> write = std::async(std::launch::async, [&]() {
     writer.save_cache_if_configured(graph, node, "int8");
@@ -4397,20 +4815,21 @@ TEST(CacheSemantics, DriveClearCannotBeUndoneByEarlierInflightWriter) {
     write.wait();
   }
   ASSERT_TRUE(writer_entered);
+  lock_probe.arm();
   std::future<GraphModel::DriveClearResult> clear = std::async(
       std::launch::async, [&]() { return clearer.clear_drive_cache(graph); });
-  const bool clear_returned_while_writer_blocked =
-      clear.wait_for(std::chrono::milliseconds(100)) ==
-      std::future_status::ready;
+  const CacheRootLockProbeResult lock_result =
+      lock_probe.wait_for_result(std::chrono::seconds(2));
   gate.release();
   write.get();
   (void)clear.get();
 
-  EXPECT_FALSE(clear_returned_while_writer_blocked);
+  EXPECT_EQ(lock_result, CacheRootLockProbeResult::Contended);
   EXPECT_TRUE(std::filesystem::exists(root));
   EXPECT_TRUE(std::filesystem::is_empty(root));
   std::filesystem::remove_all(root);
 }
+#endif
 
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
 /**
@@ -4487,6 +4906,7 @@ TEST(CacheSemantics, LaterPartialCleanupInvalidatesEarlierAdmittedWriter) {
 }
 #endif
 
+#if !defined(_WIN32)
 /**
  * @brief Rejects sparse archive storage before payload allocation or decode.
  * @return Nothing; GoogleTest reports a false hit or unexpected diagnostic.
@@ -4545,6 +4965,7 @@ TEST(CacheSemantics, SparsePortableArchiveIsRejectedBeforeReplay) {
 #endif
   std::filesystem::remove_all(root);
 }
+#endif
 
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
 /**
@@ -5558,6 +5979,7 @@ TEST(CacheSemantics,
   EXPECT_TRUE(ctx.graph.has_node(11));
   EXPECT_FALSE(ctx.graph.last_disk_cache_load_result_snapshot().has_value());
 }
+#endif
 
 TEST(ComputeContracts, RealTimeUpdateWithoutDirtyRoiFailsClearly) {
   register_contract_ops();
@@ -6246,7 +6668,7 @@ TEST(ComputeContracts,
   std::filesystem::remove_all(cache_root);
 }
 
-#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING) && !defined(_WIN32)
 /**
  * @brief Proves revision exhaustion precedes every cache-clear side effect.
  * @return Nothing; GoogleTest assertions report graph, cache, or file changes.
@@ -6328,7 +6750,7 @@ TEST(ComputeContracts, CacheClearRevisionOverflowPreservesAllAuthority) {
 #endif
 
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING) && \
-    defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+    defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING) && !defined(_WIN32)
 /**
  * @brief Proves a partially failed disk clear still invalidates an older Run.
  * @return Nothing; GoogleTest assertions report ordering, propagation, or
@@ -7933,7 +8355,7 @@ struct KernelShutdownPostGateFault final {
  * the required marker.
  */
 [[noreturn]] void run_kernel_shutdown_post_gate_fault_watchdog() {
-  (void)::alarm(5U);
+  set_kernel_contract_process_watchdog(5U);
   const std::string graph_name = "contract_shutdown_post_gate";
   const std::string late_name = "contract_shutdown_post_gate_late";
   const auto root =
@@ -8168,7 +8590,7 @@ TEST(ComputeContracts, CloseEraseAndSuccessPublishAsOneRegistryTransaction) {
  * argument.
  */
 [[noreturn]] void run_throwing_close_joiner_watchdog() {
-  (void)::alarm(5U);
+  set_kernel_contract_process_watchdog(5U);
   const std::string graph_name = "contract_close_throwing_joiner_observer";
   const auto root =
       clean_temp_path("photospider-contract-close-throwing-joiner-root");
@@ -8217,7 +8639,7 @@ TEST(ComputeContracts, CloseEraseAndSuccessPublishAsOneRegistryTransaction) {
     std::_Exit(9);
   }
   std::filesystem::remove_all(root);
-  (void)::alarm(0U);
+  set_kernel_contract_process_watchdog(0U);
   std::_Exit(0);
 }
 
@@ -8251,7 +8673,7 @@ TEST(ComputeContracts, DestructorRetriesPreLinearizationCloseFailure) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
   ASSERT_EXIT(
       {
-        (void)::alarm(5U);
+        set_kernel_contract_process_watchdog(5U);
         const std::string graph_name = "contract_destructor_close_retry";
         const auto root =
             clean_temp_path("photospider-contract-destructor-close-retry-root");
@@ -8278,7 +8700,7 @@ TEST(ComputeContracts, DestructorRetriesPreLinearizationCloseFailure) {
           }
         }
         std::filesystem::remove_all(root);
-        (void)::alarm(0U);
+        set_kernel_contract_process_watchdog(0U);
         std::_Exit(0);
       },
       ::testing::ExitedWithCode(0), "");

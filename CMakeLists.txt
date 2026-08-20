@@ -585,7 +585,6 @@ set(PHOTOSPIDER_GRAPH_INTERNAL_SOURCES
     src/lib/graph/image_statistics_store.cpp
     src/lib/graph/graph_inspect_service.cpp
 )
-
 add_library(photospider_graph_internal STATIC
     ${PHOTOSPIDER_GRAPH_INTERNAL_SOURCES})
 target_include_directories(photospider_graph_internal PRIVATE

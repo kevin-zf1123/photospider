@@ -555,6 +555,8 @@ class Kernel {
    * @param name Graph session whose cache root should be cleared.
    * @return True on success; false when the graph is missing or an ordinary
    *         cache/executor failure is handled by the quiet facade.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   *         with a nonempty cache root, before revision or cache mutation.
    * @throws std::bad_alloc from revision preparation, submission, or cache
    *         clearing.
    * @note Revision overflow fails before filesystem mutation. After successful
@@ -580,11 +582,27 @@ class Kernel {
    * @param name Graph session whose cache authority should be cleared.
    * @return True on success; false for a missing graph or handled ordinary
    *         cache/executor failure.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   *         with a nonempty cache root, before revision or memory mutation.
    * @throws std::bad_alloc from preparation, submission, or either clear phase.
-   * @note The successor revision is published before the disk phase. It stays
-   *       advanced if disk or memory clearing later fails after partial work.
+   * @note On a disk-capable platform the successor revision is published before
+   *       the disk phase and stays advanced if a later phase fails. Windows
+   *       with an empty root follows normal memory-clear behavior; a nonempty
+   *       root fails before revision publication or either clear phase.
    */
   bool clear_cache(const std::string& name);
+  /**
+   * @brief Saves every eligible formal HP node through GraphCache policy.
+   * @param name Graph session whose HP nodes should be inspected.
+   * @param cache_precision Explicit auxiliary image projection precision.
+   * @return True on success; false for a missing graph or handled ordinary
+   * cache/executor failure.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   * with a nonempty cache root, before codec, executor, or cache mutation.
+   * @throws std::bad_alloc from graph-state submission or cache preparation.
+   * @note An empty cache root retains the historical HP-node count behavior
+   * and performs no disk work.
+   */
   bool cache_all_nodes(const std::string& name,
                        const std::string& cache_precision);
 
@@ -598,6 +616,18 @@ class Kernel {
    *       rolled back after any partially successful node-cache release.
    */
   bool free_transient_memory(const std::string& name);
+  /**
+   * @brief Synchronizes configured disk artifacts with formal HP authority.
+   * @param name Graph session whose cache should be synchronized.
+   * @param cache_precision Explicit auxiliary image projection precision.
+   * @return True on success; false for a missing graph or handled ordinary
+   * cache/executor failure.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   * with a nonempty cache root, before save, cleanup, or diagnostic mutation.
+   * @throws std::bad_alloc from graph-state submission or cache preparation.
+   * @note An empty cache root retains the historical HP-node count behavior
+   * and performs no disk work.
+   */
   bool synchronize_disk_cache(const std::string& name,
                               const std::string& cache_precision);
   bool clear_graph(const std::string& name);
@@ -607,6 +637,8 @@ class Kernel {
    * @param name Graph session whose disk cache should be cleared.
    * @return Removal statistics, or nullopt for a missing graph or handled
    *         ordinary failure.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   *         with a nonempty cache root, before revision or cache mutation.
    * @throws std::bad_alloc from preparation, submission, or cache clearing.
    * @note Uses the same prepare-publish-clear ordering and no-rollback rule as
    *       clear_drive_cache().
@@ -625,6 +657,18 @@ class Kernel {
    */
   std::optional<GraphModel::MemoryClearResult> clear_memory_cache_stats(
       const std::string& name);
+  /**
+   * @brief Saves eligible HP nodes and returns the service-owned count.
+   * @param name Graph session whose nodes should be inspected.
+   * @param cache_precision Explicit auxiliary image projection precision.
+   * @return Save-attempt statistics, or nullopt for a missing graph or handled
+   * ordinary failure.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   * with a nonempty cache root, before any disk side effect.
+   * @throws std::bad_alloc from graph-state submission or cache preparation.
+   * @note Empty-root calls return the historical HP-node count without disk
+   * persistence.
+   */
   std::optional<GraphModel::CacheSaveResult> cache_all_nodes_stats(
       const std::string& name, const std::string& cache_precision);
   /**
@@ -638,6 +682,18 @@ class Kernel {
    */
   std::optional<GraphModel::MemoryClearResult> free_transient_memory_stats(
       const std::string& name);
+  /**
+   * @brief Synchronizes GraphCache disk state and returns exact service counts.
+   * @param name Graph session whose cache should be synchronized.
+   * @param cache_precision Explicit auxiliary image projection precision.
+   * @return Synchronization statistics, or nullopt for a missing graph or
+   * handled ordinary failure.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   * with a nonempty cache root, before save, cleanup, or diagnostics.
+   * @throws std::bad_alloc from graph-state submission or cache preparation.
+   * @note Empty-root calls return the historical HP-node count without disk
+   * persistence.
+   */
   std::optional<GraphModel::DiskSyncResult> synchronize_disk_cache_stats(
       const std::string& name, const std::string& cache_precision);
 
@@ -1278,6 +1334,58 @@ class Kernel {
       return runtime->graph_state().submit(std::forward<Fn>(op)).get();
     } catch (const std::bad_alloc&) {
       throw;
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
+
+  /**
+   * @brief Executes one quiet disk-cache facade while preserving platform
+   * failure typing.
+   *
+   * @tparam Fn Callable accepted as `op(GraphModel&)`.
+   * @param name Graph name to resolve without creating a session.
+   * @param op Disk-cache operation submitted to the graph-state executor.
+   * @return Optional result, or nullopt for absence and ordinary handled
+   * failure on a disk-capable platform.
+   * @throws GraphError with `InvalidParameter` when the platform preflight
+   * rejects a resolved nonempty-root disk request, so Host status translation
+   * does not fabricate NotFound.
+   * @throws std::bad_alloc unchanged from lookup, submission, or operation.
+   * @throws std::system_error if graph-registry synchronization fails.
+   * @note The GraphCache platform check runs inside the same graph-state work
+   * item and precedes revision, executor, diagnostic, or cache mutation. Empty
+   * roots keep their service-defined no-disk behavior and do not throw.
+   */
+  template <typename Fn>
+  auto with_graph_state_disk_cache(const std::string& name, Fn&& op)
+      -> std::optional<std::decay_t<std::invoke_result_t<Fn, GraphModel&>>> {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
+      return std::nullopt;
+    }
+    bool platform_rejected = false;
+    auto guarded_op = [&op, &platform_rejected](GraphModel& graph)
+        -> std::decay_t<std::invoke_result_t<Fn, GraphModel&>> {
+      if (!graph.cache_root.empty()) {
+        try {
+          GraphCacheService::require_disk_persistence_supported();
+        } catch (const GraphError&) {
+          platform_rejected = true;
+          throw;
+        }
+      }
+      return std::forward<Fn>(op)(graph);
+    };
+    try {
+      return runtime->graph_state().submit(std::move(guarded_op)).get();
+    } catch (const std::bad_alloc&) {
+      throw;
+    } catch (const GraphError&) {
+      if (platform_rejected) {
+        throw;
+      }
+      return std::nullopt;
     } catch (...) {
       return std::nullopt;
     }

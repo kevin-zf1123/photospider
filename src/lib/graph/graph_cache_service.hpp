@@ -108,16 +108,51 @@ struct GraphCacheResourceLimits final {
  * coordination serializes readers, writers, cleanup, synchronization, and
  * clear across independent service instances; a cryptographically random
  * generation joins each archive to its manifest. No-follow regular-file,
- * one-link, non-sparse, stat-before-allocation, and frozen service quota checks
- * precede replay allocation. This service contains no OpenCV/YAML calls or
- * provider-library types. Staged HP commit may submit the const cache-save
- * mechanism to the
+ * one-link, current-owner, non-sparse, stat-before-allocation, and frozen
+ * service quota checks precede replay allocation. Disk persistence is
+ * currently POSIX-only and uses descriptor-relative no-follow operations.
+ * On Windows every nonempty-root disk save, load, cleanup, synchronization,
+ * and clear request fails closed before codec, filesystem, executor, Graph,
+ * cache, timing, or diagnostic effects. Empty-root and disabled-save no-disk
+ * intent retains its historical no-op or memory/statistics behavior. Windows
+ * persistence is a future capability, not a partially supported handle path.
+ * This service contains no OpenCV/YAML calls or provider-library types. Staged
+ * HP commit may submit the const cache-save mechanism to the
  * process compute-I/O executor while the graph-state policy owner retains path,
  * failure, timing, and publication decisions; administration and load paths
  * remain synchronous.
  */
 class GraphCacheService {
  public:
+#if defined(_WIN32)
+  /**
+   * @brief Whether this build supports GraphCache disk persistence.
+   * @note False on Windows and true on the current POSIX implementation. The
+   * value describes disk persistence only; memory/statistics APIs are
+   * platform-independent.
+   */
+  inline static constexpr bool kDiskPersistenceSupported = false;
+#else
+  /**
+   * @brief Whether this build supports GraphCache disk persistence.
+   * @note False on Windows and true on the current POSIX implementation. The
+   * value describes disk persistence only; memory/statistics APIs are
+   * platform-independent.
+   */
+  inline static constexpr bool kDiskPersistenceSupported = true;
+#endif
+
+  /**
+   * @brief Requires current-platform GraphCache disk persistence support.
+   * @return Nothing when the platform supports GraphCache disk persistence.
+   * @throws GraphError with `InvalidParameter` on Windows.
+   * @throws std::bad_alloc if constructing the typed diagnostic fails.
+   * @note The check performs no codec, filesystem, executor, Graph, cache,
+   * timing, or diagnostic work. Callers apply established empty-root or
+   * disabled-save no-disk policy before invoking it.
+   */
+  static void require_disk_persistence_supported();
+
   /**
    * @brief Creates a cache service with explicitly owned artifact codecs.
    *
@@ -221,6 +256,8 @@ class GraphCacheService {
    *
    * @param graph Graph whose disk cache root should be cleared.
    * @return Number of filesystem entries removed.
+   * @throws GraphError with `InvalidParameter` for an unsafe root or any
+   *         nonempty-root Windows request.
    * @throws std::filesystem::filesystem_error on filesystem failures.
    * @throws std::bad_alloc when filesystem path or diagnostic storage exhausts
    *         memory.
@@ -230,7 +267,9 @@ class GraphCacheService {
    *       prepared successor revision before calling this method and never
    *       rolls that invalidation back. Process-root coordination also
    *       supersedes every earlier admitted asynchronous cache writer before
-   *       removal begins.
+   *       removal begins. Windows rejects the complete disk-cache API before
+   *       coordination, epoch, filesystem, or Graph/cache mutation. Windows
+   *       persistence remains a future target.
    */
   GraphModel::DriveClearResult clear_drive_cache(GraphModel& graph) const;
 
@@ -249,10 +288,15 @@ class GraphCacheService {
    * @brief Clears both disk-cache files and in-memory cache state.
    *
    * @param graph Graph whose cache state should be cleared.
+   * @throws GraphError with `InvalidParameter` on Windows for a nonempty disk
+   *         root, before either cache is mutated.
    * @throws std::filesystem::filesystem_error or graph access exceptions from
    * the delegated clear operations.
    * @note Result details are discarded for compatibility with the legacy
    * command path; callers needing counts should use the split clear APIs.
+   * Windows callers may still invoke `clear_memory_cache` directly. With an
+   * empty root this combined operation clears memory normally; with a nonempty
+   * root it never skips its failed disk phase to clear memory partially.
    */
   void clear_cache(GraphModel& graph) const;
 
@@ -262,10 +306,13 @@ class GraphCacheService {
    * @param graph Graph whose nodes are scanned for HP cache outputs.
    * @param cache_precision Precision label used for image serialization.
    * @return Number of nodes for which a save attempt was issued.
+   * @throws GraphError with `InvalidParameter` on Windows when the cache root
+   * is nonempty.
    * @throws Codec, filesystem, graph, or allocation exceptions from saving.
    * @note RT-only state is ignored because disk cache authority is HP-only.
    * One root-scoped mutation epoch supersedes earlier admitted writers before
-   * the batch begins.
+   * the batch begins. An empty root performs only the historical HP-node count
+   * and is not a disk-persistence request on any platform.
    */
   GraphModel::CacheSaveResult cache_all_nodes(
       GraphModel& graph, const std::string& cache_precision) const;
@@ -287,10 +334,13 @@ class GraphCacheService {
    * @param graph Graph whose disk cache should be synchronized.
    * @param cache_precision Precision label used for image serialization.
    * @return Counts for saved HP nodes and removed stale files/directories.
+   * @throws GraphError with `InvalidParameter` on Windows when the cache root
+   * is nonempty.
    * @throws Filesystem, codec, or graph access exceptions.
    * @note Nodes with only RT state do not protect existing disk cache files.
    * The complete save/cleanup pass is root-serialized and supersedes earlier
-   * admitted asynchronous writers before its first filesystem effect.
+   * admitted asynchronous writers before its first filesystem effect. An
+   * empty root performs only the historical HP-node count.
    */
   GraphModel::DiskSyncResult synchronize_disk_cache(
       GraphModel& graph, const std::string& cache_precision) const;
@@ -302,6 +352,8 @@ class GraphCacheService {
    * @param graph Graph providing cache root and IO timing counters.
    * @param node Node whose HP output and cache entries should be saved.
    * @param cache_precision Precision label used for image serialization.
+   * @throws GraphError with `InvalidParameter` on Windows for a nonempty-root,
+   * enabled-save request, before capture or any side effect.
    * @throws Codec, filesystem, graph, or allocation exceptions from saving.
    * @note The method is a no-op for disabled saving, missing cache roots,
    * unsupported cache-entry types, or nodes without HP output. An image entry
@@ -322,7 +374,8 @@ class GraphCacheService {
    * both archive and metadata manifest records;
    * failures or concurrent replacement yield a non-reusable transaction and
    * never authorize partial publication. Runtime allocation and Value revision
-   * identities are never persisted.
+   * identities are never persisted. Empty roots and `skip_save_cache` remain
+   * no-disk no-ops on every platform.
    */
   void save_cache_if_configured(GraphModel& graph, const Node& node,
                                 const std::string& cache_precision) const;
@@ -345,6 +398,8 @@ class GraphCacheService {
    * @throws GraphError with `InvalidParameter` when portable persistence
    * rejects a packed, quantized, latent, unreadable, pending, provider-missing,
    * or otherwise incompatible Value before executor admission.
+   * @throws GraphError with `InvalidParameter` on Windows for a nonempty-root,
+   * enabled-save request before capture or executor admission.
    * @throws GraphError with `ComputeError` for typed admission rejection or
    * cancellation.
    * @throws Codec, filesystem, graph, allocation, or synchronization
@@ -354,7 +409,8 @@ class GraphCacheService {
    * cache failure ordering; it grants no Graph-document, daemon, OutputStore,
    * retry, receipt, or durability authority. A later root mutation supersedes
    * an admitted but not-yet-authoritative callback, which then settles as a
-   * successful no-op without recreating a removed transaction.
+   * successful no-op without recreating a removed transaction. Empty roots and
+   * `skip_save_cache` remain no-disk no-ops on every platform.
    */
   void save_cache_if_configured_via_executor(
       execution::ComputeIoExecutor& executor,
@@ -373,6 +429,8 @@ class GraphCacheService {
    * @throws std::bad_alloc from diagnostic/output/Value storage. Disk read,
    * parse, and explicit CPU Value import failures are recorded through
    * GraphModel's locked disk-cache diagnostic API and reported as false.
+   * @throws GraphError with `InvalidParameter` on Windows when the cache root
+   * is nonempty, before memory-cache inspection or diagnostic publication.
    * @note This preserves the legacy try-load bool contract while making disk
    * errors distinguishable from misses through graph diagnostics. Successful
    * archive reconstruction mints fresh process-local allocation/revision
@@ -383,7 +441,8 @@ class GraphCacheService {
    * leaves, and frozen resource-limit violations fail before archive
    * allocation. Any mismatch publishes nothing.
    * A hit publishes the output, incremented HP content version, and derived
-   * full-validity Region together on the supplied Node.
+   * full-validity Region together on the supplied Node. Empty-root calls retain
+   * the existing memory/Skipped diagnostic behavior and perform no disk work.
    */
   bool try_load_from_disk_cache(GraphModel& graph, Node& node,
                                 ValueDiskCacheOutputSchema output_schema) const;
@@ -400,13 +459,17 @@ class GraphCacheService {
    * @throws std::bad_alloc from diagnostic/output/Value storage. Disk read,
    * parse, and explicit CPU Value import failures are recorded through
    * GraphModel's locked disk-cache diagnostic API and reported as false.
+   * @throws GraphError with `InvalidParameter` on Windows when the cache root
+   * is nonempty, before memory-cache inspection or diagnostic publication.
    * @note Used by execution worker paths that stage outputs outside the
    * formal HP cache before committing. Existing complete or partial formal
    * memory state prevents disk load so regionless artifacts cannot override
    * current runtime validity. Replay validates the complete manifest-bound
    * named-Value transaction, safe descriptor-backed files, resource limits,
    * and exact frozen Value/parameter names before one move publishes the
-   * candidate; mismatches and errors leave `out` unchanged.
+   * candidate; mismatches and errors leave `out` unchanged. Empty-root calls
+   * retain the existing memory/Skipped diagnostic behavior and perform no disk
+   * work.
    */
   bool try_load_from_disk_cache_into(
       GraphModel& graph, const Node& node, NodeOutput& out,

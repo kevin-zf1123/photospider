@@ -51,6 +51,22 @@ namespace {
 
 using DiskCacheLoadStatus = GraphModel::DiskCacheLoadStatus;
 
+#if defined(_WIN32)
+/**
+ * @brief Rejects GraphCache disk persistence on the unsupported Windows host.
+ * @return Never returns.
+ * @throws GraphError with the stable `InvalidParameter` platform boundary.
+ * @throws std::bad_alloc if diagnostic ownership cannot allocate.
+ * @note The helper performs no codec, filesystem, executor, Graph, cache,
+ * timing, diagnostic, or platform-API work. Windows persistence is a future
+ * capability rather than a partial native-filesystem implementation.
+ */
+[[noreturn]] void throw_graph_cache_disk_persistence_unsupported() {
+  throw GraphError(GraphErrc::InvalidParameter,
+                   "Graph cache disk persistence is unsupported on Windows.");
+}
+#endif
+
 /**
  * @brief Holds one disk-cache read attempt plus the loaded output, if any.
  *
@@ -249,19 +265,26 @@ std::shared_ptr<GraphCacheRootCoordination> graph_cache_root_coordination(
  * @throws std::logic_error when the same root is already active on this thread.
  * @throws std::bad_alloc when active-root tracking cannot grow.
  * @throws std::system_error when mutex acquisition fails.
- * @note Codec callbacks and test hooks execute under this guard. Reentry is a
- * contract error, never a recursive cache transaction or hidden deadlock.
+ * @note Codec callbacks execute under this guard. In test-enabled builds the
+ * root-lock observer runs immediately before the nonblocking lock attempt and
+ * after that attempt classifies contention; it must not re-enter this root.
+ * Reentry is a contract error, never a recursive cache transaction or hidden
+ * deadlock.
  */
 class GraphCacheRootGuard final {
  public:
   /**
    * @brief Acquires one retained root coordinator.
    * @param coordination Non-null process coordinator.
+   * @param cache_root Nonempty root used only for test-checkpoint provenance.
    * @throws std::invalid_argument for an empty owner.
    * @throws std::logic_error, std::bad_alloc, or std::system_error as above.
+   * @throws Any exception selected by the test-only observer before or after
+   * the nonblocking lock attempt.
    */
   explicit GraphCacheRootGuard(
-      std::shared_ptr<GraphCacheRootCoordination> coordination)
+      std::shared_ptr<GraphCacheRootCoordination> coordination,
+      const fs::path& cache_root)
       : coordination_(std::move(coordination)) {
     if (!coordination_) {
       throw std::invalid_argument(
@@ -273,7 +296,26 @@ class GraphCacheRootGuard final {
       throw std::logic_error(
           "Graph cache operation cannot re-enter the same cache root.");
     }
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
+    testing::notify_graph_cache_service_test_hook(
+        testing::GraphCacheServiceTestEvent::RootOperationBeforeLock,
+        cache_root);
+    lock_ = std::unique_lock<std::mutex>(coordination_->mutex, std::defer_lock);
+    if (lock_.try_lock()) {
+      testing::notify_graph_cache_service_test_hook(
+          testing::GraphCacheServiceTestEvent::
+              RootOperationLockAcquiredWithoutContention,
+          cache_root);
+    } else {
+      testing::notify_graph_cache_service_test_hook(
+          testing::GraphCacheServiceTestEvent::RootOperationLockContended,
+          cache_root);
+      lock_.lock();
+    }
+#else
+    (void)cache_root;
     lock_ = std::unique_lock<std::mutex>(coordination_->mutex);
+#endif
     g_active_graph_cache_roots.push_back(coordination_.get());
     active_ = true;
   }
@@ -359,6 +401,8 @@ std::string portable_graph_cache_leaf_key(std::string leaf) {
  * @param location Candidate portable leaf bytes.
  * @return True for CON, PRN, AUX, NUL, COM1-9, or LPT1-9 before extension.
  * @throws std::bad_alloc when folded basename ownership cannot allocate.
+ * @note The enclosing portable validator admits ASCII only, which also rejects
+ * Windows' Unicode superscript COM/LPT digit spellings before filesystem use.
  */
 bool graph_cache_leaf_has_reserved_device_name(const std::string& location) {
   const std::size_t dot = location.find('.');
@@ -379,28 +423,37 @@ bool graph_cache_leaf_has_reserved_device_name(const std::string& location) {
  * @param location Untrusted configured location bytes.
  * @return Validated filesystem leaf.
  * @throws GraphError with `InvalidParameter` for empty, oversized, rooted,
- * traversing, multi-component, control-character, Windows-root-like, reserved,
- * or ambiguous names.
+ * traversing, multi-component, non-ASCII/non-allowlisted, Windows-root-like,
+ * reserved, or ambiguous names.
  * @throws std::bad_alloc when path ownership cannot allocate.
- * @note Backslash and colon are rejected even on POSIX so a graph has the same
- * authority when moved to a Windows product build.
+ * @note The portable allowlist is exactly ASCII letters, digits, dot,
+ * underscore, and hyphen. It therefore rejects every separator, control,
+ * Windows-illegal punctuation, Unicode normalization alias, and superscript
+ * device-name spelling identically on every platform.
  */
 fs::path validate_graph_cache_location(const std::string& location) {
-  const fs::path candidate(location);
   const bool invalid_character =
       std::any_of(location.begin(), location.end(), [](char character) {
         const unsigned char byte = static_cast<unsigned char>(character);
-        return byte == 0U || byte < 0x20U || byte == 0x7fU ||
-               character == '/' || character == '\\' || character == ':' ||
-               character == '*' || character == '?' || character == '"' ||
-               character == '<' || character == '>' || character == '|';
+        const bool ascii_letter = (byte >= static_cast<unsigned char>('A') &&
+                                   byte <= static_cast<unsigned char>('Z')) ||
+                                  (byte >= static_cast<unsigned char>('a') &&
+                                   byte <= static_cast<unsigned char>('z'));
+        const bool ascii_digit = byte >= static_cast<unsigned char>('0') &&
+                                 byte <= static_cast<unsigned char>('9');
+        return !ascii_letter && !ascii_digit && character != '.' &&
+               character != '_' && character != '-';
       });
   if (location.empty() || location.size() > kMaximumGraphCacheLocationBytes ||
-      invalid_character || candidate.is_absolute() ||
-      candidate.has_root_name() || candidate.has_root_directory() ||
-      !candidate.has_filename() || candidate.filename() != candidate ||
-      candidate == "." || candidate == ".." || location.back() == ' ' ||
-      location.back() == '.' ||
+      invalid_character) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Graph cache location must be one safe file leaf.");
+  }
+  const fs::path candidate(location);
+  if (candidate.is_absolute() || candidate.has_root_name() ||
+      candidate.has_root_directory() || !candidate.has_filename() ||
+      candidate.filename() != candidate || candidate == "." ||
+      candidate == ".." || location.back() == ' ' || location.back() == '.' ||
       graph_cache_leaf_has_reserved_device_name(location)) {
     throw GraphError(GraphErrc::InvalidParameter,
                      "Graph cache location must be one safe file leaf.");
@@ -903,8 +956,10 @@ struct stat graph_cache_regular_stat(int descriptor, const fs::path& path) {
  * @throws Filesystem, validation, and allocation exceptions from `open`.
  * @note POSIX builds retain root/node directory descriptors and perform every
  * owned archive/manifest read, write, and delete with no-follow `*at` calls.
- * Codec path calls are bracketed by directory/leaf identity validation because
- * those dependency-neutral interfaces currently accept paths rather than fds.
+ * Windows builds retain only a typed fail-closed stub and call no filesystem
+ * API. Codec path calls on POSIX are bracketed by directory/leaf identity
+ * validation because those dependency-neutral interfaces currently accept
+ * paths rather than native capabilities.
  */
 class GraphCacheNodeDirectory final {
  public:
@@ -923,13 +978,13 @@ class GraphCacheNodeDirectory final {
       throw GraphError(GraphErrc::InvalidParameter,
                        "Graph cache root must be nonempty.");
     }
+    const std::string node_leaf = std::to_string(node_id);
+#if !defined(_WIN32)
     if (create) {
       fs::create_directories(root);
     } else if (!fs::exists(root)) {
       return std::nullopt;
     }
-    const std::string node_leaf = std::to_string(node_id);
-#if !defined(_WIN32)
     const int raw_root =
         ::open(root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (raw_root < 0) {
@@ -983,23 +1038,9 @@ class GraphCacheNodeDirectory final {
                                    std::move(node_descriptor), root_stat,
                                    node_stat);
 #else
-    const fs::file_status root_status = fs::symlink_status(root);
-    if (fs::is_symlink(root_status) || !fs::is_directory(root_status)) {
-      throw GraphError(GraphErrc::InvalidParameter,
-                       "Graph cache root must be a real directory.");
-    }
-    const fs::path node_path = root / node_leaf;
-    if (create) {
-      fs::create_directories(node_path);
-    } else if (!fs::exists(node_path)) {
-      return std::nullopt;
-    }
-    const fs::file_status node_status = fs::symlink_status(node_path);
-    if (fs::is_symlink(node_status) || !fs::is_directory(node_status)) {
-      throw GraphError(GraphErrc::InvalidParameter,
-                       "Graph cache node path must be a real directory.");
-    }
-    return GraphCacheNodeDirectory(root, node_leaf);
+    (void)node_leaf;
+    (void)create;
+    throw_graph_cache_disk_persistence_unsupported();
 #endif
   }
 
@@ -1061,16 +1102,8 @@ class GraphCacheNodeDirectory final {
     }
     return true;
 #else
-    const fs::path candidate = leaf_path(leaf);
-    const fs::file_status status = fs::symlink_status(candidate);
-    if (status.type() == fs::file_type::not_found) {
-      return false;
-    }
-    if (fs::is_symlink(status) || !fs::is_regular_file(status)) {
-      throw GraphError(GraphErrc::InvalidParameter,
-                       "Graph cache leaf must be a regular file.");
-    }
-    return true;
+    (void)leaf;
+    throw_graph_cache_disk_persistence_unsupported();
 #endif
   }
 
@@ -1168,35 +1201,12 @@ class GraphCacheNodeDirectory final {
                      digest.finish()};
     return result;
 #else
-    const fs::path candidate = leaf_path(leaf);
-    if (!leaf_exists(leaf)) {
-      throw fs::filesystem_error(
-          "Graph cache leaf is absent", candidate,
-          std::make_error_code(std::errc::no_such_file_or_directory));
-    }
-    const std::uintmax_t size = fs::file_size(candidate);
-    if (size > maximum_bytes ||
-        (expected_bytes.has_value() && size != *expected_bytes) ||
-        size > std::numeric_limits<std::size_t>::max()) {
-      throw GraphError(GraphErrc::InvalidParameter,
-                       "Graph cache payload size exceeds its frozen limit.");
-    }
+    (void)leaf;
+    (void)maximum_bytes;
+    (void)expected_bytes;
     (void)reject_sparse;
     (void)allocation_event;
-    GraphCacheFileRead result;
-    result.bytes.resize(static_cast<std::size_t>(size));
-    std::ifstream stream(candidate, std::ios::binary);
-    if (!result.bytes.empty()) {
-      stream.read(reinterpret_cast<char*>(result.bytes.data()),
-                  static_cast<std::streamsize>(result.bytes.size()));
-    }
-    if (!stream) {
-      throw GraphError(GraphErrc::Io,
-                       "Graph cache payload could not be read completely.");
-    }
-    result.record = {static_cast<std::uint64_t>(result.bytes.size()),
-                     compute_artifact_payload_digest(result.bytes)};
-    return result;
+    throw_graph_cache_disk_persistence_unsupported();
 #endif
   }
 
@@ -1278,9 +1288,11 @@ class GraphCacheNodeDirectory final {
     }
     return {total, digest.finish()};
 #else
-    const GraphCacheFileRead read =
-        read_leaf(leaf, maximum_bytes, expected_bytes, reject_sparse);
-    return read.record;
+    (void)leaf;
+    (void)maximum_bytes;
+    (void)expected_bytes;
+    (void)reject_sparse;
+    throw_graph_cache_disk_persistence_unsupported();
 #endif
   }
 
@@ -1350,22 +1362,9 @@ class GraphCacheNodeDirectory final {
     return {static_cast<std::uint64_t>(bytes.size()),
             compute_artifact_payload_digest(bytes)};
 #else
-    if (leaf_exists(leaf)) {
-      (void)leaf_exists(leaf);
-    }
-    const fs::path candidate = leaf_path(leaf);
-    std::ofstream stream(candidate, std::ios::binary | std::ios::trunc);
-    if (!bytes.empty()) {
-      stream.write(reinterpret_cast<const char*>(bytes.data()),
-                   static_cast<std::streamsize>(bytes.size()));
-    }
-    stream.close();
-    if (!stream) {
-      throw GraphError(GraphErrc::Io,
-                       "Could not write complete graph cache leaf.");
-    }
-    return {static_cast<std::uint64_t>(bytes.size()),
-            compute_artifact_payload_digest(bytes)};
+    (void)leaf;
+    (void)bytes;
+    throw_graph_cache_disk_persistence_unsupported();
 #endif
   }
 
@@ -1377,17 +1376,18 @@ class GraphCacheNodeDirectory final {
    * @throws Filesystem errors unchanged.
    */
   bool remove_leaf_if_present(const std::string& leaf) const {
+#if !defined(_WIN32)
     if (!leaf_exists(leaf)) {
       return false;
     }
-#if !defined(_WIN32)
     if (::unlinkat(node_descriptor_.get(), leaf.c_str(), 0) != 0) {
       throw_graph_cache_errno("Could not remove graph cache leaf",
                               leaf_path(leaf));
     }
     return true;
 #else
-    return fs::remove(leaf_path(leaf));
+    (void)leaf;
+    throw_graph_cache_disk_persistence_unsupported();
 #endif
   }
 
@@ -1398,7 +1398,7 @@ class GraphCacheNodeDirectory final {
    * @throws GraphError for directory identity replacement.
    * @throws Filesystem or allocation exceptions unchanged.
    */
-  bool remove_if_empty() const {
+  bool remove_if_empty() {
 #if !defined(_WIN32)
     const int duplicate = ::dup(node_descriptor_.get());
     if (duplicate < 0) {
@@ -1441,10 +1441,7 @@ class GraphCacheNodeDirectory final {
     }
     return true;
 #else
-    if (!fs::is_empty(path_)) {
-      return false;
-    }
-    return fs::remove(path_);
+    throw_graph_cache_disk_persistence_unsupported();
 #endif
   }
 
@@ -1476,13 +1473,7 @@ class GraphCacheNodeDirectory final {
                        "Graph cache directory identity was replaced.");
     }
 #else
-    const fs::file_status root_status = fs::symlink_status(root_);
-    const fs::file_status node_status = fs::symlink_status(path_);
-    if (fs::is_symlink(root_status) || !fs::is_directory(root_status) ||
-        fs::is_symlink(node_status) || !fs::is_directory(node_status)) {
-      throw GraphError(GraphErrc::InvalidParameter,
-                       "Graph cache directory identity was replaced.");
-    }
+    throw_graph_cache_disk_persistence_unsupported();
 #endif
   }
 
@@ -1509,16 +1500,7 @@ class GraphCacheNodeDirectory final {
         node_descriptor_(std::move(node_descriptor)),
         root_stat_(root_stat),
         node_stat_(node_stat) {}
-#else
-  /**
-   * @brief Constructs one validated portable fallback directory.
-   * @param root Lexical configured root.
-   * @param node_leaf Numeric child name.
-   */
-  GraphCacheNodeDirectory(fs::path root, std::string node_leaf)
-      : root_(std::move(root)),
-        path_(root_ / node_leaf),
-        node_leaf_(std::move(node_leaf)) {}
+
 #endif
 
   /** @brief Lexical configured cache root used by codec paths. */
@@ -1536,6 +1518,7 @@ class GraphCacheNodeDirectory final {
   struct stat root_stat_{};
   /** @brief Numeric child identity bound at open. */
   struct stat node_stat_{};
+
 #endif
 };
 
@@ -1724,8 +1707,11 @@ void validate_image_disk_cache_output(const NodeOutput& output) {
  * @note Partial validity must not protect or produce a regionless disk cache
  * artifact because disk load initializes current artifacts as complete.
  * Explicit empty/whole validity is classified before interpreting the Value,
- * so provider-incompatible partial output can authorize predecessor cleanup
- * without constructing an ImageView or consulting a provider.
+ * and finite provider-defined canonical-image validity is conservatively
+ * incomplete, so provider-incompatible partial output can authorize
+ * predecessor cleanup without constructing an ImageView or consulting a
+ * provider. Whole provider-defined output remains complete here and therefore
+ * reaches the existing unsupported-image preflight.
  */
 bool has_complete_hp_cache(const Node& node) {
   const NodeOutput* output = hp_cache_ptr(node);
@@ -1735,6 +1721,11 @@ bool has_complete_hp_cache(const Node& node) {
   }
   if (node.hp_region->is_whole()) {
     return true;
+  }
+  if (output->has_image_value() &&
+      output->image_value().representation_kind() ==
+          ValueRepresentationKind::ProviderDefined) {
+    return false;
   }
   return value_region::node_output_region_is_complete(*output, *node.hp_region);
 }
@@ -2198,6 +2189,8 @@ DiskCacheReadAttempt make_error_attempt(int node_id,
  * @param data_definitions Optional provider registry used for reconstruction.
  * @param limits Frozen GraphCache-specific resource boundaries.
  * @return Hit, Miss, or Error attempt with diagnostic details.
+ * @throws GraphError with `InvalidParameter` on Windows before path, codec,
+ * filesystem, allocation, or diagnostic work.
  * @throws std::bad_alloc from result/message allocation.
  * @note The versioned manifest binds the archive and optional metadata bytes.
  * Exact Value/parameter names and all public artifact facts validate before a
@@ -2210,6 +2203,9 @@ DiskCacheReadAttempt read_cache_entry(
     const CacheMetadataCodec& metadata_codec,
     DataDefinitionRegistry* data_definitions,
     const GraphCacheResourceLimits& limits) {
+#if defined(_WIN32)
+  throw_graph_cache_disk_persistence_unsupported();
+#endif
   const GraphCacheArtifactPaths paths =
       graph_cache_artifact_paths(graph, node, cache_entry);
 
@@ -2424,6 +2420,8 @@ DiskCacheReadAttempt read_cache_entry(
  * @param limits Frozen GraphCache-specific resource boundaries.
  * @return Hit/Error for the first existing or failing entry, Miss when all
  * supported entries are absent, or Skipped when no load should be attempted.
+ * @throws GraphError with `InvalidParameter` on Windows for a nonempty-root
+ * request, before entry inspection or diagnostic construction.
  * @throws std::bad_alloc from diagnostic construction.
  * @note Missing and incompatible entries remain cache misses and do not stop
  * scanning later entries; the last incompatibility reason is retained.
@@ -2438,6 +2436,9 @@ DiskCacheReadAttempt read_first_disk_cache_entry(
   if (graph.cache_root.empty()) {
     return make_skipped_attempt(node.id, "Graph has no disk cache root.");
   }
+#if defined(_WIN32)
+  throw_graph_cache_disk_persistence_unsupported();
+#endif
   if (node.caches.empty()) {
     return make_skipped_attempt(node.id, "Node has no configured cache entry.");
   }
@@ -2581,6 +2582,8 @@ void remove_cache_siblings_not_retained(GraphCacheNodeDirectory& directory,
  * @param limits Frozen GraphCache-specific resource boundaries.
  * @param timing_graph Optional graph-state-only timing sink; null on the
  * independent I/O worker.
+ * @throws GraphError with `InvalidParameter` on Windows before path, codec,
+ * filesystem, allocation, cleanup, or timing work.
  * @throws Codec, filesystem, Graph, Value, or allocation exceptions unchanged.
  * @note A null timing sink guarantees that provider work mutates no Graph
  * state. Partial HP output removes the complete older transaction. Complete
@@ -2595,6 +2598,9 @@ void save_cache_mechanism(const GraphModel& graph, const Node& node,
                           const CacheMetadataCodec& metadata_codec,
                           const GraphCacheResourceLimits& limits,
                           GraphModel* timing_graph) {
+#if defined(_WIN32)
+  throw_graph_cache_disk_persistence_unsupported();
+#endif
   for (const CacheEntry& cache_entry : node.caches) {
     if (cache_entry.cache_type != "image") {
       continue;
@@ -2761,6 +2767,13 @@ GraphCacheService::GraphCacheService(
   validate_graph_cache_resource_limits(resource_limits_);
 }
 
+/** @copydoc GraphCacheService::require_disk_persistence_supported */
+void GraphCacheService::require_disk_persistence_supported() {
+#if defined(_WIN32)
+  throw_graph_cache_disk_persistence_unsupported();
+#endif
+}
+
 /** @copydoc GraphCacheService::schedule_image_statistics */
 ScheduledImageStatistics GraphCacheService::schedule_image_statistics(
     Value value, std::optional<ContentDigest> content_digest,
@@ -2805,9 +2818,10 @@ void GraphCacheService::save_cache_if_configured(
   if (graph.skip_save_cache() || graph.cache_root.empty()) {
     return;
   }
+  require_disk_persistence_supported();
   const std::shared_ptr<GraphCacheRootCoordination> coordination =
       graph_cache_root_coordination(graph.cache_root);
-  GraphCacheRootGuard guard(coordination);
+  GraphCacheRootGuard guard(coordination, graph.cache_root);
   const std::optional<PreparedGraphCacheSave> prepared =
       prepare_graph_cache_save(graph, node, cache_precision, resource_limits_);
   if (!prepared.has_value()) {
@@ -2826,12 +2840,13 @@ void GraphCacheService::save_cache_if_configured_via_executor(
   if (graph.skip_save_cache() || graph.cache_root.empty()) {
     return;
   }
+  require_disk_persistence_supported();
   const std::shared_ptr<GraphCacheRootCoordination> coordination =
       graph_cache_root_coordination(graph.cache_root);
   std::optional<PreparedGraphCacheSave> prepared;
   std::uint64_t prepared_epoch = 0U;
   {
-    GraphCacheRootGuard guard(coordination);
+    GraphCacheRootGuard guard(coordination, graph.cache_root);
     prepared = prepare_graph_cache_save(graph, node, cache_precision,
                                         resource_limits_);
     if (!prepared.has_value()) {
@@ -2863,7 +2878,7 @@ void GraphCacheService::save_cache_if_configured_via_executor(
               testing::GraphCacheServiceTestEvent::AsyncWriterBeforeRootLock,
               graph.cache_root);
 #endif
-          GraphCacheRootGuard guard(coordination);
+          GraphCacheRootGuard guard(coordination, graph.cache_root);
           if (guard.mutation_epoch() != prepared_epoch) {
             return;
           }
@@ -2891,6 +2906,9 @@ void GraphCacheService::save_cache_if_configured_via_executor(
 bool GraphCacheService::try_load_from_disk_cache(
     GraphModel& graph, Node& node,
     ValueDiskCacheOutputSchema output_schema) const {
+  if (!graph.cache_root.empty()) {
+    require_disk_persistence_supported();
+  }
   if (node.cached_output_high_precision.has_value()) {
     const bool complete_output = has_complete_hp_cache(node);
     record_disk_cache_load_result(
@@ -2921,7 +2939,7 @@ bool GraphCacheService::try_load_from_disk_cache(
   }
   const std::shared_ptr<GraphCacheRootCoordination> coordination =
       graph_cache_root_coordination(graph.cache_root);
-  GraphCacheRootGuard guard(coordination);
+  GraphCacheRootGuard guard(coordination, graph.cache_root);
   return load();
 }
 
@@ -2929,6 +2947,9 @@ bool GraphCacheService::try_load_from_disk_cache(
 bool GraphCacheService::try_load_from_disk_cache_into(
     GraphModel& graph, const Node& node, NodeOutput& out,
     ValueDiskCacheOutputSchema output_schema) const {
+  if (!graph.cache_root.empty()) {
+    require_disk_persistence_supported();
+  }
   if (node.cached_output_high_precision.has_value()) {
     record_disk_cache_load_result(
         graph, make_skipped_attempt(
@@ -2952,7 +2973,7 @@ bool GraphCacheService::try_load_from_disk_cache_into(
   }
   const std::shared_ptr<GraphCacheRootCoordination> coordination =
       graph_cache_root_coordination(graph.cache_root);
-  GraphCacheRootGuard guard(coordination);
+  GraphCacheRootGuard guard(coordination, graph.cache_root);
   return load();
 }
 
@@ -2963,10 +2984,12 @@ GraphModel::DriveClearResult GraphCacheService::clear_drive_cache(
   if (graph.cache_root.empty()) {
     return result;
   }
+  require_disk_persistence_supported();
   const std::shared_ptr<GraphCacheRootCoordination> coordination =
       graph_cache_root_coordination(graph.cache_root);
-  GraphCacheRootGuard guard(coordination);
+  GraphCacheRootGuard guard(coordination, graph.cache_root);
   (void)guard.advance_mutation_epoch();
+#if !defined(_WIN32)
   const fs::file_status status = fs::symlink_status(graph.cache_root);
   if (status.type() != fs::file_type::not_found) {
     if (fs::is_symlink(status) || !fs::is_directory(status)) {
@@ -2982,6 +3005,7 @@ GraphModel::DriveClearResult GraphCacheService::clear_drive_cache(
 #endif
     fs::create_directories(graph.cache_root);
   }
+#endif
   return result;
 }
 
@@ -2998,6 +3022,7 @@ GraphModel::MemoryClearResult GraphCacheService::clear_memory_cache(
   return result;
 }
 
+/** @copydoc GraphCacheService::clear_cache */
 void GraphCacheService::clear_cache(GraphModel& graph) const {
   (void)clear_drive_cache(graph);
   (void)clear_memory_cache(graph);
@@ -3015,9 +3040,10 @@ GraphModel::CacheSaveResult GraphCacheService::cache_all_nodes(
     }
     return result;
   }
+  require_disk_persistence_supported();
   const std::shared_ptr<GraphCacheRootCoordination> coordination =
       graph_cache_root_coordination(graph.cache_root);
-  GraphCacheRootGuard guard(coordination);
+  GraphCacheRootGuard guard(coordination, graph.cache_root);
   (void)guard.advance_mutation_epoch();
   for (int node_id : graph.node_ids()) {
     const Node& node = graph.node(node_id);
@@ -3064,9 +3090,10 @@ GraphModel::DiskSyncResult GraphCacheService::synchronize_disk_cache(
     }
     return result;
   }
+  require_disk_persistence_supported();
   const std::shared_ptr<GraphCacheRootCoordination> coordination =
       graph_cache_root_coordination(graph.cache_root);
-  GraphCacheRootGuard guard(coordination);
+  GraphCacheRootGuard guard(coordination, graph.cache_root);
   (void)guard.advance_mutation_epoch();
 
   for (int node_id : graph.node_ids()) {

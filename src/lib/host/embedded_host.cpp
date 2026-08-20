@@ -4060,11 +4060,13 @@ class EmbeddedHost final : public Host,
    * @brief Clears all cache layers for a graph session.
    *
    * @param session Session whose caches should be cleared.
-   * @return Success, or NotFound for a missing or closing session.
+   * @return Success, NotFound for a missing/closing session, or
+   * InvalidParameter when Windows rejects a nonempty-root disk-cache request.
    * @throws std::bad_alloc on allocation failure.
    * @note One lifecycle admission keeps the session alive across Kernel cache
    * mutation and public status translation. Cache service exceptions are
-   * converted to Host status values.
+   * converted to Host status values. Windows platform rejection precedes
+   * Graph revision and both disk/memory cache mutation.
    */
   VoidResult clear_cache(const GraphSessionId& session) override {
     std::optional<EmbeddedHostState::SessionAdmissionToken> admission;
@@ -4103,9 +4105,11 @@ class EmbeddedHost final : public Host,
    * @brief Clears disk cache for a graph session.
    *
    * @param session Session whose disk cache should be cleared.
-   * @return Success or failure status.
+   * @return Success or exact failure status, including InvalidParameter for a
+   * nonempty-root Windows GraphCache disk request.
    * @throws std::bad_alloc on allocation failure.
-   * @note Detailed cache counts are not exposed by this Host slice.
+   * @note Detailed cache counts are not exposed by this Host slice. Windows
+   * rejection precedes Graph revision and disk mutation.
    */
   VoidResult clear_drive_cache(const GraphSessionId& session) override {
     return guarded_void("clear_drive_cache", GraphErrc::NotFound, [&] {
@@ -4142,9 +4146,11 @@ class EmbeddedHost final : public Host,
    *
    * @param session Session whose nodes should be cached.
    * @param precision Cache precision label.
-   * @return Success or failure status.
+   * @return Success or exact failure status, including InvalidParameter for a
+   * nonempty-root Windows GraphCache disk request.
    * @throws std::bad_alloc on allocation failure.
    * @note Precision handling is delegated to the backend cache service.
+   * Windows rejection precedes codec, executor, and cache effects.
    */
   VoidResult cache_all_nodes(const GraphSessionId& session,
                              const std::string& precision) override {
@@ -4182,9 +4188,11 @@ class EmbeddedHost final : public Host,
    *
    * @param session Session whose cache should be synchronized.
    * @param precision Cache precision label.
-   * @return Success or failure status.
+   * @return Success or exact failure status, including InvalidParameter for a
+   * nonempty-root Windows GraphCache disk request.
    * @throws std::bad_alloc on allocation failure.
-   * @note Synchronization failures are mapped to status values.
+   * @note Synchronization failures are mapped to status values. Windows
+   * rejection precedes save, cleanup, and diagnostic effects.
    */
   VoidResult synchronize_disk_cache(const GraphSessionId& session,
                                     const std::string& precision) override {

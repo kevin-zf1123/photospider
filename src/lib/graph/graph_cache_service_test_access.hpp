@@ -19,6 +19,25 @@ enum class GraphCacheServiceTestEvent {
   ArchiveAllocationApproved,
   /** @brief An admitted async writer is about to acquire root coordination. */
   AsyncWriterBeforeRootLock,
+  /**
+   * @brief One cache operation reached its root mutex before lock acquisition.
+   * @note Tests arm this checkpoint only after another operation has proved it
+   *       owns the same root. The callback runs before `try_lock` and must not
+   *       re-enter the observed root.
+   */
+  RootOperationBeforeLock,
+  /**
+   * @brief The root mutex was already owned when an operation tried it.
+   * @note The operation blocks on the same mutex only after this positive
+   *       contention checkpoint returns.
+   */
+  RootOperationLockContended,
+  /**
+   * @brief The operation acquired its root mutex without contention.
+   * @note An armed overlapping-operation test treats this event as evidence
+   *       that the two operations did not share one coordinator.
+   */
+  RootOperationLockAcquiredWithoutContention,
 };
 
 /**

@@ -909,7 +909,9 @@ class PHOTOSPIDER_API Host {
    * @brief Clears all cache layers for a session.
    *
    * @param session Session whose caches should be cleared.
-   * @return Success or `GraphErrc::NotFound` for a missing or closing session.
+   * @return Success, `GraphErrc::NotFound` for a missing/closing session, or
+   * `GraphErrc::InvalidParameter` when the backend rejects a nonempty-root
+   * Windows GraphCache disk request before either cache layer changes.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note This mirrors the existing `clear-cache all` behavior. The embedded
@@ -923,7 +925,8 @@ class PHOTOSPIDER_API Host {
    * @brief Clears disk cache for a session.
    *
    * @param session Session whose disk cache should be cleared.
-   * @return Success or failure status.
+   * @return Success or failure status; a backend without GraphCache disk
+   * persistence reports `GraphErrc::InvalidParameter` before mutation.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note The first Host slice returns status only; detailed cache counts can
@@ -947,7 +950,9 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session whose nodes should be cached.
    * @param precision Cache precision label.
-   * @return Success or failure status.
+   * @return Success or failure status; a backend without GraphCache disk
+   * persistence reports `GraphErrc::InvalidParameter` before codec, executor,
+   * or cache effects for a nonempty root.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note Precision semantics are backend-defined and match existing CLI
@@ -972,7 +977,9 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session whose cache should be synchronized.
    * @param precision Cache precision label.
-   * @return Success or failure status.
+   * @return Success or failure status; a backend without GraphCache disk
+   * persistence reports `GraphErrc::InvalidParameter` before save, cleanup,
+   * or diagnostic effects for a nonempty root.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note The first Host slice returns status only.
