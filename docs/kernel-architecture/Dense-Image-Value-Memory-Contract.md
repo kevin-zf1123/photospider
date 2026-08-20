@@ -179,14 +179,18 @@ Identity conversion performs no scaling. Semantic conversion applies the
 declared affine mapping only after source-domain rejection or clamp, then
 applies the selected rounding, representability, non-finite, and precision
 rules. Exact endpoints and equal domains bypass arithmetic. A finite source
-span computes an endpoint-relative position toward the destination endpoint
-closest to zero. A symmetric destination uses a centered coordinate, while
-only an overflowing source or destination span is power-of-two scaled. A
-finite destination span uses one fused endpoint interpolation, so a subnormal
-result is rounded only after the affine operation. The forward map and
-precision-reverse map therefore preserve same-sign, cross-zero, and narrow
-subnormal intervals without requiring `long double` to be wider than binary64
-or creating an avoidable infinity, NaN, zero radius, or rounded midpoint ratio.
+and destination span first form their quotient. When it is finite and nonzero,
+one endpoint-relative source distance is fused directly with the destination
+endpoint closest to zero; a symmetric destination uses a stable source
+midpoint when available. A zero or infinite quotient falls back to an
+endpoint-relative fraction plus fused destination interpolation. Only an
+actually overflowing source or destination span is power-of-two scaled. The
+forward and precision-reverse maps therefore preserve same-sign, cross-zero,
+narrow-subnormal, and ratio-underflow cases without requiring `long double` to
+be wider than binary64 or creating an avoidable infinity, NaN, zero radius,
+rounded midpoint ratio, or premature zero. Precision Reject still compares the
+working affine result with exact destination storage and exact reverse mapping;
+it does not pre-round a wider `1/3` to make FP64 narrowing appear exact.
 There is no hidden 255/65535 arithmetic, color transform, channel-role
 inference, or missing-metadata fallback. Equal endpoint/storage identity reads
 integer domains with type-aware comparison and copies each in-domain native
@@ -215,3 +219,7 @@ conversion, artifact reconstruction, Host results, IPC leases, worker/durable
 replay, OpenCV lifetime, ordinary OpenEXR round trips, and provider-defined
 Deep behavior. Source-residue searches are migration evidence only and are not
 registered as CTest or CI behavior tests.
+The later-buffer artifact regression uses a BUILD_TESTING-only source-private
+runtime failpoint immediately before the selected `BufferHandle::ControlBlock`
+allocation. Production builds compile no test-access seam, and the test does
+not replace process or shared-library global allocation symbols.
