@@ -22,7 +22,6 @@ plugin_targets=(
   lifecycle_op_plugin
   override_lifecycle_op_plugin
   invert_op_custom_example
-  save_op
   threshold_op
 )
 case "$runtime_contract" in
