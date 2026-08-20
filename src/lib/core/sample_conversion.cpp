@@ -321,67 +321,190 @@ long double round_integral(long double value, SampleRoundingMode mode) {
 }
 
 /**
- * @brief Midpoint/radius form of one finite ordered interval.
- * @throws Nothing for ordinary value operations.
- * @note The form keeps a cross-zero full binary range finite without relying
- *       on a wider floating-point type.
+ * @brief Power-of-two normalized form of one finite nondegenerate interval.
+ * @throws Nothing for ordinary aggregate operations.
+ * @note Scaling makes the largest endpoint magnitude lie in `[1, 2)` and
+ *       therefore keeps the scaled span finite. A narrow subnormal interval
+ *       is promoted as a unit, without requiring a wider floating type.
  */
-struct CenteredInterval final {
-  /** @brief Finite midpoint rounded in the active working type. */
-  long double midpoint = 0.0L;
-  /** @brief Finite nonnegative half-span. */
-  long double radius = 0.0L;
+struct ScaledInterval final {
+  /** @brief Lower endpoint after power-of-two scaling. */
+  long double minimum = 0.0L;
+  /** @brief Upper endpoint after power-of-two scaling. */
+  long double maximum = 0.0L;
+  /** @brief Binary exponent removed from both endpoints. */
+  int exponent = 0;
 };
 
 /**
- * @brief Centers one finite ordered interval without overflowing its span.
+ * @brief Scales one finite ordered interval into a bounded exponent domain.
  * @param minimum Finite inclusive lower endpoint.
- * @param maximum Finite inclusive upper endpoint.
- * @return Finite midpoint and nonnegative radius.
- * @throws std::logic_error when validated interval preconditions are broken.
- * @note A finite direct span preserves narrow/subnormal intervals. Only an
- *       overflowing span uses separately halved endpoints.
+ * @param maximum Finite inclusive upper endpoint greater than minimum.
+ * @return Power-of-two-scaled endpoints and their removed exponent.
+ * @throws std::logic_error when validated interval preconditions are broken or
+ *         scaling does not retain a finite ordered interval.
+ * @note At least one nonzero endpoint exists for a nondegenerate interval, so
+ *       `ilogb` is never called with zero. The largest endpoint is scaled
+ *       toward unity; exact affine endpoints bypass this helper, and the
+ *       scaled interval is checked for retained order before use.
  */
-CenteredInterval center_interval(long double minimum, long double maximum) {
-  const long double span = maximum - minimum;
-  CenteredInterval result;
-  if (std::isfinite(span)) {
-    result.radius = span / 2.0L;
-    result.midpoint = minimum + result.radius;
-  } else {
-    result.midpoint = minimum / 2.0L + maximum / 2.0L;
-    result.radius = maximum / 2.0L - minimum / 2.0L;
+ScaledInterval scale_finite_interval(long double minimum, long double maximum) {
+  if (!std::isfinite(minimum) || !std::isfinite(maximum) ||
+      !(minimum < maximum)) {
+    throw std::logic_error("Finite sample interval is not ordered.");
   }
-  if (!std::isfinite(result.midpoint) || !std::isfinite(result.radius) ||
-      result.radius < 0.0L) {
-    throw std::logic_error("Finite sample interval could not be centered.");
+  int exponent = std::numeric_limits<int>::min();
+  if (minimum != 0.0L) {
+    exponent = std::ilogb(std::fabs(minimum));
+  }
+  if (maximum != 0.0L) {
+    exponent = std::max(exponent, std::ilogb(std::fabs(maximum)));
+  }
+  if (exponent == std::numeric_limits<int>::min()) {
+    throw std::logic_error("Finite sample interval has no nonzero endpoint.");
+  }
+  ScaledInterval result;
+  result.minimum = std::scalbn(minimum, -exponent);
+  result.maximum = std::scalbn(maximum, -exponent);
+  result.exponent = exponent;
+  if (!std::isfinite(result.minimum) || !std::isfinite(result.maximum) ||
+      !(result.minimum < result.maximum)) {
+    throw std::logic_error("Finite sample interval scaling lost its order.");
   }
   return result;
 }
 
 /**
- * @brief Interpolates finite endpoints without an overflowing endpoint span.
- * @param minimum Finite lower endpoint.
- * @param maximum Finite upper endpoint.
- * @param position Clamped affine position in `[0, 1]`.
- * @return Finite rounded value between the endpoints.
- * @throws Nothing for validated inputs.
- * @note Opposite-sign endpoints use a weighted sum; same-sign subtraction is
- *       finite. Exact endpoints bypass arithmetic.
+ * @brief Interpolates a destination from its nearer endpoint.
+ * @param minimum Finite destination lower endpoint.
+ * @param maximum Finite destination upper endpoint greater than minimum.
+ * @param fraction Clamped distance fraction in `[0, 1]`.
+ * @param from_minimum True to add the fraction from the lower endpoint; false
+ *        to subtract it from the upper endpoint.
+ * @return Finite destination value rounded by the active working type.
+ * @throws std::domain_error when validated finite inputs unexpectedly produce
+ *         a non-finite result.
+ * @throws std::logic_error when interval preconditions are broken.
+ * @note A finite span uses one direct `fma`, so a subnormal result is rounded
+ *       only once and cannot be lost through a pre-rounded half-span. Only an
+ *       overflowing destination span requires power-of-two endpoint scaling
+ *       before `fma` and one final `scalbn` restore.
  */
-long double interpolate_finite(long double minimum, long double maximum,
-                               long double position) noexcept {
-  if (position <= 0.0L) {
-    return minimum;
+long double interpolate_finite_from_endpoint(long double minimum,
+                                             long double maximum,
+                                             long double fraction,
+                                             bool from_minimum) {
+  const long double bounded_fraction = std::clamp(fraction, 0.0L, 1.0L);
+  const long double direct_span = maximum - minimum;
+  if (std::isfinite(direct_span)) {
+    const long double mapped =
+        from_minimum ? std::fma(bounded_fraction, direct_span, minimum)
+                     : std::fma(-bounded_fraction, direct_span, maximum);
+    if (!std::isfinite(mapped)) {
+      throw std::domain_error(
+          "Finite sample affine interpolation produced a non-finite result.");
+    }
+    return std::clamp(mapped, minimum, maximum);
   }
-  if (position >= 1.0L) {
-    return maximum;
+
+  const ScaledInterval destination = scale_finite_interval(minimum, maximum);
+  const long double scaled_span = destination.maximum - destination.minimum;
+  long double scaled =
+      from_minimum
+          ? std::fma(bounded_fraction, scaled_span, destination.minimum)
+          : std::fma(-bounded_fraction, scaled_span, destination.maximum);
+  scaled = std::clamp(scaled, destination.minimum, destination.maximum);
+  const long double mapped = std::scalbn(scaled, destination.exponent);
+  if (!std::isfinite(mapped)) {
+    throw std::domain_error(
+        "Finite sample affine interpolation produced a non-finite result.");
   }
-  if ((minimum <= 0.0L && maximum >= 0.0L) ||
-      (minimum >= 0.0L && maximum <= 0.0L)) {
-    return (1.0L - position) * minimum + position * maximum;
+  return std::clamp(mapped, minimum, maximum);
+}
+
+/**
+ * @brief Interpolates a destination from a centered position.
+ * @param minimum Finite destination lower endpoint.
+ * @param maximum Finite destination upper endpoint greater than minimum.
+ * @param centered_position Clamped affine position in `[-1, 1]`.
+ * @return Finite rounded destination value.
+ * @throws std::domain_error when validated finite inputs unexpectedly produce
+ *         a non-finite result.
+ * @throws std::logic_error when interval preconditions are broken.
+ * @note Equal-magnitude endpoints multiply the centered position by the
+ *       positive endpoint directly, retaining a representable near-midpoint
+ *       sign without adding the displacement to one-half. Other intervals are
+ *       power-of-two scaled because this helper is reached for them only after
+ *       an overflowing source span has already been normalized.
+ */
+long double interpolate_finite_centered(long double minimum,
+                                        long double maximum,
+                                        long double centered_position) {
+  const long double bounded_position =
+      std::clamp(centered_position, -1.0L, 1.0L);
+  if (std::fabs(minimum) == std::fabs(maximum)) {
+    const long double mapped = std::fma(bounded_position, maximum, 0.0L);
+    if (!std::isfinite(mapped)) {
+      throw std::domain_error(
+          "Finite centered affine interpolation produced a non-finite "
+          "result.");
+    }
+    return std::clamp(mapped, minimum, maximum);
   }
-  return minimum + position * (maximum - minimum);
+
+  const ScaledInterval destination = scale_finite_interval(minimum, maximum);
+  const long double destination_span =
+      destination.maximum - destination.minimum;
+  const long double destination_radius = destination_span / 2.0L;
+  const long double destination_midpoint =
+      std::fma(0.5L, destination_span, destination.minimum);
+  long double scaled_mapped =
+      std::fma(bounded_position, destination_radius, destination_midpoint);
+  scaled_mapped =
+      std::clamp(scaled_mapped, destination.minimum, destination.maximum);
+  const long double mapped = std::scalbn(scaled_mapped, destination.exponent);
+  if (!std::isfinite(mapped)) {
+    throw std::domain_error(
+        "Finite centered affine interpolation produced a non-finite result.");
+  }
+  return std::clamp(mapped, minimum, maximum);
+}
+
+/**
+ * @brief Maps through scaled centered coordinates when a direct source span
+ *        overflows.
+ * @param value Finite source value inside the inclusive source interval.
+ * @param source_minimum Finite source lower endpoint.
+ * @param source_maximum Finite source upper endpoint greater than minimum.
+ * @param destination_minimum Finite destination lower endpoint.
+ * @param destination_maximum Finite destination upper endpoint.
+ * @return Finite rounded destination value.
+ * @throws std::domain_error when finite inputs produce a non-finite result.
+ * @throws std::logic_error when interval preconditions are broken.
+ * @note The source is normalized by an exact power of two, making its span and
+ *       half-span finite and non-subnormal. The centered coordinate retains
+ *       every near-midpoint displacement whose destination contribution is
+ *       representable, without adding that displacement to one-half.
+ */
+long double map_scaled_centered(long double value, long double source_minimum,
+                                long double source_maximum,
+                                long double destination_minimum,
+                                long double destination_maximum) {
+  const ScaledInterval source =
+      scale_finite_interval(source_minimum, source_maximum);
+  const long double source_span = source.maximum - source.minimum;
+  const long double source_radius = source_span / 2.0L;
+  const long double source_midpoint =
+      std::fma(0.5L, source_span, source.minimum);
+  if (source_radius == 0.0L || !std::isfinite(source_midpoint)) {
+    throw std::logic_error("Scaled source interval could not be centered.");
+  }
+  const long double scaled_value = std::scalbn(value, -source.exponent);
+  const long double centered_position =
+      std::clamp((scaled_value - source_midpoint) / source_radius, -1.0L, 1.0L);
+
+  return interpolate_finite_centered(destination_minimum, destination_maximum,
+                                     centered_position);
 }
 
 /**
@@ -395,11 +518,19 @@ long double interpolate_finite(long double minimum, long double maximum,
  * @throws std::domain_error when finite validated inputs unexpectedly produce
  *         a non-finite result.
  * @throws std::logic_error when interval preconditions are broken.
- * @note Exact endpoints and equal numeric domains avoid arithmetic. Otherwise
- *       centered scale plus `fma` avoids overflowing interval differences and
- *       preserves representable near-midpoint values even when `long double`
- *       has only binary64 range and precision. The same helper is used for
- *       forward conversion and reverse precision validation.
+ * @note Exact endpoints and equal numeric domains avoid arithmetic. A finite
+ *       source span computes an endpoint-relative fraction toward the
+ *       destination endpoint closest to zero, avoiding destination
+ *       cancellation while narrow subnormal intervals never halve their span
+ *       or subtract an unverified rounded midpoint. Equal-magnitude
+ *       destination endpoints use a centered source coordinate only when the
+ *       span is normal and halving/restoring it is exact; otherwise their two
+ *       endpoint-relative distances form the centered position directly. Only
+ *       an overflowing source span requires a scaled source-centered form.
+ *       Finite destination spans use one fused endpoint interpolation; only an
+ *       overflowing destination span is exponent-scaled before one final
+ *       restore. The same helper is used for forward conversion and reverse
+ *       precision validation.
  */
 long double map_finite_affine(long double value, long double source_minimum,
                               long double source_maximum,
@@ -416,40 +547,39 @@ long double map_finite_affine(long double value, long double source_minimum,
     return value;
   }
 
-  const CenteredInterval source =
-      center_interval(source_minimum, source_maximum);
-  const CenteredInterval destination =
-      center_interval(destination_minimum, destination_maximum);
-  if (source.radius == 0.0L) {
-    const long double span = source_maximum - source_minimum;
-    const long double position =
-        std::clamp((value - source_minimum) / span, 0.0L, 1.0L);
-    return interpolate_finite(destination_minimum, destination_maximum,
-                              position);
+  const long double source_span = source_maximum - source_minimum;
+  if (std::isfinite(source_span) && source_span > 0.0L) {
+    const long double from_minimum = value - source_minimum;
+    const long double from_maximum = source_maximum - value;
+    const long double destination_minimum_magnitude =
+        std::fabs(destination_minimum);
+    const long double destination_maximum_magnitude =
+        std::fabs(destination_maximum);
+    if (destination_minimum_magnitude < destination_maximum_magnitude) {
+      return interpolate_finite_from_endpoint(destination_minimum,
+                                              destination_maximum,
+                                              from_minimum / source_span, true);
+    }
+    if (destination_maximum_magnitude < destination_minimum_magnitude) {
+      return interpolate_finite_from_endpoint(
+          destination_minimum, destination_maximum, from_maximum / source_span,
+          false);
+    }
+    long double centered_position = (from_minimum - from_maximum) / source_span;
+    if (std::isnormal(source_span)) {
+      const long double source_radius = source_span / 2.0L;
+      const long double source_midpoint =
+          std::fma(0.5L, source_span, source_minimum);
+      if (source_radius > 0.0L && std::isfinite(source_midpoint) &&
+          source_radius + source_radius == source_span) {
+        centered_position = (value - source_midpoint) / source_radius;
+      }
+    }
+    return interpolate_finite_centered(destination_minimum, destination_maximum,
+                                       centered_position);
   }
-
-  const long double displacement = value - source.midpoint;
-  const long double centered_position =
-      std::clamp(displacement / source.radius, -1.0L, 1.0L);
-  const long double scale = destination.radius / source.radius;
-  long double mapped = 0.0L;
-  if (destination.radius != 0.0L && scale != 0.0L && std::isfinite(scale)) {
-    mapped = std::fma(displacement, scale, destination.midpoint);
-  } else {
-    mapped =
-        std::fma(centered_position, destination.radius, destination.midpoint);
-  }
-  if (!std::isfinite(mapped)) {
-    const long double position =
-        std::clamp((centered_position + 1.0L) / 2.0L, 0.0L, 1.0L);
-    mapped =
-        interpolate_finite(destination_minimum, destination_maximum, position);
-  }
-  if (!std::isfinite(mapped)) {
-    throw std::domain_error(
-        "Finite sample affine mapping produced a non-finite result.");
-  }
-  return std::clamp(mapped, destination_minimum, destination_maximum);
+  return map_scaled_centered(value, source_minimum, source_maximum,
+                             destination_minimum, destination_maximum);
 }
 
 /**

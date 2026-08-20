@@ -448,6 +448,169 @@ TEST(SampleConversion,
   EXPECT_EQ(negative_mapped, (std::vector<double>{-1.0, 0.0, 1.0}));
 }
 
+TEST(SampleConversion,
+     MapsNarrowSubnormalIntervalsWithExactEndpointRelativePositions) {
+  const double denormal = std::numeric_limits<double>::denorm_min();
+  const double three_denormals = 3.0 * denormal;
+  const SampleEndpoint positive_subnormal{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, 0.0, three_denormals}};
+  const SampleEndpoint negative_subnormal{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -three_denormals, 0.0}};
+  const SampleEndpoint positive_unit{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, 0.0, 1.0}};
+  const SampleEndpoint negative_unit{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -1.0, 0.0}};
+
+  for (const PrecisionLossPolicy precision :
+       {PrecisionLossPolicy::Allow, PrecisionLossPolicy::Reject}) {
+    SampleConversion positive_forward =
+        make_conversion(positive_subnormal, positive_unit,
+                        ElementSemantics::FloatingPoint, 64U);
+    positive_forward.precision_loss = precision;
+    EXPECT_DOUBLE_EQ(read_samples<double>(convert_dense_image_samples(
+                         make_sample_image(std::vector<double>{denormal},
+                                           positive_subnormal),
+                         positive_forward))[0],
+                     1.0 / 3.0);
+
+    SampleConversion positive_reverse =
+        make_conversion(positive_unit, positive_subnormal,
+                        ElementSemantics::FloatingPoint, 64U);
+    positive_reverse.precision_loss = precision;
+    EXPECT_EQ(
+        read_samples<double>(convert_dense_image_samples(
+            make_sample_image(std::vector<double>{1.0 / 3.0}, positive_unit),
+            positive_reverse))[0],
+        denormal);
+
+    SampleConversion negative_forward =
+        make_conversion(negative_subnormal, negative_unit,
+                        ElementSemantics::FloatingPoint, 64U);
+    negative_forward.precision_loss = precision;
+    EXPECT_DOUBLE_EQ(read_samples<double>(convert_dense_image_samples(
+                         make_sample_image(std::vector<double>{-denormal},
+                                           negative_subnormal),
+                         negative_forward))[0],
+                     -1.0 / 3.0);
+
+    SampleConversion negative_reverse =
+        make_conversion(negative_unit, negative_subnormal,
+                        ElementSemantics::FloatingPoint, 64U);
+    negative_reverse.precision_loss = precision;
+    EXPECT_EQ(
+        read_samples<double>(convert_dense_image_samples(
+            make_sample_image(std::vector<double>{-1.0 / 3.0}, negative_unit),
+            negative_reverse))[0],
+        -denormal);
+  }
+}
+
+TEST(SampleConversion,
+     MapsCrossZeroSubnormalIntervalsSymmetricallyForwardAndReverse) {
+  const double denormal = std::numeric_limits<double>::denorm_min();
+  const SampleEndpoint right_heavy{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -denormal, 2.0 * denormal}};
+  const SampleEndpoint left_heavy{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -2.0 * denormal, denormal}};
+  const SampleEndpoint unit{SampleEncoding{1U, SampleEncodingKind::Value},
+                            SampleDomain{SampleDomainKind::Legal, 0.0, 1.0}};
+
+  for (const PrecisionLossPolicy precision :
+       {PrecisionLossPolicy::Allow, PrecisionLossPolicy::Reject}) {
+    SampleConversion right_forward = make_conversion(
+        right_heavy, unit, ElementSemantics::FloatingPoint, 64U);
+    right_forward.precision_loss = precision;
+    std::vector<double> right_forward_samples;
+    EXPECT_NO_THROW(
+        right_forward_samples =
+            read_samples<double>(convert_dense_image_samples(
+                make_sample_image(std::vector<double>{0.0}, right_heavy),
+                right_forward)));
+    ASSERT_EQ(right_forward_samples.size(), 1U);
+    EXPECT_DOUBLE_EQ(right_forward_samples[0], 1.0 / 3.0);
+
+    SampleConversion left_forward =
+        make_conversion(left_heavy, unit, ElementSemantics::FloatingPoint, 64U);
+    left_forward.precision_loss = precision;
+    std::vector<double> left_forward_samples;
+    EXPECT_NO_THROW(
+        left_forward_samples = read_samples<double>(convert_dense_image_samples(
+            make_sample_image(std::vector<double>{0.0}, left_heavy),
+            left_forward)));
+    ASSERT_EQ(left_forward_samples.size(), 1U);
+    EXPECT_DOUBLE_EQ(left_forward_samples[0], 2.0 / 3.0);
+
+    SampleConversion right_reverse = make_conversion(
+        unit, right_heavy, ElementSemantics::FloatingPoint, 64U);
+    right_reverse.precision_loss = precision;
+    std::vector<double> right_reverse_samples;
+    EXPECT_NO_THROW(
+        right_reverse_samples =
+            read_samples<double>(convert_dense_image_samples(
+                make_sample_image(std::vector<double>{1.0 / 3.0}, unit),
+                right_reverse)));
+    ASSERT_EQ(right_reverse_samples.size(), 1U);
+    EXPECT_EQ(right_reverse_samples[0], 0.0);
+
+    SampleConversion left_reverse =
+        make_conversion(unit, left_heavy, ElementSemantics::FloatingPoint, 64U);
+    left_reverse.precision_loss = precision;
+    std::vector<double> left_reverse_samples;
+    EXPECT_NO_THROW(
+        left_reverse_samples = read_samples<double>(convert_dense_image_samples(
+            make_sample_image(std::vector<double>{2.0 / 3.0}, unit),
+            left_reverse)));
+    ASSERT_EQ(left_reverse_samples.size(), 1U);
+    EXPECT_EQ(left_reverse_samples[0], 0.0);
+  }
+}
+
+TEST(SampleConversion,
+     RoundsSubnormalDestinationThenRejectsNoninvertiblePrecision) {
+  const double denormal = std::numeric_limits<double>::denorm_min();
+  const SampleEndpoint unit{SampleEncoding{1U, SampleEncodingKind::Value},
+                            SampleDomain{SampleDomainKind::Legal, 0.0, 1.0}};
+  const SampleEndpoint positive_subnormal{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, 0.0, denormal}};
+  const SampleEndpoint negative_subnormal{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -denormal, 0.0}};
+
+  SampleConversion positive = make_conversion(
+      unit, positive_subnormal, ElementSemantics::FloatingPoint, 64U);
+  EXPECT_EQ(
+      read_samples<double>(convert_dense_image_samples(
+          make_sample_image(std::vector<double>{0.75}, unit), positive))[0],
+      denormal);
+  positive.precision_loss = PrecisionLossPolicy::Reject;
+  EXPECT_THROW(
+      (void)convert_dense_image_samples(
+          make_sample_image(std::vector<double>{0.75}, unit), positive),
+      std::domain_error);
+
+  const SampleEndpoint negative_unit{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -1.0, 0.0}};
+  SampleConversion negative = make_conversion(
+      negative_unit, negative_subnormal, ElementSemantics::FloatingPoint, 64U);
+  EXPECT_EQ(read_samples<double>(convert_dense_image_samples(
+                make_sample_image(std::vector<double>{-0.75}, negative_unit),
+                negative))[0],
+            -denormal);
+  negative.precision_loss = PrecisionLossPolicy::Reject;
+  EXPECT_THROW((void)convert_dense_image_samples(
+                   make_sample_image(std::vector<double>{-0.75}, negative_unit),
+                   negative),
+               std::domain_error);
+}
+
 TEST(SampleConversion, DegenerateDomainRequiresExactIdentity) {
   const SampleEndpoint degenerate{
       SampleEncoding{1U, SampleEncodingKind::Value},
