@@ -310,8 +310,8 @@ struct NodeOutput {
    * @throws Nothing.
    * @note This classification inspects names only; planned output validation
    * separately proves the exact generic schema, immutable Value identities,
-   * representation, and readiness. The current image disk-cache format uses
-   * this fact to avoid silently persisting a partial formal output.
+   * representation, and readiness. Portable named-Value persistence accepts
+   * these entries after full artifact validation.
    */
   bool has_generic_named_values() const noexcept {
     return std::any_of(

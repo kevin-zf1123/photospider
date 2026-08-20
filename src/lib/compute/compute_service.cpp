@@ -967,10 +967,10 @@ NodeOutput& ComputeService::compute_internal(
       break;
     }
     NodeOutput disk_output;
-    const ImageDiskCacheOutputSchema disk_schema{
+    const ValueDiskCacheOutputSchema disk_schema{
         output_authority.image_output_name.has_value(),
         output_authority.parameter_output_names,
-        !output_authority.named_value_output_names.empty()};
+        output_authority.named_value_output_names};
     if (context.allow_disk_cache &&
         cache_.try_load_from_disk_cache_into(graph, target_node, disk_output,
                                              disk_schema)) {

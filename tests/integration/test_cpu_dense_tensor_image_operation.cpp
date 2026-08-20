@@ -3756,21 +3756,12 @@ TEST(CpuDenseTensorImageOperation,
      DiskReloadMintsFreshRuntimeIdentitiesWithoutChangingCachePath) {
   ScopedTestDirectory directory("photospider-v3-disk-identity");
   const std::filesystem::path node_directory = directory.path() / "81";
-  std::filesystem::create_directories(node_directory);
   const std::filesystem::path artifact = node_directory / "image.fake";
-  {
-    std::ofstream marker(artifact, std::ios::binary);
-    ASSERT_TRUE(marker.good());
-    marker.put('x');
-  }
 
   auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
-      [](const std::filesystem::path& path,
-         const ImageArtifactDecodeRequest& request) {
-        (void)path;
-        EXPECT_EQ(request.rules.size(), 2U);
-        return make_unsigned8_value(2U, 2U, 1U, 2U);
-      });
+      testing::FakeImageArtifactCodec::DecodeCallback{},
+      [](const std::filesystem::path&, const Value&,
+         const ImageArtifactEncodeRequest&) {});
   auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>();
   GraphCacheService cache(image_codec, metadata_codec);
 
@@ -3780,20 +3771,34 @@ TEST(CpuDenseTensorImageOperation,
   node.id = 81;
   node.name = "disk_identity";
   node.caches.push_back(CacheEntry{"image", "image.fake"});
+  node.cached_output_high_precision = NodeOutput{};
+  node.cached_output_high_precision->publish_image_value(
+      make_unsigned8_value(2U, 2U, 1U, 2U));
+  node.hp_region =
+      value_region::full_node_output_region(*node.cached_output_high_precision);
   graph.add_node(node);
+  const Value source =
+      graph.node(81).cached_output_high_precision->image_value();
+  cache.save_cache_if_configured(graph, graph.node(81), "int8");
+  graph.mutate_node_runtime_state(81, [](GraphModel::NodeRuntimeState& state) {
+    state.cached_output_high_precision.reset();
+    state.hp_region.reset();
+  });
 
   NodeOutput first_output;
   ASSERT_TRUE(cache.try_load_from_disk_cache_into(
       graph, graph.node(81), first_output,
-      ImageDiskCacheOutputSchema{true, {}, false}));
+      ValueDiskCacheOutputSchema{true, {}, {}}));
   const Value first = first_output.image_value();
   ASSERT_TRUE(first.valid());
+  EXPECT_NE(first.allocation_identity(), source.allocation_identity());
+  EXPECT_NE(first.revision_id(), source.revision_id());
   EXPECT_EQ(cache.node_cache_dir(graph, 81), node_directory);
 
   NodeOutput second_output;
   ASSERT_TRUE(cache.try_load_from_disk_cache_into(
       graph, graph.node(81), second_output,
-      ImageDiskCacheOutputSchema{true, {}, false}));
+      ValueDiskCacheOutputSchema{true, {}, {}}));
   const Value second = second_output.image_value();
   ASSERT_TRUE(second.valid());
   EXPECT_NE(second.allocation_identity(), first.allocation_identity());
@@ -3801,13 +3806,10 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_EQ(cache.node_cache_dir(graph, 81), node_directory);
 
   const auto calls = image_codec->calls();
-  ASSERT_EQ(calls.size(), 2U);
+  ASSERT_EQ(calls.size(), 1U);
   EXPECT_EQ(calls[0].path, artifact);
-  EXPECT_EQ(calls[1].path, artifact);
-  ASSERT_TRUE(calls[0].decode_request.has_value());
-  ASSERT_TRUE(calls[1].decode_request.has_value());
-  EXPECT_FALSE(calls[0].encode_request.has_value());
-  EXPECT_FALSE(calls[1].encode_request.has_value());
+  EXPECT_FALSE(calls[0].decode_request.has_value());
+  ASSERT_TRUE(calls[0].encode_request.has_value());
 }
 
 TEST(CpuDenseTensorImageOperation,
@@ -3907,7 +3909,7 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_TRUE(image_codec->calls().empty());
   EXPECT_TRUE(metadata_codec->calls().empty());
   EXPECT_FALSE(cache.try_load_from_disk_cache(
-      graph, node, ImageDiskCacheOutputSchema{true, {}, false}));
+      graph, node, ValueDiskCacheOutputSchema{true, {}, {}}));
   EXPECT_TRUE(image_codec->calls().empty());
   EXPECT_TRUE(metadata_codec->calls().empty());
 }

@@ -14,27 +14,29 @@
 
 namespace ps {
 
+class DataDefinitionRegistry;
+
 namespace execution {
 class ComputeIoExecutor;
 }  // namespace execution
 
 /**
- * @brief Freezes the complete planned shape representable by image disk cache.
+ * @brief Freezes the complete planned shape of one portable disk-cache set.
  *
  * @throws std::bad_alloc when owning or copying parameter-output names cannot
  * allocate.
- * @note The image/YAML artifact pair can represent one canonical image and an
- * exact `NodeOutput::data` parameter map. Generic named Values have no durable
- * format and therefore force pre-filesystem miss/save-skip behavior. Instances
- * are request-owned snapshots and retain no Graph, registry, or codec state.
+ * @note Every planned Value name is validated against one canonical
+ * `NamedValueArtifactSet` archive. Parameter outputs remain detached values
+ * whose encoded bytes are digest-bound by the cache manifest. Instances are
+ * request-owned snapshots and retain no Graph, registry, or codec state.
  */
-struct ImageDiskCacheOutputSchema final {
-  /** @brief Whether the frozen plan requires the canonical image sibling. */
+struct ValueDiskCacheOutputSchema final {
+  /** @brief Whether the frozen plan requires the canonical `image` Value. */
   bool canonical_image_planned = false;
-  /** @brief Exact frozen parameter-result names requiring the YAML sibling. */
+  /** @brief Exact frozen parameter-result names in the metadata payload. */
   std::vector<std::string> parameter_output_names;
-  /** @brief Whether any unrepresentable generic named Value is planned. */
-  bool contains_generic_named_values = false;
+  /** @brief Exact frozen generic Value names outside the `image` slot. */
+  std::vector<std::string> generic_named_value_output_names;
 };
 
 /**
@@ -49,37 +51,38 @@ struct ImageDiskCacheOutputSchema final {
  * @note Disk-cache load wrappers keep their historical bool return contract:
  * true means a reusable output is available, false means the caller should
  * compute normally. Detailed miss/error diagnostics are recorded through
- * GraphModel's locked disk-cache diagnostic API. Compatible image bytes and
- * detached named values cross injected `ImageArtifactCodec` and
- * `CacheMetadataCodec` boundaries; packed, quantized, or latent formal Values
- * fail with a typed invalid-parameter error before executor admission,
- * filesystem mutation, or codec invocation. A planned schema containing any
- * generic named Value makes every existing artifact an incompatible miss
- * before filesystem or codec inspection. Otherwise, physical image/YAML
- * sibling presence must equal the frozen image/parameter shape before either
- * codec is entered, and decoded metadata keys must equal the exact frozen
- * parameter names before a Hit is returned. Exact validated formal outputs
- * containing generic Values skip image/YAML persistence before planned-byte
- * admission, filesystem work, or codec invocation. Successful representable
- * saves write every planned sibling before removing an unplanned predecessor
- * sibling; failures remain non-transactional but cannot produce a reusable
- * shape-mismatched hit. This service contains no OpenCV/YAML calls or
+ * GraphModel's locked disk-cache diagnostic API. Every complete formal named
+ * Value is captured through the public `NamedValueArtifactSet` archive. A
+ * versioned manifest digest-binds that archive and optional detached parameter
+ * metadata; an image-codec file is only an auxiliary projection and never a
+ * replay authority. Replay validates the manifest, exact frozen names,
+ * descriptor/layout/binding facts, payload digests, provider availability,
+ * metadata names, and stable manifest generation before publishing the
+ * complete candidate with fresh runtime allocation/revision identities.
+ * Packed, quantized, latent, unreadable, pending, unknown-provider, or
+ * otherwise unsupported Values fail with a typed invalid-parameter error
+ * before executor admission, filesystem mutation, or codec invocation.
+ * Partial, tampered, mixed-generation, or retired image/YAML pairs cannot
+ * publish any output. This service contains no OpenCV/YAML calls or
  * provider-library types. Staged HP commit may submit the const cache-save
  * mechanism to the
  * process compute-I/O executor while the graph-state policy owner retains path,
- * failure, timing, and publication decisions; synchronous administration and
- * load paths remain unchanged.
+ * failure, timing, and publication decisions; administration and load paths
+ * remain synchronous.
  */
 class GraphCacheService {
  public:
   /**
    * @brief Creates a cache service with explicitly owned artifact codecs.
    *
-   * @param image_codec Shared codec used for every image cache read and write.
+   * @param image_codec Shared codec used for every optional image projection
+   * write.
    * @param metadata_codec Shared codec used for every named-value metadata
    * read and write.
    * @param maximum_statistics_entries Positive bounded derived statistics
    * result capacity owned by this cache service.
+   * @param data_definitions Borrowed process registry used to reconstruct
+   * provider-defined artifacts; null permits built-in replay only.
    * @throws std::invalid_argument when either codec owner is empty.
    * @throws std::invalid_argument when the statistics bound is zero or exceeds
    * its source-private frozen maximum.
@@ -91,7 +94,8 @@ class GraphCacheService {
   GraphCacheService(std::shared_ptr<const ImageArtifactCodec> image_codec,
                     std::shared_ptr<const CacheMetadataCodec> metadata_codec,
                     std::size_t maximum_statistics_entries =
-                        kDefaultImageStatisticsCacheEntries);
+                        kDefaultImageStatisticsCacheEntries,
+                    DataDefinitionRegistry* data_definitions = nullptr);
 
   /**
    * @brief Schedules or reuses one Value-backed derived statistics request.
@@ -235,7 +239,8 @@ class GraphCacheService {
       GraphModel& graph, const std::string& cache_precision) const;
 
   /**
-   * @brief Saves one node's formal HP output when an image cache is configured.
+   * @brief Saves one node's complete formal HP output as a portable
+   * transaction.
    *
    * @param graph Graph providing cache root and IO timing counters.
    * @param node Node whose HP output and cache entries should be saved.
@@ -243,29 +248,18 @@ class GraphCacheService {
    * @throws Codec, filesystem, graph, or allocation exceptions from saving.
    * @note The method is a no-op for disabled saving, missing cache roots,
    * unsupported cache-entry types, empty locations, or nodes without HP
-   * output. A configured image entry with a packed, quantized, or latent formal
-   * Value instead throws `GraphError{InvalidParameter}` before filesystem or
-   * codec effects. A formal output containing generic named Values is an
-   * explicit no-op before planned-byte admission, filesystem work, or codec
-   * effects because the current artifact pair cannot encode that exact output
-   * schema.
-   * Partial hp_region validity is never serialized; any older configured
-   * artifact for that node is removed so a later load cannot relabel stale
-   * bytes as complete.
-   * A valid sealed CPU image Value is the sole serialization authority and is
-   * passed as an immutable Value to the selected codec. Nonempty
-   * compatibility staging is rejected instead of serving as a fallback.
-   * Named ParameterValue outputs cross the metadata codec; a future device
-   * adapter may add explicit download. After all required writes succeed, an
-   * absent image removes only the configured image sibling and empty parameter
-   * data removes only its YAML sibling. Image-plus-parameter output retains
-   * both, while an empty complete output removes both. If a required write
-   * fails, stale siblings are retained and the exception propagates; cleanup
-   * failures may leave a partially updated pair, which later shape validation
-   * rejects as a miss. The current Value must be image-faceted, Strided,
-   * unquantized, host-readable, and whole-byte compatible before the save
-   * mechanism proceeds. Runtime allocation and Value revision identities are
-   * never persisted.
+   * output. Every complete formal Value, including provider-defined
+   * multi-buffer Values, must enter one public named-Value archive; unsupported
+   * facts throw `GraphError{InvalidParameter}` before executor admission,
+   * filesystem work, or codec effects. Partial hp_region validity removes the
+   * older complete transaction so a later load cannot relabel stale bytes as
+   * complete. A canonical CPU image may additionally cross the selected image
+   * codec as an auxiliary projection, but replay reconstructs only from the
+   * archive. Named ParameterValue outputs cross the metadata codec. The archive
+   * and metadata byte sizes/digests are bound by a manifest written last;
+   * failures or concurrent replacement yield a non-reusable transaction and
+   * never authorize partial publication. Runtime allocation and Value revision
+   * identities are never persisted.
    */
   void save_cache_if_configured(GraphModel& graph, const Node& node,
                                 const std::string& cache_precision) const;
@@ -285,9 +279,9 @@ class GraphCacheService {
    * @param graph Transaction-owned Graph providing cache policy and paths.
    * @param node Stable node inside `graph` whose formal HP output is saved.
    * @param cache_precision Precision label forwarded to the selected codec.
-   * @throws GraphError with `InvalidParameter` when image disk persistence
-   * rejects a packed, quantized, latent, or otherwise incompatible Value
-   * before executor admission.
+   * @throws GraphError with `InvalidParameter` when portable persistence
+   * rejects a packed, quantized, latent, unreadable, pending, provider-missing,
+   * or otherwise incompatible Value before executor admission.
    * @throws GraphError with `ComputeError` for typed admission rejection or
    * cancellation.
    * @throws Codec, filesystem, graph, allocation, or synchronization
@@ -307,7 +301,7 @@ class GraphCacheService {
    *
    * @param graph Graph whose cache root, timing, and diagnostics are updated.
    * @param node Node receiving the loaded HP output on cache hit.
-   * @param output_schema Complete frozen image/parameter/generic output shape.
+   * @param output_schema Complete frozen Value/parameter output shape.
    * @return true when complete HP output is already present or disk cache was
    * loaded; false for partial memory validity, cache miss, skipped load, or
    * read/parse error.
@@ -316,17 +310,16 @@ class GraphCacheService {
    * GraphModel's locked disk-cache diagnostic API and reported as false.
    * @note This preserves the legacy try-load bool contract while making disk
    * errors distinguishable from misses through graph diagnostics. Successful
-   * CPU image decode mints fresh process-local allocation/revision identities.
-   * A schema containing generic named Values records an incompatible Miss and
-   * performs no filesystem or codec inspection. Representable plans compare
-   * sibling presence before either codec and compare exact decoded parameter
-   * keys before returning Hit; mismatches are misses and never reach output
-   * authority validation as false hits.
+   * archive reconstruction mints fresh process-local allocation/revision
+   * identities for every Value. Replay validates the versioned manifest,
+   * detached archive digest, exact planned Value names, complete artifact
+   * facts, optional metadata digest and exact parameter keys, then rereads the
+   * manifest before returning Hit. Any mismatch publishes nothing.
    * A hit publishes the output, incremented HP content version, and derived
    * full-validity Region together on the supplied Node.
    */
   bool try_load_from_disk_cache(GraphModel& graph, Node& node,
-                                ImageDiskCacheOutputSchema output_schema) const;
+                                ValueDiskCacheOutputSchema output_schema) const;
 
   /**
    * @brief Attempts to load a node's disk cache into a caller-owned output.
@@ -334,7 +327,7 @@ class GraphCacheService {
    * @param graph Graph whose cache root, timing, and diagnostics are updated.
    * @param node Node whose cache entries define candidate disk files.
    * @param out Receives the loaded output on cache hit.
-   * @param output_schema Complete frozen image/parameter/generic output shape.
+   * @param output_schema Complete frozen Value/parameter output shape.
    * @return true on disk cache hit; false on cache miss, skipped load, or
    * read/parse error.
    * @throws std::bad_alloc from diagnostic/output/Value storage. Disk read,
@@ -343,19 +336,17 @@ class GraphCacheService {
    * @note Used by execution worker paths that stage outputs outside the
    * formal HP cache before committing. Existing complete or partial formal
    * memory state prevents disk load so regionless artifacts cannot override
-   * current runtime validity. A schema containing generic named Values records
-   * an incompatible Miss and performs no filesystem or codec inspection.
-   * Representable plans compare sibling presence before either codec and
-   * compare exact decoded parameter keys before returning Hit; mismatches are
-   * misses and leave `out` unchanged.
+   * current runtime validity. Replay validates the complete manifest-bound
+   * named-Value transaction and exact frozen Value/parameter names before one
+   * move publishes the candidate; mismatches and errors leave `out` unchanged.
    */
   bool try_load_from_disk_cache_into(
       GraphModel& graph, const Node& node, NodeOutput& out,
-      ImageDiskCacheOutputSchema output_schema) const;
+      ValueDiskCacheOutputSchema output_schema) const;
 
  private:
   /**
-   * @brief Shared immutable codec used by every image artifact operation.
+   * @brief Shared immutable codec used by every image projection operation.
    * @note The owner is non-null after construction. The codec may be called by
    * different graph-state lanes concurrently and therefore must provide its own
    * provider-local synchronization when needed.
@@ -369,6 +360,13 @@ class GraphCacheService {
    * diagnostic state.
    */
   std::shared_ptr<const CacheMetadataCodec> metadata_codec_;
+
+  /**
+   * @brief Borrowed provider-definition authority for executable replay.
+   * @note The pointer may be null for built-in-only products. When non-null,
+   * its owner must outlive this service and every in-flight cache operation.
+   */
+  DataDefinitionRegistry* data_definitions_ = nullptr;
 
   /**
    * @brief Per-service bounded owner of discardable observed-image results.

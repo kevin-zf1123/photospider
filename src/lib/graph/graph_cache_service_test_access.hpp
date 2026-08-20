@@ -5,7 +5,7 @@
 namespace ps::testing {
 
 /**
- * @brief Deterministic checkpoints from disk-cache clearing.
+ * @brief Deterministic checkpoints from disk-cache transactions.
  * @throws Nothing for value construction and comparison.
  * @note This contract exists only in test-enabled product builds and is not
  * installed or exposed through Host.
@@ -13,6 +13,8 @@ namespace ps::testing {
 enum class GraphCacheServiceTestEvent {
   /** @brief The cache root was removed and has not yet been recreated. */
   DriveCacheRootRemoved,
+  /** @brief A validated manifest was detached before payload acquisition. */
+  ManifestReadBeforePayload,
 };
 
 /**
@@ -30,7 +32,7 @@ struct GraphCacheServiceTestHook {
    * @brief Observes one exact disk-cache checkpoint.
    * @param context Borrowed context supplied by the installing test.
    * @param event Exact checkpoint reached by the product cache service.
-   * @param cache_root Removed cache root that would next be recreated.
+   * @param cache_root Cache scope associated with the exact checkpoint.
    * @return Nothing.
    * @throws Any exception selected by the deterministic fault injector.
    */
@@ -50,7 +52,7 @@ void set_graph_cache_service_test_hook(
 /**
  * @brief Publishes one cache-clear checkpoint to the installed observer.
  * @param event Exact checkpoint reached by the product cache service.
- * @param cache_root Removed cache root that would next be recreated.
+ * @param cache_root Cache scope associated with the exact checkpoint.
  * @return Nothing.
  * @throws Any exception selected by the installed observer.
  */

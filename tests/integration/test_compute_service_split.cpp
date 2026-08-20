@@ -696,6 +696,18 @@ NodeOutput make_full_route_output_fixture(FullRouteOutputFixture fixture) {
 Value make_metrics_provider_defined_value(BufferHandle buffer);
 
 /**
+ * @brief Declares a multi-buffer provider fixture with an optional live
+ * registry retained for later artifact reconstruction.
+ * @param buffers One to 32 host-readable sealed bindings.
+ * @param registry Optional caller-owned registry that outlives replay.
+ * @return Ready provider-defined Value retaining the loaded generation.
+ * @throws Provider registry, validation, overflow, or allocation exceptions
+ * unchanged.
+ */
+Value make_metrics_provider_defined_value(std::vector<BufferHandle> buffers,
+                                          DataDefinitionRegistry* registry);
+
+/**
  * @brief Proves a legal provider-defined generic Value needs independent
  * revisioned output authority.
  *
@@ -1152,12 +1164,12 @@ std::uint32_t PS_DATA_CALL metrics_provider_abi_version(void) PS_DATA_NOEXCEPT {
 }
 
 /**
- * @brief Accepts the generically checked one-buffer fixture publication.
+ * @brief Accepts the generically checked multi-buffer fixture publication.
  * @param provider_context Non-null MetricsProviderState retained by the module.
  * @param value Payload-enabled Host view of the candidate Value.
  * @param diagnostic Unused Host-owned diagnostic output.
  * @param output Unused Host-owned variable-output sink.
- * @return OK only for one present, payload-visible buffer.
+ * @return OK only for one to 32 present payload-visible buffers.
  * @throws Nothing across the pure-C ABI.
  * @note Validation reads no payload byte; it checks only Host-supplied framing
  * and availability facts needed by this minimal fixture.
@@ -1169,10 +1181,16 @@ ps_data_status_v3 PS_DATA_CALL metrics_provider_validate(
   (void)diagnostic;
   (void)output;
   if (provider_context == nullptr || value == nullptr ||
-      value->buffer_count != 1U || value->buffers == nullptr ||
-      value->buffers[0].data == nullptr ||
-      (value->buffers[0].flags & PS_DATA_BUFFER_PAYLOAD_AVAILABLE_V3) == 0U) {
+      value->buffer_count == 0U || value->buffer_count > 32U ||
+      value->buffers == nullptr) {
     return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+  }
+  for (std::uint64_t index = 0U; index < value->buffer_count; ++index) {
+    if (value->buffers[index].data == nullptr ||
+        (value->buffers[index].flags & PS_DATA_BUFFER_PAYLOAD_AVAILABLE_V3) ==
+            0U) {
+      return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+    }
   }
   return PS_DATA_STATUS_OK_V3;
 }
@@ -1256,26 +1274,41 @@ ps_data_status_v3 PS_DATA_CALL metrics_provider_evaluate_spec(
 }
 
 /**
- * @brief Declines content traversal outside this fixture's validation purpose.
- * @param provider_context Ignored provider state.
- * @param value Ignored payload-enabled Value view.
- * @param sink Ignored canonical-content sink.
+ * @brief Emits every provider buffer in canonical index order.
+ * @param provider_context Non-null retained provider state.
+ * @param value Payload-enabled one-to-32-buffer Value view.
+ * @param sink Non-null Host-owned canonical-content sink.
  * @param diagnostic Ignored Host-owned diagnostic.
  * @param output Ignored Host-owned output sink.
- * @return `PS_DATA_STATUS_UNSUPPORTED_V3`.
+ * @return Stable sink status, or invalid argument for malformed input.
  * @throws Nothing across the pure-C ABI.
- * @note All callback inputs and outputs are intentionally ignored.
+ * @note Segment boundaries carry no identity meaning; deterministic index
+ * order and exact bytes provide the fixture's logical content identity.
  */
 ps_data_status_v3 PS_DATA_CALL metrics_provider_visit_content(
     void* provider_context, const ps_data_value_view_v3* value,
     const ps_data_byte_sink_v3* sink, ps_data_diagnostic_v3* diagnostic,
     const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
-  (void)provider_context;
-  (void)value;
-  (void)sink;
+  if (provider_context == nullptr || value == nullptr || sink == nullptr ||
+      sink->append == nullptr || value->buffer_count == 0U ||
+      value->buffers == nullptr) {
+    return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+  }
   (void)diagnostic;
   (void)output;
-  return PS_DATA_STATUS_UNSUPPORTED_V3;
+  for (std::uint64_t index = 0U; index < value->buffer_count; ++index) {
+    const ps_data_buffer_view_v3& buffer = value->buffers[index];
+    if (buffer.data == nullptr ||
+        (buffer.flags & PS_DATA_BUFFER_PAYLOAD_AVAILABLE_V3) == 0U) {
+      return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+    }
+    const ps_data_status_v3 status =
+        sink->append(sink->context, buffer.data, buffer.byte_size);
+    if (status != PS_DATA_STATUS_OK_V3) {
+      return status;
+    }
+  }
+  return PS_DATA_STATUS_OK_V3;
 }
 
 /**
@@ -1386,17 +1419,35 @@ metrics_provider_get_api(ps_data_provider_api_v3* api) PS_DATA_NOEXCEPT {
  * generation and module lease remain sufficient for later metrics inspection.
  */
 Value make_metrics_provider_defined_value(BufferHandle buffer) {
+  std::vector<BufferHandle> buffers;
+  buffers.push_back(std::move(buffer));
+  return make_metrics_provider_defined_value(std::move(buffers), nullptr);
+}
+
+/** @copydoc
+ * make_metrics_provider_defined_value(std::vector<BufferHandle>,DataDefinitionRegistry*)
+ */
+Value make_metrics_provider_defined_value(std::vector<BufferHandle> buffers,
+                                          DataDefinitionRegistry* registry) {
+  if (buffers.empty() || buffers.size() > 32U) {
+    throw std::invalid_argument(
+        "Metrics provider fixture requires one to 32 buffers.");
+  }
   auto state = std::make_shared<MetricsProviderState>();
   DataProviderCandidate candidate;
   candidate.get_abi_version = &metrics_provider_abi_version;
   candidate.get_api = &metrics_provider_get_api;
   candidate.module_lease = state;
 
-  DataDefinitionRegistry registry;
+  std::unique_ptr<DataDefinitionRegistry> local_registry;
+  if (registry == nullptr) {
+    local_registry = std::make_unique<DataDefinitionRegistry>();
+    registry = local_registry.get();
+  }
   staged_metrics_provider = state.get();
   DataProviderLoadResult loaded;
   try {
-    loaded = registry.load(std::move(candidate));
+    loaded = registry->load(std::move(candidate));
   } catch (...) {
     staged_metrics_provider = nullptr;
     throw;
@@ -1417,10 +1468,12 @@ Value make_metrics_provider_defined_value(BufferHandle buffer) {
   layout.definition.identity = kMetricsLayoutIdentity;
   layout.definition.structural_version = 1U;
   layout.definition.payload = {std::byte{0x01}};
-  layout.buffers.push_back({0U, 1U, 0U, buffer.size()});
-  std::vector<BufferHandle> buffers;
-  buffers.push_back(std::move(buffer));
-  return Value::from_provider_defined(registry, std::move(descriptor),
+  for (std::size_t index = 0U; index < buffers.size(); ++index) {
+    layout.buffers.push_back({static_cast<std::uint32_t>(index),
+                              static_cast<std::uint32_t>(index + 1U), 0U,
+                              buffers[index].size()});
+  }
+  return Value::from_provider_defined(*registry, std::move(descriptor),
                                       std::move(layout), std::move(buffers));
 }
 
@@ -6602,20 +6655,18 @@ TEST(ComputeOutputAuthority, FullRoutesCommitCanonicalImageAndGenericValue) {
 }
 
 /**
- * @brief Proves image-plus-generic full routes never accept or create a
- * partial image disk-cache artifact.
+ * @brief Proves image-plus-generic routes replay one portable transaction.
  *
  * @return Nothing; GoogleTest reports provider-count, named-output, artifact,
  * diagnostic, or sequential/parallel route failures.
  * @throws Registry, runtime, graph, codec, filesystem, Value, or service
  * exceptions unchanged.
- * @note Each route computes twice with disk cache enabled and clears only
- * formal memory cache between requests. Both requests must reach the provider,
- * preserve the exact `image` plus `deep` declaration, and leave the configured
- * image/metadata paths absent.
+ * @note Each route computes once, clears only formal memory, then reconstructs
+ * exact fresh `image` plus `deep` Values from the manifest-bound archive
+ * without a second provider call.
  */
 TEST(ComputeOutputAuthority,
-     DiskEnabledImageAndGenericRoutesRecomputeWithoutPartialArtifact) {
+     DiskEnabledImageAndGenericRoutesReplayPortableTransaction) {
   constexpr char kType[] = "issue130_generic_disk_cache";
   constexpr char kSubtype[] = "image_and_generic";
   OpRegistry& registry = OpRegistry::instance();
@@ -6686,18 +6737,24 @@ TEST(ComputeOutputAuthority,
         cache.node_cache_dir(graph, 1) / "output.png";
     auto metadata = artifact;
     metadata.replace_extension(".yml");
-    EXPECT_FALSE(std::filesystem::exists(artifact));
+    auto archive = artifact;
+    archive += ".values";
+    auto manifest = artifact;
+    manifest += ".manifest";
+    EXPECT_TRUE(std::filesystem::exists(artifact));
     EXPECT_FALSE(std::filesystem::exists(metadata));
+    EXPECT_TRUE(std::filesystem::exists(archive));
+    EXPECT_TRUE(std::filesystem::exists(manifest));
 
     EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
     verify_output(compute_once());
-    EXPECT_EQ(provider_entries->load(std::memory_order_relaxed), 2);
-    EXPECT_FALSE(std::filesystem::exists(artifact));
+    EXPECT_EQ(provider_entries->load(std::memory_order_relaxed), 1);
+    EXPECT_TRUE(std::filesystem::exists(artifact));
     EXPECT_FALSE(std::filesystem::exists(metadata));
     const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
     ASSERT_TRUE(diagnostic.has_value());
-    EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Miss);
-    EXPECT_NE(diagnostic->message.find("generic named Values"),
+    EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Hit);
+    EXPECT_NE(diagnostic->message.find("portable named-Value"),
               std::string::npos);
     runtime.stop();
   }
@@ -6812,8 +6869,7 @@ TEST(ComputeOutputAuthority,
     const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
     ASSERT_TRUE(diagnostic.has_value());
     EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Miss);
-    EXPECT_NE(diagnostic->message.find("generic named Values"),
-              std::string::npos);
+    EXPECT_NE(diagnostic->message.find("manifest/files"), std::string::npos);
     runtime.stop();
   }
   registry.unregister_key(make_key(kType, kSubtype));
@@ -7009,9 +7065,11 @@ TEST(ComputeOutputAuthority,
       EXPECT_FALSE(std::filesystem::exists(artifact));
       EXPECT_TRUE(std::filesystem::exists(metadata));
       EXPECT_EQ(codecs.image->calls().size(), 1U);
-      ASSERT_EQ(codecs.metadata->calls().size(), 1U);
+      ASSERT_EQ(codecs.metadata->calls().size(), 2U);
       EXPECT_EQ(codecs.metadata->calls().front().kind,
                 testing::FakeCacheMetadataCodec::Call::Kind::Write);
+      EXPECT_EQ(codecs.metadata->calls()[1U].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Read);
       const auto miss = graph.last_disk_cache_load_result_snapshot();
       ASSERT_TRUE(miss.has_value());
       EXPECT_EQ(miss->status, GraphModel::DiskCacheLoadStatus::Miss);
@@ -7023,15 +7081,16 @@ TEST(ComputeOutputAuthority,
       EXPECT_EQ(hit.data.at("radius").as_int64(), 17);
       EXPECT_EQ(data_entries->load(std::memory_order_relaxed), 1);
       EXPECT_EQ(codecs.image->calls().size(), 1U);
-      const std::size_t expected_metadata_calls = parallel ? 3U : 2U;
+      const std::size_t expected_metadata_calls = parallel ? 5U : 3U;
       ASSERT_EQ(codecs.metadata->calls().size(), expected_metadata_calls);
-      const std::size_t read_call =
-          expected_metadata_calls - (parallel ? 2U : 1U);
+      constexpr std::size_t read_call = 2U;
       EXPECT_EQ(codecs.metadata->calls()[read_call].kind,
                 testing::FakeCacheMetadataCodec::Call::Kind::Read);
       if (parallel) {
-        EXPECT_EQ(codecs.metadata->calls().back().kind,
+        EXPECT_EQ(codecs.metadata->calls()[3U].kind,
                   testing::FakeCacheMetadataCodec::Call::Kind::Write);
+        EXPECT_EQ(codecs.metadata->calls().back().kind,
+                  testing::FakeCacheMetadataCodec::Call::Kind::Read);
       }
       const auto hit_diagnostic = graph.last_disk_cache_load_result_snapshot();
       ASSERT_TRUE(hit_diagnostic.has_value());
@@ -7122,7 +7181,7 @@ TEST(ComputeOutputAuthority,
     ASSERT_TRUE(std::filesystem::exists(artifact));
     ASSERT_TRUE(std::filesystem::exists(metadata));
     ASSERT_EQ(codecs.image->calls().size(), 1U);
-    ASSERT_EQ(codecs.metadata->calls().size(), 1U);
+    ASSERT_EQ(codecs.metadata->calls().size(), 2U);
     EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
 
     registry.unregister_key(make_key(kType, kSubtype));
@@ -7148,7 +7207,7 @@ TEST(ComputeOutputAuthority,
       ASSERT_EQ(codecs.image->calls().size(), 2U);
       EXPECT_EQ(codecs.image->calls().back().kind,
                 testing::FakeImageArtifactCodec::Call::Kind::Encode);
-      EXPECT_EQ(codecs.metadata->calls().size(), 1U);
+      EXPECT_EQ(codecs.metadata->calls().size(), 2U);
       const auto miss = graph.last_disk_cache_load_result_snapshot();
       ASSERT_TRUE(miss.has_value());
       EXPECT_EQ(miss->status, GraphModel::DiskCacheLoadStatus::Miss);
@@ -7158,17 +7217,20 @@ TEST(ComputeOutputAuthority,
       EXPECT_TRUE(hit.has_image_value());
       EXPECT_TRUE(hit.data.empty());
       EXPECT_EQ(image_entries->load(std::memory_order_relaxed), 1);
-      const std::size_t expected_image_calls = parallel ? 4U : 3U;
-      ASSERT_EQ(codecs.image->calls().size(), expected_image_calls);
-      const std::size_t decode_call =
-          expected_image_calls - (parallel ? 2U : 1U);
-      EXPECT_EQ(codecs.image->calls()[decode_call].kind,
-                testing::FakeImageArtifactCodec::Call::Kind::Decode);
+      const std::size_t expected_image_calls = parallel ? 3U : 2U;
+      const auto image_calls = codecs.image->calls();
+      ASSERT_EQ(image_calls.size(), expected_image_calls);
+      EXPECT_TRUE(std::none_of(
+          image_calls.begin(), image_calls.end(),
+          [](const testing::FakeImageArtifactCodec::Call& call) {
+            return call.kind ==
+                   testing::FakeImageArtifactCodec::Call::Kind::Decode;
+          }));
       if (parallel) {
-        EXPECT_EQ(codecs.image->calls().back().kind,
+        EXPECT_EQ(image_calls.back().kind,
                   testing::FakeImageArtifactCodec::Call::Kind::Encode);
       }
-      EXPECT_EQ(codecs.metadata->calls().size(), 1U);
+      EXPECT_EQ(codecs.metadata->calls().size(), 2U);
       const auto hit_diagnostic = graph.last_disk_cache_load_result_snapshot();
       ASSERT_TRUE(hit_diagnostic.has_value());
       EXPECT_EQ(hit_diagnostic->status, GraphModel::DiskCacheLoadStatus::Hit);
@@ -7258,7 +7320,7 @@ TEST(ComputeOutputAuthority,
     ASSERT_FALSE(std::filesystem::exists(artifact));
     ASSERT_TRUE(std::filesystem::exists(metadata));
     ASSERT_TRUE(codecs.image->calls().empty());
-    ASSERT_EQ(codecs.metadata->calls().size(), 1U);
+    ASSERT_EQ(codecs.metadata->calls().size(), 2U);
     EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
 
     registry.unregister_key(make_key(kType, kSubtype));
@@ -7282,11 +7344,13 @@ TEST(ComputeOutputAuthority,
       EXPECT_EQ(replaced->data.at("sigma").as_int64(), 29);
       EXPECT_EQ(sigma_entries->load(std::memory_order_relaxed), 1);
       EXPECT_TRUE(codecs.image->calls().empty());
-      ASSERT_EQ(codecs.metadata->calls().size(), 3U);
-      EXPECT_EQ(codecs.metadata->calls()[1U].kind,
-                testing::FakeCacheMetadataCodec::Call::Kind::Read);
+      ASSERT_EQ(codecs.metadata->calls().size(), 5U);
       EXPECT_EQ(codecs.metadata->calls()[2U].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Read);
+      EXPECT_EQ(codecs.metadata->calls()[3U].kind,
                 testing::FakeCacheMetadataCodec::Call::Kind::Write);
+      EXPECT_EQ(codecs.metadata->calls()[4U].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Read);
       const auto miss = graph.last_disk_cache_load_result_snapshot();
       ASSERT_TRUE(miss.has_value());
       EXPECT_EQ(miss->status, GraphModel::DiskCacheLoadStatus::Miss);
@@ -7296,15 +7360,16 @@ TEST(ComputeOutputAuthority,
       ASSERT_EQ(hit.data.size(), 1U);
       EXPECT_EQ(hit.data.at("sigma").as_int64(), 29);
       EXPECT_EQ(sigma_entries->load(std::memory_order_relaxed), 1);
-      const std::size_t expected_metadata_calls = parallel ? 5U : 4U;
+      const std::size_t expected_metadata_calls = parallel ? 8U : 6U;
       ASSERT_EQ(codecs.metadata->calls().size(), expected_metadata_calls);
-      const std::size_t read_call =
-          expected_metadata_calls - (parallel ? 2U : 1U);
+      constexpr std::size_t read_call = 5U;
       EXPECT_EQ(codecs.metadata->calls()[read_call].kind,
                 testing::FakeCacheMetadataCodec::Call::Kind::Read);
       if (parallel) {
-        EXPECT_EQ(codecs.metadata->calls().back().kind,
+        EXPECT_EQ(codecs.metadata->calls()[6U].kind,
                   testing::FakeCacheMetadataCodec::Call::Kind::Write);
+        EXPECT_EQ(codecs.metadata->calls().back().kind,
+                  testing::FakeCacheMetadataCodec::Call::Kind::Read);
       }
       const auto hit_diagnostic = graph.last_disk_cache_load_result_snapshot();
       ASSERT_TRUE(hit_diagnostic.has_value());
@@ -7323,9 +7388,9 @@ TEST(ComputeOutputAuthority,
  * @throws Registry, runtime, graph, codec, filesystem, Value, or service
  * exceptions unchanged outside the explicit replacement no-throw boundary.
  * @note The first request persists image plus metadata. Empty replacement must
- * miss before both codecs, recompute, and remove both siblings. Since empty
- * outputs have no durable artifact, the following request must recompute again
- * while still avoiding every codec.
+ * miss before both codecs, recompute, remove both projections, and publish a
+ * canonical empty archive. The following request reuses that exact empty
+ * transaction without another provider call.
  */
 TEST(ComputeOutputAuthority,
      ImageAndParameterArtifactThenEmptySchemaClearsBothSiblings) {
@@ -7391,7 +7456,7 @@ TEST(ComputeOutputAuthority,
     ASSERT_TRUE(std::filesystem::exists(artifact));
     ASSERT_TRUE(std::filesystem::exists(metadata));
     ASSERT_EQ(codecs.image->calls().size(), 1U);
-    ASSERT_EQ(codecs.metadata->calls().size(), 1U);
+    ASSERT_EQ(codecs.metadata->calls().size(), 2U);
     EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
 
     registry.unregister_key(make_key(kType, kSubtype));
@@ -7416,7 +7481,7 @@ TEST(ComputeOutputAuthority,
       EXPECT_FALSE(std::filesystem::exists(artifact));
       EXPECT_FALSE(std::filesystem::exists(metadata));
       EXPECT_EQ(codecs.image->calls().size(), 1U);
-      EXPECT_EQ(codecs.metadata->calls().size(), 1U);
+      EXPECT_EQ(codecs.metadata->calls().size(), 2U);
       const auto miss = graph.last_disk_cache_load_result_snapshot();
       ASSERT_TRUE(miss.has_value());
       EXPECT_EQ(miss->status, GraphModel::DiskCacheLoadStatus::Miss);
@@ -7426,14 +7491,14 @@ TEST(ComputeOutputAuthority,
       EXPECT_FALSE(second.has_image_value());
       EXPECT_TRUE(second.data.empty());
       EXPECT_TRUE(second.named_values.empty());
-      EXPECT_EQ(empty_entries->load(std::memory_order_relaxed), 2);
+      EXPECT_EQ(empty_entries->load(std::memory_order_relaxed), 1);
       EXPECT_FALSE(std::filesystem::exists(artifact));
       EXPECT_FALSE(std::filesystem::exists(metadata));
       EXPECT_EQ(codecs.image->calls().size(), 1U);
-      EXPECT_EQ(codecs.metadata->calls().size(), 1U);
-      const auto second_miss = graph.last_disk_cache_load_result_snapshot();
-      ASSERT_TRUE(second_miss.has_value());
-      EXPECT_EQ(second_miss->status, GraphModel::DiskCacheLoadStatus::Miss);
+      EXPECT_EQ(codecs.metadata->calls().size(), 2U);
+      const auto second_hit = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(second_hit.has_value());
+      EXPECT_EQ(second_hit->status, GraphModel::DiskCacheLoadStatus::Hit);
     }
     runtime.stop();
     registry.unregister_key(make_key(kType, kSubtype));
@@ -9943,6 +10008,124 @@ TEST(GraphCacheServiceSplit,
   metadata_path.replace_extension(".yml");
   EXPECT_FALSE(std::filesystem::exists(image_path));
   EXPECT_FALSE(std::filesystem::exists(metadata_path));
+}
+
+/**
+ * @brief Proves disabled saving bypasses unsupported portable capture cleanly.
+ * @return Nothing; GoogleTest reports exception, codec call, or file side
+ *         effect mismatches.
+ * @throws Fixture publication, Region, or allocation exceptions unchanged.
+ * @note The same opaque pending device Value is rejected by the preceding
+ * enabled-save test. Here `skip_save_cache` wins before capability validation,
+ * preserving the explicit no-save policy without a silent configured skip.
+ */
+TEST(GraphCacheServiceSplit,
+     NoSavePolicyBypassesUnsupportedValueWithoutSideEffects) {
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-backend-cache-nosave");
+  GraphModel graph(root.path());
+  graph.set_skip_save_cache(true);
+  Node node = make_node(1, "split_plan", "source");
+  node.caches.push_back({"image", "output.png"});
+  node.cached_output_high_precision = NodeOutput{};
+  auto owner = std::make_shared<int>(9);
+  PendingDeviceValuePublication publication =
+      publish_opaque_device_image(8, 8, 1, ElementSemantics::FloatingPoint, 32U,
+                                  DeviceBackend::CUDA, owner);
+  node.cached_output_high_precision->publish_image_value(publication.value);
+  node.hp_region =
+      value_region::full_node_output_region(*node.cached_output_high_precision);
+  graph.add_node(node);
+
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>();
+  auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>();
+  GraphCacheService cache{image_codec, metadata_codec};
+  EXPECT_NO_THROW(cache.save_cache_if_configured(graph, graph.node(1), "int8"));
+  EXPECT_TRUE(image_codec->calls().empty());
+  EXPECT_TRUE(metadata_codec->calls().empty());
+  EXPECT_FALSE(std::filesystem::exists(cache.node_cache_dir(graph, 1)));
+}
+
+/**
+ * @brief Replays one provider-defined multi-buffer Value transactionally.
+ * @return Nothing; GoogleTest reports provider, payload, fresh-identity, or
+ *         missing-provider outcome mismatches.
+ * @throws Provider, artifact, filesystem, cache, Region, or allocation
+ *         exceptions from valid setup and replay.
+ * @note The active registry is injected only for executable reconstruction.
+ * A second service without it sees the same well-framed archive but publishes
+ * no placeholder Value.
+ */
+TEST(GraphCacheServiceSplit,
+     ProviderDefinedMultiBufferArchiveReplaysWithFreshIdentity) {
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-provider-cache-replay");
+  GraphModel graph(root.path());
+  Node saved = make_node(1, "split_plan", "source");
+  saved.caches.push_back({"image", "provider.cache"});
+  DataDefinitionRegistry registry;
+  std::vector<BufferHandle> buffers;
+  buffers.push_back(
+      make_image_output(1, 1, 1, 0.25F).image_value().buffer_handle());
+  buffers.push_back(
+      make_image_output(2, 1, 1, 0.75F).image_value().buffer_handle());
+  const Value source =
+      make_metrics_provider_defined_value(std::move(buffers), &registry);
+  ASSERT_EQ(source.buffer_count(), 2U);
+  NodeOutput output;
+  output.publish_named_value("deep", source);
+  saved.cached_output_high_precision = std::move(output);
+  saved.hp_region = value_region::full_node_output_region(
+      *saved.cached_output_high_precision);
+
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec(),
+                          kDefaultImageStatisticsCacheEntries, &registry};
+  cache.save_cache_if_configured(graph, saved, "int8");
+  const std::filesystem::path configured =
+      cache.node_cache_dir(graph, saved.id) / saved.caches.front().location;
+  std::filesystem::path archive = configured;
+  archive += ".values";
+  std::filesystem::path manifest = configured;
+  manifest += ".manifest";
+  ASSERT_TRUE(std::filesystem::exists(archive));
+  ASSERT_TRUE(std::filesystem::exists(manifest));
+
+  Node loaded = make_node(1, "split_plan", "source");
+  loaded.caches = saved.caches;
+  ASSERT_TRUE(cache.try_load_from_disk_cache(
+      graph, loaded, ValueDiskCacheOutputSchema{false, {}, {"deep"}}));
+  ASSERT_TRUE(loaded.cached_output_high_precision.has_value());
+  const Value& replay =
+      loaded.cached_output_high_precision->named_values.at("deep");
+  ASSERT_EQ(replay.buffer_count(), 2U);
+  EXPECT_EQ(replay.provider_defined_descriptor(),
+            source.provider_defined_descriptor());
+  EXPECT_EQ(replay.provider_defined_layout(), source.provider_defined_layout());
+  EXPECT_NE(replay.revision_id(), source.revision_id());
+  for (std::size_t index = 0U; index < replay.buffer_count(); ++index) {
+    EXPECT_NE(replay.storage_binding(index).allocation,
+              source.storage_binding(index).allocation);
+    const ProviderReadLease source_read = source.acquire_provider_read(index);
+    const ProviderReadLease replay_read = replay.acquire_provider_read(index);
+    ASSERT_EQ(replay_read.size(), source_read.size());
+    EXPECT_EQ(
+        std::memcmp(replay_read.data(), source_read.data(), source_read.size()),
+        0);
+  }
+
+  GraphCacheService missing_provider{
+      providers::make_configured_image_artifact_codec(),
+      testing::make_yaml_cache_metadata_codec()};
+  Node unavailable = make_node(1, "split_plan", "source");
+  unavailable.caches = saved.caches;
+  EXPECT_FALSE(missing_provider.try_load_from_disk_cache(
+      graph, unavailable, ValueDiskCacheOutputSchema{false, {}, {"deep"}}));
+  EXPECT_FALSE(unavailable.cached_output_high_precision.has_value());
+  const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(diagnostic.has_value());
+  EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Error);
+  EXPECT_EQ(diagnostic->code, GraphErrc::InvalidParameter);
 }
 
 TEST(DownsampleExecutorSplit,

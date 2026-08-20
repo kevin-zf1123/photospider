@@ -150,20 +150,87 @@ NodeOutput make_kernel_contract_image_output(int width, int height,
 }
 
 /**
- * @brief Creates one deterministic canonical CPU image Value for codec tests.
- * @param width Positive image width.
- * @param height Positive image height.
- * @param channels Positive interleaved channel count.
- * @param value Scalar assigned to every logical channel element.
- * @return Ready immutable image Value with padded aligned rows.
- * @throws Exceptions from `make_kernel_contract_image_output` unchanged.
- * @note The temporary NodeOutput adds no identity or storage; the returned
- * Value retains its exact revision and allocation after the wrapper retires.
+ * @brief Builds one rich signed-window image for portable cache replay tests.
+ * @return Ready padded FP32 RGBA Value with explicit channels, sample meaning,
+ *         color interpretation, and independent data/display windows.
+ * @throws Descriptor, Value, arithmetic, or allocation exceptions unchanged.
+ * @note Every logical sample is finite and inside the normalized domain so the
+ *       configured cache projection may also encode it deterministically.
  */
-Value make_kernel_contract_image_value(int width, int height, int channels,
-                                       float value) {
-  return make_kernel_contract_image_output(width, height, channels, value)
-      .image_value();
+Value make_rich_cache_image_value() {
+  DenseTensorDescriptor descriptor{{2U, 3U, 4U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.data_window = ImageBounds{-7, 11, -4, 13};
+  facet.display_window = ImageBounds{-12, 5, 2, 19};
+  ChannelSchema channels;
+  channels.channels = {{{1U}, "red"},
+                       {{2U}, "green"},
+                       {{3U}, "blue"},
+                       {{4U}, "alpha"}};
+  channels.groups.push_back(
+      ChannelGroupDescription{{17U}, "color", {{1U}, {2U}, {3U}}});
+  facet.channel_schema = std::move(channels);
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        {}};
+  facet.color = ColorFacet{1U,
+                           {17U},
+                           ColorTransferFunction::Srgb,
+                           ColorPrimaries::DisplayP3D65};
+  constexpr std::size_t kRowStride = 64U;
+  constexpr std::size_t kRowBytes = 3U * 4U * sizeof(float);
+  std::vector<std::byte> storage(kRowStride + kRowBytes, std::byte{0x5a});
+  for (std::size_t row = 0U; row < 2U; ++row) {
+    for (std::size_t index = 0U; index < 12U; ++index) {
+      const float sample = static_cast<float>(index + 1U) / 16.0F;
+      std::memcpy(storage.data() + row * kRowStride + index * sizeof(float),
+                  &sample, sizeof(sample));
+    }
+  }
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{{static_cast<std::ptrdiff_t>(kRowStride),
+                     static_cast<std::ptrdiff_t>(4U * sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float))}},
+      std::move(storage));
+}
+
+/**
+ * @brief Builds one non-image generic DenseTensor cache output.
+ * @return Ready padded UINT16 Value with deterministic payload bytes.
+ * @throws Value validation or allocation exceptions unchanged.
+ * @note The padding byte participates in the portable artifact and therefore
+ *       helps prove cache replay preserves the exact storage envelope.
+ */
+Value make_generic_cache_value() {
+  return Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{{2U, 3U},
+                            ElementSemantics::UnsignedInteger,
+                            StorageEncoding{16U}},
+      std::nullopt, StridedLayout{{8, 2}},
+      std::vector<std::byte>{std::byte{0x01}, std::byte{0x00}, std::byte{0x02},
+                             std::byte{0x00}, std::byte{0x03}, std::byte{0x00},
+                             std::byte{0xa5}, std::byte{0xa5}, std::byte{0x04},
+                             std::byte{0x00}, std::byte{0x05}, std::byte{0x00},
+                             std::byte{0x06}, std::byte{0x00}});
+}
+
+/**
+ * @brief Appends one private cache-transaction suffix without replacing the
+ *        configured image extension.
+ * @param path Configured cache projection path.
+ * @param suffix Exact private suffix beginning with a dot.
+ * @return Derived sibling path.
+ * @throws std::bad_alloc when native path storage cannot allocate.
+ */
+std::filesystem::path cache_transaction_sibling(std::filesystem::path path,
+                                                const char* suffix) {
+  path += suffix;
+  return path;
 }
 
 /**
@@ -1148,6 +1215,54 @@ void write_text(const std::filesystem::path& path, const std::string& text) {
 }
 
 /**
+ * @brief Reads one complete binary test artifact into detached bytes.
+ * @param path Existing file selected by the test.
+ * @return Exact file bytes.
+ * @throws std::runtime_error for open, size, seek, or read failure.
+ * @throws std::bad_alloc when detached storage cannot allocate.
+ */
+std::vector<std::byte> read_test_file_bytes(const std::filesystem::path& path) {
+  std::ifstream stream(path, std::ios::binary | std::ios::ate);
+  if (!stream.is_open() || stream.tellg() < 0) {
+    throw std::runtime_error("Could not size test artifact.");
+  }
+  const std::size_t size = static_cast<std::size_t>(stream.tellg());
+  std::vector<std::byte> bytes(size);
+  stream.seekg(0);
+  if (size != 0U) {
+    stream.read(reinterpret_cast<char*>(bytes.data()),
+                static_cast<std::streamsize>(size));
+  }
+  if (!stream) {
+    throw std::runtime_error("Could not read complete test artifact.");
+  }
+  return bytes;
+}
+
+/**
+ * @brief Replaces one binary test artifact with exact caller-owned bytes.
+ * @param path Destination whose parent already exists.
+ * @param bytes Complete bytes to write.
+ * @return Nothing after checked close.
+ * @throws std::runtime_error for open, write, or close failure.
+ */
+void write_test_file_bytes(const std::filesystem::path& path,
+                           const std::vector<std::byte>& bytes) {
+  std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+  if (!stream.is_open()) {
+    throw std::runtime_error("Could not open test artifact for replacement.");
+  }
+  if (!bytes.empty()) {
+    stream.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+  }
+  stream.close();
+  if (!stream) {
+    throw std::runtime_error("Could not replace complete test artifact.");
+  }
+}
+
+/**
  * @brief Writes a single-node graph whose operation intentionally is missing.
  *
  * @param path YAML file path to create.
@@ -1608,6 +1723,74 @@ class ScopedGraphCacheServiceHook {
 
  private:
   /** @brief Borrowed hook installed for this scope. */
+  testing::GraphCacheServiceTestHook hook_;
+};
+
+/**
+ * @brief Replaces one archive after its manifest snapshot is detached.
+ * @throws std::bad_alloc when replacement bytes are copied during setup.
+ * @note The callback runs synchronously on the cache reader and mutates only
+ * the exact test-owned archive path, creating a deterministic generation race.
+ */
+struct CachePayloadRace final {
+  /** @brief Exact archive replaced at the selected checkpoint. */
+  std::filesystem::path archive_path;
+  /** @brief Complete other-generation archive bytes. */
+  std::vector<std::byte> replacement;
+  /** @brief Number of matching checkpoints observed. */
+  std::atomic<int> observed{0};
+
+  /**
+   * @brief Installs the other generation before product payload acquisition.
+   * @param context Borrowed CachePayloadRace retained by the test.
+   * @param event Exact cache transaction checkpoint.
+   * @param cache_scope Per-node cache directory for provenance.
+   * @return Nothing after exact replacement.
+   * @throws Filesystem or stream errors from deterministic replacement.
+   */
+  static void notify(void* context, testing::GraphCacheServiceTestEvent event,
+                     const std::filesystem::path& cache_scope) {
+    auto* race = static_cast<CachePayloadRace*>(context);
+    if (event !=
+        testing::GraphCacheServiceTestEvent::ManifestReadBeforePayload) {
+      return;
+    }
+    EXPECT_EQ(race->archive_path.parent_path(), cache_scope);
+    race->observed.fetch_add(1, std::memory_order_relaxed);
+    write_test_file_bytes(race->archive_path, race->replacement);
+  }
+};
+
+/**
+ * @brief Installs one manifest/payload race and clears it at scope exit.
+ * @param race Mutation state retained through the guarded load.
+ * @throws Nothing.
+ * @note The test must serialize process-local hook use.
+ */
+class ScopedGraphCachePayloadRaceHook final {
+ public:
+  /**
+   * @brief Installs the borrowed race callback.
+   * @param race Context that outlives this guard.
+   * @throws Nothing.
+   */
+  explicit ScopedGraphCachePayloadRaceHook(CachePayloadRace& race)
+      : hook_{&race, &CachePayloadRace::notify} {
+    testing::set_graph_cache_service_test_hook(&hook_);
+  }
+
+  /** @brief Clears the process-local hook before context destruction. */
+  ~ScopedGraphCachePayloadRaceHook() noexcept {
+    testing::set_graph_cache_service_test_hook(nullptr);
+  }
+
+  ScopedGraphCachePayloadRaceHook(const ScopedGraphCachePayloadRaceHook&) =
+      delete;
+  ScopedGraphCachePayloadRaceHook& operator=(
+      const ScopedGraphCachePayloadRaceHook&) = delete;
+
+ private:
+  /** @brief Borrowed process-local hook record. */
   testing::GraphCacheServiceTestHook hook_;
 };
 #endif
@@ -2802,7 +2985,7 @@ TEST(CacheSemantics, DiskCacheMissRecordsDiagnostic) {
 
   NodeOutput out;
   EXPECT_FALSE(ctx.cache.try_load_from_disk_cache_into(
-      ctx.graph, ctx.node, out, ImageDiskCacheOutputSchema{true, {}, false}));
+      ctx.graph, ctx.node, out, ValueDiskCacheOutputSchema{true, {}, {}}));
 
   const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
   ASSERT_TRUE(result.has_value());
@@ -2816,13 +2999,21 @@ TEST(CacheSemantics, DiskCacheMissRecordsDiagnostic) {
 TEST(CacheSemantics, DiskCacheMetadataHitPreservesTryLoadBehavior) {
   DiskCacheDiagnosticContext ctx("photospider-contract-disk-cache-hit",
                                  "output.png");
-  auto metadata_file = ctx.metadata_file();
-  write_text(metadata_file, "answer: 42\nlabel: cached\n");
+  const auto metadata_file = ctx.metadata_file();
+  ctx.node.cached_output_high_precision = NodeOutput{};
+  ctx.node.cached_output_high_precision->data = {
+      {"answer", plugin::ParameterValue(42)},
+      {"label", plugin::ParameterValue("cached")}};
+  ctx.node.hp_region = value_region::full_node_output_region(
+      *ctx.node.cached_output_high_precision);
+  ctx.cache.save_cache_if_configured(ctx.graph, ctx.node, "int8");
+  ctx.node.cached_output_high_precision.reset();
+  ctx.node.hp_region.reset();
 
   NodeOutput out;
   EXPECT_TRUE(ctx.cache.try_load_from_disk_cache_into(
       ctx.graph, ctx.node, out,
-      ImageDiskCacheOutputSchema{false, {"answer", "label"}, false}));
+      ValueDiskCacheOutputSchema{false, {"answer", "label"}, {}}));
   ASSERT_NE(out.data.find("answer"), out.data.end());
   ASSERT_NE(out.data.find("label"), out.data.end());
   EXPECT_EQ(out.data.at("answer").as_int64(), 42);
@@ -2868,7 +3059,7 @@ TEST(CacheSemantics, ConfiguredYamlMetadataCodecRoundTripsNamedValues) {
   Node loaded = make_cached_process_node("output.png");
   ASSERT_TRUE(cache.try_load_from_disk_cache(
       graph, loaded,
-      ImageDiskCacheOutputSchema{false, {"answer", "nested"}, false}));
+      ValueDiskCacheOutputSchema{false, {"answer", "nested"}, {}}));
   ASSERT_TRUE(loaded.cached_output_high_precision.has_value());
   EXPECT_EQ(loaded.cached_output_high_precision->data, expected);
   EXPECT_EQ(loaded.hp_version, 1);
@@ -2878,16 +3069,137 @@ TEST(CacheSemantics, ConfiguredYamlMetadataCodecRoundTripsNamedValues) {
   std::filesystem::remove_all(root);
 }
 
+/**
+ * @brief Proves one cache transaction replays rich and generic named Values.
+ * @return Nothing; GoogleTest reports archive, metadata, identity, or payload
+ *         mismatches.
+ * @throws Filesystem, codec, artifact, Value, Region, or allocation exceptions
+ *         when the production cache boundary cannot complete.
+ * @note The same immutable archive is loaded twice after independent memory
+ *       eviction. Logical metadata and bytes remain exact while both replays
+ *       must mint process-local revisions and allocations distinct from the
+ *       source and from each other.
+ */
+TEST(CacheSemantics,
+     PortableNamedValueTransactionPreservesRichFactsAndFreshIdentity) {
+  const auto root =
+      clean_temp_path("photospider-portable-named-value-cache-round-trip");
+  GraphModel graph(root);
+  Node saved = make_cached_process_node("output.png");
+  NodeOutput output;
+  const Value source_image = make_rich_cache_image_value();
+  const Value source_auxiliary = make_generic_cache_value();
+  output.publish_image_value(source_image);
+  output.publish_named_value("auxiliary", source_auxiliary);
+  output.data.emplace("answer", plugin::ParameterValue(42));
+  saved.cached_output_high_precision = std::move(output);
+  saved.hp_region = value_region::full_node_output_region(
+      *saved.cached_output_high_precision);
+
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  cache.save_cache_if_configured(graph, saved, "int8");
+
+  const std::filesystem::path image_path =
+      cache.node_cache_dir(graph, saved.id) / saved.caches.front().location;
+  auto metadata_path = image_path;
+  metadata_path.replace_extension(".yml");
+  const std::filesystem::path archive_path =
+      cache_transaction_sibling(image_path, ".values");
+  const std::filesystem::path manifest_path =
+      cache_transaction_sibling(image_path, ".manifest");
+  EXPECT_TRUE(std::filesystem::exists(image_path));
+  EXPECT_TRUE(std::filesystem::exists(metadata_path));
+  EXPECT_TRUE(std::filesystem::exists(archive_path));
+  EXPECT_TRUE(std::filesystem::exists(manifest_path));
+
+  const auto load_once = [&]() {
+    Node loaded = make_cached_process_node("output.png");
+    EXPECT_TRUE(cache.try_load_from_disk_cache(
+        graph, loaded,
+        ValueDiskCacheOutputSchema{true, {"answer"}, {"auxiliary"}}));
+    EXPECT_TRUE(loaded.cached_output_high_precision.has_value());
+    return loaded;
+  };
+  Node first = load_once();
+  Node second = load_once();
+  ASSERT_TRUE(first.cached_output_high_precision.has_value());
+  ASSERT_TRUE(second.cached_output_high_precision.has_value());
+  const NodeOutput& first_output = *first.cached_output_high_precision;
+  const NodeOutput& second_output = *second.cached_output_high_precision;
+  ASSERT_EQ(first_output.named_values.size(), 2U);
+  ASSERT_EQ(second_output.named_values.size(), 2U);
+  EXPECT_EQ(first_output.data, saved.cached_output_high_precision->data);
+  EXPECT_EQ(second_output.data, saved.cached_output_high_precision->data);
+
+  const Value& first_image = first_output.image_value();
+  const Value& second_image = second_output.image_value();
+  EXPECT_EQ(first_image.dense_tensor_descriptor(),
+            source_image.dense_tensor_descriptor());
+  EXPECT_EQ(first_image.image_facet(), source_image.image_facet());
+  EXPECT_EQ(first_image.strided_layout(), source_image.strided_layout());
+  EXPECT_NE(first_image.revision_id(), source_image.revision_id());
+  EXPECT_NE(first_image.allocation_identity(),
+            source_image.allocation_identity());
+  EXPECT_NE(second_image.revision_id(), first_image.revision_id());
+  EXPECT_NE(second_image.allocation_identity(),
+            first_image.allocation_identity());
+
+  const Value& first_auxiliary = first_output.named_values.at("auxiliary");
+  const Value& second_auxiliary = second_output.named_values.at("auxiliary");
+  EXPECT_EQ(first_auxiliary.dense_tensor_descriptor(),
+            source_auxiliary.dense_tensor_descriptor());
+  EXPECT_EQ(first_auxiliary.strided_layout(),
+            source_auxiliary.strided_layout());
+  EXPECT_NE(first_auxiliary.revision_id(), source_auxiliary.revision_id());
+  EXPECT_NE(first_auxiliary.allocation_identity(),
+            source_auxiliary.allocation_identity());
+  EXPECT_NE(second_auxiliary.revision_id(), first_auxiliary.revision_id());
+  EXPECT_NE(second_auxiliary.allocation_identity(),
+            first_auxiliary.allocation_identity());
+  const ReadLease source_read = source_auxiliary.buffer_handle().acquire_read();
+  const ReadLease first_read = first_auxiliary.buffer_handle().acquire_read();
+  ASSERT_EQ(first_read.size(), source_read.size());
+  EXPECT_EQ(
+      std::memcmp(first_read.data(), source_read.data(), source_read.size()),
+      0);
+  EXPECT_EQ(first.hp_version, 1);
+  EXPECT_EQ(second.hp_version, 1);
+  ASSERT_TRUE(first.hp_region.has_value());
+  ASSERT_TRUE(second.hp_region.has_value());
+  EXPECT_TRUE(value_region::node_output_region_is_complete(first_output,
+                                                           *first.hp_region));
+  EXPECT_TRUE(value_region::node_output_region_is_complete(second_output,
+                                                           *second.hp_region));
+
+  std::filesystem::remove_all(root);
+}
+
 TEST(CacheSemantics, DiskCacheInvalidMetadataRecordsErrorDiagnostic) {
   DiskCacheDiagnosticContext ctx("photospider-contract-disk-cache-bad-yaml",
                                  "output.png");
-  auto metadata_file = ctx.metadata_file();
-  write_text(metadata_file, "answer: [1, 2\n");
+  const auto metadata_file = ctx.metadata_file();
+  ctx.node.cached_output_high_precision = NodeOutput{};
+  ctx.node.cached_output_high_precision->data.emplace(
+      "answer", plugin::ParameterValue(42));
+  ctx.node.hp_region = value_region::full_node_output_region(
+      *ctx.node.cached_output_high_precision);
+  auto invalid_writer = std::make_shared<testing::FakeCacheMetadataCodec>(
+      [](const std::filesystem::path&) {
+        return plugin::ParameterMap{{"answer", plugin::ParameterValue(42)}};
+      },
+      [](const std::filesystem::path& path, const plugin::ParameterMap&) {
+        write_text(path, "answer: [1, 2\n");
+      });
+  GraphCacheService writer{ctx.codec, invalid_writer};
+  writer.save_cache_if_configured(ctx.graph, ctx.node, "int8");
+  ctx.node.cached_output_high_precision.reset();
+  ctx.node.hp_region.reset();
 
   NodeOutput out;
   EXPECT_FALSE(ctx.cache.try_load_from_disk_cache_into(
       ctx.graph, ctx.node, out,
-      ImageDiskCacheOutputSchema{false, {"answer"}, false}));
+      ValueDiskCacheOutputSchema{false, {"answer"}, {}}));
 
   const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
   ASSERT_TRUE(result.has_value());
@@ -2898,51 +3210,162 @@ TEST(CacheSemantics, DiskCacheInvalidMetadataRecordsErrorDiagnostic) {
             std::string::npos);
 }
 
-TEST(CacheSemantics, InjectedCodecIoErrorLeavesHpCacheUnchanged) {
+TEST(CacheSemantics, TamperedPortableArchiveLeavesHpCacheUnchanged) {
   DiskCacheDiagnosticContext ctx(
-      "photospider-contract-disk-cache-codec-io", "output.png",
-      [](const std::filesystem::path& path,
-         const ImageArtifactDecodeRequest&) -> Value {
-        throw GraphError(
-            GraphErrc::Io,
-            "fake decode rejected image artifact: " + path.string());
-      });
-  auto image_file = ctx.cache_file();
-  write_text(image_file, "fake image bytes");
+      "photospider-contract-disk-cache-archive-tamper", "output.png");
+  ctx.node.cached_output_high_precision =
+      make_kernel_contract_image_output(2, 1, 1, 0.25F);
+  ctx.node.hp_region = value_region::full_node_output_region(
+      *ctx.node.cached_output_high_precision);
+  ctx.cache.save_cache_if_configured(ctx.graph, ctx.node, "int8");
+  const auto archive_path =
+      cache_transaction_sibling(ctx.cache_file(), ".values");
+  std::vector<std::byte> archive = read_test_file_bytes(archive_path);
+  ASSERT_FALSE(archive.empty());
+  archive.back() ^= std::byte{0x01};
+  write_test_file_bytes(archive_path, archive);
+  ctx.node.cached_output_high_precision.reset();
+  ctx.node.hp_region.reset();
 
   EXPECT_FALSE(ctx.cache.try_load_from_disk_cache(
-      ctx.graph, ctx.node, ImageDiskCacheOutputSchema{true, {}, false}));
+      ctx.graph, ctx.node, ValueDiskCacheOutputSchema{true, {}, {}}));
   EXPECT_FALSE(ctx.node.cached_output_high_precision.has_value());
 
   const auto calls = ctx.codec->calls();
   ASSERT_EQ(calls.size(), 1u);
   EXPECT_EQ(calls.front().kind,
-            testing::FakeImageArtifactCodec::Call::Kind::Decode);
-  EXPECT_EQ(calls.front().path, image_file);
+            testing::FakeImageArtifactCodec::Call::Kind::Encode);
 
   const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(result->status, GraphModel::DiskCacheLoadStatus::Error);
-  EXPECT_EQ(result->code, GraphErrc::Io);
-  EXPECT_EQ(result->cache_file, image_file);
-  EXPECT_NE(result->message.find("fake decode rejected image artifact"),
-            std::string::npos);
+  EXPECT_EQ(result->code, GraphErrc::InvalidParameter);
+  EXPECT_NE(result->message.find("digest"), std::string::npos);
 }
 
-TEST(CacheSemantics, InjectedCodecBadAllocPropagatesWithoutHpMutation) {
+TEST(CacheSemantics, PartialPortableTransactionIsMissWithoutHpMutation) {
   DiskCacheDiagnosticContext ctx(
-      "photospider-contract-disk-cache-codec-bad-alloc", "output.png",
-      [](const std::filesystem::path&, const ImageArtifactDecodeRequest&)
-          -> Value { throw std::bad_alloc(); });
-  write_text(ctx.cache_file(), "fake image bytes");
+      "photospider-contract-disk-cache-partial-transaction", "output.png");
+  ctx.node.cached_output_high_precision =
+      make_kernel_contract_image_output(2, 1, 1, 0.25F);
+  ctx.node.hp_region = value_region::full_node_output_region(
+      *ctx.node.cached_output_high_precision);
+  ctx.cache.save_cache_if_configured(ctx.graph, ctx.node, "int8");
+  const auto archive_path =
+      cache_transaction_sibling(ctx.cache_file(), ".values");
+  ASSERT_TRUE(std::filesystem::remove(archive_path));
+  ctx.node.cached_output_high_precision.reset();
+  ctx.node.hp_region.reset();
 
-  EXPECT_THROW(
-      ctx.cache.try_load_from_disk_cache(
-          ctx.graph, ctx.node, ImageDiskCacheOutputSchema{true, {}, false}),
-      std::bad_alloc);
+  EXPECT_FALSE(ctx.cache.try_load_from_disk_cache(
+      ctx.graph, ctx.node, ValueDiskCacheOutputSchema{true, {}, {}}));
   EXPECT_FALSE(ctx.node.cached_output_high_precision.has_value());
-  ASSERT_EQ(ctx.codec->calls().size(), 1u);
+  const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->status, GraphModel::DiskCacheLoadStatus::Miss);
+  EXPECT_NE(result->message.find("partial"), std::string::npos);
 }
+
+/**
+ * @brief Rejects a manifest and archive selected from different save results.
+ * @return Nothing; GoogleTest reports digest, publication, or diagnostic
+ *         mismatches.
+ * @throws Cache, artifact, filesystem, Region, or allocation exceptions from
+ *         fixture setup.
+ * @note Both generations are independently valid; only their cross-generation
+ * pairing is invalid, proving the manifest is a real transaction boundary.
+ */
+TEST(CacheSemantics, MixedPortableGenerationsPublishNoNamedValue) {
+  DiskCacheDiagnosticContext ctx(
+      "photospider-contract-disk-cache-mixed-generations", "output.png");
+  const auto archive_path =
+      cache_transaction_sibling(ctx.cache_file(), ".values");
+  const auto manifest_path =
+      cache_transaction_sibling(ctx.cache_file(), ".manifest");
+
+  ctx.node.cached_output_high_precision =
+      make_kernel_contract_image_output(2, 1, 1, 0.25F);
+  ctx.node.hp_region = value_region::full_node_output_region(
+      *ctx.node.cached_output_high_precision);
+  ctx.cache.save_cache_if_configured(ctx.graph, ctx.node, "int8");
+  const std::vector<std::byte> first_archive =
+      read_test_file_bytes(archive_path);
+  const std::vector<std::byte> first_manifest =
+      read_test_file_bytes(manifest_path);
+
+  ctx.node.cached_output_high_precision =
+      make_kernel_contract_image_output(2, 1, 1, 0.75F);
+  ctx.node.hp_region = value_region::full_node_output_region(
+      *ctx.node.cached_output_high_precision);
+  ctx.cache.save_cache_if_configured(ctx.graph, ctx.node, "int8");
+  ASSERT_NE(read_test_file_bytes(archive_path), first_archive);
+  write_test_file_bytes(manifest_path, first_manifest);
+  ctx.node.cached_output_high_precision.reset();
+  ctx.node.hp_region.reset();
+
+  EXPECT_FALSE(ctx.cache.try_load_from_disk_cache(
+      ctx.graph, ctx.node, ValueDiskCacheOutputSchema{true, {}, {}}));
+  EXPECT_FALSE(ctx.node.cached_output_high_precision.has_value());
+  const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->status, GraphModel::DiskCacheLoadStatus::Error);
+  EXPECT_EQ(result->code, GraphErrc::InvalidParameter);
+}
+
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
+/**
+ * @brief Rejects a payload replaced after the matching manifest was read.
+ * @return Nothing; GoogleTest reports checkpoint, digest, or publication
+ *         mismatches.
+ * @throws Cache, artifact, filesystem, Region, or allocation exceptions from
+ *         fixture setup and deterministic replacement.
+ * @note The test-only checkpoint changes the archive synchronously between
+ * manifest detachment and payload acquisition, avoiding timing or sleep-based
+ * race assertions.
+ */
+TEST(CacheSemantics, ManifestPayloadRacePublishesNoNamedValue) {
+  DiskCacheDiagnosticContext ctx(
+      "photospider-contract-disk-cache-manifest-payload-race", "output.png");
+  const auto archive_path =
+      cache_transaction_sibling(ctx.cache_file(), ".values");
+  const auto manifest_path =
+      cache_transaction_sibling(ctx.cache_file(), ".manifest");
+
+  ctx.node.cached_output_high_precision =
+      make_kernel_contract_image_output(2, 1, 1, 0.25F);
+  ctx.node.hp_region = value_region::full_node_output_region(
+      *ctx.node.cached_output_high_precision);
+  ctx.cache.save_cache_if_configured(ctx.graph, ctx.node, "int8");
+  const std::vector<std::byte> first_archive =
+      read_test_file_bytes(archive_path);
+  const std::vector<std::byte> first_manifest =
+      read_test_file_bytes(manifest_path);
+
+  ctx.node.cached_output_high_precision =
+      make_kernel_contract_image_output(2, 1, 1, 0.75F);
+  ctx.node.hp_region = value_region::full_node_output_region(
+      *ctx.node.cached_output_high_precision);
+  ctx.cache.save_cache_if_configured(ctx.graph, ctx.node, "int8");
+  const std::vector<std::byte> second_archive =
+      read_test_file_bytes(archive_path);
+  ASSERT_NE(first_archive, second_archive);
+  write_test_file_bytes(archive_path, first_archive);
+  write_test_file_bytes(manifest_path, first_manifest);
+  ctx.node.cached_output_high_precision.reset();
+  ctx.node.hp_region.reset();
+
+  CachePayloadRace race{archive_path, second_archive};
+  ScopedGraphCachePayloadRaceHook hook(race);
+  EXPECT_FALSE(ctx.cache.try_load_from_disk_cache(
+      ctx.graph, ctx.node, ValueDiskCacheOutputSchema{true, {}, {}}));
+  EXPECT_EQ(race.observed.load(std::memory_order_relaxed), 1);
+  EXPECT_FALSE(ctx.node.cached_output_high_precision.has_value());
+  const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->status, GraphModel::DiskCacheLoadStatus::Error);
+  EXPECT_EQ(result->code, GraphErrc::InvalidParameter);
+}
+#endif
 
 /**
  * @brief Verifies the metadata codec is required, retained, and receives exact
@@ -2960,7 +3383,7 @@ TEST(CacheSemantics,
   saved.hp_region = value_region::full_node_output_region(
       *saved.cached_output_high_precision);
   const plugin::ParameterMap read_values{
-      {"loaded", plugin::ParameterValue(73)}};
+      {"written", plugin::ParameterValue("value")}};
 
   std::filesystem::path expected_path =
       root / std::to_string(saved.id) / saved.caches.front().location;
@@ -2976,7 +3399,10 @@ TEST(CacheSemantics,
   std::weak_ptr<testing::FakeCacheMetadataCodec> weak_codec;
   {
     auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
-        [read_values](const std::filesystem::path&) { return read_values; });
+        [read_values](const std::filesystem::path&) { return read_values; },
+        [](const std::filesystem::path& path, const plugin::ParameterMap&) {
+          write_text(path, "written: value\n");
+        });
     weak_codec = metadata_codec;
     GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                             metadata_codec};
@@ -2984,26 +3410,28 @@ TEST(CacheSemantics,
     ASSERT_FALSE(weak_codec.expired());
 
     cache.save_cache_if_configured(graph, saved, "int8");
-    write_text(expected_path, "fake metadata presence");
 
     Node loaded = make_cached_process_node("output.png");
     NodeOutput output;
     ASSERT_TRUE(cache.try_load_from_disk_cache_into(
         graph, loaded, output,
-        ImageDiskCacheOutputSchema{false, {"loaded"}, false}));
+        ValueDiskCacheOutputSchema{false, {"written"}, {}}));
     EXPECT_EQ(output.data, read_values);
 
     const auto retained = weak_codec.lock();
     ASSERT_TRUE(retained);
     const auto calls = retained->calls();
-    ASSERT_EQ(calls.size(), 2U);
+    ASSERT_EQ(calls.size(), 3U);
     EXPECT_EQ(calls[0].kind,
               testing::FakeCacheMetadataCodec::Call::Kind::Write);
     EXPECT_EQ(calls[0].path, expected_path);
     EXPECT_EQ(calls[0].values, saved.cached_output_high_precision->data);
-    EXPECT_EQ(calls[1].kind, testing::FakeCacheMetadataCodec::Call::Kind::Read);
-    EXPECT_EQ(calls[1].path, expected_path);
-    EXPECT_TRUE(calls[1].values.empty());
+    for (std::size_t index : {1U, 2U}) {
+      EXPECT_EQ(calls[index].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Read);
+      EXPECT_EQ(calls[index].path, expected_path);
+      EXPECT_TRUE(calls[index].values.empty());
+    }
   }
 
   EXPECT_TRUE(weak_codec.expired());
@@ -3023,7 +3451,16 @@ TEST(CacheSemantics,
   std::filesystem::path metadata_file =
       root / std::to_string(node.id) / node.caches.front().location;
   metadata_file.replace_extension(".yml");
-  write_text(metadata_file, "fake metadata presence");
+  node.cached_output_high_precision = NodeOutput{};
+  node.cached_output_high_precision->data.emplace("answer",
+                                                  plugin::ParameterValue(42));
+  node.hp_region =
+      value_region::full_node_output_region(*node.cached_output_high_precision);
+  GraphCacheService writer{providers::make_configured_image_artifact_codec(),
+                           testing::make_yaml_cache_metadata_codec()};
+  writer.save_cache_if_configured(graph, node, "int8");
+  node.cached_output_high_precision.reset();
+  node.hp_region.reset();
 
   auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
       [](const std::filesystem::path&) -> plugin::ParameterMap {
@@ -3034,7 +3471,7 @@ TEST(CacheSemantics,
                           metadata_codec};
 
   EXPECT_FALSE(cache.try_load_from_disk_cache(
-      graph, node, ImageDiskCacheOutputSchema{false, {"answer"}, false}));
+      graph, node, ValueDiskCacheOutputSchema{false, {"answer"}, {}}));
   EXPECT_FALSE(node.cached_output_high_precision.has_value());
   const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
   ASSERT_TRUE(diagnostic.has_value());
@@ -3058,7 +3495,16 @@ TEST(CacheSemantics, InjectedMetadataCodecBadAllocPropagatesUnchanged) {
   std::filesystem::path metadata_file =
       root / std::to_string(node.id) / node.caches.front().location;
   metadata_file.replace_extension(".yml");
-  write_text(metadata_file, "fake metadata presence");
+  node.cached_output_high_precision = NodeOutput{};
+  node.cached_output_high_precision->data.emplace("answer",
+                                                  plugin::ParameterValue(42));
+  node.hp_region =
+      value_region::full_node_output_region(*node.cached_output_high_precision);
+  GraphCacheService writer{providers::make_configured_image_artifact_codec(),
+                           testing::make_yaml_cache_metadata_codec()};
+  writer.save_cache_if_configured(graph, node, "int8");
+  node.cached_output_high_precision.reset();
+  node.hp_region.reset();
 
   auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
       [](const std::filesystem::path&) -> plugin::ParameterMap {
@@ -3069,7 +3515,7 @@ TEST(CacheSemantics, InjectedMetadataCodecBadAllocPropagatesUnchanged) {
 
   EXPECT_THROW(
       cache.try_load_from_disk_cache(
-          graph, node, ImageDiskCacheOutputSchema{false, {"answer"}, false}),
+          graph, node, ValueDiskCacheOutputSchema{false, {"answer"}, {}}),
       std::bad_alloc);
   EXPECT_FALSE(node.cached_output_high_precision.has_value());
   EXPECT_FALSE(graph.last_disk_cache_load_result_snapshot().has_value());
@@ -3079,13 +3525,13 @@ TEST(CacheSemantics, InjectedMetadataCodecBadAllocPropagatesUnchanged) {
 
 /**
  * @brief Verifies a metadata `std::runtime_error` uses the standard-exception
- * fallback after image decode without publishing partial HP output.
+ * fallback during manifest-bound metadata replay without partial HP output.
  *
  * @return Nothing; GoogleTest assertions report codec-call, path, diagnostic,
  * or HP-state mismatches.
  * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
- * @note Both cache files exist and the image fake returns a valid buffer, so
- * the metadata failure occurs only after image decoding has succeeded.
+ * @note A valid transaction is first written by the configured codec. The
+ * failing reader is then injected after every archive digest check succeeds.
  */
 TEST(CacheSemantics,
      InjectedMetadataCodecRuntimeErrorRecordsUnknownWithoutPartialHp) {
@@ -3095,16 +3541,20 @@ TEST(CacheSemantics,
   Node node = make_cached_process_node("output.png");
   const std::filesystem::path image_file =
       root / std::to_string(node.id) / node.caches.front().location;
-  auto metadata_file = image_file;
+  std::filesystem::path metadata_file = image_file;
   metadata_file.replace_extension(".yml");
-  write_text(image_file, "fake image bytes");
-  write_text(metadata_file, "fake metadata presence");
+  node.cached_output_high_precision = NodeOutput{};
+  node.cached_output_high_precision->data.emplace("answer",
+                                                  plugin::ParameterValue(42));
+  node.hp_region =
+      value_region::full_node_output_region(*node.cached_output_high_precision);
+  GraphCacheService writer{providers::make_configured_image_artifact_codec(),
+                           testing::make_yaml_cache_metadata_codec()};
+  writer.save_cache_if_configured(graph, node, "int8");
+  node.cached_output_high_precision.reset();
+  node.hp_region.reset();
 
-  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
-      [](const std::filesystem::path&,
-         const ImageArtifactDecodeRequest&) -> Value {
-        return make_kernel_contract_image_value(2, 1, 1, 0.0F);
-      });
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>();
   auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
       [](const std::filesystem::path&) -> plugin::ParameterMap {
         throw std::runtime_error("injected metadata runtime failure");
@@ -3112,14 +3562,11 @@ TEST(CacheSemantics,
   GraphCacheService cache{image_codec, metadata_codec};
 
   EXPECT_FALSE(cache.try_load_from_disk_cache(
-      graph, node, ImageDiskCacheOutputSchema{true, {"answer"}, false}));
+      graph, node, ValueDiskCacheOutputSchema{false, {"answer"}, {}}));
   EXPECT_FALSE(node.cached_output_high_precision.has_value());
 
   const auto image_calls = image_codec->calls();
-  ASSERT_EQ(image_calls.size(), 1U);
-  EXPECT_EQ(image_calls.front().kind,
-            testing::FakeImageArtifactCodec::Call::Kind::Decode);
-  EXPECT_EQ(image_calls.front().path, image_file);
+  EXPECT_TRUE(image_calls.empty());
   const auto metadata_calls = metadata_codec->calls();
   ASSERT_EQ(metadata_calls.size(), 1U);
   EXPECT_EQ(metadata_calls.front().kind,
@@ -3141,13 +3588,13 @@ TEST(CacheSemantics,
 
 /**
  * @brief Verifies a non-standard metadata exception uses the unknown fallback
- * after image decode without publishing partial HP output.
+ * during manifest-bound replay without publishing partial HP output.
  *
  * @return Nothing; GoogleTest assertions report codec-call, path, diagnostic,
  * or HP-state mismatches.
  * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
  * @note Throwing an integer exercises `GraphCacheService`'s `catch (...)`
- * branch after a successful image fake decode.
+ * branch only after a valid transaction passes framing and digest checks.
  */
 TEST(CacheSemantics,
      InjectedMetadataCodecNonStandardExceptionRecordsUnknownWithoutPartialHp) {
@@ -3157,29 +3604,30 @@ TEST(CacheSemantics,
   Node node = make_cached_process_node("output.png");
   const std::filesystem::path image_file =
       root / std::to_string(node.id) / node.caches.front().location;
-  auto metadata_file = image_file;
+  std::filesystem::path metadata_file = image_file;
   metadata_file.replace_extension(".yml");
-  write_text(image_file, "fake image bytes");
-  write_text(metadata_file, "fake metadata presence");
+  node.cached_output_high_precision = NodeOutput{};
+  node.cached_output_high_precision->data.emplace("answer",
+                                                  plugin::ParameterValue(42));
+  node.hp_region =
+      value_region::full_node_output_region(*node.cached_output_high_precision);
+  GraphCacheService writer{providers::make_configured_image_artifact_codec(),
+                           testing::make_yaml_cache_metadata_codec()};
+  writer.save_cache_if_configured(graph, node, "int8");
+  node.cached_output_high_precision.reset();
+  node.hp_region.reset();
 
-  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
-      [](const std::filesystem::path&,
-         const ImageArtifactDecodeRequest&) -> Value {
-        return make_kernel_contract_image_value(2, 1, 1, 0.0F);
-      });
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>();
   auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
       [](const std::filesystem::path&) -> plugin::ParameterMap { throw 73; });
   GraphCacheService cache{image_codec, metadata_codec};
 
   EXPECT_FALSE(cache.try_load_from_disk_cache(
-      graph, node, ImageDiskCacheOutputSchema{true, {"answer"}, false}));
+      graph, node, ValueDiskCacheOutputSchema{false, {"answer"}, {}}));
   EXPECT_FALSE(node.cached_output_high_precision.has_value());
 
   const auto image_calls = image_codec->calls();
-  ASSERT_EQ(image_calls.size(), 1U);
-  EXPECT_EQ(image_calls.front().kind,
-            testing::FakeImageArtifactCodec::Call::Kind::Decode);
-  EXPECT_EQ(image_calls.front().path, image_file);
+  EXPECT_TRUE(image_calls.empty());
   const auto metadata_calls = metadata_codec->calls();
   ASSERT_EQ(metadata_calls.size(), 1U);
   EXPECT_EQ(metadata_calls.front().kind,

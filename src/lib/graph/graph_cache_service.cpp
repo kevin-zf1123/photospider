@@ -4,8 +4,11 @@
 #include <atomic>
 #endif
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <new>
@@ -21,6 +24,8 @@
 #include "graph/graph_traversal_service.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "photospider/data/image_view.hpp"
+#include "photospider/data/value_artifact.hpp"
+#include "photospider/plugin/data_definition_registry.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
 #include "graph/graph_cache_service_test_access.hpp"  // NOLINT(build/include_subdir)
 #endif
@@ -51,6 +56,391 @@ struct DiskCacheReadAttempt {
   bool preserve_miss_diagnostic = false;
 };
 
+/** @brief Private graph-cache transaction manifest structural version. */
+constexpr std::uint32_t kGraphCacheManifestVersion = 1U;
+
+/** @brief Bit indicating one digest-bound parameter metadata payload. */
+constexpr std::uint32_t kGraphCacheManifestHasMetadata = 1U;
+
+/** @brief Exact private graph-cache manifest magic. */
+constexpr std::array<std::byte, 8U> kGraphCacheManifestMagic{
+    std::byte{'P'}, std::byte{'S'}, std::byte{'C'},
+    std::byte{'A'}, std::byte{'C'}, std::byte{'H'},
+    std::byte{'E'}, std::byte{'1'}};  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Frozen maximum encoded parameter metadata bytes per cache entry. */
+constexpr auto kMaximumGraphCacheMetadataBytes = 16ULL * 1024ULL * 1024ULL;
+
+/**
+ * @brief Identifies one exact immutable cache transaction payload file.
+ * @throws Nothing for aggregate construction and comparison.
+ * @note The record contains content facts only and grants no path authority.
+ */
+struct CacheArtifactFileRecord final {
+  /** @brief Exact positive byte size, or zero for an absent optional file. */
+  std::uint64_t byte_size = 0U;
+  /** @brief SHA-256 over the complete exact file bytes. */
+  ArtifactPayloadDigest digest;
+};
+
+/**
+ * @brief Versioned commit record for one graph-cache replay transaction.
+ * @throws Nothing for ordinary aggregate construction.
+ * @note The configured cache path remains the cache-key authority. This record
+ * binds one complete public named-Value archive and optional parameter bytes;
+ * the image-codec projection remains an auxiliary policy output and is never
+ * used to reconstruct runtime Value authority.
+ */
+struct GraphCacheManifest final {
+  /** @brief Exact private manifest version. */
+  std::uint32_t structural_version = kGraphCacheManifestVersion;
+  /** @brief Exact public named-Value archive version. */
+  std::uint32_t archive_version = kNamedValueArtifactSetArchiveVersion;
+  /** @brief Closed optional-field flags. */
+  std::uint32_t flags = 0U;
+  /** @brief Number of exact named Values in the archive. */
+  std::uint32_t value_count = 0U;
+  /** @brief Number of exact parameter outputs in the metadata payload. */
+  std::uint32_t parameter_count = 0U;
+  /** @brief Complete named-Value archive file identity. */
+  CacheArtifactFileRecord archive;
+  /** @brief Optional encoded parameter metadata file identity. */
+  CacheArtifactFileRecord metadata;
+};
+
+/**
+ * @brief Resolves every controlled sibling in one configured cache entry.
+ * @throws std::bad_alloc when path construction cannot allocate.
+ * @note Suffixes are appended rather than replacing the configured extension,
+ * preserving the existing image projection and `.yml` metadata paths.
+ */
+struct GraphCacheArtifactPaths final {
+  /** @brief Per-node directory containing the complete transaction. */
+  fs::path directory;
+  /** @brief Existing configured image-codec projection path. */
+  fs::path image_projection;
+  /** @brief Existing configured parameter metadata path. */
+  fs::path metadata;
+  /** @brief Canonical public named-Value archive path. */
+  fs::path value_archive;
+  /** @brief Versioned manifest written last. */
+  fs::path manifest;
+};
+
+/**
+ * @brief Derives one cache entry's controlled transaction paths.
+ * @param graph Graph whose cache root anchors the entry.
+ * @param node Node supplying the stable numeric cache namespace.
+ * @param entry Configured nonempty image cache entry.
+ * @return Complete deterministic sibling path set.
+ * @throws std::bad_alloc when path construction cannot allocate.
+ */
+GraphCacheArtifactPaths graph_cache_artifact_paths(const GraphModel& graph,
+                                                   const Node& node,
+                                                   const CacheEntry& entry) {
+  GraphCacheArtifactPaths paths;
+  paths.directory = graph.cache_root / std::to_string(node.id);
+  paths.image_projection = paths.directory / entry.location;
+  paths.metadata = paths.image_projection;
+  paths.metadata.replace_extension(".yml");
+  paths.value_archive = paths.image_projection;
+  paths.value_archive += ".values";
+  paths.manifest = paths.image_projection;
+  paths.manifest += ".manifest";
+  return paths;
+}
+
+/**
+ * @brief Appends one canonical little-endian 32-bit scalar.
+ * @param output Mutable encoded byte owner.
+ * @param value Scalar to append.
+ * @return Nothing.
+ * @throws std::bad_alloc when output growth cannot allocate.
+ */
+void append_cache_u32(std::vector<std::byte>* output, std::uint32_t value) {
+  for (unsigned int shift = 0U; shift < 32U; shift += 8U) {
+    output->push_back(std::byte{static_cast<unsigned char>(value >> shift)});
+  }
+}
+
+/**
+ * @brief Appends one canonical little-endian 64-bit scalar.
+ * @param output Mutable encoded byte owner.
+ * @param value Scalar to append.
+ * @return Nothing.
+ * @throws std::bad_alloc when output growth cannot allocate.
+ */
+void append_cache_u64(std::vector<std::byte>* output, std::uint64_t value) {
+  for (unsigned int shift = 0U; shift < 64U; shift += 8U) {
+    output->push_back(std::byte{static_cast<unsigned char>(value >> shift)});
+  }
+}
+
+/**
+ * @brief Reads one bounded canonical 32-bit manifest scalar.
+ * @param bytes Complete manifest bytes.
+ * @param offset Mutable next-byte offset.
+ * @return Decoded scalar.
+ * @throws GraphError with `InvalidParameter` on truncation.
+ */
+std::uint32_t read_cache_u32(const std::vector<std::byte>& bytes,
+                             std::size_t* offset) {
+  if (*offset > bytes.size() || bytes.size() - *offset < 4U) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Graph cache manifest is truncated.");
+  }
+  std::uint32_t value = 0U;
+  for (unsigned int index = 0U; index < 4U; ++index) {
+    value |= std::to_integer<std::uint32_t>(bytes[*offset + index])
+             << (8U * index);
+  }
+  *offset += 4U;
+  return value;
+}
+
+/**
+ * @brief Reads one bounded canonical 64-bit manifest scalar.
+ * @param bytes Complete manifest bytes.
+ * @param offset Mutable next-byte offset.
+ * @return Decoded scalar.
+ * @throws GraphError with `InvalidParameter` on truncation.
+ */
+std::uint64_t read_cache_u64(const std::vector<std::byte>& bytes,
+                             std::size_t* offset) {
+  if (*offset > bytes.size() || bytes.size() - *offset < 8U) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Graph cache manifest is truncated.");
+  }
+  std::uint64_t value = 0U;
+  for (unsigned int index = 0U; index < 8U; ++index) {
+    value |= std::to_integer<std::uint64_t>(bytes[*offset + index])
+             << (8U * index);
+  }
+  *offset += 8U;
+  return value;
+}
+
+/**
+ * @brief Requires one manifest's closed versions, flags, counts, and sizes.
+ * @param manifest Candidate detached record.
+ * @return Nothing after complete validation.
+ * @throws GraphError with `InvalidParameter` for malformed facts.
+ */
+void validate_graph_cache_manifest(const GraphCacheManifest& manifest) {
+  const bool has_metadata =
+      (manifest.flags & kGraphCacheManifestHasMetadata) != 0U;
+  const ArtifactPayloadDigest empty_digest;
+  if (manifest.structural_version != kGraphCacheManifestVersion ||
+      manifest.archive_version != kNamedValueArtifactSetArchiveVersion ||
+      (manifest.flags & ~kGraphCacheManifestHasMetadata) != 0U ||
+      manifest.value_count > kMaximumNamedValueArtifacts ||
+      manifest.parameter_count > kMaximumNamedValueArtifacts ||
+      manifest.archive.byte_size == 0U ||
+      manifest.archive.byte_size >
+          kMaximumValueArtifactPayloadBytes +
+              static_cast<std::uint64_t>(kMaximumValueArtifactMetadataBytes) ||
+      (has_metadata &&
+       (manifest.parameter_count == 0U || manifest.metadata.byte_size == 0U ||
+        manifest.metadata.byte_size > kMaximumGraphCacheMetadataBytes)) ||
+      (!has_metadata &&
+       (manifest.parameter_count != 0U || manifest.metadata.byte_size != 0U ||
+        !(manifest.metadata.digest == empty_digest)))) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Graph cache manifest facts are invalid.");
+  }
+}
+
+/**
+ * @brief Encodes one validated graph-cache manifest canonically.
+ * @param manifest Complete detached transaction record.
+ * @return Exact fixed-length version-one bytes.
+ * @throws GraphError for malformed facts and std::bad_alloc for allocation.
+ */
+std::vector<std::byte> encode_graph_cache_manifest(
+    const GraphCacheManifest& manifest) {
+  validate_graph_cache_manifest(manifest);
+  std::vector<std::byte> bytes;
+  bytes.reserve(8U + 5U * 4U + 2U * 8U + 2U * 32U);
+  bytes.insert(bytes.end(), kGraphCacheManifestMagic.begin(),
+               kGraphCacheManifestMagic.end());
+  append_cache_u32(&bytes, manifest.structural_version);
+  append_cache_u32(&bytes, manifest.archive_version);
+  append_cache_u32(&bytes, manifest.flags);
+  append_cache_u32(&bytes, manifest.value_count);
+  append_cache_u32(&bytes, manifest.parameter_count);
+  append_cache_u64(&bytes, manifest.archive.byte_size);
+  append_cache_u64(&bytes, manifest.metadata.byte_size);
+  bytes.insert(bytes.end(), manifest.archive.digest.bytes.begin(),
+               manifest.archive.digest.bytes.end());
+  bytes.insert(bytes.end(), manifest.metadata.digest.bytes.begin(),
+               manifest.metadata.digest.bytes.end());
+  return bytes;
+}
+
+/**
+ * @brief Decodes one exact versioned graph-cache manifest.
+ * @param bytes Complete fixed-length manifest bytes.
+ * @return Detached validated transaction record.
+ * @throws GraphError with `InvalidParameter` for malformed framing or facts.
+ */
+GraphCacheManifest decode_graph_cache_manifest(
+    const std::vector<std::byte>& bytes) {
+  constexpr std::size_t kEncodedSize = 8U + 5U * 4U + 2U * 8U + 2U * 32U;
+  if (bytes.size() != kEncodedSize ||
+      !std::equal(kGraphCacheManifestMagic.begin(),
+                  kGraphCacheManifestMagic.end(), bytes.begin())) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Graph cache manifest framing is invalid.");
+  }
+  std::size_t offset = kGraphCacheManifestMagic.size();
+  GraphCacheManifest manifest;
+  manifest.structural_version = read_cache_u32(bytes, &offset);
+  manifest.archive_version = read_cache_u32(bytes, &offset);
+  manifest.flags = read_cache_u32(bytes, &offset);
+  manifest.value_count = read_cache_u32(bytes, &offset);
+  manifest.parameter_count = read_cache_u32(bytes, &offset);
+  manifest.archive.byte_size = read_cache_u64(bytes, &offset);
+  manifest.metadata.byte_size = read_cache_u64(bytes, &offset);
+  std::memcpy(manifest.archive.digest.bytes.data(), bytes.data() + offset,
+              manifest.archive.digest.bytes.size());
+  offset += manifest.archive.digest.bytes.size();
+  std::memcpy(manifest.metadata.digest.bytes.data(), bytes.data() + offset,
+              manifest.metadata.digest.bytes.size());
+  offset += manifest.metadata.digest.bytes.size();
+  if (offset != bytes.size()) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Graph cache manifest has trailing bytes.");
+  }
+  validate_graph_cache_manifest(manifest);
+  return manifest;
+}
+
+/**
+ * @brief Reads one exact bounded regular cache payload into detached bytes.
+ * @param path Controlled cache sibling path.
+ * @param maximum_bytes Frozen maximum accepted byte count.
+ * @param expected_bytes Optional exact manifest-declared byte count.
+ * @return Complete detached file bytes.
+ * @throws Filesystem, stream, length, overflow, or allocation failures.
+ * @note File size is checked before allocation and again after read. A racing
+ * writer can therefore cause rejection but cannot publish partial bytes.
+ */
+std::vector<std::byte> read_cache_file_bytes(
+    const fs::path& path, std::uint64_t maximum_bytes,
+    std::optional<std::uint64_t> expected_bytes = std::nullopt) {
+  const std::uintmax_t physical_size = fs::file_size(path);
+  if (physical_size > maximum_bytes ||
+      (expected_bytes.has_value() && physical_size != *expected_bytes) ||
+      physical_size > std::numeric_limits<std::size_t>::max() ||
+      physical_size > static_cast<std::uintmax_t>(
+                          std::numeric_limits<std::streamsize>::max())) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Graph cache payload size is invalid.");
+  }
+  const std::size_t size = static_cast<std::size_t>(physical_size);
+  std::ifstream stream(path, std::ios::binary);
+  if (!stream.is_open()) {
+    throw fs::filesystem_error("Could not open graph cache payload", path,
+                               std::make_error_code(std::errc::io_error));
+  }
+  std::vector<std::byte> bytes(size);
+  if (size != 0U) {
+    stream.read(reinterpret_cast<char*>(bytes.data()),
+                static_cast<std::streamsize>(size));
+  }
+  if (!stream || fs::file_size(path) != physical_size) {
+    throw GraphError(GraphErrc::Io,
+                     "Graph cache payload changed during detached read.");
+  }
+  return bytes;
+}
+
+/**
+ * @brief Writes one complete cache payload to its controlled final sibling.
+ * @param path Existing-parent destination path.
+ * @param bytes Complete bytes to truncate and write.
+ * @return Nothing after checked close.
+ * @throws std::runtime_error when open, write, or close fails.
+ * @note Graph cache is discardable and retains its existing non-durable
+ * failure semantics; the separate manifest remains the final hit authority.
+ */
+void write_cache_file_bytes(const fs::path& path,
+                            const std::vector<std::byte>& bytes) {
+  std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+  if (!stream.is_open()) {
+    throw std::runtime_error("Could not open graph cache payload for writing.");
+  }
+  if (!bytes.empty()) {
+    stream.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+  }
+  stream.close();
+  if (!stream) {
+    throw std::runtime_error("Could not write complete graph cache payload.");
+  }
+}
+
+/**
+ * @brief Captures one exact detached file identity for a manifest.
+ * @param path Existing cache payload path.
+ * @param maximum_bytes Frozen maximum accepted payload size.
+ * @return Exact size and SHA-256 content digest.
+ * @throws File-read, hashing, or allocation exceptions unchanged.
+ */
+CacheArtifactFileRecord capture_cache_file_record(const fs::path& path,
+                                                  std::uint64_t maximum_bytes) {
+  const std::vector<std::byte> bytes =
+      read_cache_file_bytes(path, maximum_bytes);
+  return {static_cast<std::uint64_t>(bytes.size()),
+          compute_artifact_payload_digest(bytes)};
+}
+
+/**
+ * @brief Requires detached bytes to match one manifest-bound file record.
+ * @param bytes Exact candidate file bytes.
+ * @param record Manifest-declared size and digest.
+ * @return Nothing after complete agreement.
+ * @throws GraphError with `InvalidParameter` for mismatch.
+ */
+void validate_cache_file_record(const std::vector<std::byte>& bytes,
+                                const CacheArtifactFileRecord& record) {
+  if (static_cast<std::uint64_t>(bytes.size()) != record.byte_size ||
+      !(compute_artifact_payload_digest(bytes) == record.digest)) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Graph cache payload size or digest disagrees.");
+  }
+}
+
+/**
+ * @brief Builds the exact canonical Value-name set required by one plan.
+ * @param schema Frozen output schema.
+ * @return Strictly increasing complete names including optional `image`.
+ * @throws std::invalid_argument for duplicate, reserved, empty, NUL, or
+ * oversized generic names.
+ * @throws std::bad_alloc when result ownership cannot allocate.
+ */
+std::vector<std::string> expected_cache_value_names(
+    const ValueDiskCacheOutputSchema& schema) {
+  std::vector<std::string> names = schema.generic_named_value_output_names;
+  for (const std::string& name : names) {
+    if (name.empty() || name == NodeOutput::kImageOutputName ||
+        name.size() > NodeOutput::kMaximumNamedValueNameBytes ||
+        name.find('\0') != std::string::npos) {
+      throw std::invalid_argument(
+          "Value disk cache schema contains an invalid generic name.");
+    }
+  }
+  if (schema.canonical_image_planned) {
+    names.emplace_back(NodeOutput::kImageOutputName);
+  }
+  std::sort(names.begin(), names.end());
+  if (std::adjacent_find(names.begin(), names.end()) != names.end()) {
+    throw std::invalid_argument(
+        "Value disk cache schema contains duplicate Value names.");
+  }
+  return names;
+}
+
 /**
  * @brief Builds the explicit code-value endpoint selected by cache policy.
  * @param precision Exact `int8` or `int16` cache precision label.
@@ -69,33 +459,6 @@ SampleEndpoint cache_code_endpoint(const std::string& precision) {
         SampleDomain{SampleDomainKind::CodeValue, 0.0, 65535.0}};
   }
   throw std::invalid_argument("Unknown image cache precision: " + precision);
-}
-
-/**
- * @brief Builds explicit storage-preserving decode plus normalized FP32 rules.
- * @return Complete deterministic decode request.
- * @throws std::bad_alloc when rule storage cannot allocate.
- */
-ImageArtifactDecodeRequest cache_decode_request() {
-  ImageArtifactDecodeRequest request;
-  for (const char* precision : {"int8", "int16"}) {
-    const SampleEndpoint code = cache_code_endpoint(precision);
-    SampleConversion conversion;
-    conversion.source = code;
-    conversion.destination =
-        SampleEndpoint{SampleEncoding{1U, SampleEncodingKind::Normalized},
-                       SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}};
-    conversion.destination_element_semantics = ElementSemantics::FloatingPoint;
-    conversion.destination_storage_encoding = StorageEncoding{32U};
-    conversion.out_of_domain = OutOfDomainPolicy::Reject;
-    conversion.rounding = SampleRoundingMode::NearestEven;
-    conversion.non_finite = NonFinitePolicy::Reject;
-    conversion.precision_loss = PrecisionLossPolicy::Allow;
-    request.rules.push_back(ImageArtifactDecodeRule{
-        ElementSemantics::UnsignedInteger,
-        StorageEncoding{precision[3] == '8' ? 8U : 16U}, code, conversion});
-  }
-  return request;
 }
 
 /**
@@ -160,16 +523,17 @@ bool has_image_disk_cache_entry(const Node& node) {
 }
 
 /**
- * @brief Fails closed when a formal Value cannot enter image disk persistence.
+ * @brief Fails closed when a canonical image cannot enter codec projection.
  *
  * @param output Formal HP output inspected without payload copying.
  * @throws GraphError with `InvalidParameter` for packed, quantized, latent,
  * non-host-readable, pending, or otherwise unsupported Value facts.
  * @throws std::bad_alloc when validation state or diagnostic allocation fails.
  * @note This helper performs no planned-byte admission, filesystem operation,
- * codec call, payload read, or persistent identity
- * creation. Callers first bypass outputs containing generic named Values;
- * metadata-only parameter results with no formal Value remain supported.
+ * codec call, payload read, or persistent identity creation. Generic and
+ * provider-defined non-image Values are validated by portable artifact capture
+ * instead; metadata-only parameter results with no formal Value remain
+ * supported.
  */
 void validate_image_disk_cache_output(const NodeOutput& output) {
   if (!output.has_image_value()) {
@@ -293,35 +657,68 @@ void add_parameter_value_planned_bytes(std::uint64_t& total,
 }
 
 /**
- * @brief Estimates one complete image payload without reading pixel bytes.
- * @param output Formal HP output inspected without copying.
- * @return Canonical Value storage bytes, or zero when no image Value exists.
- * @throws Value accessor exceptions for corrupt canonical output state.
- * @note Compatibility staging is rejected before this helper is entered and
- * never contributes a second allocation estimate.
+ * @brief Detached immutable input for one complete cache-save mechanism.
+ * @throws std::bad_alloc when archive, metadata, policy, or Value ownership
+ * cannot allocate.
+ * @note Preparation completes all portable Value capture and typed capability
+ * validation before executor admission or filesystem work. Partial outputs
+ * carry no archive and authorize stale-transaction cleanup only.
  */
-std::uint64_t image_planned_bytes(const NodeOutput& output) {
-  if (output.has_image_value()) {
-    return planned_size(output.image_value().storage_size());
+struct PreparedGraphCacheSave final {
+  /** @brief Whether exact hp_region proves the complete formal output. */
+  bool complete_output = false;
+  /** @brief Exact canonical public named-Value archive bytes. */
+  std::vector<std::byte> value_archive;
+  /** @brief Number of Values encoded into `value_archive`. */
+  std::uint32_t value_count = 0U;
+  /** @brief Detached parameter outputs written through the metadata codec. */
+  plugin::ParameterMap parameters;
+  /** @brief Optional exact canonical image retained for codec projection. */
+  std::optional<Value> image_projection;
+  /** @brief Explicit conversion policy paired with the retained image. */
+  std::optional<ImageArtifactEncodeRequest> image_request;
+  /** @brief Positive checked executor admission estimate. */
+  std::uint64_t planned_bytes = 0U;
+};
+
+/**
+ * @brief Captures every formal named Value into one canonical portable set.
+ * @param output Exact validated formal HP output.
+ * @return Encoded public archive after every payload and digest validates.
+ * @throws All capture, digest, provider, bounds, and allocation failures.
+ * @note The map is already canonical name order. No archive escapes until all
+ * Values have been synchronously copied through checked read leases.
+ */
+std::vector<std::byte> capture_graph_cache_value_archive(
+    const NodeOutput& output) {
+  if (output.named_values.size() > kMaximumNamedValueArtifacts) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Graph cache Value count exceeds the portable bound.");
   }
-  return 0U;
+  NamedValueArtifactSet artifacts;
+  artifacts.values.reserve(output.named_values.size());
+  for (const auto& [name, value] : output.named_values) {
+    artifacts.values.push_back(capture_value_artifact(name, value));
+  }
+  return encode_named_value_artifact_set(artifacts);
 }
 
 /**
- * @brief Computes a conservative positive estimate for one cache-save task.
+ * @brief Prepares one cache save before executor or filesystem side effects.
  * @param graph Graph providing current cache policy and root.
  * @param node Node providing entries and formal HP output.
- * @param cache_precision Precision label retained by the lazy callback.
- * @return Positive estimate when a supported save/removal task is eligible;
- * `std::nullopt` when current policy requires no task.
- * @throws Graph, Value, image-view, allocation, or checked arithmetic
- * exceptions from read-only inspection.
- * @note Pixels, named values, codec owners, paths, and callback payload are not
- * copied. Filesystem and codec APIs are not entered. The output payload is
- * counted once because one task retains it while processing configured entries
- * sequentially; each entry contributes its own path/envelope overhead.
+ * @param cache_precision Precision label retained by image projection policy.
+ * @return Complete detached save, or nullopt when policy requires no task.
+ * @throws GraphError with `InvalidParameter` when any formal Value cannot be
+ * captured as a complete portable artifact or image projection policy is
+ * unsupported.
+ * @throws std::bad_alloc unchanged from detached preparation.
+ * @throws GraphError with `ComputeError` for checked estimate overflow.
+ * @note Portable capture intentionally precedes task/byte admission so a
+ * configured unsupported Value never becomes a silently skipped cache task.
+ * No filesystem or codec method is called here.
  */
-std::optional<std::uint64_t> cache_save_planned_bytes(
+std::optional<PreparedGraphCacheSave> prepare_graph_cache_save(
     const GraphModel& graph, const Node& node,
     const std::string& cache_precision) {
   if (graph.skip_save_cache() || graph.cache_root.empty() ||
@@ -331,10 +728,42 @@ std::optional<std::uint64_t> cache_save_planned_bytes(
   if (!has_image_disk_cache_entry(node)) {
     return std::nullopt;
   }
-  if (hp_cache_ptr(node)->has_generic_named_values()) {
-    return std::nullopt;
+
+  PreparedGraphCacheSave prepared;
+  const NodeOutput& output = *hp_cache_ptr(node);
+  try {
+    validate_image_disk_cache_output(output);
+    prepared.complete_output = has_complete_hp_cache(node);
+    if (prepared.complete_output) {
+      if (output.data.size() > kMaximumNamedValueArtifacts) {
+        throw GraphError(
+            GraphErrc::InvalidParameter,
+            "Graph cache parameter count exceeds the manifest bound.");
+      }
+      prepared.value_count =
+          static_cast<std::uint32_t>(output.named_values.size());
+      prepared.value_archive = capture_graph_cache_value_archive(output);
+      prepared.parameters = output.data;
+      if (output.has_image_value()) {
+        prepared.image_projection = output.image_value();
+        prepared.image_request =
+            cache_encode_request(output.image_value(), cache_precision);
+      }
+    }
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const GraphError&) {
+    throw;
+  } catch (const std::exception& error) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        std::string("Value disk cache cannot capture formal output: ") +
+            error.what());
+  } catch (...) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Value disk cache cannot capture formal output: unknown "
+                     "non-standard failure.");
   }
-  validate_image_disk_cache_output(*hp_cache_ptr(node));
 
   constexpr std::uint64_t kTaskAndPathOverhead = 1024U;
   constexpr std::uint64_t kEntryOverhead = 256U;
@@ -347,10 +776,15 @@ std::optional<std::uint64_t> cache_save_planned_bytes(
   add_planned_bytes(total, 1U);
 
   std::uint64_t output_bytes = 0U;
-  if (has_complete_hp_cache(node)) {
-    const NodeOutput& output = *hp_cache_ptr(node);
-    add_planned_bytes(output_bytes, image_planned_bytes(output));
-    for (const auto& [key, value] : output.data) {
+  if (prepared.complete_output) {
+    add_planned_bytes(output_bytes,
+                      planned_size(prepared.value_archive.size()));
+    if (prepared.image_projection.has_value()) {
+      add_planned_bytes(
+          output_bytes,
+          planned_size(prepared.image_projection->storage_size()));
+    }
+    for (const auto& [key, value] : prepared.parameters) {
       add_planned_bytes(output_bytes, planned_size(key.size()));
       add_planned_bytes(output_bytes, 1U);
       add_parameter_value_planned_bytes(output_bytes, value);
@@ -371,7 +805,8 @@ std::optional<std::uint64_t> cache_save_planned_bytes(
     return std::nullopt;
   }
   add_planned_bytes(total, output_bytes);
-  return total;
+  prepared.planned_bytes = total;
+  return prepared;
 }
 
 /**
@@ -492,35 +927,17 @@ DiskCacheReadAttempt make_skipped_attempt(int node_id, std::string message) {
 }
 
 /**
- * @brief Creates a miss for a plan the current image artifact cannot encode.
- * @param node_id Node id associated with the incompatible artifact lookup.
- * @return Diagnostic result with Miss status and no concrete artifact path.
- * @throws std::bad_alloc from diagnostic message allocation.
- * @note The caller invokes this before filesystem inspection or codec entry.
- * Existing image-only artifacts remain untouched but cannot enter formal
- * output-authority validation for this planned schema.
- */
-DiskCacheReadAttempt make_generic_schema_miss(int node_id) {
-  DiskCacheReadAttempt attempt;
-  attempt.result = make_load_result(
-      node_id, nullptr, {}, {}, DiskCacheLoadStatus::Miss, GraphErrc::Unknown,
-      "Planned output schema contains generic named Values; the current "
-      "image disk cache treats configured artifacts as incompatible.");
-  return attempt;
-}
-
-/**
- * @brief Creates a concrete miss for incompatible artifact/schema shape.
+ * @brief Creates a concrete miss for an incompatible transaction/schema.
  *
  * @param node_id Node id associated with the incompatible entry.
- * @param cache_entry Entry that supplied the inspected sibling paths.
- * @param cache_file Resolved canonical image sibling path.
- * @param metadata_file Resolved parameter-metadata sibling path.
- * @param message Exact sibling or decoded-key incompatibility reason.
+ * @param cache_entry Entry that supplied the inspected transaction paths.
+ * @param cache_file Resolved optional image-projection path.
+ * @param metadata_file Resolved parameter-metadata path.
+ * @param message Exact transaction or decoded-name incompatibility reason.
  * @return Miss whose specific diagnostic survives multi-entry finalization.
  * @throws std::bad_alloc from path and message copies.
- * @note The output is empty. Presence mismatches call this before either codec;
- * decoded-key mismatches discard every candidate decoded by the attempt.
+ * @note The output is empty. Transaction-shape mismatches call this before
+ * reconstruction; decoded-name mismatches discard the complete local candidate.
  */
 DiskCacheReadAttempt make_schema_shape_miss(int node_id,
                                             const CacheEntry& cache_entry,
@@ -587,85 +1004,182 @@ DiskCacheReadAttempt make_error_attempt(int node_id,
  * @param node Node that owns the cache entry.
  * @param cache_entry Image cache entry to inspect.
  * @param output_schema Complete frozen image/parameter output shape.
- * @param image_codec Injected codec used to decode image bytes.
  * @param metadata_codec Injected codec used to decode named-value metadata.
+ * @param data_definitions Optional provider registry used for reconstruction.
  * @return Hit, Miss, or Error attempt with diagnostic details.
  * @throws std::bad_alloc from result/message allocation.
- * @note Filesystem sibling presence is compared with the planned shape before
- * either codec. Metadata's exact key set is checked before returning Hit.
- * Shape/key mismatches are Miss; filesystem and codec exceptions are converted
- * into Error rather than silently collapsed into miss.
+ * @note The versioned manifest binds the archive and optional metadata bytes.
+ * Exact Value/parameter names and all public artifact facts validate before a
+ * candidate escapes. Shape mismatches are Miss; tamper, filesystem, provider,
+ * and decode failures are Error rather than silently collapsed into miss.
  */
 DiskCacheReadAttempt read_cache_entry(
     const GraphModel& graph, const Node& node, const CacheEntry& cache_entry,
-    const ImageDiskCacheOutputSchema& output_schema,
-    const ImageArtifactCodec& image_codec,
-    const CacheMetadataCodec& metadata_codec) {
-  auto cache_file =
-      graph.cache_root / std::to_string(node.id) / cache_entry.location;
-  auto metadata_file = cache_file;
-  metadata_file.replace_extension(".yml");
+    const ValueDiskCacheOutputSchema& output_schema,
+    const CacheMetadataCodec& metadata_codec,
+    DataDefinitionRegistry* data_definitions) {
+  const GraphCacheArtifactPaths paths =
+      graph_cache_artifact_paths(graph, node, cache_entry);
 
   try {
-    const bool has_cache_file = fs::exists(cache_file);
-    const bool has_metadata_file = fs::exists(metadata_file);
-    if (!has_cache_file && !has_metadata_file) {
+    const bool has_image_projection = fs::exists(paths.image_projection);
+    const bool has_metadata_file = fs::exists(paths.metadata);
+    const bool has_archive_file = fs::exists(paths.value_archive);
+    const bool has_manifest_file = fs::exists(paths.manifest);
+    if (!has_image_projection && !has_metadata_file && !has_archive_file &&
+        !has_manifest_file) {
       DiskCacheReadAttempt attempt;
       attempt.result = make_load_result(
-          node.id, &cache_entry, cache_file, metadata_file,
+          node.id, &cache_entry, paths.image_projection, paths.metadata,
           DiskCacheLoadStatus::Miss, GraphErrc::Unknown,
-          "No disk cache image or metadata file exists for configured entry.");
+          "No disk cache transaction exists for configured entry.");
       return attempt;
     }
+    if (!has_archive_file || !has_manifest_file) {
+      return make_schema_shape_miss(
+          node.id, cache_entry, paths.image_projection, paths.metadata,
+          "Disk-cache transaction is partial or uses the retired image/YAML "
+          "format.");
+    }
 
-    const bool expects_cache_file = output_schema.canonical_image_planned;
+    constexpr std::uint64_t kMaximumManifestBytes = 1024U;
+    const std::vector<std::byte> initial_manifest_bytes =
+        read_cache_file_bytes(paths.manifest, kMaximumManifestBytes);
+    const GraphCacheManifest manifest =
+        decode_graph_cache_manifest(initial_manifest_bytes);
+    const std::vector<std::string> expected_names =
+        expected_cache_value_names(output_schema);
     const bool expects_metadata_file =
         !output_schema.parameter_output_names.empty();
-    if (has_cache_file != expects_cache_file ||
+    const bool manifest_has_metadata =
+        (manifest.flags & kGraphCacheManifestHasMetadata) != 0U;
+    if (manifest.value_count != expected_names.size() ||
+        manifest.parameter_count !=
+            output_schema.parameter_output_names.size() ||
+        manifest_has_metadata != expects_metadata_file ||
         has_metadata_file != expects_metadata_file) {
       return make_schema_shape_miss(
-          node.id, cache_entry, cache_file, metadata_file,
-          "Disk-cache artifact siblings do not match the frozen planned "
-          "output shape.");
+          node.id, cache_entry, paths.image_projection, paths.metadata,
+          "Disk-cache manifest/files do not match the frozen planned output "
+          "shape.");
+    }
+
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
+    testing::notify_graph_cache_service_test_hook(
+        testing::GraphCacheServiceTestEvent::ManifestReadBeforePayload,
+        paths.directory);
+#endif
+
+    const std::vector<std::byte> archive_bytes = read_cache_file_bytes(
+        paths.value_archive,
+        kMaximumValueArtifactPayloadBytes +
+            static_cast<std::uint64_t>(kMaximumValueArtifactMetadataBytes),
+        manifest.archive.byte_size);
+    validate_cache_file_record(archive_bytes, manifest.archive);
+    const NamedValueArtifactSet artifacts =
+        decode_named_value_artifact_set(archive_bytes);
+    if (artifacts.values.size() != manifest.value_count) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Graph cache archive count disagrees with manifest.");
+    }
+    std::vector<std::string> actual_names;
+    actual_names.reserve(artifacts.values.size());
+    for (const ValueArtifact& artifact : artifacts.values) {
+      actual_names.push_back(artifact.envelope.output_name);
+    }
+    if (actual_names != expected_names) {
+      return make_schema_shape_miss(
+          node.id, cache_entry, paths.image_projection, paths.metadata,
+          "Disk-cache archive names do not match the frozen planned Value "
+          "schema.");
+    }
+
+    NodeOutput candidate;
+    for (const ValueArtifact& artifact : artifacts.values) {
+      candidate.publish_named_value(
+          artifact.envelope.output_name,
+          reconstruct_value_artifact(artifact, data_definitions));
+    }
+
+    if (manifest_has_metadata) {
+      const std::vector<std::byte> metadata_before =
+          read_cache_file_bytes(paths.metadata, kMaximumGraphCacheMetadataBytes,
+                                manifest.metadata.byte_size);
+      validate_cache_file_record(metadata_before, manifest.metadata);
+      candidate.data = metadata_codec.read(paths.metadata);
+      const std::vector<std::byte> metadata_after =
+          read_cache_file_bytes(paths.metadata, kMaximumGraphCacheMetadataBytes,
+                                manifest.metadata.byte_size);
+      validate_cache_file_record(metadata_after, manifest.metadata);
+      if (metadata_after != metadata_before) {
+        throw GraphError(
+            GraphErrc::InvalidParameter,
+            "Graph cache metadata changed during transactional replay.");
+      }
+    }
+    if (!has_exact_parameter_output_names(
+            candidate.data, output_schema.parameter_output_names)) {
+      return make_schema_shape_miss(
+          node.id, cache_entry, paths.image_projection, paths.metadata,
+          "Disk-cache metadata keys do not match the frozen planned "
+          "parameter-output schema.");
+    }
+
+    const std::vector<std::byte> final_manifest_bytes =
+        read_cache_file_bytes(paths.manifest, kMaximumManifestBytes);
+    if (final_manifest_bytes != initial_manifest_bytes) {
+      throw GraphError(
+          GraphErrc::InvalidParameter,
+          "Graph cache manifest changed during transactional replay.");
     }
 
     DiskCacheReadAttempt attempt;
-    if (has_cache_file) {
-      attempt.output.publish_image_value(
-          image_codec.decode(cache_file, cache_decode_request()));
-    }
-    if (has_metadata_file) {
-      attempt.output.data = metadata_codec.read(metadata_file);
-      if (!has_exact_parameter_output_names(
-              attempt.output.data, output_schema.parameter_output_names)) {
-        return make_schema_shape_miss(
-            node.id, cache_entry, cache_file, metadata_file,
-            "Disk-cache metadata keys do not match the frozen planned "
-            "parameter-output schema.");
-      }
-    }
-    attempt.result =
-        make_load_result(node.id, &cache_entry, cache_file, metadata_file,
-                         DiskCacheLoadStatus::Hit, GraphErrc::Unknown,
-                         "Loaded disk cache entry.");
+    attempt.output = std::move(candidate);
+    attempt.result = make_load_result(
+        node.id, &cache_entry, paths.image_projection, paths.metadata,
+        DiskCacheLoadStatus::Hit, GraphErrc::Unknown,
+        "Loaded portable named-Value disk cache transaction.");
     return attempt;
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const fs::filesystem_error& e) {
     return make_error_attempt(
-        node.id, cache_entry, cache_file, metadata_file, GraphErrc::Io,
+        node.id, cache_entry, paths.image_projection, paths.metadata,
+        GraphErrc::Io,
         std::string("Filesystem failed while reading disk cache: ") + e.what());
   } catch (const GraphError& e) {
-    return make_error_attempt(node.id, cache_entry, cache_file, metadata_file,
-                              e.code(), e.what());
+    return make_error_attempt(node.id, cache_entry, paths.image_projection,
+                              paths.metadata, e.code(), e.what());
+  } catch (const ExtensionContractError& e) {
+    return make_error_attempt(
+        node.id, cache_entry, paths.image_projection, paths.metadata,
+        GraphErrc::InvalidParameter,
+        std::string("Portable cache provider validation failed: ") + e.what());
+  } catch (const std::invalid_argument& e) {
+    return make_error_attempt(
+        node.id, cache_entry, paths.image_projection, paths.metadata,
+        GraphErrc::InvalidParameter,
+        std::string("Portable cache artifact validation failed: ") + e.what());
+  } catch (const std::overflow_error& e) {
+    return make_error_attempt(
+        node.id, cache_entry, paths.image_projection, paths.metadata,
+        GraphErrc::InvalidParameter,
+        std::string("Portable cache artifact validation failed: ") + e.what());
+  } catch (const std::length_error& e) {
+    return make_error_attempt(
+        node.id, cache_entry, paths.image_projection, paths.metadata,
+        GraphErrc::InvalidParameter,
+        std::string("Portable cache artifact validation failed: ") + e.what());
   } catch (const std::exception& e) {
     return make_error_attempt(
-        node.id, cache_entry, cache_file, metadata_file, GraphErrc::Unknown,
+        node.id, cache_entry, paths.image_projection, paths.metadata,
+        GraphErrc::Unknown,
         std::string("Unexpected exception while reading disk cache: ") +
             e.what());
   } catch (...) {
     return make_error_attempt(
-        node.id, cache_entry, cache_file, metadata_file, GraphErrc::Unknown,
+        node.id, cache_entry, paths.image_projection, paths.metadata,
+        GraphErrc::Unknown,
         "Unknown non-standard exception while reading disk cache.");
   }
 }
@@ -676,8 +1190,8 @@ DiskCacheReadAttempt read_cache_entry(
  * @param graph Graph whose cache root anchors the entries.
  * @param node Node whose cache entries should be inspected.
  * @param output_schema Complete frozen image/parameter output shape.
- * @param image_codec Injected codec used for every supported image entry.
  * @param metadata_codec Injected codec used for every existing metadata file.
+ * @param data_definitions Optional provider registry used for reconstruction.
  * @return Hit/Error for the first existing or failing entry, Miss when all
  * supported entries are absent, or Skipped when no load should be attempted.
  * @throws std::bad_alloc from diagnostic construction.
@@ -687,9 +1201,9 @@ DiskCacheReadAttempt read_cache_entry(
  */
 DiskCacheReadAttempt read_first_disk_cache_entry(
     const GraphModel& graph, const Node& node,
-    const ImageDiskCacheOutputSchema& output_schema,
-    const ImageArtifactCodec& image_codec,
-    const CacheMetadataCodec& metadata_codec) {
+    const ValueDiskCacheOutputSchema& output_schema,
+    const CacheMetadataCodec& metadata_codec,
+    DataDefinitionRegistry* data_definitions) {
   if (graph.cache_root.empty()) {
     return make_skipped_attempt(node.id, "Graph has no disk cache root.");
   }
@@ -707,8 +1221,9 @@ DiskCacheReadAttempt read_first_disk_cache_entry(
     }
 
     saw_supported_entry = true;
-    DiskCacheReadAttempt attempt = read_cache_entry(
-        graph, node, cache_entry, output_schema, image_codec, metadata_codec);
+    DiskCacheReadAttempt attempt =
+        read_cache_entry(graph, node, cache_entry, output_schema,
+                         metadata_codec, data_definitions);
     if (attempt.result.status != DiskCacheLoadStatus::Miss) {
       return attempt;
     }
@@ -771,35 +1286,39 @@ bool finalize_disk_cache_load(
 }
 
 /**
- * @brief Removes only configured siblings excluded by the retained shape.
+ * @brief Removes configured artifacts excluded by the retained transaction.
  *
- * @param directory Exact per-node cache directory containing both siblings.
- * @param image_path Exact configured canonical image sibling.
- * @param metadata_path Exact derived YAML parameter sibling.
- * @param retain_image Whether the completed output retains the image sibling.
- * @param retain_metadata Whether it retains the parameter-metadata sibling.
+ * @param paths Exact paths for the optional projections and transaction files.
+ * @param retain_image Whether the completed output retains the image
+ * projection.
+ * @param retain_metadata Whether it retains detached parameter metadata.
+ * @param retain_transaction Whether it retains the archive and manifest.
  * @return Nothing after optional empty-directory removal.
  * @throws std::filesystem::filesystem_error when an existence, removal, or
  * emptiness query fails.
- * @note Callers invoke this after every required write succeeds, or directly
- * for partial/empty outputs that retain no sibling. Removal is intentionally
- * scoped to the configured pair and is not transactional: one removal can
- * succeed before a later removal fails. A remaining shape mismatch is rejected
- * before codecs on the next read.
+ * @note Callers invoke this after required writes succeed, or directly for
+ * partial outputs that retain no transaction. Removal is intentionally scoped
+ * to the four configured paths and is not atomic: one removal can succeed
+ * before a later removal fails. Replay still requires a digest-valid archive
+ * and manifest pair, so residual mixed generations cannot publish output.
  */
-void remove_cache_siblings_not_retained(const fs::path& directory,
-                                        const fs::path& image_path,
-                                        const fs::path& metadata_path,
-                                        bool retain_image,
-                                        bool retain_metadata) {
-  if (!retain_image && fs::exists(image_path)) {
-    (void)fs::remove(image_path);
+void remove_cache_siblings_not_retained(const GraphCacheArtifactPaths& paths,
+                                        bool retain_image, bool retain_metadata,
+                                        bool retain_transaction) {
+  if (!retain_image && fs::exists(paths.image_projection)) {
+    (void)fs::remove(paths.image_projection);
   }
-  if (!retain_metadata && fs::exists(metadata_path)) {
-    (void)fs::remove(metadata_path);
+  if (!retain_metadata && fs::exists(paths.metadata)) {
+    (void)fs::remove(paths.metadata);
   }
-  if (fs::exists(directory) && fs::is_empty(directory)) {
-    (void)fs::remove(directory);
+  if (!retain_transaction && fs::exists(paths.value_archive)) {
+    (void)fs::remove(paths.value_archive);
+  }
+  if (!retain_transaction && fs::exists(paths.manifest)) {
+    (void)fs::remove(paths.manifest);
+  }
+  if (fs::exists(paths.directory) && fs::is_empty(paths.directory)) {
+    (void)fs::remove(paths.directory);
   }
 }
 
@@ -807,74 +1326,80 @@ void remove_cache_siblings_not_retained(const fs::path& directory,
  * @brief Executes the service-owned cache-save filesystem and codec mechanism.
  * @param graph Read-only Graph policy, cache root, and prepared output owner.
  * @param node Read-only node whose configured cache entries are processed.
- * @param cache_precision Precision label converted for the image codec.
+ * @param prepared Detached archive, metadata, image policy, and admission
+ * estimate captured before side effects.
  * @param image_codec Codec selected and retained by GraphCacheService.
  * @param metadata_codec Named-value codec retained by GraphCacheService.
  * @param timing_graph Optional graph-state-only timing sink; null on the
  * independent I/O worker.
  * @throws Codec, filesystem, Graph, Value, or allocation exceptions unchanged.
  * @note A null timing sink guarantees that provider work mutates no Graph
- * state. Partial HP output removes older artifacts exactly as the synchronous
- * path did before the executor vertical. Generic named Values make the current
- * image/YAML projection ineligible and return before filesystem or codec work.
- * Complete representable output writes all retained siblings first, then
- * removes only excluded configured siblings. Write failure therefore preserves
- * predecessor siblings; cleanup failure propagates after successful writes and
- * may leave a pair that the next pre-codec shape check rejects as a miss.
+ * state. Partial HP output removes the complete older transaction. Complete
+ * output writes the optional image projection and parameter bytes, the exact
+ * named-Value archive, and finally its versioned manifest. Any failure before
+ * the manifest leaves an unusable mixed/partial generation; replay verifies
+ * every file and publishes no partial NodeOutput.
  */
 void save_cache_mechanism(const GraphModel& graph, const Node& node,
-                          const std::string& cache_precision,
+                          const PreparedGraphCacheSave& prepared,
                           const ImageArtifactCodec& image_codec,
                           const CacheMetadataCodec& metadata_codec,
                           GraphModel* timing_graph) {
-  if (graph.skip_save_cache()) {
-    return;
-  }
-  const NodeOutput* output = hp_cache_ptr(node);
-  if (graph.cache_root.empty() || node.caches.empty() || output == nullptr) {
-    return;
-  }
-  if (!has_image_disk_cache_entry(node)) {
-    return;
-  }
-  if (output->has_generic_named_values()) {
-    return;
-  }
-  validate_image_disk_cache_output(*output);
-  const bool complete_output = has_complete_hp_cache(node);
-
   for (const CacheEntry& cache_entry : node.caches) {
     if (cache_entry.cache_type != "image" || cache_entry.location.empty()) {
       continue;
     }
 
-    const fs::path dir = graph.cache_root / std::to_string(node.id);
-    fs::path final_path = dir / cache_entry.location;
-    fs::path metadata_path = final_path;
-    metadata_path.replace_extension(".yml");
-    if (!complete_output) {
-      remove_cache_siblings_not_retained(dir, final_path, metadata_path, false,
-                                         false);
+    const GraphCacheArtifactPaths paths =
+        graph_cache_artifact_paths(graph, node, cache_entry);
+    if (!prepared.complete_output) {
+      remove_cache_siblings_not_retained(paths, false, false, false);
       continue;
     }
 
-    const bool retain_image = output->has_image_value();
-    const bool retain_metadata = !output->data.empty();
-    if (retain_image || retain_metadata) {
-      fs::create_directories(dir);
-    }
+    const bool retain_image = prepared.image_projection.has_value();
+    const bool retain_metadata = !prepared.parameters.empty();
+    fs::create_directories(paths.directory);
 
     const auto start_io = std::chrono::high_resolution_clock::now();
     if (retain_image) {
-      image_codec.encode(
-          final_path, output->image_value(),
-          cache_encode_request(output->image_value(), cache_precision));
+      image_codec.encode(paths.image_projection, *prepared.image_projection,
+                         *prepared.image_request);
     }
     if (retain_metadata) {
-      metadata_codec.write(metadata_path, output->data);
+      metadata_codec.write(paths.metadata, prepared.parameters);
     }
-    remove_cache_siblings_not_retained(dir, final_path, metadata_path,
-                                       retain_image, retain_metadata);
+    write_cache_file_bytes(paths.value_archive, prepared.value_archive);
+    remove_cache_siblings_not_retained(paths, retain_image, retain_metadata,
+                                       true);
+
+    GraphCacheManifest manifest;
+    manifest.value_count = prepared.value_count;
+    manifest.archive = capture_cache_file_record(
+        paths.value_archive,
+        kMaximumValueArtifactPayloadBytes +
+            static_cast<std::uint64_t>(kMaximumValueArtifactMetadataBytes));
+    if (retain_metadata) {
+      manifest.flags |= kGraphCacheManifestHasMetadata;
+      manifest.parameter_count =
+          static_cast<std::uint32_t>(prepared.parameters.size());
+      manifest.metadata = capture_cache_file_record(
+          paths.metadata, kMaximumGraphCacheMetadataBytes);
+      if (metadata_codec.read(paths.metadata) != prepared.parameters) {
+        throw GraphError(
+            GraphErrc::InvalidParameter,
+            "Graph cache metadata codec round-trip changed parameter facts.");
+      }
+    }
+    const std::vector<std::byte> manifest_bytes =
+        encode_graph_cache_manifest(manifest);
+    write_cache_file_bytes(paths.manifest, manifest_bytes);
+    const std::vector<std::byte> persisted_manifest =
+        read_cache_file_bytes(paths.manifest, 1024U, manifest_bytes.size());
+    if (persisted_manifest != manifest_bytes) {
+      throw GraphError(GraphErrc::Io,
+                       "Graph cache manifest write did not round-trip.");
+    }
     if (timing_graph != nullptr) {
       add_io_duration(*timing_graph, start_io);
     }
@@ -924,9 +1449,11 @@ void notify_graph_cache_service_test_hook(
 GraphCacheService::GraphCacheService(
     std::shared_ptr<const ImageArtifactCodec> image_codec,
     std::shared_ptr<const CacheMetadataCodec> metadata_codec,
-    std::size_t maximum_statistics_entries)
+    std::size_t maximum_statistics_entries,
+    DataDefinitionRegistry* data_definitions)
     : image_codec_(std::move(image_codec)),
       metadata_codec_(std::move(metadata_codec)),
+      data_definitions_(data_definitions),
       image_statistics_store_(maximum_statistics_entries) {
   if (!image_codec_) {
     throw std::invalid_argument(
@@ -977,8 +1504,13 @@ std::filesystem::path GraphCacheService::node_cache_dir(const GraphModel& graph,
 void GraphCacheService::save_cache_if_configured(
     GraphModel& graph, const Node& node,
     const std::string& cache_precision) const {
-  save_cache_mechanism(graph, node, cache_precision, *image_codec_,
-                       *metadata_codec_, &graph);
+  const std::optional<PreparedGraphCacheSave> prepared =
+      prepare_graph_cache_save(graph, node, cache_precision);
+  if (!prepared.has_value()) {
+    return;
+  }
+  save_cache_mechanism(graph, node, *prepared, *image_codec_, *metadata_codec_,
+                       &graph);
 }
 
 /** @copydoc GraphCacheService::save_cache_if_configured_via_executor */
@@ -986,24 +1518,25 @@ void GraphCacheService::save_cache_if_configured_via_executor(
     execution::ComputeIoExecutor& executor,
     const std::shared_ptr<const void>& lifetime_token, GraphModel& graph,
     const Node& node, const std::string& cache_precision) const {
-  const std::optional<std::uint64_t> planned_bytes =
-      cache_save_planned_bytes(graph, node, cache_precision);
-  if (!planned_bytes.has_value()) {
+  std::optional<PreparedGraphCacheSave> prepared =
+      prepare_graph_cache_save(graph, node, cache_precision);
+  if (!prepared.has_value()) {
     return;
   }
+  const auto retained_prepared =
+      std::make_shared<const PreparedGraphCacheSave>(std::move(*prepared));
 
   const execution::ComputeIoSubmission submission = executor.try_submit(
-      *planned_bytes, lifetime_token,
-      [&graph, &node, &cache_precision,
+      retained_prepared->planned_bytes, lifetime_token,
+      [&graph, &node, retained_prepared,
        this]() -> execution::ComputeIoExecutor::Task {
         const std::shared_ptr<const ImageArtifactCodec> image_codec =
             image_codec_;
         const std::shared_ptr<const CacheMetadataCodec> metadata_codec =
             metadata_codec_;
-        const std::string retained_precision = cache_precision;
         return
-            [&graph, &node, retained_precision, image_codec, metadata_codec]() {
-              save_cache_mechanism(graph, node, retained_precision,
+            [&graph, &node, retained_prepared, image_codec, metadata_codec]() {
+              save_cache_mechanism(graph, node, *retained_prepared,
                                    *image_codec, *metadata_codec, nullptr);
             };
       });
@@ -1025,7 +1558,7 @@ void GraphCacheService::save_cache_if_configured_via_executor(
 
 bool GraphCacheService::try_load_from_disk_cache(
     GraphModel& graph, Node& node,
-    ImageDiskCacheOutputSchema output_schema) const {
+    ValueDiskCacheOutputSchema output_schema) const {
   if (node.cached_output_high_precision.has_value()) {
     const bool complete_output = has_complete_hp_cache(node);
     record_disk_cache_load_result(
@@ -1038,15 +1571,9 @@ bool GraphCacheService::try_load_from_disk_cache(
                    .result);
     return complete_output;
   }
-  if (output_schema.contains_generic_named_values) {
-    record_disk_cache_load_result(graph,
-                                  make_generic_schema_miss(node.id).result);
-    return false;
-  }
-
   auto start_io = std::chrono::high_resolution_clock::now();
   DiskCacheReadAttempt attempt = read_first_disk_cache_entry(
-      graph, node, output_schema, *image_codec_, *metadata_codec_);
+      graph, node, output_schema, *metadata_codec_, data_definitions_);
   return finalize_disk_cache_load(
       graph, std::move(attempt), start_io, [&](NodeOutput output) {
         RegionSet full_region = value_region::full_node_output_region(output);
@@ -1058,7 +1585,7 @@ bool GraphCacheService::try_load_from_disk_cache(
 
 bool GraphCacheService::try_load_from_disk_cache_into(
     GraphModel& graph, const Node& node, NodeOutput& out,
-    ImageDiskCacheOutputSchema output_schema) const {
+    ValueDiskCacheOutputSchema output_schema) const {
   if (node.cached_output_high_precision.has_value()) {
     record_disk_cache_load_result(
         graph, make_skipped_attempt(
@@ -1068,14 +1595,9 @@ bool GraphCacheService::try_load_from_disk_cache_into(
                    .result);
     return false;
   }
-  if (output_schema.contains_generic_named_values) {
-    record_disk_cache_load_result(graph,
-                                  make_generic_schema_miss(node.id).result);
-    return false;
-  }
   auto start_io = std::chrono::high_resolution_clock::now();
   DiskCacheReadAttempt attempt = read_first_disk_cache_entry(
-      graph, node, output_schema, *image_codec_, *metadata_codec_);
+      graph, node, output_schema, *metadata_codec_, data_definitions_);
   return finalize_disk_cache_load(
       graph, std::move(attempt), start_io,
       [&](NodeOutput output) { out = std::move(output); });
@@ -1168,16 +1690,14 @@ GraphModel::DiskSyncResult GraphCacheService::synchronize_disk_cache(
       auto cache_file = dir_path / cache_entry.location;
       auto meta_file = cache_file;
       meta_file.replace_extension(".yml");
+      auto archive_file = cache_file;
+      archive_file += ".values";
+      auto manifest_file = cache_file;
+      manifest_file += ".manifest";
 
-      if (fs::exists(cache_file)) {
-        const bool removed_cache_file = fs::remove(cache_file);
-        if (removed_cache_file) {
-          result.removed_files++;
-        }
-      }
-      if (fs::exists(meta_file)) {
-        const bool removed_meta_file = fs::remove(meta_file);
-        if (removed_meta_file) {
+      for (const fs::path& file :
+           {cache_file, meta_file, archive_file, manifest_file}) {
+        if (fs::exists(file) && fs::remove(file)) {
           result.removed_files++;
         }
       }
