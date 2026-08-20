@@ -35,9 +35,9 @@ namespace ps::plugin::opencv {
 cv::Mat to_mat(const Value& value);
 
 /**
- * @brief Creates a borrowed read-only OpenCV unified view of one image Value.
+ * @brief Creates a read-only OpenCV unified view from one image Value.
  * @param value Ready host-readable Value accepted by `to_mat`.
- * @return Read-only-by-contract UMat borrowing the Value payload.
+ * @return Read-only-by-contract UMat produced from the borrowed host matrix.
  * @throws std::invalid_argument for the same representation, axes, layout,
  *         element, channel, extent, or stride rejection as `to_mat`.
  * @throws ReadyFenceAccessError or BufferAccessError when the Value is not
@@ -50,11 +50,14 @@ cv::Mat to_mat(const Value& value);
  * @throws cv::Exception when matrix-header construction or
  *         `getUMat(cv::ACCESS_READ)` fails.
  * @note This function first follows the complete `to_mat` path and translates
- *       no exception. The external-data `getUMat` path creates
- *       `USER_ALLOCATED` UMatData over the host payload; it copies no payload
- *       and retains neither the Value nor a ReadLease. The returned UMat must
- *       be treated as read-only and must not outlive `value`. No sample-domain
- *       or color conversion occurs.
+ *       no exception. The source external-data `cv::Mat` borrows the host
+ *       payload. `getUMat(cv::ACCESS_READ)` may wrap that payload or allocate
+ *       and populate storage owned by the active allocator/backend, so no
+ *       `USER_ALLOCATED`, zero-copy, or no-copy result is guaranteed. The
+ *       returned UMat does not retain or extend the lifetime of the
+ *       Photospider Value or ReadLease. Keep the complete `value` alive for
+ *       every UMat access and treat the UMat as read-only. No sample-domain or
+ *       color conversion occurs.
  */
 cv::UMat to_umat(const Value& value);
 

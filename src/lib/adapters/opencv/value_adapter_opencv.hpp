@@ -63,9 +63,9 @@ cv::Mat toCvMat(const InputTile& tile);
 cv::Mat toCvMat(const OutputTile& tile);
 
 /**
- * @brief Creates a borrowed read-only unified view of one image Value.
+ * @brief Creates a read-only unified view from one image Value.
  * @param value Value accepted by `toCvMat`.
- * @return Read-only-by-contract UMat borrowing the Value payload.
+ * @return Read-only-by-contract UMat produced from the borrowed host matrix.
  * @throws std::invalid_argument for an unsupported Value or a logical width or
  *         height above OpenCV's `int` extent domain.
  * @throws ReadyFenceAccessError or BufferAccessError when the Value is not
@@ -78,17 +78,20 @@ cv::Mat toCvMat(const OutputTile& tile);
  * @throws cv::Exception when OpenCV rejects the validated matrix header or
  *         `getUMat(cv::ACCESS_READ)` fails.
  * @note The complete `toCvMat` path runs first, and no exception is translated.
- *       The external-data `getUMat` path creates `USER_ALLOCATED` UMatData over
- *       the host payload; it copies no payload and retains neither the Value
- *       nor a ReadLease. The caller keeps `value` alive for every UMat access
- *       and treats the UMat as read-only.
+ *       The source external-data `cv::Mat` borrows the host payload.
+ *       `getUMat(cv::ACCESS_READ)` may wrap that payload or allocate and
+ *       populate storage owned by the active allocator/backend, so no
+ *       `USER_ALLOCATED`, zero-copy, or no-copy result is guaranteed. The
+ *       returned UMat does not retain or extend the lifetime of the
+ *       Photospider Value or ReadLease. The caller keeps the complete `value`
+ *       alive for every UMat access and treats the UMat as read-only.
  */
 cv::UMat toCvUMat(const Value& value);
 
 /**
- * @brief Creates a borrowed read-only unified view of one input tile ROI.
+ * @brief Creates a read-only unified view from one input tile ROI.
  * @param tile Tile accepted by `toCvMat(InputTile)`.
- * @return Read-only-by-contract UMat borrowing exactly `tile.roi`.
+ * @return Read-only-by-contract UMat produced from exactly `tile.roi`.
  * @throws std::runtime_error for a disconnected tile.
  * @throws std::invalid_argument or std::out_of_range for an unsupported Value
  *         or invalid ROI facts.
@@ -102,11 +105,14 @@ cv::UMat toCvUMat(const Value& value);
  * @throws cv::Exception when OpenCV rejects the validated matrix header or
  *         `getUMat(cv::ACCESS_READ)` fails.
  * @note The complete `toCvMat(InputTile)` path runs first, and no exception is
- *       translated. The external-data `getUMat` path creates `USER_ALLOCATED`
- *       UMatData over the host payload; it copies no payload and retains
- *       neither the Value nor a ReadLease. Use the read-only UMat only
- *       synchronously within the tile callback while the borrowed Value owner
- *       remains alive.
+ *       translated. The source external-data `cv::Mat` borrows the ROI host
+ *       payload. `getUMat(cv::ACCESS_READ)` may wrap that payload or allocate
+ *       and populate storage owned by the active allocator/backend, so no
+ *       `USER_ALLOCATED`, zero-copy, or no-copy result is guaranteed. The
+ *       returned UMat does not retain or extend the lifetime of the
+ *       Photospider Value or ReadLease. Use it only for read-only access
+ *       synchronously within the tile callback while the complete source
+ *       Value remains alive.
  */
 cv::UMat toCvUMat(const InputTile& tile);
 
