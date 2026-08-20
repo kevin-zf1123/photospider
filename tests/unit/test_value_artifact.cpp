@@ -1,14 +1,17 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "core/canonical_ieee754.hpp"
 #include "core/pending_value.hpp"
 #include "photospider/data/image_view.hpp"
 #include "photospider/data/value_artifact.hpp"
@@ -86,6 +89,148 @@ Value make_blocked_artifact_value() {
   return Value::from_cpu_blocked_dense_tensor(std::move(descriptor),
                                               std::move(layout), storage,
                                               kMaximumValueArtifactAlignment);
+}
+
+/**
+ * @brief Publishes one minimal image whose declared domain is one binary64.
+ * @param endpoint Finite degenerate endpoint encoded twice in the artifact.
+ * @return Ready one-pixel UINT8 Value with no optional image records besides
+ *         its SampleDomainFacet.
+ * @throws Value validation and allocation failures unchanged.
+ * @note A degenerate declared domain is valid metadata. It lets the artifact
+ *       test isolate exact binary64 wire bytes without sample conversion.
+ */
+Value make_binary64_artifact_image(double endpoint) {
+  DenseTensorDescriptor descriptor{{1U, 1U, 1U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain = SampleDomainFacet{
+      1U,
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, endpoint, endpoint},
+      {}};
+  return Value::from_cpu_dense_tensor(std::move(descriptor), std::move(facet),
+                                      StridedLayout{{1, 1, 1}},
+                                      std::vector<std::byte>{std::byte{0x5a}});
+}
+
+/**
+ * @brief Returns one byte from a fixed little-endian integer spelling.
+ * @param bits Expected canonical binary64 bit pattern.
+ * @param index Byte index in `[0, 8)`.
+ * @return Exact little-endian byte.
+ * @throws Nothing under the caller's bounded-index precondition.
+ */
+std::byte binary64_wire_byte(std::uint64_t bits, std::size_t index) noexcept {
+  return std::byte{static_cast<std::uint8_t>((bits >> (index * 8U)) & 0xffU)};
+}
+
+/**
+ * @brief Proves the shared numeric helper derives both interchange profiles
+ *        without object-byte inspection.
+ * @return Nothing; GoogleTest reports bit-pattern, round-trip, or canonical
+ *         signed-zero mismatches.
+ * @throws Unexpected helper validation failures when a finite vector is not
+ *         supported by the compile-time IEC 559 profile.
+ * @note The vectors cover both zero spellings, signs, unity, minimum
+ *       subnormal, and maximum finite values for binary32 and binary64.
+ */
+TEST(ValueArtifact, CanonicalIeeeHelpersUseNumericBitsForBinary32AndBinary64) {
+  const std::array<std::pair<float, std::uint32_t>, 6U> binary32_cases{{
+      {0.0F, 0x00000000U},
+      {-0.0F, 0x00000000U},
+      {1.0F, 0x3f800000U},
+      {-1.0F, 0xbf800000U},
+      {std::numeric_limits<float>::denorm_min(), 0x00000001U},
+      {std::numeric_limits<float>::max(), 0x7f7fffffU},
+  }};
+  for (const auto& [value, bits] : binary32_cases) {
+    EXPECT_EQ(internal::canonical_binary32_bits(value), bits);
+    const float decoded = internal::decode_canonical_binary32(bits);
+    EXPECT_EQ(decoded, value);
+    if (decoded == 0.0F) {
+      EXPECT_FALSE(std::signbit(decoded));
+    }
+  }
+
+  const std::array<std::pair<double, std::uint64_t>, 6U> binary64_cases{{
+      {0.0, 0x0000000000000000ULL},
+      {-0.0, 0x0000000000000000ULL},
+      {1.0, 0x3ff0000000000000ULL},
+      {-1.0, 0xbff0000000000000ULL},
+      {std::numeric_limits<double>::denorm_min(), 0x0000000000000001ULL},
+      {std::numeric_limits<double>::max(), 0x7fefffffffffffffULL},
+  }};
+  for (const auto& [value, bits] : binary64_cases) {
+    EXPECT_EQ(internal::canonical_binary64_bits(value), bits);
+    const double decoded = internal::decode_canonical_binary64(bits);
+    EXPECT_EQ(decoded, value);
+    if (decoded == 0.0) {
+      EXPECT_FALSE(std::signbit(decoded));
+    }
+  }
+}
+
+/**
+ * @brief Locks canonical binary64 bytes inside real SampleDomain artifact
+ *        metadata.
+ * @return Nothing; GoogleTest reports fixed-wire, decode, signed-zero, or
+ *         noncanonical-input acceptance mismatches.
+ * @throws Artifact capture/encode/decode failures when a positive vector
+ *         cannot complete its real public codec path.
+ * @note The negative-zero input must encode as positive zero, while a forged
+ *       negative-zero wire spelling is rejected before envelope publication.
+ */
+TEST(ValueArtifact,
+     SampleDomainBinary64WireIsCanonicalAndNativeOrderIndependent) {
+  const std::array<std::pair<double, std::uint64_t>, 6U> cases{{
+      {0.0, 0x0000000000000000ULL},
+      {-0.0, 0x0000000000000000ULL},
+      {1.0, 0x3ff0000000000000ULL},
+      {-1.0, 0xbff0000000000000ULL},
+      {std::numeric_limits<double>::denorm_min(), 0x0000000000000001ULL},
+      {std::numeric_limits<double>::max(), 0x7fefffffffffffffULL},
+  }};
+
+  // Version-one minimal `image` metadata fixes these field offsets: magic,
+  // envelope/name/flags, a rank-three unquantized descriptor, axes/bounds,
+  // absent display/channel schema, then the SampleDomain header.
+  constexpr std::size_t kMinimumOffset = 148U;
+  constexpr std::size_t kMaximumOffset = kMinimumOffset + sizeof(double);
+  for (const auto& [value, canonical_bits] : cases) {
+    const ValueArtifact captured =
+        capture_value_artifact("image", make_binary64_artifact_image(value));
+    const std::vector<std::byte> encoded =
+        encode_value_artifact_envelope(captured.envelope);
+    ASSERT_GE(encoded.size(), kMaximumOffset + sizeof(double));
+    for (std::size_t index = 0U; index < sizeof(double); ++index) {
+      const std::byte expected = binary64_wire_byte(canonical_bits, index);
+      EXPECT_EQ(encoded[kMinimumOffset + index], expected);
+      EXPECT_EQ(encoded[kMaximumOffset + index], expected);
+    }
+
+    const ValueArtifactEnvelope decoded =
+        decode_value_artifact_envelope(encoded);
+    ASSERT_TRUE(decoded.image_facet.has_value());
+    ASSERT_TRUE(decoded.image_facet->sample_domain.has_value());
+    const SampleDomain& domain =
+        decoded.image_facet->sample_domain->default_domain;
+    EXPECT_EQ(domain.minimum, value);
+    EXPECT_EQ(domain.maximum, value);
+    if (domain.minimum == 0.0) {
+      EXPECT_FALSE(std::signbit(domain.minimum));
+      EXPECT_FALSE(std::signbit(domain.maximum));
+    }
+  }
+
+  ValueArtifact zero =
+      capture_value_artifact("image", make_binary64_artifact_image(0.0));
+  std::vector<std::byte> noncanonical =
+      encode_value_artifact_envelope(zero.envelope);
+  noncanonical[kMinimumOffset + sizeof(double) - 1U] = std::byte{0x80};
+  EXPECT_THROW((void)decode_value_artifact_envelope(noncanonical),
+               std::invalid_argument);
 }
 
 TEST(ValueArtifact, RichDenseImageArchiveRoundTripsExactPortableFacts) {
