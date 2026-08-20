@@ -318,6 +318,13 @@ target_include_directories(photospider_operation_runtime
     PRIVATE
         "${PROJECT_SOURCE_DIR}/src/lib")
 target_link_libraries(photospider_operation_runtime PRIVATE OpenSSL::Crypto)
+if(BUILD_TESTING)
+    # The source-private Value allocation failpoint is compiled only into test
+    # runtime images. Installed/production builds expose no test symbol or
+    # failpoint branch, and the test-access header is never installed.
+    target_compile_definitions(photospider_operation_runtime PRIVATE
+        PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+endif()
 
 # Public pure-C operation-plugin SDK. C11 and C++17 producers receive only the
 # generated/installed include root; Host registry and runtime authority never
@@ -2042,6 +2049,8 @@ if(BUILD_TESTING)
         Photospider::operation_runtime
         GTest::gtest
         GTest::gtest_main)
+    target_compile_definitions(test_variable_sample_field_extensions PRIVATE
+        PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
     gtest_discover_tests(test_variable_sample_field_extensions
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES

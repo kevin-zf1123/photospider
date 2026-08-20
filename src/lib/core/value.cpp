@@ -19,6 +19,9 @@
 #include "core/pending_value.hpp"
 #include "core/value_descriptor_metadata.hpp"
 #include "core/value_validation.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+#include "core/value_test_access.hpp"
+#endif
 #include "photospider/data/image_view.hpp"
 
 namespace ps {
@@ -130,6 +133,95 @@ ProcessIdentityAuthority& process_identity_authority() noexcept {
   static ProcessIdentityAuthority authority;
   return authority;
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+/**
+ * @brief Calling-thread state for one deterministic ControlBlock allocation
+ * observation.
+ *
+ * @throws Nothing for construction and destruction.
+ * @note This state exists only in BUILD_TESTING runtime images. Thread-local
+ *       ownership isolates concurrently running tests without adding a lock or
+ *       allocation to the production path.
+ */
+struct BufferControlBlockAllocationTestState final {
+  /** @brief Whether a future allocation boundary remains armed. */
+  bool armed = false;
+
+  /** @brief Whether completed owners belong to the current observation. */
+  bool observing = false;
+
+  /** @brief Whether the selected one-shot boundary has thrown. */
+  bool fired = false;
+
+  /** @brief Remaining one-based ControlBlock boundary count. */
+  std::size_t remaining = 0U;
+
+  /** @brief Owners completed inside the current observation window. */
+  std::size_t successful_allocations = 0U;
+
+  /** @brief Observed owners destroyed before the current snapshot. */
+  std::size_t released_allocations = 0U;
+};
+
+/** @brief Calling thread's source-private allocation-test state. */
+thread_local BufferControlBlockAllocationTestState buffer_allocation_test_state;
+
+/**
+ * @brief Applies the selected one-shot failure before ControlBlock allocation.
+ *
+ * @return Nothing when disabled or before the selected boundary.
+ * @throws std::bad_alloc exactly when the calling thread reaches its selected
+ *         one-based allocation number.
+ * @note The failpoint disarms itself before throwing, while observation stays
+ *       active so synchronous stack unwinding can report prior owner release.
+ */
+void inject_buffer_control_block_allocation_failure_for_testing() {
+  BufferControlBlockAllocationTestState& state = buffer_allocation_test_state;
+  if (!state.armed) {
+    return;
+  }
+  if (state.remaining == 1U) {
+    state.armed = false;
+    state.fired = true;
+    throw std::bad_alloc{};
+  }
+  --state.remaining;
+}
+
+/**
+ * @brief Records one completed ControlBlock owner in the active observation.
+ *
+ * @return True when the owner must report its later destruction.
+ * @throws Nothing.
+ * @note The returned flag belongs to the private ControlBlock instance and
+ *       prevents destruction of preexisting owners from entering the count.
+ */
+bool record_buffer_control_block_allocation_for_testing() noexcept {
+  BufferControlBlockAllocationTestState& state = buffer_allocation_test_state;
+  if (!state.observing) {
+    return false;
+  }
+  ++state.successful_allocations;
+  return true;
+}
+
+/**
+ * @brief Records destruction of one owner created in the active observation.
+ *
+ * @param observed True only for a ControlBlock whose construction was counted.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note The targeted artifact reconstruction is synchronous, so its earlier
+ *       owners unwind on the same thread before the test captures a snapshot.
+ */
+void record_buffer_control_block_release_for_testing(bool observed) noexcept {
+  BufferControlBlockAllocationTestState& state = buffer_allocation_test_state;
+  if (observed && state.observing) {
+    ++state.released_allocations;
+  }
+}
+#endif
 
 /**
  * @brief Multiplies address-envelope components with overflow checking.
@@ -905,6 +997,36 @@ std::size_t resolve_coordinate_offset(const StridedLayout& layout,
 
 }  // namespace
 
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+namespace testing {
+
+/** @copydoc arm_buffer_control_block_allocation_failure_for_testing */
+void arm_buffer_control_block_allocation_failure_for_testing(
+    std::size_t allocation_number) noexcept {
+  BufferControlBlockAllocationTestState& state = buffer_allocation_test_state;
+  state = {};
+  state.armed = allocation_number != 0U;
+  state.observing = true;
+  state.remaining = allocation_number;
+}
+
+/** @copydoc buffer_control_block_allocation_observation_for_testing */
+BufferControlBlockAllocationObservation
+buffer_control_block_allocation_observation_for_testing() noexcept {
+  const BufferControlBlockAllocationTestState& state =
+      buffer_allocation_test_state;
+  return {state.fired, state.successful_allocations,
+          state.released_allocations};
+}
+
+/** @copydoc clear_buffer_control_block_allocation_failure_for_testing */
+void clear_buffer_control_block_allocation_failure_for_testing() noexcept {
+  buffer_allocation_test_state = {};
+}
+
+}  // namespace testing
+#endif
+
 /** @copydoc ps::image_bounds_width */
 std::size_t image_bounds_width(const ImageBounds& bounds) {
   return checked_image_bounds_span(bounds.x_begin, bounds.x_end, "x");
@@ -978,6 +1100,11 @@ struct BufferHandle::ControlBlock final {
   /** @brief Positive power-of-two allocation-base alignment guarantee. */
   std::size_t required_alignment = 1U;
 
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+  /** @brief Whether this owner belongs to the active test observation. */
+  bool observed_allocation_for_testing = false;
+#endif
+
   /**
    * @brief Allocates one zero-initialized CPU byte range.
    *
@@ -1005,6 +1132,10 @@ struct BufferHandle::ControlBlock final {
         });
     host_data = static_cast<std::byte*>(allocation);
     std::memset(host_data, 0, size);
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+    observed_allocation_for_testing =
+        record_buffer_control_block_allocation_for_testing();
+#endif
   }
 
   /**
@@ -1028,6 +1159,24 @@ struct BufferHandle::ControlBlock final {
         native(native_in),
         host_data(host_data_in),
         byte_size(size) {}
+
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+  /**
+   * @brief Releases retained storage and reports test-observed owner cleanup.
+   *
+   * @throws Nothing.
+   * @note Resetting the mutually exclusive storage owners first guarantees the
+   *       matching aligned deleter or external owner has completed before the
+   *       observation is counted. Production runtime images use the implicit
+   *       destructor and compile no observer field or callback.
+   */
+  ~ControlBlock() noexcept {
+    owned_cpu_storage.reset();
+    external_owner.reset();
+    record_buffer_control_block_release_for_testing(
+        observed_allocation_for_testing);
+  }
+#endif
 };
 
 /** @copydoc BufferHandle::BufferHandle */
@@ -1048,6 +1197,9 @@ BufferHandle BufferHandle::allocate_for_builder(std::size_t size,
   }
   const AllocationIdentity identity(
       process_identity_authority().mint_allocation_identity());
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+  inject_buffer_control_block_allocation_failure_for_testing();
+#endif
   return BufferHandle(std::make_shared<ControlBlock>(identity, size, alignment),
                       0U, size);
 }
