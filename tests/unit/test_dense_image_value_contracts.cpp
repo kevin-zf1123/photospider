@@ -147,6 +147,71 @@ Value make_codec_value(const cv::Mat& matrix, SampleEncodingKind encoding,
   return plugin::opencv::from_mat(matrix, facet);
 }
 
+/**
+ * @brief Describes one exact OpenCV encode tuple retained by the closed matrix.
+ * @throws Nothing for aggregate construction and destruction.
+ * @note The extension includes its leading dot; depth and channels use OpenCV
+ *       scalar constants rather than inferred file-format behavior.
+ */
+struct OpenCvEncodeTuple final {
+  /** @brief Lowercase output extension including the leading dot. */
+  const char* extension = nullptr;
+  /** @brief Exact OpenCV scalar depth. */
+  int depth = -1;
+  /** @brief Exact positive channel count. */
+  int channels = 0;
+};
+
+/**
+ * @brief Returns every tuple accepted by the closed OpenCV encode matrix.
+ * @return Canonically ordered extension/depth/channel cases.
+ * @throws std::bad_alloc when parameter storage cannot allocate.
+ * @note Every returned tuple is exercised through a real encode/decode below;
+ *       adding matrix support without adding a case therefore requires this
+ *       single authoritative catalog to change in the same review.
+ */
+std::vector<OpenCvEncodeTuple> allowed_opencv_encode_tuples() {
+  std::vector<OpenCvEncodeTuple> tuples;
+  const auto append = [&tuples](const char* extension,
+                                std::initializer_list<int> depths,
+                                std::initializer_list<int> channels) {
+    for (const int depth : depths) {
+      for (const int channel_count : channels) {
+        tuples.push_back({extension, depth, channel_count});
+      }
+    }
+  };
+  append(".jpg", {CV_8U}, {1, 3});
+  append(".jpeg", {CV_8U}, {1, 3});
+  append(".png", {CV_8U, CV_16U}, {1, 3, 4});
+  append(".tif", {CV_8U, CV_16U}, {1, 3, 4});
+  append(".tiff", {CV_8U, CV_16U}, {1, 3, 4});
+  append(".jp2", {CV_8U, CV_16U}, {1, 3, 4});
+  append(".bmp", {CV_8U}, {1, 3});
+  append(".webp", {CV_8U}, {3, 4});
+  append(".pgm", {CV_8U, CV_16U}, {1});
+  append(".ppm", {CV_8U, CV_16U}, {3});
+  append(".pnm", {CV_8U, CV_16U}, {1, 3});
+  append(".pam", {CV_8U}, {1, 3});
+  return tuples;
+}
+
+/**
+ * @brief GoogleTest parameter base for one allowed OpenCV encode tuple.
+ * @throws Nothing for alias declaration.
+ * @note The alias owns no test state beyond the framework parameter fixture.
+ */
+using OpenCvTupleTestBase = ::testing::TestWithParam<OpenCvEncodeTuple>;
+
+/**
+ * @brief Parameterized real-file proof for one allowed OpenCV matrix tuple.
+ * @throws Filesystem, Value, OpenCV, codec, or allocation exceptions from the
+ *         exercised production boundary.
+ * @note The test owns a unique directory per case and checks the decoder's
+ *       actual storage/shape result rather than only `cv::imwrite` acceptance.
+ */
+class OpenCvAllowedEncodeTupleTest : public OpenCvTupleTestBase {};
+
 TEST(DenseImageValueContracts, PreservesSignedCoordinatesAndPaddedLayout) {
   const ImageFacet facet = make_test_facet(2U, 2U, -7, 11);
   const Value value =
@@ -245,6 +310,35 @@ TEST(OpenCvImageArtifactCodec, PreservesAllowedUint16PngAndTiffStorage) {
   EXPECT_EQ(tiff_round_trip.at<std::uint16_t>(0, 1), 32768U);
 }
 
+TEST_P(OpenCvAllowedEncodeTupleTest,
+       RealEncodeDecodePreservesDepthChannelsAndShape) {
+  const OpenCvEncodeTuple tuple = GetParam();
+  CodecTempDirectory directory;
+  constexpr int kRows = 32;
+  constexpr int kColumns = 48;
+  cv::Mat matrix(kRows, kColumns, CV_MAKETYPE(tuple.depth, tuple.channels));
+  matrix.setTo(tuple.depth == CV_16U ? cv::Scalar::all(32768U)
+                                     : cv::Scalar::all(127U));
+  const double maximum = tuple.depth == CV_16U ? 65535.0 : 255.0;
+  const Value value =
+      make_codec_value(matrix, SampleEncodingKind::CodeValue,
+                       SampleDomain{SampleDomainKind::CodeValue, 0.0, maximum});
+  adapters::opencv::OpenCvImageArtifactCodec codec;
+  const std::filesystem::path path =
+      directory.path() / (std::string("allowed") + tuple.extension);
+
+  ASSERT_NO_THROW(codec.encode(path, value, ImageArtifactEncodeRequest{}));
+  const cv::Mat decoded = cv::imread(path.string(), cv::IMREAD_UNCHANGED);
+  ASSERT_FALSE(decoded.empty());
+  EXPECT_EQ(decoded.depth(), tuple.depth);
+  EXPECT_EQ(decoded.channels(), tuple.channels);
+  EXPECT_EQ(decoded.rows, kRows);
+  EXPECT_EQ(decoded.cols, kColumns);
+}
+
+INSTANTIATE_TEST_SUITE_P(ClosedMatrix, OpenCvAllowedEncodeTupleTest,
+                         ::testing::ValuesIn(allowed_opencv_encode_tuples()));
+
 TEST(OpenCvImageArtifactCodec,
      RejectsUnsupportedDepthAndChannelBeforeDestinationMutation) {
   CodecTempDirectory directory;
@@ -311,6 +405,55 @@ TEST(OpenCvImageArtifactCodec,
   EXPECT_THROW(codec.encode(jpeg_rgba, rgba_value, request),
                std::invalid_argument);
   EXPECT_FALSE(std::filesystem::exists(jpeg_rgba));
+
+  cv::Mat grayscale(2, 2, CV_8UC1, cv::Scalar(127U));
+  const Value grayscale_value =
+      make_codec_value(grayscale, SampleEncodingKind::CodeValue,
+                       SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0});
+  const std::filesystem::path webp_gray = directory.path() / "gray.webp";
+  EXPECT_THROW(codec.encode(webp_gray, grayscale_value, request),
+               std::invalid_argument);
+  EXPECT_FALSE(std::filesystem::exists(webp_gray));
+
+  const std::filesystem::path pbm_gray = directory.path() / "gray.pbm";
+  EXPECT_THROW(codec.encode(pbm_gray, grayscale_value, request),
+               std::invalid_argument);
+  EXPECT_FALSE(std::filesystem::exists(pbm_gray));
+
+  const std::filesystem::path bmp_rgba = directory.path() / "rgba.bmp";
+  EXPECT_THROW(codec.encode(bmp_rgba, rgba_value, request),
+               std::invalid_argument);
+  EXPECT_FALSE(std::filesystem::exists(bmp_rgba));
+
+  const std::filesystem::path pam_rgba = directory.path() / "rgba.pam";
+  EXPECT_THROW(codec.encode(pam_rgba, rgba_value, request),
+               std::invalid_argument);
+  EXPECT_FALSE(std::filesystem::exists(pam_rgba));
+
+  const std::filesystem::path pam_u16_gray =
+      directory.path() / "uint16-gray.pam";
+  EXPECT_THROW(codec.encode(pam_u16_gray, unsigned16_value, request),
+               std::invalid_argument);
+  EXPECT_FALSE(std::filesystem::exists(pam_u16_gray));
+
+  cv::Mat unsigned16_rgb(1, 1, CV_16UC3, cv::Scalar::all(32768U));
+  const Value unsigned16_rgb_value =
+      make_codec_value(unsigned16_rgb, SampleEncodingKind::CodeValue,
+                       SampleDomain{SampleDomainKind::CodeValue, 0.0, 65535.0});
+  const std::filesystem::path pam_u16_rgb = directory.path() / "uint16-rgb.pam";
+  EXPECT_THROW(codec.encode(pam_u16_rgb, unsigned16_rgb_value, request),
+               std::invalid_argument);
+  EXPECT_FALSE(std::filesystem::exists(pam_u16_rgb));
+
+  cv::Mat unsigned16_rgba(1, 1, CV_16UC4, cv::Scalar::all(32768U));
+  const Value unsigned16_rgba_value =
+      make_codec_value(unsigned16_rgba, SampleEncodingKind::CodeValue,
+                       SampleDomain{SampleDomainKind::CodeValue, 0.0, 65535.0});
+  const std::filesystem::path pam_u16_rgba =
+      directory.path() / "uint16-rgba.pam";
+  EXPECT_THROW(codec.encode(pam_u16_rgba, unsigned16_rgba_value, request),
+               std::invalid_argument);
+  EXPECT_FALSE(std::filesystem::exists(pam_u16_rgba));
 }
 
 }  // namespace

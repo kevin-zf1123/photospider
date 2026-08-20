@@ -52,10 +52,11 @@ bool is_openexr_path(const std::filesystem::path& path) {
  * @throws std::bad_alloc when extension normalization allocates.
  * @note This preflight intentionally exposes only ordinary unsigned 8/16-bit
  * formats: JPEG uses UINT8 with one or three channels; PNG/TIFF/JPEG2000 use
- * UINT8/UINT16 with one, three, or four channels; BMP/WebP use UINT8 with one,
- * three, or four channels; and Netpbm variants use their declared one/three/
- * four-channel forms. Signed and floating matrices are rejected rather than
- * allowing OpenCV to fall back to CV_8U implicitly.
+ * UINT8/UINT16 with one, three, or four channels; BMP uses UINT8 with one or
+ * three channels; WebP uses UINT8 with three or four channels; PGM/PPM/PNM use
+ * their declared UINT8/UINT16 forms; and PAM uses UINT8 with one or three
+ * channels. PBM and OpenCV combinations that change depth/channel/shape are
+ * rejected rather than delegated to an implicit conversion.
  */
 void validate_encode_matrix(const std::filesystem::path& path,
                             const cv::Mat& matrix) {
@@ -74,10 +75,10 @@ void validate_encode_matrix(const std::filesystem::path& path,
   } else if (extension == ".png" || extension == ".tif" ||
              extension == ".tiff" || extension == ".jp2") {
     supported = (unsigned8 || unsigned16) && (one || three || four);
-  } else if (extension == ".bmp" || extension == ".webp") {
-    supported = unsigned8 && (one || three || four);
-  } else if (extension == ".pbm") {
-    supported = unsigned8 && one;
+  } else if (extension == ".bmp") {
+    supported = unsigned8 && (one || three);
+  } else if (extension == ".webp") {
+    supported = unsigned8 && (three || four);
   } else if (extension == ".pgm") {
     supported = (unsigned8 || unsigned16) && one;
   } else if (extension == ".ppm") {
@@ -85,7 +86,7 @@ void validate_encode_matrix(const std::filesystem::path& path,
   } else if (extension == ".pnm") {
     supported = (unsigned8 || unsigned16) && (one || three);
   } else if (extension == ".pam") {
-    supported = (unsigned8 || unsigned16) && (one || three || four);
+    supported = unsigned8 && (one || three);
   }
   if (!supported) {
     throw std::invalid_argument(
