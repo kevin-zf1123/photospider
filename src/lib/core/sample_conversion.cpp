@@ -12,6 +12,9 @@
 #include <vector>
 
 #include "photospider/data/image_view.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_SAMPLE_CONVERSION_TESTING)
+#include "core/sample_conversion_test_access.hpp"
+#endif
 
 namespace ps {
 namespace {
@@ -320,18 +323,38 @@ long double round_integral(long double value, SampleRoundingMode mode) {
   throw std::invalid_argument("Unknown sample rounding mode.");
 }
 
+#if defined(PHOTOSPIDER_INTERNAL_SAMPLE_CONVERSION_TESTING)
+/**
+ * @brief Calling-thread working-type selection for deterministic affine tests.
+ *
+ * @throws Nothing for construction and destruction.
+ * @note This state exists only in BUILD_TESTING runtime images. The public
+ *       conversion request and production runtime contain no corresponding
+ *       field, branch, or process-global mutation.
+ */
+struct SampleConversionTestState final {
+  /** @brief Whether finite affine arithmetic uses binary64 on this thread. */
+  bool force_binary64_affine = false;
+};
+
+/** @brief Calling thread's source-private sample-conversion test state. */
+thread_local SampleConversionTestState sample_conversion_test_state;
+#endif
+
 /**
  * @brief Power-of-two normalized form of one finite nondegenerate interval.
+ * @tparam Working Floating-point type used by the complete affine operation.
  * @throws Nothing for ordinary aggregate operations.
  * @note Scaling makes the largest endpoint magnitude lie in `[1, 2)` and
  *       therefore keeps the scaled span finite. A narrow subnormal interval
  *       is promoted as a unit, without requiring a wider floating type.
  */
+template <typename Working>
 struct ScaledInterval final {
   /** @brief Lower endpoint after power-of-two scaling. */
-  long double minimum = 0.0L;
+  Working minimum = Working{0};
   /** @brief Upper endpoint after power-of-two scaling. */
-  long double maximum = 0.0L;
+  Working maximum = Working{0};
   /** @brief Binary exponent removed from both endpoints. */
   int exponent = 0;
 };
@@ -348,22 +371,26 @@ struct ScaledInterval final {
  *       toward unity; exact affine endpoints bypass this helper, and the
  *       scaled interval is checked for retained order before use.
  */
-ScaledInterval scale_finite_interval(long double minimum, long double maximum) {
+template <typename Working>
+ScaledInterval<Working> scale_finite_interval(Working minimum,
+                                              Working maximum) {
+  static_assert(std::is_floating_point_v<Working>,
+                "sample affine work requires a floating-point type");
   if (!std::isfinite(minimum) || !std::isfinite(maximum) ||
       !(minimum < maximum)) {
     throw std::logic_error("Finite sample interval is not ordered.");
   }
   int exponent = std::numeric_limits<int>::min();
-  if (minimum != 0.0L) {
+  if (minimum != Working{0}) {
     exponent = std::ilogb(std::fabs(minimum));
   }
-  if (maximum != 0.0L) {
+  if (maximum != Working{0}) {
     exponent = std::max(exponent, std::ilogb(std::fabs(maximum)));
   }
   if (exponent == std::numeric_limits<int>::min()) {
     throw std::logic_error("Finite sample interval has no nonzero endpoint.");
   }
-  ScaledInterval result;
+  ScaledInterval<Working> result;
   result.minimum = std::scalbn(minimum, -exponent);
   result.maximum = std::scalbn(maximum, -exponent);
   result.exponent = exponent;
@@ -375,7 +402,38 @@ ScaledInterval scale_finite_interval(long double minimum, long double maximum) {
 }
 
 /**
+ * @brief Derives one affine scale from independently normalized intervals.
+ * @tparam Working Floating-point type used by the complete affine operation.
+ * @param source Power-of-two-normalized finite source interval.
+ * @param destination Power-of-two-normalized finite destination interval.
+ * @return Destination/source scale, including zero or infinity when the exact
+ *         quotient is outside the working type's representable range.
+ * @throws std::logic_error when a scaled-interval invariant is broken.
+ * @note The bounded mantissa quotient is adjusted with the exact exponent
+ *       difference. No original interval span is formed, and no source sample
+ *       or endpoint distance is scaled before later fused mapping.
+ */
+template <typename Working>
+Working derive_scale_from_scaled_intervals(
+    const ScaledInterval<Working>& source,
+    const ScaledInterval<Working>& destination) {
+  const Working source_span = source.maximum - source.minimum;
+  const Working destination_span = destination.maximum - destination.minimum;
+  if (!std::isfinite(source_span) || source_span <= Working{0} ||
+      !std::isfinite(destination_span) || destination_span <= Working{0}) {
+    throw std::logic_error("Scaled sample interval span is invalid.");
+  }
+  const Working mantissa_scale = destination_span / source_span;
+  if (!std::isfinite(mantissa_scale) || mantissa_scale <= Working{0}) {
+    throw std::logic_error("Scaled sample interval quotient is invalid.");
+  }
+  const int exponent_difference = destination.exponent - source.exponent;
+  return std::scalbn(mantissa_scale, exponent_difference);
+}
+
+/**
  * @brief Interpolates a destination from its nearer endpoint.
+ * @tparam Working Floating-point type used by the complete affine operation.
  * @param minimum Finite destination lower endpoint.
  * @param maximum Finite destination upper endpoint greater than minimum.
  * @param fraction Clamped distance fraction in `[0, 1]`.
@@ -390,14 +448,13 @@ ScaledInterval scale_finite_interval(long double minimum, long double maximum) {
  *       overflowing destination span requires power-of-two endpoint scaling
  *       before `fma` and one final `scalbn` restore.
  */
-long double interpolate_finite_from_endpoint(long double minimum,
-                                             long double maximum,
-                                             long double fraction,
-                                             bool from_minimum) {
-  const long double bounded_fraction = std::clamp(fraction, 0.0L, 1.0L);
-  const long double direct_span = maximum - minimum;
+template <typename Working>
+Working interpolate_finite_from_endpoint(Working minimum, Working maximum,
+                                         Working fraction, bool from_minimum) {
+  const Working bounded_fraction = std::clamp(fraction, Working{0}, Working{1});
+  const Working direct_span = maximum - minimum;
   if (std::isfinite(direct_span)) {
-    const long double mapped =
+    const Working mapped =
         from_minimum ? std::fma(bounded_fraction, direct_span, minimum)
                      : std::fma(-bounded_fraction, direct_span, maximum);
     if (!std::isfinite(mapped)) {
@@ -407,14 +464,15 @@ long double interpolate_finite_from_endpoint(long double minimum,
     return std::clamp(mapped, minimum, maximum);
   }
 
-  const ScaledInterval destination = scale_finite_interval(minimum, maximum);
-  const long double scaled_span = destination.maximum - destination.minimum;
-  long double scaled =
+  const ScaledInterval<Working> destination =
+      scale_finite_interval(minimum, maximum);
+  const Working scaled_span = destination.maximum - destination.minimum;
+  Working scaled =
       from_minimum
           ? std::fma(bounded_fraction, scaled_span, destination.minimum)
           : std::fma(-bounded_fraction, scaled_span, destination.maximum);
   scaled = std::clamp(scaled, destination.minimum, destination.maximum);
-  const long double mapped = std::scalbn(scaled, destination.exponent);
+  const Working mapped = std::scalbn(scaled, destination.exponent);
   if (!std::isfinite(mapped)) {
     throw std::domain_error(
         "Finite sample affine interpolation produced a non-finite result.");
@@ -424,6 +482,7 @@ long double interpolate_finite_from_endpoint(long double minimum,
 
 /**
  * @brief Applies one finite affine scale from the corresponding endpoints.
+ * @tparam Working Floating-point type used by the complete affine operation.
  * @param minimum Finite destination lower endpoint.
  * @param maximum Finite destination upper endpoint greater than minimum.
  * @param distance Nonnegative source distance from the matching endpoint.
@@ -438,13 +497,12 @@ long double interpolate_finite_from_endpoint(long double minimum,
  *       endpoint preserves a representable final result even when computing
  *       the source fraction first would underflow.
  */
-long double interpolate_finite_from_endpoint_scale(long double minimum,
-                                                   long double maximum,
-                                                   long double distance,
-                                                   long double scale,
-                                                   bool from_minimum) {
-  const long double mapped = from_minimum ? std::fma(distance, scale, minimum)
-                                          : std::fma(-distance, scale, maximum);
+template <typename Working>
+Working interpolate_finite_from_endpoint_scale(Working minimum, Working maximum,
+                                               Working distance, Working scale,
+                                               bool from_minimum) {
+  const Working mapped = from_minimum ? std::fma(distance, scale, minimum)
+                                      : std::fma(-distance, scale, maximum);
   if (!std::isfinite(mapped)) {
     throw std::domain_error(
         "Finite sample affine scale produced a non-finite result.");
@@ -453,7 +511,96 @@ long double interpolate_finite_from_endpoint_scale(long double minimum,
 }
 
 /**
+ * @brief Maps one sample with a finite nonzero affine scale and raw distance.
+ * @tparam Working Floating-point type used by the complete affine operation.
+ * @param value Finite in-domain source value that is not an endpoint.
+ * @param source_minimum Finite source lower endpoint.
+ * @param source_maximum Finite source upper endpoint.
+ * @param source_span Direct source span, or infinity when it overflows.
+ * @param destination_minimum Finite destination lower endpoint.
+ * @param destination_maximum Finite destination upper endpoint.
+ * @param scale Positive finite destination/source interval scale.
+ * @return Finite destination result rounded once by fused mapping.
+ * @throws std::domain_error when validated finite inputs unexpectedly produce
+ *         a non-finite result.
+ * @throws std::logic_error when no finite source anchor distance exists.
+ * @note A symmetric destination prefers a source-midpoint anchor. When the
+ *       direct source span overflows, the midpoint is reconstructed from
+ *       scaled endpoints, but `value - midpoint` remains in the original
+ *       exponent domain. Other destinations prefer the endpoint closest to
+ *       zero and switch anchors only when its original distance overflows.
+ */
+template <typename Working>
+Working map_finite_with_scale(Working value, Working source_minimum,
+                              Working source_maximum, Working source_span,
+                              Working destination_minimum,
+                              Working destination_maximum, Working scale) {
+  const Working destination_minimum_magnitude = std::fabs(destination_minimum);
+  const Working destination_maximum_magnitude = std::fabs(destination_maximum);
+  if (destination_minimum_magnitude == destination_maximum_magnitude) {
+    const Working half = static_cast<Working>(0.5);
+    Working source_midpoint = Working{0};
+    bool stable_midpoint = false;
+    if (std::isnormal(source_span)) {
+      const Working source_radius = source_span * half;
+      source_midpoint = std::fma(half, source_span, source_minimum);
+      stable_midpoint = source_radius > Working{0} &&
+                        std::isfinite(source_midpoint) &&
+                        source_radius + source_radius == source_span;
+    } else if (!std::isfinite(source_span)) {
+      const ScaledInterval<Working> source =
+          scale_finite_interval(source_minimum, source_maximum);
+      const Working scaled_span = source.maximum - source.minimum;
+      const Working scaled_radius = scaled_span * half;
+      const Working scaled_midpoint =
+          std::fma(half, scaled_span, source.minimum);
+      source_midpoint = std::scalbn(scaled_midpoint, source.exponent);
+      const Working source_radius = std::scalbn(scaled_radius, source.exponent);
+      stable_midpoint = scaled_radius > Working{0} &&
+                        scaled_radius + scaled_radius == scaled_span &&
+                        source_radius > Working{0} &&
+                        std::isfinite(source_radius) &&
+                        std::isfinite(source_midpoint);
+    }
+    if (stable_midpoint) {
+      const Working distance = value - source_midpoint;
+      if (std::isfinite(distance)) {
+        const Working mapped = std::fma(distance, scale, Working{0});
+        if (!std::isfinite(mapped)) {
+          throw std::domain_error(
+              "Finite centered affine scale produced a non-finite result.");
+        }
+        return std::clamp(mapped, destination_minimum, destination_maximum);
+      }
+    }
+  }
+
+  const Working from_minimum = value - source_minimum;
+  const Working from_maximum = source_maximum - value;
+  const bool prefer_minimum =
+      destination_minimum_magnitude <= destination_maximum_magnitude;
+  if (prefer_minimum && std::isfinite(from_minimum)) {
+    return interpolate_finite_from_endpoint_scale(
+        destination_minimum, destination_maximum, from_minimum, scale, true);
+  }
+  if (!prefer_minimum && std::isfinite(from_maximum)) {
+    return interpolate_finite_from_endpoint_scale(
+        destination_minimum, destination_maximum, from_maximum, scale, false);
+  }
+  if (std::isfinite(from_minimum)) {
+    return interpolate_finite_from_endpoint_scale(
+        destination_minimum, destination_maximum, from_minimum, scale, true);
+  }
+  if (std::isfinite(from_maximum)) {
+    return interpolate_finite_from_endpoint_scale(
+        destination_minimum, destination_maximum, from_maximum, scale, false);
+  }
+  throw std::logic_error("Finite affine map has no finite source distance.");
+}
+
+/**
  * @brief Interpolates a destination from a centered position.
+ * @tparam Working Floating-point type used by the complete affine operation.
  * @param minimum Finite destination lower endpoint.
  * @param maximum Finite destination upper endpoint greater than minimum.
  * @param centered_position Clamped affine position in `[-1, 1]`.
@@ -468,13 +615,13 @@ long double interpolate_finite_from_endpoint_scale(long double minimum,
  *       endpoint interpolator, so destination exponent scaling occurs only
  *       when its span actually overflows.
  */
-long double interpolate_finite_centered(long double minimum,
-                                        long double maximum,
-                                        long double centered_position) {
-  const long double bounded_position =
-      std::clamp(centered_position, -1.0L, 1.0L);
+template <typename Working>
+Working interpolate_finite_centered(Working minimum, Working maximum,
+                                    Working centered_position) {
+  const Working bounded_position =
+      std::clamp(centered_position, Working{-1}, Working{1});
   if (std::fabs(minimum) == std::fabs(maximum)) {
-    const long double mapped = std::fma(bounded_position, maximum, 0.0L);
+    const Working mapped = std::fma(bounded_position, maximum, Working{0});
     if (!std::isfinite(mapped)) {
       throw std::domain_error(
           "Finite centered affine interpolation produced a non-finite "
@@ -482,10 +629,11 @@ long double interpolate_finite_centered(long double minimum,
     }
     return std::clamp(mapped, minimum, maximum);
   }
-  const bool from_minimum = bounded_position <= 0.0L;
-  const long double endpoint_fraction =
-      from_minimum ? std::fma(0.5L, bounded_position, 0.5L)
-                   : std::fma(-0.5L, bounded_position, 0.5L);
+  const bool from_minimum = bounded_position <= Working{0};
+  const Working half = static_cast<Working>(0.5);
+  const Working endpoint_fraction =
+      from_minimum ? std::fma(half, bounded_position, half)
+                   : std::fma(-half, bounded_position, half);
   return interpolate_finite_from_endpoint(minimum, maximum, endpoint_fraction,
                                           from_minimum);
 }
@@ -493,6 +641,7 @@ long double interpolate_finite_centered(long double minimum,
 /**
  * @brief Maps through scaled centered coordinates when a direct source span
  *        overflows.
+ * @tparam Working Floating-point type used by the complete affine operation.
  * @param value Finite source value inside the inclusive source interval.
  * @param source_minimum Finite source lower endpoint.
  * @param source_maximum Finite source upper endpoint greater than minimum.
@@ -502,26 +651,28 @@ long double interpolate_finite_centered(long double minimum,
  * @throws std::domain_error when finite inputs produce a non-finite result.
  * @throws std::logic_error when interval preconditions are broken.
  * @note The source is normalized by an exact power of two, making its span and
- *       half-span finite and non-subnormal. The centered coordinate retains
- *       every near-midpoint displacement whose destination contribution is
- *       representable, without adding that displacement to one-half.
+ *       half-span finite and non-subnormal. This fallback is used only after
+ *       a normalized interval quotient is zero, subnormal, or infinite, so a
+ *       displacement lost while forming the centered fraction cannot change
+ *       a correctly rounded representable destination result.
  */
-long double map_scaled_centered(long double value, long double source_minimum,
-                                long double source_maximum,
-                                long double destination_minimum,
-                                long double destination_maximum) {
-  const ScaledInterval source =
+template <typename Working>
+Working map_scaled_centered(Working value, Working source_minimum,
+                            Working source_maximum, Working destination_minimum,
+                            Working destination_maximum) {
+  const ScaledInterval<Working> source =
       scale_finite_interval(source_minimum, source_maximum);
-  const long double source_span = source.maximum - source.minimum;
-  const long double source_radius = source_span / 2.0L;
-  const long double source_midpoint =
-      std::fma(0.5L, source_span, source.minimum);
-  if (source_radius == 0.0L || !std::isfinite(source_midpoint)) {
+  const Working source_span = source.maximum - source.minimum;
+  const Working half = static_cast<Working>(0.5);
+  const Working source_radius = source_span * half;
+  const Working source_midpoint = std::fma(half, source_span, source.minimum);
+  if (source_radius == Working{0} || !std::isfinite(source_midpoint)) {
     throw std::logic_error("Scaled source interval could not be centered.");
   }
-  const long double scaled_value = std::scalbn(value, -source.exponent);
-  const long double centered_position =
-      std::clamp((scaled_value - source_midpoint) / source_radius, -1.0L, 1.0L);
+  const Working scaled_value = std::scalbn(value, -source.exponent);
+  const Working centered_position =
+      std::clamp((scaled_value - source_midpoint) / source_radius, Working{-1},
+                 Working{1});
 
   return interpolate_finite_centered(destination_minimum, destination_maximum,
                                      centered_position);
@@ -529,6 +680,7 @@ long double map_scaled_centered(long double value, long double source_minimum,
 
 /**
  * @brief Maps one in-domain finite value through an overflow-safe affine core.
+ * @tparam Working Floating-point type used by the complete affine operation.
  * @param value Finite source value inside the inclusive source interval.
  * @param source_minimum Finite source lower endpoint.
  * @param source_maximum Finite source upper endpoint greater than minimum.
@@ -543,18 +695,22 @@ long double map_scaled_centered(long double value, long double source_minimum,
  *       endpoint-relative distance is fused directly with the destination
  *       endpoint closest to zero. Equal-magnitude destinations use a stable
  *       source midpoint when available so cross-zero near-center displacement
- *       is retained. If the scale underflows or overflows, the core falls back
- *       to endpoint-relative fraction plus fused interpolation; narrow
- *       subnormal intervals therefore never halve their span or subtract an
- *       unverified rounded midpoint. Only an overflowing source span requires
- *       a scaled source-centered form, and only an overflowing destination
- *       span is exponent-scaled before one final restore. The same helper is
- *       used for forward conversion and reverse precision validation.
+ *       is retained. If a direct finite-span scale underflows or overflows,
+ *       the core falls back to endpoint-relative fraction plus fused
+ *       interpolation; narrow subnormal intervals therefore never halve their
+ *       span or subtract an unverified rounded midpoint. Overflowing spans are
+ *       independently normalized to derive a bounded mantissa quotient and
+ *       exponent difference. A normal derived scale multiplies the original,
+ *       unscaled source anchor distance. A zero, subnormal, or infinite
+ *       derived scale retains the scaled-position fallback, and an overflowing
+ *       destination interpolation is restored once. The same helper is used
+ *       for forward conversion and reverse precision validation.
  */
-long double map_finite_affine(long double value, long double source_minimum,
-                              long double source_maximum,
-                              long double destination_minimum,
-                              long double destination_maximum) {
+template <typename Working>
+Working map_finite_affine_working(Working value, Working source_minimum,
+                                  Working source_maximum,
+                                  Working destination_minimum,
+                                  Working destination_maximum) {
   if (value == source_minimum) {
     return destination_minimum;
   }
@@ -566,46 +722,40 @@ long double map_finite_affine(long double value, long double source_minimum,
     return value;
   }
 
-  const long double source_span = source_maximum - source_minimum;
-  if (std::isfinite(source_span) && source_span > 0.0L) {
-    const long double from_minimum = value - source_minimum;
-    const long double from_maximum = source_maximum - value;
-    const long double destination_minimum_magnitude =
-        std::fabs(destination_minimum);
-    const long double destination_maximum_magnitude =
-        std::fabs(destination_maximum);
-    const long double destination_span =
-        destination_maximum - destination_minimum;
-    if (std::isfinite(destination_span) && destination_span > 0.0L) {
-      const long double scale = destination_span / source_span;
-      if (std::isfinite(scale) && scale > 0.0L) {
-        if (destination_minimum_magnitude == destination_maximum_magnitude &&
-            std::isnormal(source_span)) {
-          const long double source_radius = source_span / 2.0L;
-          const long double source_midpoint =
-              std::fma(0.5L, source_span, source_minimum);
-          if (source_radius > 0.0L && std::isfinite(source_midpoint) &&
-              source_radius + source_radius == source_span) {
-            const long double mapped =
-                std::fma(value - source_midpoint, scale, 0.0L);
-            if (!std::isfinite(mapped)) {
-              throw std::domain_error(
-                  "Finite centered affine scale produced a non-finite "
-                  "result.");
-            }
-            return std::clamp(mapped, destination_minimum, destination_maximum);
-          }
-        }
-        if (destination_minimum_magnitude <= destination_maximum_magnitude) {
-          return interpolate_finite_from_endpoint_scale(
-              destination_minimum, destination_maximum, from_minimum, scale,
-              true);
-        }
-        return interpolate_finite_from_endpoint_scale(
-            destination_minimum, destination_maximum, from_maximum, scale,
-            false);
-      }
+  const Working source_span = source_maximum - source_minimum;
+  const Working destination_span = destination_maximum - destination_minimum;
+  const bool finite_source_span =
+      std::isfinite(source_span) && source_span > Working{0};
+  const bool finite_destination_span =
+      std::isfinite(destination_span) && destination_span > Working{0};
+  if (finite_source_span && finite_destination_span) {
+    const Working scale = destination_span / source_span;
+    if (std::isfinite(scale) && scale > Working{0}) {
+      return map_finite_with_scale(value, source_minimum, source_maximum,
+                                   source_span, destination_minimum,
+                                   destination_maximum, scale);
     }
+  } else {
+    const ScaledInterval<Working> scaled_source =
+        scale_finite_interval(source_minimum, source_maximum);
+    const ScaledInterval<Working> scaled_destination =
+        scale_finite_interval(destination_minimum, destination_maximum);
+    const Working scale =
+        derive_scale_from_scaled_intervals(scaled_source, scaled_destination);
+    if (std::isnormal(scale)) {
+      return map_finite_with_scale(value, source_minimum, source_maximum,
+                                   source_span, destination_minimum,
+                                   destination_maximum, scale);
+    }
+  }
+
+  if (finite_source_span) {
+    const Working from_minimum = value - source_minimum;
+    const Working from_maximum = source_maximum - value;
+    const Working destination_minimum_magnitude =
+        std::fabs(destination_minimum);
+    const Working destination_maximum_magnitude =
+        std::fabs(destination_maximum);
     if (destination_minimum_magnitude < destination_maximum_magnitude) {
       return interpolate_finite_from_endpoint(destination_minimum,
                                               destination_maximum,
@@ -616,12 +766,13 @@ long double map_finite_affine(long double value, long double source_minimum,
           destination_minimum, destination_maximum, from_maximum / source_span,
           false);
     }
-    long double centered_position = (from_minimum - from_maximum) / source_span;
+    Working centered_position = (from_minimum - from_maximum) / source_span;
     if (std::isnormal(source_span)) {
-      const long double source_radius = source_span / 2.0L;
-      const long double source_midpoint =
-          std::fma(0.5L, source_span, source_minimum);
-      if (source_radius > 0.0L && std::isfinite(source_midpoint) &&
+      const Working half = static_cast<Working>(0.5);
+      const Working source_radius = source_span * half;
+      const Working source_midpoint =
+          std::fma(half, source_span, source_minimum);
+      if (source_radius > Working{0} && std::isfinite(source_midpoint) &&
           source_radius + source_radius == source_span) {
         centered_position = (value - source_midpoint) / source_radius;
       }
@@ -631,6 +782,44 @@ long double map_finite_affine(long double value, long double source_minimum,
   }
   return map_scaled_centered(value, source_minimum, source_maximum,
                              destination_minimum, destination_maximum);
+}
+
+/**
+ * @brief Dispatches one finite affine map through the selected working type.
+ *
+ * Production always uses `long double`. BUILD_TESTING runtime images may
+ * select binary64 on the current thread so the public conversion path proves
+ * correctness without relying on a platform's extended working type.
+ *
+ * @param value Finite source value inside the inclusive source interval.
+ * @param source_minimum Finite source lower endpoint.
+ * @param source_maximum Finite source upper endpoint greater than minimum.
+ * @param destination_minimum Finite destination lower endpoint.
+ * @param destination_maximum Finite destination upper endpoint.
+ * @return Finite destination value rounded by the selected working type.
+ * @throws std::domain_error when finite validated inputs unexpectedly produce
+ *         a non-finite result.
+ * @throws std::logic_error when interval preconditions are broken.
+ * @note Forward conversion and reverse precision validation call this same
+ *       dispatcher. The test selection is thread-local and absent from
+ *       production builds.
+ */
+long double map_finite_affine(long double value, long double source_minimum,
+                              long double source_maximum,
+                              long double destination_minimum,
+                              long double destination_maximum) {
+#if defined(PHOTOSPIDER_INTERNAL_SAMPLE_CONVERSION_TESTING)
+  if (sample_conversion_test_state.force_binary64_affine) {
+    return static_cast<long double>(map_finite_affine_working<double>(
+        static_cast<double>(value), static_cast<double>(source_minimum),
+        static_cast<double>(source_maximum),
+        static_cast<double>(destination_minimum),
+        static_cast<double>(destination_maximum)));
+  }
+#endif
+  return map_finite_affine_working<long double>(
+      value, source_minimum, source_maximum, destination_minimum,
+      destination_maximum);
 }
 
 /**
@@ -1048,6 +1237,27 @@ std::pair<long double, long double> map_sample(
 }
 
 }  // namespace
+
+#if defined(PHOTOSPIDER_INTERNAL_SAMPLE_CONVERSION_TESTING)
+namespace testing {
+
+/**
+ * @copydoc ScopedBinary64AffineForTesting::ScopedBinary64AffineForTesting()
+ */
+ScopedBinary64AffineForTesting::ScopedBinary64AffineForTesting() noexcept
+    : previous_mode_(sample_conversion_test_state.force_binary64_affine) {
+  sample_conversion_test_state.force_binary64_affine = true;
+}
+
+/** @copydoc
+ * ScopedBinary64AffineForTesting::~ScopedBinary64AffineForTesting()
+ */
+ScopedBinary64AffineForTesting::~ScopedBinary64AffineForTesting() noexcept {
+  sample_conversion_test_state.force_binary64_affine = previous_mode_;
+}
+
+}  // namespace testing
+#endif
 
 /** @copydoc convert_dense_image_samples */
 Value convert_dense_image_samples(const Value& source,

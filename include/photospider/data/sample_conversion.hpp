@@ -94,14 +94,17 @@ struct SampleConversion final {
  * in-domain native scalars without any floating-point promotion. Other
  * conversions prefer one endpoint-relative distance multiplied by a finite
  * nonzero destination/source span scale and fused with the destination
- * endpoint. A zero or infinite scale falls back to an endpoint fraction plus
- * fused destination interpolation; only genuinely overflowing spans require
- * power-of-two scaling, while symmetric destinations use a stable centered
- * coordinate. Arithmetic begins only when the source integer is exactly
+ * endpoint. When either span overflows, independently power-of-two-normalized
+ * source and destination endpoints provide bounded spans plus an exact
+ * exponent difference. A usable normal scale then multiplies an unscaled
+ * finite endpoint/midpoint distance directly; zero, subnormal, or infinite
+ * derived scales fall back to an endpoint fraction plus fused destination
+ * interpolation. Arithmetic begins only when the source integer is exactly
  * representable by the platform. The shared forward/reverse core does not
  * require `long double` to be wider than binary64 and preserves finite
- * same-sign, cross-zero, subnormal, and ratio-underflow intervals before the
- * selected exceptional/out-of-domain/rounding/loss policies publish one fresh
+ * same-sign, cross-zero, subnormal, and ratio-underflow intervals without
+ * pre-scaling a representable small displacement before the selected
+ * exceptional/out-of-domain/rounding/loss policies publish one fresh
  * interleaved CPU Value.
  *
  * @param source Valid built-in Strided Value with complete ImageFacet and one
