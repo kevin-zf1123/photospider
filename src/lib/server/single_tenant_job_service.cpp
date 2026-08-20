@@ -424,6 +424,9 @@ SingleTenantJobService::SingleTenantJobService(
   worker_manager_ = std::make_unique<WorkerManager>(
       worker_factory_, std::move(callbacks), std::move(worker_options),
       in_process_test_mode);
+  state_options.maximum_recovery_archive_bytes =
+      std::min(state_options.maximum_recovery_archive_bytes,
+               quota_limits.capacity.retention_bytes);
   durable_state_ = std::make_unique<DurableServerState>(
       std::move(state_root), tenant_id_, std::move(state_options));
   quota_authority_ = std::make_unique<TenantQuotaAuthority>(

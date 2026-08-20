@@ -14,6 +14,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -21,6 +22,24 @@
 #include "server/state/job_contract.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
+
+/** @brief Hard byte limit for one authoritative/private artifact manifest. */
+inline constexpr std::size_t kMaximumDurableArtifactManifestBytes = 64U << 10U;
+
+/** @brief Hard byte limit for one complete durable Job journal record. */
+inline constexpr std::size_t kMaximumDurableJobRecordBytes = 256U << 10U;
+
+/** @brief Hard byte limit for one non-authoritative Job diagnostic message. */
+inline constexpr std::size_t kMaximumDurableJobMessageBytes = 16U << 10U;
+
+/**
+ * @brief Frozen maximum complete named-Value archive accepted by durability.
+ * @note This is a representation safety ceiling, not tenant quota authority.
+ */
+inline constexpr std::uint64_t kMaximumDurableArchiveBytes =
+    kMaximumValueArtifactPayloadBytes +  // NOLINT(whitespace/indent_namespace)
+    static_cast<std::uint64_t>(          // NOLINT(whitespace/indent_namespace)
+        kMaximumValueArtifactMetadataBytes);
 
 /**
  * @brief Base failure for durable state validation or filesystem authority.
@@ -405,6 +424,23 @@ class DurableJobCommitError final : public DurableStateError {
  */
 struct DurableServerStateOptions final {
   /**
+   * @brief Maximum aggregate archive bytes that restart may read and retain.
+   * @note `SingleTenantJobService` narrows this value to the configured tenant
+   * retention quota before constructing durable state. Direct state users
+   * retain the frozen representation ceiling by default.
+   */
+  std::uint64_t maximum_recovery_archive_bytes = kMaximumDurableArchiveBytes;
+  /**
+   * @brief Optional preallocation observer for bounded retained-file reads.
+   * @note The callback runs synchronously only after regular-file, hard-limit,
+   * exact-length, and sparse-file checks succeed and immediately before byte
+   * allocation. It receives the fixed/opaque leaf name and exact allocation
+   * size, grants no descriptor or path authority, and exists for deterministic
+   * source-private verification. Production leaves it empty.
+   */
+  std::function<void(std::string_view, std::size_t)>
+      recovery_preallocation_observer;
+  /**
    * @brief Optional observer/fault injector invoked at exact commit stages.
    * @note An exception before manifest publication causes safe private cleanup.
    * An exception after publication preserves manifest-visible aliases in a
@@ -478,7 +514,10 @@ struct DurableJobRecord final {
   JobAttemptOutcome attempt_outcome = JobAttemptOutcome::None;
   /** @brief Accepted worker/control-plane failure fact, if any. */
   JobAttemptFailure failure = JobAttemptFailure::None;
-  /** @brief Human-readable diagnostic encoded without authority. */
+  /**
+   * @brief Human-readable diagnostic encoded without authority.
+   * @note Persistence accepts at most `kMaximumDurableJobMessageBytes`.
+   */
   std::string message;
   /** @brief Durable required output receipt for successful Job state. */
   std::optional<OutputCommitReceipt> output_receipt;
@@ -510,7 +549,8 @@ class DurableServerState final {
    * @param root Trusted state-root path, created when absent.
    * @param tenant_id Valid configured tenant bound into every record.
    * @param options Optional source-private commit observer/fault seam.
-   * @throws std::invalid_argument for invalid tenant/root input.
+   * @throws std::invalid_argument for invalid tenant/root input or a zero/
+   * above-frozen recovery archive limit.
    * @throws DurableCapabilityError when lock/barrier/publication primitives are
    * unsupported.
    * @throws DurableCorruptionError for malformed or ambiguous retained state.

@@ -244,6 +244,66 @@ class ScopedTestStateRoot final {
 };
 
 /**
+ * @brief Rewrites only the canonical archive-byte field in one test manifest.
+ * @param path Existing authoritative artifact manifest.
+ * @param archive_bytes Replacement decimal archive length.
+ * @return Nothing after an exact canonical rewrite.
+ * @throws std::runtime_error when the retained fixture framing is unexpected.
+ * @throws Filesystem, stream, conversion, or allocation failures unchanged.
+ * @note This test-only helper preserves every other identity/digest field and
+ * does not read or mutate the payload, allowing frozen-bound validation to be
+ * distinguished from payload allocation.
+ */
+void rewrite_manifest_archive_bytes(const std::filesystem::path& path,
+                                    std::uint64_t archive_bytes) {
+  constexpr std::string_view kVersion = "photospider-artifact-manifest-v2";
+  constexpr std::size_t kFieldCount = 14U;
+  constexpr std::size_t kArchiveBytesField = 11U;
+  const std::size_t size =
+      static_cast<std::size_t>(std::filesystem::file_size(path));
+  std::string input(size, '\0');
+  std::ifstream source(path, std::ios::binary);
+  if (!source.is_open() ||
+      (size != 0U && !source.read(input.data(), static_cast<std::streamsize>(
+                                                    input.size()))) ||
+      input.substr(0U, kVersion.size()) != kVersion) {
+    throw std::runtime_error("durable manifest test fixture cannot be read");
+  }
+  std::size_t offset = kVersion.size();
+  std::vector<std::string> fields;
+  fields.reserve(kFieldCount);
+  for (std::size_t index = 0U; index < kFieldCount; ++index) {
+    const std::size_t colon = input.find(':', offset);
+    if (colon == std::string::npos || colon == offset) {
+      throw std::runtime_error("durable manifest test frame is malformed");
+    }
+    const std::size_t length = static_cast<std::size_t>(
+        std::stoull(input.substr(offset, colon - offset)));
+    offset = colon + 1U;
+    if (length > input.size() - offset) {
+      throw std::runtime_error("durable manifest test frame is truncated");
+    }
+    fields.push_back(input.substr(offset, length));
+    offset += length;
+  }
+  if (offset != input.size()) {
+    throw std::runtime_error("durable manifest test has trailing bytes");
+  }
+  fields[kArchiveBytesField] = std::to_string(archive_bytes);
+  std::string output(kVersion);
+  for (const std::string& field : fields) {
+    output.append(std::to_string(field.size()));
+    output.push_back(':');
+    output.append(field);
+  }
+  std::ofstream destination(path, std::ios::binary | std::ios::trunc);
+  destination.write(output.data(), static_cast<std::streamsize>(output.size()));
+  if (!destination.good()) {
+    throw std::runtime_error("durable manifest test fixture cannot be written");
+  }
+}
+
+/**
  * @brief Best-effort cleanup owner for one additional exact test path.
  * @throws Nothing after construction; path moves may allocate beforehand.
  * @note This helper is used when a test deliberately renames a managed root,
@@ -1964,6 +2024,196 @@ TEST(DurableServerState,
   EXPECT_THROW(
       DurableServerState(corruption_root.path(), TenantId("tenant.test")),
       DurableCorruptionError);
+}
+
+TEST(DurableServerState, RecoveryBoundsManifestAndPrivateControlFiles) {
+  const DurableArtifactCommitRequest request = make_test_commit_request(58U);
+
+  ScopedTestStateRoot manifest_root;
+  {
+    DurableServerState store(manifest_root.path(), TenantId("tenant.test"));
+    static_cast<void>(store.commit_artifact(request, make_test_values()));
+  }
+  const std::filesystem::path artifact_directory =
+      manifest_root.path() / "artifacts" / request.artifact_id.value();
+  std::filesystem::resize_file(artifact_directory / "manifest",
+                               kMaximumDurableArtifactManifestBytes + 1U);
+  std::vector<std::string> manifest_allocations;
+  DurableServerStateOptions manifest_options;
+  manifest_options.recovery_preallocation_observer =
+      [&manifest_allocations](std::string_view name, std::size_t) {
+        manifest_allocations.emplace_back(name);
+      };
+  EXPECT_THROW(DurableServerState(manifest_root.path(), TenantId("tenant.test"),
+                                  manifest_options),
+               DurableCorruptionError);
+  EXPECT_TRUE(manifest_allocations.empty());
+
+  ScopedTestStateRoot private_root;
+  const DurableArtifactCommitRequest private_request =
+      make_test_commit_request(59U);
+  {
+    DurableServerState store(private_root.path(), TenantId("tenant.test"));
+    static_cast<void>(
+        store.commit_artifact(private_request, make_test_values()));
+  }
+  const std::filesystem::path private_directory =
+      private_root.path() / "artifacts" / private_request.artifact_id.value();
+  std::filesystem::copy_file(private_directory / "manifest",
+                             private_directory / ".manifest.private");
+  std::filesystem::resize_file(private_directory / ".manifest.private",
+                               kMaximumDurableArtifactManifestBytes + 1U);
+  std::vector<std::string> private_allocations;
+  DurableServerStateOptions private_options;
+  private_options.recovery_preallocation_observer =
+      [&private_allocations](std::string_view name, std::size_t) {
+        private_allocations.emplace_back(name);
+      };
+  EXPECT_THROW(DurableServerState(private_root.path(), TenantId("tenant.test"),
+                                  private_options),
+               DurableCorruptionError);
+  EXPECT_NE(std::find(private_allocations.begin(), private_allocations.end(),
+                      "manifest"),
+            private_allocations.end());
+  EXPECT_EQ(std::find(private_allocations.begin(), private_allocations.end(),
+                      ".manifest.private"),
+            private_allocations.end());
+}
+
+TEST(DurableServerState, RecoveryBoundsJobRecordsBeforeAllocation) {
+  ScopedTestStateRoot root;
+  const DurableJobRecord record = make_test_durable_job_record(60U);
+  {
+    DurableServerState store(root.path(), TenantId("tenant.test"));
+    DurableJobRecord oversized = record;
+    oversized.message.assign(kMaximumDurableJobMessageBytes + 1U, 'x');
+    const DurableJobCommitResult rejected = store.persist_job(oversized);
+    EXPECT_EQ(rejected.state, DurableJobCommitState::NotPublished);
+    EXPECT_THROW(rejected.rethrow_failure(), std::invalid_argument);
+    ASSERT_TRUE(store.persist_job(record).succeeded());
+  }
+  std::filesystem::resize_file(
+      root.path() / "control" / "jobs" / (record.job_id.value() + ".record"),
+      kMaximumDurableJobRecordBytes + 1U);
+  std::vector<std::string> allocations;
+  DurableServerStateOptions options;
+  options.recovery_preallocation_observer =
+      [&allocations](std::string_view name, std::size_t) {
+        allocations.emplace_back(name);
+      };
+
+  EXPECT_THROW(
+      DurableServerState(root.path(), TenantId("tenant.test"), options),
+      DurableCorruptionError);
+  EXPECT_TRUE(allocations.empty());
+}
+
+TEST(DurableServerState,
+     RecoveryRejectsFrozenOversizedLengthAndSparsePayloadsBoundedly) {
+  ScopedTestStateRoot oversized_root;
+  const DurableArtifactCommitRequest oversized_request =
+      make_test_commit_request(61U);
+  {
+    DurableServerState store(oversized_root.path(), TenantId("tenant.test"));
+    static_cast<void>(
+        store.commit_artifact(oversized_request, make_test_values()));
+  }
+  rewrite_manifest_archive_bytes(oversized_root.path() / "artifacts" /
+                                     oversized_request.artifact_id.value() /
+                                     "manifest",
+                                 kMaximumDurableArchiveBytes + 1U);
+  std::vector<std::string> oversized_allocations;
+  DurableServerStateOptions oversized_options;
+  oversized_options.recovery_preallocation_observer =
+      [&oversized_allocations](std::string_view name, std::size_t) {
+        oversized_allocations.emplace_back(name);
+      };
+  EXPECT_THROW(DurableServerState(oversized_root.path(),
+                                  TenantId("tenant.test"), oversized_options),
+               DurableCorruptionError);
+  EXPECT_EQ(std::find(oversized_allocations.begin(),
+                      oversized_allocations.end(), "payload.bin"),
+            oversized_allocations.end());
+
+  ScopedTestStateRoot length_root;
+  const DurableArtifactCommitRequest length_request =
+      make_test_commit_request(64U);
+  std::size_t declared_archive_bytes = 0U;
+  {
+    DurableServerState store(length_root.path(), TenantId("tenant.test"));
+    declared_archive_bytes =
+        store.commit_artifact(length_request, make_test_values())
+            .descriptor.archive_bytes;
+  }
+  std::filesystem::resize_file(length_root.path() / "artifacts" /
+                                   length_request.artifact_id.value() /
+                                   "payload.bin",
+                               declared_archive_bytes + 1U);
+  std::vector<std::string> length_allocations;
+  DurableServerStateOptions length_options;
+  length_options.recovery_preallocation_observer =
+      [&length_allocations](std::string_view name, std::size_t) {
+        length_allocations.emplace_back(name);
+      };
+  EXPECT_THROW(DurableServerState(length_root.path(), TenantId("tenant.test"),
+                                  length_options),
+               DurableCorruptionError);
+  EXPECT_EQ(std::find(length_allocations.begin(), length_allocations.end(),
+                      "payload.bin"),
+            length_allocations.end());
+
+  ScopedTestStateRoot sparse_root;
+  const DurableArtifactCommitRequest sparse_request =
+      make_test_commit_request(62U);
+  std::size_t exact_archive_bytes = 0U;
+  {
+    DurableServerState store(sparse_root.path(), TenantId("tenant.test"));
+    exact_archive_bytes =
+        store.commit_artifact(sparse_request, make_test_values())
+            .descriptor.archive_bytes;
+  }
+  const std::filesystem::path sparse_payload =
+      sparse_root.path() / "artifacts" / sparse_request.artifact_id.value() /
+      "payload.bin";
+  std::filesystem::resize_file(sparse_payload, 0U);
+  std::filesystem::resize_file(sparse_payload, exact_archive_bytes);
+  std::vector<std::string> sparse_allocations;
+  DurableServerStateOptions sparse_options;
+  sparse_options.recovery_preallocation_observer =
+      [&sparse_allocations](std::string_view name, std::size_t) {
+        sparse_allocations.emplace_back(name);
+      };
+  EXPECT_THROW(DurableServerState(sparse_root.path(), TenantId("tenant.test"),
+                                  sparse_options),
+               DurableCorruptionError);
+  EXPECT_EQ(std::find(sparse_allocations.begin(), sparse_allocations.end(),
+                      "payload.bin"),
+            sparse_allocations.end());
+}
+
+TEST(SingleTenantJobService,
+     RecoveryRejectsArtifactBeforeReadingBeyondTenantRetentionQuota) {
+  ScopedTestStateRoot root;
+  const DurableArtifactCommitRequest request = make_test_commit_request(63U);
+  std::size_t archive_bytes = 0U;
+  {
+    DurableServerState store(root.path(), TenantId("tenant.test"));
+    archive_bytes = store.commit_artifact(request, make_test_values())
+                        .descriptor.archive_bytes;
+  }
+  ASSERT_GT(archive_bytes, 1U);
+  TenantQuotaLimits limits = test_quota_limits();
+  limits.capacity.retention_bytes = archive_bytes - 1U;
+  auto factory = std::make_shared<FunctionWorkerFactory>(
+      [](const JobAssignment& assignment,
+         const std::function<bool()>& cancellation_requested) {
+        EXPECT_FALSE(cancellation_requested());
+        return successful_report(assignment);
+      });
+
+  EXPECT_THROW(SingleTenantJobService(TenantId("tenant.test"), limits,
+                                      root.path(), factory),
+               DurableCorruptionError);
 }
 
 TEST(DurableServerState, EnforcesExclusiveRootOwnershipAndNoFollowChildren) {

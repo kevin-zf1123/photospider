@@ -17,6 +17,7 @@
 #include <exception>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -207,12 +208,30 @@ void write_all(int descriptor, const std::byte* bytes, std::size_t size) {
  * @brief Opens and reads one exact no-follow regular file below a directory.
  * @param parent_descriptor Held trusted parent directory.
  * @param name Single opaque/fixed leaf name.
+ * @param maximum_bytes Hard maximum accepted physical file length.
+ * @param expected_bytes Optional exact physical length required by an already
+ * authenticated manifest or in-memory candidate.
+ * @param preallocation_observer Optional source-private observer invoked only
+ * after every stat-based allocation precondition succeeds.
  * @return Exact file bytes.
- * @throws DurableCorruptionError for invalid type/size/drift.
- * @throws std::system_error/allocation failures unchanged.
+ * @throws DurableCorruptionError for invalid type, size, sparse storage, or
+ * identity drift.
+ * @throws std::invalid_argument when `maximum_bytes` is zero.
+ * @throws std::system_error or bounded allocation failures unchanged.
+ * @throws Any `preallocation_observer` exception before allocation.
+ * @note Regular files created by this authority are completely written and
+ * cannot contain holes. Rejecting sparse retained state prevents a forged
+ * logical length from forcing payload-proportional physical allocation.
  */
-std::vector<std::byte> read_file_at(int parent_descriptor,
-                                    const std::string& name) {
+std::vector<std::byte> read_file_at(
+    int parent_descriptor, const std::string& name, std::size_t maximum_bytes,
+    std::optional<std::size_t> expected_bytes,
+    const std::function<void(std::string_view, std::size_t)>*
+        preallocation_observer) {
+  if (maximum_bytes == 0U) {
+    throw std::invalid_argument(
+        "durable retained-file read maximum must be positive");
+  }
   const int raw = ::openat(parent_descriptor, name.c_str(),
                            O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   if (raw < 0) {
@@ -225,15 +244,35 @@ std::vector<std::byte> read_file_at(int parent_descriptor,
   ScopedDescriptor descriptor(raw);
   const struct stat value =
       regular_file_stat(descriptor.get(), "fstat durable state leaf");
-  if (static_cast<std::uintmax_t>(value.st_size) >
-      std::numeric_limits<std::size_t>::max()) {
-    throw DurableCorruptionError("durable state leaf is too large");
+  const std::uintmax_t physical_size =
+      static_cast<std::uintmax_t>(value.st_size);
+  if (physical_size > maximum_bytes ||
+      (expected_bytes.has_value() && physical_size != *expected_bytes)) {
+    throw DurableCorruptionError(
+        "durable state leaf length violates its preallocation bound");
   }
-  std::vector<std::byte> result(static_cast<std::size_t>(value.st_size));
+  constexpr std::uintmax_t kStatBlockBytes = 512U;
+  if (physical_size != 0U && value.st_blocks >= 0) {
+    const std::uintmax_t blocks = static_cast<std::uintmax_t>(value.st_blocks);
+    const bool block_bytes_representable =
+        blocks <= std::numeric_limits<std::uintmax_t>::max() / kStatBlockBytes;
+    if (block_bytes_representable && blocks * kStatBlockBytes < physical_size) {
+      throw DurableCorruptionError(
+          "durable state leaf contains unsupported sparse storage");
+    }
+  }
+  const std::size_t allocation_size = static_cast<std::size_t>(physical_size);
+  if (preallocation_observer != nullptr && *preallocation_observer) {
+    (*preallocation_observer)(name, allocation_size);
+  }
+  std::vector<std::byte> result(allocation_size);
   std::size_t offset = 0U;
   while (offset < result.size()) {
-    const ssize_t count = ::read(descriptor.get(), result.data() + offset,
-                                 result.size() - offset);
+    const std::size_t chunk =
+        std::min(result.size() - offset,
+                 static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+    const ssize_t count =
+        ::read(descriptor.get(), result.data() + offset, chunk);
     if (count < 0) {
       if (errno == EINTR) {
         continue;
@@ -686,10 +725,7 @@ OutputCommitReceipt parse_artifact_manifest(std::string_view bytes) {
         receipt.descriptor.archive_bytes == 0U) {
       throw DurableCorruptionError("artifact manifest has an invalid field");
     }
-    const std::uint64_t maximum_archive_bytes =
-        kMaximumValueArtifactPayloadBytes +
-        static_cast<std::uint64_t>(kMaximumValueArtifactMetadataBytes);
-    if (receipt.descriptor.archive_bytes > maximum_archive_bytes) {
+    if (receipt.descriptor.archive_bytes > kMaximumDurableArchiveBytes) {
       throw DurableCorruptionError(
           "artifact manifest archive length exceeds its frozen bound");
     }
@@ -800,6 +836,9 @@ NamedValueArtifactSet decode_durable_value_archive(
  * @param tenant_id Exact configured tenant owner.
  * @param artifact_id Directory identity expected in the manifest.
  * @param root_descriptor Held durability root for final barrier.
+ * @param maximum_archive_bytes Remaining/global quota bound applied before
+ * payload allocation.
+ * @param preallocation_observer Optional bounded-read observer.
  * @param revalidation_observer Optional pending-durability replay observer.
  * @return Immutable verified artifact record.
  * @throws DurableCorruptionError/system/allocation failures unchanged.
@@ -812,6 +851,9 @@ NamedValueArtifactSet decode_durable_value_archive(
 std::shared_ptr<const ArtifactRecord> load_artifact(
     int artifacts_descriptor, const TenantId& tenant_id,
     const ArtifactId& artifact_id, int root_descriptor,
+    std::uint64_t maximum_archive_bytes,
+    const std::function<void(std::string_view, std::size_t)>*
+        preallocation_observer,
     const std::function<void(DurableArtifactCommitStage)>*
         revalidation_observer = nullptr) {
   ScopedDescriptor directory(
@@ -835,27 +877,36 @@ std::shared_ptr<const ArtifactRecord> load_artifact(
   if (!has_payload || !has_manifest) {
     throw DurableCorruptionError("committed artifact is incomplete");
   }
-  const std::string manifest =
-      bytes_to_string(read_file_at(directory.get(), kManifestName));
+  const std::string manifest = bytes_to_string(read_file_at(
+      directory.get(), kManifestName, kMaximumDurableArtifactManifestBytes,
+      std::nullopt, preallocation_observer));
   const OutputCommitReceipt receipt = parse_artifact_manifest(manifest);
   if (receipt.attempt.tenant_id != tenant_id ||
       receipt.artifact_id != artifact_id) {
     throw DurableCorruptionError(
         "artifact manifest identity does not match root");
   }
-  const std::vector<std::byte> archive =
-      read_file_at(directory.get(), kPayloadName);
-  NamedValueArtifactSet values = decode_durable_value_archive(archive, receipt);
+  if (receipt.descriptor.archive_bytes > maximum_archive_bytes) {
+    throw DurableCorruptionError(
+        "artifact archive exceeds the retained recovery quota");
+  }
   if (has_private_manifest) {
     const std::vector<std::byte> private_manifest =
-        read_file_at(directory.get(), kPrivateManifestName);
+        read_file_at(directory.get(), kPrivateManifestName,
+                     kMaximumDurableArtifactManifestBytes, manifest.size(),
+                     preallocation_observer);
     if (bytes_to_string(private_manifest) != manifest) {
       throw DurableCorruptionError(
           "published artifact retains a conflicting private manifest");
     }
-    if (::unlinkat(directory.get(), kPrivateManifestName, 0) != 0) {
-      throw_errno("remove reconciled private artifact manifest");
-    }
+  }
+  const std::vector<std::byte> archive = read_file_at(
+      directory.get(), kPayloadName, receipt.descriptor.archive_bytes,
+      receipt.descriptor.archive_bytes, preallocation_observer);
+  NamedValueArtifactSet values = decode_durable_value_archive(archive, receipt);
+  if (has_private_manifest &&
+      ::unlinkat(directory.get(), kPrivateManifestName, 0) != 0) {
+    throw_errno("remove reconciled private artifact manifest");
   }
   if (revalidation_observer != nullptr && *revalidation_observer) {
     (*revalidation_observer)(
@@ -1515,9 +1566,7 @@ void validate_durable_receipt(const OutputCommitReceipt& receipt,
   }
   const std::uint64_t archive_bytes =
       static_cast<std::uint64_t>(descriptor.archive_bytes);
-  if (archive_bytes >
-      kMaximumValueArtifactPayloadBytes +
-          static_cast<std::uint64_t>(kMaximumValueArtifactMetadataBytes)) {
+  if (archive_bytes > kMaximumDurableArchiveBytes) {
     throw std::invalid_argument(
         "durable Job receipt archive exceeds its frozen bound");
   }
@@ -1647,7 +1696,8 @@ void validate_durable_job_record(const DurableJobRecord& record,
                                  const TenantId& configured_tenant) {
   if (record.tenant_id != configured_tenant || !record.job_id.valid() ||
       record.spec == nullptr || !record.output_artifact_id.valid() ||
-      !record.output_commit_id.valid()) {
+      !record.output_commit_id.valid() ||
+      record.message.size() > kMaximumDurableJobMessageBytes) {
     throw std::invalid_argument("durable Job record identity is incomplete");
   }
   validate_job_spec(*record.spec);
@@ -1713,6 +1763,9 @@ std::string serialize_job_record(const DurableJobRecord& record) {
                    ? serialize_artifact_manifest(*record.output_receipt)
                    : std::string{},
                &output);
+  if (output.size() > kMaximumDurableJobRecordBytes) {
+    throw std::length_error("durable Job record exceeds its frozen byte bound");
+  }
   return output;
 }
 
@@ -1869,7 +1922,9 @@ DurableServerState::DurableServerState(std::filesystem::path root,
                                        TenantId tenant_id,
                                        DurableServerStateOptions options)
     : tenant_id_(std::move(tenant_id)), options_(std::move(options)) {
-  if (!tenant_id_.valid() || root.empty()) {
+  if (!tenant_id_.valid() || root.empty() ||
+      options_.maximum_recovery_archive_bytes == 0U ||
+      options_.maximum_recovery_archive_bytes > kMaximumDurableArchiveBytes) {
     throw std::invalid_argument("durable state root or tenant is invalid");
   }
   std::filesystem::create_directories(root);
@@ -1910,6 +1965,8 @@ DurableServerState::DurableServerState(std::filesystem::path root,
 
   try {
     verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
+    std::uint64_t remaining_recovery_archive_bytes =
+        options_.maximum_recovery_archive_bytes;
     for (const std::string& name : list_directory(artifacts_descriptor_)) {
       ArtifactId artifact_id;
       try {
@@ -1930,8 +1987,12 @@ DurableServerState::DurableServerState(std::filesystem::path root,
                                    root_descriptor_);
         continue;
       }
-      auto record = load_artifact(artifacts_descriptor_, tenant_id_,
-                                  artifact_id, root_descriptor_);
+      auto record =
+          load_artifact(artifacts_descriptor_, tenant_id_, artifact_id,
+                        root_descriptor_, remaining_recovery_archive_bytes,
+                        &options_.recovery_preallocation_observer);
+      remaining_recovery_archive_bytes -=
+          static_cast<std::uint64_t>(record->receipt.descriptor.archive_bytes);
       if (!artifacts_.emplace(artifact_id.value(), record).second ||
           !commits_.emplace(record->receipt.output_commit_id.value(), record)
                .second ||
@@ -1967,7 +2028,10 @@ DurableServerState::DurableServerState(std::filesystem::path root,
             "durable Job filename identity is invalid");
       }
       DurableJobRecord record = parse_job_record(
-          bytes_to_string(read_file_at(jobs_descriptor_, name)), tenant_id_);
+          bytes_to_string(read_file_at(
+              jobs_descriptor_, name, kMaximumDurableJobRecordBytes,
+              std::nullopt, &options_.recovery_preallocation_observer)),
+          tenant_id_);
       if (record.job_id != job_id ||
           !jobs_.emplace(job_id.value(), std::move(record)).second) {
         throw DurableCorruptionError(
@@ -2037,7 +2101,10 @@ DurableServerState::confirm_artifact_durability_locked(
 
   const std::shared_ptr<const ArtifactRecord> revalidated = load_artifact(
       artifacts_descriptor_, tenant_id_, record->receipt.artifact_id,
-      root_descriptor_, &options_.artifact_commit_observer);
+      root_descriptor_,
+      static_cast<std::uint64_t>(record->receipt.descriptor.archive_bytes),
+      &options_.recovery_preallocation_observer,
+      &options_.artifact_commit_observer);
   if (!same_artifact_record(*record, *revalidated)) {
     throw DurableCorruptionError(
         "pending artifact differs from its authoritative manifest");
@@ -2118,6 +2185,10 @@ OutputCommitReceipt DurableServerState::commit_artifact(
   candidate.values = decode_named_value_artifact_set(archive);
   validate_durable_value_joins(candidate.receipt, candidate.values);
   const std::string manifest = serialize_artifact_manifest(candidate.receipt);
+  if (manifest.size() > kMaximumDurableArtifactManifestBytes) {
+    throw std::logic_error(
+        "durable artifact manifest exceeds its frozen byte bound");
+  }
   auto candidate_record =
       std::make_shared<const ArtifactRecord>(std::move(candidate));
 
@@ -2150,7 +2221,13 @@ OutputCommitReceipt DurableServerState::commit_artifact(
     } else {
       auto recovered =
           load_artifact(artifacts_descriptor_, tenant_id_, request.artifact_id,
-                        root_descriptor_, &options_.artifact_commit_observer);
+                        root_descriptor_,
+                        std::min({options_.maximum_recovery_archive_bytes,
+                                  request.reserved_resources.output_bytes,
+                                  request.reserved_resources.staging_bytes,
+                                  request.reserved_resources.retention_bytes}),
+                        &options_.recovery_preallocation_observer,
+                        &options_.artifact_commit_observer);
       validate_idempotent_retry(request, *candidate_record, *recovered);
       StagedArtifactIndexPublication indexes(
           &artifacts_, &commits_, &artifact_durability_confirmed_, recovered,
@@ -2199,7 +2276,8 @@ OutputCommitReceipt DurableServerState::commit_artifact(
       }
     }
     const std::vector<std::byte> reopened =
-        read_file_at(directory.get(), kPayloadName);
+        read_file_at(directory.get(), kPayloadName, archive.size(),
+                     archive.size(), &options_.recovery_preallocation_observer);
     if (reopened != archive ||
         hash_artifact_content(reopened.data(), reopened.size()) !=
             candidate_record->receipt.content_digest) {
@@ -2226,8 +2304,10 @@ OutputCommitReceipt DurableServerState::commit_artifact(
     if (::unlinkat(directory.get(), kPrivateManifestName, 0) != 0) {
       throw_errno("remove private durable artifact manifest");
     }
-    if (bytes_to_string(read_file_at(directory.get(), kManifestName)) !=
-        manifest) {
+    if (bytes_to_string(read_file_at(
+            directory.get(), kManifestName,
+            kMaximumDurableArtifactManifestBytes, manifest.size(),
+            &options_.recovery_preallocation_observer)) != manifest) {
       throw DurableCorruptionError(
           "published durable artifact manifest drifted");
     }
@@ -2279,7 +2359,9 @@ std::shared_ptr<const ArtifactRecord> DurableServerState::find_artifact(
   }
   auto record =
       load_artifact(artifacts_descriptor_, tenant_id_, artifact_id,
-                    root_descriptor_, &options_.artifact_commit_observer);
+                    root_descriptor_, options_.maximum_recovery_archive_bytes,
+                    &options_.recovery_preallocation_observer,
+                    &options_.artifact_commit_observer);
   const auto commit = commits_.find(record->receipt.output_commit_id.value());
   if (commit != commits_.end() &&
       !same_artifact_record(*commit->second, *record)) {
@@ -2332,8 +2414,10 @@ DurableArtifactEraseResult DurableServerState::erase_artifact(
           open_artifact_directory(artifacts_descriptor_, artifact_id);
       manifest_exists = child_exists(directory_descriptor, kManifestName);
       if (manifest_exists) {
-        authoritative = load_artifact(artifacts_descriptor_, tenant_id_,
-                                      artifact_id, root_descriptor_);
+        authoritative = load_artifact(
+            artifacts_descriptor_, tenant_id_, artifact_id, root_descriptor_,
+            options_.maximum_recovery_archive_bytes,
+            &options_.recovery_preallocation_observer);
       }
     }
 
