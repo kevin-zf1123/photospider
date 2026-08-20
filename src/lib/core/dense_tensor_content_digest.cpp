@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/canonical_ieee754.hpp"
 #include "core/extension_internal.hpp"
 #include "photospider/data/packed_dense_tensor_view.hpp"
 #include "photospider/data/value.hpp"
@@ -120,40 +121,7 @@ void append_i64(std::vector<std::byte>* output, std::int64_t value) {
  *       subnormal support.
  */
 void append_f64(std::vector<std::byte>* output, double value) {
-  static_assert(
-      std::numeric_limits<double>::is_iec559 &&
-          std::numeric_limits<double>::radix == 2 &&
-          std::numeric_limits<double>::digits == 53 &&
-          std::numeric_limits<double>::min_exponent == -1021 &&
-          std::numeric_limits<double>::max_exponent == 1024 &&
-          std::numeric_limits<double>::has_denorm == std::denorm_present,
-      "binary64 canonical encoding requires IEC 559 binary64");
-
-  if (!std::isfinite(value)) {
-    throw std::invalid_argument(
-        "binary64 canonical encoding requires a finite value");
-  }
-  if (value == 0.0) {
-    append_u64(output, 0U);
-    return;
-  }
-
-  constexpr std::uint64_t kSignBit = std::uint64_t{1U} << 63U;
-  constexpr std::uint64_t kImplicitSignificandBit = std::uint64_t{1U} << 52U;
-  std::uint64_t bits = std::signbit(value) ? kSignBit : 0U;
-  const double magnitude = std::fabs(value);
-  if (magnitude < std::numeric_limits<double>::min()) {
-    bits |= static_cast<std::uint64_t>(std::ldexp(magnitude, 1074));
-  } else {
-    int exponent = 0;
-    const double fraction = std::frexp(magnitude, &exponent);
-    const std::uint64_t significand =
-        static_cast<std::uint64_t>(std::ldexp(fraction, 53));
-    const std::uint64_t biased_exponent =
-        static_cast<std::uint64_t>(exponent + 1022);
-    bits |= (biased_exponent << 52U) | (significand - kImplicitSignificandBit);
-  }
-  append_u64(output, bits);
+  append_u64(output, canonical_binary64_bits(value));
 }
 
 /**
@@ -249,11 +217,7 @@ ExtensionRecord dense_tensor_schema_record(
     }
     append_u64(&record.payload, size_to_u64(quantization.scales.size()));
     for (const float scale : quantization.scales) {
-      std::uint32_t bits = 0U;
-      static_assert(sizeof(bits) == sizeof(scale),
-                    "binary32 canonical encoding requires 32-bit float");
-      std::memcpy(&bits, &scale, sizeof(bits));
-      append_u32(&record.payload, bits);
+      append_u32(&record.payload, canonical_binary32_bits(scale));
     }
   }
   return record;

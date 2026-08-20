@@ -251,6 +251,11 @@ Value reconstruct_value_artifact(const ValueArtifact& artifact,
  *         ExtensionContractError for invalid metadata.
  * @throws std::bad_alloc when output storage cannot allocate.
  * @note Payload bytes and all runtime/path/authority identities are absent.
+ *       Finite binary32/binary64 metadata is encoded from numeric sign,
+ *       exponent, and fraction into little-endian interchange words, with
+ *       signed zero canonicalized to positive zero. Native object byte/word
+ *       order is irrelevant; unsupported non-IEC-559 profiles fail at compile
+ *       time.
  */
 std::vector<std::byte> encode_value_artifact_envelope(
     const ValueArtifactEnvelope& envelope);
@@ -263,6 +268,9 @@ std::vector<std::byte> encode_value_artifact_envelope(
  *         ExtensionContractError for malformed/noncanonical framing.
  * @throws std::bad_alloc when decoded ownership cannot allocate.
  * @note Decode publishes no Value and grants no payload, path, or lease access.
+ *       Canonical binary32/binary64 words are reconstructed numerically;
+ *       nonfinite and negative-zero metadata spellings fail closed without
+ *       writing native floating object bytes.
  */
 ValueArtifactEnvelope decode_value_artifact_envelope(
     const std::vector<std::byte>& bytes);

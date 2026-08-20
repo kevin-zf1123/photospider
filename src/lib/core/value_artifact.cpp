@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/canonical_ieee754.hpp"
+
 namespace ps {
 namespace {
 
@@ -148,30 +150,24 @@ class Writer final {
   void i64(std::int64_t value) { u64(static_cast<std::uint64_t>(value)); }
 
   /**
-   * @brief Appends exact binary32 object bits.
+   * @brief Appends one canonical numeric binary32 word.
    * @param value Finite validated scalar.
+   * @throws std::invalid_argument when the finite-value invariant is broken.
    * @throws std::length_error when metadata exceeds the frozen bound.
+   * @note Signed zero is canonicalized to positive zero. Native object byte
+   *       order and floating word order are never inspected.
    */
-  void f32(float value) {
-    std::uint32_t bits = 0U;
-    static_assert(sizeof(bits) == sizeof(value),
-                  "portable artifact requires 32-bit float");
-    std::memcpy(&bits, &value, sizeof(bits));
-    u32(bits);
-  }
+  void f32(float value) { u32(internal::canonical_binary32_bits(value)); }
 
   /**
-   * @brief Appends exact binary64 object bits.
+   * @brief Appends one canonical numeric binary64 word.
    * @param value Finite validated scalar.
+   * @throws std::invalid_argument when the finite-value invariant is broken.
    * @throws std::length_error when metadata exceeds the frozen bound.
+   * @note Signed zero is canonicalized to positive zero. Native object byte
+   *       order and floating word order are never inspected.
    */
-  void f64(double value) {
-    std::uint64_t bits = 0U;
-    static_assert(sizeof(bits) == sizeof(value),
-                  "portable artifact requires 64-bit double");
-    std::memcpy(&bits, &value, sizeof(bits));
-    u64(bits);
-  }
+  void f64(double value) { u64(internal::canonical_binary64_bits(value)); }
 
   /**
    * @brief Appends a uint32-length-prefixed byte vector.
@@ -281,21 +277,19 @@ class Reader final {
   /** @brief Reads one canonical signed scalar. @return Exact value. */
   std::int64_t i64() { return static_cast<std::int64_t>(u64()); }
 
-  /** @brief Reads exact binary32 object bits. @return Decoded scalar. */
-  float f32() {
-    const std::uint32_t bits = u32();
-    float value = 0.0F;
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
-  }
+  /**
+   * @brief Reads one canonical finite numeric binary32 word.
+   * @return Exact native scalar with positive canonical zero.
+   * @throws std::invalid_argument for nonfinite or negative-zero spellings.
+   */
+  float f32() { return internal::decode_canonical_binary32(u32()); }
 
-  /** @brief Reads exact binary64 object bits. @return Decoded scalar. */
-  double f64() {
-    const std::uint64_t bits = u64();
-    double value = 0.0;
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
-  }
+  /**
+   * @brief Reads one canonical finite numeric binary64 word.
+   * @return Exact native scalar with positive canonical zero.
+   * @throws std::invalid_argument for nonfinite or negative-zero spellings.
+   */
+  double f64() { return internal::decode_canonical_binary64(u64()); }
 
   /**
    * @brief Reads one bounded length-prefixed byte vector.
