@@ -56,15 +56,26 @@ Dirty RT execution 不会写 graph-owned RT 字段。Worker task 会先把代理
 | `<location>.values` | 包含全部正式 named Value 的 canonical public `NamedValueArtifactSet` archive。 |
 | `<location>.manifest` | 最后写入的 versioned transaction record；它绑定 archive/metadata 数量、byte size、generation-derived SHA-256 digest 与一个随机 writer generation。 |
 
-Graph-document location 是不受信任的 path input，必须是单个非空 portable leaf。Absolute/rooted
-或 multi-component path、`.`/`..`、separator、control/Windows-illegal character、reserved device
-basename、trailing dot/space、自身 derived-sibling alias，以及不同 configured image entry 之间的
-alias，都会在 capture、codec 或 filesystem effect 前被拒绝。在 POSIX 上，cache owner 会保留
-no-follow root/node directory descriptor，并通过 `*at` operation 执行 archive/manifest read、write
-与受控 delete；每个 accepted leaf 都必须是当前用户拥有的 regular single-link file。Symlink、
-directory、device、FIFO、hard-link alias 与 sparse replay file 都会被拒绝。当前 dependency-neutral
-image/metadata codec interface 仍按 path 调用，因此其前后会校验 directory/leaf identity；这会收窄
-外部 path-only codec 内恶意 same-uid replacement race，但不声称彻底消除该竞态。
+Graph-document location 是不受信任的 path input，必须是仅使用 ASCII 字母、数字、点、下划线和
+连字符的单个非空 portable leaf。Absolute/rooted 或 multi-component path、`.`/`..`、separator、
+其他 punctuation/control/non-ASCII byte、reserved device basename（包括由 ASCII 边界一并拒绝的
+Unicode superscript COM/LPT spelling）、trailing dot/space、自身 derived-sibling alias，以及不同
+configured image entry 之间的 alias，都会在受支持的持久化路径上于 capture、codec 或 filesystem
+effect 前被拒绝。GraphCache 磁盘持久化当前仅支持 POSIX。Cache owner 会保留 no-follow root/node
+directory descriptor，并通过 `*at` operation 执行 archive/manifest read、write 与受控 delete。
+Symlink、directory、device、FIFO、hard-link alias、foreign owner、无法证明的 identity 与 sparse
+replay file 都会被拒绝。当前 dependency-neutral image/metadata codec interface 仍按 path 调用，
+因此其前后会校验 directory/leaf identity；这会收窄外部 path-only codec 内恶意 same-owner
+replacement race，但不声称彻底消除该竞态。
+
+在 Windows 上，所有可能 save、load、read、write、cleanup、synchronize 或 clear 磁盘状态且 cache
+root 非空的 GraphCache 请求，都会在 capture、codec、filesystem、executor admission、Graph/cache
+mutation、timing 或 diagnostic publication 前，以稳定 typed `GraphErrc::InvalidParameter` platform
+error fail closed。实现不会调用 Win32 filesystem API，也不会创建 root、directory 或 file。空 root
+仍表示 no-disk intent：load 保留既有 Skipped diagnostic，clear-drive 返回零结果，cache-all/
+synchronize 保留 HP-node count，combined clear 仍可清理 memory。`skip_save_cache` 同样保持 no-op，
+纯 memory 与 derived-statistics API 继续可用。Windows 磁盘持久化是 future target，而不是部分支持的
+HANDLE 实现。
 
 Archive 是唯一持久化 Value authority。它保留精确有序名称、descriptor 与 Facet record、layout 与
 binding fact、buffer role 与 envelope、payload byte/digest，以及适用的 descriptor/content/layout
@@ -92,10 +103,13 @@ disk load 覆盖，也绝不会被重新标记为 complete。保存或同步 par
 projection、metadata、archive 与 manifest，而不是编码 partial byte。成功 disk load 会为 fresh
 reconstructed output 派生 complete validity。
 
-显式 Empty/Whole validity 会在解释 formal Value 前完成分类。因此 partial packed、quantized 或
-provider-incompatible canonical image 只会运行受控 predecessor cleanup：不会构造 `ImageView`、
-捕获 artifact、查询 provider、调用 codec，也不可能在 restart 后命中。只有确认 complete validity
-后才会执行 unsupported capability preflight。
+显式 Empty/Whole validity 会在解释 formal Value 前完成分类。任何 finite provider-defined
+canonical-image validity 都会被保守判定为 incomplete，因为 core 不能通过错误的 representation
+accessor 推导 DenseTensor bounds。此类 output，以及所有 partial packed、quantized 或其他
+provider-incompatible canonical image，只会运行受控 predecessor cleanup：不会构造 `ImageView`、
+捕获 artifact、查询 provider、调用 codec，也不可能在 restart 后命中。Whole provider-defined
+canonical-image validity 在此分类中仍为 complete，并会在 filesystem effect 前到达既有的
+unsupported-image preflight。
 
 可选 ordinary-image projection 通过私有、依赖中立的 `ImageArtifactCodec` 契约。`Kernel` 从产品组合根取得一个配置好的
 共享 codec，并将其注入 `GraphCacheService`；Graph/cache 代码只提供 path、精确的普通 image Value
@@ -202,13 +216,13 @@ live Graph/RT state 不变。这种顺序是当前行为，不表示 cache 属�
 
 | 操作 | 效果 |
 | --- | --- |
-| Clear drive cache | 删除磁盘缓存目录内容并重建根目录。 |
+| Clear drive cache | 在 POSIX 上删除磁盘缓存目录内容并重建根目录；Windows 非空 root 请求在 revision、coordination 或 filesystem mutation 前被拒绝。 |
 | Clear memory cache | 清理 `GraphModel` 跟踪的内存 HP 缓存。 |
-| Clear cache | 同时清理磁盘和内存缓存。 |
+| Clear cache | 在 POSIX 上同时清理磁盘和内存缓存；Windows 非空 root 请求在两层 cache 改变前被拒绝，空 root 仍会清理 memory。 |
 | Clear derived image statistics | 通过内部 cache-service API 移除保留的 statistics result；不会隐式取消已经接受的 in-flight work。 |
-| Cache all nodes | 在配置允许时将具有 complete HP 输出的节点保存到磁盘；partial node 会清理 stale configured artifact。 |
+| Cache all nodes | 在 POSIX 配置允许时将 complete HP 输出保存到磁盘；Windows 非空 root 请求在副作用前被拒绝，空 root 返回既有 HP-node count。 |
 | Free transient memory | 清理非终点节点的内存缓存状态。 |
-| Synchronize disk cache | 保存 complete HP 输出，并为没有 complete validity 的节点移除陈旧磁盘文件。 |
+| Synchronize disk cache | 在 POSIX 上保存 complete HP 输出并移除 stale file；Windows 非空 root 请求在副作用前被拒绝，空 root 返回既有 HP-node count。 |
 
 磁盘缓存保存、加载和同步只使用 `cached_output_high_precision`。RT proxy 输出不会保护陈旧磁盘文件，也不会被提升为磁盘缓存状态。
 

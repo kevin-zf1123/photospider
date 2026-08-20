@@ -75,18 +75,33 @@ location now names one portable named-Value transaction:
 | `<location>.manifest` | Versioned transaction record written last; it binds archive/metadata counts, byte sizes, generation-derived SHA-256 digests, and one random writer generation. |
 
 The graph-document location is untrusted path input. It must be one nonempty
-portable leaf: absolute/rooted or multi-component paths, `.`/`..`, separators,
-control or Windows-illegal characters, reserved device basenames, trailing
+portable ASCII leaf using only letters, digits, dot, underscore, and hyphen:
+absolute/rooted or multi-component paths, `.`/`..`, separators, every other
+punctuation/control/non-ASCII byte, reserved device basenames (including the
+Unicode superscript COM/LPT spellings rejected by the ASCII boundary), trailing
 dot/space, self-aliasing derived siblings, and aliases across configured image
-entries are rejected before capture, codec, or filesystem effects. On POSIX,
-the cache owner retains no-follow root/node directory descriptors and performs
-archive/manifest reads, writes, and controlled deletion through `*at`
-operations; every accepted leaf is an owned, regular, single-link file.
-Symlink, directory, device, FIFO, hard-link alias, and sparse replay files are
-rejected. The current dependency-neutral image/metadata codec interfaces still
-accept paths, so their calls are bracketed by directory/leaf identity checks;
-this narrows but does not claim to eliminate a malicious same-uid replacement
-race inside an external path-only codec.
+entries are rejected before capture, codec, or filesystem effects on the
+supported persistence path. GraphCache disk persistence is currently
+POSIX-only. Its owner retains no-follow root/node directory descriptors and
+performs archive/manifest reads, writes, and controlled deletion through `*at`
+operations. Symlink, directory, device, FIFO, hard-link alias, foreign-owner,
+inconclusive identity, and sparse replay files are rejected. The current
+dependency-neutral image/metadata codec interfaces still accept paths, so
+their calls are bracketed by directory/leaf identity checks; this narrows but
+does not claim to eliminate a malicious same-owner replacement race inside an
+external path-only codec.
+
+On Windows, every GraphCache request with a nonempty cache root that can save,
+load, read, write, clean up, synchronize, or clear disk state fails with the
+stable typed `GraphErrc::InvalidParameter` platform error before capture,
+codec, filesystem, executor admission, Graph/cache mutation, timing, or
+diagnostic publication. It calls no Win32 filesystem API and creates no root,
+directory, or file. An empty root remains no disk intent: loads retain their
+existing Skipped diagnostic, clear-drive remains a zero-result no-op,
+cache-all/synchronize retain their HP-node count, and combined clear may still
+clear memory. `skip_save_cache` also remains a no-op, while pure memory and
+derived-statistics APIs remain available. Windows disk persistence is a future
+target, not a partially supported HANDLE implementation.
 
 The archive is the sole persisted Value authority. It preserves exact ordered
 names, descriptor and Facet records, layout and binding facts, buffer roles and
@@ -124,11 +139,15 @@ bytes. A successful disk load derives complete validity for the freshly
 reconstructed output.
 
 Explicit Empty/Whole validity is classified before interpreting the formal
-Value. A partial packed, quantized, or provider-incompatible canonical image
-therefore runs only controlled predecessor cleanup: it constructs no
-`ImageView`, captures no artifact, consults no provider, invokes no codec, and
-cannot become a restart hit. Unsupported capability preflight runs only after
-complete validity has been established.
+Value. Any finite provider-defined canonical-image validity is conservatively
+incomplete because the core cannot derive DenseTensor bounds without invoking
+the wrong representation accessor. Such output, and every partial packed,
+quantized, or otherwise provider-incompatible canonical image, therefore runs
+only controlled predecessor cleanup: it constructs no `ImageView`, captures no
+artifact, consults no provider, invokes no codec, and cannot become a restart
+hit. Whole provider-defined canonical-image validity remains complete for this
+classification and reaches the existing unsupported-image preflight before
+filesystem effects.
 
 An optional ordinary-image projection crosses the private, dependency-neutral
 `ImageArtifactCodec` contract.
@@ -277,13 +296,13 @@ independent typed outcome after Run publication.
 
 | Operation | Effect |
 | --- | --- |
-| Clear drive cache | Remove disk cache directory contents and recreate root. |
+| Clear drive cache | Remove disk cache directory contents and recreate root on POSIX; reject any nonempty-root Windows request before revision, coordination, or filesystem mutation. |
 | Clear memory cache | Clear in-memory HP cache tracked by `GraphModel`. |
-| Clear cache | Clear both disk and memory cache. |
+| Clear cache | Clear both disk and memory cache on POSIX; reject a nonempty-root Windows request before either layer changes, while an empty root still clears memory. |
 | Clear derived image statistics | Remove retained statistics results through the internal cache-service API; accepted in-flight work is not implicitly cancelled. |
-| Cache all nodes | Save nodes with complete HP output to disk when configured; partial nodes purge stale configured artifacts. |
+| Cache all nodes | Save nodes with complete HP output to disk when configured on POSIX; a nonempty-root Windows request fails before effects, while an empty root returns the historical HP-node count. |
 | Free transient memory | Clear non-ending node memory cache state. |
-| Synchronize disk cache | Save complete HP output and remove stale disk files for nodes without complete validity. |
+| Synchronize disk cache | Save complete HP output and remove stale disk files for nodes without complete validity on POSIX; a nonempty-root Windows request fails before effects, while an empty root returns the historical HP-node count. |
 
 Disk cache save, load, and synchronization use `cached_output_high_precision`
 only. RT proxy output does not protect stale disk files and is not promoted to

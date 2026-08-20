@@ -68,7 +68,10 @@ directory synchronization 或 crash-durability receipt。
 metadata、作为唯一 replay authority 的 canonical named-Value archive，以及最后写入的 versioned
 manifest。Manifest 会把 archive/metadata fact 绑定到同一个随机 writer generation，replay 要么
 发布全部 Value，要么一个也不发布。这套进程内串行化、manifest-last mechanism 既不是 atomic
-filesystem transaction，也不是 crash-durable user output。
+filesystem transaction，也不是 crash-durable user output。当前磁盘持久化仅支持 POSIX。在
+Windows 上，每个非空 root 的 GraphCache 磁盘请求都会在副作用前以 typed platform error 失败；
+空 root/no-save 的 no-disk 语义与纯 memory/statistics API 继续可用。原生 Windows GraphCache
+持久化是 future target。
 
 **`OutputStore` 发布（`OutputStore` publication）**
 当前 daemon 的观察：受保护进程级 canonical named-Value archive 通过 identity check，并在

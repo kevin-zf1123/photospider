@@ -41,10 +41,13 @@ but each answers a different question:
 - `ComputeRun::Succeeded` means a validated Graph/RT publication, or a
   validated no-op, won the Run terminal arbiter. A provider returning is not
   sufficient.
-- `GraphCacheService` writes configured image and metadata paths directly.
-  One cache entry is not published transactionally, and the current product
-  commit policy can fail a Run when deferred cache persistence fails before
-  visible Graph publication.
+- `GraphCacheService` currently persists configured cache artifacts on POSIX
+  only. On Windows every nonempty-root disk request fails with a typed platform
+  error before codec, filesystem, executor, Graph/cache, timing, or diagnostic
+  effects; native Windows persistence remains a future target. On the supported
+  POSIX path, one cache entry is not published transactionally, and the current
+  product commit policy can fail a Run when deferred cache persistence fails
+  before visible Graph publication.
 - `ImageArtifactCodec` and `CacheMetadataCodec` own representation conversion,
   not directory creation, path authority, atomic replacement, retry,
   visibility, or durability.

@@ -34,9 +34,11 @@ PhotoSpider 已经有若干有效的完成与持久化机制，但每个机制�
 
 - `ComputeRun::Succeeded` 表示经过校验的 Graph/RT 发布或经过校验的 no-op 赢得
   Run 终态仲裁。仅 provider 返回并不足够。
-- `GraphCacheService` 直接写入配置的图像与元数据路径。一个缓存条目不是事务性
-  发布；当前 product commit policy 还可能在可见 Graph 发布之前，因为延迟缓存
-  持久化失败而令 Run 失败。
+- `GraphCacheService` 当前只在 POSIX 上持久化 configured cache artifact。在 Windows 上，
+  每个非空 root 的磁盘请求都会在 codec、filesystem、executor、Graph/cache、timing 或
+  diagnostic effect 前以 typed platform error 失败；原生 Windows 持久化仍是 future target。
+  在受支持的 POSIX 路径上，一个 cache entry 不是事务性发布；当前 product commit policy
+  还可能在可见 Graph 发布之前，因为延迟 cache persistence 失败而令 Run 失败。
 - `ImageArtifactCodec` 与 `CacheMetadataCodec` 拥有表示转换，不拥有目录创建、
   路径权威、原子替换、重试、可见性或 durability。
 - Graph 文档加载会在替换内存 Graph 前校验 detached definition。当前 YAML 保存

@@ -86,7 +86,11 @@ metadata, the canonical named-Value archive that is the sole replay authority,
 and a versioned manifest written last. The manifest binds archive/metadata
 facts to one random writer generation, and replay publishes all Values or none.
 This process-serialized, manifest-last mechanism is neither an atomic
-filesystem transaction nor crash-durable user output.
+filesystem transaction nor crash-durable user output. Current disk persistence
+is POSIX-only. On Windows every nonempty-root GraphCache disk request fails
+with a typed platform error before side effects; empty-root/no-save no-disk
+semantics and pure memory/statistics APIs remain available. Native Windows
+GraphCache persistence is a future target.
 
 **`OutputStore` publication**
 The current daemon observation that a protected process-scoped canonical
