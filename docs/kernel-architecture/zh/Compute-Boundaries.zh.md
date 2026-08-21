@@ -241,16 +241,25 @@ texture-to-buffer blit，不调用
 仍不拥有 native Metal state，#74 仍是最终 visible-commit gate，而 #86 把 device-memory/scratch
 authority 保留在 service ledger 内，而不是放进 residency 或 Run。
 
-Metal 会在首个 allocation 前通过 native heap texture/buffer size-and-alignment query 得到完整
-preallocation plan。每个 persistent texture 都会使用通过校验的 texture query 和同一个 descriptor，
-创建专用 tracked `MTLHeap` 及 heap-backed texture；这里不使用 direct-texture 或进程 page 的经验规则。
-Actual `MTLResource::allocatedSize` 必须在 command commit 前适配这份原子 plan。随后该 plan 会变成
-两个唯一 owner：persistent memory 随 type-erased native `Value` owner 跨副本与 residency 延续；
-该 owner 会显式保有 texture 与 heap，并依次释放 texture、heap，最后释放 lease。Scratch 则随精确
-command-completion object 跨 success、native failure、stale/rejected publication 与 callback unwind
-延续。未使用的 planned byte 会在 actual commit 时归还。Device account 按完整 `DeviceId` 隔离，
-不借用 Host 容量，并提供复制式 limits/reserved/available snapshot。Command queue、fixed lane 与
-pipeline cache entry 仍是 infrastructure，不是 per-invocation scratch。
+Metal 会在首个 allocation 前通过 native heap size-and-alignment query 得到经过检查的 texture 与
+buffer 最小需求。Texture query 无法预测专用 `MTLHeap` 的 device-specific rounding；Metal 只会在
+heap 创建后暴露其 `size` 与 `currentAllocatedSize`。因此 service ledger 会执行一个线性化操作：要求
+texture 最小需求能够容纳，预留隔离 device account 当时全部可用的 persistent memory，并预留精确
+scratch plan。在 actual 校准归还未使用的 ceiling 前，并发 heap 尝试无法通过该 account；已经提交的
+heap 会继续计费，并减少下一次 ceiling。准入前不会发生 allocation，也不会使用 direct-texture、
+进程 page 或 device 采样值的经验规则。
+
+随后，同一个 descriptor 会创建专用 tracked `MTLHeap` 及其 heap-backed texture。正值且可表示的
+`MTLHeap::currentAllocatedSize` 是唯一 persistent actual，因为 heap 才是长期 backing owner；texture
+suballocation 的 `allocatedSize` 不会重复相加。Scratch buffer 使用各自的
+`MTLResource::allocatedSize`。每项累计 actual 都必须在 command commit 前适配原子 plan；否则 typed
+failure 会依次释放局部 texture、heap，最后释放未提交的 reservation。适配成功的 actual commit 会
+归还未使用的 planned byte，并产生两个唯一 owner：persistent memory 随 type-erased native `Value`
+owner 跨副本与 residency 延续；该 owner 会保有 texture 与 heap，并依次释放 texture、heap，最后释放
+lease。Scratch 则随精确 command-completion object 跨 success、native failure、stale/rejected
+publication 与 callback unwind 延续。Device account 按完整 `DeviceId` 隔离，不借用 Host 容量，并
+提供复制式 limits/reserved/available snapshot。Command queue、fixed lane 与 pipeline cache entry
+仍是 infrastructure，不是 per-invocation scratch。
 
 当前内建 CPU 准入会把强制、经检查的 service envelope 与可审计的 adapter envelope 组合起来。
 Run/control/plan 或 phase-context 共享的 retained storage 只计费一次。统一的逐任务 retained 与

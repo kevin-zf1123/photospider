@@ -391,12 +391,16 @@ lookup, publication, replacement, capacity, and eviction behavior.
 
 V-9 places authoritative device-memory and scratch admission in the existing
 service `ResourceLedger`, not in policy or residency. Each configured
-non-CPU `DeviceId` has isolated limits. Metal atomically reserves native
-size/alignment plans before allocation, audits `allocatedSize`, and commits
-actual bytes before command submission. Persistent memory follows the native
-Value owner through residency; scratch follows exact command completion.
-Policy sees no native handle or token, does not rank byte owners, and gains no
-second waiting/fairness queue.
+non-CPU `DeviceId` has isolated limits. For a dedicated Metal heap, the native
+size/alignment query is a minimum rather than a backing upper bound, so one
+ledger operation atomically reserves all memory currently available in that
+account plus exact scratch before allocation. The created heap's positive,
+representable `currentAllocatedSize` is the sole persistent actual; texture
+`allocatedSize` is not counted twice. Reconciliation returns the unused
+ceiling before command submission. Persistent memory follows the native Value
+owner through residency; scratch follows exact command completion. Policy sees
+no native handle or token, does not rank byte owners, and gains no second
+waiting/fairness queue.
 
 Freshness publication uses two phases. Kernel first asks `ExecutionService` to
 pretrack the lineage without assigning a managed current identity; this

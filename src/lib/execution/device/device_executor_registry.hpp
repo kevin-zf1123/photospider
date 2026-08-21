@@ -156,6 +156,24 @@ class DeviceExecutorInvocation {
     (void)checkpoint;
     return std::chrono::steady_clock::now();
   }
+
+  /**
+   * @brief Observes one invocation-local native accounting update.
+   * @param planned Complete device plan already admitted before allocation.
+   * @param actual Checked native actual total after the latest allocation.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The default is a no-op. Source-private tests may copy these values to
+   * verify allocator-to-ledger mapping. The callback receives no native handle,
+   * reservation, lease, mutation path, or capacity authority and MUST NOT call
+   * back into the executor or ledger.
+   */
+  virtual void observe_device_resource_accounting(
+      DeviceResourceVector planned,
+      DeviceResourceVector actual) const noexcept {
+    (void)planned;
+    (void)actual;
+  }
 };
 
 /**

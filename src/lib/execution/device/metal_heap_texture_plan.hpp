@@ -15,9 +15,11 @@ namespace ps::execution {
  * @brief Validated native requirements for one dedicated heap texture.
  *
  * @throws Nothing for aggregate construction, copying, and destruction.
- * @note `heap_size` is the admitted size passed to `MTLHeapDescriptor`; it is
- * never an estimate for a direct `MTLDevice::newTextureWithDescriptor`
- * allocation.
+ * @note `requested_heap_size` is the minimum request passed to
+ * `MTLHeapDescriptor`. Apple permits the device to round the created heap's
+ * backing size, so this value is neither a pre-allocation upper bound nor the
+ * persistent actual. It is never an estimate for a direct
+ * `MTLDevice::newTextureWithDescriptor` allocation.
  */
 struct MetalHeapTexturePlan final {
   /** @brief Native heap-suballocation byte requirement. */
@@ -26,21 +28,23 @@ struct MetalHeapTexturePlan final {
   /** @brief Positive power-of-two native placement alignment. */
   std::uint64_t required_alignment = 0U;
 
-  /** @brief Required size conservatively rounded to native alignment. */
-  std::uint64_t heap_size = 0U;
+  /** @brief Minimum heap descriptor request rounded to query alignment. */
+  std::uint64_t requested_heap_size = 0U;
 };
 
 /**
  * @brief Validates and rounds one native heap texture size/alignment query.
  * @param required_size Positive heap-suballocation byte requirement.
  * @param required_alignment Positive power-of-two placement alignment.
- * @return Complete plan whose heap size covers the queried requirement.
+ * @return Complete plan whose descriptor request covers the queried
+ * suballocation requirement.
  * @throws std::invalid_argument for zero size or a zero/non-power-of-two
  * alignment.
  * @throws std::overflow_error when alignment rounding is unrepresentable.
  * @note The helper allocates nothing and performs no native call. Callers must
  * use the resulting plan only with a heap-backed texture whose descriptor is
- * identical to the queried descriptor.
+ * identical to the queried descriptor. The result does not predict
+ * device-specific heap-backing rounding.
  */
 inline MetalHeapTexturePlan checked_metal_heap_texture_plan(
     std::uint64_t required_size, std::uint64_t required_alignment) {

@@ -319,11 +319,13 @@ clear residency、用 capacity pressure 代替清理，也不会改变普通 loo
 replacement、capacity 与 eviction 行为。
 
 V-9 把权威 device-memory 与 scratch admission 放入既有 service `ResourceLedger`，而不是
-policy 或 residency。每个已配置非 CPU `DeviceId` 都有隔离 limit。Metal 会在 allocation
-前原子预留 native size/alignment plan、审计 `allocatedSize`，并在 command submission 前提交
-actual byte。Persistent memory 随 native Value owner 跨 residency 延续；scratch 随精确
-command completion 延续。Policy 看不到 native handle 或 token，不排列 byte owner，也不会
-获得第二套 waiting/fairness queue。
+policy 或 residency。每个已配置非 CPU `DeviceId` 都有隔离 limit。对于专用 Metal heap，native
+size/alignment query 是最小需求，而不是 backing 上界，因此 ledger 会在 allocation 前通过一次操作
+原子预留该 account 当时全部可用的 memory 与精确 scratch。创建出的 heap 所报告的正值、可表示
+`currentAllocatedSize` 是唯一 persistent actual；texture `allocatedSize` 不会重复计费。Actual
+校准会在 command submission 前归还未使用的 ceiling。Persistent memory 随 native Value owner
+跨 residency 延续；scratch 随精确 command completion 延续。Policy 看不到 native handle 或 token，
+不排列 byte owner，也不会获得第二套 waiting/fairness queue。
 
 Freshness publication 分为两个阶段。Kernel 先要求 `ExecutionService` 预跟踪 lineage，
 但不指派 managed current identity；该可失败 allocation 会在 coordinator submission 前完成。

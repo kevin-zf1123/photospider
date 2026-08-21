@@ -118,15 +118,22 @@ non-CPU `DeviceId` account atomically reserves persistent-memory and scratch
 plans under the same ledger root mutex. The Metal Perlin path plans its output
 texture, permutation/scale buffers, and readback buffer before its first native
 allocation; CPU-to-Metal upload plans its destination texture and staging
-buffer before either allocation. Native heap size/alignment supplies the plan.
-Each persistent texture is allocated from a dedicated tracked heap using the
-same descriptor and validated query, rather than applying a direct-allocation
-page-size heuristic. `allocatedSize` supplies actual bytes, and command commit
-occurs only after actual reconciliation. Persistent memory then follows the
-native Value owner, which explicitly retains both texture and heap through
-residency and releases them before its lease; scratch remains charged until the
-exact native completion owner retires. Provider/Run return cannot release
-either owner early, and queue/pipeline infrastructure is not charged as
+buffer before either allocation. Native heap texture size/alignment supplies a
+validated minimum descriptor request, not an upper bound on the backing of the
+heap that the device later creates. Because Metal exposes `MTLHeap::size` and
+`currentAllocatedSize` only after heap creation, the ledger atomically reserves
+all persistent memory currently available in that device account when the
+minimum fits, together with the exact scratch plan. This occurs before any
+native allocation and applies no process-page or observed-device heuristic.
+After the heap-backed texture exists, the positive, representable
+`MTLHeap::currentAllocatedSize` is the one persistent actual; the texture's
+`allocatedSize` is not added again, while scratch resources retain their own
+`allocatedSize` audit. Command commit occurs only after every actual fits the
+admitted plan, which returns the unused memory ceiling. Persistent memory then
+follows the native Value owner, which explicitly retains both texture and heap
+through residency and releases them before its lease; scratch remains charged
+until the exact native completion owner retires. Provider/Run return cannot
+release either owner early, and queue/pipeline infrastructure is not charged as
 invocation scratch.
 
 Benchmark configuration does not reconfigure that process pool. For each

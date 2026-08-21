@@ -57,16 +57,20 @@ class MetalExecutionContext {
    * @param height Positive persistent R32Float texture height.
    * @param auxiliary_scratch_lengths Positive scratch-buffer byte lengths that
    * later `allocate_device_scratch_buffer_copy()` calls will consume in order.
-   * @return Nothing after the complete heap-backed persistent texture,
-   * auxiliary buffers, and host-readback buffer plan is admitted for the exact
+   * @return Nothing after the complete currently available persistent-memory
+   * ceiling plus exact auxiliary/readback scratch plan is admitted for the
    * Metal device.
    * @throws std::invalid_argument for zero dimensions or scratch lengths.
    * @throws std::overflow_error when exact native-size accumulation overflows.
    * @throws DeviceResourceError when native planning is invalid or the device
    * account cannot admit both dimensions atomically.
    * @throws std::logic_error when a plan or publication already exists.
-   * @note This method allocates no native texture or buffer. Call it after
-   * pipeline resolution and before the first invocation allocation.
+   * @note The native texture query supplies a minimum heap descriptor request,
+   * not an upper bound for device-specific heap-backing rounding. This method
+   * therefore reserves the device account's complete currently available
+   * memory ceiling under the ledger lock. It allocates no native texture or
+   * buffer; call it after pipeline resolution and before the first invocation
+   * allocation.
    */
   virtual void prepare_float32_texture_to_host_resources(
       std::uint32_t width, std::uint32_t height,
@@ -79,14 +83,16 @@ class MetalExecutionContext {
    * @return Non-null opaque `id<MTLTexture>` retained through callback exit.
    * @throws std::invalid_argument for a zero dimension.
    * @throws std::logic_error without a matching unconsumed resource plan.
-   * @throws DeviceResourceError when the heap size is unrepresentable or the
-   * native texture exceeds its admitted actual-byte plan.
+   * @throws DeviceResourceError when the heap request/current allocation is
+   * invalid or the heap's actual bytes exceed its admitted ceiling.
    * @throws std::bad_alloc when heap descriptor allocation fails.
    * @throws std::runtime_error when heap/texture allocation or exact backing
    * validation fails.
    * @note The dedicated native heap and texture remain explicit co-owners.
-   * Their ownership and exact device-memory lease transfer together to the
-   * pending resident Value when publication succeeds.
+   * The heap's positive `currentAllocatedSize` is the unique persistent actual;
+   * the texture suballocation is not counted again. Native ownership and the
+   * exact heap-sized device-memory lease transfer together to the pending
+   * resident Value when publication succeeds.
    */
   virtual NativeHandle allocate_persistent_float32_texture_2d(
       std::uint32_t width, std::uint32_t height) = 0;

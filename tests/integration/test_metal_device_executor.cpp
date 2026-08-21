@@ -138,6 +138,8 @@ class CallbackDeviceExecutorInvocation final
    * @param completion_seed Optional exact native completion lineage.
    * @param execution_deadline Optional exclusive absolute executor deadline.
    * @param deadline_clock Optional deterministic checkpoint clock.
+   * @param device_limits Immutable Metal memory/scratch limits for this direct
+   * invocation's isolated ledger.
    * @throws std::invalid_argument when callback is empty.
    * @throws std::bad_alloc when callback ownership cannot allocate.
    */
@@ -147,17 +149,17 @@ class CallbackDeviceExecutorInvocation final
           std::nullopt,
       std::optional<std::chrono::steady_clock::time_point> execution_deadline =
           std::nullopt,
-      DeadlineClock deadline_clock = {})
+      DeadlineClock deadline_clock = {},
+      DeviceResourceVector device_limits =
+          DeviceResourceVector{std::numeric_limits<std::uint64_t>::max(),
+                               std::numeric_limits<std::uint64_t>::max()})
       : callback_(std::move(callback)),
         completion_seed_(std::move(completion_seed)),
         execution_deadline_(execution_deadline),
         deadline_clock_(std::move(deadline_clock)),
         resource_ledger_(ResourceVector{},
                          std::vector<DeviceResourceLimit>{DeviceResourceLimit{
-                             DeviceId(DeviceBackend::Metal),
-                             DeviceResourceVector{
-                                 std::numeric_limits<std::uint64_t>::max(),
-                                 std::numeric_limits<std::uint64_t>::max()}}}) {
+                             DeviceId(DeviceBackend::Metal), device_limits}}) {
     if (!callback_) {
       throw std::invalid_argument(
           "CallbackDeviceExecutorInvocation requires a callback.");
@@ -195,6 +197,16 @@ class CallbackDeviceExecutorInvocation final
         checkpoint);
   }
 
+  /** @copydoc
+   * execution::DeviceExecutorInvocation::observe_device_resource_accounting */
+  void observe_device_resource_accounting(
+      DeviceResourceVector planned,
+      DeviceResourceVector actual) const noexcept override {
+    last_observed_plan_ = planned;
+    last_observed_actual_ = actual;
+    ++accounting_observations_;
+  }
+
   /**
    * @brief Copies this direct invocation's Metal accounting state.
    * @return Configured immutable snapshot, always present in these tests.
@@ -203,6 +215,33 @@ class CallbackDeviceExecutorInvocation final
   std::optional<ResourceLedger::DeviceSnapshot> device_resource_snapshot()
       const {
     return resource_ledger_.device_snapshot(DeviceId(DeviceBackend::Metal));
+  }
+
+  /**
+   * @brief Returns the latest invocation-local native accounting plan.
+   * @return Last copied plan, or zero before the first native allocation.
+   * @throws Nothing.
+   */
+  DeviceResourceVector last_observed_plan() const noexcept {
+    return last_observed_plan_;
+  }
+
+  /**
+   * @brief Returns the latest invocation-local native actual total.
+   * @return Last copied actual vector, or zero before native allocation.
+   * @throws Nothing.
+   */
+  DeviceResourceVector last_observed_actual() const noexcept {
+    return last_observed_actual_;
+  }
+
+  /**
+   * @brief Returns the number of native accounting updates in this invocation.
+   * @return Monotonic callback-local observation count.
+   * @throws Nothing.
+   */
+  std::uint64_t accounting_observations() const noexcept {
+    return accounting_observations_;
   }
 
  private:
@@ -220,6 +259,16 @@ class CallbackDeviceExecutorInvocation final
 
   /** @brief Isolated device-account authority for one direct native probe. */
   ResourceLedger resource_ledger_;
+
+  /** @brief Latest admitted plan copied by the executor observation seam. */
+  mutable DeviceResourceVector last_observed_plan_;
+
+  /** @brief Latest native actual total copied by the executor observation seam.
+   */
+  mutable DeviceResourceVector last_observed_actual_;
+
+  /** @brief Number of allocation-accounting updates observed so far. */
+  mutable std::uint64_t accounting_observations_ = 0U;
 };
 
 /**
@@ -279,6 +328,82 @@ bool native_metal_resource_is_heap_backed(void* resource) {
 }
 
 /**
+ * @brief Native allocation facts sampled from one heap-backed Metal texture.
+ *
+ * @throws Nothing for aggregate construction, copying, and destruction.
+ * @note These values are runtime observations. Tests compare their
+ * relationships and ledger mapping but never freeze one GPU's numeric
+ * granularity as product policy.
+ */
+struct NativeMetalHeapAllocationObservation final {
+  /** @brief Device-rounded capacity exposed by `MTLHeap::size`. */
+  std::uint64_t heap_size = 0U;
+
+  /** @brief Current native backing exposed by `MTLHeap::currentAllocatedSize`.
+   */
+  std::uint64_t heap_current_allocated_size = 0U;
+
+  /** @brief Sum of resources suballocated from the heap. */
+  std::uint64_t heap_used_size = 0U;
+
+  /** @brief Byte occupancy reported by the texture resource itself. */
+  std::uint64_t texture_allocated_size = 0U;
+};
+
+/**
+ * @brief Reads one unsigned Objective-C property through the callback-bounded
+ * native object.
+ * @param object Non-null borrowed Objective-C object.
+ * @param selector_name Non-null property getter selector name.
+ * @return Native unsigned value widened without loss to the ledger scalar.
+ * @throws std::invalid_argument for a null object or selector name.
+ * @note The Apple test target is 64-bit. The helper retains no native object
+ * and must run while the surrounding executor callback owns it.
+ */
+std::uint64_t native_metal_unsigned_property(void* object,
+                                             const char* selector_name) {
+  static_assert(sizeof(std::uintptr_t) <= sizeof(std::uint64_t),
+                "Native Metal sizes must fit the ledger scalar.");
+  if (object == nullptr || selector_name == nullptr) {
+    throw std::invalid_argument(
+        "Metal property observation requires an object and selector.");
+  }
+  using UnsignedGetter = std::uintptr_t (*)(void*, SEL);
+  const auto getter = reinterpret_cast<UnsignedGetter>(&objc_msgSend);
+  return static_cast<std::uint64_t>(
+      getter(object, sel_registerName(selector_name)));
+}
+
+/**
+ * @brief Samples heap and texture accounting facts from one native texture.
+ * @param resource Non-null callback-bounded `id<MTLTexture>` handle.
+ * @return Complete positive-or-zero native observation for test assertions.
+ * @throws std::invalid_argument when the resource is null or not heap-backed.
+ * @note The helper neither retains native objects nor changes heap allocation,
+ * resource purgeability, residency, or ledger state.
+ */
+NativeMetalHeapAllocationObservation observe_native_metal_heap_allocation(
+    void* resource) {
+  if (resource == nullptr) {
+    throw std::invalid_argument(
+        "Metal heap allocation observation requires a native texture.");
+  }
+  using ObjectGetter = void* (*)(void*, SEL);
+  const auto getter = reinterpret_cast<ObjectGetter>(&objc_msgSend);
+  void* heap = getter(resource, sel_registerName("heap"));
+  if (heap == nullptr) {
+    throw std::invalid_argument(
+        "Metal heap allocation observation requires heap backing.");
+  }
+  return NativeMetalHeapAllocationObservation{
+      native_metal_unsigned_property(heap, "size"),
+      native_metal_unsigned_property(heap, "currentAllocatedSize"),
+      native_metal_unsigned_property(heap, "usedSize"),
+      native_metal_unsigned_property(resource, "allocatedSize"),
+  };
+}
+
+/**
  * @brief Builds one fixed-size Ready FLOAT32 source for real upload tests.
  * @param base First sample value; later values advance deterministically.
  * @return Host-visible two-by-two tensor with unique revision identity.
@@ -319,6 +444,47 @@ class NativeAllocationProbeError final : public std::exception {
   /** @copydoc std::exception::what */
   const char* what() const noexcept override { return kExpectedFailure; }
 };
+
+/**
+ * @brief Tests whether one memory limit can admit the native minimum texture
+ * plan without allocating a heap, texture, or buffer.
+ * @param registry Real Metal executor registry used for the bounded query.
+ * @param width Positive R32Float texture width.
+ * @param height Positive R32Float texture height.
+ * @param memory_limit Candidate persistent-memory account limit.
+ * @param scratch_limit Sufficient scratch account limit for the readback plan.
+ * @return True when preparation admits the candidate, false only for typed
+ * capacity rejection.
+ * @throws DeviceResourceError for native-plan failures other than capacity.
+ * @throws Standard executor and synchronization exceptions unchanged.
+ * @note The invocation deliberately unwinds immediately after preparation, so
+ * every admitted ceiling is returned before the next binary-search probe.
+ */
+bool native_metal_minimum_texture_plan_fits(
+    execution::DeviceExecutorRegistry& registry, std::uint32_t width,
+    std::uint32_t height, std::uint64_t memory_limit,
+    std::uint64_t scratch_limit) {
+  CallbackDeviceExecutorInvocation invocation(
+      [&] {
+        execution::require_current_metal_execution_context()
+            .prepare_float32_texture_to_host_resources(width, height, {});
+        throw NativeAllocationProbeError{};
+      },
+      std::nullopt, std::nullopt, {},
+      DeviceResourceVector{memory_limit, scratch_limit});
+  try {
+    registry.execute(DeviceBackend::Metal, invocation);
+  } catch (const NativeAllocationProbeError&) {
+    return true;
+  } catch (const DeviceResourceError& error) {
+    if (error.code() == DeviceResourceErrorCode::AdmissionRejected) {
+      return false;
+    }
+    throw;
+  }
+  throw std::logic_error(
+      "Metal minimum-plan probe returned without its deliberate unwind.");
+}
 
 /**
  * @brief Exercises same-executor callback re-entry in a watchdog child.
@@ -643,13 +809,13 @@ TEST(MetalDeviceExecutorAccounting,
       execution::checked_metal_heap_texture_plan(4096U, 4096U);
   EXPECT_EQ(exact.required_size, 4096U);
   EXPECT_EQ(exact.required_alignment, 4096U);
-  EXPECT_EQ(exact.heap_size, 4096U);
+  EXPECT_EQ(exact.requested_heap_size, 4096U);
 
   const execution::MetalHeapTexturePlan rounded =
       execution::checked_metal_heap_texture_plan(4097U, 4096U);
   EXPECT_EQ(rounded.required_size, 4097U);
   EXPECT_EQ(rounded.required_alignment, 4096U);
-  EXPECT_EQ(rounded.heap_size, 8192U);
+  EXPECT_EQ(rounded.requested_heap_size, 8192U);
 
   EXPECT_THROW(execution::checked_metal_heap_texture_plan(0U, 4096U),
                std::invalid_argument);
@@ -1337,6 +1503,174 @@ TEST(MetalDeviceExecutorIntegration,
 }
 
 /**
+ * @brief Proves dedicated-heap admission covers the full currently available
+ * persistent-memory ceiling and maps only the heap's current allocation into
+ * native actual accounting.
+ *
+ * @return Nothing; GoogleTest reports admission, native sampling, accounting,
+ * or unwind failures.
+ * @throws Native executor and synchronization exceptions are caught at the
+ * exact deliberate provider-failure boundary.
+ * @note Native byte values remain device observations: the test freezes only
+ * positivity, safe containment, and exact mapping to the invocation-local
+ * accounting total. It does not generalize one GPU's rounding granularity.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     DedicatedHeapAdmissionAndActualCoverCompleteBackingAllocation) {
+  execution::DeviceExecutorRegistry registry =
+      execution::make_default_device_executor_registry();
+  if (!registry.contains(DeviceBackend::Metal)) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+
+  constexpr std::uint64_t kMemoryLimit = 64U * 1024U * 1024U;
+  constexpr std::uint64_t kScratchLimit = 64U * 1024U * 1024U;
+  constexpr std::uint32_t kWidth = 256U;
+  constexpr std::uint32_t kHeight = 256U;
+  std::optional<ResourceLedger::DeviceSnapshot> admitted;
+  NativeMetalHeapAllocationObservation native;
+  DeviceResourceVector observed_plan;
+  DeviceResourceVector observed_actual;
+  std::uint64_t observation_count = 0U;
+  CallbackDeviceExecutorInvocation* invocation_observer = nullptr;
+  CallbackDeviceExecutorInvocation invocation(
+      [&] {
+        execution::MetalExecutionContext& context =
+            execution::require_current_metal_execution_context();
+        context.prepare_float32_texture_to_host_resources(kWidth, kHeight, {});
+        admitted = invocation_observer->device_resource_snapshot();
+        void* texture =
+            context.allocate_persistent_float32_texture_2d(kWidth, kHeight);
+        native = observe_native_metal_heap_allocation(texture);
+        observed_plan = invocation_observer->last_observed_plan();
+        observed_actual = invocation_observer->last_observed_actual();
+        observation_count = invocation_observer->accounting_observations();
+        throw NativeAllocationProbeError{};
+      },
+      std::nullopt, std::nullopt, {},
+      DeviceResourceVector{kMemoryLimit, kScratchLimit});
+  invocation_observer = &invocation;
+
+  bool caught_expected_exception = false;
+  try {
+    registry.execute(DeviceBackend::Metal, invocation);
+  } catch (const NativeAllocationProbeError& error) {
+    caught_expected_exception = true;
+    EXPECT_STREQ(error.what(), kExpectedFailure);
+  }
+  ASSERT_TRUE(caught_expected_exception);
+  ASSERT_TRUE(admitted.has_value());
+  EXPECT_EQ(admitted->limits,
+            (DeviceResourceVector{kMemoryLimit, kScratchLimit}));
+  EXPECT_EQ(admitted->reserved.device_memory_bytes, kMemoryLimit);
+  EXPECT_GT(admitted->reserved.device_scratch_bytes, 0U);
+  EXPECT_LE(admitted->reserved.device_scratch_bytes, kScratchLimit);
+  EXPECT_EQ(observed_plan, admitted->reserved);
+
+  EXPECT_EQ(observation_count, 1U);
+  EXPECT_GT(native.heap_size, 0U);
+  EXPECT_GT(native.heap_current_allocated_size, 0U);
+  EXPECT_GT(native.heap_used_size, 0U);
+  EXPECT_GT(native.texture_allocated_size, 0U);
+  EXPECT_LE(native.heap_used_size, native.heap_size);
+  EXPECT_LE(native.heap_current_allocated_size, native.heap_size);
+  EXPECT_EQ(observed_actual.device_memory_bytes,
+            native.heap_current_allocated_size);
+  EXPECT_EQ(observed_actual.device_scratch_bytes, 0U);
+  EXPECT_LE(observed_actual.device_memory_bytes,
+            observed_plan.device_memory_bytes);
+
+  const auto after_unwind = invocation.device_resource_snapshot();
+  ASSERT_TRUE(after_unwind.has_value());
+  EXPECT_EQ(after_unwind->reserved, DeviceResourceVector{});
+  const execution::DeviceExecutorDiagnostics diagnostics =
+      registry.diagnostics(DeviceBackend::Metal);
+  EXPECT_EQ(diagnostics.total_allocations, 1U);
+  EXPECT_EQ(diagnostics.live_allocations, 0U);
+}
+
+/**
+ * @brief Forces a native heap-rounding excess above the exact query minimum and
+ * proves typed fail-closed unwind before executor retention.
+ * @return Nothing; GoogleTest reports admission, error-vector, or unwind
+ * mismatches; the test skips only when the current device has no observable
+ * heap-backing excess for this descriptor.
+ * @throws Unexpected native planning and executor failures are reported by
+ * GoogleTest.
+ * @note A bounded binary search discovers the current device's minimum without
+ * freezing its number as policy. The final allocation uses that exact account
+ * limit, so any larger `MTLHeap::currentAllocatedSize` must fail before native
+ * retention and return the reservation.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     DedicatedHeapOversizeFailsTypedAndUnwindsBeforeRetention) {
+  execution::DeviceExecutorRegistry registry =
+      execution::make_default_device_executor_registry();
+  if (!registry.contains(DeviceBackend::Metal)) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+
+  constexpr std::uint64_t kSearchCeiling = 64U * 1024U * 1024U;
+  constexpr std::uint64_t kScratchLimit = 64U * 1024U * 1024U;
+  constexpr std::uint32_t kWidth = 256U;
+  constexpr std::uint32_t kHeight = 256U;
+  ASSERT_TRUE(native_metal_minimum_texture_plan_fits(
+      registry, kWidth, kHeight, kSearchCeiling, kScratchLimit));
+  std::uint64_t lower = 1U;
+  std::uint64_t upper = kSearchCeiling;
+  while (lower < upper) {
+    const std::uint64_t middle = lower + (upper - lower) / 2U;
+    if (native_metal_minimum_texture_plan_fits(registry, kWidth, kHeight,
+                                               middle, kScratchLimit)) {
+      upper = middle;
+    } else {
+      lower = middle + 1U;
+    }
+  }
+  const std::uint64_t minimum_memory_plan = lower;
+
+  std::optional<ResourceLedger::DeviceSnapshot> admitted;
+  CallbackDeviceExecutorInvocation* invocation_observer = nullptr;
+  CallbackDeviceExecutorInvocation invocation(
+      [&] {
+        execution::MetalExecutionContext& context =
+            execution::require_current_metal_execution_context();
+        context.prepare_float32_texture_to_host_resources(kWidth, kHeight, {});
+        admitted = invocation_observer->device_resource_snapshot();
+        static_cast<void>(
+            context.allocate_persistent_float32_texture_2d(kWidth, kHeight));
+        throw NativeAllocationProbeError{};
+      },
+      std::nullopt, std::nullopt, {},
+      DeviceResourceVector{minimum_memory_plan, kScratchLimit});
+  invocation_observer = &invocation;
+
+  bool caught_oversize = false;
+  try {
+    registry.execute(DeviceBackend::Metal, invocation);
+  } catch (const DeviceResourceError& error) {
+    caught_oversize = true;
+    EXPECT_EQ(error.code(), DeviceResourceErrorCode::ActualExceedsReservation);
+    EXPECT_EQ(error.planned().device_memory_bytes, minimum_memory_plan);
+    EXPECT_GT(error.actual().device_memory_bytes,
+              error.planned().device_memory_bytes);
+    EXPECT_EQ(error.actual().device_scratch_bytes, 0U);
+  } catch (const NativeAllocationProbeError&) {
+    GTEST_SKIP() << "This Metal device reports no heap-backing excess above "
+                    "the native minimum for the probe descriptor";
+  }
+  ASSERT_TRUE(caught_oversize);
+  ASSERT_TRUE(admitted.has_value());
+  EXPECT_EQ(admitted->reserved.device_memory_bytes, minimum_memory_plan);
+  EXPECT_EQ(invocation.device_resource_snapshot()->reserved,
+            DeviceResourceVector{});
+  const execution::DeviceExecutorDiagnostics diagnostics =
+      registry.diagnostics(DeviceBackend::Metal);
+  EXPECT_EQ(diagnostics.total_allocations, 0U);
+  EXPECT_EQ(diagnostics.live_allocations, 0U);
+}
+
+/**
  * @brief Proves native allocations and TLS retire on exception and that the
  * same real executor accepts a later invocation.
  *
@@ -1541,6 +1875,8 @@ TEST(MetalDeviceExecutorIntegration,
   const ResourceLedger::DeviceSnapshot resources =
       wait_for_scratch_release(upload);
   EXPECT_GT(resources.reserved.device_memory_bytes, 0U);
+  EXPECT_EQ(resources.reserved.device_memory_bytes,
+            upload.last_observed_actual().device_memory_bytes);
   EXPECT_EQ(resources.reserved.device_scratch_bytes, 0U);
 
   const execution::DeviceExecutorDiagnostics diagnostics =

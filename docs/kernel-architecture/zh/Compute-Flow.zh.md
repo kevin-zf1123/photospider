@@ -92,13 +92,18 @@ unsupported 与 dependency-disabled profile 则让 registry 中没有 Metal exec
 Device allocation 与 Run admission 具有不同生命周期。一个完整非 CPU `DeviceId` account 会在同一
 ledger root mutex 下原子预留 persistent-memory 与 scratch plan。Metal Perlin 路径会在首个
 native allocation 前规划 output texture、permutation/scale buffer 与 readback buffer；
-CPU-to-Metal upload 会在两项 allocation 前规划 destination texture 与 staging buffer。Native
-heap size/alignment 提供 plan。每个 persistent texture 都使用同一个 descriptor 和通过校验的 query，
-从专用 tracked heap 分配，而不是应用 direct-allocation page-size 经验规则。`allocatedSize` 提供
-actual byte，只有完成 actual 校准后才会 command commit。随后 persistent memory 随 native Value
-owner 跨 residency 延续；该 owner 会显式保有 texture 与 heap，并在 lease 前释放二者。Scratch
-则保持计费直到精确 native completion owner 退役。Provider/Run return 都不能提前释放任一 owner，
-queue/pipeline infrastructure 也不按 invocation scratch 计费。
+CPU-to-Metal upload 会在两项 allocation 前规划 destination texture 与 staging buffer。Native heap
+texture size/alignment 提供的是通过校验的最小 descriptor request，而不是 device 随后创建的 heap
+backing 上界。由于 Metal 只在 heap 创建后才暴露 `MTLHeap::size` 与 `currentAllocatedSize`，只要最小
+request 能容纳，ledger 就会原子预留该 device account 当时全部可用的 persistent memory，并同时预留
+精确 scratch plan。该步骤发生在任何 native allocation 之前，且不采用进程 page 或当前 device
+观测值的经验规则。Heap-backed texture 创建后，正值且可表示的 `MTLHeap::currentAllocatedSize` 是唯一
+persistent actual；texture 的 `allocatedSize` 不会重复相加，而 scratch resource 仍分别审计自身的
+`allocatedSize`。所有 actual 都适配已准入 plan 后才会 command commit，并归还未使用的 memory
+ceiling。随后 persistent memory 随 native Value owner 跨 residency 延续；该 owner 会显式保有
+texture 与 heap，并在 lease 前释放二者。Scratch 则保持计费直到精确 native completion owner
+退役。Provider/Run return 都不能提前释放任一 owner，queue/pipeline infrastructure 也不按
+invocation scratch 计费。
 
 Benchmark 配置不会重新配置该进程池。对于每次 benchmark Run，`execution.threads` 会解析为
 一个可选正值 `maximum_parallelism`：缺失或 `0` 会在 `[1,8]` 中选择有界自动值，

@@ -348,6 +348,161 @@ TEST(DeviceResourceLedgerAdmission, PlanIsAtomicAcrossBothDimensions) {
 }
 
 /**
+ * @brief Reserves all currently available memory while preserving existing
+ * leases and admitting only the exact requested scratch plan.
+ * @return Nothing; GoogleTest reports plan, reconciliation, or release errors.
+ * @throws Nothing when all owner transitions and snapshots remain exact.
+ * @note The first ceiling reservation models a native heap whose observed
+ * backing is larger than its query minimum. No device-specific rounding value
+ * is embedded in ledger policy.
+ */
+TEST(DeviceResourceLedgerAdmission,
+     MemoryCeilingPreservesExistingLeaseAndReturnsUnusedPlan) {
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(ResourceVector{},
+                        std::vector<DeviceResourceLimit>{
+                            DeviceResourceLimit{metal, {100U, 50U}}});
+  auto existing_reservation =
+      ledger.try_reserve_device(metal, DeviceResourceVector{20U, 0U});
+  ASSERT_TRUE(existing_reservation.has_value());
+  auto existing_leases =
+      existing_reservation->commit_actual(DeviceResourceVector{20U, 0U});
+
+  auto ceiling = ledger.try_reserve_device_with_memory_ceiling(
+      metal, DeviceResourceVector{30U, 10U});
+  ASSERT_TRUE(ceiling.has_value());
+  EXPECT_EQ(ceiling->planned_resources(), (DeviceResourceVector{80U, 10U}));
+  auto snapshot = ledger.device_snapshot(metal);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->reserved, (DeviceResourceVector{100U, 10U}));
+  EXPECT_EQ(snapshot->high_water, (DeviceResourceVector{100U, 10U}));
+  EXPECT_FALSE(ledger.try_reserve_device(metal, DeviceResourceVector{1U, 0U})
+                   .has_value());
+
+  auto heap_leases = ceiling->commit_actual(DeviceResourceVector{40U, 7U});
+  EXPECT_GT(heap_leases.persistent_memory.resources().device_memory_bytes, 30U);
+  snapshot = ledger.device_snapshot(metal);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->reserved, (DeviceResourceVector{60U, 7U}));
+
+  std::optional<ResourceLedger::DeviceLease> heap_scratch(
+      std::move(heap_leases.scratch));
+  std::optional<ResourceLedger::DeviceLease> heap_memory(
+      std::move(heap_leases.persistent_memory));
+  heap_scratch.reset();
+  heap_memory.reset();
+  snapshot = ledger.device_snapshot(metal);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->reserved, (DeviceResourceVector{20U, 0U}));
+  std::optional<ResourceLedger::DeviceLease> existing_memory(
+      std::move(existing_leases.persistent_memory));
+  existing_memory.reset();
+  EXPECT_EQ(ledger.device_snapshot(metal)->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Rejects an unavailable memory minimum, exact scratch overflow, and an
+ * unknown device without changing the prior account.
+ * @return Nothing; GoogleTest reports any partial mutation.
+ * @throws Nothing when all rejection paths remain synchronous and atomic.
+ */
+TEST(DeviceResourceLedgerAdmission,
+     MemoryCeilingRejectsInvalidAvailabilityWithoutMutation) {
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(ResourceVector{},
+                        std::vector<DeviceResourceLimit>{
+                            DeviceResourceLimit{metal, {100U, 50U}}});
+  auto existing =
+      ledger.try_reserve_device(metal, DeviceResourceVector{20U, 45U});
+  ASSERT_TRUE(existing.has_value());
+  const auto before = ledger.device_snapshot(metal);
+  ASSERT_TRUE(before.has_value());
+
+  EXPECT_FALSE(ledger
+                   .try_reserve_device_with_memory_ceiling(
+                       metal, DeviceResourceVector{81U, 5U})
+                   .has_value());
+  EXPECT_FALSE(ledger
+                   .try_reserve_device_with_memory_ceiling(
+                       metal, DeviceResourceVector{80U, 6U})
+                   .has_value());
+  EXPECT_FALSE(ledger
+                   .try_reserve_device_with_memory_ceiling(
+                       DeviceId(DeviceBackend::CUDA), DeviceResourceVector{})
+                   .has_value());
+  const auto after = ledger.device_snapshot(metal);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_EQ(after->reserved, before->reserved);
+  EXPECT_EQ(after->available, before->available);
+  EXPECT_EQ(after->high_water, before->high_water);
+}
+
+/**
+ * @brief Linearizes concurrent heap-ceiling attempts and admits a later heap
+ * only after the winner reconciles its larger-than-minimum native actual.
+ * @return Nothing; GoogleTest reports overcommit or recovery errors.
+ * @throws std::system_error if deterministic thread synchronization fails.
+ * @note This dependency-neutral schedule models different heap roundings and
+ * proves no concurrent allocator can bypass the configured device limit.
+ */
+TEST(DeviceResourceLedgerAdmission,
+     ConcurrentMemoryCeilingsSerializeMultipleHeapActuals) {
+  constexpr std::size_t kParticipants = 8U;
+  const DeviceId metal(DeviceBackend::Metal);
+  const DeviceResourceVector minimum{10U, 0U};
+  ResourceLedger ledger(ResourceVector{},
+                        std::vector<DeviceResourceLimit>{
+                            DeviceResourceLimit{metal, {100U, 20U}}});
+  ConcurrentAdmissionGate gate(kParticipants);
+  std::vector<std::optional<ResourceLedger::DeviceReservation>> results(
+      kParticipants);
+  std::vector<std::thread> threads;
+  threads.reserve(kParticipants);
+
+  for (std::size_t index = 0U; index < kParticipants; ++index) {
+    threads.emplace_back([&ledger, &gate, &results, index, metal, minimum] {
+      gate.arrive_and_wait();
+      results[index] =
+          ledger.try_reserve_device_with_memory_ceiling(metal, minimum);
+    });
+  }
+  gate.open();
+  for (std::thread& thread : threads) {
+    thread.join();
+  }
+
+  std::size_t winner = kParticipants;
+  for (std::size_t index = 0U; index < kParticipants; ++index) {
+    if (results[index].has_value()) {
+      EXPECT_EQ(winner, kParticipants);
+      winner = index;
+    }
+  }
+  ASSERT_LT(winner, kParticipants);
+  EXPECT_EQ(results[winner]->planned_resources(),
+            (DeviceResourceVector{100U, 0U}));
+  EXPECT_EQ(ledger.device_snapshot(metal)->reserved,
+            (DeviceResourceVector{100U, 0U}));
+
+  auto first_heap =
+      results[winner]->commit_actual(DeviceResourceVector{20U, 0U});
+  auto second = ledger.try_reserve_device_with_memory_ceiling(metal, minimum);
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(second->planned_resources(), (DeviceResourceVector{80U, 0U}));
+  auto second_heap = second->commit_actual(DeviceResourceVector{30U, 0U});
+  EXPECT_EQ(ledger.device_snapshot(metal)->reserved,
+            (DeviceResourceVector{50U, 0U}));
+
+  std::optional<ResourceLedger::DeviceLease> second_memory(
+      std::move(second_heap.persistent_memory));
+  std::optional<ResourceLedger::DeviceLease> first_memory(
+      std::move(first_heap.persistent_memory));
+  second_memory.reset();
+  first_memory.reset();
+  EXPECT_EQ(ledger.device_snapshot(metal)->reserved, DeviceResourceVector{});
+}
+
+/**
  * @brief Retains the largest successful device plan after exact release.
  * @throws Nothing when smaller/rejected plans preserve monotonic diagnostics.
  */
