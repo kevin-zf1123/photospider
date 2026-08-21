@@ -714,6 +714,7 @@ TEST(OperationPluginAbi, CanonicalizesEmptyCppViewsBeforeHostGenerationLoad) {
 /**
  * @brief Proves the public pass-through helper derives whole-byte alignment
  * before real Host output-plan admission.
+ * @return Nothing; GoogleTest records alignment contract mismatches.
  * @throws Nothing when every descriptor crosses inference, allocation,
  * execution, retirement, and immutable publication successfully.
  * @note FP32 and FP64 are the P1 regression cases. Integer widths lock the
@@ -721,7 +722,12 @@ TEST(OperationPluginAbi, CanonicalizesEmptyCppViewsBeforeHostGenerationLoad) {
  */
 TEST(OperationPluginAbi,
      PassthroughCppHelperDerivesWholeByteAlignmentBeforeHostAdmission) {
-  /** @brief One supported logical-semantics and physical-width combination. */
+  /**
+   * @brief Records one supported logical-semantics and physical-width case.
+   * @throws Nothing; aggregate construction stores only enum and bit width.
+   * @note This TEST-local semantics/bit-width matrix record owns no resources
+   *       and never crosses a callback, thread, or test-body lifetime boundary.
+   */
   struct ElementCase final {
     /** @brief Logical interpretation used by Host descriptor validation. */
     ElementSemantics semantics;
