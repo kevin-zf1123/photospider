@@ -319,11 +319,13 @@ target_include_directories(photospider_operation_runtime
         "${PROJECT_SOURCE_DIR}/src/lib")
 target_link_libraries(photospider_operation_runtime PRIVATE OpenSSL::Crypto)
 if(BUILD_TESTING)
-    # Source-private Value-allocation and sample-arithmetic seams are compiled
-    # only into test runtime images. Installed/production builds expose no test
-    # symbol or seam branch, and the test-access headers are never installed.
+    # Source-private Value-allocation, Value-artifact-bound, and
+    # sample-arithmetic seams are compiled only into test runtime images.
+    # Installed/production builds expose no test symbol or seam branch, and
+    # the test-access headers are never installed.
     target_compile_definitions(photospider_operation_runtime PRIVATE
         PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING
+        PHOTOSPIDER_INTERNAL_VALUE_ARTIFACT_TESTING
         PHOTOSPIDER_INTERNAL_SAMPLE_CONVERSION_TESTING)
 endif()
 
@@ -2648,6 +2650,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PHOTOSPIDER_INTERNAL_SAMPLE_CONVERSION_TESTING)
     add_ps_test(test_value_artifact
         tests/unit/test_value_artifact.cpp)
+    target_compile_definitions(test_value_artifact PRIVATE
+        PHOTOSPIDER_INTERNAL_VALUE_ARTIFACT_TESTING)
     add_ps_test(test_host_output_authorization
         tests/unit/test_host_output_authorization.cpp)
     add_ps_test(test_image_statistics_store

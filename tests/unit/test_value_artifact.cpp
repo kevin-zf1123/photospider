@@ -13,6 +13,7 @@
 
 #include "core/canonical_ieee754.hpp"
 #include "core/pending_value.hpp"
+#include "core/value_artifact_test_access.hpp"
 #include "photospider/data/image_view.hpp"
 #include "photospider/data/value_artifact.hpp"
 #include "photospider/host/value_artifact_result.hpp"
@@ -396,6 +397,64 @@ TEST(ValueArtifact,
   archive[payload_offset - 1U] = std::byte{0x01};
   EXPECT_THROW((void)decode_named_value_artifact_set(archive),
                std::invalid_argument);
+}
+
+/**
+ * @brief Rejects a padding-heavy archive whose complete encoded size exceeds
+ *        the frozen metadata-plus-payload ceiling.
+ * @return Nothing; GoogleTest reports component-bound, production-sizing,
+ *         encoder rejection, or decoder-consistency failures.
+ * @throws Artifact capture/codec failures when the real public path cannot
+ *         complete its bounded sizing checks.
+ * @note A BUILD_TESTING-only calling-thread scope substitutes smaller positive
+ *       subsets of the existing frozen limits without allocating hundreds of
+ *       MiB. The assertion consumes sizing recorded by the production encoder,
+ *       so it does not duplicate the alignment calculation as a test oracle.
+ */
+TEST(ValueArtifact, RejectsAggregateAlignmentPaddingBeyondArchiveBound) {
+  constexpr std::uint64_t kMetadataLimit = 16U * 1024U;
+  constexpr std::uint64_t kPayloadLimit = 64U;
+  testing::ScopedValueArtifactArchiveLimitsForTesting limits(kMetadataLimit,
+                                                             kPayloadLimit);
+
+  const ValueArtifact seed =
+      capture_value_artifact("value-00", make_binary64_artifact_image(0.0));
+  NamedValueArtifactSet artifacts;
+  for (std::size_t index = 0U; index < 8U; ++index) {
+    ValueArtifact artifact = seed;
+    artifact.envelope.output_name =
+        std::string("value-0") + std::to_string(index);
+    artifact.envelope.buffers.front().required_alignment =
+        kMaximumValueArtifactAlignment;
+    artifacts.values.push_back(std::move(artifact));
+  }
+
+  std::vector<std::byte> archive;
+  try {
+    archive = encode_named_value_artifact_set(artifacts);
+  } catch (const std::length_error& error) {
+    EXPECT_STREQ(error.what(),
+                 "Named Value artifact set archive exceeds its bound.");
+    const auto sizing = limits.observation();
+    EXPECT_TRUE(sizing.observed);
+    EXPECT_LE(sizing.metadata_bytes, kMetadataLimit);
+    EXPECT_LE(sizing.payload_bytes, kPayloadLimit);
+    EXPECT_GT(sizing.archive_bytes, kMetadataLimit + kPayloadLimit);
+    return;
+  }
+
+  const auto sizing = limits.observation();
+  EXPECT_TRUE(sizing.observed);
+  EXPECT_LE(sizing.metadata_bytes, kMetadataLimit);
+  EXPECT_LE(sizing.payload_bytes, kPayloadLimit);
+  EXPECT_GT(sizing.archive_bytes, kMetadataLimit + kPayloadLimit);
+  EXPECT_EQ(sizing.archive_bytes, archive.size());
+  EXPECT_THROW((void)decode_named_value_artifact_set(archive),
+               std::length_error);
+  FAIL() << "encoder produced an archive that its decoder rejects: metadata="
+         << sizing.metadata_bytes << ", payload=" << sizing.payload_bytes
+         << ", archive=" << sizing.archive_bytes
+         << ", bound=" << kMetadataLimit + kPayloadLimit;
 }
 
 TEST(ValueArtifact,

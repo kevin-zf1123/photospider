@@ -17,6 +17,9 @@
 #include <vector>
 
 #include "core/canonical_ieee754.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ARTIFACT_TESTING)
+#include "core/value_artifact_test_access.hpp"
+#endif
 
 namespace ps {
 namespace {
@@ -101,6 +104,71 @@ std::uint64_t checked_u64_add(std::uint64_t left, std::uint64_t right) {
   }
   return left + right;
 }
+
+/**
+ * @brief Effective frozen named-artifact archive component limits.
+ * @throws Nothing for ordinary aggregate operations.
+ * @note Production builds always contain the public frozen constants. A
+ *       BUILD_TESTING runtime may substitute smaller calling-thread limits.
+ */
+struct ValueArtifactArchiveLimits final {
+  /** @brief Maximum canonical metadata-prefix bytes. */
+  std::uint64_t metadata_bytes = 0U;
+  /** @brief Maximum aggregate raw payload bytes. */
+  std::uint64_t payload_bytes = 0U;
+};
+
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ARTIFACT_TESTING)
+/**
+ * @brief Calling-thread state for bounded real-code archive regression tests.
+ * @throws Nothing for ordinary aggregate operations.
+ * @note This state exists only in BUILD_TESTING runtime images and changes no
+ *       public codec contract or wire field.
+ */
+struct ValueArtifactArchiveTestState final {
+  /** @brief Effective metadata-prefix limit. */
+  std::uint64_t metadata_bytes = kMaximumValueArtifactMetadataBytes;
+  /** @brief Effective aggregate raw-payload limit. */
+  std::uint64_t payload_bytes = kMaximumValueArtifactPayloadBytes;
+  /** @brief Latest real encoder sizing result. */
+  testing::ValueArtifactArchiveSizingObservationForTesting observation;
+};
+
+/** @brief Calling thread's source-private artifact archive test state. */
+thread_local ValueArtifactArchiveTestState value_artifact_archive_test_state;
+#endif
+
+/**
+ * @brief Returns archive limits used by the real encoder and decoder.
+ * @return Production constants or smaller BUILD_TESTING thread-local limits.
+ * @throws Nothing.
+ */
+ValueArtifactArchiveLimits value_artifact_archive_limits() noexcept {
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ARTIFACT_TESTING)
+  return {value_artifact_archive_test_state.metadata_bytes,
+          value_artifact_archive_test_state.payload_bytes};
+#else
+  return {kMaximumValueArtifactMetadataBytes,
+          kMaximumValueArtifactPayloadBytes};
+#endif
+}
+
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ARTIFACT_TESTING)
+/**
+ * @brief Records one completed real encoder archive sizing pass.
+ * @param metadata_bytes Exact metadata-prefix bytes.
+ * @param payload_bytes Exact aggregate raw-payload bytes.
+ * @param archive_bytes Exact full archive bytes including padding.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void record_value_artifact_archive_sizing(
+    std::uint64_t metadata_bytes, std::uint64_t payload_bytes,
+    std::uint64_t archive_bytes) noexcept {
+  value_artifact_archive_test_state.observation = {
+      true, metadata_bytes, payload_bytes, archive_bytes};
+}
+#endif
 
 /**
  * @brief Canonical little-endian bounded metadata writer.
@@ -1094,6 +1162,48 @@ std::uint64_t align_artifact_offset(std::uint64_t value,
 }
 
 /**
+ * @brief Checked canonical span for one aligned artifact payload buffer.
+ * @throws Nothing for ordinary aggregate operations.
+ * @note The same result type drives encoder planning and decoder validation so
+ *       their padding and end-offset arithmetic cannot diverge.
+ */
+struct ValueArtifactArchiveSpan final {
+  /** @brief Canonical aligned first payload byte. */
+  std::uint64_t offset = 0U;
+  /** @brief Exclusive payload end after checked addition. */
+  std::uint64_t end = 0U;
+};
+
+/**
+ * @brief Calculates one canonical aligned archive span without unsigned wrap.
+ * @param cursor Exclusive end of metadata or the previous payload span.
+ * @param alignment Positive power-of-two payload alignment.
+ * @param byte_size Exact payload byte count.
+ * @return Canonical aligned offset and exclusive end.
+ * @throws std::overflow_error when alignment or span-end arithmetic exceeds
+ *         the portable uint64 domain.
+ * @note Alignment validity is enforced by the surrounding artifact validator;
+ *       this helper owns the identical checked arithmetic used on both codec
+ *       directions.
+ */
+ValueArtifactArchiveSpan checked_value_artifact_archive_span(
+    std::uint64_t cursor, std::uint64_t alignment, std::uint64_t byte_size) {
+  const std::uint64_t offset = align_artifact_offset(cursor, alignment);
+  return {offset, checked_u64_add(offset, byte_size)};
+}
+
+/**
+ * @brief Calculates the complete frozen archive ceiling without wraparound.
+ * @param limits Effective metadata and raw-payload component limits.
+ * @return Exact sum consumed jointly by metadata, padding, and payload bytes.
+ * @throws std::overflow_error when the component-limit sum exceeds uint64.
+ */
+std::uint64_t maximum_value_artifact_archive_bytes(
+    const ValueArtifactArchiveLimits& limits) {
+  return checked_u64_add(limits.metadata_bytes, limits.payload_bytes);
+}
+
+/**
  * @brief Appends exact bytes to an in-memory artifact-set archive.
  * @param output Destination archive.
  * @param data Borrowed bytes, null only for zero size.
@@ -1198,6 +1308,49 @@ class ArtifactSetReader final {
 };
 
 }  // namespace
+
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ARTIFACT_TESTING)
+namespace testing {
+
+/** @copydoc ScopedValueArtifactArchiveLimitsForTesting */
+ScopedValueArtifactArchiveLimitsForTesting::
+    ScopedValueArtifactArchiveLimitsForTesting(  // NOLINT(whitespace/indent_namespace)
+        std::uint64_t metadata_bytes, std::uint64_t payload_bytes)
+    : previous_metadata_bytes_(  // NOLINT(whitespace/indent_namespace)
+          value_artifact_archive_test_state.metadata_bytes),
+      previous_payload_bytes_(  // NOLINT(whitespace/indent_namespace)
+          value_artifact_archive_test_state.payload_bytes),
+      previous_observation_(  // NOLINT(whitespace/indent_namespace)
+          value_artifact_archive_test_state.observation) {
+  if (metadata_bytes == 0U || payload_bytes == 0U ||
+      metadata_bytes > kMaximumValueArtifactMetadataBytes ||
+      payload_bytes > kMaximumValueArtifactPayloadBytes) {
+    throw std::invalid_argument(
+        "Value artifact test limits must be positive production subsets.");
+  }
+  value_artifact_archive_test_state.metadata_bytes = metadata_bytes;
+  value_artifact_archive_test_state.payload_bytes = payload_bytes;
+  value_artifact_archive_test_state.observation = {};
+}
+
+/** @copydoc
+ * ScopedValueArtifactArchiveLimitsForTesting::~ScopedValueArtifactArchiveLimitsForTesting
+ */
+ScopedValueArtifactArchiveLimitsForTesting::
+    ~ScopedValueArtifactArchiveLimitsForTesting() noexcept {  // NOLINT(whitespace/indent_namespace)
+  value_artifact_archive_test_state.metadata_bytes = previous_metadata_bytes_;
+  value_artifact_archive_test_state.payload_bytes = previous_payload_bytes_;
+  value_artifact_archive_test_state.observation = previous_observation_;
+}
+
+/** @copydoc ScopedValueArtifactArchiveLimitsForTesting::observation */
+ValueArtifactArchiveSizingObservationForTesting
+ScopedValueArtifactArchiveLimitsForTesting::observation() const noexcept {
+  return value_artifact_archive_test_state.observation;
+}
+
+}  // namespace testing
+#endif
 
 /** @copydoc capture_value_artifact */
 ValueArtifact capture_value_artifact(std::string output_name,
@@ -1522,6 +1675,7 @@ ArtifactPayloadDigest compute_artifact_payload_digest(
 /** @copydoc encode_named_value_artifact_set */
 std::vector<std::byte> encode_named_value_artifact_set(
     const NamedValueArtifactSet& artifacts) {
+  const ValueArtifactArchiveLimits limits = value_artifact_archive_limits();
   if (artifacts.values.size() > kMaximumNamedValueArtifacts) {
     throw std::length_error(
         "Named Value artifact set exceeds its count bound.");
@@ -1542,12 +1696,12 @@ std::vector<std::byte> encode_named_value_artifact_set(
     first = false;
     std::uint64_t local_offset = 0U;
     for (ValueArtifactBuffer& buffer : artifact.envelope.buffers) {
-      local_offset =
-          align_artifact_offset(local_offset, buffer.required_alignment);
-      buffer.artifact_offset = local_offset;
-      local_offset = checked_u64_add(local_offset, buffer.byte_size);
+      const ValueArtifactArchiveSpan span = checked_value_artifact_archive_span(
+          local_offset, buffer.required_alignment, buffer.byte_size);
+      buffer.artifact_offset = span.offset;
+      local_offset = span.end;
       aggregate_payload = checked_u64_add(aggregate_payload, buffer.byte_size);
-      if (aggregate_payload > kMaximumValueArtifactPayloadBytes) {
+      if (aggregate_payload > limits.payload_bytes) {
         throw std::length_error(
             "Named Value artifact payload exceeds its bound.");
       }
@@ -1563,7 +1717,7 @@ std::vector<std::byte> encode_named_value_artifact_set(
     metadata_size = checked_u64_add(
         metadata_size, checked_u64_add(4U, size_to_u64(envelope.size())));
   }
-  if (metadata_size > kMaximumValueArtifactMetadataBytes) {
+  if (metadata_size > limits.metadata_bytes) {
     throw std::length_error(
         "Named Value artifact set metadata exceeds its bound.");
   }
@@ -1573,21 +1727,39 @@ std::vector<std::byte> encode_named_value_artifact_set(
        ++value_index) {
     ValueArtifact& artifact = normalized.values[value_index];
     for (ValueArtifactBuffer& buffer : artifact.envelope.buffers) {
-      payload_offset =
-          align_artifact_offset(payload_offset, buffer.required_alignment);
-      buffer.artifact_offset = payload_offset;
-      payload_offset = checked_u64_add(payload_offset, buffer.byte_size);
+      const ValueArtifactArchiveSpan span = checked_value_artifact_archive_span(
+          payload_offset, buffer.required_alignment, buffer.byte_size);
+      buffer.artifact_offset = span.offset;
+      payload_offset = span.end;
     }
-    encoded_envelopes[value_index] =
-        encode_value_artifact_envelope(artifact.envelope);
+  }
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ARTIFACT_TESTING)
+  record_value_artifact_archive_sizing(metadata_size, aggregate_payload,
+                                       payload_offset);
+#endif
+  if (payload_offset > maximum_value_artifact_archive_bytes(limits)) {
+    throw std::length_error(
+        "Named Value artifact set archive exceeds its bound.");
   }
   if (payload_offset > std::numeric_limits<std::size_t>::max()) {
     throw std::overflow_error(
         "Named Value artifact archive exceeds local address space.");
   }
 
+  for (std::size_t value_index = 0U; value_index < normalized.values.size();
+       ++value_index) {
+    encoded_envelopes[value_index] =
+        encode_value_artifact_envelope(normalized.values[value_index].envelope);
+  }
+
   std::vector<std::byte> output;
-  output.reserve(static_cast<std::size_t>(payload_offset));
+  const std::size_t local_archive_size =
+      static_cast<std::size_t>(payload_offset);
+  if (local_archive_size > output.max_size()) {
+    throw std::length_error(
+        "Named Value artifact archive exceeds local container capacity.");
+  }
+  output.reserve(local_archive_size);
   append_archive_bytes(&output, kArtifactSetMagic.data(),
                        kArtifactSetMagic.size());
   append_archive_u32(&output, kNamedValueArtifactSetArchiveVersion);
@@ -1624,12 +1796,12 @@ std::vector<std::byte> encode_named_value_artifact_set(
 /** @copydoc decode_named_value_artifact_set */
 NamedValueArtifactSet decode_named_value_artifact_set(
     const std::vector<std::byte>& bytes) {
+  const ValueArtifactArchiveLimits limits = value_artifact_archive_limits();
   if (bytes.size() < kArtifactSetMagic.size() + 8U) {
     invalid_artifact("Named Value artifact set archive is truncated.");
   }
   if (size_to_u64(bytes.size()) >
-      checked_u64_add(kMaximumValueArtifactPayloadBytes,
-                      kMaximumValueArtifactMetadataBytes)) {
+      maximum_value_artifact_archive_bytes(limits)) {
     throw std::length_error(
         "Named Value artifact set archive exceeds its bound.");
   }
@@ -1653,9 +1825,8 @@ NamedValueArtifactSet decode_named_value_artifact_set(
   bool first = true;
   for (std::size_t index = 0U; index < value_count; ++index) {
     const std::size_t envelope_size = reader.u32();
-    if (envelope_size == 0U ||
-        envelope_size > kMaximumValueArtifactMetadataBytes ||
-        reader.offset() > kMaximumValueArtifactMetadataBytes - envelope_size) {
+    if (envelope_size == 0U || envelope_size > limits.metadata_bytes ||
+        reader.offset() > limits.metadata_bytes - envelope_size) {
       throw std::length_error(
           "Named Value artifact envelope size exceeds its bound.");
     }
@@ -1672,7 +1843,7 @@ NamedValueArtifactSet decode_named_value_artifact_set(
   }
 
   const std::size_t metadata_end = reader.offset();
-  if (metadata_end > kMaximumValueArtifactMetadataBytes) {
+  if (metadata_end > limits.metadata_bytes) {
     throw std::length_error(
         "Named Value artifact set metadata exceeds its bound.");
   }
@@ -1681,9 +1852,9 @@ NamedValueArtifactSet decode_named_value_artifact_set(
   for (ValueArtifact& artifact : result.values) {
     artifact.payloads.reserve(artifact.envelope.buffers.size());
     for (const ValueArtifactBuffer& buffer : artifact.envelope.buffers) {
-      const std::uint64_t expected_offset =
-          align_artifact_offset(cursor, buffer.required_alignment);
-      if (buffer.artifact_offset != expected_offset ||
+      const ValueArtifactArchiveSpan span = checked_value_artifact_archive_span(
+          cursor, buffer.required_alignment, buffer.byte_size);
+      if (buffer.artifact_offset != span.offset ||
           buffer.artifact_offset > size_to_u64(bytes.size())) {
         invalid_artifact(
             "Named Value artifact payload spans are noncanonical.");
@@ -1694,21 +1865,19 @@ NamedValueArtifactSet decode_named_value_artifact_set(
                       [](std::byte value) { return value != std::byte{0U}; })) {
         invalid_artifact("Named Value artifact alignment padding is nonzero.");
       }
-      const std::uint64_t end =
-          checked_u64_add(buffer.artifact_offset, buffer.byte_size);
-      if (end > size_to_u64(bytes.size())) {
+      if (span.end > size_to_u64(bytes.size())) {
         invalid_artifact("Named Value artifact payload span is truncated.");
       }
       const std::size_t begin_index = u64_to_size(buffer.artifact_offset);
-      const std::size_t end_index = u64_to_size(end);
+      const std::size_t end_index = u64_to_size(span.end);
       artifact.payloads.emplace_back(bytes.begin() + begin_index,
                                      bytes.begin() + end_index);
       aggregate_payload = checked_u64_add(aggregate_payload, buffer.byte_size);
-      if (aggregate_payload > kMaximumValueArtifactPayloadBytes) {
+      if (aggregate_payload > limits.payload_bytes) {
         throw std::length_error(
             "Named Value artifact payload exceeds its bound.");
       }
-      cursor = end;
+      cursor = span.end;
     }
     validate_value_artifact(artifact);
   }

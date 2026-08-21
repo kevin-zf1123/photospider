@@ -23,14 +23,22 @@ inline constexpr std::uint32_t kValueArtifactEnvelopeVersion = 1U;
 /** @brief Canonical named-Value artifact-set archive structural version. */
 inline constexpr std::uint32_t kNamedValueArtifactSetArchiveVersion = 1U;
 
-/** @brief Frozen maximum serialized Value artifact metadata bytes. */
+/**
+ * @brief Frozen maximum serialized Value artifact metadata-prefix bytes.
+ * @note Its checked sum with the payload limit is the complete archive ceiling
+ *       shared by metadata, alignment padding, and payload bytes.
+ */
 inline constexpr std::size_t kMaximumValueArtifactMetadataBytes =
     16U * 1024U * 1024U;  // NOLINT(whitespace/indent_namespace)
 
 /** @brief Frozen maximum portable Host output-name byte length. */
 inline constexpr std::size_t kMaximumValueArtifactNameBytes = 128U;
 
-/** @brief Frozen maximum aggregate payload bytes accepted by one artifact. */
+/**
+ * @brief Frozen maximum aggregate raw payload bytes accepted by one set.
+ * @note Alignment padding is not raw payload; it still consumes the complete
+ *       archive ceiling formed with the metadata-prefix limit.
+ */
 inline constexpr std::uint64_t kMaximumValueArtifactPayloadBytes =
     8ULL * 1024ULL * 1024ULL * 1024ULL;  // NOLINT
 
@@ -280,8 +288,11 @@ ValueArtifactEnvelope decode_value_artifact_envelope(
  * @param artifacts Valid canonical set with exact payload bytes.
  * @return Metadata-first archive with separately addressed aligned payloads.
  * @throws Artifact validation, overflow, length, digest, or allocation errors.
- * @note Payload spans are outside the encoded envelope records; no JSON,
- *       native handle, path, lease, or process-local identity is serialized.
+ * @note Header, envelope records, every alignment gap, and every payload span
+ *       are checked as one complete archive before output storage is reserved
+ *       or written. Payload spans remain outside the encoded envelope records;
+ *       no JSON, native handle, path, lease, or process-local identity is
+ *       serialized.
  */
 std::vector<std::byte> encode_named_value_artifact_set(
     const NamedValueArtifactSet& artifacts);
@@ -291,7 +302,9 @@ std::vector<std::byte> encode_named_value_artifact_set(
  * @param bytes Exact archive bytes without trailing content.
  * @return Detached canonical artifacts after every span/digest validates.
  * @throws Artifact validation, overflow, length, or allocation errors.
- * @note Decoding publishes no Value and grants no durable/cache authority.
+ * @note Decoding applies the encoder's same checked align-up/span arithmetic
+ *       and complete metadata-plus-payload archive ceiling before publication.
+ *       It publishes no Value and grants no durable/cache authority.
  */
 NamedValueArtifactSet decode_named_value_artifact_set(
     const std::vector<std::byte>& bytes);
