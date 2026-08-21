@@ -93,11 +93,12 @@ Device allocation 与 Run admission 具有不同生命周期。一个完整非 C
 ledger root mutex 下原子预留 persistent-memory 与 scratch plan。Metal Perlin 路径会在首个
 native allocation 前规划 output texture、permutation/scale buffer 与 readback buffer；
 CPU-to-Metal upload 会在两项 allocation 前规划 destination texture 与 staging buffer。Native
-heap size/alignment 提供基础 plan；direct texture 会保守地把该 size 对齐到 native query
-alignment 与进程 VM page granularity 中较严格的一项。`allocatedSize` 提供 actual byte，只有完成
-actual 校准后才会 command commit。随后 persistent memory 随 native Value owner 跨 residency 延续，scratch
-则保持计费直到精确 native completion owner 退役。Provider/Run return 都不能提前释放任一
-owner，queue/pipeline infrastructure 也不按 invocation scratch 计费。
+heap size/alignment 提供 plan。每个 persistent texture 都使用同一个 descriptor 和通过校验的 query，
+从专用 tracked heap 分配，而不是应用 direct-allocation page-size 经验规则。`allocatedSize` 提供
+actual byte，只有完成 actual 校准后才会 command commit。随后 persistent memory 随 native Value
+owner 跨 residency 延续；该 owner 会显式保有 texture 与 heap，并在 lease 前释放二者。Scratch
+则保持计费直到精确 native completion owner 退役。Provider/Run return 都不能提前释放任一 owner，
+queue/pipeline infrastructure 也不按 invocation scratch 计费。
 
 Benchmark 配置不会重新配置该进程池。对于每次 benchmark Run，`execution.threads` 会解析为
 一个可选正值 `maximum_parallelism`：缺失或 `0` 会在 `[1,8]` 中选择有界自动值，

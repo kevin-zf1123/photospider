@@ -118,14 +118,16 @@ non-CPU `DeviceId` account atomically reserves persistent-memory and scratch
 plans under the same ledger root mutex. The Metal Perlin path plans its output
 texture, permutation/scale buffers, and readback buffer before its first native
 allocation; CPU-to-Metal upload plans its destination texture and staging
-buffer before either allocation. Native heap size/alignment supplies the base
-plan; direct textures conservatively round that size to the stricter native
-query alignment or process VM-page granularity. `allocatedSize` supplies actual
-bytes, and command commit occurs only after actual reconciliation. Persistent
-memory then follows the native Value owner
-through residency, while scratch remains charged until the exact native
-completion owner retires. Provider/Run return cannot release either owner
-early, and queue/pipeline infrastructure is not charged as invocation scratch.
+buffer before either allocation. Native heap size/alignment supplies the plan.
+Each persistent texture is allocated from a dedicated tracked heap using the
+same descriptor and validated query, rather than applying a direct-allocation
+page-size heuristic. `allocatedSize` supplies actual bytes, and command commit
+occurs only after actual reconciliation. Persistent memory then follows the
+native Value owner, which explicitly retains both texture and heap through
+residency and releases them before its lease; scratch remains charged until the
+exact native completion owner retires. Provider/Run return cannot release
+either owner early, and queue/pipeline infrastructure is not charged as
+invocation scratch.
 
 Benchmark configuration does not reconfigure that process pool. For each
 benchmark Run, `execution.threads` resolves to an optional positive

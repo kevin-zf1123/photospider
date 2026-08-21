@@ -242,15 +242,15 @@ texture-to-buffer blit，不调用
 authority 保留在 service ledger 内，而不是放进 residency 或 Run。
 
 Metal 会在首个 allocation 前通过 native heap texture/buffer size-and-alignment query 得到完整
-preallocation plan。由于 direct-resource `allocatedSize` 可能大于 heap suballocation size，direct
-texture plan 会把 query size 对齐到 query alignment 与进程 VM page granularity 中较严格的一项。
+preallocation plan。每个 persistent texture 都会使用通过校验的 texture query 和同一个 descriptor，
+创建专用 tracked `MTLHeap` 及 heap-backed texture；这里不使用 direct-texture 或进程 page 的经验规则。
 Actual `MTLResource::allocatedSize` 必须在 command commit 前适配这份原子 plan。随后该 plan 会变成
-两个唯一 owner：persistent memory 随 type-erased native `Value`
-owner 跨副本与 residency 延续，scratch 则随精确 command-completion object 跨 success、
-native failure、stale/rejected publication 与 callback unwind 延续。未使用的 planned byte 会在
-actual commit 时归还。Device account 按完整 `DeviceId` 隔离，不借用 Host 容量，并提供复制式
-limits/reserved/available snapshot。Command queue、fixed lane 与 pipeline cache entry 仍是
-infrastructure，不是 per-invocation scratch。
+两个唯一 owner：persistent memory 随 type-erased native `Value` owner 跨副本与 residency 延续；
+该 owner 会显式保有 texture 与 heap，并依次释放 texture、heap，最后释放 lease。Scratch 则随精确
+command-completion object 跨 success、native failure、stale/rejected publication 与 callback unwind
+延续。未使用的 planned byte 会在 actual commit 时归还。Device account 按完整 `DeviceId` 隔离，
+不借用 Host 容量，并提供复制式 limits/reserved/available snapshot。Command queue、fixed lane 与
+pipeline cache entry 仍是 infrastructure，不是 per-invocation scratch。
 
 当前内建 CPU 准入会把强制、经检查的 service envelope 与可审计的 adapter envelope 组合起来。
 Run/control/plan 或 phase-context 共享的 retained storage 只计费一次。统一的逐任务 retained 与

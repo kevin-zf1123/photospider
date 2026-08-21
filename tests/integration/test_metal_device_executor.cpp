@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include <objc/message.h>
+#include <objc/objc.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -28,6 +30,7 @@
 #include "execution/device/device_execution_context.hpp"
 #include "execution/device/device_executor_registry.hpp"
 #include "execution/device/metal_device_executor.hpp"
+#include "execution/device/metal_heap_texture_plan.hpp"
 #include "execution/execution_task_runtime.hpp"
 #include "metal/perlin_noise_metal.hpp"
 #include "photospider/data/image_view.hpp"
@@ -255,6 +258,25 @@ constexpr char kReentryError[] = "Same-executor callback re-entry denied.";
 
 /** @brief Process watchdog bound for the deliberate old-implementation hang. */
 constexpr unsigned int kExecutorReentryWatchdogSeconds = 5U;
+
+/**
+ * @brief Reports whether one borrowed native Metal resource has heap backing.
+ * @param resource Non-null callback-bounded `id<MTLResource>` handle.
+ * @return True when the resource's native `heap` property is non-null.
+ * @throws std::invalid_argument when `resource` is null.
+ * @note The Objective-C result is borrowed only for this observation. The
+ * caller remains responsible for keeping the native resource alive and MUST
+ * NOT retain either handle beyond the surrounding executor callback.
+ */
+bool native_metal_resource_is_heap_backed(void* resource) {
+  if (resource == nullptr) {
+    throw std::invalid_argument(
+        "Metal heap-backing observation requires a native resource.");
+  }
+  using HeapGetter = void* (*)(void*, SEL);
+  const auto heap_getter = reinterpret_cast<HeapGetter>(&objc_msgSend);
+  return heap_getter(resource, sel_registerName("heap")) != nullptr;
+}
 
 /**
  * @brief Builds one fixed-size Ready FLOAT32 source for real upload tests.
@@ -605,6 +627,39 @@ ReadyFenceSnapshot wait_for_terminal_value(const Value& value) {
     snapshot = value.ready_fence().poll();
   }
   return snapshot;
+}
+
+/**
+ * @brief Locks down checked dedicated-heap size and alignment planning.
+ * @return Nothing; GoogleTest reports invalid acceptance or overflow handling.
+ * @throws Nothing; every expected standard exception is captured by
+ * GoogleTest.
+ * @note The cases allocate no native resource and therefore run independently
+ * of Metal device availability inside this Apple-only integration binary.
+ */
+TEST(MetalDeviceExecutorAccounting,
+     HeapTexturePlanRejectsInvalidAlignmentAndOverflow) {
+  const execution::MetalHeapTexturePlan exact =
+      execution::checked_metal_heap_texture_plan(4096U, 4096U);
+  EXPECT_EQ(exact.required_size, 4096U);
+  EXPECT_EQ(exact.required_alignment, 4096U);
+  EXPECT_EQ(exact.heap_size, 4096U);
+
+  const execution::MetalHeapTexturePlan rounded =
+      execution::checked_metal_heap_texture_plan(4097U, 4096U);
+  EXPECT_EQ(rounded.required_size, 4097U);
+  EXPECT_EQ(rounded.required_alignment, 4096U);
+  EXPECT_EQ(rounded.heap_size, 8192U);
+
+  EXPECT_THROW(execution::checked_metal_heap_texture_plan(0U, 4096U),
+               std::invalid_argument);
+  EXPECT_THROW(execution::checked_metal_heap_texture_plan(4096U, 0U),
+               std::invalid_argument);
+  EXPECT_THROW(execution::checked_metal_heap_texture_plan(4096U, 3U),
+               std::invalid_argument);
+  EXPECT_THROW(execution::checked_metal_heap_texture_plan(
+                   std::numeric_limits<std::uint64_t>::max(), 2U),
+               std::overflow_error);
 }
 
 /**
@@ -1312,6 +1367,7 @@ TEST(MetalDeviceExecutorIntegration,
   bool throwing_context_was_current = false;
   bool throwing_queue_was_ready = false;
   bool throwing_texture_was_allocated = false;
+  bool throwing_texture_was_heap_backed = false;
   bool throwing_buffer_was_allocated = false;
   CallbackDeviceExecutorInvocation throwing_invocation([&] {
     execution::MetalExecutionContext& context =
@@ -1322,8 +1378,10 @@ TEST(MetalDeviceExecutorIntegration,
     const std::array<std::uint32_t, 4> payload{{84U, 1U, 2U, 3U}};
     context.prepare_float32_texture_to_host_resources(
         2U, 2U, std::vector<std::size_t>{sizeof(payload)});
-    throwing_texture_was_allocated =
-        context.allocate_persistent_float32_texture_2d(2U, 2U) != nullptr;
+    void* texture = context.allocate_persistent_float32_texture_2d(2U, 2U);
+    throwing_texture_was_allocated = texture != nullptr;
+    throwing_texture_was_heap_backed =
+        native_metal_resource_is_heap_backed(texture);
     throwing_buffer_was_allocated =
         context.allocate_device_scratch_buffer_copy(payload.data(),
                                                     sizeof(payload)) != nullptr;
@@ -1346,6 +1404,7 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_TRUE(throwing_context_was_current);
   EXPECT_TRUE(throwing_queue_was_ready);
   EXPECT_TRUE(throwing_texture_was_allocated);
+  EXPECT_TRUE(throwing_texture_was_heap_backed);
   EXPECT_TRUE(throwing_buffer_was_allocated);
   EXPECT_EQ(execution::current_metal_execution_context(), nullptr);
 

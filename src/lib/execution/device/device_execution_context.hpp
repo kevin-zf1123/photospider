@@ -57,8 +57,9 @@ class MetalExecutionContext {
    * @param height Positive persistent R32Float texture height.
    * @param auxiliary_scratch_lengths Positive scratch-buffer byte lengths that
    * later `allocate_device_scratch_buffer_copy()` calls will consume in order.
-   * @return Nothing after the complete persistent texture, auxiliary buffers,
-   * and host-readback buffer plan is admitted for the exact Metal device.
+   * @return Nothing after the complete heap-backed persistent texture,
+   * auxiliary buffers, and host-readback buffer plan is admitted for the exact
+   * Metal device.
    * @throws std::invalid_argument for zero dimensions or scratch lengths.
    * @throws std::overflow_error when exact native-size accumulation overflows.
    * @throws DeviceResourceError when native planning is invalid or the device
@@ -72,14 +73,19 @@ class MetalExecutionContext {
       const std::vector<std::size_t>& auxiliary_scratch_lengths) = 0;
 
   /**
-   * @brief Allocates the planned persistent writable R32Float 2D texture.
+   * @brief Allocates the planned persistent heap-backed R32Float 2D texture.
    * @param width Positive texture width in pixels.
    * @param height Positive texture height in pixels.
    * @return Non-null opaque `id<MTLTexture>` retained through callback exit.
    * @throws std::invalid_argument for a zero dimension.
    * @throws std::logic_error without a matching unconsumed resource plan.
-   * @throws std::runtime_error when native allocation fails.
-   * @note Native ownership and its exact device-memory lease transfer to the
+   * @throws DeviceResourceError when the heap size is unrepresentable or the
+   * native texture exceeds its admitted actual-byte plan.
+   * @throws std::bad_alloc when heap descriptor allocation fails.
+   * @throws std::runtime_error when heap/texture allocation or exact backing
+   * validation fails.
+   * @note The dedicated native heap and texture remain explicit co-owners.
+   * Their ownership and exact device-memory lease transfer together to the
    * pending resident Value when publication succeeds.
    */
   virtual NativeHandle allocate_persistent_float32_texture_2d(

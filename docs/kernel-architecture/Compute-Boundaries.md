@@ -303,19 +303,20 @@ visible-commit gate, and #86 keeps device-memory/scratch authority inside the
 service ledger rather than residency or the Run.
 
 Metal obtains a complete preallocation plan from native heap texture/buffer
-size-and-alignment queries before its first allocation. A direct texture plan
-rounds the queried size to the stricter query alignment or process VM-page
-granularity because direct-resource `allocatedSize` may exceed the heap
-suballocation size. Actual `MTLResource::allocatedSize` values must fit that
-atomic plan before command commit. The plan then becomes two unique owners:
-persistent memory follows the
-type-erased native `Value` owner across copies and residency, while scratch
-follows the exact command-completion object across success, native failure,
-stale/rejected publication, and callback unwind. Unused planned bytes return
-at actual commit. Device accounts are isolated by complete `DeviceId`, do not
-borrow Host capacity, and provide copied limits/reserved/available snapshots.
-Command queues, fixed lanes, and pipeline cache entries remain infrastructure,
-not per-invocation scratch.
+size-and-alignment queries before its first allocation. Each persistent texture
+uses the validated texture query with the identical descriptor to create a
+dedicated tracked `MTLHeap` and heap-backed texture; no direct-texture or
+process-page heuristic is used. Actual `MTLResource::allocatedSize` values must
+fit that atomic plan before command commit. The plan then becomes two unique
+owners: persistent memory follows a type-erased native `Value` owner that
+explicitly retains both texture and heap across copies and residency, releasing
+the texture and then heap before its lease, while scratch follows the exact
+command-completion object across success, native failure, stale/rejected
+publication, and callback unwind. Unused planned bytes return at actual commit.
+Device accounts are isolated by complete `DeviceId`, do not borrow Host
+capacity, and provide copied limits/reserved/available snapshots. Command
+queues, fixed lanes, and pipeline cache entries remain infrastructure, not
+per-invocation scratch.
 
 Current built-in CPU admission combines a mandatory checked service envelope
 with an auditable adapter envelope. Shared Run/control/plan or phase-context
