@@ -4,6 +4,7 @@
 #include <cstring>
 #include <new>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 
 #include "photospider/plugin/operation_plugin.hpp"
@@ -21,6 +22,19 @@ constexpr const char* kCallbackReleaseEnvironment{
 constexpr const char* kCallbackThrowEnvironment{
     "PS_LIFECYCLE_PLUGIN_CALLBACK_THROW",
 };
+
+/** @brief Nonnull storage backing the intentionally empty version view. */
+constexpr char kEmptyVersionStorage[] = "";
+/**
+ * @brief Explicit empty version whose borrowed storage pointer is nonnull.
+ * @note The public C++ helper must canonicalize this to `{nullptr, 0}` before
+ *       the generated root crosses the pure-C ABI.
+ */
+constexpr auto kEmptyVersion = std::string_view{kEmptyVersionStorage, 0U};
+static_assert(kEmptyVersion.data() != nullptr,
+              "empty-version regression requires nonnull source storage");
+static_assert(kEmptyVersion.empty(),
+              "empty-version regression requires zero source bytes");
 
 /** @brief Permanent lifecycle fixture plugin identity. */
 constexpr auto kPluginIdentity{
@@ -301,7 +315,7 @@ ps_operation_descriptor_v1 make_operation() noexcept {
 /** @brief Stable complete lifecycle fixture definition. */
 const Definition kDefinition{
     kPluginIdentity,
-    "lifecycle-operation-abi1",
+    kEmptyVersion,
     make_operation(),
     kImplementations,
     1U,

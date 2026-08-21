@@ -32,6 +32,7 @@
 #include "graph/graph_model.hpp"               // NOLINT(build/include_subdir)
 #include "graph/node.hpp"                      // NOLINT(build/include_subdir)
 #include "graph/roi_propagation_service.hpp"   // NOLINT(build/include_subdir)
+#include "photospider/plugin/operation_plugin.hpp"
 #include "plugin/operation_host_adapter.hpp"
 #include "plugin/operation_runtime_router.hpp"
 
@@ -653,6 +654,35 @@ std::string invalid_argument_message(Callback&& callback) {
     return error.what();
   }
   throw std::runtime_error("expected std::invalid_argument was not thrown");
+}
+
+/**
+ * @brief Proves empty C++ byte views are canonical before Host generation
+ * validation.
+ * @throws Nothing; GoogleTest captures an unexpected loader exception.
+ * @note The fixture publishes an explicitly nonnull, zero-length
+ * `implementation_version` through generated `get_api`; the real Host
+ * generation loader then exercises strict `copy_bytes` validation.
+ */
+TEST(OperationPluginAbi, CanonicalizesEmptyCppViewsBeforeHostGenerationLoad) {
+  constexpr std::uint8_t kNonNullByteStorage{0U};
+  const auto pointer_view =
+      operation_plugin::make_bytes(&kNonNullByteStorage, 0U);
+  EXPECT_EQ(pointer_view.data, nullptr);
+  EXPECT_EQ(pointer_view.size, 0U);
+
+  constexpr char kNonNullTextStorage[] = "nonempty backing storage";
+  const std::string_view empty_text{kNonNullTextStorage, 0U};
+  ASSERT_NE(empty_text.data(), nullptr);
+  const auto string_view = operation_plugin::make_bytes(empty_text);
+  EXPECT_EQ(string_view.data, nullptr);
+  EXPECT_EQ(string_view.size, 0U);
+
+  const std::filesystem::path plugin_path = PS_TEST_LIFECYCLE_OPERATION_PLUGIN;
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  std::shared_ptr<plugin_host::OperationPluginGeneration> generation;
+  EXPECT_NO_THROW(generation = load_generation(plugin_path));
+  EXPECT_NE(generation, nullptr);
 }
 
 /**

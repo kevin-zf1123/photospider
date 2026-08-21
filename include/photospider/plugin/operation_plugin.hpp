@@ -99,18 +99,21 @@ constexpr ps_operation_suite_header_v1 make_suite_header(
 }
 
 /**
- * @brief Creates one borrowed immutable byte view.
- * @param data First byte, or null only for an empty view.
+ * @brief Creates one canonical borrowed immutable byte view.
+ * @param data First byte for a nonempty view; ignored when `size` is zero.
  * @param size Exact callback-bounded byte count.
- * @return Plain pure-C byte view.
+ * @return Null/zero for an empty view, otherwise the supplied borrowed range.
  * @throws std::invalid_argument when a nonempty view has null storage.
- * @note The returned view owns nothing; its source must remain live for the
- *       complete callback or metadata lifetime required by the containing
- *       record.
+ * @note Empty views never retain a nonnull source pointer. Nonempty returned
+ *       views own nothing; their source must remain live for the complete
+ *       callback or metadata lifetime required by the containing record.
  */
 inline ps_operation_bytes_v1 make_bytes(const std::uint8_t* data,
                                         std::size_t size) {
-  if (data == nullptr && size != 0U) {
+  if (size == 0U) {
+    return ps_operation_bytes_v1{};
+  }
+  if (data == nullptr) {
     throw std::invalid_argument(
         "operation ABI byte view has null nonempty storage");
   }
@@ -118,14 +121,18 @@ inline ps_operation_bytes_v1 make_bytes(const std::uint8_t* data,
 }
 
 /**
- * @brief Creates one borrowed UTF-8/string byte view without a terminator.
+ * @brief Creates one canonical borrowed UTF-8/string view without a terminator.
  * @param value Borrowed string bytes.
- * @return Plain pure-C byte view.
+ * @return Null/zero for an empty view, otherwise its borrowed byte range.
  * @throws Nothing.
  * @note Embedded NUL and semantic UTF-8/name constraints remain the containing
- *       record's responsibility; the Host validates them independently.
+ *       record's responsibility; the Host validates them independently. An
+ *       empty `value.data()` pointer is never propagated across the ABI.
  */
 inline ps_operation_bytes_v1 make_bytes(std::string_view value) noexcept {
+  if (value.empty()) {
+    return ps_operation_bytes_v1{};
+  }
   return ps_operation_bytes_v1{
       reinterpret_cast<const std::uint8_t*>(value.data()),
       static_cast<std::uint64_t>(value.size())};
