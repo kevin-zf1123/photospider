@@ -1,3 +1,4 @@
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -35,6 +36,11 @@ static_assert(kEmptyVersion.data() != nullptr,
               "empty-version regression requires nonnull source storage");
 static_assert(kEmptyVersion.empty(),
               "empty-version regression requires zero source bytes");
+
+/** @brief Nonnull storage backing the intentionally empty port arrays. */
+constexpr std::array<ps_operation_port_descriptor_v1, 1U> kEmptyPortStorage{};
+static_assert(kEmptyPortStorage.data() != nullptr,
+              "empty-port regression requires nonnull source storage");
 
 /** @brief Permanent lifecycle fixture plugin identity. */
 constexpr auto kPluginIdentity{
@@ -296,7 +302,14 @@ Implementation make_implementation() noexcept {
 /** @brief Stable lifecycle implementation row. */
 const Implementation kImplementations[]{make_implementation()};
 
-/** @brief Creates the immutable zero-port lifecycle operation definition. */
+/**
+ * @brief Creates the immutable zero-port lifecycle operation definition.
+ * @return Exact descriptor whose empty port views use canonical ABI storage.
+ * @throws Nothing; each fixed helper input has a representable zero count.
+ * @note Both logical port arrays intentionally originate from nonnull static
+ *       storage so the public C++ helper must canonicalize them before the real
+ *       Host copies and validates the descriptor.
+ */
 ps_operation_descriptor_v1 make_operation() noexcept {
   ps_operation_descriptor_v1 operation{};
   operation.header =
@@ -307,8 +320,8 @@ ps_operation_descriptor_v1 make_operation() noexcept {
   operation.subtype = make_bytes("op");
   operation.display_name = make_bytes("Lifecycle operation ABI fixture");
   operation.configuration_schema_identity = kConfigurationIdentity;
-  operation.input_ports = empty_array_ref();
-  operation.output_ports = empty_array_ref();
+  operation.input_ports = make_array_ref(kEmptyPortStorage.data(), 0U);
+  operation.output_ports = make_array_ref(kEmptyPortStorage.data(), 0U);
   return operation;
 }
 

@@ -683,14 +683,22 @@ std::string invalid_argument_message(Callback&& callback) {
 }
 
 /**
- * @brief Proves empty C++ byte views are canonical before Host generation
- * validation.
+ * @brief Proves empty C++ byte and array views are canonical before Host
+ * generation validation.
+ * @return Nothing; GoogleTest records helper or Host-admission mismatches.
  * @throws Nothing; GoogleTest captures an unexpected loader exception.
- * @note The fixture publishes an explicitly nonnull, zero-length
- * `implementation_version` through generated `get_api`; the real Host
- * generation loader then exercises strict `copy_bytes` validation.
+ * @note The fixture publishes explicitly nonnull, zero-length version and port
+ * array storage through generated discovery callbacks; the real Host generation
+ * loader then exercises strict `copy_bytes` and `require_array` validation.
  */
 TEST(OperationPluginAbi, CanonicalizesEmptyCppViewsBeforeHostGenerationLoad) {
+  static_assert(noexcept(operation_plugin::empty_array_ref()),
+                "the dedicated empty-array helper must remain noexcept");
+  static_assert(
+      !noexcept(operation_plugin::make_array_ref(
+          static_cast<const std::uint64_t*>(nullptr), std::size_t{0U})),
+      "the validating array helper must preserve its throwing contract");
+
   constexpr std::uint8_t kNonNullByteStorage{0U};
   const auto pointer_view =
       operation_plugin::make_bytes(&kNonNullByteStorage, 0U);
@@ -703,6 +711,34 @@ TEST(OperationPluginAbi, CanonicalizesEmptyCppViewsBeforeHostGenerationLoad) {
   const auto string_view = operation_plugin::make_bytes(empty_text);
   EXPECT_EQ(string_view.data, nullptr);
   EXPECT_EQ(string_view.size, 0U);
+
+  const std::array<std::uint64_t, 1U> array_storage{42U};
+  const auto nonempty_array = operation_plugin::make_array_ref(
+      array_storage.data(), array_storage.size());
+  EXPECT_EQ(nonempty_array.data,
+            static_cast<const void*>(array_storage.data()));
+  EXPECT_EQ(nonempty_array.count, array_storage.size());
+  EXPECT_EQ(nonempty_array.stride, sizeof(std::uint64_t));
+
+  const auto nonnull_empty_array =
+      operation_plugin::make_array_ref(array_storage.data(), 0U);
+  EXPECT_EQ(nonnull_empty_array.data, nullptr);
+  EXPECT_EQ(nonnull_empty_array.count, 0U);
+  EXPECT_EQ(nonnull_empty_array.stride, 0U);
+
+  const std::vector<std::uint64_t> empty_vector;
+  const auto vector_view = operation_plugin::make_array_ref(
+      empty_vector.data(), empty_vector.size());
+  EXPECT_EQ(vector_view.data, nullptr);
+  EXPECT_EQ(vector_view.count, 0U);
+  EXPECT_EQ(vector_view.stride, 0U);
+
+  const std::array<std::uint64_t, 0U> empty_array{};
+  const auto array_view =
+      operation_plugin::make_array_ref(empty_array.data(), empty_array.size());
+  EXPECT_EQ(array_view.data, nullptr);
+  EXPECT_EQ(array_view.count, 0U);
+  EXPECT_EQ(array_view.stride, 0U);
 
   const std::filesystem::path plugin_path = PS_TEST_LIFECYCLE_OPERATION_PLUGIN;
   ASSERT_TRUE(std::filesystem::exists(plugin_path));

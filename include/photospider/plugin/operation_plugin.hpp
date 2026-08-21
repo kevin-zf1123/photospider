@@ -139,13 +139,15 @@ inline ps_operation_bytes_v1 make_bytes(std::string_view value) noexcept {
 }
 
 /**
- * @brief Creates one exact-stride borrowed array reference.
+ * @brief Creates one canonical exact-stride borrowed array reference.
  * @tparam Element Complete standard-layout pure-C element type.
- * @param data First element, or null only when count is zero.
+ * @param data First element for a nonempty array; ignored when `count` is zero.
  * @param count Exact bounded element count.
- * @return Plain array reference with stride `sizeof(Element)`.
+ * @return Null/zero/zero for an empty array, otherwise the supplied borrowed
+ *         range with stride `sizeof(Element)`.
  * @throws std::invalid_argument for null nonempty storage or count overflow.
- * @note The source remains borrowed and must satisfy the ABI's alignment and
+ * @note Empty arrays never retain a nonnull source pointer. Nonempty storage
+ *       remains borrowed and must satisfy the ABI's alignment and
  *       callback/lifetime rules. The Host checks the complete nested range.
  */
 template <typename Element>
@@ -155,16 +157,18 @@ ps_operation_array_ref_v1 make_array_ref(const Element* data,
                 "operation ABI array elements must be standard layout");
   static_assert(sizeof(Element) <= UINT32_MAX,
                 "operation ABI array stride must fit uint32_t");
-  if (data == nullptr && count != 0U) {
+  if (count == 0U) {
+    return ps_operation_array_ref_v1{};
+  }
+  if (data == nullptr) {
     throw std::invalid_argument(
         "operation ABI array has null nonempty storage");
   }
   if (count > UINT32_MAX) {
     throw std::invalid_argument("operation ABI array count exceeds uint32_t");
   }
-  return ps_operation_array_ref_v1{
-      data, static_cast<std::uint32_t>(count),
-      count == 0U ? 0U : static_cast<std::uint32_t>(sizeof(Element))};
+  return ps_operation_array_ref_v1{data, static_cast<std::uint32_t>(count),
+                                   static_cast<std::uint32_t>(sizeof(Element))};
 }
 
 /**
