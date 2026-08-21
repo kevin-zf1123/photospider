@@ -2152,9 +2152,11 @@ TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
   options.heartbeat_timeout = kBulkHeartbeatEvidenceTimeout;
   // The case deliberately holds one transfer for 2.1 seconds, then moves an
   // archive above 64 MiB through both output and checkpoint paths. Its verdict
-  // is data-plane/heartbeat correctness, not the independent runtime or I/O
-  // deadline. Retain bounded deadlines with enough margin for loaded parallel
-  // CTest workers.
+  // is data-plane/heartbeat correctness, not tight fixture deadlines. The
+  // checkpoint transfer, worker decode/digest, and AssignmentAccepted share
+  // the manager's single absolute startup deadline, so loaded parallel CTest
+  // workers need the same bounded margin there as runtime and I/O.
+  options.startup_timeout = 15s;
   options.attempt_runtime_timeout = 15s;
   // This case moves more than 64 MiB twice and validates the data-plane join,
   // not the fixture's 150-ms post-Report close boundary. Preserve a bounded
