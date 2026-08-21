@@ -4516,6 +4516,97 @@ TEST(CpuDenseTensorImageOperation,
 }
 
 /**
+ * @brief Plans TensorSlice work from Ready device-local image metadata.
+ *
+ * @return Nothing; GoogleTest reports payload-access, signed-window, storage-
+ * extent, logical-Region, or snapshot mismatches.
+ * @throws Graph, Value, Region, registry, traversal, or allocation exceptions
+ * unchanged when the production planning contract is violated.
+ * @note The target cache is Ready but has no Host pointer. Direct payload
+ * access and ImageView construction must therefore remain rejected while
+ * DirtyRegionPlanner reads only the immutable signed data window and retains
+ * the exact TensorSlice without fabricating a PixelRect ROI.
+ */
+TEST(CpuDenseTensorImageOperation,
+     TensorDirtyPlanReadsSignedMetadataFromReadyDeviceLocalValue) {
+  ops::register_core_operations();
+  GraphModel graph("cache/tensor-device-local-metadata");
+  Node source;
+  source.id = 122;
+  source.name = "tensor_device_local_source";
+  source.type = "image_generator";
+  source.subtype = "constant";
+  source.cached_output_high_precision = NodeOutput{};
+  source.cached_output_high_precision->publish_image_value(
+      make_unsigned8_rank4_value(4U, 3U, 3U, 16U));
+  source.hp_region = full_rank4_region();
+  graph.add_node(std::move(source));
+
+  const DenseTensorDescriptor descriptor{{1U, 3U, 4U, 3U},
+                                         ElementSemantics::UnsignedInteger,
+                                         StorageEncoding{8U}};
+  ImageFacet image = make_zero_origin_image_facet(descriptor, 2U, 1U, 3U);
+  image.data_window = ImageBounds{-7, 11, -3, 14};
+  const StridedLayout layout{{1, 16, 3, 1}};
+  constexpr std::size_t kStorageSize = 44U;
+  auto allocation = std::make_shared<FakeMatrixDeviceAllocation>(kStorageSize);
+  PendingDeviceValuePublication publication =
+      PendingDeviceValuePublisher::publish_dense_tensor(
+          descriptor, image, layout, allocation, allocation.get(), nullptr,
+          kStorageSize, DeviceId(DeviceBackend::Metal),
+          MemoryDomain::DeviceLocal);
+  const Value device_value = publication.value;
+  ASSERT_TRUE(publication.producer.complete_ready());
+  ASSERT_EQ(device_value.ready_fence().poll().state(), ReadyFenceState::Ready);
+  EXPECT_EQ(device_value.storage_binding().device,
+            DeviceId(DeviceBackend::Metal));
+  EXPECT_EQ(device_value.storage_binding().memory_domain,
+            MemoryDomain::DeviceLocal);
+  EXPECT_FALSE(device_value.storage_binding().host_visible);
+  EXPECT_EQ(device_value.image_bounds(), (ImageBounds{-7, 11, -3, 14}));
+  EXPECT_THROW(device_value.buffer_handle().acquire_read(), BufferAccessError);
+  EXPECT_THROW((void)ImageView(device_value), BufferAccessError);
+
+  Node target;
+  target.id = 123;
+  target.name = "tensor_device_local_target";
+  target.type = "image_process";
+  target.subtype = "invert_dense";
+  target.image_inputs.push_back({122, "image"});
+  target.cached_output_high_precision = NodeOutput{};
+  target.cached_output_high_precision->publish_image_value(device_value);
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  RoiPropagationService propagation({DeviceBackend::CPU},
+                                    ComputeIntent::GlobalHighPrecision);
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+  const RegionSet requested = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 1U}, {1U, 3U}, {1U, 4U}, {1U, 3U}}});
+  const compute::HighPrecisionDirtyPlan plan =
+      planner.plan_high_precision(graph, 123, requested);
+
+  ASSERT_EQ(plan.execution_order, (std::vector<int>{123}));
+  ASSERT_EQ(plan.entries.size(), 1U);
+  const compute::HpPlanEntry& entry = plan.entries.at(123);
+  EXPECT_EQ(entry.region_hp, requested);
+  EXPECT_EQ(entry.roi_hp, PixelRect{});
+  EXPECT_EQ(entry.hp_size, (PixelSize{4, 3}));
+  EXPECT_EQ(entry.hp_data_window, (ImageBounds{-7, 11, -3, 14}));
+  ASSERT_EQ(plan.snapshot.per_node_dirty_regions.at(123).size(), 1U);
+  EXPECT_EQ(plan.snapshot.per_node_dirty_regions.at(123).front(), requested);
+  ASSERT_EQ(plan.snapshot.actual_dirty_regions.at(123).size(), 1U);
+  EXPECT_EQ(plan.snapshot.actual_dirty_regions.at(123).front(), requested);
+  ASSERT_EQ(plan.snapshot.dirty_monolithic_nodes.size(), 1U);
+  EXPECT_EQ(plan.snapshot.dirty_monolithic_nodes.front().node_id, 123);
+  EXPECT_EQ(plan.snapshot.dirty_monolithic_nodes.front().pixel_roi,
+            PixelRect{});
+  EXPECT_TRUE(plan.snapshot.dirty_monolithic_nodes.front().whole_output);
+  EXPECT_EQ(plan.snapshot.dirty_monolithic_nodes.front().region, requested);
+}
+
+/**
  * @brief Proves one clipped TensorSlice flows from dirty planning through the
  * production HP dirty node executor into the registered dense operation.
  *

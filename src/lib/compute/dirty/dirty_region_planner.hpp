@@ -264,8 +264,11 @@ class DirtyRegionPlanner {
    * TensorSlice selects each executable target/upstream implementation once,
    * accepts only the exact core dense identity, and freezes its callback-free
    * complete route for task-population validation. TensorSlice entry
-   * validation completes before a standalone dirty generation is allocated,
-   * so a rejected extent preserves prior Graph dirty state.
+   * validation reads cached image extents through metadata-only
+   * `Value::image_bounds()` access without constructing a payload view or
+   * requiring a host-visible binding. Validation completes before a standalone
+   * dirty generation is allocated, so a rejected extent preserves prior Graph
+   * dirty state.
    */
   HighPrecisionDirtyPlan plan_high_precision(GraphModel& graph, int node_id,
                                              const RegionSet& dirty_region);

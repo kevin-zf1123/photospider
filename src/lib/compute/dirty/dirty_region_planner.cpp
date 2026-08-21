@@ -16,7 +16,7 @@
 #include "core/region_image_adapter.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
-#include "photospider/data/image_view.hpp"
+#include "photospider/data/image_metadata.hpp"
 
 namespace ps::compute {
 namespace {
@@ -771,10 +771,11 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
         current_node.cached_output_high_precision->image_value()
             .image_facet()
             .has_value()) {
-      const ImageView view(
-          current_node.cached_output_high_precision->image_value());
-      const std::size_t width = view.width();
-      const std::size_t height = view.height();
+      const Value& cached_image =
+          current_node.cached_output_high_precision->image_value();
+      const ImageBounds& bounds = cached_image.image_bounds();
+      const std::size_t width = image_bounds_width(bounds);
+      const std::size_t height = image_bounds_height(bounds);
       const std::size_t maximum_extent =
           static_cast<std::size_t>(std::numeric_limits<int>::max());
       if (width > maximum_extent || height > maximum_extent) {
@@ -785,7 +786,7 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
       }
       entry.hp_size =
           PixelSize{static_cast<int>(width), static_cast<int>(height)};
-      entry.hp_data_window = view.image_facet().data_window;
+      entry.hp_data_window = bounds;
     }
     result.entries.emplace(current_id, entry);
     result.operation_routes.node_routes.emplace(current_id,
