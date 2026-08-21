@@ -34,7 +34,6 @@
 #include "core/ops.hpp"
 #include "core/param_utils.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/data/image_view.hpp"
 
 namespace ps::providers::opencv {
 
@@ -201,10 +200,94 @@ static const Value& require_input_image(const NodeOutput& output,
 }
 
 /**
+ * @brief Projects one source ImageFacet onto a selected stable channel.
+ *
+ * @param source Valid ordinary DenseImage source retained by the caller.
+ * @param selected_channel Zero-based source channel-axis coordinate.
+ * @return Copied facet containing only semantic facts valid for that channel.
+ * @throws std::invalid_argument when the source lacks image metadata, the
+ *         selected coordinate is outside its channel extent, or validated
+ *         channel-schema cardinality is inconsistent with the descriptor.
+ * @throws std::bad_alloc when copied or filtered metadata cannot allocate.
+ * @note The selected ChannelDescription, global sample interpretation, and
+ *       matching per-channel override survive. A channel group survives only
+ *       when it was already the exact singleton selected channel; groups that
+ *       mention removed channels are discarded instead of being assigned new
+ *       membership under an existing stable ID. Color survives only when its
+ *       referenced group therefore remains unchanged. Axes and windows are
+ *       copied here and normalized later by result_image_facet().
+ */
+static ImageFacet project_selected_channel_facet(const Value& source,
+                                                 std::size_t selected_channel) {
+  if (!source.image_facet().has_value()) {
+    throw std::invalid_argument(
+        "OpenCV channel source lacks ordinary-image metadata.");
+  }
+  const DenseTensorDescriptor& descriptor = source.dense_tensor_descriptor();
+  const ImageFacet& source_facet = *source.image_facet();
+  const std::size_t source_channels =
+      source_facet.channel_axis.has_value()
+          ? descriptor.shape[*source_facet.channel_axis]
+          : 1U;
+  if (selected_channel >= source_channels) {
+    throw std::invalid_argument(
+        "OpenCV selected channel is outside the source channel extent.");
+  }
+
+  ImageFacet projected = source_facet;
+  if (!source_facet.channel_schema.has_value()) {
+    return projected;
+  }
+  const ChannelSchema& source_schema = *source_facet.channel_schema;
+  if (source_schema.channels.size() != source_channels) {
+    throw std::invalid_argument(
+        "OpenCV source channel schema does not match its descriptor.");
+  }
+
+  const ChannelDescription& selected = source_schema.channels[selected_channel];
+  ChannelSchema projected_schema;
+  projected_schema.channels.reserve(1U);
+  projected_schema.channels.push_back(selected);
+  projected_schema.groups.reserve(source_schema.groups.size());
+  for (const ChannelGroupDescription& group : source_schema.groups) {
+    if (group.members.size() == 1U && group.members.front() == selected.id) {
+      projected_schema.groups.push_back(group);
+    }
+  }
+  projected.channel_schema = std::move(projected_schema);
+
+  if (projected.sample_domain.has_value()) {
+    auto& overrides = projected.sample_domain->per_channel;
+    overrides.erase(
+        std::remove_if(overrides.begin(), overrides.end(),
+                       [&selected](const ChannelSampleDomain& candidate) {
+                         return !(candidate.channel == selected.id);
+                       }),
+        overrides.end());
+  }
+  if (projected.color.has_value()) {
+    const ChannelGroupId color_group = projected.color->channel_group;
+    const bool color_group_survives =
+        std::any_of(projected.channel_schema->groups.begin(),
+                    projected.channel_schema->groups.end(),
+                    [color_group](const ChannelGroupDescription& group) {
+                      return group.id == color_group;
+                    });
+    if (!color_group_survives) {
+      projected.color.reset();
+    }
+  }
+  return projected;
+}
+
+/**
  * @brief Derives explicit HWC metadata for one OpenCV result matrix.
  * @param matrix Nonempty two-dimensional result.
  * @param source Optional ordinary-image source whose semantic metadata is
  * retained when channel cardinality remains compatible.
+ * @param selected_channel Optional explicit source-channel projection. When
+ * present, matrix must be single-channel and this coordinate defines the
+ * complete channel/schema/sample/color mapping.
  * @return Complete HWC ImageFacet with resized signed data window and an
  * independent unchanged display window.
  * @throws std::invalid_argument when a channel-changing operation would make
@@ -214,8 +297,9 @@ static const Value& require_input_image(const NodeOutput& output,
  * @note Generated results use zero-origin data windows and absent display,
  * channel, sample, and color facts instead of guessing their meaning.
  */
-static ImageFacet result_image_facet(const cv::Mat& matrix,
-                                     const Value* source) {
+static ImageFacet result_image_facet(
+    const cv::Mat& matrix, const Value* source,
+    std::optional<std::size_t> selected_channel = std::nullopt) {
   if (matrix.empty() || matrix.rows <= 0 || matrix.cols <= 0 ||
       matrix.channels() <= 0) {
     throw std::invalid_argument(
@@ -235,10 +319,17 @@ static ImageFacet result_image_facet(const cv::Mat& matrix,
     const std::size_t source_channels =
         facet.channel_axis.has_value() ? descriptor.shape[*facet.channel_axis]
                                        : 1U;
-    if (source_channels != static_cast<std::size_t>(matrix.channels()) &&
-        (facet.channel_schema.has_value() || facet.color.has_value() ||
-         (facet.sample_domain.has_value() &&
-          !facet.sample_domain->per_channel.empty()))) {
+    if (selected_channel.has_value()) {
+      if (matrix.channels() != 1) {
+        throw std::invalid_argument(
+            "OpenCV selected-channel publication requires one output "
+            "channel.");
+      }
+      facet = project_selected_channel_facet(*source, *selected_channel);
+    } else if (source_channels != static_cast<std::size_t>(matrix.channels()) &&
+               (facet.channel_schema.has_value() || facet.color.has_value() ||
+                (facet.sample_domain.has_value() &&
+                 !facet.sample_domain->per_channel.empty()))) {
       throw std::invalid_argument(
           "OpenCV channel-changing result needs an explicit semantic map.");
     }
@@ -265,6 +356,8 @@ static ImageFacet result_image_facet(const cv::Mat& matrix,
  * @param output Mutable private result without an existing image output.
  * @param matrix Callback-local OpenCV result copied during publication.
  * @param source Optional semantic source for window/channel/sample/color facts.
+ * @param selected_channel Optional explicit source channel whose stable facts
+ * are projected onto a single-channel result.
  * @return Nothing after publishing a fresh Ready image Value.
  * @throws std::invalid_argument for malformed matrix, metadata, or destination.
  * @throws std::logic_error when output already carries image authority.
@@ -272,8 +365,9 @@ static ImageFacet result_image_facet(const cv::Mat& matrix,
  * @note Matrix scalar storage is preserved exactly. No normalization, clamp,
  * rounding, color transform, or compatibility allocation is introduced.
  */
-static void publish_opencv_output(NodeOutput* output, const cv::Mat& matrix,
-                                  const Value* source = nullptr) {
+static void publish_opencv_output(
+    NodeOutput* output, const cv::Mat& matrix, const Value* source = nullptr,
+    std::optional<std::size_t> selected_channel = std::nullopt) {
   if (output == nullptr) {
     throw std::invalid_argument(
         "OpenCV output publication requires a destination");
@@ -283,7 +377,7 @@ static void publish_opencv_output(NodeOutput* output, const cv::Mat& matrix,
         "OpenCV output publication requires an empty image destination");
   }
   output->publish_image_value(
-      fromCvMat(matrix, result_image_facet(matrix, source)));
+      fromCvMat(matrix, result_image_facet(matrix, source, selected_channel)));
 }
 
 /**
@@ -785,27 +879,30 @@ static void apply_channel_mapping(const plugin::ParameterValue::Object* mapping,
 }
 
 /**
- * @brief Reads a valid cached image extent without exposing provider geometry.
+ * @brief Reads a cached image extent through validated metadata only.
  *
  * @param output_opt Optional cached node output.
  * @return Positive kernel-native extent, otherwise an empty PixelSize.
  * @throws Nothing.
- * @note Pixel storage ownership stays in NodeOutput; only scalar dimensions
- *       cross into ROI propagation.
+ * @note Pixel storage ownership stays in NodeOutput; this path never polls
+ *       readiness, acquires a payload lease, maps/imports storage, or creates
+ *       an ImageView. Signed logical origins intentionally do not enter the
+ *       returned zero-based storage extent used by ROI propagation.
  */
 static PixelSize cached_image_size(
     const std::optional<NodeOutput>& output_opt) noexcept {
   if (!output_opt || !output_opt->has_image_value())
     return PixelSize{};
   try {
-    const ImageView view(output_opt->image_value());
+    const ImageBounds& bounds = output_opt->image_value().image_bounds();
+    const std::size_t width = image_bounds_width(bounds);
+    const std::size_t height = image_bounds_height(bounds);
     const std::size_t maximum =
         static_cast<std::size_t>(std::numeric_limits<int>::max());
-    if (view.width() > maximum || view.height() > maximum) {
+    if (width > maximum || height > maximum) {
       return PixelSize{};
     }
-    return PixelSize{static_cast<int>(view.width()),
-                     static_cast<int>(view.height())};
+    return PixelSize{static_cast<int>(width), static_cast<int>(height)};
   } catch (...) {
     return PixelSize{};
   }
@@ -1856,11 +1953,16 @@ static NodeOutput op_crop(const Node& node,
  * @param node Effective channel name or numeric alias.
  * @param inputs One required source image.
  * @return Owned single-channel output image.
- * @throws std::bad_alloc if parameter or channel storage allocation fails.
+ * @throws std::bad_alloc if parameter, channel, or semantic storage allocation
+ *         fails.
  * @throws GraphError for missing input or an unavailable channel.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         when projected source semantics cannot publish a valid output.
  * @throws cv::Exception if OpenCV split or buffer conversion fails.
  * @note The callback is stateless `cv::Mat` work and is safe for concurrent
- *       invocation on independent inputs.
+ *       invocation on independent inputs. The selected stable channel,
+ *       compatible singleton groups, global/sample override facts, and any
+ *       still-valid color binding are projected explicitly.
  */
 static NodeOutput op_extract_channel(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -1888,7 +1990,8 @@ static NodeOutput op_extract_channel(
   std::vector<cv::Mat> channels;
   cv::split(input, channels);
   NodeOutput result;
-  publish_opencv_output(&result, channels[ch_idx], &inputs[0]->image_value());
+  publish_opencv_output(&result, channels[ch_idx], &inputs[0]->image_value(),
+                        static_cast<std::size_t>(ch_idx));
   return result;
 }
 
