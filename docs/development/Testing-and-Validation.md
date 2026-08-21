@@ -230,7 +230,7 @@ surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product,
 `test_cpu_dense_tensor_image_operation`, `test_packed_fp4_dense_tensor`,
 `test_variable_sample_field_extensions`, and `test_value_identity_across_dsos`
-binaries. Before installation it runs all 54 dense-image cases, all four packed
+binaries. Before installation it runs all 55 dense-image cases, all four packed
 FP4 cases, all seventeen provider-defined VariableSampleField cases, and the
 dual-DSO identity case in that actual disabled producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
@@ -1254,7 +1254,7 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor, Packed FP4, Provider Extensions, Region, ReadyFence, and Transfer Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
-binary for the implemented V-2 through V-12 and DI-1 through DI-4 boundaries. Its 54
+binary for the implemented V-2 through V-12 and DI-1 through DI-4 boundaries. Its 55
 durable cases
 verify:
 
@@ -1421,7 +1421,7 @@ ctest --test-dir build --output-on-failure \
   -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor|VariableSampleFieldExtensions|DenseImageValueContracts|SampleConversion|ValueArtifact|DenseImageProcessing)\.'
 ```
 
-`DependencyDisabledInstallSmoke` builds and runs all 54 dense cases plus all
+`DependencyDisabledInstallSmoke` builds and runs all 55 dense cases plus all
 four packed FP4 and seventeen V-14 extension cases in an actual
 OpenCV/YAML/OpenEXR-discovery-disabled
 product before proving the installed consumers.
@@ -1430,7 +1430,7 @@ product before proving the installed consumers.
 Value-using DSOs and proves that they mint from one shared runtime authority.
 Both installed consumers construct and evaluate Region and observe a
 synchronous Ready Value fence without optional dependencies. The
-provider-disabled nested build below also compiles and runs all 54 dense cases
+provider-disabled nested build below also compiles and runs all 55 dense cases
 plus that dual-DSO case, so the real core operation, fence/transfer proof, and
 identity authority do not depend on the optional OpenCV operation provider or
 a native device SDK.
@@ -1496,17 +1496,18 @@ dependencies, without hard-coding a target count or future target name and
 without deriving expectations from CTest's observed sentinels. The exact CTest
 inventory is the union of that derived set and
 `DependencyDisabledInstallSmoke`,
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 54
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 55
 `CpuDenseTensorImageOperation.*` cases,
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two
 `KernelLifecycleConcurrency.*` cases.
 
 DI-1 established the 49-case dense-image subset; the three Issue #130
-regressions raised it to 52 cases, and the two Issue #132 HP/RT ImageRect
-route-freeze regressions raise the current subset to 54 cases. The following
-counts remain the historical V-14 checkpoint rather than current inventory
-arithmetic.
+regressions raised it to 52 cases, the two Issue #132 HP/RT ImageRect
+route-freeze regressions raised it to 54 cases, and the Issue #131
+metadata-only device-local planning regression raises the current subset to 55
+cases. The following counts remain the historical V-14 checkpoint rather than
+current inventory arithmetic.
 At that V-14 checkpoint, CMake registers exactly eight active GoogleTest
 targets in this profile. The six-target focused build materializes five of
 those registered executables; its sixth target, `test_kernel_contracts`, is

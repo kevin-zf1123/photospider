@@ -281,6 +281,10 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
+        "TensorDirtyPlanReadsSignedMetadataFromReadyDeviceLocalValue"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
         "TensorTargetPlanRejectsPreferredRouteAddedBeforeTaskPopulation"
     ),
     (
@@ -361,7 +365,7 @@ def provider_disabled_ctest_payload(
     @param include_native_plugin_test Whether to include the native operation
       provider execution case used by supported target platforms.
     @return JSON payload containing the dependency profile entry, optional
-      native-provider case, 54 dense-image cases, one Value-runtime case,
+      native-provider case, 55 dense-image cases, one Value-runtime case,
       three disk cases, two production lifecycle cases, and requested derived
       sentinels.
     @throws Nothing; every serialized value is deterministic and JSON-safe.
@@ -1133,7 +1137,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
     def test_accepts_exact_focused_ctest_inventory(self) -> None:
         """@brief Parse and accept the supported provider-off CTest surface.
 
-        @return None after parsing preserves 64 names and focused-test
+        @return None after parsing preserves 65 names and focused-test
           properties.
         @throws AssertionError If parsing or validation rejects the contract.
         @note Exact labels exclude the build-smoke label from disk and
@@ -1154,8 +1158,8 @@ class ProviderDisabledProfileTest(unittest.TestCase):
             provider_disabled_ctest_payload()
         )
 
-        self.assertEqual(len(CPU_DENSE_IMAGE_CTEST_NAMES), 54)
-        self.assertEqual(len(expected), 64)
+        self.assertEqual(len(CPU_DENSE_IMAGE_CTEST_NAMES), 55)
+        self.assertEqual(len(expected), 65)
         self.assertEqual(set(inventory), expected)
         subject.validate_provider_disabled_inventory(
             inventory,
@@ -1179,7 +1183,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
                 include_native_plugin_test=False
             )
         )
-        self.assertEqual(len(darwin_inventory), 63)
+        self.assertEqual(len(darwin_inventory), 64)
         self.assertNotIn(OPTIONAL_PROVIDER_CTEST_NAME, darwin_inventory)
         subject.validate_provider_disabled_inventory(
             darwin_inventory,
@@ -1517,7 +1521,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         @return None after validation reports the injected property drift.
         @throws AssertionError If the exact provider-disabled contract accepts
           the sentinel with a CTest label.
-        @note Each mutation starts from the complete valid 64-entry inventory
+        @note Each mutation starts from the complete valid 65-entry inventory
           and changes only one sentinel's `LABELS` property.
         """
 
@@ -1543,7 +1547,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         @return None after validation reports the injected property drift.
         @throws AssertionError If the exact provider-disabled contract accepts
           the sentinel with a CTest timeout.
-        @note Each mutation starts from the complete valid 64-entry inventory
+        @note Each mutation starts from the complete valid 65-entry inventory
           and changes only one sentinel's `TIMEOUT` property.
         """
 
