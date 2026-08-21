@@ -21,6 +21,7 @@
 #include "graph_cli/command/commands.hpp"
 #include "graph_cli/command/help_utils.hpp"
 #include "graph_cli/dependency_tree_formatter.hpp"
+#include "graph_cli/print_repl_help.hpp"
 #include "photospider/data/image_view.hpp"
 #include "providers/configured_image_artifact_codec.hpp"  // NOLINT(build/include_subdir)
 
@@ -317,6 +318,26 @@ TEST(CliHelpResources, LoadsConfiguredHelpOutsideRepositoryCwd) {
 
   EXPECT_NE(output.find("compute <id|all> [flags]"), std::string::npos);
   EXPECT_EQ(output.find("Help not available"), std::string::npos);
+}
+
+/**
+ * @brief Proves the main REPL help lists every supported save storage token.
+ * @return Nothing; GoogleTest reports a missing canonical save signature.
+ * @throws Nothing; the default configuration and stdout capture remain local
+ *         to this test body.
+ * @note This locks the overview syntax only. The detailed backend/format
+ *       matrix remains authoritative in the dedicated `help save` resource.
+ */
+TEST(CliHelpResources, MainReplHelpListsEverySaveStorageChoice) {
+  CliConfig config;
+
+  testing::internal::CaptureStdout();
+  ::print_repl_help(config);
+  const std::string output = testing::internal::GetCapturedStdout();
+
+  EXPECT_NE(output.find("save <id> <output> <file> "
+                        "<uint8|uint16|uint32|fp32>"),
+            std::string::npos);
 }
 
 TEST(CliNodeInspectionFormatter, RendersLocalInverseMatrix) {

@@ -80,7 +80,7 @@ void print_repl_help(const CliConfig& config) {
       << "    Defaults: flags='" << config.default_compute_args
       << "', log_path='" << config.default_timer_log_path << "'\n\n"
 
-      << "  save <id> <output> <file> <uint8|uint16> "
+      << "  save <id> <output> <file> <uint8|uint16|uint32|fp32> "
          "<destination-encoding> <destination-domain> <min> <max> "
          "<domain-policy> <rounding> <non-finite-policy> "
          "<precision-policy>\n"
