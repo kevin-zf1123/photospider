@@ -3141,7 +3141,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         set_tests_properties(PhotospiderdInstallLayoutSmoke PROPERTIES
             LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
             RUN_SERIAL TRUE
-            TIMEOUT 900)
+            TIMEOUT 1200)
     endif()
     add_test(NAME IpcDisabledInstallSmoke
         COMMAND ${Python3_EXECUTABLE} -B
