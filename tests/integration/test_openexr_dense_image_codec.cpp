@@ -22,7 +22,12 @@
 #include <vector>
 
 #include "adapters/openexr/openexr_dense_image_codec.hpp"
+#include "core/ps_types.hpp"
+#include "graph/node.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/data/image_view.hpp"
+#if defined(PHOTOSPIDER_TEST_HAS_CONFIGURED_IMAGE_SOURCE)
+#include "providers/configured_operation_providers.hpp"
+#endif
 
 /**
  * @file test_openexr_dense_image_codec.cpp
@@ -191,6 +196,42 @@ std::vector<Scalar> read_value(const Value& value) {
   return result;
 }
 
+#if defined(PHOTOSPIDER_TEST_HAS_CONFIGURED_IMAGE_SOURCE)
+/**
+ * @brief Decodes one file through the configured production image-source op.
+ *
+ * @param path Existing image artifact path.
+ * @return Full callback output retaining the decoded canonical image Value.
+ * @throws std::logic_error when configured registration does not publish one
+ *         CPU monolithic image-source callback.
+ * @throws Provider, registry, filesystem-codec, validation, or allocation
+ *         exceptions unchanged.
+ * @note Registration and callback selection use the same source-private
+ *       composition and registry surfaces reached by the process plugin owner;
+ *       the test does not instantiate the ordinary OpenEXR codec directly.
+ */
+NodeOutput decode_through_configured_image_source(
+    const std::filesystem::path& path) {
+  providers::register_configured_operation_providers();
+  const std::optional<OpImplementation> implementation =
+      OpRegistry::instance().select_implementation(
+          "image_source", "path", {DeviceBackend::CPU},
+          ComputeIntent::GlobalHighPrecision);
+  if (!implementation.has_value() || !implementation->is_monolithic()) {
+    throw std::logic_error(
+        "Configured image source lacks a CPU monolithic implementation.");
+  }
+
+  Node node;
+  node.id = 1;
+  node.name = "configured-openexr-source";
+  node.type = "image_source";
+  node.subtype = "path";
+  node.parameters.emplace("path", plugin::ParameterValue(path.string()));
+  return std::get<MonolithicOpFunc>(implementation->func)(node, {});
+}
+#endif
+
 TEST(OpenExrDenseImageCodec, FloatRoundTripPreservesIndependentWindows) {
   TempDirectory directory;
   const std::filesystem::path input = directory.path() / "input.exr";
@@ -280,6 +321,68 @@ TEST(OpenExrDenseImageCodec, UintRoundTripPreservesFullCodeValues) {
   codec.encode(output, decoded, {});
   EXPECT_EQ(read_value<std::uint32_t>(codec.decode(output, request)), planes);
 }
+
+#if defined(PHOTOSPIDER_TEST_HAS_CONFIGURED_IMAGE_SOURCE)
+/**
+ * @brief Proves configured image-source decoding preserves ordinary EXR types.
+ *
+ * @return Nothing; GoogleTest reports registration, storage, metadata, or
+ *         sample mismatches.
+ * @throws Unexpected fixture, provider, registry, codec, or allocation
+ *         exceptions unchanged.
+ * @note UINT remains UINT32 CodeValue and FLOAT remains FP32 Value storage;
+ *       neither source is silently normalized through the OpenCV 8/16-bit
+ *       policy.
+ */
+TEST(OpenExrDenseImageCodec,
+     ConfiguredImageSourcePreservesUint32AndFp32Storage) {
+  TempDirectory directory;
+  const Imath::Box2i window{{0, 0}, {1, 1}};
+  const std::vector<std::string> names{"Y"};
+
+  const std::filesystem::path uint_path = directory.path() / "source-uint.exr";
+  std::vector<std::uint32_t> uint_planes{0U, 65535U, 4000000000U, 4294967295U};
+  write_fixture(uint_path, window, window, names, &uint_planes);
+  const NodeOutput uint_output =
+      decode_through_configured_image_source(uint_path);
+  ASSERT_TRUE(uint_output.has_image_value());
+  const Value& uint_value = uint_output.image_value();
+  EXPECT_EQ(uint_value.dense_tensor_descriptor().element_semantics,
+            ElementSemantics::UnsignedInteger);
+  EXPECT_EQ(uint_value.dense_tensor_descriptor().storage_encoding,
+            (StorageEncoding{32U}));
+  EXPECT_EQ(read_value<std::uint32_t>(uint_value), uint_planes);
+  ASSERT_TRUE(uint_value.image_facet().has_value());
+  ASSERT_TRUE(uint_value.image_facet()->sample_domain.has_value());
+  EXPECT_EQ(uint_value.image_facet()->sample_domain->encoding.kind,
+            SampleEncodingKind::CodeValue);
+  EXPECT_EQ(uint_value.image_facet()->sample_domain->default_domain,
+            (SampleDomain{SampleDomainKind::CodeValue, 0.0, 4294967295.0}));
+
+  const std::filesystem::path float_path =
+      directory.path() / "source-float.exr";
+  std::vector<float> float_planes{-4.0F, -0.0F, 0.5F, 17.25F};
+  write_fixture(float_path, window, window, names, &float_planes);
+  const NodeOutput float_output =
+      decode_through_configured_image_source(float_path);
+  ASSERT_TRUE(float_output.has_image_value());
+  const Value& float_value = float_output.image_value();
+  EXPECT_EQ(float_value.dense_tensor_descriptor().element_semantics,
+            ElementSemantics::FloatingPoint);
+  EXPECT_EQ(float_value.dense_tensor_descriptor().storage_encoding,
+            (StorageEncoding{32U}));
+  EXPECT_EQ(read_value<float>(float_value), float_planes);
+  ASSERT_TRUE(float_value.image_facet().has_value());
+  ASSERT_TRUE(float_value.image_facet()->sample_domain.has_value());
+  EXPECT_EQ(float_value.image_facet()->sample_domain->encoding.kind,
+            SampleEncodingKind::Value);
+  EXPECT_EQ(
+      float_value.image_facet()->sample_domain->default_domain,
+      (SampleDomain{SampleDomainKind::Legal,
+                    static_cast<double>(std::numeric_limits<float>::lowest()),
+                    static_cast<double>(std::numeric_limits<float>::max())}));
+}
+#endif
 
 TEST(OpenExrDenseImageCodec, RejectsMixedChannelStorageWithoutConversionGuess) {
   TempDirectory directory;

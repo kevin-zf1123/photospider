@@ -2071,11 +2071,19 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/src/lib"
             "${PROJECT_SOURCE_DIR}/tests")
         target_link_libraries(test_openexr_dense_image_codec PRIVATE
-            photospider_core_internal
             Photospider::operation_runtime
             OpenEXR::OpenEXR
             GTest::gtest
             GTest::gtest_main)
+        if(TARGET photospider_opencv_operation_provider_internal)
+            target_compile_definitions(test_openexr_dense_image_codec PRIVATE
+                PHOTOSPIDER_TEST_HAS_CONFIGURED_IMAGE_SOURCE)
+            target_link_libraries(test_openexr_dense_image_codec PRIVATE
+                photospider)
+        else()
+            target_link_libraries(test_openexr_dense_image_codec PRIVATE
+                photospider_core_internal)
+        endif()
         gtest_discover_tests(test_openexr_dense_image_codec
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES

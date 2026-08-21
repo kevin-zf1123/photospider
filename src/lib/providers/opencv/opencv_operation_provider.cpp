@@ -287,35 +287,55 @@ static void publish_opencv_output(NodeOutput* output, const cv::Mat& matrix,
 }
 
 /**
- * @brief Builds the explicit file-code to normalized FP32 source policy.
- * @return Ordered unsigned 8/16-bit decode rules with deterministic affine
- * conversion into normalized `[0,1]` samples.
+ * @brief Builds the complete explicit configured image-source decode policy.
+ *
+ * @return Strictly ordered rules that normalize unsigned 8/16-bit file codes
+ *         to FP32 `[0,1]` while preserving ordinary OpenEXR UINT32 CodeValue
+ *         and FP32 Value storage without conversion.
  * @throws std::bad_alloc when rule storage cannot allocate.
- * @note This preserves the documented built-in source semantics while making
- * storage, domain, exceptional-value, rounding, and precision policy explicit.
+ * @note The native 32-bit rules are exact source tuples for the dedicated
+ *       ordinary OpenEXR codec. They do not broaden OpenCV's closed unsigned
+ *       8/16-bit input matrix or guess an implicit numeric conversion.
  */
-static ImageArtifactDecodeRequest normalized_source_decode_request() {
+static ImageArtifactDecodeRequest configured_source_decode_request() {
   ImageArtifactDecodeRequest request;
-  for (const std::uint32_t bits : {8U, 16U}) {
-    const double maximum = bits == 8U ? 255.0 : 65535.0;
+  for (const std::uint32_t bits : {8U, 16U, 32U}) {
+    const double maximum =
+        bits == 8U
+            ? 255.0
+            : (bits == 16U ? 65535.0
+                           : static_cast<double>(
+                                 std::numeric_limits<std::uint32_t>::max()));
     const SampleEndpoint code{
         SampleEncoding{1U, SampleEncodingKind::CodeValue},
         SampleDomain{SampleDomainKind::CodeValue, 0.0, maximum}};
-    SampleConversion conversion;
-    conversion.source = code;
-    conversion.destination =
-        SampleEndpoint{SampleEncoding{1U, SampleEncodingKind::Normalized},
-                       SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}};
-    conversion.destination_element_semantics = ElementSemantics::FloatingPoint;
-    conversion.destination_storage_encoding = StorageEncoding{32U};
-    conversion.out_of_domain = OutOfDomainPolicy::Reject;
-    conversion.rounding = SampleRoundingMode::NearestEven;
-    conversion.non_finite = NonFinitePolicy::Reject;
-    conversion.precision_loss = PrecisionLossPolicy::Allow;
-    request.rules.push_back(
-        ImageArtifactDecodeRule{ElementSemantics::UnsignedInteger,
-                                StorageEncoding{bits}, code, conversion});
+    std::optional<SampleConversion> conversion;
+    if (bits != 32U) {
+      conversion.emplace();
+      conversion->source = code;
+      conversion->destination =
+          SampleEndpoint{SampleEncoding{1U, SampleEncodingKind::Normalized},
+                         SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}};
+      conversion->destination_element_semantics =
+          ElementSemantics::FloatingPoint;
+      conversion->destination_storage_encoding = StorageEncoding{32U};
+      conversion->out_of_domain = OutOfDomainPolicy::Reject;
+      conversion->rounding = SampleRoundingMode::NearestEven;
+      conversion->non_finite = NonFinitePolicy::Reject;
+      conversion->precision_loss = PrecisionLossPolicy::Allow;
+    }
+    request.rules.push_back(ImageArtifactDecodeRule{
+        ElementSemantics::UnsignedInteger, StorageEncoding{bits}, code,
+        std::move(conversion)});
   }
+  const SampleEndpoint floating{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal,
+                   static_cast<double>(std::numeric_limits<float>::lowest()),
+                   static_cast<double>(std::numeric_limits<float>::max())}};
+  request.rules.push_back(
+      ImageArtifactDecodeRule{ElementSemantics::FloatingPoint,
+                              StorageEncoding{32U}, floating, std::nullopt});
   return request;
 }
 
@@ -1451,11 +1471,12 @@ static NodeOutput op_coordinate_pattern(
 }
 
 /**
- * @brief Loads one image file and normalizes scalar storage to float32.
+ * @brief Loads one image file under the configured explicit sample policy.
  *
  * @param node Source node carrying a required static `path` parameter.
  * @param inputs Unused source inputs.
- * @return Owned CPU image normalized to `[0,1]` for unsigned 8/16-bit files.
+ * @return Owned CPU image normalized to FP32 `[0,1]` for supported unsigned
+ *         8/16-bit files, or preserving ordinary OpenEXR UINT32/FP32 storage.
  * @throws GraphError with `GraphErrc::InvalidParameter` for an empty path or
  *         `GraphErrc::Io` when decoding produces no image.
  * @throws GraphError with `GraphErrc::Io` when the injected production codec
@@ -1463,7 +1484,9 @@ static NodeOutput op_coordinate_pattern(
  * @throws std::bad_alloc for codec or output ownership allocation failure.
  * @note The operation owns no filesystem codec implementation. It obtains the
  * configured artifact codec from the product composition boundary and
- * publishes its canonical image Value unchanged.
+ * publishes its canonical image Value unchanged. Ordinary OpenEXR decoding
+ * retains declared signed windows, UINT32 CodeValue meaning, and FP32 Value
+ * meaning; it performs no hidden normalization.
  */
 static NodeOutput op_image_source_path(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -1477,7 +1500,7 @@ static NodeOutput op_image_source_path(
   const auto codec = providers::make_configured_image_artifact_codec();
   NodeOutput result;
   result.publish_image_value(
-      codec->decode(path, normalized_source_decode_request()));
+      codec->decode(path, configured_source_decode_request()));
   return result;
 }
 
