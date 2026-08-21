@@ -452,6 +452,32 @@ NodeOutput conformance_fallback_input() {
 }
 
 /**
+ * @brief Publishes one whole-byte image for pass-through alignment admission.
+ * @param semantics Supported integer or floating-point element semantics.
+ * @param bit_width Supported whole-byte native-scalar physical width.
+ * @return Ready two-by-two single-channel image with a tight positive layout.
+ * @throws Descriptor, allocation, or publication failures unchanged.
+ * @note The source binding may be more strongly aligned than its element;
+ *       the output plan must request the descriptor's exact minimum alignment.
+ */
+NodeOutput conformance_passthrough_input(ElementSemantics semantics,
+                                         std::uint32_t bit_width) {
+  DenseTensorDescriptor descriptor{{2U, 2U, 1U},
+                                   semantics,
+                                   StorageEncoding{bit_width}};
+  const std::size_t element_bytes = dense_tensor_element_bytes(descriptor);
+  ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  StridedLayout layout{{static_cast<std::ptrdiff_t>(2U * element_bytes),
+                        static_cast<std::ptrdiff_t>(element_bytes),
+                        static_cast<std::ptrdiff_t>(element_bytes)}};
+  NodeOutput output;
+  output.publish_image_value(Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(image), std::move(layout),
+      std::vector<std::byte>(4U * element_bytes, std::byte{0x11})));
+  return output;
+}
+
+/**
  * @brief Publishes one ordinary facet-free fallback DenseTensor input.
  * @return Ready two-by-three UINT8 tensor with no retained operation metadata.
  * @throws Value validation, allocation, or publication failures unchanged.
@@ -683,6 +709,53 @@ TEST(OperationPluginAbi, CanonicalizesEmptyCppViewsBeforeHostGenerationLoad) {
   std::shared_ptr<plugin_host::OperationPluginGeneration> generation;
   EXPECT_NO_THROW(generation = load_generation(plugin_path));
   EXPECT_NE(generation, nullptr);
+}
+
+/**
+ * @brief Proves the public pass-through helper derives whole-byte alignment
+ * before real Host output-plan admission.
+ * @throws Nothing when every descriptor crosses inference, allocation,
+ * execution, retirement, and immutable publication successfully.
+ * @note FP32 and FP64 are the P1 regression cases. Integer widths lock the
+ * same storage-encoding derivation without replacing Host validation.
+ */
+TEST(OperationPluginAbi,
+     PassthroughCppHelperDerivesWholeByteAlignmentBeforeHostAdmission) {
+  /** @brief One supported logical-semantics and physical-width combination. */
+  struct ElementCase final {
+    /** @brief Logical interpretation used by Host descriptor validation. */
+    ElementSemantics semantics;
+    /** @brief Native-scalar physical width expressed in bits. */
+    std::uint32_t bit_width;
+  };
+  constexpr std::array<ElementCase, 10U> kCases{{
+      {ElementSemantics::FloatingPoint, 32U},
+      {ElementSemantics::FloatingPoint, 64U},
+      {ElementSemantics::UnsignedInteger, 8U},
+      {ElementSemantics::UnsignedInteger, 16U},
+      {ElementSemantics::UnsignedInteger, 32U},
+      {ElementSemantics::UnsignedInteger, 64U},
+      {ElementSemantics::SignedInteger, 8U},
+      {ElementSemantics::SignedInteger, 16U},
+      {ElementSemantics::SignedInteger, 32U},
+      {ElementSemantics::SignedInteger, 64U},
+  }};
+  for (const ElementCase& element : kCases) {
+    SCOPED_TRACE(element.bit_width);
+    NodeOutput input =
+        conformance_passthrough_input(element.semantics, element.bit_width);
+    NodeOutput output;
+    EXPECT_NO_THROW(output = execute_conformance_monolithic(
+                        "trusted_monolithic_passthrough_alignment", &input));
+    ASSERT_TRUE(output.has_image_value());
+    const Value& value = output.image_value();
+    EXPECT_EQ(value.dense_tensor_descriptor().element_semantics,
+              element.semantics);
+    EXPECT_EQ(value.dense_tensor_descriptor().storage_encoding.bit_width,
+              element.bit_width);
+    EXPECT_EQ(value.storage_binding().required_alignment,
+              dense_tensor_element_bytes(value.dense_tensor_descriptor()));
+  }
 }
 
 /**

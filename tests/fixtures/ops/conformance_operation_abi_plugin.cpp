@@ -134,7 +134,9 @@ void PS_OPERATION_CALL reserved_callback() noexcept {}
  * @return Sink status after synchronous emission.
  * @throws Nothing; every record borrows callback-local fixed storage.
  * @note Non-default versions and digests prove exact trusted/supervised plan
- * echo. Identity-mismatch modes deliberately violate the output-port contract.
+ *       echo. The pass-through-alignment mode delegates to the public C++
+ *       helper and retains the input descriptor; identity-mismatch modes
+ *       deliberately violate the output-port contract.
  */
 ps_operation_status_v1 PS_OPERATION_CALL infer_conformance(
     void* plugin_context, const ps_operation_invocation_v1* invocation,
@@ -146,6 +148,9 @@ ps_operation_status_v1 PS_OPERATION_CALL infer_conformance(
   (void)configuration;
   if (sink == nullptr || sink->emit == nullptr) {
     return PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
+  }
+  if (mode_contains("passthrough_alignment")) {
+    return emit_passthrough_image_plan(inputs, sink);
   }
   if (mode_contains("input_metadata")) {
     const auto* input = array_element<ps_operation_input_binding_v1>(
@@ -390,8 +395,10 @@ void mutate_output_authority(
  * @return Stable status after validation, payload fill, and mutation.
  * @throws Nothing.
  * @note Hostile mutation modes deliberately bypass the independent exact-
- * metadata assertion so the callback reaches and modifies the requested
- * authority surface even when replayed against the old Host implementation.
+ *       metadata assertion so the callback reaches and modifies the requested
+ *       authority surface even when replayed against the old Host
+ *       implementation. Pass-through-alignment mode bypasses only that
+ *       fixture-specific metadata oracle because its output copies the input.
  */
 ps_operation_status_v1 execute_conformance(
     const ps_operation_array_ref_v1* inputs,
@@ -403,8 +410,10 @@ ps_operation_status_v1 execute_conformance(
     return PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
   }
   const bool isolates_authority_mutation = mode_contains("mutate_");
+  const bool validates_passthrough_alignment =
+      mode_contains("passthrough_alignment");
   if (!mode_contains("identity_mismatch") && !isolates_authority_mutation &&
-      !metadata_is_exact(output)) {
+      !validates_passthrough_alignment && !metadata_is_exact(output)) {
     return PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
   }
   if (mode_contains("input_metadata") && !input_metadata_is_exact(inputs)) {

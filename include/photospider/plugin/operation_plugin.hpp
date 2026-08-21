@@ -682,13 +682,18 @@ inline std::string_view configuration_string(
 }
 
 /**
- * @brief Emits a pass-through image output plan from the first connected input.
- * @param inputs Exact input-binding array.
- * @param sink Host output-plan sink.
- * @return Stable ABI status from validation or synchronous emission.
+ * @brief Emits one whole-byte pass-through image plan from the first input.
+ * @param inputs Exact-stride input bindings containing one single-buffer,
+ *        zero-offset Strided ordinary image.
+ * @param sink Nonnull Host output-plan sink consumed synchronously.
+ * @return The sink status after emission, or `INVALID_DESCRIPTOR` for
+ *         malformed records, unsupported element storage, packed encoding,
+ *         multiple buffers, or an inexact storage envelope.
  * @throws Nothing.
- * @note The descriptor and Region remain borrowed only for the synchronous
- * sink call; the Host deep-copies and independently validates both.
+ * @note The output buffer's minimum alignment is derived from the complete
+ *       native-scalar element semantics and physical bit width. The borrowed
+ *       descriptor and Region remain live only for the synchronous sink call;
+ *       the Host deep-copies and independently validates the complete plan.
  */
 inline ps_operation_status_v1 emit_passthrough_image_plan(
     const ps_operation_array_ref_v1* inputs,
@@ -698,23 +703,79 @@ inline ps_operation_status_v1 emit_passthrough_image_plan(
   const Definition& definition = plugin_definition();
   if (input == nullptr || input->value == nullptr || input->region == nullptr ||
       input->value->descriptor == nullptr ||
+      input->value->descriptor->dense_tensor == nullptr ||
+      input->value->descriptor->image_facet == nullptr ||
       input->value->descriptor->strided_layout == nullptr ||
       input->value->buffers.count != 1U ||
-      definition.operation.output_ports.count != 1U || sink == nullptr ||
+      input->value->buffers.stride != PS_OPERATION_BUFFER_VIEW_V1_SIZE ||
+      input->value->buffers.data == nullptr ||
+      definition.operation.output_ports.count != 1U ||
+      definition.operation.output_ports.stride !=
+          PS_OPERATION_PORT_DESCRIPTOR_V1_SIZE ||
+      definition.operation.output_ports.data == nullptr || sink == nullptr ||
       sink->emit == nullptr) {
     return PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
   }
+  const auto& descriptor = *input->value->descriptor;
+  const auto& dense = *descriptor.dense_tensor;
+  const auto& layout = *descriptor.strided_layout;
   const auto* output_port = static_cast<const ps_operation_port_descriptor_v1*>(
       definition.operation.output_ports.data);
   const auto* input_buffer = static_cast<const ps_operation_buffer_view_v1*>(
       input->value->buffers.data);
+  if (descriptor.header.struct_size != PS_OPERATION_VALUE_DESCRIPTOR_V1_SIZE ||
+      descriptor.header.struct_kind !=
+          PS_OPERATION_RECORD_VALUE_DESCRIPTOR_V1 ||
+      descriptor.header.struct_version != 1U || descriptor.header.flags != 0U ||
+      dense.header.struct_size !=
+          PS_OPERATION_DENSE_TENSOR_DESCRIPTOR_V1_SIZE ||
+      dense.header.struct_kind !=
+          PS_OPERATION_RECORD_DENSE_TENSOR_DESCRIPTOR_V1 ||
+      dense.header.struct_version != 1U || dense.header.flags != 0U ||
+      layout.header.struct_size != PS_OPERATION_STRIDED_LAYOUT_V1_SIZE ||
+      layout.header.struct_kind != PS_OPERATION_RECORD_STRIDED_LAYOUT_V1 ||
+      layout.header.struct_version != 1U || layout.header.flags != 0U ||
+      input_buffer->header.struct_size != PS_OPERATION_BUFFER_VIEW_V1_SIZE ||
+      input_buffer->header.struct_kind != PS_OPERATION_RECORD_BUFFER_VIEW_V1 ||
+      input_buffer->header.struct_version != 1U ||
+      input_buffer->header.flags != 0U || layout.rank != dense.rank ||
+      layout.buffer_index != 0U || layout.byte_offset != 0U ||
+      input_buffer->size == 0U || layout.storage_size != input_buffer->size) {
+    return PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
+  }
+
+  constexpr std::uint32_t kBitsPerByte =
+      std::numeric_limits<std::uint8_t>::digits;
+  std::uint64_t alignment = 0U;
+  if (dense.storage_encoding == PS_OPERATION_STORAGE_NATIVE_SCALAR_V1) {
+    switch (dense.element_semantics) {
+      case PS_OPERATION_ELEMENT_UNSIGNED_INTEGER_V1:
+      case PS_OPERATION_ELEMENT_SIGNED_INTEGER_V1:
+        if (dense.bit_width == 8U || dense.bit_width == 16U ||
+            dense.bit_width == 32U || dense.bit_width == 64U) {
+          alignment = dense.bit_width / kBitsPerByte;
+        }
+        break;
+      case PS_OPERATION_ELEMENT_FLOATING_POINT_V1:
+        if (dense.bit_width == 32U || dense.bit_width == 64U) {
+          alignment = dense.bit_width / kBitsPerByte;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  if (alignment == 0U) {
+    return PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
+  }
+
   ps_operation_output_buffer_plan_v1 buffer{};
   buffer.header = make_record_header(PS_OPERATION_OUTPUT_BUFFER_PLAN_V1_SIZE,
                                      PS_OPERATION_RECORD_OUTPUT_BUFFER_PLAN_V1);
   buffer.buffer_index = 0U;
   buffer.access_mask = PS_OPERATION_ACCESS_WRITE_V1;
   buffer.byte_size = input_buffer->size;
-  buffer.alignment = 1U;
+  buffer.alignment = alignment;
 
   ps_operation_output_plan_v1 plan{};
   plan.header = make_record_header(PS_OPERATION_OUTPUT_PLAN_V1_SIZE,
