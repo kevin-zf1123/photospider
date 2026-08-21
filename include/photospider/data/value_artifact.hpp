@@ -302,9 +302,13 @@ std::vector<std::byte> encode_named_value_artifact_set(
  * @param bytes Exact archive bytes without trailing content.
  * @return Detached canonical artifacts after every span/digest validates.
  * @throws Artifact validation, overflow, length, or allocation errors.
- * @note Decoding applies the encoder's same checked align-up/span arithmetic
- *       and complete metadata-plus-payload archive ceiling before publication.
- *       It publishes no Value and grants no durable/cache authority.
+ * @note Decoding first checks the aggregate raw-payload bytes across every
+ *       detached envelope, then validates the encoder's same checked
+ *       align-up/span arithmetic, padding, offsets, and complete
+ *       metadata-plus-payload archive ceiling before reserving or copying any
+ *       payload ownership. Digest and local Value validation remain
+ *       transactional after materialization. Decode publishes no Value and
+ *       grants no durable/cache authority.
  */
 NamedValueArtifactSet decode_named_value_artifact_set(
     const std::vector<std::byte>& bytes);

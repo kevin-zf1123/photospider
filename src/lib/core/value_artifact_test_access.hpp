@@ -29,11 +29,24 @@ struct ValueArtifactArchiveSizingObservationForTesting final {
 };
 
 /**
+ * @brief Snapshot of payload ownership materialized by the production decoder.
+ *
+ * @throws Nothing for ordinary aggregate operations.
+ * @note This source-private observation exists only in BUILD_TESTING runtime
+ *       images. A count is published only after one real payload copy has
+ *       successfully joined a decoded artifact.
+ */
+struct ValueArtifactArchiveDecodeObservationForTesting final {
+  /** @brief Number of payload buffers successfully copied by the decoder. */
+  std::uint64_t payload_materializations = 0U;
+};
+
+/**
  * @brief Scales frozen named-artifact archive limits on the current thread.
  *
  * Construction saves the calling thread's prior source-private limits and
- * observation, installs smaller positive metadata/payload limits, and clears
- * the current observation. Destruction restores the saved state.
+ * observations, installs smaller positive metadata/payload limits, and clears
+ * the current observations. Destruction restores the saved state.
  *
  * @throws std::invalid_argument when either limit is zero or exceeds its
  *         production counterpart.
@@ -54,7 +67,7 @@ class ScopedValueArtifactArchiveLimitsForTesting final {
                                              std::uint64_t payload_bytes);
 
   /**
-   * @brief Restores the calling thread's prior limits and observation.
+   * @brief Restores the calling thread's prior limits and observations.
    * @throws Nothing.
    */
   ~ScopedValueArtifactArchiveLimitsForTesting() noexcept;
@@ -79,13 +92,23 @@ class ScopedValueArtifactArchiveLimitsForTesting final {
    */
   ValueArtifactArchiveSizingObservationForTesting observation() const noexcept;
 
+  /**
+   * @brief Returns the calling thread's production decoder observation.
+   * @return Payload materializations completed under this scope.
+   * @throws Nothing.
+   */
+  ValueArtifactArchiveDecodeObservationForTesting decode_observation()
+      const noexcept;
+
  private:
   /** @brief Calling thread's metadata limit before construction. */
   std::uint64_t previous_metadata_bytes_ = 0U;
   /** @brief Calling thread's payload limit before construction. */
   std::uint64_t previous_payload_bytes_ = 0U;
-  /** @brief Calling thread's observation before construction. */
+  /** @brief Calling thread's sizing observation before construction. */
   ValueArtifactArchiveSizingObservationForTesting previous_observation_;
+  /** @brief Calling thread's decoder observation before construction. */
+  ValueArtifactArchiveDecodeObservationForTesting previous_decode_observation_;
 };
 
 }  // namespace ps::testing

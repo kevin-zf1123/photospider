@@ -132,6 +132,8 @@ struct ValueArtifactArchiveTestState final {
   std::uint64_t payload_bytes = kMaximumValueArtifactPayloadBytes;
   /** @brief Latest real encoder sizing result. */
   testing::ValueArtifactArchiveSizingObservationForTesting observation;
+  /** @brief Latest real decoder payload-materialization result. */
+  testing::ValueArtifactArchiveDecodeObservationForTesting decode_observation;
 };
 
 /** @brief Calling thread's source-private artifact archive test state. */
@@ -167,6 +169,18 @@ void record_value_artifact_archive_sizing(
     std::uint64_t archive_bytes) noexcept {
   value_artifact_archive_test_state.observation = {
       true, metadata_bytes, payload_bytes, archive_bytes};
+}
+
+/**
+ * @brief Records one successfully materialized production decoder payload.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note The bounded archive/value/buffer counts make uint64 saturation
+ *       unreachable. The caller records only after the owned copy succeeds.
+ */
+void record_value_artifact_payload_materialization() noexcept {
+  ++value_artifact_archive_test_state.decode_observation
+        .payload_materializations;
 }
 #endif
 
@@ -1321,7 +1335,9 @@ ScopedValueArtifactArchiveLimitsForTesting::
       previous_payload_bytes_(  // NOLINT(whitespace/indent_namespace)
           value_artifact_archive_test_state.payload_bytes),
       previous_observation_(  // NOLINT(whitespace/indent_namespace)
-          value_artifact_archive_test_state.observation) {
+          value_artifact_archive_test_state.observation),
+      previous_decode_observation_(  // NOLINT(whitespace/indent_namespace)
+          value_artifact_archive_test_state.decode_observation) {
   if (metadata_bytes == 0U || payload_bytes == 0U ||
       metadata_bytes > kMaximumValueArtifactMetadataBytes ||
       payload_bytes > kMaximumValueArtifactPayloadBytes) {
@@ -1331,6 +1347,7 @@ ScopedValueArtifactArchiveLimitsForTesting::
   value_artifact_archive_test_state.metadata_bytes = metadata_bytes;
   value_artifact_archive_test_state.payload_bytes = payload_bytes;
   value_artifact_archive_test_state.observation = {};
+  value_artifact_archive_test_state.decode_observation = {};
 }
 
 /** @copydoc
@@ -1341,12 +1358,21 @@ ScopedValueArtifactArchiveLimitsForTesting::
   value_artifact_archive_test_state.metadata_bytes = previous_metadata_bytes_;
   value_artifact_archive_test_state.payload_bytes = previous_payload_bytes_;
   value_artifact_archive_test_state.observation = previous_observation_;
+  value_artifact_archive_test_state.decode_observation =
+      previous_decode_observation_;
 }
 
 /** @copydoc ScopedValueArtifactArchiveLimitsForTesting::observation */
 ValueArtifactArchiveSizingObservationForTesting
 ScopedValueArtifactArchiveLimitsForTesting::observation() const noexcept {
   return value_artifact_archive_test_state.observation;
+}
+
+/** @copydoc ScopedValueArtifactArchiveLimitsForTesting::decode_observation */
+ValueArtifactArchiveDecodeObservationForTesting
+ScopedValueArtifactArchiveLimitsForTesting::decode_observation()
+    const noexcept {  // NOLINT(whitespace/indent_namespace)
+  return value_artifact_archive_test_state.decode_observation;
 }
 
 }  // namespace testing
@@ -1847,10 +1873,20 @@ NamedValueArtifactSet decode_named_value_artifact_set(
     throw std::length_error(
         "Named Value artifact set metadata exceeds its bound.");
   }
-  std::uint64_t cursor = size_to_u64(metadata_end);
+
   std::uint64_t aggregate_payload = 0U;
-  for (ValueArtifact& artifact : result.values) {
-    artifact.payloads.reserve(artifact.envelope.buffers.size());
+  for (const ValueArtifact& artifact : result.values) {
+    for (const ValueArtifactBuffer& buffer : artifact.envelope.buffers) {
+      aggregate_payload = checked_u64_add(aggregate_payload, buffer.byte_size);
+      if (aggregate_payload > limits.payload_bytes) {
+        throw std::length_error(
+            "Named Value artifact payload exceeds its bound.");
+      }
+    }
+  }
+
+  std::uint64_t cursor = size_to_u64(metadata_end);
+  for (const ValueArtifact& artifact : result.values) {
     for (const ValueArtifactBuffer& buffer : artifact.envelope.buffers) {
       const ValueArtifactArchiveSpan span = checked_value_artifact_archive_span(
           cursor, buffer.required_alignment, buffer.byte_size);
@@ -1868,21 +1904,29 @@ NamedValueArtifactSet decode_named_value_artifact_set(
       if (span.end > size_to_u64(bytes.size())) {
         invalid_artifact("Named Value artifact payload span is truncated.");
       }
+      cursor = span.end;
+    }
+  }
+  if (cursor != size_to_u64(bytes.size())) {
+    invalid_artifact("Named Value artifact set archive has trailing bytes.");
+  }
+
+  cursor = size_to_u64(metadata_end);
+  for (ValueArtifact& artifact : result.values) {
+    artifact.payloads.reserve(artifact.envelope.buffers.size());
+    for (const ValueArtifactBuffer& buffer : artifact.envelope.buffers) {
+      const ValueArtifactArchiveSpan span = checked_value_artifact_archive_span(
+          cursor, buffer.required_alignment, buffer.byte_size);
       const std::size_t begin_index = u64_to_size(buffer.artifact_offset);
       const std::size_t end_index = u64_to_size(span.end);
       artifact.payloads.emplace_back(bytes.begin() + begin_index,
                                      bytes.begin() + end_index);
-      aggregate_payload = checked_u64_add(aggregate_payload, buffer.byte_size);
-      if (aggregate_payload > limits.payload_bytes) {
-        throw std::length_error(
-            "Named Value artifact payload exceeds its bound.");
-      }
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ARTIFACT_TESTING)
+      record_value_artifact_payload_materialization();
+#endif
       cursor = span.end;
     }
     validate_value_artifact(artifact);
-  }
-  if (cursor != size_to_u64(bytes.size())) {
-    invalid_artifact("Named Value artifact set archive has trailing bytes.");
   }
   return result;
 }

@@ -457,6 +457,63 @@ TEST(ValueArtifact, RejectsAggregateAlignmentPaddingBeyondArchiveBound) {
          << ", bound=" << kMetadataLimit + kPayloadLimit;
 }
 
+/**
+ * @brief Rejects an aggregate raw-payload excess before decoder ownership
+ *        materialization begins.
+ * @return Nothing; GoogleTest reports archive construction, exception, or
+ *         production-path materialization-order mismatches.
+ * @throws Artifact capture/codec failures when the real public path cannot
+ *         complete its bounded encode or decode checks.
+ * @note Separate BUILD_TESTING-only scopes let the real encoder accept a tiny
+ *       archive that remains below the decoder's complete archive ceiling but
+ *       exceeds its narrower aggregate raw-payload limit. No test duplicates
+ *       archive sizing or span arithmetic.
+ */
+TEST(ValueArtifact,
+     RejectsAggregateRawPayloadBeforeDecoderMaterializationBegins) {
+  constexpr std::uint64_t kMetadataLimit = 16U * 1024U;
+  constexpr std::uint64_t kEncodePayloadLimit = 16U;
+  constexpr std::uint64_t kDecodePayloadLimit = 8U;
+  std::vector<std::byte> archive;
+  testing::ValueArtifactArchiveSizingObservationForTesting sizing;
+
+  {
+    testing::ScopedValueArtifactArchiveLimitsForTesting encode_limits(
+        kMetadataLimit, kEncodePayloadLimit);
+    const ValueArtifact seed =
+        capture_value_artifact("value-00", make_binary64_artifact_image(0.0));
+    NamedValueArtifactSet artifacts;
+    for (std::size_t index = 0U; index < 9U; ++index) {
+      ValueArtifact artifact = seed;
+      artifact.envelope.output_name =
+          std::string("value-0") + std::to_string(index);
+      artifacts.values.push_back(std::move(artifact));
+    }
+    archive = encode_named_value_artifact_set(artifacts);
+    sizing = encode_limits.observation();
+  }
+
+  ASSERT_TRUE(sizing.observed);
+  ASSERT_EQ(sizing.payload_bytes, 9U);
+  ASSERT_GT(sizing.payload_bytes, kDecodePayloadLimit);
+  ASSERT_LE(sizing.payload_bytes, kEncodePayloadLimit);
+  ASSERT_EQ(sizing.archive_bytes, archive.size());
+  ASSERT_LE(sizing.archive_bytes, kMetadataLimit + kDecodePayloadLimit);
+
+  testing::ScopedValueArtifactArchiveLimitsForTesting decode_limits(
+      kMetadataLimit, kDecodePayloadLimit);
+  try {
+    (void)decode_named_value_artifact_set(archive);
+    ADD_FAILURE() << "decoder accepted an aggregate raw-payload excess";
+  } catch (const std::length_error& error) {
+    EXPECT_STREQ(error.what(),
+                 "Named Value artifact payload exceeds its bound.");
+  } catch (...) {
+    ADD_FAILURE() << "decoder used the wrong exception type";
+  }
+  EXPECT_EQ(decode_limits.decode_observation().payload_materializations, 0U);
+}
+
 TEST(ValueArtifact,
      BlockedArchiveRoundTripPreservesPaddingAlignmentAndFreshIdentity) {
   const Value original = make_blocked_artifact_value();
