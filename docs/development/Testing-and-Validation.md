@@ -827,14 +827,22 @@ an exact revision-preserving device replica enters residency. V-9 additionally
 proves upload scratch returns only after completion, persistent memory remains
 through callback return and residency, capacity-one eviction returns the old
 lease, and final manager destruction returns the last lease. A tiny Perlin
-device budget rejects the complete native heap-query plan before its first
-texture/buffer allocation. The sufficient-budget path runs the real repository
-Perlin operation twice through one `ExecutionService` and proves queue
-availability, two operation submissions and executor entries, eight retired
-invocation allocations, one reused pipeline, asynchronous pending-Value
-readback to CPU-owned outputs, the dedicated Metal worker id, and zero settled
-Host and device reservations. Native `allocatedSize` is audited before command
-commit in both upload and download.
+device budget rejects the heap query's aligned persistent minimum before its
+first texture/buffer allocation. Dedicated-heap admission tests then prove
+that the query is only a minimum: one ledger root-mutex transaction reserves
+the complete currently available persistent-memory ceiling with exact
+scratch, the heap's positive `currentAllocatedSize` is the sole persistent
+actual, the heap-backed texture is not counted again, and each scratch
+resource contributes its positive `allocatedSize`. They also prove a fitting
+commit returns all unused ceiling bytes and splits exact leases, while an
+actual heap backing above the admitted plan fails with the typed
+actual-exceeds-reservation category before native retention or command commit
+and unwinds native owners plus the reservation exactly once. The
+sufficient-budget path runs the real repository Perlin operation twice
+through one `ExecutionService` and proves queue availability, two operation
+submissions and executor entries, eight retired invocation allocations, one
+reused pipeline, asynchronous pending-Value readback to CPU-owned outputs, the
+dedicated Metal worker id, and zero settled Host and device reservations.
 
 V-8 and V-9 portable cases in `test_device_residency` lock direct
 host-read versus transfer planning, exact current completion publication, late
@@ -913,10 +921,12 @@ Focused companion regressions own the remaining boundaries:
   independent saturation and exact recovery for all five Host dimensions,
   CPU/duplicate device configuration rejection, zero and exact-boundary
   device plans, atomic memory-plus-scratch rejection, per-device isolation,
-  same-device contention, plan-to-actual shrink, typed underplanning failure,
-  split memory/scratch lifetimes, move-only authority, delayed asynchronous
-  release, bounded Host child grants, deferred Host parent release, and
-  concurrent no-overcommit behavior.
+  same-device contention, minimum-query validation followed by a single-lock
+  complete-currently-available persistent ceiling, exact scratch admission,
+  plan-to-actual shrink and unused-byte return, typed underplanning rollback,
+  split exact memory/scratch lifetimes, move-only authority, delayed
+  asynchronous release, bounded Host child grants, deferred Host parent
+  release, and concurrent no-overcommit behavior.
 - `test_resource_admission` proves the exact private-route vocabulary,
   worker-limit rollback, one fixed pool per Host with independent Host
   compositions, and validation-first session route replacement that preserves

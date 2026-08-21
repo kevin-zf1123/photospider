@@ -408,13 +408,21 @@ encodes an explicit texture-to-shared-buffer blit, installs the completion
 handler, commits, and returns without `waitUntilCompleted` or `getBytes`.
 V-9 keeps the Host `ResourceVector` unchanged and adds isolated immutable
 memory/scratch accounts for each configured non-CPU `DeviceId`. Perlin and
-CPU-to-Metal upload query native heap size/alignment and reserve their complete
-plans before allocation. They audit `allocatedSize`, return unused plan bytes,
-and commit exact actual bytes before command submission. The memory lease is
-owned by the same type-erased native owner that `BufferHandle` copies and
-residency retains; scratch is owned by the exact completion object until
-terminal native handling. Residency remains a count-bounded retention owner,
-not a byte-budget authority.
+CPU-to-Metal upload treat the native heap size/alignment query as an aligned
+descriptor minimum, never as an upper bound for the dedicated heap backing.
+Before allocation, one ledger root-mutex transaction validates that minimum
+and the exact scratch plan and reserves the device's complete currently
+available persistent-memory ceiling. The dedicated heap's positive
+`currentAllocatedSize` is the sole persistent actual; its texture
+suballocation is not counted again, while each scratch resource contributes
+its own positive `allocatedSize`. A fitting commit under the same sole ledger
+mutex returns unused plan bytes and splits exact actual leases before command
+submission. Invalid or over-plan actual observations fail with a typed error,
+retire local native owners, and roll the uncommitted reservation back exactly
+once. The memory lease is owned by the same type-erased native owner that
+`BufferHandle` copies and residency retains; scratch is owned by the exact
+completion object until terminal native handling. Residency remains a
+count-bounded retention owner, not a byte-budget authority.
 
 The current-generation handoff is staged rather than allocating in the
 coordinator critical section. Kernel pretracks a zero-generation lineage row

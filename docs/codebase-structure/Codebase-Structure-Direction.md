@@ -568,11 +568,18 @@ In the current layout:
   Explicit CPU/Metal transfer, bounded residency, coherency, exact stale
   completion, and revision-preserving publication are current from issue #85.
   Issue #86 now makes each concrete non-CPU `DeviceId` an isolated
-  device-memory/scratch account: the executor atomically reserves a native
-  size/alignment plan before allocation, reconciles `allocatedSize`, and binds
-  independent memory/scratch leases to persistent Value and completion
-  lifetimes. The dependency-disabled profile installs no Metal executor and
-  therefore makes no native utilization claim;
+  device-memory/scratch account. A native heap query supplies only an aligned
+  descriptor minimum. Before allocation, one ledger root-mutex transaction
+  validates that minimum plus exact scratch and reserves the device's complete
+  currently available persistent-memory ceiling. The dedicated heap's
+  positive `currentAllocatedSize` is the sole persistent actual; its texture
+  suballocation is not counted again, while scratch uses each resource's
+  positive `allocatedSize`. A fitting commit under the same sole mutex returns
+  unused bytes and binds independent exact memory/scratch leases to persistent
+  Value and completion lifetimes. Typed invalid/over-plan failure retires local
+  native owners and rolls the uncommitted reservation back exactly once. The
+  dependency-disabled profile installs no Metal executor and therefore makes
+  no native utilization claim;
   `ExecutionService` also owns a
   policy-aware entry/byte-bounded ready store,
   checked full-vector Run admission, work/byte cost, class-local Graph and

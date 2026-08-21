@@ -483,10 +483,15 @@ fence、单调 Graph close、显式 shutdown、精确 settlement 与 source-priv
   公共 reserved-start transaction 后进入该 executor；operation 只借用已安装的 invocation
   context，不保留进程级 native resource。Issue #85 交付的显式 CPU/Metal transfer、有界
   residency、coherency、准确 stale completion 与保留 revision 的 publication 已是当前行为。
-  Issue #86 现在让每个具体非 CPU `DeviceId` 成为相互隔离的 device-memory/scratch 账户：
-  executor 在 allocation 前原子预留原生 size/alignment plan，校准 `allocatedSize`，并把彼此独立的
-  memory/scratch lease 分别绑定到持久 Value 与 completion 生命周期。Dependency-disabled
-  profile 不安装 Metal executor，因此不提出原生 utilization claim；
+  Issue #86 现在让每个具体非 CPU `DeviceId` 成为相互隔离的 device-memory/scratch 账户。
+  Native heap query 只提供对齐后的 descriptor minimum。在 allocation 前，一次 ledger
+  root-mutex transaction 会校验该 minimum 与精确 scratch，并预留该 device 当前全部可用的
+  persistent-memory ceiling。Dedicated heap 的正值 `currentAllocatedSize` 是唯一 persistent
+  actual；不会再次计入其 texture suballocation，而 scratch 会使用每项 resource 自身的正值
+  `allocatedSize`。适配 plan 的 commit 会在同一套唯一 mutex 下归还未使用的 byte，并把彼此独立的
+  精确 memory/scratch lease 分别绑定到持久 Value 与 completion 生命周期。Typed invalid/over-plan
+  failure 会退役局部 native owner，并让尚未 commit 的 reservation 准确 rollback 一次。
+  Dependency-disabled profile 不安装 Metal executor，因此不提出原生 utilization claim；
   `ExecutionService` 还拥有
   policy-aware、受 entry/byte 约束的 ready store、checked full-vector Run admission、work/byte
   cost、class-local Graph/weighted-Run 公平性、稳定 aging、三个 Interactive dispatch 的 burst

@@ -412,18 +412,25 @@ release a token.
 The current ledger validates transactional vectors for CPU slots, ready-store
 entries and bytes, retained/in-flight Host memory, and Host scratch. It also
 owns isolated immutable memory/scratch limits for each configured non-CPU
-`DeviceId`. Native allocation plans commit both dimensions atomically, return
-unused bytes after `allocatedSize` reconciliation, and split actual ownership
-between persistent native Value owners and asynchronous completion scratch.
-Device queue depth/in-flight command limits and compute-I/O operations/bytes
-remain future dimensions and are not represented by fake zero-valued
-authority. Issue #104 has added an explicit isolated-plugin vector to the same
-ledger: runtime-process slots, CPU slots, address-space bytes, shared-memory
-bytes, and descriptor count. Its one-use token binds the complete invocation
-identity and exact vector, retains a replay tombstone for the ledger lifetime,
-and settles capacity exactly once on every path. This remains a private
-direct/supervised runtime composition with no current end-user route. Current
-success, failure,
+`DeviceId`. A Metal heap query provides only an aligned descriptor minimum,
+not a preallocation upper bound. Before native allocation, one root-mutex
+transaction verifies that minimum and exact scratch, then reserves the exact
+device's complete currently available persistent-memory ceiling. The
+dedicated heap's positive `currentAllocatedSize` is the sole persistent
+actual; its texture suballocation is not counted again, while each scratch
+resource contributes its own positive `allocatedSize`. A fitting actual commit
+under the same sole mutex returns unused planned bytes and splits exact
+ownership between persistent native Value owners and asynchronous completion
+scratch. Invalid or over-plan observations fail with a typed error and unwind
+local native owners plus the uncommitted reservation exactly once. Device
+queue depth/in-flight command limits and compute-I/O operations/bytes remain
+future dimensions and are not represented by fake zero-valued authority.
+Issue #104 has added an explicit isolated-plugin vector to the same ledger:
+runtime-process slots, CPU slots, address-space bytes, shared-memory bytes, and
+descriptor count. Its one-use token binds the complete invocation identity and
+exact vector, retains a replay tombstone for the ledger lifetime, and settles
+capacity exactly once on every path. This remains a private direct/supervised
+runtime composition with no current end-user route. Current success, failure,
 rejection, rollback, replacement, worker-exception, stale completion, eviction,
 cancellation, and close/shutdown paths release every active authority exactly
 once. Capacity exhaustion and checked overflow fail without partial
@@ -635,9 +642,12 @@ checked CPU/Metal binding facts, pure explicit access planning,
 revision-preserving bidirectional transfer, process-owned residency, exact
 stale-completion arbitration, pending-Value continuation, and asynchronous
 Perlin readback. V-9 now adds isolated memory/scratch accounts only for
-executable devices in the fixed registry, admits native plans before
-allocation, reconciles allocator-reported actual bytes, and binds exact leases
-to persistent Values and asynchronous completion. V-10 ratifies typed
+executable devices in the fixed registry. It treats the heap query as a
+minimum, atomically reserves the complete currently available persistent
+ceiling with exact scratch before allocation, counts only the dedicated heap's
+`currentAllocatedSize` as persistent actual, counts each scratch
+`allocatedSize`, returns unused bytes, and binds exact leases to persistent
+Values and asynchronous completion. V-10 ratifies typed
 compute-I/O completion and keeps persistence authorities separate; V-11 runs
 the first bounded cache/codec mechanism through `ComputeIoExecutor`. V-12 now
 verifies the installed generic model across 1/3/4/8/16-channel FP32/FP64
@@ -1033,10 +1043,17 @@ A current V-9 Metal route combines process ownership, registry dispatch,
 queue/allocator/cache reuse, provider-state removal, asynchronous pending
 Values, explicit CPU/Metal transfer, process residency, and exact stale-result
 arbitration. Its sole service ledger now atomically admits per-device
-memory/scratch plans before native allocation, reconciles native actual bytes,
-binds memory to persistent Value ownership, and binds scratch to exact command
-completion. Queue, lane, and pipeline-cache infrastructure remain outside
-per-invocation accounting.
+memory/scratch plans before native allocation. A heap query contributes only
+the aligned persistent minimum; one root-mutex transaction pairs it with exact
+scratch and reserves the complete persistent-memory capacity currently
+available to that device. The dedicated heap's positive
+`currentAllocatedSize` is the sole persistent actual, its texture is not
+double-counted, and each scratch resource contributes `allocatedSize`. A
+fitting commit under the same sole mutex returns unused bytes and binds memory
+to persistent Value ownership plus scratch to exact command completion. Typed
+invalid/over-plan failure retires local native owners and rolls the
+uncommitted reservation back exactly once. Queue, lane, and pipeline-cache
+infrastructure remain outside per-invocation accounting.
 
 A GPU executor is not a second ordinary CPU worker pool. Each physical device
 executor owns its native queue/stream, allocator, in-flight limit, memory and

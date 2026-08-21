@@ -386,12 +386,19 @@ row。仍有 transfer pending 时调用退役属于 invariant failure。这项 G
 不会清除已结算的 resident replica。
 
 V-9 在不改变逻辑 Value identity 或 public binding fact 的前提下新增 byte authority。
-`ResourceLedger` 为每个已配置非 CPU `DeviceId` 拥有隔离的 memory/scratch account。Native
-plan 使用 backend size/alignment fact，actual allocation 使用 `allocatedSize`。Persistent
-device `Value` 的 type-erased external owner 会把唯一 memory lease 与 native allocation
-共同保留，因此 Value 副本与 residency 会保留而不是复制该 authority。Scratch 不进入 Value，
-而是随精确 asynchronous completion owner 延续。完成后的 HostPinned readback 在 scratch lease
-结束后继续保留其 shared Metal buffer，并将其归类为 CPU-owned output storage。
+`ResourceLedger` 为每个已配置非 CPU `DeviceId` 拥有隔离的 memory/scratch account。Metal
+texture size/alignment query 只提供 dedicated heap descriptor 的对齐后最小 request，不是 backing
+byte 的上界。在 native allocation 前，ledger 的唯一 root mutex 会原子校验该 minimum 与精确
+scratch plan，并预留该 device 当前全部可用的 persistent-memory ceiling。Allocation 后，
+dedicated heap 的正值 `currentAllocatedSize` 是唯一 persistent actual；不会再次计入
+heap-backed texture，而每项 scratch resource 都贡献自身的正值 `allocatedSize`。适配 plan 的
+commit 会在同一套唯一 mutex 下归还未使用的 ceiling，并拆分精确 persistent/scratch lease。
+无效或超过 plan 的 observation 会以 typed error 失败，让 native owner 与尚未 commit 的
+reservation 各自准确 rollback 一次。Persistent device `Value` 的 type-erased external owner
+会把唯一 memory lease 与 native allocation 共同保留，因此 Value 副本与 residency 会保留而不是
+复制该 authority。Scratch 不进入 Value，而是随精确 asynchronous completion owner 延续。
+完成后的 HostPinned readback 在 scratch lease 结束后继续保留其 shared Metal buffer，并将其
+归类为 CPU-owned output storage。
 
 V-12 针对最容易暴露 image-only 假设的维度验证这套已安装模型。dependency-neutral 矩阵覆盖
 带 padding image-faceted Value 的 1/3/4/8/16 通道与 FP32/FP64、rank-one 至 rank-five

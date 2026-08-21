@@ -478,13 +478,23 @@ maintenance does not clear settled resident replicas.
 
 V-9 adds byte authority without changing logical Value identity or public
 binding facts. `ResourceLedger` owns an isolated memory/scratch account for
-each configured non-CPU `DeviceId`. Native plans use backend size/alignment
-facts; actual allocations use `allocatedSize`. A persistent device `Value`'s
-type-erased external owner holds the unique memory lease beside its native
-allocation, so Value copies and residency retain—not duplicate—the authority.
-Scratch remains outside the Value and follows the exact asynchronous
-completion owner. A completed HostPinned readback retains its shared Metal
-buffer as CPU-owned output storage after the scratch lease ends.
+each configured non-CPU `DeviceId`. A Metal texture size/alignment query
+provides only the aligned minimum request for a dedicated heap descriptor, not
+an upper bound on backing bytes. Before native allocation, the ledger's sole
+root mutex atomically validates that minimum and the exact scratch plan and
+reserves the device's complete currently available persistent-memory ceiling.
+After allocation, the dedicated heap's positive `currentAllocatedSize` is the
+sole persistent actual; the heap-backed texture is not counted again, while
+each scratch resource contributes its positive `allocatedSize`. A fitting
+commit under the same sole mutex returns the unused ceiling and splits exact
+persistent/scratch leases. Invalid or over-plan observations fail with a typed
+error and roll native owners plus the uncommitted reservation back exactly
+once. A persistent device `Value`'s type-erased external owner holds the unique
+memory lease beside its native allocation, so Value copies and residency
+retain—not duplicate—the authority. Scratch remains outside the Value and
+follows the exact asynchronous completion owner. A completed HostPinned
+readback retains its shared Metal buffer as CPU-owned output storage after the
+scratch lease ends.
 
 V-12 verifies this installed model across the dimensions most likely to expose
 image-only assumptions. The dependency-neutral matrix covers 1/3/4/8/16

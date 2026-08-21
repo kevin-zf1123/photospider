@@ -448,17 +448,25 @@ the general ceiling after configured interactive headroom is subtracted.
 Interactive Runs do not debit this class quota, but the ledger still authorizes
 every reservation and grant and remains the sole physical-capacity authority.
 
-Device allocation follows a separate two-stage transaction under the same
-root mutex. `try_reserve_device()` admits a complete memory/scratch plan or
-nothing for one exact configured device. Metal derives that plan from native
-heap size/alignment queries before allocation, audits each allocation's
-`allocatedSize`, and commits actual bytes before command submission. Unused
-planned bytes return immediately. The resulting memory lease follows the
-type-erased native `Value` owner through copies and residency, while the
-scratch lease follows the exact command-completion owner. Neither lease is
-Run-scoped, and neither device account can borrow Host or another device's
-capacity. Queue and pipeline-cache infrastructure remains outside these
-per-invocation dimensions.
+Device allocation follows a separate two-stage transaction under the ledger's
+sole root mutex. For a dedicated Metal heap, the native texture
+size/alignment query supplies only an aligned descriptor minimum, not an upper
+bound on the backing allocation. Before the first native allocation,
+`try_reserve_device_with_memory_ceiling()` atomically verifies that minimum and
+the exact scratch plan, then reserves the complete persistent-memory capacity
+currently available to the exact configured device. Once native allocation
+facts exist, the heap's positive `currentAllocatedSize` is the sole persistent
+actual; its texture suballocation is not added again, and each scratch
+resource contributes its own positive `allocatedSize`. A fitting actual commit
+under the same sole mutex returns every unused planned byte and splits exact
+memory/scratch leases before command submission. Invalid or over-plan actual
+facts produce a typed failure, retire local native owners, and roll the
+uncommitted reservation back exactly once without publishing a lease. The
+resulting memory lease follows the type-erased native `Value` owner through
+copies and residency, while the scratch lease follows the exact
+command-completion owner. Neither lease is Run-scoped, and neither device
+account can borrow Host or another device's capacity. Queue and pipeline-cache
+infrastructure remains outside these per-invocation dimensions.
 Throughput quota check, ledger reservation, and class charge are one serialized transaction. The
 non-authoritative class charge is removed only at exact physical root release,
 including when live child grants defer that release.

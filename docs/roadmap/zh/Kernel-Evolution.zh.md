@@ -332,14 +332,20 @@ registry/lane lock cycle。
 
 当前 ledger 会验证 CPU slot、ready-store entry/byte、retained/in-flight Host memory 与 Host
 scratch 的事务性 vector。它还为每个已配置非 CPU `DeviceId` 拥有隔离且 immutable 的
-memory/scratch limit。Native allocation plan 会原子提交两个 dimension，在 `allocatedSize`
-校准后归还未使用 byte，并把 actual ownership 拆分给 persistent native Value owner 与
-asynchronous completion scratch。Device queue depth/in-flight command limit 与 compute-I/O
-operation/byte 仍是未来维度，当前不会用虚假的零值 authority 表示。Issue #104 已经向同一 ledger
-增加显式 isolated-plugin vector：runtime-process slot、CPU slot、address-space byte、shared-memory
-byte 与 descriptor count。其一次性 token 绑定完整 invocation identity 与精确 vector，在 ledger
-生命周期内保留 replay tombstone，并在每条路径只结算一次 capacity。该能力仍是没有当前最终用户
-route 的私有 direct/supervised runtime 组合。当前 success、failure、
+memory/scratch limit。Metal heap query 只提供对齐后的 descriptor minimum，不是 preallocation
+上界。在 native allocation 前，一次 root-mutex transaction 会校验该 minimum 与精确 scratch，
+然后预留该确切 device 当前全部可用的 persistent-memory ceiling。Dedicated heap 的正值
+`currentAllocatedSize` 是唯一 persistent actual；不会再次计入其 texture suballocation，而每项
+scratch resource 都贡献自身的正值 `allocatedSize`。适配 plan 的 actual commit 会在同一套唯一
+mutex 下归还未使用的 planned byte，并把精确 ownership 拆分给 persistent native Value owner 与
+asynchronous completion scratch。无效或超过 plan 的 observation 会以 typed error 失败，并让
+局部 native owner 与尚未 commit 的 reservation 各自准确 unwind 一次。Device queue depth/
+in-flight command limit 与 compute-I/O operation/byte 仍是未来维度，当前不会用虚假的零值
+authority 表示。Issue #104 已经向同一 ledger 增加显式 isolated-plugin vector：runtime-process
+slot、CPU slot、address-space byte、shared-memory byte 与 descriptor count。其一次性 token 绑定
+完整 invocation identity 与精确 vector，在 ledger 生命周期内保留 replay tombstone，并在每条路径
+只结算一次 capacity。该能力仍是没有当前最终用户 route 的私有 direct/supervised runtime 组合。
+当前 success、failure、
 rejection、rollback、replacement、worker-exception、stale completion、eviction、cancellation 与
 close/shutdown path 都会恰好一次释放每份 active authority。Capacity exhaustion 与 checked
 overflow 会在无 partial reservation、overcommit、跨 device 借用或 silent clamping 的情况下失败。
@@ -503,8 +509,10 @@ device/queue、invocation-scoped allocator 与持久 pipeline cache。V-8 现已
 CPU/Metal binding fact、纯显式 access planning、保留 revision 的双向 transfer、进程级
 residency、精确 stale-completion arbitration、pending-Value continuation 与 asynchronous
 Perlin readback。V-9 现已新增仅面向 fixed registry 中可执行设备的隔离 memory/scratch
-account，在 allocation 前准入 native plan，与 allocator 上报的 actual byte 对账，并把精确
-lease 绑定到 persistent Value 与 asynchronous completion。V-10 批准 typed compute-I/O
+account。它把 heap query 只当作 minimum，在 allocation 前原子预留当前全部可用的 persistent
+ceiling 与精确 scratch，只把 dedicated heap 的 `currentAllocatedSize` 计为 persistent actual，
+按每项 scratch 的 `allocatedSize` 计费，归还未使用 byte，并把精确 lease 绑定到 persistent
+Value 与 asynchronous completion。V-10 批准 typed compute-I/O
 completion 并让 persistence authority 保持分离；V-11 通过 `ComputeIoExecutor` 运行首条有界
 cache/codec mechanism。V-12 现在会验证已安装通用模型中的 1/3/4/8/16 通道 FP32/FP64
 image、rank-one 至 rank-five FP32/FP64 latent Value、padded 与 signed/zero stride、精确
@@ -821,9 +829,14 @@ isolation protocol v2。DI-4 实现 named Host/IPC result、worker 与 durable V
 当前 V-9 Metal route 组合了 process ownership、registry dispatch、queue/allocator/cache 复用、
 provider-state 移除、asynchronous pending Value、显式 CPU/Metal transfer、进程级 residency 与
 精确 stale-result arbitration。它的唯一 service ledger 现在会在 native allocation 前原子准入
-per-device memory/scratch plan、校准 native actual byte、把 memory 绑定到 persistent Value
-ownership，并把 scratch 绑定到精确 command completion。Queue、lane 与 pipeline-cache
-infrastructure 仍不属于 per-invocation 核算。
+per-device memory/scratch plan。Heap query 只贡献对齐后的 persistent minimum；一次 root-mutex
+transaction 会把它与精确 scratch 配对，并预留该 device 当前全部可用的 persistent-memory
+capacity。Dedicated heap 的正值 `currentAllocatedSize` 是唯一 persistent actual，不会重复计入
+其 texture，而每项 scratch resource 都贡献 `allocatedSize`。适配 plan 的 commit 会在同一套唯一
+mutex 下归还未使用 byte，并把 memory 绑定到 persistent Value ownership、把 scratch 绑定到精确
+command completion。Typed invalid/over-plan failure 会退役局部 native owner，并让尚未 commit 的
+reservation 准确 rollback 一次。Queue、lane 与 pipeline-cache infrastructure 仍不属于
+per-invocation 核算。
 
 GPU executor 不是第二个普通 CPU worker pool。每个物理 device executor 拥有 native queue/stream、
 allocator、in-flight limit、memory/scratch reservation、pipeline cache、transfer queue 和 completion

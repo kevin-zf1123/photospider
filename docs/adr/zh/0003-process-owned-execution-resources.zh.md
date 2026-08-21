@@ -105,10 +105,17 @@ scalar candidate snapshot。
 device-executor registry、显式 CPU/Metal transfer、精确进程级 residency，以及权威的
 per-`DeviceId` memory/scratch 核算。在仓库 Metal provider 已启用的 profile 中，Apple entry 会拥有并
 复用 native device/queue 与经过校验的 pipeline cache，而每次 entry 都获得 invocation-scoped
-native allocator。在进行 native allocation 前，Perlin 与 CPU-to-Metal upload 会根据 Metal heap
-size/alignment query 原子预留完整 device plan。Native `allocatedSize` fact 会在 command commit
-前校准该 plan：未使用的字节立即归还，persistent memory lease 移入 native `Value` owner，
-scratch lease 移入精确的 command-completion owner。Perlin 会发布 pending native Value、
+native allocator。在进行 native allocation 前，Perlin 与 CPU-to-Metal upload 只把 Metal heap
+size/alignment query 用作对齐后的最小 `MTLHeapDescriptor` request；该 query 不是 dedicated heap
+backing 的上界。Executor 会在一次 `ResourceLedger` root-mutex transaction 中校验该 persistent
+minimum 与精确 scratch plan，然后预留该确切 `DeviceId` 当前全部可用的 persistent-memory
+capacity。分配后，dedicated heap 的正值 `currentAllocatedSize` 是唯一 persistent actual；不会再把
+heap-backed texture 的 `allocatedSize` 重复计入，而每项 scratch resource 都贡献自身的正值
+`allocatedSize`。适配 plan 的 actual commit 会在同一套唯一 ledger mutex 下立即归还每个未使用的
+planned byte，并把精确 persistent/scratch lease 分别交给 native `Value` 与 command-completion
+owner。无效或超过 plan 的 actual observation 会在 command commit 或所有权逸出前以 typed
+resource error 失败，随后局部 native owner 与尚未 commit 的 reservation 各自准确 unwind 一次。
+Perlin 会发布 pending native Value、
 编码 texture-to-buffer readback，并且不等待 command buffer 就返回。Completion freshness、
 适用的 producer Ready publication、destination Ready publication 与 resident insertion 是一个
 由 manager lock 保护的事务。Kernel 会先在可失败的 coordinator submission 前预跟踪 lineage，

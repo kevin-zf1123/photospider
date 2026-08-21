@@ -332,11 +332,17 @@ Mismatched 与 duplicate identity 不能消费或重新发布另一条 admission
 显式 texture-to-shared-buffer blit、安装 completion handler、commit 并立即返回，不再调用
 `waitUntilCompleted` 或 `getBytes`。V-9 保持 Host `ResourceVector` 不变，并为每个已配置的
 非 CPU `DeviceId` 新增隔离且 immutable 的 memory/scratch account。Perlin 与 CPU-to-Metal
-upload 会查询 native heap size/alignment，并在 allocation 前预留完整 plan。它们会审计
-`allocatedSize`、归还未使用的 plan byte，并在 command submission 前提交精确 actual byte。
-Memory lease 由 `BufferHandle` 会复制、residency 会保留的同一个 type-erased native owner
-拥有；scratch 由精确 completion object 保留到 terminal native handling 结束。Residency
-仍是按 entry 数量有界的 retention owner，不是 byte-budget authority。
+upload 只把 native heap size/alignment query 视为对齐后的 descriptor minimum，绝不把它当作
+dedicated heap backing 的上界。在 allocation 前，一次 ledger root-mutex transaction 会校验该
+minimum 与精确 scratch plan，并预留该 device 当前全部可用的 persistent-memory ceiling。
+Dedicated heap 的正值 `currentAllocatedSize` 是唯一 persistent actual；不会再次计入其 texture
+suballocation，而每项 scratch resource 都贡献自身的正值 `allocatedSize`。适配 plan 的 commit
+会在同一套唯一 ledger mutex 下归还未使用的 plan byte，并在 command submission 前拆分精确
+actual lease。无效或超过 plan 的 actual observation 会以 typed error 失败，退役局部 native
+owner，并让尚未 commit 的 reservation 准确 rollback 一次。Memory lease 由 `BufferHandle` 会
+复制、residency 会保留的同一个 type-erased native owner 拥有；scratch 由精确 completion object
+保留到 terminal native handling 结束。Residency 仍是按 entry 数量有界的 retention owner，不是
+byte-budget authority。
 
 Current-generation handoff 会分阶段完成，而不会在 coordinator critical section 中
 allocation。Kernel 会在提交 publication 前预跟踪一个零 generation lineage row。只有
