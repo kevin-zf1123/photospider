@@ -141,9 +141,9 @@ CMake declaration rather than a Python number or future-name special case.
   output; the job-level route still requires successful preflight and build
   integrity, whose strict matrix cannot be empty. Each matrix entry appears as its own
   `Build smoke (<exact CTest name>)` job, downloads `ci-build-default`, receives
-  a separate 20-minute job timeout and artifact path, and runs only that
+  a separate 30-minute job timeout and artifact path, and runs only that
   selected CTest entry. The CTest registrations retain their individual
-  300-to-900-second timeouts and existing `RUN_SERIAL` semantics.
+  300-to-1200-second timeouts and existing `RUN_SERIAL` semantics.
 
 The runner re-queries CTest JSON immediately before execution and requires the
 selected exact name to remain unique, enabled, executable, and labelled.

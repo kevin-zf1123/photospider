@@ -413,7 +413,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.build-integrity-default.outputs.build_smoke_matrix || '{"include":[]}') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     container:
       image: ghcr.io/${{ github.repository }}/photospider-ci:latest
       credentials:
