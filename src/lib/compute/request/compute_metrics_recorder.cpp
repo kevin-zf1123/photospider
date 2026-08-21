@@ -234,6 +234,8 @@ Scalar read_scalar(const std::byte* bytes) noexcept {
  * @return Nothing.
  * @throws std::out_of_range only if internal validated coordinate iteration
  * diverges from the immutable descriptor.
+ * @throws std::bad_alloc when ImageView::channel_data cannot allocate its
+ * per-sample full-rank logical-coordinate vector.
  * @note ImageView resolves arbitrary signed strides and skips every padding or
  * non-logical byte. No compatibility projection is allocated.
  */
@@ -258,8 +260,12 @@ void inspect_typed_pixels(const ImageView& view, PixelStatistics* statistics) {
  * @throws std::invalid_argument for an unsupported semantics/width pair.
  * @throws ReadyFenceAccessError, BufferAccessError, or std::out_of_range from
  * checked view access.
- * @throws std::bad_alloc when complete ImageFacet view metadata allocates.
- * @note No provider conversion or compatibility snapshot is performed.
+ * @throws std::bad_alloc when ImageView cannot copy complete ImageFacet
+ * metadata or ImageView::channel_data cannot allocate a per-sample full-rank
+ * logical-coordinate vector.
+ * @note No provider conversion, sample-domain normalization, or compatibility
+ * snapshot is performed. Native UINT32 samples promote exactly to the binary64
+ * diagnostic range.
  */
 PixelStatistics inspect_cpu_pixels(const Value& value) {
   ImageView view(value);
@@ -279,6 +285,10 @@ PixelStatistics inspect_cpu_pixels(const Value& value) {
   } else if (descriptor.element_semantics == ElementSemantics::SignedInteger &&
              bits == 16U) {
     inspect_typed_pixels<std::int16_t>(view, &statistics);
+  } else if (descriptor.element_semantics ==
+                 ElementSemantics::UnsignedInteger &&
+             bits == 32U) {
+    inspect_typed_pixels<std::uint32_t>(view, &statistics);
   } else if (descriptor.element_semantics == ElementSemantics::FloatingPoint &&
              bits == 32U) {
     inspect_typed_pixels<float>(view, &statistics);
@@ -299,7 +309,9 @@ PixelStatistics inspect_cpu_pixels(const Value& value) {
  * @throws std::invalid_argument for unsupported image element facts.
  * @throws ReadyFenceAccessError, BufferAccessError, or std::out_of_range from
  * checked Value access.
- * @throws std::bad_alloc when complete ImageFacet view metadata allocates.
+ * @throws std::bad_alloc when ImageView cannot copy complete ImageFacet
+ * metadata or ImageView::channel_data cannot allocate a per-sample full-rank
+ * logical-coordinate vector.
  * @note Absent, pending, failed, cancelled, or non-host-visible Values retain
  * operation-provided statistics. Ready host-visible samples are scanned
  * through ImageView and padding is never interpreted. An all-NaN active
@@ -339,7 +351,10 @@ void populate_debug_statistics(NodeOutput& output) {
  * unrepresentable.
  * @throws ReadyFenceAccessError, BufferAccessError, or std::out_of_range when
  * a Ready host-visible Value cannot provide a checked logical sample.
- * @throws std::bad_alloc if view metadata or the device label cannot allocate.
+ * @throws std::bad_alloc if ImageView cannot copy complete ImageFacet metadata
+ * or ImageView::channel_data cannot allocate a per-sample full-rank
+ * logical-coordinate vector, or if diagnostic device-label storage cannot
+ * allocate.
  * @note Spatial inheritance occurs before timestamp, worker, duration, and
  *       device publication. A spatial fallback conversion failure leaves the
  *       original space, debug metadata, and named Values unchanged. Debug
@@ -348,9 +363,10 @@ void populate_debug_statistics(NodeOutput& output) {
  *       `enable_timing`. Pending Values expose device metadata through
  *       representation-neutral indexed StorageBinding inspection without
  *       payload access and retain callback-provided statistics until a later
- *       Ready observation. ImageView walks logical samples and ignores
- *       padding; opaque backend statistics remain untouched without a device
- *       adapter.
+ *       Ready observation. Native UINT32 samples are promoted exactly to
+ *       binary64 min/max diagnostics without sample-domain normalization.
+ *       ImageView walks logical samples and ignores padding; opaque backend
+ *       statistics remain untouched without a device adapter.
  */
 void ComputeMetricsRecorder::finalize_output_metadata(
     NodeOutput& output, const std::vector<const NodeOutput*>& inputs,

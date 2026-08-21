@@ -32,7 +32,10 @@ class ComputeMetricsRecorder {
    * unrepresentable.
    * @throws ReadyFenceAccessError, BufferAccessError, or std::out_of_range if
    * checked Value inspection cannot access a logical sample.
-   * @throws std::bad_alloc if diagnostic device-label storage cannot allocate.
+   * @throws std::bad_alloc if ImageView cannot copy complete ImageFacet
+   * metadata or ImageView::channel_data cannot allocate a per-sample full-rank
+   * logical-coordinate vector, or if diagnostic device-label storage cannot
+   * allocate.
    * @note A default output spatial context inherits from the first live input,
    *       resets its local inverse transform, and completes an empty absolute
    *       ROI from output bounds. A fallback conversion failure leaves the
@@ -44,10 +47,11 @@ class ComputeMetricsRecorder {
    *       ProviderDefined and non-Ready DenseTensor Values require no payload
    *       access. Pixel statistics are inspected only for Ready host-visible
    *       named image Values. Inspection uses ImageView logical coordinates
-   *       and excludes padding. Compatibility staging is never read. An
-   *       all-NaN active payload retains the legacy positive/negative infinity
-   *       empty-range sentinels; opaque/non-Ready resources retain
-   *       callback-provided values.
+   *       and excludes padding. Native UINT32 samples are promoted exactly
+   *       to binary64 min/max diagnostics without sample-domain normalization.
+   *       Compatibility staging is never read. An all-NaN active payload
+   *       retains the legacy positive/negative infinity empty-range sentinels;
+   *       opaque/non-Ready resources retain callback-provided values.
    */
   static void finalize_output_metadata(
       NodeOutput& output, const std::vector<const NodeOutput*>& inputs,

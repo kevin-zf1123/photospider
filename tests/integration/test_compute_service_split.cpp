@@ -506,6 +506,59 @@ NodeOutput make_image_output(int width, int height, int channels = 1,
 }
 
 /**
+ * @brief Publishes exact row-major UINT32 code values as one canonical image.
+ * @param width Positive image width.
+ * @param height Positive image height.
+ * @param channels Positive interleaved channel count.
+ * @param samples Exact row-major interleaved UINT32 payload.
+ * @return NodeOutput containing one sealed canonical `image` Value.
+ * @throws std::invalid_argument for invalid dimensions or sample count.
+ * @throws Allocation, overflow, Value validation, or publication exceptions
+ * unchanged.
+ * @note The fixture matches ordinary OpenEXR UINT storage: native 32-bit
+ *       unsigned elements with a CodeValue `[0, UINT32_MAX]` domain. No sample
+ *       conversion or normalization is requested or performed.
+ */
+NodeOutput make_uint32_sampled_image_output(
+    int width, int height, int channels, std::vector<std::uint32_t> samples) {
+  if (width <= 0 || height <= 0 || channels <= 0) {
+    throw std::invalid_argument(
+        "split UINT32 image fixture dimensions are invalid");
+  }
+  const std::size_t image_width = static_cast<std::size_t>(width);
+  const std::size_t image_height = static_cast<std::size_t>(height);
+  const std::size_t image_channels = static_cast<std::size_t>(channels);
+  if (samples.size() != image_width * image_height * image_channels) {
+    throw std::invalid_argument(
+        "split UINT32 image fixture sample count is invalid");
+  }
+
+  std::vector<std::byte> storage(samples.size() * sizeof(std::uint32_t));
+  std::memcpy(storage.data(), samples.data(), storage.size());
+  DenseTensorDescriptor descriptor{{image_height, image_width, image_channels},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain = SampleDomainFacet{
+      1U,
+      SampleEncoding{1U, SampleEncodingKind::CodeValue},
+      SampleDomain{
+          SampleDomainKind::CodeValue, 0.0,
+          static_cast<double>(std::numeric_limits<std::uint32_t>::max())},
+      {}};
+  NodeOutput output;
+  output.publish_image_value(Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{
+          {static_cast<std::ptrdiff_t>(image_width * image_channels *
+                                       sizeof(std::uint32_t)),
+           static_cast<std::ptrdiff_t>(image_channels * sizeof(std::uint32_t)),
+           static_cast<std::ptrdiff_t>(sizeof(std::uint32_t))}},
+      std::move(storage)));
+  return output;
+}
+
+/**
  * @brief Publishes one Ready generic CPU DenseTensor without ImageFacet.
  * @param value Byte-fill seed retained only to distinguish test revisions.
  * @return Valid Ready one-dimensional DenseTensor Value.
@@ -4180,6 +4233,60 @@ TEST(ComputeMetricsRecorderSplit, FinalizesMetadataAndDebugStatistics) {
     EXPECT_DOUBLE_EQ(backend.debug.min_val, 12.0);
     EXPECT_DOUBLE_EQ(backend.debug.max_val, 34.0);
   }
+}
+
+/**
+ * @brief Proves timing statistics inspect native UINT32 code values exactly.
+ * @return Nothing; GoogleTest reports dispatch, extrema, or payload failures.
+ * @throws Fixture publication and metrics finalization exceptions unchanged.
+ * @note The debug schema exposes min/max/non-finite fields but no mean. The
+ *       test derives a mean from the unchanged native payload as an independent
+ *       oracle that no implicit OpenEXR-style normalization or mutation
+ *       occurred while the production timing seam inspected the Value.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     InspectsUint32CodeValuesWithoutNormalization) {
+  const std::vector<std::uint32_t> expected_samples{
+      0U, 65535U, 4000000000U, std::numeric_limits<std::uint32_t>::max()};
+  NodeOutput output =
+      make_uint32_sampled_image_output(2, 2, 1, expected_samples);
+  const ValueRevisionId original_revision = output.image_value().revision_id();
+
+  const DenseTensorDescriptor& descriptor =
+      output.image_value().dense_tensor_descriptor();
+  ASSERT_EQ(descriptor.element_semantics, ElementSemantics::UnsignedInteger);
+  ASSERT_EQ(descriptor.storage_encoding, StorageEncoding{32U});
+  ASSERT_TRUE(output.image_value().image_facet()->sample_domain.has_value());
+  const SampleDomainFacet& sample_domain =
+      *output.image_value().image_facet()->sample_domain;
+  ASSERT_EQ(sample_domain.encoding.kind, SampleEncodingKind::CodeValue);
+  EXPECT_DOUBLE_EQ(sample_domain.default_domain.minimum, 0.0);
+  EXPECT_DOUBLE_EQ(
+      sample_domain.default_domain.maximum,
+      static_cast<double>(std::numeric_limits<std::uint32_t>::max()));
+
+  ASSERT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      output, {}, true, 7.0));
+  EXPECT_EQ(output.debug.compute_device, "CPU");
+  EXPECT_DOUBLE_EQ(output.debug.min_val, 0.0);
+  EXPECT_DOUBLE_EQ(
+      output.debug.max_val,
+      static_cast<double>(std::numeric_limits<std::uint32_t>::max()));
+  EXPECT_FALSE(output.debug.has_nan);
+  EXPECT_EQ(output.image_value().revision_id(), original_revision);
+
+  const ImageView view(output.image_value());
+  std::uint64_t sum = 0U;
+  for (std::size_t index = 0U; index < expected_samples.size(); ++index) {
+    const std::size_t x = index % view.width();
+    const std::size_t y = index / view.width();
+    std::uint32_t observed = 0U;
+    std::memcpy(&observed, view.channel_data(x, y, 0U), sizeof(observed));
+    EXPECT_EQ(observed, expected_samples[index]);
+    sum += observed;
+  }
+  EXPECT_DOUBLE_EQ(static_cast<double>(sum) / expected_samples.size(),
+                   2073758207.5);
 }
 
 /**
