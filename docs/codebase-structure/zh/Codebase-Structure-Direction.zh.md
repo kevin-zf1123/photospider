@@ -415,8 +415,8 @@ CMake 规则：
   `embedded` 的 backend dependency 不可用时，该 component 会成为 not-found，但不会使 required
   IPC component 无效。Unknown required component 会失败；IPC-disabled install 中的 required
   IPC component 也会失败。
-- 在 Apple 平台启用仓库 Metal/OpenCV operation-plugin profile 时，静态产品会为进程拥有的
-  Metal executor 携带系统 `Metal` 与 `Foundation` framework 链接标志。Metal operation plugin
+- 在 Apple 平台启用仓库 Metal-provider/OpenCV-operation-plugin profile 时，静态产品会为进程拥有的
+  Metal executor 携带系统 `Metal` 与 `Foundation` framework 链接标志。Metal operation provider
   借用该 executor 的 invocation context，不再依赖 `CoreImage` 或 `CoreVideo`。Dependency-disabled
   profile 会编译 stub factory，不向 registry 安装 Metal executor，也不会增加 Metal framework
   requirement。
@@ -477,7 +477,7 @@ fence、单调 Graph close、显式 shutdown、精确 settlement 与 source-priv
 - 当前 request-owned `RunGroup` coordination 让 HP 与 RT 保持为独立 Run，只在两个 child 按确定性
   规则 settle 后返回 RT output，并且绝不创建 cross-domain task dependency；
 - 当前 `ExecutionService` 拥有一个固定 CPU worker pool、私有 `serial_debug`/`gpu_pipeline` 行为、
-  一个 Host 与逐设备权威 ledger、固定 `DeviceExecutorRegistry`，并且在启用仓库 Metal plugin
+  一个 Host 与逐设备权威 ledger、固定 `DeviceExecutorRegistry`，并且在启用仓库 Metal provider
   的 Apple profile 中拥有一个进程级 Metal executor。该 executor 拥有 command queue、
   invocation-scoped native-allocation facade 与经过验证的持久 pipeline cache。GPU work 只会在
   公共 reserved-start transaction 后进入该 executor；operation 只借用已安装的 invocation

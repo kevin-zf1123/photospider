@@ -512,8 +512,9 @@ composition entry point is
 `src/lib/providers/configured_operation_providers.cpp`; when enabled, the
 optional provider under `src/lib/providers/opencv/` registers the OpenCV image
 algorithms and owns their process policy and exception translation. Runtime
-plugin examples live in `plugins/ops/`; the Metal operation implementation is
-private to `plugins/ops/metal/`. Dynamic operation plugins use numeric ABI-v1
+plugin examples live in `plugins/ops/`; the build-configured Metal operation
+provider implementation is private to `plugins/ops/metal/` and is not a DSO.
+Dynamic operation plugins use numeric ABI-v1
 discovery followed by exact root and suite records. Their pure-C callbacks
 receive bounded configuration/input/plan/grant records and no mutable `Node`,
 `GraphModel`, `OpRegistry`, YAML tree, or private cache owner.

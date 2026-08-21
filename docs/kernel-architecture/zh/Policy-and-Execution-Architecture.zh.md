@@ -280,7 +280,7 @@ state 与 source-private `ValueTransferTask` 都不拥有 worker 或 queue。仓
 transfer-destruction/callback-entry 竞争。
 
 V-7 在同一个 `ExecutionService` domain 中增加 source-private 的固定
-`DeviceExecutorRegistry`。仓库 Metal plugin 启用时，Apple entry 拥有一个 device 与 command
+`DeviceExecutorRegistry`。仓库 Metal provider profile 启用时，Apple entry 拥有一个 device 与 command
 queue，提供 invocation-scoped texture/buffer allocator，并保留经过校验的 process-lifetime
 pipeline cache。
 Reserved-start worker 会同步进入该 executor，并通过同一条 Run completion/exception path 调用

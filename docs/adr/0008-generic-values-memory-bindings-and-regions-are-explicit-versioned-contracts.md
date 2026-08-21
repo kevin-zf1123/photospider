@@ -381,7 +381,7 @@ source readiness and publishes a distinct destination.
 
 The implemented V-7 subset adds a separate source-private
 `DeviceExecutorRegistry` under `ExecutionService`. In the enabled repository
-Metal-plugin profile, its Apple executor owns one native device and queue, one
+Metal-provider profile, its Apple executor owns one native device and queue, one
 callback-scoped texture/buffer allocator, and a validated persistent pipeline
 cache. Reserved-start work invokes the
 Metal Perlin provider inside that borrowed context and returns an independent

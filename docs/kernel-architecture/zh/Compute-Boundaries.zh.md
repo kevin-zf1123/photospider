@@ -181,7 +181,7 @@ grant 或 device identity。确定性且线程安全的 fake executor 与仅用�
 竞争 rendezvous 归测试所有。
 
 V-7 在 `ExecutionService` 中增加 source-private 的固定 `DeviceExecutorRegistry`。仓库 Metal
-plugin 启用时，Apple executor 拥有并复用 device、command queue 与经过校验的
+provider profile 启用时，Apple executor 拥有并复用 device、command queue 与经过校验的
 compute-pipeline cache；一个
 callback-scoped allocator 会保留 texture 与 buffer，直到 provider 返回。经过 reserved start 的
 Metal submission 会同步进入匹配 executor，并使用同一条 Run completion/exception/retirement
@@ -242,8 +242,10 @@ texture-to-buffer blit，不调用
 authority 保留在 service ledger 内，而不是放进 residency 或 Run。
 
 Metal 会在首个 allocation 前通过 native heap texture/buffer size-and-alignment query 得到完整
-preallocation plan。Actual `MTLResource::allocatedSize` 必须在 command commit 前适配这份原子
-plan。随后该 plan 会变成两个唯一 owner：persistent memory 随 type-erased native `Value`
+preallocation plan。由于 direct-resource `allocatedSize` 可能大于 heap suballocation size，direct
+texture plan 会把 query size 对齐到 query alignment 与进程 VM page granularity 中较严格的一项。
+Actual `MTLResource::allocatedSize` 必须在 command commit 前适配这份原子 plan。随后该 plan 会变成
+两个唯一 owner：persistent memory 随 type-erased native `Value`
 owner 跨副本与 residency 延续，scratch 则随精确 command-completion object 跨 success、
 native failure、stale/rejected publication 与 callback unwind 延续。未使用的 planned byte 会在
 actual commit 时归还。Device account 按完整 `DeviceId` 隔离，不借用 Host 容量，并提供复制式

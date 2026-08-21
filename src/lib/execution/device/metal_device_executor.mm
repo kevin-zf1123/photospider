@@ -2,6 +2,7 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <condition_variable>
@@ -1382,10 +1383,17 @@ class MetalDeviceExecutor final : public DeviceExecutor {
     }
 
     /**
-     * @brief Queries the native heap plan for one exact texture descriptor.
+     * @brief Builds a conservative direct-allocation texture byte plan.
      * @param descriptor Non-null descriptor later used for allocation.
-     * @return Positive native physical plan bytes.
-     * @throws DeviceResourceError when the native query is invalid.
+     * @return Positive native heap size rounded to the stricter of the reported
+     *         texture alignment and process VM-page granularity.
+     * @throws DeviceResourceError when native size/alignment/page facts are
+     *         invalid or rounding overflows the ledger scalar.
+     * @note `heapTextureSizeAndAlignWithDescriptor` describes heap
+     *       suballocation. A direct `newTextureWithDescriptor` may report a
+     *       larger page-granular `allocatedSize`, so the preallocation plan
+     *       conservatively includes that native allocator granularity while
+     *       actual commit still returns every unused byte.
      */
     std::uint64_t planned_texture_bytes(
         MTLTextureDescriptor* descriptor) const {
@@ -1395,7 +1403,35 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       }
       const MTLSizeAndAlign size_and_align =
           [executor_.device_ heapTextureSizeAndAlignWithDescriptor:descriptor];
-      return checked_native_size(size_and_align.size, "texture plan");
+      const std::uint64_t size =
+          checked_native_size(size_and_align.size, "texture plan");
+      const std::uint64_t query_alignment =
+          checked_native_size(size_and_align.align, "texture alignment");
+      const std::int64_t page_size =
+          static_cast<std::int64_t>(sysconf(_SC_PAGESIZE));
+      if (page_size <= 0) {
+        throw DeviceResourceError(DeviceResourceErrorCode::InvalidNativeSize,
+                                  device_id(), planned_resources_,
+                                  actual_resources_,
+                                  "Metal reported an invalid process page size "
+                                  "for texture planning.");
+      }
+      const std::uint64_t page_alignment =
+          static_cast<std::uint64_t>(page_size);
+      const std::uint64_t allocation_alignment =
+          query_alignment < page_alignment ? page_alignment : query_alignment;
+      const std::uint64_t remainder = size % allocation_alignment;
+      if (remainder == 0U) {
+        return size;
+      }
+      const std::uint64_t padding = allocation_alignment - remainder;
+      if (size > std::numeric_limits<std::uint64_t>::max() - padding) {
+        throw DeviceResourceError(
+            DeviceResourceErrorCode::InvalidNativeSize, device_id(),
+            planned_resources_, actual_resources_,
+            "Metal texture allocation plan overflowed native granularity.");
+      }
+      return size + padding;
     }
 
     /**

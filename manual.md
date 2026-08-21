@@ -495,17 +495,13 @@ resolved from the current working directory, and the graph cache root becomes
 `<cache_root_dir>/<graph_name>`. Lower-level `Kernel` callers that omit this
 setting continue to use the session-local `sessions/<name>/cache` fallback.
 
-Metal operation plugins are manual config entries, not generated defaults. On
-macOS, CMake places the Metal loader plugin in `build/high_performance/metal`
-and its implementation library under `build/high_performance/metal/ops`. Add the
-loader directory to `plugin_dirs` before starting `graph_cli` if
-`image_generator:perlin_noise_metal` should be scanned and registered:
-
-```yaml
-plugin_dirs:
-  - build/plugins
-  - build/high_performance/metal
-```
+Metal Perlin is a build-configured Host-private provider, not an operation DSO.
+On macOS, enabling the repository OpenCV operation-plugin profile also compiles
+`image_generator:perlin_noise_metal` into the embedded product and registers it
+automatically through the configured-provider composition boundary. It borrows
+the process-owned Metal executor and its callback-scoped context; no Metal
+loader directory belongs in `plugin_dirs`, and pure-C operation ABI v1 remains
+synchronous CPU-only.
 
 ## 11. Built-In Operations
 
@@ -519,6 +515,7 @@ OpenCV-backed entries are provided by the optional
 | `image_source` | `path` | Load an image from a local path. |
 | `image_generator` | `constant` | Create a constant image. |
 | `image_generator` | `perlin_noise` | Generate a Perlin noise image. |
+| `image_generator` | `perlin_noise_metal` | Generate Perlin noise through the build-configured macOS Metal provider. |
 | `analyzer` | `get_dimensions` | Emit width and height metadata. |
 | `math` | `divide` | Divide numeric operands. |
 | `image_process` | `convolve` | Apply a convolution kernel image. |
@@ -533,10 +530,9 @@ OpenCV-backed entries are provided by the optional
 
 Plugin examples from `plugins/ops/` add `image_process:invert` and
 `image_process:threshold`. File output belongs to the explicit `save` CLI/
-codec path; the former side-effecting `io:save` plugin has been removed. On
-macOS, Metal builds also produce
-`image_generator:perlin_noise_metal`, but it is only scanned when
-`build/high_performance/metal` is manually present in `plugin_dirs`.
+codec path; the former side-effecting `io:save` plugin has been removed. The
+Metal Perlin source also lives below `plugins/ops/`, but CMake compiles it into
+the configured Host product instead of producing or scanning an operation DSO.
 
 ## 12. Validation
 

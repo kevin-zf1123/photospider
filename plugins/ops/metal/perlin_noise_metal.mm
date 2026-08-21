@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "execution/device/device_execution_context.hpp"
@@ -272,6 +273,116 @@ void execute_perlin_noise_metal(const Node& node) {
               static_cast<std::uint32_t>(height));
         });
   }
+}
+
+namespace {
+
+/**
+ * @brief Preserves downstream dirty demand for the Metal source generator.
+ *
+ * @param node Unused operation node.
+ * @param downstream_roi Requested output dirty rectangle.
+ * @param graph Unused graph snapshot.
+ * @param output_extent Unused output extent.
+ * @param input_extents Unused source-input extents; the generator has none.
+ * @param parameters Unused effective parameters.
+ * @param inputs Unused resolved input snapshots.
+ * @return Unchanged requested output rectangle.
+ * @throws Nothing.
+ * @note The provider is monolithic HP work; this explicit callback records
+ *       generator coordinate identity without introducing tiled execution.
+ */
+PixelRect perlin_metal_dirty_roi(
+    const Node& node, const PixelRect& downstream_roi, const GraphModel& graph,
+    const PixelSize& output_extent, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters,
+    const std::vector<const NodeOutput*>* inputs) noexcept {
+  (void)node;
+  (void)graph;
+  (void)output_extent;
+  (void)input_extents;
+  (void)parameters;
+  (void)inputs;
+  return downstream_roi;
+}
+
+/**
+ * @brief Preserves upstream change coordinates for the Metal source generator.
+ *
+ * @param node Unused operation node.
+ * @param upstream_roi Changed output-space rectangle.
+ * @param graph Unused graph snapshot.
+ * @param parent_extent Unused parent extent; the generator has no parent.
+ * @param child_extent Unused generator extent.
+ * @param input_index Unused source-input index.
+ * @param input_extents Unused source-input extents.
+ * @param parameters Unused effective parameters.
+ * @return Unchanged affected rectangle.
+ * @throws Nothing.
+ * @note This explicit planning callback owns no native resource or callback-
+ *       spanning state.
+ */
+PixelRect perlin_metal_forward_roi(
+    const Node& node, const PixelRect& upstream_roi, const GraphModel& graph,
+    const PixelSize& parent_extent, const PixelSize& child_extent,
+    std::size_t input_index, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters) noexcept {
+  (void)node;
+  (void)graph;
+  (void)parent_extent;
+  (void)child_extent;
+  (void)input_index;
+  (void)input_extents;
+  (void)parameters;
+  return upstream_roi;
+}
+
+/**
+ * @brief Adapts one configured registry invocation to the Metal executor ABI.
+ *
+ * @param node Effective private operation node.
+ * @param inputs Unused source inputs; Metal Perlin is a generator.
+ * @return Canonical image output retaining the pending CPU-replica Value.
+ * @throws std::logic_error when invoked outside the Metal executor context or
+ *         when execution fails to publish one valid pending Value.
+ * @throws std::bad_alloc, std::runtime_error, parameter, resource, or native
+ *         execution exceptions unchanged.
+ * @note The wrapper takes publication before the callback-scoped TLS binding
+ *       retires. It returns no native handle and does not wait for completion;
+ *       the Value fence and process executor retain asynchronous ownership.
+ */
+NodeOutput run_perlin_noise_metal(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  (void)inputs;
+  execute_perlin_noise_metal(node);
+  Value pending = execution::require_current_metal_execution_context()
+                      .take_published_value();
+  if (!pending.valid()) {
+    throw std::logic_error(
+        "Metal Perlin execution did not publish a pending image Value.");
+  }
+  NodeOutput output;
+  output.publish_image_value(std::move(pending));
+  return output;
+}
+
+}  // namespace
+
+/** @copydoc register_metal_perlin_operation_provider */
+void register_metal_perlin_operation_provider() {
+  OpImplementation implementation;
+  implementation.func = MonolithicOpFunc(run_perlin_noise_metal);
+  implementation.metadata.device_preference = DeviceBackend::Metal;
+  implementation.metadata.supports_high_precision = true;
+  implementation.metadata.supports_realtime = false;
+  implementation.dirty_propagator = DirtyRoiPropFunc(perlin_metal_dirty_roi);
+  implementation.forward_propagator =
+      ForwardRoiPropFunc(perlin_metal_forward_roi);
+
+  std::vector<OpImplementation> candidates;
+  candidates.push_back(std::move(implementation));
+  OpRegistry::instance().replace_implementation_candidates(
+      "image_generator", "perlin_noise_metal", std::move(candidates));
 }
 
 }  // namespace ops

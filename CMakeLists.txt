@@ -729,6 +729,7 @@ set(PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
     src/lib/runtime/resource_ledger.cpp
 )
 set(PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES)
+set(PHOTOSPIDER_METAL_PERLIN_PROVIDER_SOURCES)
 set(PHOTOSPIDER_HAS_METAL_EXECUTOR OFF)
 set(PHOTOSPIDER_HAS_ISOLATED_CPU_INVOCATION OFF)
 if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -762,12 +763,27 @@ if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
     list(APPEND PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES
         ${METAL_FRAMEWORK}
         ${FOUNDATION_FRAMEWORK})
+    list(APPEND PHOTOSPIDER_METAL_PERLIN_PROVIDER_SOURCES
+        plugins/ops/metal/perlin_noise_metal.mm)
     set_source_files_properties(
         src/lib/execution/device/metal_device_executor.mm
+        plugins/ops/metal/perlin_noise_metal.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 else()
     list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
         src/lib/execution/device/metal_device_executor_stub.cpp)
+endif()
+
+if(PHOTOSPIDER_HAS_METAL_EXECUTOR)
+    target_sources(photospider_plugin_host_internal PRIVATE
+        ${PHOTOSPIDER_METAL_PERLIN_PROVIDER_SOURCES})
+    target_compile_definitions(photospider_plugin_host_internal PRIVATE
+        PHOTOSPIDER_HAS_METAL_PERLIN_OPERATION_PROVIDER)
+    target_include_directories(photospider_plugin_host_internal PRIVATE
+        "${PROJECT_SOURCE_DIR}/plugins/ops")
+    target_link_libraries(photospider_plugin_host_internal PRIVATE
+        ${METAL_FRAMEWORK}
+        ${FOUNDATION_FRAMEWORK})
 endif()
 
 add_library(photospider_execution_internal STATIC
@@ -926,6 +942,7 @@ set(PHOTOSPIDER_PRODUCT_SOURCES
     ${PHOTOSPIDER_POLICY_INTERNAL_SOURCES}
     ${PHOTOSPIDER_HOST_OUTPUT_OPENCV_ADAPTER_SOURCES}
     ${PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES}
+    ${PHOTOSPIDER_METAL_PERLIN_PROVIDER_SOURCES}
     ${PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES}
     ${PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES}
     ${KERNEL_FACADE_SOURCES}
@@ -988,6 +1005,12 @@ function(configure_photospider_product_objects TARGET_NAME)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
         target_compile_definitions(${TARGET_NAME} PRIVATE
             PHOTOSPIDER_HAS_OPENCV_OPERATION_PROVIDER)
+    endif()
+    if(PHOTOSPIDER_HAS_METAL_EXECUTOR)
+        target_compile_definitions(${TARGET_NAME} PRIVATE
+            PHOTOSPIDER_HAS_METAL_PERLIN_OPERATION_PROVIDER)
+        target_include_directories(${TARGET_NAME} PRIVATE
+            "${PROJECT_SOURCE_DIR}/plugins/ops")
     endif()
     if(PHOTOSPIDER_ENABLE_OPENCV)
         target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_HAS_OPENCV)
@@ -1934,24 +1957,9 @@ if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
         )
     endif()
 
-    # Source-private native/async adapter. Pure-C operation ABI v1 is
-    # synchronous CPU-only, so this target is neither installed nor loaded as
-    # an operation plugin.
-    add_library(photospider_metal_perlin_adapter_internal STATIC
-        plugins/ops/metal/perlin_noise_metal.mm)
-    set_source_files_properties(
-        plugins/ops/metal/perlin_noise_metal.mm
-        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_link_libraries(photospider_metal_perlin_adapter_internal PRIVATE
-        Photospider::operation_runtime
-        ${METAL_FRAMEWORK}
-        ${FOUNDATION_FRAMEWORK}
-    )
-    target_include_directories(photospider_metal_perlin_adapter_internal PRIVATE
-        "${PROJECT_SOURCE_DIR}/plugins/ops"
-        "${PROJECT_SOURCE_DIR}/src/lib"
-    )
-
+    # Metal Perlin is a configured source-private provider compiled into both
+    # product compositions above. Pure-C operation ABI v1 remains synchronous
+    # CPU-only; no Metal operation DSO or second native-resource owner exists.
 endif()
 
 # ==============================================================================
@@ -2956,7 +2964,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         target_compile_definitions(test_bad_alloc_boundaries PRIVATE
             PHOTOSPIDER_INTERNAL_METAL_PERLIN_TESTING)
         target_link_libraries(test_bad_alloc_boundaries PRIVATE
-            photospider_metal_perlin_adapter_internal
             ${METAL_FRAMEWORK}
             ${FOUNDATION_FRAMEWORK})
     endif()
@@ -2965,8 +2972,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             tests/integration/test_metal_device_executor.cpp)
         target_include_directories(test_metal_device_executor PRIVATE
             "${PROJECT_SOURCE_DIR}/plugins/ops")
-        target_link_libraries(test_metal_device_executor PRIVATE
-            photospider_metal_perlin_adapter_internal)
     endif()
     add_ps_test(test_cli_dirty_snapshot_formatter
         tests/integration/test_cli_dirty_snapshot_formatter.cpp)
@@ -3708,6 +3713,6 @@ message(STATUS "  Single-Tenant Job: ${PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB}")
 message(STATUS "  Focused Tests     : ${PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS}")
 message(STATUS "  Full Test Suite   : ${PHOTOSPIDER_BUILD_FULL_TEST_SUITE}")
 if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
-    message(STATUS "  Metal Adapter     : Host-private")
+    message(STATUS "  Metal Perlin      : configured Host-private provider")
 endif()
 message(STATUS "-----------------------------------------------------------")

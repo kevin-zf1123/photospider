@@ -338,7 +338,8 @@ registration/publication, cancellation/callback-entry, and
 transfer-destruction/callback-entry races without sleeps.
 
 V-7 adds a source-private, fixed `DeviceExecutorRegistry` to the same
-`ExecutionService` domain. When the repository Metal plugin is enabled, the
+`ExecutionService` domain. When the repository Metal provider profile is
+enabled, the
 Apple entry owns one device and command queue, supplies an invocation-scoped
 texture/buffer allocator, and keeps a validated process-lifetime pipeline
 cache. Reserved-start workers enter that

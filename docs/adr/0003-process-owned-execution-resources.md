@@ -138,7 +138,7 @@ The current #84 through #86 slices realize the CPU executor, one service-owned
 Metal lane, a source-private fixed device-executor registry, explicit
 CPU/Metal transfer, exact process-owned residency, and authoritative
 per-`DeviceId` memory/scratch accounting. In the enabled
-repository Metal-plugin profile, the Apple entry owns and reuses its native
+repository Metal-provider profile, the Apple entry owns and reuses its native
 device/queue and validated pipeline cache, while each entry receives an
 invocation-scoped native allocator. Before native allocation, Perlin and
 CPU-to-Metal upload atomically reserve complete device plans derived from

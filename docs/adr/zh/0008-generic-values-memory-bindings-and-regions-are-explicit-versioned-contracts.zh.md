@@ -311,7 +311,7 @@ source-private pending CPU producer。其 source-private `ValueTransferTask` 只
 ready 后复制一个已验证的 CPU envelope，并发布独立 destination。
 
 已实现的 V-7 子集在 `ExecutionService` 下增加一套单独的 source-private
-`DeviceExecutorRegistry`。在仓库 Metal plugin 已启用的 profile 中，其中的 Apple executor
+`DeviceExecutorRegistry`。在仓库 Metal provider 已启用的 profile 中，其中的 Apple executor
 拥有一个 native device 与 queue、一个 callback-scoped texture/buffer allocator，以及经过校验的
 持久 pipeline cache。经过 reserved start 的 work 会在该借用 context 内调用 Metal Perlin
 provider，并返回独立的 CPU compatibility image。

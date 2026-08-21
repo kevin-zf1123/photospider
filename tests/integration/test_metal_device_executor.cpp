@@ -31,6 +31,7 @@
 #include "execution/execution_task_runtime.hpp"
 #include "metal/perlin_noise_metal.hpp"
 #include "photospider/data/image_view.hpp"
+#include "providers/configured_operation_providers.hpp"
 
 namespace ps::compute {
 namespace {
@@ -615,26 +616,31 @@ ReadyFenceSnapshot wait_for_terminal_value(const Value& value) {
  */
 struct PerlinInvocationState final {
   /**
-   * @brief Creates a deterministic 8x8 Perlin operation snapshot.
+   * @brief Creates a deterministic Perlin operation snapshot.
    * @param node_id Stable node and trace identity.
+   * @param width Positive output width.
+   * @param height Positive output height.
    * @throws std::bad_alloc from parameter-map or node ownership.
    */
-  explicit PerlinInvocationState(int node_id) : node(make_node(node_id)) {}
+  explicit PerlinInvocationState(int node_id, int width = 8, int height = 8)
+      : node(make_node(node_id, width, height)) {}
 
   /**
    * @brief Builds the deterministic operation node.
    * @param node_id Stable node identity.
+   * @param width Positive output width.
+   * @param height Positive output height.
    * @return Complete private node snapshot.
    * @throws std::bad_alloc from parameter storage.
    */
-  static Node make_node(int node_id) {
+  static Node make_node(int node_id, int width, int height) {
     Node result;
     result.id = node_id;
     result.name = "perlin_noise_metal";
     result.type = "image_generator";
     result.subtype = "perlin_noise_metal";
-    result.parameters.emplace("width", plugin::ParameterValue(8));
-    result.parameters.emplace("height", plugin::ParameterValue(8));
+    result.parameters.emplace("width", plugin::ParameterValue(width));
+    result.parameters.emplace("height", plugin::ParameterValue(height));
     result.parameters.emplace("grid_size", plugin::ParameterValue(3.0));
     result.parameters.emplace("seed", plugin::ParameterValue(84));
     return result;
@@ -708,6 +714,32 @@ float perlin_sample(const ImageView& image, int column, int row) {
 }
 
 /**
+ * @brief Resolves the configured production Metal Perlin implementation.
+ *
+ * @return Copied HP monolithic implementation owned independently from later
+ *         registry mutation.
+ * @throws std::logic_error when configured composition omits the Metal Perlin
+ *         operation or publishes a non-monolithic shape.
+ * @throws Provider, registry, callback-copy, or allocation exceptions
+ *         unchanged.
+ * @note Selection advertises only Metal availability, proving the configured
+ *       candidate carries the exact device preference used by production
+ *       planning rather than relying on a test-only direct adapter call.
+ */
+OpImplementation configured_metal_perlin_implementation() {
+  providers::register_configured_operation_providers();
+  std::optional<OpImplementation> implementation =
+      OpRegistry::instance().select_best_implementation(
+          "image_generator", "perlin_noise_metal", {DeviceBackend::Metal},
+          ComputeIntent::GlobalHighPrecision);
+  if (!implementation.has_value() || !implementation->is_monolithic()) {
+    throw std::logic_error(
+        "Configured providers omit the Metal Perlin implementation.");
+  }
+  return std::move(*implementation);
+}
+
+/**
  * @brief Builds one deterministic standalone Metal Run descriptor.
  * @param label Stable Graph policy identity.
  * @param identity Nonzero Graph/Run identity seed.
@@ -735,28 +767,36 @@ ComputeRunSubmission make_metal_run_submission(std::string label,
  * @param service Configured service with a real Metal executor.
  * @param host Stable observation target.
  * @param identity Unique Run and node identity.
+ * @param width Positive output width.
+ * @param height Positive output height.
  * @return Shared state containing the Ready host-readable Value.
  * @throws Provider, service, allocation, or Run failures unchanged.
  * @note The submission callback and all native handles retire before return.
  */
 std::shared_ptr<PerlinInvocationState> execute_perlin(
     ExecutionService& service, MetalIntegrationHost& host,
-    std::uint64_t identity) {
+    std::uint64_t identity, int width = 8, int height = 8) {
+  const OpImplementation implementation =
+      configured_metal_perlin_implementation();
+  const MonolithicOpFunc callback =
+      std::get<MonolithicOpFunc>(implementation.func);
   ComputeRun run(make_metal_run_submission(
       "metal-perlin-" + std::to_string(identity), identity));
-  auto state =
-      std::make_shared<PerlinInvocationState>(static_cast<int>(identity));
+  auto state = std::make_shared<PerlinInvocationState>(
+      static_cast<int>(identity), width, height);
   ComputeRunLease lease = run.acquire_lease();
   const ComputeRunTaskIdentity task_identity = lease.task_identity(0U);
   std::vector<ReadyTaskSubmission> submissions;
   submissions.emplace_back(
       std::move(lease), task_identity, static_cast<int>(identity), true,
-      [state](ComputeRunLease&, const ComputeRunTaskIdentity&,
-              ExecutionTaskRuntime& runtime) {
-        ops::execute_perlin_noise_metal(state->node);
-        execution::MetalExecutionContext& context =
-            execution::require_current_metal_execution_context();
-        state->pending_value = context.take_published_value();
+      [state, callback](ComputeRunLease&, const ComputeRunTaskIdentity&,
+                        ExecutionTaskRuntime& runtime) {
+        const NodeOutput output = callback(state->node, {});
+        if (!output.has_image_value()) {
+          throw std::logic_error(
+              "Metal Perlin callback did not publish its image output.");
+        }
+        state->pending_value = output.image_value();
         if (!state->pending_value.valid()) {
           throw std::logic_error(
               "Metal Perlin did not publish its pending host Value.");
@@ -1615,6 +1655,65 @@ TEST(MetalDeviceExecutorIntegration,
   retained = second_invocation->device_resource_snapshot();
   ASSERT_TRUE(retained.has_value());
   EXPECT_EQ(retained->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves build-configured composition publishes Metal Perlin in product.
+ *
+ * @return Nothing; GoogleTest reports missing callback, device, intent, or
+ *         exact planning metadata.
+ * @throws Unexpected provider, registry, callback-copy, or allocation
+ *         exceptions unchanged.
+ * @note This registration gate does not require a runtime Metal device. The
+ *       adjacent behavior tests invoke the same copied callback inside the
+ *       process-owned Metal executor context when hardware is available.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     ConfiguredProviderRegistersProductionPerlinOperation) {
+  const OpImplementation implementation =
+      configured_metal_perlin_implementation();
+  EXPECT_EQ(implementation.metadata.device_preference, DeviceBackend::Metal);
+  EXPECT_TRUE(implementation.metadata.supports_high_precision);
+  EXPECT_FALSE(implementation.metadata.supports_realtime);
+  EXPECT_TRUE(implementation.is_monolithic());
+  EXPECT_TRUE(implementation.dirty_propagator.has_value());
+  EXPECT_TRUE(implementation.forward_propagator.has_value());
+}
+
+/**
+ * @brief Runs the configured provider at its production-default 256x256 extent.
+ *
+ * @return Nothing; GoogleTest reports allocation planning, execution, fence,
+ *         shape, or resource-retirement failures.
+ * @throws Unexpected provider, service, native, allocation, or synchronization
+ *         exceptions unchanged.
+ * @note The larger texture crosses native allocation granularities hidden by
+ *       the 8x8 oracle fixture. Runtime absence remains a platform skip.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     ConfiguredProviderExecutesDefaultExtentAndRetiresResources) {
+  ExecutionService service(ExecutionService::default_resource_limits());
+  if (!service.has_device_executor(DeviceBackend::Metal)) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+  service.configure_worker_count(1U);
+  MetalIntegrationHost host;
+
+  const auto state = execute_perlin(service, host, 8410U, 256, 256);
+  ASSERT_TRUE(state);
+  ASSERT_TRUE(state->pending_value.valid());
+  EXPECT_EQ(state->pending_value.ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+  const ImageView image(state->pending_value);
+  EXPECT_EQ(image.width(), 256U);
+  EXPECT_EQ(image.height(), 256U);
+  EXPECT_EQ(image.channels(), 1U);
+  EXPECT_FLOAT_EQ(perlin_sample(image, 0, 0), 0.5F);
+  EXPECT_TRUE(std::isfinite(perlin_sample(image, 128, 128)));
+  const auto resources =
+      service.device_resource_snapshot(DeviceId(DeviceBackend::Metal));
+  ASSERT_TRUE(resources.has_value());
+  EXPECT_EQ(resources->reserved, DeviceResourceVector{});
 }
 
 /**

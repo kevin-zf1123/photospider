@@ -223,7 +223,7 @@ The deterministic thread-safe fake executor and test-only C++17 mutex/CV race
 rendezvous are test-owned.
 
 V-7 adds a source-private fixed `DeviceExecutorRegistry` to
-`ExecutionService`. In the enabled repository Metal-plugin profile, the Apple
+`ExecutionService`. In the enabled repository Metal-provider profile, the Apple
 executor owns and reuses its device, command queue, and validated
 compute-pipeline cache; one callback-scoped
 allocator retains textures and buffers until provider return. A reserved-start
@@ -303,9 +303,12 @@ visible-commit gate, and #86 keeps device-memory/scratch authority inside the
 service ledger rather than residency or the Run.
 
 Metal obtains a complete preallocation plan from native heap texture/buffer
-size-and-alignment queries before its first allocation. Actual
-`MTLResource::allocatedSize` values must fit that atomic plan before command
-commit. The plan then becomes two unique owners: persistent memory follows the
+size-and-alignment queries before its first allocation. A direct texture plan
+rounds the queried size to the stricter query alignment or process VM-page
+granularity because direct-resource `allocatedSize` may exceed the heap
+suballocation size. Actual `MTLResource::allocatedSize` values must fit that
+atomic plan before command commit. The plan then becomes two unique owners:
+persistent memory follows the
 type-erased native `Value` owner across copies and residency, while scratch
 follows the exact command-completion object across success, native failure,
 stale/rejected publication, and callback unwind. Unused planned bytes return

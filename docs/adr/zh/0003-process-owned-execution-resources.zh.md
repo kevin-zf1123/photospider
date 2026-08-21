@@ -103,7 +103,7 @@ scalar candidate snapshot。
 
 当前 #84 至 #86 切片实现 CPU executor、一个由 service 拥有的 Metal lane、source-private 的固定
 device-executor registry、显式 CPU/Metal transfer、精确进程级 residency，以及权威的
-per-`DeviceId` memory/scratch 核算。在仓库 Metal plugin 已启用的 profile 中，Apple entry 会拥有并
+per-`DeviceId` memory/scratch 核算。在仓库 Metal provider 已启用的 profile 中，Apple entry 会拥有并
 复用 native device/queue 与经过校验的 pipeline cache，而每次 entry 都获得 invocation-scoped
 native allocator。在进行 native allocation 前，Perlin 与 CPU-to-Metal upload 会根据 Metal heap
 size/alignment query 原子预留完整 device plan。Native `allocatedSize` fact 会在 command commit

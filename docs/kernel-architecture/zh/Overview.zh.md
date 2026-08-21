@@ -427,8 +427,9 @@ CPU、retained-memory、scratch、ready-entry 与 ready-byte vector。容量耗�
 `src/lib/core/ops.cpp` 中注册。Build-configured composition 入口位于
 `src/lib/providers/configured_operation_providers.cpp`；启用可选 provider 时，
 `src/lib/providers/opencv/` 下的实现会注册 OpenCV image algorithm，并拥有对应的 process policy
-与 exception translation。运行时插件示例位于 `plugins/ops/`；Metal operation 实现仅属于
-`plugins/ops/metal/`。Dynamic operation plugin 先执行 numeric ABI-v1 discovery，再使用精确
+与 exception translation。运行时插件示例位于 `plugins/ops/`；build-configured Metal operation
+provider 实现仅属于 `plugins/ops/metal/`，且不是 DSO。Dynamic operation plugin 先执行 numeric
+ABI-v1 discovery，再使用精确
 root 与 suite record。其 pure-C callback 只接收有界 configuration/input/plan/grant record，
 不会获得可变 `Node`、`GraphModel`、`OpRegistry`、YAML tree 或 private cache owner。
 

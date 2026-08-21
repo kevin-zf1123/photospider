@@ -478,10 +478,10 @@ CMake rules:
   component becomes not-found when its backend dependencies are unavailable
   without invalidating a required IPC component. Unknown required components,
   and required IPC from an IPC-disabled install, fail discovery.
-- On Apple, when the repository Metal/OpenCV operation-plugin profile is
+- On Apple, when the repository Metal-provider/OpenCV-operation-plugin profile is
   enabled, the static product carries system `Metal` and `Foundation`
   framework link flags for the process-owned Metal executor. The Metal
-  operation plugin borrows that executor's invocation context and has no
+  operation provider borrows that executor's invocation context and has no
   `CoreImage` or `CoreVideo` dependency. The dependency-disabled profile
   compiles the stub factory, leaves the registry without a Metal executor, and
   adds no Metal framework requirement.
@@ -560,7 +560,7 @@ In the current layout:
 - the current `ExecutionService` owns one fixed CPU worker pool, private
   `serial_debug` and `gpu_pipeline` behavior, one Host-and-per-device
   authoritative ledger, a fixed `DeviceExecutorRegistry`, and, in the enabled
-  Apple repository Metal-plugin profile, one process-owned Metal executor.
+  Apple repository Metal-provider profile, one process-owned Metal executor.
   That executor owns its command queue, invocation-scoped native-allocation
   facade, and validated persistent pipeline cache. GPU work enters it only
   after the common reserved-start transaction, and an operation borrows the

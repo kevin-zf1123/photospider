@@ -25,5 +25,25 @@ namespace ops {
  */
 void execute_perlin_noise_metal(const Node& node);
 
+/**
+ * @brief Publishes the build-configured Host-private Metal Perlin operation.
+ *
+ * Registration installs one high-precision monolithic Metal candidate with
+ * exact identity propagation callbacks. Its execution wrapper borrows the
+ * process-owned Metal context, collects the pending CPU-replica Value published
+ * by `execute_perlin_noise_metal()`, and returns that Value through
+ * `NodeOutput`.
+ *
+ * @return Nothing after atomically replacing this configured candidate set.
+ * @throws std::bad_alloc if callback, metadata, owner, or registry storage
+ *         cannot allocate.
+ * @throws std::invalid_argument if the source-authored candidate violates an
+ *         internal registry invariant.
+ * @note This source-private provider is compiled into the configured Host
+ *       product only on the real Apple Metal profile. It exports no operation
+ *       DSO symbol, public ABI record, native handle, or asynchronous owner.
+ */
+void register_metal_perlin_operation_provider();
+
 }  // namespace ops
 }  // namespace ps

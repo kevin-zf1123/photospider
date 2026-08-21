@@ -93,8 +93,9 @@ Device allocation 与 Run admission 具有不同生命周期。一个完整非 C
 ledger root mutex 下原子预留 persistent-memory 与 scratch plan。Metal Perlin 路径会在首个
 native allocation 前规划 output texture、permutation/scale buffer 与 readback buffer；
 CPU-to-Metal upload 会在两项 allocation 前规划 destination texture 与 staging buffer。Native
-heap size/alignment 提供 plan，`allocatedSize` 提供 actual byte，只有完成 actual 校准后才会
-command commit。随后 persistent memory 随 native Value owner 跨 residency 延续，scratch
+heap size/alignment 提供基础 plan；direct texture 会保守地把该 size 对齐到 native query
+alignment 与进程 VM page granularity 中较严格的一项。`allocatedSize` 提供 actual byte，只有完成
+actual 校准后才会 command commit。随后 persistent memory 随 native Value owner 跨 residency 延续，scratch
 则保持计费直到精确 native completion owner 退役。Provider/Run return 都不能提前释放任一
 owner，queue/pipeline infrastructure 也不按 invocation scratch 计费。
 
