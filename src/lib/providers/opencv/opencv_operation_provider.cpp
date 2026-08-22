@@ -281,6 +281,103 @@ static ImageFacet project_selected_channel_facet(const Value& source,
 }
 
 /**
+ * @brief Projects two weighted-blend sources onto an expanded channel result.
+ *
+ * @param primary Primary source whose signed windows remain output authority.
+ * @param secondary Secondary source contributing mapped sample values.
+ * @param output_channels Expanded positive destination channel count.
+ * @return Copied primary facet containing only facts valid for the result.
+ * @throws std::invalid_argument when either source lacks image metadata or the
+ *         requested count does not expand the primary channel extent.
+ * @throws std::bad_alloc when copied metadata cannot allocate.
+ * @note Expanded channels have no source-authored stable identities, so the
+ *       channel schema and dependent color binding are removed rather than
+ *       synthesized. A sample facet survives only when both sources declare
+ *       the same uniform endpoint without stable-ID overrides. Signed data and
+ *       display windows remain independent spatial facts and are preserved.
+ */
+static ImageFacet project_channel_expanded_blend_facet(
+    const Value& primary, const Value& secondary, std::size_t output_channels) {
+  if (!primary.image_facet().has_value() ||
+      !secondary.image_facet().has_value()) {
+    throw std::invalid_argument(
+        "OpenCV weighted-blend source lacks ordinary-image metadata.");
+  }
+  const ImageFacet& primary_facet = *primary.image_facet();
+  const std::size_t primary_channels =
+      primary_facet.channel_axis.has_value()
+          ? primary.dense_tensor_descriptor().shape[*primary_facet.channel_axis]
+          : 1U;
+  if (output_channels <= primary_channels) {
+    throw std::invalid_argument(
+        "OpenCV weighted-blend facet projection requires expanded channels.");
+  }
+
+  ImageFacet projected = primary_facet;
+  projected.channel_schema.reset();
+  projected.color.reset();
+
+  const auto& primary_samples = primary_facet.sample_domain;
+  const auto& secondary_samples = secondary.image_facet()->sample_domain;
+  const bool common_uniform_samples = primary_samples.has_value() &&
+                                      secondary_samples.has_value() &&
+                                      primary_samples->per_channel.empty() &&
+                                      secondary_samples->per_channel.empty() &&
+                                      *primary_samples == *secondary_samples;
+  if (!common_uniform_samples) {
+    projected.sample_domain.reset();
+  }
+  return projected;
+}
+
+/**
+ * @brief Validates the physical shape required for OpenCV Value publication.
+ *
+ * @param matrix Candidate nonempty two-dimensional result matrix.
+ * @return Nothing when rows, columns, and channel count are positive.
+ * @throws std::invalid_argument when the matrix cannot describe an ordinary
+ *         HWC image result.
+ * @note The helper reads matrix metadata only and performs no allocation,
+ *       payload access, or image-facet mutation.
+ */
+static void validate_opencv_result_matrix(const cv::Mat& matrix) {
+  if (matrix.empty() || matrix.rows <= 0 || matrix.cols <= 0 ||
+      matrix.channels() <= 0) {
+    throw std::invalid_argument(
+        "OpenCV result publication requires a nonempty matrix.");
+  }
+}
+
+/**
+ * @brief Normalizes explicit semantic metadata to one validated HWC result.
+ *
+ * @param matrix Previously validated nonempty two-dimensional result matrix.
+ * @param facet Explicit result-compatible semantic facts to move and resize.
+ * @return Complete HWC facet with preserved signed origin, resized data-window
+ *         end points, and an independent unchanged display window.
+ * @throws std::overflow_error when a signed data-window endpoint overflows.
+ * @note The caller must first use validate_opencv_result_matrix(). This helper
+ *       changes no channel, sample, color, or display interpretation.
+ */
+static ImageFacet resize_opencv_result_facet(const cv::Mat& matrix,
+                                             ImageFacet facet) {
+  facet.x_axis = 1U;
+  facet.y_axis = 0U;
+  facet.channel_axis = 2U;
+  const std::int64_t width = static_cast<std::int64_t>(matrix.cols);
+  const std::int64_t height = static_cast<std::int64_t>(matrix.rows);
+  if (facet.data_window.x_begin >
+          std::numeric_limits<std::int64_t>::max() - width ||
+      facet.data_window.y_begin >
+          std::numeric_limits<std::int64_t>::max() - height) {
+    throw std::overflow_error("OpenCV result data window overflows int64.");
+  }
+  facet.data_window.x_end = facet.data_window.x_begin + width;
+  facet.data_window.y_end = facet.data_window.y_begin + height;
+  return facet;
+}
+
+/**
  * @brief Derives explicit HWC metadata for one OpenCV result matrix.
  * @param matrix Nonempty two-dimensional result.
  * @param source Optional ordinary-image source whose semantic metadata is
@@ -300,11 +397,7 @@ static ImageFacet project_selected_channel_facet(const Value& source,
 static ImageFacet result_image_facet(
     const cv::Mat& matrix, const Value* source,
     std::optional<std::size_t> selected_channel = std::nullopt) {
-  if (matrix.empty() || matrix.rows <= 0 || matrix.cols <= 0 ||
-      matrix.channels() <= 0) {
-    throw std::invalid_argument(
-        "OpenCV result publication requires a nonempty matrix.");
-  }
+  validate_opencv_result_matrix(matrix);
   ImageFacet facet;
   facet.x_axis = 1U;
   facet.y_axis = 0U;
@@ -334,20 +427,39 @@ static ImageFacet result_image_facet(
           "OpenCV channel-changing result needs an explicit semantic map.");
     }
   }
-  facet.x_axis = 1U;
-  facet.y_axis = 0U;
-  facet.channel_axis = 2U;
-  const std::int64_t width = static_cast<std::int64_t>(matrix.cols);
-  const std::int64_t height = static_cast<std::int64_t>(matrix.rows);
-  if (facet.data_window.x_begin >
-          std::numeric_limits<std::int64_t>::max() - width ||
-      facet.data_window.y_begin >
-          std::numeric_limits<std::int64_t>::max() - height) {
-    throw std::overflow_error("OpenCV result data window overflows int64.");
+  return resize_opencv_result_facet(matrix, std::move(facet));
+}
+
+/**
+ * @brief Publishes one OpenCV result from an explicit compatible ImageFacet.
+ *
+ * @param output Mutable private result without existing image authority.
+ * @param matrix Callback-local nonempty OpenCV result copied on publication.
+ * @param facet Caller-projected semantic facts for the result channels.
+ * @return Nothing after HWC normalization and fresh Ready Value publication.
+ * @throws std::invalid_argument for malformed matrix, metadata, or destination.
+ * @throws std::logic_error when output already carries image authority.
+ * @throws std::overflow_error, std::length_error, or std::bad_alloc from facet
+ *         normalization and Value publication.
+ * @note The caller owns semantic projection. This helper changes only axes and
+ *       the data-window end points; it never invents channel, sample, color, or
+ *       display facts. Publication is transactional: failure leaves output
+ *       without image authority, and no matrix/source lifetime escapes.
+ */
+static void publish_opencv_output_with_facet(NodeOutput* output,
+                                             const cv::Mat& matrix,
+                                             ImageFacet facet) {
+  if (output == nullptr) {
+    throw std::invalid_argument(
+        "OpenCV output publication requires a destination");
   }
-  facet.data_window.x_end = facet.data_window.x_begin + width;
-  facet.data_window.y_end = facet.data_window.y_begin + height;
-  return facet;
+  if (output->has_image_value()) {
+    throw std::logic_error(
+        "OpenCV output publication requires an empty image destination");
+  }
+  validate_opencv_result_matrix(matrix);
+  output->publish_image_value(
+      fromCvMat(matrix, resize_opencv_result_facet(matrix, std::move(facet))));
 }
 
 /**
@@ -361,9 +473,12 @@ static ImageFacet result_image_facet(
  * @return Nothing after publishing a fresh Ready image Value.
  * @throws std::invalid_argument for malformed matrix, metadata, or destination.
  * @throws std::logic_error when output already carries image authority.
- * @throws std::overflow_error or std::bad_alloc from Value publication.
+ * @throws std::overflow_error, std::length_error, or std::bad_alloc from Value
+ *         publication.
  * @note Matrix scalar storage is preserved exactly. No normalization, clamp,
- * rounding, color transform, or compatibility allocation is introduced.
+ *       rounding, color transform, or compatibility allocation is introduced.
+ *       Callers with explicit channel-changing semantics use
+ *       publish_opencv_output_with_facet() instead of source-facet inference.
  */
 static void publish_opencv_output(
     NodeOutput* output, const cv::Mat& matrix, const Value* source = nullptr,
@@ -1519,8 +1634,9 @@ static float byte_fraction_to_binary32(std::uint8_t numerator) noexcept {
  * provider fence translates the exception category.
  * @throws std::bad_alloc when Host image ownership cannot allocate.
  * @note Every sample is constructed from integer arithmetic and explicit IEEE
- * bits, independent of ambient rounding mode. Invocation-local storage makes
- * the callback reentrant across execution workers.
+ *       bits, independent of ambient rounding mode. The output explicitly
+ *       declares FP32 normalized `[0,1]` sample interpretation. Invocation-
+ *       local storage makes the callback reentrant across execution workers.
  */
 static NodeOutput op_coordinate_pattern(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -1563,7 +1679,13 @@ static NodeOutput op_coordinate_pattern(
   }
 
   NodeOutput result;
-  publish_opencv_output(&result, output);
+  ImageFacet facet;
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        {}};
+  publish_opencv_output_with_facet(&result, output, std::move(facet));
   return result;
 }
 
@@ -2545,16 +2667,21 @@ static void normalize_to_base(cv::Mat& current_mat, const cv::Mat& base_mat,
  *
  * @param node Operation node providing weights, mapping, and alpha strategy.
  * @param inputs Two resolved full-image inputs.
- * @return Blended NodeOutput with an owned image buffer.
+ * @return Blended NodeOutput with one owned canonical image Value.
  * @throws std::bad_alloc if parameter copying, channel storage, or result
  * allocation exhausts memory.
  * @throws GraphError for missing/empty/mismatched inputs or invalid strategy
  * data.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error when
+ *         result metadata cannot describe the generated channel layout.
  * @throws cv::Exception for OpenCV blending/channel failures.
  * @note Invalid individual channel-map entries are skipped, while memory
  *       exhaustion remains exceptional for the public Host compute boundary.
- *       All mutable matrices and result storage are callback-local, so
- *       independent invocations are reentrant.
+ *       Channel expansion preserves primary signed windows, removes stable
+ *       channel/color authority that cannot describe new destinations, and
+ *       retains sample meaning only when both sources share one uniform
+ *       endpoint. All mutable matrices and result storage are callback-local,
+ *       so independent invocations are reentrant.
  */
 static NodeOutput op_add_weighted_monolithic(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -2649,7 +2776,14 @@ static NodeOutput op_add_weighted_monolithic(
   }
 
   NodeOutput out;
-  publish_opencv_output(&out, output, &inputs[0]->image_value());
+  if (output.channels() != input_a.channels()) {
+    ImageFacet projected = project_channel_expanded_blend_facet(
+        inputs[0]->image_value(), inputs[1]->image_value(),
+        static_cast<std::size_t>(output.channels()));
+    publish_opencv_output_with_facet(&out, output, std::move(projected));
+  } else {
+    publish_opencv_output(&out, output, &inputs[0]->image_value());
+  }
   return out;
 }
 

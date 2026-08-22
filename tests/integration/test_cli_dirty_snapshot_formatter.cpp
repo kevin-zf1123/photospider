@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -24,6 +25,7 @@
 #include "graph_cli/print_repl_help.hpp"
 #include "photospider/data/image_view.hpp"
 #include "providers/configured_image_artifact_codec.hpp"  // NOLINT(build/include_subdir)
+#include "providers/configured_operation_providers.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::cli {
 namespace {
@@ -287,6 +289,29 @@ void write_empty_output_graph(const std::filesystem::path& path) {
       << "  subtype: empty_output\n";
 }
 
+/**
+ * @brief Writes a source-only graph using the real coordinate-pattern op.
+ *
+ * @param path YAML file path to create.
+ * @throws std::filesystem::filesystem_error or std::ios_base::failure if file
+ *         creation fails.
+ * @note The `3x2x3` FP32 output contains exact normalized byte fractions and
+ *       reaches the production OpenCV provider through embedded Host compute.
+ */
+void write_coordinate_pattern_graph(const std::filesystem::path& path) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "- id: 1\n"
+      << "  name: coordinate_pattern\n"
+      << "  type: image_generator\n"
+      << "  subtype: coordinate_pattern\n"
+      << "  parameters:\n"
+      << "    width: 3\n"
+      << "    height: 2\n"
+      << "    channels: 3\n"
+      << "    seed: 0\n";
+}
+
 TEST(CliDirtySnapshotFormatter, RendersMonolithicAndEdgeMappings) {
   DirtyRegionInspectionSnapshot snapshot;
   snapshot.graph_generation = 7;
@@ -512,6 +537,72 @@ TEST(CliSaveCommand, SavesWithExplicitDestinationSampleSemantics) {
   EXPECT_NE(text.find("Saved named output 'image'"), std::string::npos) << text;
   ASSERT_TRUE(std::filesystem::is_regular_file(output_path)) << text;
   EXPECT_GT(std::filesystem::file_size(output_path), 0U);
+}
+
+/**
+ * @brief Saves the real coordinate-pattern Value through CLI and codec seams.
+ *
+ * @return Nothing; GoogleTest reports compute, conversion, file, or decode
+ *         failures.
+ * @throws Host, filesystem, codec, and allocation exceptions unchanged to the
+ *         test runner outside the command's maintained diagnostic boundary.
+ * @note Success proves `make_encode_request` consumed the source's explicit
+ *       normalized `[0,1]` endpoint. Decoding the emitted PNG then proves the
+ *       conversion reached the real codec instead of stopping at metadata
+ *       inspection or a mock encoder.
+ */
+TEST(CliSaveCommand, SavesCoordinatePatternThroughConfiguredCodec) {
+  providers::register_configured_operation_providers();
+  ScopedTempDir temp("photospider_cli_save_coordinate_pattern_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const auto yaml_path =
+      temp.root() / "source" / "coordinate_pattern_graph.yaml";
+  const auto output_path = temp.root() / "coordinate-pattern.png";
+  write_coordinate_pattern_graph(yaml_path);
+
+  GraphLoadRequest request;
+  request.session = GraphSessionId{"cli_save_coordinate_pattern"};
+  request.root_dir = (temp.root() / "sessions").string();
+  request.yaml_path = yaml_path.string();
+  request.cache_root_dir = (temp.root() / "cache").string();
+  auto loaded = host->load_graph(request);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  std::istringstream args(
+      "1 image " + output_path.string() +
+      " uint8 code code 0 255 reject nearest-even reject allow");
+  std::string current_graph = request.session.value;
+  bool modified = false;
+  CliConfig config;
+  std::ostringstream captured;
+  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
+  const bool handled =
+      ::handle_save(args, *host, current_graph, modified, config);
+  std::cout.rdbuf(original_buffer);
+
+  const std::string text = captured.str();
+  EXPECT_TRUE(handled);
+  EXPECT_NE(text.find("Saved named output 'image'"), std::string::npos) << text;
+  ASSERT_TRUE(std::filesystem::is_regular_file(output_path)) << text;
+
+  const SampleEndpoint code_samples{
+      SampleEncoding{1U, SampleEncodingKind::CodeValue},
+      SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0}};
+  const Value decoded =
+      providers::make_configured_image_artifact_codec()->decode(
+          output_path, {{ImageArtifactDecodeRule{
+                           ElementSemantics::UnsignedInteger,
+                           StorageEncoding{8U}, code_samples, std::nullopt}}});
+  const ImageView view(decoded);
+  ASSERT_EQ(view.width(), 3U);
+  ASSERT_EQ(view.height(), 2U);
+  ASSERT_EQ(view.channels(), 3U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(*view.channel_data(0U, 0U, 0U)), 0U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(*view.channel_data(0U, 0U, 1U)), 47U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(*view.channel_data(1U, 0U, 0U)), 17U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(*view.channel_data(0U, 1U, 0U)), 31U);
 }
 
 #if defined(PHOTOSPIDER_TEST_HAS_OPENEXR_DENSE)

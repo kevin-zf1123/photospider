@@ -6,6 +6,7 @@
 #include <memory>
 #include <new>
 #include <opencv2/core.hpp>
+#include <optional>
 #include <string>
 #include <typeinfo>
 #include <utility>
@@ -105,6 +106,185 @@ NodeOutput execute_channel_extract(const Value& source,
   NodeOutput input;
   input.publish_image_value(source);
   return std::get<MonolithicOpFunc>(resolved.value())(node, {&input});
+}
+
+/**
+ * @brief Publishes one padded signed-window three-channel blend source.
+ *
+ * @param with_per_channel_overrides Whether stable-ID sample overrides make
+ *        the source interpretation non-uniform.
+ * @return Fresh host-readable FP32 Value with channel schema, sample
+ *         interpretation, color authority, display metadata, and row padding.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         when fixture metadata violates the dense-image contract.
+ * @throws std::bad_alloc when metadata or payload allocation fails.
+ * @note Active samples occupy 36 bytes per row while the y stride is 48 bytes;
+ *       padding is initialized to `0xA5` and is never an active sample.
+ */
+Value make_weighted_blend_primary(bool with_per_channel_overrides) {
+  constexpr std::array<float, 18U> kSamples{0.2F, 0.4F, 0.6F, 0.3F, 0.5F, 0.7F,
+                                            0.4F, 0.6F, 0.8F, 0.5F, 0.7F, 0.9F,
+                                            0.6F, 0.8F, 1.0F, 0.7F, 0.9F, 0.1F};
+  constexpr std::size_t kActiveRowBytes = 9U * sizeof(float);
+  constexpr std::size_t kRowStride = 12U * sizeof(float);
+  std::vector<std::byte> storage(kRowStride + kActiveRowBytes, std::byte{0xA5});
+  std::memcpy(storage.data(), kSamples.data(), kActiveRowBytes);
+  std::memcpy(storage.data() + kRowStride, kSamples.data() + 9U,
+              kActiveRowBytes);
+
+  DenseTensorDescriptor descriptor{{2U, 3U, 3U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.data_window = ImageBounds{-7, 11, -4, 13};
+  facet.display_window = ImageBounds{-8, 10, -3, 14};
+  facet.channel_schema =
+      ChannelSchema{{{ChannelId{11U}, "left"},
+                     {ChannelId{12U}, "middle"},
+                     {ChannelId{13U}, "right"}},
+                    {{ChannelGroupId{20U},
+                      "triple",
+                      {ChannelId{11U}, ChannelId{12U}, ChannelId{13U}}}}};
+  SampleDomainFacet sample_domain{
+      1U,
+      SampleEncoding{1U, SampleEncodingKind::Normalized},
+      SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+      {}};
+  if (with_per_channel_overrides) {
+    sample_domain.per_channel = {
+        {ChannelId{11U}, SampleDomain{SampleDomainKind::Legal, -1.0, 1.0}},
+        {ChannelId{12U},
+         SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0}}};
+  }
+  facet.sample_domain = std::move(sample_domain);
+  facet.color =
+      ColorFacet{1U, ChannelGroupId{20U}, ColorTransferFunction::Rec709,
+                 ColorPrimaries::Rec2020};
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{{static_cast<std::ptrdiff_t>(kRowStride),
+                     static_cast<std::ptrdiff_t>(3U * sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float))}},
+      std::move(storage));
+}
+
+/**
+ * @brief Publishes one uniform single-channel secondary blend source.
+ *
+ * @return Fresh tightly packed FP32 Value with normalized `[0,1]` sample
+ *         interpretation and no channel or color authority.
+ * @throws std::invalid_argument or std::overflow_error when the fixture
+ *         descriptor, metadata, layout, or storage is invalid.
+ * @throws std::bad_alloc when metadata or payload allocation fails.
+ * @note The operation expands this source to the primary channel count before
+ *       mapping it into a distinct fourth destination channel.
+ */
+Value make_weighted_blend_secondary() {
+  constexpr std::array<float, 6U> kSamples{0.8F, 0.7F, 0.6F, 0.5F, 0.4F, 0.3F};
+  std::vector<std::byte> storage(sizeof(kSamples));
+  std::memcpy(storage.data(), kSamples.data(), storage.size());
+  DenseTensorDescriptor descriptor{{2U, 3U, 1U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        {}};
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{{static_cast<std::ptrdiff_t>(3U * sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float))}},
+      std::move(storage));
+}
+
+/**
+ * @brief Executes a weighted blend that maps three primary channels to four.
+ *
+ * @param primary Three-channel primary Value moved into callback-local input
+ *        authority.
+ * @param secondary Single-channel secondary Value moved into callback-local
+ *        input authority.
+ * @return Fresh four-channel provider output after both local input owners and
+ *         every borrowed OpenCV header have been destroyed.
+ * @throws GraphError when the callback is unavailable or rejects the request.
+ * @throws std::invalid_argument, std::overflow_error, std::length_error, or
+ *         std::bad_alloc from metadata projection and Value publication.
+ * @note The mapping sends the three primary channels to matching destinations
+ *       zero through two and secondary channel zero to destination three.
+ *       Invalid-map fallback behavior is not exercised.
+ */
+NodeOutput execute_channel_expanding_weighted_blend(Value primary,
+                                                    Value secondary) {
+  auto resolved = OpRegistry::instance().resolve_for_intent(
+      "image_mixing", "add_weighted", ComputeIntent::GlobalHighPrecision);
+  if (!resolved ||
+      !std::holds_alternative<MonolithicOpFunc>(resolved.value())) {
+    throw GraphError(GraphErrc::NoOperation,
+                     "image_mixing:add_weighted is not monolithic");
+  }
+
+  plugin::ParameterValue::Object input0_mapping;
+  input0_mapping.emplace(
+      "0", plugin::ParameterValue::Array{plugin::ParameterValue{0}});
+  input0_mapping.emplace(
+      "1", plugin::ParameterValue::Array{plugin::ParameterValue{1}});
+  input0_mapping.emplace(
+      "2", plugin::ParameterValue::Array{plugin::ParameterValue{2}});
+  plugin::ParameterValue::Object input1_mapping;
+  input1_mapping.emplace(
+      "0", plugin::ParameterValue::Array{plugin::ParameterValue{3}});
+  plugin::ParameterValue::Object channel_mapping;
+  channel_mapping.emplace("input0", std::move(input0_mapping));
+  channel_mapping.emplace("input1", std::move(input1_mapping));
+
+  Node node;
+  node.id = 205;
+  node.type = "image_mixing";
+  node.subtype = "add_weighted";
+  node.runtime_parameters["alpha"] = 0.5;
+  node.runtime_parameters["beta"] = 0.25;
+  node.runtime_parameters["gamma"] = 0.0;
+  node.runtime_parameters["merge_strategy"] = "resize";
+  node.runtime_parameters["channel_mapping"] = std::move(channel_mapping);
+
+  NodeOutput primary_input;
+  primary_input.publish_image_value(std::move(primary));
+  NodeOutput secondary_input;
+  secondary_input.publish_image_value(std::move(secondary));
+  return std::get<MonolithicOpFunc>(resolved.value())(
+      node, {&primary_input, &secondary_input});
+}
+
+/**
+ * @brief Executes one small frozen coordinate-pattern generator request.
+ *
+ * @return Fresh `3x2x3` FP32 provider output for seed zero.
+ * @throws GraphError when the callback is unavailable or rejects the request.
+ * @throws std::invalid_argument, std::overflow_error, std::length_error, or
+ *         std::bad_alloc from metadata and Value publication.
+ * @note The returned Value outlives every callback-local OpenCV allocation.
+ */
+NodeOutput execute_coordinate_pattern() {
+  auto resolved = OpRegistry::instance().resolve_for_intent(
+      "image_generator", "coordinate_pattern",
+      ComputeIntent::GlobalHighPrecision);
+  if (!resolved ||
+      !std::holds_alternative<MonolithicOpFunc>(resolved.value())) {
+    throw GraphError(GraphErrc::NoOperation,
+                     "image_generator:coordinate_pattern is not monolithic");
+  }
+  Node node;
+  node.id = 206;
+  node.type = "image_generator";
+  node.subtype = "coordinate_pattern";
+  node.runtime_parameters["width"] = 3;
+  node.runtime_parameters["height"] = 2;
+  node.runtime_parameters["channels"] = 3;
+  node.runtime_parameters["seed"] = 0;
+  return std::get<MonolithicOpFunc>(resolved.value())(node, {});
 }
 
 /**
@@ -305,6 +485,98 @@ TEST(OpenCvOperationProviderMetadataContract,
       (std::vector<ChannelSampleDomain>{
           {ChannelId{40U}, SampleDomain{SampleDomainKind::Legal, 0.0, 2.0}}}));
   EXPECT_FALSE(alpha_facet.color.has_value());
+}
+
+/**
+ * @brief Proves a channel-expanding blend publishes only compatible facts.
+ *
+ * @return Nothing; GoogleTest reports payload, authority, or metadata failures.
+ * @throws Provider resolution, OpenCV execution, metadata validation, and
+ *         allocation exceptions unchanged to the test runner.
+ * @note The first pass rejects per-channel/color/schema reuse while retaining
+ *       signed spatial facts. The second proves a uniform sample endpoint
+ *       shared by both sources remains legal after expansion. Returned Values
+ *       are inspected after callback-local inputs and matrices are destroyed.
+ */
+TEST(OpenCvOperationProviderMetadataContract,
+     WeightedBlendProjectsExpandedChannelSemantics) {
+  ASSERT_NO_THROW(register_provider());
+
+  Value rich_primary = make_weighted_blend_primary(true);
+  const ValueRevisionId rich_revision = rich_primary.revision_id();
+  const NodeOutput rich_output = execute_channel_expanding_weighted_blend(
+      std::move(rich_primary), make_weighted_blend_secondary());
+  ASSERT_TRUE(rich_output.has_image_value());
+  const Value& rich_value = rich_output.image_value();
+  EXPECT_NE(rich_value.revision_id(), rich_revision);
+  EXPECT_EQ(rich_value.dense_tensor_descriptor().shape,
+            (std::vector<std::size_t>{2U, 3U, 4U}));
+  ASSERT_TRUE(rich_value.image_facet().has_value());
+  const ImageFacet& rich_facet = *rich_value.image_facet();
+  EXPECT_EQ(rich_facet.x_axis, 1U);
+  EXPECT_EQ(rich_facet.y_axis, 0U);
+  EXPECT_EQ(rich_facet.channel_axis, std::optional<std::size_t>(2U));
+  EXPECT_EQ(rich_facet.data_window, (ImageBounds{-7, 11, -4, 13}));
+  EXPECT_EQ(rich_facet.display_window,
+            std::optional<ImageBounds>(ImageBounds{-8, 10, -3, 14}));
+  EXPECT_FALSE(rich_facet.channel_schema.has_value());
+  EXPECT_FALSE(rich_facet.sample_domain.has_value());
+  EXPECT_FALSE(rich_facet.color.has_value());
+
+  const ImageView rich_view(rich_value);
+  ASSERT_EQ(rich_view.channels(), 4U);
+  std::array<float, 4U> first_pixel{};
+  for (std::size_t channel = 0U; channel < first_pixel.size(); ++channel) {
+    std::memcpy(&first_pixel[channel], rich_view.channel_data(0U, 0U, channel),
+                sizeof(float));
+  }
+  EXPECT_FLOAT_EQ(first_pixel[0], 0.1F);
+  EXPECT_FLOAT_EQ(first_pixel[1], 0.2F);
+  EXPECT_FLOAT_EQ(first_pixel[2], 0.3F);
+  EXPECT_FLOAT_EQ(first_pixel[3], 0.2F);
+
+  const NodeOutput uniform_output = execute_channel_expanding_weighted_blend(
+      make_weighted_blend_primary(false), make_weighted_blend_secondary());
+  ASSERT_TRUE(uniform_output.has_image_value());
+  ASSERT_TRUE(uniform_output.image_value().image_facet().has_value());
+  const ImageFacet& uniform_facet = *uniform_output.image_value().image_facet();
+  EXPECT_FALSE(uniform_facet.channel_schema.has_value());
+  ASSERT_TRUE(uniform_facet.sample_domain.has_value());
+  EXPECT_EQ(uniform_facet.sample_domain->encoding,
+            (SampleEncoding{1U, SampleEncodingKind::Normalized}));
+  EXPECT_EQ(uniform_facet.sample_domain->default_domain,
+            (SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}));
+  EXPECT_TRUE(uniform_facet.sample_domain->per_channel.empty());
+  EXPECT_FALSE(uniform_facet.color.has_value());
+}
+
+/**
+ * @brief Proves coordinate-pattern publication declares its exact endpoint.
+ *
+ * @return Nothing; GoogleTest reports descriptor or sample-domain failures.
+ * @throws Provider resolution, OpenCV execution, metadata validation, and
+ *         allocation exceptions unchanged to the test runner.
+ * @note Payload formula bits are locked by the optional-provider integration
+ *       test; this case locks the independent interpretation authority used by
+ *       codecs and CLI conversion.
+ */
+TEST(OpenCvOperationProviderMetadataContract,
+     CoordinatePatternDeclaresNormalizedSampleDomain) {
+  ASSERT_NO_THROW(register_provider());
+  const NodeOutput output = execute_coordinate_pattern();
+  ASSERT_TRUE(output.has_image_value());
+  const Value& value = output.image_value();
+  EXPECT_EQ(value.dense_tensor_descriptor().element_semantics,
+            ElementSemantics::FloatingPoint);
+  EXPECT_EQ(value.dense_tensor_descriptor().storage_encoding.bit_width, 32U);
+  ASSERT_TRUE(value.image_facet().has_value());
+  ASSERT_TRUE(value.image_facet()->sample_domain.has_value());
+  const SampleDomainFacet& samples = *value.image_facet()->sample_domain;
+  EXPECT_EQ(samples.encoding,
+            (SampleEncoding{1U, SampleEncodingKind::Normalized}));
+  EXPECT_EQ(samples.default_domain,
+            (SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}));
+  EXPECT_TRUE(samples.per_channel.empty());
 }
 
 /**
