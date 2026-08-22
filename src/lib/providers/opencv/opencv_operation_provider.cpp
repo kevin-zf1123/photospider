@@ -1724,16 +1724,26 @@ static NodeOutput op_image_source_path(
 }
 
 /**
- * @brief Creates one uniform float32 image from request-effective parameters.
+ * @brief Creates one uniform normalized float32 image from effective params.
  *
- * @param node Generator node carrying width, height, channels, and byte-scale
- *        value parameters.
+ * @param node Generator node carrying width, height, channels, and the integer
+ *        numerator used by the maintained `value / 255` pixel formula.
  * @param inputs Unused generator inputs.
- * @return Owned CPU image whose channel values equal `value / 255`.
+ * @return Owned CPU image whose channel values equal `value / 255` and whose
+ *         default sample interpretation is FP32 Normalized `[0,1]`.
  * @throws cv::Exception internally for invalid shape/channel or allocation
  *         failure; the provider fence translates the exception category.
- * @throws std::bad_alloc if host ownership storage allocation fails.
- * @note The callback owns only invocation-local OpenCV matrix state.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         when the requested matrix cannot publish a valid image Value.
+ * @throws std::bad_alloc if matrix, metadata, or host ownership allocation
+ *         fails.
+ * @note The declared normalized interval is the samples' legal semantic
+ *       domain, not payload statistics. Existing integer values below zero or
+ *       above 255 remain accepted and produce out-of-domain samples; this
+ *       producer neither rejects nor clamps them. The callback retains only
+ *       invocation-local OpenCV state and publishes through the explicit-facet
+ *       helper without changing shape/channel errors, the pixel formula,
+ *       revision, or lifetime rules.
  */
 static NodeOutput op_constant_image(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -1749,7 +1759,13 @@ static NodeOutput op_constant_image(
   cv::Mat out_mat(height, width, CV_MAKETYPE(CV_32F, channels), fill_value);
 
   NodeOutput result;
-  publish_opencv_output(&result, out_mat);
+  ImageFacet facet;
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        {}};
+  publish_opencv_output_with_facet(&result, out_mat, std::move(facet));
   return result;
 }
 

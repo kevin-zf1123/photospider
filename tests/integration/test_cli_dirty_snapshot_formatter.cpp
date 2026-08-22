@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -238,6 +239,47 @@ void write_empty_output_graph(const std::filesystem::path& path) {
       << "  name: empty_output\n"
       << "  type: cli_dirty_test\n"
       << "  subtype: empty_output\n";
+}
+
+/**
+ * @brief Writes constants at and beyond the normalized legal-domain endpoints.
+ *
+ * @param path YAML file path to create.
+ * @throws std::filesystem::filesystem_error if parent-directory creation
+ *         fails.
+ * @throws std::ios_base::failure if the destination cannot be opened or a
+ *         YAML write fails.
+ * @note Nodes 1 and 2 produce the normalized endpoints through integer values
+ *       0 and 255. Nodes 3 and 4 use adjacent integers -1 and 256, which the
+ *       maintained producer accepts as out-of-domain payload samples. Every
+ *       case is integral, so non-finite floating input is outside this
+ *       compatibility regression.
+ */
+void write_constant_boundary_graph(const std::filesystem::path& path) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream out;
+  out.exceptions(std::ios::failbit | std::ios::badbit);
+  out.open(path);
+  out << "- id: 1\n"
+      << "  name: constant_zero\n"
+      << "  type: image_generator\n"
+      << "  subtype: constant\n"
+      << "  parameters: {width: 2, height: 1, channels: 1, value: 0}\n"
+      << "- id: 2\n"
+      << "  name: constant_255\n"
+      << "  type: image_generator\n"
+      << "  subtype: constant\n"
+      << "  parameters: {width: 2, height: 1, channels: 1, value: 255}\n"
+      << "- id: 3\n"
+      << "  name: constant_negative\n"
+      << "  type: image_generator\n"
+      << "  subtype: constant\n"
+      << "  parameters: {width: 2, height: 1, channels: 1, value: -1}\n"
+      << "- id: 4\n"
+      << "  name: constant_overflow\n"
+      << "  type: image_generator\n"
+      << "  subtype: constant\n"
+      << "  parameters: {width: 2, height: 1, channels: 1, value: 256}\n";
 }
 
 /**
@@ -544,6 +586,242 @@ TEST(CliSaveCommand, SavesWithExplicitDestinationSampleSemantics) {
   EXPECT_NE(text.find("Saved named output 'image'"), std::string::npos) << text;
   ASSERT_TRUE(std::filesystem::is_regular_file(output_path)) << text;
   EXPECT_GT(std::filesystem::file_size(output_path), 0U);
+}
+
+/**
+ * @brief Saves both inclusive constant byte-code boundaries through the real
+ * configured provider, Host, CLI, and PNG codec.
+ *
+ * @return Nothing; GoogleTest reports metadata, conversion, file, or decoded
+ *         code-value disagreement.
+ * @throws Host, filesystem, codec, and allocation exceptions unchanged to the
+ *         test runner outside the command's maintained diagnostic boundary.
+ * @note `NamedValueResult::inspect()` verifies the source SampleDomain without
+ *       acquiring payload authority. The subsequent save and decode prove the
+ *       same configured result reaches the real codec at both endpoints.
+ */
+TEST(CliSaveCommand, SavesConstantByteBoundariesThroughConfiguredCodec) {
+  providers::register_configured_operation_providers();
+  ScopedTempDir temp("photospider_cli_save_constant_boundaries_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const auto yaml_path = temp.root() / "source" / "constant_graph.yaml";
+  write_constant_boundary_graph(yaml_path);
+
+  GraphLoadRequest request;
+  request.session = GraphSessionId{"cli_save_constant_boundaries"};
+  request.root_dir = (temp.root() / "sessions").string();
+  request.yaml_path = yaml_path.string();
+  request.cache_root_dir = (temp.root() / "cache").string();
+  const auto loaded = host->load_graph(request);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  const SampleEndpoint code_samples{
+      SampleEncoding{1U, SampleEncodingKind::CodeValue},
+      SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0}};
+  const std::array<std::pair<int, std::uint8_t>, 2U> cases{
+      {{1, 0U}, {2, 255U}}};
+  for (const auto& [node_id, expected_code] : cases) {
+    HostComputeRequest compute_request;
+    compute_request.session = request.session;
+    compute_request.node = NodeId{node_id};
+    compute_request.cache.precision = "fp32";
+    const Result<NamedValueResult> computed =
+        host->compute_and_get_values(compute_request);
+    ASSERT_TRUE(computed.status.ok) << computed.status.message;
+
+    const std::vector<NamedValueInspection> inspections =
+        computed.value.inspect();
+    ASSERT_EQ(inspections.size(), 1U);
+    EXPECT_EQ(inspections.front().name, "image");
+    ASSERT_TRUE(inspections.front().dense_descriptor.has_value());
+    EXPECT_EQ(inspections.front().dense_descriptor->element_semantics,
+              ElementSemantics::FloatingPoint);
+    EXPECT_EQ(inspections.front().dense_descriptor->storage_encoding,
+              (StorageEncoding{32U}));
+    ASSERT_TRUE(inspections.front().image_facet.has_value());
+    const auto& sample_domain = inspections.front().image_facet->sample_domain;
+    EXPECT_TRUE(sample_domain.has_value());
+    if (sample_domain.has_value()) {
+      EXPECT_TRUE(sample_domain->per_channel.empty());
+      EXPECT_EQ(sample_domain->encoding,
+                (SampleEncoding{1U, SampleEncodingKind::Normalized}));
+      EXPECT_EQ(sample_domain->default_domain,
+                (SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}));
+    }
+
+    const auto output_path =
+        temp.root() / ("constant-" + std::to_string(expected_code) + ".png");
+    std::istringstream args(
+        std::to_string(node_id) + " image " + output_path.string() +
+        " uint8 code code 0 255 reject nearest-even reject allow");
+    std::string current_graph = request.session.value;
+    bool modified = false;
+    CliConfig config;
+    std::ostringstream captured;
+    bool handled = false;
+    {
+      ScopedStreamBufferRedirect redirect(std::cout, captured.rdbuf());
+      handled = ::handle_save(args, *host, current_graph, modified, config);
+    }
+
+    const std::string text = captured.str();
+    EXPECT_TRUE(handled);
+    EXPECT_NE(text.find("Saved named output 'image'"), std::string::npos)
+        << text;
+    ASSERT_TRUE(std::filesystem::is_regular_file(output_path)) << text;
+
+    const Value decoded =
+        providers::make_configured_image_artifact_codec()->decode(
+            output_path,
+            {{ImageArtifactDecodeRule{ElementSemantics::UnsignedInteger,
+                                      StorageEncoding{8U}, code_samples,
+                                      std::nullopt}}});
+    const ImageView view(decoded);
+    ASSERT_EQ(view.width(), 2U);
+    ASSERT_EQ(view.height(), 1U);
+    ASSERT_EQ(view.channels(), 1U);
+    EXPECT_EQ(std::to_integer<std::uint8_t>(*view.channel_data(0U, 0U, 0U)),
+              expected_code);
+    EXPECT_EQ(std::to_integer<std::uint8_t>(*view.channel_data(1U, 0U, 0U)),
+              expected_code);
+  }
+}
+
+/**
+ * @brief Preserves out-of-domain constants and requires explicit save policy.
+ *
+ * @return Nothing; GoogleTest reports compute, descriptor, payload, conversion,
+ *         file, or decoded endpoint disagreement.
+ * @throws Host, filesystem, codec, stream, and allocation exceptions unchanged
+ *         to the test runner outside the command's maintained diagnostic
+ *         boundary.
+ * @note The producer remains compatible with integer values -1 and 256. Their
+ *       payloads lie beyond the declared Normalized `[0,1]` legal interval,
+ *       proving the facet is not inferred from actual minima/maxima. CLI
+ *       `reject` fails closed without creating a file, while an explicit
+ *       `clamp` request writes the corresponding code-value endpoint.
+ */
+TEST(CliSaveCommand, ConstantOutOfDomainValuesRequireExplicitSavePolicy) {
+  providers::register_configured_operation_providers();
+  ScopedTempDir temp("photospider_cli_constant_out_of_range_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const auto yaml_path = temp.root() / "source" / "constant_graph.yaml";
+  write_constant_boundary_graph(yaml_path);
+
+  GraphLoadRequest request;
+  request.session = GraphSessionId{"cli_constant_out_of_range"};
+  request.root_dir = (temp.root() / "sessions").string();
+  request.yaml_path = yaml_path.string();
+  request.cache_root_dir = (temp.root() / "cache").string();
+  const auto loaded = host->load_graph(request);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  const SampleEndpoint code_samples{
+      SampleEncoding{1U, SampleEncodingKind::CodeValue},
+      SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0}};
+  const std::array<std::pair<int, int>, 2U> cases{{{3, -1}, {4, 256}}};
+  for (const auto& [node_id, value_int] : cases) {
+    HostComputeRequest compute_request;
+    compute_request.session = request.session;
+    compute_request.node = NodeId{node_id};
+    compute_request.cache.precision = "fp32";
+    const Result<NamedValueResult> computed =
+        host->compute_and_get_values(compute_request);
+    ASSERT_TRUE(computed.status.ok) << computed.status.message;
+
+    const std::vector<NamedValueInspection> inspections =
+        computed.value.inspect();
+    ASSERT_EQ(inspections.size(), 1U);
+    ASSERT_TRUE(inspections.front().dense_descriptor.has_value());
+    EXPECT_EQ(inspections.front().dense_descriptor->shape,
+              (std::vector<std::size_t>{1U, 2U, 1U}));
+    EXPECT_EQ(inspections.front().dense_descriptor->element_semantics,
+              ElementSemantics::FloatingPoint);
+    EXPECT_EQ(inspections.front().dense_descriptor->storage_encoding,
+              (StorageEncoding{32U}));
+    ASSERT_TRUE(inspections.front().image_facet.has_value());
+    ASSERT_TRUE(inspections.front().image_facet->sample_domain.has_value());
+    const SampleDomainFacet& source_samples =
+        *inspections.front().image_facet->sample_domain;
+    EXPECT_TRUE(source_samples.per_channel.empty());
+    EXPECT_EQ(source_samples.encoding,
+              (SampleEncoding{1U, SampleEncodingKind::Normalized}));
+    EXPECT_EQ(source_samples.default_domain,
+              (SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}));
+
+    const Value* source = computed.value.find("image");
+    ASSERT_NE(source, nullptr);
+    const ImageView source_view(*source);
+    ASSERT_EQ(source_view.width(), 2U);
+    ASSERT_EQ(source_view.height(), 1U);
+    ASSERT_EQ(source_view.channels(), 1U);
+    float source_sample = 0.0F;
+    std::memcpy(&source_sample, source_view.channel_data(0U, 0U, 0U),
+                sizeof(source_sample));
+    EXPECT_FLOAT_EQ(source_sample, static_cast<float>(value_int) / 255.0F);
+
+    const auto reject_path =
+        temp.root() / ("rejected-constant-" + std::to_string(node_id) + ".png");
+    EXPECT_FALSE(std::filesystem::exists(reject_path));
+    std::istringstream reject_args(
+        std::to_string(node_id) + " image " + reject_path.string() +
+        " uint8 code code 0 255 reject nearest-even reject allow");
+    std::string current_graph = request.session.value;
+    bool modified = false;
+    CliConfig config;
+    std::ostringstream captured;
+    bool handled = false;
+    {
+      ScopedStreamBufferRedirect redirect(std::cout, captured.rdbuf());
+      handled =
+          ::handle_save(reject_args, *host, current_graph, modified, config);
+    }
+
+    const std::string text = captured.str();
+    EXPECT_TRUE(handled);
+    EXPECT_NE(text.find("Failed to save image:"), std::string::npos) << text;
+    EXPECT_NE(text.find("out-of-domain"), std::string::npos) << text;
+    EXPECT_FALSE(std::filesystem::exists(reject_path));
+
+    const auto clamp_path =
+        temp.root() / ("clamped-constant-" + std::to_string(node_id) + ".png");
+    std::istringstream clamp_args(
+        std::to_string(node_id) + " image " + clamp_path.string() +
+        " uint8 code code 0 255 clamp nearest-even reject allow");
+    std::ostringstream clamp_captured;
+    bool clamp_handled = false;
+    {
+      ScopedStreamBufferRedirect redirect(std::cout, clamp_captured.rdbuf());
+      clamp_handled =
+          ::handle_save(clamp_args, *host, current_graph, modified, config);
+    }
+    const std::string clamp_text = clamp_captured.str();
+    EXPECT_TRUE(clamp_handled);
+    EXPECT_NE(clamp_text.find("Saved named output 'image'"), std::string::npos)
+        << clamp_text;
+    ASSERT_TRUE(std::filesystem::is_regular_file(clamp_path)) << clamp_text;
+
+    const Value decoded =
+        providers::make_configured_image_artifact_codec()->decode(
+            clamp_path, {{ImageArtifactDecodeRule{
+                            ElementSemantics::UnsignedInteger,
+                            StorageEncoding{8U}, code_samples, std::nullopt}}});
+    const ImageView decoded_view(decoded);
+    ASSERT_EQ(decoded_view.width(), 2U);
+    ASSERT_EQ(decoded_view.height(), 1U);
+    ASSERT_EQ(decoded_view.channels(), 1U);
+    const std::uint8_t expected_code = value_int < 0 ? 0U : 255U;
+    EXPECT_EQ(
+        std::to_integer<std::uint8_t>(*decoded_view.channel_data(0U, 0U, 0U)),
+        expected_code);
+    EXPECT_EQ(
+        std::to_integer<std::uint8_t>(*decoded_view.channel_data(1U, 0U, 0U)),
+        expected_code);
+  }
 }
 
 /**
