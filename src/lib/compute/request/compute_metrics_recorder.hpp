@@ -47,11 +47,15 @@ class ComputeMetricsRecorder {
    *       ProviderDefined and non-Ready DenseTensor Values require no payload
    *       access. Pixel statistics are inspected only for Ready host-visible
    *       named image Values. Inspection uses ImageView logical coordinates
-   *       and excludes padding. Native UINT32 samples are promoted exactly
-   *       to binary64 min/max diagnostics without sample-domain normalization.
-   *       Compatibility staging is never read. An all-NaN active payload
-   *       retains the legacy positive/negative infinity empty-range sentinels;
-   *       opaque/non-Ready resources retain callback-provided values.
+   *       and excludes padding. Native 8/16/32-bit integers project exactly
+   *       to binary64; signed/unsigned 64-bit integers use deterministic
+   *       nearest-representable binary64 diagnostics with ties to even and may
+   *       lose integer precision. Projection is independent of the ambient
+   *       floating-point rounding mode and performs no sample-domain
+   *       normalization. Compatibility staging is never read. An all-NaN
+   *       active payload retains the legacy positive/negative infinity
+   *       empty-range sentinels; opaque/non-Ready resources retain callback-
+   *       provided values.
    */
   static void finalize_output_metadata(
       NodeOutput& output, const std::vector<const NodeOutput*>& inputs,

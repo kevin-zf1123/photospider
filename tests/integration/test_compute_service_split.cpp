@@ -1,3 +1,4 @@
+#include <fenv.h>  // NOLINT(build/c++11)
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -22,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -556,6 +558,174 @@ NodeOutput make_uint32_sampled_image_output(
            static_cast<std::ptrdiff_t>(sizeof(std::uint32_t))}},
       std::move(storage)));
   return output;
+}
+
+/**
+ * @brief Publishes native signed or unsigned integer code values as an image.
+ * @tparam Scalar Exact signed or unsigned 32-bit or 64-bit storage scalar.
+ * @param samples Nonempty row-major single-channel payload.
+ * @param domain Binary64-declared code-value interval retained by ImageFacet.
+ * @return NodeOutput containing one sealed canonical `image` Value.
+ * @throws std::invalid_argument when the sample vector is empty.
+ * @throws Allocation, overflow, Value validation, or publication exceptions
+ * unchanged.
+ * @note The helper performs no numeric conversion. For 64-bit storage the
+ *       declared domain endpoints are bounded binary64 metadata projections;
+ *       the native payload remains the sole exact sample authority.
+ */
+template <typename Scalar>
+NodeOutput make_native_integer_sampled_image_output(std::vector<Scalar> samples,
+                                                    SampleDomain domain) {
+  static_assert(std::is_integral_v<Scalar> && !std::is_same_v<Scalar, bool>,
+                "integer metrics fixture requires a native integer scalar");
+  static_assert(sizeof(Scalar) == sizeof(std::int32_t) ||
+                    sizeof(Scalar) == sizeof(std::int64_t),
+                "integer metrics fixture supports only 32-bit or 64-bit");
+  if (samples.empty()) {
+    throw std::invalid_argument(
+        "integer metrics fixture requires at least one sample");
+  }
+
+  std::vector<std::byte> storage(samples.size() * sizeof(Scalar));
+  std::memcpy(storage.data(), samples.data(), storage.size());
+  DenseTensorDescriptor descriptor{
+      {1U, samples.size(), 1U},
+      std::is_signed_v<Scalar> ? ElementSemantics::SignedInteger
+                               : ElementSemantics::UnsignedInteger,
+      StorageEncoding{static_cast<std::uint32_t>(sizeof(Scalar) * 8U)}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::CodeValue},
+                        std::move(domain),
+                        {}};
+  NodeOutput output;
+  output.publish_image_value(Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{
+          {static_cast<std::ptrdiff_t>(samples.size() * sizeof(Scalar)),
+           static_cast<std::ptrdiff_t>(sizeof(Scalar)),
+           static_cast<std::ptrdiff_t>(sizeof(Scalar))}},
+      std::move(storage)));
+  return output;
+}
+
+/**
+ * @brief Restores the calling thread's floating-point rounding mode on exit.
+ * @throws std::runtime_error when the original mode cannot be observed.
+ * @note Tests select each supported standard mode explicitly through `set`;
+ *       destruction performs best-effort restoration without throwing.
+ */
+class ScopedFloatingPointRoundingMode final {
+ public:
+  /**
+   * @brief Captures the calling thread's current rounding mode.
+   * @throws std::runtime_error when `fegetround` reports failure.
+   */
+  ScopedFloatingPointRoundingMode() : original_mode_(fegetround()) {
+    if (original_mode_ == -1) {
+      throw std::runtime_error(
+          "integer metrics test could not observe the rounding mode");
+    }
+  }
+
+  /** @brief Restores the captured mode without masking test failures. */
+  ~ScopedFloatingPointRoundingMode() noexcept {
+    (void)fesetround(original_mode_);
+  }
+
+  ScopedFloatingPointRoundingMode(const ScopedFloatingPointRoundingMode&) =
+      delete;
+  ScopedFloatingPointRoundingMode& operator=(
+      const ScopedFloatingPointRoundingMode&) = delete;
+
+  /**
+   * @brief Selects one standard floating-point rounding mode.
+   * @param mode One supported `FE_*` rounding-mode constant.
+   * @return Nothing.
+   * @throws std::runtime_error when the environment rejects the mode.
+   */
+  void set(int mode) {
+    if (fesetround(mode) != 0) {
+      throw std::runtime_error(
+          "integer metrics test could not select the rounding mode");
+    }
+  }
+
+ private:
+  /** @brief Rounding mode restored during destruction. */
+  int original_mode_ = FE_TONEAREST;
+};
+
+/**
+ * @brief Verifies one production timing scan over native integer samples.
+ * @tparam Scalar Exact signed or unsigned 32-bit or 64-bit storage scalar.
+ * @param samples Nonempty payload copied into the canonical Value.
+ * @param domain Declared storage-independent code-value interval.
+ * @param expected_min Expected finite binary64 diagnostic minimum.
+ * @param expected_max Expected finite binary64 diagnostic maximum.
+ * @return Nothing; GoogleTest records dispatch, metadata, or payload failures.
+ * @throws Fixture publication and unexpected metrics exceptions unchanged;
+ * expected production success is checked by GoogleTest.
+ * @note Full descriptor, facet, binding, allocation, producer, revision, and
+ *       payload facts must survive timing finalization. Comparing raw bytes
+ *       separately from binary64 diagnostics proves the scan performs no
+ *       sample-domain normalization or payload rewrite.
+ */
+template <typename Scalar>
+void expect_native_integer_timing_statistics(const std::vector<Scalar>& samples,
+                                             SampleDomain domain,
+                                             double expected_min,
+                                             double expected_max) {
+  NodeOutput output =
+      make_native_integer_sampled_image_output(samples, std::move(domain));
+  const DenseTensorDescriptor original_descriptor =
+      output.image_value().dense_tensor_descriptor();
+  const ImageFacet original_facet = *output.image_value().image_facet();
+  const StorageBinding original_binding =
+      output.image_value().storage_binding();
+  const AllocationIdentity original_allocation =
+      output.image_value().allocation_identity();
+  const ProducerIdentity original_producer =
+      output.image_value().producer_identity();
+  const ValueRevisionId original_revision = output.image_value().revision_id();
+  const ReadLease original_read =
+      output.image_value().buffer_handle().acquire_read();
+  const std::vector<std::byte> original_payload(
+      original_read.data(), original_read.data() + original_read.size());
+
+  output.debug.min_val = -17.0;
+  output.debug.max_val = -19.0;
+  output.debug.has_nan = true;
+  ASSERT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      output, {}, true, 7.0));
+  EXPECT_EQ(output.debug.compute_device, "CPU");
+  EXPECT_EQ(output.debug.execution_time_ms, 7U);
+  EXPECT_DOUBLE_EQ(output.debug.min_val, expected_min);
+  EXPECT_DOUBLE_EQ(output.debug.max_val, expected_max);
+  EXPECT_FALSE(output.debug.has_nan);
+
+  EXPECT_EQ(output.image_value().dense_tensor_descriptor(),
+            original_descriptor);
+  ASSERT_TRUE(output.image_value().image_facet().has_value());
+  EXPECT_EQ(*output.image_value().image_facet(), original_facet);
+  EXPECT_EQ(output.image_value().storage_binding(), original_binding);
+  EXPECT_EQ(output.image_value().allocation_identity(), original_allocation);
+  EXPECT_EQ(output.image_value().producer_identity(), original_producer);
+  EXPECT_EQ(output.image_value().revision_id(), original_revision);
+  const ReadLease final_read =
+      output.image_value().buffer_handle().acquire_read();
+  const std::vector<std::byte> final_payload(
+      final_read.data(), final_read.data() + final_read.size());
+  EXPECT_EQ(final_payload, original_payload);
+
+  const ImageView view(output.image_value());
+  ASSERT_EQ(view.width(), samples.size());
+  for (std::size_t index = 0U; index < samples.size(); ++index) {
+    Scalar observed{};
+    std::memcpy(&observed, view.channel_data(index, 0U, 0U), sizeof(observed));
+    EXPECT_EQ(observed, samples[index]);
+  }
 }
 
 /**
@@ -4287,6 +4457,92 @@ TEST(ComputeMetricsRecorderSplit,
   }
   EXPECT_DOUBLE_EQ(static_cast<double>(sum) / expected_samples.size(),
                    2073758207.5);
+}
+
+/**
+ * @brief Proves native INT32 timing extrema remain exact code values.
+ * @return Nothing; GoogleTest reports dispatch, projection, or mutation.
+ * @throws Fixture, rounding-environment, and metrics exceptions unchanged.
+ * @note Every INT32 value is exactly representable in binary64. Repeating the
+ *       production scan under all standard rounding modes proves diagnostic
+ *       collection neither normalizes the CodeValue payload nor consults the
+ *       ambient mode.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     InspectsInt32CodeValuesExactlyWithoutNormalization) {
+  const std::vector<std::int32_t> samples{
+      std::numeric_limits<std::int32_t>::min(), -1, 0,
+      std::numeric_limits<std::int32_t>::max()};
+  ScopedFloatingPointRoundingMode rounding_mode;
+  for (const int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    SCOPED_TRACE(mode);
+    rounding_mode.set(mode);
+    expect_native_integer_timing_statistics(
+        samples,
+        SampleDomain{SampleDomainKind::CodeValue, -2147483648.0, 2147483647.0},
+        -2147483648.0, 2147483647.0);
+  }
+}
+
+/**
+ * @brief Proves UINT64 timing uses deterministic nearest-even binary64.
+ * @return Nothing; GoogleTest reports dispatch, projection, or mutation.
+ * @throws Fixture, rounding-environment, and metrics exceptions unchanged.
+ * @note `2^53+1`, `2^53+3`, and `UINT64_MAX` are not represented exactly by
+ *       binary64. Native payload bytes remain exact while diagnostic extrema
+ *       project to the nearest representable value with ties to even under
+ *       every ambient rounding mode.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     InspectsUint64CodeValuesWithDeterministicBinary64Projection) {
+  constexpr std::uint64_t kTwoTo53 = std::uint64_t{1U} << 53U;
+  const std::vector<std::uint64_t> adjacent_samples{kTwoTo53 + 1U,
+                                                    kTwoTo53 + 3U};
+  const std::vector<std::uint64_t> extrema_samples{
+      0U, std::numeric_limits<std::uint64_t>::max()};
+  ScopedFloatingPointRoundingMode rounding_mode;
+  for (const int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    SCOPED_TRACE(mode);
+    rounding_mode.set(mode);
+    expect_native_integer_timing_statistics(
+        adjacent_samples,
+        SampleDomain{SampleDomainKind::CodeValue, 0.0, 0x1p+64}, 0x1p+53,
+        0x1.0000000000002p+53);
+    expect_native_integer_timing_statistics(
+        extrema_samples,
+        SampleDomain{SampleDomainKind::CodeValue, 0.0, 0x1p+64}, 0.0, 0x1p+64);
+  }
+}
+
+/**
+ * @brief Proves INT64 timing uses deterministic nearest-even binary64.
+ * @return Nothing; GoogleTest reports dispatch, projection, or mutation.
+ * @throws Fixture, rounding-environment, and metrics exceptions unchanged.
+ * @note Signed extrema and negative `2^53` neighbors cover magnitude handling
+ *       without negating `INT64_MIN`. Diagnostic projection may round, while
+ *       descriptor, revision, and native payload authority remain exact.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     InspectsInt64CodeValuesWithDeterministicBinary64Projection) {
+  constexpr std::int64_t kTwoTo53 = std::int64_t{1} << 53U;
+  const std::vector<std::int64_t> adjacent_samples{-kTwoTo53 - 3,
+                                                   -kTwoTo53 - 1};
+  const std::vector<std::int64_t> extrema_samples{
+      std::numeric_limits<std::int64_t>::min(),
+      std::numeric_limits<std::int64_t>::max()};
+  ScopedFloatingPointRoundingMode rounding_mode;
+  for (const int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    SCOPED_TRACE(mode);
+    rounding_mode.set(mode);
+    expect_native_integer_timing_statistics(
+        adjacent_samples,
+        SampleDomain{SampleDomainKind::CodeValue, -0x1p+63, 0x1p+63},
+        -0x1.0000000000002p+53, -0x1p+53);
+    expect_native_integer_timing_statistics(
+        extrema_samples,
+        SampleDomain{SampleDomainKind::CodeValue, -0x1p+63, 0x1p+63}, -0x1p+63,
+        0x1p+63);
+  }
 }
 
 /**

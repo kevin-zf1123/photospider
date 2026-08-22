@@ -120,11 +120,21 @@ struct DebugMeta {
   uint64_t timestamp_us{0};
   /** @brief Execution duration in milliseconds. */
   uint64_t execution_time_ms{0};
-  /** @brief Minimum observed output value. */
+  /**
+   * @brief Minimum observed output value represented as binary64.
+   * @note Native integers through 32 bits are exact. Wider integer diagnostics
+   *       may use a documented nearest-representable projection; the native
+   *       Value payload remains authoritative.
+   */
   double min_val{0.0};
-  /** @brief Maximum observed output value. */
+  /**
+   * @brief Maximum observed output value represented as binary64.
+   * @note Native integers through 32 bits are exact. Wider integer diagnostics
+   *       may use a documented nearest-representable projection; the native
+   *       Value payload remains authoritative.
+   */
   double max_val{0.0};
-  /** @brief Whether output inspection observed a NaN. */
+  /** @brief Whether output inspection observed NaN or infinity. */
   bool has_nan{false};
   /** @brief Owned execution-device label. */
   std::string compute_device{"UNKNOWN"};

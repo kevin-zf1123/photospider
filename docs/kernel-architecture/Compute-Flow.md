@@ -790,7 +790,14 @@ No unbounded Host vector drain exists.
 
 `TimingCollector` separately stores node timings and total elapsed compute time
 when timing is enabled. Debug metadata in `NodeOutput` records worker id,
-timestamp, execution time, device, and optional range checks.
+timestamp, execution time, device, and optional range checks. For a Ready,
+host-readable ordinary image, timing range inspection accepts every valid
+native signed/unsigned 8/16/32/64-bit integer encoding and reads only logical
+samples. Binary64 extrema are exact through 32 bits; wider integers use a
+deterministic nearest-representable, ties-to-even projection independent of
+the ambient floating-point rounding mode. That diagnostic projection may lose
+integer precision, performs no sample-domain normalization, and changes no
+Value descriptor, Facet, binding, revision, or payload bytes.
 
 ## Error Handling
 

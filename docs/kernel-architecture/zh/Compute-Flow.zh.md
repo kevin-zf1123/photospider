@@ -615,7 +615,12 @@ production retained ring；有活跃 producer 时，它可防止单轮无限追�
 的事件留给未来 polling pass 重新检查。Host 不存在无上限 vector drain。
 
 `TimingCollector` 独立地在启用 timing 时存储节点计时与总计算耗时。`NodeOutput` 中的 debug
-metadata 记录 worker id、时间戳、执行时间、设备和可选范围检查。
+metadata 记录 worker id、时间戳、执行时间、设备和可选范围检查。对于 Ready、host-readable
+的普通图像，timing range inspection 接受所有合法 native signed/unsigned 8/16/32/64-bit
+integer encoding，并且只读取逻辑样本。binary64 extrema 对不超过 32-bit 的整数保持精确；
+更宽整数采用不受环境浮点 rounding mode 影响的确定性 nearest-representable、ties-to-even
+投影。该诊断投影可能损失整数精度，不执行 sample-domain normalization，也不改变 Value
+descriptor、Facet、binding、revision 或 payload byte。
 
 ## 错误处理
 

@@ -170,7 +170,7 @@ Graph state.
 | `named_values` | Canonically ordered immutable Values. The current image port is permanently named `image`; every image or generic entry is the sole payload, allocation, readiness, and revision authority for that exact name. |
 | `data` | Named parameter-result scalars or structures stored as a `plugin::ParameterMap`; generic Values never enter this field. |
 | `space` | Spatial transform, scale, and ROI metadata. |
-| `debug` | Worker/device/timing/range diagnostics. Enabled CPU range inspection walks active scalar bytes through the canonical Value layout; padding is excluded and opaque device Values retain provider diagnostics. |
+| `debug` | Worker/device/timing/range diagnostics. Enabled CPU range inspection walks active scalar bytes through the canonical Value layout; padding is excluded and opaque device Values retain provider diagnostics. Every valid native signed/unsigned 8/16/32/64-bit integer image is accepted. The binary64 range is exact through 32 bits; wider integers use deterministic nearest-representable, ties-to-even projection and can lose integer precision without changing descriptor, Facet, binding, revision, or payload authority. Sample domains are never normalized. |
 
 Operators may return a canonical image Value, independently named generic
 Values, parameter results, or an authorized combination of those categories.

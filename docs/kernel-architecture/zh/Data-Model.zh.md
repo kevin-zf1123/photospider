@@ -131,7 +131,7 @@ Scalar 拼写保持稳定；array 与 object 递归渲染；object key 保持 or
 | `named_values` | 按规范顺序保存的 immutable Value。当前 image port 永久命名为 `image`；每个 image 或 generic entry 都是该精确名称唯一的 payload、allocation、readiness 与 revision 权威。 |
 | `data` | 作为 `plugin::ParameterMap` 保存的 named parameter-result 标量或结构；generic Value 绝不进入此字段。 |
 | `space` | 空间变换、尺度和 ROI 元数据。 |
-| `debug` | worker/设备/计时/范围诊断信息。启用的 CPU range inspection 会通过规范 Value layout 遍历 active scalar byte；padding 被排除，opaque device Value 保留 provider diagnostic。 |
+| `debug` | worker/设备/计时/范围诊断信息。启用的 CPU range inspection 会通过规范 Value layout 遍历 active scalar byte；padding 被排除，opaque device Value 保留 provider diagnostic。所有合法 native signed/unsigned 8/16/32/64-bit integer image 均可被检查。binary64 range 对不超过 32-bit 的整数保持精确；更宽整数采用确定性的 nearest-representable、ties-to-even 投影，可能损失整数精度，但不会改变 descriptor、Facet、binding、revision 或 payload 权威。sample domain 绝不会被 normalization。 |
 
 算子可以返回 canonical image Value、独立命名的 generic Value、parameter result，或这些类别
 的已授权组合。

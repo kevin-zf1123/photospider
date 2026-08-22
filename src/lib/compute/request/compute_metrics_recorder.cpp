@@ -11,6 +11,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "core/canonical_ieee754.hpp"
 #include "photospider/data/image_view.hpp"
 #include "runtime/graph_runtime.hpp"
 
@@ -160,7 +161,8 @@ std::string device_to_string(DeviceBackend backend) {
  * @throws Nothing for value operations.
  * @note `has_non_finite` preserves the legacy `has_nan` diagnostic behavior
  * that also flagged infinities through OpenCV checkRange. NaN samples do not
- * participate in min/max comparisons.
+ * participate in min/max comparisons. The accumulator is stack-local to one
+ * inspection and owns no payload, cache, or shared state.
  */
 struct PixelStatistics {
   /** @brief Whether at least one non-NaN value initialized the range. */
@@ -227,6 +229,91 @@ Scalar read_scalar(const std::byte* bytes) noexcept {
 }
 
 /**
+ * @brief Projects one unsigned integer magnitude to nearest-even binary64.
+ * @param magnitude Exact nonnegative magnitude to project.
+ * @param negative Whether the nonzero result carries a negative sign.
+ * @return Nearest representable finite binary64 value, with ties to even.
+ * @throws Nothing; the constructed canonical word is always finite and valid.
+ * @note The algorithm uses only integer shifts, division-free remainder bits,
+ *       and the repository's numeric canonical-word decoder. It performs no
+ *       inexact integer-to-floating conversion and is independent of the
+ *       ambient floating-point rounding mode. Zero is always positive.
+ */
+double project_integer_magnitude_to_binary64(std::uint64_t magnitude,
+                                             bool negative) {
+  if (magnitude == 0U) {
+    return 0.0;
+  }
+
+  unsigned int exponent = 0U;
+  for (std::uint64_t remaining = magnitude; remaining > 1U; remaining >>= 1U) {
+    ++exponent;
+  }
+
+  constexpr unsigned int kFractionBits = 52U;
+  constexpr std::uint64_t kImplicitBit = std::uint64_t{1U} << kFractionBits;
+  constexpr std::uint64_t kSignificandOverflow = kImplicitBit << 1U;
+  std::uint64_t significand = 0U;
+  if (exponent <= kFractionBits) {
+    significand = magnitude << (kFractionBits - exponent);
+  } else {
+    const unsigned int discarded_bits = exponent - kFractionBits;
+    significand = magnitude >> discarded_bits;
+    const std::uint64_t remainder_mask =
+        (std::uint64_t{1U} << discarded_bits) - 1U;
+    const std::uint64_t remainder = magnitude & remainder_mask;
+    const std::uint64_t halfway = std::uint64_t{1U} << (discarded_bits - 1U);
+    if (remainder > halfway ||
+        (remainder == halfway && (significand & 1U) != 0U)) {
+      ++significand;
+    }
+    if (significand == kSignificandOverflow) {
+      significand >>= 1U;
+      ++exponent;
+    }
+  }
+
+  constexpr std::uint64_t kFractionMask = kImplicitBit - 1U;
+  constexpr std::uint64_t kSignBit = std::uint64_t{1U} << 63U;
+  constexpr std::uint64_t kExponentBias = 1023U;
+  const std::uint64_t bits = (negative ? kSignBit : 0U) |
+                             ((kExponentBias + exponent) << kFractionBits) |
+                             (significand & kFractionMask);
+  return internal::decode_canonical_binary64(bits);
+}
+
+/**
+ * @brief Projects one native integer sample to nearest-even binary64.
+ * @tparam Scalar Signed or unsigned native integer no wider than uint64.
+ * @param value Exact native payload value.
+ * @return Exact binary64 for every value through INT32 and nearest-even
+ *         binary64 for wider values that are not representable.
+ * @throws Nothing for the supported native integer types.
+ * @note Negative magnitude extraction avoids negating `INT64_MIN`. The helper
+ *       changes neither payload nor declared sample-domain metadata and is
+ *       independent of the ambient floating-point rounding mode.
+ */
+template <typename Scalar>
+double project_integer_to_binary64(Scalar value) {
+  static_assert(std::is_integral_v<Scalar> && !std::is_same_v<Scalar, bool>,
+                "pixel projection requires a native integer scalar");
+  static_assert(sizeof(Scalar) <= sizeof(std::uint64_t),
+                "pixel projection supports integers through 64 bits");
+
+  bool negative = false;
+  std::uint64_t magnitude = 0U;
+  if constexpr (std::is_signed_v<Scalar>) {
+    const std::int64_t widened = static_cast<std::int64_t>(value);
+    negative = widened < 0;
+    magnitude = negative ? static_cast<std::uint64_t>(-(widened + 1)) + 1U
+                         : static_cast<std::uint64_t>(widened);
+  } else {
+    magnitude = static_cast<std::uint64_t>(value);
+  }
+  return project_integer_magnitude_to_binary64(magnitude, negative);
+}
+
+/**
  * @brief Inspects all logical image samples of one declared scalar type.
  * @tparam Scalar C++ type corresponding to Value element facts.
  * @param view Valid retaining host-readable ImageView.
@@ -237,7 +324,9 @@ Scalar read_scalar(const std::byte* bytes) noexcept {
  * @throws std::bad_alloc when ImageView::channel_data cannot allocate its
  * per-sample full-rank logical-coordinate vector.
  * @note ImageView resolves arbitrary signed strides and skips every padding or
- * non-logical byte. No compatibility projection is allocated.
+ * non-logical byte. Native integers use deterministic nearest-even binary64
+ * diagnostics; floating-point samples preserve their native value. No sample
+ * normalization or compatibility projection is allocated.
  */
 template <typename Scalar>
 void inspect_typed_pixels(const ImageView& view, PixelStatistics* statistics) {
@@ -246,8 +335,12 @@ void inspect_typed_pixels(const ImageView& view, PixelStatistics* statistics) {
       for (std::size_t channel = 0U; channel < view.channels(); ++channel) {
         const Scalar value =
             read_scalar<Scalar>(view.channel_data(x, y, channel));
-        observe_pixel_value(static_cast<double>(value),
-                            std::is_floating_point_v<Scalar>, statistics);
+        if constexpr (std::is_integral_v<Scalar>) {
+          observe_pixel_value(project_integer_to_binary64(value), false,
+                              statistics);
+        } else {
+          observe_pixel_value(static_cast<double>(value), true, statistics);
+        }
       }
     }
   }
@@ -264,8 +357,9 @@ void inspect_typed_pixels(const ImageView& view, PixelStatistics* statistics) {
  * metadata or ImageView::channel_data cannot allocate a per-sample full-rank
  * logical-coordinate vector.
  * @note No provider conversion, sample-domain normalization, or compatibility
- * snapshot is performed. Native UINT32 samples promote exactly to the binary64
- * diagnostic range.
+ * snapshot is performed. Native 8/16/32-bit integers project exactly;
+ * signed/unsigned 64-bit values use deterministic nearest-representable
+ * binary64 diagnostics with ties to even and may lose integer precision.
  */
 PixelStatistics inspect_cpu_pixels(const Value& value) {
   ImageView view(value);
@@ -289,6 +383,16 @@ PixelStatistics inspect_cpu_pixels(const Value& value) {
                  ElementSemantics::UnsignedInteger &&
              bits == 32U) {
     inspect_typed_pixels<std::uint32_t>(view, &statistics);
+  } else if (descriptor.element_semantics == ElementSemantics::SignedInteger &&
+             bits == 32U) {
+    inspect_typed_pixels<std::int32_t>(view, &statistics);
+  } else if (descriptor.element_semantics ==
+                 ElementSemantics::UnsignedInteger &&
+             bits == 64U) {
+    inspect_typed_pixels<std::uint64_t>(view, &statistics);
+  } else if (descriptor.element_semantics == ElementSemantics::SignedInteger &&
+             bits == 64U) {
+    inspect_typed_pixels<std::int64_t>(view, &statistics);
   } else if (descriptor.element_semantics == ElementSemantics::FloatingPoint &&
              bits == 32U) {
     inspect_typed_pixels<float>(view, &statistics);
@@ -316,6 +420,8 @@ PixelStatistics inspect_cpu_pixels(const Value& value) {
  * operation-provided statistics. Ready host-visible samples are scanned
  * through ImageView and padding is never interpreted. An all-NaN active
  * payload retains the legacy positive/negative infinity empty-range sentinels.
+ * Integer observations project to nearest-even binary64 without consulting
+ * sample-domain metadata or the ambient floating-point rounding mode.
  */
 void populate_debug_statistics(NodeOutput& output) {
   if (!output.has_image_value()) {
@@ -363,10 +469,12 @@ void populate_debug_statistics(NodeOutput& output) {
  *       `enable_timing`. Pending Values expose device metadata through
  *       representation-neutral indexed StorageBinding inspection without
  *       payload access and retain callback-provided statistics until a later
- *       Ready observation. Native UINT32 samples are promoted exactly to
- *       binary64 min/max diagnostics without sample-domain normalization.
- *       ImageView walks logical samples and ignores padding; opaque backend
- *       statistics remain untouched without a device adapter.
+ *       Ready observation. Native 8/16/32-bit integers project exactly to
+ *       binary64; signed/unsigned 64-bit integers use deterministic
+ *       nearest-even binary64 diagnostics and may lose integer precision.
+ *       No sample-domain normalization occurs. ImageView walks logical
+ *       samples and ignores padding; opaque backend statistics remain
+ *       untouched without a device adapter.
  */
 void ComputeMetricsRecorder::finalize_output_metadata(
     NodeOutput& output, const std::vector<const NodeOutput*>& inputs,
