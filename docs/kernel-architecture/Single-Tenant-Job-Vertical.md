@@ -544,9 +544,13 @@ service keeps `Cancelling`, fences the worker, and enters the same journal
 fail-stop. After accepted intent, WorkerManager first sends exact cooperative
 cancellation. A send failure continues bounded report/EOF/wait-status drainage
 and preserves an actual Failed report, nonzero exit, signal death, or channel
-close; it does not itself mint forced cancellation. A worker still alive at the
-cooperative deadline has its channel closed/revoked and receives owned
-`SIGTERM`/`SIGKILL` escalation under configured bounds before exact reaping.
+close; it does not itself mint forced cancellation. For a worker still alive at
+the cooperative deadline, WorkerManager first delivers owned `SIGTERM` while
+the control channel remains live, then immediately closes/revokes that channel
+before the terminate grace period. This ordering prevents an EOF-driven worker
+exit from replacing the wait-status causality of a successfully delivered
+owned signal. A survivor receives owned `SIGKILL` under configured bounds
+before exact reaping.
 The deadline decision performs another exact nonblocking exit observation. If
 that observation reaps a natural exit before channel revocation, reaping is not
 treated as channel EOF: WorkerManager retains the parent socket and stateful

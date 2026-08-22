@@ -461,12 +461,15 @@ class WorkerManager::Impl final {
    * observes an abnormal exit.
    * @throws std::overflow_error if a captured monotonic base cannot represent
    * a validated termination or reap deadline.
-   * @note Exact natural exit observed before revocation leaves `control` open
-   * for the caller's bounded report/EOF drain. Every signal revalidates
-   * complete record/PID ownership under mutex. Missing the final reap deadline
-   * or losing exact wait authority fail-stops the authority process; this
-   * function never falls back to an unbounded `waitpid` or a recoverable
-   * manager completion.
+   * @note Exact natural exit observed before escalation leaves `control` open
+   * for the caller's bounded report/EOF drain. Otherwise the manager delivers
+   * owned `SIGTERM` while the control channel is still live, then revokes that
+   * channel before bounded wait/KILL escalation. This ordering prevents peer
+   * EOF from replacing signal-death causality with a normal worker exit. Every
+   * signal revalidates complete record/PID ownership under mutex. Missing the
+   * final reap deadline or losing exact wait authority fail-stops the authority
+   * process; this function never falls back to an unbounded `waitpid` or a
+   * recoverable manager completion.
    */
   TerminateAndReapResult terminate_and_reap(
       const std::shared_ptr<Record>& record, ChildProcess* process);

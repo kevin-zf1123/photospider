@@ -423,8 +423,10 @@ durability barrier 或 completion observer 失败，service 会保留 `Cancellin
 并进入相同 journal fail-stop。Intent 被接受后，WorkerManager 先发送精确 cooperative
 cancellation。发送失败会继续有界排空 report/EOF/wait status，并保留真实 Failed report、
 nonzero exit、signal death 或 channel close；发送失败本身不会 mint forced cancellation。
-Cooperative deadline 时仍存活的 worker 会先被关闭/撤销 channel，再在 configured bound 下接收
-owner-validated `SIGTERM`/`SIGKILL` escalation，最后精确 reap。Deadline 决策会再执行一次
+对于 cooperative deadline 时仍存活的 worker，WorkerManager 会在 control channel 仍存活时
+先投递 owned `SIGTERM`，随后在 terminate grace period 开始前立即关闭/撤销该 channel。
+这一顺序防止 EOF 驱动的 worker exit 取代已成功投递 owned signal 的 wait-status 因果事实。
+仍然存活的 worker 会在 configured bound 下接收 owned `SIGKILL`，最后精确 reap。Deadline 决策会再执行一次
 精确的 nonblocking exit observation。如果该观察在 channel 撤销前 reap 了自然退出，reaping
 不得被当作 channel EOF：WorkerManager 会在独立且有界的 post-reap drain 期间保留 parent
 socket 与 stateful decoder，使已经进入缓冲区的 Report 与 EOF 仍按普通 report/channel/exit

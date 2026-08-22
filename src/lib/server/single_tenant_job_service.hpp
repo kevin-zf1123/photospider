@@ -461,11 +461,22 @@ struct WorkerManagerOptions final {
    * @brief Holds escalation until a normally exited child is waitable in tests.
    * @note False in product construction. When true, `WorkerManager` performs
    * one initial exact `waitpid(WNOHANG)` observation, revokes the channel, and
-   * then uses `waitid(WNOWAIT)` to preserve a zero-exit zombie until the real
-   * signal-decision path runs. This deterministic seam neither reaps the child
-   * nor transfers PID or signal authority to test code.
+   * then uses `waitid(WNOWAIT)` to preserve a zero-exit zombie before the sole
+   * production `waitpid` reaps it without sending a signal. This deterministic
+   * seam neither reaps the child nor transfers PID or signal authority to test
+   * code.
    */
   bool await_pre_signal_zero_exit_for_test = false;
+  /**
+   * @brief Holds channel-revocation escalation until child exit in tests.
+   * @note False in product construction. When true, the manager closes the
+   * control channel and then uses bounded `waitid(WNOWAIT)` observation to
+   * ensure the exact child has consumed either revocation or an already-owned
+   * signal before production `waitpid` classification continues. The seam
+   * exposes no status, descriptor, PID, signal, wait, reap, cancellation, or
+   * completion authority to test code.
+   */
+  bool await_channel_revocation_exit_for_test = false;
   /**
    * @brief Holds cancellation-channel classification until child exit in tests.
    * @note False in product construction. When true, an accepted worker channel

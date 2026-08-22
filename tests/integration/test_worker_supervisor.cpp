@@ -1949,6 +1949,7 @@ TEST(WorkerSupervisor, CooperativeAndForcedCancellationRemainDistinct) {
     auto heartbeat_observed = std::make_shared<std::atomic<bool>>(false);
     WorkerManagerOptions options = supervisor_options();
     options.heartbeat_timeout = 2s;
+    options.await_channel_revocation_exit_for_test = true;
     options.first_external_heartbeat_observed_for_test = heartbeat_observed;
     auto service = make_service(root.path(), std::move(options));
     const JobSubmission ignored =
