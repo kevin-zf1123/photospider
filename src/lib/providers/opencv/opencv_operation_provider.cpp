@@ -281,23 +281,30 @@ static ImageFacet project_selected_channel_facet(const Value& source,
 }
 
 /**
- * @brief Projects two weighted-blend sources onto an expanded channel result.
+ * @brief Projects two weighted-blend sources onto their result channels.
  *
  * @param primary Primary source whose signed windows remain output authority.
  * @param secondary Secondary source contributing mapped sample values.
- * @param output_channels Expanded positive destination channel count.
+ * @param output_channels Positive destination channel count.
+ * @param has_channel_mapping Whether explicit source-to-destination channel
+ *        mapping contributed to the result.
  * @return Copied primary facet containing only facts valid for the result.
  * @throws std::invalid_argument when either source lacks image metadata or the
- *         requested count does not expand the primary channel extent.
+ *         requested count is smaller than the primary channel extent.
  * @throws std::bad_alloc when copied metadata cannot allocate.
- * @note Expanded channels have no source-authored stable identities, so the
- *       channel schema and dependent color binding are removed rather than
- *       synthesized. A sample facet survives only when both sources declare
- *       the same uniform endpoint without stable-ID overrides. Signed data and
- *       display windows remain independent spatial facts and are preserved.
+ * @note Stable channel and color authority survives only for unchanged,
+ *       unmapped channels when both sources declare equal semantic facts.
+ *       Expanded or explicitly mapped destinations have no proven stable
+ *       identity, so those facts are removed rather than synthesized. A sample
+ *       facet survives only when both sources declare the same uniform
+ *       endpoint without stable-ID overrides. Signed data and display windows
+ *       remain independent primary spatial facts and are preserved. No payload
+ *       inspection, sample conversion, or channel-role inference occurs.
  */
-static ImageFacet project_channel_expanded_blend_facet(
-    const Value& primary, const Value& secondary, std::size_t output_channels) {
+static ImageFacet project_weighted_blend_facet(const Value& primary,
+                                               const Value& secondary,
+                                               std::size_t output_channels,
+                                               bool has_channel_mapping) {
   if (!primary.image_facet().has_value() ||
       !secondary.image_facet().has_value()) {
     throw std::invalid_argument(
@@ -308,17 +315,32 @@ static ImageFacet project_channel_expanded_blend_facet(
       primary_facet.channel_axis.has_value()
           ? primary.dense_tensor_descriptor().shape[*primary_facet.channel_axis]
           : 1U;
-  if (output_channels <= primary_channels) {
+  if (output_channels < primary_channels) {
     throw std::invalid_argument(
-        "OpenCV weighted-blend facet projection requires expanded channels.");
+        "OpenCV weighted-blend facet projection cannot shrink primary "
+        "channels.");
   }
 
   ImageFacet projected = primary_facet;
-  projected.channel_schema.reset();
-  projected.color.reset();
+  const ImageFacet& secondary_facet = *secondary.image_facet();
+  const bool common_channel_schema =
+      output_channels == primary_channels && !has_channel_mapping &&
+      primary_facet.channel_schema.has_value() &&
+      secondary_facet.channel_schema.has_value() &&
+      *primary_facet.channel_schema == *secondary_facet.channel_schema;
+  if (!common_channel_schema) {
+    projected.channel_schema.reset();
+  }
+  const bool common_color = common_channel_schema &&
+                            primary_facet.color.has_value() &&
+                            secondary_facet.color.has_value() &&
+                            *primary_facet.color == *secondary_facet.color;
+  if (!common_color) {
+    projected.color.reset();
+  }
 
   const auto& primary_samples = primary_facet.sample_domain;
-  const auto& secondary_samples = secondary.image_facet()->sample_domain;
+  const auto& secondary_samples = secondary_facet.sample_domain;
   const bool common_uniform_samples = primary_samples.has_value() &&
                                       secondary_samples.has_value() &&
                                       primary_samples->per_channel.empty() &&
@@ -2701,11 +2723,13 @@ static void normalize_to_base(cv::Mat& current_mat, const cv::Mat& base_mat,
  * @throws cv::Exception for OpenCV blending/channel failures.
  * @note Invalid individual channel-map entries are skipped, while memory
  *       exhaustion remains exceptional for the public Host compute boundary.
- *       Channel expansion preserves primary signed windows, removes stable
- *       channel/color authority that cannot describe new destinations, and
- *       retains sample meaning only when both sources share one uniform
- *       endpoint. All mutable matrices and result storage are callback-local,
- *       so independent invocations are reentrant.
+ *       Every result preserves primary signed windows. Stable channel/color
+ *       authority survives only for unchanged unmapped destinations when both
+ *       sources agree; expansion, explicit mapping, or source disagreement
+ *       clears it. Sample meaning survives only when both sources share one
+ *       uniform endpoint without per-channel overrides. No payload inference
+ *       or sample conversion occurs. All mutable matrices and result storage
+ *       are callback-local, so independent invocations are reentrant.
  */
 static NodeOutput op_add_weighted_monolithic(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -2800,14 +2824,10 @@ static NodeOutput op_add_weighted_monolithic(
   }
 
   NodeOutput out;
-  if (output.channels() != input_a.channels()) {
-    ImageFacet projected = project_channel_expanded_blend_facet(
-        inputs[0]->image_value(), inputs[1]->image_value(),
-        static_cast<std::size_t>(output.channels()));
-    publish_opencv_output_with_facet(&out, output, std::move(projected));
-  } else {
-    publish_opencv_output(&out, output, &inputs[0]->image_value());
-  }
+  ImageFacet projected = project_weighted_blend_facet(
+      inputs[0]->image_value(), inputs[1]->image_value(),
+      static_cast<std::size_t>(output.channels()), has_mapping);
+  publish_opencv_output_with_facet(&out, output, std::move(projected));
   return out;
 }
 

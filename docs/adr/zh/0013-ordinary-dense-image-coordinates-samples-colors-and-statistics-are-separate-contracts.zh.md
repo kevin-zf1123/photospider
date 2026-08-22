@@ -69,6 +69,16 @@ Rec.709/Display-P3-D65/Rec.2020/ACES-AP0/ACES-AP1 色原色。scene linearity
 独立 Image、Sample Domain 与 Color Facet 记录，使这些含义可独立版本化且不
 创建第二 Value 权威。
 
+组合多个图像输入的 operation 只能投影所有参与输入均已证明兼容的 metadata
+事实。当 output geometry 不变时，它可以保留 primary input 的有符号 data window
+与 display window。只有 output channel cardinality 不变、没有发生显式 channel
+remapping，且每个输入都声明语义相等的 channel 事实时，channel schema 才能保留。
+color interpretation 还要求该 schema 已保留，且每个输入都声明语义相等的 color 事实。
+只有每个输入都声明完全相同的 sample domain，
+并且都没有 per-channel override 时，uniform sample domain 才能保留。否则必须省略
+对应的 optional fact，使 downstream consumer fail closed。payload value 绝不暗示
+sample domain、不授权 sample conversion，也不选择 channel role。
+
 ### 观测统计
 
 观测 min/max 与固定 bin histogram 是独立有界派生数据记录，永远不是

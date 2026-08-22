@@ -39,14 +39,16 @@ using test_support::ScopedTempDir;
  * @param width Positive image width.
  * @param height Positive image height.
  * @param sample Scalar copied to every channel element.
+ * @param sample_domain Explicit uniform sample declaration.
  * @return Fresh immutable single-channel CPU image Value.
  * @throws std::invalid_argument or std::overflow_error when the requested
  * image cannot be represented.
  * @throws std::bad_alloc when metadata or payload allocation fails.
  * @note The helper performs no implicit sample-domain conversion.
  */
-Value make_cli_float_image(std::size_t width, std::size_t height,
-                           float sample) {
+Value make_cli_float_image(std::size_t width, std::size_t height, float sample,
+                           SampleDomain sample_domain = SampleDomain{
+                               SampleDomainKind::Normalized, 0.0, 1.0}) {
   std::vector<float> samples(width * height, sample);
   std::vector<std::byte> storage(samples.size() * sizeof(float));
   std::memcpy(storage.data(), samples.data(), storage.size());
@@ -58,7 +60,7 @@ Value make_cli_float_image(std::size_t width, std::size_t height,
   facet.sample_domain =
       SampleDomainFacet{1U,
                         SampleEncoding{1U, SampleEncodingKind::Normalized},
-                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        sample_domain,
                         {}};
   return Value::from_cpu_dense_tensor(
       std::move(descriptor), std::move(facet),
@@ -100,6 +102,15 @@ void register_cli_command_ops() {
                                    static_cast<std::size_t>(height), 0.25F));
           output.space.absolute_roi = PixelRect{0, 0, width, height};
           output.debug.compute_device = "cli-dirty-test-source";
+          return output;
+        }));
+    OpRegistry::instance().register_op_hp_monolithic(
+        "cli_dirty_test", "legal_source",
+        MonolithicOpFunc([](const Node&,
+                            const std::vector<const NodeOutput*>&) {
+          NodeOutput output;
+          output.publish_image_value(make_cli_float_image(
+              2U, 1U, 0.75F, SampleDomain{SampleDomainKind::Legal, -1.0, 1.0}));
           return output;
         }));
     const DirtyRoiPropFunc offset_dirty(
@@ -339,6 +350,47 @@ void write_perlin_noise_graph(const std::filesystem::path& path) {
       << "    height: 8\n"
       << "    grid_size: 3.0\n"
       << "    seed: 84\n";
+}
+
+/**
+ * @brief Writes a same-channel blend whose two sources disagree on samples.
+ *
+ * @param path YAML file path to create.
+ * @return Nothing after the complete graph fixture has been written.
+ * @throws std::filesystem::filesystem_error if parent-directory creation
+ *         fails.
+ * @throws std::ios_base::failure if the destination cannot be opened or a
+ *         YAML write fails.
+ * @throws std::bad_alloc if path, stream, or YAML text construction exhausts
+ *         memory.
+ * @note Node 1 is the configured normalized constant producer, node 2 is a
+ *       deterministic Legal `[-1,1]` test source, and node 3 reaches the real
+ *       configured OpenCV weighted-blend candidate without channel mapping.
+ */
+void write_incompatible_weighted_blend_graph(
+    const std::filesystem::path& path) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream out;
+  out.exceptions(std::ios::failbit | std::ios::badbit);
+  out.open(path);
+  out << "- id: 1\n"
+      << "  name: normalized_source\n"
+      << "  type: image_generator\n"
+      << "  subtype: constant\n"
+      << "  parameters: {width: 2, height: 1, channels: 1, value: 64}\n"
+      << "- id: 2\n"
+      << "  name: legal_source\n"
+      << "  type: cli_dirty_test\n"
+      << "  subtype: legal_source\n"
+      << "- id: 3\n"
+      << "  name: incompatible_weighted_blend\n"
+      << "  type: image_mixing\n"
+      << "  subtype: add_weighted\n"
+      << "  image_inputs:\n"
+      << "    - from_node_id: 1\n"
+      << "    - from_node_id: 2\n"
+      << "  parameters: {alpha: 0.5, beta: 0.5, gamma: 0.0, "
+         "merge_strategy: resize}\n";
 }
 
 /**
@@ -973,6 +1025,77 @@ TEST(CliSaveCommand, SavesPerlinNoiseThroughConfiguredCodec) {
   ASSERT_EQ(view.channels(), 1U);
   EXPECT_EQ(std::to_integer<std::uint8_t>(*view.channel_data(0U, 0U, 0U)),
             128U);
+}
+
+/**
+ * @brief Proves an incompatible same-channel blend fails closed at CLI save.
+ *
+ * @return Nothing; GoogleTest reports provider, metadata, diagnostic, or
+ *         filesystem disagreement.
+ * @throws Host, filesystem, provider, stream, and allocation exceptions
+ *         unchanged outside the command's maintained diagnostic boundary.
+ * @note The configured weighted-blend candidate publishes raw FP32 pixels but
+ *       no false common SampleDomain. Metadata-only Host inspection observes
+ *       that absence, and the real save command refuses to invent a source
+ *       endpoint or create a PNG despite an explicit destination policy.
+ */
+TEST(CliSaveCommand,
+     IncompatibleWeightedBlendSampleDomainsFailClosedBeforeCodecWrite) {
+  register_cli_command_ops();
+  providers::register_configured_operation_providers();
+  ScopedTempDir temp("photospider_cli_weighted_blend_sample_mismatch_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const auto yaml_path =
+      temp.root() / "source" / "weighted_blend_mismatch.yaml";
+  const auto output_path = temp.root() / "weighted-blend-mismatch.png";
+  write_incompatible_weighted_blend_graph(yaml_path);
+
+  GraphLoadRequest request;
+  request.session = GraphSessionId{"cli_weighted_blend_sample_mismatch"};
+  request.root_dir = (temp.root() / "sessions").string();
+  request.yaml_path = yaml_path.string();
+  request.cache_root_dir = (temp.root() / "cache").string();
+  const auto loaded = host->load_graph(request);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  HostComputeRequest compute_request;
+  compute_request.session = request.session;
+  compute_request.node = NodeId{3};
+  compute_request.cache.precision = "fp32";
+  const Result<NamedValueResult> computed =
+      host->compute_and_get_values(compute_request);
+  ASSERT_TRUE(computed.status.ok) << computed.status.message;
+  const Value* blend = computed.value.find("image");
+  ASSERT_NE(blend, nullptr);
+  ASSERT_TRUE(blend->image_facet().has_value());
+  EXPECT_FALSE(blend->image_facet()->sample_domain.has_value());
+  const ImageView blend_view(*blend);
+  ASSERT_EQ(blend_view.width(), 2U);
+  ASSERT_EQ(blend_view.height(), 1U);
+  ASSERT_EQ(blend_view.channels(), 1U);
+
+  EXPECT_FALSE(std::filesystem::exists(output_path));
+  std::istringstream args(
+      "3 image " + output_path.string() +
+      " uint8 code code 0 255 reject nearest-even reject allow");
+  std::string current_graph = request.session.value;
+  bool modified = false;
+  CliConfig config;
+  std::ostringstream captured;
+  bool handled = false;
+  {
+    ScopedStreamBufferRedirect redirect(std::cout, captured.rdbuf());
+    handled = ::handle_save(args, *host, current_graph, modified, config);
+  }
+
+  const std::string text = captured.str();
+  EXPECT_TRUE(handled);
+  EXPECT_NE(text.find("Failed to save image:"), std::string::npos) << text;
+  EXPECT_NE(text.find("explicit default sample domain"), std::string::npos)
+      << text;
+  EXPECT_FALSE(std::filesystem::exists(output_path));
 }
 
 #if defined(PHOTOSPIDER_TEST_HAS_OPENEXR_DENSE)

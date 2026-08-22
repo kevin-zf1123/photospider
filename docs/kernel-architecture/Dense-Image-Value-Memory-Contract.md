@@ -40,6 +40,19 @@ equality. Stable `ChannelId` and `ChannelGroupId` records do. Observed extrema,
 histograms, NaN/Inf counts, and other statistics never become descriptor,
 Facet, or content identity.
 
+For a multi-input image operation, output metadata is a semantic intersection,
+not a copy from one favored input. Unchanged output geometry may retain the
+primary input's signed data and display windows. Channel facts survive only
+when output channel cardinality is unchanged, no explicit channel mapping was
+applied, and every contributing input declares semantically equal schemas.
+Color additionally requires that retained schema and semantically equal color
+interpretation from every input. A sample-domain fact survives only when every
+input declares the exact same uniform domain and none has per-channel
+overrides. An
+unproven or incompatible optional fact is omitted; implementations do not infer
+it from payload extrema, guess channel roles, or perform implicit sample
+conversion.
+
 ## Layout, binding, and ownership
 
 Ordinary built-in images use a validated whole-byte `StridedLayout`.

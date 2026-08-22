@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -113,6 +114,9 @@ NodeOutput execute_channel_extract(const Value& source,
  *
  * @param with_per_channel_overrides Whether stable-ID sample overrides make
  *        the source interpretation non-uniform.
+ * @param default_sample_domain Uniform default sample declaration.
+ * @param stable_id_offset Offset applied to every channel and group identity.
+ * @param color_transfer Explicit transfer function bound to the channel group.
  * @return Fresh host-readable FP32 Value with channel schema, sample
  *         interpretation, color authority, display metadata, and row padding.
  * @throws std::invalid_argument, std::overflow_error, or std::length_error
@@ -121,7 +125,12 @@ NodeOutput execute_channel_extract(const Value& source,
  * @note Active samples occupy 36 bytes per row while the y stride is 48 bytes;
  *       padding is initialized to `0xA5` and is never an active sample.
  */
-Value make_weighted_blend_primary(bool with_per_channel_overrides) {
+Value make_weighted_blend_primary(
+    bool with_per_channel_overrides,
+    SampleDomain default_sample_domain =
+        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+    std::uint64_t stable_id_offset = 0U,
+    ColorTransferFunction color_transfer = ColorTransferFunction::Rec709) {
   constexpr std::array<float, 18U> kSamples{0.2F, 0.4F, 0.6F, 0.3F, 0.5F, 0.7F,
                                             0.4F, 0.6F, 0.8F, 0.5F, 0.7F, 0.9F,
                                             0.6F, 0.8F, 1.0F, 0.7F, 0.9F, 0.1F};
@@ -138,28 +147,25 @@ Value make_weighted_blend_primary(bool with_per_channel_overrides) {
   ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
   facet.data_window = ImageBounds{-7, 11, -4, 13};
   facet.display_window = ImageBounds{-8, 10, -3, 14};
+  const ChannelId left{11U + stable_id_offset};
+  const ChannelId middle{12U + stable_id_offset};
+  const ChannelId right{13U + stable_id_offset};
+  const ChannelGroupId triple{20U + stable_id_offset};
   facet.channel_schema =
-      ChannelSchema{{{ChannelId{11U}, "left"},
-                     {ChannelId{12U}, "middle"},
-                     {ChannelId{13U}, "right"}},
-                    {{ChannelGroupId{20U},
-                      "triple",
-                      {ChannelId{11U}, ChannelId{12U}, ChannelId{13U}}}}};
+      ChannelSchema{{{left, "left"}, {middle, "middle"}, {right, "right"}},
+                    {{triple, "triple", {left, middle, right}}}};
   SampleDomainFacet sample_domain{
       1U,
       SampleEncoding{1U, SampleEncodingKind::Normalized},
-      SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+      default_sample_domain,
       {}};
   if (with_per_channel_overrides) {
     sample_domain.per_channel = {
-        {ChannelId{11U}, SampleDomain{SampleDomainKind::Legal, -1.0, 1.0}},
-        {ChannelId{12U},
-         SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0}}};
+        {left, SampleDomain{SampleDomainKind::Legal, -1.0, 1.0}},
+        {middle, SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0}}};
   }
   facet.sample_domain = std::move(sample_domain);
-  facet.color =
-      ColorFacet{1U, ChannelGroupId{20U}, ColorTransferFunction::Rec709,
-                 ColorPrimaries::Rec2020};
+  facet.color = ColorFacet{1U, triple, color_transfer, ColorPrimaries::Rec2020};
   return Value::from_cpu_dense_tensor(
       std::move(descriptor), std::move(facet),
       StridedLayout{{static_cast<std::ptrdiff_t>(kRowStride),
@@ -249,6 +255,46 @@ NodeOutput execute_channel_expanding_weighted_blend(Value primary,
   node.runtime_parameters["gamma"] = 0.0;
   node.runtime_parameters["merge_strategy"] = "resize";
   node.runtime_parameters["channel_mapping"] = std::move(channel_mapping);
+
+  NodeOutput primary_input;
+  primary_input.publish_image_value(std::move(primary));
+  NodeOutput secondary_input;
+  secondary_input.publish_image_value(std::move(secondary));
+  return std::get<MonolithicOpFunc>(resolved.value())(
+      node, {&primary_input, &secondary_input});
+}
+
+/**
+ * @brief Executes an ordinary same-channel weighted blend without mapping.
+ *
+ * @param primary Three-channel primary Value moved into callback-local input.
+ * @param secondary Three-channel secondary Value moved into callback-local
+ *        input.
+ * @return Fresh three-channel provider output after local inputs retire.
+ * @throws GraphError when the configured production callback is unavailable or
+ *         rejects the request.
+ * @throws std::invalid_argument, std::overflow_error, std::length_error, or
+ *         std::bad_alloc from metadata projection and Value publication.
+ * @note Equal weights and zero gamma keep pixel assertions simple. The helper
+ *       supplies no channel mapping, sample conversion, or metadata override.
+ */
+NodeOutput execute_same_channel_weighted_blend(Value primary, Value secondary) {
+  auto resolved = OpRegistry::instance().resolve_for_intent(
+      "image_mixing", "add_weighted", ComputeIntent::GlobalHighPrecision);
+  if (!resolved ||
+      !std::holds_alternative<MonolithicOpFunc>(resolved.value())) {
+    throw GraphError(GraphErrc::NoOperation,
+                     "image_mixing:add_weighted is not monolithic");
+  }
+
+  Node node;
+  node.id = 207;
+  node.type = "image_mixing";
+  node.subtype = "add_weighted";
+  node.runtime_parameters["alpha"] = 0.5;
+  node.runtime_parameters["beta"] = 0.5;
+  node.runtime_parameters["gamma"] = 0.0;
+  node.runtime_parameters["merge_strategy"] = "resize";
 
   NodeOutput primary_input;
   primary_input.publish_image_value(std::move(primary));
@@ -548,6 +594,104 @@ TEST(OpenCvOperationProviderMetadataContract,
             (SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}));
   EXPECT_TRUE(uniform_facet.sample_domain->per_channel.empty());
   EXPECT_FALSE(uniform_facet.color.has_value());
+}
+
+/**
+ * @brief Proves same-channel blend metadata is the two-source intersection.
+ *
+ * @return Nothing; GoogleTest reports pixel, identity, or facet drift.
+ * @throws Provider resolution, OpenCV execution, metadata validation, and
+ *         allocation exceptions unchanged to the test runner.
+ * @note Incompatible sample facts cannot inherit the primary declaration;
+ *       identical uniform facts may survive. Stable channel/color authority
+ *       survives only when both sources agree exactly. Signed windows and raw
+ *       pixels remain primary-shaped, and every output receives a fresh Value
+ *       revision after callback-local inputs retire.
+ */
+TEST(OpenCvOperationProviderMetadataContract,
+     WeightedBlendProjectsSameChannelSemanticIntersection) {
+  ASSERT_NO_THROW(register_provider());
+
+  Value sample_primary = make_weighted_blend_primary(false);
+  const ValueRevisionId sample_primary_revision = sample_primary.revision_id();
+  const ImageFacet sample_primary_facet = *sample_primary.image_facet();
+  const NodeOutput incompatible_sample = execute_same_channel_weighted_blend(
+      std::move(sample_primary),
+      make_weighted_blend_primary(
+          false, SampleDomain{SampleDomainKind::Legal, -1.0, 1.0}));
+  ASSERT_TRUE(incompatible_sample.has_image_value());
+  const Value& incompatible_sample_value = incompatible_sample.image_value();
+  EXPECT_NE(incompatible_sample_value.revision_id(), sample_primary_revision);
+  EXPECT_EQ(incompatible_sample_value.dense_tensor_descriptor().shape,
+            (std::vector<std::size_t>{2U, 3U, 3U}));
+  ASSERT_TRUE(incompatible_sample_value.image_facet().has_value());
+  const ImageFacet& incompatible_sample_facet =
+      *incompatible_sample_value.image_facet();
+  EXPECT_EQ(incompatible_sample_facet.data_window,
+            sample_primary_facet.data_window);
+  EXPECT_EQ(incompatible_sample_facet.display_window,
+            sample_primary_facet.display_window);
+  EXPECT_EQ(incompatible_sample_facet.channel_schema,
+            sample_primary_facet.channel_schema);
+  EXPECT_EQ(incompatible_sample_facet.color, sample_primary_facet.color);
+  EXPECT_FALSE(incompatible_sample_facet.sample_domain.has_value());
+
+  Value uniform_primary = make_weighted_blend_primary(false);
+  const ValueRevisionId uniform_primary_revision =
+      uniform_primary.revision_id();
+  const ImageFacet uniform_primary_facet = *uniform_primary.image_facet();
+  const NodeOutput uniform = execute_same_channel_weighted_blend(
+      std::move(uniform_primary), make_weighted_blend_primary(false));
+  ASSERT_TRUE(uniform.has_image_value());
+  EXPECT_NE(uniform.image_value().revision_id(), uniform_primary_revision);
+  ASSERT_TRUE(uniform.image_value().image_facet().has_value());
+  EXPECT_EQ(*uniform.image_value().image_facet(), uniform_primary_facet);
+  const ImageView uniform_view(uniform.image_value());
+  float first_sample = 0.0F;
+  std::memcpy(&first_sample, uniform_view.channel_data(0U, 0U, 0U),
+              sizeof(first_sample));
+  EXPECT_FLOAT_EQ(first_sample, 0.2F);
+
+  Value schema_primary = make_weighted_blend_primary(false);
+  const ImageFacet schema_primary_facet = *schema_primary.image_facet();
+  const NodeOutput incompatible_schema = execute_same_channel_weighted_blend(
+      std::move(schema_primary),
+      make_weighted_blend_primary(
+          false, SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}, 100U));
+  ASSERT_TRUE(incompatible_schema.has_image_value());
+  ASSERT_TRUE(incompatible_schema.image_value().image_facet().has_value());
+  const ImageFacet& incompatible_schema_facet =
+      *incompatible_schema.image_value().image_facet();
+  EXPECT_EQ(incompatible_schema_facet.data_window,
+            schema_primary_facet.data_window);
+  EXPECT_EQ(incompatible_schema_facet.display_window,
+            schema_primary_facet.display_window);
+  EXPECT_FALSE(incompatible_schema_facet.channel_schema.has_value());
+  ASSERT_TRUE(incompatible_schema_facet.sample_domain.has_value());
+  EXPECT_EQ(incompatible_schema_facet.sample_domain,
+            schema_primary_facet.sample_domain);
+  EXPECT_FALSE(incompatible_schema_facet.color.has_value());
+
+  Value color_primary = make_weighted_blend_primary(false);
+  const ImageFacet color_primary_facet = *color_primary.image_facet();
+  const NodeOutput incompatible_color = execute_same_channel_weighted_blend(
+      std::move(color_primary),
+      make_weighted_blend_primary(
+          false, SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}, 0U,
+          ColorTransferFunction::Srgb));
+  ASSERT_TRUE(incompatible_color.has_image_value());
+  ASSERT_TRUE(incompatible_color.image_value().image_facet().has_value());
+  const ImageFacet& incompatible_color_facet =
+      *incompatible_color.image_value().image_facet();
+  EXPECT_EQ(incompatible_color_facet.data_window,
+            color_primary_facet.data_window);
+  EXPECT_EQ(incompatible_color_facet.display_window,
+            color_primary_facet.display_window);
+  EXPECT_EQ(incompatible_color_facet.channel_schema,
+            color_primary_facet.channel_schema);
+  EXPECT_EQ(incompatible_color_facet.sample_domain,
+            color_primary_facet.sample_domain);
+  EXPECT_FALSE(incompatible_color_facet.color.has_value());
 }
 
 /**

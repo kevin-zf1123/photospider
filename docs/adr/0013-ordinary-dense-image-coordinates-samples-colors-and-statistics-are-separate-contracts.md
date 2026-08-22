@@ -84,6 +84,18 @@ Canonical encoding nevertheless emits independent Image, Sample Domain, and
 Color Facet records so those meanings can version independently without a
 second Value authority.
 
+An operation that combines multiple image inputs projects only metadata facts
+proven compatible across every contributing input. It may retain the primary
+input's signed data and display windows when the output geometry is unchanged.
+A channel schema survives only when output channel cardinality is unchanged,
+no explicit channel remapping occurred, and every input declares semantically
+equal channel facts. Color interpretation additionally requires that retained
+schema and semantically equal color facts from every input. A uniform sample
+domain survives only when every input declares the exact same sample domain
+and none has per-channel overrides. Otherwise the corresponding optional fact
+is omitted so downstream consumers fail closed. Payload values never imply a
+sample domain, authorize sample conversion, or select channel roles.
+
 ### Observed statistics
 
 Observed min/max and fixed-bin histograms are independent bounded derived-data

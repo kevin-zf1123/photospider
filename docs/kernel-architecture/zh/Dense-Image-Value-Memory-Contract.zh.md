@@ -33,6 +33,15 @@ coordinate；逻辑访问仅在完成 containment 检查后才减去 data-window
 `ChannelId` 和 `ChannelGroupId` record 承担该职责。观测 extrema、histogram、NaN/Inf count
 及其他 statistics 永远不会成为 descriptor、Facet 或 content identity。
 
+对于 multi-input image operation，output metadata 是语义交集，不是从某个偏好的 input
+直接复制。output geometry 不变时，可以保留 primary input 的有符号 data window 与
+display window。只有 output channel cardinality 不变、没有应用显式 channel mapping，且
+每个参与输入都声明语义相等的 schema 时，channel 事实才能保留。color 还要求该 schema
+已保留，且每个输入都声明语义相等的 color interpretation。只有每个输入都声明完全相同的
+uniform domain，并且都没有 per-channel override
+时，sample-domain 事实才能保留。未经证明或不兼容的 optional fact 必须省略；实现不得从
+payload extrema 推断它、猜测 channel role，也不得执行隐式 sample conversion。
+
 ## Layout、binding 与所有权
 
 普通内置图像使用经过验证的 whole-byte `StridedLayout`。descriptor shape 和 element width
