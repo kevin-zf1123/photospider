@@ -161,15 +161,17 @@ double parameter_double(const Node& node, std::string_view key,
  * @param node Private effective parameters controlling width, height, grid
  * size, and random seed.
  * @return Nothing after the source-private Host adapter publishes a pending,
- * revision-preserving Value through MetalExecutionContext.
+ * revision-preserving FP32 Normalized `[0,1]` Value through
+ * MetalExecutionContext.
  * @throws std::bad_alloc unchanged from parameter parsing, working buffers, or
  * output conversion; also propagates diagnostic-construction exhaustion.
  * @throws std::runtime_error with the current stage for other standard or
  * unknown failures.
  * @note The process Metal executor serializes entry and supplies a borrowed
  * queue, invocation allocator, pipeline cache, and explicit transfer
- * publication boundary. The adapter commits without waiting; the command
- * buffer completion handler settles the Value fence and stale-safe residency.
+ * publication boundary. The producer passes its explicit sample meaning into
+ * that boundary; the adapter commits without waiting, and the command-buffer
+ * completion handler settles the Value fence and stale-safe residency.
  */
 void execute_perlin_noise_metal(const Node& node) {
   @autoreleasepool {
@@ -267,10 +269,15 @@ void execute_perlin_noise_metal(const Node& node) {
           [encoder endEncoding];
 
           dbg_stage = "explicit_transfer";
+          const SampleDomainFacet sample_domain{
+              1U,
+              SampleEncoding{1U, SampleEncodingKind::Normalized},
+              SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+              {}};
           context.publish_float32_texture_to_host(
               (__bridge void*)command_buffer, (__bridge void*)out_texture,
               static_cast<std::uint32_t>(width),
-              static_cast<std::uint32_t>(height));
+              static_cast<std::uint32_t>(height), sample_domain);
         });
   }
 }

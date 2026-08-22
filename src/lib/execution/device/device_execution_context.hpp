@@ -134,10 +134,13 @@ class MetalExecutionContext {
    * @param texture_handle Non-null R32Float id<MTLTexture>.
    * @param width Positive texture width matching its logical output.
    * @param height Positive texture height matching its logical output.
+   * @param sample_domain Complete caller-declared sample meaning copied onto
+   *        both the pending device source and host-visible destination Values.
    * @return Nothing after pending source/destination Values, exact completion
    * identity, transfer blit, native completion handler, and commit are
    * installed.
-   * @throws std::invalid_argument for missing handles or dimensions.
+   * @throws std::invalid_argument for missing handles, dimensions, or malformed
+   *         sample-domain metadata.
    * @throws std::logic_error without ComputeRun completion lineage or after a
    * prior output publication in the same operation callback.
    * @throws std::overflow_error for byte arithmetic or identity exhaustion.
@@ -145,11 +148,13 @@ class MetalExecutionContext {
    * @throws std::bad_alloc for retained publication/completion ownership.
    * @note The method never waits and never calls texture getBytes. The
    * destination is a host-visible revision-preserving replica whose ReadyFence
-   * settles from the command-buffer completion handler.
+   * settles from the command-buffer completion handler. The executor never
+   * infers sample meaning from R32Float storage or payload values.
    */
   virtual void publish_float32_texture_to_host(
       NativeHandle command_buffer_handle, NativeHandle texture_handle,
-      std::uint32_t width, std::uint32_t height) = 0;
+      std::uint32_t width, std::uint32_t height,
+      const SampleDomainFacet& sample_domain) = 0;
 
   /**
    * @brief Submits an explicit host-to-R32Float-texture transfer.

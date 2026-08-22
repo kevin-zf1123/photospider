@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -34,6 +35,7 @@
 #include "execution/execution_task_runtime.hpp"
 #include "metal/perlin_noise_metal.hpp"
 #include "photospider/data/image_view.hpp"
+#include "providers/configured_image_artifact_codec.hpp"
 #include "providers/configured_operation_providers.hpp"
 
 namespace ps::compute {
@@ -1068,6 +1070,15 @@ void expect_valid_perlin_output(
   EXPECT_EQ(image.descriptor().element_semantics,
             ElementSemantics::FloatingPoint);
   EXPECT_EQ(image.descriptor().storage_encoding.bit_width, 32U);
+  ASSERT_TRUE(state->pending_value.image_facet().has_value());
+  ASSERT_TRUE(state->pending_value.image_facet()->sample_domain.has_value());
+  const SampleDomainFacet& samples =
+      *state->pending_value.image_facet()->sample_domain;
+  EXPECT_TRUE(samples.per_channel.empty());
+  EXPECT_EQ(samples.encoding,
+            (SampleEncoding{1U, SampleEncodingKind::Normalized}));
+  EXPECT_EQ(samples.default_domain,
+            (SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}));
   float minimum = std::numeric_limits<float>::infinity();
   float maximum = -std::numeric_limits<float>::infinity();
   for (std::size_t row = 0U; row < image.height(); ++row) {
@@ -2105,6 +2116,77 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_EQ(image.channels(), 1U);
   EXPECT_FLOAT_EQ(perlin_sample(image, 0, 0), 0.5F);
   EXPECT_TRUE(std::isfinite(perlin_sample(image, 128, 128)));
+  const auto resources =
+      service.device_resource_snapshot(DeviceId(DeviceBackend::Metal));
+  ASSERT_TRUE(resources.has_value());
+  EXPECT_EQ(resources->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Saves the configured Metal Perlin host replica through the real codec.
+ *
+ * @return Nothing; GoogleTest reports provider, fence, metadata, conversion,
+ *         file, decode, or resource-retirement failures.
+ * @throws Unexpected provider, service, native, codec, filesystem, allocation,
+ *         or synchronization exceptions unchanged.
+ * @note Runtime absence remains a platform skip. The operation's explicit
+ *       texture-to-shared-buffer transfer is the only readback; the test does
+ *       not manufacture a Host binding or enter a CPU operation fallback.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     PerlinPublishesSampleDomainAndEncodesThroughConfiguredCodec) {
+  ExecutionService service(ExecutionService::default_resource_limits());
+  if (!service.has_device_executor(DeviceBackend::Metal)) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+  service.configure_worker_count(1U);
+  MetalIntegrationHost host;
+
+  const auto state = execute_perlin(service, host, 8411U);
+  expect_valid_perlin_output(state);
+
+  ASSERT_TRUE(state->pending_value.image_facet().has_value());
+  ASSERT_TRUE(state->pending_value.image_facet()->sample_domain.has_value());
+  const SampleDomainFacet& samples =
+      *state->pending_value.image_facet()->sample_domain;
+  SampleConversion conversion;
+  conversion.source = SampleEndpoint{samples.encoding, samples.default_domain};
+  conversion.destination =
+      SampleEndpoint{SampleEncoding{1U, SampleEncodingKind::CodeValue},
+                     SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0}};
+  conversion.destination_element_semantics = ElementSemantics::UnsignedInteger;
+  conversion.destination_storage_encoding = StorageEncoding{8U};
+  conversion.out_of_domain = OutOfDomainPolicy::Reject;
+  conversion.rounding = SampleRoundingMode::NearestEven;
+  conversion.non_finite = NonFinitePolicy::Reject;
+  conversion.precision_loss = PrecisionLossPolicy::Allow;
+
+  const std::filesystem::path artifact =
+      std::filesystem::temp_directory_path() /
+      ("photospider-metal-perlin-" + std::to_string(::getpid()) + ".png");
+  std::error_code cleanup_error;
+  std::filesystem::remove(artifact, cleanup_error);
+  const auto codec = providers::make_configured_image_artifact_codec();
+  codec->encode(artifact, state->pending_value,
+                ImageArtifactEncodeRequest{conversion});
+  ASSERT_TRUE(std::filesystem::is_regular_file(artifact));
+
+  const SampleEndpoint code_samples{
+      SampleEncoding{1U, SampleEncodingKind::CodeValue},
+      SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0}};
+  const Value decoded = codec->decode(
+      artifact, {{ImageArtifactDecodeRule{ElementSemantics::UnsignedInteger,
+                                          StorageEncoding{8U}, code_samples,
+                                          std::nullopt}}});
+  const ImageView decoded_view(decoded);
+  EXPECT_EQ(decoded_view.width(), 8U);
+  EXPECT_EQ(decoded_view.height(), 8U);
+  EXPECT_EQ(decoded_view.channels(), 1U);
+  EXPECT_EQ(
+      std::to_integer<std::uint8_t>(*decoded_view.channel_data(0U, 0U, 0U)),
+      128U);
+  std::filesystem::remove(artifact, cleanup_error);
+
   const auto resources =
       service.device_resource_snapshot(DeviceId(DeviceBackend::Metal));
   ASSERT_TRUE(resources.has_value());

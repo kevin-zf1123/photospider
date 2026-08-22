@@ -967,10 +967,10 @@ class MetalDeviceExecutor final : public DeviceExecutor {
     }
 
     /** @copydoc MetalExecutionContext::publish_float32_texture_to_host */
-    void publish_float32_texture_to_host(NativeHandle command_buffer_handle,
-                                         NativeHandle texture_handle,
-                                         std::uint32_t width,
-                                         std::uint32_t height) override {
+    void publish_float32_texture_to_host(
+        NativeHandle command_buffer_handle, NativeHandle texture_handle,
+        std::uint32_t width, std::uint32_t height,
+        const SampleDomainFacet& sample_domain) override {
       if (command_buffer_handle == nullptr || texture_handle == nullptr ||
           width == 0U || height == 0U) {
         throw std::invalid_argument(
@@ -1042,8 +1042,9 @@ class MetalDeviceExecutor final : public DeviceExecutor {
           ElementSemantics::FloatingPoint,
           StorageEncoding{32U},
       };
-      const std::optional<ImageFacet> image_facet =
+      std::optional<ImageFacet> image_facet =
           make_zero_origin_image_facet(descriptor, 1U, 0U, std::nullopt);
+      image_facet->sample_domain = sample_domain;
       const StridedLayout layout{{static_cast<std::ptrdiff_t>(bytes_per_row),
                                   static_cast<std::ptrdiff_t>(sizeof(float))},
                                  0U};

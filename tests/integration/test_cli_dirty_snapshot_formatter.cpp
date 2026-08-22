@@ -319,6 +319,33 @@ void write_coordinate_pattern_graph(const std::filesystem::path& path) {
 }
 
 /**
+ * @brief Writes a source-only graph using the real CPU Perlin operation.
+ *
+ * @param path YAML file path to create.
+ * @throws std::filesystem::filesystem_error if parent-directory creation
+ *         fails.
+ * @throws std::ios_base::failure if the destination cannot be opened or a
+ *         YAML write fails.
+ * @note The deterministic `8x8` FP32 output reaches the configured OpenCV
+ *       provider and has producer-declared normalized `[0,1]` sample meaning.
+ */
+void write_perlin_noise_graph(const std::filesystem::path& path) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream out;
+  out.exceptions(std::ios::failbit | std::ios::badbit);
+  out.open(path);
+  out << "- id: 1\n"
+      << "  name: perlin_noise\n"
+      << "  type: image_generator\n"
+      << "  subtype: perlin_noise\n"
+      << "  parameters:\n"
+      << "    width: 8\n"
+      << "    height: 8\n"
+      << "    grid_size: 3.0\n"
+      << "    seed: 84\n";
+}
+
+/**
  * @brief Rejects a directory destination for coordinate-pattern graph YAML.
  *
  * @return Nothing; GoogleTest reports a missing I/O exception or a destination
@@ -628,6 +655,86 @@ TEST(CliSaveCommand, SavesCoordinatePatternThroughConfiguredCodec) {
   EXPECT_EQ(std::to_integer<std::uint8_t>(*view.channel_data(0U, 0U, 1U)), 47U);
   EXPECT_EQ(std::to_integer<std::uint8_t>(*view.channel_data(1U, 0U, 0U)), 17U);
   EXPECT_EQ(std::to_integer<std::uint8_t>(*view.channel_data(0U, 1U, 0U)), 31U);
+}
+
+/**
+ * @brief Saves the real CPU Perlin Value through CLI and configured codec.
+ *
+ * @return Nothing; GoogleTest reports provider, metadata, conversion, file, or
+ *         decode failures.
+ * @throws Host, filesystem, codec, and allocation exceptions unchanged to the
+ *         test runner outside the command's maintained diagnostic boundary.
+ * @note The first compute inspects the exact configured-provider Value. The
+ *       save then proves `make_encode_request` consumes that same explicit
+ *       normalized `[0,1]` endpoint before the real PNG codec round trip.
+ */
+TEST(CliSaveCommand, SavesPerlinNoiseThroughConfiguredCodec) {
+  providers::register_configured_operation_providers();
+  ScopedTempDir temp("photospider_cli_save_perlin_noise_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const auto yaml_path = temp.root() / "source" / "perlin_noise_graph.yaml";
+  const auto output_path = temp.root() / "perlin-noise.png";
+  write_perlin_noise_graph(yaml_path);
+
+  GraphLoadRequest request;
+  request.session = GraphSessionId{"cli_save_perlin_noise"};
+  request.root_dir = (temp.root() / "sessions").string();
+  request.yaml_path = yaml_path.string();
+  request.cache_root_dir = (temp.root() / "cache").string();
+  const auto loaded = host->load_graph(request);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  HostComputeRequest compute_request;
+  compute_request.session = request.session;
+  compute_request.node = NodeId{1};
+  compute_request.cache.precision = "fp32";
+  const Result<NamedValueResult> computed =
+      host->compute_and_get_values(compute_request);
+  ASSERT_TRUE(computed.status.ok) << computed.status.message;
+  const Value* source = computed.value.find("image");
+  ASSERT_NE(source, nullptr);
+  ASSERT_TRUE(source->image_facet().has_value());
+  ASSERT_TRUE(source->image_facet()->sample_domain.has_value());
+  const SampleDomainFacet& samples = *source->image_facet()->sample_domain;
+  EXPECT_TRUE(samples.per_channel.empty());
+  EXPECT_EQ(samples.encoding,
+            (SampleEncoding{1U, SampleEncodingKind::Normalized}));
+  EXPECT_EQ(samples.default_domain,
+            (SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}));
+
+  std::istringstream args(
+      "1 image " + output_path.string() +
+      " uint8 code code 0 255 reject nearest-even reject allow");
+  std::string current_graph = request.session.value;
+  bool modified = false;
+  CliConfig config;
+  std::ostringstream captured;
+  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
+  const bool handled =
+      ::handle_save(args, *host, current_graph, modified, config);
+  std::cout.rdbuf(original_buffer);
+
+  const std::string text = captured.str();
+  EXPECT_TRUE(handled);
+  EXPECT_NE(text.find("Saved named output 'image'"), std::string::npos) << text;
+  ASSERT_TRUE(std::filesystem::is_regular_file(output_path)) << text;
+
+  const SampleEndpoint code_samples{
+      SampleEncoding{1U, SampleEncodingKind::CodeValue},
+      SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0}};
+  const Value decoded =
+      providers::make_configured_image_artifact_codec()->decode(
+          output_path, {{ImageArtifactDecodeRule{
+                           ElementSemantics::UnsignedInteger,
+                           StorageEncoding{8U}, code_samples, std::nullopt}}});
+  const ImageView view(decoded);
+  ASSERT_EQ(view.width(), 8U);
+  ASSERT_EQ(view.height(), 8U);
+  ASSERT_EQ(view.channels(), 1U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(*view.channel_data(0U, 0U, 0U)),
+            128U);
 }
 
 #if defined(PHOTOSPIDER_TEST_HAS_OPENEXR_DENSE)

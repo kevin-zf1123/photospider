@@ -1765,7 +1765,9 @@ static NodeOutput op_constant_image(
  *         provider fence translates it before registry return.
  * @throws std::bad_alloc if permutation or image ownership allocation fails.
  * @note A seed of `-1` uses `std::random_device`; every other seed is
- *       deterministic. All permutation and matrix state is callback-local.
+ *       deterministic. The producer explicitly publishes FP32 Normalized
+ *       `[0,1]` sample meaning; all permutation and matrix state is callback-
+ *       local.
  */
 static NodeOutput op_perlin_noise(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -1834,7 +1836,13 @@ static NodeOutput op_perlin_noise(
   }
 
   NodeOutput result;
-  publish_opencv_output(&result, noise_image);
+  ImageFacet facet;
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        {}};
+  publish_opencv_output_with_facet(&result, noise_image, std::move(facet));
   return result;
 }
 

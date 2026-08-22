@@ -61,7 +61,8 @@ class TestMetalExecutionContext final : public MetalExecutionContext {
 
   /** @copydoc MetalExecutionContext::publish_float32_texture_to_host */
   void publish_float32_texture_to_host(NativeHandle, NativeHandle,
-                                       std::uint32_t, std::uint32_t) override {
+                                       std::uint32_t, std::uint32_t,
+                                       const SampleDomainFacet&) override {
     throw std::logic_error("native transfer publication is outside this test");
   }
 
