@@ -40,21 +40,31 @@ equality. Stable `ChannelId` and `ChannelGroupId` records do. Observed extrema,
 histograms, NaN/Inf counts, and other statistics never become descriptor,
 Facet, or content identity.
 
-The OpenCV provider's monolithic weighted-blend
-(`image_mixing:add_weighted`) publication boundary treats output metadata as a
-semantic intersection of its two inputs, not a copy from one favored input.
-Unchanged output geometry may retain the primary input's signed data and
-display windows. Channel facts survive only when output channel cardinality is
-unchanged, no explicit channel mapping was applied, and both inputs declare
-semantically equal schemas. Color additionally requires a retained schema and
-semantically equal color interpretation from both inputs. A sample-domain
-fact survives only when both inputs declare the exact same uniform domain and
-neither has per-channel overrides. An unproven or incompatible optional fact
-is omitted; the boundary does not infer it from payload extrema, guess channel
-roles, or perform implicit sample conversion. This rule does not cover `diff`,
-`multiply`, or tiled output planning/publication, including tiled
-`add_weighted`; this contract makes no broader multi-input metadata-
-intersection claim.
+The OpenCV provider uses operation-specific semantic projection instead of
+copying one favored input. Monolithic and tiled `image_mixing:add_weighted`
+retain independently proven channel, color, and uniform sample intersections;
+an explicit channel mapping or expansion removes stable channel/color
+authority. Monolithic and tiled `image_mixing:multiply` retain the same
+channel/color intersection, while sample authority additionally requires an
+identical uniform facet and a finite scale whose four declared interval
+endpoint products remain inside that same interval. Tiled
+`image_mixing:diff` retains only common stable channel facts and omits
+sample/color authority. Tiled `image_process:gaussian_blur` preserves the
+complete interpretation, while nonlinear tiled
+`image_process:curve_transform` preserves primary signed geometry and stable
+channel facts but omits sample/color authority. Unproven optional facts are
+absent; no path derives replacements from payload extrema, guesses roles, or
+performs implicit sample conversion.
+
+For tiled execution, the selected implementation's pure source-private output
+inference freezes one descriptor/facet before allocation and callback entry.
+Its inputs are the exact operation inputs; an old staged output may seed bytes
+only after the frozen plan matches and never becomes semantic evidence. An
+implementation without exact inference keeps scalar/channel allocation facts
+and a required zero-origin data window, but omits optional
+display/channel/sample/color authority. This scope covers the five currently
+registered tiled OpenCV operations listed above and does not claim a policy for
+monolithic `diff` or unlisted provider paths.
 
 ## Layout, binding, and ownership
 

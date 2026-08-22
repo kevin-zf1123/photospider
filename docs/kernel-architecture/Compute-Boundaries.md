@@ -197,10 +197,15 @@ entry uses checked move-only grants over that binding; all executable grants
 must retire successfully before one seal. A validation, overlap, range,
 alignment, overflow, exception, cancellation, duplicate, or omitted-retirement
 failure is sticky and prevents publication. Operation ABI v1 and codec staging
-are normalized at their inbound adapters; formal commit never synthesizes a missing
-Value. V-5 adds no new callback slot or general planner inference. It does add
-a callback-free implementation identity/metadata route to planned work and
-requires exact identity re-resolution before provider entry.
+are normalized at their inbound adapters; formal commit never synthesizes a
+missing Value. Planned work retains a callback-free implementation
+identity/metadata route and requires exact identity re-resolution before
+provider entry. After that re-resolution, a source-private tiled
+output-inference callback is copied from the same exact implementation snapshot
+as the execution callback, scheduling metadata, dirty propagator, and identity.
+It freezes the logical descriptor/facet before Host allocation; it is not an
+installed ABI callback and cannot be obtained from a sibling operation-level
+registration.
 
 `OutputTile::roi` remains a zero-based storage-relative callback projection,
 while `HostOutputWriteGrant::image_region()` remains a signed logical
@@ -715,7 +720,10 @@ cancellation, retry choice, settlement, quota, artifact, or commit authority.
   from it may still execute.
 - Planned node work retains only selected implementation identity, device,
   metadata, and callback shape. Submission must re-resolve the same nonzero
-  identity before retaining a callback, so cached plans own no DSO lease.
+  identity before retaining execution, propagation, or tiled output-inference
+  callbacks, so cached plans own no DSO lease. The selected tiled inference
+  receives exact operation inputs and effective parameters before allocation;
+  prior staged output can seed matching bytes later but is not semantic input.
 - TensorSlice HP Region planning uses its eligibility selection once per
   executable target/upstream node and retains a callback-free operation key
   plus complete identity/device/shape/metadata route. Immediately after dirty
@@ -1263,6 +1271,14 @@ adds neither another Value/readiness authority nor another provider callback;
 whole and parameter dependencies remain complete node joins. Commit rejects an
 undrained binding and publishes the already sealed Value once with independent
 Graph revision, HP generation, and Region facts.
+
+The per-node binding plan is already operation-specific at this point. For the
+current OpenCV tiled set, revision-paired inference preserves complete blur
+interpretation, projects blend/multiply facts independently, omits
+sample/color authority for difference and nonlinear curve output, and computes
+mapped blend channel cardinality before allocation. A tiled implementation
+without exact inference receives the conservative scalar/channel allocation
+fallback with no optional display/channel/sample/color authority.
 
 RT applies that predicate and publishes its proxy before opening the sibling
 gate. HP later validates independently. A newer Graph revision can therefore

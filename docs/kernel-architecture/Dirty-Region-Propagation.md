@@ -134,7 +134,9 @@ revision to a callback-free operation key and complete
 identity/device/shape/metadata record. That same revision supplies ImageRect
 dirty/dependency behavior and, for TensorSlice, passes the exact-core check.
 The request plan retains these revisioned records, not the callable or DSO
-lease.
+lease. Dirty preparation later re-resolves that exact revision and copies its
+tiled output inference together with execution and propagation callbacks; it
+never borrows a sibling operation-level policy.
 After dirty/external-satisfaction selection identifies active task nodes, dirty
 preparation treats an empty active view as successful no-work before comparing
 intent, device inventory, task ids, or node routes. Otherwise an empty route
@@ -267,6 +269,13 @@ fill/copy primitives, so active pixels are copied through each descriptor's
 `step` and padded bytes are excluded. Temporary normalized `NodeOutput` owners
 remain request-local and live until synchronous tile callbacks finish. This
 normalization changes neither the selected task ids nor dirty ROI geometry.
+
+Before the per-node dirty Host binding is allocated, the exact selected output
+inference receives those operation inputs and freezes descriptor, channel
+count, signed geometry, and authorized optional facts. Existing staged output
+is only a possible byte seed after exact plan matching and is never prepended
+as a semantic operation input. Absent inference omits optional
+display/channel/sample/color facts rather than copying the first input.
 
 The dispatcher submits the selected source group and waits for it to settle,
 validates that required source outputs exist in the relevant staged or committed

@@ -76,10 +76,12 @@ reciprocal 近似，并在复用前恢复先前的浮点环境。
 独立 I1 最终 oracle 的版本是 `i1-coordinate-pattern-curve-chain-fp32-v1`。它不经过
 Host、Kernel、cache、scheduler、YAML 或候选 provider，独立重建 source 和四个 stage。
 对 HWC `[2048,2048,4]` FloatingPoint/NativeScalar32 tensor、ImageFacet
-`(x=1,y=0,channel=2)`、零原点 `[0,2048) x [0,2048)` 数据窗口、DenseTensor
-schema/Image facet 结构版本 2，以及声明 FP32 Normalized `[0,1]` 的 Sample Domain
-facet 结构版本 1，冻结的 `Sha256CanonicalV1` digest 是
-`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`。
+`(x=1,y=0,channel=2)`、零原点 `[0,2048) x [0,2048)` 有符号 data/display
+window，以及 DenseTensor schema/Image facet 结构版本 2，冻结输出会省略可选的
+Sample Domain 与 Color 权威。Source 仍声明 FP32 Normalized `[0,1]`；非线性
+`curve_transform` 输出策略在没有 operation-specific 证明时不会发布该声明。冻结的
+`Sha256CanonicalV1` digest 是
+`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`。
 expected value 在候选执行前固定；product-path test 会交叉校验它，但绝不能用候选结果
 bootstrap 它。
 
@@ -88,14 +90,18 @@ bootstrap 它。
 Sample Domain facet，并产生历史上的、不含 Sample Domain 的 I1 logical digest
 `18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`。
 后续 coordinate-pattern metadata correction 通过绑定声明 FP32 Normalized `[0,1]` 的
-Sample Domain facet 结构版本 1，完成了该 design 要求；在该完整 descriptor 下重新生成
-独立 oracle 后，产生当前 digest
+Sample Domain facet 结构版本 1，完成了 source design 要求。当时 generic tiled
+propagation 又把该 source 声明复制过每个非线性 curve，并产生现已被取代的 digest
 `b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`。
-这两个阶段都没有改变 `Sha256CanonicalV1` 算法标签、workload 算术或 workload
-identity。I2 preview logical golden 仍为
+operation-specific tiled metadata correction 会保留 source 声明，但从每个 curve 输出
+省略未经证明的 Sample Domain 与 Color 权威，因此当前输出 digest 回到
+`18d88b...eed0`。Digest byte 相同并不表示历史 source 遗漏重新出现：source 与
+transform 后输出现在具有彼此区分且显式的权威。所有阶段都没有改变
+`Sha256CanonicalV1` 算法标签、workload 算术、raw payload 或 workload identity。
+I2 preview logical golden 仍为
 `2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`。
-全部 34 项 B1 logical golden 均在当前结构记录下重新生成；对 coordinate-pattern
-输出，它们还绑定 Sample Domain record，而 B1 raw-payload hash 保持不变。
+全部 34 项 B1 logical golden 均按同一 curve-output 省略规则重新生成；其
+raw-payload hash 保持不变。
 
 规范 workload matrix 如下：
 

@@ -115,7 +115,9 @@ PixelRect compatibility projection 推断 source provenance。
 upstream node 都会立即把其精确选中的 revision 缩减成 callback-free operation key 与完整
 identity/device/shape/metadata record。同一个 revision 既提供 ImageRect dirty/dependency 行为，
 也在 TensorSlice 情况下通过 exact-core 检查。Request plan 只保留这些带 revision 的 record，
-不保留 callable 或 DSO lease。在
+不保留 callable 或 DSO lease。Dirty preparation 随后会重新解析该精确 revision，并把其 tiled
+output inference 与 execution、propagation callback 一起复制；它永远不会借用 sibling
+operation-level policy。在
 dirty/external-satisfaction selection 识别 active task node 后，若 active view 为空，dirty
 preparation 会在比较 intent、device inventory、task id 或 node route 前把它视为成功 no-work。
 否则，空 route snapshot 或缺失 active-node route 本身就是 fail-closed mismatch；preparation 会在
@@ -218,6 +220,11 @@ gate、policy invocation、physical reservation/grant、provider entry 或 ledge
 stride-aware 内核 fill/copy 原语，因此 active pixel 会通过各 descriptor 的 `step` 复制，padding
 byte 则被排除。临时 normalized `NodeOutput` owner 保持 request-local，并存活到同步 tile callback
 全部结束。该 normalization 不会改变 selected task id 或 dirty ROI geometry。
+
+在分配 per-node dirty Host binding 前，精确 selected output inference 会接收这些 operation input，
+并冻结 descriptor、channel count、有符号 geometry 与已授权 optional fact。现有 staged output
+只有在精确 plan matching 后才可能成为 byte seed，绝不会作为 semantic operation input 被前置。
+Inference 缺失时会省略可选 display/channel/sample/color 事实，而不是复制 first input。
 
 Dispatcher 会提交 selected source group 并等待其 settle，验证所需 source output 已存在于相关
 staged 或 committed store，随后提交 initially-ready downstream group。Dependency completion 会继续

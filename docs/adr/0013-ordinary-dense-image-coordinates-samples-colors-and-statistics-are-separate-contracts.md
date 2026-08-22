@@ -84,22 +84,34 @@ Canonical encoding nevertheless emits independent Image, Sample Domain, and
 Color Facet records so those meanings can version independently without a
 second Value authority.
 
-At the OpenCV provider's monolithic weighted-blend
-(`image_mixing:add_weighted`) publication boundary, output metadata contains
-only facts proven compatible across both contributing inputs. That boundary
-may retain the primary input's signed data and display windows when output
-geometry is unchanged. A channel schema survives only when output channel
-cardinality is unchanged, no explicit channel remapping occurred, and both
-inputs declare semantically equal channel facts. Color interpretation
-additionally requires a retained schema and semantically equal color facts
-from both inputs. A uniform sample domain survives only when both inputs
-declare the exact same sample domain and neither has per-channel overrides.
-Otherwise the corresponding optional fact is omitted so downstream consumers
-fail closed. Payload values never imply a sample domain, authorize sample
-conversion, or select channel roles. This implemented rule is limited to
-monolithic `add_weighted`; it does not cover `diff`, `multiply`, or tiled
-output planning/publication, including the tiled `add_weighted` callback. No
-broader multi-input metadata-projection guarantee is claimed.
+At the OpenCV provider's implemented multi-input publication and tiled
+planning boundaries, output metadata contains only operation-specific facts
+proved from immutable input declarations and effective parameters. Unchanged
+output geometry may retain the primary input's signed data and display
+windows. Monolithic and tiled `image_mixing:add_weighted` retain a channel
+schema only when output channel cardinality is unchanged, no explicit channel
+mapping occurred, and both inputs have semantically equal stable channel/group
+facts; color additionally requires that retained schema and equal color facts,
+while sample authority requires an identical uniform facet with no per-channel
+overrides. Monolithic and tiled `image_mixing:multiply` use the same independent
+channel/color intersection, but retain sample authority only when both inputs
+declare the exact same uniform facet and the finite configured scale maps all
+four declared interval endpoint products back inside that same interval.
+Tiled `image_mixing:diff` retains only common stable channel facts and omits
+sample/color authority. Among the current unary tiled OpenCV callbacks,
+`image_process:gaussian_blur` preserves the complete interpretation, whereas
+nonlinear `image_process:curve_transform` preserves signed geometry and stable
+channel facts but omits sample/color authority.
+
+Each tiled policy is a pure source-private callback paired with the exact
+selected implementation revision and freezes the descriptor/facet before Host
+allocation or provider entry. A tiled implementation without such a policy
+falls back to scalar/channel allocation facts, a required zero-origin data
+window, and no optional display/channel/sample/color authority. Payload values
+never imply a sample domain, authorize sample conversion, or select channel
+roles. The current guarantee is limited to the operation paths listed above;
+it does not claim a policy for monolithic `diff` or another unlisted provider
+path.
 
 ### Observed statistics
 

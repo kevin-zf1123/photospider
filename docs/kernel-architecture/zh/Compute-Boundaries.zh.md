@@ -162,8 +162,11 @@ producer entry 使用该 binding 上经过检查的 move-only grant；所有 exe
 retirement 后才能完成一次 seal。validation、overlap、range、alignment、overflow、exception、
 cancellation、duplicate 或 omitted-retirement failure 都是 sticky failure，并阻止 publication。
 Operation ABI v1 与 codec staging 会在各自入站 adapter 处规范化；正式 commit 绝不合成缺失 Value。
-V-5 不新增 callback slot 或 general planner inference；它会在 planned work 中新增 callback-free
-implementation identity/metadata route，并要求 provider entry 前重新解析且精确 identity 相同。
+Planned work 会保留 callback-free implementation identity/metadata route，并要求 provider
+entry 前重新解析且精确 identity 相同。完成该重新解析后，source-private tiled output-inference
+callback 会从与 execution callback、scheduling metadata、dirty propagator 和 identity 相同的
+精确 implementation snapshot 中复制。它会在 Host allocation 前冻结 logical descriptor/facet；
+它不是 installed ABI callback，也不能从 sibling operation-level registration 获取。
 
 `OutputTile::roi` 保持为零基 storage-relative callback projection，而
 `HostOutputWriteGrant::image_region()` 保持为有符号 logical data-window Region。Adapter 会先按
@@ -549,7 +552,10 @@ retry choice、settlement、quota、artifact 或 commit authority。
   而不执行 A；如果另一个未满足 consumer 仍需要 A，则 A 会作为 shared demand 被保留。
 - 只要仍有由 `ComputeTaskGraph` 派生的 execution-visible callback 可能执行，该图就不可变。
 - Planned node work 只保留选中的 implementation identity、device、metadata 与 callback shape。
-  Submission 必须重新解析同一个非零 identity 后才能保留 callback，因此 cached plan 不拥有 DSO lease。
+  Submission 必须重新解析同一个非零 identity 后才能保留 execution、propagation 或 tiled
+  output-inference callback，因此 cached plan 不拥有 DSO lease。选中的 tiled inference 会在
+  allocation 前接收精确 operation input 与 effective parameter；旧 staged output 随后只能 seed
+  匹配的 byte，不是 semantic input。
 - TensorSlice HP Region planning 会为每个 executable target/upstream node 只执行一次 eligibility
   selection，并保留 callback-free operation key 与完整 identity/device/shape/metadata route。
   Dirty active-task selection 一完成，如果 active view 为空，route validation 会在比较 intent、
@@ -968,6 +974,12 @@ task map 批量释放。这样既保留精确 logical task identity，也不会�
 authority 或另一条 provider callback；whole 与 parameter dependency 继续使用完整 node join。
 Commit 会拒绝未排空的 binding，并以相互独立的 Graph revision、HP generation 与 Region fact
 恰好一次发布已经 sealed 的 Value。
+
+此时 per-node binding plan 已经具备 operation-specific 语义。对于当前 OpenCV tiled 集合，
+与 revision 配对的 inference 会保留 blur 的完整 interpretation、分别投影 blend/multiply 事实、
+为 difference 与非线性 curve output 省略 sample/color authority，并在 allocation 前计算 mapped
+blend channel cardinality。没有精确 inference 的 tiled implementation 会使用保守的
+scalar/channel allocation fallback，且不携带任何可选 display/channel/sample/color authority。
 
 RT 会先应用该 predicate 并发布 proxy，再打开 sibling gate。HP 随后独立验证。因此，较新的 Graph
 revision 可以拒绝 HP，而不会回滚已经胜出的 RT publication。Gate 仍为 `Pending` 时发生的 RT

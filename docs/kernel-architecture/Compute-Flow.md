@@ -691,8 +691,9 @@ These constants are not permanent ABI.
 
 Every ordinary dense-image producer now follows one private lifecycle:
 
-1. `NodeExecutor` freezes the complete `DenseImageOutputPlan` from immutable
-   input/inference facts before allocation;
+1. `NodeExecutor` invokes the exact selected tiled implementation's pure output
+   inference, then freezes the complete `DenseImageOutputPlan` from immutable
+   operation inputs and effective parameters before allocation;
 2. one `HostOutputBinding` creates the aligned allocation and owns the sole
    builder write authority;
 3. whole-output work receives one whole grant, while tiled HP/RT work receives
@@ -702,6 +703,14 @@ Every ordinary dense-image producer now follows one private lifecycle:
    named `image` Value in request-local output; and
 6. Run commit publishes that already Ready Value with independent graph,
    Region, HP-generation, and RT-generation predicates.
+
+The inference callback belongs to the same revisioned snapshot as execution
+and is used by full, dirty HP, and dirty RT paths. An old staged output is never
+inserted into its input vector; it may seed bytes only after its descriptor and
+facet exactly match the frozen plan. Maintained OpenCV tiled operations attach
+operation-specific policies. An implementation without one gets a conservative
+zero-origin plan that retains scalar/channel allocation facts but omits
+optional display/channel/sample/color authority.
 
 No consumer observes partial binding bytes. For a nonempty mapped ROI,
 task-graph planning retains each consumer's exact ROI-covered producer task

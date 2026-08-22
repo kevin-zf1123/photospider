@@ -656,27 +656,32 @@ explicit scalar cuts. An independent oracle versioned
 `i1-coordinate-pattern-curve-chain-fp32-v1` reconstructs the source and four
 stages without Host/Kernel/cache/scheduler/YAML/provider dependencies. For the
 HWC `[2048,2048,4]` NativeScalar32 tensor, zero-origin
-`[0,2048) x [0,2048)` data window, frozen DenseTensor schema/Image facet
-structural version 2, and Sample Domain facet structural version 1 declaring
-FP32 Normalized `[0,1]`, its exact `Sha256CanonicalV1` digest is
-`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`.
+`[0,2048) x [0,2048)` signed data/display windows, and frozen DenseTensor
+schema/Image facet structural version 2, the output omits optional Sample
+Domain and Color authority. The source still declares FP32 Normalized
+`[0,1]`; the nonlinear `curve_transform` policy does not project that
+declaration without a proof. Its exact `Sha256CanonicalV1` digest is
+`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`.
 For this oracle migration, the initial DI-1 implementation and oracle refresh
 advanced the DenseTensor schema and Image facet structural records to version 2
 but did not fully implement the archived DI-1 design: it omitted the
 coordinate-pattern Sample Domain facet and produced the historical
 pre-Sample-Domain I1 logical digest
 `18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`.
-The later coordinate-pattern metadata correction completed that design
+The later coordinate-pattern metadata correction completed that source-design
 requirement by binding Sample Domain facet structural version 1 declaring FP32
-Normalized `[0,1]`; regenerating the independent oracle under that complete
-descriptor produced the current digest
+Normalized `[0,1]`. Generic tiled propagation then copied that declaration
+through each nonlinear curve and produced the superseded digest
 `b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`.
-Neither stage changed the `Sha256CanonicalV1` algorithm, workload arithmetic,
-or workload identities. The I2 preview golden remains
+Operation-specific tiled inference now keeps the source declaration but omits
+unproved Sample Domain and Color authority from curve outputs, returning the
+current output digest to `18d88b...eed0`. Equal digest bytes do not reinstate
+the historical source omission. No stage changed the digest algorithm,
+workload arithmetic, raw payload, or workload identities. The I2 preview
+golden remains
 `2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`;
-the 34 B1 logical goldens were regenerated under the current structural
-records and, for coordinate-pattern outputs, the Sample Domain record, while
-their raw-payload hashes remain unchanged.
+the 34 B1 logical goldens were regenerated under the same curve-output policy,
+while their raw-payload hashes remain unchanged.
 
 The frozen I1 graph, twelve coefficients/Regions, success-only accepted
 coordinate collector and product binding, continuous cold/warmup/measured

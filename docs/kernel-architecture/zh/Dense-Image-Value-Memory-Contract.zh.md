@@ -33,16 +33,24 @@ coordinate；逻辑访问仅在完成 containment 检查后才减去 data-window
 `ChannelId` 和 `ChannelGroupId` record 承担该职责。观测 extrema、histogram、NaN/Inf count
 及其他 statistics 永远不会成为 descriptor、Facet 或 content identity。
 
-OpenCV provider 的 monolithic weighted-blend（`image_mixing:add_weighted`）发布边界把
-output metadata 视为两个 input 的语义交集，而不是从某个偏好的 input 直接复制。output
-geometry 不变时，可以保留 primary input 的有符号 data window 与 display window。只有
-output channel cardinality 不变、没有应用显式 channel mapping，且两个 input 都声明语义
-相等的 schema 时，channel 事实才能保留。color 还要求保留该 schema，且两个 input 都
-声明语义相等的 color interpretation。只有两个 input 都声明完全相同的 uniform domain，且
-均没有 per-channel override 时，sample-domain 事实才能保留。未经证明或不兼容的 optional
-fact 必须省略；该边界不得从 payload extrema 推断它、猜测 channel role，也不得执行隐式
-sample conversion。该规则不覆盖 `diff`、`multiply` 或 tiled output planning/publication，
-包括 tiled `add_weighted`；本文不声称更广泛的 multi-input metadata 交集保证。
+OpenCV provider 使用 operation-specific semantic projection，而不是从某个偏好的 input 直接
+复制。Monolithic 与 tiled `image_mixing:add_weighted` 分别保留已证明的 channel、color 与
+uniform sample 交集；显式 channel mapping 或 expansion 会移除稳定 channel/color authority。
+Monolithic 与 tiled `image_mixing:multiply` 保留同样的 channel/color 交集，而 sample
+authority 还要求完全相同的 uniform facet，以及一个有限 scale，其声明区间四个端点乘积都
+仍位于同一区间内。Tiled `image_mixing:diff` 只保留共同的稳定 channel 事实，并省略
+sample/color authority。Tiled `image_process:gaussian_blur` 保留完整 interpretation；非线性的
+tiled `image_process:curve_transform` 则保留 primary 的有符号 geometry 与稳定 channel 事实，
+同时省略 sample/color authority。未经证明的 optional fact 必须缺失；任何路径都不得从
+payload extrema 推断替代事实、猜测 role 或执行隐式 sample conversion。
+
+对于 tiled execution，selected implementation 的 pure source-private output inference 会在
+allocation 与 callback entry 前冻结唯一 descriptor/facet。其 input 是精确 operation input；旧的
+staged output 只能在匹配 frozen plan 后 seed byte，永远不能成为 semantic evidence。没有精确
+inference 的 implementation 会保留 scalar/channel allocation 事实与必需的 zero-origin data
+window，但省略可选 display/channel/sample/color authority。该范围覆盖上面列出的当前五个
+registered tiled OpenCV operation；本文不为 monolithic `diff` 或未列出的 provider path 声明
+policy。
 
 ## Layout、binding 与所有权
 

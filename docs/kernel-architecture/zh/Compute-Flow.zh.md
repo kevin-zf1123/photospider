@@ -540,7 +540,8 @@ subscription surface 都不属于当前软件契约。
 
 每个普通 dense-image producer 现在都遵循同一个 private lifecycle：
 
-1. `NodeExecutor` 在 allocation 前根据 immutable input/inference fact 冻结完整
+1. `NodeExecutor` 调用精确 selected tiled implementation 的 pure output inference，再于
+   allocation 前根据 immutable operation input 与 effective parameter 冻结完整
    `DenseImageOutputPlan`；
 2. 一个 `HostOutputBinding` 创建 aligned allocation，并拥有唯一 builder write authority；
 3. whole-output work 获得一个 whole grant，tiled HP/RT work 则在同一个 per-node binding 上
@@ -550,6 +551,12 @@ subscription surface 都不属于当前软件契约。
    `image` Value；
 6. Run commit 以相互独立的 graph、Region、HP-generation 与 RT-generation predicate 发布该
    已经 Ready 的 Value。
+
+Inference callback 与 execution 属于同一个 revisioned snapshot，并由 full、dirty HP 与 dirty
+RT path 使用。旧 staged output 永远不会插入其 input vector；只有 descriptor 与 facet 精确匹配
+frozen plan 后，它才能 seed byte。Maintained OpenCV tiled operation 会附带 operation-specific
+policy。没有 policy 的 implementation 会得到保守的 zero-origin plan：保留 scalar/channel
+allocation 事实，但省略可选 display/channel/sample/color authority。
 
 任何 consumer 都不会观察 partial binding byte。对于非空 mapped ROI，Task-graph planning
 会保留每个 consumer 精确覆盖 ROI 的 producer task id。若 exact clipping 得到空 upstream
