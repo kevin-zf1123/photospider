@@ -293,14 +293,20 @@ void write_empty_output_graph(const std::filesystem::path& path) {
  * @brief Writes a source-only graph using the real coordinate-pattern op.
  *
  * @param path YAML file path to create.
- * @throws std::filesystem::filesystem_error or std::ios_base::failure if file
- *         creation fails.
+ * @throws std::filesystem::filesystem_error if parent-directory creation
+ *         fails.
+ * @throws std::ios_base::failure if the destination cannot be opened or a
+ *         YAML write fails.
  * @note The `3x2x3` FP32 output contains exact normalized byte fractions and
  *       reaches the production OpenCV provider through embedded Host compute.
+ * @note Stream exceptions are enabled before `open` so an invalid destination
+ *       cannot be mistaken for a successfully written fixture.
  */
 void write_coordinate_pattern_graph(const std::filesystem::path& path) {
   std::filesystem::create_directories(path.parent_path());
-  std::ofstream out(path);
+  std::ofstream out;
+  out.exceptions(std::ios::failbit | std::ios::badbit);
+  out.open(path);
   out << "- id: 1\n"
       << "  name: coordinate_pattern\n"
       << "  type: image_generator\n"
@@ -310,6 +316,25 @@ void write_coordinate_pattern_graph(const std::filesystem::path& path) {
       << "    height: 2\n"
       << "    channels: 3\n"
       << "    seed: 0\n";
+}
+
+/**
+ * @brief Rejects a directory destination for coordinate-pattern graph YAML.
+ *
+ * @return Nothing; GoogleTest reports a missing I/O exception or a destination
+ *         that masquerades as a regular output file.
+ * @throws std::filesystem::filesystem_error if temporary-directory setup or
+ *         inspection fails unexpectedly.
+ * @note An existing directory is a deterministic invalid `std::ofstream`
+ *       target on Darwin and Linux and avoids permission-bit assumptions.
+ */
+TEST(CliSaveCommand, CoordinatePatternGraphWriterReportsFileCreationFailures) {
+  ScopedTempDir temp("photospider_cli_coordinate_graph_io_failure_test");
+
+  EXPECT_THROW(write_coordinate_pattern_graph(temp.root()),
+               std::ios_base::failure);
+  EXPECT_TRUE(std::filesystem::is_directory(temp.root()));
+  EXPECT_FALSE(std::filesystem::is_regular_file(temp.root()));
 }
 
 TEST(CliDirtySnapshotFormatter, RendersMonolithicAndEdgeMappings) {
