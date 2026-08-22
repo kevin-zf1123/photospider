@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -26,9 +25,13 @@
 #include "photospider/data/image_view.hpp"
 #include "providers/configured_image_artifact_codec.hpp"  // NOLINT(build/include_subdir)
 #include "providers/configured_operation_providers.hpp"  // NOLINT(build/include_subdir)
+#include "support/scoped_test_resources.hpp"
 
 namespace ps::cli {
 namespace {
+
+using test_support::ScopedStreamBufferRedirect;
+using test_support::ScopedTempDir;
 
 /**
  * @brief Publishes one constant tightly packed FP32 ordinary image Value.
@@ -136,58 +139,6 @@ void register_cli_command_ops() {
         empty_output_metadata);
   });
 }
-
-/**
- * @brief Owns a unique temporary directory for one dirty inspect CLI test.
- *
- * @throws std::filesystem::filesystem_error if setup cleanup or directory
- *         creation fails.
- * @note Cleanup is best-effort so test failures are not masked by filesystem
- *       teardown errors.
- */
-class ScopedTempDir {
- public:
-  /**
-   * @brief Creates an empty unique temporary directory.
-   *
-   * @param name Directory name below the platform temporary directory.
-   * @throws std::filesystem::filesystem_error if directory creation fails.
-   */
-  explicit ScopedTempDir(const std::string& name)
-      : root_(std::filesystem::temp_directory_path() /
-              (name + "_" +
-               std::to_string(std::chrono::high_resolution_clock::now()
-                                  .time_since_epoch()
-                                  .count()))) {
-    std::filesystem::remove_all(root_);
-    std::filesystem::create_directories(root_);
-  }
-
-  ScopedTempDir(const ScopedTempDir&) = delete;
-  ScopedTempDir& operator=(const ScopedTempDir&) = delete;
-
-  /**
-   * @brief Removes the temporary directory.
-   *
-   * @throws Nothing.
-   */
-  ~ScopedTempDir() {
-    std::error_code ec;
-    std::filesystem::remove_all(root_, ec);
-  }
-
-  /**
-   * @brief Returns the root path for the temporary directory.
-   *
-   * @return Temporary root path.
-   * @throws Nothing.
-   */
-  const std::filesystem::path& root() const { return root_; }
-
- private:
-  /** @brief Temporary directory root owned by this helper. */
-  std::filesystem::path root_;
-};
 
 /**
  * @brief Temporarily changes the process working directory for one test scope.
@@ -476,10 +427,11 @@ TEST(CliDirtySnapshotFormatter,
   bool modified = false;
   CliConfig config;
   std::ostringstream captured;
-  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
-  const bool handled =
-      ::handle_inspect(args, *host, current_graph, modified, config);
-  std::cout.rdbuf(original_buffer);
+  bool handled = false;
+  {
+    ScopedStreamBufferRedirect redirect(std::cout, captured.rdbuf());
+    handled = ::handle_inspect(args, *host, current_graph, modified, config);
+  }
 
   const std::string text = captured.str();
   EXPECT_TRUE(handled);
@@ -502,10 +454,11 @@ TEST(CliDirtySnapshotFormatter, InspectDirtyReportsHostFailures) {
   bool modified = false;
   CliConfig config;
   std::ostringstream captured;
-  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
-  const bool handled =
-      ::handle_inspect(args, *host, current_graph, modified, config);
-  std::cout.rdbuf(original_buffer);
+  bool handled = false;
+  {
+    ScopedStreamBufferRedirect redirect(std::cout, captured.rdbuf());
+    handled = ::handle_inspect(args, *host, current_graph, modified, config);
+  }
 
   const std::string text = captured.str();
   EXPECT_TRUE(handled);
@@ -540,10 +493,11 @@ TEST(CliSaveCommand, ReportsSuccessfulEmptyImageOutputs) {
   bool modified = false;
   CliConfig config;
   std::ostringstream captured;
-  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
-  const bool handled =
-      ::handle_save(args, *host, current_graph, modified, config);
-  std::cout.rdbuf(original_buffer);
+  bool handled = false;
+  {
+    ScopedStreamBufferRedirect redirect(std::cout, captured.rdbuf());
+    handled = ::handle_save(args, *host, current_graph, modified, config);
+  }
 
   const std::string text = captured.str();
   EXPECT_TRUE(handled);
@@ -579,10 +533,11 @@ TEST(CliSaveCommand, SavesWithExplicitDestinationSampleSemantics) {
   bool modified = false;
   CliConfig config;
   std::ostringstream captured;
-  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
-  const bool handled =
-      ::handle_save(args, *host, current_graph, modified, config);
-  std::cout.rdbuf(original_buffer);
+  bool handled = false;
+  {
+    ScopedStreamBufferRedirect redirect(std::cout, captured.rdbuf());
+    handled = ::handle_save(args, *host, current_graph, modified, config);
+  }
 
   const std::string text = captured.str();
   EXPECT_TRUE(handled);
@@ -629,10 +584,11 @@ TEST(CliSaveCommand, SavesCoordinatePatternThroughConfiguredCodec) {
   bool modified = false;
   CliConfig config;
   std::ostringstream captured;
-  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
-  const bool handled =
-      ::handle_save(args, *host, current_graph, modified, config);
-  std::cout.rdbuf(original_buffer);
+  bool handled = false;
+  {
+    ScopedStreamBufferRedirect redirect(std::cout, captured.rdbuf());
+    handled = ::handle_save(args, *host, current_graph, modified, config);
+  }
 
   const std::string text = captured.str();
   EXPECT_TRUE(handled);
@@ -711,10 +667,11 @@ TEST(CliSaveCommand, SavesPerlinNoiseThroughConfiguredCodec) {
   bool modified = false;
   CliConfig config;
   std::ostringstream captured;
-  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
-  const bool handled =
-      ::handle_save(args, *host, current_graph, modified, config);
-  std::cout.rdbuf(original_buffer);
+  bool handled = false;
+  {
+    ScopedStreamBufferRedirect redirect(std::cout, captured.rdbuf());
+    handled = ::handle_save(args, *host, current_graph, modified, config);
+  }
 
   const std::string text = captured.str();
   EXPECT_TRUE(handled);
@@ -764,10 +721,11 @@ TEST(CliSaveCommand, SavesOrdinaryOpenExrWithExplicitUint32AndFp32Policies) {
   bool modified = false;
   CliConfig config;
   std::ostringstream captured;
-  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
-  const bool handled =
-      ::handle_save(args, *host, current_graph, modified, config);
-  std::cout.rdbuf(original_buffer);
+  bool handled = false;
+  {
+    ScopedStreamBufferRedirect redirect(std::cout, captured.rdbuf());
+    handled = ::handle_save(args, *host, current_graph, modified, config);
+  }
 
   const std::string text = captured.str();
   EXPECT_TRUE(handled);
@@ -793,10 +751,12 @@ TEST(CliSaveCommand, SavesOrdinaryOpenExrWithExplicitUint32AndFp32Policies) {
       "1 image " + uint_output_path.string() +
       " uint32 code code 0 4294967295 reject nearest-even reject allow");
   std::ostringstream uint_captured;
-  original_buffer = std::cout.rdbuf(uint_captured.rdbuf());
-  const bool uint_handled =
-      ::handle_save(uint_args, *host, current_graph, modified, config);
-  std::cout.rdbuf(original_buffer);
+  bool uint_handled = false;
+  {
+    ScopedStreamBufferRedirect redirect(std::cout, uint_captured.rdbuf());
+    uint_handled =
+        ::handle_save(uint_args, *host, current_graph, modified, config);
+  }
   EXPECT_TRUE(uint_handled);
   EXPECT_NE(uint_captured.str().find("Saved named output 'image'"),
             std::string::npos)
@@ -831,10 +791,11 @@ TEST(CliSaveCommand, ReportsImageComputeFailures) {
   bool modified = false;
   CliConfig config;
   std::ostringstream captured;
-  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
-  const bool handled =
-      ::handle_save(args, *host, current_graph, modified, config);
-  std::cout.rdbuf(original_buffer);
+  bool handled = false;
+  {
+    ScopedStreamBufferRedirect redirect(std::cout, captured.rdbuf());
+    handled = ::handle_save(args, *host, current_graph, modified, config);
+  }
 
   const std::string text = captured.str();
   EXPECT_TRUE(handled);
@@ -856,10 +817,11 @@ TEST(CliSaveCommand, RejectsImplicitDestinationSampleSemantics) {
   bool modified = false;
   CliConfig config;
   std::ostringstream captured;
-  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
-  const bool handled =
-      ::handle_save(args, *host, current_graph, modified, config);
-  std::cout.rdbuf(original_buffer);
+  bool handled = false;
+  {
+    ScopedStreamBufferRedirect redirect(std::cout, captured.rdbuf());
+    handled = ::handle_save(args, *host, current_graph, modified, config);
+  }
 
   const std::string text = captured.str();
   EXPECT_TRUE(handled);

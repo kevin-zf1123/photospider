@@ -1010,6 +1010,19 @@ class MetalDeviceExecutor final : public DeviceExecutor {
             "Metal transfer texture does not match R32Float dimensions.");
       }
 
+      DenseTensorDescriptor descriptor{
+          {static_cast<std::size_t>(height), static_cast<std::size_t>(width)},
+          ElementSemantics::FloatingPoint,
+          StorageEncoding{32U},
+      };
+      std::optional<ImageFacet> image_facet =
+          make_zero_origin_image_facet(descriptor, 1U, 0U, std::nullopt);
+      image_facet->sample_domain = sample_domain;
+      validate_dense_tensor_image_metadata(descriptor, image_facet);
+      const StridedLayout layout{{static_cast<std::ptrdiff_t>(bytes_per_row),
+                                  static_cast<std::ptrdiff_t>(sizeof(float))},
+                                 0U};
+
       id<MTLBuffer> host_buffer =
           [executor_.device_ newBufferWithLength:storage_size
                                          options:MTLResourceStorageModeShared];
@@ -1037,17 +1050,6 @@ class MetalDeviceExecutor final : public DeviceExecutor {
           destinationBytesPerImage:storage_size];
       [blit endEncoding];
 
-      DenseTensorDescriptor descriptor{
-          {static_cast<std::size_t>(height), static_cast<std::size_t>(width)},
-          ElementSemantics::FloatingPoint,
-          StorageEncoding{32U},
-      };
-      std::optional<ImageFacet> image_facet =
-          make_zero_origin_image_facet(descriptor, 1U, 0U, std::nullopt);
-      image_facet->sample_domain = sample_domain;
-      const StridedLayout layout{{static_cast<std::ptrdiff_t>(bytes_per_row),
-                                  static_cast<std::ptrdiff_t>(sizeof(float))},
-                                 0U};
       NSArray<id<MTLResource>>* completion_scratch_resources =
           [scratch_resources_ copy];
       if (completion_scratch_resources == nil) {

@@ -37,9 +37,12 @@
 #include "photospider/data/image_view.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
 #include "providers/configured_operation_providers.hpp"
+#include "support/scoped_test_resources.hpp"
 
 namespace ps::compute {
 namespace {
+
+using test_support::ScopedTempDir;
 
 /**
  * @brief Minimal observation target for real Metal service integration.
@@ -327,6 +330,33 @@ bool native_metal_resource_is_heap_backed(void* resource) {
   using HeapGetter = void* (*)(void*, SEL);
   const auto heap_getter = reinterpret_cast<HeapGetter>(&objc_msgSend);
   return heap_getter(resource, sel_registerName("heap")) != nullptr;
+}
+
+/**
+ * @brief Creates one callback-bounded command buffer from a borrowed queue.
+ * @param command_queue Non-null `id<MTLCommandQueue>` borrowed from the active
+ *        Metal execution context.
+ * @return Non-null autoreleased `id<MTLCommandBuffer>` borrowed until the
+ *         surrounding executor callback returns.
+ * @throws std::invalid_argument when the queue handle is null.
+ * @throws std::runtime_error when Metal cannot create a command buffer.
+ * @note The helper retains no Objective-C object and grants no submission or
+ *       completion authority; the production context remains the sole owner
+ *       of native commit and publication.
+ */
+void* make_native_metal_command_buffer(void* command_queue) {
+  if (command_queue == nullptr) {
+    throw std::invalid_argument(
+        "Metal command-buffer creation requires a native queue.");
+  }
+  using ObjectGetter = void* (*)(void*, SEL);
+  const auto getter = reinterpret_cast<ObjectGetter>(&objc_msgSend);
+  void* command_buffer =
+      getter(command_queue, sel_registerName("commandBuffer"));
+  if (command_buffer == nullptr) {
+    throw std::runtime_error("Metal failed to create a command buffer.");
+  }
+  return command_buffer;
 }
 
 /**
@@ -2131,7 +2161,9 @@ TEST(MetalDeviceExecutorIntegration,
  *         or synchronization exceptions unchanged.
  * @note Runtime absence remains a platform skip. The operation's explicit
  *       texture-to-shared-buffer transfer is the only readback; the test does
- *       not manufacture a Host binding or enter a CPU operation fallback.
+ *       not manufacture a Host binding or enter a CPU operation fallback. A
+ *       unique directory owner removes the real codec artifact on ordinary,
+ *       exceptional, or fatal-assertion exit.
  */
 TEST(MetalDeviceExecutorIntegration,
      PerlinPublishesSampleDomainAndEncodesThroughConfiguredCodec) {
@@ -2161,11 +2193,8 @@ TEST(MetalDeviceExecutorIntegration,
   conversion.non_finite = NonFinitePolicy::Reject;
   conversion.precision_loss = PrecisionLossPolicy::Allow;
 
-  const std::filesystem::path artifact =
-      std::filesystem::temp_directory_path() /
-      ("photospider-metal-perlin-" + std::to_string(::getpid()) + ".png");
-  std::error_code cleanup_error;
-  std::filesystem::remove(artifact, cleanup_error);
+  ScopedTempDir temp("photospider-metal-perlin-codec");
+  const std::filesystem::path artifact = temp.root() / "perlin-noise.png";
   const auto codec = providers::make_configured_image_artifact_codec();
   codec->encode(artifact, state->pending_value,
                 ImageArtifactEncodeRequest{conversion});
@@ -2185,12 +2214,149 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_EQ(
       std::to_integer<std::uint8_t>(*decoded_view.channel_data(0U, 0U, 0U)),
       128U);
-  std::filesystem::remove(artifact, cleanup_error);
 
   const auto resources =
       service.device_resource_snapshot(DeviceId(DeviceBackend::Metal));
   ASSERT_TRUE(resources.has_value());
   EXPECT_EQ(resources->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Rejects malformed readback metadata before mutation and then retries.
+ *
+ * @return Nothing; GoogleTest reports exception identity, allocation,
+ *         publication, fence, ledger, residency, or retry failures.
+ * @throws Unexpected native, executor, allocation, or synchronization
+ *         exceptions unchanged.
+ * @note Both attempts share one real Apple Metal invocation and its already
+ *       allocated persistent texture. The malformed attempt must fail before
+ *       this method allocates or records a readback buffer, encodes a blit, or
+ *       changes publication state; the valid retry must use the same context
+ *       and reach the real completion path without a production test seam.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     MalformedReadbackSampleMetadataFailsBeforeMutationAndAllowsRetry) {
+  execution::DeviceExecutorRegistry registry =
+      execution::make_default_device_executor_registry();
+  if (!registry.contains(DeviceBackend::Metal)) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+
+  constexpr std::uint32_t kWidth = 2U;
+  constexpr std::uint32_t kHeight = 2U;
+  constexpr std::uint64_t kIdentity = 8412U;
+  SampleDomainFacet malformed{
+      1U,
+      SampleEncoding{1U, SampleEncodingKind::Normalized},
+      SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+      {}};
+  malformed.per_channel.resize(kMaximumImageChannels + 1U);
+  const SampleDomainFacet valid{
+      1U,
+      SampleEncoding{1U, SampleEncodingKind::Normalized},
+      SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+      {}};
+
+  bool caught_length_error = false;
+  std::string malformed_diagnostic;
+  bool failed_attempt_published = false;
+  bool retry_succeeded = false;
+  std::string retry_diagnostic;
+  Value published;
+  execution::DeviceExecutorDiagnostics before_malformed;
+  execution::DeviceExecutorDiagnostics after_malformed;
+  std::optional<ResourceLedger::DeviceSnapshot> resources_before_malformed;
+  std::optional<ResourceLedger::DeviceSnapshot> resources_after_malformed;
+  DeviceResourceVector actual_before_malformed;
+  DeviceResourceVector actual_after_malformed;
+  std::uint64_t observations_before_malformed = 0U;
+  std::uint64_t observations_after_malformed = 0U;
+  CallbackDeviceExecutorInvocation* invocation_observer = nullptr;
+  CallbackDeviceExecutorInvocation invocation(
+      [&] {
+        execution::MetalExecutionContext& context =
+            execution::require_current_metal_execution_context();
+        context.prepare_float32_texture_to_host_resources(kWidth, kHeight, {});
+        void* texture =
+            context.allocate_persistent_float32_texture_2d(kWidth, kHeight);
+        before_malformed = registry.diagnostics(DeviceBackend::Metal);
+        resources_before_malformed =
+            invocation_observer->device_resource_snapshot();
+        actual_before_malformed = invocation_observer->last_observed_actual();
+        observations_before_malformed =
+            invocation_observer->accounting_observations();
+
+        try {
+          context.publish_float32_texture_to_host(
+              make_native_metal_command_buffer(context.command_queue_handle()),
+              texture, kWidth, kHeight, malformed);
+        } catch (const std::length_error& error) {
+          caught_length_error = true;
+          malformed_diagnostic = error.what();
+        }
+        after_malformed = registry.diagnostics(DeviceBackend::Metal);
+        resources_after_malformed =
+            invocation_observer->device_resource_snapshot();
+        actual_after_malformed = invocation_observer->last_observed_actual();
+        observations_after_malformed =
+            invocation_observer->accounting_observations();
+        failed_attempt_published = context.take_published_value().valid();
+
+        try {
+          context.publish_float32_texture_to_host(
+              make_native_metal_command_buffer(context.command_queue_handle()),
+              texture, kWidth, kHeight, valid);
+          published = context.take_published_value();
+          retry_succeeded = published.valid();
+        } catch (const std::exception& error) {
+          retry_diagnostic = error.what();
+        }
+      },
+      execution::DeviceCompletionSeed(kIdentity, static_cast<int>(kIdentity),
+                                      ComputeIntent::GlobalHighPrecision, 1U,
+                                      kIdentity, 0U));
+  invocation_observer = &invocation;
+
+  ASSERT_NO_THROW(registry.execute(DeviceBackend::Metal, invocation));
+  EXPECT_TRUE(caught_length_error);
+  EXPECT_EQ(malformed_diagnostic,
+            "SampleDomainFacet exceeds its frozen override bound.");
+  EXPECT_FALSE(failed_attempt_published);
+  EXPECT_EQ(after_malformed.total_allocations,
+            before_malformed.total_allocations);
+  EXPECT_EQ(after_malformed.live_allocations,
+            before_malformed.live_allocations);
+  ASSERT_TRUE(resources_before_malformed.has_value());
+  ASSERT_TRUE(resources_after_malformed.has_value());
+  EXPECT_EQ(resources_after_malformed->reserved,
+            resources_before_malformed->reserved);
+  EXPECT_EQ(actual_after_malformed, actual_before_malformed);
+  EXPECT_EQ(observations_after_malformed, observations_before_malformed);
+  EXPECT_TRUE(retry_succeeded) << retry_diagnostic;
+  ASSERT_TRUE(published.valid()) << retry_diagnostic;
+  EXPECT_EQ(wait_for_terminal_value(published).state(), ReadyFenceState::Ready);
+  ASSERT_TRUE(published.image_facet().has_value());
+  ASSERT_TRUE(published.image_facet()->sample_domain.has_value());
+  EXPECT_EQ(*published.image_facet()->sample_domain, valid);
+
+  const ResourceLedger::DeviceSnapshot resources =
+      wait_for_scratch_release(invocation);
+  EXPECT_EQ(resources.reserved, DeviceResourceVector{});
+  const std::optional<Value> resident = registry.residency_manager()->find(
+      published.revision_id(), DeviceId(DeviceBackend::CPU),
+      MemoryDomain::HostPinned);
+  ASSERT_TRUE(resident.has_value());
+  EXPECT_EQ(resident->producer_identity(), published.producer_identity());
+  EXPECT_EQ(registry.residency_manager()->lineage_count_for_graph(kIdentity),
+            1U);
+  EXPECT_EQ(registry.residency_manager()->retire_graph_lineages(kIdentity), 1U);
+
+  const execution::DeviceExecutorDiagnostics diagnostics =
+      registry.diagnostics(DeviceBackend::Metal);
+  EXPECT_EQ(diagnostics.submission_count, 1U);
+  EXPECT_EQ(diagnostics.invocation_count, 1U);
+  EXPECT_EQ(diagnostics.total_allocations, 2U);
+  EXPECT_EQ(diagnostics.live_allocations, 0U);
 }
 
 /**

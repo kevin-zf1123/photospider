@@ -139,17 +139,29 @@ class MetalExecutionContext {
    * @return Nothing after pending source/destination Values, exact completion
    * identity, transfer blit, native completion handler, and commit are
    * installed.
-   * @throws std::invalid_argument for missing handles, dimensions, or malformed
-   *         sample-domain metadata.
+   * @throws std::invalid_argument for missing handles, dimensions, texture
+   *         mismatch, or malformed descriptor/sample-domain metadata.
    * @throws std::logic_error without ComputeRun completion lineage or after a
    * prior output publication in the same operation callback.
    * @throws std::overflow_error for byte arithmetic or identity exhaustion.
+   * @throws std::length_error when bounded image metadata exceeds its frozen
+   *         limit.
+   * @throws DeviceResourceError when native actual bytes are invalid or exceed
+   *         the admitted resource plan.
    * @throws std::runtime_error for native allocation/encoder failures.
-   * @throws std::bad_alloc for retained publication/completion ownership.
+   * @throws std::bad_alloc when descriptor/ImageFacet copying or validation,
+   *         native collection copying, or retained publication/completion
+   *         ownership exhausts memory.
+   * @throws std::system_error from ledger, residency, or diagnostic-state
+   *         synchronization.
    * @note The method never waits and never calls texture getBytes. The
    * destination is a host-visible revision-preserving replica whose ReadyFence
    * settles from the command-buffer completion handler. The executor never
-   * infers sample meaning from R32Float storage or payload values.
+   * infers sample meaning from R32Float storage or payload values. The complete
+   * executor-authored descriptor and caller facet are validated before this
+   * method allocates or records a readback buffer, encodes a blit, commits
+   * ledger actuals, or changes publication state; metadata rejection therefore
+   * leaves the invocation reusable for a corrected call.
    */
   virtual void publish_float32_texture_to_host(
       NativeHandle command_buffer_handle, NativeHandle texture_handle,
