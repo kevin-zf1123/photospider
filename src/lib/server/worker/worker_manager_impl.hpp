@@ -458,7 +458,8 @@ class WorkerManager::Impl final {
    * escalation.
    * @throws std::invalid_argument when `process` is null.
    * @throws ManagerFailure when the test-only pre-signal observation expires or
-   * observes an abnormal exit.
+   * observes an abnormal exit, or when the post-revocation test observation
+   * times out.
    * @throws std::overflow_error if a captured monotonic base cannot represent
    * a validated termination or reap deadline.
    * @note Exact natural exit observed before escalation leaves `control` open

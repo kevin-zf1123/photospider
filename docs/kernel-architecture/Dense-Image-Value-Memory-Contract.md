@@ -40,18 +40,21 @@ equality. Stable `ChannelId` and `ChannelGroupId` records do. Observed extrema,
 histograms, NaN/Inf counts, and other statistics never become descriptor,
 Facet, or content identity.
 
-For a multi-input image operation, output metadata is a semantic intersection,
-not a copy from one favored input. Unchanged output geometry may retain the
-primary input's signed data and display windows. Channel facts survive only
-when output channel cardinality is unchanged, no explicit channel mapping was
-applied, and every contributing input declares semantically equal schemas.
-Color additionally requires that retained schema and semantically equal color
-interpretation from every input. A sample-domain fact survives only when every
-input declares the exact same uniform domain and none has per-channel
-overrides. An
-unproven or incompatible optional fact is omitted; implementations do not infer
-it from payload extrema, guess channel roles, or perform implicit sample
-conversion.
+The OpenCV provider's monolithic weighted-blend
+(`image_mixing:add_weighted`) publication boundary treats output metadata as a
+semantic intersection of its two inputs, not a copy from one favored input.
+Unchanged output geometry may retain the primary input's signed data and
+display windows. Channel facts survive only when output channel cardinality is
+unchanged, no explicit channel mapping was applied, and both inputs declare
+semantically equal schemas. Color additionally requires a retained schema and
+semantically equal color interpretation from both inputs. A sample-domain
+fact survives only when both inputs declare the exact same uniform domain and
+neither has per-channel overrides. An unproven or incompatible optional fact
+is omitted; the boundary does not infer it from payload extrema, guess channel
+roles, or perform implicit sample conversion. This rule does not cover `diff`,
+`multiply`, or tiled output planning/publication, including tiled
+`add_weighted`; this contract makes no broader multi-input metadata-
+intersection claim.
 
 ## Layout, binding, and ownership
 

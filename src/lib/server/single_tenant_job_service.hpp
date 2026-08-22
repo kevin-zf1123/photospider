@@ -468,13 +468,14 @@ struct WorkerManagerOptions final {
    */
   bool await_pre_signal_zero_exit_for_test = false;
   /**
-   * @brief Holds channel-revocation escalation until child exit in tests.
-   * @note False in product construction. When true, the manager closes the
-   * control channel and then uses bounded `waitid(WNOWAIT)` observation to
-   * ensure the exact child has consumed either revocation or an already-owned
-   * signal before production `waitpid` classification continues. The seam
-   * exposes no status, descriptor, PID, signal, wait, reap, cancellation, or
-   * completion authority to test code.
+   * @brief Holds post-revocation classification until child exit in tests.
+   * @note False in product construction. When true, after attempting owned
+   * `SIGTERM` delivery and revoking the control channel, the manager uses a
+   * bounded `waitid(WNOWAIT)` observation to detect the exact child's terminal
+   * status before production `waitpid` classification continues. This proves
+   * no causal link to signal delivery or channel revocation. The seam exposes
+   * no status, descriptor, PID, signal, wait, reap, cancellation, or completion
+   * authority to test code.
    */
   bool await_channel_revocation_exit_for_test = false;
   /**

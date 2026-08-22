@@ -69,15 +69,18 @@ Rec.709/Display-P3-D65/Rec.2020/ACES-AP0/ACES-AP1 色原色。scene linearity
 独立 Image、Sample Domain 与 Color Facet 记录，使这些含义可独立版本化且不
 创建第二 Value 权威。
 
-组合多个图像输入的 operation 只能投影所有参与输入均已证明兼容的 metadata
-事实。当 output geometry 不变时，它可以保留 primary input 的有符号 data window
-与 display window。只有 output channel cardinality 不变、没有发生显式 channel
-remapping，且每个输入都声明语义相等的 channel 事实时，channel schema 才能保留。
-color interpretation 还要求该 schema 已保留，且每个输入都声明语义相等的 color 事实。
-只有每个输入都声明完全相同的 sample domain，
-并且都没有 per-channel override 时，uniform sample domain 才能保留。否则必须省略
-对应的 optional fact，使 downstream consumer fail closed。payload value 绝不暗示
-sample domain、不授权 sample conversion，也不选择 channel role。
+在 OpenCV provider 的 monolithic weighted-blend
+（`image_mixing:add_weighted`）发布边界内，output metadata 只包含两个参与 input 均已
+证明兼容的事实。output geometry 不变时，该边界可以保留 primary input 的有符号
+data window 与 display window。只有 output channel cardinality 不变、没有发生显式
+channel remapping，且两个 input 都声明语义相等的 channel 事实时，channel schema 才能
+保留。color interpretation 还要求保留该 schema，且两个 input 都声明语义相等的
+color 事实。只有两个 input 都声明完全相同的 sample domain，且均没有 per-channel
+override 时，uniform sample domain 才能保留。否则必须省略对应的 optional fact，使
+downstream consumer fail closed。payload value 绝不暗示 sample domain、不授权 sample
+conversion，也不选择 channel role。该已实现规则仅限 monolithic `add_weighted`；它不覆盖
+`diff`、`multiply` 或 tiled output planning/publication，包括 tiled `add_weighted` callback。
+本文不声称更广泛的 multi-input metadata projection 保证。
 
 ### 观测统计
 

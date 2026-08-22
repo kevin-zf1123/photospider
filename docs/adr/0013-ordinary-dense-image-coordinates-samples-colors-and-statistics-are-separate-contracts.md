@@ -84,17 +84,22 @@ Canonical encoding nevertheless emits independent Image, Sample Domain, and
 Color Facet records so those meanings can version independently without a
 second Value authority.
 
-An operation that combines multiple image inputs projects only metadata facts
-proven compatible across every contributing input. It may retain the primary
-input's signed data and display windows when the output geometry is unchanged.
-A channel schema survives only when output channel cardinality is unchanged,
-no explicit channel remapping occurred, and every input declares semantically
-equal channel facts. Color interpretation additionally requires that retained
-schema and semantically equal color facts from every input. A uniform sample
-domain survives only when every input declares the exact same sample domain
-and none has per-channel overrides. Otherwise the corresponding optional fact
-is omitted so downstream consumers fail closed. Payload values never imply a
-sample domain, authorize sample conversion, or select channel roles.
+At the OpenCV provider's monolithic weighted-blend
+(`image_mixing:add_weighted`) publication boundary, output metadata contains
+only facts proven compatible across both contributing inputs. That boundary
+may retain the primary input's signed data and display windows when output
+geometry is unchanged. A channel schema survives only when output channel
+cardinality is unchanged, no explicit channel remapping occurred, and both
+inputs declare semantically equal channel facts. Color interpretation
+additionally requires a retained schema and semantically equal color facts
+from both inputs. A uniform sample domain survives only when both inputs
+declare the exact same sample domain and neither has per-channel overrides.
+Otherwise the corresponding optional fact is omitted so downstream consumers
+fail closed. Payload values never imply a sample domain, authorize sample
+conversion, or select channel roles. This implemented rule is limited to
+monolithic `add_weighted`; it does not cover `diff`, `multiply`, or tiled
+output planning/publication, including the tiled `add_weighted` callback. No
+broader multi-input metadata-projection guarantee is claimed.
 
 ### Observed statistics
 

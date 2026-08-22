@@ -33,14 +33,16 @@ coordinate；逻辑访问仅在完成 containment 检查后才减去 data-window
 `ChannelId` 和 `ChannelGroupId` record 承担该职责。观测 extrema、histogram、NaN/Inf count
 及其他 statistics 永远不会成为 descriptor、Facet 或 content identity。
 
-对于 multi-input image operation，output metadata 是语义交集，不是从某个偏好的 input
-直接复制。output geometry 不变时，可以保留 primary input 的有符号 data window 与
-display window。只有 output channel cardinality 不变、没有应用显式 channel mapping，且
-每个参与输入都声明语义相等的 schema 时，channel 事实才能保留。color 还要求该 schema
-已保留，且每个输入都声明语义相等的 color interpretation。只有每个输入都声明完全相同的
-uniform domain，并且都没有 per-channel override
-时，sample-domain 事实才能保留。未经证明或不兼容的 optional fact 必须省略；实现不得从
-payload extrema 推断它、猜测 channel role，也不得执行隐式 sample conversion。
+OpenCV provider 的 monolithic weighted-blend（`image_mixing:add_weighted`）发布边界把
+output metadata 视为两个 input 的语义交集，而不是从某个偏好的 input 直接复制。output
+geometry 不变时，可以保留 primary input 的有符号 data window 与 display window。只有
+output channel cardinality 不变、没有应用显式 channel mapping，且两个 input 都声明语义
+相等的 schema 时，channel 事实才能保留。color 还要求保留该 schema，且两个 input 都
+声明语义相等的 color interpretation。只有两个 input 都声明完全相同的 uniform domain，且
+均没有 per-channel override 时，sample-domain 事实才能保留。未经证明或不兼容的 optional
+fact 必须省略；该边界不得从 payload extrema 推断它、猜测 channel role，也不得执行隐式
+sample conversion。该规则不覆盖 `diff`、`multiply` 或 tiled output planning/publication，
+包括 tiled `add_weighted`；本文不声称更广泛的 multi-input metadata 交集保证。
 
 ## Layout、binding 与所有权
 
