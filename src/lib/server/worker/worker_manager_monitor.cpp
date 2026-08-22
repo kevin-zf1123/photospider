@@ -30,7 +30,7 @@ WorkerManagerCompletion WorkerManager::Impl::monitor_process(
   std::optional<std::chrono::steady_clock::time_point> post_reap_drain_deadline;
   std::optional<PreparedWorkerReport> candidate_report;
   std::optional<JobAttemptReport> materialized_report;
-  std::optional<ImageBuffer> output_image;
+  std::optional<std::vector<std::byte>> output_archive;
   std::size_t output_expected_bytes = 0U;
   std::size_t output_received_bytes = 0U;
   ArtifactContentHasher output_hasher;
@@ -82,7 +82,7 @@ WorkerManagerCompletion WorkerManager::Impl::monitor_process(
                                     options_.terminate_timeout));
         if (candidate_report.has_value() && !output_eof) {
           static_cast<void>(
-              drain_output_slice(process, output_image, output_expected_bytes,
+              drain_output_slice(process, output_archive, output_expected_bytes,
                                  &output_received_bytes, &output_hasher,
                                  &output_eof, &output_digest));
         }
@@ -140,7 +140,8 @@ WorkerManagerCompletion WorkerManager::Impl::monitor_process(
           output_digest.value_or(ArtifactContentDigest{});
       materialized_report = process->data_plane.materialize_report(
           std::move(candidate_report->report), candidate_report->output,
-          std::move(output_image), output_received_bytes, materialized_digest);
+          std::move(output_archive), output_received_bytes,
+          materialized_digest);
       if (!process->reaped && !cancel_delivery_failed &&
           !cancel_channel_failed) {
         auto acknowledgement_deadline =
@@ -328,11 +329,11 @@ WorkerManagerCompletion WorkerManager::Impl::monitor_process(
         }
         observe_exit(record, process);
         if (!process->reaped || !report.output.has_value()) {
-          output_image = process->data_plane.prepare_output_image(
+          output_archive = process->data_plane.prepare_output_archive(
               report.report, report.output);
         }
         output_expected_bytes = report.output.has_value()
-                                    ? report.output->descriptor.payload_bytes
+                                    ? report.output->descriptor.archive_bytes
                                     : 0U;
         output_received_bytes = 0U;
         if (process->reaped && !report.output.has_value()) {
@@ -350,7 +351,7 @@ WorkerManagerCompletion WorkerManager::Impl::monitor_process(
       }
       if (output_slice_ready) {
         const WorkerDataPlaneIoStatus status =
-            drain_output_slice(process, output_image, output_expected_bytes,
+            drain_output_slice(process, output_archive, output_expected_bytes,
                                &output_received_bytes, &output_hasher,
                                &output_eof, &output_digest);
         if (status == WorkerDataPlaneIoStatus::WouldBlock) {

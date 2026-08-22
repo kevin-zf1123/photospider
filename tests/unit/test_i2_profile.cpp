@@ -170,7 +170,7 @@ ContentDigest recompute_i2_preview_reference(float node_one,
   descriptor.shape = {kI2PreviewImageEdge, kI2PreviewImageEdge, kChannels};
   descriptor.element_semantics = ElementSemantics::FloatingPoint;
   descriptor.storage_encoding = StorageEncoding{32U};
-  const ImageFacet image{1U, 0U, 2U};
+  const ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
   const StridedLayout layout{
       {static_cast<std::ptrdiff_t>(kI2PreviewImageEdge * kChannels *
                                    kElementBytes),

@@ -723,9 +723,22 @@ std::vector<PixelSize> cached_image_input_extents(const Node& node,
     if (!upstream.cached_output_high_precision) {
       continue;
     }
-    const ImageBuffer& image =
-        upstream.cached_output_high_precision->image_buffer;
-    extents[index] = PixelSize{image.width, image.height};
+    const NodeOutput& output = *upstream.cached_output_high_precision;
+    if (!output.has_image_value() ||
+        !output.image_value().image_facet().has_value()) {
+      continue;
+    }
+    const ImageBounds& bounds = output.image_value().image_bounds();
+    const std::size_t width = image_bounds_width(bounds);
+    const std::size_t height = image_bounds_height(bounds);
+    const std::size_t maximum_extent =
+        static_cast<std::size_t>(std::numeric_limits<int>::max());
+    if (width > maximum_extent || height > maximum_extent) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Cached image extent exceeds PixelSize.");
+    }
+    extents[index] =
+        PixelSize{static_cast<int>(width), static_cast<int>(height)};
   }
   return extents;
 }

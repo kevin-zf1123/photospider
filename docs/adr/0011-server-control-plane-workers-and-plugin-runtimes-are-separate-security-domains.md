@@ -9,9 +9,13 @@ worker-manager, standalone artifact data plane, sandbox, or isolated-plugin
 target is current software behavior. Live delivery status remains in the linked
 Issue and Project.
 
-The current `photospiderd` and plugin loaders remain unchanged. Issues #99,
-#100, and #105 now implement a source-private local JobSpec vertical with complete-
-envelope tenant quota accounting, durable Job/image artifact recovery,
+The current `photospiderd` remains unchanged. DI-3 separately replaces the
+operation-plugin registrar boundary with pure-C ABI v1 and lets each validated
+operation descriptor admitted from a signed package select its trusted in-
+process or supervised isolated CPU route. Data-definition and policy loaders
+remain separate versioned contracts. Issues #99, #100, and #105 now implement
+a source-private local JobSpec vertical with complete-envelope tenant quota
+accounting, durable Job/named-Value archive recovery,
 explicit retry/checkpoint identity, and one freshly execed Embedded Host worker
 process per attempt. One same-process `WorkerManager` object owns the private
 socket, PID, heartbeat, cancellation escalation, exact reaping, and supervision
@@ -20,13 +24,14 @@ retry authority. Host memory is enforced as POSIX `RLIMIT_AS`; configured device
 capacity remains admission-only. The private closed protocol and exact lease
 fencing isolate startup, exit, signal, channel, protocol, heartbeat, runtime,
 and forced-cancellation failures to the owning attempt. Private worker protocol
-v2 limits control frames to 128 KiB of attempt/Job/artifact-reference metadata.
-Checkpoint and candidate image bytes instead use manager-created,
+v3 limits control frames to 128 KiB of attempt/Job/aggregate-archive metadata.
+Checkpoint and canonical named-Value archive bytes instead use manager-created,
 direction-reduced local Unix stream descriptors. The registered supervisor
 creates them only after record/thread ownership and outside the service mutex;
 manager endpoints are nonblocking, while blocking transfer remains in the
-killable worker. Manager acceptance requires exact reference, descriptor,
-stream EOF/size, resource, and SHA-256 revalidation before clean-reap
+killable worker. Manager acceptance requires exact reference, archive version/
+Value count, stream EOF/size, resource, whole-archive SHA-256, and every
+embedded Value-artifact revalidation before clean-reap
 completion handoff. The worker sends exact metadata-only Report first, keeps
 authenticated heartbeats active while streaming, and closes the output lane
 only after exact bytes. The manager creates one exact lazy anonymous final
@@ -36,7 +41,9 @@ worker remains alive and terminable until the manager completes that join and
 replies with one identity-only `CompletionReady`; the
 acknowledgement grants no Job, quota, artifact, commit, or publication
 authority. Post-reap processing never reads the bulk lane and performs no data-
-plane filesystem I/O.
+plane filesystem I/O. Durable restart additionally bounds manifest/Job control
+files and proves frozen/archive/quota/exact-length/non-sparse facts before
+payload allocation.
 
 That local slice preserves this decision's identity and authority ordering and
 provides real quota admission, crash durability, process-crash containment, and
@@ -80,14 +87,14 @@ executor inside the existing `ExecutionService` callback/request boundary and
 proves a failed Run does not kill its fixed worker or a later unrelated Run.
 
 That #103 boundary is authenticated private-session supervision, not hostile-
-child attestation, package trust, sandboxing, resource enforcement, or a
-selected end-user operation route. Issue #104 now wraps the maintained direct
-and supervised entries with signed package admission, one-use Host resource
-admission, and process rlimits. No current `ExecutionService`, `WorkerManager`,
-embedded Host/CLI, `photospider-worker`, or operation loader constructs this
-path for an end-user Graph operation; the complete operation-ABI migration
-still owns final selection, and a general syscall/network sandbox remains
-separate.
+child attestation, package trust, sandboxing, resource enforcement, or by
+itself a selected end-user operation route. Issue #104 wraps the maintained
+direct and supervised entries with signed package admission, one-use Host
+resource admission, and process rlimits. DI-3 now lets the operation loader
+construct the supervised path when a validated pure-C operation descriptor
+selects it and the signed runtime route is complete; there is no trusted
+fallback. `WorkerManager`, `photospider-worker`, and a general syscall/network
+sandbox remain separate boundaries.
 
 ## Context
 
@@ -328,15 +335,16 @@ for the trusted Embedded worker composition; it is not network peer
 authentication, a syscall sandbox, device isolation, or the isolated tenant-
 plugin runtime assigned to Issues #101-#104.
 
-Issue #105 replaces that historical bulk-control transport with private
-protocol v2. Every complete Report is bounded to 128 KiB of identity, outcome,
-diagnostic, image-descriptor, reference, size, and digest metadata; it contains
-no tight image bytes. Checkpoint and candidate bytes move only through exact
+Issue #105 introduced bulk-control separation; DI-4 advances the current
+worker contract to private protocol v3. Every complete Report is bounded to
+128 KiB of identity, outcome, diagnostic, aggregate archive version/Value
+count/reference/size/digest metadata; it contains no archive bytes. Checkpoint
+and candidate archive bytes move only through exact
 manager-created, direction-reduced local Unix streams. Manager endpoints are
 nonblocking and advance in bounded slices under the attempt's absolute
 lifecycle deadlines; blocking receive/send remains in the exactly owned
 worker. A candidate above the accepted output/staging/retention envelope
-becomes one bounded identity-preserving `Failed/Compute` Report with no image,
+becomes one bounded identity-preserving `Failed/Compute` Report with no archive,
 while a finite hard `RLIMIT_FSIZE` below the accepted output-stage maximum
 fails the owning attempt as `WorkerStartup` before `fork` instead of silently
 narrowing that envelope. There is no 64-MiB compatibility or transport-size
@@ -344,8 +352,8 @@ fallback. The worker sends one metadata-only Report, retains its source and
 real heartbeat loop while streaming, closes its output lane only after exact
 bytes, and waits under the same exact process lifecycle for a matching identity-only
 `CompletionReady`. WorkerManager sends it only after EOF, size/hash/reference/
-descriptor/resource validation, and O(1) transfer of the already-final exact
-anonymous CPU owner. Each manager receive is one at-most-64-KiB direct slice
+archive/resource validation, strict decode of every named Value artifact, and
+O(1) transfer of the already-final exact anonymous archive owner. Each manager receive is one at-most-64-KiB direct slice
 followed by absolute runtime/heartbeat/cancel/shutdown arbitration; neither
 continuous nor prebuffered output renews or revives heartbeat. If an
 already failed cancellation channel makes the reply impossible, a completely
@@ -443,7 +451,7 @@ digest, and runtime identities never substitute for `ArtifactId` or a receipt.
 
 ### Plugin trust and isolation
 
-Operation v2, data-definition-provider v3, and policy v1 DSOs are trusted
+Operation v1, data-definition-provider v3, and policy v1 DSOs are trusted
 native code whenever loaded in a Host process. Pure-C records and minimized
 legitimate authority do not sandbox native code. The server control plane and
 WorkerManager load none. Current operation and policy candidates require a
@@ -474,16 +482,15 @@ identity, current worker lease, and declared resource bounds. Returned
 descriptors, handles, offsets, digests, statuses, and diagnostics are untrusted
 data and never mint authority.
 
-The current Issue #102 slice implements the first CPU shared-memory/FD record
-without migrating operation ABI v2 or implementing the target-only operation
-ABI v1. Its callback seam is process-local runtime code; neither ABI family's
-pointer-bearing records are serialized. It binds the canonical request and
-every declared physical tensor range to the invocation identity, grants only
-declared directional capabilities, and fails closed on malformed or mutated
-request, response, descriptor, header, FD, or content state. The one-shot
-process and RAII owners provide exact normal/error-path transport retirement.
-Direct use of the accurately named non-supervised adapter still does not bound a
-callback that never returns.
+Issue #102 implemented the first CPU shared-memory/FD record before the
+operation boundary migration. Its callback seam was process-local runtime
+code, and no pointer-bearing record was serialized. It binds the canonical
+request and every declared physical tensor range to the invocation identity,
+grants only declared directional capabilities, and fails closed on malformed
+or mutated request, response, descriptor, header, FD, or content state. The
+one-shot process and RAII owners provide exact normal/error-path transport
+retirement. Direct use of the accurately named non-supervised adapter still
+does not bound a callback that never returns.
 
 Those source-private Issue #102 objects are compiled into the installable
 product archive and exercised from that archive by a real-exec fixture. Issue
@@ -498,12 +505,11 @@ later invocation in a fresh process instead of falling back in-process.
 Maintained integration also invokes that executor from a real
 `ExecutionService` ready callback. The original `PluginRuntimeFault` reaches
 the request boundary, that boundary publishes the owning Run as Failed, and the
-fixed service worker executes a later unrelated Run. This is a product-linked
-Run-failure composition proof, not an end-user route: no current
-`ExecutionService`, `WorkerManager`, embedded Host/CLI,
-`photospider-worker`, or operation loader constructs an isolated request from a
-Graph operation. Wiring current ABI v2 or implementing or shimming target-only
-ABI v1 remains outside #102 and #103.
+fixed service worker executes a later unrelated Run. DI-3 subsequently routes
+pure-C operation ABI v1 supervised descriptors through this exact executor and
+isolation protocol v2, with no direct callback fallback. Public
+`ExecutionService`, `WorkerManager`, embedded Host/CLI, and
+`photospider-worker` still expose no end-user runtime selector.
 
 Issue #104 now configures one process-immutable trust policy through
 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`,
@@ -552,9 +558,11 @@ and Issue #104 owns the current signed admission and resource-token
 composition. Session authentication proves binding and liveness of the private
 launch; signed content approval establishes package admission; neither proves
 returned output truth. This ADR fixes their authority and process boundaries.
-Atomic operation-ABI migration and end-user selection, a general syscall/
-network sandbox, cross-process GPU handles/fences, and long-lived fuzz/audit
-evidence remain later decisions.
+DI-3 subsequently completed the atomic migration to pure-C operation ABI v1
+and routes supervised CPU descriptors through the exact signed-package
+executor. A public end-user isolated-runtime selector, a general
+syscall/network sandbox, cross-process GPU handles/fences, and long-lived
+fuzz/audit evidence remain later decisions.
 
 ### Failure, revocation, and replay
 

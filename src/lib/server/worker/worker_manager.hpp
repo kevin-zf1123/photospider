@@ -121,8 +121,11 @@ struct WorkerManagerOwnershipSnapshot final {
  * remains in the killable worker. The manager escalates cancellation,
  * preserves bounded buffered report/EOF drainage when natural exit wins the
  * deadline-side reap, and prevents either an ordinary EOF or candidate-Report
- * deadline from preempting an active cooperative cancellation deadline. It
- * classifies exit and clears/reaps the PID before delivering one completion.
+ * deadline from preempting an active cooperative cancellation deadline. After
+ * a final natural-exit observation, forced escalation delivers owned `SIGTERM`
+ * while the control channel is still live, then revokes the channel before
+ * bounded wait/KILL handling. It classifies exit and clears/reaps the PID
+ * before delivering one completion.
  * The explicit test mode executes a marked factory in its supervision thread
  * and makes no process-isolation or bounded-termination claim.
  *

@@ -168,7 +168,8 @@ Kernel::Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec,
                std::shared_ptr<const GraphDocumentReader> document_reader,
                std::shared_ptr<const GraphDocumentWriter> document_writer,
                std::shared_ptr<compute::ExecutionService> execution_service)
-    : cache_service_(std::move(image_codec), std::move(metadata_codec)),
+    : cache_service_(std::move(image_codec), std::move(metadata_codec),
+                     kDefaultImageStatisticsCacheEntries, &data_definitions_),
       io_service_(std::move(document_reader), std::move(document_writer)),
       execution_service_(std::move(execution_service)) {
   if (!execution_service_) {

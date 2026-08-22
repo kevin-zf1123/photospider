@@ -11,18 +11,20 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "core/extension_internal.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/data/value.hpp"
 
 namespace ps::execution {
 namespace {
 
-/** @brief Fixed big-endian packet magic spelling ASCII `PSI1`. */
-constexpr std::uint32_t kIsolatedCpuPacketMagic = 0x50534931U;
+/** @brief Fixed big-endian packet magic spelling ASCII `PSI2`. */
+constexpr std::uint32_t kIsolatedCpuPacketMagic = 0x50534932U;
 
 /**
- * @brief Closed packet kinds in protocol version one.
+ * @brief Closed packet kinds in protocol version two.
  * @throws Nothing for ordinary enum operations.
  */
 enum class IsolatedCpuPacketKind : std::uint16_t {
@@ -481,7 +483,7 @@ IsolatedCpuPacketKind parse_packet_kind(std::uint16_t value) {
 }
 
 /**
- * @brief Wraps one bounded payload in the fixed protocol-v1 header.
+ * @brief Wraps one bounded payload in the fixed protocol-v2 header.
  * @param kind Closed packet kind.
  * @param payload Exact payload bytes.
  * @return Complete packet.
@@ -713,6 +715,76 @@ IsolatedCpuScalarParameter decode_parameter(ByteReader* reader) {
 }
 
 /**
+ * @brief Parses one closed recursive configuration kind.
+ * @param value Numeric wire value.
+ * @return Valid closed kind.
+ * @throws IsolatedCpuProtocolError for an unknown value.
+ */
+IsolatedCpuConfigurationKind parse_configuration_kind(std::uint8_t value) {
+  switch (static_cast<IsolatedCpuConfigurationKind>(value)) {
+    case IsolatedCpuConfigurationKind::Null:
+    case IsolatedCpuConfigurationKind::Boolean:
+    case IsolatedCpuConfigurationKind::SignedInteger:
+    case IsolatedCpuConfigurationKind::FloatingPoint:
+    case IsolatedCpuConfigurationKind::String:
+    case IsolatedCpuConfigurationKind::Bytes:
+    case IsolatedCpuConfigurationKind::Array:
+    case IsolatedCpuConfigurationKind::Object:
+      return static_cast<IsolatedCpuConfigurationKind>(value);
+  }
+  fail("isolated CPU configuration kind is invalid");
+}
+
+/**
+ * @brief Encodes one flattened recursive configuration node.
+ * @param node Canonical node whose inactive fields remain zero/empty.
+ * @param writer Nonnull bounded payload writer.
+ * @throws std::invalid_argument for a null writer.
+ * @throws Encoding bound failures unchanged.
+ */
+void encode_configuration_node(const IsolatedCpuConfigurationNode& node,
+                               ByteWriter* writer) {
+  if (writer == nullptr) {
+    throw std::invalid_argument(
+        "isolated CPU configuration-node writer is null");
+  }
+  writer->put_u8(static_cast<std::uint8_t>(node.kind));
+  writer->put_string(node.key, kMaximumIsolatedCpuConfigurationKeyBytes);
+  writer->put_bool(node.boolean_value);
+  writer->put_i64(node.signed_value);
+  writer->put_f64(node.floating_value);
+  writer->put_string(node.bytes_value,
+                     kMaximumIsolatedCpuConfigurationValueBytes);
+  writer->put_u32(node.first_child);
+  writer->put_u32(node.child_count);
+}
+
+/**
+ * @brief Decodes one flattened recursive configuration node.
+ * @param reader Nonnull bounded payload reader.
+ * @return Fresh node pending whole-tree semantic validation.
+ * @throws std::invalid_argument for a null reader.
+ * @throws IsolatedCpuProtocolError or std::bad_alloc for malformed content.
+ */
+IsolatedCpuConfigurationNode decode_configuration_node(ByteReader* reader) {
+  if (reader == nullptr) {
+    throw std::invalid_argument(
+        "isolated CPU configuration-node reader is null");
+  }
+  IsolatedCpuConfigurationNode node;
+  node.kind = parse_configuration_kind(reader->get_u8());
+  node.key = reader->get_string(kMaximumIsolatedCpuConfigurationKeyBytes);
+  node.boolean_value = reader->get_bool();
+  node.signed_value = reader->get_i64();
+  node.floating_value = reader->get_f64();
+  node.bytes_value =
+      reader->get_string(kMaximumIsolatedCpuConfigurationValueBytes);
+  node.first_child = reader->get_u32();
+  node.child_count = reader->get_u32();
+  return node;
+}
+
+/**
  * @brief Parses one closed capability access mode.
  * @param value Numeric wire value.
  * @return Valid access mode.
@@ -866,6 +938,42 @@ IsolatedCpuStorageEncoding parse_storage_encoding(std::uint8_t value) {
 }
 
 /**
+ * @brief Encodes one exact operation descriptor digest.
+ * @param digest Four opaque canonical words, including all zero.
+ * @param writer Nonnull bounded output owner.
+ * @return Nothing after writing all words.
+ * @throws std::invalid_argument for a null writer.
+ * @throws Encoding bound errors unchanged.
+ */
+void encode_operation_digest(const IsolatedCpuSha256Digest& digest,
+                             ByteWriter* writer) {
+  if (writer == nullptr) {
+    throw std::invalid_argument("isolated CPU operation digest writer is null");
+  }
+  for (const std::uint64_t word : digest.words) {
+    writer->put_u64(word);
+  }
+}
+
+/**
+ * @brief Decodes one exact operation descriptor digest.
+ * @param reader Nonnull bounded input owner.
+ * @return Four opaque words, preserving the all-zero spelling.
+ * @throws std::invalid_argument for a null reader.
+ * @throws IsolatedCpuProtocolError for truncation.
+ */
+IsolatedCpuSha256Digest decode_operation_digest(ByteReader* reader) {
+  if (reader == nullptr) {
+    throw std::invalid_argument("isolated CPU operation digest reader is null");
+  }
+  IsolatedCpuSha256Digest digest;
+  for (std::uint64_t& word : digest.words) {
+    word = reader->get_u64();
+  }
+  return digest;
+}
+
+/**
  * @brief Encodes one optional canonical ContentDigest.
  * @param digest Optional digest.
  * @param writer Non-null output owner.
@@ -910,6 +1018,404 @@ std::optional<ContentDigest> decode_content_binding(ByteReader* reader) {
 }
 
 /**
+ * @brief Reads one bounded vector count before allocation.
+ * @param reader Nonnull payload reader.
+ * @param maximum Inclusive count maximum.
+ * @param label Stable diagnostic label.
+ * @return Valid local count.
+ * @throws std::invalid_argument for a null reader.
+ * @throws IsolatedCpuProtocolError for a value above maximum.
+ */
+std::size_t decode_count(ByteReader* reader, std::size_t maximum,
+                         const char* label);
+
+/**
+ * @brief Encodes one signed half-open image window.
+ * @param bounds Complete public window.
+ * @param writer Nonnull bounded payload writer.
+ * @throws std::invalid_argument for a null writer.
+ * @throws Encoding bound failures unchanged.
+ */
+void encode_image_bounds(const ImageBounds& bounds, ByteWriter* writer) {
+  if (writer == nullptr) {
+    throw std::invalid_argument("isolated CPU image-bounds writer is null");
+  }
+  writer->put_i64(bounds.x_begin);
+  writer->put_i64(bounds.y_begin);
+  writer->put_i64(bounds.x_end);
+  writer->put_i64(bounds.y_end);
+}
+
+/**
+ * @brief Decodes one signed half-open image window.
+ * @param reader Nonnull bounded payload reader.
+ * @return Exact reconstructed endpoints.
+ * @throws std::invalid_argument for a null reader.
+ * @throws IsolatedCpuProtocolError for truncation.
+ */
+ImageBounds decode_image_bounds(ByteReader* reader) {
+  if (reader == nullptr) {
+    throw std::invalid_argument("isolated CPU image-bounds reader is null");
+  }
+  ImageBounds bounds;
+  bounds.x_begin = reader->get_i64();
+  bounds.y_begin = reader->get_i64();
+  bounds.x_end = reader->get_i64();
+  bounds.y_end = reader->get_i64();
+  return bounds;
+}
+
+/**
+ * @brief Encodes one complete finite declared sample interval.
+ * @param domain Validated sample-domain record.
+ * @param writer Nonnull bounded payload writer.
+ * @throws std::invalid_argument for a null writer.
+ * @throws Encoding bound failures unchanged.
+ */
+void encode_sample_domain(const SampleDomain& domain, ByteWriter* writer) {
+  if (writer == nullptr) {
+    throw std::invalid_argument("isolated CPU sample-domain writer is null");
+  }
+  writer->put_u32(static_cast<std::uint32_t>(domain.kind));
+  writer->put_f64(domain.minimum);
+  writer->put_f64(domain.maximum);
+}
+
+/**
+ * @brief Decodes one declared sample interval with a closed kind.
+ * @param reader Nonnull bounded payload reader.
+ * @return Reconstructed interval; enclosing metadata validation checks range.
+ * @throws std::invalid_argument for a null reader.
+ * @throws IsolatedCpuProtocolError for an unknown kind or truncation.
+ */
+SampleDomain decode_sample_domain(ByteReader* reader) {
+  if (reader == nullptr) {
+    throw std::invalid_argument("isolated CPU sample-domain reader is null");
+  }
+  SampleDomain domain;
+  switch (reader->get_u32()) {
+    case static_cast<std::uint32_t>(SampleDomainKind::Normalized):
+      domain.kind = SampleDomainKind::Normalized;
+      break;
+    case static_cast<std::uint32_t>(SampleDomainKind::Legal):
+      domain.kind = SampleDomainKind::Legal;
+      break;
+    case static_cast<std::uint32_t>(SampleDomainKind::CodeValue):
+      domain.kind = SampleDomainKind::CodeValue;
+      break;
+    default:
+      fail("isolated CPU sample-domain kind is invalid");
+  }
+  domain.minimum = reader->get_f64();
+  domain.maximum = reader->get_f64();
+  return domain;
+}
+
+/**
+ * @brief Encodes a complete rich ordinary-image facet without addresses.
+ * @param facet Validated image facts.
+ * @param writer Nonnull bounded payload writer.
+ * @throws std::invalid_argument for a null writer.
+ * @throws Encoding allocation or bound failures unchanged.
+ */
+void encode_image_facet(const IsolatedCpuImageFacet& facet,
+                        ByteWriter* writer) {
+  if (writer == nullptr) {
+    throw std::invalid_argument("isolated CPU image-facet writer is null");
+  }
+  writer->put_u32(facet.x_axis);
+  writer->put_u32(facet.y_axis);
+  writer->put_bool(facet.channel_axis.has_value());
+  if (facet.channel_axis.has_value()) {
+    writer->put_u32(*facet.channel_axis);
+  }
+  encode_image_bounds(facet.data_window, writer);
+  writer->put_bool(facet.display_window.has_value());
+  if (facet.display_window.has_value()) {
+    encode_image_bounds(*facet.display_window, writer);
+  }
+  writer->put_bool(facet.channel_schema.has_value());
+  if (facet.channel_schema.has_value()) {
+    writer->put_u32(
+        static_cast<std::uint32_t>(facet.channel_schema->channels.size()));
+    for (const ChannelDescription& channel : facet.channel_schema->channels) {
+      writer->put_u64(channel.id.value);
+      writer->put_string(channel.diagnostic_name,
+                         kMaximumImageDiagnosticNameBytes);
+    }
+    writer->put_u32(
+        static_cast<std::uint32_t>(facet.channel_schema->groups.size()));
+    for (const ChannelGroupDescription& group : facet.channel_schema->groups) {
+      writer->put_u64(group.id.value);
+      writer->put_string(group.diagnostic_name,
+                         kMaximumImageDiagnosticNameBytes);
+      writer->put_u32(static_cast<std::uint32_t>(group.members.size()));
+      for (const ChannelId member : group.members) {
+        writer->put_u64(member.value);
+      }
+    }
+  }
+  writer->put_bool(facet.sample_domain.has_value());
+  if (facet.sample_domain.has_value()) {
+    const SampleDomainFacet& sample = *facet.sample_domain;
+    writer->put_u32(sample.structural_version);
+    writer->put_u32(sample.encoding.structural_version);
+    writer->put_u32(static_cast<std::uint32_t>(sample.encoding.kind));
+    encode_sample_domain(sample.default_domain, writer);
+    writer->put_u32(static_cast<std::uint32_t>(sample.per_channel.size()));
+    for (const ChannelSampleDomain& per_channel : sample.per_channel) {
+      writer->put_u64(per_channel.channel.value);
+      encode_sample_domain(per_channel.domain, writer);
+    }
+  }
+  writer->put_bool(facet.color.has_value());
+  if (facet.color.has_value()) {
+    writer->put_u32(facet.color->structural_version);
+    writer->put_u64(facet.color->channel_group.value);
+    writer->put_u32(static_cast<std::uint32_t>(facet.color->transfer));
+    writer->put_u32(static_cast<std::uint32_t>(facet.color->primaries));
+  }
+}
+
+/**
+ * @brief Decodes one complete bounded ordinary-image facet.
+ * @param reader Nonnull bounded payload reader.
+ * @return Fresh Host/runtime-owned metadata.
+ * @throws std::invalid_argument for a null reader.
+ * @throws IsolatedCpuProtocolError or std::bad_alloc for malformed content.
+ */
+IsolatedCpuImageFacet decode_image_facet(ByteReader* reader) {
+  if (reader == nullptr) {
+    throw std::invalid_argument("isolated CPU image-facet reader is null");
+  }
+  IsolatedCpuImageFacet facet;
+  facet.x_axis = reader->get_u32();
+  facet.y_axis = reader->get_u32();
+  if (reader->get_bool()) {
+    facet.channel_axis = reader->get_u32();
+  }
+  facet.data_window = decode_image_bounds(reader);
+  if (reader->get_bool()) {
+    facet.display_window = decode_image_bounds(reader);
+  }
+  if (reader->get_bool()) {
+    ChannelSchema schema;
+    const std::size_t channel_count =
+        decode_count(reader, kMaximumImageChannels, "image channel count");
+    schema.channels.reserve(channel_count);
+    for (std::size_t index = 0U; index < channel_count; ++index) {
+      ChannelDescription channel;
+      channel.id.value = reader->get_u64();
+      channel.diagnostic_name =
+          reader->get_string(kMaximumImageDiagnosticNameBytes);
+      schema.channels.push_back(std::move(channel));
+    }
+    const std::size_t group_count = decode_count(
+        reader, kMaximumImageChannelGroups, "image channel-group count");
+    schema.groups.reserve(group_count);
+    std::size_t memberships = 0U;
+    for (std::size_t index = 0U; index < group_count; ++index) {
+      ChannelGroupDescription group;
+      group.id.value = reader->get_u64();
+      group.diagnostic_name =
+          reader->get_string(kMaximumImageDiagnosticNameBytes);
+      const std::size_t member_count =
+          decode_count(reader, kMaximumImageChannelGroupMembers,
+                       "image channel-group member count");
+      if (member_count > kMaximumImageChannelGroupMemberships - memberships) {
+        fail("isolated CPU image channel memberships exceed their bound");
+      }
+      memberships += member_count;
+      group.members.reserve(member_count);
+      for (std::size_t member = 0U; member < member_count; ++member) {
+        group.members.push_back(ChannelId{reader->get_u64()});
+      }
+      schema.groups.push_back(std::move(group));
+    }
+    facet.channel_schema = std::move(schema);
+  }
+  if (reader->get_bool()) {
+    SampleDomainFacet sample;
+    sample.structural_version = reader->get_u32();
+    sample.encoding.structural_version = reader->get_u32();
+    switch (reader->get_u32()) {
+      case static_cast<std::uint32_t>(SampleEncodingKind::Value):
+        sample.encoding.kind = SampleEncodingKind::Value;
+        break;
+      case static_cast<std::uint32_t>(SampleEncodingKind::Normalized):
+        sample.encoding.kind = SampleEncodingKind::Normalized;
+        break;
+      case static_cast<std::uint32_t>(SampleEncodingKind::CodeValue):
+        sample.encoding.kind = SampleEncodingKind::CodeValue;
+        break;
+      default:
+        fail("isolated CPU sample encoding is invalid");
+    }
+    sample.default_domain = decode_sample_domain(reader);
+    const std::size_t count = decode_count(reader, kMaximumImageChannels,
+                                           "per-channel sample-domain count");
+    sample.per_channel.reserve(count);
+    for (std::size_t index = 0U; index < count; ++index) {
+      ChannelSampleDomain domain;
+      domain.channel.value = reader->get_u64();
+      domain.domain = decode_sample_domain(reader);
+      sample.per_channel.push_back(std::move(domain));
+    }
+    facet.sample_domain = std::move(sample);
+  }
+  if (reader->get_bool()) {
+    ColorFacet color;
+    color.structural_version = reader->get_u32();
+    color.channel_group.value = reader->get_u64();
+    switch (reader->get_u32()) {
+      case static_cast<std::uint32_t>(ColorTransferFunction::SceneLinear):
+        color.transfer = ColorTransferFunction::SceneLinear;
+        break;
+      case static_cast<std::uint32_t>(ColorTransferFunction::Srgb):
+        color.transfer = ColorTransferFunction::Srgb;
+        break;
+      case static_cast<std::uint32_t>(ColorTransferFunction::Rec709):
+        color.transfer = ColorTransferFunction::Rec709;
+        break;
+      case static_cast<std::uint32_t>(ColorTransferFunction::Pq):
+        color.transfer = ColorTransferFunction::Pq;
+        break;
+      case static_cast<std::uint32_t>(ColorTransferFunction::Hlg):
+        color.transfer = ColorTransferFunction::Hlg;
+        break;
+      default:
+        fail("isolated CPU color transfer is invalid");
+    }
+    switch (reader->get_u32()) {
+      case static_cast<std::uint32_t>(ColorPrimaries::Rec709):
+        color.primaries = ColorPrimaries::Rec709;
+        break;
+      case static_cast<std::uint32_t>(ColorPrimaries::DisplayP3D65):
+        color.primaries = ColorPrimaries::DisplayP3D65;
+        break;
+      case static_cast<std::uint32_t>(ColorPrimaries::Rec2020):
+        color.primaries = ColorPrimaries::Rec2020;
+        break;
+      case static_cast<std::uint32_t>(ColorPrimaries::AcesAp0):
+        color.primaries = ColorPrimaries::AcesAp0;
+        break;
+      case static_cast<std::uint32_t>(ColorPrimaries::AcesAp1):
+        color.primaries = ColorPrimaries::AcesAp1;
+        break;
+      default:
+        fail("isolated CPU color primaries are invalid");
+    }
+    facet.color = color;
+  }
+  return facet;
+}
+
+/**
+ * @brief Encodes one canonical RegionSet without process-local state.
+ * @param region Valid canonical Region.
+ * @param writer Nonnull bounded payload writer.
+ * @throws std::invalid_argument for a null writer.
+ * @throws Encoding bound failures unchanged.
+ */
+void encode_region(const RegionSet& region, ByteWriter* writer) {
+  if (writer == nullptr) {
+    throw std::invalid_argument("isolated CPU Region writer is null");
+  }
+  writer->put_u8(static_cast<std::uint8_t>(region.kind()));
+  writer->put_u32(static_cast<std::uint32_t>(region.atoms().size()));
+  for (const RegionAtom& atom : region.atoms()) {
+    if (const auto* rect = std::get_if<ImageRect>(&atom)) {
+      writer->put_u8(1U);
+      writer->put_u64(rect->domain.high);
+      writer->put_u64(rect->domain.low);
+      writer->put_i64(rect->x_begin);
+      writer->put_i64(rect->x_end);
+      writer->put_i64(rect->y_begin);
+      writer->put_i64(rect->y_end);
+      continue;
+    }
+    const auto& slice = std::get<TensorSlice>(atom);
+    writer->put_u8(2U);
+    writer->put_u64(slice.domain.high);
+    writer->put_u64(slice.domain.low);
+    writer->put_u32(static_cast<std::uint32_t>(slice.axes.size()));
+    for (const RegionInterval& interval : slice.axes) {
+      writer->put_u64(interval.begin);
+      writer->put_u64(interval.end);
+    }
+  }
+}
+
+/**
+ * @brief Decodes and canonicalizes one bounded RegionSet.
+ * @param reader Nonnull bounded payload reader.
+ * @return Fresh canonical Region.
+ * @throws std::invalid_argument for a null reader.
+ * @throws IsolatedCpuProtocolError or std::bad_alloc for malformed content.
+ */
+RegionSet decode_region(ByteReader* reader) {
+  if (reader == nullptr) {
+    throw std::invalid_argument("isolated CPU Region reader is null");
+  }
+  const std::uint8_t kind = reader->get_u8();
+  const std::size_t atom_count =
+      decode_count(reader, RegionSet::kMaximumAtoms, "Region atom count");
+  if (kind == static_cast<std::uint8_t>(RegionSet::Kind::Empty)) {
+    if (atom_count != 0U) {
+      fail("isolated CPU Empty Region carries atoms");
+    }
+    return RegionSet::empty();
+  }
+  if (kind == static_cast<std::uint8_t>(RegionSet::Kind::Whole)) {
+    if (atom_count != 0U) {
+      fail("isolated CPU Whole Region carries atoms");
+    }
+    return RegionSet::whole();
+  }
+  if (kind != static_cast<std::uint8_t>(RegionSet::Kind::Clause) ||
+      atom_count == 0U) {
+    fail("isolated CPU Region kind or atom count is invalid");
+  }
+  std::vector<RegionAtom> atoms;
+  atoms.reserve(atom_count);
+  for (std::size_t index = 0U; index < atom_count; ++index) {
+    const std::uint8_t atom_kind = reader->get_u8();
+    RegionDomainKey domain{reader->get_u64(), reader->get_u64()};
+    if (atom_kind == 1U) {
+      atoms.push_back(ImageRect{domain, reader->get_i64(), reader->get_i64(),
+                                reader->get_i64(), reader->get_i64()});
+      continue;
+    }
+    if (atom_kind != 2U) {
+      fail("isolated CPU Region atom kind is invalid");
+    }
+    const std::size_t rank =
+        decode_count(reader, kMaximumIsolatedCpuTensorRank, "Region rank");
+    TensorSlice slice;
+    slice.domain = domain;
+    slice.axes.reserve(rank);
+    for (std::size_t axis = 0U; axis < rank; ++axis) {
+      slice.axes.push_back(
+          RegionInterval{reader->get_u64(), reader->get_u64()});
+    }
+    atoms.push_back(std::move(slice));
+  }
+  try {
+    RegionSet normalized = RegionSet::from_atoms(std::move(atoms));
+    if (normalized.kind() != RegionSet::Kind::Clause) {
+      fail("isolated CPU Region clause is not canonical nonempty data");
+    }
+    return normalized;
+  } catch (const IsolatedCpuProtocolError&) {
+    throw;
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& error) {
+    fail(std::string("isolated CPU Region is invalid: ") + error.what());
+  }
+}
+
+/**
  * @brief Encodes one complete tensor descriptor.
  * @param descriptor Validated descriptor.
  * @param writer Non-null output owner.
@@ -927,6 +1433,16 @@ void encode_tensor(const IsolatedCpuTensorDescriptor& descriptor,
   writer->put_u8(static_cast<std::uint8_t>(descriptor.access));
   writer->put_u8(static_cast<std::uint8_t>(descriptor.readiness));
   writer->put_u8(static_cast<std::uint8_t>(descriptor.ownership));
+  encode_opaque_id(descriptor.port_identity, writer);
+  encode_opaque_id(descriptor.binding_identity, writer);
+  encode_opaque_id(descriptor.schema_identity, writer);
+  encode_opaque_id(descriptor.facet_identity, writer);
+  encode_opaque_id(descriptor.layout_identity, writer);
+  writer->put_u64(descriptor.schema_version);
+  writer->put_u64(descriptor.layout_version);
+  encode_operation_digest(descriptor.descriptor_digest, writer);
+  encode_operation_digest(descriptor.logical_content_digest, writer);
+  encode_operation_digest(descriptor.layout_digest, writer);
   writer->put_u64(descriptor.capability_id);
   writer->put_u64(descriptor.capability_offset);
   writer->put_u64(descriptor.capability_length);
@@ -944,13 +1460,12 @@ void encode_tensor(const IsolatedCpuTensorDescriptor& descriptor,
   writer->put_u64(descriptor.byte_offset);
   writer->put_bool(descriptor.image_facet.has_value());
   if (descriptor.image_facet.has_value()) {
-    writer->put_u32(descriptor.image_facet->x_axis);
-    writer->put_u32(descriptor.image_facet->y_axis);
-    writer->put_bool(descriptor.image_facet->channel_axis.has_value());
-    if (descriptor.image_facet->channel_axis.has_value()) {
-      writer->put_u32(*descriptor.image_facet->channel_axis);
-    }
+    encode_image_facet(*descriptor.image_facet, writer);
   }
+  encode_region(descriptor.region, writer);
+  writer->put_u64(descriptor.allocation_alignment);
+  writer->put_u64(descriptor.written_offset);
+  writer->put_u64(descriptor.written_length);
   encode_content_binding(descriptor.content_binding, writer);
 }
 
@@ -994,6 +1509,16 @@ IsolatedCpuTensorDescriptor decode_tensor(ByteReader* reader) {
   descriptor.access = parse_tensor_access(reader->get_u8());
   descriptor.readiness = parse_tensor_readiness(reader->get_u8());
   descriptor.ownership = parse_tensor_ownership(reader->get_u8());
+  descriptor.port_identity = decode_opaque_id(reader);
+  descriptor.binding_identity = decode_opaque_id(reader);
+  descriptor.schema_identity = decode_opaque_id(reader);
+  descriptor.facet_identity = decode_opaque_id(reader);
+  descriptor.layout_identity = decode_opaque_id(reader);
+  descriptor.schema_version = reader->get_u64();
+  descriptor.layout_version = reader->get_u64();
+  descriptor.descriptor_digest = decode_operation_digest(reader);
+  descriptor.logical_content_digest = decode_operation_digest(reader);
+  descriptor.layout_digest = decode_operation_digest(reader);
   descriptor.capability_id = reader->get_u64();
   descriptor.capability_offset = reader->get_u64();
   descriptor.capability_length = reader->get_u64();
@@ -1014,14 +1539,12 @@ IsolatedCpuTensorDescriptor decode_tensor(ByteReader* reader) {
   }
   descriptor.byte_offset = reader->get_u64();
   if (reader->get_bool()) {
-    IsolatedCpuImageFacet facet;
-    facet.x_axis = reader->get_u32();
-    facet.y_axis = reader->get_u32();
-    if (reader->get_bool()) {
-      facet.channel_axis = reader->get_u32();
-    }
-    descriptor.image_facet = facet;
+    descriptor.image_facet = decode_image_facet(reader);
   }
+  descriptor.region = decode_region(reader);
+  descriptor.allocation_alignment = reader->get_u64();
+  descriptor.written_offset = reader->get_u64();
+  descriptor.written_length = reader->get_u64();
   descriptor.content_binding = decode_content_binding(reader);
   return descriptor;
 }
@@ -1260,6 +1783,139 @@ void validate_parameter(const IsolatedCpuScalarParameter& parameter) {
 }
 
 /**
+ * @brief Validates one node and recursively proves its canonical child tree.
+ * @param nodes Complete flattened configuration inventory.
+ * @param index Current node index.
+ * @param depth Root-inclusive current depth.
+ * @param seen Nonnull exact-size visitation state.
+ * @throws std::invalid_argument for a null or mismatched visitation vector.
+ * @throws IsolatedCpuProtocolError for inactive fields, ranges, keys,
+ * duplicates, cycles, excessive depth, or malformed scalar content.
+ */
+void validate_configuration_subtree(
+    const std::vector<IsolatedCpuConfigurationNode>& nodes, std::size_t index,
+    std::size_t depth, std::vector<bool>* seen) {
+  if (seen == nullptr || seen->size() != nodes.size()) {
+    throw std::invalid_argument(
+        "isolated CPU configuration visitation state is invalid");
+  }
+  if (index >= nodes.size() || (*seen)[index] ||
+      depth >= kMaximumIsolatedCpuConfigurationDepth) {
+    fail("isolated CPU configuration tree is cyclic or too deep");
+  }
+  (*seen)[index] = true;
+  const IsolatedCpuConfigurationNode& node = nodes[index];
+  if (node.key.size() > kMaximumIsolatedCpuConfigurationKeyBytes ||
+      node.key.find('\0') != std::string::npos ||
+      node.bytes_value.size() > kMaximumIsolatedCpuConfigurationValueBytes) {
+    fail("isolated CPU configuration text exceeds its canonical bound");
+  }
+  const bool floating_zero =
+      node.floating_value == 0.0 && !std::signbit(node.floating_value);
+  const bool is_container = node.kind == IsolatedCpuConfigurationKind::Array ||
+                            node.kind == IsolatedCpuConfigurationKind::Object;
+  if (!is_container && (node.first_child != 0U || node.child_count != 0U)) {
+    fail("isolated CPU configuration scalar carries child state");
+  }
+  switch (node.kind) {
+    case IsolatedCpuConfigurationKind::Null:
+      if (node.boolean_value || node.signed_value != 0 || !floating_zero ||
+          !node.bytes_value.empty()) {
+        fail("isolated CPU null configuration is noncanonical");
+      }
+      break;
+    case IsolatedCpuConfigurationKind::Boolean:
+      if (node.signed_value != 0 || !floating_zero ||
+          !node.bytes_value.empty()) {
+        fail("isolated CPU boolean configuration is noncanonical");
+      }
+      break;
+    case IsolatedCpuConfigurationKind::SignedInteger:
+      if (node.boolean_value || !floating_zero || !node.bytes_value.empty()) {
+        fail("isolated CPU signed configuration is noncanonical");
+      }
+      break;
+    case IsolatedCpuConfigurationKind::FloatingPoint:
+      if (node.boolean_value || node.signed_value != 0 ||
+          !std::isfinite(node.floating_value) || !node.bytes_value.empty()) {
+        fail("isolated CPU floating configuration is noncanonical");
+      }
+      break;
+    case IsolatedCpuConfigurationKind::String:
+      if (node.boolean_value || node.signed_value != 0 || !floating_zero ||
+          node.bytes_value.find('\0') != std::string::npos) {
+        fail("isolated CPU string configuration is noncanonical");
+      }
+      break;
+    case IsolatedCpuConfigurationKind::Bytes:
+      if (node.boolean_value || node.signed_value != 0 || !floating_zero) {
+        fail("isolated CPU bytes configuration is noncanonical");
+      }
+      break;
+    case IsolatedCpuConfigurationKind::Array:
+    case IsolatedCpuConfigurationKind::Object:
+      if (node.boolean_value || node.signed_value != 0 || !floating_zero ||
+          !node.bytes_value.empty()) {
+        fail("isolated CPU container configuration is noncanonical");
+      }
+      break;
+  }
+  if (!is_container) {
+    return;
+  }
+  if (node.child_count == 0U) {
+    if (node.first_child != 0U) {
+      fail("isolated CPU empty configuration container has an offset");
+    }
+    return;
+  }
+  if (node.first_child <= index || node.first_child >= nodes.size() ||
+      node.child_count > nodes.size() - node.first_child) {
+    fail("isolated CPU configuration child range is invalid");
+  }
+  std::string_view prior_key;
+  for (std::size_t ordinal = 0U; ordinal < node.child_count; ++ordinal) {
+    const std::size_t child_index = node.first_child + ordinal;
+    const std::string& key = nodes[child_index].key;
+    if (node.kind == IsolatedCpuConfigurationKind::Array) {
+      if (!key.empty()) {
+        fail("isolated CPU array configuration child has a key");
+      }
+    } else {
+      if (key.empty() || (!prior_key.empty() && prior_key >= key)) {
+        fail("isolated CPU object configuration keys are not sorted unique");
+      }
+      prior_key = key;
+    }
+    validate_configuration_subtree(nodes, child_index, depth + 1U, seen);
+  }
+}
+
+/**
+ * @brief Validates one complete optional recursive configuration.
+ * @param configuration Flattened root-first configuration tree.
+ * @throws IsolatedCpuProtocolError for a malformed or unreachable node.
+ * @throws std::bad_alloc when bounded visitation storage cannot allocate.
+ */
+void validate_configuration(
+    const std::vector<IsolatedCpuConfigurationNode>& configuration) {
+  if (configuration.empty()) {
+    return;
+  }
+  if (configuration.size() > kMaximumIsolatedCpuConfigurationNodes ||
+      configuration.front().kind != IsolatedCpuConfigurationKind::Object ||
+      !configuration.front().key.empty()) {
+    fail("isolated CPU configuration root is invalid");
+  }
+  std::vector<bool> seen(configuration.size(), false);
+  validate_configuration_subtree(configuration, 0U, 0U, &seen);
+  if (std::any_of(seen.begin(), seen.end(),
+                  [](bool value) { return !value; })) {
+    fail("isolated CPU configuration contains unreachable nodes");
+  }
+}
+
+/**
  * @brief Finds one capability in a strictly id-sorted table.
  * @param capabilities Valid sorted capability vector.
  * @param capability_id Nonzero referenced selector.
@@ -1281,9 +1937,11 @@ const IsolatedCpuCapability& find_capability(
 }
 
 /**
- * @brief Validates optional image axes against one bounded rank.
+ * @brief Validates complete optional image metadata against one tensor.
  * @param descriptor Tensor descriptor containing optional facet.
- * @throws IsolatedCpuProtocolError for out-of-rank or duplicate axes.
+ * @throws IsolatedCpuProtocolError for malformed axes, windows, channel,
+ * sample, or color metadata.
+ * @throws std::bad_alloc when bounded public metadata validation allocates.
  */
 void validate_image_facet(const IsolatedCpuTensorDescriptor& descriptor) {
   if (!descriptor.image_facet.has_value()) {
@@ -1297,6 +1955,45 @@ void validate_image_facet(const IsolatedCpuTensorDescriptor& descriptor) {
        (*facet.channel_axis >= rank || *facet.channel_axis == facet.x_axis ||
         *facet.channel_axis == facet.y_axis))) {
     fail("isolated CPU invocation image facet is invalid");
+  }
+  DenseTensorDescriptor public_descriptor;
+  public_descriptor.shape.reserve(descriptor.extents.size());
+  for (const std::uint64_t extent : descriptor.extents) {
+    if (extent > std::numeric_limits<std::size_t>::max()) {
+      fail("isolated CPU image extent exceeds local representation");
+    }
+    public_descriptor.shape.push_back(static_cast<std::size_t>(extent));
+  }
+  switch (descriptor.element_semantics) {
+    case IsolatedCpuElementSemantics::UnsignedInteger:
+      public_descriptor.element_semantics = ElementSemantics::UnsignedInteger;
+      break;
+    case IsolatedCpuElementSemantics::SignedInteger:
+      public_descriptor.element_semantics = ElementSemantics::SignedInteger;
+      break;
+    case IsolatedCpuElementSemantics::FloatingPoint:
+      public_descriptor.element_semantics = ElementSemantics::FloatingPoint;
+      break;
+  }
+  public_descriptor.storage_encoding =
+      StorageEncoding{descriptor.bit_width, StorageEncodingKind::NativeScalar};
+  ImageFacet public_facet;
+  public_facet.x_axis = facet.x_axis;
+  public_facet.y_axis = facet.y_axis;
+  if (facet.channel_axis.has_value()) {
+    public_facet.channel_axis = *facet.channel_axis;
+  }
+  public_facet.data_window = facet.data_window;
+  public_facet.display_window = facet.display_window;
+  public_facet.channel_schema = facet.channel_schema;
+  public_facet.sample_domain = facet.sample_domain;
+  public_facet.color = facet.color;
+  try {
+    validate_dense_tensor_image_metadata(public_descriptor, public_facet);
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& error) {
+    fail(std::string("isolated CPU image facet is invalid: ") + error.what());
   }
 }
 
@@ -1315,6 +2012,14 @@ void validate_tensor(const IsolatedCpuTensorDescriptor& descriptor,
       descriptor.kind != IsolatedCpuTensorKind::DenseTensor ||
       descriptor.layout_kind != IsolatedCpuLayoutKind::Strided) {
     fail("isolated CPU invocation tensor version or kind is unsupported");
+  }
+  if (!descriptor.port_identity.valid() ||
+      !descriptor.binding_identity.valid() ||
+      !descriptor.schema_identity.valid() ||
+      !descriptor.layout_identity.valid() || descriptor.schema_version == 0U ||
+      descriptor.layout_version == 0U ||
+      descriptor.facet_identity.valid() != descriptor.image_facet.has_value()) {
+    fail("isolated CPU invocation tensor identity metadata is invalid");
   }
   if (descriptor.capability_id == 0U || descriptor.capability_length == 0U) {
     fail("isolated CPU invocation tensor capability range is empty");
@@ -1350,7 +2055,9 @@ void validate_tensor(const IsolatedCpuTensorDescriptor& descriptor,
           descriptor.readiness != IsolatedCpuTensorReadiness::ReadyInput ||
           descriptor.ownership != IsolatedCpuTensorOwnership::HostInput ||
           capability.access != IsolatedCpuCapabilityAccess::ReadOnly ||
-          !descriptor.content_binding.has_value()) {
+          !descriptor.content_binding.has_value() ||
+          descriptor.allocation_alignment != 0U ||
+          descriptor.written_offset != 0U || descriptor.written_length != 0U) {
         fail("isolated CPU invocation input state or permission is invalid");
       }
       return;
@@ -1359,7 +2066,8 @@ void validate_tensor(const IsolatedCpuTensorDescriptor& descriptor,
           descriptor.readiness != IsolatedCpuTensorReadiness::WritableOutput ||
           descriptor.ownership != IsolatedCpuTensorOwnership::RuntimeOutput ||
           capability.access != IsolatedCpuCapabilityAccess::ReadWrite ||
-          descriptor.content_binding.has_value()) {
+          descriptor.content_binding.has_value() ||
+          descriptor.written_offset != 0U || descriptor.written_length != 0U) {
         fail("isolated CPU invocation output plan state is invalid");
       }
       break;
@@ -1370,12 +2078,17 @@ void validate_tensor(const IsolatedCpuTensorDescriptor& descriptor,
           descriptor.ownership !=
               IsolatedCpuTensorOwnership::HostOutputCandidate ||
           capability.access != IsolatedCpuCapabilityAccess::ReadWrite ||
-          !descriptor.content_binding.has_value()) {
+          !descriptor.content_binding.has_value() ||
+          descriptor.written_offset != 0U ||
+          descriptor.written_length != descriptor.capability_length) {
         fail("isolated CPU invocation output candidate state is invalid");
       }
       break;
   }
-  if (descriptor.byte_offset != 0U ||
+  if (descriptor.allocation_alignment == 0U ||
+      (descriptor.allocation_alignment &
+       (descriptor.allocation_alignment - 1U)) != 0U ||
+      descriptor.byte_offset != 0U ||
       std::any_of(descriptor.byte_strides.begin(),
                   descriptor.byte_strides.end(),
                   [](std::int64_t stride) { return stride <= 0; }) ||
@@ -1429,6 +2142,16 @@ bool same_output_plan(const IsolatedCpuTensorDescriptor& expected,
          expected.kind == observed.kind &&
          expected.layout_kind == observed.layout_kind &&
          expected.access == observed.access &&
+         expected.port_identity == observed.port_identity &&
+         expected.binding_identity == observed.binding_identity &&
+         expected.schema_identity == observed.schema_identity &&
+         expected.facet_identity == observed.facet_identity &&
+         expected.layout_identity == observed.layout_identity &&
+         expected.schema_version == observed.schema_version &&
+         expected.layout_version == observed.layout_version &&
+         expected.descriptor_digest == observed.descriptor_digest &&
+         expected.logical_content_digest == observed.logical_content_digest &&
+         expected.layout_digest == observed.layout_digest &&
          expected.capability_id == observed.capability_id &&
          expected.capability_offset == observed.capability_offset &&
          expected.capability_length == observed.capability_length &&
@@ -1438,7 +2161,9 @@ bool same_output_plan(const IsolatedCpuTensorDescriptor& expected,
          expected.extents == observed.extents &&
          expected.byte_strides == observed.byte_strides &&
          expected.byte_offset == observed.byte_offset &&
-         expected.image_facet == observed.image_facet;
+         expected.image_facet == observed.image_facet &&
+         expected.region == observed.region &&
+         expected.allocation_alignment == observed.allocation_alignment;
 }
 
 /**
@@ -1452,9 +2177,16 @@ std::vector<std::byte> encode_request_payload(
   ByteWriter writer;
   encode_identity(request.identity, &writer);
   writer.put_string(request.operation, kMaximumIsolatedCpuOperationBytes);
+  encode_opaque_id(request.operation_identity, &writer);
+  encode_opaque_id(request.implementation_identity, &writer);
+  encode_opaque_id(request.configuration_schema_identity, &writer);
   writer.put_u32(static_cast<std::uint32_t>(request.parameters.size()));
   for (const IsolatedCpuScalarParameter& parameter : request.parameters) {
     encode_parameter(parameter, &writer);
+  }
+  writer.put_u32(static_cast<std::uint32_t>(request.configuration.size()));
+  for (const IsolatedCpuConfigurationNode& node : request.configuration) {
+    encode_configuration_node(node, &writer);
   }
   writer.put_u32(static_cast<std::uint32_t>(request.capabilities.size()));
   for (const IsolatedCpuCapability& capability : request.capabilities) {
@@ -1484,11 +2216,21 @@ IsolatedCpuInvocationRequest decode_request_payload(
   IsolatedCpuInvocationRequest request;
   request.identity = decode_identity(&reader);
   request.operation = reader.get_string(kMaximumIsolatedCpuOperationBytes);
+  request.operation_identity = decode_opaque_id(&reader);
+  request.implementation_identity = decode_opaque_id(&reader);
+  request.configuration_schema_identity = decode_opaque_id(&reader);
   const std::size_t parameter_count =
       decode_count(&reader, limits.maximum_parameters, "parameter count");
   request.parameters.reserve(parameter_count);
   for (std::size_t index = 0U; index < parameter_count; ++index) {
     request.parameters.push_back(decode_parameter(&reader));
+  }
+  const std::size_t configuration_count =
+      decode_count(&reader, kMaximumIsolatedCpuConfigurationNodes,
+                   "configuration node count");
+  request.configuration.reserve(configuration_count);
+  for (std::size_t index = 0U; index < configuration_count; ++index) {
+    request.configuration.push_back(decode_configuration_node(&reader));
   }
   const std::size_t capability_count =
       decode_count(&reader, limits.maximum_capabilities, "capability count");
@@ -1557,10 +2299,10 @@ IsolatedCpuInvocationResponse decode_response_payload(
   return response;
 }
 
-/** @brief Permanent canonical schema identity for protocol-v1 bindings. */
+/** @brief Permanent canonical schema identity for protocol-v2 bindings. */
 constexpr ExtensionIdentity kIsolatedCpuBindingSchemaIdentity{
     0x70686f746f737069ULL,
-    0x6465722d69736f31ULL};  // NOLINT(whitespace/indent_namespace)
+    0x6465722d69736f32ULL};  // NOLINT(whitespace/indent_namespace)
 
 /**
  * @brief Builds the canonical immutable descriptor record for byte binding.
@@ -1582,6 +2324,16 @@ DataDescriptorEnvelope binding_descriptor_envelope(
   writer.put_u8(static_cast<std::uint8_t>(descriptor.kind));
   writer.put_u8(static_cast<std::uint8_t>(descriptor.layout_kind));
   writer.put_u8(static_cast<std::uint8_t>(descriptor.access));
+  encode_opaque_id(descriptor.port_identity, &writer);
+  encode_opaque_id(descriptor.binding_identity, &writer);
+  encode_opaque_id(descriptor.schema_identity, &writer);
+  encode_opaque_id(descriptor.facet_identity, &writer);
+  encode_opaque_id(descriptor.layout_identity, &writer);
+  writer.put_u64(descriptor.schema_version);
+  writer.put_u64(descriptor.layout_version);
+  encode_operation_digest(descriptor.descriptor_digest, &writer);
+  encode_operation_digest(descriptor.logical_content_digest, &writer);
+  encode_operation_digest(descriptor.layout_digest, &writer);
   writer.put_u64(descriptor.capability_id);
   writer.put_u64(descriptor.capability_offset);
   writer.put_u64(descriptor.capability_length);
@@ -1599,18 +2351,15 @@ DataDescriptorEnvelope binding_descriptor_envelope(
   writer.put_u64(descriptor.byte_offset);
   writer.put_bool(descriptor.image_facet.has_value());
   if (descriptor.image_facet.has_value()) {
-    writer.put_u32(descriptor.image_facet->x_axis);
-    writer.put_u32(descriptor.image_facet->y_axis);
-    writer.put_bool(descriptor.image_facet->channel_axis.has_value());
-    if (descriptor.image_facet->channel_axis.has_value()) {
-      writer.put_u32(*descriptor.image_facet->channel_axis);
-    }
+    encode_image_facet(*descriptor.image_facet, &writer);
   }
+  encode_region(descriptor.region, &writer);
+  writer.put_u64(descriptor.allocation_alignment);
 
   ExtensionRecord schema;
   schema.kind = ExtensionDefinitionKind::Schema;
   schema.identity = kIsolatedCpuBindingSchemaIdentity;
-  schema.structural_version = 1U;
+  schema.structural_version = 2U;
   schema.payload = writer.finish();
   DataDescriptorEnvelope envelope;
   envelope.schema = std::move(schema);
@@ -1647,12 +2396,73 @@ bool IsolatedCpuScalarParameter::operator==(
          string_value == other.string_value;
 }
 
+/** @copydoc IsolatedCpuConfigurationNode::operator== */
+bool IsolatedCpuConfigurationNode::operator==(
+    const IsolatedCpuConfigurationNode& other) const noexcept {
+  return kind == other.kind && key == other.key &&
+         boolean_value == other.boolean_value &&
+         signed_value == other.signed_value &&
+         floating_value == other.floating_value &&
+         bytes_value == other.bytes_value && first_child == other.first_child &&
+         child_count == other.child_count;
+}
+
+/** @copydoc IsolatedCpuImageFacet::operator== */
+bool IsolatedCpuImageFacet::operator==(
+    const IsolatedCpuImageFacet& other) const noexcept {
+  if (x_axis != other.x_axis || y_axis != other.y_axis ||
+      channel_axis != other.channel_axis ||
+      !(data_window == other.data_window) ||
+      !(display_window == other.display_window) ||
+      !(sample_domain == other.sample_domain) || !(color == other.color) ||
+      channel_schema.has_value() != other.channel_schema.has_value()) {
+    return false;
+  }
+  if (!channel_schema.has_value()) {
+    return true;
+  }
+  if (channel_schema->channels.size() !=
+          other.channel_schema->channels.size() ||
+      channel_schema->groups.size() != other.channel_schema->groups.size()) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < channel_schema->channels.size();
+       ++index) {
+    const ChannelDescription& left = channel_schema->channels[index];
+    const ChannelDescription& right = other.channel_schema->channels[index];
+    if (!(left.id == right.id) ||
+        left.diagnostic_name != right.diagnostic_name) {
+      return false;
+    }
+  }
+  for (std::size_t index = 0U; index < channel_schema->groups.size(); ++index) {
+    const ChannelGroupDescription& left = channel_schema->groups[index];
+    const ChannelGroupDescription& right = other.channel_schema->groups[index];
+    if (!(left.id == right.id) ||
+        left.diagnostic_name != right.diagnostic_name ||
+        left.members != right.members) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** @copydoc IsolatedCpuTensorDescriptor::operator== */
 bool IsolatedCpuTensorDescriptor::operator==(
     const IsolatedCpuTensorDescriptor& other) const noexcept {
   return descriptor_version == other.descriptor_version && kind == other.kind &&
          layout_kind == other.layout_kind && access == other.access &&
          readiness == other.readiness && ownership == other.ownership &&
+         port_identity == other.port_identity &&
+         binding_identity == other.binding_identity &&
+         schema_identity == other.schema_identity &&
+         facet_identity == other.facet_identity &&
+         layout_identity == other.layout_identity &&
+         schema_version == other.schema_version &&
+         layout_version == other.layout_version &&
+         descriptor_digest == other.descriptor_digest &&
+         logical_content_digest == other.logical_content_digest &&
+         layout_digest == other.layout_digest &&
          capability_id == other.capability_id &&
          capability_offset == other.capability_offset &&
          capability_length == other.capability_length &&
@@ -1661,6 +2471,10 @@ bool IsolatedCpuTensorDescriptor::operator==(
          bit_width == other.bit_width && extents == other.extents &&
          byte_strides == other.byte_strides &&
          byte_offset == other.byte_offset && image_facet == other.image_facet &&
+         region == other.region &&
+         allocation_alignment == other.allocation_alignment &&
+         written_offset == other.written_offset &&
+         written_length == other.written_length &&
          content_binding == other.content_binding;
 }
 
@@ -1668,8 +2482,13 @@ bool IsolatedCpuTensorDescriptor::operator==(
 bool IsolatedCpuInvocationRequest::operator==(
     const IsolatedCpuInvocationRequest& other) const noexcept {
   return identity == other.identity && operation == other.operation &&
-         parameters == other.parameters && capabilities == other.capabilities &&
-         tensors == other.tensors && input_count == other.input_count &&
+         operation_identity == other.operation_identity &&
+         implementation_identity == other.implementation_identity &&
+         configuration_schema_identity == other.configuration_schema_identity &&
+         parameters == other.parameters &&
+         configuration == other.configuration &&
+         capabilities == other.capabilities && tensors == other.tensors &&
+         input_count == other.input_count &&
          output_count == other.output_count && resources == other.resources;
 }
 
@@ -1692,7 +2511,7 @@ void validate_isolated_cpu_invocation_limits(
       limits.maximum_descriptors > kMaximumIsolatedCpuDescriptors ||
       limits.maximum_parameters > kMaximumIsolatedCpuParameters) {
     throw std::invalid_argument(
-        "isolated CPU required limit is zero or limit exceeds protocol v1");
+        "isolated CPU required limit is zero or limit exceeds protocol v2");
   }
 }
 
@@ -1723,6 +2542,15 @@ void validate_isolated_cpu_invocation_request(
     const IsolatedCpuInvocationLimits& limits) {
   validate_isolated_cpu_invocation_metadata(request.identity, request.operation,
                                             request.parameters, limits);
+  if (!request.operation_identity.valid() ||
+      !request.implementation_identity.valid() ||
+      !request.configuration_schema_identity.valid()) {
+    fail("isolated CPU operation/configuration identity is incomplete");
+  }
+  if (!request.parameters.empty() && !request.configuration.empty()) {
+    fail("isolated CPU invocation carries two configuration representations");
+  }
+  validate_configuration(request.configuration);
 
   if (request.capabilities.empty() ||
       request.capabilities.size() > limits.maximum_capabilities) {

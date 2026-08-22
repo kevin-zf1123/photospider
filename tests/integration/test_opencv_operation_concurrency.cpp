@@ -17,13 +17,14 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <variant>
 #include <vector>
 
 #include "benchmark/benchmark_service.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/node.hpp"     // NOLINT(build/include_subdir)
-#include "photospider/core/image_buffer.hpp"
+#include "photospider/data/image_view.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
 #include "support/ipc_host_spy.hpp"
@@ -495,11 +496,14 @@ class ScopedOpenCvObserverPublication final {
  * @return Nothing.
  * @throws std::bad_alloc if registry key or callback storage allocation fails.
  * @note Registration is process-persistent and idempotent; the borrowed gate
- *       controls observation lifetime separately.
+ *       controls observation lifetime separately. Both callbacks explicitly
+ *       declare an empty output schema because they observe scheduling only.
  */
 void ensure_benchmark_probe_registered() {
   static std::once_flag once;
   std::call_once(once, [] {
+    OpMetadata no_output_metadata;
+    no_output_metadata.produces_image = false;
     OpRegistry::instance().register_op_hp_monolithic(
         kBenchmarkProbeType, kBenchmarkProbeSourceSubtype,
         MonolithicOpFunc(
@@ -510,13 +514,15 @@ void ensure_benchmark_probe_registered() {
                 gate->enter_and_wait();
               }
               return NodeOutput{};
-            }));
+            }),
+        no_output_metadata);
     OpRegistry::instance().register_op_hp_monolithic(
         kBenchmarkProbeType, kBenchmarkProbeSinkSubtype,
         MonolithicOpFunc(
             [](const Node&, const std::vector<const NodeOutput*>&) {
               return NodeOutput{};
-            }));
+            }),
+        no_output_metadata);
   });
 }
 
@@ -702,23 +708,53 @@ void write_curve_output_graph(const std::filesystem::path& path) {
 }
 
 /**
+ * @brief Publishes one tightly packed single-channel FP32 image Value.
+ * @param width Positive image width.
+ * @param height Positive image height.
+ * @param samples Exact row-major sample payload.
+ * @return Fresh immutable zero-origin ordinary image Value.
+ * @throws std::invalid_argument for inconsistent shape or payload.
+ * @throws std::overflow_error when Value envelope arithmetic overflows.
+ * @throws std::bad_alloc when metadata or payload allocation fails.
+ * @note Samples retain their native FP32 domain without scaling.
+ */
+Value make_float_image_value(std::size_t width, std::size_t height,
+                             const std::vector<float>& samples) {
+  if (width == 0U || height == 0U || samples.size() != width * height) {
+    throw std::invalid_argument("OpenCV concurrency image fixture is invalid");
+  }
+  std::vector<std::byte> storage(samples.size() * sizeof(float));
+  std::memcpy(storage.data(), samples.data(), storage.size());
+  DenseTensorDescriptor descriptor{{height, width, 1U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{{static_cast<std::ptrdiff_t>(width * sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float))}},
+      std::move(storage));
+}
+
+/**
  * @brief Computes one deterministic curve image with an exact Run cap.
  * @param host Seeded public Host whose process execution pool is already fixed.
  * @param root Temporary root owning source, session, and cache paths.
  * @param yaml_path Deterministic Graph source path.
  * @param maximum_parallelism Exact positive Run callback cap.
  * @param session Unique graph session label.
- * @return Owned public image snapshot retained after graph close.
+ * @return Immutable public image Value retained after graph close.
  * @throws std::bad_alloc if request, Host, or image storage exhausts memory.
  * @throws std::runtime_error if load, compute, or close fails.
  * @note Compute uses the real public Host and tiled built-in callback path with
  *       cache reads, disk writes, and output saves disabled. The cap changes
  *       Run QoS without changing the process pool.
  */
-ImageBuffer compute_curve_image(Host& host, const std::filesystem::path& root,
-                                const std::filesystem::path& yaml_path,
-                                unsigned int maximum_parallelism,
-                                const std::string& session) {
+Value compute_curve_value(Host& host, const std::filesystem::path& root,
+                          const std::filesystem::path& yaml_path,
+                          unsigned int maximum_parallelism,
+                          const std::string& session) {
   GraphLoadRequest load;
   load.session = GraphSessionId{session};
   load.root_dir = (root / "sessions").string();
@@ -740,7 +776,8 @@ ImageBuffer compute_curve_image(Host& host, const std::filesystem::path& root,
   request.execution.parallel = true;
   request.execution.maximum_parallelism = maximum_parallelism;
   request.intent = ComputeIntent::GlobalHighPrecision;
-  const Result<ImageBuffer> computed = host.compute_and_get_image(request);
+  const Result<NamedValueResult> computed =
+      host.compute_and_get_values(request);
   const VoidResult closed = host.close_graph(load.session);
   if (!computed.status.ok) {
     throw std::runtime_error("failed to compute deterministic curve Graph: " +
@@ -750,7 +787,13 @@ ImageBuffer compute_curve_image(Host& host, const std::filesystem::path& root,
     throw std::runtime_error("failed to close deterministic curve Graph: " +
                              closed.status.message);
   }
-  return computed.value;
+  const Value* image =
+      computed.value.find(std::string(NodeOutput::kImageOutputName));
+  if (image == nullptr) {
+    throw std::runtime_error(
+        "deterministic curve Graph omitted its named image Value");
+  }
+  return *image;
 }
 
 /**
@@ -1038,12 +1081,12 @@ TEST(OpenCvOperationConcurrency,
             static_cast<std::int32_t>(GraphErrc::InvalidParameter));
   EXPECT_EQ(asynchronous.status.name, "invalid_parameter");
 
-  const Result<ImageBuffer> image = host->compute_and_get_image(request);
-  EXPECT_FALSE(image.status.ok);
-  EXPECT_EQ(image.status.domain, OperationErrorDomain::Graph);
-  EXPECT_EQ(image.status.code,
+  const Result<NamedValueResult> values = host->compute_and_get_values(request);
+  EXPECT_FALSE(values.status.ok);
+  EXPECT_EQ(values.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(values.status.code,
             static_cast<std::int32_t>(GraphErrc::InvalidParameter));
-  EXPECT_EQ(image.status.name, "invalid_parameter");
+  EXPECT_EQ(values.status.name, "invalid_parameter");
 
   const VoidResult closed = host->close_graph(load.session);
   EXPECT_TRUE(closed.status.ok) << closed.status.message;
@@ -1053,12 +1096,13 @@ TEST(OpenCvOperationConcurrency,
  * @brief Proves the real curve provider restores the complete calling-thread
  * floating-point environment.
  *
- * @throws Provider, registry, allocation, or floating-point setup failures
- * unchanged to GoogleTest.
+ * @throws Provider, registry, Host output planning/grant, Value view,
+ * allocation, or floating-point setup failures unchanged to GoogleTest.
  * @note The callback runs synchronously on this thread after a non-default
  * rounding mode and two sticky exceptions are installed. The test snapshots
  * rounding and every `FE_ALL_EXCEPT` flag immediately after provider return,
- * while `ScopedTestFloatingPointEnvironment` restores the thread's original
+ * then retires the sole Host grant and inspects the sealed Value. The
+ * `ScopedTestFloatingPointEnvironment` restores the thread's original
  * environment on every later exit.
  */
 TEST(OpenCvOperationConcurrency,
@@ -1081,15 +1125,18 @@ TEST(OpenCvOperationConcurrency,
   node.subtype = "curve_transform";
   node.runtime_parameters["k"] = 1.75;
 
-  ImageBuffer input = make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
-  ImageBuffer output =
-      make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
-  auto* const input_row = static_cast<float*>(input.data.get());
-  input_row[0] = 0.25F;
-  input_row[1] = 0.5F;
+  const Value input_value = make_float_image_value(2U, 1U, {0.25F, 0.5F});
+  ASSERT_TRUE(input_value.image_facet().has_value());
+  HostOutputBinding output_binding =
+      HostOutputBinding::allocate(DenseImageOutputPlan::create(
+          std::string(NodeOutput::kImageOutputName),
+          input_value.dense_tensor_descriptor(), *input_value.image_facet(),
+          input_value.strided_layout(), input_value.storage_size(), 64U));
   const PixelRect tile_roi{0, 0, 2, 1};
-  const OutputTile output_tile{&output, tile_roi};
-  const std::vector<InputTile> input_tiles{{&input, tile_roi, nullptr}};
+  HostOutputWriteGrant output_grant =
+      output_binding.grant_tile({image_region_domain(), 0, 2, 0, 1});
+  const OutputTile output_tile{&output_binding.plan(), &output_grant, tile_roi};
+  const std::vector<InputTile> input_tiles{{&input_value, tile_roi, nullptr}};
 
   ASSERT_EQ(fesetenv(FE_DFL_ENV), 0);
   ASSERT_EQ(fesetround(FE_DOWNWARD), 0);
@@ -1105,9 +1152,16 @@ TEST(OpenCvOperationConcurrency,
 
   EXPECT_EQ(restored_rounding, FE_DOWNWARD);
   EXPECT_EQ(restored_exceptions, kPresetExceptions);
-  const auto* const output_row = static_cast<const float*>(output.data.get());
-  EXPECT_GT(output_row[0], 0.0F);
-  EXPECT_GT(output_row[1], 0.0F);
+  output_grant.retire_success();
+  const ImageView output_view(output_binding.seal());
+  float first_output = 0.0F;
+  float second_output = 0.0F;
+  std::memcpy(&first_output, output_view.channel_data(0U, 0U, 0U),
+              sizeof(first_output));
+  std::memcpy(&second_output, output_view.channel_data(1U, 0U, 0U),
+              sizeof(second_output));
+  EXPECT_GT(first_output, 0.0F);
+  EXPECT_GT(second_output, 0.0F);
 }
 
 /**
@@ -1175,8 +1229,8 @@ TEST(OpenCvOperationConcurrency,
  *
  * @throws Nothing when deterministic output is preserved; setup exceptions
  *         fail the test and GoogleTest records descriptor or pixel mismatches.
- * @note Comparison ignores aligned row padding and checks every packed pixel
- *       byte retained by the public Host image snapshots. Both Runs share one
+ * @note Comparison checks every logical channel element retained by the
+ *       public Host Values. Both Runs share one
  *       fixed eight-lane pool and vary only public Run QoS.
  */
 TEST(OpenCvOperationConcurrency,
@@ -1195,37 +1249,30 @@ TEST(OpenCvOperationConcurrency,
       host->configure_execution_defaults(execution_config);
   ASSERT_TRUE(configured.status.ok) << configured.status.message;
 
-  const ImageBuffer serial = compute_curve_image(*host, temp.root(), yaml_path,
-                                                 1U, "curve_output_serial");
-  const ImageBuffer parallel = compute_curve_image(
-      *host, temp.root(), yaml_path, 8U, "curve_output_parallel");
+  const ImageView serial(compute_curve_value(*host, temp.root(), yaml_path, 1U,
+                                             "curve_output_serial"));
+  const ImageView parallel(compute_curve_value(*host, temp.root(), yaml_path,
+                                               8U, "curve_output_parallel"));
 
-  ASSERT_EQ(serial.width, parallel.width);
-  ASSERT_EQ(serial.height, parallel.height);
-  ASSERT_EQ(serial.channels, parallel.channels);
-  ASSERT_EQ(serial.type, parallel.type);
-  ASSERT_EQ(serial.device, Device::CPU);
-  ASSERT_EQ(parallel.device, Device::CPU);
-  ASSERT_NE(serial.data, nullptr);
-  ASSERT_NE(parallel.data, nullptr);
-
-  const std::size_t packed_row = static_cast<std::size_t>(serial.width) *
-                                 static_cast<std::size_t>(serial.channels) *
-                                 image_buffer_bytes_per_channel(serial.type);
-  ASSERT_GE(serial.step, packed_row);
-  ASSERT_GE(parallel.step, packed_row);
-  const auto* serial_bytes =
-      static_cast<const unsigned char*>(serial.data.get());
-  const auto* parallel_bytes =
-      static_cast<const unsigned char*>(parallel.data.get());
-  for (int row = 0; row < serial.height; ++row) {
-    EXPECT_EQ(
-        std::memcmp(
-            serial_bytes + static_cast<std::size_t>(row) * serial.step,
-            parallel_bytes + static_cast<std::size_t>(row) * parallel.step,
-            packed_row),
-        0)
-        << "row=" << row;
+  ASSERT_EQ(serial.width(), parallel.width());
+  ASSERT_EQ(serial.height(), parallel.height());
+  ASSERT_EQ(serial.channels(), parallel.channels());
+  ASSERT_EQ(serial.descriptor().element_semantics,
+            parallel.descriptor().element_semantics);
+  ASSERT_EQ(serial.descriptor().storage_encoding.bit_width,
+            parallel.descriptor().storage_encoding.bit_width);
+  ASSERT_EQ(serial.element_bytes(), parallel.element_bytes());
+  for (std::size_t row = 0U; row < serial.height(); ++row) {
+    for (std::size_t column = 0U; column < serial.width(); ++column) {
+      for (std::size_t channel = 0U; channel < serial.channels(); ++channel) {
+        EXPECT_EQ(std::memcmp(serial.channel_data(column, row, channel),
+                              parallel.channel_data(column, row, channel),
+                              serial.element_bytes()),
+                  0)
+            << "row=" << row << ", column=" << column
+            << ", channel=" << channel;
+      }
+    }
   }
 }
 

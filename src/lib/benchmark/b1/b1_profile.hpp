@@ -13,8 +13,8 @@
 #include <vector>
 
 #include "compute/compute_run.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/core/image_buffer.hpp"
 #include "photospider/data/extension.hpp"
+#include "photospider/data/value.hpp"
 #include "photospider/host/host.hpp"
 
 namespace ps::benchmark {
@@ -514,7 +514,8 @@ std::vector<B1SemanticRecord> parse_b1_semantic_trace(std::string_view bytes);
 /**
  * @brief Generates the independent frozen B1 oracle image for one job.
  * @param job_index Source seed/fixture selector in `[0,255]`.
- * @return Exact CPU FP32 RGBA output after four binary32-RNE stages.
+ * @return Exact Ready CPU FP32 normalized `[0,1]` RGBA Value after four
+ * binary32-RNE stages.
  * @throws std::out_of_range outside `[0,255]`.
  * @throws std::bad_alloc when the image allocation fails.
  * @throws std::runtime_error when the floating-point environment cannot be
@@ -522,15 +523,18 @@ std::vector<B1SemanticRecord> parse_b1_semantic_trace(std::string_view bytes);
  * @note This path invokes no Host, Kernel, Graph, cache, scheduler, YAML, or
  * candidate provider code.
  */
-ImageBuffer generate_b1_oracle_image(std::uint64_t job_index);
+Value generate_b1_oracle_image(std::uint64_t job_index);
 
 /**
  * @brief Computes independent logical and raw goldens from the frozen oracle.
  * @param job_index Source seed/fixture selector in `[0,255]`.
  * @return Complete expected logical/raw identity.
- * @throws Oracle, Value adaptation, digest, or allocation errors unchanged.
+ * @throws Oracle, Value validation, digest, or allocation errors unchanged.
  * @note Runners call this before candidate execution; candidate bytes never
- * initialize or replace the expected result.
+ * initialize or replace the expected result. Logical identity binds
+ * DenseTensor schema/Image facet structural version 2 and normalized `[0,1]`
+ * Sample Domain facet structural version 1, while raw payload identity remains
+ * independent of descriptor framing.
  */
 B1JobGolden compute_b1_job_golden(std::uint64_t job_index);
 
@@ -541,7 +545,10 @@ B1JobGolden compute_b1_job_golden(std::uint64_t job_index);
  * @throws std::out_of_range outside `0..29,252..255`.
  * @throws std::logic_error if a compiled digest spelling is corrupt.
  * @note Candidate execution never initializes or updates this table. The
- * independent oracle exists only to regenerate and verify fixture constants.
+ * independent oracle exists only to regenerate and verify fixture constants;
+ * its current logical entries bind DenseTensor schema/Image facet structural
+ * version 2 plus normalized `[0,1]` Sample Domain facet structural version 1,
+ * and retain the prior raw-payload entries.
  */
 B1JobGolden b1_frozen_job_golden(std::uint64_t job_index);
 

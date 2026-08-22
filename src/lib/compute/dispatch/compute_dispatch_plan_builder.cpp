@@ -41,8 +41,8 @@ ComputeDispatchPlanBuilder::ComputeDispatchPlanBuilder(
 /** @copydoc ComputeDispatchPlanBuilder::build_high_precision_plan */
 ComputePlan ComputeDispatchPlanBuilder::build_high_precision_plan(
     GraphModel& graph, int node_id,
-    const std::vector<Device>& available_devices, bool publish_inspection,
-    bool allow_reusable_cache) const {
+    const std::vector<DeviceBackend>& available_devices,
+    bool publish_inspection, bool allow_reusable_cache) const {
   const std::vector<int> execution_order =
       traversal_.topo_postorder_from(graph, node_id);
   NodeCacheTaskGraphPruner node_cache_pruner;

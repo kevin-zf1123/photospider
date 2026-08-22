@@ -149,9 +149,9 @@ stable inode.
 The installed C++17 target `Photospider::photospider_ipc_client` exposes the
 move-only `ps::ipc::Client` and complete `create_ipc_host(socket_path)` adapter.
 The Client provides the exact 60 typed version 2 methods for daemon identity,
-graph/inspection, polling compute and protected image metadata, bounded
-events/traces, cache, operation plugins, process policy, and private execution
-routes. Graph loads retain the caller's safe Host session name as request
+graph/inspection, polling compute and protected named-Value artifact archive
+delivery, bounded events/traces, cache, operation plugins, process policy, and
+private execution routes. Graph loads retain the caller's safe Host session name as request
 metadata but return a separate opaque daemon session id; disconnecting the
 client does not close that session.
 
@@ -175,8 +175,8 @@ or install its header.
 Extension DSOs use separate installed components:
 
 ```cmake
-find_package(Photospider CONFIG REQUIRED COMPONENTS operation_sdk)
-target_link_libraries(my_operation PRIVATE Photospider::operation_sdk)
+find_package(Photospider CONFIG REQUIRED COMPONENTS operation_plugin_sdk)
+target_link_libraries(my_operation PRIVATE Photospider::operation_plugin_sdk)
 
 find_package(Photospider CONFIG REQUIRED COMPONENTS data_provider_sdk)
 target_link_libraries(my_data_provider PRIVATE Photospider::data_provider_sdk)
@@ -185,10 +185,14 @@ find_package(Photospider CONFIG REQUIRED COMPONENTS policy_sdk)
 target_link_libraries(my_policy PRIVATE Photospider::policy_sdk)
 ```
 
-`operation_sdk` contains the v2 `ps::plugin` contracts and transitively links
-the no-external-dependency `operation_runtime` image factories. An adapter user
-requests `operation_opencv`, which discovers only OpenCV `core`; algorithm-
-specific modules remain the plugin's responsibility. `data_provider_sdk` is a
+`operation_plugin_sdk` contains the dependency-neutral C11 operation ABI v1
+header and its header-only C++17 authoring helper. Operation DSOs export only
+`ps_operation_plugin_get_abi_version` and `ps_operation_plugin_get_api_v1`;
+no C++ callback, exception, allocator, registry, or ownership object crosses
+the DSO boundary. A plugin needing public Value/runtime helpers links
+`Photospider::operation_runtime` explicitly. An adapter user requests
+`operation_opencv`, which discovers only OpenCV `core`; algorithm-specific
+modules remain the plugin's responsibility. `data_provider_sdk` is a
 dependency-neutral C11/C++17 header-only contract for immutable
 Schema/Facet/Layout definition bundles. Providers export
 `ps_data_provider_get_abi_version` and `ps_data_provider_get_api_v3`; the v3
@@ -203,17 +207,18 @@ dependency-neutral C11/C++17 header-only contract. Policy DSOs export
 receive only bounded immutable ranking snapshots and return one candidate id or
 an abstention. They receive no worker, queue, resource grant, Graph, Run, or
 lifecycle capability. The operation SDK likewise exposes no mutable backend
-owner, and old source-tree extension includes have no forwarding compatibility.
+owner. The retired C++ operation registration headers, component, symbols,
+aliases, and source-tree extension includes have no forwarding compatibility.
 
 The IPC Host implements all 58 current non-destructor Host virtuals through
 short-lived typed connections. Compute submits once, polls immediately and then
 at a 10/20/40/80/160/320/500-ms cadence without a synchronous total timeout;
 owned async workers are stopped, woken, interrupted, completed as Transport
-`client_stopped` (5), and joined during adapter destruction. Image mode
+`client_stopped` (5), and joined during adapter destruction. Values mode
 performs strict same-user artifact validation while the delivery lease is
-active, creates a shared read-only mapping, and then releases the matching
-job/lease. The final image reference unmaps and closes the retained descriptor
-exactly once.
+active, creates a temporary read-only archive mapping, verifies and detaches
+the exact bytes, unmaps and closes exactly once, reconstructs fresh local
+Values, and then releases the matching job/lease.
 
 Every accepted compute reports `cancellable:false` and advances only through
 `queued`, `running`, `succeeded`, or `failed`. A terminal failure is a normal
@@ -222,7 +227,7 @@ Daemon-domain `OperationStatus`; RPC/admission/lookup failures remain separate.
 Across embedded and IPC calls, the sole status vocabulary distinguishes
 `none`, `transport`, `protocol`, `graph`, and `daemon`, and callers must branch
 on domain/code/name rather than diagnostic text. The
-daemon retains at most 64 active jobs, 256 terminal jobs, 64 image artifacts,
+daemon retains at most 64 active jobs, 256 terminal jobs, 64 named-Value archives,
 one GiB of artifact bytes with a 512-MiB per-artifact ceiling, 8,192 compute
 events per session, and 65,536 execution-trace entries per session. Event
 drains are destructive pages of at most 1,024 entries; trace pages are
@@ -299,7 +304,7 @@ compute from the CLI.
 | Command | Description |
 | --- | --- |
 | `compute <id|all> [flags]` | Compute one node or all ending nodes. |
-| `save <id> <file>` | Compute a node and save its floating-point image output. |
+| `save <id> <output> <file> <uint8|uint16|uint32|fp32> <destination-encoding> <destination-domain> <min> <max> <domain-policy> <rounding> <non-finite-policy> <precision-policy>` | Compute a node and encode one named ordinary-image output with an explicit sample conversion. |
 | `clear-cache [m|d|md]` or `cc [m|d|md]` | Clear memory cache, disk cache, or both. |
 | `free` | Free memory used by non-essential intermediate nodes. |
 
@@ -320,8 +325,28 @@ Examples:
 ```text
 compute 7 parallel t
 compute all force tl out/timer.yaml
-save 7 out/result.png
+save 7 image out/result.png uint8 code code 0 255 reject nearest-even reject allow
 ```
+
+`save` reads the explicit source `SampleEncoding` and `SampleDomain` from the
+selected Value. The destination is also explicit: encoding is `value`,
+`normalized`, or `code`; domain kind is `normalized`, `legal`, or `code`; and
+the next two finite numbers are the inclusive destination endpoints. Domain
+policy is `reject` or `clamp`; rounding is `nearest-even`, `toward-zero`,
+`floor`, or `ceil`; non-finite policy is `reject` or `preserve`; and
+precision-loss policy is `reject` or `allow`. The CLI never derives conversion
+semantics from the file extension or storage width and does not hide a `255`
+or `65535` multiplier.
+
+The configured codec still validates representation capability explicitly.
+OpenCV-backed JPEG output accepts only unsigned `uint8` with one or three
+channels; PNG, TIFF, and JPEG 2000 accept the declared unsigned
+`uint8`/`uint16` one/three/four-channel combinations, with the documented
+BMP/WebP/Netpbm subsets. Signed and floating OpenCV matrices are rejected
+before file mutation. Ordinary `.exr` output instead uses the configured
+OpenEXR codec and accepts explicit `uint32` or `fp32`, preserving independent
+data and display windows. A mismatched extension, storage, or channel count is
+an error rather than permission for an image library to narrow implicitly.
 
 The CLI and REPL compute surface is permanently batch-oriented. It does not
 expose RT intent commands, dirty ROI creation, or dirty source lifecycle
@@ -470,17 +495,13 @@ resolved from the current working directory, and the graph cache root becomes
 `<cache_root_dir>/<graph_name>`. Lower-level `Kernel` callers that omit this
 setting continue to use the session-local `sessions/<name>/cache` fallback.
 
-Metal operation plugins are manual config entries, not generated defaults. On
-macOS, CMake places the Metal loader plugin in `build/high_performance/metal`
-and its implementation library under `build/high_performance/metal/ops`. Add the
-loader directory to `plugin_dirs` before starting `graph_cli` if
-`image_generator:perlin_noise_metal` should be scanned and registered:
-
-```yaml
-plugin_dirs:
-  - build/plugins
-  - build/high_performance/metal
-```
+Metal Perlin is a build-configured Host-private provider, not an operation DSO.
+On macOS, enabling the repository OpenCV operation-plugin profile also compiles
+`image_generator:perlin_noise_metal` into the embedded product and registers it
+automatically through the configured-provider composition boundary. It borrows
+the process-owned Metal executor and its callback-scoped context; no Metal
+loader directory belongs in `plugin_dirs`, and pure-C operation ABI v1 remains
+synchronous CPU-only.
 
 ## 11. Built-In Operations
 
@@ -494,6 +515,7 @@ OpenCV-backed entries are provided by the optional
 | `image_source` | `path` | Load an image from a local path. |
 | `image_generator` | `constant` | Create a constant image. |
 | `image_generator` | `perlin_noise` | Generate a Perlin noise image. |
+| `image_generator` | `perlin_noise_metal` | Generate Perlin noise through the build-configured macOS Metal provider. |
 | `analyzer` | `get_dimensions` | Emit width and height metadata. |
 | `math` | `divide` | Divide numeric operands. |
 | `image_process` | `convolve` | Apply a convolution kernel image. |
@@ -506,10 +528,11 @@ OpenCV-backed entries are provided by the optional
 | `image_mixing` | `diff` | Absolute difference of two images. |
 | `image_mixing` | `multiply` | Pixel-wise multiplication. |
 
-Plugin examples from `plugins/ops/` add `image_process:invert`,
-`image_process:threshold`, and `io:save`. On macOS, Metal builds also produce
-`image_generator:perlin_noise_metal`, but it is only scanned when
-`build/high_performance/metal` is manually present in `plugin_dirs`.
+Plugin examples from `plugins/ops/` add `image_process:invert` and
+`image_process:threshold`. File output belongs to the explicit `save` CLI/
+codec path; the former side-effecting `io:save` plugin has been removed. The
+Metal Perlin source also lives below `plugins/ops/`, but CMake compiles it into
+the configured Host product instead of producing or scanning an operation DSO.
 
 ## 12. Validation
 

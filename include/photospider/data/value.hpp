@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/data/image_metadata.hpp"
 #include "photospider/memory/access_plan.hpp"
 #include "photospider/memory/blocked_layout.hpp"
 #include "photospider/memory/buffer_handle.hpp"
@@ -23,6 +24,7 @@ namespace ps {
 
 class PendingValuePublisher;
 class PendingDeviceValuePublisher;
+class DenseTensorValueDescriptorMetadataAccess;
 
 /**
  * @brief Identifies the logical interpretation of one tensor element.
@@ -185,37 +187,6 @@ struct DenseTensorDescriptor {
 };
 
 /**
- * @brief Maps explicit image coordinates onto distinct DenseTensor axes.
- *
- * @throws Nothing for ordinary value operations.
- * @note An absent channel axis means one channel. Axis names, color roles,
- *       alpha semantics, and packing are not inferred.
- */
-struct ImageFacet {
-  /** @brief Logical axis used as the image x coordinate. */
-  std::size_t x_axis = 0U;
-
-  /** @brief Logical axis used as the image y coordinate. */
-  std::size_t y_axis = 0U;
-
-  /** @brief Optional logical axis used as the channel coordinate. */
-  std::optional<std::size_t> channel_axis;
-
-  /**
-   * @brief Compares every explicit image-axis assignment.
-   *
-   * @param other Facet to compare.
-   * @return True when x, y, and optional channel axes match.
-   * @throws Nothing.
-   * @note Tensor shape and storage layout are intentionally excluded.
-   */
-  bool operator==(const ImageFacet& other) const noexcept {
-    return x_axis == other.x_axis && y_axis == other.y_axis &&
-           channel_axis == other.channel_axis;
-  }
-};
-
-/**
  * @brief Returns the validated byte width of one DenseTensor element.
  *
  * @param descriptor Descriptor whose semantics and encoding are inspected.
@@ -237,6 +208,53 @@ std::size_t dense_tensor_element_bytes(const DenseTensorDescriptor& descriptor);
  * @note Shape, quantization, facet, layout, and storage are not inspected.
  */
 std::size_t dense_tensor_element_bits(const DenseTensorDescriptor& descriptor);
+
+/**
+ * @brief Derives the numeric range representable by physical element storage.
+ * @param descriptor Descriptor whose element semantics and encoding are used.
+ * @return Finite endpoints and exceptional-value capability flags.
+ * @throws std::invalid_argument for unsupported semantics/encoding/bit-width
+ *         combinations.
+ * @note Shape, quantization, ImageFacet, declared sample/color meaning,
+ *       payload bytes, and observed statistics are intentionally ignored.
+ */
+StorageRepresentableRange storage_representable_range(
+    const DenseTensorDescriptor& descriptor);
+
+/**
+ * @brief Validates positive DenseTensor shape and optional image metadata.
+ * @param descriptor Logical tensor shape supplying all axis extents.
+ * @param image_facet Optional complete ordinary-image interpretation.
+ * @return Nothing.
+ * @throws std::invalid_argument for empty/zero shape, malformed axes/windows,
+ *         span mismatch, invalid stable references, sample domains, or color.
+ * @throws std::overflow_error when a signed window span is unrepresentable.
+ * @throws std::length_error when bounded image metadata exceeds frozen limits.
+ * @throws std::bad_alloc when bounded validation state cannot allocate.
+ * @note This metadata-only function reads no layout, binding, readiness,
+ *       payload, RegionSet, cache, or device state. Element encoding,
+ *       quantization, and physical producer-envelope checks remain separate.
+ */
+void validate_dense_tensor_image_metadata(
+    const DenseTensorDescriptor& descriptor,
+    const std::optional<ImageFacet>& image_facet);
+
+/**
+ * @brief Creates one explicit zero-origin ordinary-image facet for a tensor.
+ * @param descriptor Positive concrete tensor descriptor supplying x/y extents.
+ * @param x_axis Explicit in-rank x axis.
+ * @param y_axis Explicit distinct in-rank y axis.
+ * @param channel_axis Optional distinct in-rank channel axis.
+ * @return ImageFacet with data window `[0, width) x [0, height)` and no
+ *         display, channel-schema, sample-domain, or color metadata.
+ * @throws std::invalid_argument for empty/zero shape or invalid image axes.
+ * @throws std::overflow_error when a shape extent exceeds signed int64.
+ * @note This is an explicit compatibility projection used at construction
+ *       boundaries; Value sealing never guesses a missing data window.
+ */
+ImageFacet make_zero_origin_image_facet(
+    const DenseTensorDescriptor& descriptor, std::size_t x_axis,
+    std::size_t y_axis, std::optional<std::size_t> channel_axis);
 
 /**
  * @brief Opaque process-local identity of one immutable Value publication.
@@ -442,26 +460,37 @@ class ValueBuilder final {
    * @brief Allocates one exact positive-stride CPU DenseTensor producer.
    *
    * Validation checks positive shape, supported element encoding, optional
-   * distinct in-rank image axes, one positive stride per axis, checked
+   * complete bounded image metadata, one positive stride per axis, checked
    * envelope arithmetic, a rank-general non-overlap proof, zero layout byte
    * offset, and exact storage size.
    *
    * @param descriptor Logical descriptor copied into private builder state.
-   * @param image_facet Optional explicit image-axis mapping.
+   * @param image_facet Optional complete ordinary-image interpretation copied
+   *        into private builder state.
    * @param layout Positive producer layout copied into private builder state.
    * @param storage_size Exact positive allocation byte length.
+   * @param alignment Requested positive power-of-two base alignment. Values
+   *        smaller than `alignof(std::max_align_t)` are satisfied by the
+   *        stronger default allocation alignment.
    * @return Move-only exclusive builder ready to issue one WriteLease.
    * @throws std::invalid_argument for malformed descriptor, facet, layout,
-   * storage-size mismatch, or a writable layout whose non-overlap cannot be
-   * proven.
+   * storage-size mismatch, invalid alignment, or a writable layout whose
+   * non-overlap cannot be proven.
    * @throws std::overflow_error when envelope, non-overlap, or identity
    * arithmetic overflows.
-   * @throws std::bad_alloc when state or CPU allocation cannot be created.
-   * @note No caller allocation is retained.
+   * @throws std::length_error when bounded image records exceed frozen limits.
+   * @throws std::bad_alloc when bounded validation, complete
+   *         descriptor/ImageFacet metadata copies, private state, or CPU
+   *         allocation cannot be created.
+   * @note No caller allocation is retained. Descriptor shape/quantization and
+   *       ImageFacet diagnostic/channel/group/sample storage are deep-copied.
+   *       Alignment affects physical allocation and portable reconstruction
+   *       only; it is never logical Value or content identity.
    */
   static ValueBuilder allocate_cpu_dense_tensor(
       DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
-      StridedLayout layout, std::size_t storage_size);
+      StridedLayout layout, std::size_t storage_size,
+      std::size_t alignment = alignof(std::max_align_t));
 
   /**
    * @brief Allocates one exact writable CPU FP4 Blocked DenseTensor producer.
@@ -475,6 +504,7 @@ class ValueBuilder final {
    * @param layout Physical Blocked layout copied into private state.
    * @param storage_size Exact positive allocation byte length, including any
    *        unused leading or trailing nibble.
+   * @param alignment Requested positive power-of-two base alignment.
    * @return Move-only exclusive builder ready to issue one WriteLease over the
    *         complete byte envelope.
    * @throws std::invalid_argument for malformed descriptor, quantization,
@@ -483,11 +513,12 @@ class ValueBuilder final {
    *         overflows.
    * @throws std::bad_alloc when validation state or CPU storage cannot
    * allocate.
-   * @note No ImageBuffer or byte-addressed element view is implied.
+   * @note No ordinary-image facet or byte-addressed element view is implied.
    */
   static ValueBuilder allocate_cpu_blocked_dense_tensor(
       DenseTensorDescriptor descriptor, BlockedLayout layout,
-      std::size_t storage_size);
+      std::size_t storage_size,
+      std::size_t alignment = alignof(std::max_align_t));
 
   /**
    * @brief Acquires the builder's sole active exclusive write lease.
@@ -506,9 +537,11 @@ class ValueBuilder final {
    * @throws std::logic_error when the builder is moved-from, already sealed, or
    * still has an active WriteLease.
    * @throws std::overflow_error when Value revision identity is exhausted.
-   * @throws std::bad_alloc when immutable publication state cannot allocate.
+   * @throws std::bad_alloc when copying the complete descriptor, ImageFacet, or
+   *         layout into immutable publication state cannot allocate.
    * @note A successful seal is irreversible. All bytes, including padding,
-   * become immutable.
+   *       become immutable. Metadata allocation completes before builder
+   *       authority closes, so allocation failure leaves the builder unsealed.
    */
   Value seal();
 
@@ -536,6 +569,7 @@ class ValueBuilder final {
   std::unique_ptr<Impl> impl_;
 
   friend class PendingValuePublisher;
+  friend class DenseTensorValueDescriptorMetadataAccess;
 };
 
 /**
@@ -569,32 +603,40 @@ class Value final {
    * @brief Publishes one exclusively owned immutable CPU DenseTensor.
    *
    * Validation checks nonempty positive shape, supported element encoding,
-   * optional distinct in-rank image axes, one positive stride per axis, zero
-   * producer byte offset, checked envelope arithmetic, rank-general
-   * non-overlap proof, and exact storage size before publication.
+   * optional complete image metadata (signed windows, distinct axes, stable
+   * channel/group, sample-domain, and color references), one positive stride
+   * per axis, zero producer byte offset, checked envelope arithmetic,
+   * rank-general non-overlap proof, and exact storage size before publication.
    *
    * @param descriptor Concrete logical tensor descriptor copied into isolated
    *        immutable state after validation.
-   * @param image_facet Optional explicit image-axis mapping.
+   * @param image_facet Optional complete ordinary-image interpretation copied
+   *        into isolated immutable state.
    * @param layout Physical signed byte strides copied into isolated immutable
    *        state after validation.
    * @param storage Exclusively owned input bytes consumed as the source for an
    *        isolated immutable allocation.
+   * @param alignment Requested positive power-of-two base alignment.
    * @return Valid immutable Value whose shape, strides, and payload allocations
    *         are distinct from every caller-owned input allocation.
    * @throws std::invalid_argument for malformed descriptors, facets, layouts,
    *         a storage-size mismatch, or an unproven writable layout.
    * @throws std::overflow_error when the required address envelope cannot be
    *         represented by std::size_t.
-   * @throws std::bad_alloc when immutable state allocation fails.
+   * @throws std::length_error when bounded image records exceed frozen limits.
+   * @throws std::bad_alloc when complete descriptor/ImageFacet metadata,
+   *         layout, payload, builder, or immutable publication allocation
+   *         fails.
    * @note Validation finishes before the immutable PImpl is published. The
-   *       published state deep-copies shape, strides, and payload so pointers
-   *       retained before an lvalue or rvalue call never alias the Value.
+   *       published state deep-copies descriptor shape/quantization, complete
+   *       ImageFacet metadata, strides, and payload so pointers retained before
+   *       an lvalue or rvalue call never alias the Value. Alignment is a
+   *       physical binding/artifact reconstruction fact, not logical identity.
    */
-  static Value from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
-                                     std::optional<ImageFacet> image_facet,
-                                     StridedLayout layout,
-                                     std::vector<std::byte> storage);
+  static Value from_cpu_dense_tensor(
+      DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
+      StridedLayout layout, std::vector<std::byte> storage,
+      std::size_t alignment = alignof(std::max_align_t));
 
   /**
    * @brief Publishes an immutable logical view over a sealed buffer binding.
@@ -605,7 +647,8 @@ class Value final {
    * element lies inside `buffer`.
    *
    * @param descriptor Concrete logical descriptor copied into immutable state.
-   * @param image_facet Optional explicit image-axis mapping.
+   * @param image_facet Optional complete ordinary-image interpretation copied
+   *        into isolated immutable state.
    * @param layout Signed byte strides and logical-origin byte offset.
    * @param buffer Sealed immutable range and binding retained by the new Value.
    * @return Valid Value with a fresh revision and buffer allocation identity.
@@ -613,9 +656,13 @@ class Value final {
    * or an invalid buffer.
    * @throws std::out_of_range when the signed layout envelope escapes buffer.
    * @throws std::overflow_error when envelope or revision arithmetic overflows.
-   * @throws std::bad_alloc when immutable publication state cannot allocate.
+   * @throws std::length_error when bounded image records exceed frozen limits.
+   * @throws std::bad_alloc when complete descriptor/ImageFacet metadata,
+   *         layout, or immutable publication state cannot allocate.
    * @note Publishing another logical view over the same BufferHandle preserves
-   * allocation identity but creates a distinct ValueRevisionId.
+   *       allocation identity but creates a distinct ValueRevisionId. The
+   *       logical descriptor, rich ImageFacet, and layout are deep-copied while
+   *       the sealed buffer allocation is retained.
    */
   static Value from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
                                      std::optional<ImageFacet> image_facet,
@@ -627,6 +674,7 @@ class Value final {
    * @param descriptor Valid V-13 FP4 descriptor with block-scale quantization.
    * @param layout Valid version-1 bit-addressed Blocked layout.
    * @param storage Exclusively owned complete byte envelope.
+   * @param alignment Requested positive power-of-two base alignment.
    * @return Fresh immutable Ready CPU Value with Blocked layout identity.
    * @throws std::invalid_argument for malformed descriptor, quantization,
    *         layout, overlap, alignment, or exact-envelope mismatch.
@@ -636,9 +684,10 @@ class Value final {
    * @note Input bytes are copied into isolated builder storage. Padding and
    *       unused nibble bits become immutable and remain transfer-visible.
    */
-  static Value from_cpu_blocked_dense_tensor(DenseTensorDescriptor descriptor,
-                                             BlockedLayout layout,
-                                             std::vector<std::byte> storage);
+  static Value from_cpu_blocked_dense_tensor(
+      DenseTensorDescriptor descriptor, BlockedLayout layout,
+      std::vector<std::byte> storage,
+      std::size_t alignment = alignof(std::max_align_t));
 
   /**
    * @brief Publishes an immutable FP4 Blocked view over a sealed CPU buffer.
@@ -692,6 +741,33 @@ class Value final {
                                      std::vector<BufferHandle> buffers);
 
   /**
+   * @brief Reconstructs one provider-defined Value from owned CPU payloads.
+   *
+   * @param registry Injected provider-definition authority.
+   * @param descriptor Versioned Schema and ordered Facet records.
+   * @param layout Versioned provider Layout and generic buffer envelopes.
+   * @param payloads One nonempty exact byte vector per provider buffer.
+   * @param required_alignments One positive power-of-two allocation alignment
+   *        per payload in the same dense buffer-index order.
+   * @return Fresh Ready provider-defined Value with isolated CPU allocations.
+   * @throws ExtensionContractError for malformed metadata, unavailable
+   *         provider definitions, or provider semantic rejection.
+   * @throws std::invalid_argument when a payload is empty, alignment count
+   *         differs, or an alignment is not a positive power of two.
+   * @throws std::overflow_error when allocation/publication identity exhausts.
+   * @throws std::bad_alloc when allocation or immutable state cannot allocate.
+   * @note Every payload is copied into a fresh independently aligned Host
+   *       allocation before provider validation. Local owners and prior
+   *       allocations unwind on failure; no partial Value or BufferHandle
+   *       escapes.
+   */
+  static Value from_provider_defined_payloads(
+      DataDefinitionRegistry& registry, DataDescriptorEnvelope descriptor,
+      ProviderDefinedLayout layout,
+      std::vector<std::vector<std::byte>> payloads,
+      std::vector<std::size_t> required_alignments);
+
+  /**
    * @brief Reports whether this handle owns a published generic Value.
    *
    * @return True when immutable state is present.
@@ -718,12 +794,24 @@ class Value final {
   const DenseTensorDescriptor& dense_tensor_descriptor() const;
 
   /**
-   * @brief Returns the optional explicit image-axis mapping.
+   * @brief Returns the optional complete ordinary-image interpretation.
    *
    * @return Borrowed optional facet retained by this Value.
    * @throws std::logic_error when the handle is invalid or provider-defined.
    */
   const std::optional<ImageFacet>& image_facet() const;
+
+  /**
+   * @brief Returns the immutable ordinary-image data window as metadata only.
+   * @return Borrowed signed half-open bounds retained by this Value.
+   * @throws std::logic_error when the handle is invalid, provider-defined, or
+   *         has no ImageFacet.
+   * @note This accessor does not poll readiness, map storage, create a lease,
+   *       perform device work, or inspect payload bytes. It remains legal in
+   *       Pending, Failed, and ProducerCancelled states; payload access keeps
+   *       its existing Ready-only contract.
+   */
+  const ImageBounds& image_bounds() const;
 
   /**
    * @brief Returns the byte-preserved provider-defined logical descriptor.
@@ -801,7 +889,8 @@ class Value final {
 
   /**
    * @brief Returns immutable facts for this Value's current storage binding.
-   * @return Allocation, concrete device, memory domain, size, and visibility.
+   * @return Allocation, concrete device, memory domain, size, retained-range
+   *         alignment requirement, and visibility.
    * @throws std::logic_error when the handle is invalid or provider-defined.
    * @note Binding observation grants no pointer, mapping, transfer, cache, or
    *       persistence authority.
@@ -811,7 +900,8 @@ class Value final {
   /**
    * @brief Returns immutable facts for one indexed storage binding.
    * @param buffer_index Dense zero-based buffer index.
-   * @return Allocation, device, memory domain, size, and visibility facts.
+   * @return Allocation, device, memory domain, size, retained-range alignment
+   *         requirement, and visibility facts.
    * @throws std::logic_error when the handle is invalid.
    * @throws std::out_of_range when the index is outside buffer_count().
    * @note Metadata inspection grants no pointer or provider callback authority.
@@ -959,6 +1049,7 @@ class Value final {
   friend class PendingValuePublisher;
   friend class PendingDeviceValuePublisher;
   friend class ValueBuilder;
+  friend class DenseTensorValueDescriptorMetadataAccess;
   friend ContentDigestResult compute_content_digest(const Value& value);
 };
 

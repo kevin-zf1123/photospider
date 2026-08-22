@@ -17,8 +17,9 @@ OpenCV adapter 或标准库实现，因此 compute/runtime 代码不会直接声
 
 **Dirty Region** 是由 `RegionSet` 表示的规范化逻辑 affected/demanded work。V-4 的 HP 支持
 精确 ImageRect 与 rank-general TensorSlice；RT 只接受精确 ImageRect。当前 Host/IPC v2
-inspection、operation ABI v2、ImageBuffer processing 与 physical image tile 使用 checked
-derived `PixelRect`/`PixelSize`。只有 provider 或算法在真实 matrix 或 algorithm call 处才会
+inspection、operation ABI v1 adapter、dense Value processing 与 physical image tile 使用 checked
+derived `PixelRect`/`PixelSize`。这些 physical rectangle 在各自 HP 或 RT storage
+allocation 中都是零基坐标，不继承有符号逻辑原点。只有 provider 或算法在真实 matrix 或 algorithm call 处才会
 局部创建 OpenCV rectangle 与 size。
 
 **Dirty generation** 是存储在 `DirtyRegionSnapshot` 中并复制到 selected task metadata 的值，用于
@@ -110,13 +111,16 @@ formal output 处停止。缺失或部分有效的 intermediate exact-core dense
 前继续保留在 plan 中，并接收同一 logical demand。uncached leaf source 是分类明确的
 missing dependency。Planner 会记录 direct TensorSlice source Region，而不会从空
 PixelRect compatibility projection 推断 source provenance。
-对于每个 executable target 或 upstream node，通过 exact-core 检查的同一次 route selection
-会立即缩减成 callback-free operation key 与完整 identity/device/shape/metadata record。
-Request plan 只保留这些带 revision 的 record，不保留 callable 或 DSO lease。在
+对于 ImageRect HP、当前所有 ImageRect RT 路径与 TensorSlice HP，每个 executable target 或
+upstream node 都会立即把其精确选中的 revision 缩减成 callback-free operation key 与完整
+identity/device/shape/metadata record。同一个 revision 既提供 ImageRect dirty/dependency 行为，
+也在 TensorSlice 情况下通过 exact-core 检查。Request plan 只保留这些带 revision 的 record，
+不保留 callable 或 DSO lease。在
 dirty/external-satisfaction selection 识别 active task node 后，若 active view 为空，dirty
 preparation 会在比较 intent、device inventory、task id 或 node route 前把它视为成功 no-work。
-否则 preparation 会在应用 ROI 或 materialize work 前，把每条 active task-population route 与这些
-record 比较。因此剩余 active work 的 target 或 upstream replacement 会在取得
+否则，空 route snapshot 或缺失 active-node route 本身就是 fail-closed mismatch；preparation 会在
+应用 ROI 或 materialize work 前，把每条 active task-population route 与保留的 record 比较。因此
+剩余 active work 的 target 或 upstream replacement 会在取得
 provider/gate/grant/reservation/ledger ownership 前以 `NoOperation` 失败；普通 execution
 随后仍会重新解析 callable。
 
@@ -133,10 +137,12 @@ Planner 记录 `BackwardDemand` edge mapping。Forward affected-region projectio
 
 ## Region 传播
 
-对于精确内建 ImageRect，`RoiPropagationService` 会经过 checked private adapter 转换，向当前
-选中的 v2 callback 请求 projection，验证返回 rectangle，再把它包装成 Exact Region。Static
-formula 继续覆盖 identity、neighborhood、crop、resize 与其他 image geometry；data-dependent
-operation 可以提供经过验证的 dependency LUT。同一 parent 的 image demand 保留当前有界矩形行为。
+对于精确内建 ImageRect，`RoiPropagationService` 会经过 checked private adapter 转换，向选中的
+provider-neutral propagation callback 请求 projection，验证返回 rectangle，再把它包装成 Exact
+Region。这个 callback 可以来自 dependency-neutral core、optional provider 或当前 pure-C
+operation ABI v1 adapter。Static formula 继续覆盖 identity、neighborhood、crop、resize 与其他
+image geometry；data-dependent operation 可以提供经过验证的 dependency LUT。同一 parent 的
+image demand 保留当前有界矩形行为。
 
 TensorSlice 绝不进入 rectangular callback。Request-bound `RoiPropagationService` 会使用与
 execution 相同的规范 route device inventory 和 HP/RT intent 选出实际的 revisioned
@@ -238,22 +244,36 @@ dirty generation 或 route/runtime epoch 变成 cancellation authority。
 ## 暂存与提交
 
 HP dirty task 把 output 与 Region validity 暂存到 `HighPrecisionDirtyWriteBuffer`；RT dirty task
-把 image output 与 HP-space ImageRect validity 暂存到 `RealtimeProxyWriteBuffer`。成功 request
-会通过 intent-specific commit path，把 staged HP state
-提交到 `GraphModel`，或把 RT state 提交到 `RealtimeProxyGraph`。Standalone 非 realtime HP
-request 拥有一个 `ComputeRun`。每个 `RealTimeUpdate` 会在 preflight 前创建不同的 HP 与 RT child
-Run，并将它们放入一个 request-owned `RunGroup`；两者捕获相同的强 Graph instance identity、
+把 image output 与 HP-space ImageRect validity 暂存到 `RealtimeProxyWriteBuffer`。每个 write
+buffer 对每个节点最多拥有一个尚未发布的 `HostOutputBinding`。它冻结 selected task 中 immutable
+HP/RT geometry 实际可执行的 task 数量，从该单一 binding 签发 disjoint grant，并让最后一个
+executable task 恰好一次完成 seal。被裁剪为空 RT geometry 的 selected task 不会增加
+retirement count。成功 request 会通过 intent-specific commit path，把 staged HP state 提交到
+`GraphModel`，或把 RT state 提交到 `RealtimeProxyGraph`。Standalone 非 realtime HP request
+拥有一个 `ComputeRun`。每个 `RealTimeUpdate` 会在 preflight 前创建不同的 HP 与 RT child Run，
+并将它们放入一个 request-owned `RunGroup`；两者捕获相同的强 Graph instance identity、
 authoritative revision 与 request supersession generation，同时保留各自独立的 domain、lease、
 phase、terminal 与 staging state。当前不会创建 mixed-domain Run。
 
 Exact core Region bridge 会返回 complete-shaped dense result，但对于 partial invocation，
-只有 selected coordinate 是 authoritative。`HighPrecisionDirtyWriteBuffer` 会把这些
-coordinate 合并进 existing staged byte，再 seal 为一个 fresh Value；unselected
-coordinate 保持不变。若 prior output 为 complete，即使 full ImageRect proof 与
+只有 selected coordinate 是 authoritative。`HighPrecisionDirtyWriteBuffer` 会通过一个 checked
+whole grant seed 其 binding，随后 update grant 只替换 selected coordinate，最后只 seal 一次；
+unselected coordinate 保持不变。若 prior output 为 complete，即使 full ImageRect proof 与
 TensorSlice update 使用不同 Region domain，其 complete validity 仍保持为 true。fresh
 partial output 只有 partial validity，因此 whole-output dependency resolution 与当前
-regionless disk persistence 会拒绝它，直到 normal Whole commit 将其替换。Generic ABI v2
+regionless disk persistence 会拒绝它，直到 normal Whole commit 将其替换。Generic operation ABI v1
 monolithic callback 保持 complete-output replacement behavior。
+
+Task pruner 会把 active selected-task flag 之外的 dependency 视为已经满足。对于非空 mapping，
+active spatial consumer 会保留精确覆盖 ROI 的 producer task id；空的 exact mapping 只把
+selected producer task set 保留为 publication join，因为 execution 仍会解析完整 `NodeOutput`。
+每个非最终 tile 都会 retirement，但不释放这些 edge；最终 selected producer seal 并安装完整
+Value 后，其唯一 publisher 才会通过每个原始 selected sibling task map 批量释放。这样，tile
+无法消费 sibling 正在部分写入的 binding，同时非空 task identity 保持精确，也不会制造
+continuation task。Whole 与 parameter dependency 继续使用完整的 producer-node join。
+overlap、out-of-range geometry、exception、cancellation、
+duplicate 或 missing retirement，或者使用未排空 binding 执行 commit，都会形成 sticky failure，
+不释放尚未发布的 tile edge，并保持此前的 formal/proxy Value 不变。
 
 Kernel 的 product commit policy 会先物化 publication copy，随后在 graph-state work item 内检查：
 每个 child Run 已处于 `CommitPending`、拥有精确 staged Graph/proxy，并且仍匹配 live Graph
@@ -285,10 +305,24 @@ resolution 与短暂 staging 临界区会被串行化；不同节点与 operatio
 
 当前逻辑 dirty authority 在 propagation、planning、source history、per-node state、edge
 mapping、HP validity、staging 与 Region-aware core dense operation 中使用规范化 `RegionSet`。
-Checked derived `PixelRect` 与 `PixelSize` 只保留在 image tile/task、ImageBuffer、Host/IPC v2
-与 operation ABI v2 边缘。Region endpoint 与 tensor-shape arithmetic 都受检查；image adapter
+Checked derived `PixelRect` 与 `PixelSize` 只保留在 image tile/task、dense Value processing、Host/IPC v2
+与 operation ABI v1 adapter 边缘。Region endpoint 与 tensor-shape arithmetic 都受检查；image adapter
 拒绝 uncertainty、TensorSlice、custom domain、multi-atom clause 与 narrowing overflow。只有
 provider 或 adapter 实现在真实调用处才会创建 OpenCV rectangle 与 size。
+
+对于普通 dense image，`ImageRect` 使用 immutable `ImageFacet::data_window` 的 signed logical
+coordinate domain。full-image region 就是该 half-open window 本身，包括 non-zero 或 negative
+origin。只有在完成 containment 检查之后，才可通过减去 data-window origin 得到 dense storage
+index。可选 display window 不会重定义 dirty coordinate，dynamic `RegionSet` 也不会修改任一
+window。provider-defined OpenEXR Deep window 仍是独立 provider contract，不是 ordinary dense
+image 的 authority。
+
+因此，每个 image `HpPlanEntry`/`RtPlanEntry` 都会保留 HP data window、零基 `roi_hp` 与逻辑
+`region_hp`；`roi_rt` 则独立地在 RT proxy allocation 中使用零基坐标。Edge/snapshot Region
+metadata 只能从相应 storage ROI 经 checked origin addition 构造。HP dirty write 会把 logical
+ImageRect validity 交给 downsample；downsample 为像素访问减去当前已提交 HP origin，并把逻辑
+Region 原样保存为 RT HP-validity metadata。Empty、Whole、stale-generation、failure 与
+cancellation handling 都不会授权一个坐标域不匹配的结果。
 
 把 dirty fact、static task shape、ready dispatch 与 staged commit 保持为不同 value，可以防止 ROI
 update 重写 topology，或把 graph ownership 转交 policy snapshot、ready store 或私有 execution
@@ -300,10 +334,10 @@ route。上述明确限制界定了当前 generation 与 epoch check 能够保�
 - `include/photospider/data/region.hpp`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
-- `src/lib/core/image_buffer_processing.*`
-- `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
+- `src/lib/core/{dense_image_processing,value_region}.*`
+- `src/lib/adapters/opencv/value_adapter_opencv.*`
 - `src/lib/compute/dirty/dirty_region_snapshot.hpp`
-- `tests/unit/test_stdlib_image_buffer_processing.cpp`
+- `tests/unit/test_dense_image_processing.cpp`
 - `src/lib/compute/dirty/dirty_region_snapshot_builder.cpp`
 - `src/lib/compute/dirty/dirty_region_planner.cpp`
 - `src/lib/compute/dirty/dirty_region_planning_policy.hpp`

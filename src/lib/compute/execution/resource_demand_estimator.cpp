@@ -15,8 +15,8 @@
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
 #include "compute/execution/execution_service_test_probe.hpp"
 #endif
+#include "photospider/data/parameter_value.hpp"
 #include "photospider/data/region.hpp"
-#include "photospider/plugin/node_view.hpp"
 
 namespace ps::compute {
 namespace {
@@ -184,6 +184,35 @@ void add_planned_work_dynamic(const PlannedNodeWork& work,
         work.operation_route->metadata.exclusive_key, before_operation_route,
         estimate->bytes());
 #endif
+    add_vector_capacity(work.operation_route->metadata.named_value_output_names,
+                        estimate);
+    for (const std::string& name :
+         work.operation_route->metadata.named_value_output_names) {
+      estimate->add_string_payload(name);
+    }
+    add_vector_capacity(work.operation_route->metadata.parameter_output_names,
+                        estimate);
+    for (const std::string& name :
+         work.operation_route->metadata.parameter_output_names) {
+      estimate->add_string_payload(name);
+    }
+  }
+  if (work.output_authority.has_value()) {
+    if (work.output_authority->image_output_name.has_value()) {
+      estimate->add_string_payload(*work.output_authority->image_output_name);
+    }
+    add_vector_capacity(work.output_authority->named_value_output_names,
+                        estimate);
+    for (const std::string& name :
+         work.output_authority->named_value_output_names) {
+      estimate->add_string_payload(name);
+    }
+    add_vector_capacity(work.output_authority->parameter_output_names,
+                        estimate);
+    for (const std::string& name :
+         work.output_authority->parameter_output_names) {
+      estimate->add_string_payload(name);
+    }
   }
 }
 
@@ -293,6 +322,18 @@ void add_dirty_operation_route_snapshot_dynamic(
     (void)node_id;
     estimate->add_string_payload(planned_route.operation_key);
     estimate->add_string_payload(planned_route.route.metadata.exclusive_key);
+    add_vector_capacity(planned_route.route.metadata.named_value_output_names,
+                        estimate);
+    for (const std::string& name :
+         planned_route.route.metadata.named_value_output_names) {
+      estimate->add_string_payload(name);
+    }
+    add_vector_capacity(planned_route.route.metadata.parameter_output_names,
+                        estimate);
+    for (const std::string& name :
+         planned_route.route.metadata.parameter_output_names) {
+      estimate->add_string_payload(name);
+    }
   }
 }
 
@@ -410,6 +451,11 @@ std::uint64_t real_time_dirty_plan_retained_memory_bytes(
 std::uint64_t node_output_dynamic_retained_memory_bytes(
     const NodeOutput& output) {
   RetainedMemoryEstimator estimate("NodeOutput");
+  add_map_nodes(output.named_values, &estimate);
+  for (const auto& [name, value] : output.named_values) {
+    (void)value;
+    estimate.add_string_payload(name);
+  }
   add_parameter_object_dynamic(output.data, &estimate);
   estimate.add_string_payload(output.debug.compute_device);
   return estimate.bytes();

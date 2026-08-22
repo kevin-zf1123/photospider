@@ -47,7 +47,7 @@ class GraphArtifactResolver {
  * checkpoint binding before resolution, creates a fresh Embedded Host, seeds
  * repository built-ins, loads one attempt-local graph session, computes the
  * declared node within reserved CPU slots, closes the graph, destroys the Host,
- * and returns only attempt facts plus a candidate image.
+ * and returns only attempt facts plus candidate named Values.
  *
  * @throws Constructor validation errors only; `execute` converts ordinary
  * resolver/Host failures into typed reports while allocation/system failures
@@ -70,8 +70,8 @@ class EmbeddedHostJobWorker final : public JobAttemptWorker {
    * @brief Executes one immutable assignment through a fresh Embedded Host.
    * @param assignment Exact current assignment and shared immutable JobSpec.
    * @param cancellation_requested Read-only monotonic control-plane observer.
-   * @return Attempt facts with exact settlement truth plus one candidate CPU
-   * image only on settled success.
+   * @return Attempt facts with exact settlement truth plus candidate named
+   * Values only on settled success.
    * @throws std::bad_alloc or std::system_error only when safe report
    * construction or synchronization cannot continue.
    * @note Cancellation is observed before resolution, before compute, and after

@@ -17,8 +17,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/pending_value.hpp"
 #include "ipc/server.hpp"
-#include "photospider/core/image_buffer.hpp"
 #include "support/ipc_host_spy.hpp"
 
 namespace {
@@ -27,16 +27,15 @@ namespace {
 volatile std::sig_atomic_t g_stop_write_fd = -1;
 
 /**
- * @brief Selects the deterministic image result returned by the test Host.
+ * @brief Selects the deterministic Values result returned by the test Host.
  * @throws Nothing.
  */
-enum class ImageMode {
-  /** @brief Canonical successful empty CPU image. */
+enum class ValuesMode {
+  /** @brief Canonical successful empty named-Value result. */
   Empty,
-  /** @brief Successful two-by-two tight-row UINT8 CPU image. */
+  /** @brief Successful four-byte u8 DenseTensor Value. */
   Nonempty,
-  /** @brief Malformed image used to exercise nested image validation failure.
-   */
+  /** @brief Failed Value used to exercise artifact capture failure. */
   Invalid,
 };
 
@@ -48,8 +47,8 @@ struct Options {
   /** @brief Absolute Unix socket path owned by the real internal Server. */
   std::string socket_path;
 
-  /** @brief Deterministic Host image behavior for every image compute. */
-  ImageMode image_mode = ImageMode::Empty;
+  /** @brief Deterministic Host Values behavior for every Values compute. */
+  ValuesMode values_mode = ValuesMode::Empty;
 
   /** @brief Existing fixed-width manual monotonic-clock control file. */
   std::string clock_control_path;
@@ -232,7 +231,8 @@ class DeterministicIdSource final {
  * @return Snapshot/compute/output policies with short deterministic TTLs.
  * @throws std::bad_alloc if callback storage cannot allocate.
  * @note Limits are intentionally fixture-only: three terminal jobs, two
- *       artifacts, ten-second job retention, and one-second delivery leases.
+ *       four-KiB Value archives, ten-second job retention, and one-second
+ *       delivery leases.
  */
 ps::ipc::internal::RequestRouterRuntimeDependencies fixture_dependencies(
     const std::shared_ptr<ControlFileClock>& clock,
@@ -251,8 +251,8 @@ ps::ipc::internal::RequestRouterRuntimeDependencies fixture_dependencies(
   dependencies.compute_clock = [clock] { return clock->now(); };
   dependencies.compute_id_generator = [ids] { return ids->next(); };
   dependencies.output_limits.artifacts = 2;
-  dependencies.output_limits.total_bytes = 1024;
-  dependencies.output_limits.artifact_bytes = 256;
+  dependencies.output_limits.total_bytes = 8 * 1024;
+  dependencies.output_limits.artifact_bytes = 4 * 1024;
   dependencies.output_limits.job_ttl = std::chrono::seconds(10);
   dependencies.output_limits.delivery_ttl = std::chrono::seconds(1);
   dependencies.output_clock = [clock] { return clock->now(); };
@@ -474,16 +474,16 @@ bool parse_options(int argc, char** argv, Options* options,
       candidate.socket_path = argv[++index];
       continue;
     }
-    if (argument == "--image-mode" && index + 1 < argc) {
+    if (argument == "--values-mode" && index + 1 < argc) {
       const std::string value(argv[++index]);
       if (value == "empty") {
-        candidate.image_mode = ImageMode::Empty;
+        candidate.values_mode = ValuesMode::Empty;
       } else if (value == "nonempty") {
-        candidate.image_mode = ImageMode::Nonempty;
+        candidate.values_mode = ValuesMode::Nonempty;
       } else if (value == "invalid") {
-        candidate.image_mode = ImageMode::Invalid;
+        candidate.values_mode = ValuesMode::Invalid;
       } else {
-        *message = "image mode must be empty, nonempty, or invalid";
+        *message = "Values mode must be empty, nonempty, or invalid";
         return false;
       }
       continue;
@@ -509,31 +509,31 @@ bool parse_options(int argc, char** argv, Options* options,
 }
 
 /**
- * @brief Builds the configured deterministic Host image value.
- * @param mode Requested successful or malformed image behavior.
- * @return Owned ImageBuffer whose payload outlives every copied Host result.
- * @throws std::bad_alloc when the four-byte payload cannot be allocated.
+ * @brief Builds the configured deterministic Host named-Value result.
+ * @param mode Requested empty, Ready, or Failed Value behavior.
+ * @return Owned named Values whose payload outlives every copied Host result.
+ * @throws Value publication, result validation, or allocation failures
+ *         unchanged.
  */
-ps::ImageBuffer make_image(ImageMode mode) {
-  if (mode == ImageMode::Empty) {
+ps::NamedValueResult make_values(ValuesMode mode) {
+  if (mode == ValuesMode::Empty) {
     return {};
   }
-  if (mode == ImageMode::Invalid) {
-    ps::ImageBuffer invalid;
-    invalid.width = 1;
-    return invalid;
+  ps::DenseTensorDescriptor descriptor{{4U},
+                                       ps::ElementSemantics::UnsignedInteger,
+                                       ps::StorageEncoding{8U}};
+  if (mode == ValuesMode::Invalid) {
+    ps::PendingValuePublication pending =
+        ps::PendingValuePublisher::allocate_cpu_dense_tensor(
+            std::move(descriptor), std::nullopt, ps::StridedLayout{{1}}, 4U);
+    return ps::NamedValueResult(
+        {ps::NamedValue{"image", std::move(pending.value)}}, false);
   }
-  auto storage = std::make_shared<std::vector<std::uint8_t>>(
-      std::initializer_list<std::uint8_t>{1, 2, 3, 4});
-  ps::ImageBuffer image;
-  image.width = 2;
-  image.height = 2;
-  image.channels = 1;
-  image.type = ps::DataType::UINT8;
-  image.device = ps::Device::CPU;
-  image.step = 2;
-  image.data = std::shared_ptr<void>(storage, storage->data());
-  return image;
+  ps::Value value = ps::Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::nullopt, ps::StridedLayout{{1}},
+      std::vector<std::byte>{std::byte{1}, std::byte{2}, std::byte{3},
+                             std::byte{4}});
+  return ps::NamedValueResult({ps::NamedValue{"image", std::move(value)}});
 }
 
 /**
@@ -599,7 +599,7 @@ int main(int argc, char** argv) {
     StopPipe stop_pipe;
     SignalRegistration signals(stop_pipe.write_fd());
     ps::testing::IpcHostSpy host;
-    host.set_compute_image(make_image(options.image_mode));
+    host.set_compute_values(make_values(options.values_mode));
     configure_observations(&host);
     auto clock = std::make_shared<ControlFileClock>(options.clock_control_path);
     auto ids = std::make_shared<DeterministicIdSource>();

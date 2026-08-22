@@ -3,117 +3,90 @@
 #include <memory>
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/plugin/plugin_api.hpp"
-
-namespace ps {
-class Node;
-}
+#include "photospider/plugin/operation_plugin_api.h"
 
 namespace ps::plugin_host {
 
 /**
- * @brief Creates one callback-scoped public identity and parameter snapshot.
+ * @brief Owns one validated pure-C operation-plugin generation.
  *
- * @param node Host-private operation node.
- * @return Public view borrowing identity strings and owning effective params.
- * @throws std::bad_alloc unchanged from recursive parameter copying.
- * @note The returned identity views must not outlive node; its parameter map
- * may be copied or moved independently.
- */
-plugin::NodeView make_node_view(const Node& node);
-
-/**
- * @brief Validates one public device enumerator at the plugin boundary.
- * @param device Device value supplied by metadata or an explicit registrar.
- * @return The same validated device value.
- * @throws std::invalid_argument for an unknown enumerator.
- */
-Device operation_device_to_private(Device device);
-
-/**
- * @brief Converts public scheduling metadata to the private registry contract.
+ * A generation deep-copies every definition record and retains the native DSO
+ * lease. Its final destructor invokes the plugin root destroy callback once,
+ * while the library is still mapped. Executable registry callbacks capture a
+ * shared generation owner, so replacement and explicit unload remove
+ * publication immediately without unmapping in-flight code.
  *
- * @param metadata Public plugin metadata.
- * @return Equivalent private registry metadata.
- * @throws std::invalid_argument for an unknown enum value or negative cost.
- * @note The conversion performs no allocation or policy selection.
+ * @throws std::bad_alloc when Host-owned validation or copied metadata cannot
+ * allocate.
+ * @note The type is source-private. Plugins observe only the pure-C records
+ * declared by `operation_plugin_api.h`.
  */
-OpMetadata operation_metadata_to_private(
-    const plugin::OperationMetadata& metadata);
+class OperationPluginGeneration final
+    : public std::enable_shared_from_this<OperationPluginGeneration> {
+ public:
+  /** @brief Opaque Host-owned validated generation implementation. */
+  struct Impl;
 
-/**
- * @brief Adapts one public full-output callback to the private executor shape.
- *
- * @param callback Plugin callback to retain inside the returned adapter.
- * @param library_lifetime Optional DSO lease attached by a loaded-plugin
- * registrar after host-side output conversion succeeds.
- * @return Private callback that constructs complete public input snapshots and
- *         converts complete output values before returning.
- * @throws std::bad_alloc if adapter callable storage cannot be allocated.
- * @note For loaded plugins, the caller must fence the public callback itself
- * with the DSO exception wrapper before passing it here. Host pre-entry
- * conversion and post-return validation then remain outside that fence and
- * preserve their host-owned exception types. Effective parameters are copied
- * directly from Graph-owned format-neutral storage.
- */
-MonolithicOpFunc adapt_monolithic_operation(
-    plugin::MonolithicOperation callback,
-    std::shared_ptr<void> library_lifetime = nullptr);
+  /**
+   * @brief Completes numeric discovery, root/suite negotiation, and definition
+   * validation for one already-authorized native library.
+   *
+   * @param native_library_lifetime Shared native handle and exact-object trust
+   * capability; it remains live through root/context destruction.
+   * @param get_abi_version Resolved numeric discovery entry.
+   * @param get_api Resolved exact ABI-v1 root entry.
+   * @return Valid unpublished generation ready for registry staging.
+   * @throws std::invalid_argument for any malformed status, size, version,
+   * stride, count, identity, name, callback, reserved field, or relationship.
+   * @throws std::bad_alloc when Host staging cannot allocate.
+   * @note Only the numeric function is called before the ABI value equals one.
+   * A successfully returned root earns exactly one destroy attempt even when a
+   * later suite or definition record is rejected.
+   */
+  static std::shared_ptr<OperationPluginGeneration> create(
+      std::shared_ptr<void> native_library_lifetime,
+      ps_operation_plugin_get_abi_version_fn_v1 get_abi_version,
+      ps_operation_plugin_get_api_fn_v1 get_api);
 
-/**
- * @brief Adapts one public tiled callback to the private executor shape.
- *
- * @param callback Plugin callback to retain inside the returned adapter.
- * @return Private tiled callback over converted geometry and spatial views.
- * @throws std::bad_alloc if adapter callable storage cannot be allocated.
- * @note For loaded plugins, the supplied public callback must already carry
- * the DSO-only exception fence. Every public pointer remains valid only through
- * one callback.
- */
-TileOpFunc adapt_tiled_operation(plugin::TiledOperation callback);
+  /**
+   * @brief Destroys plugin-owned generation state before releasing the DSO.
+   * @throws Nothing; destroy status and diagnostic failures are observed but
+   * cannot escape final retirement.
+   * @note The plugin destroy callback is attempted exactly once for every root
+   * that completed `get_api_v1` with `OK`.
+   */
+  ~OperationPluginGeneration() noexcept;
 
-/**
- * @brief Adapts one public dirty ROI callback to private graph propagation.
- *
- * @param callback Plugin callback to retain inside the returned adapter.
- * @return Private propagator that builds an immutable topology snapshot.
- * @throws std::bad_alloc if adapter callable storage cannot be allocated.
- * @throws std::invalid_argument after callback return for a negative dimension
- * or signed-int endpoint overflow in the returned ROI.
- * @note For loaded plugins, the supplied public callback must already carry
- * the DSO-only exception fence. Effective parameters are copied before plugin
- * entry.
- */
-DirtyRoiPropFunc adapt_dirty_propagator(plugin::DirtyRoiPropagator callback);
+  OperationPluginGeneration(const OperationPluginGeneration&) = delete;
+  OperationPluginGeneration& operator=(const OperationPluginGeneration&) =
+      delete;
 
-/**
- * @brief Adapts one public forward ROI callback to private graph propagation.
- *
- * @param callback Plugin callback to retain inside the returned adapter.
- * @return Private propagator that identifies the exact active input edge.
- * @throws std::bad_alloc if adapter callable storage cannot be allocated.
- * @throws std::invalid_argument after callback return for a negative dimension
- * or signed-int endpoint overflow in the returned ROI.
- * @note For loaded plugins, the supplied public callback must already carry
- * the DSO-only exception fence. Effective parameters are copied before plugin
- * entry.
- */
-ForwardRoiPropFunc adapt_forward_propagator(
-    plugin::ForwardRoiPropagator callback);
+  /**
+   * @brief Registers every copied executable contribution into replacement
+   * slots of a shadow registry.
+   * @param registry Transaction-local registry receiving complete callbacks,
+   * metadata, Region/dependency hooks, and generation leases.
+   * @return Nothing.
+   * @throws std::invalid_argument if a copied definition cannot map to the
+   * current CPU execution model.
+   * @throws std::bad_alloc or registry storage exceptions unchanged.
+   * @note The caller wraps this method in `OpRegistry::capture_registration`;
+   * scalar executable slots replace their active predecessor so generation
+   * unload can restore or splice it. This function never publishes the process
+   * singleton directly and never appends a cross-generation device candidate.
+   */
+  void register_into(OpRegistry& registry);
 
-/**
- * @brief Adapts one public dependency builder to private LUT storage.
- *
- * @param callback Plugin callback to retain inside the returned adapter.
- * @return Private builder that validates the complete public LUT before
- *         returning a host value.
- * @throws std::bad_alloc if adapter callable storage cannot be allocated.
- * @note For loaded plugins, the supplied public callback must already carry
- * the DSO-only exception fence. Invalid, mismatched, or overflowing LUTs throw
- * host-owned `std::invalid_argument` after plugin return and before cache
- * replacement.
- */
-DependencyLutBuilder adapt_dependency_builder(
-    plugin::DependencyLutBuilder callback);
+ private:
+  /**
+   * @brief Takes ownership of one completely initialized implementation.
+   * @param impl Valid implementation whose native lease is declared first.
+   * @throws Nothing.
+   */
+  explicit OperationPluginGeneration(std::unique_ptr<Impl> impl) noexcept;
+
+  /** @brief Validated generation state, absent only during destruction. */
+  std::unique_ptr<Impl> impl_;
+};
 
 }  // namespace ps::plugin_host

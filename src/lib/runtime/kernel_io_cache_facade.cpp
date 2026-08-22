@@ -84,14 +84,14 @@ void Kernel::save_graph_document(const std::string& name,
 
 /** @copydoc Kernel::clear_drive_cache */
 bool Kernel::clear_drive_cache(const std::string& name) {
-  return with_graph_state(name,
-                          [this](GraphModel& graph) {
-                            const GraphRevision prepared =
-                                graph.revision().next();
-                            graph.publish_prepared_revision(prepared);
-                            cache_service_.clear_drive_cache(graph);
-                            return true;
-                          })
+  return with_graph_state_disk_cache(
+             name,
+             [this](GraphModel& graph) {
+               const GraphRevision prepared = graph.revision().next();
+               graph.publish_prepared_revision(prepared);
+               cache_service_.clear_drive_cache(graph);
+               return true;
+             })
       .value_or(false);
 }
 
@@ -110,25 +110,25 @@ bool Kernel::clear_memory_cache(const std::string& name) {
 
 /** @copydoc Kernel::clear_cache */
 bool Kernel::clear_cache(const std::string& name) {
-  return with_graph_state(name,
-                          [this](GraphModel& graph) {
-                            const GraphRevision prepared =
-                                graph.revision().next();
-                            graph.publish_prepared_revision(prepared);
-                            cache_service_.clear_cache(graph);
-                            return true;
-                          })
+  return with_graph_state_disk_cache(
+             name,
+             [this](GraphModel& graph) {
+               const GraphRevision prepared = graph.revision().next();
+               graph.publish_prepared_revision(prepared);
+               cache_service_.clear_cache(graph);
+               return true;
+             })
       .value_or(false);
 }
 
 bool Kernel::cache_all_nodes(const std::string& name,
                              const std::string& cache_precision) {
-  return with_graph_state(name,
-                          [this, cache_precision](GraphModel& graph) {
-                            cache_service_.cache_all_nodes(graph,
-                                                           cache_precision);
-                            return true;
-                          })
+  return with_graph_state_disk_cache(
+             name,
+             [this, cache_precision](GraphModel& graph) {
+               cache_service_.cache_all_nodes(graph, cache_precision);
+               return true;
+             })
       .value_or(false);
 }
 
@@ -148,7 +148,7 @@ bool Kernel::free_transient_memory(const std::string& name) {
 /** @copydoc Kernel::clear_drive_cache_stats */
 std::optional<GraphModel::DriveClearResult> Kernel::clear_drive_cache_stats(
     const std::string& name) {
-  return with_graph_state(name, [this](GraphModel& graph) {
+  return with_graph_state_disk_cache(name, [this](GraphModel& graph) {
     const GraphRevision prepared = graph.revision().next();
     graph.publish_prepared_revision(prepared);
     GraphModel::DriveClearResult result =
@@ -171,9 +171,10 @@ std::optional<GraphModel::MemoryClearResult> Kernel::clear_memory_cache_stats(
 
 std::optional<GraphModel::CacheSaveResult> Kernel::cache_all_nodes_stats(
     const std::string& name, const std::string& cache_precision) {
-  return with_graph_state(name, [this, cache_precision](GraphModel& graph) {
-    return cache_service_.cache_all_nodes(graph, cache_precision);
-  });
+  return with_graph_state_disk_cache(
+      name, [this, cache_precision](GraphModel& graph) {
+        return cache_service_.cache_all_nodes(graph, cache_precision);
+      });
 }
 
 /** @copydoc Kernel::free_transient_memory_stats */
@@ -190,19 +191,20 @@ Kernel::free_transient_memory_stats(const std::string& name) {
 
 std::optional<GraphModel::DiskSyncResult> Kernel::synchronize_disk_cache_stats(
     const std::string& name, const std::string& cache_precision) {
-  return with_graph_state(name, [this, cache_precision](GraphModel& graph) {
-    return cache_service_.synchronize_disk_cache(graph, cache_precision);
-  });
+  return with_graph_state_disk_cache(
+      name, [this, cache_precision](GraphModel& graph) {
+        return cache_service_.synchronize_disk_cache(graph, cache_precision);
+      });
 }
 
 bool Kernel::synchronize_disk_cache(const std::string& name,
                                     const std::string& cache_precision) {
-  return with_graph_state(name,
-                          [this, cache_precision](GraphModel& graph) {
-                            cache_service_.synchronize_disk_cache(
-                                graph, cache_precision);
-                            return true;
-                          })
+  return with_graph_state_disk_cache(
+             name,
+             [this, cache_precision](GraphModel& graph) {
+               cache_service_.synchronize_disk_cache(graph, cache_precision);
+               return true;
+             })
       .value_or(false);
 }
 

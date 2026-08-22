@@ -44,6 +44,8 @@ class ComputeCommitPolicy {
    * @note Implementations must claim commit inside their serialized visible
    * transaction before persistence or publication, resolve success/failure
    * before it returns, and must not advance the authoritative GraphRevision.
+   * A target with no image Value still publishes its graph snapshot and
+   * resolves ordinary success without emitting a current-image observation.
    * Failure to claim means cancellation/failure already owns the Run and no
    * visible side effect may occur.
    */

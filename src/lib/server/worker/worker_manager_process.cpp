@@ -208,11 +208,11 @@ std::optional<WorkerManagerCompletion> WorkerManager::Impl::transfer_checkpoint(
   if (process == nullptr) {
     throw std::invalid_argument("worker checkpoint process is null");
   }
-  static const std::vector<std::byte> kEmptyPayload;
-  const std::vector<std::byte>& payload =
+  const std::vector<std::byte> payload =
       record->assignment.checkpoint == nullptr
-          ? kEmptyPayload
-          : record->assignment.checkpoint->payload;
+          ? std::vector<std::byte>{}
+          : encode_named_value_artifact_set(
+                record->assignment.checkpoint->values);
   std::size_t offset = 0U;
   while (offset != payload.size()) {
     if (cancellation_requested(record)) {
@@ -278,17 +278,16 @@ std::optional<WorkerManagerCompletion> WorkerManager::Impl::transfer_checkpoint(
 
 /** @copydoc WorkerManager::Impl::drain_output_slice */
 WorkerDataPlaneIoStatus WorkerManager::Impl::drain_output_slice(
-    ChildProcess* process, const std::optional<ImageBuffer>& image,
+    ChildProcess* process, std::optional<std::vector<std::byte>>& archive,
     std::size_t expected_bytes, std::size_t* received_bytes,
     ArtifactContentHasher* hasher, bool* output_eof,
     std::optional<ArtifactContentDigest>* output_digest) {
   if (process == nullptr || received_bytes == nullptr || hasher == nullptr ||
       output_eof == nullptr || output_digest == nullptr ||
-      (expected_bytes != 0U && !image.has_value())) {
+      (expected_bytes != 0U && !archive.has_value())) {
     throw std::invalid_argument("worker output drain state is incomplete");
   }
-  std::byte* destination =
-      image.has_value() ? static_cast<std::byte*>(image->data.get()) : nullptr;
+  std::byte* destination = archive.has_value() ? archive->data() : nullptr;
   const std::size_t prior_size = *received_bytes;
   const WorkerDataPlaneIoStatus status =
       process->data_plane.receive_output_chunk(destination, expected_bytes,

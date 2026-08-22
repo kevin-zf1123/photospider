@@ -90,7 +90,7 @@ class RoiPropagationService {
    *       executors inject their request's actual route inventory and intent.
    */
   explicit RoiPropagationService(
-      std::vector<Device> available_devices = {Device::CPU},
+      std::vector<DeviceBackend> available_devices = {DeviceBackend::CPU},
       ComputeIntent intent = ComputeIntent::GlobalHighPrecision);
 
   /**
@@ -98,13 +98,22 @@ class RoiPropagationService {
    * context.
    *
    * @param node Node whose operation key is selected.
-   * @return Owned callback, metadata, identity, and device snapshot, or
-   * nullopt when no implementation can run on the bound inventory.
-   * @throws std::bad_alloc or callback-copy exceptions from registry snapshot
-   * selection.
-   * @note The returned value may retain a plugin DSO lease. Region planning
-   * must immediately copy only its callback-free route fields and release this
-   * temporary before returning a plan.
+   * @return Owned execution and propagation callbacks, metadata, exact
+   *         revision identity, device, and callback-shape snapshot; or nullopt
+   *         when no implementation can run on the bound inventory and intent.
+   * @throws std::bad_alloc or any callback-copy exception from coherent
+   *         registry snapshot selection.
+   * @note This delegates to OpRegistry::select_implementation(): intent
+   *       eligibility is checked before HP/RT device-shape priority and cost,
+   *       followed only then by intent-specific scalar and legacy fallback.
+   *       All callbacks belong to the selected revision; absence uses identity
+   *       or no-dependency behavior and never a sibling callback. The returned
+   *       value remains valid across registry mutation and may retain a plugin
+   *       DSO lease. A caller invoking selected-implementation propagation must
+   *       keep it alive through that synchronous callback. Region planning may
+   *       then retain only callback-free identity, device, callback shape, and
+   *       metadata fields and must release the selected value before returning
+   *       a plan.
    */
   std::optional<OpImplementation> select_route_implementation(
       const Node& node) const;
@@ -117,7 +126,7 @@ class RoiPropagationService {
    * @note The inventory preserves caller order; consumers comparing route
    * contexts should canonicalize it as a set.
    */
-  const std::vector<Device>& available_devices() const noexcept {
+  const std::vector<DeviceBackend>& available_devices() const noexcept {
     return available_devices_;
   }
 
@@ -192,8 +201,9 @@ class RoiPropagationService {
    * @throws GraphError or callback exceptions for the ImageRect path.
    * @throws std::bad_alloc when result storage cannot allocate.
    * @note TensorSlice is preserved only by the explicit core dense identity
-   *       operation; other current operations have only rectangular v2
-   *       propagation semantics.
+   *       operation; other current private core operations expose only
+   *       rectangular propagation semantics. Operation ABI v1 Region suites
+   *       use their separately validated rank-general contract.
    */
   RegionOperationResult compute_upstream_region(
       const Node& node, const RegionSet& downstream_region,
@@ -202,19 +212,64 @@ class RoiPropagationService {
 
   /**
    * @brief Computes shared and input-selected upstream ROI contributions.
+   *
    * @param node Node whose input demand is being computed.
    * @param downstream_roi ROI in node output coordinates.
    * @param graph Graph supplying topology, caches, and extent context.
    * @param size_cache Request-local output extent cache.
    * @return Projection retaining dependency input-index routing.
-   * @throws GraphError or callback exceptions from extent/propagation logic.
-   * @note The effective parameter snapshot and all input extents are resolved
-   *       once and shared by dirty and dependency callbacks for this request.
+   * @throws GraphError or callback exceptions from extent, parameter, dirty,
+   *         spatial, or dependency propagation.
+   * @throws std::bad_alloc when route selection or request-local snapshots
+   *         cannot allocate.
+   * @throws Any exception raised while copying a selected callback target.
+   * @note One exact implementation is selected using this service's intent and
+   *       device context, then its coherent dirty/dependency callbacks and
+   *       metadata consume one effective parameter and input-extent snapshot.
+   *       A selected revision with no dirty callback uses identity propagation;
+   *       one with no dependency builder adds no dependency demand. Only when
+   *       no implementation is selectable does this compatibility API consult
+   *       operation-level legacy propagation registrations. The selected
+   *       temporary and any DSO lease remain alive through the synchronous
+   *       propagation callback, then are released; no callback-bearing value
+   *       enters a Region snapshot.
    */
   UpstreamRoiProjection compute_upstream_projection(
       const Node& node, const PixelRect& downstream_roi,
       const GraphModel& graph,
       std::unordered_map<int, PixelSize>& size_cache) const;
+
+  /**
+   * @brief Computes upstream demand with one already selected exact revision.
+   *
+   * @param node Node whose input demand is being computed.
+   * @param downstream_roi ROI in node output coordinates.
+   * @param graph Graph supplying topology, caches, and extent context.
+   * @param size_cache Request-local output extent cache.
+   * @param selected Exact implementation returned by
+   *        select_route_implementation() for this node and service context.
+   *        The caller must keep it alive throughout this synchronous call.
+   * @return Projection retaining dependency input-index routing.
+   * @throws GraphError or callback exceptions from extent, parameter, dirty,
+   *         spatial, or dependency propagation.
+   * @throws std::bad_alloc when request-local snapshots or selected callback
+   *         temporaries cannot allocate.
+   * @throws Any exception raised while copying a selected callback target.
+   * @note Dirty and dependency callbacks, their metadata, and the execution
+   *       identity all come from `selected`. If that revision omits a dirty
+   *       callback, identity propagation is used; if it omits a dependency
+   *       builder, no dependency contribution is produced. Neither absence
+   *       may borrow a callback from a sibling revision. The caller must keep
+   *       `selected` and any plugin DSO lease alive through the immediate
+   *       propagation callback. Afterward Region planning may retain only the
+   *       operation key plus callback-free identity, device, callback shape,
+   *       and metadata fields; `selected` must not enter a long-lived plan or
+   *       Region snapshot.
+   */
+  UpstreamRoiProjection compute_upstream_projection_for_selected_implementation(
+      const Node& node, const PixelRect& downstream_roi,
+      const GraphModel& graph, std::unordered_map<int, PixelSize>& size_cache,
+      const OpImplementation& selected) const;
 
   /**
    * @brief Computes the upstream input ROI required by one node output ROI.
@@ -281,7 +336,7 @@ class RoiPropagationService {
 
  private:
   /** @brief Owned route-visible devices for implementation selection. */
-  std::vector<Device> available_devices_;
+  std::vector<DeviceBackend> available_devices_;
   /** @brief Request compute intent controlling registry candidate ordering. */
   ComputeIntent intent_;
   /** @brief Stateless graph extent resolver for rectangular propagation. */

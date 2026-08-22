@@ -714,14 +714,14 @@ std::string i1_frozen_graph_yaml() {
 ContentDigest i1_frozen_final_content_digest() noexcept {
   return ContentDigest{
       CanonicalDigestAlgorithm::Sha256CanonicalV1,
-      {std::byte{0x17}, std::byte{0x26}, std::byte{0x6c}, std::byte{0xf3},
-       std::byte{0x87}, std::byte{0x15}, std::byte{0x44}, std::byte{0xd6},
-       std::byte{0x1d}, std::byte{0xec}, std::byte{0xc0}, std::byte{0x80},
-       std::byte{0x5c}, std::byte{0xe3}, std::byte{0x00}, std::byte{0xde},
-       std::byte{0xd5}, std::byte{0x9a}, std::byte{0x68}, std::byte{0x8e},
-       std::byte{0x75}, std::byte{0xe8}, std::byte{0x26}, std::byte{0xc1},
-       std::byte{0x5c}, std::byte{0xe4}, std::byte{0xb6}, std::byte{0x98},
-       std::byte{0x9d}, std::byte{0xb4}, std::byte{0xc4}, std::byte{0x93}}};
+      {std::byte{0xb8}, std::byte{0xa4}, std::byte{0x8c}, std::byte{0x4d},
+       std::byte{0x31}, std::byte{0x53}, std::byte{0x6e}, std::byte{0xf1},
+       std::byte{0x1a}, std::byte{0x8a}, std::byte{0x4b}, std::byte{0x94},
+       std::byte{0x1b}, std::byte{0x1b}, std::byte{0x82}, std::byte{0x7f},
+       std::byte{0x97}, std::byte{0x23}, std::byte{0x44}, std::byte{0xeb},
+       std::byte{0xf0}, std::byte{0x30}, std::byte{0x11}, std::byte{0xff},
+       std::byte{0xfa}, std::byte{0x0a}, std::byte{0x92}, std::byte{0x5d},
+       std::byte{0x4d}, std::byte{0xed}, std::byte{0xde}, std::byte{0xb1}}};
 }
 
 /** @copydoc i1_edit_node_one_yaml */

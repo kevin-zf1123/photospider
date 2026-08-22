@@ -25,16 +25,17 @@ namespace ps::compute {
  * @note Callers must synchronize the proxy against GraphModel before RT
  * planning or commit when topology may have changed. The proxy owns its own
  * mutex so RT preview state can be committed without mutating GraphModel node
- * cache fields. Consumers must inspect ImageBuffer::device and must not treat
- * opaque passthrough output as reduced CPU pixels.
+ * cache fields. Consumers must inspect the output Value storage binding and
+ * must not treat opaque passthrough output as reduced CPU pixels.
  */
 class RealtimeProxyGraph {
  public:
   /**
    * @brief Transient RT state for one graph node id.
    *
-   * @note Region metadata is stored in HP logical coordinates. Current
-   * inspection/IPC v2 rectangles are derived edge projections.
+   * @note Region metadata is stored in signed HP logical data-window
+   * coordinates. RT Value bytes and current inspection/IPC v2 rectangles use
+   * independent zero-based storage projections.
    */
   struct NodeState {
     /**
@@ -44,7 +45,7 @@ class RealtimeProxyGraph {
     std::optional<NodeOutput> output;
 
     /**
-     * @brief Normalized HP-space Region represented by the RT proxy output.
+     * @brief Normalized signed logical HP Region represented by RT output.
      * @note RT remains image-only in V-4 and rejects TensorSlice before
      *       publication.
      */

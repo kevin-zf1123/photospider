@@ -14,8 +14,8 @@
 #include <vector>
 
 #include "ipc/session_registry.hpp"
-#include "photospider/core/image_buffer.hpp"
 #include "photospider/host/compute_request.hpp"
+#include "photospider/host/value_result.hpp"
 #include "photospider/ipc/protocol.hpp"
 
 namespace ps::ipc::internal {
@@ -42,14 +42,14 @@ enum class ComputeRequestState {
  * @brief Matching synchronous Host operation selected for one job.
  *
  * @throws Nothing.
- * @note Status invokes `Host::compute`; Image invokes exactly one
- *       `Host::compute_and_get_image` operation before output publication.
+ * @note Status invokes `Host::compute`; Values invokes exactly one
+ *       `Host::compute_and_get_values` operation before output publication.
  */
 enum class ComputeResultMode {
   /** @brief Retain only the exact Host compute status. */
   Status,
-  /** @brief Publish the exact Host image result through the output callback. */
-  Image,
+  /** @brief Publish the exact Host Values through the output callback. */
+  Values,
 };
 
 /**
@@ -94,7 +94,7 @@ class ComputeOutputOwnership {
       std::function<void(const std::optional<std::string>& delivery_id)>;
 
   /**
-   * @brief Creates inactive ownership for a successful empty image.
+   * @brief Creates inactive ownership for a successful empty Value set.
    * @throws Nothing.
    */
   ComputeOutputOwnership() = default;
@@ -178,10 +178,10 @@ class ComputeOutputOwnership {
 };
 
 /**
- * @brief Result of post-Host image validation and output publication.
+ * @brief Result of post-Host Values validation and output publication.
  *
  * @throws Whatever owned status or output operations throw.
- * @note A successful empty image uses canonical success and inactive output;
+ * @note A successful empty set uses canonical success and inactive output;
  *       a failure status must not publish ownership into a terminal record.
  */
 struct ComputeOutputPublication {
@@ -271,21 +271,21 @@ class ComputeRequestRegistry {
   using StatusExecutor =
       std::function<OperationStatus(const HostComputeRequest&)>;
 
-  /** @brief Exact synchronous image-mode Host executor. */
-  using ImageExecutor =
-      std::function<Result<ImageBuffer>(const HostComputeRequest&)>;
+  /** @brief Exact synchronous Values-mode Host executor. */
+  using ValuesExecutor =
+      std::function<Result<NamedValueResult>(const HostComputeRequest&)>;
 
-  /** @brief Post-Host image validation/materialization callback. */
+  /** @brief Post-Host Values validation/materialization callback. */
   using OutputPublisher = std::function<ComputeOutputPublication(
-      const ComputeRequestId&, ImageBuffer)>;
+      const ComputeRequestId&, NamedValueResult)>;
 
   /**
    * @brief Creates a stopped registry with injected lifecycle dependencies.
    *
    * @param sessions Session admission registry that outlives this object.
    * @param status_executor Matching status-mode Host boundary.
-   * @param image_executor Matching image-mode Host boundary.
-   * @param output_publisher Post-Host image publication boundary.
+   * @param values_executor Matching Values-mode Host boundary.
+   * @param output_publisher Post-Host Values publication boundary.
    * @param limits Global active/terminal limits and terminal TTL.
    * @param clock Monotonic clock; empty selects `steady_clock::now`.
    * @param id_generator Candidate source; empty selects OS entropy.
@@ -295,7 +295,7 @@ class ComputeRequestRegistry {
    */
   ComputeRequestRegistry(SessionRegistry& sessions,
                          StatusExecutor status_executor,
-                         ImageExecutor image_executor,
+                         ValuesExecutor values_executor,
                          OutputPublisher output_publisher,
                          ComputeRequestRegistryLimits limits = {},
                          Clock clock = {}, IdGenerator id_generator = {});
@@ -352,7 +352,7 @@ class ComputeRequestRegistry {
    * @param session_id Existing opaque session id.
    * @param request Host compute value whose private session is overwritten by
    *        the admitted mapping.
-   * @param mode Matching status or image executor selection.
+   * @param mode Matching status or Values executor selection.
    * @return Queued noncancellable snapshot, or top-level admission failure.
    * @throws std::bad_alloc if pre-publication ownership cannot be allocated.
    * @throws std::runtime_error if the opaque source fails.
@@ -471,8 +471,8 @@ class ComputeRequestRegistry {
   /** @brief Matching status-mode executor, normally locking daemon Host. */
   StatusExecutor status_executor_;
 
-  /** @brief Matching image-mode executor, normally locking daemon Host. */
-  ImageExecutor image_executor_;
+  /** @brief Matching Values-mode executor, normally locking daemon Host. */
+  ValuesExecutor values_executor_;
 
   /** @brief Output validator/publisher invoked after Host mutex release. */
   OutputPublisher output_publisher_;

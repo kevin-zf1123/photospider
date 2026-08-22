@@ -506,7 +506,11 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
-            "SnapshotRejectsHugeZeroStrideImageBeforeIntNarrowing"
+            "ImageViewPreservesHugeZeroStrideExtentWithoutNarrowing"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "SnapshotCompactsReverseBroadcastAndPlanarImageLayouts"
         ),
         (
             "CpuDenseTensorImageOperation."
@@ -546,6 +550,14 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "FormalCommitPublishesPendingNativeValueAfterReadyUnderExplicitPlan"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "FormalCommitPreservesValidatedOpaqueNativeImageValue"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "FormalHpCachePreservesAliasesAndResealsDirtyAndReplacementBytes"
         ),
         (
@@ -562,7 +574,7 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
-            "DiskSaveSerializesSealedValueInsteadOfMutableCompatibilitySnapshot"
+            "DiskSaveUsesSealedValueAsSoleImageAuthority"
         ),
         (
             "CpuDenseTensorImageOperation."
@@ -582,6 +594,10 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "ProductExecutorUsesNegativeOriginImageRectCoordinates"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "ProductExecutorUsesAllRankFourTensorSliceAxes"
         ),
         (
@@ -594,7 +610,19 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "TensorDirtyPlanReadsSignedMetadataFromReadyDeviceLocalValue"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "TensorTargetPlanRejectsPreferredRouteAddedBeforeTaskPopulation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ImageRectHpPlanRejectsRouteSwitchBeforeTaskPopulation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ImageRectRtPlanRejectsRouteSwitchBeforeTaskPopulation"
         ),
         (
             "CpuDenseTensorImageOperation."
@@ -626,7 +654,7 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
-            "RunnerRejectsExecuteDescriptorMismatchAsComputeError"
+            "RunnerRejectsExecuteAccessBeyondFrozenGrantAsComputeError"
         ),
     }
     value_runtime_tests = {

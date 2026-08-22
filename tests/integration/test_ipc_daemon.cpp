@@ -42,6 +42,7 @@
 #include "ipc/server.hpp"
 #include "ipc/server_lifecycle_test_access.hpp"
 #include "ipc/unix_socket.hpp"
+#include "photospider/data/value_artifact.hpp"
 #include "photospider/ipc/client.hpp"
 #include "support/ipc_host_spy.hpp"
 
@@ -439,7 +440,7 @@ class DaemonProcess {
    *        environment for default-path tests.
    * @param start_gate_fd Optional descriptor from which the child must consume
    *        one byte before exec.
-   * @param fixture_image_mode Empty for `photospiderd`, otherwise one of the
+   * @param fixture_values_mode Empty for photospiderd, otherwise one of the
    *        deterministic fixture modes `empty`, `nonempty`, or `invalid`.
    * @param fixture_clock_control Absolute fixed-width manual-clock file passed
    *        only to the output fixture; ignored for the product daemon.
@@ -451,7 +452,7 @@ class DaemonProcess {
    */
   void start(std::string socket_path, bool explicit_socket = true,
              std::string xdg_runtime = {}, int start_gate_fd = -1,
-             std::string fixture_image_mode = {},
+             std::string fixture_values_mode = {},
              std::string fixture_clock_control = {}) {
     stop();
     if (pid_ >= 0) {
@@ -483,11 +484,11 @@ class DaemonProcess {
           ::_exit(126);
         }
       }
-      if (!fixture_image_mode.empty()) {
+      if (!fixture_values_mode.empty()) {
         ::execl(PS_IPC_OUTPUT_FIXTURE_DAEMON_PATH,
                 PS_IPC_OUTPUT_FIXTURE_DAEMON_PATH, "--socket",
-                socket_path_.c_str(), "--image-mode",
-                fixture_image_mode.c_str(), "--clock-control",
+                socket_path_.c_str(), "--values-mode",
+                fixture_values_mode.c_str(), "--clock-control",
                 fixture_clock_control.c_str(), static_cast<char*>(nullptr));
         ::_exit(127);
       }
@@ -842,7 +843,8 @@ struct ListenerReplacementState {
   /** @brief Whether a socket replacement enters listening state. */
   bool listen_on_replacement = false;
 
-  /** @brief Device number captured immediately after socket replacement. */
+  /** @brief DeviceBackend number captured immediately after socket replacement.
+   */
   dev_t replacement_device = 0;
 
   /** @brief Inode number captured immediately after socket replacement. */
@@ -2373,17 +2375,17 @@ internal::Json minimal_compute_submit_params(const IpcSessionId& session,
 }
 
 /**
- * @brief Builds the smallest valid image-mode compute submission.
+ * @brief Builds the smallest valid named-Values compute submission.
  * @param session Active opaque daemon session id.
  * @param node Target public node id recorded by the deterministic Host.
- * @return Params containing only required fields and image result mode.
+ * @return Params containing only required fields and Values result mode.
  * @throws std::bad_alloc if JSON storage cannot allocate.
  */
-internal::Json image_compute_submit_params(const IpcSessionId& session,
-                                           std::int64_t node = 1) {
+internal::Json values_compute_submit_params(const IpcSessionId& session,
+                                            std::int64_t node = 1) {
   return internal::Json{{"session_id", session.value},
                         {"node_id", node},
-                        {"result_mode", "image"}};
+                        {"result_mode", "values"}};
 }
 
 /**
@@ -2528,6 +2530,24 @@ std::vector<std::uint8_t> read_artifact_bytes(const std::string& path) {
 }
 
 /**
+ * @brief Decodes one fixture artifact through the production archive codec.
+ * @param bytes Exact bytes read from the protected output artifact.
+ * @return Fully validated detached named-Value artifact set.
+ * @throws All canonical archive validation and allocation failures unchanged.
+ * @note The byte-type conversion changes neither ordering nor content and
+ *       grants no path, lease, or runtime Value authority.
+ */
+NamedValueArtifactSet decode_fixture_value_archive(
+    const std::vector<std::uint8_t>& bytes) {
+  std::vector<std::byte> archive;
+  archive.reserve(bytes.size());
+  for (const std::uint8_t byte : bytes) {
+    archive.push_back(static_cast<std::byte>(byte));
+  }
+  return decode_named_value_artifact_set(archive);
+}
+
+/**
  * @brief Loads one opaque session through the public typed Client.
  * @param socket_path Running product or fixture daemon socket.
  * @param root_dir Absolute test-owned graph root.
@@ -2637,10 +2657,10 @@ class ScopedFixtureJobRelease final {
 };
 
 /**
- * @brief Terminal nonempty image job plus its first protected delivery.
+ * @brief Terminal nonempty named-Values job plus its protected delivery.
  * @throws std::bad_alloc when owned JSON or identity storage cannot allocate.
  */
-struct FixtureImageDelivery {
+struct FixtureValueDelivery {
   /** @brief Accepted opaque compute identity. */
   std::string compute_id;
 
@@ -2649,7 +2669,7 @@ struct FixtureImageDelivery {
 };
 
 /**
- * @brief Submits, awaits, and obtains one nonempty fixture image delivery.
+ * @brief Submits, awaits, and obtains one nonempty fixture Values delivery.
  * @param socket_path Running nonempty output fixture socket.
  * @param session Active opaque fixture session.
  * @param label Unique request-id prefix.
@@ -2657,24 +2677,24 @@ struct FixtureImageDelivery {
  * @throws std::runtime_error if any correlated stage is not successful.
  * @throws std::bad_alloc if request/response storage cannot allocate.
  */
-FixtureImageDelivery deliver_fixture_image(const std::string& socket_path,
-                                           const IpcSessionId& session,
-                                           const std::string& label) {
+FixtureValueDelivery deliver_fixture_values(const std::string& socket_path,
+                                            const IpcSessionId& session,
+                                            const std::string& label) {
   const internal::Json submitted =
       raw_daemon_call(socket_path, "compute.submit",
-                      image_compute_submit_params(session), label + "-submit");
+                      values_compute_submit_params(session), label + "-submit");
   if (!submitted.contains("result") ||
       !submitted["result"].value("compute_id", internal::Json()).is_string()) {
-    throw std::runtime_error("fixture image submission failed: " +
+    throw std::runtime_error("fixture Values submission failed: " +
                              submitted.dump());
   }
-  FixtureImageDelivery delivery;
+  FixtureValueDelivery delivery;
   delivery.compute_id = submitted["result"]["compute_id"].get<std::string>();
   const internal::Json terminal = wait_for_real_compute_terminal(
       socket_path, delivery.compute_id, std::chrono::seconds(3));
   if (!terminal.contains("result") ||
       terminal["result"].value("state", "") != "succeeded") {
-    throw std::runtime_error("fixture image did not succeed: " +
+    throw std::runtime_error("fixture Values did not succeed: " +
                              terminal.dump());
   }
   const internal::Json result = raw_daemon_call(
@@ -2682,7 +2702,8 @@ FixtureImageDelivery deliver_fixture_image(const std::string& socket_path,
       internal::Json{{"compute_id", delivery.compute_id}}, label + "-result");
   if (!result.contains("result") ||
       !result["result"].value("output", internal::Json()).is_object()) {
-    throw std::runtime_error("fixture image delivery failed: " + result.dump());
+    throw std::runtime_error("fixture Values delivery failed: " +
+                             result.dump());
   }
   delivery.output = result["result"]["output"];
   return delivery;
@@ -2713,7 +2734,7 @@ internal::UniqueFd open_fixture_artifact(const std::string& path) {
 std::vector<std::uint8_t> read_open_fixture_artifact(int fd) {
   struct stat metadata{};
   if (::fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
-      metadata.st_size < 0 || metadata.st_size > 256) {
+      metadata.st_size < 0 || metadata.st_size > 4 * 1024) {
     throw std::runtime_error("open fixture artifact metadata is invalid");
   }
   std::vector<std::uint8_t> bytes(static_cast<std::size_t>(metadata.st_size));
@@ -4529,7 +4550,7 @@ TEST(IpcDaemonPolicy,
 #endif
 
 TEST(IpcOutputFixtureDaemon,
-     EmptyImageSucceedsWithoutArtifactOrDeliveryMetadata) {
+     EmptyValuesSucceedsWithoutArtifactOrDeliveryMetadata) {
   ScopedDaemonDirectory temp("ps-output-empty", true);
   const std::string socket_path = (temp.path() / "empty.sock").string();
   ManualProcessClock clock(temp.path() / "clock.bin");
@@ -4542,7 +4563,7 @@ TEST(IpcOutputFixtureDaemon,
 
   const internal::Json submitted = raw_daemon_call(
       socket_path, "compute.submit",
-      image_compute_submit_params(loaded.value.session_id), "empty-submit");
+      values_compute_submit_params(loaded.value.session_id), "empty-submit");
   ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
   ASSERT_EQ(submitted["result"].size(), 6U);
   EXPECT_TRUE(submitted["result"]["output"].is_null());
@@ -4643,7 +4664,7 @@ TEST(IpcObservationFixtureDaemon,
 }
 
 TEST(IpcOutputFixtureDaemon,
-     NonemptyImageReturnsExactProtectedMetadataAndStableLease) {
+     NonemptyValuesReturnsExactProtectedMetadataAndStableLease) {
   ScopedDaemonDirectory temp("ps-output-value", true);
   const std::string socket_path = (temp.path() / "value.sock").string();
   ManualProcessClock clock(temp.path() / "clock.bin");
@@ -4656,7 +4677,7 @@ TEST(IpcOutputFixtureDaemon,
 
   const internal::Json submitted = raw_daemon_call(
       socket_path, "compute.submit",
-      image_compute_submit_params(loaded.value.session_id), "image-submit");
+      values_compute_submit_params(loaded.value.session_id), "values-submit");
   ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
   EXPECT_TRUE(submitted["result"]["output"].is_null());
   const std::string compute_id =
@@ -4670,7 +4691,7 @@ TEST(IpcOutputFixtureDaemon,
 
   const internal::Json result = raw_daemon_call(
       socket_path, "compute.result", internal::Json{{"compute_id", compute_id}},
-      "image-result");
+      "values-result");
   ASSERT_TRUE(result.contains("result")) << result.dump();
   ASSERT_EQ(result["result"].size(), 6U);
   const internal::Json output = result["result"]["output"];
@@ -4679,23 +4700,32 @@ TEST(IpcOutputFixtureDaemon,
     release_guard.protect_delivery(output["delivery_id"].get<std::string>());
   }
   ASSERT_TRUE(output.is_object()) << result.dump();
-  ASSERT_EQ(output.size(), 12U);
+  ASSERT_EQ(output.size(), 9U);
   EXPECT_TRUE(
       internal::valid_opaque_id(output["output_id"].get<std::string>()));
   EXPECT_TRUE(
       internal::valid_opaque_id(output["delivery_id"].get<std::string>()));
   EXPECT_FALSE(output.contains("output_reference"));
-  EXPECT_EQ(output["width"], 2);
-  EXPECT_EQ(output["height"], 2);
-  EXPECT_EQ(output["channels"], 1);
-  EXPECT_EQ(output["data_type"], "uint8");
-  EXPECT_EQ(output["device"], "cpu");
-  EXPECT_EQ(output["row_step"], 2);
-  EXPECT_EQ(output["byte_size"], 4);
+  EXPECT_GT(output["byte_size"].get<std::uint64_t>(), 4U);
+  EXPECT_EQ(output["digest_sha256"].get<std::string>().size(), 64U);
+  EXPECT_EQ(output["archive_version"], kNamedValueArtifactSetArchiveVersion);
+  EXPECT_EQ(output["value_count"], 1U);
   const std::string artifact_path = output["path"].get<std::string>();
   EXPECT_TRUE(std::filesystem::path(artifact_path).is_absolute());
-  EXPECT_EQ(read_artifact_bytes(artifact_path),
-            (std::vector<std::uint8_t>{1, 2, 3, 4}));
+  const std::vector<std::uint8_t> artifact_bytes =
+      read_artifact_bytes(artifact_path);
+  const NamedValueArtifactSet artifacts =
+      decode_fixture_value_archive(artifact_bytes);
+  ASSERT_EQ(artifacts.values.size(), 1U);
+  EXPECT_EQ(artifacts.values.front().envelope.output_name, "image");
+  ASSERT_EQ(artifacts.values.front().payloads.size(), 1U);
+  const std::vector<std::byte>& payload =
+      artifacts.values.front().payloads.front();
+  ASSERT_EQ(payload.size(), 4U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(payload[0]), 1U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(payload[1]), 2U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(payload[2]), 3U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(payload[3]), 4U);
   struct stat artifact{};
   ASSERT_EQ(::lstat(artifact_path.c_str(), &artifact), 0);
   EXPECT_TRUE(S_ISREG(artifact.st_mode));
@@ -4709,14 +4739,14 @@ TEST(IpcOutputFixtureDaemon,
 
   const internal::Json repeated = raw_daemon_call(
       socket_path, "compute.result", internal::Json{{"compute_id", compute_id}},
-      "image-result-repeated");
+      "values-result-repeated");
   ASSERT_TRUE(repeated.contains("result")) << repeated.dump();
   EXPECT_EQ(repeated["result"]["output"], output);
   const internal::Json released =
       raw_daemon_call(socket_path, "compute.release",
                       internal::Json{{"compute_id", compute_id},
                                      {"delivery_id", output["delivery_id"]}},
-                      "image-release");
+                      "values-release");
   ASSERT_TRUE(released.contains("result")) << released.dump();
   release_guard.dismiss();
   EXPECT_FALSE(std::filesystem::exists(artifact_path));
@@ -4739,13 +4769,15 @@ TEST(IpcOutputFixtureDaemon,
       socket_path, temp.path() / "sessions", "manual_clock_output");
   ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
 
-  FixtureImageDelivery refreshed = deliver_fixture_image(
+  FixtureValueDelivery refreshed = deliver_fixture_values(
       socket_path, loaded.value.session_id, "near-expiry");
   ScopedFixtureJobRelease refreshed_guard(socket_path, refreshed.compute_id);
   refreshed_guard.protect_delivery(
       refreshed.output["delivery_id"].get<std::string>());
   const std::string refreshed_path =
       refreshed.output["path"].get<std::string>();
+  const std::vector<std::uint8_t> refreshed_bytes =
+      read_artifact_bytes(refreshed_path);
   clock.advance(std::chrono::milliseconds(900));
   const internal::Json repeated =
       raw_daemon_call(socket_path, "compute.result",
@@ -4766,8 +4798,7 @@ TEST(IpcOutputFixtureDaemon,
   clock.advance(std::chrono::milliseconds(200));
   trigger_fixture_cleanup(socket_path, "near-expiry-cleanup");
   EXPECT_TRUE(std::filesystem::exists(refreshed_path));
-  EXPECT_EQ(read_artifact_bytes(refreshed_path),
-            (std::vector<std::uint8_t>{1, 2, 3, 4}));
+  EXPECT_EQ(read_artifact_bytes(refreshed_path), refreshed_bytes);
   const internal::Json orphan_released = raw_daemon_call(
       socket_path, "compute.release",
       internal::Json{{"compute_id", refreshed.compute_id},
@@ -4777,8 +4808,8 @@ TEST(IpcOutputFixtureDaemon,
   refreshed_guard.dismiss();
   EXPECT_FALSE(std::filesystem::exists(refreshed_path));
 
-  FixtureImageDelivery reactivated =
-      deliver_fixture_image(socket_path, loaded.value.session_id, "reactivate");
+  FixtureValueDelivery reactivated = deliver_fixture_values(
+      socket_path, loaded.value.session_id, "reactivate");
   ScopedFixtureJobRelease reactivated_guard(socket_path,
                                             reactivated.compute_id);
   reactivated_guard.protect_delivery(
@@ -4821,10 +4852,10 @@ TEST(IpcOutputFixtureDaemon,
   const IpcResult<GraphSessionSummary> loaded = load_fixture_session(
       socket_path, temp.path() / "sessions", "retention_output");
   ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
-  const std::vector<std::uint8_t> expected{1, 2, 3, 4};
-
-  FixtureImageDelivery normal =
-      deliver_fixture_image(socket_path, loaded.value.session_id, "fd-normal");
+  FixtureValueDelivery normal =
+      deliver_fixture_values(socket_path, loaded.value.session_id, "fd-normal");
+  const std::vector<std::uint8_t> expected =
+      read_artifact_bytes(normal.output["path"].get<std::string>());
   internal::UniqueFd normal_fd =
       open_fixture_artifact(normal.output["path"].get<std::string>());
   const internal::Json normal_released = raw_daemon_call(
@@ -4837,7 +4868,7 @@ TEST(IpcOutputFixtureDaemon,
       std::filesystem::exists(normal.output["path"].get<std::string>()));
   EXPECT_EQ(read_open_fixture_artifact(normal_fd.get()), expected);
 
-  FixtureImageDelivery evicted = deliver_fixture_image(
+  FixtureValueDelivery evicted = deliver_fixture_values(
       socket_path, loaded.value.session_id, "fd-eviction");
   ScopedFixtureJobRelease eviction_guard(socket_path, evicted.compute_id);
   eviction_guard.protect_delivery(
@@ -4869,8 +4900,8 @@ TEST(IpcOutputFixtureDaemon,
   EXPECT_EQ(read_open_fixture_artifact(eviction_fd.get()), expected);
   eviction_guard.dismiss();
 
-  FixtureImageDelivery expired =
-      deliver_fixture_image(socket_path, loaded.value.session_id, "fd-expiry");
+  FixtureValueDelivery expired =
+      deliver_fixture_values(socket_path, loaded.value.session_id, "fd-expiry");
   ScopedFixtureJobRelease expiry_guard(socket_path, expired.compute_id);
   expiry_guard.protect_delivery(
       expired.output["delivery_id"].get<std::string>());
@@ -4906,9 +4937,10 @@ TEST(IpcOutputFixtureDaemon,
   const IpcResult<GraphSessionSummary> loaded = load_fixture_session(
       socket_path, temp.path() / "sessions", "shutdown_lease_output");
   ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
-  FixtureImageDelivery delivery = deliver_fixture_image(
+  FixtureValueDelivery delivery = deliver_fixture_values(
       socket_path, loaded.value.session_id, "shutdown-lease");
   const std::string path = delivery.output["path"].get<std::string>();
+  const std::vector<std::uint8_t> expected = read_artifact_bytes(path);
   internal::UniqueFd descriptor = open_fixture_artifact(path);
 
   clock.advance(std::chrono::milliseconds(900));
@@ -4936,13 +4968,12 @@ TEST(IpcOutputFixtureDaemon,
   ASSERT_TRUE(daemon.wait_for_exit(std::chrono::seconds(2)));
   EXPECT_TRUE(daemon.exited_successfully());
   EXPECT_FALSE(std::filesystem::exists(path));
-  EXPECT_EQ(read_open_fixture_artifact(descriptor.get()),
-            (std::vector<std::uint8_t>{1, 2, 3, 4}));
+  EXPECT_EQ(read_open_fixture_artifact(descriptor.get()), expected);
   EXPECT_TRUE(std::filesystem::is_empty(socket_path + ".outputs"));
 }
 
 TEST(IpcOutputFixtureDaemon,
-     InvalidImageFilesystemPublicationAndArtifactCountQuotaStayNested) {
+     InvalidValuesFilesystemPublicationAndArtifactCountQuotaStayNested) {
   ScopedDaemonDirectory temp("ps-output-fail", true);
   ManualProcessClock clock(temp.path() / "clock.bin");
   const std::string invalid_socket = (temp.path() / "invalid.sock").string();
@@ -4955,8 +4986,8 @@ TEST(IpcOutputFixtureDaemon,
   ASSERT_TRUE(invalid_session.status.ok) << invalid_session.status.message;
   internal::Json submitted = raw_daemon_call(
       invalid_socket, "compute.submit",
-      image_compute_submit_params(invalid_session.value.session_id),
-      "invalid-image-submit");
+      values_compute_submit_params(invalid_session.value.session_id),
+      "invalid-values-submit");
   ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
   const std::string invalid_id =
       submitted["result"]["compute_id"].get<std::string>();
@@ -4969,7 +5000,7 @@ TEST(IpcOutputFixtureDaemon,
   EXPECT_TRUE(terminal["result"]["output"].is_null());
   EXPECT_TRUE(raw_daemon_call(invalid_socket, "compute.release",
                               internal::Json{{"compute_id", invalid_id}},
-                              "invalid-image-release")
+                              "invalid-values-release")
                   .contains("result"));
   invalid_daemon.stop();
   ASSERT_TRUE(invalid_daemon.exited_successfully());
@@ -4989,7 +5020,7 @@ TEST(IpcOutputFixtureDaemon,
     ScopedDirectoryMode block_publication(quota_instance, 0500);
     submitted = raw_daemon_call(
         quota_socket, "compute.submit",
-        image_compute_submit_params(quota_session.value.session_id),
+        values_compute_submit_params(quota_session.value.session_id),
         "filesystem-publication-submit");
     ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
     const std::string publication_failure_id =
@@ -5025,7 +5056,7 @@ TEST(IpcOutputFixtureDaemon,
   for (std::size_t index = 0; index < 3; ++index) {
     submitted = raw_daemon_call(
         quota_socket, "compute.submit",
-        image_compute_submit_params(quota_session.value.session_id),
+        values_compute_submit_params(quota_session.value.session_id),
         "quota-submit-" + std::to_string(index));
     ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
     const std::string compute_id =
@@ -5070,7 +5101,7 @@ TEST(IpcOutputFixtureDaemon,
 
   internal::Json submitted = raw_daemon_call(
       socket_path, "compute.submit",
-      image_compute_submit_params(loaded.value.session_id), "tamper-submit");
+      values_compute_submit_params(loaded.value.session_id), "tamper-submit");
   ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
   const std::string tamper_id =
       submitted["result"]["compute_id"].get<std::string>();
@@ -5119,7 +5150,7 @@ TEST(IpcOutputFixtureDaemon,
 
   submitted = raw_daemon_call(
       socket_path, "compute.submit",
-      image_compute_submit_params(loaded.value.session_id), "orphan-submit");
+      values_compute_submit_params(loaded.value.session_id), "orphan-submit");
   ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
   const std::string orphan_id =
       submitted["result"]["compute_id"].get<std::string>();
@@ -5187,7 +5218,7 @@ TEST(IpcOutputFixtureDaemon,
   ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
   const internal::Json submitted = raw_daemon_call(
       socket_path, "compute.submit",
-      image_compute_submit_params(loaded.value.session_id), "restart-submit");
+      values_compute_submit_params(loaded.value.session_id), "restart-submit");
   ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
   const std::string compute_id =
       submitted["result"]["compute_id"].get<std::string>();

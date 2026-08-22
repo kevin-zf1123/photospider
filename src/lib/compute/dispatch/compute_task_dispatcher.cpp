@@ -304,7 +304,7 @@ PreparedComputeDispatch ComputeTaskDispatcher::prepare(
       graph, cache_, request, run, lifecycle_lease, execution_service);
 
   observe_dispatch_cancellation(state->lifecycle_lease);
-  std::vector<Device> available_devices =
+  std::vector<DeviceBackend> available_devices =
       execution_service.available_devices(execution_type);
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
       graph, traversal_, node_id, std::move(available_devices), false,
@@ -329,6 +329,7 @@ PreparedComputeDispatch ComputeTaskDispatcher::prepare(
       request.disable_disk_cache,
       request.benchmark_events,
       &state->lifecycle_lease,
+      &plan.compute_plan().planned_work,
   });
   observe_dispatch_cancellation(state->lifecycle_lease);
 
@@ -415,6 +416,7 @@ NodeOutput& ComputeTaskDispatcher::execute_prepared(
   }
   observe_dispatch_cancellation(state->lifecycle_lease);
   committer.commit(*state->graph, state->plan->execution_order(),
+                   state->plan->compute_plan().planned_work,
                    state->plan->temp_results());
   observe_dispatch_cancellation(state->lifecycle_lease);
 
@@ -482,7 +484,7 @@ NodeOutput& ComputeTaskDispatcher::execute_impl(
 
   ComputeRunLease dispatcher_lease = lifecycle_lease;
   observe_dispatch_cancellation(dispatcher_lease);
-  std::vector<Device> available_devices =
+  std::vector<DeviceBackend> available_devices =
       execution_service != nullptr && host != nullptr &&
               execution_type != nullptr
           ? execution_service->available_devices(*execution_type)
@@ -512,6 +514,7 @@ NodeOutput& ComputeTaskDispatcher::execute_impl(
       request.disable_disk_cache,
       request.benchmark_events,
       &dispatcher_lease,
+      &plan.compute_plan().planned_work,
   });
   observe_dispatch_cancellation(dispatcher_lease);
   if (!run.advance_to(ComputeRunPhase::Queued)) {
@@ -543,7 +546,8 @@ NodeOutput& ComputeTaskDispatcher::execute_impl(
     committer.finalize_timing(timing_results, timing_mutex);
   }
   observe_dispatch_cancellation(dispatcher_lease);
-  committer.commit(graph, plan.execution_order(), plan.temp_results());
+  committer.commit(graph, plan.execution_order(),
+                   plan.compute_plan().planned_work, plan.temp_results());
   observe_dispatch_cancellation(dispatcher_lease);
 
   NodeOutput* output =

@@ -38,8 +38,8 @@ bool known_route(std::string_view type_name) noexcept {
  * @throws Nothing.
  * @note CUDA, ASIC, and NPU are outside the fixed Issue #75 route inventory.
  */
-bool is_metal_device(Device device) noexcept {
-  return device == Device::GPU_METAL;
+bool is_metal_device(DeviceBackend device) noexcept {
+  return device == DeviceBackend::Metal;
 }
 
 }  // namespace
@@ -73,23 +73,24 @@ bool PhysicalExecutionRoutes::is_supported(
 
 /** @copydoc PhysicalExecutionRoutes::can_start */
 bool PhysicalExecutionRoutes::can_start(
-    std::string_view type_name, Device device, PhysicalExecutionLane lane,
-    int worker_id, std::uint64_t run_in_flight) const noexcept {
+    std::string_view type_name, DeviceBackend device,
+    PhysicalExecutionLane lane, int worker_id,
+    std::uint64_t run_in_flight) const noexcept {
   if (stopping_) {
     return false;
   }
   if (type_name == kCpuRoute) {
-    return device == Device::CPU && lane == PhysicalExecutionLane::Cpu;
+    return device == DeviceBackend::CPU && lane == PhysicalExecutionLane::Cpu;
   }
   if (type_name == kSerialDebugRoute) {
-    return device == Device::CPU && lane == PhysicalExecutionLane::Cpu &&
+    return device == DeviceBackend::CPU && lane == PhysicalExecutionLane::Cpu &&
            worker_id == 0 && run_in_flight == 0U &&
            serial_debug_in_flight_ == 0U;
   }
   if (type_name != kGpuPipelineRoute) {
     return false;
   }
-  if (device == Device::CPU) {
+  if (device == DeviceBackend::CPU) {
     return lane == PhysicalExecutionLane::Cpu;
   }
   return is_metal_device(device) && lane == PhysicalExecutionLane::Gpu &&
@@ -98,19 +99,19 @@ bool PhysicalExecutionRoutes::can_start(
 
 /** @copydoc PhysicalExecutionRoutes::commit_start */
 bool PhysicalExecutionRoutes::commit_start(std::string_view type_name,
-                                           Device device) noexcept {
+                                           DeviceBackend device) noexcept {
   if (stopping_) {
     return false;
   }
   std::uint64_t* counter = nullptr;
-  if (type_name == kCpuRoute && device == Device::CPU) {
+  if (type_name == kCpuRoute && device == DeviceBackend::CPU) {
     counter = &cpu_in_flight_;
-  } else if (type_name == kGpuPipelineRoute && device == Device::CPU) {
+  } else if (type_name == kGpuPipelineRoute && device == DeviceBackend::CPU) {
     counter = &gpu_pipeline_cpu_in_flight_;
   } else if (type_name == kGpuPipelineRoute && is_metal_device(device) &&
              gpu_pipeline_gpu_in_flight_ == 0U) {
     counter = &gpu_pipeline_gpu_in_flight_;
-  } else if (type_name == kSerialDebugRoute && device == Device::CPU &&
+  } else if (type_name == kSerialDebugRoute && device == DeviceBackend::CPU &&
              serial_debug_in_flight_ == 0U) {
     counter = &serial_debug_in_flight_;
   }
@@ -124,15 +125,15 @@ bool PhysicalExecutionRoutes::commit_start(std::string_view type_name,
 
 /** @copydoc PhysicalExecutionRoutes::finish */
 bool PhysicalExecutionRoutes::finish(std::string_view type_name,
-                                     Device device) noexcept {
+                                     DeviceBackend device) noexcept {
   std::uint64_t* counter = nullptr;
-  if (type_name == kCpuRoute && device == Device::CPU) {
+  if (type_name == kCpuRoute && device == DeviceBackend::CPU) {
     counter = &cpu_in_flight_;
-  } else if (type_name == kGpuPipelineRoute && device == Device::CPU) {
+  } else if (type_name == kGpuPipelineRoute && device == DeviceBackend::CPU) {
     counter = &gpu_pipeline_cpu_in_flight_;
   } else if (type_name == kGpuPipelineRoute && is_metal_device(device)) {
     counter = &gpu_pipeline_gpu_in_flight_;
-  } else if (type_name == kSerialDebugRoute && device == Device::CPU) {
+  } else if (type_name == kSerialDebugRoute && device == DeviceBackend::CPU) {
     counter = &serial_debug_in_flight_;
   }
   if (counter == nullptr || *counter == 0U) {

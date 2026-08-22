@@ -550,8 +550,8 @@ TEST(M1ProductPath,
      ThroughputSettlesInsideInteractiveBacklogWithBoundedStarts) {
   ScopedM1TempDirectory temp;
   std::unique_ptr<Host> host = make_m1_host(1U);
-  std::future<Result<ImageBuffer>> blocker_future;
-  std::vector<std::future<Result<ImageBuffer>>> throughput_futures;
+  std::future<Result<NamedValueResult>> blocker_future;
+  std::vector<std::future<Result<NamedValueResult>>> throughput_futures;
   OperationCallbackGate gate("image_generator:coordinate_pattern");
   ScopedOperationObserver observer(gate);
 
@@ -584,7 +584,7 @@ TEST(M1ProductPath,
 
   M1FairnessObservationCollector blocker_observations(16U);
   blocker_future = std::async(std::launch::async, [&] {
-    return b1_host->compute_b1_image(make_reduced_throughput_request(
+    return b1_host->compute_b1_values(make_reduced_throughput_request(
         blocker, 1U,
         blocker_observations.make_sink(
             M1ObservedRequestTag::ThroughputGraphA)));
@@ -618,7 +618,7 @@ TEST(M1ProductPath,
   throughput_futures.reserve(throughput_sessions.size());
   for (std::size_t index = 0U; index < throughput_sessions.size(); ++index) {
     throughput_futures.push_back(std::async(std::launch::async, [&, index] {
-      return b1_host->compute_b1_image(make_reduced_throughput_request(
+      return b1_host->compute_b1_values(make_reduced_throughput_request(
           throughput_sessions[index], 1U,
           observations.make_sink(
               index % 2U == 0U ? M1ObservedRequestTag::ThroughputGraphA
@@ -634,11 +634,11 @@ TEST(M1ProductPath,
 
   gate.release();
   ASSERT_EQ(blocker_future.wait_for(5s), std::future_status::ready);
-  const Result<ImageBuffer> blocker_result = blocker_future.get();
+  const Result<NamedValueResult> blocker_result = blocker_future.get();
   ASSERT_TRUE(blocker_result.status.ok) << blocker_result.status.message;
-  for (std::future<Result<ImageBuffer>>& future : throughput_futures) {
+  for (std::future<Result<NamedValueResult>>& future : throughput_futures) {
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
-    const Result<ImageBuffer> result = future.get();
+    const Result<NamedValueResult> result = future.get();
     ASSERT_TRUE(result.status.ok) << result.status.message;
   }
   for (I1EditAdmissionResult& admission : interactive_admissions) {
@@ -763,7 +763,7 @@ TEST(M1ProductPath,
 TEST(M1ProductPath, ThroughputGeneralCapacityPreservesInteractiveHeadroom) {
   ScopedM1TempDirectory temp;
   std::unique_ptr<Host> host = make_m1_host(8U);
-  std::vector<std::future<Result<ImageBuffer>>> throughput_futures;
+  std::vector<std::future<Result<NamedValueResult>>> throughput_futures;
   OperationCallbackGate gate("image_generator:coordinate_pattern");
   ScopedOperationObserver observer(gate);
 
@@ -792,7 +792,7 @@ TEST(M1ProductPath, ThroughputGeneralCapacityPreservesInteractiveHeadroom) {
   throughput_futures.reserve(active_caps.size());
   for (std::size_t index = 0U; index < active_caps.size(); ++index) {
     throughput_futures.push_back(std::async(std::launch::async, [&, index] {
-      return b1_host->compute_b1_image(make_reduced_throughput_request(
+      return b1_host->compute_b1_values(make_reduced_throughput_request(
           throughput_sessions[index], active_caps[index],
           observations.make_sink(
               index % 2U == 0U ? M1ObservedRequestTag::ThroughputGraphA
@@ -805,8 +805,8 @@ TEST(M1ProductPath, ThroughputGeneralCapacityPreservesInteractiveHeadroom) {
   ASSERT_EQ(saturated.host_resources.limits.cpu_slots, 32U);
   ASSERT_EQ(saturated.throughput.capacity.cpu_slots, 31U);
 
-  const Result<ImageBuffer> rejected =
-      b1_host->compute_b1_image(make_reduced_throughput_request(
+  const Result<NamedValueResult> rejected =
+      b1_host->compute_b1_values(make_reduced_throughput_request(
           throughput_sessions.back(), 1U,
           observations.make_sink(M1ObservedRequestTag::ThroughputGraphA)));
   EXPECT_FALSE(rejected.status.ok);
@@ -839,9 +839,9 @@ TEST(M1ProductPath, ThroughputGeneralCapacityPreservesInteractiveHeadroom) {
   EXPECT_EQ(with_interactive.throughput.reserved.cpu_slots, 31U);
 
   gate.release();
-  for (std::future<Result<ImageBuffer>>& future : throughput_futures) {
+  for (std::future<Result<NamedValueResult>>& future : throughput_futures) {
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
-    const Result<ImageBuffer> result = future.get();
+    const Result<NamedValueResult> result = future.get();
     ASSERT_TRUE(result.status.ok) << result.status.message;
   }
   ASSERT_EQ(interactive.settlement.wait_for(5s), std::future_status::ready);

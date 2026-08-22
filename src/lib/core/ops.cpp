@@ -13,6 +13,7 @@
 #include "core/cpu_dense_image_operation.hpp"
 #include "core/param_utils.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/data/image_metadata.hpp"
 
 namespace ps::ops {
 namespace {
@@ -159,8 +160,16 @@ PixelRect identity_forward_roi(
  * @return Named `width` and `height` integer values.
  * @throws GraphError with `GraphErrc::MissingDependency` for an absent or empty
  *         input.
+ * @throws std::logic_error if the canonical image Value does not retain an
+ *         ordinary ImageFacet.
+ * @throws std::invalid_argument or std::overflow_error if retained bounds
+ *         violate their validated nonempty signed-extent invariant.
  * @throws std::bad_alloc if named-output storage allocation fails.
- * @note The callback reads only the dependency-neutral ImageBuffer descriptor.
+ * @note The callback derives extents from `Value::image_bounds()` only. It
+ *       neither polls readiness nor creates a payload lease, so Pending and
+ *       opaque non-Host-readable Values retain their existing fence, binding,
+ *       allocation, and revision identities. Signed data-window origins are
+ *       logical coordinates and are not returned as dimensions.
  */
 NodeOutput op_get_dimensions(const Node& node,
                              const std::vector<const NodeOutput*>& inputs) {
@@ -169,15 +178,17 @@ NodeOutput op_get_dimensions(const Node& node,
     throw GraphError(GraphErrc::MissingDependency,
                      "analyzer:get_dimensions requires an image input.");
   }
-  const ImageBuffer& input_buffer = inputs[0]->image_buffer;
-  if (input_buffer.width == 0 || input_buffer.height == 0) {
+  if (!inputs[0]->has_image_value()) {
     throw GraphError(GraphErrc::MissingDependency,
                      "analyzer:get_dimensions input image is empty.");
   }
+  const ImageBounds& input_bounds = inputs[0]->image_value().image_bounds();
+  const std::size_t width = image_bounds_width(input_bounds);
+  const std::size_t height = image_bounds_height(input_bounds);
 
   NodeOutput output;
-  output.data["width"] = input_buffer.width;
-  output.data["height"] = input_buffer.height;
+  output.data["width"] = static_cast<std::int64_t>(width);
+  output.data["height"] = static_cast<std::int64_t>(height);
   return output;
 }
 
@@ -228,7 +239,7 @@ NodeOutput op_divide(const Node& node,
  * @throws GraphError for input, inference, execution, or output failures.
  * @throws std::bad_alloc unchanged for resource exhaustion.
  * @note The static operation definition is immutable and reentrant; the runner
- *       performs all current ImageBuffer edge adaptation.
+ *       performs all checked Value and Host-grant adaptation.
  */
 NodeOutput op_invert_dense(const Node& node,
                            const std::vector<const NodeOutput*>& inputs) {
@@ -241,7 +252,7 @@ NodeOutput op_invert_dense(const Node& node,
  * @param node Borrowed operation node snapshot.
  * @param inputs Borrowed destination-indexed inputs.
  * @param region Exact normalized ImageRect, TensorSlice, Whole, or Empty.
- * @return Independently owned sealed dense output and ImageBuffer snapshot.
+ * @return Independently owned sealed named dense output.
  * @throws GraphError or std::bad_alloc from the validated dense runner.
  * @note The static operation definition is immutable and reentrant.
  */
@@ -296,10 +307,18 @@ int builtin_input_halo_radius(const std::string& type,
 /** @copydoc ps::ops::register_core_operations */
 void register_core_operations() {
   OpRegistry& registry = OpRegistry::instance();
+  OpMetadata dimensions_metadata;
+  dimensions_metadata.produces_image = false;
+  dimensions_metadata.parameter_output_names = {"height", "width"};
   registry.register_op_hp_monolithic("analyzer", "get_dimensions",
-                                     MonolithicOpFunc(op_get_dimensions));
+                                     MonolithicOpFunc(op_get_dimensions),
+                                     std::move(dimensions_metadata));
+  OpMetadata divide_metadata;
+  divide_metadata.produces_image = false;
+  divide_metadata.parameter_output_names = {"result"};
   registry.register_op_hp_monolithic("math", "divide",
-                                     MonolithicOpFunc(op_divide));
+                                     MonolithicOpFunc(op_divide),
+                                     std::move(divide_metadata));
   registry.register_op_hp_monolithic("image_process", "invert_dense",
                                      MonolithicOpFunc(op_invert_dense));
 

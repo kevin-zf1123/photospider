@@ -54,8 +54,9 @@ fence. OpenCV resource exhaustion is rethrown as a fresh `std::bad_alloc`;
 every other `cv::Exception` is translated to a host-owned `GraphError` with
 `GraphErrc::ComputeError`. The provider is included only when
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` is enabled. Dependency-neutral
-core operations and the v2 registrar remain available when it is disabled, and
-a v2 provider can replace the same registry slots when it is enabled.
+core operations and pure-C ABI v1 publication remain available when it is
+disabled, and an ABI-v1 provider can replace the same registry slots when it is
+enabled.
 
 Synchronization remains backend-owner-local for real shared mutable state.
 The process Metal executor, rather than the Perlin provider, serializes its

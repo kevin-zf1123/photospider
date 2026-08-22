@@ -12,9 +12,12 @@ compute-request executor、一个 latest-wins request coordinator、复制的 HP
 execution-route binding、event/execution-trace state 与一个稳定 Graph lifetime anchor。
 Native platform device、command queue、allocator、pipeline cache 与 executor resource
 改由进程 `ExecutionService` 中的固定 `DeviceExecutorRegistry` 持有，不属于 Graph lifetime。
-Map lookup 会在短临界区内复制一个 shared runtime owner；释放 map lock 后才执行 graph-state、
-compute、IO、inspection 与 lane work。因此，并发 close 可以移除 name，但不会销毁已由准入内部
-调用保留的 runtime。
+Kernel 还拥有一个 `GraphCacheService`；其有界 `ImageStatisticsStore` 是 process-service
+derived state，而不是 `GraphRuntime` 或 `GraphModel` 的成员。accepted statistics task 会通过
+settlement 只保留 store 的 opaque state 与其精确 source Value，因此 Graph close 或 facade
+destruction 都不会留下 borrowed task target。Map lookup 会在短临界区内复制一个 shared runtime
+owner；释放 map lock 后才执行 graph-state、compute、IO、inspection 与 lane work。因此，并发
+close 可以移除 name，但不会销毁已由准入内部调用保留的 runtime。
 
 ```text
 Kernel
@@ -237,6 +240,12 @@ mode。它不会关闭或销毁所属 `GraphRuntime`；session 仍处于 loaded 
 snapshot、reset、clone 与 staged exchange 全部使用同一个封装的 no-throw mutex 契约，
 因此 clear 可以与 worker diagnostic traffic 重叠，而不会无同步访问
 optional/path/string。
+
+Model clear 不会隐式取消或清除 derived image-statistics work。Statistics identity 包含精确 Value
+revision，因此后续 Graph Value 不会与较早 result 发生碰撞。cache service 暴露显式 exact-
+revision invalidation 与 bounded-store clear；accepted in-flight work 可以在 clear 后发布，除非
+其 request-local cancellation 先胜出。这些 operation 不会修改 Graph revision 或正式 HP/RT
+cache state。
 
 ## Close 与 Lifetime
 

@@ -17,7 +17,8 @@ plugin owner。
 
 **IPC Host adapter**
 已安装的 client-side `ps::Host` 实现。它把 Host 调用转换为版本化本地 IPC 协议，并拥有
-client polling 和映射图像生命周期，不拥有 daemon session 或后端运行时对象。
+client polling 以及临时 mapped named-Value archive delivery 生命周期。返回的 Value 使用 fresh、
+detached runtime storage；该 adapter 不拥有 daemon session 或后端 runtime object。
 
 **`Kernel`**
 内部多图 facade，也是 graph、compute、cache、traversal、inspection 和 persistence service
@@ -62,23 +63,29 @@ ready dispatch 分离；其 worker 是不计费的基础设施，不是 Run exec
 directory synchronization 或 crash-durability receipt。
 
 **磁盘缓存制品（Disk-cache artifact）**
-由 graph cache path 拥有、可丢弃的 acceleration state。当前 image payload 与 metadata 会作为
-两个独立文件直接写入，因此各自 save success 既不是 atomic cache-entry commit，也不是 durable
-user output。
+由 numeric node cache directory 下一个安全 configured leaf 拥有、可丢弃的 acceleration state。
+当前 entry 有四个受控 sibling：可选 image-codec inspection projection、可选 detached parameter
+metadata、作为唯一 replay authority 的 canonical named-Value archive，以及最后写入的 versioned
+manifest。Manifest 会把 archive/metadata fact 绑定到同一个随机 writer generation，replay 要么
+发布全部 Value，要么一个也不发布。这套进程内串行化、manifest-last mechanism 既不是 atomic
+filesystem transaction，也不是 crash-durable user output。当前磁盘持久化仅支持 POSIX。在
+Windows 上，每个非空 root 的 GraphCache 磁盘请求都会在副作用前以 typed platform error 失败；
+空 root/no-save 的 no-disk 语义与纯 memory/statistics API 继续可用。原生 Windows GraphCache
+持久化是 future target。
 
 **`OutputStore` 发布（`OutputStore` publication）**
-当前 image-daemon 的观察：受保护进程级 artifact 通过 identity check，并在 file
-synchronization 后通过 no-replace rename 发布。其 index 位于内存，retention 基于 lease/TTL；
-不声称支持 directory synchronization 或 crash-recoverable index。
+当前 daemon 的观察：受保护进程级 canonical named-Value archive 通过 identity check，并在
+file synchronization 后通过 no-replace rename 发布。其 index 位于内存，retention 基于
+lease/TTL；不声称支持 directory synchronization 或 crash-recoverable index。
 
 **Daemon 计算作业终态（Daemon compute-job terminal）**
-进程内 job registry 在 queued/running work 失败，或完成 Host compute 以及 image result 的
+进程内 job registry 在 queued/running work 失败，或完成 Host compute 以及 nonempty Values result 的
 `OutputStore` publication 后到达的状态。它不是 durable acknowledgement，并会随进程丢失。
 
-**源码私有单租户耐久图像 Job 纵向路径（当前 Issue #99/#100 子集）**
-当前 `src/lib/server/` 纵切把一个紧密 CPU 图像绑定到稳定的 `ArtifactId` 与
-`OutputCommitId` identity，以 manifest-last 方式发布 canonical manifest，并且只有在精确
-校验 payload/manifest 且完成从 artifact directory 到 root 的完整屏障链后，才返回
+**源码私有单租户耐久 named-Value Job 纵向路径（当前 Issue #99/#100/#105/#131 子集）**
+当前 `src/lib/server/` 纵切把一个 canonical nonempty named-Value archive 绑定到稳定的
+`ArtifactId` 与 `OutputCommitId` identity，以 manifest-last 方式发布 canonical manifest，
+并且只有在精确校验 archive/manifest 且完成从 artifact directory 到 root 的完整屏障链后，才返回
 crash-durable receipt。Manifest publication 会让两个 alias 都可在内部识别；但 barrier
 尚未确认的 alias 不能返回 artifact 或 crash-durable receipt：`ArtifactId` lookup、
 `OutputCommitId` lookup、same-commit retry 与 Job reconciliation 都必须先重新校验精确
@@ -87,7 +94,8 @@ occurrence 并重放完整 barrier chain。一个源码私有 WorkerManager 还�
 runtime deadline、cancellation escalation 与精确 reaping。参见
 [单租户 Job 纵切](Single-Tenant-Job-Vertical.zh.md)。
 
-这是一个狭窄的源码私有、本地单租户图像输出与 trusted-worker-process 子集。它不是 daemon
+这是一个狭窄的源码私有、本地单租户 named-Value artifact-set output 与
+trusted-worker-process 子集。它不是 daemon
 `OutputStore`，不是通用 `Value`/checkpoint `OutputStore` 或 bulk data plane，不是多租户
 授权，也不是独立部署的 WorkerManager、syscall/device isolation 或 untrusted-plugin
 security domain。
@@ -398,11 +406,34 @@ lease 会阻止 seal；sealed Value 永不签发该 lease。
 新 identity。它不是 `GraphRevision`、allocation identity、持久 digest/artifact id 或
 task/cache key。
 
-**`ImageBuffer`**
-当前图像 payload 契约：二维 extent、通道数、单一 scalar type、device、row stride、共享数据
-所有权和可选 backend context。在带有效 sealed `image_value` 的正式 CPU image cache entry
-中，它是独立 compatibility snapshot，而不是 allocation/revision identity authority。它不是
-通用 Tensor、Deep Image 或 vector-scene 模型。
+**`ImageBounds` / data window / display window**
+`ImageBounds` 是有符号、非空、半开的普通图像坐标窗口。每个内建 `ImageFacet` 都有一个
+不可变 data window，其 x/y 跨度与显式 tensor axes 精确一致。可选 display window 是独立
+呈现元数据。两者都不是 `RegionSet`：Region 仍是动态工作或有效性。载荷 readiness 为
+Pending、Failed 或 ProducerCancelled 时仍可读取 bounds 元数据。
+
+**`ChannelSchema` / `ChannelId` / `ChannelGroupId`**
+普通图像 channel 与 group 的有界稳定语义 identity。Channel vector 顺序匹配 channel axis；
+group membership 使用稳定 ID。Channel 与 group 名称只用于诊断，永不选择角色或进入语义
+identity。
+
+**`SampleDomainFacet` / `ColorFacet`**
+相互独立的版本化普通图像解释。Sample encoding/domain 声明 normalized、legal 或 code-value
+区间及可选稳定 ID 逐通道覆盖；它不改变 storage representability 或 quantization。Color
+把一个稳定 channel group 绑定到显式 transfer function 与 primaries；scene linearity 是
+color 事实。
+
+**图像 statistics query / result / cache key**
+观测 min/max 或 histogram 请求的有界派生记录。其 key 包含 Value revision、可选 content
+digest、RegionSet、稳定 channel/group 选择、算法与版本。Result 永远不成为 Value、
+ImageFacet、descriptor/content identity 或正式 cache validity。
+
+**普通稠密图像 `Value`**
+唯一的现行普通图像 payload 契约：一个不可变 DenseTensor `Value`，具有完整
+`ImageFacet`、显式 Layout 与 binding，以及一个 `ReadyFence`。Host、IPC、worker、durable、
+codec、CLI、operation ABI 与 cache 边界会保留该 Value metadata 或其可移植 artifact 形式。
+它不是 provider-defined variable-sample Deep image、vector-scene 模型或 rank-free 通用 Tensor
+解释。DI-4 删除了此前的二维兼容图像对象，而不是保留双表面。
 
 **`RegionDomainKey` / `RegionSet`**
 `RegionDomainKey` 是永久的 128-bit 逻辑 coordinate-domain identity。`RegionSet` 是 immutable
@@ -412,7 +443,7 @@ complexity budget、typed algebra outcome 与 containment。它不是 physical t
 cache owner、Value revision 或 uncertainty placeholder。
 
 **`PixelRect` / `PixelSize`**
-当前 Host/IPC v2 inspection、operation ABI v2、ImageBuffer processing 与 physical image
+当前 Host/IPC inspection、operation ABI v1 adapter、dense-Value processing 与 physical image
 tile/task record 使用的不依赖外部 library 的二维整数 geometry。在需要逻辑 Region authority
 的位置，它只能从一个精确内建 ImageRect 派生。它无法表示 TensorSlice、Whole、custom domain、
 multi-atom clause 或 uncertainty。只能在 OpenCV adapter 或 provider 实际调用 matrix/library
@@ -421,9 +452,9 @@ multi-atom clause 或 uncertainty。只能在 OpenCV adapter 或 provider 实际
 **Operation provider**
 operation callback、propagation contract 与 metadata 的实现来源。依赖中立 core operation
 始终在进程 seed 时组合。仓库 OpenCV CPU provider 是独立的可选 build module，拥有自身
-algorithm、进程初始化与异常翻译。它与 v2 DSO provider 都向相同的 provider-neutral registry
-slot 发布，因此 DSO 可以替换 active operation，并在卸载后恢复其 predecessor。公共 operation
-契约使用 Photospider 值类型。
+algorithm、进程初始化与异常翻译。它与 pure-C operation ABI v1 DSO generation 都向相同的
+provider-neutral registry slot 发布，因此 DSO 可以替换 active operation，并在卸载后恢复其
+predecessor。公共 operation 契约使用 Photospider 值类型。
 
 **Adapter**
 位于外部库、transport 或产品边缘的窄转换。Adapter 转换表示，但不会成为 graph、planning、
@@ -438,12 +469,13 @@ cache、policy 或物理 execution 语义的所有者。
 - ready task 不是任务图。
 - HP cache 不是 RT proxy state。
 - `AllocationIdentity` 不是 `ValueRevisionId`；二者都不是持久 content/cache identity。
-- `ImageBuffer` 不是[目标通用数据模型](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)。
+- 普通稠密图像 `Value` 不是 provider-defined 或 rank-general 的
+  [通用数据模型](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)。
 - Operation return 不是 `Value` readiness，二者也都不是 Run terminal publication。
 - Run success 不是 cache persistence、Graph 文档保存、durable output commit、daemon terminal
   state 或 result delivery。
 - 当前 `OutputStore` publication 不是 crash-durable output commit。
-- 当前 Issue #99/#100 耐久图像子集不是未来通用 `OutputStore`/bulk data plane、network
+- 当前 single-tenant named-Value artifact 纵向路径不是通用 `OutputStore`/bulk data plane、network
   control plane 或 untrusted-plugin security domain。
 - Daemon job terminal state 或 acknowledgement 不是 durable receipt。
 - `RegionSet` 不是 `PixelRect`；后者是 checked image-edge projection，绝不是 TensorSlice
@@ -467,7 +499,8 @@ cache、policy 或物理 execution 语义的所有者。
 - `include/photospider/data/value.hpp`
 - `include/photospider/host/host.hpp`
 - `include/photospider/core/compute_intent.hpp`
-- `include/photospider/core/image_buffer.hpp`
+- `include/photospider/data/image_view.hpp`
+- `include/photospider/data/value_artifact.hpp`
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/runtime/graph_runtime.hpp`
 - `src/lib/graph/graph_model.hpp`
@@ -476,7 +509,6 @@ cache、policy 或物理 execution 语义的所有者。
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/ipc/output_store.*`
 - `src/lib/ipc/request_router.cpp`
-- `plugins/ops/save_op.cpp`
 - `src/lib/compute/dispatch/task_graph_planning.hpp`
 - `src/lib/compute/dirty/dirty_region_snapshot.hpp`
 - `src/lib/compute/execution/execution_service.hpp`

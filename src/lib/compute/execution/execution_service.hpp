@@ -568,7 +568,7 @@ class ReadyTaskMetadata final {
    * @note The value selects a physical service lane but grants no native
    * device handle or execution authority.
    */
-  Device device() const noexcept { return device_; }
+  DeviceBackend device() const noexcept { return device_; }
 
   /**
    * @brief Reports whether this submission belongs to the initial ready set.
@@ -593,7 +593,7 @@ class ReadyTaskMetadata final {
    * state.
    */
   ReadyTaskMetadata(const ComputeRunDescriptor& descriptor, int trace_node_id,
-                    bool is_initial_ready, Device device);
+                    bool is_initial_ready, DeviceBackend device);
 
   /** @brief Opaque Run namespace copied from the matching descriptor. */
   ComputeRunId run_id_;
@@ -626,7 +626,7 @@ class ReadyTaskMetadata final {
   int trace_node_id_ = -1;
 
   /** @brief Device selected before physical ready-store admission. */
-  Device device_ = Device::CPU;
+  DeviceBackend device_ = DeviceBackend::CPU;
 
   /** @brief Whether this task was in the initial dependency-ready set. */
   bool is_initial_ready_ = false;
@@ -688,7 +688,7 @@ class ReadyTaskSubmission final {
       bool is_initial_ready, Executable executable,
       ExecutionTaskPriority priority = ExecutionTaskPriority::Normal,
       ReadyTaskResourceDemand resource_demand = default_resource_demand(),
-      Device device = Device::CPU,
+      DeviceBackend device = DeviceBackend::CPU,
       OperationExecutionConstraints operation_constraints = {});
 
   /**
@@ -1245,7 +1245,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @note This observational query grants no native handle or execution
    * authority.
    */
-  bool has_device_executor(Device device) const noexcept;
+  bool has_device_executor(DeviceBackend device) const noexcept;
 
   /**
    * @brief Copies diagnostics from one registered device executor.
@@ -1258,7 +1258,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * visible while another invocation is active.
    */
   execution::DeviceExecutorDiagnostics device_executor_diagnostics(
-      Device device) const;
+      DeviceBackend device) const;
 
   /**
    * @brief Acquires or explicitly uploads one Ready Value to process Metal.
@@ -1694,7 +1694,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @return One-element CPU device list; route-aware callers use the overload.
    * @throws std::bad_alloc when result storage cannot allocate.
    */
-  std::vector<Device> available_devices() const override;
+  std::vector<DeviceBackend> available_devices() const override;
 
   /**
    * @brief Reports devices exposed by one exact private route and registry.
@@ -1706,7 +1706,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @note The copied labels contain no native handle. This is the canonical
    * inventory for full, preflight, and dirty operation selection.
    */
-  std::vector<Device> available_devices(
+  std::vector<DeviceBackend> available_devices(
       const std::string& execution_type) const;
 
   /**

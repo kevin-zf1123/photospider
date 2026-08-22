@@ -22,6 +22,8 @@
 
 #include "execution/device/plugin_runtime_supervisor.hpp"  // NOLINT(build/include_subdir)
 #include "execution/isolation/isolated_cpu_invocation.hpp"  // NOLINT(build/include_subdir)
+#include "isolated_cpu_conformance_fixture.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/plugin/operation_plugin_api.h"
 
 namespace ps::execution {
 namespace {
@@ -31,7 +33,7 @@ namespace {
  * @return Never returns; the fixture exits after transferring the test frame.
  * @throws Nothing; syscall failures terminate the fixture with status 74.
  * @note The first byte is sent without ancillary data. The remaining bytes are
- * sent with one `SCM_RIGHTS` record, deliberately violating protocol v1.
+ * sent with one `SCM_RIGHTS` record, deliberately violating protocol v2.
  * `SOCK_STREAM` may coalesce both sends into the first `recvmsg`; the Host must
  * fail closed either at the observed-segment gate or at its response FD
  * inventory gate.
@@ -104,7 +106,7 @@ namespace {
  * @brief Sends the fixed deliberately truncated response prefix.
  * @return Nothing after all four prefix bytes are transferred.
  * @throws Nothing; syscall failure exits the fixture with status 74.
- * @note The prefix is shorter than the protocol-v1 frame header and therefore
+ * @note The prefix is shorter than the protocol-v2 frame header and therefore
  * can never become a complete response.
  */
 void send_truncated_response_prefix() noexcept {
@@ -218,6 +220,18 @@ IsolatedCpuRuntimeCallbackResult run_fixture_operation(
     return IsolatedCpuRuntimeCallbackResult{
         IsolatedCpuInvocationOutcome::Cancelled,
         "fixture callback observed cooperative cancellation"};
+  }
+  if (invocation.operation == "operation_conformance:supervised_tile") {
+    if (!test_support::conformance_runtime_invocation_is_exact(invocation)) {
+      return IsolatedCpuRuntimeCallbackResult{
+          IsolatedCpuInvocationOutcome::PluginFailed,
+          "operation conformance descriptor metadata changed in isolation"};
+    }
+    std::memset(invocation.outputs[0].output_data, 0x5A,
+                invocation.outputs[0].size);
+    return IsolatedCpuRuntimeCallbackResult{
+        IsolatedCpuInvocationOutcome::Succeeded,
+        {}};
   }
   if (invocation.operation == "fixture.fill_sequence" ||
       invocation.operation == "fixture.delayed_fill_sequence" ||

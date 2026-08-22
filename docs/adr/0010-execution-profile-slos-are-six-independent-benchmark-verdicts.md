@@ -87,10 +87,31 @@ The independent I1 final oracle is versioned
 `i1-coordinate-pattern-curve-chain-fp32-v1`. It reconstructs the source and
 four stages without Host, Kernel, cache, scheduler, YAML, or the candidate
 provider. For the HWC `[2048,2048,4]` FloatingPoint/NativeScalar32 tensor with
-ImageFacet `(x=1,y=0,channel=2)`, the frozen `Sha256CanonicalV1` digest is
-`17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`.
+ImageFacet `(x=1,y=0,channel=2)`, zero-origin `[0,2048) x [0,2048)` data
+window, DenseTensor schema/Image facet structural version 2, and Sample Domain
+facet structural version 1 declaring FP32 Normalized `[0,1]`, the frozen
+`Sha256CanonicalV1` digest is
+`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`.
 The expected value is fixed before candidate execution; a product-path test
 cross-checks it but can never bootstrap it.
+
+For this oracle migration, the initial DI-1 implementation and oracle refresh
+advanced the DenseTensor schema and Image facet structural records to version 2
+but did not fully implement the archived DI-1 design: it omitted the
+coordinate-pattern Sample Domain facet and produced the historical
+pre-Sample-Domain I1 logical digest
+`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`.
+The later coordinate-pattern metadata correction completed that design
+requirement by binding Sample Domain facet structural version 1 declaring FP32
+Normalized `[0,1]`; regenerating the independent oracle under that complete
+descriptor produced the current digest
+`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`.
+Neither stage changed the `Sha256CanonicalV1` algorithm tag, workload
+arithmetic, or workload identities. The I2 preview logical golden remains
+`2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`.
+All 34 B1 logical goldens were regenerated under the current structural
+records and, for coordinate-pattern outputs, the Sample Domain record, while
+B1 raw-payload hashes remain unchanged.
 
 The canonical workload matrix is:
 

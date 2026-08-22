@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -397,7 +398,7 @@ bool read_compute_boolean_object(
  * @param session_id Receives the opaque session identity.
  * @param request Receives the public Host compute value with its private
  *        session left empty for registry admission to overwrite.
- * @param mode Receives the exact status or image executor selection.
+ * @param mode Receives the exact status or Values executor selection.
  * @param message Receives one stable validation diagnostic on failure.
  * @return True only after every known submit member validates completely.
  * @throws std::bad_alloc if owned request strings or diagnostics allocate.
@@ -424,12 +425,12 @@ bool decode_compute_submit(const Json& params, IpcSessionId* session_id,
   if (!params.contains("result_mode") ||
       !decode_bounded_string(params["result_mode"], kShortTextMaxBytes,
                              &result_mode) ||
-      (result_mode != "status" && result_mode != "image")) {
-    *message = "compute.submit result_mode must be status or image";
+      (result_mode != "status" && result_mode != "values")) {
+    *message = "compute.submit result_mode must be status or values";
     return false;
   }
   *mode = result_mode == "status" ? ComputeResultMode::Status
-                                  : ComputeResultMode::Image;
+                                  : ComputeResultMode::Values;
 
   if (params.contains("cache")) {
     const Json& cache = params["cache"];
@@ -523,7 +524,7 @@ std::string_view compute_state_label(ComputeRequestState state) {
 /**
  * @brief Encodes one immutable polling-job snapshot using stable common fields.
  * @param snapshot Complete registry snapshot at one lookup instant.
- * @param output Nullable protected image metadata supplied only by result.
+ * @param output Nullable protected Value metadata supplied only by result.
  * @return Owned JSON value containing nullable nested status and output.
  * @throws std::bad_alloc if JSON or copied status storage cannot allocate.
  * @throws std::invalid_argument for an invalid state or noncanonical terminal
@@ -561,7 +562,7 @@ Json encode_compute_snapshot(const ComputeRequestSnapshot& snapshot,
  * @brief Encodes one revalidated protected output delivery for compute.result.
  * @param delivery Metadata and stable lease returned atomically by OutputStore.
  * @param expected_output_reference Private job reference used for lookup.
- * @return Exact version 2 metadata object without pixel bytes or private
+ * @return Exact version 2 metadata object without payload bytes or private
  *         registry references.
  * @throws std::bad_alloc if JSON or enum string storage cannot allocate.
  * @throws std::invalid_argument if trusted store metadata violates the wire
@@ -572,24 +573,25 @@ Json encode_compute_snapshot(const ComputeRequestSnapshot& snapshot,
 Json encode_output_delivery(const OutputArtifactDelivery& delivery,
                             const std::string& expected_output_reference) {
   const OutputArtifactMetadata& metadata = delivery.metadata;
-  Json data_type;
-  Json device;
-  if (!valid_output_delivery_for_wire(delivery, expected_output_reference) ||
-      !encode_enum(metadata.data_type, &data_type) ||
-      !encode_enum(metadata.device, &device)) {
+  if (!valid_output_delivery_for_wire(delivery, expected_output_reference)) {
     throw std::invalid_argument(
         "output store returned malformed delivery metadata");
+  }
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string digest;
+  digest.reserve(metadata.digest.bytes.size() * 2U);
+  for (std::byte byte : metadata.digest.bytes) {
+    const std::uint8_t value = std::to_integer<std::uint8_t>(byte);
+    digest.push_back(kHex[value >> 4U]);
+    digest.push_back(kHex[value & 0x0FU]);
   }
   return Json{{"output_id", metadata.output_id},
               {"delivery_id", delivery.delivery_id},
               {"path", metadata.path},
-              {"width", metadata.width},
-              {"height", metadata.height},
-              {"channels", metadata.channels},
-              {"data_type", std::move(data_type)},
-              {"device", std::move(device)},
-              {"row_step", metadata.row_step},
               {"byte_size", metadata.byte_size},
+              {"digest_sha256", std::move(digest)},
+              {"archive_version", metadata.archive_version},
+              {"value_count", metadata.value_count},
               {"filesystem_device", metadata.filesystem_device},
               {"inode", metadata.inode}};
 }
@@ -1683,44 +1685,16 @@ bool valid_output_delivery_for_wire(
     const OutputArtifactDelivery& delivery,
     const std::string& expected_output_reference) noexcept {
   const OutputArtifactMetadata& metadata = delivery.metadata;
-  std::size_t scalar_bytes = 0;
-  switch (metadata.data_type) {
-    case DataType::UINT8:
-    case DataType::INT8:
-      scalar_bytes = 1;
-      break;
-    case DataType::UINT16:
-    case DataType::INT16:
-      scalar_bytes = 2;
-      break;
-    case DataType::FLOAT32:
-      scalar_bytes = 4;
-      break;
-    case DataType::FLOAT64:
-      scalar_bytes = 8;
-      break;
-    default:
-      return false;
-  }
   if (!valid_opaque_id(metadata.output_id) ||
       metadata.output_id != expected_output_reference ||
       !valid_opaque_id(delivery.delivery_id) ||
-      !valid_absolute_path(metadata.path, false) ||
-      metadata.device != Device::CPU || metadata.width <= 0 ||
-      metadata.height <= 0 || metadata.channels <= 0) {
+      !valid_absolute_path(metadata.path, false) || metadata.byte_size == 0U ||
+      metadata.byte_size > kOutputArtifactMaxBytes ||
+      metadata.archive_version != 1U || metadata.value_count == 0U ||
+      metadata.value_count > kMaximumNamedValueArtifacts) {
     return false;
   }
-  const std::size_t width = static_cast<std::size_t>(metadata.width);
-  const std::size_t height = static_cast<std::size_t>(metadata.height);
-  const std::size_t channels = static_cast<std::size_t>(metadata.channels);
-  const std::size_t maximum = std::numeric_limits<std::size_t>::max();
-  if (width > maximum / channels || width * channels > maximum / scalar_bytes) {
-    return false;
-  }
-  const std::size_t expected_row_step = width * channels * scalar_bytes;
-  return metadata.row_step == expected_row_step &&
-         height <= maximum / expected_row_step &&
-         metadata.byte_size == expected_row_step * height;
+  return true;
 }
 
 /**
@@ -1833,13 +1807,14 @@ RequestRouter::RequestRouter(Host& host, std::string service_version,
           },                                           // NOLINT
           [this](const HostComputeRequest& request) {  // NOLINT
             std::lock_guard<std::mutex> host_lock(host_mutex_);
-            Result<ImageBuffer> result = host_.compute_and_get_image(request);
+            Result<NamedValueResult> result =
+                host_.compute_and_get_values(request);
             result.status = graph_status(result.status);
             return result;
           },                                          // NOLINT
           [this](const ComputeRequestId& compute_id,  // NOLINT
-                 ImageBuffer image) {
-            return output_store_.publish(compute_id, std::move(image));
+                 NamedValueResult values) {
+            return output_store_.publish(compute_id, std::move(values));
           },  // NOLINT
           dependencies.compute_limits, std::move(dependencies.compute_clock),
           std::move(dependencies.compute_id_generator)),  // NOLINT

@@ -56,7 +56,7 @@ struct WorkerOutputStageReference final {
  * @brief Complete metadata for one attempt's two direction-scoped data lanes.
  * @throws Nothing for default construction; retained values may allocate.
  * @note The checkpoint lane is absent when JobSpec declares no checkpoint.
- * The output lane is always present for the one supported image output.
+ * The output lane is always present for the required named-Value output set.
  */
 struct WorkerDataPlaneAssignment final {
   /** @brief Optional immutable checkpoint receipt and read-reference join. */
@@ -96,9 +96,9 @@ struct WorkerOutputDataReference final {
   std::string reference_id;
   /** @brief Exact immutable JobSpec output slot echoed by worker. */
   OutputSlotId output_slot_id;
-  /** @brief Tight image descriptor for the staged active rows. */
-  ArtifactImageDescriptor descriptor;
-  /** @brief SHA-256 of the exact staged tight payload. */
+  /** @brief Canonical named-Value archive descriptor. */
+  ValueArtifactSetDescriptor descriptor;
+  /** @brief SHA-256 of the exact staged canonical archive. */
   ArtifactContentDigest content_digest;
 };
 
@@ -154,10 +154,10 @@ enum class WorkerDataPlaneIoStatus : std::uint8_t {
 /**
  * @brief Worker-owned output metadata plus the retained tight byte source.
  *
- * Preparation removes image bytes from the control Report while retaining the
- * exact source owner in this moveable value. The worker sends the Report first,
- * streams `source` second, closes the output lane, and remains killable until
- * `CompletionReady`.
+ * Preparation removes Value artifacts from the control Report while retaining
+ * the exact canonical archive in this moveable value. The worker sends the
+ * Report first, streams `source` second, closes the output lane, and remains
+ * killable until `CompletionReady`.
  *
  * @throws Nothing for default/value operations; preparation may allocate or
  * hash before construction.
@@ -167,8 +167,8 @@ enum class WorkerDataPlaneIoStatus : std::uint8_t {
 struct PreparedWorkerOutputTransfer final {
   /** @brief Metadata carried by the Report before bulk transfer. */
   std::optional<WorkerOutputDataReference> reference;
-  /** @brief Exact tight CPU source retained only inside the worker. */
-  std::optional<ImageBuffer> source;
+  /** @brief Exact canonical archive retained only inside the worker. */
+  std::optional<std::vector<std::byte>> source;
 };
 
 /**
@@ -340,21 +340,20 @@ class WorkerArtifactDataPlane final {
   void close_manager_output_descriptor() noexcept;
 
   /**
-   * @brief Validates Report metadata and creates its exact final CPU owner.
+   * @brief Validates Report metadata and creates exact archive storage.
    * @param report Metadata-only current attempt report.
    * @param output Optional candidate metadata decoded from that Report.
-   * @return Empty for an image-free report; otherwise a tight `ImageBuffer`
-   * backed by one lazy anonymous mapping of exactly the declared byte length.
+   * @return Empty for a Values-free report; otherwise exact-size archive bytes.
    * @throws WorkerArtifactDataPlaneError for report/reference/descriptor/size
-   * or accepted-resource mismatch, or anonymous mapping failure.
-   * @throws std::bad_alloc when the shared mapping owner cannot be retained.
+   * or accepted-resource mismatch.
+   * @throws std::bad_alloc when archive storage cannot be allocated.
    * @throws std::overflow_error when descriptor arithmetic overflows.
    * @note Call only after an identity-current Report while its exact worker PID
    * remains live. This method performs no filesystem or descriptor I/O and
-   * touches no payload byte; later bounded receives write directly into the
-   * final `ImageBuffer` owner without cumulative reallocation or copy.
+   * touches no payload byte; later bounded receives write directly into final
+   * archive storage without cumulative reallocation.
    */
-  std::optional<ImageBuffer> prepare_output_image(
+  std::optional<std::vector<std::byte>> prepare_output_archive(
       const JobAttemptReport& report,
       const std::optional<WorkerOutputDataReference>& output) const;
 
@@ -362,23 +361,23 @@ class WorkerArtifactDataPlane final {
    * @brief Revalidates and materializes one completely received candidate.
    * @param report Metadata-only attempt report decoded from the control frame.
    * @param output Optional candidate reference decoded with that report.
-   * @param image Exact final owner returned by `prepare_output_image`.
-   * @param payload_size Exact bytes received directly into `image`.
+   * @param archive Exact final owner returned by `prepare_output_archive`.
+   * @param payload_size Exact bytes received directly into `archive`.
    * @param payload_digest Independently accumulated digest of those bytes.
-   * @return Complete report with an independent CPU image only for a valid
-   * settled success; other valid report shapes remain image-free.
+   * @return Complete report with detached validated named artifacts only for a
+   * valid settled success; other valid report shapes remain Values-free.
    * @throws WorkerArtifactDataPlaneError for missing/extra/mismatched output,
    * size/descriptor/resource/digest mismatch, or truncated bytes.
    * @throws std::overflow_error when shape or hash arithmetic overflows.
    * @note This method performs no filesystem or descriptor I/O. WorkerManager
    * calls it after exact stream EOF and bounded incremental hashing. It moves
-   * the already-final owner into the Report in O(1); it allocates/copies no
-   * payload and grants no artifact or Job/quota authority.
+   * the decoded artifact set into the Report only after local validation and
+   * grants no durable artifact, Job, or quota authority.
    */
   JobAttemptReport materialize_report(
       JobAttemptReport report,
       const std::optional<WorkerOutputDataReference>& output,
-      std::optional<ImageBuffer> image, std::size_t payload_size,
+      std::optional<std::vector<std::byte>> archive, std::size_t payload_size,
       const ArtifactContentDigest& payload_digest) const;
 
  private:
@@ -432,18 +431,18 @@ std::shared_ptr<const ArtifactRecord> materialize_worker_checkpoint(
  * @brief Prepares worker candidate metadata before any output byte is sent.
  * @param spec Immutable current JobSpec and resource envelope.
  * @param output_stage Exact manager-assigned output reference and maximum.
- * @param report Non-null complete worker report; an image is consumed on
- * success and never remains in the returned control metadata.
- * @return Optional reference plus retained tight source on staged success;
- * both fields are empty for an image-free report or resource-bound fallback.
+ * @param report Non-null complete worker report; Values are consumed on
+ * success and never remain in returned control metadata.
+ * @return Optional reference plus retained archive on staged success; both
+ * fields are empty for a Values-free report or resource-bound fallback.
  * @throws std::invalid_argument for null/malformed report, identity/spec/stage
- * mismatch, or invalid image.
- * @throws std::overflow_error when image or digest arithmetic overflows.
+ * mismatch, or invalid artifact set.
+ * @throws std::overflow_error when archive or digest arithmetic overflows.
  * @throws std::bad_alloc when fallback/reference construction exhausts memory.
  * @note This function sends no bytes and accesses no descriptor. An otherwise
  * valid settled success above the accepted output/staging/
  * retention maximum becomes a bounded settled `Failed/Compute` report with no
- * image. The caller sends metadata first, retaining `source` inside the exact
+ * Values. The caller sends metadata first, retaining `source` inside the exact
  * killable worker. No artifact or commit identity is minted.
  */
 PreparedWorkerOutputTransfer prepare_worker_output_transfer(
@@ -453,8 +452,8 @@ PreparedWorkerOutputTransfer prepare_worker_output_transfer(
 /**
  * @brief Sends one prepared worker candidate after its metadata-only Report.
  * @param output_descriptor Exact inherited candidate stream fd.
- * @param transfer Prepared optional reference and retained tight CPU source.
- * @return Nothing after every tight active row byte is sent.
+ * @param transfer Prepared optional reference and retained canonical archive.
+ * @return Nothing after every canonical archive byte is sent.
  * @throws std::invalid_argument for malformed transfer/source metadata or the
  * wrong descriptor access mode.
  * @throws std::system_error for stream send failure.

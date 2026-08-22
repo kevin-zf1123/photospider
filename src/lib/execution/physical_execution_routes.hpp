@@ -83,7 +83,7 @@ class PhysicalExecutionRoutes final {
    * requires worker zero, an idle global serial route, and no callback already
    * in flight for the same Run.
    */
-  bool can_start(std::string_view type_name, Device device,
+  bool can_start(std::string_view type_name, DeviceBackend device,
                  PhysicalExecutionLane lane, int worker_id,
                  std::uint64_t run_in_flight) const noexcept;
 
@@ -98,7 +98,7 @@ class PhysicalExecutionRoutes final {
    * ready-store reserved-start transition. No allocation or external callback
    * occurs here.
    */
-  bool commit_start(std::string_view type_name, Device device) noexcept;
+  bool commit_start(std::string_view type_name, DeviceBackend device) noexcept;
 
   /**
    * @brief Retires one previously committed route-local callback.
@@ -108,7 +108,7 @@ class PhysicalExecutionRoutes final {
    * route or unmatched finish.
    * @throws Nothing.
    */
-  bool finish(std::string_view type_name, Device device) noexcept;
+  bool finish(std::string_view type_name, DeviceBackend device) noexcept;
 
   /**
    * @brief Stops future starts while allowing committed callbacks to retire.

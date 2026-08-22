@@ -35,14 +35,15 @@ for canonical JobSpec, tenant quota, durable Job/artifact recovery, explicit
 retry/checkpoint identity, one fresh process per attempt, and separated worker
 control/data transport. It is linked only through an internal CMake target,
 has no daemon route or installed codec, and is not composed into
-`photospiderd`. Its private worker protocol v2 is distinct from this local IPC
+`photospiderd`. Its private worker protocol v3 is distinct from this local IPC
 v2: a 128-KiB control socket carries only attempt/Job/receipt/reference/
-descriptor/digest metadata, while checkpoint and candidate image bytes use
+artifact-set-descriptor/digest metadata, while checkpoint and candidate
+named-Value archive bytes use
 manager-created direction-reduced `AF_UNIX SOCK_STREAM` lanes through inherited
 descriptors. The manager endpoints are nonblocking; the worker may block only
 while its exact PID remains subject to absolute lifecycle deadlines and
 TERM/KILL/reap ownership. Checkpoint digest verification happens in the worker,
-and output hydration starts from metadata-first descriptor/exact-size/digest.
+and output hydration starts from metadata-first descriptor/digest joins.
 For the unreaped current PID, the manager creates one exact lazy anonymous final
 owner and directly receives at most one 64-KiB slice between absolute lifecycle
 checks; it performs no cumulative accumulator growth or whole-payload copy.
@@ -175,9 +176,10 @@ daemon metadata; a stable collection continuation reads only its frozen
 snapshot registry record.
 
 Version 2 exposes daemon-owned compute-job submission, polling, terminal result,
-release, and protected metadata-only image delivery at the router boundary.
-Image bytes stay in private artifacts; a terminal nonempty image result returns
-only the specified artifact metadata under one stable delivery lease. Version 2
+release, and protected metadata-only named-Value delivery at the router
+boundary. Canonical archive bytes stay in private artifacts; a terminal
+nonempty Values result returns only the specified artifact metadata under one
+stable delivery lease. Version 2
 exposes no compute cancellation, `daemon.shutdown`, TCP, Windows named pipe,
 remote or multi-user access mode, or `graph_cli --connect`.
 Issue #74's per-Graph latest-wins supersession remains private to the embedded
@@ -209,7 +211,7 @@ report; neither composition adds another wire method.
 | 6 | `clear_graph` | `Client::clear_graph` | `graph.clear` |
 | 7 | `compute` | submit, poll, result, best-effort release in status mode | `compute.submit`, `compute.status`, `compute.result`, `compute.release` |
 | 8 | `compute_async` | joined worker performs the status-mode composition | `compute.submit`, `compute.status`, `compute.result`, `compute.release` |
-| 9 | `compute_and_get_image` | image-mode composition, protected map, lease-aware release | `compute.submit`, `compute.status`, `compute.result`, `compute.release` |
+| 9 | `compute_and_get_values` | Values-mode composition, protected archive map/reconstruction, lease-aware release | `compute.submit`, `compute.status`, `compute.result`, `compute.release` |
 | 10 | `timing` | `Client::timing` | `compute.timing` |
 | 11 | `last_io_time` | `Client::last_io_time` | `compute.last_io_time` |
 | 12 | `last_error` | `Client::last_error` | `compute.last_error` |
@@ -823,17 +825,18 @@ message.
 
 After a terminal status is known, cleanup attempts one best-effort
 `compute.release` even when result retrieval or cross-RPC validation fails.
-Only a successfully validated image result contributes its delivery id.
-Cleanup failure never replaces the already obtained status or image. A status
+Only a successfully validated named-Value result contributes its delivery id.
+Cleanup failure never replaces the already obtained status or Values. A status
 poll failure before terminal publication and adapter stop do not release an
-unfinished daemon job. The production image consumer opens with
+unfinished daemon job. The production artifact consumer opens with
 `O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK` while the delivery lease protects
 result-to-open, verifies same uid, regular type, exact `0600`, one link,
-device/inode/size and tight layout, maps the complete file with
-`PROT_READ|MAP_PRIVATE`, and revalidates the descriptor before exposing bytes.
+device/inode/size, maps the complete archive with `PROT_READ|MAP_PRIVATE`, and
+revalidates the file identity before decoding bytes.
 The 512-MiB metadata limit is enforced before mapping. The adapter then sends
-lease-aware release; copied `ImageBuffer` values share the mapping, and the
-final reference invokes `munmap` and `close` exactly once.
+lease-aware release. The temporary mapping invokes `munmap` and `close` exactly
+once after digest verification and byte detachment; artifact reconstruction
+then creates fresh locally validated Values and runtime identities.
 
 `compute_async` creates its joined worker before remote submission. Adapter
 destruction publishes stop, wakes all waiters, shuts down active worker
@@ -843,7 +846,7 @@ is discarded. Destruction never resubmits, releases unfinished jobs, closes
 daemon sessions, unloads plugins, or starts embedded execution.
 
 `compute.submit` requires `session_id`, nonnegative `node_id`, and
-`result_mode` equal to `status` or `image`. It accepts the existing Host request
+`result_mode` equal to `status` or `values`. It accepts the existing Host request
 as nested values:
 
 ```json
@@ -883,9 +886,9 @@ maximum of 64 queued/running records, validates and collision-checks a
 daemon-generated 32-lowercase-hex compute id, and reserves all queue/terminal
 bookkeeping. A successful commit snapshot is always `queued` with
 `cancellable: false`. The sole FIFO worker advances a record to `running`,
-invokes exactly one matching synchronous Host callback for `status` or `image`
+invokes exactly one matching synchronous Host callback for `status` or `values`
 mode, and publishes exactly one immutable `succeeded` or `failed` terminal
-status. Host calls use the same daemon Host mutex; image publication occurs
+status. Host calls use the same daemon Host mutex; artifact publication occurs
 after that callback releases the Host mutex.
 
 Submit, status, and result use one stable result schema:
@@ -903,22 +906,19 @@ Submit, status, and result use one stable result schema:
 
 `status` is null while queued/running and is the canonical exact nested
 `OperationStatus` after terminal publication. Submit, status, status-mode
-result, empty-image result, and failed result keep `output` null. Only
-`compute.result` for a terminal successful nonempty image returns this exact
-object in `output`:
+result, empty-Values result, and failed result keep `output` null. Only
+`compute.result` for a terminal successful nonempty named-Value set returns
+this exact object in `output`:
 
 ```json
 {
   "output_id": "32-lowercase-hex",
   "delivery_id": "32-lowercase-hex",
   "path": "/protected/socket.outputs/instance-id/output-id.bin",
-  "width": 2,
-  "height": 2,
-  "channels": 1,
-  "data_type": "uint8",
-  "device": "cpu",
-  "row_step": 2,
-  "byte_size": 4,
+  "byte_size": 8192,
+  "digest_sha256": "64-lowercase-hex",
+  "archive_version": 1,
+  "value_count": 2,
   "filesystem_device": 16777234,
   "inode": 12345
 }
@@ -938,7 +938,7 @@ release accept terminal records only, and release checks/removes the record in
 one registry operation. A well-formed absent, expired, released, or evicted id
 maps to daemon `job_not_found`; a queued/running result or release maps to
 daemon `job_not_ready`. Host failures remain exact nested terminal statuses.
-Every accepted Host failure, invalid image, output quota denial, or publication
+Every accepted Host failure, invalid Value set, output quota denial, or publication
 failure remains an immutable failed job in successful status/result envelopes;
 quota denial is nested daemon `artifact_limit_exceeded`, while unexpected
 worker/publication failure is nested daemon `internal_error`. Only malformed
@@ -961,20 +961,22 @@ without a matching delivery removes job ownership only; release with a
 matching id removes job ownership and its active lease in the same OutputStore
 critical section.
 
-## Protected Output Store and Image Result
+## Protected Output Store and Named-Value Result
 
-The wire surface exposes image metadata only from terminal `compute.result` and
+The wire surface exposes named-Value artifact metadata only from terminal `compute.result` and
 uses optional lease-aware `compute.release`; it adds no separate delivery
 method. Behind the router, one private `OutputStore` is bound to the joined
 compute publisher and socket lifecycle. It starts after the Unix socket and
 persistent lifecycle lock are owned but before session, compute, or client
 admission. A startup failure therefore admits no request.
 
-A canonical empty CPU image publishes no artifact. A nonempty result must be a
-valid CPU `ImageBuffer` with a defined data type, positive dimensions and
-channels, non-null data, a source step at least as large as its checked tight
-row, and overflow-safe row/total byte counts. The store copies only tight rows;
-source padding and backend context never enter the artifact. Validation,
+A canonical empty named-Value result publishes no artifact. A nonempty result
+must have bounded, nonempty, unique, canonical output names and complete valid
+Values. The store captures every output as a versioned `ValueArtifactEnvelope`,
+preserving descriptor, Facet, Layout, buffer roles/spans/alignment, payload
+digests, optional content digest, and bounded statistics references in one
+canonical named archive. Runtime bindings, device handles, paths, leases, and
+allocation/revision identities never enter the artifact. Validation,
 allocation, write, rename, or identity failure becomes nested daemon
 `internal_error` through the already-accepted compute job. Quota denial becomes
 nested daemon `artifact_limit_exceeded`.
@@ -993,8 +995,8 @@ The store base is the socket-specific same-owner exact-mode `0700`
 `<socket>.outputs`; one process writes below the exact-mode `0700`
 `instance-<server_instance_id>` child. Artifact files are same-owner regular
 files opened with `O_NOFOLLOW|O_CLOEXEC`, exact mode `0600`, and one link.
-Metadata retains only output id, absolute path, dimensions, data type, CPU
-device, tight row step, byte size, filesystem device, and inode. Live access
+Metadata retains only output id, absolute path, archive byte size and digest,
+archive version, Value count, filesystem device, and inode. Live access
 revalidates base/instance ancestry plus file owner, type, exact mode, link
 count, device, inode, and size through held directory descriptors. A missing or
 mismatched record/file returns top-level daemon `artifact_not_found` from
@@ -1036,7 +1038,7 @@ while a same-uid hostile process can still race the final validation and
 `unlinkat` instructions at the platform level.
 
 Shutdown immediately stops new or refreshed delivery leases while accepted
-image jobs may still publish during compute drain. After the joined compute
+Values jobs may still publish during compute drain. After the joined compute
 worker exits, terminal cleanup removes job ownership, the store stops
 publication, waits for active leases to be explicitly released or reach their
 injected monotonic TTL, identity-cleans unowned artifacts, and closes its

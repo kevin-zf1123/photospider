@@ -93,6 +93,13 @@ struct NodeTaskRunnerContext {
    * synchronous execution settlement.
    */
   const ComputeRunLease* run_lease = nullptr;
+
+  /**
+   * @brief Frozen node output authorities retained by the ComputePlan.
+   * @note Product execution supplies this pointer. A null pointer is malformed
+   * preparation and fails closed before any result enters temporary staging.
+   */
+  const std::vector<PlannedNodeWork>* planned_work = nullptr;
 };
 
 /**
@@ -111,6 +118,23 @@ struct NodeTaskRunnerContext {
 class NodeTaskRunner {
  public:
   /**
+   * @brief Selects which dependency counters one completed task may release.
+   *
+   * @note Ordinary tasks release only their own edges. Nonfinal tiled tasks
+   * retire successfully without releasing edges because their shared Host
+   * output is not publishable yet. The unique tiled publisher releases every
+   * selected sibling's exact ROI edges after installing the complete Value.
+   */
+  enum class TaskDependencyRelease {
+    /** @brief Release only this task's dependency edges. */
+    CurrentTask,
+    /** @brief Retire this tile but retain all node dependency edges. */
+    DeferTiledNode,
+    /** @brief Release every selected tile edge for this completed node. */
+    CompleteTiledNode,
+  };
+
+  /**
    * @brief Binds one worker runner to a borrowed dispatch context.
    *
    * @param context Borrowed graph, service, timing, plan, and option state.
@@ -125,7 +149,7 @@ class NodeTaskRunner {
    *
    * @param node_idx Dense index into execution_order_, temp_results_, and
    * resolved_ops_.
-   * @return Nothing.
+   * @return Nothing after the node's request-local result is available.
    * @throws std::bad_alloc when node execution exhausts memory.
    * @throws GraphError without node wrapping when cancellation is observed
    * before node identity lookup, or with compute-stage node context for other
@@ -142,7 +166,7 @@ class NodeTaskRunner {
    * @brief Runs one planned task by task id.
    *
    * @param task_id Dense id into task_graph.tasks.
-   * @return Nothing.
+   * @return Exact dependency-release ownership after task execution.
    * @throws std::bad_alloc when task execution exhausts memory.
    * @throws GraphError without task wrapping when cancellation is observed
    * before task lookup, or with compute-stage node context for other operation
@@ -151,7 +175,7 @@ class NodeTaskRunner {
    * cancellation before each provider tile. Node and monolithic tasks delegate
    * to run_node(); a monolithic provider already entered is non-preemptible.
    */
-  void run_task(int task_id);
+  TaskDependencyRelease run_task(int task_id);
 
   /**
    * @brief Estimates complete Host-owned runner structural storage.
@@ -172,6 +196,17 @@ class NodeTaskRunner {
    * @note This request flag gate does not inspect node validity.
    */
   bool allow_disk_cache() const;
+
+  /**
+   * @brief Resolves the exact planned output authority for one dense node.
+   * @param node_idx Dense index into execution_order_.
+   * @return Borrowed callback-free authority frozen during graph planning.
+   * @throws GraphError with ComputeError when preparation omitted or corrupted
+   * the node's output authority.
+   * @note The lookup never consults provider-returned output or live registry
+   * metadata and therefore cannot widen the frozen declaration.
+   */
+  const PlannedOutputAuthority& output_authority(int node_idx) const;
 
   /**
    * @brief Resolves a complete upstream output for a whole-output dependency.
@@ -221,7 +256,7 @@ class NodeTaskRunner {
    * @brief Computes one tile task into request-local output staging.
    *
    * @param task Immutable tile task with node identity, ROI, and tile size.
-   * @return Nothing after execution or a complete cache-based skip.
+   * @return Current-task, deferred-node, or complete-node release ownership.
    * @throws GraphError when task identity/operation/dependencies are invalid.
    * @throws std::logic_error, std::invalid_argument, std::overflow_error,
    * std::bad_alloc, or provider/cache exceptions from validity checking,
@@ -230,7 +265,7 @@ class NodeTaskRunner {
    * ComputeCachePolicy proves exact complete Region coverage. A partial formal
    * output remains visible state but is recomputed for this Whole plan.
    */
-  void compute_tile_task(const PlannedTask& task);
+  TaskDependencyRelease compute_tile_task(const PlannedTask& task);
 
   /**
    * @brief Stops a tile task when the node was satisfied by disk cache.
@@ -241,35 +276,62 @@ class NodeTaskRunner {
    * @throws Exceptions from disk-cache diagnostic/output storage.
    * @note The method holds the per-node output mutex while it rechecks
    * node_precomputed_ and, if no staging output exists, attempts a single
-   * disk-cache load. `temp_results_` alone is not an authority signal because
-   * normal tiled execution also uses it as a partially written staging buffer.
+   * disk-cache load. `temp_results_` remains empty during ordinary tiled
+   * binding writes and receives only the final sealed output.
    */
   bool try_satisfy_tile_from_disk_cache(const Node& target_node, int node_idx);
 
   /**
-   * @brief Ensures a tile output buffer exists for the planned node.
+   * @brief Ensures one Host output binding exists for the planned tiled node.
    *
    * @param node_idx Dense planned-node index for output staging state.
    * @param target_node Node whose fallback dimensions may seed allocation.
    * @param image_inputs Ready image inputs used to infer channels and type.
-   * @return Mutable buffer for tile writes, or nullptr when the node became
-   * precomputed before buffer allocation.
-   * @throws std::bad_alloc or OpenCV allocation exceptions when creating a new
-   * aligned image buffer.
+   * @return Borrowed open binding for checked tile grants, or nullptr when the
+   * node became precomputed before allocation.
+   * @throws std::invalid_argument or std::overflow_error for invalid canonical
+   * input facts or output-plan arithmetic.
+   * @throws std::bad_alloc when creating plan, aligned Value allocation, or
+   * binding state fails.
    * @note Callers must treat nullptr as a successful skip, not as a compute
    * error, because another tile task has already provided whole-node output.
+   * The returned pointer remains stable until the last successful sibling
+   * moves and seals the binding.
    */
-  ImageBuffer* ensure_tile_output_buffer(
+  HostOutputBinding* ensure_tile_output_binding(
       int node_idx, const Node& target_node,
       const std::vector<const NodeOutput*>& image_inputs);
 
-  /** @brief Finalizes per-node metadata after the last tile task completes. */
-  void finalize_tiled_node_if_complete(
+  /**
+   * @brief Finalizes output after the last tile task completes.
+   * @param node_idx Dense planned-node index for output staging state.
+   * @param target_node Graph node whose event and metadata are finalized.
+   * @param image_inputs Complete inputs contributing spatial metadata.
+   * @param current_event Mutable benchmark event for the publishing task.
+   * @return True only for the unique task that installed the complete output.
+   * @throws GraphError when completion has no Host output binding.
+   * @throws Host binding, metadata, event, or allocation exceptions unchanged.
+   * @note The final task seals, finalizes metadata, and installs temp_results_
+   * before returning complete-node ownership of all exact tile-edge release.
+   */
+  bool finalize_tiled_node_if_complete(
       int node_idx, const Node& target_node,
       const std::vector<const NodeOutput*>& image_inputs,
       BenchmarkEvent& current_event);
 
-  /** @brief Attempts to satisfy a node from disk cache into its temp slot. */
+  /**
+   * @brief Attempts to satisfy a node from disk cache into its temp slot.
+   * @param target_node Planned node whose configured artifact may be read.
+   * @param node_idx Dense planned-node index resolving the frozen schema.
+   * @return Nothing after a compatible hit is staged or an incompatible/missing
+   * artifact is left for provider recomputation.
+   * @throws GraphError, allocation, diagnostic, or output-validation
+   * exceptions unchanged.
+   * @note The complete frozen image/parameter/generic shape is passed to the
+   * cache service. Generic output misses before filesystem inspection; sibling
+   * presence misses before either codec; decoded parameter-key mismatch misses
+   * before returning Hit. None can become a partial staged hit.
+   */
   void try_load_disk_cache(const Node& target_node, int node_idx);
 
   /**
@@ -375,14 +437,20 @@ class NodeTaskRunner {
   /**
    * @brief Marks nodes satisfied by whole-node memory or disk-cache output.
    *
-   * @note This flag is distinct from temp_results_ presence: temp_results_ can
-   * also hold the partially written staging buffer used by ordinary tiled
-   * execution.
+   * @note This flag distinguishes reusable/cache satisfaction from the final
+   * sealed temp result installed by ordinary tiled execution.
    */
   std::vector<std::atomic<bool>> node_precomputed_;
 
   /** @brief Mutexes guarding per-node temp output allocation. */
   std::vector<std::unique_ptr<std::mutex>> output_mutexes_;
+
+  /**
+   * @brief Per-node unpublished Host bindings shared by sibling tile tasks.
+   * @note A slot is allocated once under its output mutex and moved only by the
+   * last successfully completed tile before formal temp-result publication.
+   */
+  std::vector<std::unique_ptr<HostOutputBinding>> tile_output_bindings_;
 
   /** @brief Whether in-memory and disk cache should be bypassed. */
   bool force_recache_;
@@ -403,6 +471,9 @@ class NodeTaskRunner {
    * settlement by the NodeTaskRunnerContext contract.
    */
   const ComputeRunLease* run_lease_;
+
+  /** @brief Borrowed frozen per-node work and output-authority records. */
+  const std::vector<PlannedNodeWork>* planned_work_;
 };
 
 }  // namespace ps::compute

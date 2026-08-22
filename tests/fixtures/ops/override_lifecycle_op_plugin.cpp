@@ -1,31 +1,43 @@
 #include <cstdio>
 #include <cstdlib>
-#include <memory>
-#include <stdexcept>
-#include <utility>
 
-#include "photospider/plugin/plugin_api.hpp"
+#include "photospider/plugin/operation_plugin.hpp"
 
+namespace ps::operation_plugin {
 namespace {
 
+/** @brief Environment variable selecting the shared lifecycle trace file. */
 constexpr const char* kTraceEnvironment = "PS_LIFECYCLE_PLUGIN_TRACE";
+/** @brief Permanent replacement plugin identity. */
+constexpr auto kPluginIdentity{
+    make_identity(0x50534F5645525244ULL, 0x0001ULL),
+};
+/** @brief Exact operation identity shared with the predecessor generation. */
+constexpr auto kOperationIdentity{
+    make_identity(0x50534C4946454F50ULL, 0x0001ULL),
+};
+/** @brief Permanent replacement implementation identity. */
+constexpr auto kImplementationIdentity{
+    make_identity(0x50534F564552494DULL, 0x0001ULL),
+};
+/** @brief Shared operation configuration-schema identity. */
+constexpr auto kConfigurationIdentity{
+    make_identity(0x50534C4946454346ULL, 0x0001ULL),
+};
 
 /**
- * @brief Appends one replacement-plugin lifecycle event to the selected trace.
- *
- * @param event Stable event label owned by the caller.
+ * @brief Appends one replacement-generation lifecycle trace event.
+ * @param event Stable event label.
  * @return Nothing.
- * @throws Nothing; missing environment and file I/O failures are ignored.
- * @note This duplicates the tiny probe locally so no cross-plugin test helper
- *       symbol becomes part of the operation plugin ABI.
+ * @throws Nothing; missing configuration and I/O failures are ignored.
  */
 void append_lifecycle_trace(const char* event) noexcept {
   const char* path = std::getenv(kTraceEnvironment);
-  if (!path || path[0] == '\0') {
+  if (path == nullptr || path[0] == '\0') {
     return;
   }
   std::FILE* output = std::fopen(path, "a");
-  if (!output) {
+  if (output == nullptr) {
     return;
   }
   (void)std::fputs(event, output);
@@ -33,162 +45,123 @@ void append_lifecycle_trace(const char* event) noexcept {
   (void)std::fclose(output);
 }
 
-/**
- * @brief Shared state whose final destructor proves replacement callback order.
- *
- * @throws Nothing directly.
- * @note The registered callback captures one shared instance. Its destruction
- *       must precede replacement-library unmapping during explicit unload.
- */
-struct OverrideCallbackLifetimeProbe {
-  /**
-   * @brief Records final replacement callback-state destruction.
-   *
-   * @throws Nothing; trace I/O failures are suppressed.
-   * @note The event executes from plugin code and therefore requires a live
-   *       replacement-library lease.
-   */
-  ~OverrideCallbackLifetimeProbe() {
-    append_lifecycle_trace("override_callback_destroy");
-  }
-};
-
-/**
- * @brief Static probe corresponding to real replacement-library unmapping.
- *
- * @throws Nothing directly.
- * @note Its event must follow `override_callback_destroy` in unload traces.
- */
-struct OverrideLibraryLifetimeProbe {
-  /**
-   * @brief Records actual teardown of the replacement dynamic library.
-   *
-   * @throws Nothing; trace I/O failures are suppressed.
-   * @note Static destruction is driven by the final host-side handle release.
-   */
+/** @brief Static probe corresponding to replacement DSO retirement. */
+struct OverrideLibraryLifetimeProbe final {
+  /** @brief Traces final native-library unmapping. */
   ~OverrideLibraryLifetimeProbe() {
     append_lifecycle_trace("override_library_unload");
   }
 };
 
-/** @brief Per-load static whose destructor marks replacement library release.
- */
+/** @brief Process-per-load replacement library probe. */
 OverrideLibraryLifetimeProbe override_library_lifetime_probe;
 
 /**
- * @brief Replacement operation used to verify plugin key overwrite handling.
- *
- * @param node Borrowed public node view; unused by this fixture.
- * @param inputs Borrowed public upstream views; unused by this fixture.
- * @return Empty output with a marker that distinguishes the replacement
- * implementation from the original lifecycle plugin.
- * @throws std::bad_alloc if output diagnostic string storage cannot allocate.
- * @note The callback lives in the replacement plugin library and must be
- * removed or replaced before that library is unloaded.
- */
-ps::plugin::OperationOutput override_lifecycle_test_op(
-    const ps::plugin::NodeView& node,
-    ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) {
-  (void)node;
-  (void)inputs;
-
-  ps::plugin::OperationOutput output;
-  output.spatial.absolute_roi = ps::PixelRect{0, 0, 22, 9};
-  output.debug.compute_device = "PLUGIN_OVERRIDE_TEST";
-  return output;
-}
-
-/**
- * @brief Creates a replacement callback retaining plugin-owned trace state.
- *
- * @return Monolithic callback whose final captured state destruction is traced.
- * @throws std::bad_alloc if shared state or callback storage cannot allocate.
- * @note The callback body delegates to `override_lifecycle_test_op`; the probe
- *       exists only to audit callback-before-library retirement order.
- */
-ps::plugin::MonolithicOperation make_override_lifecycle_test_op() {
-  auto probe = std::make_shared<OverrideCallbackLifetimeProbe>();
-  return [probe = std::move(probe)](
-             const ps::plugin::NodeView& node,
-             ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) {
-    (void)probe;
-    return override_lifecycle_test_op(node, inputs);
-  };
-}
-
-/**
- * @brief Propagates replacement-fixture dirty demand unchanged.
- *
- * @param context Borrowed public dirty ROI snapshot.
- * @return The unchanged dirty region.
+ * @brief Accepts the replacement operation's empty output plan.
+ * @param invocation Exact callback invocation.
+ * @param inputs Exact empty input array.
+ * @return Stable ABI status.
  * @throws Nothing.
- * @note Registering this slot makes the replacement plugin own the complete
- *       active lifecycle operation rather than leaving mixed plugin sources.
  */
-ps::PixelRect override_dirty_propagator(const ps::plugin::RoiContext& context) {
-  return context.requested_roi;
+ps_operation_status_v1 PS_OPERATION_CALL
+infer_override(void*, const ps_operation_invocation_v1* invocation,
+               const ps_operation_configuration_view_v1*,
+               const ps_operation_array_ref_v1* inputs,
+               const ps_operation_output_sink_v1*) noexcept {
+  return invocation != nullptr && inputs != nullptr && inputs->count == 0U
+             ? PS_OPERATION_STATUS_OK_V1
+             : PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
 }
 
 /**
- * @brief Propagates replacement-fixture affected regions unchanged.
- *
- * @param context Borrowed public forward ROI and active-edge snapshot.
- * @return The unchanged affected region.
+ * @brief Executes the replacement operation without producing a value.
+ * @param invocation Exact callback invocation.
+ * @param inputs Exact empty input array.
+ * @param outputs Exact empty output array.
+ * @return Stable ABI status.
  * @throws Nothing.
- * @note The host wraps this callback with the replacement library lease.
  */
-ps::PixelRect override_forward_propagator(
-    const ps::plugin::RoiContext& context) {
-  return context.requested_roi;
+ps_operation_status_v1 PS_OPERATION_CALL
+execute_override(void*, const ps_operation_invocation_v1* invocation,
+                 const ps_operation_configuration_view_v1*,
+                 const ps_operation_array_ref_v1* inputs,
+                 const ps_operation_array_ref_v1* outputs,
+                 const ps_operation_output_sink_v1*) noexcept {
+  return invocation != nullptr && inputs != nullptr && outputs != nullptr &&
+                 inputs->count == 0U && outputs->count == 0U
+             ? PS_OPERATION_STATUS_OK_V1
+             : PS_OPERATION_STATUS_INVALID_DESCRIPTOR_V1;
 }
 
 /**
- * @brief Builds the replacement lifecycle plugin's dependency table.
- * @param context Borrowed public topology and output-extent snapshot.
- * @return One-cell table routed to input zero with x marker two.
- * @throws std::bad_alloc if cell vector growth cannot allocate.
- * @note The distinct marker proves cache identity follows callback ownership.
+ * @brief Observes exactly-once replacement-generation destruction.
+ * @return Stable ABI status.
+ * @throws Nothing.
  */
-ps::plugin::DependencyLutSnapshot override_dependency_builder(
-    const ps::plugin::RoiContext& context) {
-  ps::plugin::DependencyLutSnapshot result;
-  result.upstream_input_index = 0;
-  result.cell_size = context.output_extent;
-  result.output_extent = context.output_extent;
-  result.cell_to_upstream_roi.push_back(ps::PixelRect{2, 0, 1, 1});
-  return result;
+ps_operation_status_v1 PS_OPERATION_CALL destroy_override_generation(
+    void*, const ps_operation_output_sink_v1*) noexcept {
+  append_lifecycle_trace("override_callback_destroy");
+  return PS_OPERATION_STATUS_OK_V1;
 }
+
+/** @brief Creates the replacement implementation definition. */
+Implementation make_implementation() noexcept {
+  Implementation implementation;
+  auto& descriptor = implementation.descriptor;
+  descriptor.header =
+      make_record_header(PS_OPERATION_IMPLEMENTATION_DESCRIPTOR_V1_SIZE,
+                         PS_OPERATION_RECORD_IMPLEMENTATION_DESCRIPTOR_V1);
+  descriptor.implementation_identity = kImplementationIdentity;
+  descriptor.operation_identity = kOperationIdentity;
+  descriptor.name = make_bytes("PLUGIN_OVERRIDE_TEST");
+  descriptor.intent_mask = PS_OPERATION_INTENT_HP_V1;
+  descriptor.execution_shape_mask = PS_OPERATION_EXECUTION_MONOLITHIC_V1;
+  descriptor.device_kind = PS_OPERATION_DEVICE_CPU_V1;
+  descriptor.reentrant = 1U;
+  descriptor.relative_cost_binary64_bits = 0x4000000000000000ULL;
+  descriptor.execution_mode = PS_OPERATION_EXECUTION_TRUSTED_IN_PROCESS_V1;
+  implementation.infer = infer_override;
+  implementation.execute_monolithic = execute_override;
+  return implementation;
+}
+
+/** @brief Stable replacement implementation row. */
+const Implementation kImplementations[]{make_implementation()};
+
+/** @brief Creates the replacement definition for the predecessor key. */
+ps_operation_descriptor_v1 make_operation() noexcept {
+  ps_operation_descriptor_v1 operation{};
+  operation.header =
+      make_record_header(PS_OPERATION_DESCRIPTOR_V1_SIZE,
+                         PS_OPERATION_RECORD_OPERATION_DESCRIPTOR_V1);
+  operation.operation_identity = kOperationIdentity;
+  operation.type = make_bytes("plugin_lifecycle");
+  operation.subtype = make_bytes("op");
+  operation.display_name = make_bytes("Lifecycle replacement ABI fixture");
+  operation.configuration_schema_identity = kConfigurationIdentity;
+  operation.input_ports = empty_array_ref();
+  operation.output_ports = empty_array_ref();
+  return operation;
+}
+
+/** @brief Stable complete replacement fixture definition. */
+const Definition kDefinition{
+    kPluginIdentity,
+    "lifecycle-override-abi1",
+    make_operation(),
+    kImplementations,
+    1U,
+    destroy_override_generation,
+    nullptr,
+};
 
 }  // namespace
 
-/**
- * @brief Re-registers the lifecycle fixture key with a replacement callback.
- *
- * @param registrar Host-provided operation registration API.
- * @return Nothing.
- * @throws std::invalid_argument when the loader passes a null registrar.
- * @throws std::logic_error if the host registrar is incomplete.
- * @throws std::bad_alloc if callback state/wrappers, copied operation names,
- *         active capture bookkeeping, or registry storage cannot allocate.
- * @note This intentionally touches an existing key through the host registrar
- * so plugin unload can prove overwritten callbacks are tracked and the
- * previous implementation is restored.
- */
-extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void register_photospider_ops_v2(
-    ps::plugin::OperationPluginRegistrar* registrar) {
-  if (!registrar) {
-    throw std::invalid_argument(
-        "register_photospider_ops_v2 requires registrar");
-  }
-  ps::plugin::OperationMetadata metadata;
-  metadata.cost_score = 2;
-  registrar->register_op_hp_monolithic(
-      "plugin_lifecycle", "op", make_override_lifecycle_test_op(), metadata);
-  registrar->register_dirty_propagator("plugin_lifecycle", "op",
-                                       override_dirty_propagator);
-  registrar->register_forward_propagator("plugin_lifecycle", "op",
-                                         override_forward_propagator);
-  registrar->register_dependency_builder("plugin_lifecycle", "op",
-                                         override_dependency_builder);
-  append_lifecycle_trace("override_registrar_return");
+/** @copydoc plugin_definition */
+const Definition& plugin_definition() noexcept {
+  return kDefinition;
 }
+
+}  // namespace ps::operation_plugin
+
+PS_DEFINE_OPERATION_PLUGIN_V1()

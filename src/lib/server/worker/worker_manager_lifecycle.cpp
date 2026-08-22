@@ -509,14 +509,24 @@ TerminateAndReapResult WorkerManager::Impl::terminate_and_reap(
   if (observe_exit(record, process)) {
     return TerminateAndReapResult::ExitedBeforeChannelRevocation;
   }
-  process->control.reset();
   if (options_.await_pre_signal_zero_exit_for_test) {
+    process->control.reset();
     await_pre_signal_zero_exit_for_test(
         process->pid, checked_worker_deadline(std::chrono::steady_clock::now(),
                                               options_.terminate_timeout));
+    if (!observe_exit(record, process)) {
+      fail_stop_reaping_authority_lost();
+    }
+    return TerminateAndReapResult::ReapedAfterChannelRevocation;
   }
   const bool term_delivered = signal_owned(record, process->pid, SIGTERM) ==
                               OwnedSignalResult::Delivered;
+  process->control.reset();
+  if (options_.await_channel_revocation_exit_for_test) {
+    await_any_exit_for_test(
+        process->pid, checked_worker_deadline(std::chrono::steady_clock::now(),
+                                              options_.terminate_timeout));
+  }
   if (wait_for_exit_until(
           record, process,
           checked_worker_deadline(std::chrono::steady_clock::now(),

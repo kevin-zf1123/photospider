@@ -19,6 +19,7 @@
 #include <utility>
 
 #include "benchmark/b1/b1_evidence.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/data/image_view.hpp"
 #include "photospider/host/host.hpp"
 
 namespace ps::benchmark {
@@ -175,8 +176,8 @@ B1RunObservationSnapshot run_observed_b1_job(Host& host, B1Host& b1_host,
                              std::nullopt, 1U,
                              static_cast<std::uint32_t>(job.run_cap)},
       collector.sink()};
-  const Result<ImageBuffer> computed =
-      b1_host.compute_b1_image(std::move(request));
+  const Result<NamedValueResult> computed =
+      b1_host.compute_b1_values(std::move(request));
   if (!computed.status.ok) {
     throw std::runtime_error(computed.status.message);
   }
@@ -204,18 +205,32 @@ TEST(B1ProductPath, ExactJobClosesLifecycleResourcesGoldenAndDurableOutput) {
       compute::ComputeRunQos{compute::ComputeRunQosClass::Throughput,
                              std::nullopt, 1U, 8U},
       collector.sink()};
-  const Result<ImageBuffer> computed =
-      b1_host->compute_b1_image(std::move(request));
+  const Result<NamedValueResult> computed =
+      b1_host->compute_b1_values(std::move(request));
   ASSERT_TRUE(computed.status.ok) << computed.status.message;
-  EXPECT_EQ(computed.value.width, static_cast<int>(kB1ImageEdge));
-  EXPECT_EQ(computed.value.height, static_cast<int>(kB1ImageEdge));
-  EXPECT_EQ(computed.value.channels, static_cast<int>(kB1ChannelCount));
-  EXPECT_EQ(computed.value.type, DataType::FLOAT32);
-  EXPECT_EQ(computed.value.device, Device::CPU);
+  const Value* computed_image = computed.value.find("image");
+  ASSERT_NE(computed_image, nullptr);
+  const ImageView computed_view(*computed_image);
+  EXPECT_EQ(computed_view.width(), kB1ImageEdge);
+  EXPECT_EQ(computed_view.height(), kB1ImageEdge);
+  EXPECT_EQ(computed_view.channels(), kB1ChannelCount);
+  EXPECT_EQ(computed_view.descriptor().element_semantics,
+            ElementSemantics::FloatingPoint);
+  EXPECT_EQ(computed_view.descriptor().storage_encoding,
+            (StorageEncoding{32U}));
+  ASSERT_TRUE(computed_view.image_facet().sample_domain.has_value());
+  EXPECT_EQ(
+      computed_view.image_facet().sample_domain,
+      (SampleDomainFacet{1U,
+                         SampleEncoding{1U, SampleEncodingKind::Normalized},
+                         SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                         {}}));
+  EXPECT_EQ(computed_image->storage_binding().device.backend(),
+            DeviceBackend::CPU);
 
   B1OutputStore output_store(temp.root() / "output",
                              b1_host->b1_compute_io_executor());
-  const B1OutputCommitResult output = output_store.commit(job, computed.value);
+  const B1OutputCommitResult output = output_store.commit(job, *computed_image);
   ASSERT_TRUE(output.succeeded()) << output.diagnostic;
   const B1ExecutionSnapshot after =
       b1_host->b1_execution_snapshot(before.lifecycle.snapshot_cut, 4096U);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -41,7 +42,7 @@ struct DirtyResolvedOperation {
   OpRegistry::OpVariant operation;
 
   /** @brief Device whose private lane must execute the callable. */
-  Device device = Device::CPU;
+  DeviceBackend device = DeviceBackend::CPU;
 
   /** @brief Nonzero registry revision of the exact selected implementation. */
   std::uint64_t implementation_identity = 0U;
@@ -52,6 +53,20 @@ struct DirtyResolvedOperation {
    * concurrency behavior.
    */
   OpMetadata metadata;
+
+  /**
+   * @brief Exact callback-free output authority frozen by graph planning.
+   * @note Dirty execution validates provider results against this value before
+   * staging and again before formal HP/RT publication.
+   */
+  PlannedOutputAuthority output_authority;
+
+  /**
+   * @brief Dirty-ROI callback frozen with the exact selected implementation.
+   * @note Tiled execution uses this copy instead of consulting the mutable
+   * operation-level registry callback after admission.
+   */
+  std::optional<DirtyRoiPropFunc> dirty_propagator;
 };
 
 /** @brief Node-id index of immutable dirty operation/device snapshots. */
@@ -122,6 +137,15 @@ struct DirtyNodeExecutionContext {
    * progressive request path and never changes downstream operation kernels.
    */
   bool exact_factor_four_preview = false;
+
+  /**
+   * @brief Executable tiled-task counts keyed by node for node-level sealing.
+   * @note Product execution supplies this request-owned map. Null is reserved
+   * for direct single-task tests/callers and implies one tiled task per node.
+   * The map outlives every executor callback and is immutable after physical
+   * admission.
+   */
+  const std::unordered_map<int, std::size_t>* tiled_task_counts = nullptr;
 };
 
 /**
@@ -202,29 +226,14 @@ class HighPrecisionDirtyNodeExecutor {
       const DirtyResolvedOperation& operation) const;
 
   /**
-   * @brief Ensures the HP cache image buffer can receive tiled dirty output.
-   *
-   * @param node Node whose staged HP cache is allocated.
-   * @param entry HP output extent.
-   * @param image_inputs_ready Resolved inputs used to infer format.
-   * @return Mutable HP image buffer matching the planned extent and format.
-   * @throws GraphError or std::bad_alloc if allocation fails.
-   * @note Existing HP data payloads remain owned by the staged NodeOutput
-   * object, not by GraphModel.
-   */
-  ImageBuffer& ensure_hp_buffer(
-      Node& node, const HpPlanEntry& entry,
-      const std::vector<const NodeOutput*>& image_inputs_ready) const;
-
-  /**
-   * @brief Runs a tiled HP implementation into the selected HP ROI.
+   * @brief Runs a tiled HP implementation through checked Host grants.
    *
    * @param node Node being computed.
    * @param tile_fn Tiled HP operation implementation.
    * @param entry HP ROI, extent, and halo metadata.
-   * @param metadata Metadata frozen with the selected tiled implementation.
+   * @param operation Exact selected implementation metadata and ROI callback.
    * @param image_inputs_ready Resolved HP image inputs.
-   * @param hp_buffer Request-local destination buffer.
+   * @param output_binding Open request-local destination binding.
    * @return Nothing.
    * @throws GraphError or operation exceptions from NodeExecutor.
    * @note Execution tile trace events are emitted before execution to mirror
@@ -232,9 +241,10 @@ class HighPrecisionDirtyNodeExecutor {
    * observed before every tile callback enters provider work.
    */
   void execute_tiled(Node& node, const TileOpFunc& tile_fn,
-                     const HpPlanEntry& entry, const OpMetadata& metadata,
+                     const HpPlanEntry& entry,
+                     const DirtyResolvedOperation& operation,
                      const std::vector<const NodeOutput*>& image_inputs_ready,
-                     ImageBuffer& hp_buffer) const;
+                     HostOutputBinding& output_binding) const;
 
   /**
    * @brief Runs a monolithic HP implementation and stores its output.
@@ -247,8 +257,8 @@ class HighPrecisionDirtyNodeExecutor {
    * @throws GraphError if the operation produces no output.
    * @note The exact core Region bridge stages selected bytes through the HP
    *       write buffer so prior valid coordinates survive a partial result.
-   *       Generic ABI v2 monolithic callbacks preserve complete-output
-   *       replacement behavior.
+   *       Generic monolithic callbacks preserve complete-output replacement
+   *       behavior.
    */
   void execute_monolithic(
       Node& node, const HpPlanEntry& entry, const MonolithicOpFunc& mono_fn,
@@ -261,11 +271,13 @@ class HighPrecisionDirtyNodeExecutor {
    * @param node Node whose staged HP cache was updated.
    * @param entry HP ROI and extent used for metadata.
    * @param dirty_source Whether the node is a dirty source boundary.
+   * @param tiled_operation Whether this task wrote the shared tiled binding.
    * @throws std::bad_alloc if event storage grows and allocation fails.
    * @note HP ROI metadata stays in HP coordinates and is committed later by
    * HighPrecisionDirtyExecutor.
    */
-  void commit_node(Node& node, const HpPlanEntry& entry, bool dirty_source);
+  void commit_node(Node& node, const HpPlanEntry& entry, bool dirty_source,
+                   bool tiled_operation);
 
   /**
    * @brief Checks and logs stale dirty source generations.
@@ -319,6 +331,9 @@ class HighPrecisionDirtyNodeExecutor {
 
   /** @brief Optional process authority for direct provider admission. */
   ExecutionService* direct_execution_service_ = nullptr;
+
+  /** @brief Frozen executable tiled-task counts, or null for direct callers. */
+  const std::unordered_map<int, std::size_t>* tiled_task_counts_ = nullptr;
 };
 
 /**
@@ -382,77 +397,25 @@ class RealTimeDirtyNodeExecutor {
   ResolvedNodeInputs resolve_inputs(Node& node) const;
 
   /**
-   * @brief Ensures the staged RT proxy buffer matches the planned RT extent.
-   *
-   * @param node Node whose id and HP fallback state are used.
-   * @param entry RT extent metadata.
-   * @param image_inputs_ready Resolved inputs used to infer format.
-   * @return Mutable staged RT image buffer matching the planned extent and
-   * format.
-   * @throws GraphError or std::bad_alloc if allocation fails.
-   * @note HP cache shape is used as a final format hint when staged RT output
-   * and inputs do not carry concrete image metadata.
-   */
-  ImageBuffer& ensure_rt_buffer(
-      const Node& node, const RtPlanEntry& entry,
-      const std::vector<const NodeOutput*>& image_inputs_ready) const;
-
-  /**
-   * @brief Executes the selected RT or HP-fallback operation.
-   *
-   * @param node Node being computed.
-   * @param entry RT dirty ROI and extent metadata.
-   * @param image_inputs_ready Resolved RT image inputs.
-   * @param rt_buffer Destination RT proxy buffer.
-   * @param operation Selected operation and metadata snapshot.
-   * @return Nothing.
-   * @throws std::bad_alloc when RT operation execution exhausts memory.
-   * @throws GraphError wrapping other OpenCV and standard exceptions with node
-   * id context, preserving previous RT dirty error reporting.
-   * @note GraphError exceptions from the operation are rethrown unchanged.
-   */
-  void execute_operation(
-      Node& node, const RtPlanEntry& entry,
-      const std::vector<const NodeOutput*>& image_inputs_ready,
-      ImageBuffer& rt_buffer, const DirtyResolvedOperation& operation) const;
-
-  /**
-   * @brief Runs a monolithic operation and copies the affected RT ROI.
-   *
-   * @param node Node being computed.
-   * @param entry RT dirty ROI and extent metadata.
-   * @param image_inputs_ready Resolved RT image inputs.
-   * @param rt_buffer Destination RT proxy buffer.
-   * @param mono_fn Monolithic operation implementation.
-   * @throws OpenCV exceptions from Mat conversion, resize, ROI slicing, or
-   * copy.
-   * @note Non-image payloads are copied even when the image buffer is empty.
-   */
-  void execute_monolithic(
-      Node& node, const RtPlanEntry& entry,
-      const std::vector<const NodeOutput*>& image_inputs_ready,
-      ImageBuffer& rt_buffer, const MonolithicOpFunc& mono_fn) const;
-
-  /**
-   * @brief Copies a monolithic image result into the planned RT ROI.
+   * @brief Copies a monolithic Value result through one checked RT grant.
    *
    * @param result Operation result produced by a monolithic implementation.
    * @param entry RT dirty ROI and extent metadata.
-   * @param rt_buffer Destination RT proxy buffer.
+   * @param output_binding Open Host binding for the RT proxy Value.
    * @param exact_factor_four_source Whether to use the frozen aligned box
    * average instead of ordinary build-selected resize.
    * @return Nothing.
-   * @throws OpenCV exceptions from Mat conversion, resize, ROI slicing, or
-   * copy.
+   * @throws GraphError, standard, or image-processing exceptions from Value
+   * projection, resize/downsample scratch work, grant issuance, or copy.
    * @throws std::invalid_argument or std::out_of_range when exact factor-four
    * geometry, format, storage separation, or ROI constraints are invalid.
-   * @note Full-frame monolithic output is resized to the planned RT extent when
-   * necessary before the dirty ROI is copied. The exact path instead applies
-   * the frozen aligned box average directly into the planned dirty ROI.
+   * @note Resize/downsample dense Values are callback-local read/scratch
+   * projections only. The binding remains the sole mutable RT authority and is
+   * sealed by the caller after this function retires its grant.
    */
   void copy_monolithic_image_roi(const NodeOutput& result,
                                  const RtPlanEntry& entry,
-                                 ImageBuffer& rt_buffer,
+                                 HostOutputBinding& output_binding,
                                  bool exact_factor_four_source) const;
 
   /**
@@ -461,9 +424,9 @@ class RealTimeDirtyNodeExecutor {
    * @param node Node being computed.
    * @param tile_fn Tiled operation implementation.
    * @param entry RT dirty ROI, extent, and halo metadata.
-   * @param metadata Metadata frozen with the selected tiled implementation.
+   * @param operation Exact selected implementation metadata and ROI callback.
    * @param image_inputs_ready Resolved RT image inputs.
-   * @param rt_buffer Destination RT proxy buffer.
+   * @param output_binding Open request-local destination binding.
    * @return Nothing.
    * @throws GraphError or operation exceptions from NodeExecutor.
    * @note Execution tile trace events are emitted after tiled execution, as in
@@ -471,9 +434,10 @@ class RealTimeDirtyNodeExecutor {
    * observed before every tile callback enters provider work.
    */
   void execute_tiled(Node& node, const TileOpFunc& tile_fn,
-                     const RtPlanEntry& entry, const OpMetadata& metadata,
+                     const RtPlanEntry& entry,
+                     const DirtyResolvedOperation& operation,
                      const std::vector<const NodeOutput*>& image_inputs_ready,
-                     ImageBuffer& rt_buffer) const;
+                     HostOutputBinding& output_binding) const;
 
   /**
    * @brief Records RT ROI, version, source generation, and node event state.
@@ -481,11 +445,13 @@ class RealTimeDirtyNodeExecutor {
    * @param node Node whose staged RT output was updated.
    * @param entry HP-space ROI and extent used for inspection metadata.
    * @param dirty_source Whether the node is a dirty source boundary.
+   * @param tiled_operation Whether this task wrote the shared tiled binding.
    * @throws std::bad_alloc if event storage grows and allocation fails.
    * @note RT ROI metadata is staged in HP coordinates for frontend/debug
    * consistency and committed by the owning RealTimeDirtyExecutor.
    */
-  void commit_node(Node& node, const RtPlanEntry& entry, bool dirty_source);
+  void commit_node(Node& node, const RtPlanEntry& entry, bool dirty_source,
+                   bool tiled_operation);
 
   /**
    * @brief Checks and logs stale dirty source generations.
@@ -548,6 +514,9 @@ class RealTimeDirtyNodeExecutor {
 
   /** @brief Frozen exact RT source-normalization selector. */
   bool exact_factor_four_preview_ = false;
+
+  /** @brief Frozen executable tiled-task counts, or null for direct callers. */
+  const std::unordered_map<int, std::size_t>* tiled_task_counts_ = nullptr;
 };
 
 }  // namespace ps::compute

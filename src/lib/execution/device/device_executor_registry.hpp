@@ -48,7 +48,7 @@ enum class DeviceExecutorDeadlineCheckpoint : std::uint32_t {
  */
 struct DeviceExecutorDiagnostics final {
   /** @brief Device label owned by the observed executor. */
-  Device device = Device::CPU;
+  DeviceBackend device = DeviceBackend::CPU;
 
   /** @brief Whether the executor owns a usable native command queue. */
   bool queue_ready = false;
@@ -156,6 +156,24 @@ class DeviceExecutorInvocation {
     (void)checkpoint;
     return std::chrono::steady_clock::now();
   }
+
+  /**
+   * @brief Observes one invocation-local native accounting update.
+   * @param planned Complete device plan already admitted before allocation.
+   * @param actual Checked native actual total after the latest allocation.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The default is a no-op. Source-private tests may copy these values to
+   * verify allocator-to-ledger mapping. The callback receives no native handle,
+   * reservation, lease, mutation path, or capacity authority and MUST NOT call
+   * back into the executor or ledger.
+   */
+  virtual void observe_device_resource_accounting(
+      DeviceResourceVector planned,
+      DeviceResourceVector actual) const noexcept {
+    (void)planned;
+    (void)actual;
+  }
 };
 
 /**
@@ -181,7 +199,7 @@ class DeviceExecutor {
    * @return Immutable executor device.
    * @throws Nothing.
    */
-  virtual Device device() const noexcept = 0;
+  virtual DeviceBackend device() const noexcept = 0;
 
   /**
    * @brief Runs one borrowed invocation inside the native executor scope.
@@ -301,7 +319,7 @@ class DeviceExecutorRegistry final {
    * @return True only for a populated valid non-CPU slot.
    * @throws Nothing.
    */
-  bool contains(Device device) const noexcept;
+  bool contains(DeviceBackend device) const noexcept;
 
   /**
    * @brief Returns the number of registered non-CPU executors.
@@ -315,7 +333,7 @@ class DeviceExecutorRegistry final {
    * @return `GPU_METAL`, `GPU_CUDA`, and `ASIC_NPU` when present.
    * @throws std::bad_alloc when result storage cannot allocate.
    */
-  std::vector<Device> available_devices() const;
+  std::vector<DeviceBackend> available_devices() const;
 
   /**
    * @brief Dispatches one invocation to the exact registered executor.
@@ -329,7 +347,7 @@ class DeviceExecutorRegistry final {
    * @note Nested dispatch through a different executor object is permitted;
    * the identity guard is restored after return or exception.
    */
-  void execute(Device device, DeviceExecutorInvocation& invocation);
+  void execute(DeviceBackend device, DeviceExecutorInvocation& invocation);
 
   /**
    * @brief Copies diagnostics for one exact registered executor.
@@ -340,7 +358,7 @@ class DeviceExecutorRegistry final {
    * @note A submitted call waiting for serialized callback admission is
    * visible without waiting for the active callback to return.
    */
-  DeviceExecutorDiagnostics diagnostics(Device device) const;
+  DeviceExecutorDiagnostics diagnostics(DeviceBackend device) const;
 
   /**
    * @brief Returns the shared process-domain residency manager.
@@ -408,8 +426,8 @@ class DeviceExecutorRegistry final {
   std::size_t retire_graph_lineages(std::uint64_t graph_instance_id);
 
  private:
-  /** @brief Number of public Device enum slots currently recognized. */
-  static constexpr std::size_t kDeviceSlotCount = 4U;
+  /** @brief Number of public backend-family slots currently recognized. */
+  static constexpr std::size_t kDeviceSlotCount = 5U;
 
   /**
    * @brief Resolves one validated enum to its fixed slot.
@@ -417,9 +435,9 @@ class DeviceExecutorRegistry final {
    * @return Slot index, or `kDeviceSlotCount` for an unknown value.
    * @throws Nothing.
    */
-  static std::size_t slot_for(Device device) noexcept;
+  static std::size_t slot_for(DeviceBackend device) noexcept;
 
-  /** @brief Unique executor owners indexed by stable Device value. */
+  /** @brief Unique executor owners indexed by stable backend-family value. */
   std::array<std::unique_ptr<DeviceExecutor>, kDeviceSlotCount> executors_{};
 
   /** @brief Replica publication authority shared by concrete executors. */

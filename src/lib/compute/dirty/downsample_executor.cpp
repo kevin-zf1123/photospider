@@ -1,15 +1,22 @@
 #include "compute/dirty/downsample_executor.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
 #include <new>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "compute/compute_geometry.hpp"
 #include "compute/compute_run.hpp"
-#include "core/image_buffer_processing.hpp"
+#include "compute/dirty/node_executor.hpp"
+#include "core/dense_image_processing.hpp"
 #include "core/region_image_adapter.hpp"
+#include "photospider/data/image_view.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 
@@ -17,47 +24,13 @@ namespace ps::compute {
 namespace {
 
 /**
- * @brief Deep-copies an image buffer before downsample staging writes.
- *
- * @param source Source proxy image buffer.
- * @return Independent CPU buffer when CPU pixels are present, or a shared
- * immutable descriptor for an opaque non-CPU backend resource.
- * @throws GraphError when the selected image-processing clone implementation
- *         fails.
- * @note Empty buffers keep shape metadata but drop ownership. Opaque backend
- * descriptors are shared because the generic downsampler cannot clone or map
- * their resource; passthrough later replaces the complete proxy output.
- */
-ImageBuffer clone_image_buffer(const ImageBuffer& source) {
-  ImageBuffer cloned = source;
-  cloned.data.reset();
-  cloned.context.reset();
-  if (source.width <= 0 || source.height <= 0 || source.channels <= 0 ||
-      (!source.data && !source.context)) {
-    return cloned;
-  }
-  if (source.device != Device::CPU) {
-    return source;
-  }
-  try {
-    return image_processing::clone_cpu_image_buffer(source);
-  } catch (const std::bad_alloc&) {
-    throw;
-  } catch (const std::exception& e) {
-    throw GraphError(
-        GraphErrc::ComputeError,
-        "Failed to clone downsample proxy buffer: " + std::string(e.what()));
-  }
-}
-
-/**
- * @brief Deep-copies committed proxy node state for staged downsample writes.
+ * @brief Copies committed proxy state for immutable downsample staging.
  *
  * @param state Committed proxy state to copy.
- * @return Independent proxy state with cleared image Value identity, safe for
- * ROI mutation before transient proxy commit.
- * @throws std::bad_alloc when image or metadata copying exhausts memory.
- * @throws GraphError when image payload cloning otherwise fails.
+ * @return Independent metadata state retaining any immutable output Value.
+ * @throws std::bad_alloc when output or Region metadata copying allocates.
+ * @note ROI mutation never touches the retained Value. A fresh Host binding is
+ * seeded from it later and replaces it only after successful seal.
  */
 RealtimeProxyGraph::NodeState clone_proxy_state(
     const RealtimeProxyGraph::NodeState& state) {
@@ -66,12 +39,100 @@ RealtimeProxyGraph::NodeState clone_proxy_state(
   cloned.version = state.version;
   cloned.dirty_source_generation = state.dirty_source_generation;
   if (state.output) {
-    NodeOutput output = *state.output;
-    output.image_buffer = clone_image_buffer(state.output->image_buffer);
-    output.image_value = Value{};
-    cloned.output = std::move(output);
+    cloned.output = *state.output;
   }
   return cloned;
+}
+
+/**
+ * @brief Seeds one RT binding when prior proxy Value facts match exactly.
+ * @param state Staged prior proxy state.
+ * @param binding Fresh RT Host binding.
+ * @return True after exact immutable bytes are copied; false when no compatible
+ * prior image exists.
+ * @throws Value-view or grant lifecycle exceptions from seed_from_value().
+ * @note A mismatch is detected before mutable grant issuance.
+ */
+bool seed_downsample_binding(const RealtimeProxyGraph::NodeState& state,
+                             HostOutputBinding& binding) {
+  if (!state.output.has_value() || !state.output->has_image_value()) {
+    return false;
+  }
+  const Value& value = state.output->image_value();
+  if (!(value.dense_tensor_descriptor() == binding.plan().descriptor()) ||
+      !value.image_facet().has_value() ||
+      !(*value.image_facet() == binding.plan().image_facet())) {
+    return false;
+  }
+  binding.seed_from_value(value);
+  return true;
+}
+
+/**
+ * @brief Copies one immutable Value ROI into an active RT binding.
+ * @param source Full-extent Ready host-readable image Value.
+ * @param roi Nonempty zero-origin RT selection.
+ * @param binding Open RT output binding.
+ * @return Nothing after exact row spans retire successfully.
+ * @throws std::invalid_argument when Value facts or ROI disagree with plan.
+ * @throws ReadyFenceAccessError or BufferAccessError for inaccessible bytes.
+ * @throws std::overflow_error when row arithmetic is unrepresentable.
+ * @throws std::logic_error or std::system_error from grant lifecycle failure.
+ * @note Any exception after issuance retires the grant as failure, preventing
+ * partial RT Value publication. Source row padding is never copied.
+ */
+void copy_downsample_value(const Value& source, const PixelRect& roi,
+                           HostOutputBinding& binding) {
+  const ImageView view(source);
+  const DenseImageOutputPlan& plan = binding.plan();
+  const PixelSize planned_size{static_cast<int>(plan.width()),
+                               static_cast<int>(plan.height())};
+  if (view.width() != plan.width() || view.height() != plan.height() ||
+      view.channels() != plan.channels() ||
+      !(view.descriptor() == plan.descriptor()) ||
+      !(view.image_facet() == plan.image_facet()) || roi.width <= 0 ||
+      roi.height <= 0 || !(clip_rect(roi, planned_size) == roi)) {
+    throw std::invalid_argument(
+        "Downsample Value disagrees with the RT output plan.");
+  }
+  const RegionSet logical_region =
+      region_image_adapter::from_storage_pixel_rect(
+          roi, plan.image_facet().data_window);
+  const ImageRect& logical_roi =
+      std::get<ImageRect>(logical_region.atoms().front());
+  HostOutputWriteGrant grant = binding.grant_tile(logical_roi);
+  try {
+    const std::size_t row_bytes =
+        static_cast<std::size_t>(roi.width) * plan.pixel_bytes();
+    for (int row = 0; row < roi.height; ++row) {
+      if (grant.span(static_cast<std::size_t>(row)).byte_size != row_bytes) {
+        throw std::logic_error(
+            "Downsample grant span disagrees with planned row width.");
+      }
+      std::byte* destination = grant.data(static_cast<std::size_t>(row));
+      for (int column = 0; column < roi.width; ++column) {
+        for (std::size_t channel = 0U; channel < plan.channels(); ++channel) {
+          const std::size_t offset =
+              static_cast<std::size_t>(column) * plan.pixel_bytes() +
+              channel * plan.element_bytes();
+          std::memcpy(
+              destination + offset,
+              view.channel_data(static_cast<std::size_t>(roi.x + column),
+                                static_cast<std::size_t>(roi.y + row), channel),
+              plan.element_bytes());
+        }
+      }
+    }
+    grant.retire_success();
+  } catch (...) {
+    try {
+      if (grant.active()) {
+        grant.retire_failure("Downsample Value copy failed.");
+      }
+    } catch (...) {
+    }
+    throw;
+  }
 }
 
 /**
@@ -82,8 +143,8 @@ RealtimeProxyGraph::NodeState clone_proxy_state(
  * @throws GraphError after accepted cancellation to suppress later proxy work.
  * @throws std::system_error when Run-state synchronization fails.
  * @note The Run retains the exact reason for outer service translation. One
- * OpenCV resize remains non-preemptible, but its result is checked before proxy
- * publication.
+ * One dense resize remains non-preemptible, but its result is checked before
+ * proxy publication.
  */
 void observe_downsample_cancellation(const ComputeRunLease* run_lease) {
   if (run_lease != nullptr && run_lease->observe_cancellation().has_value()) {
@@ -132,19 +193,38 @@ void DownsampleExecutor::execute_one(const Request& request) {
     return;
   }
   const NodeOutput& hp_output = *node.cached_output_high_precision;
-  const ImageBuffer& hp_buffer = hp_output.image_buffer;
-  const PixelSize hp_size{std::max(hp_buffer.width, 0),
-                          std::max(hp_buffer.height, 0)};
-  const PixelRect roi_hp = normalize_hp_roi(request.roi_hp, hp_size);
+  if (!hp_output.has_image_value()) {
+    apply_passthrough(node, proxy_state, RegionSet::empty(),
+                      request.hp_version);
+    observe_downsample_cancellation(run_lease_);
+    proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
+    return;
+  }
+  const Value& hp_value = hp_output.image_value();
+  const ImageBounds& hp_bounds = hp_value.image_bounds();
+  const std::size_t hp_width = image_bounds_width(hp_bounds);
+  const std::size_t hp_height = image_bounds_height(hp_bounds);
+  if (hp_width > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+      hp_height > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Downsample HP Value extent exceeds PixelSize.");
+  }
+  const PixelSize hp_size{static_cast<int>(hp_width),
+                          static_cast<int>(hp_height)};
+  const PixelRect roi_hp =
+      normalize_hp_roi(request.region_hp, hp_bounds, hp_size);
+  const RegionSet region_hp =
+      region_image_adapter::from_storage_pixel_rect(roi_hp, hp_bounds);
 
   if (!proxy_state.output) {
     proxy_state.output = NodeOutput{};
   }
   proxy_state.output->data = hp_output.data;
 
-  if (hp_buffer.width <= 0 || hp_buffer.height <= 0 ||
-      hp_buffer.device != Device::CPU || !hp_buffer.data) {
-    apply_passthrough(node, proxy_state, roi_hp, hp_size, request.hp_version);
+  const StorageBinding hp_binding = hp_value.storage_binding();
+  if (hp_binding.device.backend() != DeviceBackend::CPU ||
+      !hp_binding.host_visible) {
+    apply_passthrough(node, proxy_state, region_hp, request.hp_version);
     observe_downsample_cancellation(run_lease_);
     proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
     return;
@@ -152,15 +232,30 @@ void DownsampleExecutor::execute_one(const Request& request) {
 
   const PixelSize rt_size = scale_down_size(hp_size, kRtDownscaleFactor);
   if (rt_size.width <= 0 || rt_size.height <= 0) {
-    apply_passthrough(node, proxy_state, roi_hp, hp_size, request.hp_version);
+    apply_passthrough(node, proxy_state, region_hp, request.hp_version);
     observe_downsample_cancellation(run_lease_);
     proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
     return;
   }
 
-  ImageBuffer& rt_buffer = ensure_rt_buffer(proxy_state, hp_buffer, rt_size);
-  downsample_roi(hp_buffer, rt_buffer, roi_hp, rt_size);
-  commit_rt_metadata(proxy_state, roi_hp, hp_size, request.hp_version);
+  const std::vector<const NodeOutput*> plan_inputs{&hp_output};
+  HostOutputBinding output_binding =
+      NodeExecutor::allocate_tiled_output_binding(plan_inputs, rt_size);
+  const bool preserved_existing_bytes =
+      seed_downsample_binding(proxy_state, output_binding);
+  downsample_roi(hp_value, output_binding, roi_hp, rt_size);
+  if (!proxy_state.output.has_value()) {
+    proxy_state.output = NodeOutput{};
+  }
+  if (proxy_state.output->has_image_value()) {
+    proxy_state.output->replace_image_value(output_binding.seal());
+  } else {
+    proxy_state.output->publish_image_value(output_binding.seal());
+  }
+  if (!preserved_existing_bytes) {
+    proxy_state.region_hp.reset();
+  }
+  commit_rt_metadata(proxy_state, region_hp, request.hp_version);
   observe_downsample_cancellation(run_lease_);
   proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
   events_.push(node.id, node.name, "downsample", 0.0);
@@ -185,9 +280,12 @@ Node* DownsampleExecutor::find_current_node(const Request& request) {
 }
 
 /** @copydoc DownsampleExecutor::normalize_hp_roi */
-PixelRect DownsampleExecutor::normalize_hp_roi(const PixelRect& request_roi,
+PixelRect DownsampleExecutor::normalize_hp_roi(const RegionSet& request_region,
+                                               const ImageBounds& hp_bounds,
                                                const PixelSize& hp_size) const {
-  PixelRect roi_hp = clip_rect(request_roi, hp_size);
+  PixelRect roi_hp = clip_rect(
+      region_image_adapter::to_storage_pixel_rect(request_region, hp_bounds),
+      hp_size);
   if (is_rect_empty(roi_hp) && hp_size.width > 0 && hp_size.height > 0) {
     roi_hp = PixelRect{0, 0, hp_size.width, hp_size.height};
   }
@@ -197,35 +295,15 @@ PixelRect DownsampleExecutor::normalize_hp_roi(const PixelRect& request_roi,
 /** @copydoc DownsampleExecutor::apply_passthrough */
 void DownsampleExecutor::apply_passthrough(
     Node& node, RealtimeProxyGraph::NodeState& proxy_state,
-    const PixelRect& roi_hp, const PixelSize& hp_size, int hp_version) {
+    const RegionSet& region_hp, int hp_version) {
   proxy_state.output = node.cached_output_high_precision;
-  commit_rt_metadata(proxy_state, roi_hp, hp_size, hp_version);
+  commit_rt_metadata(proxy_state, region_hp, hp_version);
   events_.push(node.id, node.name, "downsample_passthrough", 0.0);
 }
 
-/** @copydoc DownsampleExecutor::ensure_rt_buffer */
-ImageBuffer& DownsampleExecutor::ensure_rt_buffer(
-    RealtimeProxyGraph::NodeState& proxy_state, const ImageBuffer& hp_buffer,
-    const PixelSize& rt_size) {
-  if (!proxy_state.output) {
-    proxy_state.output = NodeOutput{};
-  }
-  ImageBuffer& rt_buffer = proxy_state.output->image_buffer;
-  const bool needs_alloc = (rt_buffer.width != rt_size.width) ||
-                           (rt_buffer.height != rt_size.height) ||
-                           (rt_buffer.channels != hp_buffer.channels) ||
-                           (rt_buffer.type != hp_buffer.type) ||
-                           (!rt_buffer.data);
-  if (needs_alloc) {
-    rt_buffer = make_aligned_cpu_image_buffer(
-        rt_size.width, rt_size.height, hp_buffer.channels, hp_buffer.type);
-  }
-  return rt_buffer;
-}
-
 /** @copydoc DownsampleExecutor::downsample_roi */
-PixelRect DownsampleExecutor::downsample_roi(const ImageBuffer& hp_buffer,
-                                             ImageBuffer& rt_buffer,
+PixelRect DownsampleExecutor::downsample_roi(const Value& hp_value,
+                                             HostOutputBinding& output_binding,
                                              const PixelRect& roi_hp,
                                              const PixelSize& rt_size) const {
   PixelRect roi_rt =
@@ -234,27 +312,26 @@ PixelRect DownsampleExecutor::downsample_roi(const ImageBuffer& hp_buffer,
     roi_rt = PixelRect{0, 0, rt_size.width, rt_size.height};
   }
 
-  image_processing::resize_cpu_image_buffer_region(hp_buffer, roi_hp, rt_buffer,
-                                                   roi_rt);
+  const Value resized =
+      dense_image_processing::resize_region(hp_value, roi_hp, rt_size, roi_rt);
+  copy_downsample_value(resized, roi_rt, output_binding);
   return roi_rt;
 }
 
 /** @copydoc DownsampleExecutor::commit_rt_metadata */
 void DownsampleExecutor::commit_rt_metadata(
-    RealtimeProxyGraph::NodeState& proxy_state, const PixelRect& roi_hp,
-    const PixelSize& hp_size, int hp_version) {
-  (void)hp_size;
-  if (!is_rect_empty(roi_hp)) {
-    const RegionSet update = region_image_adapter::from_pixel_rect(roi_hp);
+    RealtimeProxyGraph::NodeState& proxy_state, const RegionSet& region_hp,
+    int hp_version) {
+  if (!region_hp.is_empty()) {
     if (proxy_state.region_hp.has_value()) {
       const RegionOperationResult merged =
-          union_regions(*proxy_state.region_hp, update);
+          union_regions(*proxy_state.region_hp, region_hp);
       proxy_state.region_hp = merged.status() == RegionOperationStatus::Exact &&
                                       merged.region().has_value()
                                   ? *merged.region()
-                                  : update;
+                                  : region_hp;
     } else {
-      proxy_state.region_hp = update;
+      proxy_state.region_hp = region_hp;
     }
   }
   proxy_state.version = hp_version;

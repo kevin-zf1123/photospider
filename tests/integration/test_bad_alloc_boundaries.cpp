@@ -3,11 +3,14 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <new>
 #include <sstream>
@@ -15,7 +18,6 @@
 #include <utility>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "benchmark/benchmark_service.hpp"
 #include "compute/dirty/dirty_update_executor.hpp"
 #include "compute/dirty/realtime_proxy_graph.hpp"
@@ -27,8 +29,10 @@
 #include "graph_cli/command/commands.hpp"
 #include "graph_cli/process_command.hpp"
 #include "metal/metal_exception_boundary.hpp"
+#include "photospider/data/image_view.hpp"
+#include "photospider/data/sample_conversion.hpp"
+#include "photospider/data/value_artifact.hpp"
 #include "photospider/host/host.hpp"
-#include "photospider/plugin/plugin_api.hpp"
 #include "runtime/graph_event_service.hpp"
 
 #if defined(PHOTOSPIDER_INTERNAL_METAL_PERLIN_TESTING)
@@ -186,21 +190,6 @@ void operator delete[](void* memory, std::size_t size) noexcept {
   std::free(memory);
 }
 
-/**
- * @brief Declares the real threshold plugin registrar linked into this test.
- *
- * @param registrar Host-owned ABI registrar valid only for this call.
- * @return Nothing.
- * @throws std::invalid_argument for a null registrar.
- * @throws std::logic_error for incomplete registrar callbacks.
- * @throws std::bad_alloc if registration callback storage exhausts memory.
- * @note This repeats the canonical plugin entry declaration only because the
- * plugin ABI intentionally discovers it by symbol name; no helper symbol from
- * threshold_op.cpp is exposed to the test.
- */
-extern "C" void register_photospider_ops_v2(
-    ps::plugin::OperationPluginRegistrar* registrar);
-
 namespace ps {
 namespace {
 
@@ -288,6 +277,99 @@ AllocationFailureObservation observe_allocation_failure(
   return observation;
 }
 
+/**
+ * @brief Creates one aligned portable DenseImage artifact for allocation tests.
+ * @return Complete valid artifact requesting the maximum portable alignment.
+ * @throws Value/artifact validation and allocation failures unchanged.
+ * @note Fixture construction finishes before the allocation probe is armed.
+ */
+ValueArtifact make_aligned_bad_alloc_artifact() {
+  DenseTensorDescriptor descriptor{{1U, 1U, 1U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  Value value =
+      Value::from_cpu_dense_tensor(std::move(descriptor), std::move(facet),
+                                   StridedLayout{{1, 1, 1}}, {std::byte{0x5a}});
+  ValueArtifact artifact = capture_value_artifact("image", value);
+  artifact.envelope.buffers[0].required_alignment =
+      kMaximumValueArtifactAlignment;
+  return artifact;
+}
+
+/**
+ * @brief Creates one full-range floating SampleConversion source fixture.
+ * @return Ready ordinary image with one finite zero sample.
+ * @throws Value validation and allocation failures unchanged.
+ */
+Value make_full_range_bad_alloc_sample() {
+  const double maximum = std::numeric_limits<double>::max();
+  DenseTensorDescriptor descriptor{{1U, 1U, 1U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{64U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain = SampleDomainFacet{
+      1U,
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -maximum, maximum},
+      {}};
+  std::vector<std::byte> storage(sizeof(double));
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{{static_cast<std::ptrdiff_t>(sizeof(double)),
+                     static_cast<std::ptrdiff_t>(sizeof(double)),
+                     static_cast<std::ptrdiff_t>(sizeof(double))}},
+      std::move(storage));
+}
+
+TEST(ValueArtifactBadAllocBoundary,
+     ReconstructionPropagatesAndRecoversWithoutMutatingInput) {
+  const ValueArtifact artifact = make_aligned_bad_alloc_artifact();
+  const ArtifactPayloadDigest digest_before =
+      artifact.envelope.buffers[0].digest;
+
+  const AllocationFailureObservation failed = observe_allocation_failure(
+      0, [&] { (void)reconstruct_value_artifact(artifact); });
+
+  EXPECT_TRUE(failed.fired);
+  EXPECT_TRUE(failed.propagated);
+  EXPECT_EQ(artifact.envelope.buffers[0].digest, digest_before);
+  EXPECT_EQ(artifact.envelope.buffers[0].required_alignment,
+            kMaximumValueArtifactAlignment);
+  const Value recovered = reconstruct_value_artifact(artifact);
+  const ReadLease read = recovered.buffer_handle().acquire_read();
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(read.data()) %
+                kMaximumValueArtifactAlignment,
+            0U);
+}
+
+TEST(SampleConversionBadAllocBoundary,
+     ConversionPropagatesAndLaterPublishesOneCompleteValue) {
+  const Value source = make_full_range_bad_alloc_sample();
+  const double maximum = std::numeric_limits<double>::max();
+  SampleConversion conversion;
+  conversion.source = {
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal, -maximum, maximum}};
+  conversion.destination = {
+      SampleEncoding{1U, SampleEncodingKind::Normalized},
+      SampleDomain{SampleDomainKind::Normalized, -1.0, 1.0}};
+  conversion.destination_element_semantics = ElementSemantics::FloatingPoint;
+  conversion.destination_storage_encoding = StorageEncoding{64U};
+  conversion.precision_loss = PrecisionLossPolicy::Allow;
+
+  const AllocationFailureObservation failed = observe_allocation_failure(
+      0, [&] { (void)convert_dense_image_samples(source, conversion); });
+
+  EXPECT_TRUE(failed.fired);
+  EXPECT_TRUE(failed.propagated);
+  const Value recovered = convert_dense_image_samples(source, conversion);
+  double sample = 1.0;
+  const ImageView view(recovered);
+  std::memcpy(&sample, view.channel_data(0U, 0U, 0U), sizeof(sample));
+  EXPECT_EQ(sample, 0.0);
+}
+
 TEST(GraphEventDrainBadAllocBoundary,
      ReserveFailurePreservesEveryRetainedEventAndDropCount) {
   GraphEventService events(2);
@@ -306,128 +388,6 @@ TEST(GraphEventDrainBadAllocBoundary,
   EXPECT_EQ(recovered.events[1].sequence, 3u);
   EXPECT_EQ(recovered.dropped_count, 1u);
   EXPECT_FALSE(recovered.has_more);
-}
-
-/**
- * @brief Captured callbacks from the real threshold registration entry.
- *
- * @throws std::bad_alloc when copied names or callback targets allocate.
- * @note Callback objects own their std::function targets for the test lifetime.
- */
-struct ThresholdRegistrationCapture {
-  /** @brief Registered operation type copied by the registrar callback. */
-  std::string type;
-
-  /** @brief Registered operation subtype copied by the registrar callback. */
-  std::string subtype;
-
-  /** @brief Real registered HP monolithic threshold callback. */
-  plugin::MonolithicOperation operation;
-
-  /** @brief Real registered backward dirty ROI callback. */
-  plugin::DirtyRoiPropagator dirty;
-
-  /** @brief Real registered forward dirty ROI callback. */
-  plugin::ForwardRoiPropagator forward;
-};
-
-/**
- * @brief Captures one HP monolithic registration callback.
- *
- * @param user_data ThresholdRegistrationCapture owned by the test.
- * @param type Registered operation type.
- * @param subtype Registered operation subtype.
- * @param fn Real plugin operation callback.
- * @param meta Registration metadata; unused by this contract test.
- * @return Nothing.
- * @throws std::bad_alloc if captured strings or callback storage allocate.
- * @note user_data and incoming name pointers remain borrowed for this callback
- * only; names and callback ownership are copied/moved into the capture.
- */
-void capture_threshold_operation(void* user_data, const char* type,
-                                 const char* subtype,
-                                 plugin::MonolithicOperation fn,
-                                 plugin::OperationMetadata meta) {
-  (void)meta;
-  auto& capture = *static_cast<ThresholdRegistrationCapture*>(user_data);
-  capture.type = type;
-  capture.subtype = subtype;
-  capture.operation = std::move(fn);
-}
-
-/**
- * @brief Captures one dirty ROI callback from threshold registration.
- *
- * @param user_data ThresholdRegistrationCapture owned by the test.
- * @param type Registered operation type; already checked by the HP callback.
- * @param subtype Registered subtype; already checked by the HP callback.
- * @param fn Real plugin dirty propagator.
- * @return Nothing.
- * @throws std::bad_alloc if callback storage allocation fails.
- * @note The callback target is moved into test-owned capture storage.
- */
-void capture_threshold_dirty(void* user_data, const char* type,
-                             const char* subtype,
-                             plugin::DirtyRoiPropagator fn) {
-  (void)type;
-  (void)subtype;
-  auto& capture = *static_cast<ThresholdRegistrationCapture*>(user_data);
-  capture.dirty = std::move(fn);
-}
-
-/**
- * @brief Captures one forward ROI callback from threshold registration.
- *
- * @param user_data ThresholdRegistrationCapture owned by the test.
- * @param type Registered operation type; already checked by the HP callback.
- * @param subtype Registered subtype; already checked by the HP callback.
- * @param fn Real plugin forward propagator.
- * @return Nothing.
- * @throws std::bad_alloc if callback storage allocation fails.
- * @note The callback target is moved into test-owned capture storage.
- */
-void capture_threshold_forward(void* user_data, const char* type,
-                               const char* subtype,
-                               plugin::ForwardRoiPropagator fn) {
-  (void)type;
-  (void)subtype;
-  auto& capture = *static_cast<ThresholdRegistrationCapture*>(user_data);
-  capture.forward = std::move(fn);
-}
-
-/**
- * @brief Invokes the real threshold plugin registration entry.
- *
- * @return Captured operation and ROI callbacks.
- * @throws std::bad_alloc if callback capture storage exhausts memory.
- * @throws std::logic_error if the real entry requires an unprovided callback.
- * @note No OpRegistry singleton is used; this exercises the versioned plugin
- * registrar ABI exactly as a loader does.
- */
-ThresholdRegistrationCapture register_threshold_callbacks() {
-  ThresholdRegistrationCapture capture;
-  plugin::OperationPluginRegistrar registrar;
-  registrar.user_data = &capture;
-  registrar.register_hp_monolithic = capture_threshold_operation;
-  registrar.register_dirty = capture_threshold_dirty;
-  registrar.register_forward = capture_threshold_forward;
-  register_photospider_ops_v2(&registrar);
-  return capture;
-}
-
-/**
- * @brief Creates a valid threshold input output buffer.
- *
- * @return NodeOutput containing a deterministic 2x2 float image.
- * @throws std::bad_alloc or cv::Exception if image storage cannot be created.
- * @note The returned buffer owns its storage and remains valid for the complete
- * registered-callback invocation in each threshold test.
- */
-NodeOutput make_threshold_input() {
-  cv::Mat image(2, 2, CV_32FC1, cv::Scalar(0.75));
-  NodeOutput output;
-  output.image_buffer = fromCvMat(image);
-  return output;
 }
 
 /**
@@ -586,16 +546,33 @@ void register_bad_alloc_boundary_operations() {
                              -> NodeOutput { throw std::bad_alloc{}; }));
     registry.register_op_hp_monolithic(
         "bad_alloc_boundary_test", "dirty_source",
-        MonolithicOpFunc(
-            [](const Node& node, const std::vector<const NodeOutput*>&) {
-              const int width = as_int_flexible(node.parameters, "width", 16);
-              const int height = as_int_flexible(node.parameters, "height", 16);
-              NodeOutput output;
-              output.image_buffer = make_aligned_cpu_image_buffer(
-                  width, height, 1, DataType::FLOAT32);
-              toCvMat(output.image_buffer).setTo(1.0f);
-              return output;
-            }));
+        MonolithicOpFunc([](const Node& node,
+                            const std::vector<const NodeOutput*>&) {
+          const int width = as_int_flexible(node.parameters, "width", 16);
+          const int height = as_int_flexible(node.parameters, "height", 16);
+          DenseTensorDescriptor descriptor{
+              {static_cast<std::size_t>(height),
+               static_cast<std::size_t>(width), 1U},
+              ElementSemantics::FloatingPoint,
+              StorageEncoding{32U}};
+          ImageFacet facet =
+              make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+          std::vector<float> samples(static_cast<std::size_t>(width) *
+                                         static_cast<std::size_t>(height),
+                                     1.0F);
+          std::vector<std::byte> bytes(samples.size() * sizeof(float));
+          std::memcpy(bytes.data(), samples.data(), bytes.size());
+          NodeOutput output;
+          output.publish_image_value(Value::from_cpu_dense_tensor(
+              std::move(descriptor), std::move(facet),
+              StridedLayout{
+                  {static_cast<std::ptrdiff_t>(static_cast<std::size_t>(width) *
+                                               sizeof(float)),
+                   static_cast<std::ptrdiff_t>(sizeof(float)),
+                   static_cast<std::ptrdiff_t>(sizeof(float))}},
+              std::move(bytes)));
+          return output;
+        }));
     OpMetadata tile_metadata;
     tile_metadata.tile_preference = TileSizePreference::MICRO;
     registry.register_op_hp_tiled("bad_alloc_boundary_test",
@@ -607,9 +584,28 @@ void register_bad_alloc_boundary_operations() {
                                   tile_metadata);
     registry.register_op_hp_tiled(
         "bad_alloc_boundary_test", "rt_dirty_resource_exhausted",
-        TileOpFunc(
-            [](const Node&, const OutputTile& output,
-               const std::vector<InputTile>&) { toCvMat(output).setTo(1.0f); }),
+        TileOpFunc([](const Node&, const OutputTile& output,
+                      const std::vector<InputTile>&) {
+          if (output.grant == nullptr) {
+            throw std::invalid_argument(
+                "rt dirty boundary output grant is absent");
+          }
+          constexpr float kOne = 1.0F;
+          for (std::size_t span_index = 0U;
+               span_index < output.grant->span_count(); ++span_index) {
+            const std::size_t byte_size =
+                output.grant->span(span_index).byte_size;
+            if (byte_size % sizeof(float) != 0U) {
+              throw std::invalid_argument(
+                  "rt dirty boundary output span is not FP32 aligned");
+            }
+            std::byte* const destination = output.grant->data(span_index);
+            for (std::size_t offset = 0U; offset < byte_size;
+                 offset += sizeof(float)) {
+              std::memcpy(destination + offset, &kOne, sizeof(kOne));
+            }
+          }
+        }),
         tile_metadata);
     registry.register_op_rt_tiled("bad_alloc_boundary_test",
                                   "rt_dirty_resource_exhausted",
@@ -912,93 +908,6 @@ std::unique_ptr<GraphModel> make_dirty_boundary_graph(
 }
 
 /**
- * @brief Proves real registered numeric parsing preserves bad_alloc.
- *
- * @throws Nothing when the contract holds; GoogleTest records assertion or
- * unexpected setup failures.
- * @note The BUILD_TESTING tag injects immediately before numeric yaml-cpp
- * conversion inside the anonymous helper reached by the registered callback.
- */
-TEST(ThresholdBadAllocBoundary,
-     RegisteredCallbackNumericReadPreservesResourceExhaustion) {
-  ThresholdRegistrationCapture capture = register_threshold_callbacks();
-  ASSERT_TRUE(capture.operation);
-  plugin::ParameterMap parameters;
-  parameters.emplace(
-      "thresh", plugin::ParameterValue("photospider-test-numeric-bad-alloc"));
-  parameters.emplace("maxval", plugin::ParameterValue(1.0));
-  parameters.emplace("type", plugin::ParameterValue("binary"));
-  plugin::NodeView node(1, "threshold", "image_process", "threshold",
-                        std::move(parameters));
-  NodeOutput input = make_threshold_input();
-  const std::vector<plugin::OperationInputView> inputs{
-      plugin::OperationInputView{&input.image_buffer, nullptr, nullptr}};
-
-  EXPECT_THROW((void)capture.operation(
-                   node, plugin::ArrayView<plugin::OperationInputView>(inputs)),
-               std::bad_alloc);
-}
-
-/**
- * @brief Proves real registered string parsing preserves bad_alloc.
- *
- * @throws Nothing when the contract holds; GoogleTest records assertion or
- * unexpected setup failures.
- * @note The BUILD_TESTING tag injects immediately before string yaml-cpp
- * conversion inside the anonymous helper reached by the registered callback.
- */
-TEST(ThresholdBadAllocBoundary,
-     RegisteredCallbackStringReadPreservesResourceExhaustion) {
-  ThresholdRegistrationCapture capture = register_threshold_callbacks();
-  ASSERT_TRUE(capture.operation);
-  plugin::ParameterMap parameters;
-  parameters.emplace("thresh", plugin::ParameterValue(0.5));
-  parameters.emplace("maxval", plugin::ParameterValue(1.0));
-  parameters.emplace(
-      "type", plugin::ParameterValue("photospider-test-string-bad-alloc"));
-  plugin::NodeView node(1, "threshold", "image_process", "threshold",
-                        std::move(parameters));
-  NodeOutput input = make_threshold_input();
-  const std::vector<plugin::OperationInputView> inputs{
-      plugin::OperationInputView{&input.image_buffer, nullptr, nullptr}};
-
-  EXPECT_THROW((void)capture.operation(
-                   node, plugin::ArrayView<plugin::OperationInputView>(inputs)),
-               std::bad_alloc);
-}
-
-/**
- * @brief Executes the real threshold callback captured from the plugin ABI.
- *
- * @throws Nothing when registration and execution succeed; GoogleTest records
- * assertion or unexpected plugin failures.
- * @note The versioned registrar entry is used instead of a local direct call.
- */
-TEST(ThresholdBadAllocBoundary,
-     RealRegisteredCallbackExecutesThroughRegistrar) {
-  ThresholdRegistrationCapture capture = register_threshold_callbacks();
-  ASSERT_EQ(capture.type, "image_process");
-  ASSERT_EQ(capture.subtype, "threshold");
-  ASSERT_TRUE(capture.operation);
-  ASSERT_TRUE(capture.dirty);
-  ASSERT_TRUE(capture.forward);
-
-  plugin::ParameterMap parameters;
-  parameters.emplace("thresh", plugin::ParameterValue(0.5));
-  parameters.emplace("maxval", plugin::ParameterValue(1.0));
-  parameters.emplace("type", plugin::ParameterValue("binary"));
-  plugin::NodeView node(1, "threshold", "image_process", "threshold",
-                        std::move(parameters));
-  NodeOutput input = make_threshold_input();
-  const std::vector<plugin::OperationInputView> inputs{
-      plugin::OperationInputView{&input.image_buffer, nullptr, nullptr}};
-  const plugin::OperationOutput output = capture.operation(
-      node, plugin::ArrayView<plugin::OperationInputView>(inputs));
-  EXPECT_EQ(output.image_buffer.width, 2);
-  EXPECT_EQ(output.image_buffer.height, 2);
-}
-
-/**
  * @brief Proves the production Metal exception seam preserves bad_alloc type.
  *
  * @throws Nothing when the expected exception is observed.
@@ -1052,16 +961,17 @@ TEST(MetalBadAllocBoundary, PortableExceptionSeamContextsStandardFailure) {
  * access, so the failure is deterministic and requires no native allocation.
  */
 TEST(MetalBadAllocBoundary, RealPerlinEntryPreservesInjectedBadAlloc) {
-  plugin::ParameterMap parameters;
-  parameters.emplace("width", plugin::ParameterValue(2));
-  parameters.emplace("height", plugin::ParameterValue(2));
-  parameters.emplace("grid_size", plugin::ParameterValue(1.0));
-  parameters.emplace("seed", plugin::ParameterValue(7));
-  plugin::NodeView node(1, "perlin_noise_metal", "image_generator",
-                        "perlin_noise_metal", std::move(parameters));
-  const plugin::ArrayView<plugin::OperationInputView> inputs;
+  Node node;
+  node.id = 1;
+  node.name = "perlin_noise_metal";
+  node.type = "image_generator";
+  node.subtype = "perlin_noise_metal";
+  node.parameters.emplace("width", plugin::ParameterValue(2));
+  node.parameters.emplace("height", plugin::ParameterValue(2));
+  node.parameters.emplace("grid_size", plugin::ParameterValue(1.0));
+  node.parameters.emplace("seed", plugin::ParameterValue(7));
   const AllocationFailureObservation observation = observe_allocation_failure(
-      0, [&] { (void)ops::op_perlin_noise_metal(node, inputs); });
+      0, [&] { ops::execute_perlin_noise_metal(node); });
   EXPECT_TRUE(observation.fired);
   EXPECT_TRUE(observation.propagated);
 }
@@ -1077,16 +987,17 @@ TEST(MetalBadAllocBoundary, RealPerlinEntryPreservesInjectedBadAlloc) {
  * by real plugins.
  */
 TEST(MetalBadAllocBoundary, RealPerlinEntryContextsStandardFailure) {
-  plugin::ParameterMap parameters;
-  parameters.emplace("width", plugin::ParameterValue(0));
-  parameters.emplace("height", plugin::ParameterValue(2));
-  parameters.emplace("grid_size", plugin::ParameterValue(1.0));
-  parameters.emplace("seed", plugin::ParameterValue(7));
-  plugin::NodeView node(1, "perlin_noise_metal", "image_generator",
-                        "perlin_noise_metal", std::move(parameters));
-  const plugin::ArrayView<plugin::OperationInputView> inputs;
+  Node node;
+  node.id = 1;
+  node.name = "perlin_noise_metal";
+  node.type = "image_generator";
+  node.subtype = "perlin_noise_metal";
+  node.parameters.emplace("width", plugin::ParameterValue(0));
+  node.parameters.emplace("height", plugin::ParameterValue(2));
+  node.parameters.emplace("grid_size", plugin::ParameterValue(1.0));
+  node.parameters.emplace("seed", plugin::ParameterValue(7));
   try {
-    (void)ops::op_perlin_noise_metal(node, inputs);
+    ops::execute_perlin_noise_metal(node);
     FAIL() << "invalid Perlin dimensions did not throw";
   } catch (const std::runtime_error& error) {
     const std::string message = error.what();

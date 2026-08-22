@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "execution/device/device_execution_context.hpp"
@@ -79,8 +80,19 @@ namespace ps {
 namespace ops {
 
 /**
- * @brief Reads one optional integer parameter from a public node snapshot.
- * @param node Public operation identity and effective parameters.
+ * @brief Returns the exact effective parameter map for one private node.
+ * @param node Borrowed source-private operation node.
+ * @return Runtime-resolved parameters when present, otherwise persisted ones.
+ * @throws Nothing.
+ */
+const plugin::ParameterMap& effective_parameters(const Node& node) noexcept {
+  return node.runtime_parameters.empty() ? node.parameters
+                                         : node.runtime_parameters;
+}
+
+/**
+ * @brief Reads one optional integer parameter from a private node snapshot.
+ * @param node Private operation identity and effective parameters.
  * @param key Parameter name to read.
  * @param fallback Value returned when the parameter is absent.
  * @return Int64 or exactly integral Double converted after range validation.
@@ -89,12 +101,13 @@ namespace ops {
  * @note Numeric alternatives are inspected explicitly; exact public accessors
  *       never perform cross-alternative conversion.
  */
-int parameter_int(const plugin::NodeView& node, std::string_view key,
-                  int fallback) {
-  const plugin::ParameterValue* value = node.find_parameter(key);
-  if (!value) {
+int parameter_int(const Node& node, std::string_view key, int fallback) {
+  const auto& parameters = effective_parameters(node);
+  const auto found = parameters.find(key);
+  if (found == parameters.end()) {
     return fallback;
   }
+  const plugin::ParameterValue* value = &found->second;
   double numeric = 0.0;
   if (value->is_int64()) {
     numeric = static_cast<double>(value->as_int64());
@@ -116,20 +129,22 @@ int parameter_int(const plugin::NodeView& node, std::string_view key,
 }
 
 /**
- * @brief Reads one optional numeric parameter from a public node snapshot.
- * @param node Public operation identity and effective parameters.
+ * @brief Reads one optional numeric parameter from a private node snapshot.
+ * @param node Private operation identity and effective parameters.
  * @param key Parameter name to read.
  * @param fallback Value returned when the parameter is absent.
  * @return Double or integer alternative converted to double.
  * @throws plugin::ParameterTypeError for a non-numeric parameter.
  * @note Boolean and string alternatives are never converted implicitly.
  */
-double parameter_double(const plugin::NodeView& node, std::string_view key,
+double parameter_double(const Node& node, std::string_view key,
                         double fallback) {
-  const plugin::ParameterValue* value = node.find_parameter(key);
-  if (!value) {
+  const auto& parameters = effective_parameters(node);
+  const auto found = parameters.find(key);
+  if (found == parameters.end()) {
     return fallback;
   }
+  const plugin::ParameterValue* value = &found->second;
   if (value->is_double()) {
     return value->as_double();
   }
@@ -143,28 +158,26 @@ double parameter_double(const plugin::NodeView& node, std::string_view key,
 /**
  * @brief Executes the Metal Perlin source operation with contextual errors.
  *
- * @param node Public effective parameters controlling width, height, grid size,
- * and random seed.
- * @param inputs Unused borrowed source-operation input list.
- * @return Canonical empty public output; the source-private Host adapter takes
- * the pending revision-preserving host Value from MetalExecutionContext.
+ * @param node Private effective parameters controlling width, height, grid
+ * size, and random seed.
+ * @return Nothing after the source-private Host adapter publishes a pending,
+ * revision-preserving FP32 Normalized `[0,1]` Value through
+ * MetalExecutionContext.
  * @throws std::bad_alloc unchanged from parameter parsing, working buffers, or
  * output conversion; also propagates diagnostic-construction exhaustion.
  * @throws std::runtime_error with the current stage for other standard or
  * unknown failures.
  * @note The process Metal executor serializes entry and supplies a borrowed
  * queue, invocation allocator, pipeline cache, and explicit transfer
- * publication boundary. The operation commits without waiting; the command
- * buffer completion handler settles the Value fence and stale-safe residency.
+ * publication boundary. The producer passes its explicit sample meaning into
+ * that boundary; the adapter commits without waiting, and the command-buffer
+ * completion handler settles the Value fence and stale-safe residency.
  */
-plugin::OperationOutput op_perlin_noise_metal(
-    const plugin::NodeView& node,
-    plugin::ArrayView<plugin::OperationInputView> inputs) {
-  (void)inputs;
+void execute_perlin_noise_metal(const Node& node) {
   @autoreleasepool {
     const char* dbg_stage = "start";
-    return detail::run_metal_exception_boundary(
-        "perlin_noise_metal", dbg_stage, [&]() -> plugin::OperationOutput {
+    detail::run_metal_exception_boundary(
+        "perlin_noise_metal", dbg_stage, [&]() {
           int width = parameter_int(node, "width", 256);
           int height = parameter_int(node, "height", 256);
           float scale =
@@ -256,13 +269,127 @@ plugin::OperationOutput op_perlin_noise_metal(
           [encoder endEncoding];
 
           dbg_stage = "explicit_transfer";
+          const SampleDomainFacet sample_domain{
+              1U,
+              SampleEncoding{1U, SampleEncodingKind::Normalized},
+              SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+              {}};
           context.publish_float32_texture_to_host(
               (__bridge void*)command_buffer, (__bridge void*)out_texture,
               static_cast<std::uint32_t>(width),
-              static_cast<std::uint32_t>(height));
-          return {};
+              static_cast<std::uint32_t>(height), sample_domain);
         });
   }
+}
+
+namespace {
+
+/**
+ * @brief Preserves downstream dirty demand for the Metal source generator.
+ *
+ * @param node Unused operation node.
+ * @param downstream_roi Requested output dirty rectangle.
+ * @param graph Unused graph snapshot.
+ * @param output_extent Unused output extent.
+ * @param input_extents Unused source-input extents; the generator has none.
+ * @param parameters Unused effective parameters.
+ * @param inputs Unused resolved input snapshots.
+ * @return Unchanged requested output rectangle.
+ * @throws Nothing.
+ * @note The provider is monolithic HP work; this explicit callback records
+ *       generator coordinate identity without introducing tiled execution.
+ */
+PixelRect perlin_metal_dirty_roi(
+    const Node& node, const PixelRect& downstream_roi, const GraphModel& graph,
+    const PixelSize& output_extent, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters,
+    const std::vector<const NodeOutput*>* inputs) noexcept {
+  (void)node;
+  (void)graph;
+  (void)output_extent;
+  (void)input_extents;
+  (void)parameters;
+  (void)inputs;
+  return downstream_roi;
+}
+
+/**
+ * @brief Preserves upstream change coordinates for the Metal source generator.
+ *
+ * @param node Unused operation node.
+ * @param upstream_roi Changed output-space rectangle.
+ * @param graph Unused graph snapshot.
+ * @param parent_extent Unused parent extent; the generator has no parent.
+ * @param child_extent Unused generator extent.
+ * @param input_index Unused source-input index.
+ * @param input_extents Unused source-input extents.
+ * @param parameters Unused effective parameters.
+ * @return Unchanged affected rectangle.
+ * @throws Nothing.
+ * @note This explicit planning callback owns no native resource or callback-
+ *       spanning state.
+ */
+PixelRect perlin_metal_forward_roi(
+    const Node& node, const PixelRect& upstream_roi, const GraphModel& graph,
+    const PixelSize& parent_extent, const PixelSize& child_extent,
+    std::size_t input_index, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters) noexcept {
+  (void)node;
+  (void)graph;
+  (void)parent_extent;
+  (void)child_extent;
+  (void)input_index;
+  (void)input_extents;
+  (void)parameters;
+  return upstream_roi;
+}
+
+/**
+ * @brief Adapts one configured registry invocation to the Metal executor ABI.
+ *
+ * @param node Effective private operation node.
+ * @param inputs Unused source inputs; Metal Perlin is a generator.
+ * @return Canonical image output retaining the pending CPU-replica Value.
+ * @throws std::logic_error when invoked outside the Metal executor context or
+ *         when execution fails to publish one valid pending Value.
+ * @throws std::bad_alloc, std::runtime_error, parameter, resource, or native
+ *         execution exceptions unchanged.
+ * @note The wrapper takes publication before the callback-scoped TLS binding
+ *       retires. It returns no native handle and does not wait for completion;
+ *       the Value fence and process executor retain asynchronous ownership.
+ */
+NodeOutput run_perlin_noise_metal(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  (void)inputs;
+  execute_perlin_noise_metal(node);
+  Value pending = execution::require_current_metal_execution_context()
+                      .take_published_value();
+  if (!pending.valid()) {
+    throw std::logic_error(
+        "Metal Perlin execution did not publish a pending image Value.");
+  }
+  NodeOutput output;
+  output.publish_image_value(std::move(pending));
+  return output;
+}
+
+}  // namespace
+
+/** @copydoc register_metal_perlin_operation_provider */
+void register_metal_perlin_operation_provider() {
+  OpImplementation implementation;
+  implementation.func = MonolithicOpFunc(run_perlin_noise_metal);
+  implementation.metadata.device_preference = DeviceBackend::Metal;
+  implementation.metadata.supports_high_precision = true;
+  implementation.metadata.supports_realtime = false;
+  implementation.dirty_propagator = DirtyRoiPropFunc(perlin_metal_dirty_roi);
+  implementation.forward_propagator =
+      ForwardRoiPropFunc(perlin_metal_forward_roi);
+
+  std::vector<OpImplementation> candidates;
+  candidates.push_back(std::move(implementation));
+  OpRegistry::instance().replace_implementation_candidates(
+      "image_generator", "perlin_noise_metal", std::move(candidates));
 }
 
 }  // namespace ops

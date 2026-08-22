@@ -75,8 +75,8 @@ struct IpcHostInvocation {
    */
   std::optional<HostComputeRequest> compute_request;
 
-  /** @brief Whether `compute.submit` selected the image-returning Host call. */
-  bool image_compute = false;
+  /** @brief Whether compute.submit selected the Values-returning Host call. */
+  bool values_compute = false;
 };
 
 /**
@@ -483,17 +483,17 @@ class IpcHostSpy final : public Host {
   }
 
   /**
-   * @brief Configures the copied image returned by image-mode compute.
-   * @param image Exact public image value returned on Host success.
+   * @brief Configures the copied Values returned by Values-mode compute.
+   * @param values Exact named Values returned on Host success.
    * @return Nothing.
    * @throws std::bad_alloc if shared ownership or copied metadata allocates.
-   * @note The configured `compute.submit` status remains authoritative; tests
-   *       may provide an intentionally invalid image to exercise nested output
-   *       publication failures after an accepted submit.
+   * @note The configured compute.submit status remains authoritative; tests
+   *       may provide an intentionally invalid result sentinel only through
+   *       status/error configuration because NamedValueResult is validated.
    */
-  void set_compute_image(ImageBuffer image) {
+  void set_compute_values(NamedValueResult values) {
     std::lock_guard<std::mutex> lock(mutex_);
-    compute_image_ = std::move(image);
+    compute_values_ = std::move(values);
   }
 
   /**
@@ -656,7 +656,7 @@ class IpcHostSpy final : public Host {
     IpcHostInvocation invocation =
         session_invocation("compute.submit", request.session);
     invocation.compute_request = request;
-    invocation.image_compute = false;
+    invocation.values_compute = false;
     record(std::move(invocation));
     return {status_for("compute.submit")};
   }
@@ -671,15 +671,15 @@ class IpcHostSpy final : public Host {
     return {status, promise.get_future()};
   }
 
-  /** @copydoc Host::compute_and_get_image */
-  Result<ImageBuffer> compute_and_get_image(
+  /** @copydoc Host::compute_and_get_values */
+  Result<NamedValueResult> compute_and_get_values(
       const HostComputeRequest& request) override {
     IpcHostInvocation invocation =
         session_invocation("compute.submit", request.session);
     invocation.compute_request = request;
-    invocation.image_compute = true;
+    invocation.values_compute = true;
     record(std::move(invocation));
-    return configured_result("compute.submit", compute_image_);
+    return configured_result("compute.submit", compute_values_);
   }
 
   /** @copydoc Host::timing */
@@ -1317,8 +1317,8 @@ class IpcHostSpy final : public Host {
   /** @brief Configured bounded non-destructive execution-trace result. */
   ExecutionTracePage execution_trace_page_;
 
-  /** @brief Configured image-mode compute output. */
-  ImageBuffer compute_image_;
+  /** @brief Configured Values-mode compute output. */
+  NamedValueResult compute_values_;
 
   /** @brief Configured single-node inspection output. */
   NodeInspectionView inspected_node_;

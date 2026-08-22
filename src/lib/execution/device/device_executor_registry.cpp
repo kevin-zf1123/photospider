@@ -114,16 +114,18 @@ void DeviceExecutor::execute(DeviceExecutorInvocation& invocation) {
 }
 
 /** @copydoc DeviceExecutorRegistry::slot_for */
-std::size_t DeviceExecutorRegistry::slot_for(Device device) noexcept {
+std::size_t DeviceExecutorRegistry::slot_for(DeviceBackend device) noexcept {
   switch (device) {
-    case Device::CPU:
+    case DeviceBackend::CPU:
       return 0U;
-    case Device::GPU_METAL:
+    case DeviceBackend::Metal:
       return 1U;
-    case Device::GPU_CUDA:
+    case DeviceBackend::CUDA:
       return 2U;
-    case Device::ASIC_NPU:
+    case DeviceBackend::Vulkan:
       return 3U;
+    case DeviceBackend::NPU:
+      return 4U;
   }
   return kDeviceSlotCount;
 }
@@ -135,9 +137,9 @@ void DeviceExecutorRegistry::register_executor(
     throw std::invalid_argument(
         "DeviceExecutorRegistry requires a non-null executor.");
   }
-  const Device device = executor->device();
+  const DeviceBackend device = executor->device();
   const std::size_t slot = slot_for(device);
-  if (device == Device::CPU || slot >= kDeviceSlotCount) {
+  if (device == DeviceBackend::CPU || slot >= kDeviceSlotCount) {
     throw std::invalid_argument(
         "DeviceExecutorRegistry accepts only known non-CPU devices.");
   }
@@ -149,9 +151,9 @@ void DeviceExecutorRegistry::register_executor(
 }
 
 /** @copydoc DeviceExecutorRegistry::contains */
-bool DeviceExecutorRegistry::contains(Device device) const noexcept {
+bool DeviceExecutorRegistry::contains(DeviceBackend device) const noexcept {
   const std::size_t slot = slot_for(device);
-  return device != Device::CPU && slot < kDeviceSlotCount &&
+  return device != DeviceBackend::CPU && slot < kDeviceSlotCount &&
          executors_[slot] != nullptr;
 }
 
@@ -167,11 +169,11 @@ std::size_t DeviceExecutorRegistry::size() const noexcept {
 }
 
 /** @copydoc DeviceExecutorRegistry::available_devices */
-std::vector<Device> DeviceExecutorRegistry::available_devices() const {
-  std::vector<Device> result;
+std::vector<DeviceBackend> DeviceExecutorRegistry::available_devices() const {
+  std::vector<DeviceBackend> result;
   result.reserve(size());
-  for (Device device :
-       {Device::GPU_METAL, Device::GPU_CUDA, Device::ASIC_NPU}) {
+  for (DeviceBackend device : {DeviceBackend::Metal, DeviceBackend::CUDA,
+                               DeviceBackend::Vulkan, DeviceBackend::NPU}) {
     if (contains(device)) {
       result.push_back(device);
     }
@@ -180,10 +182,11 @@ std::vector<Device> DeviceExecutorRegistry::available_devices() const {
 }
 
 /** @copydoc DeviceExecutorRegistry::execute */
-void DeviceExecutorRegistry::execute(Device device,
+void DeviceExecutorRegistry::execute(DeviceBackend device,
                                      DeviceExecutorInvocation& invocation) {
   const std::size_t slot = slot_for(device);
-  if (device == Device::CPU || slot >= kDeviceSlotCount || !executors_[slot]) {
+  if (device == DeviceBackend::CPU || slot >= kDeviceSlotCount ||
+      !executors_[slot]) {
     throw std::invalid_argument(
         "DeviceExecutorRegistry has no matching device executor.");
   }
@@ -192,9 +195,10 @@ void DeviceExecutorRegistry::execute(Device device,
 
 /** @copydoc DeviceExecutorRegistry::diagnostics */
 DeviceExecutorDiagnostics DeviceExecutorRegistry::diagnostics(
-    Device device) const {
+    DeviceBackend device) const {
   const std::size_t slot = slot_for(device);
-  if (device == Device::CPU || slot >= kDeviceSlotCount || !executors_[slot]) {
+  if (device == DeviceBackend::CPU || slot >= kDeviceSlotCount ||
+      !executors_[slot]) {
     throw std::invalid_argument(
         "DeviceExecutorRegistry has no matching device executor.");
   }

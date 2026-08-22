@@ -57,30 +57,42 @@ class MetalExecutionContext {
    * @param height Positive persistent R32Float texture height.
    * @param auxiliary_scratch_lengths Positive scratch-buffer byte lengths that
    * later `allocate_device_scratch_buffer_copy()` calls will consume in order.
-   * @return Nothing after the complete persistent texture, auxiliary buffers,
-   * and host-readback buffer plan is admitted for the exact Metal device.
+   * @return Nothing after the complete currently available persistent-memory
+   * ceiling plus exact auxiliary/readback scratch plan is admitted for the
+   * Metal device.
    * @throws std::invalid_argument for zero dimensions or scratch lengths.
    * @throws std::overflow_error when exact native-size accumulation overflows.
    * @throws DeviceResourceError when native planning is invalid or the device
    * account cannot admit both dimensions atomically.
    * @throws std::logic_error when a plan or publication already exists.
-   * @note This method allocates no native texture or buffer. Call it after
-   * pipeline resolution and before the first invocation allocation.
+   * @note The native texture query supplies a minimum heap descriptor request,
+   * not an upper bound for device-specific heap-backing rounding. This method
+   * therefore reserves the device account's complete currently available
+   * memory ceiling under the ledger lock. It allocates no native texture or
+   * buffer; call it after pipeline resolution and before the first invocation
+   * allocation.
    */
   virtual void prepare_float32_texture_to_host_resources(
       std::uint32_t width, std::uint32_t height,
       const std::vector<std::size_t>& auxiliary_scratch_lengths) = 0;
 
   /**
-   * @brief Allocates the planned persistent writable R32Float 2D texture.
+   * @brief Allocates the planned persistent heap-backed R32Float 2D texture.
    * @param width Positive texture width in pixels.
    * @param height Positive texture height in pixels.
    * @return Non-null opaque `id<MTLTexture>` retained through callback exit.
    * @throws std::invalid_argument for a zero dimension.
    * @throws std::logic_error without a matching unconsumed resource plan.
-   * @throws std::runtime_error when native allocation fails.
-   * @note Native ownership and its exact device-memory lease transfer to the
-   * pending resident Value when publication succeeds.
+   * @throws DeviceResourceError when the heap request/current allocation is
+   * invalid or the heap's actual bytes exceed its admitted ceiling.
+   * @throws std::bad_alloc when heap descriptor allocation fails.
+   * @throws std::runtime_error when heap/texture allocation or exact backing
+   * validation fails.
+   * @note The dedicated native heap and texture remain explicit co-owners.
+   * The heap's positive `currentAllocatedSize` is the unique persistent actual;
+   * the texture suballocation is not counted again. Native ownership and the
+   * exact heap-sized device-memory lease transfer together to the pending
+   * resident Value when publication succeeds.
    */
   virtual NativeHandle allocate_persistent_float32_texture_2d(
       std::uint32_t width, std::uint32_t height) = 0;
@@ -122,22 +134,39 @@ class MetalExecutionContext {
    * @param texture_handle Non-null R32Float id<MTLTexture>.
    * @param width Positive texture width matching its logical output.
    * @param height Positive texture height matching its logical output.
+   * @param sample_domain Complete caller-declared sample meaning copied onto
+   *        both the pending device source and host-visible destination Values.
    * @return Nothing after pending source/destination Values, exact completion
    * identity, transfer blit, native completion handler, and commit are
    * installed.
-   * @throws std::invalid_argument for missing handles or dimensions.
+   * @throws std::invalid_argument for missing handles, dimensions, texture
+   *         mismatch, or malformed descriptor/sample-domain metadata.
    * @throws std::logic_error without ComputeRun completion lineage or after a
    * prior output publication in the same operation callback.
    * @throws std::overflow_error for byte arithmetic or identity exhaustion.
+   * @throws std::length_error when bounded image metadata exceeds its frozen
+   *         limit.
+   * @throws DeviceResourceError when native actual bytes are invalid or exceed
+   *         the admitted resource plan.
    * @throws std::runtime_error for native allocation/encoder failures.
-   * @throws std::bad_alloc for retained publication/completion ownership.
+   * @throws std::bad_alloc when descriptor/ImageFacet copying or validation,
+   *         native collection copying, or retained publication/completion
+   *         ownership exhausts memory.
+   * @throws std::system_error from ledger, residency, or diagnostic-state
+   *         synchronization.
    * @note The method never waits and never calls texture getBytes. The
    * destination is a host-visible revision-preserving replica whose ReadyFence
-   * settles from the command-buffer completion handler.
+   * settles from the command-buffer completion handler. The executor never
+   * infers sample meaning from R32Float storage or payload values. The complete
+   * executor-authored descriptor and caller facet are validated before this
+   * method allocates or records a readback buffer, encodes a blit, commits
+   * ledger actuals, or changes publication state; metadata rejection therefore
+   * leaves the invocation reusable for a corrected call.
    */
   virtual void publish_float32_texture_to_host(
       NativeHandle command_buffer_handle, NativeHandle texture_handle,
-      std::uint32_t width, std::uint32_t height) = 0;
+      std::uint32_t width, std::uint32_t height,
+      const SampleDomainFacet& sample_domain) = 0;
 
   /**
    * @brief Submits an explicit host-to-R32Float-texture transfer.
@@ -160,14 +189,18 @@ class MetalExecutionContext {
    * @throws std::runtime_error when an invocation's exclusive absolute deadline
    * is observed during preparation, bounded copy, or immediately before native
    * commit.
-   * @throws std::bad_alloc for retained publication/completion ownership.
+   * @throws std::bad_alloc for complete descriptor/ImageFacet metadata copies
+   *         or retained publication/completion ownership.
    * @note The method performs only explicitly requested source access and
    * never waits for Metal. Host bytes are copied in bounded chunks with the
    * invocation's unchanged deadline checked between chunks. Rank-three
    * publication retains the source
    * descriptor, ImageFacet, layout, exact storage envelope, and logical
    * revision; only the private native R32Float row is flattened. The pending
-   * device-local destination settles from the command-buffer callback.
+   * device-local destination settles from the command-buffer callback. The
+   * final deadline observation precedes completion-handler installation, so a
+   * rejected pre-commit publication unwinds every native owner, transfer
+   * admission, and resource lease without leaving an uncommitted handler graph.
    */
   virtual void publish_float32_host_to_texture(Value source,
                                                std::uint32_t width,

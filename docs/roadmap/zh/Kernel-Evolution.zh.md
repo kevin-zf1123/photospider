@@ -22,6 +22,7 @@ GitHub Project 和 Issue 跟踪。
 | Run 与进程执行域 | [compute-run-execution-domain](https://github.com/users/kevin-zf1123/projects/3) | [#64](https://github.com/kevin-zf1123/photospider/issues/64) | Request-owned `ComputeRun`、process-owned CPU execution、资源账本、graph revision、取消和 supersession。 |
 | 通用数据与异构执行 | [generic-data-heterogeneous-execution](https://github.com/users/kevin-zf1123/projects/4) | [#77](https://github.com/kevin-zf1123/photospider/issues/77) | `Value`、`DataDescriptor`、`BufferHandle`、`Region`、device queue、fence、transfer 和有界 compute I/O。 |
 | 执行画像与安全服务 | [execution-profiles-server-isolation](https://github.com/users/kevin-zf1123/projects/5) | [#91](https://github.com/kevin-zf1123/photospider/issues/91) | 交互/吞吐画像、独立 server control plane、受限 worker 和隔离插件执行。 |
+| 普通图像 Value 迁移 | [dense-image-value-migration](https://github.com/users/kevin-zf1123/projects/6) | [#128](https://github.com/kevin-zf1123/photospider/issues/128) | 普通图像采用完整 `Value` metadata 与 Host-owned output authority；operation plugin 使用纯 C ABI v1，DI-4 删除此前的 public 兼容图像表面。 |
 
 当前重构的合并门禁继续由
 [codebase-refactor](https://github.com/users/kevin-zf1123/projects/1) 跟踪，并由
@@ -331,14 +332,20 @@ registry/lane lock cycle。
 
 当前 ledger 会验证 CPU slot、ready-store entry/byte、retained/in-flight Host memory 与 Host
 scratch 的事务性 vector。它还为每个已配置非 CPU `DeviceId` 拥有隔离且 immutable 的
-memory/scratch limit。Native allocation plan 会原子提交两个 dimension，在 `allocatedSize`
-校准后归还未使用 byte，并把 actual ownership 拆分给 persistent native Value owner 与
-asynchronous completion scratch。Device queue depth/in-flight command limit 与 compute-I/O
-operation/byte 仍是未来维度，当前不会用虚假的零值 authority 表示。Issue #104 已经向同一 ledger
-增加显式 isolated-plugin vector：runtime-process slot、CPU slot、address-space byte、shared-memory
-byte 与 descriptor count。其一次性 token 绑定完整 invocation identity 与精确 vector，在 ledger
-生命周期内保留 replay tombstone，并在每条路径只结算一次 capacity。该能力仍是没有当前最终用户
-route 的私有 direct/supervised runtime 组合。当前 success、failure、
+memory/scratch limit。Metal heap query 只提供对齐后的 descriptor minimum，不是 preallocation
+上界。在 native allocation 前，一次 root-mutex transaction 会校验该 minimum 与精确 scratch，
+然后预留该确切 device 当前全部可用的 persistent-memory ceiling。Dedicated heap 的正值
+`currentAllocatedSize` 是唯一 persistent actual；不会再次计入其 texture suballocation，而每项
+scratch resource 都贡献自身的正值 `allocatedSize`。适配 plan 的 actual commit 会在同一套唯一
+mutex 下归还未使用的 planned byte，并把精确 ownership 拆分给 persistent native Value owner 与
+asynchronous completion scratch。无效或超过 plan 的 observation 会以 typed error 失败，并让
+局部 native owner 与尚未 commit 的 reservation 各自准确 unwind 一次。Device queue depth/
+in-flight command limit 与 compute-I/O operation/byte 仍是未来维度，当前不会用虚假的零值
+authority 表示。Issue #104 已经向同一 ledger 增加显式 isolated-plugin vector：runtime-process
+slot、CPU slot、address-space byte、shared-memory byte 与 descriptor count。其一次性 token 绑定
+完整 invocation identity 与精确 vector，在 ledger 生命周期内保留 replay tombstone，并在每条路径
+只结算一次 capacity。该能力仍是没有当前最终用户 route 的私有 direct/supervised runtime 组合。
+当前 success、failure、
 rejection、rollback、replacement、worker-exception、stale completion、eviction、cancellation 与
 close/shutdown path 都会恰好一次释放每份 active authority。Capacity exhaustion 与 checked
 overflow 会在无 partial reservation、overcommit、跨 device 借用或 silent clamping 的情况下失败。
@@ -466,7 +473,7 @@ ROI、dirty propagation、planning、cache 或 runtime interface。当前仓库�
 并发方向：使用可重入 `cv::Mat` callback，在发布前把 OpenCV 内部 CPU threading 固定为一，把
 外层并行交给 Host 已准入的 execution start，并让真实共享 backend 同步保持 provider-local。仓库自有
 operation algorithm、对应 OpenCV 初始化与异常翻译现已位于可独立开关的 provider module 中；
-provider-disabled profile 会证明 stdlib-only v2 provider 能提供并执行缺失 operation。Issue #63
+provider-disabled profile 会证明 stdlib-only ABI-v1 provider 能提供并执行缺失 operation。Issue #63
 让 image processing、codec、public adapter、provider/plugin 默认值与 embedded product 都由
 capability 选择。Dependency-disabled profile 不发现 OpenCV，并使用标准库或显式 unavailable
 adapter 构建真实 kernel aggregate 与 Host product。
@@ -485,8 +492,10 @@ Issue #62 让 runtime/cache value 纵向切片成为当前行为：共享 YAML c
 
 ## 通用数据与 Region
 
-当前 baseline：`ImageBuffer`、`DataType`、`Device`、`PixelRect`、`ParameterMap`、
-operation ABI v2 以及既有 cache/execution ownership 仍是已经实现的 compatibility contract。
+当前 baseline：普通图像使用 `Value`、`ImageFacet`、`ImageView`、显式 Layout/binding/readiness
+与 named Host output。Device 事实使用 `DeviceBackend`、`DeviceId` 与 `MemoryDomain`；
+`PixelRect` 是经过检查的 physical image-edge geometry，`ParameterMap` 只用于 configuration。
+DI-4 已删除此前的图像、scalar-storage 与 device 兼容类型。Operation plugin 使用纯 C ABI v1。
 V-2 实现了有界、dependency-neutral 的 CPU DenseTensor `Value`/`ImageView` 子集与一条内建
 operation。V-3 现已新增 checked BufferHandle ownership、由 lease 控制的 construction、
 process-local allocation/revision identity、受界限约束的 signed layout，以及 CPU image Value
@@ -500,8 +509,10 @@ device/queue、invocation-scoped allocator 与持久 pipeline cache。V-8 现已
 CPU/Metal binding fact、纯显式 access planning、保留 revision 的双向 transfer、进程级
 residency、精确 stale-completion arbitration、pending-Value continuation 与 asynchronous
 Perlin readback。V-9 现已新增仅面向 fixed registry 中可执行设备的隔离 memory/scratch
-account，在 allocation 前准入 native plan，与 allocator 上报的 actual byte 对账，并把精确
-lease 绑定到 persistent Value 与 asynchronous completion。V-10 批准 typed compute-I/O
+account。它把 heap query 只当作 minimum，在 allocation 前原子预留当前全部可用的 persistent
+ceiling 与精确 scratch，只把 dedicated heap 的 `currentAllocatedSize` 计为 persistent actual，
+按每项 scratch 的 `allocatedSize` 计费，归还未使用 byte，并把精确 lease 绑定到 persistent
+Value 与 asynchronous completion。V-10 批准 typed compute-I/O
 completion 并让 persistence authority 保持分离；V-11 通过 `ComputeIoExecutor` 运行首条有界
 cache/codec mechanism。V-12 现在会验证已安装通用模型中的 1/3/4/8/16 通道 FP32/FP64
 image、rank-one 至 rank-five FP32/FP64 latent Value、padded 与 signed/zero stride、精确
@@ -515,14 +526,16 @@ envelope、checked multi-buffer binding、一个注入式 typed registry、纯 C
 artifact-envelope round-trip，以及 generation-safe replacement/unload。V-15 现在会把这套未改变的
 通用模型绑定到一个可选的仓库自有 OpenEXR single-part deep-scanline provider/codec，并提供显式
 channel identity、typed shape/error rejection、有界 compute-I/O execution、generation-safe lifetime，
-以及依赖干净的默认 OFF package profile。精确行为记录在
+以及依赖干净的默认 OFF package profile。DI-1 现在会新增 signed half-open ordinary-image
+data/display window、稳定 channel/group identity、相互独立的 sample-domain 与 color facet、
+metadata-only bounds access，以及独立的 observed-statistics query/result/cache-key contract。精确行为记录在
 [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
-[ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)、
+[稠密图像 Value 内存契约](../../kernel-architecture/zh/Dense-Image-Value-Memory-Contract.zh.md)、
 [插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
 [内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)；execution ownership 记录在
 [策略与执行架构](../../kernel-architecture/zh/Policy-and-Execution-Architecture.zh.md)与
 [计算边界](../../kernel-architecture/zh/Compute-Boundaries.zh.md)。下述完整模型是已接受目标；
-只有这里明确指出的 V-2 至 V-15 子集是当前 runtime 事实。
+这里明确指出的 V-2 至 V-15 与 DI-1 至 DI-4 子集是当前 runtime 事实。
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 是完整目标契约的权威来源。其核心分离关系是：
@@ -553,13 +566,15 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 `VariableSampleField + ImageFacet + DeepSampleFacet`。StructuredValue v1 是自包含的，
 不含 runtime child Value。
 
-已实现的 V-2 至 V-15 子集刻意保持更窄的范围：
+已实现的 V-2 至 V-15 与 DI-1 子集刻意保持更窄的范围：
 
 - `DenseTensorDescriptor` 包含 positive concrete shape、彼此独立的 unsigned/signed integer
   或 floating element semantics、8/16/32/64-bit native scalar storage 或显式 four-bit FP4
   E2M1 encoding，以及可选 V-13 block-scale quantization；后者包含 rank-matched positive block
   shape，以及每个完整 row-major logical block 对应的一项 finite positive scale；
-- `ImageFacet` 显式映射彼此不同的 x/y axis 与可选 channel axis；
+- `ImageFacet` 显式映射彼此不同的 x/y axis 与可选 channel axis，拥有 required signed
+  half-open data window 与 optional display window，并且可以绑定 bounded stable-ID channel
+  schema、versioned sample domain 与 color semantics，绝不从诊断性 channel name 推导角色；
 - public `BufferHandle` 是同一个 opaque process-local `AllocationIdentity` 上受检、非空的
   range；subrange 会保留 allocation lifetime。CPU allocation 可以签发 host read lease，
   source-private native binding 则保留 external owner，并且只暴露经过检查的 binding fact；
@@ -605,11 +620,12 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
   executor 创建 device memory/scratch account。空 registry 或 non-Apple 默认 registry 不暴露
   Metal account，而缺少候选 budget 的 registered executor 仍无法准入 native allocation；
 - `image_process:invert_dense` 把精确 descriptor-only inference 与 stride-aware
-  unsigned-8 execution 分开，已有 sealed input Value 时直接复用，并发布精确 sealed result
-  revision 与独立 ImageBuffer compatibility snapshot；
-- 私有正式 HP CPU image cache entry 把有效 sealed `NodeOutput::image_value` 作为
-  allocation/revision authority。普通 copy 保留 identity；dirty mutation、replacement 与
-  disk decode 创建新 identity；disk save 读取 Value byte；runtime token 永不成为持久
+  unsigned-8 execution 分开，要求规范 sealed input Value，并发布精确 sealed result revision；
+  当前 ABI edge 会携带完整 Value 与 Host-owned output grant，不再派生 compatibility snapshot；
+- 私有正式 HP CPU image cache entry 使用规范 named `image` Value 作为唯一
+  allocation/revision authority。普通 copy 保留 identity；dirty/tiled work seal 一个全新 Host
+  binding，replacement 与 disk decode 则创建新 identity；disk save 读取 Value byte；runtime
+  token 永不成为持久
   cache/task key。V-13 正式 memory-cache copy 还会保留 packed Value 与精确 TensorSlice
   validity，而 image-only disk cache 会在 executor admission、filesystem mutation 或 codec
   call 前拒绝 packed、quantized 或 latent 正式 Value；
@@ -617,7 +633,7 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
   组成的一个有界 nonempty conjunction、checked normalization/clipping/algebra/containment、
   显式 budget，以及 typed Exact/ConservativeSuperset/Unknown/Unsupported/TooComplex outcome；
 - dirty source、per-node、edge、monolithic 与 HP validity record 保留规范化 Region；当前 image
-  tile、ImageBuffer helper、Host/IPC v2 inspection 与 operation ABI v2 使用 checked derived
+  tile、dense-Value helper、Host/IPC inspection 与 operation ABI v1 adapter 使用 checked derived
   PixelRect；
 - 当前选中的精确 core `invert_dense` callback 通过 checked stride 执行 ImageRect 或
   TensorSlice；TensorSlice 是 HP-only monolithic work，same-key plugin replacement 无法继承该
@@ -637,9 +653,10 @@ provider table，以及严格 typed 的 Schema/Facet/Layout map。它会暂存�
 callback 与 opaque owner 则保留正在退役的 generation，直到最终 provider destroy 与 module
 release。
 
-V-12 增加的是验证，而不是新的 representation 或 provider ABI。它的 dependency-neutral
-矩阵会证明：1/3/4/8/16 通道 active logical FP32/FP64 image element 穿过 padded Value 与 CPU
-ImageBuffer bridge；rank-one 至 rank-five FP32/FP64 latent Value 穿过完整 rank TensorSlice；
+V-12 增加的是验证，而不是新的 representation 或 provider ABI。在该交付时点，它的
+dependency-neutral 矩阵会证明：1/3/4/8/16 通道 active logical FP32/FP64 image element 穿过
+padded Value 与当时的 CPU compatibility bridge；DI-4 现在通过 `ImageView` 与 dense-Value clone
+直接验证这些路径；rank-one 至 rank-five FP32/FP64 latent Value 穿过完整 rank TensorSlice；
 ImageRect/TensorSlice merge 保留选中/未选中的 element；显式 CPU 与注入式 external-device
 transfer 保留完整正向 producer envelope；binding、allocation、revision 与 Pending-to-Ready
 事实保持精确；negative/zero-stride 不可变 view 可读，并且 transfer 会显式拒绝它们。独立
@@ -679,13 +696,15 @@ adapter 会读取与写入完整 single-part deep-scanline 文件，通过注入
 拆分的 codec call 都作为一项正数预算的 `ComputeIoExecutor` task 运行，同时关闭 OpenEXR 内部
 thread。
 
-V-15 仍不含 public device registry、device queue/in-flight dimension、更多 packed encoding
+V-15 本身没有增加 public device registry、device queue/in-flight dimension、更多 packed encoding
 或 quantization formula、未对齐 requantizing slice、access/conversion/inference/execution provider
-suite、通用 graph/cache Value persistence、manifest/chunk、deep-tiled/multipart/mixed-part OpenEXR，
-或通用 named graph Value output。Native
+suite、provider-defined Value 的通用 graph/cache persistence、deep-tiled/multipart/mixed-part
+OpenEXR，或 provider-defined named graph Value output。Native
 executor、transfer submission、mutable producer、completion admission 与 residency owner
-仍是 source-private。ImageBuffer 仍是 operation ABI v2、tiled write、现有 image codec 与 Host
-surface 的 compatibility representation；V-15 不会让其 deep Value 经过这套表示。
+仍是 source-private。在 DI-4 前，前身图像类型仍位于 private tiled write、普通 image codec 与
+public Host surface。DI-4 已用普通 dense Value、named portable artifact 与显式 sample
+conversion 替换这些 edge。V-15 与 DI-4 都让 OpenEXR Deep 保持 provider-defined
+variable-sample 路径，不会把它适配成普通 dense image。
 
 `ElementSemantics`、`StorageEncoding` 与 `QuantizationSchema` 彼此独立。Describable、
 executable 与 convertible 支持也彼此独立，而且 conversion 始终显式。因此 FP64、任意
@@ -716,19 +735,19 @@ Persistence 分成 graph document、canonical descriptor envelope、artifact/cac
 chunk，以及绝不持久化的 runtime binding。Provider 缺失时，未知但有效的 extension byte 会被
 保留而不被解释。
 
-Public migration 会完整收口，而不是永久保留双重边界：
+Public migration 已经完整收口，而不是永久保留双重边界：
 
 ```text
 ImageBuffer     -> Value + ImageFacet + ImageView
 PixelRect       -> RegionSet atom ImageRect
 Device          -> DeviceBackend + DeviceId + MemoryDomain
-OperationOutput -> named Value outputs
+Operation result -> named Value outputs
 ParameterMap    -> configuration only
 ```
 
-只有精确 record 与自有 consumer 已经存在后，operation plugin 才从临时 C++ ABI v2 迁移到
-ADR 0012 接受的独立版本化 pure-C operation-plugin ABI v1。完成边界会删除 v2，不保留永久
-wrapper、alias、forwarding header、dual loader 或 v2-to-v1 shim。Data-definition provider
+Operation plugin 已从临时 C++ registration generation 迁移到 ADR 0012 接受的独立版本化 pure-C
+operation-plugin ABI v1。完成边界删除 predecessor，不保留永久 wrapper、alias、forwarding
+header、dual loader 或 compatibility shim。Data-definition provider
 v3 与 policy ABI v1 仍是独立 family。
 
 ### Project 4 实现依赖契约
@@ -767,14 +786,57 @@ public ABI 与 dependency-disabled product 中移除 OpenEXR header、link、typ
 discovery、target export 与 transitive dependency。只有显式 component consumption 这条 installed
 package 路径会发现 OpenEXR 并导入 provider MODULE。
 
+## 普通图像 Value 迁移
+
+[ADR 0013](../../adr/zh/0013-ordinary-dense-image-coordinates-samples-colors-and-statistics-are-separate-contracts.zh.md)
+约束普通 dense-image metadata 基线。Project 6 按依赖顺序完成 public migration；实时状态权威
+仍是其 Issue 与 Project field，而不是本文目标文档。
+
+| 切片 | 交付边界 | 阻塞切片 |
+| --- | --- | --- |
+| [#129 / DI-1](https://github.com/kevin-zf1123/photospider/issues/129) | 冻结并交付 ordinary-image coordinate、sample/color declaration、stable channel identity、canonical descriptor record 与不进入 identity 的 observed statistics | #78、#101、#102、#105 |
+| [#130 / DI-2](https://github.com/kevin-zf1123/photospider/issues/130) | 冻结 Host-owned dense-image output plan/binding/grant，并使 kernel runtime/cache/statistics image authority 由 Value 支撑 | #129 |
+| [#132 / DI-3](https://github.com/kevin-zf1123/photospider/issues/132) | 实现 pure-C operation ABI v1，并迁移 plugin 与 isolated execution | #129、#130 |
+| [#131 / DI-4](https://github.com/kevin-zf1123/photospider/issues/131) | 迁移外部产品边界并彻底删除此前的兼容图像类型 | #129、#130、#132 |
+
+DI-1 是第一个依赖切片。它把 immutable data window、optional display window 与 dynamic
+`RegionSet` 保持为三项独立 authority；让 storage representability、quantization、declared
+sample domain、color 与 observed statistics 彼此独立；并冻结后续 output-plan、wire、artifact
+及 codec 工作所需的 bounded record。DI-1 本身刻意不删除当时的 operation 边界或 `ImageBuffer`，不迁移
+Host/IPC/worker/durable/CLI surface，不定义自动 color conversion，也不把 OpenEXR Deep
+provider-defined window 复用为普通 dense-image authority。在 DI-1 决策时点，DI-2、DI-3 与
+DI-4 都是下游交付切片。现在 DI-2 已交付内部 runtime 切片，DI-3 已交付 pure-C operation ABI
+v1 与 isolation protocol v2，当前源码树已实现 DI-4 的 external-boundary 迁移和最终兼容类型
+删除。实时 merge、review 与 Project 状态仍以远端为准。
+
+DI-2 是内部 runtime 交付切片。它会在 allocation 前冻结一个 source-private 普通图像 output
+plan，包含精确 name、DenseTensor/ImageFacet、Strided layout、storage envelope、alignment 与
+Region。一个 aligned Host binding 拥有一份 allocation，并通过 move-only、可撤销的 whole grant
+或互不重叠的 tile grant 进行 publication。每个 grant 都必须恰好一次 retirement；validation、
+overlap、range、alignment、overflow、exception、cancellation、duplicate retirement、omitted
+retirement、active-grant seal 或 second publication 都会以关闭状态失败。最后一个成功的
+executable tile 会 seal 一个 Ready Value，且任何 partial binding 都不会被 consumer 观察。
+
+私有 `NodeOutput`、full/dirty HP、RT proxy、formal/disk cache、extent、inspection、metrics 以及
+有界 statistics producer/cache 现在都从规范 named Value 派生 image fact。`image` 是永久的当前
+port。在 DI-2 completion boundary，当时的前身图像 staging 会在入站 adapter 处清除并被正式
+commit 拒绝；DI-4 现在已经删除该 staging surface。DI-3 随后交付纯 C operation ABI v1 与
+isolation protocol v2。DI-4 实现 named Host/IPC result、worker 与 durable Value artifact、
+显式 codec/CLI conversion 和最终兼容删除；DI-2 本身不发布 ABI record。
+
 ## 异构 Executor
 
 当前 V-9 Metal route 组合了 process ownership、registry dispatch、queue/allocator/cache 复用、
 provider-state 移除、asynchronous pending Value、显式 CPU/Metal transfer、进程级 residency 与
 精确 stale-result arbitration。它的唯一 service ledger 现在会在 native allocation 前原子准入
-per-device memory/scratch plan、校准 native actual byte、把 memory 绑定到 persistent Value
-ownership，并把 scratch 绑定到精确 command completion。Queue、lane 与 pipeline-cache
-infrastructure 仍不属于 per-invocation 核算。
+per-device memory/scratch plan。Heap query 只贡献对齐后的 persistent minimum；一次 root-mutex
+transaction 会把它与精确 scratch 配对，并预留该 device 当前全部可用的 persistent-memory
+capacity。Dedicated heap 的正值 `currentAllocatedSize` 是唯一 persistent actual，不会重复计入
+其 texture，而每项 scratch resource 都贡献 `allocatedSize`。适配 plan 的 commit 会在同一套唯一
+mutex 下归还未使用 byte，并把 memory 绑定到 persistent Value ownership、把 scratch 绑定到精确
+command completion。Typed invalid/over-plan failure 会退役局部 native owner，并让尚未 commit 的
+reservation 准确 rollback 一次。Queue、lane 与 pipeline-cache infrastructure 仍不属于
+per-invocation 核算。
 
 GPU executor 不是第二个普通 CPU worker pool。每个物理 device executor 拥有 native queue/stream、
 allocator、in-flight limit、memory/scratch reservation、pipeline cache、transfer queue 和 completion
@@ -803,7 +865,8 @@ CPU-heavy phase 送回 CPU executor。同步 cache administration/load、daemon 
 output store。Deferred HP cache write 仍发生在 live Graph publication 前，并可能使 Run
 失败；Graph 文档保存会直接写入 destination；daemon job state 与 acknowledgement 都是
 process-local；私有 IPC `OutputStore` 使用内存 lease/TTL index，提供受保护、no-replace 的
-进程级 delivery。旧 `io/save` callback 也可以在包围它的 staged Run 提交前暴露文件。
+进程级 delivery。DI-4 已删除旧 `io/save` callback；显式 CLI/codec output 与生成 input Value 的
+Run 仍是彼此独立的 observation。
 
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
 接受以下 typed partial order 目标：
@@ -1230,20 +1293,21 @@ immutable-read capability 和私有 output-stage/commit capability，绝不获�
 runtime 只获得 invocation buffer。Committed receipt 在 worker/plugin failure 或 Job cancellation 后
 仍具权威；未提交私有 stage 仍由 artifact authority 清理。
 
-Issue #105 现在为源码私有 WorkerManager/worker boundary 的该分离提供本地可执行证据。Private
-worker protocol v2 使用 128-KiB metadata-only control bound，且没有 v1/bulk fallback。Manager
+Issue #105 现在为源码私有 WorkerManager/worker boundary 的该分离提供本地可执行证据。DI-4 把
+private worker protocol 推进到 v3；它使用 128-KiB metadata-only control bound，且没有 v1/v2/
+bulk fallback。Manager
 record 与 supervision handle 建立后，该 owner 才在 service mutex 外创建 direction-reduced
 `AF_UNIX SOCK_STREAM` lane。Nonblocking manager endpoint 传输 checkpoint 与 candidate byte，worker
 endpoint 只有在精确 PID deadline 与 TERM/KILL/reap ownership 下才可能阻塞；reference 绑定 current
 tenant/Job/spec/attempt/worker/lease 以及精确 checkpoint 或 output slot，但脱离 stream capability
 不授予 authority。Worker 不能选择 path、quota、稳定 ArtifactId、OutputCommitId 或 publication
-result。Worker 会在执行前校验 checkpoint byte count、EOF 与 SHA-256。worker 先发送 output
-metadata，并保留 source 与真实 heartbeat。对尚未 reap 的当前 PID，manager 创建一份精确、
-惰性的匿名最终 owner，在绝对 lifecycle 检查之间最多接收一个 64-KiB direct slice，且不发生
-累计扩容或 whole-payload reconstruction copy。只有合法 Heartbeat frame 能续期 liveness，
-output progress 绝不能。只有在 stream EOF、clean reap，并对 reference、descriptor、size、
-resource 与 SHA-256 做精确复核后才暴露 candidate。worker 在精确 bytes 后关闭 output lane，
-并保持可被终止，直到 manager 完成关联与 O(1) owner transfer，再返回一次不授予
+result。Worker 会在执行前校验 checkpoint byte count、EOF 与 SHA-256。worker 先发送 aggregate
+archive metadata，并保留 source 与真实 heartbeat。对尚未 reap 的当前 PID，manager 创建一份
+exact-size archive owner，在绝对 lifecycle 检查之间最多接收一个 64-KiB direct slice，且不发生
+累计扩容。只有合法 Heartbeat frame 能续期 liveness，output progress 绝不能。只有在 stream EOF、
+clean reap，并对 reference/archive descriptor/size/resource/SHA-256 做精确复核且 strict decode
+named-Value artifact 后才暴露 candidate。worker 在精确 bytes 后关闭 output lane，并保持可被终止，
+直到 manager 完成关联与 report materialization，再返回一次不授予
 service/artifact authority 且只含 identity 的 `CompletionReady`。Post-reap
 supervision 绝不读取 bulk lane，也不执行 filesystem I/O、blocking bulk transfer、bulk allocation
 或 content hash；既有 service
@@ -1261,7 +1325,7 @@ liveness、report 或 completion authority。Write 会在正向 progress 前后�
 late frame 必须被视为 write 失败，并且绝不重试。Cancellation owner 只能为有界 receive-side
 report/EOF/exit 排空继续保留 channel。
 
-凡是加载到 Host 的 DSO 都仍是 operator-trusted native code。当前 operation C++ ABI、
+凡是加载到 Host 的 DSO 都仍是 operator-trusted native code。当前 operation pure-C ABI v1、
 data-definition pure-C ABI 与 policy pure-C ABI 都不提供 sandbox、timeout、syscall、thread 或
 memory-corruption boundary。当前 operation/policy DSO 候选必须先通过进程不可变的签名内容/role
 admission，但批准不会削弱其进程内能力。Control plane 与 WorkerManager 不加载 DSO。
@@ -1272,60 +1336,43 @@ lifecycle、authenticated IPC、heartbeat/deadline、process rlimit、restart ba
 memory/FD transport。Invocation 携带有界且带版本 descriptor 与 checked range，而不携带 C++
 object、Host callback、raw pointer、native GPU handle、credential、artifact capability 或 resource
 token。可信 Host 代码会在使用前重新校验全部返回 descriptor、offset、ownership、size、readiness、
-identity 与 declared bound。当前没有 composition root 通过这条路径选择最终用户 Graph operation，
-且已实现控制不是通用 syscall/network sandbox。纯 C 能改善 record compatibility；它不能让恶意
-native code 在进程内安全执行。
+identity 与 declared bound。DI-3 现在会在已加载的 pure-C operation ABI v1 implementation 声明
+supervised CPU mode 且安装了精确 signed-package route 时选择这条路径；不允许 direct callback
+fallback。Public Host/CLI/worker surface 仍不暴露通用的最终用户 runtime selector，且已实现控制
+不是通用 syscall/network sandbox。纯 C 能改善 record compatibility；它不能让恶意 native code
+在进程内安全执行。
 
 ### Issue #101 已接受的 operation ABI 决策
 
 [ADR 0012](../../adr/zh/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md)
-接受独立 operation-plugin ABI v1 目标。它既不是 data-provider-v3 suite，也不是 policy-v1
-演进。在后续一次 implementation 迁移每个仓库 plugin 与 installed consumer 并完整删除 v2 之前，
-当前 installed boundary 仍是 operation C++ ABI v2；不保留 wrapper、alias、dual loader、
-forwarding header 或 v2-to-v1 shim。
+接受独立 operation-plugin ABI v1。DI-3 现在把该决策实现为唯一 installed/loaded operation
+contract；它继续独立于 data-provider v3 与 policy v1。
 
-未来 self-contained C11/C++17 contract 具有 numeric ABI-one handshake、一个 exact 96-byte
-root API，以及独立 exact 64-byte v1 Definition、Configuration、Inference、Region、Dependency、
-Execution suite。Definition、Configuration、Inference、Region、Execution required；当 copied
-implementation metadata 声明 data dependence 时 Dependency required。只有 20 个 semantic
-record kind 携带 exact size/kind/version/flags。Plain identity、handle、byte view、digest、array
-reference、configuration value、axis range 不携带 record header；root/suite 使用各自 prefix。
-Reserved storage、pointer/count/stride framing 与全部 exact offset 都会检查。Unknown tail 与
-partial-prefix compatibility 会被拒绝。
+Self-contained C11/C++17 surface 具有 numeric ABI-one handshake、一个精确 96-byte root API、
+精确 64-byte Definition、Configuration、Inference、Region、Dependency、Execution suite，以及
+30 个精确 semantic record kind。它往返完整 DI-1 descriptor/facet/layout metadata 与 DI-2
+immutable output plan/callback-scoped Host grant。Reserved storage、pointer/count/stride framing、
+bound、identity、enum 与精确 offset 都会检查；unknown tail 与 partial prefix 被拒绝。
 
-Permanent 128-bit plugin/operation/implementation identity 与 Host-minted process-local
-generation/invocation handle 保持不同。Opaque plugin context 只 round-trip 到 defining generation。
-Input 在一次同步 call 中借用；metadata 与 sink output 会被验证并复制；Host 拥有 output buffer，
-不提供 allocator callback。成功 root/configured context 在精确 DSO lease 下得到一次 destroy
-attempt。Status 0 至 8 分别冻结 success、caller error、allocation failure、unsupported request、
-invalid descriptor、excessive complexity、cancellation、failed precondition、internal failure。
-Exception 不跨 DSO。
+Permanent plugin/operation/implementation identity 与 Host mint 的 generation、invocation、plan、
+binding、grant identity 保持不同。Borrowed pointer 只在 callback 中有效。Host 验证并复制 sink
+output，拥有 allocation/seal/publication，并保留精确 callback/context DSO lease。Replacement
+保留 atomic visibility、revision/predecessor restoration、middle-generation splice、reverse unload、
+in-flight lifetime 与 exactly-once context/generation destruction。
 
-V1 execution 有意限制为 synchronous、CPU-addressable。它不携带 native device handle、
-device-resident buffer、fence、completion owner、delayed sink、Graph/Run/scheduler/cache/resource
-authority 或 wire representation。Private device implementation 必须在 return 前 stage 到 Host
-CPU output，或保持在 Host-private adapter 后面。未来 native/async execution 使用新 suite/ABI
-决策。
+Trusted implementation 在进程内调用纯 C suite。Supervised implementation 只携带 signed
+runtime-package identity，并通过既有 `PluginInvocationExecutor` 与 isolation protocol v2 路由；
+没有 direct fallback，也不序列化 process pointer。Pure C 不会 sandbox trusted native code，
+`SIGKILL` 仍只能作为 memory-pressure-compatible evidence。
 
-Publication 保留当前 shadow transaction、atomic immutable slot visibility、per-slot revision/
-predecessor restoration、middle-generation splice、reverse retirement，以及精确 callback/context
-DSO lease。永不返回的 callback 可以永久保留这些 owner；pure C 不提供 bounded termination。
-Issue #102 现在已经实现其 pointer-free shared-memory/FD invocation record，Issue #103 已经实现
-authenticated private-session supervision 与基于事实的 crash/hang/signal/bad-output containment，
-Issue #104 已经为当前 operation/policy DSO 实现签名 admission，并为私有 isolated runtime 实现
-package/resource admission。这些控制既不完成 operation-ABI migration，也不增加通用 sandbox。
-`SIGKILL` observation 只表示 memory-pressure-compatible，不能证明 OOM。
-
-当这些中英文 artifact 通过本地验证、fresh 独立 diff 审核、经授权的 exact-head PR
-Integration、finding 已裁定的 fresh Codex exact-head review、zero unresolved review thread
-与 Issue/Project 行政门禁时，Issue #101 作为 decision 即完成。归档该 decision 与关闭 #101
-不等待后续 header/loader/plugin 迁移或 v2 删除；v2 仍为 current、v1 仍为 target-only 时，
-这些工作仍属于一次独立 breaking implementation change。
+该 breaking migration 同时删除 predecessor header、symbol、registrar/callback surface、loader
+lookup、component assertion、fixture 与 active documentation，不保留 wrapper、alias、dual loader、
+forwarding header 或 compatibility shim。
 
 ### Issue #102 当前 isolated CPU invocation 切片
 
-Issue #102 现在提供源码私有的 Darwin/Linux protocol-v1 CPU invocation adapter 与 one-call
-runtime endpoint。有界 framed Unix stream 承载 canonical request/response；有序
+Issue #102 提供源码私有 Darwin/Linux CPU invocation adapter 与 one-call runtime endpoint；
+DI-3 已把独立 wire 升级到 protocol v2。有界 framed Unix stream 承载 canonical request/response；有序
 `SCM_RIGHTS` descriptor 授予已 unlink 的 POSIX shared-memory capability。Wire 包含精确
 tenant/Job/attempt/worker-lease/plugin-generation/invocation identity tuple、operation key、
 immutable scalar parameter、capability/tensor descriptor、resource declaration、response status
@@ -1349,17 +1396,17 @@ Adapter 与 endpoint 会编入 installable product archive，该真实 exec inte
 两端链接 product archive。这是完整的 #102 product inclusion 纵向路径，不是已选择的终端用户
 路径：没有 `ExecutionService`、`WorkerManager`、embedded Host/CLI、
 `photospider-worker` 或其他 composition root 会调用它。范围更窄的
-`NonSupervisedIsolatedCpuInvocationExecutor` 仍是 pre-supervisor transport 子角色，而不是
-目标私有 `PluginInvocationExecutor`；后者通过 `PluginRuntimeSupervisor` 的组合属于 #103。
+`NonSupervisedIsolatedCpuInvocationExecutor` 仍是 #103 交付的私有
+`PluginInvocationExecutor`/`PluginRuntimeSupervisor` 组合内部 transport 子角色。
 
 每次调用都使用全新的 native exec，environment 为空，并且除 stdio 外只保留固定 control/status/
 executable descriptor。Issue #104 要求该直接入口先满足签名 package equality、Host ledger
 admission 与 exec 前 address-space/CPU/descriptor/core limit。直接调用时它仍有意保持 non-
 supervised：不包含 deadline、heartbeat、restart policy、有界 hang recovery 或通用 syscall/network
 sandbox，callback 可以无限期 hang。Issue #103 会组合下文独立 supervised path；non-supervised
-adapter 绝不作为其 fallback。Process-local callback seam 既不调用也不迁移当前 operation ABI v2
-或仍为目标态的 operation ABI v1；它不会新增 ABI compatibility wrapper、shim、adapter 或 dual
-loader。Cross-process GPU/native-handle support 仍是后续工作。
+adapter 绝不作为其 fallback。DI-3 只把 operation ABI v1 supervised CPU record 映射到该组合，
+不增加 compatibility wrapper 或 native-handle transport。Cross-process GPU/native-handle support
+仍是后续工作。
 
 ### Issue #103 当前 plugin runtime supervision 切片
 
@@ -1398,11 +1445,11 @@ output rejection、FD/PID 精确 retirement、后续健康恢复，以及真实 
 boundary。在该 boundary，原始 `PluginRuntimeFault` 到达 request owner，只有 owning Run 被发布
 为 Failed，固定 service worker 随后会执行无关 Run。
 
-这尚不是最终用户选择的 operation path。当前没有 `ExecutionService`、`WorkerManager`、
-embedded Host/CLI、`photospider-worker` 或 operation loader 会从 Graph operation 构造 isolated
-invocation。Operation ABI v2 无法跨越该 wire，仍为目标态的 ABI v1 既未实现也未通过 shim
-接入。Issue #104 现在为该私有组合提供 package trust 与 enforceable quota；更强 sandbox profile
-仍是独立工作。Issue #105 负责 network/artifact plane。Issue #106 现在维护两个手工 opt-in、
+DI-3 现在让 operation loader 从 supervised 纯 C ABI v1 descriptor 构造该 isolated invocation。
+它要求 signed runtime-package route，并禁止 direct trusted fallback。Public `ExecutionService`、
+`WorkerManager`、embedded Host/CLI 与 `photospider-worker` 仍不暴露最终用户 selector。Issue #104
+为该私有组合提供 package trust 与 enforceable quota；更强 sandbox profile 仍是独立工作。
+Issue #105 负责 network/artifact plane。Issue #106 现在维护两个手工 opt-in、
 调用生产 decoder 的 harness，分别覆盖有界 worker metadata 与 isolated invocation
 packet/descriptor，并维护已注册的确定性 codec regression。它还会让只用于观察的
 `(GraphSessionId, GraphRevision, RunId, RunLocalTaskId)` join 贯通 execution ring、Host page
@@ -1445,25 +1492,26 @@ limit setup failure。
 
 这会完成私有 Linux runtime 组合的 package/resource admission、Linux operation/policy loader 的
 签名 immutable-snapshot admission 与 mapping/capability 生命周期一致性，以及 Darwin 每个 native
-role 有类型的访问前拒绝。它不
-会选择最终用户 Graph operation、实现目标 operation ABI v1、隔离获批进程内
-DSO、提供通用 syscall/network sandbox，或从 `SIGKILL` 证明 OOM。
+role 有类型的访问前拒绝。在当时 Issue #104 的历史边界内，它不会选择最终用户 Graph operation、
+实现当时仍为目标态的 operation ABI v1、隔离获批进程内 DSO、提供通用 syscall/network
+sandbox，或从 `SIGKILL` 证明 OOM。DI-3 后续实现了 operation ABI 及其 supervised
+exact-package selection；进程内 DSO 隔离、通用 sandbox 与 OOM 证明仍不属于该交付。
 
-当前 Issue #99/#100/#105 基线是源码私有的
+当前 Issue #99/#100/#105/#131 基线是源码私有的
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)。它冻结
 `jobspec-v2`，原子核算完整 tenant resource envelope，在一个 locked root 下持久化 Job record 与
-manifest-last image artifact，支持经过授权的 checkpoint identity 以及 stable-Job/fresh-attempt
+manifest-last named-Value archive，支持经过授权的 checkpoint identity 以及 stable-Job/fresh-attempt
 显式 retry，并在重启后 reconcile interrupted 或 already-committed work。现在每个 attempt
 运行一个全新 exec 的 Embedded Host worker process，强制 reserved CPU parallelism 与 POSIX
 `RLIMIT_AS`，并使用带一个 bounded private protocol、精确 assignment/lease/PID fencing、
 heartbeat/runtime deadline、cancellation escalation、精确 reaping 与持续 supervision-handle
-drainage 的同进程 WorkerManager。其 protocol v2 control socket 只传输有界 attempt/Job/receipt/
+drainage 的同进程 WorkerManager。其 protocol v3 control socket 只传输有界 attempt/Job/receipt/
 reference/descriptor/digest metadata；checkpoint 与 output byte 通过独立的 attempt-local
 direction-reduced stream descriptor 传输。Manager 会在精确 worker 仍受 lifecycle 与 heartbeat
-deadline 约束时，把每个 output slice 直接接收到一个 metadata-sized 最终 owner，并且不会在
+deadline 约束时，把每个 archive slice 直接接收到一个 metadata-sized 最终 archive owner，并且不会在
 reap 后排空 bulk data。Output 绝不续期 heartbeat。Candidate 只有在 worker 发出只含 metadata
 的 Report 后保持真实 heartbeat、仍可被终止，并等待只含 identity 的
-`CompletionReady`；manager 只有在精确 stream join 与 image 重建后才发送该确认。Candidate 只有在
+`CompletionReady`；manager 只有在精确 stream join 与 named-Value artifact validation 后才发送该确认。Candidate 只有在
 stream EOF、manager 精确复核与 clean reap 后才对 service 可见。
 Report 只有在 clean process exit 与 reap 后才具备资格；
 startup、exit、signal、channel、protocol、heartbeat、runtime 与 forced-cancellation failure 只
@@ -1487,7 +1535,7 @@ Issue #97 只做分配，不吸收后续交付：
 | [#98](https://github.com/kevin-zf1123/photospider/issues/98) | Immutable single-tenant JobSpec，以及带 artifact identity 的 control-plane-to-worker submit/query/cancel/completion |
 | [#99](https://github.com/kevin-zf1123/photospider/issues/99) | Tenant quota、durable artifact、retry/checkpoint 与 recovery semantics |
 | [#100](https://github.com/kevin-zf1123/photospider/issues/100) | WorkerManager/worker supervision、crash isolation 与 bounded cancellation/shutdown |
-| [#101](https://github.com/kevin-zf1123/photospider/issues/101) | 已接受的独立版本化 pure-C operation-plugin ABI v1 决策；实现仍属于后续 breaking migration |
+| [#101](https://github.com/kevin-zf1123/photospider/issues/101) | 已接受的独立版本化 pure-C operation-plugin ABI v1 决策；DI-3 已将其实现为唯一 operation DSO 契约，并提供 trusted 与 supervised isolation-v2 路径 |
 | [#102](https://github.com/kevin-zf1123/photospider/issues/102) | 已实现源码私有的 Darwin/Linux isolated CPU shared-memory/FD invocation，并具有精确 descriptor/stride/size/ownership/content validation；authenticated supervision 仍属于 #103 |
 | [#103](https://github.com/kevin-zf1123/photospider/issues/103) | 已实现源码私有的 `PluginRuntimeSupervisor` heartbeat/deadline、基于事实的 crash/hang/signal/bad-output containment、fresh-process restart 与精确 reap；不包含最终用户路径或 OOM 归因 |
 | [#104](https://github.com/kevin-zf1123/photospider/issues/104) | 已实现 operation/policy DSO 与私有 isolated runtime 的进程不可变签名 admission，以及一次性 ledger token 和 exec 前 rlimit；不包含最终用户 route 或通用 sandbox |

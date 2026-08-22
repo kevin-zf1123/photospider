@@ -10,7 +10,7 @@
 #include <string>
 #include <string_view>
 
-#include "photospider/plugin/node_view.hpp"
+#include "photospider/data/parameter_value.hpp"
 
 namespace ps {
 

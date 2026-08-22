@@ -38,32 +38,36 @@ class FakeImageArtifactCodec final : public ImageArtifactCodec {
     Kind kind = Kind::Decode;
     /** @brief Path supplied by the cache owner. */
     std::filesystem::path path;
-    /** @brief Encode precision; absent for decode calls. */
-    std::optional<ImageArtifactPrecision> precision;
+    /** @brief Decode policy; present only for decode calls. */
+    std::optional<ImageArtifactDecodeRequest> decode_request;
+    /** @brief Encode policy; present only for encode calls. */
+    std::optional<ImageArtifactEncodeRequest> encode_request;
   };
 
   /**
    * @brief Callback used to synthesize one decode result or exception.
    * @param path Artifact path supplied by the caller.
-   * @return Owned decoded image buffer.
+   * @param request Exact explicit sample/storage policy.
+   * @return Owned decoded ordinary-image Value.
    * @throws Any exception selected by the test.
    * @note The callback runs without the fake's mutex held.
    */
   using DecodeCallback =
-      std::function<ImageBuffer(const std::filesystem::path& path)>;
+      std::function<Value(const std::filesystem::path& path,
+                          const ImageArtifactDecodeRequest& request)>;
 
   /**
    * @brief Callback used to observe or fail one encode request.
    * @param path Artifact path supplied by the caller.
-   * @param image Borrowed image descriptor valid for the callback duration.
-   * @param precision Requested normalized integer precision.
+   * @param image Borrowed image Value valid for the callback duration.
+   * @param request Exact explicit sample/storage policy.
    * @return Nothing.
    * @throws Any exception selected by the test.
    * @note The callback runs without the fake's mutex held.
    */
-  using EncodeCallback = std::function<void(const std::filesystem::path& path,
-                                            const ImageBuffer& image,
-                                            ImageArtifactPrecision precision)>;
+  using EncodeCallback =
+      std::function<void(const std::filesystem::path& path, const Value& image,
+                         const ImageArtifactEncodeRequest& request)>;
 
   /**
    * @brief Creates a fake with optional decode and encode behavior.
@@ -80,35 +84,36 @@ class FakeImageArtifactCodec final : public ImageArtifactCodec {
   /**
    * @brief Records and delegates one decode request.
    * @param path Artifact path supplied by GraphCacheService.
-   * @return Callback-produced image buffer.
+   * @return Callback-produced ordinary-image Value.
    * @throws std::logic_error when no decode callback was configured.
    * @throws Any exception propagated by the configured callback.
    * @note Call recording completes before callback execution, including failure
    * paths.
    */
-  ImageBuffer decode(const std::filesystem::path& path) const override {
-    record(Call{Call::Kind::Decode, path, std::nullopt});
+  Value decode(const std::filesystem::path& path,
+               const ImageArtifactDecodeRequest& request) const override {
+    record(Call{Call::Kind::Decode, path, request, std::nullopt});
     if (!decode_) {
       throw std::logic_error("FakeImageArtifactCodec decode is not configured");
     }
-    return decode_(path);
+    return decode_(path, request);
   }
 
   /**
    * @brief Records and delegates one encode request.
    * @param path Artifact path supplied by GraphCacheService.
-   * @param image Borrowed image descriptor.
-   * @param precision Requested integer storage precision.
+   * @param image Borrowed ordinary-image Value.
+   * @param request Exact explicit sample/storage policy.
    * @return Nothing.
    * @throws Any exception propagated by the configured callback.
    * @note With no encode callback the request is recorded and accepted without
    * writing bytes.
    */
-  void encode(const std::filesystem::path& path, const ImageBuffer& image,
-              ImageArtifactPrecision precision) const override {
-    record(Call{Call::Kind::Encode, path, precision});
+  void encode(const std::filesystem::path& path, const Value& image,
+              const ImageArtifactEncodeRequest& request) const override {
+    record(Call{Call::Kind::Encode, path, std::nullopt, request});
     if (encode_) {
-      encode_(path, image, precision);
+      encode_(path, image, request);
     }
   }
 

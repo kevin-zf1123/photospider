@@ -364,11 +364,11 @@ class ServiceReadyFenceExecutor final : public ReadyFenceExecutor {
  */
 inline bool route_inventory_exposes_device(const std::string& execution_type,
                                            bool metal_registered,
-                                           Device device) noexcept {
-  if (device == Device::CPU) {
+                                           DeviceBackend device) noexcept {
+  if (device == DeviceBackend::CPU) {
     return execution::PhysicalExecutionRoutes::is_supported(execution_type);
   }
-  return execution_type == "gpu_pipeline" && device == Device::GPU_METAL &&
+  return execution_type == "gpu_pipeline" && device == DeviceBackend::Metal &&
          metal_registered;
 }
 
@@ -427,7 +427,7 @@ struct ExecutionService::RunState final
    * @note This method performs no registry access and is safe under pool/Run
    * locks during frontier formation and reserved-start revalidation.
    */
-  bool exposes_device(Device device) const noexcept {
+  bool exposes_device(DeviceBackend device) const noexcept {
     return route_inventory_exposes_device(route, route_metal_registered,
                                           device);
   }

@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/data/value_artifact.hpp"
 #include "server/worker/worker_protocol.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
@@ -82,6 +83,24 @@ AttemptIdentity make_seed_identity(const JobSpec& spec) {
 }
 
 /**
+ * @brief Builds one canonical one-buffer u8 artifact set for seed metadata.
+ * @param byte Exact logical tensor byte.
+ * @return One image-named artifact captured through the production contract.
+ * @throws Value publication, artifact capture, or allocation failures
+ * unchanged.
+ * @note The helper retains no removed image compatibility representation.
+ */
+NamedValueArtifactSet make_seed_artifacts(std::byte byte) {
+  DenseTensorDescriptor descriptor{{1U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  Value value = Value::from_cpu_dense_tensor(std::move(descriptor),
+                                             std::nullopt, StridedLayout{{1}},
+                                             std::vector<std::byte>{byte});
+  return NamedValueArtifactSet{{capture_value_artifact("image", value)}};
+}
+
+/**
  * @brief Builds one complete canonical Assignment seed value.
  * @param spec Non-null immutable JobSpec retained by the Assignment.
  * @param checkpoint Optional local checkpoint fixture used only to derive and
@@ -133,20 +152,21 @@ ArtifactRecord make_seed_checkpoint(const JobSpec& spec,
         "worker fuzz checkpoint seed has no declared ArtifactId");
   }
   ArtifactRecord checkpoint;
-  checkpoint.payload.push_back(std::byte{0x5a});
+  checkpoint.values = make_seed_artifacts(std::byte{0x5a});
   checkpoint.receipt.attempt = identity;
   checkpoint.receipt.output_slot_id = OutputSlotId("checkpoint.input");
   checkpoint.receipt.artifact_id = *spec.checkpoint_artifact_id();
   checkpoint.receipt.output_commit_id =
       OutputCommitId("commit.fuzz.checkpoint");
-  checkpoint.receipt.descriptor.width = 1;
-  checkpoint.receipt.descriptor.height = 1;
-  checkpoint.receipt.descriptor.channels = 1;
-  checkpoint.receipt.descriptor.type = DataType::UINT8;
-  checkpoint.receipt.descriptor.row_bytes = 1U;
-  checkpoint.receipt.descriptor.payload_bytes = 1U;
-  checkpoint.receipt.content_digest = hash_artifact_content(
-      checkpoint.payload.data(), checkpoint.payload.size());
+  const std::vector<std::byte> archive =
+      encode_named_value_artifact_set(checkpoint.values);
+  checkpoint.receipt.descriptor.archive_version =
+      kNamedValueArtifactSetArchiveVersion;
+  checkpoint.receipt.descriptor.value_count =
+      static_cast<std::uint32_t>(checkpoint.values.values.size());
+  checkpoint.receipt.descriptor.archive_bytes = archive.size();
+  checkpoint.receipt.content_digest =
+      hash_artifact_content(archive.data(), archive.size());
   checkpoint.receipt.achieved_durability = ArtifactDurability::CrashDurable;
   return checkpoint;
 }
@@ -154,25 +174,29 @@ ArtifactRecord make_seed_checkpoint(const JobSpec& spec,
 /**
  * @brief Builds one canonical successful Report output reference.
  * @param assignment Valid retained no-checkpoint Assignment and output stage.
- * @return Exact stage join, one-pixel tight descriptor, and content digest.
- * @throws Contract or hashing failures unchanged.
- * @note The fixed byte is hashed on the stack only; no artifact is opened,
- * transferred, published, or retained by the seed corpus.
+ * @return Exact stage join, one-Value archive descriptor, and content digest.
+ * @throws Contract, artifact, hashing, or allocation failures unchanged.
+ * @note The canonical archive is prepared only to derive real production
+ * metadata; no artifact is opened, transferred, or published.
  */
 WorkerOutputDataReference make_successful_seed_output(
     const PreparedWorkerAssignment& assignment) {
-  const std::byte output_byte{0xa5};
-  WorkerOutputDataReference output;
-  output.reference_id = assignment.data_plane.output.reference_id;
-  output.output_slot_id = assignment.data_plane.output.output_slot_id;
-  output.descriptor.width = 1;
-  output.descriptor.height = 1;
-  output.descriptor.channels = 1;
-  output.descriptor.type = DataType::UINT8;
-  output.descriptor.row_bytes = 1U;
-  output.descriptor.payload_bytes = 1U;
-  output.content_digest = hash_artifact_content(&output_byte, 1U);
-  return output;
+  if (assignment.assignment.spec == nullptr) {
+    throw std::invalid_argument("successful worker fuzz seed has no JobSpec");
+  }
+  JobAttemptReport report;
+  report.identity = assignment.assignment.identity;
+  report.outcome = JobAttemptOutcome::Succeeded;
+  report.settled = true;
+  report.failure = JobAttemptFailure::None;
+  report.values = make_seed_artifacts(std::byte{0xa5});
+  PreparedWorkerOutputTransfer transfer = prepare_worker_output_transfer(
+      *assignment.assignment.spec, assignment.data_plane.output, &report);
+  if (!transfer.reference.has_value()) {
+    throw std::runtime_error(
+        "successful worker fuzz seed produced no output metadata");
+  }
+  return *transfer.reference;
 }
 
 /**

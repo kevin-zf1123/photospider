@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -49,8 +50,11 @@ void DirtyRegionSnapshotBuilder::apply_source_lifecycle_event(
   state.lifecycle = update.lifecycle;
   state.generation = snapshot.graph_generation;
   if (update.source_roi) {
-    const RegionSet region =
-        region_image_adapter::from_pixel_rect(*update.source_roi);
+    std::unordered_map<int, PixelSize> extent_cache;
+    const ImageBounds data_window = extent_resolver_.resolve_output_data_window(
+        graph, update.node_id, extent_cache);
+    const RegionSet region = region_image_adapter::from_storage_pixel_rect(
+        *update.source_roi, data_window);
     state.source_rois.push_back(*update.source_roi);
     state.source_regions.push_back(region);
     snapshot.source_roi_records[update.node_id].push_back(
@@ -98,15 +102,29 @@ void DirtyRegionSnapshotBuilder::refresh_actual_dirty_regions(
       return;
     }
     const Node& node = graph.node(node_id);
+    const ImageBounds hp_data_window =
+        extent_resolver_.resolve_output_data_window(graph, node_id,
+                                                    hp_size_cache);
+    const PixelSize hp_size = infer_hp_size(graph, node_id, hp_size_cache);
+    const PixelSize domain_size =
+        domain == DirtyDomain::HighPrecision
+            ? hp_size
+            : scale_down_size(hp_size, kRtDownscaleFactor);
+    const ImageBounds domain_data_window =
+        domain == DirtyDomain::HighPrecision
+            ? hp_data_window
+            : ImageBounds{0, 0, domain_size.width, domain_size.height};
     const RegionSet domain_region =
-        region_image_adapter::from_pixel_rect(domain_roi);
+        region_image_adapter::from_storage_pixel_rect(domain_roi,
+                                                      domain_data_window);
     snapshot.per_node_dirty_rois[node_id].push_back(domain_roi);
     snapshot.actual_dirty_rois[node_id].push_back(domain_roi);
     snapshot.per_node_dirty_regions[node_id].push_back(domain_region);
     snapshot.actual_dirty_regions[node_id].push_back(domain_region);
-    append_node_work(snapshot,
-                     DirtyNodeWorkRecord{&node, node_id, domain, domain_roi,
-                                         tile_size_for_domain(domain)});
+    append_node_work(
+        snapshot,
+        DirtyNodeWorkRecord{&node, node_id, domain, domain_roi,
+                            domain_data_window, tile_size_for_domain(domain)});
   };
 
   for (const auto& [node_id, records] : snapshot.source_region_records) {
@@ -120,9 +138,12 @@ void DirtyRegionSnapshotBuilder::refresh_actual_dirty_regions(
       if (record.source_region.atoms().size() == 1U &&
           std::holds_alternative<ImageRect>(
               record.source_region.atoms().front())) {
-        append_image_source(
-            node_id, record.domain,
-            region_image_adapter::to_pixel_rect(record.source_region));
+        const ImageBounds hp_data_window =
+            extent_resolver_.resolve_output_data_window(graph, node_id,
+                                                        hp_size_cache);
+        append_image_source(node_id, record.domain,
+                            region_image_adapter::to_storage_pixel_rect(
+                                record.source_region, hp_data_window));
         continue;
       }
       if (domain != DirtyDomain::HighPrecision ||
@@ -173,16 +194,16 @@ void DirtyRegionSnapshotBuilder::append_node_work(
     return;
   }
   if (is_monolithic_boundary(*record.node)) {
-    const RegionSet region =
-        region_image_adapter::from_pixel_rect(record.work_roi);
+    const RegionSet region = region_image_adapter::from_storage_pixel_rect(
+        record.work_roi, record.data_window);
     snapshot.dirty_monolithic_nodes.push_back(
         {record.node_id, record.domain, record.work_roi, true, region});
     return;
   }
-  enumerate_tiles(
-      snapshot,
-      DirtyTileEnumeration{record.node_id, record.domain, DirtyTileLevel::Micro,
-                           record.work_roi, record.tile_size});
+  enumerate_tiles(snapshot,
+                  DirtyTileEnumeration{record.node_id, record.domain,
+                                       DirtyTileLevel::Micro, record.work_roi,
+                                       record.data_window, record.tile_size});
 }
 
 /**
@@ -196,6 +217,12 @@ void DirtyRegionSnapshotBuilder::enumerate_tiles(
   if (is_rect_empty(request.roi) || request.tile_size <= 0) {
     return;
   }
+  const PixelRect storage_bounds = region_image_adapter::to_storage_pixel_rect(
+      RegionSet::whole(), request.data_window);
+  if (intersect_rect(request.roi, storage_bounds) != request.roi) {
+    throw std::invalid_argument(
+        "Dirty tile enumeration ROI exceeds its image data window.");
+  }
   const PixelRect aligned = align_rect(request.roi, request.tile_size);
   const std::int64_t right =
       static_cast<std::int64_t>(aligned.x) + aligned.width;
@@ -203,16 +230,19 @@ void DirtyRegionSnapshotBuilder::enumerate_tiles(
       static_cast<std::int64_t>(aligned.y) + aligned.height;
   for (std::int64_t y = aligned.y; y < bottom; y += request.tile_size) {
     for (std::int64_t x = aligned.x; x < right; x += request.tile_size) {
-      PixelRect tile_roi{static_cast<int>(x), static_cast<int>(y),
-                         static_cast<int>(std::min<std::int64_t>(
-                             request.tile_size, right - x)),
-                         static_cast<int>(std::min<std::int64_t>(
-                             request.tile_size, bottom - y))};
+      const PixelRect tile_roi{static_cast<int>(x), static_cast<int>(y),
+                               static_cast<int>(std::min<std::int64_t>(
+                                   request.tile_size, right - x)),
+                               static_cast<int>(std::min<std::int64_t>(
+                                   request.tile_size, bottom - y))};
+      const PixelRect bounded_tile_roi =
+          intersect_rect(tile_roi, storage_bounds);
       snapshot.dirty_tiles.push_back(
           {request.node_id, request.domain, request.level,
            static_cast<int>(x / request.tile_size),
            static_cast<int>(y / request.tile_size), request.tile_size, tile_roi,
-           region_image_adapter::from_pixel_rect(tile_roi)});
+           region_image_adapter::from_storage_pixel_rect(bounded_tile_roi,
+                                                         request.data_window)});
     }
   }
 }

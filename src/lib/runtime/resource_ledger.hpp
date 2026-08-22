@@ -1327,6 +1327,30 @@ class ResourceLedger final {
       DeviceId device, const DeviceResourceVector& planned);
 
   /**
+   * @brief Atomically reserves the complete currently available memory ceiling.
+   * @param device Exact configured non-CPU device.
+   * @param minimum Minimum persistent-memory requirement and exact scratch
+   * plan that must both fit before admission.
+   * @return Move-only reservation whose memory plan equals all device memory
+   * available at its linearization point and whose scratch plan equals
+   * `minimum.device_scratch_bytes`; returns `std::nullopt` without mutation for
+   * an unknown device, insufficient minimum memory, overflow, or exhausted
+   * scratch.
+   * @throws std::logic_error when an internal account invariant is already
+   * violated.
+   * @throws std::system_error when root synchronization fails.
+   * @note This API supports native allocation forms whose backing-size rounding
+   * has no pre-allocation query. The one root lock covers availability,
+   * minimum validation, complete-ceiling reservation, and high-water update,
+   * so no snapshot-to-reserve race can admit a competing plan. Admission is
+   * immediate and provides no FIFO wait, starvation guarantee, implicit retry,
+   * or cross-device borrowing. `DeviceReservation::commit_actual()` must later
+   * return the unused ceiling after a checked native observation.
+   */
+  std::optional<DeviceReservation> try_reserve_device_with_memory_ceiling(
+      DeviceId device, const DeviceResourceVector& minimum);
+
+  /**
    * @brief Atomically spends one identity and reserves its complete vector.
    * @param identity Domain-separated complete invocation identity digest.
    * @param requested Exact Host-derived plugin resource demand.

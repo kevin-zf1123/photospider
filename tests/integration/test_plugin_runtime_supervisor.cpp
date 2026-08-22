@@ -34,6 +34,7 @@
 #include "execution/device/plugin_runtime_supervisor.hpp"  // NOLINT(build/include_subdir)
 #include "execution/execution_task_runtime.hpp"  // NOLINT(build/include_subdir)
 #include "execution/isolation/isolated_cpu_invocation_test_probe.hpp"  // NOLINT(build/include_subdir)
+#include "plugin/operation_runtime_router.hpp"  // NOLINT(build/include_subdir)
 
 #ifndef PS_TEST_ISOLATED_CPU_FIXTURE_PATH
 #error "PS_TEST_ISOLATED_CPU_FIXTURE_PATH must name the runtime fixture"
@@ -177,6 +178,29 @@ IsolatedCpuInvocationIdentity supervisor_test_identity(
   return identity;
 }
 
+#if defined(__linux__)
+/**
+ * @brief Converts one signed package-id byte sequence to its operation ABI key.
+ * @param package Exact sixteen manifest bytes.
+ * @return Two big-endian opaque words used only for router comparison.
+ * @throws Nothing.
+ * @note The conversion assigns no package semantics and transfers no trust,
+ * executable, process, or resource authority.
+ */
+ps_operation_identity_v1 operation_runtime_key(
+    const PluginPackageId& package) noexcept {
+  ps_operation_identity_v1 result{};
+  std::uint64_t* const words[]{&result.word0, &result.word1};
+  for (std::size_t word = 0U; word < 2U; ++word) {
+    for (std::size_t byte = 0U; byte < 8U; ++byte) {
+      *words[word] = (*words[word] << 8U) |
+                     static_cast<std::uint64_t>(package[word * 8U + byte]);
+    }
+  }
+  return result;
+}
+#endif
+
 /**
  * @brief Creates the maintained two-by-three u8 tensor descriptor.
  * @return Unquantized six-element descriptor.
@@ -205,8 +229,16 @@ StridedLayout supervisor_test_layout() {
  * @throws std::bad_alloc when descriptor/layout storage cannot allocate.
  */
 IsolatedCpuDenseTensorOutputPlan supervisor_test_output_plan() {
-  return IsolatedCpuDenseTensorOutputPlan{
-      supervisor_test_descriptor(), std::nullopt, supervisor_test_layout(), 6U};
+  IsolatedCpuDenseTensorOutputPlan plan;
+  plan.port_identity = supervisor_test_id(97U);
+  plan.plan_identity = supervisor_test_id(113U);
+  plan.schema_identity = supervisor_test_id(129U);
+  plan.layout_identity = supervisor_test_id(145U);
+  plan.descriptor = supervisor_test_descriptor();
+  plan.layout = supervisor_test_layout();
+  plan.storage_size = 6U;
+  plan.alignment = 1U;
+  return plan;
 }
 
 /**
@@ -221,6 +253,9 @@ IsolatedCpuHostInvocation supervisor_test_invocation(std::string operation,
   IsolatedCpuHostInvocation invocation;
   invocation.identity = supervisor_test_identity(domain);
   invocation.operation = std::move(operation);
+  invocation.operation_identity = supervisor_test_id(161U);
+  invocation.implementation_identity = supervisor_test_id(177U);
+  invocation.configuration_schema_identity = supervisor_test_id(193U);
   invocation.outputs.push_back(supervisor_test_output_plan());
   return invocation;
 }
@@ -664,6 +699,52 @@ TEST(PluginRuntimeSupervisor, ExecutesThroughProductArchiveAndPublishesOutput) {
   EXPECT_EQ(supervisor_test_bytes(result.outputs[0]), expected);
   expect_supervised_child_reaped(before,
                                  IsolatedCpuInvocationTestProbe::snapshot());
+}
+
+/**
+ * @brief Verifies the operation runtime router selects the exact signed
+ * supervised executor and publishes validated bytes without direct fallback.
+ * @throws Standard trust, route, transport, publication, and assertion failures
+ * observed by GoogleTest.
+ * @note Positive exact-object execution is Linux-only. Darwin's focused ABI
+ * test covers route-before-process failure, while supervisor construction
+ * remains deliberately unsupported there.
+ */
+TEST(PluginRuntimeSupervisor, OperationRuntimeRouterInvokesExactSignedPackage) {
+#if defined(__linux__)
+  auto executor = std::make_shared<PluginInvocationExecutor>(
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), PluginInvocationResourcePolicy{},
+      supervisor_test_options());
+  const ps_operation_identity_v1 runtime_key =
+      operation_runtime_key(executor->package_identity().package_id);
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  plugin_host::install_supervised_operation_runtime_route(
+      runtime_key, executor, []() { return supervisor_test_identity(98U); });
+  IsolatedCpuHostInvocationResult result;
+  try {
+    result = plugin_host::invoke_supervised_operation_runtime(
+        runtime_key, supervisor_test_invocation("fixture.fill_sequence", 199U));
+  } catch (...) {
+    static_cast<void>(
+        plugin_host::remove_supervised_operation_runtime_route(runtime_key));
+    throw;
+  }
+  EXPECT_TRUE(
+      plugin_host::remove_supervised_operation_runtime_route(runtime_key));
+
+  ASSERT_EQ(result.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  ASSERT_EQ(result.outputs.size(), 1U);
+  const std::array<std::byte, 6U> expected{std::byte{0}, std::byte{1},
+                                           std::byte{2}, std::byte{3},
+                                           std::byte{4}, std::byte{5}};
+  EXPECT_EQ(supervisor_test_bytes(result.outputs[0]), expected);
+  expect_supervised_child_reaped(before,
+                                 IsolatedCpuInvocationTestProbe::snapshot());
+#else
+  GTEST_SKIP() << "exact signed runtime routing is Linux-only";
+#endif
 }
 
 /**

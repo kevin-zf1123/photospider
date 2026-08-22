@@ -15,7 +15,7 @@ protocol v2 or the installed ABI, make current Graph/cache writers atomic,
 move cache failure behind Run publication, or turn the current private IPC
 `OutputStore` into a crash-durable store. Later focused changes must implement
 post-publication cache outcomes, durable output commit, Graph-document
-transactions, and legacy output-side-effect migration.
+transactions. DI-4 later removed the legacy direct output-side-effect plugin.
 
 Issue #95 now implements a deliberately narrow source-private B1 manual/release
 output owner. `B1OutputStore` composes the Issue #88 executor with a rooted
@@ -24,7 +24,7 @@ receipt with private minting, a retained opaque root-descriptor capability, and
 leaf-to-root barriers for the exact immutable B1 artifact. It does
 not replace the private IPC delivery store, add an installed output API, or
 complete the general recovery, post-publication cache, Graph-document, and
-legacy output-side-effect targets in this ADR.
+other output targets in this ADR.
 
 Late review of Issue #118 at Primary head
 `c99c94b56065aee6d456337af8ee0aa45c12e0a1` found two deadlocks in that reused
@@ -41,10 +41,13 @@ but each answers a different question:
 - `ComputeRun::Succeeded` means a validated Graph/RT publication, or a
   validated no-op, won the Run terminal arbiter. A provider returning is not
   sufficient.
-- `GraphCacheService` writes configured image and metadata paths directly.
-  One cache entry is not published transactionally, and the current product
-  commit policy can fail a Run when deferred cache persistence fails before
-  visible Graph publication.
+- `GraphCacheService` currently persists configured cache artifacts on POSIX
+  only. On Windows every nonempty-root disk request fails with a typed platform
+  error before codec, filesystem, executor, Graph/cache, timing, or diagnostic
+  effects; native Windows persistence remains a future target. On the supported
+  POSIX path, one cache entry is not published transactionally, and the current
+  product commit policy can fail a Run when deferred cache persistence fails
+  before visible Graph publication.
 - `ImageArtifactCodec` and `CacheMetadataCodec` own representation conversion,
   not directory creation, path authority, atomic replacement, retry,
   visibility, or durability.
@@ -60,10 +63,11 @@ but each answers a different question:
   then publishes an in-memory leased record. It does not synchronize the
   containing directory or persist the record/index, and TTL/lease cleanup
   intentionally removes artifacts.
-- The legacy `io/save` operation calls `cv::imwrite` inside provider execution.
-  Its user-selected path can become visible before the enclosing Run commit
-  and cannot be rolled back if cancellation or another terminal claimant later
-  wins.
+- At this decision's acceptance boundary, the legacy `io/save` operation
+  called `cv::imwrite` inside provider execution, so a user-selected path could
+  become visible before the enclosing Run commit. DI-4 subsequently deleted
+  that plugin; current CLI output delegates to the configured codec under an
+  explicit conversion request and is not a graph operation callback.
 
 Calling all of those states “complete” or “saved” would let a worker-pool
 choice accidentally define transaction ownership. Issue #87 therefore froze
@@ -183,11 +187,10 @@ The current product differs: deferred cache persistence can fail before
 visible Graph publication. This is a documented migration gap, not evidence
 that cache is output authority.
 
-The legacy `io/save` provider callback is another migration exception. Target
-provider work produces a staged output intent/value; only `OutputStore`
+The former `io/save` provider callback was another migration exception. DI-4
+deleted it rather than expanding it into a durable commit surface. Target
+provider work still produces a staged output intent/value; only `OutputStore`
 orchestration can publish caller-visible output after the Run result is known.
-The direct side-effect path must not be expanded or treated as a durable commit
-surface.
 
 ### OutputStore uses manifest-last idempotent commit
 
@@ -474,10 +477,11 @@ than the implementation can prove.
   an explicit output policy instead of an IPC side effect.
 - Graph-document save gains optimistic versioning and a typed durability
   result, but remains independent from compute frequency and runtime state.
-- The existing `io/save` operation, synchronous cache administration/load,
-  direct YAML writer, and private IPC store remain current facts and
-  documented migration gaps. The staged HP cache-save vertical now uses the
-  bounded executor, but accepting this ADR did not make it atomic or durable.
+- The former `io/save` operation is removed. Synchronous cache
+  administration/load, the direct YAML writer, and private IPC store remain
+  distinct current facts and documented migration gaps. The staged HP
+  cache-save vertical now uses the bounded executor, but accepting this ADR did
+  not make it atomic or durable.
 - Long-lived tests validate bounded admission, exact cancellation/shutdown
   settlement, failure preservation, and CPU progress during blocked cache
   codec work. Later durability work must also validate manifest-last
@@ -523,7 +527,7 @@ unsupported-capability failure.
 Current behavior remains authoritative in:
 
 - [Kernel Data Model](../kernel-architecture/Data-Model.md);
-- [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md);
+- [Dense Image Value Memory Contract](../kernel-architecture/Dense-Image-Value-Memory-Contract.md);
 - [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md);
 - [Compute Flow](../kernel-architecture/Compute-Flow.md);
 - [Policy and Execution Architecture](../kernel-architecture/Policy-and-Execution-Architecture.md);

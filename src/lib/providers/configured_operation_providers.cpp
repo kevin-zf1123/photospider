@@ -4,6 +4,9 @@
 #if defined(PHOTOSPIDER_HAS_OPENCV_OPERATION_PROVIDER)
 #include "providers/opencv/opencv_operation_provider.hpp"
 #endif
+#if defined(PHOTOSPIDER_HAS_METAL_PERLIN_OPERATION_PROVIDER)
+#include "metal/perlin_noise_metal.hpp"  // NOLINT(build/include_subdir)
+#endif
 
 namespace ps::providers {
 
@@ -12,6 +15,9 @@ void register_configured_operation_providers() {
   ops::register_core_operations();
 #if defined(PHOTOSPIDER_HAS_OPENCV_OPERATION_PROVIDER)
   opencv::register_provider();
+#endif
+#if defined(PHOTOSPIDER_HAS_METAL_PERLIN_OPERATION_PROVIDER)
+  ops::register_metal_perlin_operation_provider();
 #endif
 }
 

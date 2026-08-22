@@ -12,6 +12,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <future>
 #include <limits>
@@ -24,9 +25,11 @@
 #include <utility>
 #include <vector>
 
+#include "core/pending_value.hpp"
 #include "ipc/codec.hpp"
 #include "ipc/output_store.hpp"
 #include "ipc/unix_socket.hpp"
+#include "photospider/data/image_view.hpp"
 
 namespace ps::ipc::internal {
 namespace {
@@ -366,27 +369,63 @@ class StoreEnvironment {
 };
 
 /**
- * @brief Creates a CPU image whose source rows may contain padding.
+ * @brief Creates one named CPU image Value whose source rows contain padding.
  * @param width Width in pixels.
  * @param height Height in pixels.
  * @param channels Channels per pixel.
  * @param step Source bytes between rows.
  * @param bytes Complete padded source payload.
- * @return ImageBuffer sharing ownership of the supplied bytes.
- * @throws std::bad_alloc if payload storage cannot be allocated.
+ * @return Canonical one-element named Value result.
+ * @throws std::invalid_argument for malformed dimensions or payload length.
+ * @throws Value/result validation and allocation failures unchanged.
+ * @note The Value preserves padded physical rows and explicit UInt8 code-value
+ *       sample meaning; no compatibility image owner is created.
  */
-ImageBuffer make_u8_image(int width, int height, int channels, std::size_t step,
-                          std::vector<std::uint8_t> bytes) {
-  auto storage = std::make_shared<std::vector<std::uint8_t>>(std::move(bytes));
-  ImageBuffer image;
-  image.width = width;
-  image.height = height;
-  image.channels = channels;
-  image.type = DataType::UINT8;
-  image.device = Device::CPU;
-  image.step = step;
-  image.data = std::shared_ptr<void>(storage, storage->data());
-  return image;
+NamedValueResult make_u8_values(int width, int height, int channels,
+                                std::size_t step,
+                                std::vector<std::uint8_t> bytes) {
+  if (width <= 0 || height <= 0 || channels <= 0) {
+    throw std::invalid_argument(
+        "Output-store image dimensions must be positive.");
+  }
+  const std::size_t row_bytes =
+      static_cast<std::size_t>(width) * static_cast<std::size_t>(channels);
+  const std::size_t storage_size =
+      static_cast<std::size_t>(height - 1) * step + row_bytes;
+  if (step < row_bytes || bytes.size() < storage_size) {
+    throw std::invalid_argument("Output-store image payload is too short.");
+  }
+  DenseTensorDescriptor descriptor{
+      {static_cast<std::size_t>(height), static_cast<std::size_t>(width),
+       static_cast<std::size_t>(channels)},
+      ElementSemantics::UnsignedInteger,
+      StorageEncoding{8U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::CodeValue},
+                        SampleDomain{SampleDomainKind::CodeValue, 0.0, 255.0},
+                        {}};
+  std::vector<std::byte> storage(storage_size);
+  std::memcpy(storage.data(), bytes.data(), storage_size);
+  Value value = Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{{static_cast<std::ptrdiff_t>(step), channels, 1}},
+      std::move(storage));
+  return NamedValueResult({NamedValue{"image", std::move(value)}});
+}
+
+/**
+ * @brief Computes the exact portable archive size for one named result.
+ * @param values Valid Ready named Values.
+ * @return Exact encoded archive byte count.
+ * @throws Artifact capture/encoding failures unchanged.
+ * @note The helper is used only to set deterministic quota boundaries.
+ */
+std::size_t archive_size(const NamedValueResult& values) {
+  return encode_named_value_artifact_set(
+             capture_named_value_artifact_set(values))
+      .size();
 }
 
 /**
@@ -416,6 +455,48 @@ std::vector<std::uint8_t> read_bytes(const std::string& path) {
       throw std::runtime_error("cannot read output-store test artifact");
     }
   }
+}
+
+/**
+ * @brief Decodes one complete output-store archive from a protected file.
+ * @param path Absolute artifact path.
+ * @return Detached validated canonical named artifacts.
+ * @throws File-read and artifact-decode failures unchanged.
+ * @note The helper reconstructs no filesystem or delivery authority.
+ */
+NamedValueArtifactSet read_artifact_set(const std::string& path) {
+  const std::vector<std::uint8_t> raw = read_bytes(path);
+  std::vector<std::byte> bytes(raw.size());
+  std::transform(raw.begin(), raw.end(), bytes.begin(), [](std::uint8_t value) {
+    return static_cast<std::byte>(value);
+  });
+  return decode_named_value_artifact_set(bytes);
+}
+
+/**
+ * @brief Reads an exact bounded archive from an already-open descriptor.
+ * @param descriptor Borrowed readable descriptor positioned at archive start.
+ * @param size Exact expected archive byte count.
+ * @return Complete owned archive bytes.
+ * @throws std::runtime_error for premature EOF or non-EINTR read failure.
+ * @note Descriptor ownership and position after the read remain with caller.
+ */
+std::vector<std::byte> read_descriptor_archive(int descriptor,
+                                               std::size_t size) {
+  std::vector<std::byte> bytes(size);
+  std::size_t offset = 0U;
+  while (offset < bytes.size()) {
+    const ssize_t count =
+        ::read(descriptor, bytes.data() + offset, bytes.size() - offset);
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+    } else if (count == 0) {
+      throw std::runtime_error("output-store archive ended prematurely");
+    } else if (errno != EINTR) {
+      throw std::runtime_error("cannot read output-store archive descriptor");
+    }
+  }
+  return bytes;
 }
 
 /**
@@ -663,7 +744,7 @@ TEST(OutputStore, FailedStartupEnumerationClosesDuplicatedDescriptor) {
   EXPECT_EQ(errno, EBADF);
 }
 
-TEST(OutputStore, CanonicalEmptyImagePublishesNoFileOrQuota) {
+TEST(OutputStore, CanonicalEmptyValuesPublishNoFileOrQuota) {
   StoreEnvironment environment;
   SequentialIds ids;
   OutputStore store({}, {}, [&] { return ids.next(); });
@@ -673,7 +754,7 @@ TEST(OutputStore, CanonicalEmptyImagePublishesNoFileOrQuota) {
           .ok);
 
   ComputeOutputPublication publication =
-      store.publish(ComputeRequestId{opaque_id(10)}, ImageBuffer{});
+      store.publish(ComputeRequestId{opaque_id(10)}, NamedValueResult{});
 
   EXPECT_TRUE(publication.status.ok);
   EXPECT_FALSE(publication.output.active());
@@ -690,26 +771,32 @@ TEST(OutputStore, WritesExactTightRowsAndPrivateIdentityMetadata) {
   ASSERT_TRUE(
       store.start(environment.socket_path(), instance_id, environment.lock_fd())
           .ok);
-  ImageBuffer image = make_u8_image(
+  NamedValueResult values = make_u8_values(
       2, 2, 3, 8, {1, 2, 3, 4, 5, 6, 90, 91, 7, 8, 9, 10, 11, 12, 92, 93});
 
   ComputeOutputPublication publication =
-      store.publish(ComputeRequestId{opaque_id(20)}, std::move(image));
+      store.publish(ComputeRequestId{opaque_id(20)}, std::move(values));
   ASSERT_TRUE(publication.status.ok);
   ASSERT_TRUE(publication.output.active());
   IpcResult<OutputArtifactDelivery> delivery =
       store.acquire_delivery(publication.output.reference());
   ASSERT_TRUE(delivery.status.ok);
 
-  EXPECT_EQ(delivery.value.metadata.width, 2);
-  EXPECT_EQ(delivery.value.metadata.height, 2);
-  EXPECT_EQ(delivery.value.metadata.channels, 3);
-  EXPECT_EQ(delivery.value.metadata.data_type, DataType::UINT8);
-  EXPECT_EQ(delivery.value.metadata.device, Device::CPU);
-  EXPECT_EQ(delivery.value.metadata.row_step, 6U);
-  EXPECT_EQ(delivery.value.metadata.byte_size, 12U);
-  EXPECT_EQ(read_bytes(delivery.value.metadata.path),
-            (std::vector<std::uint8_t>{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}));
+  EXPECT_EQ(delivery.value.metadata.archive_version,
+            kNamedValueArtifactSetArchiveVersion);
+  EXPECT_EQ(delivery.value.metadata.value_count, 1U);
+  EXPECT_EQ(delivery.value.metadata.byte_size,
+            read_bytes(delivery.value.metadata.path).size());
+  const NamedValueArtifactSet artifacts =
+      read_artifact_set(delivery.value.metadata.path);
+  ASSERT_EQ(artifacts.values.size(), 1U);
+  EXPECT_EQ(artifacts.values[0].envelope.output_name, "image");
+  ASSERT_TRUE(artifacts.values[0].envelope.dense_descriptor.has_value());
+  EXPECT_EQ(artifacts.values[0].envelope.dense_descriptor->shape,
+            (std::vector<std::size_t>{2U, 2U, 3U}));
+  EXPECT_EQ(artifacts.values[0].envelope.strided_layout->byte_strides,
+            (std::vector<std::ptrdiff_t>{8, 3, 1}));
+  EXPECT_EQ(artifacts.values[0].payloads[0].size(), 14U);
 
   struct stat base{};
   struct stat instance{};
@@ -731,7 +818,7 @@ TEST(OutputStore, WritesExactTightRowsAndPrivateIdentityMetadata) {
   EXPECT_EQ(static_cast<std::uint64_t>(artifact.st_ino),
             delivery.value.metadata.inode);
   EXPECT_EQ(store.artifact_count(), 1U);
-  EXPECT_EQ(store.retained_bytes(), 12U);
+  EXPECT_EQ(store.retained_bytes(), delivery.value.metadata.byte_size);
 
   publication.output.reset(delivery.value.delivery_id);
   EXPECT_FALSE(std::filesystem::exists(delivery.value.metadata.path));
@@ -739,7 +826,7 @@ TEST(OutputStore, WritesExactTightRowsAndPrivateIdentityMetadata) {
   EXPECT_EQ(store.retained_bytes(), 0U);
 }
 
-TEST(OutputStore, MalformedImagesBecomeInternalFailureWithoutResidue) {
+TEST(OutputStore, NonReadyValuesBecomeInternalFailureWithoutResidue) {
   StoreEnvironment environment;
   SequentialIds ids;
   OutputStore store({}, {}, [&] { return ids.next(); });
@@ -748,44 +835,21 @@ TEST(OutputStore, MalformedImagesBecomeInternalFailureWithoutResidue) {
       store.start(environment.socket_path(), instance_id, environment.lock_fd())
           .ok);
 
-  std::vector<ImageBuffer> malformed;
-  ImageBuffer missing_data;
-  missing_data.width = 1;
-  missing_data.height = 1;
-  missing_data.channels = 1;
-  missing_data.step = 1;
-  malformed.push_back(missing_data);
-
-  ImageBuffer gpu = make_u8_image(1, 1, 1, 1, {1});
-  gpu.device = Device::GPU_METAL;
-  malformed.push_back(gpu);
-
-  ImageBuffer short_step = make_u8_image(2, 1, 2, 3, {1, 2, 3, 4});
-  malformed.push_back(short_step);
-
-  ImageBuffer invalid_type =
-      make_u8_image(1, 1, 1, 8, {1, 2, 3, 4, 5, 6, 7, 8});
-  invalid_type.type = static_cast<DataType>(999);
-  malformed.push_back(invalid_type);
-
-  ImageBuffer overflow = make_u8_image(1, 1, 1, 1, {1});
-  overflow.width = std::numeric_limits<int>::max();
-  overflow.height = std::numeric_limits<int>::max();
-  overflow.channels = std::numeric_limits<int>::max();
-  overflow.type = DataType::FLOAT64;
-  overflow.step = std::numeric_limits<std::size_t>::max();
-  malformed.push_back(overflow);
-
-  std::uint64_t compute = 30;
-  for (ImageBuffer& image : malformed) {
-    ComputeOutputPublication publication =
-        store.publish(ComputeRequestId{opaque_id(compute++)}, std::move(image));
-    EXPECT_FALSE(publication.status.ok);
-    EXPECT_EQ(publication.status.domain, OperationErrorDomain::Daemon);
-    EXPECT_EQ(publication.status.code, kInternalErrorCode);
-    EXPECT_EQ(publication.status.name, "internal_error");
-    EXPECT_FALSE(publication.output.active());
-  }
+  DenseTensorDescriptor descriptor{{1U, 1U, 1U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  const ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  PendingValuePublication pending =
+      PendingValuePublisher::allocate_cpu_dense_tensor(
+          descriptor, facet, StridedLayout{{1, 1, 1}}, 1U);
+  NamedValueResult values({NamedValue{"image", pending.value}}, false);
+  ComputeOutputPublication publication =
+      store.publish(ComputeRequestId{opaque_id(30)}, std::move(values));
+  EXPECT_FALSE(publication.status.ok);
+  EXPECT_EQ(publication.status.domain, OperationErrorDomain::Daemon);
+  EXPECT_EQ(publication.status.code, kInternalErrorCode);
+  EXPECT_EQ(publication.status.name, "internal_error");
+  EXPECT_FALSE(publication.output.active());
   EXPECT_EQ(store.artifact_count(), 0U);
   EXPECT_EQ(store.retained_bytes(), 0U);
   EXPECT_EQ(directory_entry_count(environment.instance_path(instance_id)), 0U);
@@ -824,7 +888,7 @@ TEST(OutputStore, PublicationRevalidatesAncestryBeforeCreatingStage) {
       instance_path, environment.root_path() / "displaced-output-instance");
 
   ComputeOutputPublication publication = store.publish(
-      ComputeRequestId{opaque_id(300)}, make_u8_image(1, 1, 1, 1, {7}));
+      ComputeRequestId{opaque_id(300)}, make_u8_values(1, 1, 1, 1, {7}));
 
   EXPECT_FALSE(publication.status.ok);
   EXPECT_EQ(publication.status.domain, OperationErrorDomain::Daemon);
@@ -843,8 +907,14 @@ TEST(OutputStore, EnforcesPerArtifactAndTotalQuotaTransactionally) {
   SequentialIds ids;
   OutputStoreLimits limits;
   limits.artifacts = 4;
-  limits.total_bytes = 10;
-  limits.artifact_bytes = 8;
+  const std::size_t large_size =
+      archive_size(make_u8_values(9, 1, 1, 9, {1, 2, 3, 4, 5, 6, 7, 8, 9}));
+  const std::size_t first_size =
+      archive_size(make_u8_values(6, 1, 1, 6, {1, 2, 3, 4, 5, 6}));
+  const std::size_t second_size =
+      archive_size(make_u8_values(5, 1, 1, 5, {7, 8, 9, 10, 11}));
+  limits.total_bytes = first_size + second_size - 1U;
+  limits.artifact_bytes = large_size - 1U;
   OutputStore store(limits, {}, [&] { return ids.next(); });
   const std::string instance_id = opaque_id(4);
   ASSERT_TRUE(
@@ -853,23 +923,23 @@ TEST(OutputStore, EnforcesPerArtifactAndTotalQuotaTransactionally) {
 
   ComputeOutputPublication too_large =
       store.publish(ComputeRequestId{opaque_id(40)},
-                    make_u8_image(9, 1, 1, 9, {1, 2, 3, 4, 5, 6, 7, 8, 9}));
+                    make_u8_values(9, 1, 1, 9, {1, 2, 3, 4, 5, 6, 7, 8, 9}));
   EXPECT_FALSE(too_large.status.ok);
   EXPECT_EQ(too_large.status.code, kArtifactLimitExceededCode);
   EXPECT_EQ(store.artifact_count(), 0U);
 
   ComputeOutputPublication first =
       store.publish(ComputeRequestId{opaque_id(41)},
-                    make_u8_image(6, 1, 1, 6, {1, 2, 3, 4, 5, 6}));
+                    make_u8_values(6, 1, 1, 6, {1, 2, 3, 4, 5, 6}));
   ASSERT_TRUE(first.status.ok);
   ComputeOutputPublication total =
       store.publish(ComputeRequestId{opaque_id(42)},
-                    make_u8_image(5, 1, 1, 5, {7, 8, 9, 10, 11}));
+                    make_u8_values(5, 1, 1, 5, {7, 8, 9, 10, 11}));
   EXPECT_FALSE(total.status.ok);
   EXPECT_EQ(total.status.code, kArtifactLimitExceededCode);
   EXPECT_FALSE(total.output.active());
   EXPECT_EQ(store.artifact_count(), 1U);
-  EXPECT_EQ(store.retained_bytes(), 6U);
+  EXPECT_EQ(store.retained_bytes(), first_size);
   EXPECT_EQ(directory_entry_count(environment.instance_path(instance_id)), 1U);
   first.output.reset();
 }
@@ -884,16 +954,16 @@ TEST(OutputStore, OneComputeJobCanPublishOnlyOneStableArtifact) {
           .ok);
   const ComputeRequestId compute_id{opaque_id(200)};
   ComputeOutputPublication first =
-      store.publish(compute_id, make_u8_image(1, 1, 1, 1, {1}));
+      store.publish(compute_id, make_u8_values(1, 1, 1, 1, {1}));
   ASSERT_TRUE(first.status.ok);
   ComputeOutputPublication duplicate =
-      store.publish(compute_id, make_u8_image(1, 1, 1, 1, {2}));
+      store.publish(compute_id, make_u8_values(1, 1, 1, 1, {2}));
 
   EXPECT_FALSE(duplicate.status.ok);
   EXPECT_EQ(duplicate.status.code, kInternalErrorCode);
   EXPECT_FALSE(duplicate.output.active());
   EXPECT_EQ(store.artifact_count(), 1U);
-  EXPECT_EQ(store.retained_bytes(), 1U);
+  EXPECT_GT(store.retained_bytes(), 0U);
   EXPECT_EQ(directory_entry_count(environment.instance_path(instance_id)), 1U);
   first.output.reset();
   EXPECT_EQ(store.artifact_count(), 0U);
@@ -904,8 +974,10 @@ TEST(OutputStore, LastArtifactSlotHasOneConcurrentWinner) {
   SequentialIds ids;
   OutputStoreLimits limits;
   limits.artifacts = 1;
-  limits.total_bytes = 16;
-  limits.artifact_bytes = 16;
+  const std::size_t artifact_size =
+      archive_size(make_u8_values(4, 1, 1, 4, {1, 2, 3, 4}));
+  limits.total_bytes = artifact_size;
+  limits.artifact_bytes = artifact_size;
   OutputStore store(limits, {}, [&] { return ids.next(); });
   ASSERT_TRUE(
       store
@@ -920,7 +992,7 @@ TEST(OutputStore, LastArtifactSlotHasOneConcurrentWinner) {
       gate.arrive_and_wait();
       ComputeOutputPublication publication =
           store.publish(ComputeRequestId{opaque_id(50 + index)},
-                        make_u8_image(4, 1, 1, 4, {1, 2, 3, 4}));
+                        make_u8_values(4, 1, 1, 4, {1, 2, 3, 4}));
       statuses[index] = publication.status;
       ownership[index] = std::move(publication.output);
     });
@@ -960,7 +1032,7 @@ TEST(OutputStore, RepeatedDeliveryRefreshesOneStableLeaseAtomically) {
           .start(environment.socket_path(), opaque_id(6), environment.lock_fd())
           .ok);
   ComputeOutputPublication publication = store.publish(
-      ComputeRequestId{opaque_id(60)}, make_u8_image(1, 1, 1, 1, {9}));
+      ComputeRequestId{opaque_id(60)}, make_u8_values(1, 1, 1, 1, {9}));
   ASSERT_TRUE(publication.status.ok);
   IpcResult<OutputArtifactDelivery> first =
       store.acquire_delivery(publication.output.reference());
@@ -978,7 +1050,7 @@ TEST(OutputStore, RepeatedDeliveryRefreshesOneStableLeaseAtomically) {
   publication.output.reset();
   EXPECT_TRUE(std::filesystem::exists(first.value.metadata.path));
   EXPECT_EQ(store.artifact_count(), 1U);
-  EXPECT_EQ(store.retained_bytes(), 1U);
+  EXPECT_GT(store.retained_bytes(), 0U);
 
   clock.advance(std::chrono::seconds(7));
   EXPECT_EQ(store.cleanup_expired(), 0U);
@@ -1002,7 +1074,7 @@ TEST(OutputStore, ExpiredLeaseReactivatesSameIdWhileJobIsOwned) {
           .start(environment.socket_path(), opaque_id(7), environment.lock_fd())
           .ok);
   ComputeOutputPublication publication = store.publish(
-      ComputeRequestId{opaque_id(70)}, make_u8_image(1, 1, 1, 1, {1}));
+      ComputeRequestId{opaque_id(70)}, make_u8_values(1, 1, 1, 1, {1}));
   ASSERT_TRUE(publication.status.ok);
   IpcResult<OutputArtifactDelivery> first =
       store.acquire_delivery(publication.output.reference());
@@ -1036,7 +1108,7 @@ TEST(OutputStore, JobReleaseLazilyExpiresLeaseAtExactDeadline) {
                          environment.lock_fd())
                   .ok);
   ComputeOutputPublication publication = store.publish(
-      ComputeRequestId{opaque_id(190)}, make_u8_image(1, 1, 1, 1, {1}));
+      ComputeRequestId{opaque_id(190)}, make_u8_values(1, 1, 1, 1, {1}));
   ASSERT_TRUE(publication.status.ok);
   IpcResult<OutputArtifactDelivery> delivery =
       store.acquire_delivery(publication.output.reference());
@@ -1063,7 +1135,7 @@ TEST(OutputStore, JobTtlPreservesOnlyAnActiveDeliveryLease) {
           .start(environment.socket_path(), opaque_id(8), environment.lock_fd())
           .ok);
   ComputeOutputPublication publication = store.publish(
-      ComputeRequestId{opaque_id(80)}, make_u8_image(1, 1, 1, 1, {1}));
+      ComputeRequestId{opaque_id(80)}, make_u8_values(1, 1, 1, 1, {1}));
   ASSERT_TRUE(publication.status.ok);
   IpcResult<OutputArtifactDelivery> delivery =
       store.acquire_delivery(publication.output.reference());
@@ -1094,7 +1166,7 @@ TEST(OutputStore, OrphanLeaseReleaseRequiresOriginalJobAndStableDelivery) {
           .ok);
   const ComputeRequestId compute_id{opaque_id(90)};
   ComputeOutputPublication publication =
-      store.publish(compute_id, make_u8_image(1, 1, 1, 1, {4}));
+      store.publish(compute_id, make_u8_values(1, 1, 1, 1, {4}));
   ASSERT_TRUE(publication.status.ok);
   IpcResult<OutputArtifactDelivery> delivery =
       store.acquire_delivery(publication.output.reference());
@@ -1135,7 +1207,7 @@ TEST(OutputStore, ConcurrentJobRemovalAndMatchingLeaseReleaseCleanArtifact) {
                   .ok);
   const ComputeRequestId compute_id{opaque_id(210)};
   ComputeOutputPublication publication =
-      store.publish(compute_id, make_u8_image(1, 1, 1, 1, {4}));
+      store.publish(compute_id, make_u8_values(1, 1, 1, 1, {4}));
   ASSERT_TRUE(publication.status.ok);
   IpcResult<OutputArtifactDelivery> delivery =
       store.acquire_delivery(publication.output.reference());
@@ -1176,7 +1248,7 @@ TEST(OutputStore, OpenDescriptorSurvivesLeaseAwareUnlink) {
                   .ok);
   const ComputeRequestId compute_id{opaque_id(140)};
   ComputeOutputPublication publication =
-      store.publish(compute_id, make_u8_image(3, 1, 1, 3, {4, 5, 6}));
+      store.publish(compute_id, make_u8_values(3, 1, 1, 3, {4, 5, 6}));
   ASSERT_TRUE(publication.status.ok);
   IpcResult<OutputArtifactDelivery> delivery =
       store.acquire_delivery(publication.output.reference());
@@ -1190,9 +1262,16 @@ TEST(OutputStore, OpenDescriptorSurvivesLeaseAwareUnlink) {
   EXPECT_TRUE(
       store.release_orphaned_delivery(compute_id, delivery.value.delivery_id));
   EXPECT_FALSE(std::filesystem::exists(delivery.value.metadata.path));
-  std::array<std::uint8_t, 3> bytes{};
-  ASSERT_EQ(::read(descriptor.get(), bytes.data(), bytes.size()), 3);
-  EXPECT_EQ(bytes, (std::array<std::uint8_t, 3>{4, 5, 6}));
+  const NamedValueArtifactSet artifacts =
+      decode_named_value_artifact_set(read_descriptor_archive(
+          descriptor.get(), delivery.value.metadata.byte_size));
+  const NamedValueResult values =
+      reconstruct_named_value_artifact_set(artifacts);
+  const Value* image = values.find("image");
+  ASSERT_NE(image, nullptr);
+  const ImageView view(*image);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(*view.channel_data(0U, 0U, 0U)), 4U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(*view.channel_data(2U, 0U, 0U)), 6U);
 }
 
 TEST(OutputStore, ConcurrentResultAndJobReleasePreserveOneValidOutcome) {
@@ -1205,7 +1284,7 @@ TEST(OutputStore, ConcurrentResultAndJobReleasePreserveOneValidOutcome) {
                   .ok);
   const ComputeRequestId compute_id{opaque_id(150)};
   ComputeOutputPublication publication =
-      store.publish(compute_id, make_u8_image(1, 1, 1, 1, {7}));
+      store.publish(compute_id, make_u8_values(1, 1, 1, 1, {7}));
   ASSERT_TRUE(publication.status.ok);
   const std::string output_id = publication.output.reference();
   ComputeOutputOwnership ownership = std::move(publication.output);
@@ -1250,7 +1329,7 @@ TEST(OutputStore, ConcurrentLeaseExpiryAndJobReleaseCleanExactlyOnce) {
                          environment.lock_fd())
                   .ok);
   ComputeOutputPublication publication = store.publish(
-      ComputeRequestId{opaque_id(160)}, make_u8_image(1, 1, 1, 1, {8}));
+      ComputeRequestId{opaque_id(160)}, make_u8_values(1, 1, 1, 1, {8}));
   ASSERT_TRUE(publication.status.ok);
   IpcResult<OutputArtifactDelivery> delivery =
       store.acquire_delivery(publication.output.reference());
@@ -1296,20 +1375,20 @@ TEST(OutputStore, ComputeRegistryEvictionDropsJobButPreservesLease) {
   ComputeRequestRegistry registry(
       sessions, [](const HostComputeRequest&) { return ok_status(); },
       [](const HostComputeRequest& request) {
-        return Result<ImageBuffer>{
+        return Result<NamedValueResult>{
             ok_status(),
-            make_u8_image(1, 1, 1, 1,
-                          {static_cast<std::uint8_t>(request.node.value)})};
+            make_u8_values(1, 1, 1, 1,
+                           {static_cast<std::uint8_t>(request.node.value)})};
       },
-      [&](const ComputeRequestId& compute_id, ImageBuffer image) {
-        return store.publish(compute_id, std::move(image));
+      [&](const ComputeRequestId& compute_id, NamedValueResult values) {
+        return store.publish(compute_id, std::move(values));
       },
       registry_limits, {}, [&] { return compute_ids.next(); });
   ASSERT_TRUE(registry.start().ok);
   HostComputeRequest first_request;
   first_request.node = NodeId{1};
   IpcResult<ComputeRequestSnapshot> first =
-      registry.submit(session, first_request, ComputeResultMode::Image);
+      registry.submit(session, first_request, ComputeResultMode::Values);
   ASSERT_TRUE(first.status.ok);
   ComputeRequestSnapshot first_terminal =
       wait_for_output_terminal(&registry, first.value.compute_id);
@@ -1322,7 +1401,7 @@ TEST(OutputStore, ComputeRegistryEvictionDropsJobButPreservesLease) {
   HostComputeRequest second_request;
   second_request.node = NodeId{2};
   IpcResult<ComputeRequestSnapshot> second =
-      registry.submit(session, second_request, ComputeResultMode::Image);
+      registry.submit(session, second_request, ComputeResultMode::Values);
   ASSERT_TRUE(second.status.ok);
   ComputeRequestSnapshot second_terminal =
       wait_for_output_terminal(&registry, second.value.compute_id);
@@ -1357,7 +1436,7 @@ TEST(OutputStore, MissingOrReplacedArtifactReturnsOnlyArtifactNotFound) {
                   .ok);
   const ComputeRequestId missing_compute{opaque_id(100)};
   ComputeOutputPublication missing =
-      store.publish(missing_compute, make_u8_image(1, 1, 1, 1, {1}));
+      store.publish(missing_compute, make_u8_values(1, 1, 1, 1, {1}));
   ASSERT_TRUE(missing.status.ok);
   IpcResult<OutputArtifactDelivery> missing_delivery =
       store.acquire_delivery(missing.output.reference());
@@ -1370,13 +1449,13 @@ TEST(OutputStore, MissingOrReplacedArtifactReturnsOnlyArtifactNotFound) {
   EXPECT_EQ(missing_result.status.code, kArtifactNotFoundCode);
   EXPECT_EQ(missing_result.status.name, "artifact_not_found");
   EXPECT_EQ(store.artifact_count(), 1U);
-  EXPECT_EQ(store.retained_bytes(), 1U);
+  EXPECT_GT(store.retained_bytes(), 0U);
   missing.output.reset(missing_delivery.value.delivery_id);
   EXPECT_EQ(store.artifact_count(), 0U);
 
   const ComputeRequestId replaced_compute{opaque_id(101)};
   ComputeOutputPublication replaced =
-      store.publish(replaced_compute, make_u8_image(1, 1, 1, 1, {2}));
+      store.publish(replaced_compute, make_u8_values(1, 1, 1, 1, {2}));
   ASSERT_TRUE(replaced.status.ok);
   IpcResult<OutputArtifactDelivery> replaced_delivery =
       store.acquire_delivery(replaced.output.reference());
@@ -1398,7 +1477,7 @@ TEST(OutputStore, MissingOrReplacedArtifactReturnsOnlyArtifactNotFound) {
   EXPECT_TRUE(S_ISLNK(replacement.st_mode));
   EXPECT_EQ(read_bytes(victim.string()), (std::vector<std::uint8_t>{0x7e}));
   EXPECT_EQ(store.artifact_count(), 1U);
-  EXPECT_EQ(store.retained_bytes(), 1U);
+  EXPECT_GT(store.retained_bytes(), 0U);
   replaced.output.reset(replaced_delivery.value.delivery_id);
   EXPECT_EQ(store.artifact_count(), 0U);
   EXPECT_EQ(store.retained_bytes(), 0U);
@@ -1417,7 +1496,7 @@ TEST(OutputStore, DescriptorExhaustionPreservesRecordLeaseAndArtifact) {
                          environment.lock_fd())
                   .ok);
   ComputeOutputPublication publication = store.publish(
-      ComputeRequestId{opaque_id(180)}, make_u8_image(1, 1, 1, 1, {6}));
+      ComputeRequestId{opaque_id(180)}, make_u8_values(1, 1, 1, 1, {6}));
   ASSERT_TRUE(publication.status.ok);
   IpcResult<OutputArtifactDelivery> delivery =
       store.acquire_delivery(publication.output.reference());
@@ -1444,7 +1523,7 @@ TEST(OutputStore, DescriptorExhaustionPreservesRecordLeaseAndArtifact) {
   EXPECT_FALSE(exhausted.status.ok);
   EXPECT_EQ(exhausted.status.code, kInternalErrorCode);
   EXPECT_EQ(store.artifact_count(), 1U);
-  EXPECT_EQ(store.retained_bytes(), 1U);
+  EXPECT_GT(store.retained_bytes(), 0U);
   EXPECT_TRUE(std::filesystem::exists(delivery.value.metadata.path));
 
   fillers.clear();
@@ -1463,7 +1542,7 @@ TEST(OutputStore, WrongModeAndHardLinkArePreservedDuringLiveCleanup) {
                   .ok);
 
   ComputeOutputPublication wrong_mode = store.publish(
-      ComputeRequestId{opaque_id(110)}, make_u8_image(1, 1, 1, 1, {3}));
+      ComputeRequestId{opaque_id(110)}, make_u8_values(1, 1, 1, 1, {3}));
   ASSERT_TRUE(wrong_mode.status.ok);
   IpcResult<OutputArtifactDelivery> wrong_mode_delivery =
       store.acquire_delivery(wrong_mode.output.reference());
@@ -1478,7 +1557,7 @@ TEST(OutputStore, WrongModeAndHardLinkArePreservedDuringLiveCleanup) {
   EXPECT_EQ(store.artifact_count(), 0U);
 
   ComputeOutputPublication hard_linked = store.publish(
-      ComputeRequestId{opaque_id(111)}, make_u8_image(1, 1, 1, 1, {4}));
+      ComputeRequestId{opaque_id(111)}, make_u8_values(1, 1, 1, 1, {4}));
   ASSERT_TRUE(hard_linked.status.ok);
   IpcResult<OutputArtifactDelivery> hard_link_delivery =
       store.acquire_delivery(hard_linked.output.reference());
@@ -1597,7 +1676,7 @@ TEST(OutputStore, ShutdownStopsLeasesButAllowsDrainingPublication) {
   store.stop_leases();
 
   ComputeOutputPublication publication = store.publish(
-      ComputeRequestId{opaque_id(120)}, make_u8_image(1, 1, 1, 1, {8}));
+      ComputeRequestId{opaque_id(120)}, make_u8_values(1, 1, 1, 1, {8}));
   ASSERT_TRUE(publication.status.ok);
   IpcResult<OutputArtifactDelivery> rejected =
       store.acquire_delivery(publication.output.reference());
@@ -1625,7 +1704,7 @@ TEST(OutputStore, ShutdownWaitsForLeaseUntilManualExpiryWakesIt) {
           .ok);
   const ComputeRequestId compute_id{opaque_id(130)};
   ComputeOutputPublication publication =
-      store.publish(compute_id, make_u8_image(1, 1, 1, 1, {5}));
+      store.publish(compute_id, make_u8_values(1, 1, 1, 1, {5}));
   ASSERT_TRUE(publication.status.ok);
   IpcResult<OutputArtifactDelivery> delivery =
       store.acquire_delivery(publication.output.reference());

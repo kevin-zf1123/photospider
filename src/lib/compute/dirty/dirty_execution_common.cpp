@@ -57,6 +57,18 @@ struct PreparedDirtySourceFirstRunState final {
   PreparedExecutionRun source_run;
   /** @brief Complete unpublished downstream phase, when nonempty. */
   PreparedExecutionRun downstream_run;
+  /**
+   * @brief Source context retained until its cancellation callback returns.
+   * @note This owner prevents the context from destroying its own synchronized
+   * cancellation registration recursively inside the registered callback.
+   */
+  std::shared_ptr<DirtyReadyTaskContext> source_context;
+  /**
+   * @brief Downstream context retained until its cancellation callback returns.
+   * @note Normal phase completion releases this owner immediately after
+   * service settlement instead of extending it through later request work.
+   */
+  std::shared_ptr<DirtyReadyTaskContext> downstream_context;
   /** @brief Preallocated inline downstream dependency counters. */
   std::unique_ptr<TaskDependencyState> inline_dependency_state;
   /** @brief Preallocated inline ready LIFO with total-task capacity. */
@@ -102,6 +114,73 @@ std::uint64_t prepared_dirty_phase_retained_bytes(
     estimate.add_bytes(request.phase_shared_retained_memory_bytes(task_ids));
   }
   return estimate.bytes();
+}
+
+/**
+ * @brief Validates that one inline dirty task did not leave Pending output.
+ * @param request Complete prepared request containing the staging observer.
+ * @param task_id Dense planned task id that just returned.
+ * @return Nothing when no staged output exists or its planned output is Ready.
+ * @throws GraphError for a missing output authority or malformed output.
+ * @throws ReadyFenceAccessError when the staged image is not Ready.
+ * @throws std::out_of_range for an invalid task id.
+ * @note Inline execution has no any-thread continuation executor. It therefore
+ * fails closed instead of blocking the caller or releasing dependents early.
+ */
+void validate_inline_dirty_task_output_ready(
+    const DirtySourceFirstRunRequest& request, int task_id) {
+  if (request.snapshot_task_output == nullptr) {
+    return;
+  }
+  const PlannedTask& task = request.compute_plan->task_graph.tasks.at(
+      static_cast<std::size_t>(task_id));
+  std::optional<NodeOutput> output =
+      request.snapshot_task_output(request.task_output_context, task.node_id);
+  if (!output.has_value()) {
+    return;
+  }
+  if (task.kind == PlannedTaskKind::Tile && !output->has_image_value()) {
+    return;
+  }
+  const auto authority =
+      std::find_if(request.compute_plan->planned_work.begin(),
+                   request.compute_plan->planned_work.end(),
+                   [&task](const PlannedNodeWork& work) {
+                     return work.node_id == task.node_id;
+                   });
+  if (authority == request.compute_plan->planned_work.end() ||
+      !authority->output_authority.has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Inline dirty task is missing frozen output authority.");
+  }
+  validate_planned_output(*output, *authority->output_authority,
+                          PlannedOutputReadiness::RequireReady);
+}
+
+/**
+ * @brief Compares complete immutable publication and indexed binding identity.
+ * @param lhs First valid canonical or generic Value.
+ * @param rhs Second valid canonical or generic Value.
+ * @return True when revision, producer, representation, binding count, and
+ * every indexed StorageBinding match.
+ * @throws std::logic_error if either supposedly valid Value violates its own
+ * immutable representation or binding invariants.
+ * @note Readiness is deliberately excluded because a Pending publication and
+ * its Ready continuation retain the same identities and binding facts.
+ */
+bool same_value_publication_identity(const Value& lhs, const Value& rhs) {
+  if (!lhs.valid() || !rhs.valid() || lhs.revision_id() != rhs.revision_id() ||
+      lhs.producer_identity() != rhs.producer_identity() ||
+      lhs.representation_kind() != rhs.representation_kind() ||
+      lhs.buffer_count() != rhs.buffer_count()) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < lhs.buffer_count(); ++index) {
+    if (lhs.storage_binding(index) != rhs.storage_binding(index)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace
@@ -170,21 +249,24 @@ PreparedDirtySourceFirstRun prepare_dirty_source_first(
     const ComputeRunLease phase_lease = *state->request.run_lease;
 
     if (!source_task_ids.empty()) {
-      auto source_context = std::make_shared<DirtyReadyTaskContext>(
+      state->source_context = std::make_shared<DirtyReadyTaskContext>(
           compute_plan, state->request.selection, source_task_ids,
           *state->request.task_devices, *state->request.task_constraints,
           state->request.task_operation_resource_demand, owned_run_task,
           run_task_retained_memory_bytes, phase_lease, false,
-          ExecutionTaskPriority::High);
+          ExecutionTaskPriority::High, state->request.task_output_context,
+          state->request.snapshot_task_output);
+      state->source_context->install_cancellation_notification();
       RetainedMemoryEstimator source_phase_retained(
           "dirty source phase retained demand");
       source_phase_retained.add_bytes(
           prepared_dirty_phase_retained_bytes(state->request, source_task_ids));
       source_phase_retained.add_bytes(run_task_retained_memory_bytes);
       const CpuRunResourceDemand source_resource_demand =
-          source_context->run_resource_demand(source_phase_retained.bytes());
+          state->source_context->run_resource_demand(
+              source_phase_retained.bytes());
       std::vector<ReadyTaskSubmission> source_submissions =
-          source_context->make_submissions(source_task_ids, true);
+          state->source_context->make_submissions(source_task_ids, true);
       state->source_run = state->request.execution_service->prepare_run(
           *state->request.host, state->request.execution_type,
           std::move(source_submissions),
@@ -201,7 +283,7 @@ PreparedDirtySourceFirstRun prepare_dirty_source_first(
         initial_downstream_ids = ready_checker.initial_ready_task_ids(
             compute_plan.task_graph, &downstream_task_ids);
       }
-      auto downstream_context = make_dirty_context_and_release_outer_callable(
+      state->downstream_context = make_dirty_context_and_release_outer_callable(
           owned_run_task, [&](std::function<void(int)> transferred_run_task) {
             return std::make_shared<DirtyReadyTaskContext>(
                 compute_plan, state->request.selection, downstream_task_ids,
@@ -211,14 +293,18 @@ PreparedDirtySourceFirstRun prepare_dirty_source_first(
                 phase_lease, true,
                 state->request.intent == ComputeIntent::RealTimeUpdate
                     ? ExecutionTaskPriority::High
-                    : ExecutionTaskPriority::Normal);
+                    : ExecutionTaskPriority::Normal,
+                state->request.task_output_context,
+                state->request.snapshot_task_output);
           });
+      state->downstream_context->install_cancellation_notification();
       const CpuRunResourceDemand downstream_resource_demand =
-          downstream_context->run_resource_demand(
+          state->downstream_context->run_resource_demand(
               prepared_dirty_phase_retained_bytes(state->request,
                                                   downstream_task_ids));
       std::vector<ReadyTaskSubmission> downstream_submissions =
-          downstream_context->make_submissions(initial_downstream_ids, true);
+          state->downstream_context->make_submissions(initial_downstream_ids,
+                                                      true);
       state->downstream_run = state->request.execution_service->prepare_run(
           *state->request.host, state->request.execution_type,
           std::move(downstream_submissions),
@@ -265,6 +351,7 @@ void PreparedDirtySourceFirstRun::execute() {
     if (state->source_run.active()) {
       state->request.execution_service->execute_prepared_run(
           std::move(state->source_run));
+      state->source_context.reset();
       observe_prepared_dirty_cancellation(*state);
     }
     if (state->request.before_downstream) {
@@ -275,6 +362,7 @@ void PreparedDirtySourceFirstRun::execute() {
     if (state->downstream_run.active()) {
       state->request.execution_service->execute_prepared_run(
           std::move(state->downstream_run));
+      state->downstream_context.reset();
       observe_prepared_dirty_cancellation(*state);
     }
     return;
@@ -283,6 +371,7 @@ void PreparedDirtySourceFirstRun::execute() {
   for (int source_task_id : *state->request.source_task_ids) {
     observe_prepared_dirty_cancellation(*state);
     state->run_task(source_task_id);
+    validate_inline_dirty_task_output_ready(state->request, source_task_id);
     observe_prepared_dirty_cancellation(*state);
   }
   if (state->request.before_downstream) {
@@ -295,6 +384,7 @@ void PreparedDirtySourceFirstRun::execute() {
     state->inline_ready_stack.pop_back();
     observe_prepared_dirty_cancellation(*state);
     state->run_task(task_id);
+    validate_inline_dirty_task_output_ready(state->request, task_id);
     observe_prepared_dirty_cancellation(*state);
     std::vector<int> ready_ids =
         state->inline_dependency_state->release_dependents(task_id);
@@ -339,15 +429,27 @@ std::uint64_t DirtyNodeSynchronization::retained_memory_bytes() const {
 }
 
 /** @copydoc DirtyReadyTaskContext::DirtyReadyTaskContext */
+struct DirtyReadyTaskContext::DeferredValueWait final {
+  /** @brief Move-only cancellation authority for the registered fence wait. */
+  ReadyFenceWaitRegistration registration;
+  /** @brief Runtime owning the dynamically added logical completion unit. */
+  ExecutionTaskRuntime* runtime = nullptr;
+  /** @brief Exact-once ownership of that dynamically added unit. */
+  std::atomic<bool> completion_outstanding{false};
+};
+
+/** @copydoc DirtyReadyTaskContext::DirtyReadyTaskContext */
 DirtyReadyTaskContext::DirtyReadyTaskContext(
     const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay* selection,
     const std::vector<int>& active_task_ids,
-    const std::vector<Device>& task_devices,
+    const std::vector<DeviceBackend>& task_devices,
     const std::vector<OperationExecutionConstraints>& task_constraints,
     ReadyTaskResourceDemand task_operation_resource_demand,
     std::function<void(int)> run_task,
     std::uint64_t run_task_retained_memory_bytes, ComputeRunLease lease,
-    bool release_dependents, ExecutionTaskPriority priority)
+    bool release_dependents, ExecutionTaskPriority priority,
+    const void* task_output_context,
+    DirtyTaskOutputSnapshot snapshot_task_output)
     : compute_plan_(compute_plan),
       selection_(selection
                      ? std::optional<DirtyTaskSelectionOverlay>(*selection)
@@ -361,7 +463,9 @@ DirtyReadyTaskContext::DirtyReadyTaskContext(
       run_task_retained_memory_bytes_(run_task_retained_memory_bytes),
       lease_(std::move(lease)),
       release_dependents_(release_dependents),
-      priority_(priority) {
+      priority_(priority),
+      task_output_context_(task_output_context),
+      snapshot_task_output_(snapshot_task_output) {
   if (!run_task_) {
     throw std::invalid_argument(
         "DirtyReadyTaskContext requires an owned task callable.");
@@ -384,6 +488,41 @@ DirtyReadyTaskContext::DirtyReadyTaskContext(
         compute_plan_.execution_order, compute_plan_.task_graph,
         active_task_ids_);
   }
+  task_states_.assign(compute_plan_.task_graph.tasks.size(),
+                      static_cast<std::uint8_t>(TaskState::Pending));
+  deferred_value_waits_.resize(compute_plan_.task_graph.tasks.size());
+  for (int task_id : active_task_ids_) {
+    if (task_id < 0 ||
+        task_id >= static_cast<int>(deferred_value_waits_.size())) {
+      throw std::invalid_argument(
+          "DirtyReadyTaskContext received an invalid active task id.");
+    }
+    deferred_value_waits_[static_cast<std::size_t>(task_id)] =
+        std::make_unique<DeferredValueWait>();
+  }
+}
+
+/** @copydoc DirtyReadyTaskContext::install_cancellation_notification */
+void DirtyReadyTaskContext::install_cancellation_notification() {
+  std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+  if (cancellation_notification_installed_) {
+    throw std::logic_error(
+        "Dirty cancellation notification was installed more than once.");
+  }
+  cancellation_notification_installed_ = true;
+  const std::weak_ptr<DirtyReadyTaskContext> weak = weak_from_this();
+  cancellation_registration_ = lease_.register_cancellation_notification(
+      [weak](ComputeRunCancellationReason) {
+        if (const std::shared_ptr<DirtyReadyTaskContext> self = weak.lock()) {
+          self->close_publication();
+        }
+      });
+}
+
+/** @copydoc DirtyReadyTaskContext::~DirtyReadyTaskContext */
+DirtyReadyTaskContext::~DirtyReadyTaskContext() noexcept {
+  cancellation_registration_ = ComputeRunCancellationRegistration{};
+  close_publication();
 }
 
 /** @copydoc DirtyReadyTaskContext::retained_memory_bytes */
@@ -398,7 +537,7 @@ std::uint64_t DirtyReadyTaskContext::retained_memory_bytes() const {
   }
   estimate.add_objects<int>(
       static_cast<std::uint64_t>(active_task_ids_.capacity()));
-  estimate.add_objects<Device>(
+  estimate.add_objects<DeviceBackend>(
       static_cast<std::uint64_t>(task_devices_.capacity()));
   estimate.add_objects<OperationExecutionConstraints>(
       static_cast<std::uint64_t>(task_constraints_.capacity()));
@@ -411,6 +550,15 @@ std::uint64_t DirtyReadyTaskContext::retained_memory_bytes() const {
       static_cast<std::uint64_t>(active_task_id_set_.size()));
   estimate.add_objects<void*>(
       static_cast<std::uint64_t>(active_task_id_set_.size()));
+  estimate.add_objects<std::uint8_t>(
+      static_cast<std::uint64_t>(task_states_.capacity()));
+  estimate.add_objects<std::unique_ptr<DeferredValueWait>>(
+      static_cast<std::uint64_t>(deferred_value_waits_.capacity()));
+  for (const auto& wait : deferred_value_waits_) {
+    if (wait) {
+      estimate.add_objects<DeferredValueWait>();
+    }
+  }
   estimate.add_objects<void*>(
       static_cast<std::uint64_t>(active_task_id_set_.size()));
   if (dependency_state_) {
@@ -498,41 +646,378 @@ void DirtyReadyTaskContext::execute(ComputeRunLease& lease,
 
   const PlannedTask& task = compute_plan_.task_graph.tasks.at(task_id);
   try {
+    {
+      std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+      std::uint8_t& state = task_states_.at(static_cast<std::size_t>(task_id));
+      if (state != static_cast<std::uint8_t>(TaskState::Pending)) {
+        throw std::logic_error("Dirty ready task entered more than once.");
+      }
+      state = static_cast<std::uint8_t>(TaskState::Executing);
+    }
     if (lease.observe_cancellation().has_value()) {
+      std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+      task_states_.at(static_cast<std::size_t>(task_id)) =
+          static_cast<std::uint8_t>(TaskState::Completed);
       task_runtime.dec_tasks_to_complete();
       return;
     }
     run_task_(task_id);
-    if (lease.observe_cancellation().has_value()) {
+    if (defer_pending_value(task, lease, task_runtime)) {
       task_runtime.dec_tasks_to_complete();
       return;
     }
-    if (release_dependents_) {
-      const std::vector<int> ready_ids =
-          dependency_state_->release_dependents(task_id);
-      std::vector<ReadyTaskSubmission> ready_submissions =
-          make_submissions(ready_ids, false);
-      auto* ready_runtime =
-          dynamic_cast<ReadyTaskSubmissionRuntime*>(&task_runtime);
-      if (ready_runtime == nullptr) {
-        throw std::logic_error(
-            "Dirty owned context requires a ready-submission runtime.");
+    if (lease.observe_cancellation().has_value()) {
+      std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+      task_states_.at(static_cast<std::size_t>(task_id)) =
+          static_cast<std::uint8_t>(TaskState::Completed);
+      task_runtime.dec_tasks_to_complete();
+      return;
+    }
+    {
+      std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+      if (!publication_closed_ && !lease.terminal_outcome().has_value()) {
+        release_task_dependents(task, lease, task_runtime);
       }
-      for (ReadyTaskSubmission& submission : ready_submissions) {
-        if (lease.observe_cancellation().has_value()) {
-          break;
-        }
-        ready_runtime->submit_ready_submission(std::move(submission));
-      }
+      task_states_.at(static_cast<std::size_t>(task_id)) =
+          static_cast<std::uint8_t>(TaskState::Completed);
     }
     task_runtime.dec_tasks_to_complete();
   } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    {
+      std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+      task_states_.at(static_cast<std::size_t>(task_id)) =
+          static_cast<std::uint8_t>(TaskState::Failed);
+    }
+    close_publication();
     try {
       task_runtime.log_event(ExecutionTraceAction::RethrowException,
                              task.node_id);
     } catch (...) {
     }
+    try {
+      (void)lease_.publish_failure(failure);
+    } catch (...) {
+    }
+    std::rethrow_exception(failure);
+  }
+}
+
+/** @copydoc DirtyReadyTaskContext::output_authority_for */
+const PlannedOutputAuthority& DirtyReadyTaskContext::output_authority_for(
+    const PlannedTask& task) const {
+  const auto found = std::find_if(compute_plan_.planned_work.begin(),
+                                  compute_plan_.planned_work.end(),
+                                  [&task](const PlannedNodeWork& work) {
+                                    return work.node_id == task.node_id;
+                                  });
+  if (found == compute_plan_.planned_work.end() ||
+      !found->output_authority.has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Dirty task is missing frozen output authority.");
+  }
+  return *found->output_authority;
+}
+
+/** @copydoc DirtyReadyTaskContext::defer_pending_value */
+bool DirtyReadyTaskContext::defer_pending_value(
+    const PlannedTask& task, ComputeRunLease& lease,
+    ExecutionTaskRuntime& task_runtime) {
+  if (snapshot_task_output_ == nullptr) {
+    return false;
+  }
+  std::optional<NodeOutput> output =
+      snapshot_task_output_(task_output_context_, task.node_id);
+  if (!output.has_value()) {
+    return false;
+  }
+  if (task.kind == PlannedTaskKind::Tile && !output->has_image_value()) {
+    return false;
+  }
+  validate_planned_output(*output, output_authority_for(task),
+                          PlannedOutputReadiness::AllowPending);
+  std::string expected_name;
+  Value expected_value;
+  for (const auto& [name, value] : output->named_values) {
+    const ReadyFenceSnapshot observed = value.ready_fence().poll();
+    if (observed.state() == ReadyFenceState::Pending) {
+      expected_name = name;
+      expected_value = value;
+      break;
+    }
+    if (observed.state() != ReadyFenceState::Ready) {
+      throw ReadyFenceAccessError(observed);
+    }
+  }
+  if (!expected_value.valid()) {
+    return false;
+  }
+
+  std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+  if (publication_closed_ || lease.terminal_outcome().has_value()) {
+    return false;
+  }
+  const std::size_t task_index = static_cast<std::size_t>(task.task_id);
+  DeferredValueWait* record = deferred_value_waits_.at(task_index).get();
+  if (record == nullptr ||
+      record->completion_outstanding.load(std::memory_order_acquire) ||
+      record->registration.active()) {
+    throw std::logic_error(
+        "Dirty task attempted duplicate pending-Value registration.");
+  }
+  std::shared_ptr<ReadyFenceExecutor> executor =
+      task_runtime.make_ready_fence_executor();
+  const std::shared_ptr<DirtyReadyTaskContext> self = shared_from_this();
+  ReadyFence::Callback callback =
+      [self, task_id = task.task_id, expected_name, expected_value,
+       record](ReadyFenceSnapshot snapshot) mutable {
+        self->complete_deferred_value(task_id, std::move(expected_name),
+                                      std::move(expected_value), record,
+                                      std::move(snapshot));
+      };
+  record->runtime = &task_runtime;
+  record->completion_outstanding.store(true, std::memory_order_release);
+  task_states_.at(task_index) =
+      static_cast<std::uint8_t>(TaskState::AwaitingValue);
+  bool completion_counted = false;
+  try {
+    task_runtime.inc_tasks_to_complete(1);
+    completion_counted = true;
+    record->registration = expected_value.ready_fence().async_wait(
+        std::move(executor), std::move(callback));
+  } catch (...) {
+    task_states_.at(task_index) = static_cast<std::uint8_t>(TaskState::Failed);
+    record->completion_outstanding.store(false, std::memory_order_release);
+    record->runtime = nullptr;
+    if (completion_counted) {
+      task_runtime.dec_tasks_to_complete();
+    }
     throw;
+  }
+  return true;
+}
+
+/** @copydoc DirtyReadyTaskContext::release_task_dependents */
+void DirtyReadyTaskContext::release_task_dependents(
+    const PlannedTask& task, ComputeRunLease& lease,
+    ExecutionTaskRuntime& task_runtime) {
+  if (!release_dependents_) {
+    return;
+  }
+  const std::vector<int> ready_ids =
+      dependency_state_->release_dependents(task.task_id);
+  std::vector<ReadyTaskSubmission> ready_submissions =
+      make_submissions(ready_ids, false);
+  auto* ready_runtime =
+      dynamic_cast<ReadyTaskSubmissionRuntime*>(&task_runtime);
+  if (ready_runtime == nullptr) {
+    throw std::logic_error(
+        "Dirty owned context requires a ready-submission runtime.");
+  }
+  for (ReadyTaskSubmission& submission : ready_submissions) {
+    if (lease.observe_cancellation().has_value() ||
+        lease.terminal_outcome().has_value()) {
+      break;
+    }
+    ready_runtime->submit_ready_submission(std::move(submission));
+  }
+}
+
+/** @copydoc DirtyReadyTaskContext::complete_deferred_value */
+void DirtyReadyTaskContext::complete_deferred_value(
+    int task_id, std::string expected_name, Value expected_value,
+    DeferredValueWait* record, ReadyFenceSnapshot snapshot) {
+  if (record == nullptr || record->runtime == nullptr ||
+      !record->completion_outstanding.exchange(false,
+                                               std::memory_order_acq_rel)) {
+    return;
+  }
+  ExecutionTaskRuntime& task_runtime = *record->runtime;
+  std::exception_ptr failure;
+  bool deferred_again = false;
+  const PlannedTask& task =
+      compute_plan_.task_graph.tasks.at(static_cast<std::size_t>(task_id));
+  try {
+    bool suppress_completion = false;
+    {
+      std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+      std::uint8_t& state = task_states_.at(static_cast<std::size_t>(task_id));
+      if (state != static_cast<std::uint8_t>(TaskState::AwaitingValue)) {
+        throw std::logic_error(
+            "Dirty pending-Value continuation entered more than once.");
+      }
+      state = static_cast<std::uint8_t>(TaskState::CompletingValue);
+      if (publication_closed_ || lease_.terminal_outcome().has_value()) {
+        state = static_cast<std::uint8_t>(TaskState::Completed);
+        suppress_completion = true;
+      }
+    }
+    if (!suppress_completion) {
+      if (snapshot.state() != ReadyFenceState::Ready) {
+        throw ReadyFenceAccessError(std::move(snapshot));
+      }
+      std::optional<NodeOutput> output =
+          snapshot_task_output_ == nullptr
+              ? std::nullopt
+              : snapshot_task_output_(task_output_context_, task.node_id);
+      if (!output.has_value()) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "Dirty continuation lost its staged output.");
+      }
+      const auto current = output->named_values.find(expected_name);
+      if (current == output->named_values.end() ||
+          !same_value_publication_identity(current->second, expected_value)) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            "Dirty continuation observed a replaced staged Value.");
+      }
+      validate_planned_output(*output, output_authority_for(task),
+                              PlannedOutputReadiness::AllowPending);
+      std::string next_name;
+      Value next_value;
+      for (const auto& [name, value] : output->named_values) {
+        const ReadyFenceSnapshot observed = value.ready_fence().poll();
+        if (observed.state() == ReadyFenceState::Pending) {
+          next_name = name;
+          next_value = value;
+          break;
+        }
+        if (observed.state() != ReadyFenceState::Ready) {
+          throw ReadyFenceAccessError(observed);
+        }
+      }
+      if (next_value.valid()) {
+        std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+        if (publication_closed_ || lease_.terminal_outcome().has_value()) {
+          task_states_.at(static_cast<std::size_t>(task_id)) =
+              static_cast<std::uint8_t>(TaskState::Completed);
+          suppress_completion = true;
+        } else {
+          std::shared_ptr<ReadyFenceExecutor> executor =
+              task_runtime.make_ready_fence_executor();
+          const std::shared_ptr<DirtyReadyTaskContext> self =
+              shared_from_this();
+          ReadyFence::Callback callback =
+              [self, task_id, next_name, next_value,
+               record](ReadyFenceSnapshot next_snapshot) mutable {
+                self->complete_deferred_value(task_id, std::move(next_name),
+                                              std::move(next_value), record,
+                                              std::move(next_snapshot));
+              };
+          record->completion_outstanding.store(true, std::memory_order_release);
+          task_states_.at(static_cast<std::size_t>(task_id)) =
+              static_cast<std::uint8_t>(TaskState::AwaitingValue);
+          bool completion_counted = false;
+          try {
+            task_runtime.inc_tasks_to_complete(1);
+            completion_counted = true;
+            record->registration = next_value.ready_fence().async_wait(
+                std::move(executor), std::move(callback));
+            deferred_again = true;
+          } catch (...) {
+            task_states_.at(static_cast<std::size_t>(task_id)) =
+                static_cast<std::uint8_t>(TaskState::Failed);
+            record->completion_outstanding.store(false,
+                                                 std::memory_order_release);
+            if (completion_counted) {
+              task_runtime.dec_tasks_to_complete();
+            }
+            throw;
+          }
+        }
+      }
+      if (!suppress_completion && !deferred_again) {
+        validate_planned_output(*output, output_authority_for(task),
+                                PlannedOutputReadiness::RequireReady);
+      }
+      {
+        std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+        (void)lease_.observe_cancellation();
+        if (!suppress_completion && !deferred_again && !publication_closed_ &&
+            !lease_.terminal_outcome().has_value()) {
+          release_task_dependents(task, lease_, task_runtime);
+        }
+        if (!deferred_again) {
+          task_states_.at(static_cast<std::size_t>(task_id)) =
+              static_cast<std::uint8_t>(TaskState::Completed);
+        }
+      }
+    }
+  } catch (...) {
+    failure = std::current_exception();
+    {
+      std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+      task_states_.at(static_cast<std::size_t>(task_id)) =
+          static_cast<std::uint8_t>(TaskState::Failed);
+    }
+    close_publication();
+    try {
+      task_runtime.log_event(ExecutionTraceAction::RethrowException,
+                             task.node_id);
+    } catch (...) {
+    }
+  }
+  try {
+    task_runtime.dec_tasks_to_complete();
+  } catch (...) {
+    if (!failure) {
+      failure = std::current_exception();
+    }
+  }
+  if (!deferred_again) {
+    record->runtime = nullptr;
+  }
+  if (failure) {
+    try {
+      (void)lease_.publish_failure(failure);
+    } catch (...) {
+    }
+    std::rethrow_exception(failure);
+  }
+}
+
+/** @copydoc DirtyReadyTaskContext::close_publication */
+void DirtyReadyTaskContext::close_publication() noexcept {
+  std::vector<std::pair<std::size_t, ReadyFenceWaitRegistration>> retired_waits;
+  try {
+    {
+      std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+      if (publication_closed_) {
+        return;
+      }
+      publication_closed_ = true;
+      retired_waits.reserve(deferred_value_waits_.size());
+      for (std::size_t task_index = 0U;
+           task_index < deferred_value_waits_.size(); ++task_index) {
+        const std::unique_ptr<DeferredValueWait>& record =
+            deferred_value_waits_[task_index];
+        if (record != nullptr) {
+          retired_waits.emplace_back(task_index,
+                                     std::move(record->registration));
+        }
+      }
+    }
+
+    for (auto& retired : retired_waits) {
+      const std::size_t task_index = retired.first;
+      DeferredValueWait* const record =
+          deferred_value_waits_.at(task_index).get();
+      if (retired.second.cancel() && record->completion_outstanding.exchange(
+                                         false, std::memory_order_acq_rel)) {
+        {
+          std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+          if (task_index < task_states_.size() &&
+              task_states_[task_index] ==
+                  static_cast<std::uint8_t>(TaskState::AwaitingValue)) {
+            task_states_[task_index] =
+                static_cast<std::uint8_t>(TaskState::Completed);
+          }
+        }
+        record->runtime = nullptr;
+      }
+    }
+  } catch (...) {
+    std::terminate();
   }
 }
 
@@ -562,7 +1047,7 @@ void remember_compute_plan(GraphModel& graph, const ComputePlan& compute_plan,
 ComputePlan prune_node_cache_task_graph(
     GraphModel& graph, const ComputeRequest& request,
     const std::vector<int>& execution_order,
-    const std::vector<Device>& available_devices) {
+    const std::vector<DeviceBackend>& available_devices) {
   NodeCacheTaskGraphPruner node_cache_pruner;
   const std::shared_ptr<const FullTaskGraph> full_graph =
       get_or_expand_full_task_graph(graph, request.intent, available_devices);
@@ -647,56 +1132,19 @@ bool should_skip_stale_dirty_source(GraphRuntime* runtime, int node_id,
   return true;
 }
 
-/**
- * @brief Resolves the output format for a dirty-domain staging buffer.
- * @param preferred Existing staged output preferred when it has a valid image.
- * @param image_inputs Destination-indexed image inputs, including null slots.
- * @param fallback Optional committed output used after staged/input candidates.
- * @return Channel count and data type from the first usable candidate, or the
- * single-channel FLOAT32 default.
- * @throws Nothing.
- * @note Disconnected input placeholders are skipped only for format inference;
- * their slot identity remains intact for operation execution.
- */
-std::pair<int, DataType> infer_output_spec(
-    const std::optional<NodeOutput>& preferred,
-    const std::vector<const NodeOutput*>& image_inputs,
-    const std::optional<NodeOutput>* fallback) {
-  if (preferred) {
-    const auto& buffer = preferred->image_buffer;
-    if (buffer.width > 0 && buffer.height > 0 && buffer.channels > 0) {
-      return {buffer.channels, buffer.type};
-    }
-  }
-  for (const auto* input : image_inputs) {
-    if (!input) {
-      continue;
-    }
-    const auto& buffer = input->image_buffer;
-    if (buffer.width > 0 && buffer.height > 0 && buffer.channels > 0) {
-      return {buffer.channels, buffer.type};
-    }
-  }
-  if (fallback && *fallback) {
-    const auto& buffer = (*fallback)->image_buffer;
-    if (buffer.width > 0 && buffer.height > 0 && buffer.channels > 0) {
-      return {buffer.channels, buffer.type};
-    }
-  }
-  return {1, DataType::FLOAT32};
-}
-
 /** @copydoc validate_dirty_region_operation_routes */
 void validate_dirty_region_operation_routes(
     const GraphModel& graph,
     const DirtyRegionOperationRouteSnapshot& route_snapshot,
     const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay& selection,
     const ComputeRequest& request) {
-  if (route_snapshot.node_routes.empty()) {
-    return;
-  }
   if (selection.active_task_ids.empty()) {
     return;
+  }
+  if (route_snapshot.node_routes.empty()) {
+    throw GraphError(
+        GraphErrc::NoOperation,
+        "Dirty Region planning supplied no operation routes for active work.");
   }
   if (route_snapshot.intent != request.intent ||
       route_snapshot.intent != compute_plan.intent) {
@@ -759,6 +1207,8 @@ void validate_dirty_region_operation_routes(
  * @param entries HP plan entries retained by the prepared request.
  * @param selection Active task-selection overlay.
  * @return Nothing.
+ * @throws std::invalid_argument or std::overflow_error when the retained data
+ * window cannot represent the selected storage ROI.
  * @throws std::bad_alloc when exact ImageRect Region storage cannot allocate.
  * @note TensorSlice plans have no represented_hp_roi and retain their original
  *       authoritative Region.
@@ -774,7 +1224,8 @@ void apply_planned_work_rois(std::unordered_map<int, HpPlanEntry>& entries,
       entry_it->second.roi_hp = clip_rect(node_selection.represented_hp_roi,
                                           entry_it->second.hp_size);
       entry_it->second.region_hp =
-          region_image_adapter::from_pixel_rect(entry_it->second.roi_hp);
+          region_image_adapter::from_storage_pixel_rect(
+              entry_it->second.roi_hp, entry_it->second.hp_data_window);
     }
   }
 }
@@ -784,6 +1235,8 @@ void apply_planned_work_rois(std::unordered_map<int, HpPlanEntry>& entries,
  * @param entries RT plan entries retained by the prepared request.
  * @param selection Active task-selection overlay.
  * @return Nothing.
+ * @throws std::invalid_argument or std::overflow_error when the retained data
+ * window cannot represent the selected storage ROI.
  * @throws std::bad_alloc when exact ImageRect Region storage cannot allocate.
  * @note RT selection remains image-only; no TensorSlice projection occurs.
  */
@@ -798,7 +1251,8 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
       entry_it->second.roi_hp = clip_rect(node_selection.represented_hp_roi,
                                           entry_it->second.hp_size);
       entry_it->second.region_hp =
-          region_image_adapter::from_pixel_rect(entry_it->second.roi_hp);
+          region_image_adapter::from_storage_pixel_rect(
+              entry_it->second.roi_hp, entry_it->second.hp_data_window);
     }
     if (!is_rect_empty(node_selection.execution_roi)) {
       entry_it->second.roi_rt =

@@ -454,7 +454,7 @@ bool validate_i2_acquisition(const I2ValueAcquisitionEvidence& access,
       *access.metal.after_first;
   const execution::DeviceExecutorDiagnostics& after_second =
       *access.metal.after_second;
-  if (before.device != Device::GPU_METAL || !before.queue_ready ||
+  if (before.device != DeviceBackend::Metal || !before.queue_ready ||
       after_first.submission_count != before.submission_count + 1U ||
       after_first.invocation_count != before.invocation_count + 1U ||
       after_first.total_allocations < before.total_allocations + 2U ||

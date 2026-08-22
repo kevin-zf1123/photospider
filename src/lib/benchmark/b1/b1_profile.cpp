@@ -20,7 +20,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/value_image_adapter.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/data/image_view.hpp"
 
 namespace ps::benchmark {
 namespace {
@@ -48,76 +48,79 @@ struct B1GoldenHex final {
 /**
  * @brief Exact generated-once immutable goldens for the required B1 corpus.
  * @note These constants were independently generated through
- * `compute_b1_job_golden` and are verified against that oracle in tests.
+ * `compute_b1_job_golden` and are verified against that oracle in tests. The
+ * logical entries bind DenseTensor schema/Image facet structural version 2 and
+ * normalized `[0,1]` Sample Domain facet structural version 1; raw-payload
+ * entries are unchanged by descriptor framing.
  */
 constexpr std::array<B1GoldenHex, 34U> kB1FrozenGoldens{{
-    {0U, "a039f7d0eaf32c1b91e4b726e7bfee302969719a02a62d887ec4e47b49f0a964",
+    {0U, "f34bab95bb6a192fdcd648d88e5b4192b26325d8ed4c394f297f5c6471d6340a",
      "7b9a42e86a52426f1ff7b4bca35db272fcdb26c32c838991fbefd272e8562812"},
-    {1U, "e45f8a0c96072f939969856a35e413837cc05b38769f5e79d747bb28a36949a6",
+    {1U, "4eaa7c0d9bb9dd4adeef7046f9676269b2fcdb31edb9bf5b55ad76f73f70b3e8",
      "e739aaab34a8c6e782935b729791614015a85e606d8240f1e7c46ec260602793"},
-    {2U, "10e32a26f974d9c1ad215f704613aeca1c73f7e1fd4905504792e1adf9c21b93",
+    {2U, "29e01a3bad47c0d297ef071cf245a484acd249ae713f772c89b026a20359ebf4",
      "91bbf50085c42ac2445bbb4c0cd3f61b8e367609b69ec8b5bdb758b4f87e076f"},
-    {3U, "3cf12cea614255ea4f87dcd0f7cf7d807e70bb33d9dffa369c6a2ef5ccb66bd2",
+    {3U, "81f63832069efe5e5372275edb0aa64fe8d964e6af6f96bf1147e8b990abbd20",
      "57972567c02c23a2ac00e4445ab92e13cbc43f52a83957ee7f83d2912abe5f60"},
-    {4U, "8248bc089a7f6db506f4c771349496127584f7e25fd9ad2bf6de4bdc3de577b5",
+    {4U, "526c7691a134bbff046fdfde9b5e2c3f5b1bb241ae555635f133be3cfcd9f3d7",
      "346bc873431f17f531d753e5c871be4edad794d7807081c017dfc6d672329a12"},
-    {5U, "cecfb364d3e1c6daf1ae58c678f1528631ca92dc8c6be55545bf253fc103fe83",
+    {5U, "98b6038777bca6e16a1e21badc014914662bede4157943364668e456162952e4",
      "7c9c1afd04c2a9f4e4a8f61fb4382a3a626c6ac654c4787228dc308d2b1287d9"},
-    {6U, "61da22c868b3091f8b3ff8f0ea3d56ba582099d1fd7b9256b77eec0a2bf2bdde",
+    {6U, "d9e45d8cae839ccdf275d9d2b7427d757a7a5796fef370a7ab0fdb136a786761",
      "09051222d3524a4d82c5eff549cc600ca107c512daf013ee5086a92d20b3c35a"},
-    {7U, "0f7a4327ba548b30d4fcf4df10c79edd900e4d826adb4dcadaaf0a68d5c1c45c",
+    {7U, "aa4700ee932408ff4f51ec64045ff4eaa8222a264913be66cc6dc75942b0dfdd",
      "4faafcf41910b4c2340f6bca9c0e80fc403846593348bca468ac08e62b05ca11"},
-    {8U, "6d6cd4f5c7218fab8650ca11edd5ead93139dca6f103e3e43df6b1a2bb9d561d",
+    {8U, "817feaa6e4c6898c73e433a4e79b556c71093074960c1bd9183f794f5ddcf93f",
      "ddc068294e3cc07066339f7b17b17810a2930ca85a33fa5c5cf582393ca4282a"},
-    {9U, "4a84091b15248d774886f4475a63c65186608e599dd323162e83f3ccaeaab30f",
+    {9U, "f3ab03c0608769fe0aa9e6815bcc0507b4520ee967a783bba189700738d97879",
      "788da5ab090ce04ec4c5ac9d4965f750b3aa43f6230c55a261af27a9db681042"},
-    {10U, "e1dcbc2aa783b54547c91bc20c9a659f73351e98ab201916849a6f7344c59418",
+    {10U, "286a3e39c44731e4941a5c5a86d2e16e2009d3bf96441b3ad06bd4973781cd1d",
      "af9c02c202b91d5c2b1f1e804b53f66af84894d94badec27c2dd8b0779d44121"},
-    {11U, "57686f528c8a98537eead2607773d057164b888681f8127e3667803071f62777",
+    {11U, "deb3a94f842395a7921f0f225b2660da4adb005b268a3ad3c661726936301b61",
      "426accdf10eea1af785a32f4ac253da790c5e3802829f29705c16a4e49cdbce4"},
-    {12U, "f9160fd5d9af5ea5bb5c3d4feccf0202ff3206e8a3c1554e5a211f75ee6ab2f4",
+    {12U, "81ecbc027e53b50a6c299b8ed6798ca8a94f1100c684a9dd604d8ae9679e43bc",
      "262dcb21a97a38a6fe6e7c001e50130d60b91b7c026014974344e900c87fc913"},
-    {13U, "051deb51804ab44a2c52650db8e8dbe08f11fea450e0750e5507ec26d4bd70f4",
+    {13U, "fda694a5bab825b433f01598b42335c0c9a4593ac51f6deb1b0ee62b01b5e01c",
      "ef2bd6228e971be6336215eaca898ff0a8851dc259103cf33c745daed4f09c37"},
-    {14U, "5f945c63423e06acb8358eb91bcbcb1ef257050d01219bcd2ec2cd9e5519f412",
+    {14U, "b50f244e7216de67ae51e5369d51e50d99caff6de950ac1b44e1094c29dbc04e",
      "e64612fa2cc2ee08017bdaca3f1c3d0919102ada8a0ce81bb545293464e24d5b"},
-    {15U, "168781d1cc9ba7585dab11e59b9876cd5cf773901cc80fdb4a20fbb31045735c",
+    {15U, "5f588c98ec4dccf9145a5ccc8b7e4025a7ec910b0903eec38f78606c7338ff95",
      "a747b7828290c75d239dc50329563cd925d8db8a07bee82acac044b1a3f20df9"},
-    {16U, "8f5e78e6a32c50b312bd8b10bc0cbf89912c2de96c4323f04fc3613bb266790c",
+    {16U, "e416aa05eead4d0fe14c25763d6c71383ef92a3bb6e28dfde1e131d46575a78b",
      "ca79395a5f2ed3b15e28417b9b889c7d15514ae0536eb56c6b4c17944192b8bc"},
-    {17U, "4446e7e692c2cec03071c175a3d0481d7b942c16a67d1a2dba6a48817ad00a2f",
+    {17U, "358b6ba9533857f7a5263948b5eb7705da4bd97afbc4ef961563be758a479a35",
      "cc60add15fbc5db583b7f1d22b5003540b69c69a07b2c84b93c459b094801594"},
-    {18U, "6a445ae52183e4352ade563051512f932de31b957214d883e138b413a6c596da",
+    {18U, "9dcfa7cc447216e2303a1fddc66c2ebe5f4206435356425027a06ce214816a64",
      "0f5f4656980129271c3e9775f95b9842f6f91be9e51b9bbd1271731db05a0efd"},
-    {19U, "ecd2358bd66439d90083ea1a00c02312b731eb705c6c35153bb62561600b35bc",
+    {19U, "a111a5f4719743b0f4ea69e4703cd7e376aec3519b6cb35c215bc70da50d5e7e",
      "a51b437625f047837599c761de701d5983a0c5c2e22918f664b966b3ea79c964"},
-    {20U, "d118d2f49e6160515c2908b9fe07ed4ad2131b190c1412455ac4f5baaf6a2b98",
+    {20U, "01fc49e41a84f032da520662e59636ae99bab452391d1ab2c49b46e613dc2117",
      "2e35958d388fe07640970f0fda8dbc938a7112811f53b9d067fb5b255a936e97"},
-    {21U, "9d529c087dfb02d0e062841081ebd8d30c0712f4bddde602f50d7491c01bbb38",
+    {21U, "c0d3cfa8b5b776c06f4dc608624a315deb30d8c8ce6280316ec1d2aacede2456",
      "2ba83af22837cece1286b5f1d194bede5faa3e1ca81bbe27ce77f4f0ce25f978"},
-    {22U, "8f229ca7e3a1fc436daa70e45b68e72bd9926931f41de824493685ca79bbe877",
+    {22U, "fc242c14562c3b5ed55136a7581fc4be91ed80641f0a2daae5304e06f8f6bf79",
      "841796843748b1157e039dc7f64bfc6e9e23a1cb36a6ba00a0483018c6752035"},
-    {23U, "3e4f5307f29688023926e4e367f060f21f94261e2184084d543b6d30811a5afd",
+    {23U, "5d6b81d77390e1a811bdba463319e029a889fd3b4d33e0b0509c47cf9dfb68d9",
      "5c5e0654fc91dfcc232bd0addc51549b4a0d314ee1ce730ecad88d5d7efb0e5b"},
-    {24U, "4eb46321663bcfd2dd3b9eaeda5132b7f1349efc3d26b6e86815378b3e52a1dd",
+    {24U, "7c09f6b14f33d94c9bd2f93db0b839bfe44bc5203461b5b823276b538ded1f87",
      "8d21b113d0c133b94527842209c789f8de76b576fc54c997d566946c7d6eecff"},
-    {25U, "7a17f6f41465f2cb2cf28a4b2e4e1bc2ba202db2a5283fa88479b5f52ceb70d7",
+    {25U, "69cda5f3aa875fb45e5bd667aeeb5e07d276ffd654a00a8febfdb614494bcfa7",
      "efb01d71f6cdfa58bd72df057d11752698541ec9c92bd219642a03e5851a7ab6"},
-    {26U, "0b4504653dd884c6860b1931c9968eb32390800e0e47dbbe52c88c928f79d4aa",
+    {26U, "3002cda0301e841e0730db75c91b030f09a5e3a9a9fdc66bf1b6eb8e11749484",
      "f08d7c6888e1208a6ac25a539afac43c1b5e9d0761eabd1589281e3275a90092"},
-    {27U, "198a182d2ee49e23d823f43310e9a8da1e8f3ce3a7f180903d1b2b01fa2113d7",
+    {27U, "00b25c92468e8f45161795b95c6f56edc668f408e18abfd35f11ec955c772587",
      "7e804f45f22e4acf03746b0780ea4aa744357182b574a9753d0f401690eb4eb1"},
-    {28U, "d9642cab5c72adaa3ec13a53331c2c194d1b4eb4cfa689431f3bef97a7598c9e",
+    {28U, "d45c6e63078a3bf9260f97074ba3e27d54c6ed5f7d9bd7273a61426a5b6d6e59",
      "8c96207cd9fa84c6c4c358bf72f7526b61c5e2dfad60d870c6f8759afff4ae0c"},
-    {29U, "c3ed0f16cc6b71343008a550d65e9020317f1be4f151895146c9b75f2ccae7c4",
+    {29U, "34fa5625f0ced62e32f4259513d1f6b5c8725e624bb10ce3599ea098bb6a17c2",
      "2fc324176d11f46c60857ff580f6018d0a9645f6cc12c5da012d3c475239a4c2"},
-    {252U, "21006499b0c965c5d8fba3baf6c0707ceb4678a60bfdab448c946c4cef1e3c93",
+    {252U, "0d57a1cdbe33713ef2b7b2b4d883fd499bcf965a1a0e20d358bc49fab72f3291",
      "b3510eb2251009bfbd6acd1866d285ea4f2f8c2817d2e79b6a91e5073e5e2ffe"},
-    {253U, "502de20124c31045f9c8d02be2317c965c103e8163fd75f6e87cb141d490f043",
+    {253U, "755500b88d26980cb047048d72a014f1a02cb13daa5d718fd5d072e6004c34df",
      "fdc3fbae4b7f911b5fc96e380187e171efe30a3a6bfa0042035350d674505f7c"},
-    {254U, "a5b9febcedf9669cfcc7c241c2b2f83c88593c1f4cb397a638d9626496270085",
+    {254U, "bbcf8089bcd1c9c8ceb3bae4b43dbb799908eec4286978d55002b78c9403dc31",
      "0da08a669853561f4bdaaba06321f8ba8da161f25ab863775f8687f22a000ee6"},
-    {255U, "58f906513828348f530ba8058a697c6b233e945dcf786474f21737b2f0ce330c",
+    {255U, "2277a67645f7f92981568cdc5da7a1455a9e42db865801035d62fa8219e4ca3e",
      "9d526df7b9103dbab571f04ecc93a654d05ddaadc9d3f1f41634774911d4587d"},
 }};
 
@@ -1095,7 +1098,7 @@ std::vector<B1SemanticRecord> parse_b1_semantic_trace(std::string_view bytes) {
   return records;
 }
 
-ImageBuffer generate_b1_oracle_image(std::uint64_t job_index) {
+Value generate_b1_oracle_image(std::uint64_t job_index) {
   if (job_index > 255U) {
     throw std::out_of_range("B1 job index is outside [0,255].");
   }
@@ -1110,47 +1113,57 @@ ImageBuffer generate_b1_oracle_image(std::uint64_t job_index) {
     }
     transformed_samples[numerator] = sample;
   }
-  const std::size_t bytes = static_cast<std::size_t>(kB1PayloadBytes);
-  std::shared_ptr<void> storage(
-      ::operator new(bytes), [](void* pointer) { ::operator delete(pointer); });
-  float* const samples = static_cast<float*>(storage.get());
-  std::size_t offset = 0U;
-  for (std::uint64_t y = 0U; y < kB1ImageEdge; ++y) {
-    for (std::uint64_t x = 0U; x < kB1ImageEdge; ++x) {
-      for (std::uint64_t channel = 0U; channel < kB1ChannelCount; ++channel) {
-        const std::uint8_t numerator = static_cast<std::uint8_t>(
-            (17U * x + 31U * y + 47U * channel + job_index) & 255U);
-        samples[offset++] = transformed_samples[numerator];
+  DenseTensorDescriptor descriptor{{static_cast<std::size_t>(kB1ImageEdge),
+                                    static_cast<std::size_t>(kB1ImageEdge),
+                                    static_cast<std::size_t>(kB1ChannelCount)},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        {}};
+  StridedLayout layout{
+      {static_cast<std::ptrdiff_t>(kB1PayloadRowBytes),
+       static_cast<std::ptrdiff_t>(kB1ChannelCount * sizeof(float)),
+       static_cast<std::ptrdiff_t>(sizeof(float))}};
+  ValueBuilder builder = ValueBuilder::allocate_cpu_dense_tensor(
+      descriptor, facet, layout, static_cast<std::size_t>(kB1PayloadBytes));
+  {
+    WriteLease write = builder.acquire_write();
+    float* const samples = reinterpret_cast<float*>(write.data());
+    std::size_t offset = 0U;
+    for (std::uint64_t y = 0U; y < kB1ImageEdge; ++y) {
+      for (std::uint64_t x = 0U; x < kB1ImageEdge; ++x) {
+        for (std::uint64_t channel = 0U; channel < kB1ChannelCount; ++channel) {
+          const std::uint8_t numerator = static_cast<std::uint8_t>(
+              (17U * x + 31U * y + 47U * channel + job_index) & 255U);
+          samples[offset++] = transformed_samples[numerator];
+        }
       }
     }
   }
-  return ImageBuffer{static_cast<int>(kB1ImageEdge),
-                     static_cast<int>(kB1ImageEdge),
-                     static_cast<int>(kB1ChannelCount),
-                     DataType::FLOAT32,
-                     Device::CPU,
-                     static_cast<std::size_t>(kB1PayloadRowBytes),
-                     std::move(storage),
-                     nullptr};
+  return builder.seal();
 }
 
 B1JobGolden compute_b1_job_golden(std::uint64_t job_index) {
-  const ImageBuffer image = generate_b1_oracle_image(job_index);
-  const Value value = value_image_adapter::snapshot_cpu_image_value(image);
-  const ContentDigestResult logical = compute_content_digest(value);
+  const Value image = generate_b1_oracle_image(job_index);
+  const ContentDigestResult logical = compute_content_digest(image);
   if (logical.state != ContentDigestState::Available ||
       !logical.digest.has_value()) {
     throw std::runtime_error("B1 oracle logical digest is unavailable: " +
                              logical.diagnostic);
   }
+  const ImageView view(image);
   B1Sha256 raw_hash;
-  for (int y = 0; y < image.height; ++y) {
-    const float* const row =
-        reinterpret_cast<const float*>(image_buffer_row_data(image, y));
-    const std::size_t samples = static_cast<std::size_t>(image.width) *
-                                static_cast<std::size_t>(image.channels);
-    for (std::size_t index = 0U; index < samples; ++index) {
-      hash_little_endian_float(row[index], &raw_hash);
+  for (std::size_t y = 0U; y < view.height(); ++y) {
+    for (std::size_t x = 0U; x < view.width(); ++x) {
+      for (std::size_t channel = 0U; channel < view.channels(); ++channel) {
+        float sample = 0.0F;
+        std::memcpy(&sample, view.channel_data(x, y, channel), sizeof(sample));
+        hash_little_endian_float(sample, &raw_hash);
+      }
     }
   }
   return B1JobGolden{job_index, *logical.digest, raw_hash.finish()};

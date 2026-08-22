@@ -11,6 +11,7 @@
 
 #include "compute/execution/execution_service.hpp"
 #include "runtime/kernel.hpp"
+#include "support/graph_model_test_access.hpp"
 
 namespace ps::testing {
 
@@ -135,6 +136,19 @@ class KernelTestAccess {
   static std::shared_ptr<compute::ExecutionService> execution_service_owner(
       Kernel& kernel) noexcept {
     return kernel.execution_service_;
+  }
+
+  /**
+   * @brief Borrows the exact process data-definition registry used by cache.
+   * @param kernel Kernel whose product composition is under test.
+   * @return Mutable process registry for deterministic provider registration.
+   * @throws Nothing.
+   * @note This private seam proves provider-defined GraphCache replay crosses
+   * the real Kernel/GraphRuntime product route. Production frontends do not
+   * receive registry mutation authority through Host.
+   */
+  static DataDefinitionRegistry& data_definitions(Kernel& kernel) noexcept {
+    return kernel.data_definitions_;
   }
 
   /**
@@ -295,6 +309,31 @@ class KernelTestAccess {
           kernel.cache_service_.save_cache_if_configured_via_executor(
               kernel.execution_service_->compute_io_executor(), lifetime_token,
               graph, graph.node(node_id), precision);
+        });
+  }
+
+  /**
+   * @brief Loads one cache entry through the Kernel-owned GraphCacheService.
+   * @param kernel Kernel whose exact process registry and runtime are used.
+   * @param name Loaded graph name used to resolve the graph-state lane.
+   * @param node_id Node whose configured entry is replayed.
+   * @param output_schema Frozen product output shape.
+   * @return Future resolving true only after complete HP publication.
+   * @throws Graph-state, cache, registry, filesystem, or allocation exceptions
+   * through the returned future.
+   * @note This exercises the real Kernel/GraphRuntime composition and cannot
+   * inject a private GraphCacheService or alternate provider registry.
+   */
+  static std::future<bool> submit_cache_load(
+      Kernel& kernel, const std::string& name, int node_id,
+      ValueDiskCacheOutputSchema output_schema) {
+    auto runtime = runtime_owner(kernel, name);
+    return runtime->graph_state().submit(
+        [&kernel, node_id,
+         output_schema = std::move(output_schema)](GraphModel& graph) mutable {
+          return kernel.cache_service_.try_load_from_disk_cache(
+              graph, GraphModelTestAccess::mutable_node(graph, node_id),
+              std::move(output_schema));
         });
   }
 

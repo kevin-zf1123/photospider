@@ -593,7 +593,7 @@ class B1OutputStore final {
   /**
    * @brief Commits one exact candidate image using two ordered I/O tasks.
    * @param job Complete immutable occurrence allocated before offer.
-   * @param image Exact candidate CPU FP32 RGBA image.
+   * @param image Exact candidate Ready CPU FP32 RGBA Value.
    * @return Typed result, new-work evidence, and receipt only after barriers.
    * @throws std::bad_alloc or synchronization exceptions that prevent even a
    * typed result from being assembled.
@@ -613,8 +613,7 @@ class B1OutputStore final {
    * guard anchor takeover throws and preserves the ambiguous name; post-anchor
    * slot takeover or detected private cleanup drift terminates fail-stop.
    */
-  B1OutputCommitResult commit(const B1JobInstance& job,
-                              const ImageBuffer& image);
+  B1OutputCommitResult commit(const B1JobInstance& job, const Value& image);
 
  private:
   /** @brief Canonical root selected once before any commit. */

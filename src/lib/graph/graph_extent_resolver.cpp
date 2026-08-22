@@ -1,5 +1,7 @@
 #include "graph/graph_extent_resolver.hpp"
 
+#include <cstdint>
+#include <limits>
 #include <unordered_map>
 
 #include "core/param_utils.hpp"
@@ -18,10 +20,23 @@ PixelSize GraphExtentResolver::resolve_output_extent(
   PixelSize size{0, 0};
   const Node& node = graph.node(node_id);
 
-  if (node.cached_output_high_precision) {
-    const auto& buf = node.cached_output_high_precision->image_buffer;
-    if (buf.width > 0 && buf.height > 0) {
-      size = PixelSize{buf.width, buf.height};
+  if (node.cached_output_high_precision &&
+      node.cached_output_high_precision->has_image_value() &&
+      node.cached_output_high_precision->image_value()
+          .image_facet()
+          .has_value()) {
+    const ImageBounds& bounds =
+        node.cached_output_high_precision->image_value().image_bounds();
+    const std::size_t width = image_bounds_width(bounds);
+    const std::size_t height = image_bounds_height(bounds);
+    const std::size_t maximum_extent =
+        static_cast<std::size_t>(std::numeric_limits<int>::max());
+    if (width > maximum_extent || height > maximum_extent) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Cached image extent exceeds PixelSize.");
+    }
+    if (width > 0U && height > 0U) {
+      size = PixelSize{static_cast<int>(width), static_cast<int>(height)};
       return cache[node_id] = size;
     }
   }
@@ -51,6 +66,27 @@ PixelSize GraphExtentResolver::resolve_output_extent(
   }
 
   return cache[node_id] = size;
+}
+
+/** @copydoc GraphExtentResolver::resolve_output_data_window */
+ImageBounds GraphExtentResolver::resolve_output_data_window(
+    const GraphModel& graph, int node_id,
+    std::unordered_map<int, PixelSize>& extent_cache) const {
+  const PixelSize extent = resolve_output_extent(graph, node_id, extent_cache);
+  if (extent.width <= 0 || extent.height <= 0) {
+    return ImageBounds{};
+  }
+
+  const Node& node = graph.node(node_id);
+  if (node.cached_output_high_precision &&
+      node.cached_output_high_precision->has_image_value() &&
+      node.cached_output_high_precision->image_value()
+          .image_facet()
+          .has_value()) {
+    return node.cached_output_high_precision->image_value().image_bounds();
+  }
+  return ImageBounds{0, 0, static_cast<std::int64_t>(extent.width),
+                     static_cast<std::int64_t>(extent.height)};
 }
 
 }  // namespace ps

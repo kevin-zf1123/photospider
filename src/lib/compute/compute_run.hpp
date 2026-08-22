@@ -360,7 +360,7 @@ struct ComputeRunTaskReadyObservation final {
   int output_height = 0;
 
   /** @brief Device selected with the retained operation implementation. */
-  Device device = Device::CPU;
+  DeviceBackend device = DeviceBackend::CPU;
 
   /** @brief Actual ready submission's declared logical work units. */
   std::uint64_t work_units = 0U;
@@ -1608,6 +1608,22 @@ class ComputeRunLease {
                             std::exception_ptr failure);
 
   /**
+   * @brief Publishes a failure owned directly by this exact Run lease.
+   *
+   * @param failure Exact non-null exception caught by a Run-bound lifecycle
+   * continuation that has no TaskSubmissionPlan registration.
+   * @return True only when this failure wins the retained Run's terminal
+   * arbiter; false when cancellation, success, or another failure already won.
+   * @throws std::invalid_argument when failure is null.
+   * @throws std::system_error if the control mutex cannot be locked.
+   * @note Dirty source/downstream continuations use this boundary because
+   * their dense planned task ids belong to a dirty ComputePlan rather than the
+   * full-HP TaskSubmissionPlan identity registry. Possessing this lease, not a
+   * caller-supplied scalar id, selects the exact Run that may fail.
+   */
+  bool publish_failure(std::exception_ptr failure);
+
+  /**
    * @brief Returns the current terminal outcome retained by the lease.
    *
    * @return Outcome snapshot, or nullopt before terminal publication.
@@ -2123,7 +2139,7 @@ class ComputeRun {
    */
   TaskSubmissionPlan& emplace_submission_plan(
       GraphModel& graph, GraphTraversalService& traversal, int node_id,
-      std::vector<Device> available_devices,
+      std::vector<DeviceBackend> available_devices,
       bool publish_plan_inspection = true, bool allow_reusable_cache = true);
 
   /**

@@ -63,7 +63,7 @@ PreparedExecutionRun ExecutionService::prepare_run(
   }
   const bool route_metal_registered =
       execution_type == "gpu_pipeline" &&
-      pool_->device_executors.contains(Device::GPU_METAL);
+      pool_->device_executors.contains(DeviceBackend::Metal);
   const ComputeRunId run_id = initial_submissions.front().metadata().run_id();
   const ReadyTaskSubmission& representative = initial_submissions.front();
   const execution::DeviceCompletionSeed completion_seed(

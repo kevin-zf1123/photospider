@@ -1,81 +1,102 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
+#include <vector>
 
-#include "photospider/core/image_buffer.hpp"
+#include "photospider/data/sample_conversion.hpp"
 
 namespace ps {
 
 /**
- * @brief Normalized integer precision used for persisted image artifacts.
- *
- * The value describes how normalized floating-point image samples are encoded
- * on disk. It does not change the in-memory `ImageBuffer` scalar type.
- *
- * @note This private kernel contract is dependency-neutral and is not part of
- * the installed public ABI.
+ * @brief One exact storage-selected semantic rule for image-file decode.
+ * @throws Nothing for ordinary value operations.
+ * @note Storage selection is exact and caller-declared; the codec never maps a
+ *       depth to sample meaning unless a matching rule exists.
  */
-enum class ImageArtifactPrecision {
-  /** @brief Encode normalized samples with unsigned 8-bit storage. */
-  UInt8,
-  /** @brief Encode normalized samples with unsigned 16-bit storage. */
-  UInt16,
+struct ImageArtifactDecodeRule final {
+  /** @brief Logical scalar semantics required from decoded storage. */
+  ElementSemantics element_semantics = ElementSemantics::UnsignedInteger;
+  /** @brief Exact physical scalar encoding required from decoded storage. */
+  StorageEncoding storage_encoding{8U};
+  /** @brief Exact meaning assigned to matching decoded values. */
+  SampleEndpoint encoded_samples;
+  /**
+   * @brief Optional explicit conversion applied after storage-preserving
+   * decode.
+   * @note Its source endpoint must equal `encoded_samples`.
+   */
+  std::optional<SampleConversion> conversion;
 };
 
 /**
- * @class ImageArtifactCodec
- * @brief Dependency-neutral boundary for image artifact decode and encode.
- *
- * Implementations translate between filesystem image artifacts and owned
- * `ImageBuffer` values. Graph/cache code supplies paths, image descriptors, and
- * normalized integer precision without including or retaining provider-library
- * types.
- *
- * @note Implementations must be safe for independent calls from serialized
- * graph-state lanes belonging to different graphs. The interface owns no cache
- * policy, path identity, retry, or transaction semantics. Callers retain the
- * codec through shared ownership for the full service lifetime.
+ * @brief Explicit bounded semantic request for decoding one image file.
+ * @throws std::bad_alloc when rule ownership allocates.
+ * @note Rules must be strictly ordered by semantics, encoding kind, then bit
+ *       width and must not duplicate a storage key.
+ */
+struct ImageArtifactDecodeRequest final {
+  /** @brief Exact supported decoded storage rules. */
+  std::vector<ImageArtifactDecodeRule> rules;
+};
+
+/**
+ * @brief Explicit semantic request for encoding one ordinary image file.
+ * @throws Nothing for ordinary value operations.
+ * @note No conversion means the Value's declared storage and sample meaning
+ *       must already be supported exactly by the selected codec.
+ */
+struct ImageArtifactEncodeRequest final {
+  /** @brief Optional explicit source-to-file sample/storage conversion. */
+  std::optional<SampleConversion> conversion;
+};
+
+/**
+ * @brief Dependency-neutral ordinary DenseImage file codec boundary.
+ * @throws As documented by individual operations.
+ * @note The interface owns no cache, path-selection, sidecar, atomic replace,
+ *       retry, or durable publication policy. Deep/variable-sample data uses
+ *       its provider-defined adapter rather than this ordinary-image path.
  */
 class ImageArtifactCodec {
  public:
-  /**
-   * @brief Destroys one codec after every retaining service releases it.
-   * @throws Nothing.
-   * @note Destruction must not perform caller-visible cache publication.
-   */
+  /** @brief Releases a codec after all synchronous calls finish. */
   virtual ~ImageArtifactCodec() = default;
 
   /**
-   * @brief Decodes one image artifact into an owned float image buffer.
-   *
-   * @param path Existing artifact path selected by the cache owner.
-   * @return Owned CPU `ImageBuffer`; unsigned 8/16-bit artifacts are normalized
-   * to floating-point `[0,1]` samples.
-   * @throws std::bad_alloc when host or provider allocation is exhausted.
-   * @throws GraphError with `GraphErrc::Io` when the artifact cannot be opened,
-   * decoded, converted, or represented by the implementation.
-   * @note The returned payload must remain valid after this call and after any
-   * provider-local temporary image handle is destroyed.
+   * @brief Decodes one image file without implicit sample normalization.
+   * @param path Existing file selected by the caller.
+   * @param request Explicit decoded sample meaning and optional conversion.
+   * @return Fresh Ready ordinary DenseImage Value.
+   * @throws std::invalid_argument for malformed semantic policy or unsupported
+   *         file/storage facts.
+   * @throws std::domain_error for rejected sample conversion.
+   * @throws std::bad_alloc when codec or Value allocation fails.
+   * @throws GraphError with `GraphErrc::Io` when file decode fails.
+   * @note A codec preserves signed data/display-window facts when its format
+   *       carries them. Formats without that authority assign only an explicit
+   *       zero-origin data window and leave the display window absent.
    */
-  virtual ImageBuffer decode(const std::filesystem::path& path) const = 0;
+  virtual Value decode(const std::filesystem::path& path,
+                       const ImageArtifactDecodeRequest& request) const = 0;
 
   /**
-   * @brief Encodes one CPU image buffer as a normalized integer artifact.
-   *
-   * @param path Destination artifact path prepared by the cache owner.
-   * @param image Borrowed CPU image descriptor whose payload remains alive for
-   * the call.
-   * @param precision Integer storage precision selected by cache policy.
-   * @return Nothing.
-   * @throws std::bad_alloc when host or provider allocation is exhausted.
-   * @throws GraphError with `GraphErrc::Io` when the descriptor cannot be
-   * encoded or the destination write fails.
-   * @note The method does not own directory creation, metadata serialization,
-   * atomic replacement, retry, or cache visibility policy.
+   * @brief Encodes one ordinary image with explicit sample policy.
+   * @param path Destination selected by the caller.
+   * @param image Ready Host-readable ordinary DenseImage Value.
+   * @param request Explicit optional conversion to file storage/meaning.
+   * @return Nothing after synchronous write succeeds.
+   * @throws std::invalid_argument for missing/inconsistent sample facts,
+   *         unsupported storage/layout, or malformed policy.
+   * @throws std::domain_error for rejected out-of-domain, non-finite, range,
+   *         rounding, or precision-loss cases.
+   * @throws std::bad_alloc when conversion or codec allocation fails.
+   * @throws GraphError with `GraphErrc::Io` when file encode fails.
+   * @note No hidden scaling, clamp, rounding, non-finite replacement, or color
+   *       transform is permitted.
    */
-  virtual void encode(const std::filesystem::path& path,
-                      const ImageBuffer& image,
-                      ImageArtifactPrecision precision) const = 0;
+  virtual void encode(const std::filesystem::path& path, const Value& image,
+                      const ImageArtifactEncodeRequest& request) const = 0;
 };
 
 }  // namespace ps

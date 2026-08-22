@@ -15,34 +15,35 @@ namespace ps::compute {
 using namespace execution_service_detail;  // NOLINT(build/namespaces)
 
 /** @copydoc ExecutionService::available_devices */
-std::vector<Device> ExecutionService::available_devices() const {
-  return {Device::CPU};
+std::vector<DeviceBackend> ExecutionService::available_devices() const {
+  return {DeviceBackend::CPU};
 }
 
 /** @copydoc ExecutionService::available_devices(const std::string&) */
-std::vector<Device> ExecutionService::available_devices(
+std::vector<DeviceBackend> ExecutionService::available_devices(
     const std::string& execution_type) const {
   if (execution_type == "gpu_pipeline") {
-    if (pool_->device_executors.contains(Device::GPU_METAL)) {
-      return {Device::GPU_METAL, Device::CPU};
+    if (pool_->device_executors.contains(DeviceBackend::Metal)) {
+      return {DeviceBackend::Metal, DeviceBackend::CPU};
     }
-    return {Device::CPU};
+    return {DeviceBackend::CPU};
   }
   if (execution_type == "cpu" || execution_type == "serial_debug") {
-    return {Device::CPU};
+    return {DeviceBackend::CPU};
   }
   throw GraphError(GraphErrc::NotFound,
                    "Unknown private execution route: " + execution_type);
 }
 
 /** @copydoc ExecutionService::has_device_executor */
-bool ExecutionService::has_device_executor(Device device) const noexcept {
+bool ExecutionService::has_device_executor(
+    DeviceBackend device) const noexcept {
   return pool_->device_executors.contains(device);
 }
 
 /** @copydoc ExecutionService::device_executor_diagnostics */
 execution::DeviceExecutorDiagnostics
-ExecutionService::device_executor_diagnostics(Device device) const {
+ExecutionService::device_executor_diagnostics(DeviceBackend device) const {
   return pool_->device_executors.diagnostics(device);
 }
 
@@ -56,7 +57,7 @@ DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
         "Metal residency acquisition requires a valid Value and positive "
         "dimensions.");
   }
-  if (!pool_->device_executors.contains(Device::GPU_METAL)) {
+  if (!pool_->device_executors.contains(DeviceBackend::Metal)) {
     throw std::invalid_argument(
         "Metal residency acquisition requires a registered executor.");
   }
@@ -105,7 +106,7 @@ DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
   }
   HostToMetalValueInvocation invocation(source, width, height, completion_seed,
                                         capture_deadline, pool_->ledger);
-  pool_->device_executors.execute(Device::GPU_METAL, invocation);
+  pool_->device_executors.execute(DeviceBackend::Metal, invocation);
   Value pending = invocation.take_published_value();
   if (!pending.valid()) {
     throw std::logic_error(

@@ -699,9 +699,9 @@ TEST(EvidenceEnvelope, MaterializesCanonicalM1RowAndBundle) {
             fixture.m1_row_digest);
   EXPECT_EQ(digest_evidence_bundle(root.manifest_bytes), fixture.root_digest);
   EXPECT_EQ(fixture.m1_row_digest,
-            "9afe8a2124e1c583b23aabe46e801c9994f4c16635844c82ce49f03d0685b8b7");
+            "dcda529977939baa56fde0e7e7f111c28b3622e720252457498f4822bc6de1f1");
   EXPECT_EQ(fixture.root_digest,
-            "9a6e6885808f2d4688c1fbf13f2d6d4a34d71a57d21acef9146141701a77a7f7");
+            "5447340a7fe74e24bc1cca444b761072d32a9f04186c702c28ebaf556d2072e3");
   EXPECT_EQ(
       digest_evidence_section(
           fixture.corpus.rows.back().source.workload_manifest.section_name,

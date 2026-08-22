@@ -593,8 +593,8 @@ void release_capacity_blocker(void* opaque, const B1IoTaskIdentity& identity,
  * @throws Oracle or allocation failures on first call.
  * @note Tests never mutate the shared payload.
  */
-const ImageBuffer& seed_zero_image() {
-  static const ImageBuffer image = generate_b1_oracle_image(0U);
+const Value& seed_zero_image() {
+  static const Value image = generate_b1_oracle_image(0U);
   return image;
 }
 
@@ -646,7 +646,7 @@ void expect_same_receipt(const B1OutputCommitReceipt& lhs,
 }
 
 /**
- * @brief Proves invalid policy/image requests fail before filesystem mutation.
+ * @brief Proves invalid policy/Value requests fail before filesystem mutation.
  * @throws Test framework, executor, and filesystem failures unchanged.
  */
 TEST(B1OutputStore, RejectsWeakerDurabilityAndInvalidCandidateFailClosed) {
@@ -659,7 +659,7 @@ TEST(B1OutputStore, RejectsWeakerDurabilityAndInvalidCandidateFailClosed) {
     B1OutputStore weaker(
         output_root.root(), executor,
         B1OutputStoreOptions{B1OutputDurability::AtomicVisible, true});
-    EXPECT_EQ(weaker.commit(job, ImageBuffer{}).status,
+    EXPECT_EQ(weaker.commit(job, Value{}).status,
               B1OutputCommitStatus::InvalidRequest);
   }
 
@@ -667,12 +667,12 @@ TEST(B1OutputStore, RejectsWeakerDurabilityAndInvalidCandidateFailClosed) {
     B1OutputStore unsupported(
         output_root.root(), executor,
         B1OutputStoreOptions{B1OutputDurability::CrashDurable, false});
-    EXPECT_EQ(unsupported.commit(job, ImageBuffer{}).status,
+    EXPECT_EQ(unsupported.commit(job, Value{}).status,
               B1OutputCommitStatus::DurabilityUnsupported);
   }
 
   B1OutputStore store(output_root.root(), executor);
-  EXPECT_EQ(store.commit(job, ImageBuffer{}).status,
+  EXPECT_EQ(store.commit(job, Value{}).status,
             B1OutputCommitStatus::InvalidImage);
   EXPECT_TRUE(std::filesystem::is_empty(output_root.root()));
 }

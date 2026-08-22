@@ -1,11 +1,16 @@
+#include <fenv.h>  // NOLINT(build/c++11)
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <initializer_list>
@@ -13,15 +18,18 @@
 #include <memory>
 #include <mutex>
 #include <opencv2/imgproc.hpp>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/value_adapter_opencv.hpp"
 #include "benchmark/common/benchmark_types.hpp"
 #include "compute/compute_geometry.hpp"
 #include "compute/compute_run.hpp"
@@ -42,12 +50,15 @@
 #include "compute/request/compute_cache_policy.hpp"
 #include "compute/request/compute_metrics_recorder.hpp"
 #include "core/param_utils.hpp"
-#include "core/value_image_adapter.hpp"
+#include "core/pending_value.hpp"
+#include "core/value_region.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
+#include "photospider/data/image_view.hpp"
 #include "photospider/host/host.hpp"
+#include "photospider/plugin/data_definition_registry.hpp"
 #include "plugin/operation_host_adapter.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
 #include "providers/configured_operation_providers.hpp"
@@ -55,6 +66,7 @@
 #include "runtime/graph_runtime.hpp"
 #include "runtime/interaction.hpp"
 #include "support/execution_service_test_access.hpp"
+#include "support/fake_cache_metadata_codec.hpp"
 #include "support/fake_image_artifact_codec.hpp"
 #include "support/kernel_test_access.hpp"
 #include "support/kernel_test_dependencies.hpp"
@@ -363,13 +375,1329 @@ Node make_node(int id, std::string type, std::string subtype) {
   return node;
 }
 
-NodeOutput make_image_output(int width, int height, int channels = 1,
-                             float value = 1.0f) {
+/**
+ * @brief Builds explicit canonical image authority for staging-buffer tests.
+ * @param node_id Graph-local node covered by the authority.
+ * @param width Positive planned image width.
+ * @param height Positive planned image height.
+ * @return One-item frozen plan requiring exactly one `image` Value.
+ * @throws std::bad_alloc from plan-owned string/vector construction.
+ * @note The fixed dimensions are independent fixture facts, never inferred
+ * from the staged candidate. Route-backed tests use prepared ComputePlans.
+ */
+std::vector<compute::PlannedNodeWork> make_explicit_image_output_plan(
+    int node_id, int width, int height) {
+  compute::PlannedNodeWork work;
+  work.node_id = node_id;
+  compute::PlannedOutputAuthority authority;
+  authority.implementation_identity = 1U;
+  authority.route_device = DeviceBackend::CPU;
+  authority.image_output_name = std::string(NodeOutput::kImageOutputName);
+  authority.image_extent = PixelSize{width, height};
+  work.output_authority = std::move(authority);
+  return {std::move(work)};
+}
+
+/**
+ * @brief Adds an exact output declaration to test operation metadata.
+ * @param metadata Base scheduling/resource metadata to preserve.
+ * @param produces_image Whether canonical `image` is required.
+ * @param parameter_names Exact legal non-image result names.
+ * @param generic_value_names Exact legal generic Value names excluding image.
+ * @return Updated metadata ready for registry validation and sorting.
+ * @throws std::bad_alloc when copied result names allocate.
+ * @note The declaration describes callback behavior independently of any
+ * returned NodeOutput and therefore participates in the registry revision.
+ */
+OpMetadata declare_test_outputs(
+    OpMetadata metadata, bool produces_image,
+    std::initializer_list<const char*> parameter_names,
+    std::initializer_list<const char*> generic_value_names = {}) {
+  metadata.produces_image = produces_image;
+  metadata.named_value_output_names.clear();
+  metadata.named_value_output_names.reserve(generic_value_names.size());
+  for (const char* name : generic_value_names) {
+    metadata.named_value_output_names.emplace_back(name);
+  }
+  metadata.parameter_output_names.clear();
+  metadata.parameter_output_names.reserve(parameter_names.size());
+  for (const char* name : parameter_names) {
+    metadata.parameter_output_names.emplace_back(name);
+  }
+  return metadata;
+}
+
+/**
+ * @brief Publishes exact row-major FP32 samples as one canonical image.
+ * @param width Positive image width.
+ * @param height Positive image height.
+ * @param channels Positive interleaved channel count.
+ * @param samples Exact row-major interleaved payload.
+ * @return NodeOutput containing one sealed canonical `"image"` Value.
+ * @throws std::invalid_argument for invalid dimensions or sample count.
+ * @throws Allocation, overflow, Value validation, or publication exceptions
+ * unchanged.
+ * @note Samples retain their native FP32 domain. No mutable side channel is
+ * retained as graph, cache, dirty, RT, or test-result authority.
+ */
+NodeOutput make_sampled_image_output(int width, int height, int channels,
+                                     std::vector<float> samples) {
+  if (width <= 0 || height <= 0 || channels <= 0) {
+    throw std::invalid_argument("split image fixture dimensions are invalid");
+  }
+  const std::size_t image_width = static_cast<std::size_t>(width);
+  const std::size_t image_height = static_cast<std::size_t>(height);
+  const std::size_t image_channels = static_cast<std::size_t>(channels);
+  if (samples.size() != image_width * image_height * image_channels) {
+    throw std::invalid_argument("split image fixture sample count is invalid");
+  }
+  std::vector<std::byte> storage(samples.size() * sizeof(float));
+  std::memcpy(storage.data(), samples.data(), storage.size());
+  DenseTensorDescriptor descriptor{{image_height, image_width, image_channels},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  const bool normalized = std::all_of(
+      samples.begin(), samples.end(),
+      [](float sample) { return sample >= 0.0F && sample <= 1.0F; });
+  facet.sample_domain =
+      normalized ? SampleDomainFacet{1U,
+                                     SampleEncoding{
+                                         1U, SampleEncodingKind::Normalized},
+                                     SampleDomain{SampleDomainKind::Normalized,
+                                                  0.0, 1.0},
+                                     {}}
+                 : SampleDomainFacet{
+                       1U,
+                       SampleEncoding{1U, SampleEncodingKind::Value},
+                       SampleDomain{SampleDomainKind::Legal, -65504.0, 65504.0},
+                       {}};
   NodeOutput output;
-  output.image_buffer =
-      make_aligned_cpu_image_buffer(width, height, channels, DataType::FLOAT32);
-  toCvMat(output.image_buffer).setTo(value);
+  output.publish_image_value(Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{
+          {static_cast<std::ptrdiff_t>(image_width * image_channels *
+                                       sizeof(float)),
+           static_cast<std::ptrdiff_t>(image_channels * sizeof(float)),
+           static_cast<std::ptrdiff_t>(sizeof(float))}},
+      std::move(storage)));
   return output;
+}
+
+/**
+ * @brief Publishes one deterministic constant CPU image for split tests.
+ * @param width Positive image width.
+ * @param height Positive image height.
+ * @param channels Positive interleaved channel count.
+ * @param value Scalar written to every logical channel element.
+ * @return NodeOutput containing one sealed canonical `"image"` Value.
+ * @throws Exceptions from make_sampled_image_output unchanged.
+ * @note The helper performs no implicit sample conversion or scaling.
+ */
+NodeOutput make_image_output(int width, int height, int channels = 1,
+                             float value = 1.0F) {
+  if (width <= 0 || height <= 0 || channels <= 0) {
+    throw std::invalid_argument("split image fixture dimensions are invalid");
+  }
+  return make_sampled_image_output(
+      width, height, channels,
+      std::vector<float>(static_cast<std::size_t>(width) *
+                             static_cast<std::size_t>(height) *
+                             static_cast<std::size_t>(channels),
+                         value));
+}
+
+/**
+ * @brief Publishes exact row-major UINT32 code values as one canonical image.
+ * @param width Positive image width.
+ * @param height Positive image height.
+ * @param channels Positive interleaved channel count.
+ * @param samples Exact row-major interleaved UINT32 payload.
+ * @return NodeOutput containing one sealed canonical `image` Value.
+ * @throws std::invalid_argument for invalid dimensions or sample count.
+ * @throws Allocation, overflow, Value validation, or publication exceptions
+ * unchanged.
+ * @note The fixture matches ordinary OpenEXR UINT storage: native 32-bit
+ *       unsigned elements with a CodeValue `[0, UINT32_MAX]` domain. No sample
+ *       conversion or normalization is requested or performed.
+ */
+NodeOutput make_uint32_sampled_image_output(
+    int width, int height, int channels, std::vector<std::uint32_t> samples) {
+  if (width <= 0 || height <= 0 || channels <= 0) {
+    throw std::invalid_argument(
+        "split UINT32 image fixture dimensions are invalid");
+  }
+  const std::size_t image_width = static_cast<std::size_t>(width);
+  const std::size_t image_height = static_cast<std::size_t>(height);
+  const std::size_t image_channels = static_cast<std::size_t>(channels);
+  if (samples.size() != image_width * image_height * image_channels) {
+    throw std::invalid_argument(
+        "split UINT32 image fixture sample count is invalid");
+  }
+
+  std::vector<std::byte> storage(samples.size() * sizeof(std::uint32_t));
+  std::memcpy(storage.data(), samples.data(), storage.size());
+  DenseTensorDescriptor descriptor{{image_height, image_width, image_channels},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain = SampleDomainFacet{
+      1U,
+      SampleEncoding{1U, SampleEncodingKind::CodeValue},
+      SampleDomain{
+          SampleDomainKind::CodeValue, 0.0,
+          static_cast<double>(std::numeric_limits<std::uint32_t>::max())},
+      {}};
+  NodeOutput output;
+  output.publish_image_value(Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{
+          {static_cast<std::ptrdiff_t>(image_width * image_channels *
+                                       sizeof(std::uint32_t)),
+           static_cast<std::ptrdiff_t>(image_channels * sizeof(std::uint32_t)),
+           static_cast<std::ptrdiff_t>(sizeof(std::uint32_t))}},
+      std::move(storage)));
+  return output;
+}
+
+/**
+ * @brief Publishes native signed or unsigned integer code values as an image.
+ * @tparam Scalar Exact signed or unsigned 32-bit or 64-bit storage scalar.
+ * @param samples Nonempty row-major single-channel payload.
+ * @param domain Binary64-declared code-value interval retained by ImageFacet.
+ * @return NodeOutput containing one sealed canonical `image` Value.
+ * @throws std::invalid_argument when the sample vector is empty.
+ * @throws Allocation, overflow, Value validation, or publication exceptions
+ * unchanged.
+ * @note The helper performs no numeric conversion. For 64-bit storage the
+ *       declared domain endpoints are bounded binary64 metadata projections;
+ *       the native payload remains the sole exact sample authority.
+ */
+template <typename Scalar>
+NodeOutput make_native_integer_sampled_image_output(std::vector<Scalar> samples,
+                                                    SampleDomain domain) {
+  static_assert(std::is_integral_v<Scalar> && !std::is_same_v<Scalar, bool>,
+                "integer metrics fixture requires a native integer scalar");
+  static_assert(sizeof(Scalar) == sizeof(std::int32_t) ||
+                    sizeof(Scalar) == sizeof(std::int64_t),
+                "integer metrics fixture supports only 32-bit or 64-bit");
+  if (samples.empty()) {
+    throw std::invalid_argument(
+        "integer metrics fixture requires at least one sample");
+  }
+
+  std::vector<std::byte> storage(samples.size() * sizeof(Scalar));
+  std::memcpy(storage.data(), samples.data(), storage.size());
+  DenseTensorDescriptor descriptor{
+      {1U, samples.size(), 1U},
+      std::is_signed_v<Scalar> ? ElementSemantics::SignedInteger
+                               : ElementSemantics::UnsignedInteger,
+      StorageEncoding{static_cast<std::uint32_t>(sizeof(Scalar) * 8U)}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::CodeValue},
+                        std::move(domain),
+                        {}};
+  NodeOutput output;
+  output.publish_image_value(Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{
+          {static_cast<std::ptrdiff_t>(samples.size() * sizeof(Scalar)),
+           static_cast<std::ptrdiff_t>(sizeof(Scalar)),
+           static_cast<std::ptrdiff_t>(sizeof(Scalar))}},
+      std::move(storage)));
+  return output;
+}
+
+/**
+ * @brief Restores the calling thread's floating-point rounding mode on exit.
+ * @throws std::runtime_error when the original mode cannot be observed.
+ * @note Tests select each supported standard mode explicitly through `set`;
+ *       destruction performs best-effort restoration without throwing.
+ */
+class ScopedFloatingPointRoundingMode final {
+ public:
+  /**
+   * @brief Captures the calling thread's current rounding mode.
+   * @throws std::runtime_error when `fegetround` reports failure.
+   */
+  ScopedFloatingPointRoundingMode() : original_mode_(fegetround()) {
+    if (original_mode_ == -1) {
+      throw std::runtime_error(
+          "integer metrics test could not observe the rounding mode");
+    }
+  }
+
+  /** @brief Restores the captured mode without masking test failures. */
+  ~ScopedFloatingPointRoundingMode() noexcept {
+    (void)fesetround(original_mode_);
+  }
+
+  ScopedFloatingPointRoundingMode(const ScopedFloatingPointRoundingMode&) =
+      delete;
+  ScopedFloatingPointRoundingMode& operator=(
+      const ScopedFloatingPointRoundingMode&) = delete;
+
+  /**
+   * @brief Selects one standard floating-point rounding mode.
+   * @param mode One supported `FE_*` rounding-mode constant.
+   * @return Nothing.
+   * @throws std::runtime_error when the environment rejects the mode.
+   */
+  void set(int mode) {
+    if (fesetround(mode) != 0) {
+      throw std::runtime_error(
+          "integer metrics test could not select the rounding mode");
+    }
+  }
+
+ private:
+  /** @brief Rounding mode restored during destruction. */
+  int original_mode_ = FE_TONEAREST;
+};
+
+/**
+ * @brief Verifies one production timing scan over native integer samples.
+ * @tparam Scalar Exact signed or unsigned 32-bit or 64-bit storage scalar.
+ * @param samples Nonempty payload copied into the canonical Value.
+ * @param domain Declared storage-independent code-value interval.
+ * @param expected_min Expected finite binary64 diagnostic minimum.
+ * @param expected_max Expected finite binary64 diagnostic maximum.
+ * @return Nothing; GoogleTest records dispatch, metadata, or payload failures.
+ * @throws Fixture publication and unexpected metrics exceptions unchanged;
+ * expected production success is checked by GoogleTest.
+ * @note Full descriptor, facet, binding, allocation, producer, revision, and
+ *       payload facts must survive timing finalization. Comparing raw bytes
+ *       separately from binary64 diagnostics proves the scan performs no
+ *       sample-domain normalization or payload rewrite.
+ */
+template <typename Scalar>
+void expect_native_integer_timing_statistics(const std::vector<Scalar>& samples,
+                                             SampleDomain domain,
+                                             double expected_min,
+                                             double expected_max) {
+  NodeOutput output =
+      make_native_integer_sampled_image_output(samples, std::move(domain));
+  const DenseTensorDescriptor original_descriptor =
+      output.image_value().dense_tensor_descriptor();
+  const ImageFacet original_facet = *output.image_value().image_facet();
+  const StorageBinding original_binding =
+      output.image_value().storage_binding();
+  const AllocationIdentity original_allocation =
+      output.image_value().allocation_identity();
+  const ProducerIdentity original_producer =
+      output.image_value().producer_identity();
+  const ValueRevisionId original_revision = output.image_value().revision_id();
+  const ReadLease original_read =
+      output.image_value().buffer_handle().acquire_read();
+  const std::vector<std::byte> original_payload(
+      original_read.data(), original_read.data() + original_read.size());
+
+  output.debug.min_val = -17.0;
+  output.debug.max_val = -19.0;
+  output.debug.has_nan = true;
+  ASSERT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      output, {}, true, 7.0));
+  EXPECT_EQ(output.debug.compute_device, "CPU");
+  EXPECT_EQ(output.debug.execution_time_ms, 7U);
+  EXPECT_DOUBLE_EQ(output.debug.min_val, expected_min);
+  EXPECT_DOUBLE_EQ(output.debug.max_val, expected_max);
+  EXPECT_FALSE(output.debug.has_nan);
+
+  EXPECT_EQ(output.image_value().dense_tensor_descriptor(),
+            original_descriptor);
+  ASSERT_TRUE(output.image_value().image_facet().has_value());
+  EXPECT_EQ(*output.image_value().image_facet(), original_facet);
+  EXPECT_EQ(output.image_value().storage_binding(), original_binding);
+  EXPECT_EQ(output.image_value().allocation_identity(), original_allocation);
+  EXPECT_EQ(output.image_value().producer_identity(), original_producer);
+  EXPECT_EQ(output.image_value().revision_id(), original_revision);
+  const ReadLease final_read =
+      output.image_value().buffer_handle().acquire_read();
+  const std::vector<std::byte> final_payload(
+      final_read.data(), final_read.data() + final_read.size());
+  EXPECT_EQ(final_payload, original_payload);
+
+  const ImageView view(output.image_value());
+  ASSERT_EQ(view.width(), samples.size());
+  for (std::size_t index = 0U; index < samples.size(); ++index) {
+    Scalar observed{};
+    std::memcpy(&observed, view.channel_data(index, 0U, 0U), sizeof(observed));
+    EXPECT_EQ(observed, samples[index]);
+  }
+}
+
+/**
+ * @brief Publishes one Ready generic CPU DenseTensor without ImageFacet.
+ * @param value Byte-fill seed retained only to distinguish test revisions.
+ * @return Valid Ready one-dimensional DenseTensor Value.
+ * @throws DenseTensor validation, allocation, or publication exceptions
+ * unchanged.
+ * @note The missing ImageFacet is intentional: generic output authority must
+ * validate Value representation and identity without imposing image metadata.
+ */
+Value make_generic_dense_value(std::byte value = std::byte{0x13}) {
+  return Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{{4U},
+                            ElementSemantics::FloatingPoint,
+                            StorageEncoding{32U}},
+      std::nullopt, StridedLayout{{4}}, std::vector<std::byte>(16U, value));
+}
+
+/**
+ * @brief Publishes one Pending native generic DenseTensor without ImageFacet.
+ * @return Pending Value plus its unique source-private terminal producer.
+ * @throws std::invalid_argument, std::overflow_error, or std::bad_alloc from
+ * descriptor, binding, identity, or ownership construction.
+ * @note HostPinned CPU storage keeps the fixture deterministic while exercising
+ * the same native pending publication path used by device producers.
+ */
+PendingDeviceValuePublication make_pending_generic_dense_value() {
+  constexpr std::size_t kStorageSize = 16U;
+  auto owner = std::make_shared<std::array<std::byte, kStorageSize>>();
+  return PendingDeviceValuePublisher::publish_dense_tensor(
+      DenseTensorDescriptor{{4U},
+                            ElementSemantics::FloatingPoint,
+                            StorageEncoding{32U}},
+      std::nullopt, StridedLayout{{4}}, owner, owner.get(), owner->data(),
+      owner->size(), DeviceId(DeviceBackend::CPU), MemoryDomain::HostPinned);
+}
+
+/**
+ * @brief Malformed and control results used by full-route admission tests.
+ *
+ * @throws Nothing for ordinary enum operations.
+ * @note Every malformed variant is still a constructible NodeOutput. The
+ * provider callback, rather than a direct committer call, returns it so the
+ * real frozen registry plan owns the rejection decision.
+ */
+enum class FullRouteOutputFixture {
+  /** @brief Returns no named Value despite a declared image output. */
+  Empty,
+  /** @brief Publishes a valid image Value under an undeclared name. */
+  WrongName,
+  /** @brief Publishes canonical DenseTensor storage without ImageFacet. */
+  MissingImageFacet,
+  /** @brief Publishes a valid image whose extent differs from the plan. */
+  WrongExtent,
+  /** @brief Publishes a valid image plus one undeclared parameter result. */
+  UnexpectedData,
+  /** @brief Publishes one valid canonical Host image matching the plan. */
+  ValidHost,
+};
+
+/**
+ * @brief Malformed generic candidates used by exact authority regressions.
+ * @throws Nothing for ordinary enum operations.
+ * @note Every case also publishes a valid canonical image so rejection is
+ * attributable solely to the independent generic output category.
+ */
+enum class GenericRouteOutputFixture {
+  /** @brief Omits the declared `deep` Value. */
+  Missing,
+  /** @brief Adds undeclared `rogue` beside `deep`. */
+  Extra,
+  /** @brief Substitutes undeclared `latent` for `deep`. */
+  WrongName,
+  /** @brief Stores an invalid Value under the declared name. */
+  Invalid,
+  /** @brief Publishes the declared Value with a Failed fence. */
+  Failed,
+  /** @brief Publishes the declared Value after producer cancellation. */
+  ProducerCancelled,
+};
+
+/**
+ * @brief Builds one image-plus-generic provider candidate for rejection tests.
+ * @param fixture Exact malformed generic category to construct.
+ * @return NodeOutput with one valid 4-by-3 image and the selected generic map.
+ * @throws Value publication, pending-producer, or allocation exceptions
+ * unchanged.
+ * @note Invalid Values are inserted directly because `publish_named_value`
+ * correctly rejects them during assembly; the runtime validator must still
+ * fail closed against a malicious/private provider that constructs the public
+ * map member directly.
+ */
+NodeOutput make_generic_route_output_fixture(
+    GenericRouteOutputFixture fixture) {
+  NodeOutput output = make_image_output(4, 3, 1, 13.0f);
+  switch (fixture) {
+    case GenericRouteOutputFixture::Missing:
+      return output;
+    case GenericRouteOutputFixture::Extra:
+      output.publish_named_value("deep", make_generic_dense_value());
+      output.publish_named_value("rogue",
+                                 make_generic_dense_value(std::byte{0x14}));
+      return output;
+    case GenericRouteOutputFixture::WrongName:
+      output.publish_named_value("latent", make_generic_dense_value());
+      return output;
+    case GenericRouteOutputFixture::Invalid:
+      output.named_values.emplace("deep", Value{});
+      return output;
+    case GenericRouteOutputFixture::Failed: {
+      PendingDeviceValuePublication pending =
+          make_pending_generic_dense_value();
+      const Value value = pending.value;
+      if (!pending.producer.complete_failed(
+              ReadyFenceFailure(ReadyFenceFailureDomain::Producer, 130,
+                                "generic authority fixture failure"))) {
+        throw std::logic_error(
+            "Generic authority fixture could not fail its producer.");
+      }
+      output.publish_named_value("deep", value);
+      return output;
+    }
+    case GenericRouteOutputFixture::ProducerCancelled: {
+      PendingDeviceValuePublication pending =
+          make_pending_generic_dense_value();
+      const Value value = pending.value;
+      if (!pending.producer.cancel()) {
+        throw std::logic_error(
+            "Generic authority fixture could not cancel its producer.");
+      }
+      output.publish_named_value("deep", value);
+      return output;
+    }
+  }
+  throw std::logic_error("Unknown generic route output fixture.");
+}
+
+/**
+ * @brief Builds one full-route provider result without consulting its plan.
+ *
+ * @param fixture Exact malformed or valid result category.
+ * @return Provider-owned NodeOutput for a planned 4-by-3 image route.
+ * @throws Value, allocation, publication, or image-buffer exceptions
+ * unchanged.
+ * @note The output factory receives no PlannedOutputAuthority. This preserves
+ * the production trust direction: registration and graph geometry authorize
+ * the result, while the provider can only submit a candidate.
+ */
+NodeOutput make_full_route_output_fixture(FullRouteOutputFixture fixture) {
+  switch (fixture) {
+    case FullRouteOutputFixture::Empty:
+      return NodeOutput{};
+    case FullRouteOutputFixture::WrongName: {
+      NodeOutput canonical = make_image_output(4, 3, 1, 2.0f);
+      NodeOutput output;
+      output.publish_named_value("wrong", canonical.image_value());
+      return output;
+    }
+    case FullRouteOutputFixture::MissingImageFacet: {
+      NodeOutput output;
+      output.publish_image_value(Value::from_cpu_dense_tensor(
+          DenseTensorDescriptor{{3U, 4U},
+                                ElementSemantics::FloatingPoint,
+                                StorageEncoding{32U}},
+          std::nullopt, StridedLayout{{16, 4}},
+          std::vector<std::byte>(48U, std::byte{0})));
+      return output;
+    }
+    case FullRouteOutputFixture::WrongExtent:
+      return make_image_output(5, 3, 1, 3.0f);
+    case FullRouteOutputFixture::UnexpectedData: {
+      NodeOutput output = make_image_output(4, 3, 1, 3.0f);
+      output.data["rogue"] = 130;
+      return output;
+    }
+    case FullRouteOutputFixture::ValidHost:
+      return make_image_output(4, 3, 1, 4.0f);
+  }
+  throw std::logic_error("Unknown full-route output fixture.");
+}
+
+/**
+ * @brief Declares the provider-defined Value fixture used by authority tests.
+ * @param buffer Valid host-readable binding retained as provider buffer zero.
+ * @return Ready provider-defined Value retaining its provider generation.
+ * @throws Provider registry, validation, overflow, or allocation exceptions
+ * unchanged.
+ * @note The definition follows the provider ABI fixture callbacks below.
+ */
+Value make_metrics_provider_defined_value(BufferHandle buffer);
+
+/**
+ * @brief Declares a multi-buffer provider fixture with an optional live
+ * registry retained for later artifact reconstruction.
+ * @param buffers One to 32 host-readable sealed bindings.
+ * @param registry Optional caller-owned registry that outlives replay.
+ * @return Ready provider-defined Value retaining the loaded generation.
+ * @throws Provider registry, validation, overflow, or allocation exceptions
+ * unchanged.
+ */
+Value make_metrics_provider_defined_value(std::vector<BufferHandle> buffers,
+                                          DataDefinitionRegistry* registry);
+
+/**
+ * @brief Proves a legal provider-defined generic Value needs independent
+ * revisioned output authority.
+ *
+ * @return Nothing; GoogleTest reports route admission, representation, or
+ * formal identity failures.
+ * @throws Registry, provider, runtime, graph, service, or allocation
+ * exceptions unchanged.
+ * @note This graph-backed regression intentionally declares no image or
+ * parameter result. The callback publishes `deep` in `named_values`; routing
+ * it through `NodeOutput::data` would invalidate the test's contract.
+ */
+TEST(ComputeOutputAuthority,
+     FullRouteCommitsDeclaredReadyProviderDefinedGenericValue) {
+  constexpr char kType[] = "issue130_generic_named_value_red";
+  constexpr char kSubtype[] = "provider_defined";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  const Value deep = make_metrics_provider_defined_value(
+      make_image_output(1, 1, 1, 13.0f).image_value().buffer_handle());
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc(
+          [deep](const Node&, const std::vector<const NodeOutput*>&) {
+            NodeOutput output;
+            output.publish_named_value("deep", deep);
+            return output;
+          }),
+      declare_test_outputs(OpMetadata{}, false, {}, {"deep"}));
+
+  const ScopedTestDirectory root(
+      std::filesystem::temp_directory_path() /
+      "photospider-issue130-generic-provider-defined-red");
+  GraphRuntime::Info info;
+  info.name = "issue130-generic-provider-defined-red";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  graph.add_node(make_node(1, kType, kSubtype));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    const NodeOutput* committed = nullptr;
+    if (parallel) {
+      EXPECT_NO_THROW(committed =
+                          &service.compute_parallel(graph, runtime, request));
+    } else {
+      EXPECT_NO_THROW(committed = &service.compute(graph, request));
+    }
+    ASSERT_NE(committed, nullptr);
+    ASSERT_EQ(committed->named_values.size(), 1U);
+    const auto deep_entry = committed->named_values.find("deep");
+    ASSERT_NE(deep_entry, committed->named_values.end());
+    const Value& actual = deep_entry->second;
+    EXPECT_EQ(actual.representation_kind(),
+              ValueRepresentationKind::ProviderDefined);
+    EXPECT_EQ(actual.revision_id(), deep.revision_id());
+    EXPECT_EQ(actual.producer_identity(), deep.producer_identity());
+    ASSERT_EQ(actual.buffer_count(), deep.buffer_count());
+    for (std::size_t index = 0U; index < actual.buffer_count(); ++index) {
+      EXPECT_EQ(actual.storage_binding(index).allocation,
+                deep.storage_binding(index).allocation);
+    }
+    EXPECT_TRUE(committed->data.empty());
+    EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
+  }
+  EXPECT_EQ(graph.node(1).hp_version, 2);
+  runtime.stop();
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Publishes a nonzero-origin CPU image with storage-distinct pixels.
+ *
+ * @param data_window Signed logical window whose spans define the image size.
+ * @return Canonical FLOAT32 single-channel output where storage pixel `(x,y)`
+ * contains `100*y+x`.
+ * @throws std::invalid_argument or std::overflow_error when bounds, layout, or
+ * storage arithmetic is invalid.
+ * @throws std::bad_alloc, std::logic_error, or std::system_error from Host
+ * allocation, grant retirement, sealing, or output publication.
+ * @note The fill pattern is storage-relative by design, allowing tests to prove
+ * a logical Region was translated through data_window before pixel access.
+ */
+NodeOutput make_offset_image_output(const ImageBounds& data_window) {
+  const std::size_t width = image_bounds_width(data_window);
+  const std::size_t height = image_bounds_height(data_window);
+  if (width == 0U || height == 0U) {
+    throw std::invalid_argument(
+        "Offset image fixture requires a nonempty data window.");
+  }
+  if (width > std::numeric_limits<std::size_t>::max() / sizeof(float) ||
+      height >
+          std::numeric_limits<std::size_t>::max() / (width * sizeof(float))) {
+    throw std::overflow_error("Offset image fixture storage size overflowed.");
+  }
+  DenseTensorDescriptor descriptor{{height, width, 1U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.data_window = data_window;
+  const std::size_t row_stride = width * sizeof(float);
+  if (row_stride >
+      static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
+    throw std::overflow_error("Offset image fixture stride overflowed.");
+  }
+  StridedLayout layout{{static_cast<std::ptrdiff_t>(row_stride),
+                        static_cast<std::ptrdiff_t>(sizeof(float)),
+                        static_cast<std::ptrdiff_t>(sizeof(float))}};
+  HostOutputBinding binding =
+      HostOutputBinding::allocate(DenseImageOutputPlan::create(
+          "image", std::move(descriptor), std::move(facet), std::move(layout),
+          row_stride * height, 64U));
+  HostOutputWriteGrant grant = binding.grant_whole();
+  if (grant.span_count() != 1U ||
+      grant.span(0U).byte_size != row_stride * height) {
+    throw std::logic_error(
+        "Offset image fixture expected one contiguous whole grant.");
+  }
+  std::byte* const bytes = grant.data(0U);
+  for (std::size_t y = 0U; y < height; ++y) {
+    for (std::size_t x = 0U; x < width; ++x) {
+      const float value = static_cast<float>(100U * y + x);
+      std::memcpy(bytes + y * row_stride + x * sizeof(float), &value,
+                  sizeof(value));
+    }
+  }
+  grant.retire_success();
+  NodeOutput output;
+  output.publish_image_value(binding.seal());
+  return output;
+}
+
+/**
+ * @brief Publishes image metadata with an arbitrary valid signed data window.
+ *
+ * @param data_window Signed logical bounds whose positive spans define shape.
+ * @return Canonical Ready image output backed by one repeated immutable byte.
+ * @throws std::invalid_argument, std::out_of_range, std::overflow_error, or
+ *         std::length_error when bounds, descriptor, facet, layout, or buffer
+ *         validation fails.
+ * @throws std::bad_alloc when descriptor, facet, layout, Value, or output
+ *         metadata storage cannot allocate.
+ * @note Zero read strides intentionally alias every logical sample to one
+ *       immutable byte. Callers use this fixture only for metadata paths with
+ *       pixel-statistics inspection disabled, so extreme logical extents need
+ *       no correspondingly large allocation.
+ */
+NodeOutput make_metadata_only_image_output(const ImageBounds& data_window) {
+  const std::size_t width = image_bounds_width(data_window);
+  const std::size_t height = image_bounds_height(data_window);
+  DenseTensorDescriptor descriptor{{height, width},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  ImageFacet facet =
+      make_zero_origin_image_facet(descriptor, 1U, 0U, std::nullopt);
+  facet.data_window = data_window;
+  const Value seed = Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{{1U},
+                            ElementSemantics::UnsignedInteger,
+                            StorageEncoding{8U}},
+      std::nullopt, StridedLayout{{1}},
+      std::vector<std::byte>{std::byte{0x2a}});
+  NodeOutput output;
+  output.publish_image_value(Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet), StridedLayout{{0, 0}},
+      seed.buffer_handle()));
+  return output;
+}
+
+/**
+ * @brief Opens one canonical split-test image for immutable access.
+ *
+ * @param output Output containing a Ready host-readable image Value.
+ * @return Retaining checked image view over the canonical Value.
+ * @throws std::invalid_argument when the canonical image is absent.
+ * @throws ReadyFenceAccessError, BufferAccessError, or view construction
+ * exceptions unchanged.
+ * @note The view performs no payload copy or conversion.
+ */
+ImageView inspect_image_output(const NodeOutput& output) {
+  if (!output.has_image_value()) {
+    throw std::invalid_argument(
+        "Split test image inspection requires a canonical Value.");
+  }
+  return ImageView(output.image_value());
+}
+
+/**
+ * @brief Owns detached metadata persisted by recording disk-cache codecs.
+ *
+ * @throws Nothing from default construction and destruction.
+ * @note The mutex serializes fake codec callbacks across sequential, task,
+ * committer, and compute-I/O executor lanes. The state is test authority only;
+ * physical marker files remain the production filesystem-presence evidence.
+ */
+struct RecordingDiskCacheCodecState final {
+  /** @brief Serializes reads and replacement of detached metadata values. */
+  std::mutex mutex;
+  /** @brief Last complete parameter map accepted by the fake writer. */
+  plugin::ParameterMap metadata;
+};
+
+/**
+ * @brief Bundles observable image and metadata codecs for schema regressions.
+ *
+ * @throws Nothing from member destruction.
+ * @note Tests retain these shared owners while GraphCacheService holds const
+ * codec interfaces, allowing exact call-count assertions after real requests.
+ */
+struct RecordingDiskCacheCodecs final {
+  /** @brief Image codec whose callbacks maintain a physical marker artifact. */
+  std::shared_ptr<testing::FakeImageArtifactCodec> image;
+  /** @brief Metadata codec backed by detached state and a marker sidecar. */
+  std::shared_ptr<testing::FakeCacheMetadataCodec> metadata;
+};
+
+/**
+ * @brief Writes one nonempty marker at a production cache artifact path.
+ *
+ * @param path Existing-parent destination selected by GraphCacheService.
+ * @param marker Deterministic byte distinguishing image and metadata writes.
+ * @return Nothing after close-time stream state has been checked.
+ * @throws std::runtime_error when opening, writing, or closing the marker
+ * fails.
+ * @note The helper models only artifact existence. Codec payload semantics are
+ * retained separately so tests can force sibling-shape decisions before any
+ * decode or metadata parse callback.
+ */
+void write_disk_cache_marker(const std::filesystem::path& path, char marker) {
+  std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+  if (!stream.is_open()) {
+    throw std::runtime_error("Could not open disk-cache marker path.");
+  }
+  stream.put(marker);
+  stream.close();
+  if (!stream) {
+    throw std::runtime_error("Could not persist disk-cache marker path.");
+  }
+}
+
+/**
+ * @brief Creates stateful fake codecs that also maintain sibling existence.
+ *
+ * @return Shared observable codecs suitable for GraphCacheService injection.
+ * @throws std::bad_alloc when shared ownership, callback, image, or map storage
+ * cannot allocate.
+ * @throws Value or filesystem exceptions from callback execution.
+ * @note Image decode returns a fresh 4x3 float image. Metadata reads return the
+ * last detached successful write. Both writers create real marker files so the
+ * production filesystem preflight, not the fake call history, chooses a hit.
+ */
+RecordingDiskCacheCodecs make_recording_disk_cache_codecs() {
+  auto state = std::make_shared<RecordingDiskCacheCodecState>();
+  auto image = std::make_shared<testing::FakeImageArtifactCodec>(
+      [](const std::filesystem::path&, const ImageArtifactDecodeRequest&) {
+        return make_image_output(4, 3, 1, 0.73F).image_value();
+      },
+      [](const std::filesystem::path& path, const Value&,
+         const ImageArtifactEncodeRequest&) {
+        write_disk_cache_marker(path, 'I');
+      });
+  auto metadata = std::make_shared<testing::FakeCacheMetadataCodec>(
+      [state](const std::filesystem::path&) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        return state->metadata;
+      },
+      [state](const std::filesystem::path& path,
+              const plugin::ParameterMap& values) {
+        {
+          std::lock_guard<std::mutex> lock(state->mutex);
+          state->metadata = values;
+        }
+        write_disk_cache_marker(path, 'M');
+      });
+  return {std::move(image), std::move(metadata)};
+}
+
+/**
+ * @brief Copies one canonical split-test image into an owning OpenCV matrix.
+ *
+ * @param output Output containing a Ready host-readable image Value.
+ * @return Independent matrix whose bytes outlive all transient projections.
+ * @throws Image projection, OpenCV allocation, or copy exceptions unchanged.
+ * @note This helper is for test comparison only and cannot become graph,
+ * cache, dirty, RT, or publication authority.
+ */
+cv::Mat project_image_mat(const NodeOutput& output) {
+  if (!output.has_image_value()) {
+    throw std::invalid_argument(
+        "Split test image projection requires a canonical Value.");
+  }
+  return toCvMat(output.image_value()).clone();
+}
+
+/**
+ * @brief Publishes one metadata-complete opaque device image for split tests.
+ *
+ * @param width Positive logical image width.
+ * @param height Positive logical image height.
+ * @param channels Positive interleaved channel count.
+ * @param semantics Stored scalar semantics retained by the image descriptor.
+ * @param bit_width Exact whole-byte scalar bit width.
+ * @param device Provisional backend label converted to a concrete device.
+ * @param owner Non-null fake native allocation owner retained by the Value.
+ * @param memory_domain Exact non-host-readable allocation domain.
+ * @return Pending non-host-visible Value plus its move-only terminal producer.
+ * @throws Image allocation, Value validation, identity, or publication
+ * exceptions unchanged.
+ * @note The result exposes no host pointer, so tests may inspect binding and
+ * descriptor identity but cannot accidentally read payload bytes.
+ */
+PendingDeviceValuePublication publish_opaque_device_image(
+    int width, int height, int channels, ElementSemantics semantics,
+    std::uint16_t bit_width, DeviceBackend device, std::shared_ptr<void> owner,
+    MemoryDomain memory_domain = MemoryDomain::DeviceLocal) {
+  if (!owner || width <= 0 || height <= 0 || channels <= 0 || bit_width == 0U ||
+      bit_width % 8U != 0U) {
+    throw std::invalid_argument(
+        "Opaque device image test publication is invalid.");
+  }
+  const std::size_t image_width = static_cast<std::size_t>(width);
+  const std::size_t image_height = static_cast<std::size_t>(height);
+  const std::size_t image_channels = static_cast<std::size_t>(channels);
+  const std::size_t element_bytes = bit_width / 8U;
+  const std::size_t row_stride = image_width * image_channels * element_bytes;
+  DenseTensorDescriptor descriptor{{image_height, image_width, image_channels},
+                                   semantics,
+                                   StorageEncoding{bit_width}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  if (semantics == ElementSemantics::UnsignedInteger) {
+    const double maximum = bit_width == 8U    ? 255.0
+                           : bit_width == 16U ? 65535.0
+                                              : 0.0;
+    if (maximum == 0.0) {
+      throw std::invalid_argument(
+          "Opaque unsigned image fixture bit width is unsupported.");
+    }
+    facet.sample_domain = SampleDomainFacet{
+        1U,
+        SampleEncoding{1U, SampleEncodingKind::CodeValue},
+        SampleDomain{SampleDomainKind::CodeValue, 0.0, maximum},
+        {}};
+  } else {
+    facet.sample_domain =
+        SampleDomainFacet{1U,
+                          SampleEncoding{1U, SampleEncodingKind::Normalized},
+                          SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                          {}};
+  }
+  return PendingDeviceValuePublisher::publish_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{
+          {static_cast<std::ptrdiff_t>(row_stride),
+           static_cast<std::ptrdiff_t>(image_channels * element_bytes),
+           static_cast<std::ptrdiff_t>(element_bytes)}},
+      owner, owner.get(), nullptr, row_stride * image_height, DeviceId(device),
+      memory_domain);
+}
+
+/** @brief Permanent provider identity used only by metrics recorder tests. */
+constexpr ExtensionIdentity kMetricsProviderIdentity{
+    0x1300000000000001ULL,
+    0x0000000000000001ULL};  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Provider Schema identity used only by metrics recorder tests. */
+constexpr ExtensionIdentity kMetricsSchemaIdentity{
+    0x1300000000000010ULL,
+    0x0000000000000010ULL};  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Provider Layout identity used only by metrics recorder tests. */
+constexpr ExtensionIdentity kMetricsLayoutIdentity{
+    0x1300000000000020ULL,
+    0x0000000000000020ULL};  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Converts one C++ extension identity to the frozen provider record.
+ * @param identity Permanent identity to translate.
+ * @return Exact two-word pure-C identity.
+ * @throws Nothing.
+ * @note The helper performs no byte-order conversion or persistence work.
+ */
+constexpr ps_data_identity_v3 metrics_provider_identity(
+    ExtensionIdentity identity) noexcept {
+  return {identity.high, identity.low};
+}
+
+/**
+ * @brief Stable callback state for the minimal metrics provider generation.
+ * @throws std::bad_alloc if diagnostic string construction allocates.
+ * @note Definition names, records, context, and implementation bytes remain
+ * alive through the candidate module lease and every resulting Value.
+ */
+struct MetricsProviderState final {
+  /** @brief Stable provider implementation-version bytes. */
+  std::string implementation_version = "metrics-provider-v1";
+
+  /** @brief Stable diagnostic names for the Schema and Layout definitions. */
+  std::array<std::string, 2U> names{"metrics-schema", "metrics-layout"};
+
+  /** @brief Complete immutable definition bundle returned through the ABI. */
+  std::array<ps_data_definition_v3, 2U> definitions{};
+
+  /**
+   * @brief Builds the complete stable provider definition bundle.
+   * @throws std::bad_alloc when owned diagnostic strings cannot allocate.
+   * @note Pure-C record pointers are installed only after string members have
+   * completed construction.
+   */
+  MetricsProviderState() {
+    const std::array<ps_data_definition_kind_v3, 2U> kinds{
+        PS_DATA_DEFINITION_SCHEMA_V3, PS_DATA_DEFINITION_LAYOUT_V3};
+    const std::array<ExtensionIdentity, 2U> identities{kMetricsSchemaIdentity,
+                                                       kMetricsLayoutIdentity};
+    for (std::size_t index = 0U; index < definitions.size(); ++index) {
+      definitions[index].struct_size = PS_DATA_DEFINITION_V3_SIZE;
+      definitions[index].kind = kinds[index];
+      definitions[index].structural_version = 1U;
+      definitions[index].identity =
+          metrics_provider_identity(identities[index]);
+      definitions[index].canonical_name = {
+          reinterpret_cast<const std::uint8_t*>(names[index].data()),
+          static_cast<std::uint64_t>(names[index].size())};
+    }
+  }
+};
+
+/** @brief Same-thread candidate state visible only during synchronous load. */
+thread_local MetricsProviderState* staged_metrics_provider = nullptr;
+
+/**
+ * @brief Returns the exact provider ABI version for the metrics fixture.
+ * @return `PS_DATA_PROVIDER_ABI_VERSION`.
+ * @throws Nothing across the pure-C ABI.
+ * @note The numeric handshake exposes no provider state.
+ */
+std::uint32_t PS_DATA_CALL metrics_provider_abi_version(void) PS_DATA_NOEXCEPT {
+  return PS_DATA_PROVIDER_ABI_VERSION;
+}
+
+/**
+ * @brief Accepts the generically checked multi-buffer fixture publication.
+ * @param provider_context Non-null MetricsProviderState retained by the module.
+ * @param value Payload-enabled Host view of the candidate Value.
+ * @param diagnostic Unused Host-owned diagnostic output.
+ * @param output Unused Host-owned variable-output sink.
+ * @return OK only for one to 32 present payload-visible buffers.
+ * @throws Nothing across the pure-C ABI.
+ * @note Validation reads no payload byte; it checks only Host-supplied framing
+ * and availability facts needed by this minimal fixture.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_validate(
+    void* provider_context, const ps_data_value_view_v3* value,
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)diagnostic;
+  (void)output;
+  if (provider_context == nullptr || value == nullptr ||
+      value->buffer_count == 0U || value->buffer_count > 32U ||
+      value->buffers == nullptr) {
+    return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+  }
+  for (std::uint64_t index = 0U; index < value->buffer_count; ++index) {
+    if (value->buffers[index].data == nullptr ||
+        (value->buffers[index].flags & PS_DATA_BUFFER_PAYLOAD_AVAILABLE_V3) ==
+            0U) {
+      return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+    }
+  }
+  return PS_DATA_STATUS_OK_V3;
+}
+
+/**
+ * @brief Declines property queries outside this fixture's validation purpose.
+ * @param provider_context Ignored provider state.
+ * @param value Ignored metadata-only Value view.
+ * @param query Ignored property request.
+ * @param result Ignored Host-owned result.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return `PS_DATA_STATUS_UNSUPPORTED_V3`.
+ * @throws Nothing across the pure-C ABI.
+ * @note All callback inputs and outputs are intentionally ignored.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_query(
+    void* provider_context, const ps_data_value_view_v3* value,
+    const ps_data_property_query_v3* query, ps_data_property_result_v3* result,
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)provider_context;
+  (void)value;
+  (void)query;
+  (void)result;
+  (void)diagnostic;
+  (void)output;
+  return PS_DATA_STATUS_UNSUPPORTED_V3;
+}
+
+/**
+ * @brief Declines Region evaluation outside this fixture's validation purpose.
+ * @param provider_context Ignored provider state.
+ * @param value Ignored metadata-only Value view.
+ * @param request Ignored Region request.
+ * @param result Ignored Host-owned result.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return `PS_DATA_STATUS_UNSUPPORTED_V3`.
+ * @throws Nothing across the pure-C ABI.
+ * @note All callback inputs and outputs are intentionally ignored.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_evaluate_region(
+    void* provider_context, const ps_data_value_view_v3* value,
+    const ps_data_region_request_v3* request, ps_data_region_result_v3* result,
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)provider_context;
+  (void)value;
+  (void)request;
+  (void)result;
+  (void)diagnostic;
+  (void)output;
+  return PS_DATA_STATUS_UNSUPPORTED_V3;
+}
+
+/**
+ * @brief Declines DataSpec evaluation outside this fixture's validation role.
+ * @param provider_context Ignored provider state.
+ * @param value Ignored metadata-only Value view.
+ * @param request Ignored DataSpec request.
+ * @param result Ignored Host-owned result.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return `PS_DATA_STATUS_UNSUPPORTED_V3`.
+ * @throws Nothing across the pure-C ABI.
+ * @note All callback inputs and outputs are intentionally ignored.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_evaluate_spec(
+    void* provider_context, const ps_data_value_view_v3* value,
+    const ps_data_spec_request_v3* request, ps_data_spec_result_v3* result,
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)provider_context;
+  (void)value;
+  (void)request;
+  (void)result;
+  (void)diagnostic;
+  (void)output;
+  return PS_DATA_STATUS_UNSUPPORTED_V3;
+}
+
+/**
+ * @brief Emits every provider buffer in canonical index order.
+ * @param provider_context Non-null retained provider state.
+ * @param value Payload-enabled one-to-32-buffer Value view.
+ * @param sink Non-null Host-owned canonical-content sink.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return Stable sink status, or invalid argument for malformed input.
+ * @throws Nothing across the pure-C ABI.
+ * @note Segment boundaries carry no identity meaning; deterministic index
+ * order and exact bytes provide the fixture's logical content identity.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_visit_content(
+    void* provider_context, const ps_data_value_view_v3* value,
+    const ps_data_byte_sink_v3* sink, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  if (provider_context == nullptr || value == nullptr || sink == nullptr ||
+      sink->append == nullptr || value->buffer_count == 0U ||
+      value->buffers == nullptr) {
+    return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+  }
+  (void)diagnostic;
+  (void)output;
+  for (std::uint64_t index = 0U; index < value->buffer_count; ++index) {
+    const ps_data_buffer_view_v3& buffer = value->buffers[index];
+    if (buffer.data == nullptr ||
+        (buffer.flags & PS_DATA_BUFFER_PAYLOAD_AVAILABLE_V3) == 0U) {
+      return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+    }
+    const ps_data_status_v3 status =
+        sink->append(sink->context, buffer.data, buffer.byte_size);
+    if (status != PS_DATA_STATUS_OK_V3) {
+      return status;
+    }
+  }
+  return PS_DATA_STATUS_OK_V3;
+}
+
+/**
+ * @brief Creates a stable non-owning token for unused provider-owner tests.
+ * @param provider_context Non-null MetricsProviderState lifetime token.
+ * @param owner Host-owned pointer output.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return OK with the stable context token, otherwise invalid argument.
+ * @throws Nothing across the pure-C ABI.
+ * @note The token grants no ownership beyond the retained provider generation.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_create_owner(
+    void* provider_context, void** owner, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)diagnostic;
+  (void)output;
+  if (provider_context == nullptr || owner == nullptr) {
+    return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+  }
+  *owner = provider_context;
+  return PS_DATA_STATUS_OK_V3;
+}
+
+/**
+ * @brief Accepts retirement of the fixture's stable non-owning owner token.
+ * @param provider_context Expected MetricsProviderState token.
+ * @param owner Token previously returned by metrics_provider_create_owner.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return OK only when both pointers identify the same stable state.
+ * @throws Nothing across the pure-C ABI.
+ * @note No storage is released because the token never owned state.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_destroy_owner(
+    void* provider_context, void* owner, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)diagnostic;
+  (void)output;
+  return provider_context != nullptr && provider_context == owner
+             ? PS_DATA_STATUS_OK_V3
+             : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+}
+
+/**
+ * @brief Confirms final provider-generation retirement.
+ * @param provider_context Non-null MetricsProviderState retained through call.
+ * @param diagnostic Ignored Host-owned diagnostic.
+ * @param output Ignored Host-owned output sink.
+ * @return OK for a valid context, otherwise invalid argument.
+ * @throws Nothing across the pure-C ABI.
+ * @note The module lease releases state after this callback returns.
+ */
+ps_data_status_v3 PS_DATA_CALL metrics_provider_destroy(
+    void* provider_context, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+  (void)diagnostic;
+  (void)output;
+  return provider_context != nullptr ? PS_DATA_STATUS_OK_V3
+                                     : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+}
+
+/**
+ * @brief Fills the exact metrics fixture provider callback table.
+ * @param api Host-owned exact-size output table.
+ * @return OK when one staged provider state and exact table are present.
+ * @throws Nothing across the pure-C ABI.
+ * @note The function borrows staged state only for this synchronous call.
+ */
+ps_data_status_v3 PS_DATA_CALL
+metrics_provider_get_api(ps_data_provider_api_v3* api) PS_DATA_NOEXCEPT {
+  MetricsProviderState* state = staged_metrics_provider;
+  if (api == nullptr || state == nullptr ||
+      api->struct_size != PS_DATA_PROVIDER_API_V3_SIZE) {
+    return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+  }
+  *api = {};
+  api->struct_size = PS_DATA_PROVIDER_API_V3_SIZE;
+  api->abi_version = PS_DATA_PROVIDER_ABI_VERSION;
+  api->definition_count = static_cast<std::uint32_t>(state->definitions.size());
+  api->provider_identity = metrics_provider_identity(kMetricsProviderIdentity);
+  api->implementation_version = {
+      reinterpret_cast<const std::uint8_t*>(
+          state->implementation_version.data()),
+      static_cast<std::uint64_t>(state->implementation_version.size())};
+  api->definitions = state->definitions.data();
+  api->provider_context = state;
+  api->validate = &metrics_provider_validate;
+  api->query = &metrics_provider_query;
+  api->evaluate_region = &metrics_provider_evaluate_region;
+  api->evaluate_spec = &metrics_provider_evaluate_spec;
+  api->visit_content = &metrics_provider_visit_content;
+  api->create_owner = &metrics_provider_create_owner;
+  api->destroy_owner = &metrics_provider_destroy_owner;
+  api->destroy_provider = &metrics_provider_destroy;
+  return PS_DATA_STATUS_OK_V3;
+}
+
+/**
+ * @brief Publishes one provider-defined Value over a supplied sealed binding.
+ *
+ * @param buffer Valid host-readable binding retained as provider buffer zero.
+ * @return Ready ProviderDefined Value retaining the fixture generation.
+ * @throws std::logic_error when the provider candidate cannot load.
+ * @throws ExtensionContractError, std::overflow_error, or std::bad_alloc from
+ * registry loading, provider validation, or Value publication.
+ * @note The local registry retires before return; the returned Value proves its
+ * generation and module lease remain sufficient for later metrics inspection.
+ */
+Value make_metrics_provider_defined_value(BufferHandle buffer) {
+  std::vector<BufferHandle> buffers;
+  buffers.push_back(std::move(buffer));
+  return make_metrics_provider_defined_value(std::move(buffers), nullptr);
+}
+
+/** @copydoc
+ * make_metrics_provider_defined_value(std::vector<BufferHandle>,DataDefinitionRegistry*)
+ */
+Value make_metrics_provider_defined_value(std::vector<BufferHandle> buffers,
+                                          DataDefinitionRegistry* registry) {
+  if (buffers.empty() || buffers.size() > 32U) {
+    throw std::invalid_argument(
+        "Metrics provider fixture requires one to 32 buffers.");
+  }
+  auto state = std::make_shared<MetricsProviderState>();
+  DataProviderCandidate candidate;
+  candidate.get_abi_version = &metrics_provider_abi_version;
+  candidate.get_api = &metrics_provider_get_api;
+  candidate.module_lease = state;
+
+  std::unique_ptr<DataDefinitionRegistry> local_registry;
+  if (registry == nullptr) {
+    local_registry = std::make_unique<DataDefinitionRegistry>();
+    registry = local_registry.get();
+  }
+  staged_metrics_provider = state.get();
+  DataProviderLoadResult loaded;
+  try {
+    loaded = registry->load(std::move(candidate));
+  } catch (...) {
+    staged_metrics_provider = nullptr;
+    throw;
+  }
+  staged_metrics_provider = nullptr;
+  if (!loaded.ok()) {
+    throw std::logic_error("Metrics provider fixture failed to load: " +
+                           loaded.diagnostic);
+  }
+
+  DataDescriptorEnvelope descriptor;
+  descriptor.schema.kind = ExtensionDefinitionKind::Schema;
+  descriptor.schema.identity = kMetricsSchemaIdentity;
+  descriptor.schema.structural_version = 1U;
+  descriptor.schema.payload = {std::byte{0x13}};
+  ProviderDefinedLayout layout;
+  layout.definition.kind = ExtensionDefinitionKind::Layout;
+  layout.definition.identity = kMetricsLayoutIdentity;
+  layout.definition.structural_version = 1U;
+  layout.definition.payload = {std::byte{0x01}};
+  for (std::size_t index = 0U; index < buffers.size(); ++index) {
+    layout.buffers.push_back({static_cast<std::uint32_t>(index),
+                              static_cast<std::uint32_t>(index + 1U), 0U,
+                              buffers[index].size()});
+  }
+  return Value::from_provider_defined(*registry, std::move(descriptor),
+                                      std::move(layout), std::move(buffers));
 }
 
 /**
@@ -472,6 +1800,171 @@ class DirectDirtyProviderProbe final {
   int maximum_active_ = 0;
   /** @brief Whether the current blocked interval may complete. */
   bool released_ = true;
+};
+
+/**
+ * @brief Holds one source tile open while observing downstream tile entry.
+ *
+ * The left source tile writes its grant and retires normally. The right
+ * source tile announces entry, then waits before writing. A downstream
+ * callback records its first input sample so the owning test can distinguish
+ * complete publication from an early read of the still-open shared binding.
+ *
+ * @throws std::system_error from mutex or condition-variable operations.
+ * @note The owning test uses two execution workers, releases the blocked tile
+ * before joining its future, and retains this probe through callback captures.
+ */
+class TiledPublicationReleaseProbe final {
+ public:
+  /**
+   * @brief Creates one fresh blocked-source observation interval.
+   * @param fail_right_tile Whether the blocked tile throws after release.
+   * @throws Nothing.
+   */
+  explicit TiledPublicationReleaseProbe(bool fail_right_tile)
+      : fail_right_tile_(fail_right_tile) {}
+
+  /**
+   * @brief Writes one source tile, blocking the nonzero-x sibling first.
+   * @param output Borrowed checked source-tile write capability.
+   * @return Nothing after writing three to the left tile and, unless failure
+   * is injected, five to the right.
+   * @throws std::system_error from synchronization operations.
+   * @throws std::runtime_error when the armed right tile injects failure.
+   * @throws Image validation or OpenCV exceptions unchanged.
+   * @note The left-tile completion flag is published immediately before that
+   * callback returns. The right tile writes no bytes until release_source().
+   */
+  void write_source_tile(const OutputTile& output) {
+    if (output.roi.x == 0) {
+      toCvMat(output).setTo(3.0f);
+      std::lock_guard<std::mutex> lock(mutex_);
+      left_tile_written_ = true;
+      condition_.notify_all();
+      return;
+    }
+
+    bool fail_right_tile = false;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      right_tile_blocked_ = true;
+      condition_.notify_all();
+      condition_.wait(lock, [this] { return source_released_; });
+      fail_right_tile = fail_right_tile_;
+    }
+    if (fail_right_tile) {
+      throw std::runtime_error(
+          "injected tiled publication failure before final seal");
+    }
+    toCvMat(output).setTo(5.0f);
+  }
+
+  /**
+   * @brief Records one consumer entry and copies its first source sample.
+   * @param output Borrowed checked consumer-tile write capability.
+   * @param inputs Exact normalized source tile selected by ROI planning.
+   * @return Nothing after filling the output tile with the observed sample.
+   * @throws GraphError when the exact image input is absent.
+   * @throws std::system_error from synchronization operations.
+   * @throws Image validation or OpenCV exceptions unchanged.
+   * @note Entry is recorded before input validation so any premature callback
+   * remains observable even when the incomplete producer cannot be resolved.
+   */
+  void write_consumer_tile(const OutputTile& output,
+                           const std::vector<InputTile>& inputs) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++consumer_entries_;
+      condition_.notify_all();
+    }
+    if (inputs.size() != 1U || inputs.front().value == nullptr) {
+      throw GraphError(GraphErrc::MissingDependency,
+                       "publication-release consumer requires one input");
+    }
+    const InputTile& input = inputs.front();
+    const cv::Mat input_image = toCvMat(input);
+    const float observed = input_image.at<float>(0, 0);
+    toCvMat(output).setTo(observed);
+  }
+
+  /**
+   * @brief Waits until the left tile wrote and the right tile is blocked.
+   * @param timeout Maximum bounded wait.
+   * @return True when both source-side states are observed before timeout.
+   * @throws std::system_error from synchronization operations.
+   */
+  bool wait_for_partial_source(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout, [this] {
+      return left_tile_written_ && right_tile_blocked_;
+    });
+  }
+
+  /**
+   * @brief Waits for any downstream provider callback to enter.
+   * @param timeout Maximum bounded wait.
+   * @return True when at least one consumer entered before timeout.
+   * @throws std::system_error from synchronization operations.
+   */
+  bool wait_for_consumer(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout,
+                               [this] { return consumer_entries_ > 0; });
+  }
+
+  /**
+   * @brief Releases the blocked right source tile.
+   * @return Nothing.
+   * @throws std::system_error from synchronization operations.
+   * @note Release is monotonic and safe to invoke after a failed wait.
+   */
+  void release_source() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    source_released_ = true;
+    condition_.notify_all();
+  }
+
+  /**
+   * @brief Returns the number of entered consumer tile callbacks.
+   * @return Cumulative consumer entries under the probe lock.
+   * @throws std::system_error from synchronization operations.
+   */
+  int consumer_entries() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return consumer_entries_;
+  }
+
+  /**
+   * @brief Starts a clean successful interval after all callbacks settle.
+   * @return Nothing.
+   * @throws std::system_error from locking.
+   * @note The owning test invokes this only after the failed compute future
+   * returns, so no provider can observe the reset concurrently.
+   */
+  void reset_for_successful_retry() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    left_tile_written_ = false;
+    right_tile_blocked_ = false;
+    source_released_ = false;
+    fail_right_tile_ = false;
+    consumer_entries_ = 0;
+  }
+
+ private:
+  /** @brief Protects every state transition and observation. */
+  mutable std::mutex mutex_;
+  /** @brief Announces source and consumer state transitions. */
+  std::condition_variable condition_;
+  /** @brief Whether the nonblocking left source grant has been written. */
+  bool left_tile_written_ = false;
+  /** @brief Whether the right source grant is waiting before its write. */
+  bool right_tile_blocked_ = false;
+  /** @brief Monotonic authority allowing the right source tile to finish. */
+  bool source_released_ = false;
+  /** @brief Whether the blocked tile injects failure before writing. */
+  bool fail_right_tile_ = false;
+  /** @brief Number of downstream provider callbacks that entered. */
+  int consumer_entries_ = 0;
 };
 
 /**
@@ -1164,7 +2657,7 @@ void run_direct_dirty_cache_selection_case(PlannedCacheState cache_state,
             }
             target_observed_source->store(
                 static_cast<int>(
-                    toCvMat(inputs.front()->image_buffer).at<float>(0, 0)),
+                    toCvMat(inputs.front()->image_value()).at<float>(0, 0)),
                 std::memory_order_relaxed);
             return make_image_output(
                 as_int_flexible(node.parameters, "width", 8),
@@ -1217,7 +2710,7 @@ void run_direct_dirty_cache_selection_case(PlannedCacheState cache_state,
   EXPECT_EQ(target_entries->load(std::memory_order_relaxed), 1);
   EXPECT_EQ(target_observed_source->load(std::memory_order_relaxed), 7);
   if (output != nullptr) {
-    EXPECT_FLOAT_EQ(toCvMat(output->image_buffer).at<float>(0, 0), 17.0f);
+    EXPECT_FLOAT_EQ(toCvMat(output->image_value()).at<float>(0, 0), 17.0f);
   }
   expect_direct_authority_settled(authority);
   registry.unregister_key(
@@ -1321,9 +2814,10 @@ NodeOutput execute_partial_cache_producer(
         "partial-cache producer requires one image input: " + node.name);
   }
   g_partial_cache_producer_calls.fetch_add(1, std::memory_order_relaxed);
-  return make_image_output(inputs.front()->image_buffer.width,
-                           inputs.front()->image_buffer.height,
-                           inputs.front()->image_buffer.channels, 5.0f);
+  const ImageView input = inspect_image_output(*inputs.front());
+  return make_image_output(static_cast<int>(input.width()),
+                           static_cast<int>(input.height()),
+                           static_cast<int>(input.channels()), 5.0F);
 }
 
 /**
@@ -1347,12 +2841,14 @@ NodeOutput execute_partial_cache_consumer(
         GraphErrc::MissingDependency,
         "partial-cache consumer requires one image input: " + node.name);
   }
-  const ImageBuffer& input = inputs.front()->image_buffer;
-  const float observed = toCvMat(input).at<float>(0, 0);
+  const ImageView input = inspect_image_output(*inputs.front());
+  const float observed = toCvMat(input.value()).at<float>(0, 0);
   g_partial_cache_consumer_observed_value.store(static_cast<int>(observed),
                                                 std::memory_order_release);
   g_partial_cache_consumer_calls.fetch_add(1, std::memory_order_relaxed);
-  return make_image_output(input.width, input.height, input.channels, observed);
+  return make_image_output(static_cast<int>(input.width()),
+                           static_cast<int>(input.height()),
+                           static_cast<int>(input.channels()), observed);
 }
 
 /**
@@ -1426,28 +2922,31 @@ NodeOutput execute_host_preparation_source(
 }
 
 /**
- * @brief Produces a data-only radius through the public operation contract.
+ * @brief Produces a data-only radius through the private registry callback.
  *
- * @param node Public callback identity with copied effective parameters.
- * @param inputs Source image/data views prepared by the host adapter.
+ * @param node Private execution snapshot with resolved effective parameters.
+ * @param inputs Destination-indexed private input outputs.
  * @return Data-only output containing radius 1.
  * @throws std::bad_alloc when public output-map storage cannot grow.
  * @throws plugin::ParameterTypeError when `injected` is not exact Int64.
  * @note The callback increments its entry count first, then exercises the
- * public exact accessor before publishing its output.
+ * exact `ParameterValue` accessor before publishing its output.
  */
-plugin::OperationOutput execute_host_preparation_parameter(
-    const plugin::NodeView& node,
-    plugin::ArrayView<plugin::OperationInputView> inputs) {
+NodeOutput execute_host_preparation_parameter(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
   (void)inputs;
   g_host_preparation_plugin_calls.fetch_add(1, std::memory_order_relaxed);
-  const plugin::ParameterValue* injected = node.find_parameter("injected");
+  const plugin::ParameterMap& effective_parameters =
+      node.runtime_parameters.empty() ? node.parameters
+                                      : node.runtime_parameters;
+  const plugin::ParameterValue* injected =
+      find_parameter(effective_parameters, "injected");
   if (injected == nullptr) {
     throw GraphError(GraphErrc::InvalidParameter,
                      "host-preparation parameter is missing injected");
   }
   (void)injected->as_int64();
-  plugin::OperationOutput output;
+  NodeOutput output;
   output.data.emplace("radius", plugin::ParameterValue(std::int64_t{1}));
   return output;
 }
@@ -1612,11 +3111,12 @@ void execute_exact_sibling_metadata_tile(
   (void)node;
   g_exact_sibling_tiled_calls.fetch_add(1, std::memory_order_relaxed);
   bool full_input =
-      input_tiles.size() == 1U && input_tiles.front().buffer != nullptr;
+      input_tiles.size() == 1U && input_tiles.front().value != nullptr;
   if (full_input) {
-    const ImageBuffer& input = *input_tiles.front().buffer;
-    full_input =
-        input_tiles.front().roi == (PixelRect{0, 0, input.width, input.height});
+    const ImageView input(*input_tiles.front().value);
+    full_input = input_tiles.front().roi ==
+                 (PixelRect{0, 0, static_cast<int>(input.width()),
+                            static_cast<int>(input.height())});
   }
   if (!full_input) {
     g_exact_sibling_input_roi_mismatches.fetch_add(1,
@@ -1659,6 +3159,38 @@ PixelRect propagate_exact_sibling_full_input(
 }
 
 /**
+ * @brief Expands one output ROI by the effective integer radius parameter.
+ *
+ * @param node Downstream node retained for the propagator contract.
+ * @param roi Output ROI to expand in image coordinates.
+ * @param graph Graph retained for the propagator contract.
+ * @param output_extent Complete downstream output extent.
+ * @param input_extents Destination-indexed upstream image extents.
+ * @param parameters Effective request parameters containing optional radius.
+ * @param available_inputs Optional current input outputs.
+ * @return ROI expanded by radius, defaulting to 16 when absent.
+ * @throws plugin::ParameterTypeError when radius is not an exact Int64.
+ * @note This callback is attached directly to each candidate whose planning
+ * contract requires radius expansion; it is never borrowed from a sibling.
+ */
+PixelRect propagate_parameter_radius(
+    const Node& node, const PixelRect& roi, const GraphModel& graph,
+    const PixelSize& output_extent, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters,
+    const std::vector<const NodeOutput*>* available_inputs) {
+  (void)node;
+  (void)graph;
+  (void)output_extent;
+  (void)input_extents;
+  (void)available_inputs;
+  const auto found = parameters.find("radius");
+  const int radius = found == parameters.end()
+                         ? 16
+                         : static_cast<int>(found->second.as_int64());
+  return compute::expand_rect(roi, radius);
+}
+
+/**
  * @brief Registers deterministic split-test operations once per process.
  *
  * The registration set supplies HP/RT source, tiled, random-access, cache,
@@ -1679,6 +3211,18 @@ void register_split_ops() {
   std::call_once(once, [] {
     providers::register_configured_operation_providers();
     auto& registry = OpRegistry::instance();
+    const OpMetadata radius_parameter_metadata =
+        declare_test_outputs(OpMetadata{}, false, {"radius"});
+    const OpMetadata ksize_parameter_metadata =
+        declare_test_outputs(OpMetadata{}, false, {"ksize"});
+    const OpMetadata width_parameter_metadata =
+        declare_test_outputs(OpMetadata{}, false, {"width"});
+    const OpMetadata image_radius_metadata =
+        declare_test_outputs(OpMetadata{}, true, {"radius"});
+    const OpMetadata image_generation_metadata =
+        declare_test_outputs(OpMetadata{}, true, {"generation"});
+    const OpMetadata image_injected_metadata =
+        declare_test_outputs(OpMetadata{}, true, {"injected"});
     registry.register_op_hp_monolithic(
         "split_plan", "source",
         MonolithicOpFunc(
@@ -1694,11 +3238,13 @@ void register_split_ops() {
               NodeOutput output;
               output.data["radius"] = 7;
               return output;
-            }));
+            }),
+        radius_parameter_metadata);
     registry.register_op_hp_monolithic(
         "split_plan", "spatial_uncached_parameter_source",
-        MonolithicOpFunc(execute_spatial_parameter_source));
-    OpMetadata dynamic_parameter_metadata;
+        MonolithicOpFunc(execute_spatial_parameter_source),
+        radius_parameter_metadata);
+    OpMetadata dynamic_parameter_metadata = ksize_parameter_metadata;
     dynamic_parameter_metadata.reentrant = false;
     registry.register_op_hp_monolithic(
         "split_plan", "dynamic_blur_parameter",
@@ -1723,7 +3269,8 @@ void register_split_ops() {
               output.data["width"] =
                   g_dynamic_extent_width.load(std::memory_order_acquire);
               return output;
-            }));
+            }),
+        width_parameter_metadata);
     registry.register_op_hp_monolithic(
         "split_plan", "dynamic_extent_target",
         MonolithicOpFunc([](const Node& node,
@@ -1742,39 +3289,49 @@ void register_split_ops() {
           NodeOutput output = make_image_output(64, 16, 1, 3.0f);
           output.data["radius"] = 1;
           return output;
-        }));
+        }),
+        image_radius_metadata);
     registry.register_op_hp_monolithic(
         "split_plan", "gradient_source",
-        MonolithicOpFunc([](const Node& node,
-                            const std::vector<const NodeOutput*>&) {
-          NodeOutput output = make_image_output(
-              as_int_flexible(node.parameters, "width", 320),
-              as_int_flexible(node.parameters, "height", 64), 1, 0.0f);
-          cv::Mat pixels = toCvMat(output.image_buffer);
-          for (int y = 0; y < pixels.rows; ++y) {
-            for (int x = 0; x < pixels.cols; ++x) {
-              pixels.at<float>(y, x) = ((x / 5 + y / 3) % 2 == 0) ? 0.0f : 1.0f;
-            }
-          }
-          return output;
-        }));
+        MonolithicOpFunc(
+            [](const Node& node, const std::vector<const NodeOutput*>&) {
+              const int width = as_int_flexible(node.parameters, "width", 320);
+              const int height = as_int_flexible(node.parameters, "height", 64);
+              std::vector<float> samples(static_cast<std::size_t>(width) *
+                                         static_cast<std::size_t>(height));
+              for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                  samples[static_cast<std::size_t>(y) *
+                              static_cast<std::size_t>(width) +
+                          static_cast<std::size_t>(x)] =
+                      ((x / 5 + y / 3) % 2 == 0) ? 0.0F : 1.0F;
+                }
+              }
+              return make_sampled_image_output(width, height, 1,
+                                               std::move(samples));
+            }));
     registry.register_op_hp_monolithic(
         "split_plan", "staged_generation_source",
         MonolithicOpFunc([](const Node&,
                             const std::vector<const NodeOutput*>&) {
           const int generation =
               g_staged_source_generation.load(std::memory_order_acquire);
-          NodeOutput output = make_image_output(320, 64, 1, 0.0f);
-          cv::Mat pixels = toCvMat(output.image_buffer);
-          for (int y = 0; y < pixels.rows; ++y) {
-            for (int x = 0; x < pixels.cols; ++x) {
-              pixels.at<float>(y, x) =
+          constexpr int kWidth = 320;
+          constexpr int kHeight = 64;
+          std::vector<float> samples(
+              static_cast<std::size_t>(kWidth * kHeight));
+          for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+              samples[static_cast<std::size_t>(y * kWidth + x)] =
                   static_cast<float>(((x / 5 + y / 3 + generation) % 7) / 6.0);
             }
           }
+          NodeOutput output =
+              make_sampled_image_output(kWidth, kHeight, 1, std::move(samples));
           output.data["generation"] = generation;
           return output;
-        }));
+        }),
+        image_generation_metadata);
     registry.register_op_hp_monolithic(
         "split_plan", "derived_blur_parameter",
         MonolithicOpFunc(
@@ -1790,7 +3347,8 @@ void register_split_ops() {
               NodeOutput output;
               output.data["ksize"] = generation;
               return output;
-            }));
+            }),
+        ksize_parameter_metadata);
     registry.register_op_hp_monolithic(
         "split_plan", "partial_cache_producer",
         MonolithicOpFunc(execute_partial_cache_producer));
@@ -1799,19 +3357,21 @@ void register_split_ops() {
         MonolithicOpFunc(execute_partial_cache_consumer));
     registry.register_op_hp_monolithic(
         "image_generator", "host_preparation_source",
-        MonolithicOpFunc(execute_host_preparation_source));
-    registry.register_op_hp_monolithic("split_plan",
-                                       "host_preparation_parameter",
-                                       plugin_host::adapt_monolithic_operation(
-                                           execute_host_preparation_parameter));
+        MonolithicOpFunc(execute_host_preparation_source),
+        image_injected_metadata);
+    registry.register_op_hp_monolithic(
+        "split_plan", "host_preparation_parameter",
+        MonolithicOpFunc(execute_host_preparation_parameter),
+        radius_parameter_metadata);
     registry.register_op_hp_monolithic(
         "split_plan", "monolithic",
         MonolithicOpFunc(
             [](const Node&, const std::vector<const NodeOutput*>& inputs) {
               if (inputs.empty())
                 throw GraphError(GraphErrc::MissingDependency, "missing input");
-              return make_image_output(inputs.front()->image_buffer.width,
-                                       inputs.front()->image_buffer.height);
+              const ImageView input = inspect_image_output(*inputs.front());
+              return make_image_output(static_cast<int>(input.width()),
+                                       static_cast<int>(input.height()));
             }));
     ps::OpMetadata micro_meta;
     micro_meta.tile_preference = ps::TileSizePreference::MICRO;
@@ -1885,27 +3445,49 @@ void register_split_ops() {
         ps::TileSizePreference::UNDEFINED;
     exact_sibling_monolithic_meta.access_pattern =
         ps::OpMetadata::InputAccessPattern::SpatialAligned;
-    registry.register_op_hp_monolithic(
-        "split_plan", "exact_sibling_metadata",
-        MonolithicOpFunc([](const Node& node,
-                            const std::vector<const NodeOutput*>& inputs) {
-          g_exact_sibling_monolithic_calls.fetch_add(1,
-                                                     std::memory_order_relaxed);
-          const int width = inputs.empty() || !inputs.front()
-                                ? as_int_flexible(node.parameters, "width", 1)
-                                : inputs.front()->image_buffer.width;
-          const int height = inputs.empty() || !inputs.front()
-                                 ? as_int_flexible(node.parameters, "height", 1)
-                                 : inputs.front()->image_buffer.height;
-          return make_image_output(width, height, 1, 17.0f);
-        }),
-        exact_sibling_monolithic_meta);
+    exact_sibling_monolithic_meta.cost_score = 200;
+    exact_sibling_monolithic_meta.supports_realtime = false;
     ps::OpMetadata exact_sibling_tiled_meta = micro_meta;
     exact_sibling_tiled_meta.access_pattern =
         ps::OpMetadata::InputAccessPattern::RandomAccess;
-    registry.register_impl("split_plan", "exact_sibling_metadata", Device::CPU,
-                           TileOpFunc(execute_exact_sibling_metadata_tile),
-                           exact_sibling_tiled_meta);
+    exact_sibling_tiled_meta.supports_realtime = false;
+    registry.replace_implementation_candidates(
+        "split_plan", "exact_sibling_metadata",
+        std::vector<OpImplementation>{
+            OpImplementation{
+                OpRegistry::OpVariant{MonolithicOpFunc(
+                    [](const Node& node,
+                       const std::vector<const NodeOutput*>& inputs) {
+                      g_exact_sibling_monolithic_calls.fetch_add(
+                          1, std::memory_order_relaxed);
+                      std::optional<ImageView> input_image;
+                      if (!inputs.empty() && inputs.front() != nullptr) {
+                        input_image.emplace(
+                            inspect_image_output(*inputs.front()));
+                      }
+                      const int width =
+                          input_image.has_value()
+                              ? static_cast<int>(input_image->width())
+                              : as_int_flexible(node.parameters, "width", 1);
+                      const int height =
+                          input_image.has_value()
+                              ? static_cast<int>(input_image->height())
+                              : as_int_flexible(node.parameters, "height", 1);
+                      return make_image_output(width, height, 1, 17.0f);
+                    })},
+                exact_sibling_monolithic_meta,
+                0U,
+                {},
+                {},
+                {}},
+            OpImplementation{
+                OpRegistry::OpVariant{
+                    TileOpFunc(execute_exact_sibling_metadata_tile)},
+                exact_sibling_tiled_meta,
+                0U,
+                DirtyRoiPropFunc(propagate_exact_sibling_full_input),
+                {},
+                {}}});
     registry.register_op_hp_tiled(
         "split_plan", "random_tile",
         TileOpFunc([](const Node&, const OutputTile& output_tile,
@@ -1916,20 +3498,32 @@ void register_split_ops() {
     ps::OpMetadata rt_random_meta = micro_meta;
     rt_random_meta.access_pattern =
         ps::OpMetadata::InputAccessPattern::RandomAccess;
-    registry.register_op_hp_tiled(
+    ps::OpMetadata hp_random_meta = macro_meta;
+    hp_random_meta.supports_realtime = false;
+    rt_random_meta.supports_high_precision = false;
+    registry.replace_implementation_candidates(
         "split_plan", "domain_random_tile",
-        TileOpFunc([](const Node&, const OutputTile& output_tile,
-                      const std::vector<InputTile>&) {
-          toCvMat(output_tile).setTo(7.0f);
-        }),
-        macro_meta);
-    registry.register_op_rt_tiled(
-        "split_plan", "domain_random_tile",
-        TileOpFunc([](const Node&, const OutputTile& output_tile,
-                      const std::vector<InputTile>&) {
-          toCvMat(output_tile).setTo(7.0f);
-        }),
-        rt_random_meta);
+        std::vector<OpImplementation>{
+            OpImplementation{OpRegistry::OpVariant{TileOpFunc(
+                                 [](const Node&, const OutputTile& output_tile,
+                                    const std::vector<InputTile>&) {
+                                   toCvMat(output_tile).setTo(7.0f);
+                                 })},
+                             hp_random_meta,
+                             0U,
+                             {},
+                             {},
+                             {}},
+            OpImplementation{OpRegistry::OpVariant{TileOpFunc(
+                                 [](const Node&, const OutputTile& output_tile,
+                                    const std::vector<InputTile>&) {
+                                   toCvMat(output_tile).setTo(7.0f);
+                                 })},
+                             rt_random_meta,
+                             0U,
+                             DirtyRoiPropFunc(propagate_parameter_radius),
+                             {},
+                             {}}});
     registry.register_op_hp_tiled(
         "split_plan", "disk_cache_guard_tile",
         TileOpFunc([](const Node&, const OutputTile& output_tile,
@@ -1946,33 +3540,7 @@ void register_split_ops() {
                                   micro_meta);
     registry.register_dirty_propagator(
         "split_plan", "random_tile",
-        DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
-                            const GraphModel&, const PixelSize&,
-                            const std::vector<PixelSize>&,
-                            const plugin::ParameterMap& parameters,
-                            const std::vector<const NodeOutput*>*) {
-          const auto found = parameters.find("radius");
-          const int radius = found == parameters.end()
-                                 ? 16
-                                 : static_cast<int>(found->second.as_int64());
-          return compute::expand_rect(roi, radius);
-        }));
-    registry.register_dirty_propagator(
-        "split_plan", "exact_sibling_metadata",
-        DirtyRoiPropFunc(propagate_exact_sibling_full_input));
-    registry.register_dirty_propagator(
-        "split_plan", "domain_random_tile",
-        DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
-                            const GraphModel&, const PixelSize&,
-                            const std::vector<PixelSize>&,
-                            const plugin::ParameterMap& parameters,
-                            const std::vector<const NodeOutput*>*) {
-          const auto found = parameters.find("radius");
-          const int radius = found == parameters.end()
-                                 ? 16
-                                 : static_cast<int>(found->second.as_int64());
-          return compute::expand_rect(roi, radius);
-        }));
+        DirtyRoiPropFunc(propagate_parameter_radius));
   });
 }
 
@@ -2052,9 +3620,14 @@ void register_counted_monolithic_operation(
  * @param execution_order Complete dependency order retained for demand cuts.
  * @param dirty_node_ids Nodes carrying actual phase-two dirty work.
  * @return HP plan whose snapshot selects exactly dirty_node_ids.
- * @throws std::bad_alloc when plan or snapshot storage grows.
+ * @throws GraphError with `GraphErrc::NoOperation` when a dirty candidate has
+ * no current HP route.
+ * @throws std::bad_alloc or callback-copy exceptions when route, plan, or
+ * snapshot storage grows.
  * @note Nodes omitted from dirty_node_ids remain valid topology boundaries but
- * have neither an HpPlanEntry nor an active dirty task candidate.
+ * have neither an HpPlanEntry nor an active dirty task candidate. The helper
+ * mirrors production Region planning by freezing callback-free routes for
+ * every candidate that task selection may retain.
  */
 compute::HighPrecisionDirtyPlan make_sparse_monolithic_dirty_plan(
     const GraphModel& graph, const std::vector<int>& execution_order,
@@ -2062,12 +3635,29 @@ compute::HighPrecisionDirtyPlan make_sparse_monolithic_dirty_plan(
   compute::HighPrecisionDirtyPlan plan;
   plan.execution_order = execution_order;
   plan.snapshot.graph_generation = graph.topology_generation();
+  plan.operation_routes.intent = ComputeIntent::GlobalHighPrecision;
+  plan.operation_routes.available_devices = {DeviceBackend::CPU};
   const PixelRect roi{0, 0, 8, 8};
   const PixelSize extent{8, 8};
   const RegionSet region =
       RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
   for (int node_id : dirty_node_ids) {
-    plan.entries.emplace(node_id, compute::HpPlanEntry{region, roi, extent, 0});
+    const Node& node = graph.node(node_id);
+    const std::optional<OpImplementation> selected =
+        OpRegistry::instance().select_implementation(
+            node.type, node.subtype, {DeviceBackend::CPU},
+            ComputeIntent::GlobalHighPrecision);
+    if (!selected.has_value()) {
+      throw GraphError(GraphErrc::NoOperation,
+                       "Sparse dirty fixture has no HP operation route.");
+    }
+    plan.operation_routes.node_routes.emplace(
+        node_id, compute::DirtyRegionPlannedOperationRoute{
+                     make_key(node.type, node.subtype),
+                     compute::make_planned_operation_route(*selected)});
+    plan.entries.emplace(
+        node_id,
+        compute::HpPlanEntry{region, roi, extent, ImageBounds{0, 0, 8, 8}, 0});
     plan.snapshot.per_node_dirty_rois[node_id].push_back(roi);
     plan.snapshot.actual_dirty_rois[node_id].push_back(roi);
     plan.snapshot.dirty_monolithic_nodes.push_back(
@@ -2130,7 +3720,7 @@ void execute_selected_dirty_providers(
   for (int node_id : selected_nodes) {
     const Node& node = graph.node(node_id);
     const auto selected = OpRegistry::instance().select_implementation(
-        node.type, node.subtype, {Device::CPU},
+        node.type, node.subtype, {DeviceBackend::CPU},
         ComputeIntent::GlobalHighPrecision);
     if (!selected.has_value()) {
       ADD_FAILURE() << "missing selected provider for node " << node_id;
@@ -2140,10 +3730,22 @@ void execute_selected_dirty_providers(
       ADD_FAILURE() << "expected monolithic provider for node " << node_id;
       return;
     }
+    const auto planned =
+        std::find_if(prepared.compute_plan.planned_work.begin(),
+                     prepared.compute_plan.planned_work.end(),
+                     [node_id](const compute::PlannedNodeWork& work) {
+                       return work.node_id == node_id;
+                     });
+    if (planned == prepared.compute_plan.planned_work.end() ||
+        !planned->output_authority.has_value()) {
+      ADD_FAILURE() << "missing planned output authority for node " << node_id;
+      return;
+    }
     operations.emplace(
         node_id, compute::DirtyResolvedOperation{
                      selected->func, selected->metadata.device_preference,
-                     selected->implementation_identity, selected->metadata});
+                     selected->implementation_identity, selected->metadata,
+                     *planned->output_authority, selected->dirty_propagator});
   }
 
   GraphEventService events;
@@ -2317,11 +3919,12 @@ TEST(ComputeCachePolicySplit, PreservesHpAuthorityAndRtNonAuthority) {
       node, compute::CacheReadMode::InteractivePreferred));
 
   node.cached_output_high_precision = make_image_output(8, 8);
-  node.hp_region = value_image_adapter::full_node_output_region(
-      *node.cached_output_high_precision);
+  node.hp_region =
+      value_region::full_node_output_region(*node.cached_output_high_precision);
   EXPECT_EQ(
-      compute::ComputeCachePolicy::reusable_output(node)->image_buffer.width,
-      8);
+      inspect_image_output(*compute::ComputeCachePolicy::reusable_output(node))
+          .width(),
+      8U);
   EXPECT_TRUE(compute::ComputeCachePolicy::can_read_disk_cache(false, false));
   EXPECT_FALSE(compute::ComputeCachePolicy::can_read_disk_cache(true, false));
   EXPECT_FALSE(compute::ComputeCachePolicy::can_read_disk_cache(false, true));
@@ -2338,7 +3941,7 @@ TEST(NodeInputResolverSplit,
   GraphModel graph("cache/split-input-resolver");
   Node parent = make_node(10, "split", "parent");
   parent.cached_output_high_precision = make_image_output(12, 7);
-  parent.hp_region = value_image_adapter::full_node_output_region(
+  parent.hp_region = value_region::full_node_output_region(
       *parent.cached_output_high_precision);
   parent.cached_output_high_precision->data["threshold"] = 42;
   graph.add_node(parent);
@@ -2388,32 +3991,35 @@ TEST(NodeExecutorSplit,
   Node mono = make_node(1, "split_exec", "mono");
   OpRegistry::OpVariant mono_op = MonolithicOpFunc(
       [](const Node&, const std::vector<const NodeOutput*>& inputs) {
-        return make_image_output(inputs.front()->image_buffer.width,
-                                 inputs.front()->image_buffer.height);
+        const ImageView input = inspect_image_output(*inputs.front());
+        return make_image_output(static_cast<int>(input.width()),
+                                 static_cast<int>(input.height()));
       });
   std::vector<const NodeOutput*> mono_inputs;
   NodeOutput mono_input = make_image_output(5, 3);
   mono_inputs.push_back(&mono_input);
   NodeOutput mono_output =
       compute::NodeExecutor::execute(graph, mono, mono_op, mono_inputs);
-  EXPECT_EQ(mono_output.image_buffer.width, 5);
-  EXPECT_EQ(mono_output.image_buffer.height, 3);
+  const ImageView mono_image = inspect_image_output(mono_output);
+  EXPECT_EQ(mono_image.width(), 5U);
+  EXPECT_EQ(mono_image.height(), 3U);
 
   Node tiled = make_node(2, "image_mixing", "tile");
   bool saw_normalized_second_input = false;
   bool saw_normalized_second_spatial = false;
   int tiled_calls = 0;
-  std::set<const ImageBuffer*> normalized_second_buffers;
+  std::set<const Value*> normalized_second_values;
   OpRegistry::OpVariant tile_op =
       TileOpFunc([&](const Node&, const OutputTile& output_tile,
                      const std::vector<InputTile>& input_tiles) {
         ASSERT_EQ(input_tiles.size(), 2u);
-        ASSERT_NE(input_tiles[1].buffer, nullptr);
+        ASSERT_NE(input_tiles[1].value, nullptr);
         ++tiled_calls;
-        normalized_second_buffers.insert(input_tiles[1].buffer);
-        saw_normalized_second_input = input_tiles[1].buffer->width == 8 &&
-                                      input_tiles[1].buffer->height == 8 &&
-                                      input_tiles[1].buffer->channels == 3;
+        normalized_second_values.insert(input_tiles[1].value);
+        const ImageView normalized(*input_tiles[1].value);
+        saw_normalized_second_input = normalized.width() == 8U &&
+                                      normalized.height() == 8U &&
+                                      normalized.channels() == 3U;
         saw_normalized_second_spatial =
             input_tiles[1].spatial != nullptr &&
             input_tiles[1].spatial->absolute_roi == (PixelRect{3, 4, 4, 4});
@@ -2444,10 +4050,11 @@ TEST(NodeExecutorSplit,
   EXPECT_TRUE(saw_normalized_second_input);
   EXPECT_TRUE(saw_normalized_second_spatial);
   EXPECT_EQ(tiled_calls, 4);
-  ASSERT_EQ(normalized_second_buffers.size(), 1u);
-  EXPECT_NE(*normalized_second_buffers.begin(), &secondary.image_buffer);
-  EXPECT_EQ(tiled_output.image_buffer.width, 8);
-  EXPECT_EQ(tiled_output.image_buffer.channels, 3);
+  ASSERT_EQ(normalized_second_values.size(), 1u);
+  EXPECT_NE(*normalized_second_values.begin(), nullptr);
+  const ImageView tiled_image = inspect_image_output(tiled_output);
+  EXPECT_EQ(tiled_image.width(), 8U);
+  EXPECT_EQ(tiled_image.channels(), 3U);
 
   auto& registry = OpRegistry::instance();
   registry.register_dirty_propagator(
@@ -2464,7 +4071,7 @@ TEST(NodeExecutorSplit,
   random_config.metadata->access_pattern =
       OpMetadata::InputAccessPattern::RandomAccess;
   EXPECT_EQ(compute::NodeExecutor::input_roi_for_tile(
-                graph, random_node, (PixelRect{1, 1, 4, 4}), base.image_buffer,
+                graph, random_node, (PixelRect{1, 1, 4, 4}), PixelSize{8, 8},
                 random_config),
             (PixelRect{0, 0, 7, 7}));
 
@@ -2500,29 +4107,30 @@ TEST(NodeExecutorSplit,
   auto exact_context_count = std::make_shared<int>(0);
   OpRegistry::instance().register_dirty_propagator(
       "split_exec", "same_batch_random",
-      plugin_host::adapt_dirty_propagator(
-          [exact_context_count](const plugin::RoiContext& context) {
+      DirtyRoiPropFunc(
+          [exact_context_count](
+              const Node&, const PixelRect& requested, const GraphModel&,
+              const PixelSize& output_extent,
+              const std::vector<PixelSize>& input_extents,
+              const plugin::ParameterMap& effective_parameters,
+              const std::vector<const NodeOutput*>* available_inputs) {
             const plugin::ParameterValue* radius =
-                context.node->find_parameter("radius");
-            if (radius && radius->as_int64() == 3 &&
-                context.output_extent.width == 40 &&
-                context.output_extent.height == 20 &&
-                context.input_edges.size() == 2 &&
-                context.input_edges[0].extent.width == 40 &&
-                context.input_edges[0].extent.height == 20 &&
-                context.input_edges[0].has_available_input &&
-                context.input_edges[0].available_input.data != nullptr &&
-                context.input_edges[0]
-                        .available_input.data->at("generation")
-                        .as_int64() == 99 &&
-                context.input_edges[0].available_input.spatial != nullptr &&
-                context.input_edges[0]
-                        .available_input.spatial->absolute_roi.x == 7 &&
-                context.input_edges[1].extent.width == 3 &&
-                context.input_edges[1].extent.height == 4) {
+                find_parameter(effective_parameters, "radius");
+            const bool inputs_complete = available_inputs != nullptr &&
+                                         available_inputs->size() == 2U &&
+                                         (*available_inputs)[0] != nullptr &&
+                                         (*available_inputs)[1] != nullptr;
+            if (radius != nullptr && radius->as_int64() == 3 &&
+                output_extent == (PixelSize{40, 20}) &&
+                input_extents.size() == 2U &&
+                input_extents[0] == (PixelSize{40, 20}) &&
+                input_extents[1] == (PixelSize{3, 4}) && inputs_complete &&
+                (*available_inputs)[0]->data.at("generation").as_int64() ==
+                    99 &&
+                (*available_inputs)[0]->space.absolute_roi.x == 7) {
               ++*exact_context_count;
             }
-            return context.requested_roi;
+            return requested;
           }));
 
   Node execution_node = graph.node(12);
@@ -2546,15 +4154,16 @@ TEST(NodeExecutorSplit,
   const NodeOutput result = compute::NodeExecutor::execute(
       graph, execution_node, operation, inputs, config);
 
-  EXPECT_EQ(result.image_buffer.width, 40);
-  EXPECT_EQ(result.image_buffer.height, 20);
+  const ImageView result_image = inspect_image_output(result);
+  EXPECT_EQ(result_image.width(), 40U);
+  EXPECT_EQ(result_image.height(), 20U);
   EXPECT_EQ(*exact_context_count, 12)
       << "one random-access mapping per input must see the same complete "
          "same-batch snapshot";
 }
 
 TEST(NodeExecutorSplit,
-     PreservesDisconnectedSlotIdentityThroughPublicTiledCallback) {
+     PreservesDisconnectedSlotIdentityThroughPrivateTiledCallback) {
   GraphModel graph("cache/split-disconnected-public-input-slot");
   graph.add_node(make_node(11, "split_exec", "source"));
   Node graph_child = make_node(12, "split_exec", "disconnected_slot");
@@ -2580,25 +4189,35 @@ TEST(NodeExecutorSplit,
   bool roi_context_preserved_index = false;
   OpRegistry::instance().register_dirty_propagator(
       execution_node.type, execution_node.subtype,
-      plugin_host::adapt_dirty_propagator(
-          [&](const plugin::RoiContext& context) {
+      DirtyRoiPropFunc(
+          [&](const Node& callback_node, const PixelRect& requested,
+              const GraphModel&, const PixelSize&,
+              const std::vector<PixelSize>& input_extents,
+              const plugin::ParameterMap&,
+              const std::vector<const NodeOutput*>* available_inputs) {
             roi_context_preserved_index =
-                context.input_edges.size() == 1 &&
-                context.input_edges[0].input_index == 1 &&
-                context.input_edges[0].extent.width == 7 &&
-                context.input_edges[0].extent.height == 5;
-            return context.requested_roi;
+                callback_node.image_inputs.size() == 2U &&
+                callback_node.image_inputs[0].from_node_id == -1 &&
+                callback_node.image_inputs[1].from_node_id == 11 &&
+                input_extents.size() == 2U && input_extents[0] == PixelSize{} &&
+                input_extents[1] == (PixelSize{7, 5}) &&
+                available_inputs != nullptr && available_inputs->size() == 2U &&
+                (*available_inputs)[0] == nullptr &&
+                (*available_inputs)[1] != nullptr;
+            return requested;
           }));
 
   bool tiled_callback_preserved_slots = false;
-  OpRegistry::OpVariant operation = plugin_host::adapt_tiled_operation(
-      [&](const plugin::NodeView&, const OutputTileView& output,
-          plugin::ArrayView<plugin::OperationTileInputView> inputs) {
+  OpRegistry::OpVariant operation =
+      TileOpFunc([&](const Node&, const OutputTile& output,
+                     const std::vector<InputTile>& inputs) {
         tiled_callback_preserved_slots =
-            inputs.size() == 2 && inputs[0].tile.buffer == nullptr &&
-            inputs[0].spatial == nullptr &&
-            inputs[1].tile.buffer == &connected.image_buffer &&
-            inputs[1].spatial != nullptr && output.buffer != nullptr;
+            inputs.size() == 2U && inputs[0].value == nullptr &&
+            inputs[0].spatial == nullptr && inputs[1].value != nullptr &&
+            ImageView(*inputs[1].value).width() == 7U &&
+            ImageView(*inputs[1].value).height() == 5U &&
+            inputs[1].spatial != nullptr && output.plan != nullptr &&
+            output.grant != nullptr;
       });
   compute::TiledExecutionConfig config;
   config.tile_size = 16;
@@ -2608,10 +4227,146 @@ TEST(NodeExecutorSplit,
   const NodeOutput output = compute::NodeExecutor::execute(
       graph, execution_node, operation, resolved.image_inputs, config);
 
-  EXPECT_EQ(output.image_buffer.width, 7);
-  EXPECT_EQ(output.image_buffer.height, 5);
+  const ImageView output_image = inspect_image_output(output);
+  EXPECT_EQ(output_image.width(), 7U);
+  EXPECT_EQ(output_image.height(), 5U);
   EXPECT_TRUE(roi_context_preserved_index);
   EXPECT_TRUE(tiled_callback_preserved_slots);
+}
+
+/**
+ * @brief Proves the dimensions analyzer accepts one Ready opaque image
+ * without opening a Host payload lease.
+ * @return Nothing; GoogleTest records binding, output, or identity failures.
+ * @throws Registry, native publication, or operation exceptions unchanged;
+ * the expected direct ImageView access failure is consumed by GoogleTest.
+ * @note The retained native owner exposes no Host pointer. A successful
+ * analyzer result therefore proves width and height came only from immutable
+ * Value metadata and did not replace or mutate identity or readiness.
+ */
+TEST(CoreOperationsSplit, GetDimensionsReadsReadyOpaqueMetadataOnly) {
+  register_split_ops();
+  const auto selected = OpRegistry::instance().resolve_for_intent(
+      "analyzer", "get_dimensions", ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected.has_value());
+  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*selected));
+
+  auto native_owner = std::make_shared<int>(17);
+  PendingDeviceValuePublication publication = publish_opaque_device_image(
+      17, 9, 4, ElementSemantics::UnsignedInteger, 8U, DeviceBackend::CUDA,
+      native_owner, MemoryDomain::Imported);
+  ASSERT_TRUE(publication.producer.complete_ready());
+  NodeOutput input;
+  input.publish_image_value(publication.value);
+
+  ASSERT_TRUE(input.has_image_value());
+  const Value& imported = input.image_value();
+  ASSERT_EQ(imported.ready_fence().poll().state(), ReadyFenceState::Ready);
+  const StorageBinding original_binding = imported.storage_binding();
+  const AllocationIdentity original_allocation = imported.allocation_identity();
+  const ValueRevisionId original_revision = imported.revision_id();
+  EXPECT_EQ(original_binding.memory_domain, MemoryDomain::Imported);
+  EXPECT_FALSE(original_binding.host_visible);
+  EXPECT_THROW((void)ImageView(imported), BufferAccessError);
+
+  const std::vector<const NodeOutput*> inputs{&input};
+  const NodeOutput dimensions = std::get<MonolithicOpFunc>(*selected)(
+      make_node(9001, "analyzer", "get_dimensions"), inputs);
+
+  ASSERT_EQ(dimensions.data.size(), 2U);
+  ASSERT_TRUE(dimensions.data.at("width").is_int64());
+  ASSERT_TRUE(dimensions.data.at("height").is_int64());
+  EXPECT_EQ(dimensions.data.at("width").as_int64(), 17);
+  EXPECT_EQ(dimensions.data.at("height").as_int64(), 9);
+  EXPECT_TRUE(dimensions.named_values.empty());
+  EXPECT_EQ(input.image_value().storage_binding(), original_binding);
+  EXPECT_EQ(input.image_value().allocation_identity(), original_allocation);
+  EXPECT_EQ(input.image_value().revision_id(), original_revision);
+  EXPECT_EQ(input.image_value().ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+}
+
+/**
+ * @brief Proves the dimensions analyzer observes Pending device metadata
+ * without polling or settling the producer fence.
+ * @return Nothing; GoogleTest records extent, readiness, or identity failures.
+ * @throws Registry, pending-publication, or operation exceptions unchanged;
+ * the expected direct ImageView readiness failure is consumed by GoogleTest.
+ * @note Successful analysis must leave the original device-local Value
+ * Pending. The test explicitly cancels it afterward so no producer authority
+ * survives fixture teardown.
+ */
+TEST(CoreOperationsSplit, GetDimensionsPreservesPendingDeviceValue) {
+  register_split_ops();
+  const auto selected = OpRegistry::instance().resolve_for_intent(
+      "analyzer", "get_dimensions", ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected.has_value());
+  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*selected));
+
+  auto native_owner = std::make_shared<int>(31);
+  PendingDeviceValuePublication publication =
+      publish_opaque_device_image(31, 12, 1, ElementSemantics::UnsignedInteger,
+                                  16U, DeviceBackend::CUDA, native_owner);
+  NodeOutput input;
+  input.publish_image_value(publication.value);
+  const StorageBinding original_binding = publication.value.storage_binding();
+  const AllocationIdentity original_allocation =
+      publication.value.allocation_identity();
+  const ValueRevisionId original_revision = publication.value.revision_id();
+  ASSERT_EQ(publication.value.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_EQ(original_binding.memory_domain, MemoryDomain::DeviceLocal);
+  EXPECT_FALSE(original_binding.host_visible);
+  EXPECT_THROW((void)ImageView(publication.value), ReadyFenceAccessError);
+
+  const std::vector<const NodeOutput*> inputs{&input};
+  const NodeOutput dimensions = std::get<MonolithicOpFunc>(*selected)(
+      make_node(9002, "analyzer", "get_dimensions"), inputs);
+
+  ASSERT_EQ(dimensions.data.size(), 2U);
+  EXPECT_EQ(dimensions.data.at("width").as_int64(), 31);
+  EXPECT_EQ(dimensions.data.at("height").as_int64(), 12);
+  EXPECT_TRUE(dimensions.named_values.empty());
+  EXPECT_EQ(input.image_value().storage_binding(), original_binding);
+  EXPECT_EQ(input.image_value().allocation_identity(), original_allocation);
+  EXPECT_EQ(input.image_value().revision_id(), original_revision);
+  EXPECT_EQ(input.image_value().ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_TRUE(publication.producer.cancel());
+}
+
+/**
+ * @brief Proves the dimensions analyzer reports signed-window extents as
+ * Int64 without interpreting their logical origin as an output coordinate.
+ * @return Nothing; GoogleTest records output type, extent, or input mutation.
+ * @throws Registry, metadata-only Value, or operation exceptions unchanged.
+ * @note Width deliberately exceeds `int` while remaining representable by
+ * both the validated ImageBounds extent and ParameterValue's Int64 storage.
+ */
+TEST(CoreOperationsSplit, GetDimensionsReportsWideSignedWindowExtents) {
+  register_split_ops();
+  const auto selected = OpRegistry::instance().resolve_for_intent(
+      "analyzer", "get_dimensions", ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected.has_value());
+  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*selected));
+
+  const std::int64_t width =
+      static_cast<std::int64_t>(std::numeric_limits<int>::max()) + 1;
+  const ImageBounds bounds{-37, -11, -37 + width, 2};
+  NodeOutput input = make_metadata_only_image_output(bounds);
+  const ValueRevisionId original_revision = input.image_value().revision_id();
+
+  const std::vector<const NodeOutput*> inputs{&input};
+  const NodeOutput dimensions = std::get<MonolithicOpFunc>(*selected)(
+      make_node(9003, "analyzer", "get_dimensions"), inputs);
+
+  ASSERT_EQ(dimensions.data.size(), 2U);
+  ASSERT_TRUE(dimensions.data.at("width").is_int64());
+  ASSERT_TRUE(dimensions.data.at("height").is_int64());
+  EXPECT_EQ(dimensions.data.at("width").as_int64(), width);
+  EXPECT_EQ(dimensions.data.at("height").as_int64(), 13);
+  EXPECT_EQ(input.image_value().image_bounds(), bounds);
+  EXPECT_EQ(input.image_value().revision_id(), original_revision);
 }
 
 TEST(ComputeMetricsRecorderSplit, FinalizesMetadataAndDebugStatistics) {
@@ -2629,18 +4384,17 @@ TEST(ComputeMetricsRecorderSplit, FinalizesMetadataAndDebugStatistics) {
   EXPECT_FLOAT_EQ(output.debug.max_val, 4.0f);
   EXPECT_FALSE(output.debug.has_nan);
 
-  const std::pair<Device, const char*> backend_devices[] = {
-      {Device::GPU_METAL, "GPU_METAL"},
-      {Device::GPU_CUDA, "GPU_CUDA"},
-      {Device::ASIC_NPU, "ASIC_NPU"},
+  const std::pair<DeviceBackend, const char*> backend_devices[] = {
+      {DeviceBackend::Metal, "GPU_METAL"},
+      {DeviceBackend::CUDA, "GPU_CUDA"},
+      {DeviceBackend::NPU, "ASIC_NPU"},
   };
   for (const auto& [device, expected_label] : backend_devices) {
     NodeOutput backend;
-    backend.image_buffer.width = 3;
-    backend.image_buffer.height = 3;
-    backend.image_buffer.channels = 1;
-    backend.image_buffer.device = device;
-    backend.image_buffer.context = std::make_shared<int>(7);
+    auto owner = std::make_shared<int>(7);
+    PendingDeviceValuePublication publication = publish_opaque_device_image(
+        3, 3, 1, ElementSemantics::FloatingPoint, 32U, device, owner);
+    backend.publish_image_value(publication.value);
     backend.debug.min_val = 12.0;
     backend.debug.max_val = 34.0;
     compute::ComputeMetricsRecorder::finalize_output_metadata(backend, {}, true,
@@ -2649,6 +4403,347 @@ TEST(ComputeMetricsRecorderSplit, FinalizesMetadataAndDebugStatistics) {
     EXPECT_DOUBLE_EQ(backend.debug.min_val, 12.0);
     EXPECT_DOUBLE_EQ(backend.debug.max_val, 34.0);
   }
+}
+
+/**
+ * @brief Proves timing statistics inspect native UINT32 code values exactly.
+ * @return Nothing; GoogleTest reports dispatch, extrema, or payload failures.
+ * @throws Fixture publication and metrics finalization exceptions unchanged.
+ * @note The debug schema exposes min/max/non-finite fields but no mean. The
+ *       test derives a mean from the unchanged native payload as an independent
+ *       oracle that no implicit OpenEXR-style normalization or mutation
+ *       occurred while the production timing seam inspected the Value.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     InspectsUint32CodeValuesWithoutNormalization) {
+  const std::vector<std::uint32_t> expected_samples{
+      0U, 65535U, 4000000000U, std::numeric_limits<std::uint32_t>::max()};
+  NodeOutput output =
+      make_uint32_sampled_image_output(2, 2, 1, expected_samples);
+  const ValueRevisionId original_revision = output.image_value().revision_id();
+
+  const DenseTensorDescriptor& descriptor =
+      output.image_value().dense_tensor_descriptor();
+  ASSERT_EQ(descriptor.element_semantics, ElementSemantics::UnsignedInteger);
+  ASSERT_EQ(descriptor.storage_encoding, StorageEncoding{32U});
+  ASSERT_TRUE(output.image_value().image_facet()->sample_domain.has_value());
+  const SampleDomainFacet& sample_domain =
+      *output.image_value().image_facet()->sample_domain;
+  ASSERT_EQ(sample_domain.encoding.kind, SampleEncodingKind::CodeValue);
+  EXPECT_DOUBLE_EQ(sample_domain.default_domain.minimum, 0.0);
+  EXPECT_DOUBLE_EQ(
+      sample_domain.default_domain.maximum,
+      static_cast<double>(std::numeric_limits<std::uint32_t>::max()));
+
+  ASSERT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      output, {}, true, 7.0));
+  EXPECT_EQ(output.debug.compute_device, "CPU");
+  EXPECT_DOUBLE_EQ(output.debug.min_val, 0.0);
+  EXPECT_DOUBLE_EQ(
+      output.debug.max_val,
+      static_cast<double>(std::numeric_limits<std::uint32_t>::max()));
+  EXPECT_FALSE(output.debug.has_nan);
+  EXPECT_EQ(output.image_value().revision_id(), original_revision);
+
+  const ImageView view(output.image_value());
+  std::uint64_t sum = 0U;
+  for (std::size_t index = 0U; index < expected_samples.size(); ++index) {
+    const std::size_t x = index % view.width();
+    const std::size_t y = index / view.width();
+    std::uint32_t observed = 0U;
+    std::memcpy(&observed, view.channel_data(x, y, 0U), sizeof(observed));
+    EXPECT_EQ(observed, expected_samples[index]);
+    sum += observed;
+  }
+  EXPECT_DOUBLE_EQ(static_cast<double>(sum) / expected_samples.size(),
+                   2073758207.5);
+}
+
+/**
+ * @brief Proves native INT32 timing extrema remain exact code values.
+ * @return Nothing; GoogleTest reports dispatch, projection, or mutation.
+ * @throws Fixture, rounding-environment, and metrics exceptions unchanged.
+ * @note Every INT32 value is exactly representable in binary64. Repeating the
+ *       production scan under all standard rounding modes proves diagnostic
+ *       collection neither normalizes the CodeValue payload nor consults the
+ *       ambient mode.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     InspectsInt32CodeValuesExactlyWithoutNormalization) {
+  const std::vector<std::int32_t> samples{
+      std::numeric_limits<std::int32_t>::min(), -1, 0,
+      std::numeric_limits<std::int32_t>::max()};
+  ScopedFloatingPointRoundingMode rounding_mode;
+  for (const int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    SCOPED_TRACE(mode);
+    rounding_mode.set(mode);
+    expect_native_integer_timing_statistics(
+        samples,
+        SampleDomain{SampleDomainKind::CodeValue, -2147483648.0, 2147483647.0},
+        -2147483648.0, 2147483647.0);
+  }
+}
+
+/**
+ * @brief Proves UINT64 timing uses deterministic nearest-even binary64.
+ * @return Nothing; GoogleTest reports dispatch, projection, or mutation.
+ * @throws Fixture, rounding-environment, and metrics exceptions unchanged.
+ * @note `2^53+1`, `2^53+3`, and `UINT64_MAX` are not represented exactly by
+ *       binary64. Native payload bytes remain exact while diagnostic extrema
+ *       project to the nearest representable value with ties to even under
+ *       every ambient rounding mode.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     InspectsUint64CodeValuesWithDeterministicBinary64Projection) {
+  constexpr std::uint64_t kTwoTo53 = std::uint64_t{1U} << 53U;
+  const std::vector<std::uint64_t> adjacent_samples{kTwoTo53 + 1U,
+                                                    kTwoTo53 + 3U};
+  const std::vector<std::uint64_t> extrema_samples{
+      0U, std::numeric_limits<std::uint64_t>::max()};
+  ScopedFloatingPointRoundingMode rounding_mode;
+  for (const int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    SCOPED_TRACE(mode);
+    rounding_mode.set(mode);
+    expect_native_integer_timing_statistics(
+        adjacent_samples,
+        SampleDomain{SampleDomainKind::CodeValue, 0.0, 0x1p+64}, 0x1p+53,
+        0x1.0000000000002p+53);
+    expect_native_integer_timing_statistics(
+        extrema_samples,
+        SampleDomain{SampleDomainKind::CodeValue, 0.0, 0x1p+64}, 0.0, 0x1p+64);
+  }
+}
+
+/**
+ * @brief Proves INT64 timing uses deterministic nearest-even binary64.
+ * @return Nothing; GoogleTest reports dispatch, projection, or mutation.
+ * @throws Fixture, rounding-environment, and metrics exceptions unchanged.
+ * @note Signed extrema and negative `2^53` neighbors cover magnitude handling
+ *       without negating `INT64_MIN`. Diagnostic projection may round, while
+ *       descriptor, revision, and native payload authority remain exact.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     InspectsInt64CodeValuesWithDeterministicBinary64Projection) {
+  constexpr std::int64_t kTwoTo53 = std::int64_t{1} << 53U;
+  const std::vector<std::int64_t> adjacent_samples{-kTwoTo53 - 3,
+                                                   -kTwoTo53 - 1};
+  const std::vector<std::int64_t> extrema_samples{
+      std::numeric_limits<std::int64_t>::min(),
+      std::numeric_limits<std::int64_t>::max()};
+  ScopedFloatingPointRoundingMode rounding_mode;
+  for (const int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    SCOPED_TRACE(mode);
+    rounding_mode.set(mode);
+    expect_native_integer_timing_statistics(
+        adjacent_samples,
+        SampleDomain{SampleDomainKind::CodeValue, -0x1p+63, 0x1p+63},
+        -0x1.0000000000002p+53, -0x1p+53);
+    expect_native_integer_timing_statistics(
+        extrema_samples,
+        SampleDomain{SampleDomainKind::CodeValue, -0x1p+63, 0x1p+63}, -0x1p+63,
+        0x1p+63);
+  }
+}
+
+/**
+ * @brief Proves canonical bounds complete ROI only inside signed-int geometry.
+ *
+ * @return Nothing; GoogleTest reports endpoint conversion or bypass failures.
+ * @throws Value construction and metadata finalization exceptions unchanged.
+ * @note The first two outputs begin exactly at `INT_MIN` or end exactly at
+ *       `INT_MAX`. The third carries an explicit positive ROI, which remains
+ *       authoritative even though its image data-window endpoint cannot be
+ *       projected into `PixelRect`.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     CompletesAbsoluteRoiAtSignedIntEndpointBoundary) {
+  const auto pixel_min =
+      static_cast<std::int64_t>(std::numeric_limits<int>::min());
+  const auto pixel_max =
+      static_cast<std::int64_t>(std::numeric_limits<int>::max());
+  NodeOutput lower_boundary = make_metadata_only_image_output(
+      ImageBounds{pixel_min, pixel_min, pixel_min + 1, pixel_min + 1});
+  EXPECT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      lower_boundary, {}, false, 0.0));
+  EXPECT_EQ(lower_boundary.space.absolute_roi,
+            (PixelRect{std::numeric_limits<int>::min(),
+                       std::numeric_limits<int>::min(), 1, 1}));
+
+  NodeOutput boundary = make_metadata_only_image_output(
+      ImageBounds{pixel_max - 1, pixel_max - 1, pixel_max, pixel_max});
+  EXPECT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      boundary, {}, false, 1.0));
+  EXPECT_EQ(boundary.space.absolute_roi,
+            (PixelRect{std::numeric_limits<int>::max() - 1,
+                       std::numeric_limits<int>::max() - 1, 1, 1}));
+
+  NodeOutput explicit_roi = make_metadata_only_image_output(
+      ImageBounds{pixel_max, 0, pixel_max + 1, 1});
+  explicit_roi.space.absolute_roi = PixelRect{7, 8, 9, 10};
+  EXPECT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      explicit_roi, {}, false, 2.0));
+  EXPECT_EQ(explicit_roi.space.absolute_roi, (PixelRect{7, 8, 9, 10}));
+}
+
+/**
+ * @brief Rejects every unrepresentable fallback ROI before metadata mutation.
+ *
+ * @return Nothing; GoogleTest reports exception-type or strong-guarantee
+ *         failures.
+ * @throws Fixture allocation and Value publication exceptions unchanged;
+ *         expected `std::invalid_argument` finalization failures are consumed
+ *         by GoogleTest.
+ * @note Cases isolate x/y exclusive endpoints, x/y origins, and x/y extents.
+ *       A non-default input space proves inheritance is staged, while complete
+ *       debug and Value identity checks prove failure publishes no partial
+ *       output metadata or replacement payload.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     RejectsUnrepresentableAbsoluteRoiWithoutPartialMetadata) {
+  const auto pixel_min =
+      static_cast<std::int64_t>(std::numeric_limits<int>::min());
+  const auto pixel_max =
+      static_cast<std::int64_t>(std::numeric_limits<int>::max());
+  const std::array<std::pair<const char*, ImageBounds>, 6> invalid_bounds{{
+      {"x_end", {pixel_max - 1, 0, pixel_max + 1, 1}},
+      {"y_end", {0, pixel_max - 1, 1, pixel_max + 1}},
+      {"x_begin", {pixel_min - 1, 0, pixel_min, 1}},
+      {"y_begin", {0, pixel_min - 1, 1, pixel_min}},
+      {"width", {pixel_min, 0, pixel_max, 1}},
+      {"height", {0, pixel_min, 1, pixel_max}},
+  }};
+
+  NodeOutput inherited;
+  inherited.space.transform_matrix[2] = 17.0;
+  inherited.space.inverse_matrix[5] = 19.0;
+  inherited.space.local_inverse_matrix[6] = 23.0;
+  inherited.space.global_scale_x = 2.0;
+  inherited.space.global_scale_y = 3.0;
+
+  for (const auto& [label, bounds] : invalid_bounds) {
+    SCOPED_TRACE(label);
+    NodeOutput output = make_metadata_only_image_output(bounds);
+    output.space.local_inverse_matrix[7] = 29.0;
+    output.debug.computed_by_worker_id = 31;
+    output.debug.timestamp_us = 37U;
+    output.debug.execution_time_ms = 41U;
+    output.debug.min_val = 43.0;
+    output.debug.max_val = 47.0;
+    output.debug.has_nan = true;
+    output.debug.compute_device = "SENTINEL";
+    const SpatialContext original_space = output.space;
+    const DebugMeta original_debug = output.debug;
+    const ValueRevisionId original_revision =
+        output.image_value().revision_id();
+
+    EXPECT_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+                     output, {&inherited}, false, 53.0),
+                 std::invalid_argument);
+    EXPECT_EQ(output.space.transform_matrix, original_space.transform_matrix);
+    EXPECT_EQ(output.space.inverse_matrix, original_space.inverse_matrix);
+    EXPECT_EQ(output.space.local_inverse_matrix,
+              original_space.local_inverse_matrix);
+    EXPECT_EQ(output.space.absolute_roi, original_space.absolute_roi);
+    EXPECT_DOUBLE_EQ(output.space.global_scale_x,
+                     original_space.global_scale_x);
+    EXPECT_DOUBLE_EQ(output.space.global_scale_y,
+                     original_space.global_scale_y);
+    EXPECT_EQ(output.debug.computed_by_worker_id,
+              original_debug.computed_by_worker_id);
+    EXPECT_EQ(output.debug.timestamp_us, original_debug.timestamp_us);
+    EXPECT_EQ(output.debug.execution_time_ms, original_debug.execution_time_ms);
+    EXPECT_DOUBLE_EQ(output.debug.min_val, original_debug.min_val);
+    EXPECT_DOUBLE_EQ(output.debug.max_val, original_debug.max_val);
+    EXPECT_EQ(output.debug.has_nan, original_debug.has_nan);
+    EXPECT_EQ(output.debug.compute_device, original_debug.compute_device);
+    EXPECT_EQ(output.named_values.size(), 1U);
+    EXPECT_EQ(output.image_value().revision_id(), original_revision);
+    EXPECT_EQ(output.image_value().image_bounds(), bounds);
+  }
+}
+
+/**
+ * @brief Proves provider-defined named output metrics use indexed binding
+ * metadata instead of DenseTensor-only payload access.
+ * @return Nothing; GoogleTest reports publication or device-label failures.
+ * @throws Fixture allocation, provider loading, and Value validation
+ * exceptions unchanged.
+ * @note The provider Value's first binding is host-visible Metal rather than
+ * CPU so the assertion cannot pass by retaining the recorder's default label.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     ReadsProviderDefinedNamedValueBindingWithoutDenseAccess) {
+  auto bytes = std::make_shared<std::array<std::byte, 4U>>();
+  PendingDeviceValuePublication dense_publication =
+      PendingDeviceValuePublisher::publish_dense_tensor(
+          DenseTensorDescriptor{{bytes->size()},
+                                ElementSemantics::UnsignedInteger,
+                                StorageEncoding{8U}},
+          std::nullopt, StridedLayout{{1}, 0U}, bytes, bytes.get(),
+          bytes->data(), bytes->size(), DeviceId(DeviceBackend::Metal),
+          MemoryDomain::Shared);
+  ASSERT_TRUE(dense_publication.producer.complete_ready());
+  Value provider_value = make_metrics_provider_defined_value(
+      dense_publication.value.buffer_handle());
+  ASSERT_EQ(provider_value.representation_kind(),
+            ValueRepresentationKind::ProviderDefined);
+  ASSERT_EQ(provider_value.storage_binding(0U).device.backend(),
+            DeviceBackend::Metal);
+  EXPECT_THROW((void)provider_value.buffer_handle(), std::logic_error);
+
+  NodeOutput output;
+  output.publish_named_value("deep", std::move(provider_value));
+  output.debug.min_val = 12.0;
+  output.debug.max_val = 34.0;
+  EXPECT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      output, {}, true, 2.0));
+  EXPECT_EQ(output.debug.compute_device, "GPU_METAL");
+  EXPECT_DOUBLE_EQ(output.debug.min_val, 12.0);
+  EXPECT_DOUBLE_EQ(output.debug.max_val, 34.0);
+}
+
+/**
+ * @brief Proves pending and cancelled named DenseTensor Values expose device
+ * metadata without crossing their payload-read fence.
+ * @return Nothing; GoogleTest reports readiness or device-label failures.
+ * @throws Fixture allocation and pending Value publication exceptions
+ * unchanged.
+ * @note The Value is deliberately published under a non-image name so both
+ * observations exercise the recorder's first-named-Value fallback branch.
+ */
+TEST(ComputeMetricsRecorderSplit,
+     ReadsNonReadyNamedDenseTensorBindingAcrossProducerCancellation) {
+  auto owner = std::make_shared<int>(7);
+  PendingDeviceValuePublication publication =
+      publish_opaque_device_image(3, 3, 1, ElementSemantics::FloatingPoint, 32U,
+                                  DeviceBackend::CUDA, owner);
+  NodeOutput output;
+  output.publish_named_value("latent", publication.value);
+  output.debug.min_val = 56.0;
+  output.debug.max_val = 78.0;
+  ASSERT_EQ(publication.value.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_THROW((void)publication.value.buffer_handle(), ReadyFenceAccessError);
+
+  EXPECT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      output, {}, true, 3.0));
+  EXPECT_EQ(output.debug.compute_device, "GPU_CUDA");
+  EXPECT_DOUBLE_EQ(output.debug.min_val, 56.0);
+  EXPECT_DOUBLE_EQ(output.debug.max_val, 78.0);
+  EXPECT_EQ(publication.value.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+
+  ASSERT_TRUE(publication.producer.cancel());
+  ASSERT_EQ(publication.value.ready_fence().poll().state(),
+            ReadyFenceState::ProducerCancelled);
+  EXPECT_THROW((void)publication.value.buffer_handle(), ReadyFenceAccessError);
+  EXPECT_NO_THROW(compute::ComputeMetricsRecorder::finalize_output_metadata(
+      output, {}, true, 4.0));
+  EXPECT_EQ(output.debug.compute_device, "GPU_CUDA");
+  EXPECT_DOUBLE_EQ(output.debug.min_val, 56.0);
+  EXPECT_DOUBLE_EQ(output.debug.max_val, 78.0);
+  EXPECT_EQ(publication.value.ready_fence().poll().state(),
+            ReadyFenceState::ProducerCancelled);
 }
 
 TEST(DirtyRegionPlannerSplit,
@@ -2748,6 +4843,74 @@ TEST(DirtyRegionPlannerSplit, PreservesDomainSpecificHpAndRtProjection) {
   ASSERT_TRUE(rt_plan.snapshot.per_node_dirty_rois.count(20));
   EXPECT_EQ(rt_plan.snapshot.per_node_dirty_rois.at(20).front(),
             (PixelRect{0, 0, 64, 64}));
+}
+
+/**
+ * @brief Verifies planner PixelRects remain storage-relative while every HP
+ * Region retains a negative signed data-window origin.
+ *
+ * @return Nothing; GoogleTest reports plan, edge, tile, or metadata failures.
+ * @throws Graph, Value, Region, allocation, or propagation exceptions when
+ * fixture construction or planning cannot complete.
+ * @note The requested logical quadrant maps exactly to storage ROI
+ * `{64,64,64,64}`. RT execution projects that storage ROI to `{16,16,16,16}`
+ * without rewriting HP validity into zero-origin coordinates.
+ */
+TEST(DirtyRegionPlannerSplit,
+     KeepsStorageRoisAndLogicalRegionsDistinctForNegativeOrigin) {
+  register_split_ops();
+  GraphModel graph("cache/split-negative-origin-dirty-planner");
+  const ImageBounds data_window{-64, -32, 64, 96};
+  Node source = make_node(10, "split_plan", "tile");
+  source.cached_output_high_precision = make_offset_image_output(data_window);
+  Node target = make_node(20, "split_plan", "tile");
+  target.cached_output_high_precision = make_offset_image_output(data_window);
+  target.image_inputs.push_back({10, "image"});
+  graph.add_node(source);
+  graph.add_node(target);
+  graph.validate_topology();
+
+  const RegionSet requested =
+      RegionSet::from_image_rect({image_region_domain(), 0, 64, 32, 96});
+  GraphTraversalService traversal;
+  RoiPropagationService propagation;
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+
+  const compute::HighPrecisionDirtyPlan hp_plan =
+      planner.plan_high_precision(graph, 20, requested);
+  ASSERT_EQ(hp_plan.entries.size(), 2U);
+  for (int node_id : {10, 20}) {
+    const compute::HpPlanEntry& entry = hp_plan.entries.at(node_id);
+    EXPECT_EQ(entry.hp_data_window, data_window);
+    EXPECT_EQ(entry.roi_hp, (PixelRect{64, 64, 64, 64}));
+    EXPECT_EQ(entry.region_hp, requested);
+  }
+  ASSERT_EQ(hp_plan.snapshot.edge_mappings.size(), 1U);
+  EXPECT_EQ(hp_plan.snapshot.edge_mappings.front().from_region, requested);
+  EXPECT_EQ(hp_plan.snapshot.edge_mappings.front().to_region, requested);
+  ASSERT_EQ(hp_plan.snapshot.dirty_tiles.size(), 2U);
+  for (const compute::DirtyTileKey& tile : hp_plan.snapshot.dirty_tiles) {
+    EXPECT_EQ(tile.pixel_roi, (PixelRect{64, 64, 64, 64}));
+    EXPECT_EQ(tile.region, requested);
+  }
+
+  const compute::RealTimeDirtyPlan rt_plan =
+      planner.plan_real_time(graph, 20, requested);
+  ASSERT_EQ(rt_plan.entries.size(), 2U);
+  for (int node_id : {10, 20}) {
+    const compute::RtPlanEntry& entry = rt_plan.entries.at(node_id);
+    EXPECT_EQ(entry.hp_data_window, data_window);
+    EXPECT_EQ(entry.roi_hp, (PixelRect{64, 64, 64, 64}));
+    EXPECT_EQ(entry.region_hp, requested);
+    EXPECT_EQ(entry.roi_rt, (PixelRect{16, 16, 16, 16}));
+  }
+  ASSERT_EQ(rt_plan.snapshot.dirty_tiles.size(), 2U);
+  const RegionSet expected_rt_tile =
+      RegionSet::from_image_rect({image_region_domain(), 16, 32, 16, 32});
+  for (const compute::DirtyTileKey& tile : rt_plan.snapshot.dirty_tiles) {
+    EXPECT_EQ(tile.pixel_roi, (PixelRect{16, 16, 16, 16}));
+    EXPECT_EQ(tile.region, expected_rt_tile);
+  }
 }
 
 TEST(DirtyRegionPlannerSplit,
@@ -2899,7 +5062,7 @@ TEST(TaskGraphPlanningSplit, ExpandsFullGraphBeforeNodeCachePruning) {
   source.parameters["width"] = 32;
   source.parameters["height"] = 16;
   source.cached_output_high_precision = make_image_output(32, 16);
-  source.hp_region = value_image_adapter::full_node_output_region(
+  source.hp_region = value_region::full_node_output_region(
       *source.cached_output_high_precision);
   Node downstream = make_node(2, "split_plan", "tile");
   downstream.parameters["width"] = 32;
@@ -2976,7 +5139,7 @@ TEST(TaskGraphPlanningSplit,
   cached_branch.parameters["height"] = 16;
   cached_branch.image_inputs.push_back({1, "image"});
   cached_branch.cached_output_high_precision = make_image_output(16, 16);
-  cached_branch.hp_region = value_image_adapter::full_node_output_region(
+  cached_branch.hp_region = value_region::full_node_output_region(
       *cached_branch.cached_output_high_precision);
   Node active_branch = make_node(3, "split_plan", "tile");
   active_branch.parameters["width"] = 16;
@@ -3029,7 +5192,7 @@ TEST(TaskGraphPlanningSplit,
   EXPECT_EQ(partial_plan.planned_nodes, execution_order);
 
   graph.mutate_node_runtime_state(2, [](GraphModel::NodeRuntimeState& state) {
-    state.hp_region = value_image_adapter::full_node_output_region(
+    state.hp_region = value_region::full_node_output_region(
         *state.cached_output_high_precision);
   });
   compute::ComputeRequest forced_request = hp_request;
@@ -3162,7 +5325,7 @@ TEST(TaskGraphPlanningSplit,
   const std::unordered_set<int> externally_satisfied{2};
   auto prepared = compute::prepare_dirty_execution(
       graph, make_sparse_monolithic_dirty_plan(graph, {1, 2, 3}, {1, 3}),
-      request, {Device::CPU}, &externally_satisfied);
+      request, {DeviceBackend::CPU}, &externally_satisfied);
   EXPECT_EQ(selected_dirty_node_ids(prepared), (std::vector<int>{3}));
   execute_selected_dirty_providers(graph, prepared);
   EXPECT_EQ(producer_entries->load(std::memory_order_relaxed), 0);
@@ -3237,7 +5400,7 @@ TEST(TaskGraphPlanningSplit,
   const std::unordered_set<int> externally_satisfied{2};
   auto prepared = compute::prepare_dirty_execution(
       graph, make_sparse_monolithic_dirty_plan(graph, {1, 2, 3, 4}, {1, 3, 4}),
-      request, {Device::CPU}, &externally_satisfied);
+      request, {DeviceBackend::CPU}, &externally_satisfied);
   EXPECT_EQ(selected_dirty_node_ids(prepared), (std::vector<int>{1, 3, 4}));
   execute_selected_dirty_providers(graph, prepared);
   EXPECT_EQ(producer_entries->load(std::memory_order_relaxed), 1);
@@ -3352,8 +5515,7 @@ TEST(ComputeServiceDirtyCacheSelection,
   EXPECT_EQ(replacement_entries->load(std::memory_order_relaxed), 0);
   ASSERT_TRUE(harness.graph().node(1).cached_output_high_precision.has_value());
   EXPECT_FLOAT_EQ(
-      toCvMat(
-          harness.graph().node(1).cached_output_high_precision->image_buffer)
+      project_image_mat(*harness.graph().node(1).cached_output_high_precision)
           .at<float>(0, 0),
       1.0f);
   expect_direct_authority_settled(authority);
@@ -3400,7 +5562,8 @@ TEST(TaskGraphPlanningSplit,
   EXPECT_EQ(task.dirty_generation, 9u);
 }
 
-TEST(TaskGraphPlanningSplit, TileDependenciesFollowRoiOverlap) {
+TEST(TaskGraphPlanningSplit,
+     TileDependenciesRetainExactRoiWithBatchedPublicationRelease) {
   register_split_ops();
   GraphModel graph("cache/split-tile-overlap-dependencies");
   Node source = make_node(1, "split_plan", "tile");
@@ -3429,16 +5592,80 @@ TEST(TaskGraphPlanningSplit, TileDependenciesFollowRoiOverlap) {
   size_t dependency_edges = 0;
   for (const auto* task : downstream_tasks) {
     ASSERT_EQ(task->dependency_task_ids.size(), 1u);
-    const auto& upstream_task =
-        plan.task_graph.tasks.at(task->dependency_task_ids.front());
-    EXPECT_EQ(upstream_task.node_id, 1);
-    EXPECT_FALSE(compute::is_rect_empty(
-        compute::intersect_rect(upstream_task.output_roi, task->output_roi)));
+    std::size_t overlapping_dependencies = 0U;
+    for (int dependency_task_id : task->dependency_task_ids) {
+      const auto& upstream_task = plan.task_graph.tasks.at(dependency_task_id);
+      EXPECT_EQ(upstream_task.node_id, 1);
+      overlapping_dependencies +=
+          compute::is_rect_empty(compute::intersect_rect(
+              upstream_task.output_roi, task->output_roi))
+              ? 0U
+              : 1U;
+    }
+    EXPECT_EQ(overlapping_dependencies, 1u)
+        << "ROI mapping still identifies one byte-producing sibling";
     dependency_edges += task->dependency_task_ids.size();
   }
   EXPECT_EQ(dependency_edges, 2u)
-      << "two upstream tiles feeding two downstream tiles should not form the "
-         "four-edge Cartesian product";
+      << "each consumer keeps only its exact spatial task dependency; runtime "
+         "batches physical release after complete Value publication";
+}
+
+/**
+ * @brief Proves an empty exact mapping retains only publication dependencies.
+ *
+ * A 16x16 tiled source feeds a 32x16 SpatialAligned tiled consumer. The left
+ * consumer tile retains its exact byte-producing source edge; the right tile
+ * maps outside the source extent yet still waits for complete source Value
+ * publication because execution resolves the connected NodeOutput.
+ */
+TEST(TaskGraphPlanningSplit,
+     EmptyExactTileMappingRetainsProducerPublicationDependency) {
+  register_split_ops();
+  GraphModel graph("cache/split-empty-tile-publication-dependency");
+  Node source = make_node(1, "split_plan", "tile");
+  source.parameters["width"] = 16;
+  source.parameters["height"] = 16;
+  Node downstream = make_node(2, "split_plan", "tile");
+  downstream.parameters["width"] = 32;
+  downstream.parameters["height"] = 16;
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(downstream);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 2;
+  const auto plan = node_cache_pruned_plan(graph, request, {1, 2});
+
+  std::vector<const compute::PlannedTask*> downstream_tasks;
+  for (const auto& task : plan.task_graph.tasks) {
+    if (task.node_id == 2) {
+      downstream_tasks.push_back(&task);
+    }
+  }
+  ASSERT_EQ(downstream_tasks.size(), 2U);
+  std::sort(
+      downstream_tasks.begin(), downstream_tasks.end(),
+      [](const compute::PlannedTask* left, const compute::PlannedTask* right) {
+        return left->output_roi.x < right->output_roi.x;
+      });
+  for (const compute::PlannedTask* task : downstream_tasks) {
+    ASSERT_EQ(task->dependency_task_ids.size(), 1U);
+    const compute::PlannedTask& producer =
+        plan.task_graph.tasks.at(task->dependency_task_ids.front());
+    EXPECT_EQ(producer.node_id, 1);
+  }
+  const compute::PlannedTask& left_producer = plan.task_graph.tasks.at(
+      downstream_tasks.front()->dependency_task_ids.front());
+  const compute::PlannedTask& right_publication = plan.task_graph.tasks.at(
+      downstream_tasks.back()->dependency_task_ids.front());
+  EXPECT_FALSE(compute::is_rect_empty(compute::intersect_rect(
+      left_producer.output_roi, downstream_tasks.front()->output_roi)));
+  EXPECT_TRUE(compute::is_rect_empty(compute::intersect_rect(
+      right_publication.output_roi, downstream_tasks.back()->output_roi)))
+      << "the non-overlapping edge is retained only as a publication join";
 }
 
 TEST(TaskGraphPlanningSplit, TileDependenciesUseGaussianHaloInputRoi) {
@@ -3688,7 +5915,9 @@ TEST(TaskGraphPlanningSplit,
       image_dependency_count += dependency_node_id == 1 ? 1u : 0u;
       parameter_dependency_count += dependency_node_id == 3 ? 1u : 0u;
     }
-    EXPECT_EQ(image_dependency_count, 1u);
+    EXPECT_EQ(image_dependency_count, 1u)
+        << "spatial ROI retains one exact source tile while the runtime "
+           "batches release until whole-Value publication";
     EXPECT_EQ(parameter_dependency_count, 1u)
         << "the uncached parameter producer remains a scheduling dependency "
            "even though SpatialAligned ROI geometry does not read its value";
@@ -3714,11 +5943,12 @@ TEST(TaskGraphPlanningSplit,
   execution_request.cache.disable_disk_cache = true;
   NodeOutput& output = service.compute(graph, execution_request);
 
-  EXPECT_EQ(output.image_buffer.width, 32);
-  EXPECT_EQ(output.image_buffer.height, 16);
+  const ImageView output_image = inspect_image_output(output);
+  EXPECT_EQ(output_image.width(), 32U);
+  EXPECT_EQ(output_image.height(), 16U);
   double output_min = 0.0;
   double output_max = 0.0;
-  cv::minMaxLoc(toCvMat(output.image_buffer), &output_min, &output_max);
+  cv::minMaxLoc(toCvMat(output_image.value()), &output_min, &output_max);
   EXPECT_DOUBLE_EQ(output_min, 7.0);
   EXPECT_DOUBLE_EQ(output_max, 7.0);
   EXPECT_EQ(g_spatial_generator_hp_calls.load(std::memory_order_relaxed), 1)
@@ -3727,11 +5957,12 @@ TEST(TaskGraphPlanningSplit,
   EXPECT_EQ(g_spatial_parameter_hp_calls.load(std::memory_order_relaxed), 1);
   ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
   const NodeOutput& source_output = *graph.node(1).cached_output_high_precision;
-  EXPECT_EQ(source_output.image_buffer.width, 32);
-  EXPECT_EQ(source_output.image_buffer.height, 16);
+  const ImageView source_image = inspect_image_output(source_output);
+  EXPECT_EQ(source_image.width(), 32U);
+  EXPECT_EQ(source_image.height(), 16U);
   double source_min = 0.0;
   double source_max = 0.0;
-  cv::minMaxLoc(toCvMat(source_output.image_buffer), &source_min, &source_max);
+  cv::minMaxLoc(toCvMat(source_image.value()), &source_min, &source_max);
   EXPECT_DOUBLE_EQ(source_min, 3.0);
   EXPECT_DOUBLE_EQ(source_max, 3.0);
   ASSERT_TRUE(graph.node(3).cached_output_high_precision.has_value());
@@ -3792,7 +6023,8 @@ TEST(ComputeServiceSequentialAdmission,
           }),
       metadata);
   const auto selected = OpRegistry::instance().select_implementation(
-      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+      kType, kSubtype, {DeviceBackend::CPU},
+      ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(selected.has_value());
   ASSERT_NE(selected->implementation_identity, 0U);
 
@@ -3801,8 +6033,8 @@ TEST(ComputeServiceSequentialAdmission,
       "photospider-sequential-provider-lease-boundary");
   auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
       testing::FakeImageArtifactCodec::DecodeCallback{},
-      [probe](const std::filesystem::path&, const ImageBuffer&,
-              ImageArtifactPrecision) {
+      [probe](const std::filesystem::path&, const Value&,
+              const ImageArtifactEncodeRequest&) {
         probe->block_post_provider_cache_and_fail();
       });
   compute::ExecutionService authority(1U);
@@ -3990,7 +6222,8 @@ TEST(ComputeServiceSequentialAdmission,
           }),
       metadata);
   const auto selected = OpRegistry::instance().select_implementation(
-      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+      kType, kSubtype, {DeviceBackend::CPU},
+      ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(selected.has_value());
   ASSERT_NE(selected->implementation_identity, 0U);
   const compute::OperationExecutionConstraints constraints{
@@ -4100,8 +6333,8 @@ TEST(ComputeServiceSequentialAdmission,
       "photospider-sequential-exact-direct-capacity");
   auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
       testing::FakeImageArtifactCodec::DecodeCallback{},
-      [probe](const std::filesystem::path&, const ImageBuffer&,
-              ImageArtifactPrecision) {
+      [probe](const std::filesystem::path&, const Value&,
+              const ImageArtifactEncodeRequest&) {
         probe->block_post_provider_cache_and_fail();
       });
 
@@ -4444,6 +6677,1732 @@ TEST(ComputeRunProductPath,
   runtime.stop();
 }
 
+/**
+ * @brief Proves registered full routes reject unauthorized image candidates
+ * without mutating preexisting graph state.
+ *
+ * @return Nothing; GoogleTest reports admission, cache, Region, version, or
+ * inspection-state failures.
+ * @throws Registry, runtime, graph, service, Value, or allocation exceptions
+ * unchanged outside the expected GraphError boundary.
+ * @note Each malformed provider is registered normally, planned from its
+ * revisioned default image declaration, and executed through both sequential
+ * and route-backed full HP entry points. A complete old cache plus sentinel
+ * inspection state proves force-recache work remains request-local when
+ * authorization fails.
+ */
+TEST(ComputeOutputAuthority,
+     FullRoutesRejectMissingWrongNameFacetExtentAndDataWithoutMutation) {
+  struct Case final {
+    /** @brief Unique registry subtype and trace label. */
+    const char* subtype;
+    /** @brief Constructible candidate returned by the registered provider. */
+    FullRouteOutputFixture fixture;
+  };
+  constexpr char kType[] = "issue130_output_authority";
+  const std::array<Case, 5U> cases{{
+      {"empty", FullRouteOutputFixture::Empty},
+      {"wrong_name", FullRouteOutputFixture::WrongName},
+      {"missing_facet", FullRouteOutputFixture::MissingImageFacet},
+      {"wrong_extent", FullRouteOutputFixture::WrongExtent},
+      {"unexpected_data", FullRouteOutputFixture::UnexpectedData},
+  }};
+
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.subtype);
+    OpRegistry& registry = OpRegistry::instance();
+    registry.unregister_key(make_key(kType, test_case.subtype));
+    registry.register_op_hp_monolithic(
+        kType, test_case.subtype,
+        MonolithicOpFunc(
+            [fixture = test_case.fixture](
+                const Node&, const std::vector<const NodeOutput*>&) {
+              return make_full_route_output_fixture(fixture);
+            }));
+
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-authority-") + test_case.subtype));
+    GraphRuntime::Info info;
+    info.name = std::string("issue130-authority-") + test_case.subtype;
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, test_case.subtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.cached_output_high_precision = make_image_output(4, 3, 1, 13.0f);
+    node.hp_region =
+        RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 3});
+    node.hp_version = 17;
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+    graph.last_compute_plan = compute::ComputePlan{};
+    graph.last_compute_plan->target_node_id = 777;
+    graph.last_compute_plan->planned_nodes = {777};
+    graph.last_compute_plan_summary = compute::ComputePlanSummary{};
+    graph.last_compute_plan_summary->target_node_id = 777;
+    graph.recent_compute_plan_summaries = {*graph.last_compute_plan_summary};
+
+    const ValueRevisionId old_revision =
+        graph.node(1).cached_output_high_precision->image_value().revision_id();
+    const RegionSet old_region = *graph.node(1).hp_region;
+    GraphTraversalService traversal;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                            testing::make_yaml_cache_metadata_codec()};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "float32";
+    request.cache.force_recache = true;
+    request.cache.disable_disk_cache = true;
+
+    for (const bool parallel : {false, true}) {
+      SCOPED_TRACE(parallel ? "parallel" : "sequential");
+      if (parallel) {
+        EXPECT_THROW((void)service.compute_parallel(graph, runtime, request),
+                     GraphError);
+      } else {
+        EXPECT_THROW((void)service.compute(graph, request), GraphError);
+      }
+      ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+      EXPECT_EQ(graph.node(1)
+                    .cached_output_high_precision->image_value()
+                    .revision_id(),
+                old_revision);
+      EXPECT_EQ(graph.node(1).hp_region, old_region);
+      EXPECT_EQ(graph.node(1).hp_version, 17);
+      ASSERT_TRUE(graph.last_compute_plan.has_value());
+      EXPECT_EQ(graph.last_compute_plan->target_node_id, 777);
+      EXPECT_EQ(graph.last_compute_plan->planned_nodes,
+                (std::vector<int>{777}));
+      ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
+      EXPECT_EQ(graph.last_compute_plan_summary->target_node_id, 777);
+      ASSERT_EQ(graph.recent_compute_plan_summaries.size(), 1U);
+      EXPECT_EQ(graph.recent_compute_plan_summaries.front().target_node_id,
+                777);
+      EXPECT_EQ(execution_service.resource_snapshot().reserved,
+                ResourceVector{});
+    }
+    runtime.stop();
+    registry.unregister_key(make_key(kType, test_case.subtype));
+  }
+}
+
+/**
+ * @brief Proves malformed generic outputs cannot release dependent work or
+ * replace prior formal image/generic identities.
+ *
+ * @return Nothing; GoogleTest reports provider admission, dependency release,
+ * graph mutation, identity, Region, version, or resource residue failures.
+ * @throws Registry, runtime, graph, service, Value, pending-producer, or
+ * allocation exceptions unchanged outside expected GraphError boundaries.
+ * @note Each source has a revisioned image-plus-`deep` declaration and a prior
+ * complete formal output. Both sequential and parallel full routes execute a
+ * real two-node graph; the dependent callback is observable evidence that
+ * unauthorized generic results never release the edge.
+ */
+TEST(ComputeOutputAuthority,
+     FullRoutesRejectMalformedGenericValuesBeforeReleaseOrMutation) {
+  struct Case final {
+    /** @brief Unique registry subtype and trace label. */
+    const char* subtype;
+    /** @brief Malformed candidate returned by the source provider. */
+    GenericRouteOutputFixture fixture;
+  };
+  constexpr char kType[] = "issue130_generic_output_authority";
+  constexpr char kDependentSubtype[] = "dependent";
+  const std::array<Case, 6U> cases{{
+      {"missing", GenericRouteOutputFixture::Missing},
+      {"extra", GenericRouteOutputFixture::Extra},
+      {"wrong_name", GenericRouteOutputFixture::WrongName},
+      {"invalid", GenericRouteOutputFixture::Invalid},
+      {"failed", GenericRouteOutputFixture::Failed},
+      {"producer_cancelled", GenericRouteOutputFixture::ProducerCancelled},
+  }};
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+  auto dependent_entries = std::make_shared<std::atomic_int>(0);
+  registry.register_op_hp_monolithic(
+      kType, kDependentSubtype,
+      MonolithicOpFunc([dependent_entries](
+                           const Node&, const std::vector<const NodeOutput*>&) {
+        dependent_entries->fetch_add(1, std::memory_order_relaxed);
+        return make_image_output(4, 3, 1, 21.0f);
+      }));
+
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.subtype);
+    registry.unregister_key(make_key(kType, test_case.subtype));
+    registry.register_op_hp_monolithic(
+        kType, test_case.subtype,
+        MonolithicOpFunc(
+            [fixture = test_case.fixture](
+                const Node&, const std::vector<const NodeOutput*>&) {
+              return make_generic_route_output_fixture(fixture);
+            }),
+        declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-generic-reject-") +
+         test_case.subtype));
+    GraphRuntime::Info info;
+    info.name = std::string("issue130-generic-reject-") + test_case.subtype;
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node source = make_node(1, kType, test_case.subtype);
+    source.parameters["width"] = 4;
+    source.parameters["height"] = 3;
+    NodeOutput prior = make_image_output(4, 3, 1, 7.0f);
+    prior.publish_named_value("deep",
+                              make_generic_dense_value(std::byte{0x33}));
+    source.cached_output_high_precision = std::move(prior);
+    source.hp_region =
+        RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 3});
+    source.hp_version = 17;
+    Node dependent = make_node(2, kType, kDependentSubtype);
+    dependent.parameters["width"] = 4;
+    dependent.parameters["height"] = 3;
+    dependent.image_inputs.push_back(ImageInput{1, "image"});
+    dependent.cached_output_high_precision = make_image_output(4, 3, 1, 8.0f);
+    dependent.hp_region =
+        RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 3});
+    dependent.hp_version = 23;
+    graph.add_node(std::move(source));
+    graph.add_node(std::move(dependent));
+    graph.validate_topology();
+
+    const NodeOutput& old_source = *graph.node(1).cached_output_high_precision;
+    const ValueRevisionId old_image_revision =
+        old_source.image_value().revision_id();
+    const ValueRevisionId old_deep_revision =
+        old_source.named_values.at("deep").revision_id();
+    const ValueRevisionId old_dependent_revision =
+        graph.node(2).cached_output_high_precision->image_value().revision_id();
+    GraphTraversalService traversal;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                            testing::make_yaml_cache_metadata_codec()};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 2;
+    request.cache.precision = "float32";
+    request.cache.force_recache = true;
+    request.cache.disable_disk_cache = true;
+    dependent_entries->store(0, std::memory_order_relaxed);
+
+    for (const bool parallel : {false, true}) {
+      SCOPED_TRACE(parallel ? "parallel" : "sequential");
+      if (parallel) {
+        EXPECT_THROW((void)service.compute_parallel(graph, runtime, request),
+                     GraphError);
+      } else {
+        EXPECT_THROW((void)service.compute(graph, request), GraphError);
+      }
+      EXPECT_EQ(dependent_entries->load(std::memory_order_relaxed), 0);
+      ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+      const NodeOutput& current_source =
+          *graph.node(1).cached_output_high_precision;
+      EXPECT_EQ(current_source.image_value().revision_id(), old_image_revision);
+      ASSERT_EQ(current_source.named_values.size(), 2U);
+      EXPECT_EQ(current_source.named_values.at("deep").revision_id(),
+                old_deep_revision);
+      EXPECT_TRUE(current_source.data.empty());
+      EXPECT_EQ(graph.node(1).hp_version, 17);
+      EXPECT_EQ(
+          graph.node(1).hp_region,
+          RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 3}));
+      ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+      EXPECT_EQ(graph.node(2)
+                    .cached_output_high_precision->image_value()
+                    .revision_id(),
+                old_dependent_revision);
+      EXPECT_EQ(graph.node(2).hp_version, 23);
+      EXPECT_EQ(execution_service.resource_snapshot().reserved,
+                ResourceVector{});
+    }
+    runtime.stop();
+    registry.unregister_key(make_key(kType, test_case.subtype));
+  }
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+}
+
+/**
+ * @brief Proves canonical image and a non-image DenseTensor generic Value can
+ * commit together without category conflation.
+ *
+ * @return Nothing; GoogleTest reports route, category, representation,
+ * identity, extent, or publication failures.
+ * @throws Registry, runtime, graph, service, Value, or allocation exceptions
+ * unchanged.
+ * @note Both sequential and parallel routes freeze the same image-plus-`deep`
+ * declaration. The generic Value deliberately has no ImageFacet and never
+ * appears in `NodeOutput::data`.
+ */
+TEST(ComputeOutputAuthority, FullRoutesCommitCanonicalImageAndGenericValue) {
+  constexpr char kType[] = "issue130_generic_output_authority";
+  constexpr char kSubtype[] = "image_and_generic";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  const Value deep = make_generic_dense_value(std::byte{0x44});
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc(
+          [deep](const Node&, const std::vector<const NodeOutput*>&) {
+            NodeOutput output = make_image_output(4, 3, 1, 14.0f);
+            output.publish_named_value("deep", deep);
+            return output;
+          }),
+      declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-issue130-image-generic");
+  GraphRuntime::Info info;
+  info.name = "issue130-image-generic";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  Node node = make_node(1, kType, kSubtype);
+  node.parameters["width"] = 4;
+  node.parameters["height"] = 3;
+  graph.add_node(std::move(node));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    const NodeOutput& output =
+        parallel ? service.compute_parallel(graph, runtime, request)
+                 : service.compute(graph, request);
+    ASSERT_EQ(output.named_values.size(), 2U);
+    ASSERT_TRUE(output.has_image_value());
+    EXPECT_EQ(image_bounds_width(output.image_value().image_bounds()), 4U);
+    EXPECT_EQ(image_bounds_height(output.image_value().image_bounds()), 3U);
+    const Value& actual = output.named_values.at("deep");
+    EXPECT_EQ(actual.representation_kind(),
+              ValueRepresentationKind::DenseTensor);
+    EXPECT_FALSE(actual.image_facet().has_value());
+    EXPECT_EQ(actual.revision_id(), deep.revision_id());
+    EXPECT_TRUE(output.data.empty());
+  }
+  EXPECT_EQ(graph.node(1).hp_version, 2);
+  runtime.stop();
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves image-plus-generic routes replay one portable transaction.
+ *
+ * @return Nothing; GoogleTest reports provider-count, named-output, artifact,
+ * diagnostic, or sequential/parallel route failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged.
+ * @note Each route computes once, clears only formal memory, then reconstructs
+ * exact fresh `image` plus `deep` Values from the manifest-bound archive
+ * without a second provider call.
+ */
+TEST(ComputeOutputAuthority,
+     DiskEnabledImageAndGenericRoutesReplayPortableTransaction) {
+  constexpr char kType[] = "issue130_generic_disk_cache";
+  constexpr char kSubtype[] = "image_and_generic";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  auto provider_entries = std::make_shared<std::atomic_int>(0);
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc([provider_entries](
+                           const Node&, const std::vector<const NodeOutput*>&) {
+        const int entry =
+            provider_entries->fetch_add(1, std::memory_order_relaxed) + 1;
+        NodeOutput output =
+            make_image_output(4, 3, 1, static_cast<float>(entry));
+        output.publish_named_value(
+            "deep", make_generic_dense_value(static_cast<std::byte>(entry)));
+        return output;
+      }),
+      declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    provider_entries->store(0, std::memory_order_relaxed);
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-generic-disk-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-generic-disk-parallel"
+                         : "issue130-generic-disk-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    GraphTraversalService traversal;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                            testing::make_yaml_cache_metadata_codec()};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+    const auto verify_output = [](const NodeOutput& output) {
+      ASSERT_EQ(output.named_values.size(), 2U);
+      EXPECT_TRUE(output.has_image_value());
+      EXPECT_TRUE(output.named_values.count("deep"));
+      EXPECT_TRUE(output.data.empty());
+    };
+
+    verify_output(compute_once());
+    EXPECT_EQ(provider_entries->load(std::memory_order_relaxed), 1);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    auto metadata = artifact;
+    metadata.replace_extension(".yml");
+    auto archive = artifact;
+    archive += ".values";
+    auto manifest = artifact;
+    manifest += ".manifest";
+    EXPECT_TRUE(std::filesystem::exists(artifact));
+    EXPECT_FALSE(std::filesystem::exists(metadata));
+    EXPECT_TRUE(std::filesystem::exists(archive));
+    EXPECT_TRUE(std::filesystem::exists(manifest));
+
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+    verify_output(compute_once());
+    EXPECT_EQ(provider_entries->load(std::memory_order_relaxed), 1);
+    EXPECT_TRUE(std::filesystem::exists(artifact));
+    EXPECT_FALSE(std::filesystem::exists(metadata));
+    const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Hit);
+    EXPECT_NE(diagnostic->message.find("portable named-Value"),
+              std::string::npos);
+    runtime.stop();
+  }
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves a revisioned image-plus-generic schema cannot consume an old
+ * image-only artifact at the same configured path.
+ *
+ * @return Nothing; GoogleTest reports registry-generation, provider-count,
+ * disk-diagnostic, output-schema, or artifact-path failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged.
+ * @note The first request writes a real image-only artifact. After memory
+ * eviction, the same operation key is replaced with an image-plus-`deep`
+ * declaration. Both sequential and parallel routes must record an
+ * incompatible miss and recompute without accepting the predecessor bytes.
+ */
+TEST(ComputeOutputAuthority,
+     RevisionedGenericSchemaMissesExistingImageOnlyArtifact) {
+  constexpr char kType[] = "issue130_generic_disk_cache";
+  constexpr char kSubtype[] = "schema_upgrade";
+  OpRegistry& registry = OpRegistry::instance();
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto image_only_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [image_only_entries](const Node&,
+                                 const std::vector<const NodeOutput*>&) {
+              image_only_entries->fetch_add(1, std::memory_order_relaxed);
+              return make_image_output(4, 3, 1, 31.0f);
+            }),
+        declare_test_outputs(OpMetadata{}, true, {}));
+
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-schema-upgrade-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-schema-upgrade-parallel"
+                         : "issue130-schema-upgrade-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    GraphTraversalService traversal;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                            testing::make_yaml_cache_metadata_codec()};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+
+    const NodeOutput& image_only = compute_once();
+    ASSERT_EQ(image_only.named_values.size(), 1U);
+    ASSERT_TRUE(image_only.has_image_value());
+    EXPECT_EQ(image_only_entries->load(std::memory_order_relaxed), 1);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    ASSERT_TRUE(std::filesystem::exists(artifact));
+    ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
+    const std::string image_only_plan_key =
+        graph.last_compute_plan_summary->full_graph_cache_key;
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto generic_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [generic_entries](const Node&,
+                              const std::vector<const NodeOutput*>&) {
+              generic_entries->fetch_add(1, std::memory_order_relaxed);
+              NodeOutput output = make_image_output(4, 3, 1, 32.0f);
+              output.publish_named_value(
+                  "deep", make_generic_dense_value(std::byte{0x32}));
+              return output;
+            }),
+        declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+    const NodeOutput& upgraded = compute_once();
+    ASSERT_EQ(upgraded.named_values.size(), 2U);
+    EXPECT_TRUE(upgraded.has_image_value());
+    EXPECT_TRUE(upgraded.named_values.count("deep"));
+    EXPECT_TRUE(upgraded.data.empty());
+    EXPECT_EQ(generic_entries->load(std::memory_order_relaxed), 1);
+    ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
+    EXPECT_NE(graph.last_compute_plan_summary->full_graph_cache_key,
+              image_only_plan_key);
+    EXPECT_TRUE(std::filesystem::exists(artifact));
+    const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Miss);
+    EXPECT_NE(diagnostic->message.find("manifest/files"), std::string::npos);
+    runtime.stop();
+  }
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves the existing image-only disk-cache hit remains reusable.
+ *
+ * @return Nothing; GoogleTest reports provider-count, artifact, diagnostic,
+ * image-authority, or sequential/parallel route failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged.
+ * @note The first request writes a configured image artifact, formal memory is
+ * cleared, and the second request must load that artifact without another
+ * provider entry. This is the negative control for generic-schema bypass.
+ */
+TEST(ComputeOutputAuthority, ImageOnlyRoutesStillHitDiskWithoutRecompute) {
+  constexpr char kType[] = "issue130_generic_disk_cache";
+  constexpr char kSubtype[] = "image_only";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  auto provider_entries = std::make_shared<std::atomic_int>(0);
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc([provider_entries](
+                           const Node&, const std::vector<const NodeOutput*>&) {
+        provider_entries->fetch_add(1, std::memory_order_relaxed);
+        return make_image_output(4, 3, 1, 41.0f);
+      }),
+      declare_test_outputs(OpMetadata{}, true, {}));
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    provider_entries->store(0, std::memory_order_relaxed);
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-image-only-disk-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-image-only-disk-parallel"
+                         : "issue130-image-only-disk-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    GraphTraversalService traversal;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                            testing::make_yaml_cache_metadata_codec()};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+
+    const NodeOutput& computed = compute_once();
+    ASSERT_EQ(computed.named_values.size(), 1U);
+    ASSERT_TRUE(computed.has_image_value());
+    EXPECT_EQ(provider_entries->load(std::memory_order_relaxed), 1);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    ASSERT_TRUE(std::filesystem::exists(artifact));
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+
+    const NodeOutput& loaded = compute_once();
+    ASSERT_EQ(loaded.named_values.size(), 1U);
+    EXPECT_TRUE(loaded.has_image_value());
+    EXPECT_EQ(image_bounds_width(loaded.image_value().image_bounds()), 4U);
+    EXPECT_EQ(image_bounds_height(loaded.image_value().image_bounds()), 3U);
+    EXPECT_EQ(provider_entries->load(std::memory_order_relaxed), 1);
+    EXPECT_TRUE(std::filesystem::exists(artifact));
+    const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Hit);
+    runtime.stop();
+  }
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves image-to-data-only schema replacement misses before decoding.
+ *
+ * @return Nothing; GoogleTest reports route, provider-count, codec-call,
+ * sibling-lifecycle, parameter-authority, or diagnostic failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged outside the explicit replacement no-throw boundary.
+ * @note A real first request persists only the image sibling. Re-registering
+ * the same operation key as data-only must treat that image as incompatible,
+ * recompute through each real full route, write metadata, remove the image,
+ * and then reuse the exact data-only artifact without another provider call.
+ */
+TEST(ComputeOutputAuthority,
+     ImageArtifactThenDataOnlySchemaRecomputesAndRetainsDataHit) {
+  constexpr char kType[] = "issue130_disk_schema_replacement";
+  constexpr char kSubtype[] = "image_to_data";
+  OpRegistry& registry = OpRegistry::instance();
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto image_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [image_entries](const Node&,
+                            const std::vector<const NodeOutput*>&) {
+              image_entries->fetch_add(1, std::memory_order_relaxed);
+              return make_image_output(4, 3, 1, 51.0f);
+            }),
+        declare_test_outputs(OpMetadata{}, true, {}));
+
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-image-to-data-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-image-to-data-parallel"
+                         : "issue130-image-to-data-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    RecordingDiskCacheCodecs codecs = make_recording_disk_cache_codecs();
+    GraphTraversalService traversal;
+    GraphCacheService cache{codecs.image, codecs.metadata};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+
+    ASSERT_TRUE(compute_once().has_image_value());
+    EXPECT_EQ(image_entries->load(std::memory_order_relaxed), 1);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    auto metadata = artifact;
+    metadata.replace_extension(".yml");
+    ASSERT_TRUE(std::filesystem::exists(artifact));
+    ASSERT_FALSE(std::filesystem::exists(metadata));
+    ASSERT_EQ(codecs.image->calls().size(), 1U);
+    ASSERT_TRUE(codecs.metadata->calls().empty());
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto data_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [data_entries](const Node&, const std::vector<const NodeOutput*>&) {
+              data_entries->fetch_add(1, std::memory_order_relaxed);
+              NodeOutput output;
+              output.data["radius"] = 17;
+              return output;
+            }),
+        declare_test_outputs(OpMetadata{}, false, {"radius"}));
+
+    const NodeOutput* replaced = nullptr;
+    EXPECT_NO_THROW(replaced = &compute_once());
+    if (replaced != nullptr) {
+      EXPECT_FALSE(replaced->has_image_value());
+      ASSERT_EQ(replaced->data.size(), 1U);
+      EXPECT_EQ(replaced->data.at("radius").as_int64(), 17);
+      EXPECT_EQ(data_entries->load(std::memory_order_relaxed), 1);
+      EXPECT_FALSE(std::filesystem::exists(artifact));
+      EXPECT_TRUE(std::filesystem::exists(metadata));
+      EXPECT_EQ(codecs.image->calls().size(), 1U);
+      ASSERT_EQ(codecs.metadata->calls().size(), 2U);
+      EXPECT_EQ(codecs.metadata->calls().front().kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Write);
+      EXPECT_EQ(codecs.metadata->calls()[1U].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Read);
+      const auto miss = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(miss.has_value());
+      EXPECT_EQ(miss->status, GraphModel::DiskCacheLoadStatus::Miss);
+
+      EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+      const NodeOutput& hit = compute_once();
+      EXPECT_FALSE(hit.has_image_value());
+      ASSERT_EQ(hit.data.size(), 1U);
+      EXPECT_EQ(hit.data.at("radius").as_int64(), 17);
+      EXPECT_EQ(data_entries->load(std::memory_order_relaxed), 1);
+      EXPECT_EQ(codecs.image->calls().size(), 1U);
+      const std::size_t expected_metadata_calls = parallel ? 5U : 3U;
+      ASSERT_EQ(codecs.metadata->calls().size(), expected_metadata_calls);
+      constexpr std::size_t read_call = 2U;
+      EXPECT_EQ(codecs.metadata->calls()[read_call].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Read);
+      if (parallel) {
+        EXPECT_EQ(codecs.metadata->calls()[3U].kind,
+                  testing::FakeCacheMetadataCodec::Call::Kind::Write);
+        EXPECT_EQ(codecs.metadata->calls().back().kind,
+                  testing::FakeCacheMetadataCodec::Call::Kind::Read);
+      }
+      const auto hit_diagnostic = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(hit_diagnostic.has_value());
+      EXPECT_EQ(hit_diagnostic->status, GraphModel::DiskCacheLoadStatus::Hit);
+    }
+    runtime.stop();
+    registry.unregister_key(make_key(kType, kSubtype));
+  }
+}
+
+/**
+ * @brief Proves image-plus-parameter to image-only replacement is symmetric.
+ *
+ * @return Nothing; GoogleTest reports route, provider-count, codec-call,
+ * sibling-lifecycle, image-authority, or diagnostic failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged outside the explicit replacement no-throw boundary.
+ * @note The replacement request must reject the unexpected metadata sibling
+ * without image decode or metadata read, recompute, encode the new image, and
+ * remove YAML only after that encode succeeds. A following image-only request
+ * proves the remaining image is a real reusable hit.
+ */
+TEST(ComputeOutputAuthority,
+     ImageAndParameterArtifactThenImageOnlySchemaRecomputesAndHits) {
+  constexpr char kType[] = "issue130_disk_schema_replacement";
+  constexpr char kSubtype[] = "image_data_to_image";
+  OpRegistry& registry = OpRegistry::instance();
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto combined_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [combined_entries](const Node&,
+                               const std::vector<const NodeOutput*>&) {
+              combined_entries->fetch_add(1, std::memory_order_relaxed);
+              NodeOutput output = make_image_output(4, 3, 1, 61.0f);
+              output.data["radius"] = 19;
+              return output;
+            }),
+        declare_test_outputs(OpMetadata{}, true, {"radius"}));
+
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-data-to-image-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-data-to-image-parallel"
+                         : "issue130-data-to-image-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    RecordingDiskCacheCodecs codecs = make_recording_disk_cache_codecs();
+    GraphTraversalService traversal;
+    GraphCacheService cache{codecs.image, codecs.metadata};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+
+    const NodeOutput& combined = compute_once();
+    ASSERT_TRUE(combined.has_image_value());
+    ASSERT_EQ(combined.data.size(), 1U);
+    EXPECT_EQ(combined_entries->load(std::memory_order_relaxed), 1);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    auto metadata = artifact;
+    metadata.replace_extension(".yml");
+    ASSERT_TRUE(std::filesystem::exists(artifact));
+    ASSERT_TRUE(std::filesystem::exists(metadata));
+    ASSERT_EQ(codecs.image->calls().size(), 1U);
+    ASSERT_EQ(codecs.metadata->calls().size(), 2U);
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto image_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [image_entries](const Node&,
+                            const std::vector<const NodeOutput*>&) {
+              image_entries->fetch_add(1, std::memory_order_relaxed);
+              return make_image_output(4, 3, 1, 62.0f);
+            }),
+        declare_test_outputs(OpMetadata{}, true, {}));
+
+    const NodeOutput* replaced = nullptr;
+    EXPECT_NO_THROW(replaced = &compute_once());
+    if (replaced != nullptr) {
+      EXPECT_TRUE(replaced->has_image_value());
+      EXPECT_TRUE(replaced->data.empty());
+      EXPECT_EQ(image_entries->load(std::memory_order_relaxed), 1);
+      EXPECT_TRUE(std::filesystem::exists(artifact));
+      EXPECT_FALSE(std::filesystem::exists(metadata));
+      ASSERT_EQ(codecs.image->calls().size(), 2U);
+      EXPECT_EQ(codecs.image->calls().back().kind,
+                testing::FakeImageArtifactCodec::Call::Kind::Encode);
+      EXPECT_EQ(codecs.metadata->calls().size(), 2U);
+      const auto miss = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(miss.has_value());
+      EXPECT_EQ(miss->status, GraphModel::DiskCacheLoadStatus::Miss);
+
+      EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+      const NodeOutput& hit = compute_once();
+      EXPECT_TRUE(hit.has_image_value());
+      EXPECT_TRUE(hit.data.empty());
+      EXPECT_EQ(image_entries->load(std::memory_order_relaxed), 1);
+      const std::size_t expected_image_calls = parallel ? 3U : 2U;
+      const auto image_calls = codecs.image->calls();
+      ASSERT_EQ(image_calls.size(), expected_image_calls);
+      EXPECT_TRUE(std::none_of(
+          image_calls.begin(), image_calls.end(),
+          [](const testing::FakeImageArtifactCodec::Call& call) {
+            return call.kind ==
+                   testing::FakeImageArtifactCodec::Call::Kind::Decode;
+          }));
+      if (parallel) {
+        EXPECT_EQ(image_calls.back().kind,
+                  testing::FakeImageArtifactCodec::Call::Kind::Encode);
+      }
+      EXPECT_EQ(codecs.metadata->calls().size(), 2U);
+      const auto hit_diagnostic = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(hit_diagnostic.has_value());
+      EXPECT_EQ(hit_diagnostic->status, GraphModel::DiskCacheLoadStatus::Hit);
+    }
+    runtime.stop();
+    registry.unregister_key(make_key(kType, kSubtype));
+  }
+}
+
+/**
+ * @brief Proves data-only cache hits require the exact planned parameter keys.
+ *
+ * @return Nothing; GoogleTest reports route, provider-count, metadata-call,
+ * parameter-authority, persisted-key, or diagnostic failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged outside the explicit replacement no-throw boundary.
+ * @note Both revisions plan a metadata sibling, so presence alone is
+ * insufficient. The old `radius` map must parse once into an incompatible
+ * miss, the `sigma` provider must replace it, and a second `sigma` request must
+ * reuse that exact map without another provider entry.
+ */
+TEST(ComputeOutputAuthority,
+     ParameterNameReplacementRecomputesAndRetainsExactDataHit) {
+  constexpr char kType[] = "issue130_disk_schema_replacement";
+  constexpr char kSubtype[] = "parameter_name";
+  OpRegistry& registry = OpRegistry::instance();
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto radius_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [radius_entries](const Node&,
+                             const std::vector<const NodeOutput*>&) {
+              radius_entries->fetch_add(1, std::memory_order_relaxed);
+              NodeOutput output;
+              output.data["radius"] = 23;
+              return output;
+            }),
+        declare_test_outputs(OpMetadata{}, false, {"radius"}));
+
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-parameter-name-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-parameter-name-parallel"
+                         : "issue130-parameter-name-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    RecordingDiskCacheCodecs codecs = make_recording_disk_cache_codecs();
+    GraphTraversalService traversal;
+    GraphCacheService cache{codecs.image, codecs.metadata};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+
+    const NodeOutput& radius = compute_once();
+    ASSERT_EQ(radius.data.size(), 1U);
+    EXPECT_EQ(radius.data.at("radius").as_int64(), 23);
+    EXPECT_EQ(radius_entries->load(std::memory_order_relaxed), 1);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    auto metadata = artifact;
+    metadata.replace_extension(".yml");
+    ASSERT_FALSE(std::filesystem::exists(artifact));
+    ASSERT_TRUE(std::filesystem::exists(metadata));
+    ASSERT_TRUE(codecs.image->calls().empty());
+    ASSERT_EQ(codecs.metadata->calls().size(), 2U);
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto sigma_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [sigma_entries](const Node&,
+                            const std::vector<const NodeOutput*>&) {
+              sigma_entries->fetch_add(1, std::memory_order_relaxed);
+              NodeOutput output;
+              output.data["sigma"] = 29;
+              return output;
+            }),
+        declare_test_outputs(OpMetadata{}, false, {"sigma"}));
+
+    const NodeOutput* replaced = nullptr;
+    EXPECT_NO_THROW(replaced = &compute_once());
+    if (replaced != nullptr) {
+      ASSERT_EQ(replaced->data.size(), 1U);
+      EXPECT_EQ(replaced->data.at("sigma").as_int64(), 29);
+      EXPECT_EQ(sigma_entries->load(std::memory_order_relaxed), 1);
+      EXPECT_TRUE(codecs.image->calls().empty());
+      ASSERT_EQ(codecs.metadata->calls().size(), 5U);
+      EXPECT_EQ(codecs.metadata->calls()[2U].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Read);
+      EXPECT_EQ(codecs.metadata->calls()[3U].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Write);
+      EXPECT_EQ(codecs.metadata->calls()[4U].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Read);
+      const auto miss = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(miss.has_value());
+      EXPECT_EQ(miss->status, GraphModel::DiskCacheLoadStatus::Miss);
+
+      EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+      const NodeOutput& hit = compute_once();
+      ASSERT_EQ(hit.data.size(), 1U);
+      EXPECT_EQ(hit.data.at("sigma").as_int64(), 29);
+      EXPECT_EQ(sigma_entries->load(std::memory_order_relaxed), 1);
+      const std::size_t expected_metadata_calls = parallel ? 8U : 6U;
+      ASSERT_EQ(codecs.metadata->calls().size(), expected_metadata_calls);
+      constexpr std::size_t read_call = 5U;
+      EXPECT_EQ(codecs.metadata->calls()[read_call].kind,
+                testing::FakeCacheMetadataCodec::Call::Kind::Read);
+      if (parallel) {
+        EXPECT_EQ(codecs.metadata->calls()[6U].kind,
+                  testing::FakeCacheMetadataCodec::Call::Kind::Write);
+        EXPECT_EQ(codecs.metadata->calls().back().kind,
+                  testing::FakeCacheMetadataCodec::Call::Kind::Read);
+      }
+      const auto hit_diagnostic = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(hit_diagnostic.has_value());
+      EXPECT_EQ(hit_diagnostic->status, GraphModel::DiskCacheLoadStatus::Hit);
+    }
+    runtime.stop();
+    registry.unregister_key(make_key(kType, kSubtype));
+  }
+}
+
+/**
+ * @brief Proves an empty output schema removes both predecessor siblings.
+ *
+ * @return Nothing; GoogleTest reports route, provider-count, codec-call,
+ * sibling-lifecycle, empty-authority, or diagnostic failures.
+ * @throws Registry, runtime, graph, codec, filesystem, Value, or service
+ * exceptions unchanged outside the explicit replacement no-throw boundary.
+ * @note The first request persists image plus metadata. Empty replacement must
+ * miss before both codecs, recompute, remove both projections, and publish a
+ * canonical empty archive. The following request reuses that exact empty
+ * transaction without another provider call.
+ */
+TEST(ComputeOutputAuthority,
+     ImageAndParameterArtifactThenEmptySchemaClearsBothSiblings) {
+  constexpr char kType[] = "issue130_disk_schema_replacement";
+  constexpr char kSubtype[] = "combined_to_empty";
+  OpRegistry& registry = OpRegistry::instance();
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    registry.unregister_key(make_key(kType, kSubtype));
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              NodeOutput output = make_image_output(4, 3, 1, 71.0f);
+              output.data["radius"] = 31;
+              return output;
+            }),
+        declare_test_outputs(OpMetadata{}, true, {"radius"}));
+
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        (std::string("photospider-issue130-combined-to-empty-") +
+         (parallel ? "parallel" : "sequential")));
+    GraphRuntime::Info info;
+    info.name = parallel ? "issue130-combined-to-empty-parallel"
+                         : "issue130-combined-to-empty-sequential";
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    Node node = make_node(1, kType, kSubtype);
+    node.parameters["width"] = 4;
+    node.parameters["height"] = 3;
+    node.caches.push_back({"image", "output.png"});
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    RecordingDiskCacheCodecs codecs = make_recording_disk_cache_codecs();
+    GraphTraversalService traversal;
+    GraphCacheService cache{codecs.image, codecs.metadata};
+    GraphEventService events;
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+    ComputeService::Request request;
+    request.node_id = 1;
+    request.cache.precision = "int8";
+    const auto compute_once = [&]() -> NodeOutput& {
+      return parallel ? service.compute_parallel(graph, runtime, request)
+                      : service.compute(graph, request);
+    };
+
+    const NodeOutput& combined = compute_once();
+    ASSERT_TRUE(combined.has_image_value());
+    ASSERT_EQ(combined.data.size(), 1U);
+    const std::filesystem::path artifact =
+        cache.node_cache_dir(graph, 1) / "output.png";
+    auto metadata = artifact;
+    metadata.replace_extension(".yml");
+    ASSERT_TRUE(std::filesystem::exists(artifact));
+    ASSERT_TRUE(std::filesystem::exists(metadata));
+    ASSERT_EQ(codecs.image->calls().size(), 1U);
+    ASSERT_EQ(codecs.metadata->calls().size(), 2U);
+    EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+
+    registry.unregister_key(make_key(kType, kSubtype));
+    auto empty_entries = std::make_shared<std::atomic_int>(0);
+    registry.register_op_hp_monolithic(
+        kType, kSubtype,
+        MonolithicOpFunc(
+            [empty_entries](const Node&,
+                            const std::vector<const NodeOutput*>&) {
+              empty_entries->fetch_add(1, std::memory_order_relaxed);
+              return NodeOutput{};
+            }),
+        declare_test_outputs(OpMetadata{}, false, {}));
+
+    const NodeOutput* replaced = nullptr;
+    EXPECT_NO_THROW(replaced = &compute_once());
+    if (replaced != nullptr) {
+      EXPECT_FALSE(replaced->has_image_value());
+      EXPECT_TRUE(replaced->data.empty());
+      EXPECT_TRUE(replaced->named_values.empty());
+      EXPECT_EQ(empty_entries->load(std::memory_order_relaxed), 1);
+      EXPECT_FALSE(std::filesystem::exists(artifact));
+      EXPECT_FALSE(std::filesystem::exists(metadata));
+      EXPECT_EQ(codecs.image->calls().size(), 1U);
+      EXPECT_EQ(codecs.metadata->calls().size(), 2U);
+      const auto miss = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(miss.has_value());
+      EXPECT_EQ(miss->status, GraphModel::DiskCacheLoadStatus::Miss);
+
+      EXPECT_EQ(cache.clear_memory_cache(graph).cleared_nodes, 1U);
+      const NodeOutput& second = compute_once();
+      EXPECT_FALSE(second.has_image_value());
+      EXPECT_TRUE(second.data.empty());
+      EXPECT_TRUE(second.named_values.empty());
+      EXPECT_EQ(empty_entries->load(std::memory_order_relaxed), 1);
+      EXPECT_FALSE(std::filesystem::exists(artifact));
+      EXPECT_FALSE(std::filesystem::exists(metadata));
+      EXPECT_EQ(codecs.image->calls().size(), 1U);
+      EXPECT_EQ(codecs.metadata->calls().size(), 2U);
+      const auto second_hit = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(second_hit.has_value());
+      EXPECT_EQ(second_hit->status, GraphModel::DiskCacheLoadStatus::Hit);
+    }
+    runtime.stop();
+    registry.unregister_key(make_key(kType, kSubtype));
+  }
+}
+
+/**
+ * @brief Proves a parallel full route waits for every authorized Pending
+ * native generic Value before releasing its image dependent.
+ *
+ * @return Nothing; GoogleTest reports early dependency entry, graph mutation,
+ * identity replacement, readiness, chained-wait, or completion failures.
+ * @throws Registry, runtime, graph, service, future, pending-producer, or
+ * synchronization exceptions unchanged.
+ * @note The source image is Ready immediately while `latent-a` and `latent-b`
+ * remain independently Pending. Settling only the first must keep the real
+ * task edge blocked; formal publication preserves both native identities.
+ */
+TEST(ComputeOutputAuthority,
+     ParallelFullRouteWaitsForEveryPendingGenericBeforeDependentRelease) {
+  struct Probe final {
+    /** @brief Serializes pending publication and terminal producer handoff. */
+    std::mutex mutex;
+    /** @brief Announces that the source returned its pending candidate. */
+    std::promise<void> published;
+    /** @brief First immutable generic candidate for identity checks. */
+    Value first_value;
+    /** @brief Second immutable generic candidate for identity checks. */
+    Value second_value;
+    /** @brief Unique first native producer settled by the test. */
+    std::optional<PendingDeviceValueProducer> first_producer;
+    /** @brief Unique second native producer settled by the test. */
+    std::optional<PendingDeviceValueProducer> second_producer;
+  };
+
+  constexpr char kType[] = "issue130_generic_output_authority";
+  constexpr char kSourceSubtype[] = "pending_generic";
+  constexpr char kDependentSubtype[] = "pending_generic_dependent";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+  auto probe = std::make_shared<Probe>();
+  auto dependent_entries = std::make_shared<std::atomic_int>(0);
+  std::future<void> published = probe->published.get_future();
+  registry.register_op_hp_monolithic(
+      kType, kSourceSubtype,
+      MonolithicOpFunc([probe](const Node&,
+                               const std::vector<const NodeOutput*>&) {
+        PendingDeviceValuePublication first_publication =
+            make_pending_generic_dense_value();
+        PendingDeviceValuePublication second_publication =
+            make_pending_generic_dense_value();
+        NodeOutput output = make_image_output(4, 3, 1, 15.0f);
+        output.publish_named_value("latent-a", first_publication.value);
+        output.publish_named_value("latent-b", second_publication.value);
+        {
+          std::lock_guard<std::mutex> lock(probe->mutex);
+          probe->first_value = first_publication.value;
+          probe->second_value = second_publication.value;
+          probe->first_producer.emplace(std::move(first_publication.producer));
+          probe->second_producer.emplace(
+              std::move(second_publication.producer));
+        }
+        probe->published.set_value();
+        return output;
+      }),
+      declare_test_outputs(OpMetadata{}, true, {}, {"latent-a", "latent-b"}));
+  registry.register_op_hp_monolithic(
+      kType, kDependentSubtype,
+      MonolithicOpFunc([dependent_entries](
+                           const Node&, const std::vector<const NodeOutput*>&) {
+        dependent_entries->fetch_add(1, std::memory_order_release);
+        return make_image_output(4, 3, 1, 16.0f);
+      }));
+
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-issue130-pending-generic");
+  GraphRuntime::Info info;
+  info.name = "issue130-pending-generic";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  Node source = make_node(1, kType, kSourceSubtype);
+  source.parameters["width"] = 4;
+  source.parameters["height"] = 3;
+  Node dependent = make_node(2, kType, kDependentSubtype);
+  dependent.parameters["width"] = 4;
+  dependent.parameters["height"] = 3;
+  dependent.image_inputs.push_back(ImageInput{1, "image"});
+  graph.add_node(std::move(source));
+  graph.add_node(std::move(dependent));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  auto completion = std::async(std::launch::async, [&] {
+    return &service.compute_parallel(graph, runtime, request);
+  });
+  ASSERT_EQ(published.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  EXPECT_EQ(dependent_entries->load(std::memory_order_acquire), 0);
+  EXPECT_FALSE(graph.node(1).cached_output_high_precision.has_value());
+  EXPECT_FALSE(graph.node(2).cached_output_high_precision.has_value());
+
+  ValueRevisionId expected_first_revision;
+  ProducerIdentity expected_first_producer;
+  StorageBinding expected_first_binding;
+  ValueRevisionId expected_second_revision;
+  ProducerIdentity expected_second_producer;
+  StorageBinding expected_second_binding;
+  {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    ASSERT_TRUE(probe->first_value.valid());
+    ASSERT_TRUE(probe->second_value.valid());
+    ASSERT_TRUE(probe->first_producer.has_value());
+    ASSERT_TRUE(probe->second_producer.has_value());
+    expected_first_revision = probe->first_value.revision_id();
+    expected_first_producer = probe->first_value.producer_identity();
+    expected_first_binding = probe->first_value.storage_binding(0U);
+    expected_second_revision = probe->second_value.revision_id();
+    expected_second_producer = probe->second_value.producer_identity();
+    expected_second_binding = probe->second_value.storage_binding(0U);
+    ASSERT_TRUE(probe->first_producer->matches_pending_fence(
+        probe->first_value.ready_fence()));
+    ASSERT_TRUE(probe->second_producer->matches_pending_fence(
+        probe->second_value.ready_fence()));
+    ASSERT_TRUE(probe->first_producer->complete_ready());
+  }
+
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  EXPECT_EQ(dependent_entries->load(std::memory_order_acquire), 0);
+  {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    ASSERT_TRUE(probe->second_producer->complete_ready());
+  }
+
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW((void)completion.get());
+  EXPECT_EQ(dependent_entries->load(std::memory_order_acquire), 1);
+  ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+  const NodeOutput& source_output = *graph.node(1).cached_output_high_precision;
+  const Value& first = source_output.named_values.at("latent-a");
+  const Value& second = source_output.named_values.at("latent-b");
+  EXPECT_EQ(first.ready_fence().poll().state(), ReadyFenceState::Ready);
+  EXPECT_EQ(first.revision_id(), expected_first_revision);
+  EXPECT_EQ(first.producer_identity(), expected_first_producer);
+  EXPECT_EQ(first.storage_binding(0U), expected_first_binding);
+  EXPECT_EQ(second.ready_fence().poll().state(), ReadyFenceState::Ready);
+  EXPECT_EQ(second.revision_id(), expected_second_revision);
+  EXPECT_EQ(second.producer_identity(), expected_second_producer);
+  EXPECT_EQ(second.storage_binding(0U), expected_second_binding);
+  EXPECT_EQ(graph.node(1).hp_version, 1);
+  EXPECT_EQ(graph.node(2).hp_version, 1);
+  EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
+  runtime.stop();
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+}
+
+/**
+ * @brief Proves sequential formal publication rejects an otherwise authorized
+ * generic Value that remains Pending and preserves prior formal state.
+ *
+ * @return Nothing; GoogleTest reports unexpected acceptance, graph mutation,
+ * identity replacement, or resource residue.
+ * @throws Registry, runtime, graph, service, pending-producer, or allocation
+ * exceptions unchanged outside the expected GraphError boundary.
+ * @note Sequential execution has no asynchronous continuation. Its
+ * request-local candidate may pass staging but must fail the Ready-only formal
+ * gate.
+ */
+TEST(ComputeOutputAuthority,
+     SequentialFullRouteRejectsPendingGenericAtFormalBoundary) {
+  constexpr char kType[] = "issue130_generic_output_authority";
+  constexpr char kSubtype[] = "pending_generic_formal";
+  PendingDeviceValuePublication pending = make_pending_generic_dense_value();
+  const Value candidate = pending.value;
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc(
+          [candidate](const Node&, const std::vector<const NodeOutput*>&) {
+            NodeOutput output = make_image_output(4, 3, 1, 17.0f);
+            output.publish_named_value("deep", candidate);
+            return output;
+          }),
+      declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+  GraphModel graph("cache/issue130-pending-generic-formal");
+  Node node = make_node(1, kType, kSubtype);
+  node.parameters["width"] = 4;
+  node.parameters["height"] = 3;
+  NodeOutput prior = make_image_output(4, 3, 1, 18.0f);
+  prior.publish_named_value("deep", make_generic_dense_value(std::byte{0x55}));
+  node.cached_output_high_precision = std::move(prior);
+  node.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 3});
+  node.hp_version = 31;
+  graph.add_node(std::move(node));
+  graph.validate_topology();
+  const ValueRevisionId old_image_revision =
+      graph.node(1).cached_output_high_precision->image_value().revision_id();
+  const ValueRevisionId old_deep_revision =
+      graph.node(1)
+          .cached_output_high_precision->named_values.at("deep")
+          .revision_id();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  EXPECT_THROW((void)service.compute(graph, request), GraphError);
+  ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+  const NodeOutput& current = *graph.node(1).cached_output_high_precision;
+  EXPECT_EQ(current.image_value().revision_id(), old_image_revision);
+  EXPECT_EQ(current.named_values.at("deep").revision_id(), old_deep_revision);
+  EXPECT_EQ(graph.node(1).hp_version, 31);
+  EXPECT_EQ(graph.node(1).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 3}));
+  EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_TRUE(pending.producer.cancel());
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves a Host-sealed canonical image passes real full-route authority.
+ *
+ * @return Nothing; GoogleTest reports route, binding, shape, or publication
+ * failures.
+ * @throws Registry, runtime, graph, service, or image exceptions unchanged.
+ * @note Sequential and route-backed force-recache calls derive their exact
+ * 4-by-3 authority from the registry revision and graph, then commit a fresh
+ * Host Value through the same formal Graph boundary used in production.
+ */
+TEST(ComputeOutputAuthority, FullRoutesCommitAuthorizedHostValue) {
+  constexpr char kType[] = "issue130_output_authority";
+  constexpr char kSubtype[] = "valid_host";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&) {
+        return make_full_route_output_fixture(
+            FullRouteOutputFixture::ValidHost);
+      }));
+
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-issue130-authority-host");
+  GraphRuntime::Info info;
+  info.name = "issue130-authority-host";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  Node node = make_node(1, kType, kSubtype);
+  node.parameters["width"] = 4;
+  node.parameters["height"] = 3;
+  graph.add_node(std::move(node));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    const NodeOutput& output =
+        parallel ? service.compute_parallel(graph, runtime, request)
+                 : service.compute(graph, request);
+    ASSERT_TRUE(output.has_image_value());
+    EXPECT_EQ(image_bounds_width(output.image_value().image_bounds()), 4U);
+    EXPECT_EQ(image_bounds_height(output.image_value().image_bounds()), 3U);
+    const StorageBinding binding = output.image_value().storage_binding();
+    EXPECT_EQ(binding.device, DeviceId(DeviceBackend::CPU));
+    EXPECT_EQ(binding.memory_domain, MemoryDomain::Host);
+    EXPECT_TRUE(binding.host_visible);
+    EXPECT_EQ(graph.node(1).hp_region,
+              RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 3}));
+  }
+  EXPECT_EQ(graph.node(1).hp_version, 2);
+  runtime.stop();
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves a registered source-private pending native publisher retains
+ * exact identity through full-route continuation and formal commit.
+ *
+ * @return Nothing; GoogleTest reports premature mutation, worker blocking,
+ * identity replacement, binding, or settlement failures.
+ * @throws Registry, runtime, graph, service, pending publication, future, or
+ * synchronization exceptions unchanged.
+ * @note The provider is a normal revisioned CPU-route callback but publishes
+ * HostPinned storage through PendingDeviceValuePublisher. The route freezes
+ * authority before entry, returns its worker while Pending, and commits only
+ * after the test settles the same producer fence to Ready.
+ */
+TEST(ComputeOutputAuthority,
+     ParallelFullRouteCommitsAuthorizedPendingNativeValueAfterReady) {
+  struct Probe final {
+    /** @brief Serializes Value and terminal producer handoff. */
+    std::mutex mutex;
+    /** @brief Announces that the provider created the pending candidate. */
+    std::promise<void> published;
+    /** @brief Exact immutable candidate retained for identity comparison. */
+    Value value;
+    /** @brief Unique native terminal authority settled by the test. */
+    std::optional<PendingDeviceValueProducer> producer;
+    /** @brief Number of provider entries for exact-once evidence. */
+    std::atomic_int entries{0};
+  };
+
+  constexpr char kType[] = "issue130_output_authority";
+  constexpr char kSubtype[] = "valid_pending_native";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  auto probe = std::make_shared<Probe>();
+  std::future<void> published = probe->published.get_future();
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc([probe](const Node&,
+                               const std::vector<const NodeOutput*>&) {
+        constexpr std::size_t kStorageSize = 48U;
+        auto owner = std::make_shared<std::array<std::byte, kStorageSize>>();
+        const DenseTensorDescriptor descriptor{{3U, 4U},
+                                               ElementSemantics::FloatingPoint,
+                                               StorageEncoding{32U}};
+        PendingDeviceValuePublication publication =
+            PendingDeviceValuePublisher::publish_dense_tensor(
+                descriptor,
+                make_zero_origin_image_facet(descriptor, 1U, 0U, std::nullopt),
+                StridedLayout{{16, 4}}, owner, owner.get(), owner->data(),
+                owner->size(), DeviceId(DeviceBackend::CPU),
+                MemoryDomain::HostPinned);
+        NodeOutput output;
+        output.publish_image_value(publication.value);
+        {
+          std::lock_guard<std::mutex> lock(probe->mutex);
+          probe->value = publication.value;
+          probe->producer.emplace(std::move(publication.producer));
+        }
+        probe->entries.fetch_add(1, std::memory_order_release);
+        probe->published.set_value();
+        return output;
+      }));
+
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-issue130-authority-native");
+  GraphRuntime::Info info;
+  info.name = "issue130-authority-native";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  Node node = make_node(1, kType, kSubtype);
+  node.parameters["width"] = 4;
+  node.parameters["height"] = 3;
+  graph.add_node(std::move(node));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  auto completion = std::async(std::launch::async, [&] {
+    return &service.compute_parallel(graph, runtime, request);
+  });
+  ASSERT_EQ(published.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(probe->entries.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  EXPECT_FALSE(graph.node(1).cached_output_high_precision.has_value());
+  EXPECT_FALSE(graph.node(1).hp_region.has_value());
+  EXPECT_EQ(graph.node(1).hp_version, 0);
+
+  ValueRevisionId expected_revision;
+  AllocationIdentity expected_allocation;
+  ProducerIdentity expected_producer;
+  {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    ASSERT_TRUE(probe->value.valid());
+    ASSERT_TRUE(probe->producer.has_value());
+    expected_revision = probe->value.revision_id();
+    expected_allocation = probe->value.allocation_identity();
+    expected_producer = probe->value.producer_identity();
+    ASSERT_TRUE(
+        probe->producer->matches_pending_fence(probe->value.ready_fence()));
+    ASSERT_TRUE(probe->producer->complete_ready());
+  }
+
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  NodeOutput* committed = nullptr;
+  EXPECT_NO_THROW(committed = completion.get());
+  ASSERT_NE(committed, nullptr);
+  ASSERT_TRUE(committed->has_image_value());
+  const Value& value = committed->image_value();
+  EXPECT_EQ(value.ready_fence().poll().state(), ReadyFenceState::Ready);
+  EXPECT_EQ(value.revision_id(), expected_revision);
+  EXPECT_EQ(value.allocation_identity(), expected_allocation);
+  EXPECT_EQ(value.producer_identity(), expected_producer);
+  const StorageBinding binding = value.storage_binding();
+  EXPECT_EQ(binding.device, DeviceId(DeviceBackend::CPU));
+  EXPECT_EQ(binding.memory_domain, MemoryDomain::HostPinned);
+  EXPECT_TRUE(binding.host_visible);
+  EXPECT_EQ(graph.node(1).hp_version, 1);
+  EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
+  runtime.stop();
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves one Ready opaque Value may commit under full-route authority.
+ *
+ * @return Nothing; GoogleTest reports binding, identity, route, or
+ * formal publication failures.
+ * @throws Registry, runtime, native publication, graph, or service exceptions
+ * unchanged.
+ * @note The callback publishes an explicit opaque GPU_CUDA Value. Neither
+ * planning nor the committer infers authorization from returned metadata.
+ */
+TEST(ComputeOutputAuthority, FullRoutesCommitAuthorizedReadyOpaqueValue) {
+  constexpr char kType[] = "issue130_output_authority";
+  constexpr char kSubtype[] = "valid_imported";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  auto native_owner = std::make_shared<int>(130);
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc([native_owner](const Node&,
+                                      const std::vector<const NodeOutput*>&) {
+        PendingDeviceValuePublication publication = publish_opaque_device_image(
+            4, 3, 1, ElementSemantics::FloatingPoint, 32U, DeviceBackend::CUDA,
+            native_owner, MemoryDomain::Imported);
+        if (!publication.producer.complete_ready()) {
+          throw std::logic_error(
+              "opaque authority fixture could not complete Ready");
+        }
+        NodeOutput output;
+        output.publish_image_value(publication.value);
+        return output;
+      }));
+
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-issue130-authority-imported");
+  GraphRuntime::Info info;
+  info.name = "issue130-authority-imported";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  Node node = make_node(1, kType, kSubtype);
+  node.parameters["width"] = 4;
+  node.parameters["height"] = 3;
+  graph.add_node(std::move(node));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle lifecycle(execution_service, graph);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  for (const bool parallel : {false, true}) {
+    SCOPED_TRACE(parallel ? "parallel" : "sequential");
+    const NodeOutput& output =
+        parallel ? service.compute_parallel(graph, runtime, request)
+                 : service.compute(graph, request);
+    ASSERT_TRUE(output.has_image_value());
+    const Value& value = output.image_value();
+    EXPECT_EQ(value.ready_fence().poll().state(), ReadyFenceState::Ready);
+    EXPECT_EQ(image_bounds_width(value.image_bounds()), 4U);
+    EXPECT_EQ(image_bounds_height(value.image_bounds()), 3U);
+    const StorageBinding binding = value.storage_binding();
+    EXPECT_EQ(binding.device, DeviceId(DeviceBackend::CUDA));
+    EXPECT_EQ(binding.memory_domain, MemoryDomain::Imported);
+    EXPECT_FALSE(binding.host_visible);
+    EXPECT_TRUE(value.revision_id().valid());
+    EXPECT_TRUE(value.allocation_identity().valid());
+    EXPECT_TRUE(value.producer_identity().valid());
+  }
+  EXPECT_EQ(graph.node(1).hp_version, 2);
+  runtime.stop();
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
 TEST(ComputeServiceSplit,
      DirtyConnectedKernelStabilizesThreeToTwentyOneToThree) {
   register_split_ops();
@@ -4476,11 +8435,11 @@ TEST(ComputeServiceSplit,
     dirty.dirty_roi = (PixelRect{270, 16, 3, 3});
     NodeOutput& output = service.compute(graph, dirty);
     const cv::Mat source =
-        toCvMat(graph.node(1).cached_output_high_precision->image_buffer);
+        project_image_mat(*graph.node(1).cached_output_high_precision);
     cv::Mat expected;
     cv::GaussianBlur(source, expected, cv::Size{kernel_size, kernel_size}, 0, 0,
                      cv::BORDER_REPLICATE);
-    EXPECT_LE(cv::norm(toCvMat(output.image_buffer), expected, cv::NORM_INF),
+    EXPECT_LE(cv::norm(project_image_mat(output), expected, cv::NORM_INF),
               1e-6);
     ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
     EXPECT_EQ(graph.last_compute_plan_summary->topology_generation,
@@ -4495,6 +8454,182 @@ TEST(ComputeServiceSplit,
   EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed),
             calls_after_full + 2)
       << "each dirty request stabilizes its data-only producer exactly once";
+}
+
+/**
+ * @brief Proves direct HP dirty execution preserves an independently declared
+ * generic Value beside the canonical image.
+ *
+ * @return Nothing; GoogleTest reports dirty selection, exact name, identity,
+ * formal readiness, version, or resource-release failures.
+ * @throws Graph, registry, service, Value, or allocation exceptions unchanged.
+ * @note The initialization compute and subsequent dirty request use the same
+ * revisioned image-plus-`deep` declaration. Each provider entry publishes a
+ * fresh generic revision without routing it through parameter data.
+ */
+TEST(ComputeServiceDirectDirtyAdmission,
+     NonparallelHpDirtyCommitsCanonicalImageAndGenericValue) {
+  constexpr const char* kType = "issue82_direct_dirty";
+  constexpr const char* kSubtype = "issue130_image_generic";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  auto entries = std::make_shared<std::atomic_int>(0);
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc(
+          [entries](const Node& node, const std::vector<const NodeOutput*>&) {
+            const int generation =
+                entries->fetch_add(1, std::memory_order_relaxed) + 1;
+            NodeOutput output =
+                make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                  as_int_flexible(node.parameters, "height", 8),
+                                  1, static_cast<float>(generation));
+            output.publish_named_value(
+                "deep",
+                make_generic_dense_value(static_cast<std::byte>(generation)));
+            return output;
+          }),
+      declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+  compute::ExecutionService authority;
+  DirectDirtyComputeHarness harness(authority,
+                                    "issue130-hp-image-generic-dirty");
+  populate_direct_dirty_graph(harness.graph(), kSubtype);
+  ComputeService::Request full =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+  full.intent.reset();
+  full.dirty_roi.reset();
+  const NodeOutput& initial = harness.service().compute(harness.graph(), full);
+  ASSERT_TRUE(initial.has_image_value());
+  ASSERT_TRUE(initial.named_values.count("deep"));
+  const ValueRevisionId initial_image_revision =
+      initial.image_value().revision_id();
+  const ValueRevisionId initial_deep_revision =
+      initial.named_values.at("deep").revision_id();
+
+  const ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+  const NodeOutput& updated = harness.service().compute(harness.graph(), dirty);
+  ASSERT_EQ(updated.named_values.size(), 2U);
+  ASSERT_TRUE(updated.has_image_value());
+  ASSERT_TRUE(updated.named_values.count("deep"));
+  const Value& deep = updated.named_values.at("deep");
+  EXPECT_EQ(deep.ready_fence().poll().state(), ReadyFenceState::Ready);
+  EXPECT_EQ(deep.representation_kind(), ValueRepresentationKind::DenseTensor);
+  EXPECT_FALSE(deep.image_facet().has_value());
+  EXPECT_NE(updated.image_value().revision_id(), initial_image_revision);
+  EXPECT_NE(deep.revision_id(), initial_deep_revision);
+  EXPECT_TRUE(updated.data.empty());
+  EXPECT_EQ(entries->load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+  expect_direct_authority_settled(authority);
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves a nonparallel graph-backed HP dirty request rejects a Pending
+ * generic Value at its Ready-only formal boundary without graph mutation.
+ *
+ * @return Nothing; GoogleTest reports acceptance, graph mutation, readiness,
+ * version, or resource-release failures.
+ * @throws Graph, registry, service, producer, Value, or allocation exceptions
+ * unchanged outside the expected GraphError boundary.
+ * @note Initialization publishes a Ready image-plus-generic output. This
+ * direct nonparallel entry has no asynchronous fence continuation, so the
+ * dirty provider's Pending generic candidate must fail before commit.
+ */
+TEST(ComputeServiceDirectDirtyAdmission,
+     HpDirtyRejectsPendingGenericAtFormalBoundaryWithoutMutation) {
+  struct Probe final {
+    /** @brief Serializes pending Value and producer publication. */
+    std::mutex mutex;
+    /** @brief Announces that the dirty callback staged its Pending Value. */
+    std::promise<void> published;
+    /** @brief Exact immutable dirty candidate retained for identity checks. */
+    Value value;
+    /** @brief Unique source-private terminal producer. */
+    std::optional<PendingDeviceValueProducer> producer;
+    /** @brief Counts initialization and dirty provider entries. */
+    std::atomic_int entries{0};
+  };
+
+  constexpr const char* kType = "issue82_direct_dirty";
+  constexpr const char* kSubtype = "issue130_pending_generic";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  auto probe = std::make_shared<Probe>();
+  std::future<void> published = probe->published.get_future();
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc(
+          [probe](const Node& node, const std::vector<const NodeOutput*>&) {
+            const int entry =
+                probe->entries.fetch_add(1, std::memory_order_relaxed) + 1;
+            NodeOutput output =
+                make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                  as_int_flexible(node.parameters, "height", 8),
+                                  1, static_cast<float>(entry));
+            if (entry == 1) {
+              output.publish_named_value(
+                  "deep", make_generic_dense_value(std::byte{0x61}));
+              return output;
+            }
+            PendingDeviceValuePublication pending =
+                make_pending_generic_dense_value();
+            output.publish_named_value("deep", pending.value);
+            {
+              std::lock_guard<std::mutex> lock(probe->mutex);
+              probe->value = pending.value;
+              probe->producer.emplace(std::move(pending.producer));
+            }
+            probe->published.set_value();
+            return output;
+          }),
+      declare_test_outputs(OpMetadata{}, true, {}, {"deep"}));
+
+  compute::ExecutionService authority;
+  DirectDirtyComputeHarness harness(authority,
+                                    "issue130-hp-pending-generic-dirty");
+  populate_direct_dirty_graph(harness.graph(), kSubtype);
+  ComputeService::Request full =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+  full.intent.reset();
+  full.dirty_roi.reset();
+  const NodeOutput& initial = harness.service().compute(harness.graph(), full);
+  const ValueRevisionId initial_image_revision =
+      initial.image_value().revision_id();
+  const ValueRevisionId initial_deep_revision =
+      initial.named_values.at("deep").revision_id();
+
+  const ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+  EXPECT_THROW((void)harness.service().compute(harness.graph(), dirty),
+               GraphError);
+  ASSERT_EQ(published.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_TRUE(harness.graph().node(1).cached_output_high_precision.has_value());
+  const NodeOutput& while_pending =
+      *harness.graph().node(1).cached_output_high_precision;
+  EXPECT_EQ(while_pending.image_value().revision_id(), initial_image_revision);
+  EXPECT_EQ(while_pending.named_values.at("deep").revision_id(),
+            initial_deep_revision);
+  EXPECT_EQ(harness.graph().node(1).hp_version, 1);
+
+  {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    ASSERT_TRUE(probe->value.valid());
+    ASSERT_TRUE(probe->producer.has_value());
+    EXPECT_EQ(probe->value.ready_fence().poll().state(),
+              ReadyFenceState::Pending);
+    ASSERT_TRUE(
+        probe->producer->matches_pending_fence(probe->value.ready_fence()));
+    ASSERT_TRUE(probe->producer->cancel());
+  }
+  EXPECT_EQ(harness.graph().node(1).hp_version, 1);
+  EXPECT_EQ(probe->entries.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+  expect_direct_authority_settled(authority);
+  registry.unregister_key(make_key(kType, kSubtype));
 }
 
 /**
@@ -4691,11 +8826,11 @@ TEST(ComputeServiceDirectDirtyAdmission,
     }
 
     const std::optional<OpImplementation> first_selected =
-        OpRegistry::instance().select_implementation(kType, first_subtype,
-                                                     {Device::CPU}, intent);
+        OpRegistry::instance().select_implementation(
+            kType, first_subtype, {DeviceBackend::CPU}, intent);
     const std::optional<OpImplementation> second_selected =
-        OpRegistry::instance().select_implementation(kType, second_subtype,
-                                                     {Device::CPU}, intent);
+        OpRegistry::instance().select_implementation(
+            kType, second_subtype, {DeviceBackend::CPU}, intent);
     ASSERT_TRUE(first_selected.has_value());
     ASSERT_TRUE(second_selected.has_value());
     EXPECT_NE(first_selected->implementation_identity,
@@ -4782,8 +8917,12 @@ TEST(ComputeServiceDirectDirtyAdmission,
         auto probe = std::make_shared<DirectDirtyProviderProbe>();
         OpMetadata first_metadata;
         first_metadata.exclusive_key = first_key;
+        first_metadata =
+            declare_test_outputs(std::move(first_metadata), false, {"radius"});
         OpMetadata second_metadata;
         second_metadata.exclusive_key = second_key;
+        second_metadata =
+            declare_test_outputs(std::move(second_metadata), false, {"radius"});
         OpRegistry::instance().register_op_hp_monolithic(
             kType, first_subtype, make_probed_parameter_operation(probe),
             first_metadata);
@@ -4919,7 +9058,8 @@ TEST(ComputeServiceDirectDirtyAdmission,
   constexpr const char* kTargetSubtype = "retained_rejection_target";
   constexpr std::uint64_t kRetainedLimit = 4096U;
   auto probe = std::make_shared<DirectDirtyProviderProbe>();
-  OpMetadata rejected_metadata;
+  OpMetadata rejected_metadata =
+      declare_test_outputs(OpMetadata{}, false, {"radius"});
   rejected_metadata.retained_memory_bytes = kRetainedLimit;
   OpRegistry::instance().register_op_hp_monolithic(
       kType, kParameterSubtype, make_probed_parameter_operation(probe),
@@ -4958,7 +9098,7 @@ TEST(ComputeServiceDirectDirtyAdmission,
 
   OpRegistry::instance().register_op_hp_monolithic(
       kType, kParameterSubtype, make_probed_parameter_operation(probe),
-      OpMetadata{});
+      declare_test_outputs(OpMetadata{}, false, {"radius"}));
   EXPECT_NO_THROW((void)harness.service().compute(harness.graph(), dirty));
   EXPECT_EQ(probe->entered(), 1);
   EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
@@ -5199,6 +9339,8 @@ TEST(ComputeServiceDirtyIdentity,
   auto new_parameter_entries = std::make_shared<std::atomic_int>(0);
   auto target_entries = std::make_shared<std::atomic_int>(0);
   auto& registry = OpRegistry::instance();
+  const OpMetadata parameter_metadata =
+      declare_test_outputs(OpMetadata{}, false, {"radius"});
   registry.register_op_hp_monolithic(
       kType, kParameterSubtype,
       MonolithicOpFunc([old_parameter_entries](
@@ -5207,7 +9349,8 @@ TEST(ComputeServiceDirtyIdentity,
         NodeOutput output;
         output.data["radius"] = 7;
         return output;
-      }));
+      }),
+      parameter_metadata);
   registry.register_op_hp_monolithic(
       kType, kTargetSubtype,
       MonolithicOpFunc([target_entries](const Node& node,
@@ -5237,7 +9380,8 @@ TEST(ComputeServiceDirtyIdentity,
                 NodeOutput output;
                 output.data["radius"] = 9;
                 return output;
-              }));
+              }),
+          parameter_metadata);
     });
     EXPECT_NO_THROW((void)harness.service().compute(harness.graph(), dirty));
   }
@@ -5301,12 +9445,11 @@ TEST(ComputeServiceSplit,
     EXPECT_EQ(graph.last_compute_plan_summary->active_task_count,
               graph.last_compute_plan_summary->downstream_task_count);
     const cv::Mat staged_source =
-        toCvMat(graph.node(1).cached_output_high_precision->image_buffer);
+        project_image_mat(*graph.node(1).cached_output_high_precision);
     cv::Mat expected;
     cv::GaussianBlur(staged_source, expected, cv::Size{generation, generation},
                      0, 0, cv::BORDER_REPLICATE);
-    EXPECT_LE(cv::norm(toCvMat(output.image_buffer), expected, cv::NORM_INF),
-              1e-6)
+    EXPECT_LE(cv::norm(project_image_mat(output), expected, cv::NORM_INF), 1e-6)
         << "C image and parameter inputs must describe the same staged A";
   };
   verify_generation(21);
@@ -5335,20 +9478,26 @@ TEST(ComputeServiceSplit,
     request.cache.precision = "float32";
     request.cache.disable_disk_cache = true;
     (void)service.compute(graph, request);
-    ASSERT_EQ(graph.node(2).cached_output_high_precision->image_buffer.width,
-              64);
+    ASSERT_EQ(
+        image_bounds_width(graph.node(2)
+                               .cached_output_high_precision->image_value()
+                               .image_bounds()),
+        64u);
 
     g_dynamic_extent_width.store(16, std::memory_order_release);
     request.intent = intent;
     request.dirty_roi = (PixelRect{48, 0, 8, 8});
     NodeOutput& result = service.compute(graph, request);
     ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
-    EXPECT_EQ(graph.node(2).cached_output_high_precision->image_buffer.width,
-              16);
-    EXPECT_EQ(graph.node(2).cached_output_high_precision->image_buffer.height,
-              8);
-    EXPECT_GT(result.image_buffer.width, 0);
-    EXPECT_GT(result.image_buffer.height, 0);
+    const ImageBounds& cached_bounds =
+        graph.node(2)
+            .cached_output_high_precision->image_value()
+            .image_bounds();
+    EXPECT_EQ(image_bounds_width(cached_bounds), 16u);
+    EXPECT_EQ(image_bounds_height(cached_bounds), 8u);
+    ASSERT_TRUE(result.has_image_value());
+    EXPECT_GT(image_bounds_width(result.image_value().image_bounds()), 0u);
+    EXPECT_GT(image_bounds_height(result.image_value().image_bounds()), 0u);
     if (intent == ComputeIntent::RealTimeUpdate) {
       ASSERT_GE(graph.recent_dirty_region_snapshots.size(), 2u);
       const auto end = graph.recent_dirty_region_snapshots.end();
@@ -5436,7 +9585,7 @@ TEST(ComputeServiceSplit, PreflightFailurePublishesNoHpCacheState) {
   const int target_version = graph.node(2).hp_version;
   const int parameter_version = graph.node(3).hp_version;
   const cv::Mat before =
-      toCvMat(graph.node(2).cached_output_high_precision->image_buffer).clone();
+      project_image_mat(*graph.node(2).cached_output_high_precision);
 
   g_dynamic_parameter_fail.store(true, std::memory_order_release);
   request.intent = ComputeIntent::GlobalHighPrecision;
@@ -5446,10 +9595,9 @@ TEST(ComputeServiceSplit, PreflightFailurePublishesNoHpCacheState) {
   EXPECT_EQ(graph.node(2).hp_version, target_version);
   EXPECT_EQ(graph.node(3).hp_version, parameter_version);
   EXPECT_DOUBLE_EQ(
-      cv::norm(
-          before,
-          toCvMat(graph.node(2).cached_output_high_precision->image_buffer),
-          cv::NORM_INF),
+      cv::norm(before,
+               project_image_mat(*graph.node(2).cached_output_high_precision),
+               cv::NORM_INF),
       0.0);
   EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
 
@@ -5519,11 +9667,9 @@ TEST(ComputeServiceSplit,
     ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
     ASSERT_TRUE(graph.node(3).cached_output_high_precision.has_value());
     const cv::Mat source_pixels_before =
-        toCvMat(graph.node(1).cached_output_high_precision->image_buffer)
-            .clone();
+        project_image_mat(*graph.node(1).cached_output_high_precision);
     const cv::Mat target_pixels_before =
-        toCvMat(graph.node(2).cached_output_high_precision->image_buffer)
-            .clone();
+        project_image_mat(*graph.node(2).cached_output_high_precision);
     const int source_value_before =
         static_cast<int>(graph.node(1)
                              .cached_output_high_precision->data.at("injected")
@@ -5553,8 +9699,7 @@ TEST(ComputeServiceSplit,
     const bool proxy_had_output_before = proxy_before_ptr->output.has_value();
     cv::Mat proxy_pixels_before;
     if (proxy_before_ptr->output) {
-      proxy_pixels_before =
-          toCvMat(proxy_before_ptr->output->image_buffer).clone();
+      proxy_pixels_before = project_image_mat(*proxy_before_ptr->output);
     }
 
     const std::size_t dirty_snapshots_before =
@@ -5618,16 +9763,14 @@ TEST(ComputeServiceSplit,
     EXPECT_EQ(graph.node(2).hp_region, target_region_before);
     EXPECT_EQ(graph.node(3).hp_region, parameter_region_before);
     EXPECT_DOUBLE_EQ(
-        cv::norm(
-            source_pixels_before,
-            toCvMat(graph.node(1).cached_output_high_precision->image_buffer),
-            cv::NORM_INF),
+        cv::norm(source_pixels_before,
+                 project_image_mat(*graph.node(1).cached_output_high_precision),
+                 cv::NORM_INF),
         0.0);
     EXPECT_DOUBLE_EQ(
-        cv::norm(
-            target_pixels_before,
-            toCvMat(graph.node(2).cached_output_high_precision->image_buffer),
-            cv::NORM_INF),
+        cv::norm(target_pixels_before,
+                 project_image_mat(*graph.node(2).cached_output_high_precision),
+                 cv::NORM_INF),
         0.0);
     EXPECT_EQ(graph.node(1)
                   .cached_output_high_precision->data.at("injected")
@@ -5648,8 +9791,8 @@ TEST(ComputeServiceSplit,
     EXPECT_EQ(proxy_after->output.has_value(), proxy_had_output_before);
     if (proxy_after->output && proxy_had_output_before) {
       EXPECT_DOUBLE_EQ(
-          cv::norm(proxy_pixels_before,
-                   toCvMat(proxy_after->output->image_buffer), cv::NORM_INF),
+          cv::norm(proxy_pixels_before, project_image_mat(*proxy_after->output),
+                   cv::NORM_INF),
           0.0);
     }
     runtime.stop();
@@ -5779,11 +9922,9 @@ TEST(ComputeServiceCancellation,
     ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
     ASSERT_TRUE(graph.node(3).cached_output_high_precision.has_value());
     const cv::Mat source_pixels_before =
-        toCvMat(graph.node(1).cached_output_high_precision->image_buffer)
-            .clone();
+        project_image_mat(*graph.node(1).cached_output_high_precision);
     const cv::Mat target_pixels_before =
-        toCvMat(graph.node(2).cached_output_high_precision->image_buffer)
-            .clone();
+        project_image_mat(*graph.node(2).cached_output_high_precision);
     const int source_version_before = graph.node(1).hp_version;
     const int target_version_before = graph.node(2).hp_version;
     const int parameter_version_before = graph.node(3).hp_version;
@@ -5854,16 +9995,14 @@ TEST(ComputeServiceCancellation,
     EXPECT_EQ(graph.node(2).hp_region, target_region_before);
     EXPECT_EQ(graph.node(3).hp_region, parameter_region_before);
     EXPECT_DOUBLE_EQ(
-        cv::norm(
-            source_pixels_before,
-            toCvMat(graph.node(1).cached_output_high_precision->image_buffer),
-            cv::NORM_INF),
+        cv::norm(source_pixels_before,
+                 project_image_mat(*graph.node(1).cached_output_high_precision),
+                 cv::NORM_INF),
         0.0);
     EXPECT_DOUBLE_EQ(
-        cv::norm(
-            target_pixels_before,
-            toCvMat(graph.node(2).cached_output_high_precision->image_buffer),
-            cv::NORM_INF),
+        cv::norm(target_pixels_before,
+                 project_image_mat(*graph.node(2).cached_output_high_precision),
+                 cv::NORM_INF),
         0.0);
     EXPECT_EQ(runtime.realtime_proxy_graph().find_state(2), nullptr);
     runtime.stop();
@@ -6043,7 +10182,8 @@ TEST(ComputeServiceSplit,
       << "retry must open a fresh execution batch after prior failure";
   NodeOutput* output = retried.get();
   ASSERT_NE(output, nullptr);
-  EXPECT_GT(output->image_buffer.width, 0);
+  ASSERT_TRUE(output->has_image_value());
+  EXPECT_GT(image_bounds_width(output->image_value().image_bounds()), 0u);
   EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed), 2);
   EXPECT_GT(graph.node(2).hp_version, target_version_before);
   runtime.stop();
@@ -6117,7 +10257,8 @@ TEST(TaskGraphPlanningSplit, RtDependencyPlanningUsesRtMetadata) {
   ASSERT_NE(middle_downstream_task, nullptr);
   ASSERT_EQ(middle_downstream_task->dependency_task_ids.size(), 3u)
       << "RT random-access metadata expands the middle RT micro tile input "
-         "ROI across three upstream RT micro tiles";
+         "ROI across exactly three upstream tiles; batched physical release "
+         "does not add a false fourth task dependency";
   for (int dependency_task_id : middle_downstream_task->dependency_task_ids) {
     const auto& upstream_task = plan.task_graph.tasks.at(dependency_task_id);
     EXPECT_EQ(upstream_task.node_id, 1);
@@ -6188,8 +10329,9 @@ TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
   request.cache.force_recache = true;
   request.cache.disable_disk_cache = true;
   NodeOutput& output = compute.compute_parallel(graph, runtime, request);
-  EXPECT_EQ(output.image_buffer.width, 32);
-  EXPECT_EQ(output.image_buffer.height, 16);
+  const ImageView output_image = inspect_image_output(output);
+  EXPECT_EQ(output_image.width(), 32U);
+  EXPECT_EQ(output_image.height(), 16U);
 
   const auto cached_after = compute::get_or_expand_full_task_graph(
       graph, ComputeIntent::GlobalHighPrecision);
@@ -6199,32 +10341,154 @@ TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
 }
 
 TEST(GraphCacheServiceSplit,
-     SkipsOpaqueBackendImageWhilePersistingNamedOutputMetadata) {
+     RejectsOpaqueBackendImageBeforePersistingAnyArtifacts) {
   const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                                  "photospider-backend-cache-persistence");
   GraphModel graph(root.path());
   Node node = make_node(1, "split_plan", "source");
   node.caches.push_back({"image", "output.png"});
   node.cached_output_high_precision = NodeOutput{};
-  node.cached_output_high_precision->image_buffer.width = 8;
-  node.cached_output_high_precision->image_buffer.height = 8;
-  node.cached_output_high_precision->image_buffer.channels = 1;
-  node.cached_output_high_precision->image_buffer.device = Device::GPU_CUDA;
-  node.cached_output_high_precision->image_buffer.context =
-      std::make_shared<int>(7);
+  auto owner = std::make_shared<int>(7);
+  PendingDeviceValuePublication publication =
+      publish_opaque_device_image(8, 8, 1, ElementSemantics::FloatingPoint, 32U,
+                                  DeviceBackend::CUDA, owner);
+  node.cached_output_high_precision->publish_image_value(publication.value);
   node.cached_output_high_precision->data["marker"] = 9;
-  node.hp_region = value_image_adapter::full_node_output_region(
-      *node.cached_output_high_precision);
+  node.hp_region =
+      value_region::full_node_output_region(*node.cached_output_high_precision);
   graph.add_node(node);
 
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
-  cache.save_cache_if_configured(graph, graph.node(1), "int8");
+  try {
+    cache.save_cache_if_configured(graph, graph.node(1), "int8");
+    FAIL() << "opaque device Values must fail closed before persistence";
+  } catch (const GraphError& error) {
+    EXPECT_EQ(error.code(), GraphErrc::InvalidParameter);
+  }
   const auto image_path = cache.node_cache_dir(graph, 1) / "output.png";
   auto metadata_path = image_path;
   metadata_path.replace_extension(".yml");
   EXPECT_FALSE(std::filesystem::exists(image_path));
-  EXPECT_TRUE(std::filesystem::exists(metadata_path));
+  EXPECT_FALSE(std::filesystem::exists(metadata_path));
+}
+
+/**
+ * @brief Proves disabled saving bypasses unsupported portable capture cleanly.
+ * @return Nothing; GoogleTest reports exception, codec call, or file side
+ *         effect mismatches.
+ * @throws Fixture publication, Region, or allocation exceptions unchanged.
+ * @note The same opaque pending device Value is rejected by the preceding
+ * enabled-save test. Here `skip_save_cache` wins before capability validation,
+ * preserving the explicit no-save policy without a silent configured skip.
+ */
+TEST(GraphCacheServiceSplit,
+     NoSavePolicyBypassesUnsupportedValueWithoutSideEffects) {
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-backend-cache-nosave");
+  GraphModel graph(root.path());
+  graph.set_skip_save_cache(true);
+  Node node = make_node(1, "split_plan", "source");
+  node.caches.push_back({"image", "output.png"});
+  node.cached_output_high_precision = NodeOutput{};
+  auto owner = std::make_shared<int>(9);
+  PendingDeviceValuePublication publication =
+      publish_opaque_device_image(8, 8, 1, ElementSemantics::FloatingPoint, 32U,
+                                  DeviceBackend::CUDA, owner);
+  node.cached_output_high_precision->publish_image_value(publication.value);
+  node.hp_region =
+      value_region::full_node_output_region(*node.cached_output_high_precision);
+  graph.add_node(node);
+
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>();
+  auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>();
+  GraphCacheService cache{image_codec, metadata_codec};
+  EXPECT_NO_THROW(cache.save_cache_if_configured(graph, graph.node(1), "int8"));
+  EXPECT_TRUE(image_codec->calls().empty());
+  EXPECT_TRUE(metadata_codec->calls().empty());
+  EXPECT_FALSE(std::filesystem::exists(cache.node_cache_dir(graph, 1)));
+}
+
+/**
+ * @brief Replays one provider-defined multi-buffer Value transactionally.
+ * @return Nothing; GoogleTest reports provider, payload, fresh-identity, or
+ *         missing-provider outcome mismatches.
+ * @throws Provider, artifact, filesystem, cache, Region, or allocation
+ *         exceptions from valid setup and replay.
+ * @note The active registry is injected only for executable reconstruction.
+ * A second service without it sees the same well-framed archive but publishes
+ * no placeholder Value.
+ */
+TEST(GraphCacheServiceSplit,
+     ProviderDefinedMultiBufferArchiveReplaysWithFreshIdentity) {
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-provider-cache-replay");
+  GraphModel graph(root.path());
+  Node saved = make_node(1, "split_plan", "source");
+  saved.caches.push_back({"image", "provider.cache"});
+  DataDefinitionRegistry registry;
+  std::vector<BufferHandle> buffers;
+  buffers.push_back(
+      make_image_output(1, 1, 1, 0.25F).image_value().buffer_handle());
+  buffers.push_back(
+      make_image_output(2, 1, 1, 0.75F).image_value().buffer_handle());
+  const Value source =
+      make_metrics_provider_defined_value(std::move(buffers), &registry);
+  ASSERT_EQ(source.buffer_count(), 2U);
+  NodeOutput output;
+  output.publish_named_value("deep", source);
+  saved.cached_output_high_precision = std::move(output);
+  saved.hp_region = value_region::full_node_output_region(
+      *saved.cached_output_high_precision);
+
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec(),
+                          kDefaultImageStatisticsCacheEntries, &registry};
+  cache.save_cache_if_configured(graph, saved, "int8");
+  const std::filesystem::path configured =
+      cache.node_cache_dir(graph, saved.id) / saved.caches.front().location;
+  std::filesystem::path archive = configured;
+  archive += ".values";
+  std::filesystem::path manifest = configured;
+  manifest += ".manifest";
+  ASSERT_TRUE(std::filesystem::exists(archive));
+  ASSERT_TRUE(std::filesystem::exists(manifest));
+
+  Node loaded = make_node(1, "split_plan", "source");
+  loaded.caches = saved.caches;
+  ASSERT_TRUE(cache.try_load_from_disk_cache(
+      graph, loaded, ValueDiskCacheOutputSchema{false, {}, {"deep"}}));
+  ASSERT_TRUE(loaded.cached_output_high_precision.has_value());
+  const Value& replay =
+      loaded.cached_output_high_precision->named_values.at("deep");
+  ASSERT_EQ(replay.buffer_count(), 2U);
+  EXPECT_EQ(replay.provider_defined_descriptor(),
+            source.provider_defined_descriptor());
+  EXPECT_EQ(replay.provider_defined_layout(), source.provider_defined_layout());
+  EXPECT_NE(replay.revision_id(), source.revision_id());
+  for (std::size_t index = 0U; index < replay.buffer_count(); ++index) {
+    EXPECT_NE(replay.storage_binding(index).allocation,
+              source.storage_binding(index).allocation);
+    const ProviderReadLease source_read = source.acquire_provider_read(index);
+    const ProviderReadLease replay_read = replay.acquire_provider_read(index);
+    ASSERT_EQ(replay_read.size(), source_read.size());
+    EXPECT_EQ(
+        std::memcmp(replay_read.data(), source_read.data(), source_read.size()),
+        0);
+  }
+
+  GraphCacheService missing_provider{
+      providers::make_configured_image_artifact_codec(),
+      testing::make_yaml_cache_metadata_codec()};
+  Node unavailable = make_node(1, "split_plan", "source");
+  unavailable.caches = saved.caches;
+  EXPECT_FALSE(missing_provider.try_load_from_disk_cache(
+      graph, unavailable, ValueDiskCacheOutputSchema{false, {}, {"deep"}}));
+  EXPECT_FALSE(unavailable.cached_output_high_precision.has_value());
+  const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(diagnostic.has_value());
+  EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Error);
+  EXPECT_EQ(diagnostic->code, GraphErrc::InvalidParameter);
 }
 
 TEST(DownsampleExecutorSplit,
@@ -6233,14 +10497,15 @@ TEST(DownsampleExecutorSplit,
   Node node = make_node(1, "split_plan", "opaque_backend");
   auto backend_owner = std::make_shared<int>(42);
   std::shared_ptr<void> expected_owner = backend_owner;
+  PendingDeviceValuePublication publication =
+      publish_opaque_device_image(96, 48, 4, ElementSemantics::UnsignedInteger,
+                                  8U, DeviceBackend::CUDA, expected_owner);
+  const ValueRevisionId expected_revision = publication.value.revision_id();
+  const AllocationIdentity expected_allocation =
+      publication.value.allocation_identity();
+  const StorageBinding expected_binding = publication.value.storage_binding();
   node.cached_output_high_precision = NodeOutput{};
-  ImageBuffer& hp = node.cached_output_high_precision->image_buffer;
-  hp.width = 96;
-  hp.height = 48;
-  hp.channels = 4;
-  hp.type = DataType::UINT8;
-  hp.device = Device::GPU_CUDA;
-  hp.context = expected_owner;
+  node.cached_output_high_precision->publish_image_value(publication.value);
   node.cached_output_high_precision->data["marker"] = 17;
   node.hp_version = 5;
   graph.add_node(node);
@@ -6249,38 +10514,39 @@ TEST(DownsampleExecutorSplit,
   proxy.synchronize_with_graph(graph);
   GraphEventService events;
   compute::DownsampleExecutor downsample(graph, proxy, nullptr, events);
-  downsample.execute({{1, (PixelRect{8, 4, 16, 8}), 5}});
+  const RegionSet first_region =
+      RegionSet::from_image_rect({image_region_domain(), 8, 24, 4, 12});
+  downsample.execute({{1, first_region, 5}});
 
   const auto assert_passthrough = [&](int version,
-                                      const PixelRect& expected_roi) {
+                                      const RegionSet& expected_region) {
     const auto* state = proxy.find_state(1);
     ASSERT_NE(state, nullptr);
     ASSERT_TRUE(state->output.has_value());
-    const ImageBuffer& output = state->output->image_buffer;
-    EXPECT_EQ(output.width, 96);
-    EXPECT_EQ(output.height, 48);
-    EXPECT_EQ(output.channels, 4);
-    EXPECT_EQ(output.type, DataType::UINT8);
-    EXPECT_EQ(output.device, Device::GPU_CUDA);
-    EXPECT_EQ(output.data, nullptr);
-    ASSERT_NE(output.context, nullptr);
-    EXPECT_EQ(output.context.get(), expected_owner.get());
-    EXPECT_FALSE(output.context.owner_before(expected_owner));
-    EXPECT_FALSE(expected_owner.owner_before(output.context));
+    ASSERT_TRUE(state->output->has_image_value());
+    const Value& output = state->output->image_value();
+    EXPECT_EQ(image_bounds_width(output.image_bounds()), 96u);
+    EXPECT_EQ(image_bounds_height(output.image_bounds()), 48u);
+    EXPECT_EQ(output.dense_tensor_descriptor().shape,
+              (std::vector<std::size_t>{48u, 96u, 4u}));
+    EXPECT_EQ(output.dense_tensor_descriptor().storage_encoding.bit_width, 8u);
+    EXPECT_EQ(output.revision_id(), expected_revision);
+    EXPECT_EQ(output.allocation_identity(), expected_allocation);
+    EXPECT_EQ(output.storage_binding(), expected_binding);
+    EXPECT_EQ(output.storage_binding().device.backend(), DeviceBackend::CUDA);
+    EXPECT_FALSE(output.storage_binding().host_visible);
     EXPECT_EQ(state->output->data.at("marker").as_int64(), 17);
     EXPECT_EQ(state->version, version);
     ASSERT_TRUE(state->region_hp.has_value());
-    EXPECT_EQ(*state->region_hp,
-              RegionSet::from_image_rect(
-                  {image_region_domain(), expected_roi.x,
-                   expected_roi.x + expected_roi.width, expected_roi.y,
-                   expected_roi.y + expected_roi.height}));
+    EXPECT_EQ(*state->region_hp, expected_region);
   };
-  assert_passthrough(5, (PixelRect{8, 4, 16, 8}));
+  assert_passthrough(5, first_region);
 
   graph.mutate_node_runtime_state(1, [](auto& state) { state.hp_version = 6; });
-  downsample.execute({{1, (PixelRect{40, 20, 8, 4}), 6}});
-  assert_passthrough(6, (PixelRect{40, 20, 8, 4}));
+  const RegionSet second_region =
+      RegionSet::from_image_rect({image_region_domain(), 40, 48, 20, 24});
+  downsample.execute({{1, second_region, 6}});
+  assert_passthrough(6, second_region);
 
   const ComputeEventBatch recorded = events.drain(kComputeEventDrainMaxLimit);
   ASSERT_EQ(recorded.events.size(), 2u);
@@ -6288,6 +10554,64 @@ TEST(DownsampleExecutorSplit,
                           [](const ComputeEventSnapshot& event) {
                             return event.source == "downsample_passthrough";
                           }));
+}
+
+/**
+ * @brief Proves logical HP validity and storage pixel selection share one
+ * checked data-window translation during a real CPU downsample.
+ *
+ * @return Nothing; GoogleTest reports request, pixel, identity, or metadata
+ * failures.
+ * @throws Host allocation, Region, graph staging, resize, grant, or Value
+ * exceptions when the fixture cannot execute.
+ * @note The selected logical bottom-right quadrant maps to storage ROI
+ * `{4,4,4,4}`. Its one-pixel RT projection must contain the bilinear center
+ * value 555.5 while the RT Value retains the signed data-window origin and
+ * proxy validity retains the original HP Region rather than storage ROI.
+ */
+TEST(DownsampleExecutorSplit,
+     TranslatesNegativeDataWindowForPixelsAndLogicalValidity) {
+  GraphModel graph("cache/split-negative-origin-downsample");
+  Node node = make_node(1, "split_plan", "tile");
+  graph.add_node(node);
+
+  const ImageBounds hp_bounds{-4, -3, 4, 5};
+  const RegionSet changed_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 4, 1, 5});
+  compute::HighPrecisionDirtyWriteBuffer hp_writes(false);
+  NodeOutput& staged = hp_writes.ensure_output(graph.node(1));
+  staged = make_offset_image_output(hp_bounds);
+  EXPECT_EQ(hp_writes.mark_updated(graph.node(1), changed_region, true, 9U), 1);
+  hp_writes.commit_to_graph(graph, make_explicit_image_output_plan(1, 8, 8));
+  const std::vector<compute::DownsampleExecutor::Request> requests =
+      hp_writes.downsample_requests();
+  ASSERT_EQ(requests.size(), 1U);
+  EXPECT_EQ(requests.front().region_hp, changed_region);
+
+  const Value& hp_value =
+      graph.node(1).cached_output_high_precision->image_value();
+  const AllocationIdentity hp_allocation = hp_value.allocation_identity();
+  compute::RealtimeProxyGraph proxy;
+  proxy.synchronize_with_graph(graph);
+  GraphEventService events;
+  compute::DownsampleExecutor(graph, proxy, nullptr, events).execute(requests);
+
+  const compute::RealtimeProxyGraph::NodeState* state = proxy.find_state(1);
+  ASSERT_NE(state, nullptr);
+  ASSERT_TRUE(state->output.has_value());
+  ASSERT_TRUE(state->output->has_image_value());
+  EXPECT_EQ(state->version, 1);
+  ASSERT_TRUE(state->region_hp.has_value());
+  EXPECT_EQ(*state->region_hp, changed_region);
+  const Value& rt_value = state->output->image_value();
+  EXPECT_EQ(rt_value.image_bounds(), (ImageBounds{-4, -3, -2, -1}));
+  EXPECT_TRUE(rt_value.revision_id().valid());
+  EXPECT_TRUE(rt_value.allocation_identity().valid());
+  EXPECT_NE(rt_value.allocation_identity(), hp_allocation);
+  const cv::Mat rt_pixels = project_image_mat(*state->output);
+  ASSERT_EQ(rt_pixels.rows, 2);
+  ASSERT_EQ(rt_pixels.cols, 2);
+  EXPECT_FLOAT_EQ(rt_pixels.at<float>(1, 1), 555.5F);
 }
 
 /**
@@ -6320,7 +10644,7 @@ TEST(ComputeTaskRunnerSplit,
   source.parameters["width"] = 4;
   source.parameters["height"] = 4;
   source.cached_output_high_precision = make_image_output(4, 4, 1, 3.0f);
-  source.hp_region = value_image_adapter::full_node_output_region(
+  source.hp_region = value_region::full_node_output_region(
       *source.cached_output_high_precision);
 
   Node producer = make_node(2, "split_plan", "partial_cache_producer");
@@ -6339,16 +10663,15 @@ TEST(ComputeTaskRunnerSplit,
   NodeOutput& staged = dirty_buffer.ensure_output(graph.node(2));
   staged = make_image_output(4, 4, 1, 91.0f);
   (void)dirty_buffer.mark_updated(graph.node(2), partial_region, true, 1U);
-  dirty_buffer.commit_to_graph(graph);
+  dirty_buffer.commit_to_graph(graph, make_explicit_image_output_plan(2, 4, 4));
 
   ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
   ASSERT_TRUE(graph.node(2).hp_region.has_value());
   EXPECT_EQ(*graph.node(2).hp_region, partial_region);
   EXPECT_FALSE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
-  EXPECT_FLOAT_EQ(
-      toCvMat(graph.node(2).cached_output_high_precision->image_buffer)
-          .at<float>(0, 0),
-      91.0f);
+  EXPECT_FLOAT_EQ(project_image_mat(*graph.node(2).cached_output_high_precision)
+                      .at<float>(0, 0),
+                  91.0f);
 
   g_partial_cache_producer_calls.store(0, std::memory_order_relaxed);
   g_partial_cache_consumer_calls.store(0, std::memory_order_relaxed);
@@ -6374,13 +10697,229 @@ TEST(ComputeTaskRunnerSplit,
   EXPECT_EQ(
       g_partial_cache_consumer_observed_value.load(std::memory_order_acquire),
       5);
-  EXPECT_FLOAT_EQ(toCvMat(output.image_buffer).at<float>(0, 0), 5.0f);
+  EXPECT_FLOAT_EQ(project_image_mat(output).at<float>(0, 0), 5.0f);
   EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
   EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(3)));
   ASSERT_TRUE(graph.node(2).hp_region.has_value());
   EXPECT_FALSE(*graph.node(2).hp_region == partial_region);
 
   runtime.stop();
+}
+
+/**
+ * @brief Proves tiled failure releases no edges and retry publishes exactly.
+ *
+ * @return Nothing; GoogleTest reports early consumer entry, missing settlement,
+ * or final active-byte mismatches.
+ * @throws Graph, runtime, registry, allocation, future, synchronization, or
+ * image-adaptation exceptions when the production fixture cannot execute.
+ * @note Two source tiles occupy two workers. The left tile finishes while the
+ * right grant remains open and unwritten. The first interval injects failure
+ * and must release no exact dependent. A clean retry repeats the open interval,
+ * then makes both original ROI edges ready without extra continuation tasks or
+ * provider callbacks.
+ */
+TEST(ComputeTaskRunnerSplit,
+     TiledPublicationFailsClosedThenBatchesExactRoiEdgesAfterSeal) {
+  register_split_ops();
+  constexpr char kSourceType[] = "image_generator";
+  constexpr char kConsumerType[] = "issue130_publication_release";
+  constexpr char kSourceSubtype[] = "blocked_tiled_source";
+  constexpr char kConsumerSubtype[] = "observed_tiled_consumer";
+  auto probe = std::make_shared<TiledPublicationReleaseProbe>(true);
+  OpMetadata metadata;
+  metadata.tile_preference = TileSizePreference::MICRO;
+  auto& registry = OpRegistry::instance();
+  registry.register_op_hp_tiled(
+      kSourceType, kSourceSubtype,
+      TileOpFunc([probe](const Node&, const OutputTile& output,
+                         const std::vector<InputTile>&) {
+        probe->write_source_tile(output);
+      }),
+      metadata);
+  registry.register_op_hp_tiled(
+      kConsumerType, kConsumerSubtype,
+      TileOpFunc([probe](const Node&, const OutputTile& output,
+                         const std::vector<InputTile>& inputs) {
+        probe->write_consumer_tile(output, inputs);
+      }),
+      metadata);
+
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-tiled-publication-release");
+  GraphRuntime::Info info;
+  info.name = "tiled-publication-release";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+
+  GraphModel& graph = runtime.model();
+  Node source = make_node(1, kSourceType, kSourceSubtype);
+  source.parameters["width"] = 32;
+  source.parameters["height"] = 16;
+  Node consumer = make_node(2, kConsumerType, kConsumerSubtype);
+  consumer.parameters["width"] = 32;
+  consumer.parameters["height"] = 16;
+  consumer.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(consumer);
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(2U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  auto failed_compute = std::async(std::launch::async, [&] {
+    return &service.compute_parallel(graph, runtime, request);
+  });
+  const bool failed_partial_source_observed =
+      probe->wait_for_partial_source(std::chrono::seconds(2));
+  const bool failed_consumer_entered_early =
+      failed_partial_source_observed
+          ? probe->wait_for_consumer(std::chrono::milliseconds(250))
+          : false;
+  EXPECT_TRUE(failed_partial_source_observed);
+  EXPECT_FALSE(failed_consumer_entered_early)
+      << "exact ROI completion must not expose an open sibling grant";
+  EXPECT_EQ(failed_compute.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  probe->release_source();
+  EXPECT_THROW((void)failed_compute.get(), GraphError);
+  EXPECT_EQ(probe->consumer_entries(), 0);
+  EXPECT_FALSE(graph.node(1).cached_output_high_precision.has_value());
+  EXPECT_FALSE(graph.node(2).cached_output_high_precision.has_value());
+  expect_direct_authority_settled(execution_service);
+
+  probe->reset_for_successful_retry();
+  auto successful_compute = std::async(std::launch::async, [&] {
+    return &service.compute_parallel(graph, runtime, request);
+  });
+  const bool retry_partial_source_observed =
+      probe->wait_for_partial_source(std::chrono::seconds(2));
+  const bool retry_consumer_entered_early =
+      retry_partial_source_observed
+          ? probe->wait_for_consumer(std::chrono::milliseconds(250))
+          : false;
+  EXPECT_TRUE(retry_partial_source_observed);
+  EXPECT_FALSE(retry_consumer_entered_early)
+      << "retry must retain exact edges until the shared binding seals";
+  EXPECT_EQ(successful_compute.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  probe->release_source();
+
+  NodeOutput* output = nullptr;
+  EXPECT_NO_THROW(output = successful_compute.get());
+  EXPECT_EQ(probe->consumer_entries(), 2);
+  if (output != nullptr) {
+    const cv::Mat output_image = project_image_mat(*output);
+    ASSERT_EQ(output_image.rows, 16);
+    ASSERT_EQ(output_image.cols, 32);
+    EXPECT_FLOAT_EQ(output_image.at<float>(0, 0), 3.0f);
+    EXPECT_FLOAT_EQ(output_image.at<float>(0, 31), 5.0f);
+  }
+
+  runtime.stop();
+  registry.unregister_key(make_key(kSourceType, kSourceSubtype));
+  registry.unregister_key(make_key(kConsumerType, kConsumerSubtype));
+}
+
+/**
+ * @brief Proves an empty mapped tile waits for its connected source Value.
+ *
+ * @return Nothing; GoogleTest reports missing dependency or publication
+ * failures.
+ * @throws Graph, runtime, registry, allocation, cache, or execution exceptions
+ * when the focused product path cannot run.
+ * @note The right consumer tile reads no source pixels, but its callback input
+ * resolver still requires the complete source NodeOutput. The publication join
+ * prevents it from becoming initial-ready before the 16x16 source seals.
+ */
+TEST(ComputeTaskRunnerSplit,
+     EmptyExactTileMappingExecutesAfterProducerPublication) {
+  register_split_ops();
+  constexpr char kSourceType[] = "image_generator";
+  constexpr char kSourceSubtype[] = "issue130_empty_mapping_source";
+  constexpr char kConsumerType[] = "issue130_empty_mapping";
+  constexpr char kConsumerSubtype[] = "tiled_consumer";
+  OpMetadata metadata;
+  metadata.tile_preference = TileSizePreference::MICRO;
+  auto& registry = OpRegistry::instance();
+  registry.register_op_hp_tiled(
+      kSourceType, kSourceSubtype,
+      TileOpFunc(
+          [](const Node&, const OutputTile& output,
+             const std::vector<InputTile>&) { toCvMat(output).setTo(3.0f); }),
+      metadata);
+  registry.register_op_hp_tiled(
+      kConsumerType, kConsumerSubtype,
+      TileOpFunc(
+          [](const Node&, const OutputTile& output,
+             const std::vector<InputTile>&) { toCvMat(output).setTo(2.0f); }),
+      metadata);
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-empty-tile-publication");
+  GraphRuntime::Info info;
+  info.name = "empty-tile-publication";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+
+  GraphModel& graph = runtime.model();
+  Node source = make_node(1, kSourceType, kSourceSubtype);
+  source.parameters["width"] = 16;
+  source.parameters["height"] = 16;
+  Node consumer = make_node(2, kConsumerType, kConsumerSubtype);
+  consumer.parameters["width"] = 32;
+  consumer.parameters["height"] = 16;
+  consumer.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(consumer);
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(2U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  NodeOutput* output = nullptr;
+  EXPECT_NO_THROW(output = &service.compute_parallel(graph, runtime, request));
+  EXPECT_NE(output, nullptr);
+  if (output != nullptr) {
+    const cv::Mat output_image = project_image_mat(*output);
+    EXPECT_EQ(output_image.rows, 16);
+    EXPECT_EQ(output_image.cols, 32);
+    EXPECT_FLOAT_EQ(output_image.at<float>(0, 0), 2.0f);
+    EXPECT_FLOAT_EQ(output_image.at<float>(0, 31), 2.0f);
+  }
+  EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(1)));
+  EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
+
+  runtime.stop();
+  registry.unregister_key(make_key(kSourceType, kSourceSubtype));
+  registry.unregister_key(make_key(kConsumerType, kConsumerSubtype));
 }
 
 /**
@@ -6417,7 +10956,7 @@ TEST(ComputeTaskRunnerSplit,
   source.parameters["width"] = 32;
   source.parameters["height"] = 16;
   source.cached_output_high_precision = make_image_output(32, 16, 1, 3.0f);
-  source.hp_region = value_image_adapter::full_node_output_region(
+  source.hp_region = value_region::full_node_output_region(
       *source.cached_output_high_precision);
   source.hp_version = 1;
   Node target = make_node(2, "split_plan", "exact_sibling_metadata");
@@ -6448,10 +10987,11 @@ TEST(ComputeTaskRunnerSplit,
       g_exact_sibling_input_roi_mismatches.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(g_exact_sibling_monolithic_calls.load(std::memory_order_relaxed),
             0);
-  ASSERT_EQ(output.image_buffer.width, 32);
-  ASSERT_EQ(output.image_buffer.height, 16);
-  EXPECT_FLOAT_EQ(toCvMat(output.image_buffer).at<float>(0, 0), 13.0f);
-  EXPECT_FLOAT_EQ(toCvMat(output.image_buffer).at<float>(0, 31), 13.0f);
+  const cv::Mat output_mat = project_image_mat(output);
+  ASSERT_EQ(output_mat.cols, 32);
+  ASSERT_EQ(output_mat.rows, 16);
+  EXPECT_FLOAT_EQ(output_mat.at<float>(0, 0), 13.0f);
+  EXPECT_FLOAT_EQ(output_mat.at<float>(0, 31), 13.0f);
   EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
 
   runtime.stop();
@@ -6478,7 +11018,7 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
   cached_tile.caches.push_back({"image", "output.png"});
   cached_tile.cached_output_high_precision =
       make_image_output(256, 256, 1, 64.0f / 255.0f);
-  cached_tile.hp_region = value_image_adapter::full_node_output_region(
+  cached_tile.hp_region = value_region::full_node_output_region(
       *cached_tile.cached_output_high_precision);
   graph.add_node(cached_tile);
   graph.validate_topology();
@@ -6519,9 +11059,7 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
   EXPECT_EQ(
       *graph.node(1).hp_region,
       RegionSet::from_image_rect({image_region_domain(), 0, 256, 0, 256}));
-  ASSERT_EQ(output.image_buffer.width, 256);
-  ASSERT_EQ(output.image_buffer.height, 256);
-  const cv::Mat output_mat = toCvMat(output.image_buffer);
+  const cv::Mat output_mat = project_image_mat(output);
   ASSERT_EQ(output_mat.rows, 256);
   ASSERT_EQ(output_mat.cols, 256);
   EXPECT_NEAR(output_mat.at<float>(0, 0), 64.0f / 255.0f, 1.0f / 255.0f);
@@ -6849,23 +11387,23 @@ TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
 
   compute::RealtimeProxyWriteBuffer buffer(proxy_graph);
   NodeOutput& staged = buffer.ensure_output(1);
-  toCvMat(staged.image_buffer).setTo(9.0f);
+  staged = make_image_output(4, 4, 1, 9.0f);
   buffer.mark_updated(
       1, RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}), true,
       42);
 
   ASSERT_NE(proxy_graph.find_output(1), nullptr);
   EXPECT_FLOAT_EQ(
-      toCvMat(proxy_graph.find_output(1)->image_buffer).at<float>(0, 0), 3.0f);
+      project_image_mat(*proxy_graph.find_output(1)).at<float>(0, 0), 3.0f);
   ASSERT_EQ(graph.find_node(1)->cached_output_high_precision, std::nullopt);
 
-  buffer.commit_to_proxy_graph();
+  buffer.commit_to_proxy_graph(make_explicit_image_output_plan(1, 4, 4));
 
   const auto* committed_state = proxy_graph.find_state(1);
   ASSERT_NE(committed_state, nullptr);
   ASSERT_TRUE(committed_state->output.has_value());
-  EXPECT_FLOAT_EQ(
-      toCvMat(committed_state->output->image_buffer).at<float>(0, 0), 9.0f);
+  EXPECT_FLOAT_EQ(project_image_mat(*committed_state->output).at<float>(0, 0),
+                  9.0f);
   EXPECT_EQ(committed_state->version, 8);
   EXPECT_EQ(committed_state->region_hp,
             RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}))
@@ -6969,29 +11507,27 @@ TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {
 
   compute::HighPrecisionDirtyWriteBuffer buffer;
   NodeOutput& staged = buffer.ensure_output(graph.node(1));
-  toCvMat(staged.image_buffer).setTo(6.0f);
+  staged = make_image_output(4, 4, 1, 6.0f);
   buffer.mark_updated(
       graph.node(1),
       RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}), true,
       77);
 
   ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
-  EXPECT_FLOAT_EQ(
-      toCvMat(graph.node(1).cached_output_high_precision->image_buffer)
-          .at<float>(0, 0),
-      2.0f);
+  EXPECT_FLOAT_EQ(project_image_mat(*graph.node(1).cached_output_high_precision)
+                      .at<float>(0, 0),
+                  2.0f);
   EXPECT_EQ(graph.node(1).hp_version, 3);
   EXPECT_EQ(graph.node(1).hp_region,
             RegionSet::from_image_rect({image_region_domain(), 0, 1, 0, 1}));
   EXPECT_FALSE(graph.dirty_source_hp_commit_generation.count(1));
 
-  buffer.commit_to_graph(graph);
+  buffer.commit_to_graph(graph, make_explicit_image_output_plan(1, 4, 4));
 
   ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
-  EXPECT_FLOAT_EQ(
-      toCvMat(graph.node(1).cached_output_high_precision->image_buffer)
-          .at<float>(0, 0),
-      6.0f);
+  EXPECT_FLOAT_EQ(project_image_mat(*graph.node(1).cached_output_high_precision)
+                      .at<float>(0, 0),
+                  6.0f);
   EXPECT_EQ(graph.node(1).hp_version, 4);
   EXPECT_EQ(graph.node(1).hp_region,
             RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}))
@@ -7029,8 +11565,9 @@ TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {
   request.dirty_roi = (PixelRect{8, 8, 16, 16});
   NodeOutput& output = compute.compute(graph, request);
 
-  EXPECT_EQ(output.image_buffer.width, 64);
-  EXPECT_EQ(output.image_buffer.height, 64);
+  const ImageBounds& output_bounds = output.image_value().image_bounds();
+  EXPECT_EQ(image_bounds_width(output_bounds), 64u);
+  EXPECT_EQ(image_bounds_height(output_bounds), 64u);
   ASSERT_TRUE(graph.last_dirty_region_snapshot.has_value());
   EXPECT_FALSE(graph.last_dirty_region_snapshot->actual_dirty_rois.empty());
   ASSERT_TRUE(graph.last_compute_plan.has_value());
@@ -7092,12 +11629,14 @@ TEST(GlobalHighPrecisionDirtyUpdate, ForceRecacheRecomputesFullHpFrame) {
   full_request.cache.precision = "float32";
   full_request.cache.disable_disk_cache = true;
   NodeOutput& initial_output = compute.compute(graph, full_request);
-  ASSERT_EQ(initial_output.image_buffer.width, 128);
-  ASSERT_EQ(initial_output.image_buffer.height, 128);
+  ASSERT_EQ(image_bounds_width(initial_output.image_value().image_bounds()),
+            128u);
+  ASSERT_EQ(image_bounds_height(initial_output.image_value().image_bounds()),
+            128u);
 
   graph.mutate_node_runtime_state(2, [](GraphModel::NodeRuntimeState& state) {
     ASSERT_TRUE(state.cached_output_high_precision.has_value());
-    toCvMat(state.cached_output_high_precision->image_buffer).setTo(9.0f);
+    state.cached_output_high_precision = make_image_output(128, 128, 1, 9.0f);
   });
 
   ComputeService::Request dirty_request;
@@ -7109,9 +11648,9 @@ TEST(GlobalHighPrecisionDirtyUpdate, ForceRecacheRecomputesFullHpFrame) {
   dirty_request.dirty_roi = (PixelRect{16, 16, 16, 16});
   NodeOutput& forced_output = compute.compute(graph, dirty_request);
 
-  ASSERT_EQ(forced_output.image_buffer.width, 128);
-  ASSERT_EQ(forced_output.image_buffer.height, 128);
-  const cv::Mat forced_mat = toCvMat(forced_output.image_buffer);
+  const cv::Mat forced_mat = project_image_mat(forced_output);
+  ASSERT_EQ(forced_mat.cols, 128);
+  ASSERT_EQ(forced_mat.rows, 128);
   for (int y = 0; y < forced_mat.rows; ++y) {
     for (int x = 0; x < forced_mat.cols; ++x) {
       EXPECT_FLOAT_EQ(forced_mat.at<float>(y, x), 2.0f)
@@ -7155,12 +11694,14 @@ TEST(RealTimeDirtyUpdate, ForceRecacheHpSiblingCommitsCompleteHpOutput) {
   full_request.cache.precision = "float32";
   full_request.cache.disable_disk_cache = true;
   NodeOutput& initial_output = compute.compute(graph, full_request);
-  ASSERT_EQ(initial_output.image_buffer.width, 128);
-  ASSERT_EQ(initial_output.image_buffer.height, 128);
+  ASSERT_EQ(image_bounds_width(initial_output.image_value().image_bounds()),
+            128u);
+  ASSERT_EQ(image_bounds_height(initial_output.image_value().image_bounds()),
+            128u);
 
   graph.mutate_node_runtime_state(2, [](GraphModel::NodeRuntimeState& state) {
     ASSERT_TRUE(state.cached_output_high_precision.has_value());
-    toCvMat(state.cached_output_high_precision->image_buffer).setTo(9.0f);
+    state.cached_output_high_precision = make_image_output(128, 128, 1, 9.0f);
   });
 
   ComputeService::Request rt_request;
@@ -7172,11 +11713,12 @@ TEST(RealTimeDirtyUpdate, ForceRecacheHpSiblingCommitsCompleteHpOutput) {
   rt_request.dirty_roi = (PixelRect{16, 16, 16, 16});
   NodeOutput& rt_output = compute.compute(graph, rt_request);
 
-  EXPECT_GT(rt_output.image_buffer.width, 0);
-  EXPECT_GT(rt_output.image_buffer.height, 0);
+  ASSERT_TRUE(rt_output.has_image_value());
+  EXPECT_GT(image_bounds_width(rt_output.image_value().image_bounds()), 0u);
+  EXPECT_GT(image_bounds_height(rt_output.image_value().image_bounds()), 0u);
   ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
   const cv::Mat hp_mat =
-      toCvMat(graph.node(2).cached_output_high_precision->image_buffer);
+      project_image_mat(*graph.node(2).cached_output_high_precision);
   ASSERT_EQ(hp_mat.cols, 128);
   ASSERT_EQ(hp_mat.rows, 128);
   for (int y = 0; y < hp_mat.rows; ++y) {
@@ -7227,8 +11769,10 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   request.cache.disable_disk_cache = true;
   request.cache.nosave = true;
   request.intent = ComputeIntent::GlobalHighPrecision;
-  auto sequential = interaction.cmd_compute_and_get_image(request);
+  auto sequential = interaction.cmd_compute_and_get_values(request);
   ASSERT_TRUE(sequential.has_value());
+  const Value* sequential_value = sequential->find("image");
+  ASSERT_NE(sequential_value, nullptr);
   const uint64_t sequential_hp_version = graph.node(2).hp_version;
   EXPECT_GT(sequential_hp_version, 0u);
   ASSERT_TRUE(graph.node(2).hp_region.has_value());
@@ -7237,8 +11781,10 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
 
   testing::KernelTestAccess::clear_execution_trace(kernel, kGraphName);
   request.execution.parallel = true;
-  auto parallel = interaction.cmd_compute_and_get_image(request);
+  auto parallel = interaction.cmd_compute_and_get_values(request);
   ASSERT_TRUE(parallel.has_value());
+  const Value* parallel_value = parallel->find("image");
+  ASSERT_NE(parallel_value, nullptr);
   ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
   const auto& parallel_summary = *graph.last_compute_plan_summary;
   EXPECT_EQ(parallel_summary.intent, ComputeIntent::GlobalHighPrecision);
@@ -7258,8 +11804,8 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   ASSERT_TRUE(graph.node(2).hp_region.has_value());
   EXPECT_EQ(*graph.node(2).hp_region,
             RegionSet::from_image_rect({image_region_domain(), 0, 32, 0, 16}));
-  const cv::Mat sequential_matrix = toCvMat(*sequential);
-  const cv::Mat parallel_matrix = toCvMat(*parallel);
+  const cv::Mat sequential_matrix = toCvMat(*sequential_value);
+  const cv::Mat parallel_matrix = toCvMat(*parallel_value);
   ASSERT_EQ(sequential_matrix.size(), parallel_matrix.size());
   ASSERT_EQ(sequential_matrix.type(), parallel_matrix.type());
   EXPECT_DOUBLE_EQ(cv::sum(sequential_matrix)[0], cv::sum(parallel_matrix)[0]);
@@ -7329,10 +11875,13 @@ TEST(KernelComputeRuntimeSplit,
   rt_request.execution.parallel = true;
   rt_request.intent = ComputeIntent::RealTimeUpdate;
   rt_request.dirty_roi = (PixelRect{8, 8, 16, 16});
-  auto rt_image = interaction.cmd_compute_and_get_image(rt_request);
-  ASSERT_TRUE(rt_image.has_value());
-  EXPECT_GT(rt_image->width, 0);
-  EXPECT_GT(rt_image->height, 0);
+  auto rt_values = interaction.cmd_compute_and_get_values(rt_request);
+  ASSERT_TRUE(rt_values.has_value());
+  const Value* rt_value = rt_values->find("image");
+  ASSERT_NE(rt_value, nullptr);
+  const ImageView rt_image(*rt_value);
+  EXPECT_GT(rt_image.width(), 0U);
+  EXPECT_GT(rt_image.height(), 0U);
 
   auto rt_events = interaction.cmd_drain_compute_events(
       kGraphName, kComputeEventDrainMaxLimit);

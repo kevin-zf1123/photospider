@@ -42,25 +42,85 @@ class IsolatedCpuInvocationError : public std::runtime_error {
 };
 
 /**
- * @brief Explicit Host plan for one fresh positive-stride CPU output.
- * @throws std::bad_alloc when copied descriptor/layout vectors allocate.
- * @note The plan carries no allocation, producer, readiness, Run, or ledger
- * authority. `ValueBuilder` validates it again after the child returns.
+ * @brief Explicit Host-owned plan for one fresh positive-stride CPU output.
+ * @throws std::bad_alloc when copies of the complete DenseTensor descriptor,
+ *         allocation-owning ImageFacet metadata, or layout cannot allocate.
+ * @note Plan copies preserve every public ImageFacet field, including owned
+ *       diagnostic strings and channel/group/sample vectors. The plan carries
+ *       no allocation, producer, readiness, Run, or ledger authority;
+ *       `ValueBuilder` validates it again after the child returns.
  */
 struct IsolatedCpuDenseTensorOutputPlan final {
+  /** @brief Permanent operation output-port identity. */
+  IsolatedCpuOpaqueId port_identity;
+  /** @brief Host-minted invocation-local immutable plan identity. */
+  IsolatedCpuOpaqueId plan_identity;
+  /** @brief Permanent representation-Schema identity. */
+  IsolatedCpuOpaqueId schema_identity;
+  /** @brief Optional primary Facet identity; zero iff `image_facet` is absent.
+   */
+  IsolatedCpuOpaqueId facet_identity;
+  /** @brief Permanent Strided Layout identity. */
+  IsolatedCpuOpaqueId layout_identity;
+  /** @brief Nonzero logical descriptor structural version. */
+  std::uint64_t schema_version = 1U;
+  /** @brief Nonzero layout structural version. */
+  std::uint64_t layout_version = 1U;
+  /** @brief Exact descriptor digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest descriptor_digest;
+  /** @brief Exact logical-content digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest logical_content_digest;
+  /** @brief Exact physical-Layout digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest layout_digest;
   /** @brief Logical whole-byte DenseTensor descriptor. */
   DenseTensorDescriptor descriptor;
-  /** @brief Optional explicit image-axis interpretation. */
+  /** @brief Owned optional complete public ordinary-image interpretation. */
   std::optional<ImageFacet> image_facet;
   /** @brief Exact positive-stride producer layout. */
   StridedLayout layout;
   /** @brief Exact positive physical allocation bytes. */
   std::size_t storage_size = 0U;
+  /** @brief Exact positive power-of-two allocation alignment. */
+  std::size_t alignment = 1U;
+  /** @brief Exact immutable logical output Region. */
+  RegionSet region = RegionSet::whole();
+};
+
+/**
+ * @brief Host-owned source binding metadata parallel to one input Value.
+ * @throws std::bad_alloc when copied Region storage cannot allocate.
+ * @note The identities are comparison keys only and carry no graph, Value,
+ * allocation, capability, or process authority.
+ */
+struct IsolatedCpuInputBinding final {
+  /** @brief Permanent operation input-port identity. */
+  IsolatedCpuOpaqueId port_identity;
+  /** @brief Invocation-local nonzero upstream-edge identity. */
+  IsolatedCpuOpaqueId edge_identity;
+  /** @brief Permanent representation-Schema identity. */
+  IsolatedCpuOpaqueId schema_identity;
+  /** @brief Optional primary Facet identity; zero iff the Value has none. */
+  IsolatedCpuOpaqueId facet_identity;
+  /** @brief Permanent Strided Layout identity. */
+  IsolatedCpuOpaqueId layout_identity;
+  /** @brief Nonzero logical descriptor structural version. */
+  std::uint64_t schema_version = 1U;
+  /** @brief Nonzero layout structural version. */
+  std::uint64_t layout_version = 1U;
+  /** @brief Exact descriptor digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest descriptor_digest;
+  /** @brief Exact logical-content digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest logical_content_digest;
+  /** @brief Exact physical-Layout digest or all zero when unavailable. */
+  IsolatedCpuSha256Digest layout_digest;
+  /** @brief Exact immutable validity Region. */
+  RegionSet region = RegionSet::whole();
 };
 
 /**
  * @brief High-level Host request converted into one pointer-free invocation.
- * @throws std::bad_alloc when copied strings or vectors allocate.
+ * @throws std::bad_alloc when copied operation/parameter/output storage,
+ *         including complete output-plan ImageFacet metadata, cannot allocate.
  * @note Inputs remain Host-owned Ready Values. Their BufferHandle and process-
  * local identities never enter the wire.
  */
@@ -69,10 +129,20 @@ struct IsolatedCpuHostInvocation final {
   IsolatedCpuInvocationIdentity identity;
   /** @brief Bounded operation key interpreted only inside the runtime. */
   std::string operation;
+  /** @brief Permanent operation identity selected by the Host. */
+  IsolatedCpuOpaqueId operation_identity;
+  /** @brief Permanent implementation identity selected by the Host. */
+  IsolatedCpuOpaqueId implementation_identity;
+  /** @brief Permanent configuration-Schema identity. */
+  IsolatedCpuOpaqueId configuration_schema_identity;
   /** @brief Canonically name-sorted scalar parameters. */
   std::vector<IsolatedCpuScalarParameter> parameters;
+  /** @brief Optional complete recursive canonical operation configuration. */
+  std::vector<IsolatedCpuConfigurationNode> configuration;
   /** @brief Ready Host-visible Strided DenseTensor inputs. */
   std::vector<Value> inputs;
+  /** @brief Destination-indexed metadata parallel to `inputs`. */
+  std::vector<IsolatedCpuInputBinding> input_bindings;
   /** @brief Positive-stride output plans in callback order. */
   std::vector<IsolatedCpuDenseTensorOutputPlan> outputs;
 };
@@ -146,8 +216,16 @@ struct IsolatedCpuRuntimeInvocation final {
   IsolatedCpuInvocationIdentity identity;
   /** @brief Validated operation key. */
   std::string operation;
+  /** @brief Validated permanent operation identity. */
+  IsolatedCpuOpaqueId operation_identity;
+  /** @brief Validated permanent implementation identity. */
+  IsolatedCpuOpaqueId implementation_identity;
+  /** @brief Validated permanent configuration-Schema identity. */
+  IsolatedCpuOpaqueId configuration_schema_identity;
   /** @brief Validated canonical scalar parameters. */
   std::vector<IsolatedCpuScalarParameter> parameters;
+  /** @brief Validated complete recursive configuration, when present. */
+  std::vector<IsolatedCpuConfigurationNode> configuration;
   /** @brief Ordered immutable mapped inputs. */
   std::vector<IsolatedCpuRuntimeTensor> inputs;
   /** @brief Ordered exclusive mapped outputs. */
@@ -174,7 +252,8 @@ struct IsolatedCpuRuntimeCallbackResult final {
  * @throws Any exception; the runtime converts it to one bounded PluginFailed
  * response while all mappings and received descriptors remain owned.
  * @note The callback must not retain pointers or references after return. This
- * is a source-private runtime seam, not operation ABI v1/v2.
+ * is a source-private runtime seam, not the in-process operation ABI; the
+ * isolation protocol transports only separately encoded pointer-free records.
  */
 using IsolatedCpuRuntimeCallback = std::function<
     IsolatedCpuRuntimeCallbackResult(  // NOLINT(whitespace/indent_namespace)
@@ -208,7 +287,7 @@ class NonSupervisedIsolatedCpuInvocationExecutor final {
    * one-use plugin resource tokens and must be nonnull.
    * @param resource_policy Positive address-space, CPU-time, and descriptor
    * bounds applied before descriptor-based exec.
-   * @param limits Protocol-v1 bounds whose shared-memory, capability, and
+   * @param limits Protocol-v2 bounds whose shared-memory, capability, and
    * descriptor values are nonzero and whose parameter value may be zero; all
    * values remain at or below their hard maxima.
    * @throws std::invalid_argument when authority, policy, path, or limits are
@@ -283,7 +362,7 @@ class NonSupervisedIsolatedCpuInvocationExecutor final {
   /** @brief Signed exact executable descriptor retained across invocations. */
   AuthorizedPluginFile authorized_runtime_;
 
-  /** @brief Retained local protocol-v1 validation bounds. */
+  /** @brief Retained local protocol-v2 validation bounds. */
   IsolatedCpuInvocationLimits limits_;
 };
 

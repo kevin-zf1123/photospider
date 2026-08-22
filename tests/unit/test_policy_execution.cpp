@@ -67,7 +67,7 @@ ComputeRunSubmission make_submission(
 /**
  * @brief Minimal thread-safe Host observation context for route integration.
  * @throws std::bad_alloc only when copied worker-id observations grow.
- * @note Device inventory belongs to the injected execution service. This
+ * @note DeviceBackend inventory belongs to the injected execution service. This
  * object observes callback attribution only.
  */
 class TestHostContext final : public ExecutionHostContext {
@@ -307,7 +307,8 @@ class ServiceStartObservationSink final : public ComputeRunObservationSink {
  */
 ReadyTaskSubmission make_ready(
     ComputeRunLease lease, std::uint64_t local_task_id, int trace_node_id,
-    ReadyTaskSubmission::Executable executable, Device device = Device::CPU,
+    ReadyTaskSubmission::Executable executable,
+    DeviceBackend device = DeviceBackend::CPU,
     ExecutionTaskPriority priority = ExecutionTaskPriority::Normal,
     bool is_initial_ready = true) {
   const ComputeRunTaskIdentity identity = lease.task_identity(local_task_id);
@@ -436,7 +437,7 @@ class ScopedPromiseRelease final {
 void execute_successful_run(ExecutionService& service, const std::string& route,
                             const std::string& label, std::uint64_t revision,
                             std::atomic_int& entered, TestHostContext& host,
-                            Device device = Device::CPU) {
+                            DeviceBackend device = DeviceBackend::CPU) {
   ComputeRun run(make_submission(label, revision, 1));
   std::vector<ReadyTaskSubmission> ready;
   ready.push_back(make_ready(
@@ -857,13 +858,14 @@ TEST(PhysicalExecutionIntegration, PublishesRouteAwareDeviceInventory) {
   metal_service.configure_worker_count(2U);
 
   EXPECT_EQ(cpu_service.available_devices("cpu"),
-            (std::vector<Device>{Device::CPU}));
+            (std::vector<DeviceBackend>{DeviceBackend::CPU}));
   EXPECT_EQ(metal_service.available_devices("serial_debug"),
-            (std::vector<Device>{Device::CPU}));
+            (std::vector<DeviceBackend>{DeviceBackend::CPU}));
   EXPECT_EQ(cpu_service.available_devices("gpu_pipeline"),
-            (std::vector<Device>{Device::CPU}));
-  EXPECT_EQ(metal_service.available_devices("gpu_pipeline"),
-            (std::vector<Device>{Device::GPU_METAL, Device::CPU}));
+            (std::vector<DeviceBackend>{DeviceBackend::CPU}));
+  EXPECT_EQ(
+      metal_service.available_devices("gpu_pipeline"),
+      (std::vector<DeviceBackend>{DeviceBackend::Metal, DeviceBackend::CPU}));
   EXPECT_THROW(metal_service.available_devices("heterogeneous"), GraphError);
 }
 
@@ -879,11 +881,11 @@ TEST(PhysicalExecutionIntegration, EmptyRegistryCreatesNoMetalAccount) {
   ExecutionService service(ExecutionService::default_resource_limits(),
                            std::move(empty_registry));
 
-  EXPECT_FALSE(service.has_device_executor(Device::GPU_METAL));
+  EXPECT_FALSE(service.has_device_executor(DeviceBackend::Metal));
   EXPECT_FALSE(service.device_resource_snapshot(DeviceId(DeviceBackend::Metal))
                    .has_value());
   EXPECT_EQ(service.available_devices("gpu_pipeline"),
-            (std::vector<Device>{Device::CPU}));
+            (std::vector<DeviceBackend>{DeviceBackend::CPU}));
 }
 
 /**
@@ -898,7 +900,7 @@ TEST(PhysicalExecutionIntegration,
      DefaultServiceMatchesMetalAccountToPlatformRegistry) {
   ExecutionService service;
   const bool has_metal_executor =
-      service.has_device_executor(Device::GPU_METAL);
+      service.has_device_executor(DeviceBackend::Metal);
   const bool has_metal_account =
       service.device_resource_snapshot(DeviceId(DeviceBackend::Metal))
           .has_value();
@@ -929,7 +931,7 @@ TEST(PhysicalExecutionIntegration,
   ExecutionService service(std::move(limits),
                            ::ps::testing::make_fake_metal_executor_registry());
 
-  ASSERT_TRUE(service.has_device_executor(Device::GPU_METAL));
+  ASSERT_TRUE(service.has_device_executor(DeviceBackend::Metal));
   const std::optional<ResourceLedger::DeviceSnapshot> metal =
       service.device_resource_snapshot(DeviceId(DeviceBackend::Metal));
   ASSERT_TRUE(metal.has_value());
@@ -956,7 +958,7 @@ TEST(PhysicalExecutionIntegration, RejectsDeviceOutsideRouteInventory) {
         entered.fetch_add(1, std::memory_order_relaxed);
         runtime.dec_tasks_to_complete();
       },
-      Device::GPU_METAL));
+      DeviceBackend::Metal));
 
   EXPECT_THROW(service.execute_run(host, "cpu", std::move(ready), 1),
                std::invalid_argument);
@@ -1000,7 +1002,7 @@ TEST(PhysicalExecutionIntegration, CpuAndGpuPipelineLanesOverlapAndDrain) {
         release.wait();
         runtime.dec_tasks_to_complete();
       },
-      Device::GPU_METAL));
+      DeviceBackend::Metal));
 
   std::future<void> completion = std::async(
       std::launch::async,
@@ -1064,7 +1066,7 @@ TEST(PhysicalExecutionIntegration, ExecutesAndReusesEveryPrivateRoute) {
          ExecutionTaskRuntime&) {
         throw std::runtime_error("exact gpu-pipeline failure");
       },
-      Device::GPU_METAL));
+      DeviceBackend::Metal));
   try {
     service.execute_run(failure_host, "gpu_pipeline", std::move(failing_ready),
                         1);
@@ -1076,7 +1078,7 @@ TEST(PhysicalExecutionIntegration, ExecutesAndReusesEveryPrivateRoute) {
   TestHostContext recovery_host;
   EXPECT_NO_THROW(execute_successful_run(service, "gpu_pipeline",
                                          "gpu-recovery", revision++, recovered,
-                                         recovery_host, Device::GPU_METAL));
+                                         recovery_host, DeviceBackend::Metal));
   EXPECT_EQ(recovered.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
@@ -1312,7 +1314,7 @@ TEST(ExecutionServiceStartObservation,
         release_blocker.wait();
         runtime.dec_tasks_to_complete();
       },
-      Device::GPU_METAL));
+      DeviceBackend::Metal));
 
   TestHostContext throughput_host;
   ComputeRun throughput_run(
@@ -1351,7 +1353,7 @@ TEST(ExecutionServiceStartObservation,
               throughput_gpu_entered_promise.set_value();
               gpu_runtime.dec_tasks_to_complete();
             },
-            Device::GPU_METAL, ExecutionTaskPriority::High, false));
+            DeviceBackend::Metal, ExecutionTaskPriority::High, false));
         throughput_cpu_entries.fetch_add(1, std::memory_order_relaxed);
         throughput_cpu_entered_promise.set_value();
         release_throughput_cpu.wait();
@@ -1394,7 +1396,7 @@ TEST(ExecutionServiceStartObservation,
         interactive_entries.fetch_add(1, std::memory_order_relaxed);
         runtime.dec_tasks_to_complete();
       },
-      Device::GPU_METAL));
+      DeviceBackend::Metal));
   interactive_completion = std::async(
       std::launch::async, [&service, &interactive_host,
                            ready = std::move(interactive_ready)]() mutable {
@@ -1474,7 +1476,7 @@ TEST(ExecutionServiceStartObservation,
         release_blocker.wait();
         runtime.dec_tasks_to_complete();
       },
-      Device::GPU_METAL));
+      DeviceBackend::Metal));
 
   TestHostContext throughput_host;
   ComputeRun throughput_run(
@@ -1488,7 +1490,7 @@ TEST(ExecutionServiceStartObservation,
         throughput_entries.fetch_add(1, std::memory_order_relaxed);
         runtime.dec_tasks_to_complete();
       },
-      Device::GPU_METAL));
+      DeviceBackend::Metal));
 
   auto observation_sink = std::make_shared<ServiceStartObservationSink>();
   ComputeRunSubmission interactive_submission = make_submission(
@@ -1505,7 +1507,7 @@ TEST(ExecutionServiceStartObservation,
         interactive_entries.fetch_add(1, std::memory_order_relaxed);
         runtime.dec_tasks_to_complete();
       },
-      Device::GPU_METAL));
+      DeviceBackend::Metal));
 
   std::future<void> blocker_completion = std::async(
       std::launch::async,
@@ -1607,7 +1609,7 @@ TEST_F(PolicyExecutionFixture,
               gpu_a_entered_promise.set_value();
               gpu_runtime.dec_tasks_to_complete();
             },
-            Device::GPU_METAL, ExecutionTaskPriority::High, false));
+            DeviceBackend::Metal, ExecutionTaskPriority::High, false));
         cpu_a_entries.fetch_add(1, std::memory_order_relaxed);
         cpu_a_entered_promise.set_value();
         release_cpu_a.wait();
@@ -1642,7 +1644,7 @@ TEST_F(PolicyExecutionFixture,
         gpu_b_entered_promise.set_value();
         runtime.dec_tasks_to_complete();
       },
-      Device::GPU_METAL));
+      DeviceBackend::Metal));
   completion_b = std::async(
       std::launch::async,
       [&service, &host_b, ready = std::move(ready_b)]() mutable {
@@ -1714,7 +1716,7 @@ TEST_F(PolicyExecutionFixture,
               gpu_entries.fetch_add(1, std::memory_order_relaxed);
               gpu_runtime.dec_tasks_to_complete();
             },
-            Device::GPU_METAL, ExecutionTaskPriority::High, false));
+            DeviceBackend::Metal, ExecutionTaskPriority::High, false));
         cpu_entries.fetch_add(1, std::memory_order_relaxed);
         cpu_entered_promise.set_value();
         release_cpu.wait();

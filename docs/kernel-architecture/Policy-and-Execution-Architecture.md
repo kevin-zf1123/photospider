@@ -270,8 +270,8 @@ ownerless binding, serializes against active same-session requests, and
 publishes a new nonzero generation. A same-name replacement also advances the
 generation. Failure preserves the old route.
 
-Operation selection freezes one coherent callback, metadata, `Device`, and
-nonzero implementation revision before Run admission. Planning retains only
+Operation selection freezes one coherent callback, metadata, `DeviceBackend`,
+and nonzero implementation revision before Run admission. Planning retains only
 the callback-free identity/metadata/shape, and submission must re-resolve the
 same identity before it may retain the callable/DSO lease. Full HP, dirty HP/RT,
 and connected-parameter preflight all consume the same canonical route-aware
@@ -305,6 +305,26 @@ Full HP, dirty HP/RT, connected preflight, initial ready work, and
 dependency-released work all enter the common ready-store, policy,
 reserved-start, private-route, and Run-lease completion path.
 
+Issue #130 also freezes the selected revision's output schema into every
+planned work item. The Host derives canonical image requirement and the exact
+named-data set from registered metadata, never from a provider return. That
+schema is combined with implementation/device identity and any trusted extent,
+then checked before dependency release and again before formal mutation. Full
+HP routes isolate all intermediate cache, Region, version, inspection, and
+timing writes in a request-owned Graph snapshot, so policy work and disk-cache
+staging cannot make an unauthorized result visible. The existing no-throw
+Graph publication remains the only live-state swap.
+
+Dirty work preserves the same authority when a registered Metal producer
+returns a Pending Value. A Run-scoped queued continuation owns the wait without
+occupying a CPU worker, and the source/dependent task is not completed or
+released until the exact revision, allocation, producer, and staged Value are
+Ready. Failed, ProducerCancelled, cancelled, stale, or replaced results fail
+the Run without formal mutation. Publication closure removes registrations
+outside the continuation lock, worker callbacks alone change logical task
+accounting, and prepared dirty contexts remain retained until their matching
+service callbacks settle.
+
 V-6 adds no configured execution route and no second ready store.
 `ReadyFence::async_wait` accepts a shared injected executor that must enqueue
 rather than invoke inline. Its preconstructed continuation retains the executor
@@ -318,7 +338,8 @@ registration/publication, cancellation/callback-entry, and
 transfer-destruction/callback-entry races without sleeps.
 
 V-7 adds a source-private, fixed `DeviceExecutorRegistry` to the same
-`ExecutionService` domain. When the repository Metal plugin is enabled, the
+`ExecutionService` domain. When the repository Metal provider profile is
+enabled, the
 Apple entry owns one device and command queue, supplies an invocation-scoped
 texture/buffer allocator, and keeps a validated process-lifetime pipeline
 cache. Reserved-start workers enter that
@@ -370,12 +391,16 @@ lookup, publication, replacement, capacity, and eviction behavior.
 
 V-9 places authoritative device-memory and scratch admission in the existing
 service `ResourceLedger`, not in policy or residency. Each configured
-non-CPU `DeviceId` has isolated limits. Metal atomically reserves native
-size/alignment plans before allocation, audits `allocatedSize`, and commits
-actual bytes before command submission. Persistent memory follows the native
-Value owner through residency; scratch follows exact command completion.
-Policy sees no native handle or token, does not rank byte owners, and gains no
-second waiting/fairness queue.
+non-CPU `DeviceId` has isolated limits. For a dedicated Metal heap, the native
+size/alignment query is a minimum rather than a backing upper bound, so one
+ledger operation atomically reserves all memory currently available in that
+account plus exact scratch before allocation. The created heap's positive,
+representable `currentAllocatedSize` is the sole persistent actual; texture
+`allocatedSize` is not counted twice. Reconciliation returns the unused
+ceiling before command submission. Persistent memory follows the native Value
+owner through residency; scratch follows exact command completion. Policy sees
+no native handle or token, does not rank byte owners, and gains no second
+waiting/fairness queue.
 
 Freshness publication uses two phases. Kernel first asks `ExecutionService` to
 pretrack the lineage without assigning a managed current identity; this
@@ -482,6 +507,23 @@ the private `OutputStore` remain unchanged. The executor owns no user path,
 retry, overwrite, receipt, or durability policy. No current component provides
 a crash-durable user-output commit, and ADR 0009's post-publication independent
 cache outcome remains future work.
+
+### DI-2 statistics task ownership
+
+`GraphCacheService` owns one bounded `ImageStatisticsStore`, but the store owns
+no worker, ready queue, execution route, or policy context. Its
+`schedule_image_statistics()` boundary accepts a trusted one-task ownership
+receiver. On a miss, the callback independently retains the exact Ready Value
+and complete query until settlement; on a hit, no task is submitted. The
+receiver may execute inline or transfer the callback to an existing internal
+scheduler, and must either take it exactly once or throw before invocation.
+
+Cancellation and result publication linearize under request-local state before
+the derived-cache mutex. Cancellation that wins publishes no result; a result
+that wins remains a normal bounded cache entry. Scan exceptions settle only the
+future. This mechanism grants no Run, Graph, HP/RT generation, allocation,
+formal-cache, persistence, or worker authority and does not alter policy
+fairness or resource-ledger accounting.
 
 ## Host, CLI, and IPC Surfaces
 
@@ -613,9 +655,28 @@ installs, and restores the worker floating-point environment around those
 explicit scalar cuts. An independent oracle versioned
 `i1-coordinate-pattern-curve-chain-fp32-v1` reconstructs the source and four
 stages without Host/Kernel/cache/scheduler/YAML/provider dependencies. For the
-HWC `[2048,2048,4]` NativeScalar32 tensor and frozen ImageFacet, its exact
-`Sha256CanonicalV1` digest is
-`17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`.
+HWC `[2048,2048,4]` NativeScalar32 tensor, zero-origin
+`[0,2048) x [0,2048)` data window, frozen DenseTensor schema/Image facet
+structural version 2, and Sample Domain facet structural version 1 declaring
+FP32 Normalized `[0,1]`, its exact `Sha256CanonicalV1` digest is
+`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`.
+For this oracle migration, the initial DI-1 implementation and oracle refresh
+advanced the DenseTensor schema and Image facet structural records to version 2
+but did not fully implement the archived DI-1 design: it omitted the
+coordinate-pattern Sample Domain facet and produced the historical
+pre-Sample-Domain I1 logical digest
+`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`.
+The later coordinate-pattern metadata correction completed that design
+requirement by binding Sample Domain facet structural version 1 declaring FP32
+Normalized `[0,1]`; regenerating the independent oracle under that complete
+descriptor produced the current digest
+`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`.
+Neither stage changed the `Sha256CanonicalV1` algorithm, workload arithmetic,
+or workload identities. The I2 preview golden remains
+`2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`;
+the 34 B1 logical goldens were regenerated under the current structural
+records and, for coordinate-pattern outputs, the Sample Domain record, while
+their raw-payload hashes remain unchanged.
 
 The frozen I1 graph, twelve coefficients/Regions, success-only accepted
 coordinate collector and product binding, continuous cold/warmup/measured
@@ -923,7 +984,7 @@ residency, and worker execution compile from the matching
 source-private run-state, ready-store, and pool headers share the exact nested
 types without creating a forwarding or installed contract.
 
-- `include/photospider/plugin/op_contract.hpp`
+- `include/photospider/plugin/operation_plugin_api.h`
 - `src/lib/core/ps_types.hpp` and `.cpp`
 - `src/lib/compute/dispatch/task_graph_planning.hpp` and `.cpp`
 - `src/lib/compute/dispatch/compute_task_submission.hpp` and `.cpp`
@@ -949,7 +1010,7 @@ types without creating a forwarding or installed contract.
 - `src/lib/benchmark/m1/m1_canonical.*`
 - `src/lib/benchmark/common/evidence_envelope.*`
 - `src/lib/compute/execution/progressive_compute.*`
-- `src/lib/core/exact_box_downsample.cpp`
+- `src/lib/core/dense_image_processing.*`
 - `src/lib/runtime/resource_ledger.*`
 - `src/lib/execution/device/compute_io_executor.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
