@@ -39,28 +39,28 @@ The root `CMakeLists.txt` builds these internal modules:
 
 | Target | Role |
 | --- | --- |
-| `photospider_core_internal` | Build-only dependency-neutral core values and neutral parameter formatting plus the build-selected image-processing and image-artifact implementations. `PHOTOSPIDER_ENABLE_OPENCV=ON` selects OpenCV processing/codec adapters; `OFF` selects the standard-library processing implementation and an unavailable codec without discovering OpenCV. |
+| `photospider_core_internal` | Build-only dependency-neutral core values and neutral parameter formatting plus the build-selected image-processing and image-artifact implementations. `PHOTOSPIDER_ENABLE_OPENCV=ON` selects OpenCV processing/codec adapters; `OFF` retains dependency-neutral Value processing and an unavailable codec without discovering OpenCV. |
 | `photospider_graph_internal` | Build-only dependency-neutral core operation source, `GraphModel`, registry behavior, graph IO, traversal, cache, propagation, and inspection services. |
 | `photospider_yaml_adapter_internal` | Build-only YAML adapter present only with `PHOTOSPIDER_ENABLE_YAML=ON`. It owns shared parameter-value translation, graph-document parsing/emission, cache-metadata parsing/emission, and their direct filesystem behavior; format-neutral GraphIO, Kernel, runtime, and cache contracts do not declare parser values. |
 | `photospider_opencv_operation_provider_internal` | Build-only, optional repository OpenCV CPU operation provider. It owns operation algorithms, OpenCV process initialization, and OpenCV exception translation, and exists only with `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON`. |
-| `photospider_plugin_host_internal` | Build-only host-side operation plugin manager, configured-provider composition, v2 loader, value adapter, and DSO lifetime ownership. |
+| `photospider_plugin_host_internal` | Build-only host-side operation plugin manager, pure-C ABI v1 loader/value adapter, supervised runtime router, and DSO generation-lifetime ownership. |
 | `photospider_policy_internal` | Build-only process policy registry, pure-C ABI-v1 DSO loader, immutable bindings, sticky faults, and DSO leases. |
 | `photospider_execution_internal` | Build-only private physical-resource accounting, execution-domain support, explicit CPU/Metal Value-transfer tasks, exact completion identity, and process-owned residency. |
 | `photospider_compute_internal` | Build-only compute, dirty-region, runtime, interaction, event, fixed worker service, reserved-start, and private route implementation; it depends one-way on policy and execution internals. |
 | `photospider_host_internal` | Build-only Kernel/Interaction facades and embedded Host composition root. It selects real YAML persistence adapters or explicit unavailable adapters according to the producer capability. |
 | `photospider_kernel` | Buildable aggregate target that compiles the real selected core, graph, operation-plugin, policy, execution, compute, Host, and optional provider/adapter modules; it is not an install artifact or a placeholder library. |
-| `photospider_operation_runtime` | Installable shared implementation of public image-buffer factories, DenseTensor and provider-defined Value contracts, Region algebra, ReadyFence, canonical extension metadata/digests, and the injected data-definition registry. It owns the sole process-wide allocation/revision minting authority used by the static Host and every Value-using DSO, with no OpenCV, yaml-cpp, Graph, policy registry, native-device SDK, or embedded-product dependency. |
-| `photospider_operation_sdk` | Installable interface target for operation v2 and dependency-neutral data/memory headers; it transitively links `operation_runtime`. |
+| `photospider_operation_runtime` | Installable shared implementation of public DenseTensor/ImageFacet/ImageView and provider-defined Value contracts, portable artifacts, sample conversion, Region algebra, ReadyFence, canonical extension metadata/digests, and the injected data-definition registry. It owns the sole process-wide allocation/revision minting authority used by the static Host and every Value-using DSO, with no OpenCV, yaml-cpp, Graph, policy registry, native-device SDK, or embedded-product dependency. |
+| `photospider_operation_plugin_sdk` | Installable dependency-neutral interface target carrying the pure-C operation ABI v1 C11 header and header-only C++17 helper. |
 | `photospider_data_provider_sdk` | Installable dependency-neutral interface target carrying only the self-contained pure-C data-definition provider ABI v3 header plus C11/C++17 requirements. |
 | `photospider_openexr_deep_provider` | Optional installable MODULE provider, built only with `PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER=ON`. It implements the data-definition provider ABI v3 single-part deep-scanline OpenEXR candidate, links `data_provider_sdk` plus `OpenEXR::OpenEXR`, and exports as `Photospider::openexr_deep_provider`. |
 | `photospider_openexr_deep_adapter` | Source-private optional STATIC Host codec adapter, built with the provider option for Host composition and long-lived product tests. It links `operation_runtime` plus `OpenEXR::OpenEXR` and is neither installed nor exported. |
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter using only the OpenCV `core` component; it exists only with `PHOTOSPIDER_ENABLE_OPENCV=ON`. |
 | `photospider_policy_sdk` | Installable dependency-neutral interface target carrying the self-contained pure-C policy ABI header plus C11/C++17 requirements. |
-| `photospider` | Static installable backend product, archived as `libphotospider`, linked by enabled CLI and embedded Host frontends. It exports `Photospider::photospider` and remains buildable with OpenCV and YAML disabled; operation plugins register through `ps::plugin::OperationPluginRegistrar` and `register_photospider_ops_v2` instead of linking the product for registry state. |
+| `photospider` | Static installable backend product, archived as `libphotospider`, linked by enabled CLI and embedded Host frontends. It exports `Photospider::photospider` and remains buildable with OpenCV and YAML disabled; operation plugins publish exact pure-C ABI v1 roots/suites and never receive private registry state. |
 | `photospider_ipc_client` | Installed static typed Unix IPC client plus the complete IPC Host adapter. It exports `Photospider::photospider_ipc_client`, implements all 60 direct Client methods and all 58 current Host virtuals, and does not link the backend or expose JSON/POSIX implementation types. |
 | `photospider_ipc_server_internal` | Non-installed bounded Unix listener, typed router, and private session/job/snapshot/output registries. It serializes all backend access through one daemon-owned Host. |
 | `photospiderd` | Installed foreground macOS/Linux daemon that owns one embedded Host, a protected per-user socket and output store, and deterministic joined shutdown. |
-| `photospider_cli_common` | Non-installable application helper, present only with `PHOTOSPIDER_BUILD_GRAPH_CLI=ON`, built from `apps/graph_cli/src/` plus `src/lib/benchmark/benchmark_service.cpp` and `src/lib/benchmark/benchmark_yaml_generator.cpp`: REPL commands, TUI editors, autocomplete, CLI config, and CLI benchmark services. |
+| `photospider_cli_common` | Non-installable application OBJECT helper, present only with `PHOTOSPIDER_BUILD_GRAPH_CLI=ON`, built from `apps/graph_cli/src/` plus `src/lib/benchmark/benchmark_service.cpp` and `src/lib/benchmark/benchmark_yaml_generator.cpp`: REPL commands, TUI editors, autocomplete, CLI config, and CLI benchmark services. Object injection places CLI references before the selected static product archive on single-pass linkers. |
 | `graph_cli` | End-user executable whose process entry point is `apps/graph_cli/main.cpp`; its derived default is `ON` only when both OpenCV and YAML capabilities are enabled. |
 
 The CLI-owned application surface is private to `apps/graph_cli/`, including
@@ -127,9 +127,9 @@ Package boundary:
   the target's generated public include root contains only `photospider/`
   forwarding headers. CMake tracks additions and removals and the wrappers read
   live source headers without directory symlinks.
-- `Photospider::operation_runtime` is one installed shared library.
-  `Photospider::operation_sdk` and the static embedded product both link that
-  target, so independently loaded Value-using operation DSOs call the same
+- `Photospider::operation_runtime` is one installed shared library. The static
+  embedded product and Value-using operation DSOs link that target explicitly,
+  so independently loaded Value users call the same
   deterministic allocation/revision authority. Its installed
   `photospider/memory/ready_fence.hpp` surface and implementation use only the
   C++ standard library. The source-private pending producer and transfer task
@@ -139,10 +139,10 @@ Package boundary:
   no link interface. C11 and C++17 providers receive only the installed include
   root; Host-side registry/Value consumers link `operation_runtime` separately.
 - Package components are `embedded`, `ipc_client`, `data_provider_sdk`,
-  `operation_sdk`, `operation_runtime`, `operation_opencv`,
+  `operation_plugin_sdk`, `operation_runtime`, `operation_opencv`,
   `openexr_deep_provider`, and `policy_sdk`. Omitting components preserves the
   embedded default and does not import the provider. `data_provider_sdk` and
-  `policy_sdk` discover no external package; `operation_sdk`/
+  `policy_sdk` discover no external package; `operation_plugin_sdk`/
   `operation_runtime` discover none; `operation_opencv` discovers only OpenCV
   `core`; `openexr_deep_provider` discovers only `OpenEXR::OpenEXR`; and
   `ipc_client` resolves only Threads. If optional `operation_opencv` discovery
@@ -284,7 +284,7 @@ remain private process execution routes. Reserved-start transactions exchange
 ready grants for execution grants exactly once before entering a route.
 
 The IPC Host owns only client-side connections, interruptible polling workers,
-and mapped image lifetimes. Daemon sessions, accepted jobs, snapshots, output
+and temporary mapped named-Value archive lifetimes. Daemon sessions, accepted jobs, snapshots, output
 leases, and the backend Host remain daemon-owned. Destroying the adapter wakes
 and joins its pollers but does not close sessions, unload plugins, or repeat a
 mutation. The exact socket, protocol, status, quota, and artifact lifecycle is
@@ -297,7 +297,7 @@ defined in `../codebase-structure/IPC-Protocol-v2.md`.
 | `Kernel` | Multi-graph facade, service owner, runtime bootstrapper, top-level graph/cache/compute API. |
 | `ps::Host` | Public frontend interface under `include/photospider/host`; returns copied request/result/snapshot values and hides Kernel, GraphModel, and GraphRuntime. |
 | `embedded Host adapter` | In-process Host implementation backed by per-adapter `Kernel` and `InteractionService` state; all adapters share the process operation plugin owner. |
-| `IPC Host adapter` | Complete installed Host implementation backed only by typed short-lived Client calls. It composes polling compute, joins async workers, preserves exact status domains, and maps protected image artifacts read-only. |
+| `IPC Host adapter` | Complete installed Host implementation backed only by typed short-lived Client calls. It composes polling compute, joins async workers, preserves exact status domains, temporarily maps and detaches protected named-Value archives, then reconstructs fresh local Values. |
 | `ps::ipc::Client` | Move-only direct client with owned values for the exact sorted 60-method version 2 inventory; it validates correlated result shapes and exposes no raw JSON call. |
 | `photospiderd` | Foreground local service that owns one embedded Host and serializes all Host calls while independently serving metadata and job polling. |
 | daemon registries | Private bounded ownership for opaque sessions, compute jobs, stable collection snapshots, protected outputs, and delivery leases; none are public backend handles. |
@@ -411,10 +411,10 @@ Typical IPC Host compute flow:
    admission, and lookup failures remain separate. Across the public Host
    boundary the sole status vocabulary distinguishes `none`, `transport`,
    `protocol`, `graph`, and `daemon`, and transport never becomes graph IO.
-5. Image mode validates a same-user mode-`0600` artifact under its delivery
-   lease, maps its tight rows read-only, and then attempts matching
-   job/lease release. The final shared image owner unmaps and closes exactly
-   once.
+5. Values mode validates a same-user mode-`0600` named-Value archive under its
+   delivery lease, maps it read-only, verifies and detaches the exact bytes,
+   unmaps/closes exactly once, reconstructs fresh local Values, and then
+   attempts matching job/lease release.
 6. Async adapter destruction signals stop, wakes waits, interrupts active
    descriptors, completes unfinished futures as Transport
    `client_stopped` (5), and joins workers without resubmitting or closing
@@ -512,10 +512,12 @@ composition entry point is
 `src/lib/providers/configured_operation_providers.cpp`; when enabled, the
 optional provider under `src/lib/providers/opencv/` registers the OpenCV image
 algorithms and owns their process policy and exception translation. Runtime
-plugin examples live in `plugins/ops/`; the Metal operation implementation is
-private to `plugins/ops/metal/`. Dynamic operation plugins register through the
-exact v2 registrar using `ps::plugin` snapshots; public callbacks receive no
-mutable `Node`, `GraphModel`, `OpRegistry`, YAML tree, or private cache owner.
+plugin examples live in `plugins/ops/`; the build-configured Metal operation
+provider implementation is private to `plugins/ops/metal/` and is not a DSO.
+Dynamic operation plugins use numeric ABI-v1
+discovery followed by exact root and suite records. Their pure-C callbacks
+receive bounded configuration/input/plan/grant records and no mutable `Node`,
+`GraphModel`, `OpRegistry`, YAML tree, or private cache owner.
 
 ### Cache Model
 
@@ -542,66 +544,81 @@ constructs or declares a YAML value. The configured
 for YAML syntax, filesystem metadata IO, and translating parser/emitter
 failures into the existing graph error taxonomy.
 
-### ImageBuffer Contract
+### Dense Image Value Contract
 
-`ImageBuffer` is a public kernel contract, not an internal implementation
-detail. Operators, executors, plugins, adapters, and cache code may depend on
-its documented fields and invariants.
+An ordinary dense image is one immutable `Value` with a
+`DenseTensorDescriptor`, complete `ImageFacet`, explicit `StridedLayout`, one
+or more checked `BufferHandle` bindings, and a `ReadyFence`. There is no second
+image value, compatibility snapshot, storage enum, or native-context carrier.
+Kernel-owned CPU output rows provide at least 64-byte alignment; larger
+alignment remains an optimization rather than a portable requirement.
 
-CPU buffers owned by the kernel must provide 64-byte aligned row starts. `step`
-is the row stride in bytes and may be larger than the packed row size to
-preserve alignment. ARM Mac high-performance paths may need or benefit from
-128-byte alignment, but 128-byte alignment is an optimization target rather than
-the portable minimum.
+V-2 installed immutable CPU DenseTensor `Value`, `DenseTensorView`, and
+explicit-axis `ImageView` contracts. V-3 added `BufferHandle`, retaining
+read/write leases, `ValueBuilder`, checked byte offsets and signed coordinates,
+and process-local allocation/revision identity. The shared operation runtime
+owns the sole process-wide minting authority. The built-in
+`image_process:invert_dense` operation reaches these contracts through normal
+core seeding, `OpRegistry` resolution, and `NodeExecutor` invocation. Its
+callback bridge separates descriptor-only inference from stride-aware
+execution, validates the complete returned descriptor/facet/layout, and
+preserves the exact result Value. Operation ABI v1 carries complete Values and
+Host-owned output grants.
 
-V-2 installs immutable CPU DenseTensor `Value`, `DenseTensorView`, and
-explicit-axis `ImageView` contracts. V-3 adds `BufferHandle`, read/write leases,
-`ValueBuilder`, byte offsets, bounded signed immutable views, and process-local
-allocation/revision identity. The shared operation runtime owns the only
-process-wide minting authority; a nonzero identity token records issuance and
-does not query whether its allocation is still alive. The built-in
-`image_process:invert_dense`
-operation reaches those types through normal core seeding, `OpRegistry`
-resolution, and `NodeExecutor` monolithic invocation. Its private callback
-bridge reuses a valid sealed input Value or snapshots the legacy ImageBuffer,
-separates descriptor-only inference from stride-aware execution, validates the
-complete returned descriptor/facet/layout, preserves the exact result Value,
-and derives a new validated ImageBuffer compatibility snapshot.
+DI-2 moved formal HP, dirty, tiled, real-time, extent, metrics, and cache paths
+to the same Value representation. `NodeOutput` carries canonical ordered named
+Values, with `image` as the conventional image port. `DenseImageOutputPlan`
+freezes complete image facts, exact storage, alignment, and Region before one
+Host allocation. Move-only whole/tile grants reserve checked non-overlapping
+spans and must all retire before one seal and one publication. Sticky
+validation, retirement, exception, or cancellation failure revokes every grant
+and publishes nothing.
 
-Private formal HP cache state carries that Value authority; copy preserves
-identity, while dirty mutation, replacement, and disk reload mint new runtime
-identities. Host and operation plugin ABI v2 remain on the current ImageBuffer
-compatibility boundary until their later migration slices.
+V-8 added checked `DeviceId`, `MemoryDomain`, `StorageBinding`, retained native
+allocations, producer identity, and explicit `AccessPlan`. A transfer creates a
+distinct physical replica while preserving the same logical
+`ValueRevisionId`; no Host pointer is invented for a device-local binding.
+`ResidencyManager` owns exact eligible replicas and publishes destination
+readiness and residency in one freshness-checked transaction. Pending Values
+re-enter the existing `ExecutionService` ready store through Run-scoped
+continuations, so CPU workers do not wait for device completion. Operation ABI
+v1 remains synchronous and CPU-only.
 
-V-8 adds checked `DeviceId`, `MemoryDomain`, `StorageBinding`, native-allocation
-retention, producer identity, and an explicit `AccessPlan`. A transfer creates
-a distinct physical replica while preserving the same logical
-`ValueRevisionId`; no host pointer is invented for a device-local binding.
-`ResidencyManager` is the single process owner of exact eligible replicas and
-publishes destination readiness and residency in one freshness-checked
-transaction. Kernel pretracks a lineage before fallible coordinator
-publication without assigning a managed current identity. Under
-coordinator-to-manager ordering, an accepted current-generation callback
-assigns the exact published generation, including a coordinate-authorized
-numeric decrease, immediately before currentness becomes observable. Later
-stale Run observations and transfer admissions cannot replace that exact
-managed identity; standalone lineages retain numeric-maximum ordering. Pending Values
-re-enter the existing `ExecutionService` ready
-store through Run-scoped continuations, so CPU workers do not wait for Metal
-completion. The Metal Perlin route produces a pending native Value and uses
-explicit asynchronous texture-to-buffer readback before downstream CPU access.
-Operation ABI v2 and Host surfaces still use ImageBuffer compatibility values;
-V-8 adds no public native-device context or new ABI slot.
+V-14 added provider-defined multi-buffer Value contracts. One injected
+`DataDefinitionRegistry` resolves complete typed Schema/Facet/Layout bundles
+to an immutable generation. Generic bounds checks precede provider validation
+and revision minting; indexed reads retain the selected `BufferHandle` plus
+that generation. Pure property, DataSpec, and Region callbacks see metadata
+but no payload. Canonical descriptor/content/layout identities and a
+byte-preserving artifact envelope support those Values without flattening
+them into ordinary dense images.
 
-V-14 adds provider-defined multi-buffer `Value` contracts without changing
-`ImageBuffer`. One injected `DataDefinitionRegistry` resolves complete typed
-Schema/Facet/Layout bundles to an immutable generation. Generic bounds checks
-precede provider validation and revision minting; indexed reads retain the
-selected `BufferHandle` plus that generation. Pure property, DataSpec, and
-Region callbacks see metadata but no payload. Canonical descriptor/content/
-layout SHA-256 identities and a byte-preserving artifact envelope are installed,
-but no provider-defined graph operation, cache policy, codec, OpenEXR path,
-operation ABI v2 slot, or Host command is added.
+DI-4 completed the remaining external migration. Embedded and IPC Hosts return
+canonical ordered named Values and expose metadata-only inspection without
+waiting for or mapping payload. IPC OutputStore, worker protocol v3, worker
+data-plane references, and durable manifests carry canonical named Value
+artifact sets; every decode validates framing, versions, identity joins,
+digests, payload bounds, and the local data definition before publication.
+Replay preserves portable artifact identity but creates fresh local allocation,
+revision, producer, fence, and binding identities.
+
+OpenCV adapts only ordinary Ready Host-readable dense Values. The ordinary
+OpenEXR codec preserves independent signed data and display windows and keeps
+UINT32/FLOAT32 storage while exactly promoting HALF to FP32. OpenEXR Deep stays
+a provider-defined variable-sample Value and is never padded into a dense
+tensor. Codec and CLI conversions require explicit source/destination
+`SampleEncoding`, `SampleDomain`, out-of-domain, clamp, rounding, non-finite,
+and precision-loss policies; storage width never implies hidden 255 or 65535
+scaling. Same-storage identity preserves exact 64-bit integer samples without
+floating promotion; non-identity wide-integer arithmetic fails when exact
+promotion cannot be proved. OpenCV encode validates a closed unsigned
+8/16-bit extension/depth/channel matrix before file mutation, while ordinary
+OpenEXR accepts explicit UINT32/FP32. The side-effecting `io:save` operation
+plugin is absent; `graph_cli save` delegates once to the configured codec.
+Durable recovery validates small control-file bounds, aggregate retention
+quota, exact archive length, and sparse storage before payload allocation. The
+complete specialization is defined by
+[Dense Image Value Memory Contract](Dense-Image-Value-Memory-Contract.md).
 
 ### Dirty Region Propagation
 
@@ -658,7 +675,7 @@ Important current behavior:
   its provider.
 - `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` omits those built-in image
   operation callbacks while retaining dependency-neutral core operations.
-  A v2 operation plugin may then supply the absent key. With the provider
+  A pure-C operation ABI v1 plugin may then supply the absent key. With the provider
   enabled, the same registration transaction can replace an active key and
   unload restores the built-in predecessor.
 - Built-in CPU work from multiple graphs/intents shares one fixed
@@ -714,7 +731,8 @@ Important current behavior:
   validated. V-8 provides explicit
   CPU/Metal transfer,
   revision-preserving replicas, process-owned residency, exact stale-completion
-  rejection, and pending-Value continuation without changing operation ABI v2.
+  rejection, and pending-Value continuation. DI-3 then moved operation plugins
+  to the complete pure-C ABI v1 without exposing native-device ownership.
   V-9 adds atomic per-device memory/scratch plans, native actual-byte
   reconciliation, and persistent/completion lifetime leases inside the sole
   service `ResourceLedger`. V-13 adds one packed FP4/quantized vertical. V-14
@@ -722,7 +740,8 @@ Important current behavior:
   provider-defined multi-buffer Value, pure queries, canonical digests, and
   generation-safe replacement/unload. V-15 adds the optional single-part
   deep-scanline OpenEXR provider/codec while keeping the v3 ABI and neutral
-  package surface unchanged. The remaining provider suites, graph migration,
+  package surface unchanged. DI-4 completes Host/cache/IPC/worker/durable/
+  codec/CLI Value migration. The remaining provider suites,
   deep-tiled/multipart support, and broader import policy stay future work.
 - [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
   separates current Run, readiness, cache, Graph-document, daemon-delivery,
@@ -730,7 +749,9 @@ Important current behavior:
   Issue #88 now provides the source-private, process-owned, task/estimated-byte
   bounded `ComputeIoExecutor` and routes staged HP cache save through it before
   unchanged Graph publication. CPU workers cannot synchronously wait for its
-  completion. Crash-durable output commit and post-publication cache outcomes
+  completion. The source-private single-tenant Job vertical now implements one
+  bounded crash-durable named-Value archive transaction with manifest-last
+  recovery; a general installed output API and post-publication cache outcomes
   remain future work.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
@@ -755,13 +776,17 @@ this current-state document.
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/core/cache_metadata_codec.hpp`
-- `src/lib/core/image_buffer_processing.*`
+- `src/lib/core/dense_image_processing.*`
+- `src/lib/core/sample_conversion.cpp`
+- `src/lib/core/value_artifact.cpp`
 - `src/lib/core/value.cpp`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`
-- `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
+- `src/lib/adapters/opencv/value_adapter_opencv.*`
+- `src/lib/adapters/opencv/image_artifact_codec_opencv.*`
+- `src/lib/adapters/openexr/openexr_dense_image_codec.*`
 - `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/providers/configured_persistence_adapters.*`
 - `src/lib/graph/graph_io_service.*`
@@ -789,4 +814,7 @@ this current-state document.
 - `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_device_residency.cpp`
 - `tests/integration/test_metal_device_executor.cpp`
-- `tests/unit/test_stdlib_image_buffer_processing.cpp`
+- `tests/unit/test_dense_image_processing.cpp`
+- `tests/unit/test_dense_image_value_contracts.cpp`
+- `tests/unit/test_sample_conversion.cpp`
+- `tests/unit/test_value_artifact.cpp`

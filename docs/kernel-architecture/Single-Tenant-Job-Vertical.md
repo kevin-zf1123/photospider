@@ -11,7 +11,7 @@ WorkerManager/artifact service, remote data plane, or untrusted-plugin sandbox.
 ## Current Profile and Identity
 
 The supported profile is canonical `jobspec-v2`, `embedded-cpu-v1` execution,
-and `crash-durable` image artifacts. A `SingleTenantJobService` owns one
+and `crash-durable` named-Value artifact archives. A `SingleTenantJobService` owns one
 configured `TenantId`, one trusted durable state root, one finite quota
 configuration, any number of retained Jobs, and one fresh worker process and
 Embedded Host for each explicitly accepted attempt. One source-private
@@ -28,9 +28,9 @@ The identity domains remain distinct strong C++ types:
 | `JobAttemptId` | One non-reused attempt in a Job's retry history | Job identity or local Run identity |
 | `WorkerInstanceId` + `WorkerLeaseGeneration` | Exact fresh process assignment and manager-fenced lease | Raw PID capability, Job identity, or authorization by itself |
 | `GraphArtifactId` | Graph material key resolved by trusted configuration | Host path or local `GraphSessionId` |
-| `ArtifactId` | Stable immutable durable image identity | Content digest, path, or IPC `OutputArtifactId` |
+| `ArtifactId` | Stable immutable durable named-Value artifact identity | Content digest, path, or IPC `OutputArtifactId` |
 | `OutputCommitId` | Stable idempotent transaction identity for one Job output | Attempt identity or delivery lease |
-| `ArtifactContentDigest` | SHA-256 of exact tight payload bytes | Artifact or commit identity |
+| `ArtifactContentDigest` | SHA-256 of exact canonical archive bytes | Artifact or commit identity |
 
 Initial Job, artifact, and commit ids contain a collision-resistant service
 namespace plus a checked local sequence. Retry preserves `JobId`, JobSpec
@@ -88,8 +88,8 @@ or changes nothing. A worker, plugin, JobSpec, or `ResourceLedger` token cannot
 mint, enlarge, or release this server reservation.
 
 Failed and cancelled attempts release the complete envelope exactly once.
-Successful artifact commit converts reserved retention to the exact tight
-payload charge and releases every active-attempt dimension. Durable artifact
+Successful artifact commit converts reserved retention to the exact canonical
+archive charge and releases every active-attempt dimension. Durable artifact
 deletion releases the quota authority's exact retained charge only after the
 artifact-directory, artifacts-directory, and root barriers confirm manifest
 visibility removal. A visibility-unconfirmed failure keeps the charge; a
@@ -97,6 +97,12 @@ confirmed visibility removal releases it even when private payload/directory
 cleanup later fails. Startup reconstructs retained charges from validated
 artifacts and fails closed if configured retention is below recovered data;
 active attempt reservations are never reconstructed.
+Before any recovery allocation, authoritative/private manifests and Job
+records pass small fixed byte limits. Each archive must then fit the frozen
+representation ceiling and remaining aggregate retention quota, and its
+physical file must match manifest `archive_bytes` exactly and be non-sparse.
+Oversize, sparse, short, long, or digest-inconsistent state is typed durable
+corruption; it cannot trigger speculative payload-proportional allocation.
 
 Active-attempt release validates the complete subtraction before its first
 mutation and has a strong exception guarantee. If release raises, the service
@@ -158,9 +164,11 @@ restart. Restart then revalidates the record and converts a surviving
 nonterminal attempt to `RecoveryInterrupted` unless its stable artifact proves
 success.
 
-Artifact commit validates the server-owned request and CPU image, copies active
-rows into a tight payload, verifies output/staging/retention bounds, and
-reconciles any pre-existing durable occurrence or safe residue. A fresh
+Artifact commit validates the server-owned request and canonical nonempty
+`NamedValueArtifactSet`, binds each envelope to the stable
+artifact/commit/slot identities, encodes and revalidates the complete archive,
+verifies output/staging/retention bounds, and reconciles any pre-existing
+durable occurrence or safe residue. A fresh
 publication then:
 
 1. prepares complete private `ArtifactId` and `OutputCommitId` index copies and
@@ -334,9 +342,9 @@ The fork child performs only descriptor setup, `RLIMIT_AS`, `RLIMIT_FSIZE`,
 descriptor closure, and `exec`; the freshly execed worker validates Assignment
 metadata and JobSpec digest, receives and validates any checkpoint through fd
 5, creates and seeds a fresh Embedded Host, opens and loads an attempt-local
-Graph, computes within reserved CPU parallelism, sends tight candidate rows
-through fd 6, closes the Graph, destroys Host ownership, and returns only typed
-attempt and staged-output metadata.
+Graph, computes within reserved CPU parallelism, sends the canonical named-
+Value candidate archive through fd 6, closes the Graph, destroys Host
+ownership, and returns only typed attempt and staged-output metadata.
 
 Pre-exec descriptor ownership is exact: fd 0-2 are standard streams, fd 3 is
 the private control socket, and close-on-exec fd 4 carries setup `errno` to the
@@ -406,25 +414,26 @@ overflowing sum. Consequently `milliseconds::max()` cannot enter conversion or
 deadline arithmetic, and validation cannot become stale against a later clock
 observation.
 
-The private bounded protocol now has fixed magic, sole supported version 2,
+The private bounded protocol now has fixed magic, sole supported version 3,
 closed message kinds, a 128-KiB control-payload maximum, deadline-aware partial
 I/O, and strict trailing-byte, enum, identity, digest, descriptor, and Job-
-resource validation. Version 1 is rejected without a compatibility decoder or
-bulk fallback. One source-private `kMaximumWorkerTextFieldBytes` constant
+resource validation. Versions 1 and 2 are rejected without a compatibility
+decoder or bulk fallback. One source-private `kMaximumWorkerTextFieldBytes` constant
 governs all five prepared graph strings plus Report diagnostics in catalog
 admission, Assignment/Report encoding, and decoding. The exact limit is
 inclusive; local prepared-value excess is `std::length_error`, while oversized
 wire content is `WorkerProtocolError`.
 
 Assignment carries complete attempt/JobSpec and bounded graph metadata,
-optional checkpoint receipt/descriptor/digest/size/reference, output-stage
-reference/maximum, and cadence. Report carries outcome facts and, only for a
-settled success, output reference/slot/descriptor/size/digest. Neither message
-can encode checkpoint bytes, candidate rows, an `ImageBuffer`, blob, `Value`,
-path, or raw file descriptor. The fully declared maximum metadata envelope fits
-the control bound. A candidate above the former 64-MiB aggregate frame limit is
-valid when it fits the accepted output/staging/retention and file-size
-envelopes. The file-size limit exactly matches that accepted maximum; a lower
+optional checkpoint receipt/artifact-set descriptor/digest/reference,
+output-stage reference/maximum, and cadence. Report carries outcome facts and,
+only for a settled success, output reference/slot/artifact-set descriptor/
+digest. Neither message can encode checkpoint or candidate archive bytes,
+runtime Values, paths, native handles, or raw file descriptors. The fully
+declared maximum metadata envelope fits the control bound. A candidate above
+the former 64-MiB aggregate frame limit is valid when it fits the accepted
+output/staging/retention and archive-size envelopes. The archive-size limit
+exactly matches that accepted maximum; a lower
 finite inherited hard limit is a pre-fork `WorkerStartup`, not a smaller
 runtime envelope. A resource-envelope excess becomes one identity-preserving
 settled `Failed(Compute)` metadata Report with a fixed bounded diagnostic and
@@ -435,18 +444,18 @@ exact stream EOF, clean zero exit, exact reap, and control-channel EOF. The
 worker sends reference/descriptor/exact-size/digest metadata before output
 bytes and retains its source while its real heartbeat thread stays active.
 While the exact child remains lifecycle-owned and unreaped, the manager creates
-one lazy pathless anonymous owner of exactly that final image size, drains at
+one lazy pathless anonymous owner of exactly that final archive size, drains at
 most one 64-KiB nonblocking slice directly into it per monitor iteration,
 enforces the accepted maximum, and incrementally computes SHA-256. Every later
 slice follows cancellation/shutdown/runtime/heartbeat arbitration. Output
 progress, including continuous or prebuffered bytes, cannot renew or revive the
 heartbeat deadline; only a valid current-identity Heartbeat frame can. There is
 no cumulative accumulator growth, whole-payload reconstruction copy, or
-post-reap bulk access. Reference, slot, tight descriptor, exact stream byte
+post-reap bulk access. Reference, slot, canonical artifact-set descriptor, exact stream byte
 count, resource bound, and digest must all join before completion handoff. The
 worker closes the output lane only after exact bytes and remains alive and
 terminable until the manager completes the join and O(1) moves the already-final
-image owner, then replies with one matching identity-only
+archive owner, then replies with one matching identity-only
 `CompletionReady`. The acknowledgement grants no Job, quota, artifact, commit,
 or publication authority. If a prior cancellation-channel failure makes the
 reply impossible, an already completely joined Report may retain its ordinary
@@ -535,9 +544,13 @@ service keeps `Cancelling`, fences the worker, and enters the same journal
 fail-stop. After accepted intent, WorkerManager first sends exact cooperative
 cancellation. A send failure continues bounded report/EOF/wait-status drainage
 and preserves an actual Failed report, nonzero exit, signal death, or channel
-close; it does not itself mint forced cancellation. A worker still alive at the
-cooperative deadline has its channel closed/revoked and receives owned
-`SIGTERM`/`SIGKILL` escalation under configured bounds before exact reaping.
+close; it does not itself mint forced cancellation. For a worker still alive at
+the cooperative deadline, WorkerManager first delivers owned `SIGTERM` while
+the control channel remains live, then immediately closes/revokes that channel
+before the terminate grace period. This ordering prevents an EOF-driven worker
+exit from replacing the wait-status causality of a successfully delivered
+owned signal. A survivor receives owned `SIGKILL` under configured bounds
+before exact reaping.
 The deadline decision performs another exact nonblocking exit observation. If
 that observation reaps a natural exit before channel revocation, reaping is not
 treated as channel EOF: WorkerManager retains the parent socket and stateful
@@ -596,15 +609,18 @@ product process configured to auto-reap `SIGCHLD` children.
   inventory in both enabled and disabled profiles.
 - `photospiderd` and local IPC protocol v2 are unchanged and do not serialize
   these Job, quota, checkpoint, or durable-artifact contracts; private worker
-  protocol v2 is a distinct source-private wire.
+  protocol v3 is a distinct source-private wire.
 - The configured `TenantId` is trusted configuration, not authentication.
 - Trusted repository CPU operations for this vertical run in the attempt
   process. Tenant plugin ABI/network security, syscall isolation, and isolated
   hostile-plugin runtime remain absent.
-- The current artifact format is one required tight CPU `ImageBuffer`. The
-  local direction-reduced stream adapter is an attempt-scoped bulk data plane for that
-  format, not a general runtime `Value` format, remote transport, object store,
-  or standalone artifact service.
+- The current artifact format is one canonical nonempty named-Value artifact
+  set. Each envelope preserves complete descriptor, Facet, Layout, owner joins,
+  payload-digest, and optional statistics-reference metadata; reconstruction
+  performs the same local Value validation before publication. The local
+  direction-reduced stream adapter is an attempt-scoped bulk data plane for
+  that archive, not a remote transport, object store, or standalone artifact
+  service.
 
 Long-lived entry points are:
 

@@ -61,8 +61,8 @@ struct RequestRouterRuntimeDependencies {
  * @param delivery Revalidated metadata and lease candidate.
  * @param expected_output_reference Private job reference that selected the
  *        OutputStore record.
- * @return True only when ids, path, enum values, and exact tight-row byte
- *         layout are internally consistent.
+ * @return True only when ids, path, archive version/count, and byte bound are
+ *         internally consistent.
  * @throws Nothing.
  * @note This pure internal validator performs no filesystem access and does
  *       not duplicate OutputStore ancestry or identity checks. It exists as a
@@ -720,7 +720,7 @@ class RequestRouter {
    *         construction cannot allocate.
    * @throws std::invalid_argument if the registry returns a noncanonical job
    *         snapshot or OutputStore returns metadata inconsistent with the
-   *         job's private reference or exact tight-row wire layout.
+   *         job's private reference or exact named-Value archive metadata.
    * @throws Whatever pre-commit registry admission propagates; accepted worker
    *         and output-publication failures are retained as nested terminal
    *         statuses instead.
@@ -728,7 +728,7 @@ class RequestRouter {
    *       registry admission. Status, result, and release resolve only the
    *       opaque compute id and never acquire `host_mutex_` or require a live
    *       session. Submit/status/result use one stable snapshot schema;
-   *       terminal image result revalidates OutputStore metadata and refreshes
+   *       terminal Values result revalidates OutputStore metadata and refreshes
    *       its stable lease before encoding the non-null `output`. Release
    *       atomically returns `{compute_id,released:true}`, optionally removes a
    *       matching lease, and can release that lease after concurrent normal
@@ -758,7 +758,8 @@ class RequestRouter {
    * @brief Routes process-global operation-plugin control and copied views.
    *
    * @param id Valid request id correlated with the response.
-   * @param method Exact version 2 operation-plugin method name.
+   * @param method Exact IPC protocol-v2 operation-plugin method name; this is
+   *        unrelated to the separately versioned operation DSO ABI.
    * @param routed_params Internal adapter borrowing structurally valid params.
    * @return Complete response for this family, or `std::nullopt` when another
    *         route family must handle the method.
@@ -1046,7 +1047,7 @@ class RequestRouter {
    */
   CollectionSnapshotRegistry collection_snapshots_;
 
-  /** @brief Socket-specific private image artifact and delivery lease store. */
+  /** @brief Socket-specific private Value artifact and delivery lease store. */
   OutputStore output_store_;
 
   /** @brief Bounded private compute lifecycle with one joined worker. */

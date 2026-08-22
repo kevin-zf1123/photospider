@@ -15,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/core/image_buffer.hpp"
+#include "photospider/data/value_artifact.hpp"
 
 namespace ps::server {
 
@@ -384,7 +384,7 @@ enum class JobAttemptFailure : std::uint8_t {
   HostSetup,
   /** @brief Attempt-local graph load failed. */
   GraphLoad,
-  /** @brief Compute or candidate-image validation failed. */
+  /** @brief Compute or candidate-Value validation failed. */
   Compute,
   /** @brief Host/graph ownership could not be settled. */
   Settlement,
@@ -543,7 +543,7 @@ class JobSpec final {
    * @brief Validates and freezes one supported single-output JobSpec.
    * @param graph_artifact_id Immutable graph material identity.
    * @param target_node Nonnegative graph node selector.
-   * @param output_slot_id Declared required image output slot.
+   * @param output_slot_id Declared required named-Value output slot.
    * @param resource_request Complete validated server quota demand.
    * @param checkpoint_artifact_id Optional durable checkpoint identity.
    * @param execution_profile Closed current execution profile.
@@ -640,7 +640,7 @@ class JobSpec final {
   GraphArtifactId graph_artifact_id_;
   /** @brief Nonnegative graph node selector. */
   int target_node_ = -1;
-  /** @brief One required image output slot. */
+  /** @brief One required named-Value artifact-set output slot. */
   OutputSlotId output_slot_id_;
   /** @brief Complete immutable server quota demand. */
   JobResourceRequest resource_request_;
@@ -657,24 +657,18 @@ class JobSpec final {
 };
 
 /**
- * @brief Immutable image descriptor bound into an artifact receipt.
+ * @brief Immutable named-Value archive descriptor bound into a receipt.
  * @throws Nothing for value operations.
- * @note `row_bytes` is always tight and `payload_bytes` excludes source row
- * padding.
+ * @note The descriptor summarizes the canonical portable archive without
+ * duplicating any Value descriptor, Facet, Layout, or buffer metadata.
  */
-struct ArtifactImageDescriptor final {
-  /** @brief Positive image width in pixels. */
-  int width = 0;
-  /** @brief Positive image height in pixels. */
-  int height = 0;
-  /** @brief Positive channel count. */
-  int channels = 0;
-  /** @brief Exact channel storage type. */
-  DataType type = DataType::FLOAT32;
-  /** @brief Active bytes in one tightly stored row. */
-  std::size_t row_bytes = 0U;
-  /** @brief Exact immutable tight payload length. */
-  std::size_t payload_bytes = 0U;
+struct ValueArtifactSetDescriptor final {
+  /** @brief Exact named-artifact-set archive structural version. */
+  std::uint32_t archive_version = 1U;
+  /** @brief Positive canonical named-Value count. */
+  std::uint32_t value_count = 0U;
+  /** @brief Exact immutable canonical archive byte length. */
+  std::size_t archive_bytes = 0U;
 
   /**
    * @brief Compares every descriptor field.
@@ -682,7 +676,7 @@ struct ArtifactImageDescriptor final {
    * @return True only for an exact descriptor match.
    * @throws Nothing.
    */
-  bool operator==(const ArtifactImageDescriptor& other) const noexcept;
+  bool operator==(const ValueArtifactSetDescriptor& other) const noexcept;
 };
 
 /**
@@ -700,9 +694,9 @@ struct OutputCommitReceipt final {
   ArtifactId artifact_id;
   /** @brief Fresh exact commit-event identity. */
   OutputCommitId output_commit_id;
-  /** @brief Immutable tight image descriptor. */
-  ArtifactImageDescriptor descriptor;
-  /** @brief SHA-256 of exact tight payload bytes. */
+  /** @brief Immutable canonical named-Value archive descriptor. */
+  ValueArtifactSetDescriptor descriptor;
+  /** @brief SHA-256 of exact canonical archive bytes. */
   ArtifactContentDigest content_digest;
   /** @brief Exact achieved crash-durable capability. */
   ArtifactDurability achieved_durability = ArtifactDurability::CrashDurable;
@@ -717,8 +711,8 @@ struct OutputCommitReceipt final {
 struct ArtifactRecord final {
   /** @brief Identity-complete commit receipt. */
   OutputCommitReceipt receipt;
-  /** @brief Exact tight immutable image payload. */
-  std::vector<std::byte> payload;
+  /** @brief Exact decoded and locally validated named-Value artifacts. */
+  NamedValueArtifactSet values;
 };
 
 /**
@@ -741,19 +735,6 @@ JobSpecDigest hash_job_spec_bytes(const std::byte* bytes, std::size_t size);
  */
 ArtifactContentDigest hash_artifact_content(const std::byte* bytes,
                                             std::size_t size);
-
-/**
- * @brief Computes SHA-256 over the exact tight active rows of one CPU image.
- * @param image Valid nonempty CPU image; source row padding is excluded.
- * @return Exact digest matching a row-by-row tight artifact payload.
- * @throws std::invalid_argument for invalid, empty, or non-CPU image state.
- * @throws std::overflow_error when row or SHA-256 length arithmetic overflows.
- * @throws std::logic_error only if the internal single-use hash lifecycle is
- * violated.
- * @note The borrowed image and its storage remain caller-owned and unchanged.
- * Hashing performs no full-payload copy and is not a durability operation.
- */
-ArtifactContentDigest hash_image_artifact_content(const ImageBuffer& image);
 
 /**
  * @brief Validates a complete assignment identity tuple.

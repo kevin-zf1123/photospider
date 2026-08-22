@@ -33,6 +33,8 @@
 #include "graph/graph_io_service.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
+#include "photospider/host/value_result.hpp"
+#include "photospider/plugin/data_definition_registry.hpp"
 #include "plugin/plugin_manager.hpp"
 #include "runtime/graph_runtime.hpp"
 
@@ -98,8 +100,10 @@ class Kernel {
    * @param execution_service Explicit process CPU execution owner.
    * @throws std::invalid_argument when any required owner is empty.
    * @note The embedded product composition root selects concrete
-   *       implementations. Kernel retains them through its cache and graph IO
-   *       services for the complete lifetime of every admitted operation.
+   *       implementations. Kernel creates one process-domain
+   *       `DataDefinitionRegistry`, injects that exact authority into graph
+   *       cache replay, and retains all collaborators for the complete
+   *       lifetime of every admitted operation.
    */
   Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec,
          std::shared_ptr<const CacheMetadataCodec> metadata_codec,
@@ -551,6 +555,8 @@ class Kernel {
    * @param name Graph session whose cache root should be cleared.
    * @return True on success; false when the graph is missing or an ordinary
    *         cache/executor failure is handled by the quiet facade.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   *         with a nonempty cache root, before revision or cache mutation.
    * @throws std::bad_alloc from revision preparation, submission, or cache
    *         clearing.
    * @note Revision overflow fails before filesystem mutation. After successful
@@ -576,11 +582,27 @@ class Kernel {
    * @param name Graph session whose cache authority should be cleared.
    * @return True on success; false for a missing graph or handled ordinary
    *         cache/executor failure.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   *         with a nonempty cache root, before revision or memory mutation.
    * @throws std::bad_alloc from preparation, submission, or either clear phase.
-   * @note The successor revision is published before the disk phase. It stays
-   *       advanced if disk or memory clearing later fails after partial work.
+   * @note On a disk-capable platform the successor revision is published before
+   *       the disk phase and stays advanced if a later phase fails. Windows
+   *       with an empty root follows normal memory-clear behavior; a nonempty
+   *       root fails before revision publication or either clear phase.
    */
   bool clear_cache(const std::string& name);
+  /**
+   * @brief Saves every eligible formal HP node through GraphCache policy.
+   * @param name Graph session whose HP nodes should be inspected.
+   * @param cache_precision Explicit auxiliary image projection precision.
+   * @return True on success; false for a missing graph or handled ordinary
+   * cache/executor failure.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   * with a nonempty cache root, before codec, executor, or cache mutation.
+   * @throws std::bad_alloc from graph-state submission or cache preparation.
+   * @note An empty cache root retains the historical HP-node count behavior
+   * and performs no disk work.
+   */
   bool cache_all_nodes(const std::string& name,
                        const std::string& cache_precision);
 
@@ -594,6 +616,18 @@ class Kernel {
    *       rolled back after any partially successful node-cache release.
    */
   bool free_transient_memory(const std::string& name);
+  /**
+   * @brief Synchronizes configured disk artifacts with formal HP authority.
+   * @param name Graph session whose cache should be synchronized.
+   * @param cache_precision Explicit auxiliary image projection precision.
+   * @return True on success; false for a missing graph or handled ordinary
+   * cache/executor failure.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   * with a nonempty cache root, before save, cleanup, or diagnostic mutation.
+   * @throws std::bad_alloc from graph-state submission or cache preparation.
+   * @note An empty cache root retains the historical HP-node count behavior
+   * and performs no disk work.
+   */
   bool synchronize_disk_cache(const std::string& name,
                               const std::string& cache_precision);
   bool clear_graph(const std::string& name);
@@ -603,6 +637,8 @@ class Kernel {
    * @param name Graph session whose disk cache should be cleared.
    * @return Removal statistics, or nullopt for a missing graph or handled
    *         ordinary failure.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   *         with a nonempty cache root, before revision or cache mutation.
    * @throws std::bad_alloc from preparation, submission, or cache clearing.
    * @note Uses the same prepare-publish-clear ordering and no-rollback rule as
    *       clear_drive_cache().
@@ -621,6 +657,18 @@ class Kernel {
    */
   std::optional<GraphModel::MemoryClearResult> clear_memory_cache_stats(
       const std::string& name);
+  /**
+   * @brief Saves eligible HP nodes and returns the service-owned count.
+   * @param name Graph session whose nodes should be inspected.
+   * @param cache_precision Explicit auxiliary image projection precision.
+   * @return Save-attempt statistics, or nullopt for a missing graph or handled
+   * ordinary failure.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   * with a nonempty cache root, before any disk side effect.
+   * @throws std::bad_alloc from graph-state submission or cache preparation.
+   * @note Empty-root calls return the historical HP-node count without disk
+   * persistence.
+   */
   std::optional<GraphModel::CacheSaveResult> cache_all_nodes_stats(
       const std::string& name, const std::string& cache_precision);
   /**
@@ -634,6 +682,18 @@ class Kernel {
    */
   std::optional<GraphModel::MemoryClearResult> free_transient_memory_stats(
       const std::string& name);
+  /**
+   * @brief Synchronizes GraphCache disk state and returns exact service counts.
+   * @param name Graph session whose cache should be synchronized.
+   * @param cache_precision Explicit auxiliary image projection precision.
+   * @return Synchronization statistics, or nullopt for a missing graph or
+   * handled ordinary failure.
+   * @throws GraphError with `InvalidParameter` on Windows for a resolved Graph
+   * with a nonempty cache root, before save, cleanup, or diagnostics.
+   * @throws std::bad_alloc from graph-state submission or cache preparation.
+   * @note Empty-root calls return the historical HP-node count without disk
+   * persistence.
+   */
   std::optional<GraphModel::DiskSyncResult> synchronize_disk_cache_stats(
       const std::string& name, const std::string& cache_precision);
 
@@ -830,19 +890,19 @@ class Kernel {
   std::optional<compute::DirtyControlLaneResult> end_dirty_source_control(
       const std::string& name, int node_id, compute::DirtyDomain domain);
   /**
-   * @brief Computes a node and returns its output image from a request object.
+   * @brief Computes a node and returns its exact named immutable Values.
    *
    * @param request Graph name, target node, cache, execution, telemetry, and
    * optional intent/dirty ROI controls.
-   * @return Cloned output descriptor, or nullopt when graph lookup, compute, or
-   * image cloning fails.
-   * @throws std::bad_alloc if compute/image execution or handled-failure
+   * @return Canonically ordered named Values, or nullopt when graph lookup or
+   *         compute fails. A successful output without Values is engaged and
+   *         empty.
+   * @throws std::bad_alloc if compute/Value execution or handled-failure
    *         LastError construction exhausts memory.
-   * @note The image is cloned out of graph-owned storage before returning.
-   *       Other compute and image-cloning exceptions preserve the historical
-   *       nullopt preview/save contract.
+   * @note Returned Value handles retain immutable publications; no mutable
+   *       graph, cache, or runtime owner is exposed.
    */
-  std::optional<ImageBuffer> compute_and_get_image(
+  std::optional<NamedValueResult> compute_and_get_values(
       const ComputeRequest& request);
 
   std::optional<std::vector<int>> list_node_ids(const std::string& name);
@@ -1280,6 +1340,58 @@ class Kernel {
   }
 
   /**
+   * @brief Executes one quiet disk-cache facade while preserving platform
+   * failure typing.
+   *
+   * @tparam Fn Callable accepted as `op(GraphModel&)`.
+   * @param name Graph name to resolve without creating a session.
+   * @param op Disk-cache operation submitted to the graph-state executor.
+   * @return Optional result, or nullopt for absence and ordinary handled
+   * failure on a disk-capable platform.
+   * @throws GraphError with `InvalidParameter` when the platform preflight
+   * rejects a resolved nonempty-root disk request, so Host status translation
+   * does not fabricate NotFound.
+   * @throws std::bad_alloc unchanged from lookup, submission, or operation.
+   * @throws std::system_error if graph-registry synchronization fails.
+   * @note The GraphCache platform check runs inside the same graph-state work
+   * item and precedes revision, executor, diagnostic, or cache mutation. Empty
+   * roots keep their service-defined no-disk behavior and do not throw.
+   */
+  template <typename Fn>
+  auto with_graph_state_disk_cache(const std::string& name, Fn&& op)
+      -> std::optional<std::decay_t<std::invoke_result_t<Fn, GraphModel&>>> {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
+      return std::nullopt;
+    }
+    bool platform_rejected = false;
+    auto guarded_op = [&op, &platform_rejected](GraphModel& graph)
+        -> std::decay_t<std::invoke_result_t<Fn, GraphModel&>> {
+      if (!graph.cache_root.empty()) {
+        try {
+          GraphCacheService::require_disk_persistence_supported();
+        } catch (const GraphError&) {
+          platform_rejected = true;
+          throw;
+        }
+      }
+      return std::forward<Fn>(op)(graph);
+    };
+    try {
+      return runtime->graph_state().submit(std::move(guarded_op)).get();
+    } catch (const std::bad_alloc&) {
+      throw;
+    } catch (const GraphError&) {
+      if (platform_rejected) {
+        throw;
+      }
+      return std::nullopt;
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
+
+  /**
    * @brief Executes one serialized graph-state operation and records LastError
    * details on handled failures.
    *
@@ -1420,18 +1532,18 @@ class Kernel {
       ComputeRequest request);
 
   /**
-   * @brief Runs compute and returns an owned target image descriptor.
+   * @brief Runs compute and returns an owned exact named-Value result.
    *
    * @param request Internal compute request with image-returning arguments.
-   * @return Cloned CPU ImageBuffer target image, or nullopt on missing graph,
-   * compute failure, or empty output.
-   * @throws std::bad_alloc if compute/image execution or handled-failure
+   * @return Canonically ordered named Values, or nullopt on missing graph or
+   *         compute failure. Empty successful output remains engaged.
+   * @throws std::bad_alloc if compute/Value execution or handled-failure
    *         LastError construction exhausts memory.
    * @note Missing graphs return nullopt before LastError state is touched.
-   * Successful compute paths clear stale LastError state, including the
-   * no-image-output case. Other compute/image exceptions become nullopt.
+   * Successful compute paths clear stale LastError state. Other compute/Value
+   * exceptions become nullopt.
    */
-  std::optional<ImageBuffer> compute_and_get_image_request(
+  std::optional<NamedValueResult> compute_and_get_values_request(
       const ComputeRequest& request);
 
   /**
@@ -1544,6 +1656,13 @@ class Kernel {
 
   GraphTraversalService traversal_service_;
   GraphInspectService inspect_service_;
+  /**
+   * @brief Process-domain provider-definition authority used by cache replay.
+   * @note Declaration order makes this registry outlive `cache_service_`.
+   * Kernel destruction drains every GraphRuntime before either member is
+   * destroyed, while provider-generation leases remain independently safe.
+   */
+  DataDefinitionRegistry data_definitions_;
   /**
    * @brief Cache service retaining the Kernel-injected artifact codecs.
    * @note `Kernel::~Kernel()` drains and destroys every `GraphRuntime` before

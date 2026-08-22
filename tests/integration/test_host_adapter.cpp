@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -19,7 +21,8 @@
 #include <utility>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/value_adapter_opencv.hpp"
+#include "core/dense_image_processing.hpp"
 #include "core/param_utils.hpp"
 #include "core/ps_types.hpp"               // NOLINT(build/include_subdir)
 #include "graph/graph_state_executor.hpp"  // NOLINT(build/include_subdir)
@@ -27,6 +30,7 @@
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
 #include "graph/graph_state_executor_test_access.hpp"
 #endif
+#include "photospider/data/image_view.hpp"
 #include "photospider/host/host.hpp"
 #include "runtime/graph_runtime.hpp"  // NOLINT(build/include_subdir)
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING) &&      \
@@ -727,6 +731,60 @@ bool wait_for_host_blocking_source(std::chrono::milliseconds timeout) {
 }
 
 /**
+ * @brief Publishes one deterministic Host-adapter FLOAT32 test image.
+ *
+ * @param width Positive output width.
+ * @param height Positive output height.
+ * @param value Scalar written to every logical sample.
+ * @return NodeOutput containing one canonical sealed image Value.
+ * @throws Allocation, overflow, validation, or Value publication exceptions
+ * unchanged.
+ * @note Samples retain their native FP32 domain. The result owns a fresh Value
+ * revision with no mutable side channel.
+ */
+NodeOutput make_host_adapter_image_output(int width, int height, float value) {
+  const std::size_t image_width = static_cast<std::size_t>(width);
+  const std::size_t image_height = static_cast<std::size_t>(height);
+  std::vector<float> samples(image_width * image_height, value);
+  std::vector<std::byte> storage(samples.size() * sizeof(float));
+  std::memcpy(storage.data(), samples.data(), storage.size());
+  DenseTensorDescriptor descriptor{{image_height, image_width, 1U},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  NodeOutput output;
+  output.publish_image_value(Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{{static_cast<std::ptrdiff_t>(image_width * sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float))}},
+      std::move(storage)));
+  return output;
+}
+
+/**
+ * @brief Copies one canonical input image into a fresh Host-adapter output.
+ *
+ * @param input Source output containing a Ready host-readable image Value.
+ * @return NodeOutput with identical logical pixels and a fresh allocation and
+ * Value revision.
+ * @throws std::invalid_argument when the input has no canonical image.
+ * @throws Clone, allocation, or Value publication exceptions unchanged.
+ * @note The clone preserves logical metadata and samples while publishing a
+ * fresh allocation and revision.
+ */
+NodeOutput copy_host_adapter_image_output(const NodeOutput& input) {
+  if (!input.has_image_value()) {
+    throw std::invalid_argument(
+        "Host adapter image copy requires a canonical image Value.");
+  }
+  NodeOutput output;
+  output.publish_image_value(
+      dense_image_processing::clone(input.image_value()));
+  return output;
+}
+
+/**
  * @brief Registers deterministic operations used by embedded Host tests.
  *
  * @return Nothing.
@@ -749,11 +807,8 @@ void register_host_adapter_ops() {
                                                    : node.runtime_parameters;
           const int width = as_int_flexible(params, "width", 6);
           const int height = as_int_flexible(params, "height", 4);
-          NodeOutput output;
-          output.image_buffer = make_aligned_cpu_image_buffer(
-              width, height, 1, DataType::FLOAT32);
-          cv::Mat mat = toCvMat(output.image_buffer);
-          mat.setTo(7.0f);
+          NodeOutput output =
+              make_host_adapter_image_output(width, height, 7.0F);
           output.space.absolute_roi = PixelRect{0, 0, width, height};
           output.debug.compute_device = "host-adapter-test";
           return output;
@@ -769,11 +824,8 @@ void register_host_adapter_ops() {
               as_int_flexible(params, "sleep_ms", 50)));
           const int width = as_int_flexible(params, "width", 5);
           const int height = as_int_flexible(params, "height", 3);
-          NodeOutput output;
-          output.image_buffer = make_aligned_cpu_image_buffer(
-              width, height, 1, DataType::FLOAT32);
-          cv::Mat mat = toCvMat(output.image_buffer);
-          mat.setTo(3.0f);
+          NodeOutput output =
+              make_host_adapter_image_output(width, height, 3.0F);
           output.space.absolute_roi = PixelRect{0, 0, width, height};
           output.debug.compute_device = "host-adapter-slow-test";
           return output;
@@ -796,10 +848,8 @@ void register_host_adapter_ops() {
                                                    : node.runtime_parameters;
           const int width = as_int_flexible(params, "width", 5);
           const int height = as_int_flexible(params, "height", 3);
-          NodeOutput output;
-          output.image_buffer = make_aligned_cpu_image_buffer(
-              width, height, 1, DataType::FLOAT32);
-          toCvMat(output.image_buffer).setTo(4.0f);
+          NodeOutput output =
+              make_host_adapter_image_output(width, height, 4.0F);
           output.space.absolute_roi = PixelRect{0, 0, width, height};
           output.debug.compute_device = "host-adapter-blocking-test";
           return output;
@@ -815,11 +865,8 @@ void register_host_adapter_ops() {
           const int height = as_int_flexible(params, "height", 4);
           const int roi_width = as_int_flexible(params, "roi_width", 12);
           const int roi_height = as_int_flexible(params, "roi_height", 9);
-          NodeOutput output;
-          output.image_buffer = make_aligned_cpu_image_buffer(
-              width, height, 1, DataType::FLOAT32);
-          cv::Mat mat = toCvMat(output.image_buffer);
-          mat.setTo(5.0f);
+          NodeOutput output =
+              make_host_adapter_image_output(width, height, 5.0F);
           output.space.absolute_roi = PixelRect{0, 0, roi_width, roi_height};
           output.space.inverse_matrix = {2.0, 0.0, 5.0, 0.0, 3.0,
                                          7.0, 0.0, 0.0, 1.0};
@@ -828,16 +875,32 @@ void register_host_adapter_ops() {
           output.debug.compute_device = "host-adapter-resized-test";
           return output;
         }));
+    OpMetadata no_image_metadata;
+    no_image_metadata.produces_image = false;
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "no_image",
         MonolithicOpFunc(
             [](const Node&, const std::vector<const NodeOutput*>&) {
               return NodeOutput{};
-            }));
+            }),
+        std::move(no_image_metadata));
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "resource_exhausted",
         MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&)
                              -> NodeOutput { throw std::bad_alloc{}; }));
+    const DirtyRoiPropFunc identity_dirty(
+        [](const Node&, const PixelRect& roi, const GraphModel&,
+           const PixelSize&, const std::vector<PixelSize>&,
+           const plugin::ParameterMap&,
+           const std::vector<const NodeOutput*>*) { return roi; });
+    const ForwardRoiPropFunc identity_forward(
+        [](const Node&, const PixelRect& roi, const GraphModel&,
+           const PixelSize&, const PixelSize&, size_t,
+           const std::vector<PixelSize>&,
+           const plugin::ParameterMap&) { return roi; });
+    const OpPlanningCallbacks identity_planning{identity_dirty,
+                                                identity_forward,
+                                                {}};
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "identity",
         MonolithicOpFunc(
@@ -847,30 +910,24 @@ void register_host_adapter_ops() {
                                  "host adapter identity requires one input");
               }
               const NodeOutput& input = *inputs.front();
-              NodeOutput output;
-              output.image_buffer = make_aligned_cpu_image_buffer(
-                  input.image_buffer.width, input.image_buffer.height,
-                  input.image_buffer.channels, input.image_buffer.type);
-              toCvMat(input.image_buffer).copyTo(toCvMat(output.image_buffer));
+              NodeOutput output = copy_host_adapter_image_output(input);
               output.space.absolute_roi = input.space.absolute_roi;
               output.debug.compute_device = "host-adapter-identity-test";
               (void)node;
               return output;
-            }));
+            }),
+        {}, identity_planning);
     OpRegistry::instance().register_dirty_propagator(
-        "host_adapter_test", "identity",
-        DirtyRoiPropFunc(
-            [](const Node&, const PixelRect& roi, const GraphModel&,
-               const PixelSize&, const std::vector<PixelSize>&,
-               const plugin::ParameterMap&,
-               const std::vector<const NodeOutput*>*) { return roi; }));
+        "host_adapter_test", "identity", identity_dirty);
     OpRegistry::instance().register_forward_propagator(
-        "host_adapter_test", "identity",
-        ForwardRoiPropFunc([](const Node&, const PixelRect& roi,
-                              const GraphModel&, const PixelSize&,
-                              const PixelSize&, size_t,
-                              const std::vector<PixelSize>&,
-                              const plugin::ParameterMap&) { return roi; }));
+        "host_adapter_test", "identity", identity_forward);
+    const DirtyRoiPropFunc offset_dirty(
+        [](const Node&, const PixelRect& roi, const GraphModel&,
+           const PixelSize&, const std::vector<PixelSize>&,
+           const plugin::ParameterMap&, const std::vector<const NodeOutput*>*) {
+          return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
+        });
+    const OpPlanningCallbacks offset_planning{offset_dirty, {}, {}};
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "offset_identity",
         MonolithicOpFunc([](const Node& node,
@@ -880,25 +937,15 @@ void register_host_adapter_ops() {
                              "host adapter offset_identity requires one input");
           }
           const NodeOutput& input = *inputs.front();
-          NodeOutput output;
-          output.image_buffer = make_aligned_cpu_image_buffer(
-              input.image_buffer.width, input.image_buffer.height,
-              input.image_buffer.channels, input.image_buffer.type);
-          toCvMat(input.image_buffer).copyTo(toCvMat(output.image_buffer));
+          NodeOutput output = copy_host_adapter_image_output(input);
           output.space.absolute_roi = input.space.absolute_roi;
           output.debug.compute_device = "host-adapter-offset-identity-test";
           (void)node;
           return output;
-        }));
+        }),
+        {}, offset_planning);
     OpRegistry::instance().register_dirty_propagator(
-        "host_adapter_test", "offset_identity",
-        DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
-                            const GraphModel&, const PixelSize&,
-                            const std::vector<PixelSize>&,
-                            const plugin::ParameterMap&,
-                            const std::vector<const NodeOutput*>*) {
-          return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
-        }));
+        "host_adapter_test", "offset_identity", offset_dirty);
     OpMetadata offset_tiled_metadata;
     offset_tiled_metadata.tile_preference = TileSizePreference::MICRO;
     OpRegistry::instance().register_op_hp_tiled(
@@ -916,16 +963,9 @@ void register_host_adapter_ops() {
               g_offset_tiled_output_value.load(std::memory_order_relaxed));
           toCvMat(output_tile).setTo(output_value);
         }),
-        offset_tiled_metadata);
+        offset_tiled_metadata, offset_planning);
     OpRegistry::instance().register_dirty_propagator(
-        "host_adapter_test", "offset_tiled_identity",
-        DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
-                            const GraphModel&, const PixelSize&,
-                            const std::vector<PixelSize>&,
-                            const plugin::ParameterMap&,
-                            const std::vector<const NodeOutput*>*) {
-          return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
-        }));
+        "host_adapter_test", "offset_tiled_identity", offset_dirty);
   });
 }
 
@@ -2627,7 +2667,7 @@ TEST(GraphStateExecutorLane, KernelCloseJoinsGraphStateLane) {
 #endif
 
 TEST(EmbeddedHostAdapter,
-     CoversInteractionCoreWithPublicSnapshotsAndNoKernelExposure) {
+     CoversInteractionCoreWithNamedValuesAndNoKernelExposure) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_test");
   auto host = create_embedded_host();
@@ -2694,13 +2734,16 @@ TEST(EmbeddedHostAdapter,
   auto compute_status = host->compute(compute_request);
   ASSERT_TRUE(compute_status.status.ok) << compute_status.status.message;
 
-  auto image = host->compute_and_get_image(compute_request);
-  ASSERT_TRUE(image.status.ok) << image.status.message;
-  EXPECT_EQ(image.value.width, 6);
-  EXPECT_EQ(image.value.height, 4);
-  EXPECT_EQ(image.value.channels, 1);
-  EXPECT_EQ(image.value.device, Device::CPU);
-  ASSERT_NE(image.value.data, nullptr);
+  auto values = host->compute_and_get_values(compute_request);
+  ASSERT_TRUE(values.status.ok) << values.status.message;
+  const Value* image_value = values.value.find("image");
+  ASSERT_NE(image_value, nullptr);
+  const ImageView image(*image_value);
+  EXPECT_EQ(image.width(), 6U);
+  EXPECT_EQ(image.height(), 4U);
+  EXPECT_EQ(image.channels(), 1U);
+  EXPECT_EQ(image.value().storage_binding().device,
+            DeviceId(DeviceBackend::CPU));
 
   auto async_compute = host->compute_async(compute_request);
   ASSERT_TRUE(async_compute.status.ok) << async_compute.status.message;
@@ -3704,9 +3747,9 @@ TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {
   auto missing = host->compute(missing_request);
   EXPECT_FALSE(missing.status.ok);
   EXPECT_EQ(checked_graph_error_code(missing.status), GraphErrc::NotFound);
-  auto missing_image = host->compute_and_get_image(missing_request);
-  EXPECT_FALSE(missing_image.status.ok);
-  EXPECT_EQ(checked_graph_error_code(missing_image.status),
+  auto missing_values = host->compute_and_get_values(missing_request);
+  EXPECT_FALSE(missing_values.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_values.status),
             GraphErrc::NotFound);
 
   const GraphSessionId session =
@@ -3721,12 +3764,13 @@ TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {
   auto closed = host->compute(closed_request);
   EXPECT_FALSE(closed.status.ok);
   EXPECT_EQ(checked_graph_error_code(closed.status), GraphErrc::NotFound);
-  auto closed_image = host->compute_and_get_image(closed_request);
-  EXPECT_FALSE(closed_image.status.ok);
-  EXPECT_EQ(checked_graph_error_code(closed_image.status), GraphErrc::NotFound);
+  auto closed_values = host->compute_and_get_values(closed_request);
+  EXPECT_FALSE(closed_values.status.ok);
+  EXPECT_EQ(checked_graph_error_code(closed_values.status),
+            GraphErrc::NotFound);
 }
 
-TEST(EmbeddedHostAdapter, CloseGraphClearsStaleLastErrorBeforeImageCompute) {
+TEST(EmbeddedHostAdapter, CloseGraphClearsStaleLastErrorBeforeValueCompute) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_close_clears_error_test");
   auto host = create_embedded_host();
@@ -3737,9 +3781,9 @@ TEST(EmbeddedHostAdapter, CloseGraphClearsStaleLastErrorBeforeImageCompute) {
   HostComputeRequest missing_node_request = make_compute_request(session);
   missing_node_request.node = NodeId{99};
 
-  auto missing_node_image = host->compute_and_get_image(missing_node_request);
-  ASSERT_FALSE(missing_node_image.status.ok);
-  ASSERT_EQ(checked_graph_error_code(missing_node_image.status),
+  auto missing_node_values = host->compute_and_get_values(missing_node_request);
+  ASSERT_FALSE(missing_node_values.status.ok);
+  ASSERT_EQ(checked_graph_error_code(missing_node_values.status),
             GraphErrc::NotFound);
 
   auto stale_error = host->last_error(session);
@@ -3752,13 +3796,14 @@ TEST(EmbeddedHostAdapter, CloseGraphClearsStaleLastErrorBeforeImageCompute) {
   auto closed_error = host->last_error(session);
   EXPECT_TRUE(closed_error.ok) << closed_error.message;
 
-  auto closed_image =
-      host->compute_and_get_image(make_compute_request(session));
-  EXPECT_FALSE(closed_image.status.ok);
-  EXPECT_EQ(checked_graph_error_code(closed_image.status), GraphErrc::NotFound);
+  auto closed_values =
+      host->compute_and_get_values(make_compute_request(session));
+  EXPECT_FALSE(closed_values.status.ok);
+  EXPECT_EQ(checked_graph_error_code(closed_values.status),
+            GraphErrc::NotFound);
 }
 
-TEST(EmbeddedHostAdapter, ComputeImagePreservesBackendFailureStatus) {
+TEST(EmbeddedHostAdapter, ComputeValuesPreserveBackendFailureStatus) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_image_status_test");
   auto host = create_embedded_host();
@@ -3769,20 +3814,20 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesBackendFailureStatus) {
   HostComputeRequest missing_node_request = make_compute_request(session);
   missing_node_request.node = NodeId{99};
 
-  auto missing_node_image = host->compute_and_get_image(missing_node_request);
-  EXPECT_FALSE(missing_node_image.status.ok);
-  EXPECT_EQ(checked_graph_error_code(missing_node_image.status),
+  auto missing_node_values = host->compute_and_get_values(missing_node_request);
+  EXPECT_FALSE(missing_node_values.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_node_values.status),
             GraphErrc::NotFound);
-  EXPECT_FALSE(missing_node_image.status.message.empty());
+  EXPECT_FALSE(missing_node_values.status.message.empty());
 
   auto missing_node_error = host->last_error(session);
   EXPECT_FALSE(missing_node_error.ok);
   EXPECT_EQ(checked_graph_error_code(missing_node_error), GraphErrc::NotFound);
   EXPECT_FALSE(missing_node_error.message.empty());
 
-  auto recovered_image =
-      host->compute_and_get_image(make_compute_request(session));
-  ASSERT_TRUE(recovered_image.status.ok) << recovered_image.status.message;
+  auto recovered_values =
+      host->compute_and_get_values(make_compute_request(session));
+  ASSERT_TRUE(recovered_values.status.ok) << recovered_values.status.message;
   auto cleared_error = host->last_error(session);
   EXPECT_TRUE(cleared_error.ok) << cleared_error.message;
 
@@ -3796,12 +3841,12 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesBackendFailureStatus) {
   auto loaded_missing_op = host->load_graph(missing_op_load);
   ASSERT_TRUE(loaded_missing_op.status.ok) << loaded_missing_op.status.message;
 
-  auto missing_op_image = host->compute_and_get_image(
+  auto missing_op_values = host->compute_and_get_values(
       make_compute_request(missing_op_load.session));
-  EXPECT_FALSE(missing_op_image.status.ok);
-  EXPECT_EQ(checked_graph_error_code(missing_op_image.status),
+  EXPECT_FALSE(missing_op_values.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_op_values.status),
             GraphErrc::NoOperation);
-  EXPECT_NE(missing_op_image.status.message.find("No op"), std::string::npos);
+  EXPECT_NE(missing_op_values.status.message.find("No op"), std::string::npos);
 
   auto missing_op_error = host->last_error(missing_op_load.session);
   EXPECT_FALSE(missing_op_error.ok);
@@ -3809,7 +3854,7 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesBackendFailureStatus) {
   EXPECT_NE(missing_op_error.message.find("No op"), std::string::npos);
 }
 
-TEST(EmbeddedHostAdapter, ComputeImagePreservesSuccessfulEmptyOutput) {
+TEST(EmbeddedHostAdapter, ComputeValuesPreserveSuccessfulEmptyOutput) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_empty_image_test");
   auto host = create_embedded_host();
@@ -3819,16 +3864,15 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesSuccessfulEmptyOutput) {
       load_test_graph(*host, temp.root(), "empty_image_graph", "no_image");
   HostComputeRequest missing_node_request = make_compute_request(session);
   missing_node_request.node = NodeId{99};
-  auto missing_node_image = host->compute_and_get_image(missing_node_request);
-  ASSERT_FALSE(missing_node_image.status.ok);
-  ASSERT_EQ(checked_graph_error_code(missing_node_image.status),
+  auto missing_node_values = host->compute_and_get_values(missing_node_request);
+  ASSERT_FALSE(missing_node_values.status.ok);
+  ASSERT_EQ(checked_graph_error_code(missing_node_values.status),
             GraphErrc::NotFound);
 
-  auto empty_image = host->compute_and_get_image(make_compute_request(session));
-  ASSERT_TRUE(empty_image.status.ok) << empty_image.status.message;
-  EXPECT_EQ(empty_image.value.width, 0);
-  EXPECT_EQ(empty_image.value.height, 0);
-  EXPECT_EQ(empty_image.value.data, nullptr);
+  auto empty_values =
+      host->compute_and_get_values(make_compute_request(session));
+  ASSERT_TRUE(empty_values.status.ok) << empty_values.status.message;
+  EXPECT_TRUE(empty_values.value.values().empty());
 
   auto cleared_error = host->last_error(session);
   EXPECT_TRUE(cleared_error.ok) << cleared_error.message;
@@ -3836,10 +3880,11 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesSuccessfulEmptyOutput) {
   auto closed = host->close_graph(session);
   ASSERT_TRUE(closed.status.ok) << closed.status.message;
 
-  auto closed_image =
-      host->compute_and_get_image(make_compute_request(session));
-  EXPECT_FALSE(closed_image.status.ok);
-  EXPECT_EQ(checked_graph_error_code(closed_image.status), GraphErrc::NotFound);
+  auto closed_values =
+      host->compute_and_get_values(make_compute_request(session));
+  EXPECT_FALSE(closed_values.status.ok);
+  EXPECT_EQ(checked_graph_error_code(closed_values.status),
+            GraphErrc::NotFound);
 }
 
 /**
@@ -4529,11 +4574,12 @@ TEST(EmbeddedHostAdapter,
   full_request.cache.precision = "fp32";
   g_offset_tiled_output_value.store(3, std::memory_order_relaxed);
   g_offset_tiled_invocation_count.store(0, std::memory_order_relaxed);
-  auto initial_compute = host->compute_and_get_image(full_request);
+  auto initial_compute = host->compute_and_get_values(full_request);
   ASSERT_TRUE(initial_compute.status.ok) << initial_compute.status.message;
-  ASSERT_NE(initial_compute.value.data, nullptr);
+  const Value* initial_value = initial_compute.value.find("image");
+  ASSERT_NE(initial_value, nullptr);
   EXPECT_GT(g_offset_tiled_invocation_count.load(std::memory_order_relaxed), 0);
-  const cv::Mat initial_image = toCvMat(initial_compute.value);
+  const cv::Mat initial_image = toCvMat(*initial_value);
   ASSERT_EQ(initial_image.type(), CV_32FC1);
   EXPECT_FLOAT_EQ(initial_image.at<float>(10, 70), 3.0f);
   auto initial_events =
@@ -4546,12 +4592,13 @@ TEST(EmbeddedHostAdapter,
   dirty_request.execution.parallel = true;
   g_offset_tiled_output_value.store(11, std::memory_order_relaxed);
   g_offset_tiled_invocation_count.store(0, std::memory_order_relaxed);
-  auto dirty_compute = host->compute_and_get_image(dirty_request);
+  auto dirty_compute = host->compute_and_get_values(dirty_request);
   ASSERT_TRUE(dirty_compute.status.ok) << dirty_compute.status.message;
-  ASSERT_NE(dirty_compute.value.data, nullptr);
+  const Value* committed_value = dirty_compute.value.find("image");
+  ASSERT_NE(committed_value, nullptr);
   EXPECT_EQ(g_offset_tiled_invocation_count.load(std::memory_order_relaxed),
             16);
-  const cv::Mat committed_image = toCvMat(dirty_compute.value);
+  const cv::Mat committed_image = toCvMat(*committed_value);
   ASSERT_EQ(committed_image.type(), CV_32FC1);
   EXPECT_FLOAT_EQ(committed_image.at<float>(10, 70), 11.0f);
   EXPECT_FLOAT_EQ(committed_image.at<float>(10, 10), 3.0f);
@@ -4882,7 +4929,9 @@ TEST(EmbeddedHostAdapter, PolicyScanAndOperationPluginUseStatusValues) {
  *         GoogleTest records any mismatch.
  * @note The lifecycle operation and pure-C policy fixture are both loaded
  *       through public Host methods. Parallel HP compute crosses the real v2
- *       operation adapter and the Host-owned execution service.
+ *       operation adapter and the Host-owned execution service. The operation
+ *       intentionally declares zero ports and produces an empty output, so a
+ *       successful cache entry retains the canonical zero spatial snapshot.
  */
 TEST(EmbeddedHostAdapter,
      ExternalOperationAndPolicyPluginsDriveParallelCompute) {
@@ -4901,6 +4950,12 @@ TEST(EmbeddedHostAdapter,
   ASSERT_TRUE(operation_report.status.ok) << operation_report.status.message;
   ASSERT_TRUE(contains_string(operation_report.value.new_op_keys,
                               "plugin_lifecycle:op"));
+  const auto operation_sources = host->ops_sources();
+  ASSERT_TRUE(operation_sources.status.ok) << operation_sources.status.message;
+  ASSERT_EQ(operation_sources.value.count("plugin_lifecycle:op"), 1U);
+  EXPECT_NE(operation_sources.value.at("plugin_lifecycle:op")
+                .find(operation_dir.string()),
+            std::string::npos);
   const VoidResult policy_load = host->policy_load(policy_path.string());
   ASSERT_TRUE(policy_load.status.ok) << policy_load.status.message;
 
@@ -4948,9 +5003,9 @@ TEST(EmbeddedHostAdapter,
 
   const auto node = host->inspect_node(load.session, NodeId{1});
   ASSERT_TRUE(node.status.ok) << node.status.message;
+  EXPECT_TRUE(node.value.has_cached_output);
   ASSERT_TRUE(node.value.space.has_value());
-  EXPECT_EQ(node.value.space->absolute_roi.width, 11);
-  EXPECT_EQ(node.value.space->absolute_roi.height, 7);
+  EXPECT_EQ(node.value.space->absolute_roi, (PixelRect{0, 0, 0, 0}));
 
   const VoidResult closed = host->close_graph(load.session);
   EXPECT_TRUE(closed.status.ok) << closed.status.message;
@@ -4962,7 +5017,9 @@ TEST(EmbeddedHostAdapter,
  * @throws Nothing when public Host status mapping and fixture IO succeed.
  * @note One Host loads P1, another loads P2 and executes it, both loading Hosts
  *       are destroyed, and a third Host performs the global unload. The
- *       surviving and newly created Hosts must observe the same state.
+ *       surviving and newly created Hosts must observe the same state. Both
+ *       generations are zero-port lifecycle fixtures, so every successful
+ *       empty cached output has the canonical zero spatial snapshot.
  */
 TEST(EmbeddedHostAdapter,
      OperationPluginsAreProcessGlobalAcrossHostDestructionAndUnload) {
@@ -4986,6 +5043,9 @@ TEST(EmbeddedHostAdapter,
   auto observer_sources = observer->ops_sources();
   ASSERT_TRUE(observer_sources.status.ok) << observer_sources.status.message;
   ASSERT_EQ(observer_sources.value.count("plugin_lifecycle:op"), 1u);
+  EXPECT_NE(observer_sources.value.at("plugin_lifecycle:op")
+                .find(original_dir.string()),
+            std::string::npos);
 
   GraphLoadRequest load_request;
   load_request.session = GraphSessionId{"process_plugin_graph"};
@@ -5002,9 +5062,9 @@ TEST(EmbeddedHostAdapter,
   ASSERT_TRUE(computed.status.ok) << computed.status.message;
   auto original_view = observer->inspect_node(load_request.session, NodeId{1});
   ASSERT_TRUE(original_view.status.ok) << original_view.status.message;
+  EXPECT_TRUE(original_view.value.has_cached_output);
   ASSERT_TRUE(original_view.value.space.has_value());
-  EXPECT_EQ(original_view.value.space->absolute_roi.width, 11);
-  EXPECT_EQ(original_view.value.space->absolute_roi.height, 7);
+  EXPECT_EQ(original_view.value.space->absolute_roi, (PixelRect{0, 0, 0, 0}));
 
   auto replacement_loader = create_embedded_host();
   ASSERT_NE(replacement_loader, nullptr);
@@ -5013,6 +5073,12 @@ TEST(EmbeddedHostAdapter,
   ASSERT_TRUE(replacement_report.status.ok)
       << replacement_report.status.message;
   ASSERT_EQ(replacement_report.value.loaded, 1);
+  observer_sources = observer->ops_sources();
+  ASSERT_TRUE(observer_sources.status.ok) << observer_sources.status.message;
+  ASSERT_EQ(observer_sources.value.count("plugin_lifecycle:op"), 1U);
+  EXPECT_NE(observer_sources.value.at("plugin_lifecycle:op")
+                .find(replacement_dir.string()),
+            std::string::npos);
 
   const auto repeated_seed = observer->seed_builtin_ops();
   ASSERT_TRUE(repeated_seed.status.ok) << repeated_seed.status.message;
@@ -5021,21 +5087,29 @@ TEST(EmbeddedHostAdapter,
   auto replacement_view =
       observer->inspect_node(load_request.session, NodeId{1});
   ASSERT_TRUE(replacement_view.status.ok) << replacement_view.status.message;
+  EXPECT_TRUE(replacement_view.value.has_cached_output);
   ASSERT_TRUE(replacement_view.value.space.has_value());
-  EXPECT_EQ(replacement_view.value.space->absolute_roi.width, 22);
-  EXPECT_EQ(replacement_view.value.space->absolute_roi.height, 9);
+  EXPECT_EQ(replacement_view.value.space->absolute_roi,
+            (PixelRect{0, 0, 0, 0}));
 
   original_loader.reset();
   replacement_loader.reset();
+  observer_sources = observer->ops_sources();
+  ASSERT_TRUE(observer_sources.status.ok) << observer_sources.status.message;
+  ASSERT_EQ(observer_sources.value.count("plugin_lifecycle:op"), 1U);
+  EXPECT_NE(observer_sources.value.at("plugin_lifecycle:op")
+                .find(replacement_dir.string()),
+            std::string::npos);
   computed = observer->compute(request);
   ASSERT_TRUE(computed.status.ok) << computed.status.message;
   auto after_loader_destruction =
       observer->inspect_node(load_request.session, NodeId{1});
   ASSERT_TRUE(after_loader_destruction.status.ok)
       << after_loader_destruction.status.message;
+  EXPECT_TRUE(after_loader_destruction.value.has_cached_output);
   ASSERT_TRUE(after_loader_destruction.value.space.has_value());
-  EXPECT_EQ(after_loader_destruction.value.space->absolute_roi.width, 22);
-  EXPECT_EQ(after_loader_destruction.value.space->absolute_roi.height, 9);
+  EXPECT_EQ(after_loader_destruction.value.space->absolute_roi,
+            (PixelRect{0, 0, 0, 0}));
 
   auto unloading_host = create_embedded_host();
   ASSERT_NE(unloading_host, nullptr);

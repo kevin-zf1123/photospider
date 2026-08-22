@@ -215,8 +215,8 @@ float reference_curve_stage(float input, float coefficient) noexcept {
  * @throws std::runtime_error when the complete caller environment cannot be
  * captured, RNE cannot be installed, failed installation cannot restore the
  * captured environment, or the canonical digest is unavailable.
- * @throws std::invalid_argument when the fixed tensor descriptor, image facet,
- * layout, or storage envelope is rejected.
+ * @throws std::invalid_argument when the fixed tensor descriptor, image or
+ * sample-domain facet, layout, or storage envelope is rejected.
  * @throws std::overflow_error when the fixed Value address envelope cannot be
  * represented.
  * @throws std::bad_alloc when oracle storage, immutable Value state, or digest
@@ -255,10 +255,12 @@ ContentDigest recompute_i1_golden_from_reference_contract() {
   descriptor.shape = {kI1FrozenImageEdge, kI1FrozenImageEdge, kChannels};
   descriptor.element_semantics = ElementSemantics::FloatingPoint;
   descriptor.storage_encoding = StorageEncoding{32U};
-  ImageFacet image;
-  image.x_axis = 1U;
-  image.y_axis = 0U;
-  image.channel_axis = 2U;
+  ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  image.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        {}};
   const std::ptrdiff_t row_stride = static_cast<std::ptrdiff_t>(
       kI1FrozenImageEdge * kChannels * kElementBytes);
   const std::ptrdiff_t pixel_stride =
@@ -287,10 +289,7 @@ Value make_collector_test_output() {
   descriptor.shape = {1U, 1U, 1U};
   descriptor.element_semantics = ElementSemantics::FloatingPoint;
   descriptor.storage_encoding = StorageEncoding{32U};
-  ImageFacet image;
-  image.x_axis = 1U;
-  image.y_axis = 0U;
-  image.channel_axis = 2U;
+  const ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
   const float sample = 0.5F;
   std::vector<std::byte> storage(sizeof(sample));
   std::memcpy(storage.data(), &sample, sizeof(sample));

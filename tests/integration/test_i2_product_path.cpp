@@ -188,8 +188,9 @@ Value make_i2_acquisition_test_value() {
   descriptor.shape = {1U, 1U, kChannels};
   descriptor.element_semantics = ElementSemantics::FloatingPoint;
   descriptor.storage_encoding = StorageEncoding{32U};
+  const ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
   return Value::from_cpu_dense_tensor(
-      std::move(descriptor), ImageFacet{1U, 0U, 2U},
+      std::move(descriptor), image,
       StridedLayout{{static_cast<std::ptrdiff_t>(kChannels * kElementBytes),
                      static_cast<std::ptrdiff_t>(kChannels * kElementBytes),
                      static_cast<std::ptrdiff_t>(kElementBytes)},

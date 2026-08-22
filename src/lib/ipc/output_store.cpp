@@ -42,15 +42,16 @@ constexpr char kOutputPrefix[] = "output-";
 constexpr char kOutputSuffix[] = ".bin";
 
 /**
- * @brief Exact checked layout of one nonempty CPU image.
- * @throws Nothing.
+ * @brief Exact checked bytes and summary of one named-Value archive.
+ * @throws std::bad_alloc when owned archive storage cannot allocate.
  */
-struct ImageLayout {
-  /** @brief Tight bytes copied from every source row. */
-  std::size_t row_bytes = 0;
-
-  /** @brief Total tight bytes written to the artifact. */
-  std::size_t total_bytes = 0;
+struct ArtifactArchive {
+  /** @brief Complete portable named-Value archive bytes. */
+  std::vector<std::byte> bytes;
+  /** @brief SHA-256 identity of the complete exact archive. */
+  ArtifactPayloadDigest digest;
+  /** @brief Exact number of canonical named Values. */
+  std::uint32_t value_count = 0U;
 };
 
 /**
@@ -464,73 +465,23 @@ std::vector<std::string> list_directory(
 }
 
 /**
- * @brief Checks whether an ImageBuffer type is one of the six public values.
- * @param type Candidate enum value.
- * @return True for a defined DataType enumerator.
- * @throws Nothing.
+ * @brief Captures and encodes one complete nonempty Host Values result.
+ * @param values Exact canonical terminal result.
+ * @return Validated archive bytes and immutable summary metadata.
+ * @throws All Value capture, archive validation, and allocation failures.
+ * @note The operation runs before output-store locking and publishes nothing.
  */
-bool valid_data_type(DataType type) noexcept {
-  switch (type) {
-    case DataType::UINT8:
-    case DataType::INT8:
-    case DataType::UINT16:
-    case DataType::INT16:
-    case DataType::FLOAT32:
-    case DataType::FLOAT64:
-      return true;
-  }
-  return false;
-}
-
-/**
- * @brief Reports whether an image is the canonical empty CPU descriptor.
- * @param image Image returned by Host.
- * @return True only when dimensions, step, payload, context, and device are
- *         empty/default-safe.
- * @throws Nothing.
- */
-bool canonical_empty_image(const ImageBuffer& image) noexcept {
-  return image.width == 0 && image.height == 0 && image.channels == 0 &&
-         image.step == 0 && image.data == nullptr && image.context == nullptr &&
-         image.device == Device::CPU && valid_data_type(image.type);
-}
-
-/**
- * @brief Validates and computes the exact tight-row image layout.
- * @param image Nonempty Host image candidate.
- * @return Checked row and total byte counts.
- * @throws std::invalid_argument for malformed geometry, type, device, payload,
- *         or step.
- * @throws std::overflow_error when multiplication exceeds size_t.
- */
-ImageLayout checked_image_layout(const ImageBuffer& image) {
-  if (image.width <= 0 || image.height <= 0 || image.channels <= 0 ||
-      image.data == nullptr || image.device != Device::CPU ||
-      !valid_data_type(image.type)) {
+ArtifactArchive make_artifact_archive(const NamedValueResult& values) {
+  if (values.values().empty()) {
     throw std::invalid_argument(
-        "compute image is not a valid nonempty CPU image");
+        "cannot materialize an empty named-Value artifact archive");
   }
-  const std::size_t width = static_cast<std::size_t>(image.width);
-  const std::size_t height = static_cast<std::size_t>(image.height);
-  const std::size_t channels = static_cast<std::size_t>(image.channels);
-  const std::size_t channel_bytes = image_buffer_bytes_per_channel(image.type);
-  const std::size_t maximum = std::numeric_limits<std::size_t>::max();
-  if (width > maximum / channels ||
-      width * channels > maximum / channel_bytes) {
-    throw std::overflow_error("compute image row byte count overflowed");
-  }
-  const std::size_t row_bytes = width * channels * channel_bytes;
-  if (row_bytes == 0 || image.step < row_bytes) {
-    throw std::invalid_argument(
-        "compute image row step is smaller than tight rows");
-  }
-  if (height > maximum / row_bytes) {
-    throw std::overflow_error("compute image artifact byte count overflowed");
-  }
-  if (height > 1 && image.step > (maximum - row_bytes) / (height - 1)) {
-    throw std::overflow_error("compute image source row offset overflowed");
-  }
-  return {row_bytes, height * row_bytes};
+  NamedValueArtifactSet artifacts = capture_named_value_artifact_set(values);
+  ArtifactArchive archive;
+  archive.value_count = static_cast<std::uint32_t>(artifacts.values.size());
+  archive.bytes = encode_named_value_artifact_set(artifacts);
+  archive.digest = compute_artifact_payload_digest(archive.bytes);
+  return archive;
 }
 
 /**
@@ -622,10 +573,10 @@ class OutputStore::Impl {
    * @throws std::bad_alloc when owned strings or metadata are constructed.
    */
   struct Record {
-    /** @brief Original accepted image-job identity. */
+    /** @brief Original accepted Values-job identity. */
     std::string compute_id;
 
-    /** @brief Revalidated private delivery metadata without pixel bytes. */
+    /** @brief Revalidated private delivery metadata without archive bytes. */
     OutputArtifactMetadata metadata;
 
     /** @brief Controlled basename used for dirfd validation and cleanup. */
@@ -886,47 +837,47 @@ class OutputStore::Impl {
   }
 
   /**
-   * @brief Publishes an empty or validated nonempty image transactionally.
-   * @param compute_id Accepted image-job identity.
-   * @param image Exact Host image result.
+   * @brief Publishes an empty or validated nonempty Value set transactionally.
+   * @param compute_id Accepted Values-job identity.
+   * @param values Exact Host named-Value result.
    * @return Nested publication status plus output id on nonempty success.
-   * @throws std::invalid_argument for a malformed compute id or image layout.
-   * @throws std::overflow_error when image layout arithmetic overflows.
+   * @throws std::invalid_argument for a malformed compute id or artifact.
+   * @throws std::overflow_error when artifact framing arithmetic overflows.
    * @throws std::runtime_error for lifecycle, duplicate-job, or filesystem
    *         failures.
    * @throws std::bad_alloc for allocation failure before/after file creation;
    *         the file, record, and quota are rolled back before propagation.
    * @throws Whatever the injected clock or id generator throws.
-   * @note Image bytes remain borrowed for this call. `mutex_` serializes
-   *       admission, identity generation, file publication, record commit, and
-   *       rollback so quota and ownership become visible atomically.
+   * @note Values are captured before locking. `mutex_` serializes admission,
+   *       identity generation, file publication, record commit, and rollback
+   *       so quota and ownership become visible atomically.
    */
   RawPublication publish_raw(const ComputeRequestId& compute_id,
-                             const ImageBuffer& image) {
+                             const NamedValueResult& values) {
     if (!valid_opaque_id(compute_id.value)) {
       throw std::invalid_argument(
           "output publication requires a valid compute id");
     }
-    if (canonical_empty_image(image)) {
+    if (values.values().empty()) {
       return {ok_status(), {}};
     }
-    const ImageLayout layout = checked_image_layout(image);
-    if (layout.total_bytes > limits_.artifact_bytes) {
+    const ArtifactArchive archive = make_artifact_archive(values);
+    if (archive.bytes.size() > limits_.artifact_bytes) {
       return {artifact_limit_status(), {}};
     }
 
     std::unique_lock<std::mutex> lock(mutex_);
-    if (!admit_publication_locked(compute_id, layout)) {
+    if (!admit_publication_locked(compute_id, archive.bytes.size())) {
       return {artifact_limit_status(), {}};
     }
 
     PublicationCandidate candidate =
-        make_publication_candidate_locked(compute_id, image, layout);
+        make_publication_candidate_locked(compute_id, archive);
     RawPublication successful{ok_status(), candidate.output_id};
     try {
-      create_and_write_stage_locked(image, layout, &candidate);
-      publish_stage_locked(layout, &candidate);
-      commit_publication_locked(compute_id, layout, &candidate);
+      create_and_write_stage_locked(archive, &candidate);
+      publish_stage_locked(archive.bytes.size(), &candidate);
+      commit_publication_locked(compute_id, archive.bytes.size(), &candidate);
       return successful;
     } catch (...) {
       rollback_publication_locked(compute_id, &candidate);
@@ -1024,7 +975,7 @@ class OutputStore::Impl {
 
   /**
    * @brief Releases an active orphaned lease only for its original job pair.
-   * @param compute_id Original image-job identity.
+   * @param compute_id Original Values-job identity.
    * @param delivery_id Stable delivery identity.
    * @return True only when an active matching lease was released.
    * @throws Nothing.
@@ -1126,7 +1077,7 @@ class OutputStore::Impl {
   }
 
   /**
-   * @brief Returns the current retained tight-row byte total.
+   * @brief Returns the current retained archive-byte total.
    * @return Quota-accounted bytes.
    * @throws Nothing.
    */
@@ -1386,8 +1337,8 @@ class OutputStore::Impl {
 
   /**
    * @brief Applies lazy expiry and checks publication lifecycle and quota.
-   * @param compute_id Valid image-job identity being admitted.
-   * @param layout Validated nonempty tight-row image layout.
+   * @param compute_id Valid Values-job identity being admitted.
+   * @param artifact_bytes Validated nonempty archive byte count.
    * @return True when identity and count/byte quota permit publication.
    * @throws std::runtime_error when publication is closed or already exists.
    * @throws Whatever the injected clock throws.
@@ -1395,7 +1346,7 @@ class OutputStore::Impl {
    *       observation and no file is created by this helper.
    */
   bool admit_publication_locked(const ComputeRequestId& compute_id,
-                                const ImageLayout& layout) {
+                                std::size_t artifact_bytes) {
     if (!running_ || !publications_open_ || !instance_fd_) {
       throw std::runtime_error("output store is not accepting publication");
     }
@@ -1406,15 +1357,14 @@ class OutputStore::Impl {
           "output store already published this compute job");
     }
     return records_.size() < limits_.artifacts &&
-           retained_bytes_ <= limits_.total_bytes - layout.total_bytes;
+           retained_bytes_ <= limits_.total_bytes - artifact_bytes;
   }
 
   /**
    * @brief Reserves opaque names and constructs the uncommitted artifact
    * record.
-   * @param compute_id Accepted image-job identity.
-   * @param image Validated nonempty Host image.
-   * @param layout Checked tight-row byte layout.
+   * @param compute_id Accepted Values-job identity.
+   * @param archive Validated nonempty Host artifact archive.
    * @return Candidate holding names, metadata, and rollback flags.
    * @throws std::runtime_error for invalid entropy or collision exhaustion.
    * @throws std::bad_alloc when ids, names, paths, or record storage allocate.
@@ -1423,8 +1373,7 @@ class OutputStore::Impl {
    *       instance directory, but no file or map entry is created yet.
    */
   PublicationCandidate make_publication_candidate_locked(
-      const ComputeRequestId& compute_id, const ImageBuffer& image,
-      const ImageLayout& layout) {
+      const ComputeRequestId& compute_id, const ArtifactArchive& archive) {
     PublicationCandidate candidate;
     candidate.output_id = generate_unique_id_locked({}, {});
     candidate.delivery_id = generate_unique_id_locked(candidate.output_id, {});
@@ -1439,13 +1388,10 @@ class OutputStore::Impl {
     candidate.record->compute_id = compute_id.value;
     candidate.record->metadata.output_id = candidate.output_id;
     candidate.record->metadata.path = absolute_path;
-    candidate.record->metadata.width = image.width;
-    candidate.record->metadata.height = image.height;
-    candidate.record->metadata.channels = image.channels;
-    candidate.record->metadata.data_type = image.type;
-    candidate.record->metadata.device = Device::CPU;
-    candidate.record->metadata.row_step = layout.row_bytes;
-    candidate.record->metadata.byte_size = layout.total_bytes;
+    candidate.record->metadata.byte_size = archive.bytes.size();
+    candidate.record->metadata.digest = archive.digest;
+    candidate.record->metadata.archive_version = 1U;
+    candidate.record->metadata.value_count = archive.value_count;
     candidate.record->filename = candidate.final_name;
     candidate.record->delivery_id = candidate.delivery_id;
     return candidate;
@@ -1453,8 +1399,7 @@ class OutputStore::Impl {
 
   /**
    * @brief Revalidates ancestry, then creates and fills one protected stage.
-   * @param image Borrowed validated Host image source.
-   * @param layout Exact tight-row source and artifact sizes.
+   * @param archive Borrowed validated complete archive bytes.
    * @param candidate Publication transaction receiving fd and inode identity.
    * @return Nothing.
    * @throws std::runtime_error for ancestry, filesystem, identity, write, or
@@ -1466,8 +1411,7 @@ class OutputStore::Impl {
    *       exists; after creation, the candidate records inode ownership
    *       immediately and later failure retains conservative exact rollback.
    */
-  void create_and_write_stage_locked(const ImageBuffer& image,
-                                     const ImageLayout& layout,
+  void create_and_write_stage_locked(const ArtifactArchive& archive,
                                      PublicationCandidate* candidate) const {
     if (!ancestry_matches_locked()) {
       throw std::runtime_error(
@@ -1498,18 +1442,15 @@ class OutputStore::Impl {
           "output artifact stage identity verification failed");
     }
 
-    const auto* source = static_cast<const std::uint8_t*>(image.data.get());
-    for (int row = 0; row < image.height; ++row) {
-      const std::size_t offset = static_cast<std::size_t>(row) * image.step;
-      write_all(candidate->artifact_fd.get(), source + offset,
-                layout.row_bytes);
-    }
+    write_all(candidate->artifact_fd.get(),
+              reinterpret_cast<const std::uint8_t*>(archive.bytes.data()),
+              archive.bytes.size());
     if (::fsync(candidate->artifact_fd.get()) != 0 ||
         ::fstat(candidate->artifact_fd.get(), &candidate->owned_identity) !=
             0 ||
         !safe_artifact(candidate->owned_identity, instance_identity_.st_dev) ||
         static_cast<std::uintmax_t>(candidate->owned_identity.st_size) !=
-            static_cast<std::uintmax_t>(layout.total_bytes)) {
+            static_cast<std::uintmax_t>(archive.bytes.size())) {
       throw std::runtime_error(
           "output artifact write/size verification failed");
     }
@@ -1517,7 +1458,7 @@ class OutputStore::Impl {
 
   /**
    * @brief Atomically publishes and revalidates a completely written artifact.
-   * @param layout Exact expected artifact size.
+   * @param artifact_bytes Exact expected artifact size.
    * @param candidate Stage transaction receiving final identity metadata.
    * @return Nothing.
    * @throws std::runtime_error for rename, ancestry, or identity failure.
@@ -1527,7 +1468,7 @@ class OutputStore::Impl {
    *       `renamed` changes before post-rename validation so rollback targets
    *       the correct controlled name.
    */
-  void publish_stage_locked(const ImageLayout& layout,
+  void publish_stage_locked(std::size_t artifact_bytes,
                             PublicationCandidate* candidate) {
     if (!rename_noreplace(instance_fd_.get(), candidate->stage_name,
                           candidate->final_name)) {
@@ -1546,7 +1487,7 @@ class OutputStore::Impl {
         !same_identity(published_path, published_fd) ||
         !same_identity(published_fd, candidate->owned_identity) ||
         static_cast<std::uintmax_t>(published_path.st_size) !=
-            static_cast<std::uintmax_t>(layout.total_bytes)) {
+            static_cast<std::uintmax_t>(artifact_bytes)) {
       throw std::runtime_error(
           "published output artifact identity verification failed");
     }
@@ -1562,8 +1503,8 @@ class OutputStore::Impl {
 
   /**
    * @brief Commits delivery, compute, record, then retained-byte accounting.
-   * @param compute_id Original accepted image-job identity.
-   * @param layout Exact retained artifact byte count.
+   * @param compute_id Original accepted Values-job identity.
+   * @param artifact_bytes Exact retained artifact byte count.
    * @param candidate Published transaction whose record ownership transfers.
    * @return Nothing.
    * @throws std::runtime_error if any supposedly unique map identity collides.
@@ -1573,7 +1514,7 @@ class OutputStore::Impl {
    *       cannot throw.
    */
   void commit_publication_locked(const ComputeRequestId& compute_id,
-                                 const ImageLayout& layout,
+                                 std::size_t artifact_bytes,
                                  PublicationCandidate* candidate) {
     const auto delivery_result = delivery_to_output_.emplace(
         candidate->delivery_id, candidate->output_id);
@@ -1592,12 +1533,12 @@ class OutputStore::Impl {
     if (!record_result.second) {
       throw std::runtime_error("output record identity reservation failed");
     }
-    retained_bytes_ += layout.total_bytes;
+    retained_bytes_ += artifact_bytes;
   }
 
   /**
    * @brief Reverses partial lookup insertion and removes the created inode.
-   * @param compute_id Original accepted image-job identity.
+   * @param compute_id Original accepted Values-job identity.
    * @param candidate Failed publication transaction with precise commit flags.
    * @return Nothing.
    * @throws Nothing; every rollback action is conservative and best-effort.
@@ -2083,7 +2024,7 @@ class OutputStore::Impl {
   /** @brief Stable delivery id to output id lookup, active or inactive. */
   std::map<std::string, std::string> delivery_to_output_;
 
-  /** @brief Current quota-accounted tight-row bytes. */
+  /** @brief Current quota-accounted archive bytes. */
   std::size_t retained_bytes_ = 0;
 
   /** @brief Validated protected socket-parent descriptor. */
@@ -2178,9 +2119,9 @@ void OutputStore::stop_leases() noexcept {
 
 /** @copydoc OutputStore::publish */
 ComputeOutputPublication OutputStore::publish(
-    const ComputeRequestId& compute_id, ImageBuffer image) {
+    const ComputeRequestId& compute_id, NamedValueResult values) {
   try {
-    Impl::RawPublication raw = impl_->publish_raw(compute_id, image);
+    Impl::RawPublication raw = impl_->publish_raw(compute_id, values);
     if (!raw.status.ok || raw.output_id.empty()) {
       return {std::move(raw.status), {}};
     }

@@ -25,7 +25,7 @@
 #include <utility>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/value_adapter_opencv.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
@@ -178,6 +178,396 @@ static MonolithicOpFunc fence_monolithic_operation(const char* operation_key,
       throw_translated_opencv_exception(operation_key, error);
     }
   };
+}
+
+/**
+ * @brief Requires the canonical ordinary-image Value from one input.
+ *
+ * @param output Private runtime output whose permanent `image` Value is read.
+ * @param missing_message Operation-specific missing-input diagnostic.
+ * @return Borrowed immutable Value retained by `output`.
+ * @throws GraphError with `GraphErrc::MissingDependency` when the canonical
+ * image output is absent.
+ * @note OpenCV view validation remains at `toCvMat`; this helper performs no
+ * readiness wait, payload access, copy, transfer, or metadata projection.
+ */
+static const Value& require_input_image(const NodeOutput& output,
+                                        const char* missing_message) {
+  if (!output.has_image_value()) {
+    throw GraphError(GraphErrc::MissingDependency, missing_message);
+  }
+  return output.image_value();
+}
+
+/**
+ * @brief Projects one source ImageFacet onto a selected stable channel.
+ *
+ * @param source Valid ordinary DenseImage source retained by the caller.
+ * @param selected_channel Zero-based source channel-axis coordinate.
+ * @return Copied facet containing only semantic facts valid for that channel.
+ * @throws std::invalid_argument when the source lacks image metadata, the
+ *         selected coordinate is outside its channel extent, or validated
+ *         channel-schema cardinality is inconsistent with the descriptor.
+ * @throws std::bad_alloc when copied or filtered metadata cannot allocate.
+ * @note The selected ChannelDescription, global sample interpretation, and
+ *       matching per-channel override survive. A channel group survives only
+ *       when it was already the exact singleton selected channel; groups that
+ *       mention removed channels are discarded instead of being assigned new
+ *       membership under an existing stable ID. Color survives only when its
+ *       referenced group therefore remains unchanged. Axes and windows are
+ *       copied here and normalized later by result_image_facet().
+ */
+static ImageFacet project_selected_channel_facet(const Value& source,
+                                                 std::size_t selected_channel) {
+  if (!source.image_facet().has_value()) {
+    throw std::invalid_argument(
+        "OpenCV channel source lacks ordinary-image metadata.");
+  }
+  const DenseTensorDescriptor& descriptor = source.dense_tensor_descriptor();
+  const ImageFacet& source_facet = *source.image_facet();
+  const std::size_t source_channels =
+      source_facet.channel_axis.has_value()
+          ? descriptor.shape[*source_facet.channel_axis]
+          : 1U;
+  if (selected_channel >= source_channels) {
+    throw std::invalid_argument(
+        "OpenCV selected channel is outside the source channel extent.");
+  }
+
+  ImageFacet projected = source_facet;
+  if (!source_facet.channel_schema.has_value()) {
+    return projected;
+  }
+  const ChannelSchema& source_schema = *source_facet.channel_schema;
+  if (source_schema.channels.size() != source_channels) {
+    throw std::invalid_argument(
+        "OpenCV source channel schema does not match its descriptor.");
+  }
+
+  const ChannelDescription& selected = source_schema.channels[selected_channel];
+  ChannelSchema projected_schema;
+  projected_schema.channels.reserve(1U);
+  projected_schema.channels.push_back(selected);
+  projected_schema.groups.reserve(source_schema.groups.size());
+  for (const ChannelGroupDescription& group : source_schema.groups) {
+    if (group.members.size() == 1U && group.members.front() == selected.id) {
+      projected_schema.groups.push_back(group);
+    }
+  }
+  projected.channel_schema = std::move(projected_schema);
+
+  if (projected.sample_domain.has_value()) {
+    auto& overrides = projected.sample_domain->per_channel;
+    overrides.erase(
+        std::remove_if(overrides.begin(), overrides.end(),
+                       [&selected](const ChannelSampleDomain& candidate) {
+                         return !(candidate.channel == selected.id);
+                       }),
+        overrides.end());
+  }
+  if (projected.color.has_value()) {
+    const ChannelGroupId color_group = projected.color->channel_group;
+    const bool color_group_survives =
+        std::any_of(projected.channel_schema->groups.begin(),
+                    projected.channel_schema->groups.end(),
+                    [color_group](const ChannelGroupDescription& group) {
+                      return group.id == color_group;
+                    });
+    if (!color_group_survives) {
+      projected.color.reset();
+    }
+  }
+  return projected;
+}
+
+/**
+ * @brief Projects two weighted-blend sources onto their result channels.
+ *
+ * @param primary Primary source whose signed windows remain output authority.
+ * @param secondary Secondary source contributing mapped sample values.
+ * @param output_channels Positive destination channel count.
+ * @param has_channel_mapping Whether explicit source-to-destination channel
+ *        mapping contributed to the result.
+ * @return Copied primary facet containing only facts valid for the result.
+ * @throws std::invalid_argument when either source lacks image metadata or the
+ *         requested count is smaller than the primary channel extent.
+ * @throws std::bad_alloc when copied metadata cannot allocate.
+ * @note Stable channel and color authority survives only for unchanged,
+ *       unmapped channels when both sources declare equal semantic facts.
+ *       Expanded or explicitly mapped destinations have no proven stable
+ *       identity, so those facts are removed rather than synthesized. A sample
+ *       facet survives only when both sources declare the same uniform
+ *       endpoint without stable-ID overrides. Signed data and display windows
+ *       remain independent primary spatial facts and are preserved. No payload
+ *       inspection, sample conversion, or channel-role inference occurs.
+ */
+static ImageFacet project_weighted_blend_facet(const Value& primary,
+                                               const Value& secondary,
+                                               std::size_t output_channels,
+                                               bool has_channel_mapping) {
+  if (!primary.image_facet().has_value() ||
+      !secondary.image_facet().has_value()) {
+    throw std::invalid_argument(
+        "OpenCV weighted-blend source lacks ordinary-image metadata.");
+  }
+  const ImageFacet& primary_facet = *primary.image_facet();
+  const std::size_t primary_channels =
+      primary_facet.channel_axis.has_value()
+          ? primary.dense_tensor_descriptor().shape[*primary_facet.channel_axis]
+          : 1U;
+  if (output_channels < primary_channels) {
+    throw std::invalid_argument(
+        "OpenCV weighted-blend facet projection cannot shrink primary "
+        "channels.");
+  }
+
+  ImageFacet projected = primary_facet;
+  const ImageFacet& secondary_facet = *secondary.image_facet();
+  const bool common_channel_schema =
+      output_channels == primary_channels && !has_channel_mapping &&
+      primary_facet.channel_schema.has_value() &&
+      secondary_facet.channel_schema.has_value() &&
+      *primary_facet.channel_schema == *secondary_facet.channel_schema;
+  if (!common_channel_schema) {
+    projected.channel_schema.reset();
+  }
+  const bool common_color = common_channel_schema &&
+                            primary_facet.color.has_value() &&
+                            secondary_facet.color.has_value() &&
+                            *primary_facet.color == *secondary_facet.color;
+  if (!common_color) {
+    projected.color.reset();
+  }
+
+  const auto& primary_samples = primary_facet.sample_domain;
+  const auto& secondary_samples = secondary_facet.sample_domain;
+  const bool common_uniform_samples = primary_samples.has_value() &&
+                                      secondary_samples.has_value() &&
+                                      primary_samples->per_channel.empty() &&
+                                      secondary_samples->per_channel.empty() &&
+                                      *primary_samples == *secondary_samples;
+  if (!common_uniform_samples) {
+    projected.sample_domain.reset();
+  }
+  return projected;
+}
+
+/**
+ * @brief Validates the physical shape required for OpenCV Value publication.
+ *
+ * @param matrix Candidate nonempty two-dimensional result matrix.
+ * @return Nothing when rows, columns, and channel count are positive.
+ * @throws std::invalid_argument when the matrix cannot describe an ordinary
+ *         HWC image result.
+ * @note The helper reads matrix metadata only and performs no allocation,
+ *       payload access, or image-facet mutation.
+ */
+static void validate_opencv_result_matrix(const cv::Mat& matrix) {
+  if (matrix.empty() || matrix.rows <= 0 || matrix.cols <= 0 ||
+      matrix.channels() <= 0) {
+    throw std::invalid_argument(
+        "OpenCV result publication requires a nonempty matrix.");
+  }
+}
+
+/**
+ * @brief Normalizes explicit semantic metadata to one validated HWC result.
+ *
+ * @param matrix Previously validated nonempty two-dimensional result matrix.
+ * @param facet Explicit result-compatible semantic facts to move and resize.
+ * @return Complete HWC facet with preserved signed origin, resized data-window
+ *         end points, and an independent unchanged display window.
+ * @throws std::overflow_error when a signed data-window endpoint overflows.
+ * @note The caller must first use validate_opencv_result_matrix(). This helper
+ *       changes no channel, sample, color, or display interpretation.
+ */
+static ImageFacet resize_opencv_result_facet(const cv::Mat& matrix,
+                                             ImageFacet facet) {
+  facet.x_axis = 1U;
+  facet.y_axis = 0U;
+  facet.channel_axis = 2U;
+  const std::int64_t width = static_cast<std::int64_t>(matrix.cols);
+  const std::int64_t height = static_cast<std::int64_t>(matrix.rows);
+  if (facet.data_window.x_begin >
+          std::numeric_limits<std::int64_t>::max() - width ||
+      facet.data_window.y_begin >
+          std::numeric_limits<std::int64_t>::max() - height) {
+    throw std::overflow_error("OpenCV result data window overflows int64.");
+  }
+  facet.data_window.x_end = facet.data_window.x_begin + width;
+  facet.data_window.y_end = facet.data_window.y_begin + height;
+  return facet;
+}
+
+/**
+ * @brief Derives explicit HWC metadata for one OpenCV result matrix.
+ * @param matrix Nonempty two-dimensional result.
+ * @param source Optional ordinary-image source whose semantic metadata is
+ * retained when channel cardinality remains compatible.
+ * @param selected_channel Optional explicit source-channel projection. When
+ * present, matrix must be single-channel and this coordinate defines the
+ * complete channel/schema/sample/color mapping.
+ * @return Complete HWC ImageFacet with resized signed data window and an
+ * independent unchanged display window.
+ * @throws std::invalid_argument when a channel-changing operation would make
+ * channel/schema/sample/color meaning ambiguous.
+ * @throws std::overflow_error when a signed data-window endpoint overflows.
+ * @throws std::bad_alloc when copied semantic metadata allocates.
+ * @note Generated results use zero-origin data windows and absent display,
+ * channel, sample, and color facts instead of guessing their meaning.
+ */
+static ImageFacet result_image_facet(
+    const cv::Mat& matrix, const Value* source,
+    std::optional<std::size_t> selected_channel = std::nullopt) {
+  validate_opencv_result_matrix(matrix);
+  ImageFacet facet;
+  facet.x_axis = 1U;
+  facet.y_axis = 0U;
+  facet.channel_axis = 2U;
+  if (source != nullptr) {
+    if (!source->image_facet().has_value()) {
+      throw std::invalid_argument(
+          "OpenCV result source lacks ordinary-image metadata.");
+    }
+    facet = *source->image_facet();
+    const DenseTensorDescriptor& descriptor = source->dense_tensor_descriptor();
+    const std::size_t source_channels =
+        facet.channel_axis.has_value() ? descriptor.shape[*facet.channel_axis]
+                                       : 1U;
+    if (selected_channel.has_value()) {
+      if (matrix.channels() != 1) {
+        throw std::invalid_argument(
+            "OpenCV selected-channel publication requires one output "
+            "channel.");
+      }
+      facet = project_selected_channel_facet(*source, *selected_channel);
+    } else if (source_channels != static_cast<std::size_t>(matrix.channels()) &&
+               (facet.channel_schema.has_value() || facet.color.has_value() ||
+                (facet.sample_domain.has_value() &&
+                 !facet.sample_domain->per_channel.empty()))) {
+      throw std::invalid_argument(
+          "OpenCV channel-changing result needs an explicit semantic map.");
+    }
+  }
+  return resize_opencv_result_facet(matrix, std::move(facet));
+}
+
+/**
+ * @brief Publishes one OpenCV result from an explicit compatible ImageFacet.
+ *
+ * @param output Mutable private result without existing image authority.
+ * @param matrix Callback-local nonempty OpenCV result copied on publication.
+ * @param facet Caller-projected semantic facts for the result channels.
+ * @return Nothing after HWC normalization and fresh Ready Value publication.
+ * @throws std::invalid_argument for malformed matrix, metadata, or destination.
+ * @throws std::logic_error when output already carries image authority.
+ * @throws std::overflow_error, std::length_error, or std::bad_alloc from facet
+ *         normalization and Value publication.
+ * @note The caller owns semantic projection. This helper changes only axes and
+ *       the data-window end points; it never invents channel, sample, color, or
+ *       display facts. Publication is transactional: failure leaves output
+ *       without image authority, and no matrix/source lifetime escapes.
+ */
+static void publish_opencv_output_with_facet(NodeOutput* output,
+                                             const cv::Mat& matrix,
+                                             ImageFacet facet) {
+  if (output == nullptr) {
+    throw std::invalid_argument(
+        "OpenCV output publication requires a destination");
+  }
+  if (output->has_image_value()) {
+    throw std::logic_error(
+        "OpenCV output publication requires an empty image destination");
+  }
+  validate_opencv_result_matrix(matrix);
+  output->publish_image_value(
+      fromCvMat(matrix, resize_opencv_result_facet(matrix, std::move(facet))));
+}
+
+/**
+ * @brief Publishes one OpenCV result directly as canonical named Value.
+ *
+ * @param output Mutable private result without an existing image output.
+ * @param matrix Callback-local OpenCV result copied during publication.
+ * @param source Optional semantic source for window/channel/sample/color facts.
+ * @param selected_channel Optional explicit source channel whose stable facts
+ * are projected onto a single-channel result.
+ * @return Nothing after publishing a fresh Ready image Value.
+ * @throws std::invalid_argument for malformed matrix, metadata, or destination.
+ * @throws std::logic_error when output already carries image authority.
+ * @throws std::overflow_error, std::length_error, or std::bad_alloc from Value
+ *         publication.
+ * @note Matrix scalar storage is preserved exactly. No normalization, clamp,
+ *       rounding, color transform, or compatibility allocation is introduced.
+ *       Callers with explicit channel-changing semantics use
+ *       publish_opencv_output_with_facet() instead of source-facet inference.
+ */
+static void publish_opencv_output(
+    NodeOutput* output, const cv::Mat& matrix, const Value* source = nullptr,
+    std::optional<std::size_t> selected_channel = std::nullopt) {
+  if (output == nullptr) {
+    throw std::invalid_argument(
+        "OpenCV output publication requires a destination");
+  }
+  if (output->has_image_value()) {
+    throw std::logic_error(
+        "OpenCV output publication requires an empty image destination");
+  }
+  output->publish_image_value(
+      fromCvMat(matrix, result_image_facet(matrix, source, selected_channel)));
+}
+
+/**
+ * @brief Builds the complete explicit configured image-source decode policy.
+ *
+ * @return Strictly ordered rules that normalize unsigned 8/16-bit file codes
+ *         to FP32 `[0,1]` while preserving ordinary OpenEXR UINT32 CodeValue
+ *         and FP32 Value storage without conversion.
+ * @throws std::bad_alloc when rule storage cannot allocate.
+ * @note The native 32-bit rules are exact source tuples for the dedicated
+ *       ordinary OpenEXR codec. They do not broaden OpenCV's closed unsigned
+ *       8/16-bit input matrix or guess an implicit numeric conversion.
+ */
+static ImageArtifactDecodeRequest configured_source_decode_request() {
+  ImageArtifactDecodeRequest request;
+  for (const std::uint32_t bits : {8U, 16U, 32U}) {
+    const double maximum =
+        bits == 8U
+            ? 255.0
+            : (bits == 16U ? 65535.0
+                           : static_cast<double>(
+                                 std::numeric_limits<std::uint32_t>::max()));
+    const SampleEndpoint code{
+        SampleEncoding{1U, SampleEncodingKind::CodeValue},
+        SampleDomain{SampleDomainKind::CodeValue, 0.0, maximum}};
+    std::optional<SampleConversion> conversion;
+    if (bits != 32U) {
+      conversion.emplace();
+      conversion->source = code;
+      conversion->destination =
+          SampleEndpoint{SampleEncoding{1U, SampleEncodingKind::Normalized},
+                         SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}};
+      conversion->destination_element_semantics =
+          ElementSemantics::FloatingPoint;
+      conversion->destination_storage_encoding = StorageEncoding{32U};
+      conversion->out_of_domain = OutOfDomainPolicy::Reject;
+      conversion->rounding = SampleRoundingMode::NearestEven;
+      conversion->non_finite = NonFinitePolicy::Reject;
+      conversion->precision_loss = PrecisionLossPolicy::Allow;
+    }
+    request.rules.push_back(ImageArtifactDecodeRule{
+        ElementSemantics::UnsignedInteger, StorageEncoding{bits}, code,
+        std::move(conversion)});
+  }
+  const SampleEndpoint floating{
+      SampleEncoding{1U, SampleEncodingKind::Value},
+      SampleDomain{SampleDomainKind::Legal,
+                   static_cast<double>(std::numeric_limits<float>::lowest()),
+                   static_cast<double>(std::numeric_limits<float>::max())}};
+  request.rules.push_back(
+      ImageArtifactDecodeRule{ElementSemantics::FloatingPoint,
+                              StorageEncoding{32U}, floating, std::nullopt});
+  return request;
 }
 
 /**
@@ -626,22 +1016,33 @@ static void apply_channel_mapping(const plugin::ParameterValue::Object* mapping,
 }
 
 /**
- * @brief Reads a valid cached image extent without exposing provider geometry.
+ * @brief Reads a cached image extent through validated metadata only.
  *
  * @param output_opt Optional cached node output.
  * @return Positive kernel-native extent, otherwise an empty PixelSize.
  * @throws Nothing.
- * @note Pixel storage ownership stays in NodeOutput; only scalar dimensions
- *       cross into ROI propagation.
+ * @note Pixel storage ownership stays in NodeOutput; this path never polls
+ *       readiness, acquires a payload lease, maps/imports storage, or creates
+ *       an ImageView. Signed logical origins intentionally do not enter the
+ *       returned zero-based storage extent used by ROI propagation.
  */
 static PixelSize cached_image_size(
     const std::optional<NodeOutput>& output_opt) noexcept {
-  if (!output_opt)
+  if (!output_opt || !output_opt->has_image_value())
     return PixelSize{};
-  const auto& buf = output_opt->image_buffer;
-  if (buf.width <= 0 || buf.height <= 0)
+  try {
+    const ImageBounds& bounds = output_opt->image_value().image_bounds();
+    const std::size_t width = image_bounds_width(bounds);
+    const std::size_t height = image_bounds_height(bounds);
+    const std::size_t maximum =
+        static_cast<std::size_t>(std::numeric_limits<int>::max());
+    if (width > maximum || height > maximum) {
+      return PixelSize{};
+    }
+    return PixelSize{static_cast<int>(width), static_cast<int>(height)};
+  } catch (...) {
     return PixelSize{};
-  return PixelSize{buf.width, buf.height};
+  }
 }
 
 /**
@@ -1255,8 +1656,9 @@ static float byte_fraction_to_binary32(std::uint8_t numerator) noexcept {
  * provider fence translates the exception category.
  * @throws std::bad_alloc when Host image ownership cannot allocate.
  * @note Every sample is constructed from integer arithmetic and explicit IEEE
- * bits, independent of ambient rounding mode. Invocation-local storage makes
- * the callback reentrant across execution workers.
+ *       bits, independent of ambient rounding mode. The output explicitly
+ *       declares FP32 normalized `[0,1]` sample interpretation. Invocation-
+ *       local storage makes the callback reentrant across execution workers.
  */
 static NodeOutput op_coordinate_pattern(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -1299,24 +1701,33 @@ static NodeOutput op_coordinate_pattern(
   }
 
   NodeOutput result;
-  result.image_buffer = fromCvMat(output);
+  ImageFacet facet;
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        {}};
+  publish_opencv_output_with_facet(&result, output, std::move(facet));
   return result;
 }
 
 /**
- * @brief Loads one image file and normalizes scalar storage to float32.
+ * @brief Loads one image file under the configured explicit sample policy.
  *
  * @param node Source node carrying a required static `path` parameter.
  * @param inputs Unused source inputs.
- * @return Owned CPU image normalized to `[0,1]` for unsigned 8/16-bit files.
+ * @return Owned CPU image normalized to FP32 `[0,1]` for supported unsigned
+ *         8/16-bit files, or preserving ordinary OpenEXR UINT32/FP32 storage.
  * @throws GraphError with `GraphErrc::InvalidParameter` for an empty path or
  *         `GraphErrc::Io` when decoding produces no image.
  * @throws GraphError with `GraphErrc::Io` when the injected production codec
  * cannot decode or convert the image artifact.
  * @throws std::bad_alloc for codec or output ownership allocation failure.
  * @note The operation owns no filesystem codec implementation. It obtains the
- * configured artifact codec from the product composition boundary and returns
- * the codec-owned ImageBuffer unchanged.
+ * configured artifact codec from the product composition boundary and
+ * publishes its canonical image Value unchanged. Ordinary OpenEXR decoding
+ * retains declared signed windows, UINT32 CodeValue meaning, and FP32 Value
+ * meaning; it performs no hidden normalization.
  */
 static NodeOutput op_image_source_path(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -1329,21 +1740,32 @@ static NodeOutput op_image_source_path(
 
   const auto codec = providers::make_configured_image_artifact_codec();
   NodeOutput result;
-  result.image_buffer = codec->decode(path);
+  result.publish_image_value(
+      codec->decode(path, configured_source_decode_request()));
   return result;
 }
 
 /**
- * @brief Creates one uniform float32 image from request-effective parameters.
+ * @brief Creates one uniform normalized float32 image from effective params.
  *
- * @param node Generator node carrying width, height, channels, and byte-scale
- *        value parameters.
+ * @param node Generator node carrying width, height, channels, and the integer
+ *        numerator used by the maintained `value / 255` pixel formula.
  * @param inputs Unused generator inputs.
- * @return Owned CPU image whose channel values equal `value / 255`.
+ * @return Owned CPU image whose channel values equal `value / 255` and whose
+ *         default sample interpretation is FP32 Normalized `[0,1]`.
  * @throws cv::Exception internally for invalid shape/channel or allocation
  *         failure; the provider fence translates the exception category.
- * @throws std::bad_alloc if host ownership storage allocation fails.
- * @note The callback owns only invocation-local OpenCV matrix state.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         when the requested matrix cannot publish a valid image Value.
+ * @throws std::bad_alloc if matrix, metadata, or host ownership allocation
+ *         fails.
+ * @note The declared normalized interval is the samples' legal semantic
+ *       domain, not payload statistics. Existing integer values below zero or
+ *       above 255 remain accepted and produce out-of-domain samples; this
+ *       producer neither rejects nor clamps them. The callback retains only
+ *       invocation-local OpenCV state and publishes through the explicit-facet
+ *       helper without changing shape/channel errors, the pixel formula,
+ *       revision, or lifetime rules.
  */
 static NodeOutput op_constant_image(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -1359,7 +1781,13 @@ static NodeOutput op_constant_image(
   cv::Mat out_mat(height, width, CV_MAKETYPE(CV_32F, channels), fill_value);
 
   NodeOutput result;
-  result.image_buffer = fromCvMat(out_mat);
+  ImageFacet facet;
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        {}};
+  publish_opencv_output_with_facet(&result, out_mat, std::move(facet));
   return result;
 }
 
@@ -1375,7 +1803,9 @@ static NodeOutput op_constant_image(
  *         provider fence translates it before registry return.
  * @throws std::bad_alloc if permutation or image ownership allocation fails.
  * @note A seed of `-1` uses `std::random_device`; every other seed is
- *       deterministic. All permutation and matrix state is callback-local.
+ *       deterministic. The producer explicitly publishes FP32 Normalized
+ *       `[0,1]` sample meaning; all permutation and matrix state is callback-
+ *       local.
  */
 static NodeOutput op_perlin_noise(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -1444,7 +1874,13 @@ static NodeOutput op_perlin_noise(
   }
 
   NodeOutput result;
-  result.image_buffer = fromCvMat(noise_image);
+  ImageFacet facet;
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        {}};
+  publish_opencv_output_with_facet(&result, noise_image, std::move(facet));
   return result;
 }
 
@@ -1464,17 +1900,17 @@ static NodeOutput op_convolve(const Node& node,
                               const std::vector<const NodeOutput*>& inputs) {
   PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:convolve");
   // Defensive checks against cold-start/invalid inputs
-  if (inputs.size() < 2 || inputs[0]->image_buffer.width == 0 ||
-      inputs[0]->image_buffer.height == 0 ||
-      inputs[1]->image_buffer.width == 0 ||
-      inputs[1]->image_buffer.height == 0) {
+  if (inputs.size() < 2 || !inputs[0]->has_image_value() ||
+      !inputs[1]->has_image_value()) {
     throw GraphError(
         GraphErrc::MissingDependency,
         "Convolve requires two non-empty input images (src and kernel).");
   }
 
-  cv::Mat src = toCvMat(inputs[0]->image_buffer);
-  cv::Mat kernel = toCvMat(inputs[1]->image_buffer);
+  cv::Mat src = toCvMat(require_input_image(
+      *inputs[0], "Convolve requires a non-empty source image."));
+  cv::Mat kernel = toCvMat(require_input_image(
+      *inputs[1], "Convolve requires a non-empty kernel image."));
 
   if (src.empty())
     throw GraphError(GraphErrc::MissingDependency,
@@ -1523,7 +1959,7 @@ static NodeOutput op_convolve(const Node& node,
   }
 
   NodeOutput result;
-  result.image_buffer = fromCvMat(out_f32);
+  publish_opencv_output(&result, out_f32, &inputs[0]->image_value());
   return result;
 }
 
@@ -1541,11 +1977,12 @@ static NodeOutput op_convolve(const Node& node,
 static NodeOutput op_resize(const Node& node,
                             const std::vector<const NodeOutput*>& inputs) {
   PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:resize");
-  if (inputs.empty() || inputs[0]->image_buffer.width == 0)
+  if (inputs.empty() || !inputs[0]->has_image_value())
     throw GraphError(GraphErrc::MissingDependency,
                      "Resize requires an input image.");
 
-  cv::Mat input = toCvMat(inputs[0]->image_buffer);
+  cv::Mat input = toCvMat(
+      require_input_image(*inputs[0], "Resize requires an input image."));
 
   const auto& P = node.runtime_parameters;
   int width = as_int_flexible(P, "width", 0),
@@ -1561,11 +1998,11 @@ static NodeOutput op_resize(const Node& node,
   cv::Mat output;
   cv::resize(input, output, cv::Size(width, height), 0, 0, flag);
   NodeOutput result;
-  result.image_buffer = fromCvMat(output);
+  publish_opencv_output(&result, output, &inputs[0]->image_value());
   const auto& in_space = inputs[0]->space;
   result.space = in_space;
-  const int in_w = inputs[0]->image_buffer.width;
-  const int in_h = inputs[0]->image_buffer.height;
+  const int in_w = input.cols;
+  const int in_h = input.rows;
   double scale_x =
       (in_w > 0) ? static_cast<double>(width) / static_cast<double>(in_w) : 1.0;
   double scale_y = (in_h > 0)
@@ -1605,11 +2042,12 @@ static NodeOutput op_resize(const Node& node,
 static NodeOutput op_crop(const Node& node,
                           const std::vector<const NodeOutput*>& inputs) {
   PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:crop");
-  if (inputs.empty() || inputs[0]->image_buffer.width == 0)
+  if (inputs.empty() || !inputs[0]->has_image_value())
     throw GraphError(GraphErrc::MissingDependency,
                      "Crop requires an input image.");
 
-  cv::Mat src = toCvMat(inputs[0]->image_buffer);
+  cv::Mat src =
+      toCvMat(require_input_image(*inputs[0], "Crop requires an input image."));
 
   const auto& P = node.runtime_parameters;
   int x, y, w, h;
@@ -1643,7 +2081,7 @@ static NodeOutput op_crop(const Node& node,
   if (intersect.width > 0 && intersect.height > 0)
     src(intersect).copyTo(canvas(dst_roi));
   NodeOutput result;
-  result.image_buffer = fromCvMat(canvas);
+  publish_opencv_output(&result, canvas, &inputs[0]->image_value());
   const auto& in_space = inputs[0]->space;
   result.space = in_space;
   auto translation =
@@ -1683,20 +2121,26 @@ static NodeOutput op_crop(const Node& node,
  * @param node Effective channel name or numeric alias.
  * @param inputs One required source image.
  * @return Owned single-channel output image.
- * @throws std::bad_alloc if parameter or channel storage allocation fails.
+ * @throws std::bad_alloc if parameter, channel, or semantic storage allocation
+ *         fails.
  * @throws GraphError for missing input or an unavailable channel.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error
+ *         when projected source semantics cannot publish a valid output.
  * @throws cv::Exception if OpenCV split or buffer conversion fails.
  * @note The callback is stateless `cv::Mat` work and is safe for concurrent
- *       invocation on independent inputs.
+ *       invocation on independent inputs. The selected stable channel,
+ *       compatible singleton groups, global/sample override facts, and any
+ *       still-valid color binding are projected explicitly.
  */
 static NodeOutput op_extract_channel(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
   PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:extract_channel");
-  if (inputs.empty() || inputs[0]->image_buffer.width == 0)
+  if (inputs.empty() || !inputs[0]->has_image_value())
     throw GraphError(GraphErrc::MissingDependency,
                      "Extract channel requires an input image.");
 
-  cv::Mat input = toCvMat(inputs[0]->image_buffer);
+  cv::Mat input = toCvMat(require_input_image(
+      *inputs[0], "Extract channel requires an input image."));
 
   std::string ch_str = as_str(node.runtime_parameters, "channel", "a");
   int ch_idx = -1;
@@ -1714,7 +2158,8 @@ static NodeOutput op_extract_channel(
   std::vector<cv::Mat> channels;
   cv::split(input, channels);
   NodeOutput result;
-  result.image_buffer = fromCvMat(channels[ch_idx]);
+  publish_opencv_output(&result, channels[ch_idx], &inputs[0]->image_value(),
+                        static_cast<std::size_t>(ch_idx));
   return result;
 }
 
@@ -1940,8 +2385,8 @@ static NodeOutput op_gaussian_blur_monolithic(
     throw GraphError(GraphErrc::MissingDependency,
                      "gaussian_blur requires one input image.");
   }
-  const auto& in_buf = inputs[0]->image_buffer;
-  cv::Mat input_mat = toCvMat(in_buf);
+  cv::Mat input_mat = toCvMat(require_input_image(
+      *inputs[0], "gaussian_blur requires one input image."));
 
   const auto& P = node.runtime_parameters;
   int k = as_int_flexible(P, "ksize", 3);
@@ -1956,7 +2401,7 @@ static NodeOutput op_gaussian_blur_monolithic(
                    cv::BORDER_REPLICATE);
 
   NodeOutput result;
-  result.image_buffer = fromCvMat(output_mat);
+  publish_opencv_output(&result, output_mat, &inputs[0]->image_value());
   return result;
 }
 
@@ -2268,16 +2713,23 @@ static void normalize_to_base(cv::Mat& current_mat, const cv::Mat& base_mat,
  *
  * @param node Operation node providing weights, mapping, and alpha strategy.
  * @param inputs Two resolved full-image inputs.
- * @return Blended NodeOutput with an owned image buffer.
+ * @return Blended NodeOutput with one owned canonical image Value.
  * @throws std::bad_alloc if parameter copying, channel storage, or result
  * allocation exhausts memory.
  * @throws GraphError for missing/empty/mismatched inputs or invalid strategy
  * data.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error when
+ *         result metadata cannot describe the generated channel layout.
  * @throws cv::Exception for OpenCV blending/channel failures.
  * @note Invalid individual channel-map entries are skipped, while memory
  *       exhaustion remains exceptional for the public Host compute boundary.
- *       All mutable matrices and result storage are callback-local, so
- *       independent invocations are reentrant.
+ *       Every result preserves primary signed windows. Stable channel/color
+ *       authority survives only for unchanged unmapped destinations when both
+ *       sources agree; expansion, explicit mapping, or source disagreement
+ *       clears it. Sample meaning survives only when both sources share one
+ *       uniform endpoint without per-channel overrides. No payload inference
+ *       or sample conversion occurs. All mutable matrices and result storage
+ *       are callback-local, so independent invocations are reentrant.
  */
 static NodeOutput op_add_weighted_monolithic(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -2286,8 +2738,10 @@ static NodeOutput op_add_weighted_monolithic(
     throw GraphError(GraphErrc::MissingDependency,
                      "add_weighted requires two input images.");
 
-  cv::Mat input_a = toCvMat(inputs[0]->image_buffer);
-  cv::Mat input_b = toCvMat(inputs[1]->image_buffer);
+  cv::Mat input_a = toCvMat(require_input_image(
+      *inputs[0], "add_weighted requires a first input image."));
+  cv::Mat input_b = toCvMat(require_input_image(
+      *inputs[1], "add_weighted requires a second input image."));
   if (input_a.empty() || input_b.empty())
     throw GraphError(GraphErrc::MissingDependency,
                      "add_weighted inputs must be non-empty.");
@@ -2370,7 +2824,10 @@ static NodeOutput op_add_weighted_monolithic(
   }
 
   NodeOutput out;
-  out.image_buffer = fromCvMat(output);
+  ImageFacet projected = project_weighted_blend_facet(
+      inputs[0]->image_value(), inputs[1]->image_value(),
+      static_cast<std::size_t>(output.channels()), has_mapping);
+  publish_opencv_output_with_facet(&out, output, std::move(projected));
   return out;
 }
 
@@ -2391,8 +2848,10 @@ static NodeOutput op_abs_diff_monolithic(
   if (inputs.size() < 2)
     throw GraphError(GraphErrc::MissingDependency,
                      "diff requires two input images.");
-  cv::Mat input_a = toCvMat(inputs[0]->image_buffer);
-  cv::Mat input_b = toCvMat(inputs[1]->image_buffer);
+  cv::Mat input_a = toCvMat(
+      require_input_image(*inputs[0], "diff requires a first input image."));
+  cv::Mat input_b = toCvMat(
+      require_input_image(*inputs[1], "diff requires a second input image."));
   if (input_a.empty() || input_b.empty())
     throw GraphError(GraphErrc::MissingDependency,
                      "diff inputs must be non-empty.");
@@ -2435,7 +2894,7 @@ static NodeOutput op_abs_diff_monolithic(
     cv::merge(Oo, output);
   }
   NodeOutput out;
-  out.image_buffer = fromCvMat(output);
+  publish_opencv_output(&out, output, &inputs[0]->image_value());
   return out;
 }
 
@@ -2456,8 +2915,10 @@ static NodeOutput op_multiply_monolithic(
   if (inputs.size() < 2)
     throw GraphError(GraphErrc::MissingDependency,
                      "multiply requires two input images.");
-  cv::Mat input_a = toCvMat(inputs[0]->image_buffer);
-  cv::Mat input_b = toCvMat(inputs[1]->image_buffer);
+  cv::Mat input_a = toCvMat(require_input_image(
+      *inputs[0], "multiply requires a first input image."));
+  cv::Mat input_b = toCvMat(require_input_image(
+      *inputs[1], "multiply requires a second input image."));
   if (input_a.empty() || input_b.empty())
     throw GraphError(GraphErrc::MissingDependency,
                      "multiply inputs must be non-empty.");
@@ -2469,7 +2930,7 @@ static NodeOutput op_multiply_monolithic(
   cv::Mat output;
   cv::multiply(input_a, input_b, output, scale);
   NodeOutput out;
-  out.image_buffer = fromCvMat(output);
+  publish_opencv_output(&out, output, &inputs[0]->image_value());
   return out;
 }
 
@@ -2478,46 +2939,72 @@ void register_provider() {
   initialize_opencv_process_policy();
   OpRegistry& registry = OpRegistry::instance();
 
+  const DirtyRoiPropFunc identity_roi(identity_dirty_roi);
+  const ForwardRoiPropFunc identity_forward(identity_forward_roi);
+  const OpPlanningCallbacks identity_planning{identity_roi,
+                                              identity_forward,
+                                              {}};
+  const OpPlanningCallbacks convolve_planning{
+      DirtyRoiPropFunc(convolve_dirty_roi),
+      ForwardRoiPropFunc(convolve_forward_roi),
+      {}};
+  const OpPlanningCallbacks resize_planning{
+      DirtyRoiPropFunc(resize_dirty_roi),
+      ForwardRoiPropFunc(resize_forward_roi),
+      {}};
+  const OpPlanningCallbacks crop_planning{DirtyRoiPropFunc(crop_dirty_roi),
+                                          ForwardRoiPropFunc(crop_forward_roi),
+                                          {}};
+  const OpPlanningCallbacks gaussian_blur_planning{
+      DirtyRoiPropFunc(gaussian_blur_dirty_roi),
+      ForwardRoiPropFunc(gaussian_blur_forward_roi),
+      {}};
+
   registry.register_op_hp_monolithic(
       "image_source", "path",
       fence_monolithic_operation("image_source:path",
-                                 MonolithicOpFunc(op_image_source_path)));
+                                 MonolithicOpFunc(op_image_source_path)),
+      {}, identity_planning);
   registry.register_op_hp_monolithic(
       "image_generator", "constant",
       fence_monolithic_operation("image_generator:constant",
-                                 MonolithicOpFunc(op_constant_image)));
+                                 MonolithicOpFunc(op_constant_image)),
+      {}, identity_planning);
   registry.register_op_hp_monolithic(
       "image_generator", "coordinate_pattern",
       fence_monolithic_operation("image_generator:coordinate_pattern",
-                                 MonolithicOpFunc(op_coordinate_pattern)));
+                                 MonolithicOpFunc(op_coordinate_pattern)),
+      {}, identity_planning);
   registry.register_op_hp_monolithic(
       "image_generator", "perlin_noise",
       fence_monolithic_operation("image_generator:perlin_noise",
-                                 MonolithicOpFunc(op_perlin_noise)));
+                                 MonolithicOpFunc(op_perlin_noise)),
+      {}, identity_planning);
   registry.register_op_hp_monolithic(
       "image_process", "convolve",
       fence_monolithic_operation("image_process:convolve",
-                                 MonolithicOpFunc(op_convolve)));
+                                 MonolithicOpFunc(op_convolve)),
+      {}, convolve_planning);
   registry.register_op_hp_monolithic(
       "image_process", "resize",
       fence_monolithic_operation("image_process:resize",
-                                 MonolithicOpFunc(op_resize)));
+                                 MonolithicOpFunc(op_resize)),
+      {}, resize_planning);
   registry.register_op_hp_monolithic(
       "image_process", "crop",
       fence_monolithic_operation("image_process:crop",
-                                 MonolithicOpFunc(op_crop)));
+                                 MonolithicOpFunc(op_crop)),
+      {}, crop_planning);
   registry.register_op_hp_monolithic(
       "image_process", "extract_channel",
       fence_monolithic_operation("image_process:extract_channel",
-                                 MonolithicOpFunc(op_extract_channel)));
+                                 MonolithicOpFunc(op_extract_channel)),
+      {}, identity_planning);
 
   OpMetadata tiled_meta;
   tiled_meta.tile_preference = TileSizePreference::MACRO;
   OpMetadata rt_meta;
   rt_meta.tile_preference = TileSizePreference::MICRO;
-
-  const DirtyRoiPropFunc identity_roi(identity_dirty_roi);
-  const ForwardRoiPropFunc identity_forward(identity_forward_roi);
 
   registry.register_dirty_propagator("image_source", "path", identity_roi);
   registry.register_dirty_propagator("image_generator", "constant",
@@ -2568,15 +3055,15 @@ void register_provider() {
 
   registry.register_op_hp_monolithic(
       "image_process", "gaussian_blur",
-      fence_monolithic_operation(
-          "image_process:gaussian_blur",
-          MonolithicOpFunc(op_gaussian_blur_monolithic)));
+      fence_monolithic_operation("image_process:gaussian_blur",
+                                 MonolithicOpFunc(op_gaussian_blur_monolithic)),
+      {}, gaussian_blur_planning);
   const TileOpFunc gaussian_blur = fence_tiled_operation(
       "image_process:gaussian_blur", TileOpFunc(op_gaussian_blur_tiled));
   registry.register_op_hp_tiled("image_process", "gaussian_blur", gaussian_blur,
-                                tiled_meta);
+                                tiled_meta, gaussian_blur_planning);
   registry.register_op_rt_tiled("image_process", "gaussian_blur", gaussian_blur,
-                                rt_meta);
+                                rt_meta, gaussian_blur_planning);
   registry.register_dirty_propagator("image_process", "gaussian_blur",
                                      DirtyRoiPropFunc(gaussian_blur_dirty_roi));
   registry.register_forward_propagator(
@@ -2587,37 +3074,40 @@ void register_provider() {
       "image_process", "curve_transform",
       fence_tiled_operation("image_process:curve_transform",
                             TileOpFunc(op_curve_transform_tiled)),
-      tiled_meta);
+      tiled_meta, identity_planning);
 
   registry.register_op_hp_monolithic(
       "image_mixing", "add_weighted",
       fence_monolithic_operation("image_mixing:add_weighted",
-                                 MonolithicOpFunc(op_add_weighted_monolithic)));
+                                 MonolithicOpFunc(op_add_weighted_monolithic)),
+      {}, identity_planning);
   const TileOpFunc add_weighted = fence_tiled_operation(
       "image_mixing:add_weighted", TileOpFunc(op_add_weighted_tiled));
   registry.register_op_hp_tiled("image_mixing", "add_weighted", add_weighted,
-                                tiled_meta);
+                                tiled_meta, identity_planning);
   registry.register_op_rt_tiled("image_mixing", "add_weighted", add_weighted,
-                                rt_meta);
+                                rt_meta, identity_planning);
 
   registry.register_op_hp_monolithic(
       "image_mixing", "diff",
       fence_monolithic_operation("image_mixing:diff",
-                                 MonolithicOpFunc(op_abs_diff_monolithic)));
+                                 MonolithicOpFunc(op_abs_diff_monolithic)),
+      {}, identity_planning);
   registry.register_op_hp_tiled(
       "image_mixing", "diff",
       fence_tiled_operation("image_mixing:diff", TileOpFunc(op_abs_diff_tiled)),
-      tiled_meta);
+      tiled_meta, identity_planning);
 
   registry.register_op_hp_monolithic(
       "image_mixing", "multiply",
       fence_monolithic_operation("image_mixing:multiply",
-                                 MonolithicOpFunc(op_multiply_monolithic)));
+                                 MonolithicOpFunc(op_multiply_monolithic)),
+      {}, identity_planning);
   registry.register_op_hp_tiled(
       "image_mixing", "multiply",
       fence_tiled_operation("image_mixing:multiply",
                             TileOpFunc(op_multiply_tiled)),
-      tiled_meta);
+      tiled_meta, identity_planning);
 }
 
 #undef PHOTOSPIDER_OBSERVE_OPENCV_OPERATION

@@ -18,7 +18,6 @@
 #include "compute/execution/execution_service_test_probe.hpp"
 #endif
 #include "compute/execution/resource_demand_estimator.hpp"
-#include "core/value_image_adapter.hpp"
 #include "graph/graph_traversal_service.hpp"
 
 namespace ps::compute {
@@ -87,6 +86,54 @@ void settle_rejected_bootstrap(ExecutionTaskRuntime& task_runtime,
   }
 }
 
+/**
+ * @brief Resolves one task's frozen output authority from a complete plan.
+ * @param plan Callback-free compute plan retaining per-node authority.
+ * @param task Planned task whose node declaration is required.
+ * @return Borrowed exact authority owned by `plan`.
+ * @throws GraphError with ComputeError when the plan omitted the node or its
+ * authority.
+ * @note The lookup cannot consult provider output and therefore cannot widen
+ * the revisioned schema during a pending-Value continuation.
+ */
+const PlannedOutputAuthority& planned_output_authority_for_task(
+    const ComputePlan& plan, const PlannedTask& task) {
+  const auto found =
+      std::find_if(plan.planned_work.begin(), plan.planned_work.end(),
+                   [&task](const PlannedNodeWork& work) {
+                     return work.node_id == task.node_id;
+                   });
+  if (found == plan.planned_work.end() ||
+      !found->output_authority.has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Deferred task is missing its frozen output authority.");
+  }
+  return *found->output_authority;
+}
+
+/**
+ * @brief Finds the first Pending named Value in canonical map order.
+ * @param output Exact staged output to inspect without mutation.
+ * @return Borrowed Pending Value, or nullptr when every named Value is Ready.
+ * @throws ReadyFenceAccessError when any named Value is Failed or
+ * ProducerCancelled.
+ * @note Canonical map order makes chained waits deterministic. The returned
+ * pointer remains valid only while `output` is not mutated.
+ */
+const Value* first_pending_named_value(const NodeOutput& output) {
+  for (const auto& [name, value] : output.named_values) {
+    (void)name;
+    const ReadyFenceSnapshot observed = value.ready_fence().poll();
+    if (observed.state() == ReadyFenceState::Pending) {
+      return &value;
+    }
+    if (observed.state() != ReadyFenceState::Ready) {
+      throw ReadyFenceAccessError(observed);
+    }
+  }
+  return nullptr;
+}
+
 }  // namespace
 
 /**
@@ -103,12 +150,10 @@ void settle_rejected_bootstrap(ExecutionTaskRuntime& task_runtime,
  * satisfy nodes before task population.
  * @throws GraphError or standard exceptions from planning and allocation.
  */
-TaskSubmissionPlan::TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
-                                       GraphTraversalService& traversal,
-                                       int node_id,
-                                       std::vector<Device> available_devices,
-                                       bool publish_plan_inspection,
-                                       bool allow_reusable_cache)
+TaskSubmissionPlan::TaskSubmissionPlan(
+    ComputeRunId run_id, GraphModel& graph, GraphTraversalService& traversal,
+    int node_id, std::vector<DeviceBackend> available_devices,
+    bool publish_plan_inspection, bool allow_reusable_cache)
     : run_id_(run_id),
       graph_(graph),
       compute_plan_(
@@ -182,9 +227,9 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
   estimate.add_bytes(compute_plan_dynamic_retained_memory_bytes(compute_plan_));
   estimate.add_objects<int>(
       static_cast<std::uint64_t>(execution_order_.capacity()));
-  estimate.add_objects<Device>(
+  estimate.add_objects<DeviceBackend>(
       static_cast<std::uint64_t>(available_devices_.capacity()));
-  estimate.add_objects<Device>(
+  estimate.add_objects<DeviceBackend>(
       static_cast<std::uint64_t>(execution_devices_.capacity()));
   estimate.add_bytes(dependency_state_.dynamic_retained_memory_bytes());
   estimate.add_objects<void*>(
@@ -231,6 +276,18 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
           implementation->metadata.exclusive_key, before_operation_key,
           estimate.bytes());
 #endif
+      estimate.add_objects<std::string>(static_cast<std::uint64_t>(
+          implementation->metadata.named_value_output_names.capacity()));
+      for (const std::string& name :
+           implementation->metadata.named_value_output_names) {
+        estimate.add_string_payload(name);
+      }
+      estimate.add_objects<std::string>(static_cast<std::uint64_t>(
+          implementation->metadata.parameter_output_names.capacity()));
+      for (const std::string& name :
+           implementation->metadata.parameter_output_names) {
+        estimate.add_string_payload(name);
+      }
     }
   }
   estimate.add_objects<OperationExecutionConstraints>(
@@ -302,7 +359,7 @@ ReadyTaskSubmission TaskSubmissionPlan::make_ready_submission(
   const int trace_node_id = task.node_id;
   const std::size_t execution_index =
       static_cast<std::size_t>(dependency_state_.id_to_idx().at(trace_node_id));
-  const Device device = execution_devices_.at(execution_index);
+  const DeviceBackend device = execution_devices_.at(execution_index);
   ReadyTaskSubmission submission(
       lease, identity, trace_node_id, is_initial_ready,
       [](ComputeRunLease& ready_lease,
@@ -319,7 +376,7 @@ ReadyTaskSubmission TaskSubmissionPlan::make_ready_submission(
 /** @copydoc TaskSubmissionPlan::observe_task_ready */
 void TaskSubmissionPlan::observe_task_ready(
     const ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
-    const PlannedTask& task, Device device) const noexcept {
+    const PlannedTask& task, DeviceBackend device) const noexcept {
   const ComputeRunDescriptor& descriptor = lease.descriptor();
   const std::shared_ptr<ComputeRunObservationSink>& sink =
       descriptor.observation_sink();
@@ -523,13 +580,22 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
                                          : ExecutionTraceAction::Execute;
   task_runtime.log_event(execute_action, task.node_id);
   try {
-    task_runner_->run_task(task_id);
-    if (defer_pending_value(task, identity, lease, task_runtime)) {
+    const NodeTaskRunner::TaskDependencyRelease dependency_release =
+        task_runner_->run_task(task_id);
+    if (dependency_release ==
+            NodeTaskRunner::TaskDependencyRelease::CurrentTask &&
+        defer_pending_value(task, identity, lease, task_runtime)) {
       return;
     }
     (void)lease.observe_cancellation();
     if (!lease.terminal_outcome().has_value()) {
-      release_dependents(task.task_id, task.node_id, lease, task_runtime);
+      if (dependency_release ==
+          NodeTaskRunner::TaskDependencyRelease::CompleteTiledNode) {
+        release_tiled_node_dependents(task.node_id, lease, task_runtime);
+      } else if (dependency_release ==
+                 NodeTaskRunner::TaskDependencyRelease::CurrentTask) {
+        release_dependents(task.task_id, task.node_id, lease, task_runtime);
+      }
     }
     task_execution_states_.at(task_id).store(
         static_cast<std::uint8_t>(TaskExecutionState::Completed),
@@ -562,21 +628,13 @@ bool TaskSubmissionPlan::defer_pending_value(
   }
   std::optional<NodeOutput>& result =
       temp_results_.at(static_cast<std::size_t>(index->second));
-  if (!result.has_value() || !result->image_value.valid()) {
+  if (!result.has_value()) {
     return false;
   }
 
-  const ReadyFenceSnapshot observed = result->image_value.ready_fence().poll();
-  if (observed.state() == ReadyFenceState::Ready) {
-    if (result->image_buffer.width == 0 && result->image_buffer.height == 0 &&
-        result->image_buffer.channels == 0) {
-      result->image_buffer =
-          value_image_adapter::snapshot_cpu_image_buffer(result->image_value);
-    }
+  const Value* pending_value = first_pending_named_value(*result);
+  if (pending_value == nullptr) {
     return false;
-  }
-  if (observed.state() != ReadyFenceState::Pending) {
-    throw ReadyFenceAccessError(observed);
   }
 
   std::lock_guard<std::recursive_mutex> publication_lock(publication_mutex_);
@@ -601,8 +659,8 @@ bool TaskSubmissionPlan::defer_pending_value(
     task_runtime.inc_tasks_to_complete(1);
     completion_counted = true;
     ReadyFenceWaitRegistration registration =
-        result->image_value.ready_fence().async_wait(std::move(executor),
-                                                     std::move(callback));
+        pending_value->ready_fence().async_wait(std::move(executor),
+                                                std::move(callback));
     deferred_value_waits_.at(static_cast<std::size_t>(task_id))
         .emplace(std::move(registration));
   } catch (...) {
@@ -626,6 +684,7 @@ void TaskSubmissionPlan::complete_deferred_value(
         "Deferred Value identity does not belong to this submission plan.");
   }
   const int task_id = static_cast<int>(identity.local_task_id().value());
+  std::unique_lock<std::recursive_mutex> publication_lock(publication_mutex_);
   std::uint8_t expected =
       static_cast<std::uint8_t>(TaskExecutionState::AwaitingValue);
   if (!task_execution_states_.at(static_cast<std::size_t>(task_id))
@@ -650,18 +709,62 @@ void TaskSubmissionPlan::complete_deferred_value(
     }
     std::optional<NodeOutput>& result =
         temp_results_.at(static_cast<std::size_t>(index->second));
-    if (!result.has_value() || !result->image_value.valid()) {
+    if (!result.has_value()) {
       throw GraphError(GraphErrc::ComputeError,
                        "Deferred task lost its pending Value result.");
     }
-    if (result->image_buffer.width == 0 && result->image_buffer.height == 0 &&
-        result->image_buffer.channels == 0) {
-      result->image_buffer =
-          value_image_adapter::snapshot_cpu_image_buffer(result->image_value);
+    validate_planned_output(
+        *result, planned_output_authority_for_task(compute_plan_, task),
+        PlannedOutputReadiness::AllowPending);
+    if (const Value* next_pending = first_pending_named_value(*result)) {
+      if (publication_closed_ || lease.terminal_outcome().has_value()) {
+        task_execution_states_.at(static_cast<std::size_t>(task_id))
+            .store(static_cast<std::uint8_t>(TaskExecutionState::Completed),
+                   std::memory_order_release);
+        return;
+      }
+      std::shared_ptr<ReadyFenceExecutor> executor =
+          task_runtime.make_ready_fence_executor();
+      ComputeRunLease continuation_lease = lease;
+      ReadyFence::Callback callback =
+          [continuation_lease = std::move(continuation_lease), identity,
+           runtime = &task_runtime](ReadyFenceSnapshot next_snapshot) mutable {
+            continuation_lease.complete_deferred_value(
+                identity, *runtime, std::move(next_snapshot));
+          };
+      bool completion_counted = false;
+      try {
+        task_runtime.inc_tasks_to_complete(1);
+        completion_counted = true;
+        deferred_value_waits_.at(static_cast<std::size_t>(task_id)).reset();
+        task_execution_states_.at(static_cast<std::size_t>(task_id))
+            .store(static_cast<std::uint8_t>(TaskExecutionState::AwaitingValue),
+                   std::memory_order_release);
+        ReadyFenceWaitRegistration registration =
+            next_pending->ready_fence().async_wait(std::move(executor),
+                                                   std::move(callback));
+        deferred_value_waits_.at(static_cast<std::size_t>(task_id))
+            .emplace(std::move(registration));
+      } catch (...) {
+        task_execution_states_.at(static_cast<std::size_t>(task_id))
+            .store(static_cast<std::uint8_t>(TaskExecutionState::Failed),
+                   std::memory_order_release);
+        if (completion_counted) {
+          task_runtime.dec_tasks_to_complete();
+        }
+        throw;
+      }
+      return;
     }
+    validate_planned_output(
+        *result, planned_output_authority_for_task(compute_plan_, task),
+        PlannedOutputReadiness::RequireReady);
     (void)lease.observe_cancellation();
-    if (!lease.terminal_outcome().has_value()) {
+    if (!publication_closed_ && !lease.terminal_outcome().has_value()) {
+      publication_lock.unlock();
       release_dependents(task.task_id, task.node_id, lease, task_runtime);
+    } else {
+      publication_lock.unlock();
     }
     task_execution_states_.at(static_cast<std::size_t>(task_id))
         .store(static_cast<std::uint8_t>(TaskExecutionState::Completed),
@@ -683,10 +786,28 @@ void TaskSubmissionPlan::complete_deferred_value(
   }
 }
 
+/** @copydoc TaskSubmissionPlan::release_tiled_node_dependents */
+void TaskSubmissionPlan::release_tiled_node_dependents(
+    int node_id, const ComputeRunLease& lease,
+    ExecutionTaskRuntime& task_runtime) {
+  bool found_tile = false;
+  for (const PlannedTask& sibling : compute_plan_.task_graph.tasks) {
+    if (sibling.node_id != node_id || sibling.kind != PlannedTaskKind::Tile) {
+      continue;
+    }
+    found_tile = true;
+    release_dependents(sibling.task_id, node_id, lease, task_runtime);
+  }
+  if (!found_tile) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Tiled dependency release found no sibling tasks.");
+  }
+}
+
 /** @copydoc TaskSubmissionPlan::resolve_operations */
 void TaskSubmissionPlan::resolve_operations() {
   resolved_ops_.resize(execution_order_.size());
-  execution_devices_.assign(execution_order_.size(), Device::CPU);
+  execution_devices_.assign(execution_order_.size(), DeviceBackend::CPU);
   operation_constraints_.resize(compute_plan_.task_graph.tasks.size());
   task_resource_demand_ = ReadyTaskSubmission::default_resource_demand();
   for (std::size_t i = 0; i < execution_order_.size(); ++i) {

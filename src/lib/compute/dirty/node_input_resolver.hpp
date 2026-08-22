@@ -49,11 +49,12 @@ class NodeInputResolver {
    * @param missing_context Human-readable prefix for dependency diagnostics.
    * @return Borrowed image pointers indexed exactly like node.image_inputs;
    * disconnected slots contain nullptr.
-   * @throws GraphError when a connected source output or named parameter is
-   * unavailable.
+   * @throws GraphError when a connected source output/named parameter is
+   * unavailable or a canonical image extent exceeds PixelSize.
    * @throws std::bad_alloc when copied parameter/vector storage cannot grow.
    * @note The node's static parameters remain unchanged. `last_input_size_hp`
-   * uses the first connected input with a positive extent.
+   * uses the first connected canonical image Value with a positive extent and
+   * never consults compatibility staging.
    */
   static ResolvedNodeInputs resolve(Node& node, const OutputLookup& lookup,
                                     const std::string& missing_context);
@@ -66,8 +67,8 @@ class NodeInputResolver {
    * @param parameter_lookup Lookup used only for parameter-input edges.
    * @param missing_context Human-readable dependency diagnostic prefix.
    * @return Borrowed image pointers aligned with node.image_inputs.
-   * @throws GraphError when a connected source output or named parameter is
-   * unavailable.
+   * @throws GraphError when a connected source output/named parameter is
+   * unavailable or a canonical image extent exceeds PixelSize.
    * @throws std::bad_alloc from parameter/vector copying.
    * @note Dirty RT execution uses this overload so exact HP-stabilized
    * parameter values do not replace RT-domain image inputs from the same node.

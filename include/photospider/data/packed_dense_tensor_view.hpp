@@ -146,7 +146,8 @@ class PackedDenseTensorView final {
  * @throws std::bad_alloc when scale, layout, coordinate, or output storage
  *         allocation fails.
  * @note The operation never dequantizes, requantizes, widens, or adapts through
- *       ImageBuffer. Output allocation and Value revision are always fresh.
+ *       ordinary-image adaptation. Output allocation and Value revision are
+ *       always fresh.
  */
 Value copy_packed_dense_tensor_slice(const Value& source,
                                      const TensorSlice& slice);

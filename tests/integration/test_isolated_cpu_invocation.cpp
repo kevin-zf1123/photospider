@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/value_descriptor_metadata.hpp"
 #include "execution/isolation/isolated_cpu_invocation.hpp"  // NOLINT(build/include_subdir)
 #include "execution/isolation/isolated_cpu_invocation_test_probe.hpp"  // NOLINT(build/include_subdir)
 
@@ -174,6 +175,24 @@ IsolatedCpuOpaqueId integration_id(std::uint8_t seed) noexcept {
 }
 
 /**
+ * @brief Converts one pointer-free opaque identity into retained Value words.
+ * @param identity Exact big-endian identity bytes.
+ * @return Equivalent source-private extension identity.
+ * @throws Nothing.
+ */
+ExtensionIdentity integration_extension_identity(
+    const IsolatedCpuOpaqueId& identity) noexcept {
+  std::array<std::uint64_t, 2U> words{};
+  for (std::size_t word = 0U; word < words.size(); ++word) {
+    for (std::size_t byte = 0U; byte < 8U; ++byte) {
+      words[word] = (words[word] << 8U) | std::to_integer<std::uint8_t>(
+                                              identity.bytes[word * 8U + byte]);
+    }
+  }
+  return ExtensionIdentity{words[0], words[1]};
+}
+
+/**
  * @brief Creates one complete deterministic invocation identity.
  * @param domain Per-call identity domain below wraparound.
  * @return Valid tuple with current worker/plugin generations.
@@ -239,8 +258,43 @@ Value integration_input(const std::array<std::byte, 6U>& bytes) {
  * @throws std::bad_alloc when descriptor/layout vectors allocate.
  */
 IsolatedCpuDenseTensorOutputPlan integration_output_plan() {
-  return IsolatedCpuDenseTensorOutputPlan{
-      integration_descriptor(), std::nullopt, integration_layout(), 6U};
+  IsolatedCpuDenseTensorOutputPlan plan;
+  plan.port_identity = integration_id(97U);
+  plan.plan_identity = integration_id(113U);
+  plan.schema_identity = integration_id(129U);
+  plan.layout_identity = integration_id(145U);
+  plan.schema_version = 7U;
+  plan.layout_version = 11U;
+  plan.descriptor_digest.words = {1U, 2U, 3U, 4U};
+  plan.logical_content_digest.words = {5U, 6U, 7U, 8U};
+  plan.layout_digest.words = {9U, 10U, 11U, 12U};
+  plan.descriptor = integration_descriptor();
+  plan.layout = integration_layout();
+  plan.storage_size = 6U;
+  plan.alignment = 1U;
+  return plan;
+}
+
+/**
+ * @brief Builds the exact retained metadata expected from one output plan.
+ * @param plan Complete pointer-free plan accepted before child execution.
+ * @return Equivalent Schema/optional-Facet/Layout identities and digests.
+ * @throws Nothing.
+ */
+DenseTensorValueDescriptorMetadata integration_retained_metadata(
+    const IsolatedCpuDenseTensorOutputPlan& plan) noexcept {
+  DenseTensorValueDescriptorMetadata metadata;
+  metadata.schema_identity =
+      integration_extension_identity(plan.schema_identity);
+  metadata.facet_identity = integration_extension_identity(plan.facet_identity);
+  metadata.layout_identity =
+      integration_extension_identity(plan.layout_identity);
+  metadata.descriptor_version = plan.schema_version;
+  metadata.layout_version = plan.layout_version;
+  metadata.descriptor_digest = plan.descriptor_digest.words;
+  metadata.content_digest = plan.logical_content_digest.words;
+  metadata.layout_digest = plan.layout_digest.words;
+  return metadata;
 }
 
 /**
@@ -253,8 +307,16 @@ IsolatedCpuDenseTensorOutputPlan one_byte_output_plan() {
   descriptor.shape = {1U};
   descriptor.element_semantics = ElementSemantics::UnsignedInteger;
   descriptor.storage_encoding = StorageEncoding{8U};
-  return IsolatedCpuDenseTensorOutputPlan{std::move(descriptor), std::nullopt,
-                                          StridedLayout{{1}, 0U}, 1U};
+  IsolatedCpuDenseTensorOutputPlan plan;
+  plan.port_identity = integration_id(98U);
+  plan.plan_identity = integration_id(114U);
+  plan.schema_identity = integration_id(130U);
+  plan.layout_identity = integration_id(146U);
+  plan.descriptor = std::move(descriptor);
+  plan.layout = StridedLayout{{1}, 0U};
+  plan.storage_size = 1U;
+  plan.alignment = 1U;
+  return plan;
 }
 
 /**
@@ -273,9 +335,16 @@ IsolatedCpuDenseTensorOutputPlan page_sized_output_plan() {
   descriptor.shape = {static_cast<std::size_t>(page_size)};
   descriptor.element_semantics = ElementSemantics::UnsignedInteger;
   descriptor.storage_encoding = StorageEncoding{8U};
-  return IsolatedCpuDenseTensorOutputPlan{std::move(descriptor), std::nullopt,
-                                          StridedLayout{{1}, 0U},
-                                          static_cast<std::size_t>(page_size)};
+  IsolatedCpuDenseTensorOutputPlan plan;
+  plan.port_identity = integration_id(99U);
+  plan.plan_identity = integration_id(115U);
+  plan.schema_identity = integration_id(131U);
+  plan.layout_identity = integration_id(147U);
+  plan.descriptor = std::move(descriptor);
+  plan.layout = StridedLayout{{1}, 0U};
+  plan.storage_size = static_cast<std::size_t>(page_size);
+  plan.alignment = 1U;
+  return plan;
 }
 
 /**
@@ -292,7 +361,21 @@ IsolatedCpuHostInvocation integration_invocation(
   IsolatedCpuHostInvocation invocation;
   invocation.identity = integration_identity(domain);
   invocation.operation = std::move(operation);
+  invocation.operation_identity = integration_id(161U);
+  invocation.implementation_identity = integration_id(177U);
+  invocation.configuration_schema_identity = integration_id(193U);
   invocation.inputs = std::move(inputs);
+  invocation.input_bindings.reserve(invocation.inputs.size());
+  for (std::size_t index = 0U; index < invocation.inputs.size(); ++index) {
+    IsolatedCpuInputBinding binding;
+    binding.port_identity = integration_id(
+        static_cast<std::uint8_t>(9U + static_cast<std::uint8_t>(index)));
+    binding.edge_identity = integration_id(
+        static_cast<std::uint8_t>(25U + static_cast<std::uint8_t>(index)));
+    binding.schema_identity = integration_id(41U);
+    binding.layout_identity = integration_id(57U);
+    invocation.input_bindings.push_back(std::move(binding));
+  }
   invocation.outputs.push_back(integration_output_plan());
   return invocation;
 }
@@ -695,6 +778,12 @@ void expect_one_child_reaped(
   EXPECT_EQ(errno, ECHILD);
 }
 
+/**
+ * @brief Proves a generic DenseTensor survives fresh-process publication.
+ * @throws Standard trust, protocol, execution, and assertion failures.
+ * @note Generic output retains its Schema, optional-Facet absence, Layout,
+ * versions, and three publisher digests without acquiring an ImageFacet.
+ */
 TEST(IsolatedCpuInvocation, CopiesThroughFreshProcessAndPublishesFreshValue) {
   const std::array<std::byte, 6U> source{std::byte{0},   std::byte{1},
                                          std::byte{2},   std::byte{253},
@@ -709,6 +798,14 @@ TEST(IsolatedCpuInvocation, CopiesThroughFreshProcessAndPublishesFreshValue) {
   ASSERT_EQ(result.outcome, IsolatedCpuInvocationOutcome::Succeeded);
   ASSERT_EQ(result.outputs.size(), 1U);
   EXPECT_TRUE(result.diagnostic.empty());
+  EXPECT_EQ(result.outputs[0].dense_tensor_descriptor(),
+            invocation.outputs[0].descriptor);
+  EXPECT_EQ(result.outputs[0].strided_layout(), invocation.outputs[0].layout);
+  EXPECT_FALSE(result.outputs[0].image_facet().has_value());
+  const auto* retained =
+      DenseTensorValueDescriptorMetadataAccess::get(result.outputs[0]);
+  ASSERT_NE(retained, nullptr);
+  EXPECT_EQ(*retained, integration_retained_metadata(invocation.outputs[0]));
   EXPECT_NE(result.outputs[0].allocation_identity(),
             input.allocation_identity());
   const std::array<std::byte, 6U> expected{std::byte{1},   std::byte{2},
@@ -717,6 +814,10 @@ TEST(IsolatedCpuInvocation, CopiesThroughFreshProcessAndPublishesFreshValue) {
   EXPECT_EQ(integration_bytes(result.outputs[0]), expected);
 }
 
+/**
+ * @brief Proves a zero-input generic output retains its exact non-image plan.
+ * @throws Standard trust, protocol, execution, and assertion failures.
+ */
 TEST(IsolatedCpuInvocation, SupportsZeroInputAndExactOutputPlan) {
   IsolatedCpuHostInvocation invocation =
       integration_invocation("fixture.fill_sequence", 113U);
@@ -725,10 +826,68 @@ TEST(IsolatedCpuInvocation, SupportsZeroInputAndExactOutputPlan) {
 
   ASSERT_EQ(result.outcome, IsolatedCpuInvocationOutcome::Succeeded);
   ASSERT_EQ(result.outputs.size(), 1U);
+  EXPECT_EQ(result.outputs[0].dense_tensor_descriptor(),
+            invocation.outputs[0].descriptor);
+  EXPECT_EQ(result.outputs[0].strided_layout(), invocation.outputs[0].layout);
+  EXPECT_FALSE(result.outputs[0].image_facet().has_value());
+  const auto* retained =
+      DenseTensorValueDescriptorMetadataAccess::get(result.outputs[0]);
+  ASSERT_NE(retained, nullptr);
+  EXPECT_EQ(*retained, integration_retained_metadata(invocation.outputs[0]));
   const std::array<std::byte, 6U> expected{std::byte{0}, std::byte{1},
                                            std::byte{2}, std::byte{3},
                                            std::byte{4}, std::byte{5}};
   EXPECT_EQ(integration_bytes(result.outputs[0]), expected);
+}
+
+/**
+ * @brief Proves a fresh-process generic output is a later generic input.
+ * @throws Standard trust, protocol, execution, and assertion failures.
+ * @note The second request repeats the first publisher's exact identity,
+ * version, and digest facts; the runtime observes a new capability while the
+ * Host preserves the immutable Value descriptor authority across calls.
+ */
+TEST(IsolatedCpuInvocation, GenericOutputBecomesExactInputAcrossCalls) {
+#if defined(__linux__)
+  IsolatedCpuHostInvocation source_request =
+      integration_invocation("fixture.fill_sequence", 115U);
+  const IsolatedCpuHostInvocationResult source =
+      integration_executor().invoke(source_request);
+  ASSERT_EQ(source.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  ASSERT_EQ(source.outputs.size(), 1U);
+
+  IsolatedCpuHostInvocation consumer_request = integration_invocation(
+      "fixture.increment_u8", 116U, {source.outputs.front()});
+  ASSERT_EQ(consumer_request.input_bindings.size(), 1U);
+  consumer_request.input_bindings[0].schema_identity =
+      source_request.outputs[0].schema_identity;
+  consumer_request.input_bindings[0].facet_identity =
+      source_request.outputs[0].facet_identity;
+  consumer_request.input_bindings[0].layout_identity =
+      source_request.outputs[0].layout_identity;
+  consumer_request.input_bindings[0].schema_version =
+      source_request.outputs[0].schema_version;
+  consumer_request.input_bindings[0].layout_version =
+      source_request.outputs[0].layout_version;
+  consumer_request.input_bindings[0].descriptor_digest =
+      source_request.outputs[0].descriptor_digest;
+  consumer_request.input_bindings[0].logical_content_digest =
+      source_request.outputs[0].logical_content_digest;
+  consumer_request.input_bindings[0].layout_digest =
+      source_request.outputs[0].layout_digest;
+
+  const IsolatedCpuHostInvocationResult consumed =
+      integration_executor().invoke(consumer_request);
+
+  ASSERT_EQ(consumed.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  ASSERT_EQ(consumed.outputs.size(), 1U);
+  const std::array<std::byte, 6U> expected{std::byte{1}, std::byte{2},
+                                           std::byte{3}, std::byte{4},
+                                           std::byte{5}, std::byte{6}};
+  EXPECT_EQ(integration_bytes(consumed.outputs.front()), expected);
+#else
+  GTEST_SKIP() << "fresh exact-object runtime execution is Linux-only";
+#endif
 }
 
 /**
@@ -891,6 +1050,59 @@ TEST(IsolatedCpuInvocation,
   EXPECT_EQ(count_open_descriptors(), descriptors_before);
 }
 
+/**
+ * @brief Proves protocol v2 rejects a malformed complete image data window.
+ * @throws Standard test fixture exceptions unchanged.
+ */
+TEST(IsolatedCpuInvocation,
+     RejectsMismatchedImageWindowBeforeAnyHostMaterialization) {
+  IsolatedCpuHostInvocation invocation =
+      integration_invocation("fixture.fill_sequence", 172U);
+  ImageFacet facet = make_zero_origin_image_facet(
+      invocation.outputs[0].descriptor, 1U, 0U, std::nullopt);
+  facet.data_window.x_end -= 1;
+  invocation.outputs[0].image_facet = std::move(facet);
+  invocation.outputs[0].facet_identity = integration_id(209U);
+  const std::size_t descriptors_before = count_open_descriptors();
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  EXPECT_THROW(integration_executor().invoke(invocation),
+               IsolatedCpuProtocolError);
+
+  const IsolatedCpuInvocationTestSnapshot after =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  EXPECT_EQ(after.host_capability_materialization_attempts,
+            before.host_capability_materialization_attempts);
+  EXPECT_EQ(after.spawned_children, before.spawned_children);
+  EXPECT_EQ(count_open_descriptors(), descriptors_before);
+}
+
+/**
+ * @brief Proves protocol v2 preserves valid signed rich image metadata.
+ * @throws Standard runtime, wire, publication, and assertion failures.
+ */
+TEST(IsolatedCpuInvocation, PreservesRichImageFacetAcrossFreshProcess) {
+#if defined(__linux__)
+  IsolatedCpuHostInvocation invocation =
+      integration_invocation("fixture.fill_sequence", 173U);
+  ImageFacet facet = make_zero_origin_image_facet(
+      invocation.outputs[0].descriptor, 1U, 0U, std::nullopt);
+  facet.display_window = ImageBounds{-1, -1, 4, 3};
+  invocation.outputs[0].image_facet = std::move(facet);
+  invocation.outputs[0].facet_identity = integration_id(210U);
+
+  const IsolatedCpuHostInvocationResult result =
+      integration_executor().invoke(invocation);
+
+  ASSERT_EQ(result.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  ASSERT_EQ(result.outputs.size(), 1U);
+  EXPECT_EQ(result.outputs[0].image_facet(), invocation.outputs[0].image_facet);
+#else
+  GTEST_SKIP() << "fresh exact-object runtime execution is Linux-only";
+#endif
+}
+
 TEST(IsolatedCpuInvocation, RejectsAggregatePlanBeforeAnyHostMaterialization) {
   IsolatedCpuHostInvocation invocation =
       integration_invocation("fixture.fill_sequence", 171U);
@@ -981,14 +1193,14 @@ TEST(IsolatedCpuInvocation, FreshExecClearsEnvironmentAndUnrelatedDescriptors) {
   ASSERT_GE(lower_descriptor_three.get(), 0);
   ASSERT_GE(lower_descriptor_four.get(), 0);
   ASSERT_GE(inherited.get(), 7);
-  IsolatedCpuHostInvocation invocation;
-  invocation.identity = integration_identity(193U);
-  invocation.operation = "fixture.verify_isolation";
+  IsolatedCpuHostInvocation invocation =
+      integration_invocation("fixture.verify_isolation", 193U);
   IsolatedCpuScalarParameter descriptor;
   descriptor.name = "inherited_fd";
   descriptor.kind = IsolatedCpuScalarKind::UnsignedInteger;
   descriptor.unsigned_value = static_cast<std::uint64_t>(inherited.get());
   invocation.parameters.push_back(std::move(descriptor));
+  invocation.outputs.clear();
   invocation.outputs.push_back(one_byte_output_plan());
 
   const IsolatedCpuHostInvocationResult result =
@@ -1007,9 +1219,8 @@ TEST(IsolatedCpuInvocation, FreshExecClearsEnvironmentAndUnrelatedDescriptors) {
  */
 TEST(IsolatedCpuInvocation, AppliesAdmittedResourceLimitsBeforeExec) {
   const PluginInvocationResourcePolicy policy;
-  IsolatedCpuHostInvocation invocation;
-  invocation.identity = integration_identity(194U);
-  invocation.operation = "fixture.verify_resource_limits";
+  IsolatedCpuHostInvocation invocation =
+      integration_invocation("fixture.verify_resource_limits", 194U);
   const std::array<std::pair<const char*, std::uint64_t>, 3U> parameters{
       std::pair{"address_space_bytes", policy.address_space_bytes},
       std::pair{"cpu_time_seconds", policy.cpu_time_seconds},
@@ -1021,6 +1232,7 @@ TEST(IsolatedCpuInvocation, AppliesAdmittedResourceLimitsBeforeExec) {
     parameter.unsigned_value = value;
     invocation.parameters.push_back(std::move(parameter));
   }
+  invocation.outputs.clear();
   invocation.outputs.push_back(one_byte_output_plan());
 
   const IsolatedCpuHostInvocationResult result =

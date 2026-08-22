@@ -128,13 +128,27 @@ Scalar 拼写保持稳定；array 与 object 递归渲染；object key 保持 or
 
 | 字段 | 含义 |
 | --- | --- |
-| `image_buffer` | 独立的当前 plugin ABI v2、tiled-write、codec 与 Host compatibility snapshot。 |
-| `image_value` | 有效时作为带显式 allocation/binding/revision identity 的 immutable sealed 或 producer-pending Value。Pending state 只属于 request local，不能进入正式 cache 或 visible commit。 |
-| `data` | 作为 `plugin::ParameterMap` 保存的命名标量或结构化输出。 |
+| `named_values` | 按规范顺序保存的 immutable Value。当前 image port 永久命名为 `image`；每个 image 或 generic entry 都是该精确名称唯一的 payload、allocation、readiness 与 revision 权威。 |
+| `data` | 作为 `plugin::ParameterMap` 保存的 named parameter-result 标量或结构；generic Value 绝不进入此字段。 |
 | `space` | 空间变换、尺度和 ROI 元数据。 |
-| `debug` | worker/设备/计时/范围诊断信息。启用的 CPU range inspection 会通过 `ImageBuffer::step` 遍历 active scalar byte；padding 被排除，opaque device value 保留 provider diagnostic。 |
+| `debug` | worker/设备/计时/范围诊断信息。启用的 CPU range inspection 会通过规范 Value layout 遍历 active scalar byte；padding 被排除，opaque device Value 保留 provider diagnostic。所有合法 native signed/unsigned 8/16/32/64-bit integer image 均可被检查。binary64 range 对不超过 32-bit 的整数保持精确；更宽整数采用确定性的 nearest-representable、ties-to-even 投影，可能损失整数精度，但不会改变 descriptor、Facet、binding、revision 或 payload 权威。sample domain 绝不会被 normalization。 |
 
-算子可以返回图像数据、命名数据，或两者都返回。
+算子可以返回 canonical image Value、独立命名的 generic Value、parameter result，或这些类别
+的已授权组合。
+
+Return shape 本身不是授权。Issue #130 会在 execution 前，根据所选 registered operation
+revision 冻结 `PlannedOutputAuthority`：它携带精确 canonical-image requirement、精确
+generic Value 与 parameter result 两类 named-data 集合、implementation/device identity、要求
+的 canonical-image DenseTensor/ImageFacet/Strided structure，以及任何可信的有限 Graph 或
+dirty extent。每个 generic Value 必须保留有效 revision/producer identity 与有效、非空的
+indexed storage binding；其 representation/layout 必须是具有 Strided 或 Blocked layout 的
+DenseTensor，或具有 ProviderDefined layout 的 ProviderDefined。Generic Value 不会因此获得
+image-facet 要求。普通 result 必须精确匹配每个类别；缺失、额外、malformed、wrong-name、
+wrong-facet、wrong-layout、wrong-identity 或 wrong-extent output 会在 dependent release 或
+首次 formal Graph mutation 前被拒绝。有监督的 staging 可以保留精确 Pending Value，但每个
+formal 边界都要求全部 declared Value 为 Ready。完整 HP route 会把所有 computation stage 在
+Graph clone 中，仅在授权后发布完整 snapshot，因此空 `NodeOutput` 绝不能制造 Whole
+validity 或 cacheable completion。
 
 持久 `OutputPort::output_parameters` 是可选、深度拥有的 `ParameterValue`。空 optional 表示
 文档字段缺失；已包含值的 null 会保留显式出现的 YAML null。因此，嵌套 output configuration
@@ -142,9 +156,20 @@ Scalar 拼写保持稳定；array 与 object 递归渲染；object key 保持 or
 
 对于 tiled `image_mixing`，需要 crop/pad 的 secondary input 会被物化为 request-local
 `NodeOutput`：named data、spatial/debug provenance 与 plugin-library lifetime 会被复制，而其
-image descriptor 会替换为通过内核 fill/copy 原语生成的 aligned storage。Resize 与 channel
-conversion 继续保留为局部 OpenCV algorithm call。Normalization context 会持有这些临时 output，
-直到所有同步 tile callback 完成；shape 完全匹配的 input 继续借用 upstream output。
+image Value 会替换为通过内核 fill/copy 原语生成、并在 normalized output 暴露前完成 seal 的
+aligned storage。这里的“named data”同时包括 generic named Value 与 parameter result，且不会
+把任一类别移入另一类别。Resize 与 channel conversion 继续保留为局部 OpenCV algorithm call。
+Normalization context 会持有这些临时 output，直到所有同步 tile callback 完成；shape 完全
+匹配的 input 继续借用 upstream output。
+
+DI-2 将 `DenseImageOutputPlan` 冻结为唯一 source-private 普通图像输出描述。该 immutable plan
+在 Host allocation 前持有 output name、完整 DenseTensor/ImageFacet fact、精确正向 Strided
+layout、byte envelope、base alignment 与完整 image Region。一个 `HostOutputBinding` 拥有
+aligned allocation 与 private builder lease。Move-only whole grant 或互不重叠的 tile grant
+只暴露经过检查的 row span；overlap、range、alignment、overflow、cancellation、exception、
+duplicate retirement 或 omitted retirement 都会使 binding 以关闭状态失败。只有所有 grant
+成功 retirement 后，binding 才能 seal 并恰好一次发布一个 Ready Value。该 plan 是唯一的
+内部 DI-3 mapping source，而不是临时 ABI record。
 
 ## 缓存字段
 
@@ -227,8 +252,10 @@ RT proxy commit 之后。
   `GraphDefinition`、持久 `Node` 字段与 `OutputPort` 也不拥有它。静态/有效参数、output-port
   configuration 与 operation 命名 output 都是 `ParameterValue` tree。逻辑 dirty work 与
   cache validity 使用规范化 `RegionSet`；当前 image extent、physical tile、Host/IPC v2
-  inspection 与 operation ABI v2 使用 checked derived `PixelSize` 和 `PixelRect` value。
-  只有 OpenCV provider 或算法实现在 matrix slice 或 library call
+  inspection 与 operation ABI v1 adapter 使用 checked derived `PixelSize` 和 `PixelRect` value。
+  在 compute/dirty compatibility path 中，这些 rectangle 是相对于所属 data window 的零基
+  storage coordinate，绝不会被保留为逻辑 metadata。逻辑 `ImageRect` 与其互转时，必须通过
+  那个精确 `ImageBounds` 做 checked origin translation。只有 OpenCV provider 或算法实现在 matrix slice 或 library call
   确实需要时，才会创建 OpenCV geometry。
 
 ### 当前持久化 identity 与完成边界
@@ -260,9 +287,13 @@ physical ownership 与正式 HP cache identity：
 
 - installed `DenseTensorDescriptor` 把 concrete shape、`ElementSemantics`、
   `StorageEncoding` 与可选 quantization 分开；
-- installed `ImageFacet` 显式指定彼此不同的 x/y axis 与可选 channel axis；
+- installed 普通 `ImageFacet` 显式指定彼此不同的 x/y axis 与可选 channel axis，
+  要求有符号半开 data window，并可保留独立 display window、稳定 channel/group
+  schema、声明 sample-domain facet 与 color facet；
 - `BufferHandle` 是同一显式 storage binding 上受检、不可变、非空的 range；它不暴露 raw
-  或 native pointer，并创建保留 identity 的 checked subrange；CPU builder 拥有 host byte，
+  或 native pointer，并创建保留 identity 的 checked subrange；CPU binding 会记录该 retained
+  range 所保证的正二次幂 alignment，使 portable capture 能精确重建它，同时不把 alignment
+  变成 logical identity；CPU builder 拥有 host byte，
   而 source-private device publication 可以保留 opaque native owner，并独立记录 host
   visibility；
 - `ValueBuilder` 拥有唯一 move-only `WriteLease`，live lease 存在时拒绝 seal，并以全新
@@ -277,28 +308,54 @@ physical ownership 与正式 HP cache identity：
   stride-aware unsigned-8 execution；它会复用已有 sealed input Value，并发布完全相同的
   sealed result revision。
 
-私有 `NodeOutput` 同时保留 `image_value` 与 `image_buffer`。有效 Value 是 immutable
-allocation/binding/revision authority；ImageBuffer 是独立 CPU compatibility snapshot。
-Producer-pending Value 只能存在于 request-local 临时 output：`TaskSubmissionPlan` 会让其 Run
-保持未 settlement，并在 terminal Ready 后释放 dependant；Failed、ProducerCancelled 或
-stale-typed completion 不会释放任何 dependant。普通 HP commit、sequential HP compute、
-connected-preflight shadow cache、
-dirty HP commit 与 disk decode 都会在正式发布前规范化 legacy CPU buffer。immutable cache
-copy 保留两类 identity；dirty clone 在 mutation 前清除旧 Value 并对最终 byte 重新 seal；
-replacement 与 disk decode 生成新 identity。allocation/revision token 只在进程内有效，
-永不进入 task-graph key、cache path、graph/YAML document 或 artifact byte。
+私有 `NodeOutput::named_values` 是唯一正式 Value 权威；`image` entry 取代过去的
+image-buffer/value pair。Producer-pending Value 只能存在于 request-local 临时 output：
+`TaskSubmissionPlan` 会让其 Run 保持未 settlement，并在 terminal Ready 后释放 dependant；
+Failed、ProducerCancelled 或 stale-typed completion 不会释放任何 dependant。普通 HP commit、
+sequential HP compute、connected-preflight shadow cache、dirty HP commit 与 disk decode 都会在
+正式发布前拒绝或规范化 compatibility staging。immutable cache copy 保留 allocation 与
+revision；dirty/tiled execution 创建一个全新 Host binding，并在所有选中的 executable grant
+retirement 后只 seal 一次；replacement 与 disk decode 生成新 identity。allocation/revision
+token 只在进程内有效，永不进入 task-graph key、cache path、graph/YAML document 或 artifact
+byte。
 Shared operation runtime 是 static Host 与每个 Value-using DSO 共用的唯一进程级 minting
 authority。
+
+Dirty HP/RT 对 source-private Pending Value 使用同一规则。`DirtyReadyTaskContext` 会在不阻塞
+worker 的情况下排入 Run-scoped continuation，保留精确 revision/allocation/producer/staged-Value
+identity，并且只在同一个 Value 变为 Ready 且再次通过 frozen plan 后释放 dependant。Failure、
+producer cancellation、Run cancellation、supersession 或 staged-value replacement 都不会发布
+formal output。Cancellation callback 不会递减由 worker 拥有的 logical task accounting；
+prepared source/dependent context 会一直保留到匹配的 service callback 完成 settlement。
 
 V-4 安装了 `RegionDomainKey`、`ImageRect`、rank-general `TensorSlice`、`RegionAtom`、
 immutable normalized `RegionSet`、bounded algebra、typed operation outcome 与 containment。
 `Node::hp_region` 是随唯一正式 HP cache authority 一起发布的 validity metadata。Dirty
 source history、per-node state、monolithic work 与 edge mapping 都保留 Region；image-only
 tile rectangle 从其 source Region 派生并与其并存。Core dense invert path 执行精确
-ImageRect 或 TensorSlice selection；RT 拒绝 TensorSlice，operation ABI v2 保持不变。当只有
+ImageRect 或 TensorSlice selection；RT 拒绝 TensorSlice。Operation ABI v1 携带受限且匹配的
+Region record。当只有
 一个 compatible atom 变化且 overlap 从其一侧移除区间时，精确 one-clause difference 会保留
 其他所有相等的 constrained-domain atom；会切分 atom 或同时改变多个 domain 的差集仍返回
 类型化 `TooComplex`。
+
+Issue #129 / DI-1 现已把内建普通 DenseImage 元数据具体化。必需的有符号半开
+`ImageBounds` data window 是不可变逻辑像素域；其 x/y 跨度必须与显式 axis 上的
+descriptor shape 精确一致。负原点与非零原点合法。可选 display window 是呈现
+元数据，而动态 dirty/dependency/execution/HP validity 仍属于 `RegionSet`。
+`Value::image_bounds()` 在 Pending、Failed 与 ProducerCancelled 状态下暴露 data-window
+元数据且不削弱只允许 Ready 的载荷 lease；`ImageView` 分别暴露零基存储索引与有符号
+逻辑坐标访问。因此 dirty planner entry 会同时保留精确 data window 与 storage-relative
+`PixelRect`；其 `RegionSet` validity 只能通过 checked origin addition 重建。
+
+可选有界 `ChannelSchema` 使用稳定非零 `ChannelId` 与 `ChannelGroupId`；诊断名称
+不选择角色，也不进入语义相等性/digest。版本 1 `SampleEncoding`/
+`SampleDomainFacet` 声明 normalized、legal 或 code-value 区间及稳定 ID 逐通道覆盖。
+版本 1 `ColorFacet` 把有效 channel group 绑定到显式 transfer function 与 primaries。
+存储可表示范围仍只属于 element semantics 与 storage encoding；quantization、声明
+sample meaning 与 color 保持独立。观测 min/max/histogram query、result 与完整
+revision/content/Region/selector/algorithm cache key 是独立派生值，永远不成为 Value
+或 descriptor/content identity。
 
 V-6 为每个 Value 附加 installed、copyable `ReadyFence` observer。同步 publication 初始即为
 Ready。Source-private pending producer 保留唯一 mutable CPU allocation capability，在发布
@@ -329,12 +386,19 @@ row。仍有 transfer pending 时调用退役属于 invariant failure。这项 G
 不会清除已结算的 resident replica。
 
 V-9 在不改变逻辑 Value identity 或 public binding fact 的前提下新增 byte authority。
-`ResourceLedger` 为每个已配置非 CPU `DeviceId` 拥有隔离的 memory/scratch account。Native
-plan 使用 backend size/alignment fact，actual allocation 使用 `allocatedSize`。Persistent
-device `Value` 的 type-erased external owner 会把唯一 memory lease 与 native allocation
-共同保留，因此 Value 副本与 residency 会保留而不是复制该 authority。Scratch 不进入 Value，
-而是随精确 asynchronous completion owner 延续。完成后的 HostPinned readback 在 scratch lease
-结束后继续保留其 shared Metal buffer，并将其归类为 CPU-owned output storage。
+`ResourceLedger` 为每个已配置非 CPU `DeviceId` 拥有隔离的 memory/scratch account。Metal
+texture size/alignment query 只提供 dedicated heap descriptor 的对齐后最小 request，不是 backing
+byte 的上界。在 native allocation 前，ledger 的唯一 root mutex 会原子校验该 minimum 与精确
+scratch plan，并预留该 device 当前全部可用的 persistent-memory ceiling。Allocation 后，
+dedicated heap 的正值 `currentAllocatedSize` 是唯一 persistent actual；不会再次计入
+heap-backed texture，而每项 scratch resource 都贡献自身的正值 `allocatedSize`。适配 plan 的
+commit 会在同一套唯一 mutex 下归还未使用的 ceiling，并拆分精确 persistent/scratch lease。
+无效或超过 plan 的 observation 会以 typed error 失败，让 native owner 与尚未 commit 的
+reservation 各自准确 rollback 一次。Persistent device `Value` 的 type-erased external owner
+会把唯一 memory lease 与 native allocation 共同保留，因此 Value 副本与 residency 会保留而不是
+复制该 authority。Scratch 不进入 Value，而是随精确 asynchronous completion owner 延续。
+完成后的 HostPinned readback 在 scratch lease 结束后继续保留其 shared Metal buffer，并将其
+归类为 CPU-owned output storage。
 
 V-12 针对最容易暴露 image-only 假设的维度验证这套已安装模型。dependency-neutral 矩阵覆盖
 带 padding image-faceted Value 的 1/3/4/8/16 通道与 FP32/FP64、rank-one 至 rank-five
@@ -394,7 +458,7 @@ exported handshake，以及 mandatory validation、纯 property、纯 Region、�
 canonical-content、owner 和 destroy callback。纯 callback 收到 descriptor/Layout/buffer
 metadata，但所有 payload pointer 都会被清空；V-14 中只有 validation 与 canonical-content
 traversal 这两个 semantic callback 会收到 payload。Access、mapping、transfer、conversion、
-inference、execution、native-device 与 operation ABI v2 authority 均不存在。
+inference、execution、native-device 与 operation-plugin authority 均不存在。
 
 借用的 ABI byte view 只用于输入。每个 callback 都会收到一个 Host 拥有的 output sink；
 diagnostic 与 BYTES-property record 声明 scalar length，provider 会在 callback-local 源 storage
@@ -418,11 +482,27 @@ byte 增量送入 SHA-256。两次 invocation 使用独立的 callback-local dia
 三个可选 digest identity，但它不是 graph document、manifest/chunk store、filesystem codec 或
 cache-policy integration。
 
-同一个已安装的 `compute_content_digest(Value)` 入口现在也为内建 DenseTensor value 提供
-冻结的 canonical-v1 逻辑 identity，且不会调用 provider callback。其保留的内建 Schema
-record 会编码 rank、shape、element semantics、storage encoding kind/width，以及可选的
-quantization block shape 和 binary32 scale bit。可选的保留 `ImageFacet` record 会编码 x/y
-axis 与可选 channel axis。Content traversal 按 row-major logical coordinate 执行：whole-byte
+同一个已安装的 `compute_content_digest(Value)` 入口为内建 DenseTensor value 提供冻结的
+canonical-v1 stream identity，且不会调用 provider callback。内建 Schema 结构版本 2
+编码 rank、shape、element semantics、storage encoding kind/width 以及可选 quantization
+block shape 和 binary32 scale bit。Image 结构版本 2 编码 axes、有符号 data/display
+windows、稳定 channel 顺序、group IDs 与成员；独立 Sample Domain 与 Color Facet 使用
+结构版本 1。规范拥有的 DenseTensor Schema identity 是
+`{0x70686f746f737069, 0x6465722d64656e73}`，可选 Image Facet identity 是
+`{0x70686f746f737069, 0x6465722d696d6167}`，完整 Strided Layout identity 是
+`{0x70686f746f737069, 0x6465722d73747269}`，其结构版本为 2。Installed operation C11
+与 C++17 SDK 会发布这些具名 fact。Facet-free DenseTensor 使用零 Facet identity，不会从
+consumer 获得 Image identity。
+
+每个 operation-produced Strided DenseTensor 都会在 immutable `Value` 中保留其精确
+publisher Schema、可选 Facet、Layout、descriptor/Layout version，以及 descriptor、
+logical-content 与 Layout digest word。Trusted 与 supervised output（包括 fresh-process
+adoption 和 generic named output）都会在 seal 前附加该 metadata。Facet presence 必须与
+immutable ImageFacet presence 精确匹配。全零 digest 保持 unavailable，且不存在仅适用于
+DenseImage 的 retained-metadata alias。
+
+诊断名称与观测统计均不存在。Content traversal 按 row-major logical
+coordinate 执行：whole-byte
 scalar 以 little-endian 发出，blocked FP4 则为每个 logical element 发出一个 low-nibble code
 byte。Stride、byte/bit offset、padding、block placement、nibble order、allocation/binding
 identity、device identity、readiness metadata 与 Value revision 均不进入 logical content
@@ -501,7 +581,8 @@ dependency 工作由
 - `src/lib/core/dense_tensor_content_digest.*`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/packed_dense_tensor.cpp`
-- `src/lib/core/value_image_adapter.*`
+- `src/lib/core/{value_region,dense_image_processing}.*`
+- `src/lib/adapters/{opencv,openexr}/`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/cpu_dense_image_operation.*`

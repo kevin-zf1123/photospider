@@ -6,11 +6,12 @@ set(Photospider_FOUND TRUE)
 set(Photospider_data_provider_sdk_FOUND TRUE)
 set(Photospider_embedded_FOUND TRUE)
 set(Photospider_ipc_client_FOUND @PHOTOSPIDER_BUILD_IPC@)
-set(Photospider_operation_sdk_FOUND TRUE)
+set(Photospider_operation_plugin_sdk_FOUND TRUE)
 set(Photospider_operation_runtime_FOUND TRUE)
 set(Photospider_operation_opencv_FOUND @PHOTOSPIDER_ENABLE_OPENCV@)
 set(Photospider_openexr_deep_provider_FOUND
     @PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER@)
+set(Photospider_openexr_enabled @PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER@)
 set(Photospider_policy_sdk_FOUND TRUE)
 set(Photospider_opencv_enabled @PHOTOSPIDER_ENABLE_OPENCV@)
 set(Photospider_yaml_enabled @PHOTOSPIDER_ENABLE_YAML@)
@@ -20,6 +21,7 @@ set(_Photospider_need_embedded FALSE)
 set(_Photospider_need_threads FALSE)
 set(_Photospider_need_opencv_core FALSE)
 set(_Photospider_need_openexr FALSE)
+set(_Photospider_need_openexr_provider FALSE)
 set(_Photospider_component_error "")
 if(Photospider_FIND_COMPONENTS)
   foreach(_Photospider_component IN LISTS Photospider_FIND_COMPONENTS)
@@ -36,9 +38,9 @@ if(Photospider_FIND_COMPONENTS)
     elseif(_Photospider_component STREQUAL "data_provider_sdk" OR
            _Photospider_component STREQUAL "policy_sdk")
       # The pure-C provider ABI headers require no external package.
-    elseif(_Photospider_component STREQUAL "operation_sdk" OR
+    elseif(_Photospider_component STREQUAL "operation_plugin_sdk" OR
            _Photospider_component STREQUAL "operation_runtime")
-      # Standard-library contracts and image allocation require no package.
+      # Pure-C records and image allocation require no external package.
     elseif(_Photospider_component STREQUAL "operation_opencv")
       if(Photospider_operation_opencv_FOUND)
         set(_Photospider_need_opencv_core TRUE)
@@ -47,6 +49,7 @@ if(Photospider_FIND_COMPONENTS)
             "Photospider was built without the operation_opencv component")
       endif()
     elseif(_Photospider_component STREQUAL "openexr_deep_provider")
+      set(_Photospider_need_openexr_provider TRUE)
       if(Photospider_openexr_deep_provider_FOUND)
         set(_Photospider_need_openexr TRUE)
       elseif(Photospider_FIND_REQUIRED_openexr_deep_provider)
@@ -64,6 +67,9 @@ if(Photospider_FIND_COMPONENTS)
 else()
   set(_Photospider_need_embedded TRUE)
   set(_Photospider_need_threads TRUE)
+endif()
+if(_Photospider_need_embedded AND Photospider_openexr_enabled)
+  set(_Photospider_need_openexr TRUE)
 endif()
 
 @PHOTOSPIDER_OPENEXR_COMPONENT_DISCOVERY@
@@ -139,7 +145,7 @@ if(Photospider_opencv_enabled AND
     (_Photospider_need_embedded AND Photospider_embedded_FOUND)))
   include("${CMAKE_CURRENT_LIST_DIR}/PhotospiderOpenCVTargets.cmake")
 endif()
-if(_Photospider_need_openexr AND
+if(_Photospider_need_openexr_provider AND
    Photospider_openexr_deep_provider_FOUND)
   include("${CMAKE_CURRENT_LIST_DIR}/PhotospiderOpenEXRTargets.cmake")
 endif()

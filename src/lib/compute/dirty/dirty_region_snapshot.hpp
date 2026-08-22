@@ -68,15 +68,16 @@ enum class DirtySourceLifecycleState {
 /**
  * @brief Source ROI emitted by one dirty source lifecycle event.
  *
- * @note Records are stable source facts. Derived actual dirty ROIs, tiles, and
- * monolithic records are rebuilt from these records.
+ * @note Records are stable compatibility facts. PixelRect is zero-based
+ * storage geometry; logical Region authority is retained separately. Derived
+ * work is rebuilt from these records.
  */
 struct DirtySourceRoiRecord {
   /** @brief Graph node id that emitted the dirty ROI. */
   int node_id = -1;
   /** @brief Dirty domain associated with the source event. */
   DirtyDomain domain = DirtyDomain::HighPrecision;
-  /** @brief Node-local source ROI recorded for the event. */
+  /** @brief Zero-based HP node-storage source ROI recorded for the event. */
   PixelRect source_roi;
   /** @brief Dirty generation in which the source ROI was recorded. */
   uint64_t generation = 0;
@@ -115,7 +116,7 @@ struct DirtySourceNodeState {
   DirtySourceLifecycleState lifecycle = DirtySourceLifecycleState::Idle;
   /** @brief Dirty generation represented by this source state. */
   uint64_t generation = 0;
-  /** @brief Source ROIs accumulated for the generation. */
+  /** @brief Zero-based HP storage ROIs accumulated for the generation. */
   std::vector<PixelRect> source_rois;
   /**
    * @brief Authoritative logical source Regions accumulated for the generation.
@@ -128,8 +129,8 @@ struct DirtySourceNodeState {
 /**
  * @brief Stable key describing one dirty tile in domain-local coordinates.
  *
- * @note Tile records use node ids and value-type coordinates so they remain
- * inspectable across graph reload and replacement workflows.
+ * @note PixelRect fields are zero-based in their execution storage domain.
+ * Region fields are logical and may carry a signed data-window origin.
  */
 struct DirtyTileKey {
   /** @brief Graph node id whose output tile is dirty. */
@@ -144,12 +145,17 @@ struct DirtyTileKey {
   int tile_y = 0;
   /** @brief Tile edge length in domain-local pixels. */
   int tile_size = 0;
-  /** @brief Pixel ROI covered by this tile key. */
+  /**
+   * @brief Zero-based grid-aligned storage ROI identified by this tile key.
+   * @note A boundary key may extend beyond the allocation; execution clips its
+   * task shape, while region remains bounded logical metadata.
+   */
   PixelRect pixel_roi;
   /**
-   * @brief Authoritative logical ImageRect Region covered by this tile.
+   * @brief Authoritative in-data-window logical ImageRect covered by this tile.
    * @note Current tile enumeration is image-only; TensorSlice uses monolithic
-   *       Region work and never fabricates tile coordinates.
+   * Region work and never fabricates tile coordinates. Boundary-key overhang
+   * is clipped before storage-to-logical translation.
    */
   RegionSet region = RegionSet::empty();
 };
@@ -165,7 +171,7 @@ struct DirtyMonolithicRegion {
   int node_id = -1;
   /** @brief Compute domain of the monolithic dirty record. */
   DirtyDomain domain = DirtyDomain::HighPrecision;
-  /** @brief Domain-local pixel ROI represented by this record. */
+  /** @brief Zero-based domain-local storage ROI represented by this record. */
   PixelRect pixel_roi;
   /** @brief True when the node output is dirty as a whole unit. */
   bool whole_output = true;
@@ -190,9 +196,9 @@ struct DirtyEdgeMapping {
   int to_node_id = -1;
   /** @brief Dirty domain represented by the mapping. */
   DirtyDomain domain = DirtyDomain::HighPrecision;
-  /** @brief ROI on from_node_id side of the edge. */
+  /** @brief Zero-based HP storage ROI on from_node_id side of the edge. */
   PixelRect from_roi;
-  /** @brief ROI on to_node_id side of the edge. */
+  /** @brief Zero-based HP storage ROI on to_node_id side of the edge. */
   PixelRect to_roi;
   /** @brief Direction of the recorded propagation. */
   DirtyEdgeDirection direction = DirtyEdgeDirection::BackwardDemand;
@@ -231,11 +237,16 @@ struct DirtyRegionSnapshot {
   std::vector<DirtyTileKey> dirty_tiles;
   /** @brief Monolithic dirty records derived for nodes that cannot tile. */
   std::vector<DirtyMonolithicRegion> dirty_monolithic_nodes;
-  /** @brief Dirty ROIs keyed by node id after domain-specific normalization. */
+  /**
+   * @brief Zero-based compatibility ROIs in the snapshot producer's documented
+   * HP-planning or RT-lifecycle storage domain.
+   */
   std::unordered_map<int, std::vector<PixelRect>> per_node_dirty_rois;
   /** @brief Authoritative normalized dirty Regions keyed by node id. */
   std::unordered_map<int, std::vector<RegionSet>> per_node_dirty_regions;
-  /** @brief Actual dirty ROIs exposed to inspection and materialization. */
+  /**
+   * @brief Zero-based actual compatibility ROIs in the same per-node domain.
+   */
   std::unordered_map<int, std::vector<PixelRect>> actual_dirty_rois;
   /** @brief Authoritative actual dirty Regions keyed by node id. */
   std::unordered_map<int, std::vector<RegionSet>> actual_dirty_regions;

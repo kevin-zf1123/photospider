@@ -39,32 +39,32 @@ TEST(PhysicalExecutionRoutes, PublishesOnlyTheThreeCanonicalPrivateRoutes) {
  */
 TEST(PhysicalExecutionRoutes, TracksConcurrentCpuAndGpuPipelineStarts) {
   PhysicalExecutionRoutes routes;
-  EXPECT_TRUE(
-      routes.can_start("cpu", Device::CPU, PhysicalExecutionLane::Cpu, 3, 7U));
-  EXPECT_TRUE(routes.can_start("gpu_pipeline", Device::CPU,
+  EXPECT_TRUE(routes.can_start("cpu", DeviceBackend::CPU,
+                               PhysicalExecutionLane::Cpu, 3, 7U));
+  EXPECT_TRUE(routes.can_start("gpu_pipeline", DeviceBackend::CPU,
                                PhysicalExecutionLane::Cpu, 2, 5U));
-  EXPECT_TRUE(routes.can_start("gpu_pipeline", Device::GPU_METAL,
+  EXPECT_TRUE(routes.can_start("gpu_pipeline", DeviceBackend::Metal,
                                PhysicalExecutionLane::Gpu, 3, 5U));
-  EXPECT_FALSE(routes.can_start("cpu", Device::GPU_METAL,
+  EXPECT_FALSE(routes.can_start("cpu", DeviceBackend::Metal,
                                 PhysicalExecutionLane::Gpu, 3, 7U));
-  EXPECT_FALSE(routes.can_start("gpu_pipeline", Device::GPU_METAL,
+  EXPECT_FALSE(routes.can_start("gpu_pipeline", DeviceBackend::Metal,
                                 PhysicalExecutionLane::Cpu, 2, 5U));
 
-  EXPECT_TRUE(routes.commit_start("cpu", Device::CPU));
-  EXPECT_TRUE(routes.commit_start("cpu", Device::CPU));
-  EXPECT_TRUE(routes.commit_start("gpu_pipeline", Device::CPU));
-  EXPECT_TRUE(routes.commit_start("gpu_pipeline", Device::GPU_METAL));
-  EXPECT_FALSE(routes.commit_start("gpu_pipeline", Device::GPU_METAL));
+  EXPECT_TRUE(routes.commit_start("cpu", DeviceBackend::CPU));
+  EXPECT_TRUE(routes.commit_start("cpu", DeviceBackend::CPU));
+  EXPECT_TRUE(routes.commit_start("gpu_pipeline", DeviceBackend::CPU));
+  EXPECT_TRUE(routes.commit_start("gpu_pipeline", DeviceBackend::Metal));
+  EXPECT_FALSE(routes.commit_start("gpu_pipeline", DeviceBackend::Metal));
   EXPECT_EQ(routes.in_flight("cpu"), 2U);
   EXPECT_EQ(routes.in_flight("gpu_pipeline"), 2U);
   EXPECT_FALSE(routes.drained());
 
-  EXPECT_TRUE(routes.finish("cpu", Device::CPU));
-  EXPECT_TRUE(routes.finish("gpu_pipeline", Device::CPU));
-  EXPECT_TRUE(routes.finish("gpu_pipeline", Device::GPU_METAL));
-  EXPECT_TRUE(routes.finish("cpu", Device::CPU));
+  EXPECT_TRUE(routes.finish("cpu", DeviceBackend::CPU));
+  EXPECT_TRUE(routes.finish("gpu_pipeline", DeviceBackend::CPU));
+  EXPECT_TRUE(routes.finish("gpu_pipeline", DeviceBackend::Metal));
+  EXPECT_TRUE(routes.finish("cpu", DeviceBackend::CPU));
   EXPECT_TRUE(routes.drained());
-  EXPECT_FALSE(routes.finish("cpu", Device::CPU));
+  EXPECT_FALSE(routes.finish("cpu", DeviceBackend::CPU));
 }
 
 /**
@@ -73,25 +73,25 @@ TEST(PhysicalExecutionRoutes, TracksConcurrentCpuAndGpuPipelineStarts) {
  */
 TEST(PhysicalExecutionRoutes, SerialDebugIsSingleFlightAndReusable) {
   PhysicalExecutionRoutes routes;
-  EXPECT_FALSE(routes.can_start("serial_debug", Device::CPU,
+  EXPECT_FALSE(routes.can_start("serial_debug", DeviceBackend::CPU,
                                 PhysicalExecutionLane::Cpu, 1, 0U));
-  EXPECT_FALSE(routes.can_start("serial_debug", Device::CPU,
+  EXPECT_FALSE(routes.can_start("serial_debug", DeviceBackend::CPU,
                                 PhysicalExecutionLane::Cpu, 0, 1U));
-  EXPECT_FALSE(routes.can_start("serial_debug", Device::GPU_METAL,
+  EXPECT_FALSE(routes.can_start("serial_debug", DeviceBackend::Metal,
                                 PhysicalExecutionLane::Gpu, 0, 0U));
-  ASSERT_TRUE(routes.can_start("serial_debug", Device::CPU,
+  ASSERT_TRUE(routes.can_start("serial_debug", DeviceBackend::CPU,
                                PhysicalExecutionLane::Cpu, 0, 0U));
-  ASSERT_TRUE(routes.commit_start("serial_debug", Device::CPU));
-  EXPECT_FALSE(routes.can_start("serial_debug", Device::CPU,
+  ASSERT_TRUE(routes.commit_start("serial_debug", DeviceBackend::CPU));
+  EXPECT_FALSE(routes.can_start("serial_debug", DeviceBackend::CPU,
                                 PhysicalExecutionLane::Cpu, 0, 0U));
-  EXPECT_FALSE(routes.commit_start("serial_debug", Device::CPU));
+  EXPECT_FALSE(routes.commit_start("serial_debug", DeviceBackend::CPU));
   EXPECT_EQ(routes.in_flight("serial_debug"), 1U);
 
-  ASSERT_TRUE(routes.finish("serial_debug", Device::CPU));
-  EXPECT_TRUE(routes.can_start("serial_debug", Device::CPU,
+  ASSERT_TRUE(routes.finish("serial_debug", DeviceBackend::CPU));
+  EXPECT_TRUE(routes.can_start("serial_debug", DeviceBackend::CPU,
                                PhysicalExecutionLane::Cpu, 0, 0U));
-  EXPECT_TRUE(routes.commit_start("serial_debug", Device::CPU));
-  EXPECT_TRUE(routes.finish("serial_debug", Device::CPU));
+  EXPECT_TRUE(routes.commit_start("serial_debug", DeviceBackend::CPU));
+  EXPECT_TRUE(routes.finish("serial_debug", DeviceBackend::CPU));
   EXPECT_TRUE(routes.drained());
 }
 
@@ -101,22 +101,22 @@ TEST(PhysicalExecutionRoutes, SerialDebugIsSingleFlightAndReusable) {
  */
 TEST(PhysicalExecutionRoutes, ShutdownRejectsNewStartsAndDrainsCommittedWork) {
   PhysicalExecutionRoutes routes;
-  ASSERT_TRUE(routes.commit_start("cpu", Device::CPU));
-  ASSERT_TRUE(routes.commit_start("gpu_pipeline", Device::GPU_METAL));
+  ASSERT_TRUE(routes.commit_start("cpu", DeviceBackend::CPU));
+  ASSERT_TRUE(routes.commit_start("gpu_pipeline", DeviceBackend::Metal));
 
   routes.begin_shutdown();
   routes.begin_shutdown();
-  EXPECT_FALSE(
-      routes.can_start("cpu", Device::CPU, PhysicalExecutionLane::Cpu, 0, 0U));
-  EXPECT_FALSE(routes.can_start("gpu_pipeline", Device::GPU_METAL,
-                                PhysicalExecutionLane::Gpu, 0, 0U));
-  EXPECT_FALSE(routes.can_start("serial_debug", Device::CPU,
+  EXPECT_FALSE(routes.can_start("cpu", DeviceBackend::CPU,
                                 PhysicalExecutionLane::Cpu, 0, 0U));
-  EXPECT_FALSE(routes.commit_start("cpu", Device::CPU));
+  EXPECT_FALSE(routes.can_start("gpu_pipeline", DeviceBackend::Metal,
+                                PhysicalExecutionLane::Gpu, 0, 0U));
+  EXPECT_FALSE(routes.can_start("serial_debug", DeviceBackend::CPU,
+                                PhysicalExecutionLane::Cpu, 0, 0U));
+  EXPECT_FALSE(routes.commit_start("cpu", DeviceBackend::CPU));
   EXPECT_FALSE(routes.drained());
 
-  EXPECT_TRUE(routes.finish("cpu", Device::CPU));
-  EXPECT_TRUE(routes.finish("gpu_pipeline", Device::GPU_METAL));
+  EXPECT_TRUE(routes.finish("cpu", DeviceBackend::CPU));
+  EXPECT_TRUE(routes.finish("gpu_pipeline", DeviceBackend::Metal));
   EXPECT_TRUE(routes.drained());
 }
 

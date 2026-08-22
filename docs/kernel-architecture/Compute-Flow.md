@@ -83,7 +83,11 @@ fail-stop rather than a recoverable post-publication Host rejection.
 The dirty ROI remains a kernel-owned `PixelRect` while it is copied from
 `HostComputeRequest` through `Kernel::ComputeRequest`, graph propagation,
 planning, task selection, staged execution, and `NodeExecutor`. Extents use
-`PixelSize`. No OpenCV geometry conversion occurs on this path; a provider may
+`PixelSize`. This compatibility rectangle is always zero-based storage
+geometry, not a signed logical coordinate. Planner entries retain the owning
+HP `ImageBounds`; logical `RegionSet` requests are clipped and origin-subtracted
+before entering this path, and retained validity is rebuilt by checked origin
+addition. No OpenCV geometry conversion occurs on this path; a provider may
 create a local OpenCV rectangle or size only at an actual matrix or algorithm
 call.
 
@@ -114,12 +118,23 @@ non-CPU `DeviceId` account atomically reserves persistent-memory and scratch
 plans under the same ledger root mutex. The Metal Perlin path plans its output
 texture, permutation/scale buffers, and readback buffer before its first native
 allocation; CPU-to-Metal upload plans its destination texture and staging
-buffer before either allocation. Native heap size/alignment supplies the plan,
-`allocatedSize` supplies actual bytes, and command commit occurs only after
-actual reconciliation. Persistent memory then follows the native Value owner
-through residency, while scratch remains charged until the exact native
-completion owner retires. Provider/Run return cannot release either owner
-early, and queue/pipeline infrastructure is not charged as invocation scratch.
+buffer before either allocation. Native heap texture size/alignment supplies a
+validated minimum descriptor request, not an upper bound on the backing of the
+heap that the device later creates. Because Metal exposes `MTLHeap::size` and
+`currentAllocatedSize` only after heap creation, the ledger atomically reserves
+all persistent memory currently available in that device account when the
+minimum fits, together with the exact scratch plan. This occurs before any
+native allocation and applies no process-page or observed-device heuristic.
+After the heap-backed texture exists, the positive, representable
+`MTLHeap::currentAllocatedSize` is the one persistent actual; the texture's
+`allocatedSize` is not added again, while scratch resources retain their own
+`allocatedSize` audit. Command commit occurs only after every actual fits the
+admitted plan, which returns the unused memory ceiling. Persistent memory then
+follows the native Value owner, which explicitly retains both texture and heap
+through residency and releases them before its lease; scratch remains charged
+until the exact native completion owner retires. Provider/Run return cannot
+release either owner early, and queue/pipeline infrastructure is not charged as
+invocation scratch.
 
 Benchmark configuration does not reconfigure that process pool. For each
 benchmark Run, `execution.threads` resolves to an optional positive
@@ -176,6 +191,23 @@ stack executor pointer crosses that boundary. Every private route retains the sa
 and Host-authored completion identity. Realtime children settle through
 the request-owned `RunGroup`, whose stable control owns both observation leases,
 the RT-first gate, cancellation fan-out, and deterministic aggregate outcome.
+
+Issue #130 freezes output authority at that same planning boundary. The
+selected revision's `OperationMetadata` declares whether the exact canonical
+`image` output is required, the complete legal generic named-Value set, and the
+complete legal parameter-result set. A `PlannedOutputAuthority` combines that
+declaration with the frozen implementation/device identity and, when known,
+the trusted Graph or dirty extent. Provider-returned names, descriptors,
+facets, layouts, or identities cannot expand the plan. Generic Values remain
+separate from parameter data and do not inherit image-only facet/extent rules.
+Every route validates its staged `NodeOutput` before a dependent can observe
+it and validates again at formal commit. Supervised continuation may retain
+exact Pending named Values; inline/sequential and every formal boundary require
+Ready. Full sequential and parallel HP work executes against a request-owned
+Graph clone; only a fully authorized result may replace live Graph state
+through the no-throw snapshot publication. Missing, extra, malformed, or
+mismatched output therefore leaves cache, Region, version, inspection, timing,
+and disk-persistence state unchanged.
 
 `FullTaskGraphExpander` expands the raw graph into the full node/tile task graph
 for one compute domain. It does not depend on the request target, cache state,
@@ -476,9 +508,9 @@ Current compute I/O has several separately observable completion layers:
 A successful `ComputeRun` therefore means that the validated Graph/RT result
 was published, or that an admitted no-op reached its valid terminal path. It
 does not promise disk-cache persistence, Graph-document save, daemon
-acknowledgement, result delivery, or durable user-output commit. The legacy
-`io/save` operation can expose a file side effect before its enclosing staged
-Run commits; that callback-owned behavior is not a Run commit protocol.
+acknowledgement, result delivery, or durable user-output commit. The former
+callback-owned `io/save` side effect is removed; explicit CLI/codec output has
+its own outcome and is not a Run commit protocol.
 
 The current product transaction still performs eligible deferred HP cache
 writes before the no-throw live Graph swap. After the existing live predicates
@@ -548,6 +580,14 @@ and can schedule downsample work to refresh `RealtimeProxyGraph` state.
 `IntentUpdateCoordinator` routes global HP dirty requests to this path and
 records `intent_coordinator_global_dirty_update`.
 
+HP-to-RT downsample requests carry the committed logical HP `RegionSet`, not a
+storage rectangle. `DownsampleExecutor` observes the committed HP Value's
+signed data window, translates the request to a clipped zero-based dense-Value
+storage ROI for pixel selection, and commits the translated-back logical
+Region to `RealtimeProxyGraph::NodeState::region_hp`. Empty direct requests
+retain the legacy full-frame fallback, Whole maps to the explicit finite data window, and
+stale/failure/cancellation paths publish no staged proxy state.
+
 Forced HP dirty updates are the exception: when `force_recache=true`, the HP
 staging buffer intentionally does not seed pixels from the previous HP cache, so
 the executor expands the HP planning ROI to the target node's full current HP
@@ -562,6 +602,8 @@ Consequently, one public Host HP dirty request exercises one continuous
 kernel-native geometry path: request validation, graph-scoped backward
 projection, immutable plan selection, source-first ready dispatch, node
 execution, and staged HP commit all observe `PixelRect`/`PixelSize` values.
+The accompanying Region metadata remains in each Value's signed logical data
+window and is never inferred from an unqualified storage rectangle.
 
 ## RealTimeUpdate
 
@@ -645,6 +687,57 @@ Current defaults:
 
 These constants are not permanent ABI.
 
+## DI-2 Output Publication Flow
+
+Every ordinary dense-image producer now follows one private lifecycle:
+
+1. `NodeExecutor` freezes the complete `DenseImageOutputPlan` from immutable
+   input/inference facts before allocation;
+2. one `HostOutputBinding` creates the aligned allocation and owns the sole
+   builder write authority;
+3. whole-output work receives one whole grant, while tiled HP/RT work receives
+   checked pairwise-disjoint tile grants over the same per-node binding;
+4. each producer stops using its pointers and retires its grant exactly once;
+5. the final executable tile seals the binding and installs the canonical
+   named `image` Value in request-local output; and
+6. Run commit publishes that already Ready Value with independent graph,
+   Region, HP-generation, and RT-generation predicates.
+
+No consumer observes partial binding bytes. For a nonempty mapped ROI,
+task-graph planning retains each consumer's exact ROI-covered producer task
+ids. Exact clipping that yields an empty upstream ROI retains the complete
+producer task set only as a publication join because the current runner still
+resolves the connected complete `NodeOutput`. A nonfinal producer tile retires
+successfully without releasing its dependency edges; after the final tile
+seals, finalizes metadata, and installs the complete request-local Value, that
+unique publisher batches physical release of every original sibling edge.
+Nonempty logical task identity therefore remains spatially exact without adding
+a second Value/readiness authority or extra provider callback. Whole-node and
+parameter dependencies retain their complete producer-node joins. An empty
+successful target remains data-only and publishes no synthetic image. Any
+grant error, exception, cancellation, missing retirement, or undrained binding
+fails the Run, releases no unpublished tile edges, and leaves the prior visible
+Graph/RT state unchanged. Metal pre-commit deadline rejection installs no
+completion handler before the final deadline observation, so the unsubmitted
+owner graph and all device leases unwind instead of becoming an invisible
+publication.
+
+A supervised native producer may return one or more declared named Values while
+their `ReadyFence` is Pending. Full parallel continuation or
+`DirtyReadyTaskContext` registers a non-inline wait on the Run-scoped executor
+instead of blocking a worker or releasing dependencies. Multiple Pending names
+are chained in canonical map order, with a replacement completion unit added
+before each next wait. Dirty callbacks recheck the exact staged name, revision,
+producer, representation, and every indexed `StorageBinding`; all paths rerun
+the frozen authority and require every declared Value to be Ready before
+dependent release or formal commit. Inline sequential and direct formal dirty
+paths have no such continuation and reject Pending synchronously. Failed,
+ProducerCancelled, explicit Run cancellation, stale execution, or staged-Value
+replacement fails closed with no dependency release and no Graph/RT mutation.
+Cancellation closes publication and cancels registrations outside the
+continuation mutex; logical task accounting remains worker-owned, while
+retained contexts keep callback owners alive until service settlement.
+
 ## Events and Timing
 
 The I1 evidence path is separate from the public graph-event ring. Its bounded
@@ -697,7 +790,14 @@ No unbounded Host vector drain exists.
 
 `TimingCollector` separately stores node timings and total elapsed compute time
 when timing is enabled. Debug metadata in `NodeOutput` records worker id,
-timestamp, execution time, device, and optional range checks.
+timestamp, execution time, device, and optional range checks. For a Ready,
+host-readable ordinary image, timing range inspection accepts every valid
+native signed/unsigned 8/16/32/64-bit integer encoding and reads only logical
+samples. Binary64 extrema are exact through 32 bits; wider integers use a
+deterministic nearest-representable, ties-to-even projection independent of
+the ambient floating-point rounding mode. That diagnostic projection may lose
+integer precision, performs no sample-domain normalization, and changes no
+Value descriptor, Facet, binding, revision, or payload bytes.
 
 ## Error Handling
 
@@ -811,7 +911,6 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/ipc/output_store.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/execution/device/compute_io_executor.*`
-- `plugins/ops/save_op.cpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/execution/progressive_compute.*`
 - `src/lib/compute/execution/run_lifecycle_registry.*`
@@ -824,7 +923,7 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/compute/dispatch/compute_task_dispatcher.*`
 - `src/lib/compute/dirty/intent_update_coordinator.*`
 - `src/lib/compute/dirty/dirty_update_executor.*`
-- `src/lib/core/exact_box_downsample.cpp`
+- `src/lib/core/dense_image_processing.*`
 - `src/lib/runtime/graph_event_service.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/unit/test_compute_io_executor.cpp`

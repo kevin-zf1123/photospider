@@ -235,13 +235,13 @@ inline bool registry_executes_device_id(
     case DeviceBackend::CPU:
       return false;
     case DeviceBackend::Metal:
-      return device_executors.contains(Device::GPU_METAL);
+      return device_executors.contains(DeviceBackend::Metal);
     case DeviceBackend::CUDA:
-      return device_executors.contains(Device::GPU_CUDA);
+      return device_executors.contains(DeviceBackend::CUDA);
     case DeviceBackend::Vulkan:
       return false;
     case DeviceBackend::NPU:
-      return device_executors.contains(Device::ASIC_NPU);
+      return device_executors.contains(DeviceBackend::NPU);
   }
   return false;
 }

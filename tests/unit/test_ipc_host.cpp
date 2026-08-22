@@ -36,6 +36,7 @@
 #include "ipc/ipc_host_runtime.hpp"
 #include "ipc/server.hpp"
 #include "ipc/unix_socket.hpp"
+#include "photospider/data/value_artifact.hpp"
 #include "photospider/ipc/client.hpp"
 #include "photospider/ipc/host.hpp"
 #include "support/ipc_host_spy.hpp"
@@ -437,17 +438,17 @@ Json compute_job_result(const std::string& compute_id,
 }
 
 /**
- * @brief Returns one successful empty image for status-only runtime tests.
+ * @brief Returns one successful empty artifact set for status-only tests.
  * @param metadata Unused artifact metadata.
- * @return Canonical empty ImageBuffer success.
+ * @return Canonical empty named-Value artifact-set success.
  * @throws Nothing.
  * @note Status-only tests never invoke this callback; a concrete function keeps
  *       the injected callback type explicit for every supported compiler.
  */
-::ps::Result<ImageBuffer> consume_empty_test_artifact(
+::ps::Result<NamedValueArtifactSet> consume_empty_test_artifact(
     const ::ps::ipc::OutputArtifactMetadata& metadata) {
   (void)metadata;
-  return {OperationStatus{}, ImageBuffer{}};
+  return {OperationStatus{}, NamedValueArtifactSet{}};
 }
 
 /**
@@ -459,13 +460,13 @@ Json compute_job_result(const std::string& compute_id,
 class RecordingPollingRuntime {
  public:
   /** @brief Artifact callback type retained by the injected runtime. */
-  using ArtifactConsumer = std::function<Result<ImageBuffer>(
+  using ArtifactConsumer = std::function<Result<NamedValueArtifactSet>(
       const ::ps::ipc::OutputArtifactMetadata&)>;
 
   /**
    * @brief Stores immutable completion and artifact callbacks.
    * @param before_async_completion Hook called before async outcome publish.
-   * @param consume_artifact Artifact consumer used by image-mode requests.
+   * @param consume_artifact Artifact consumer used by Values-mode requests.
    * @throws std::bad_alloc if callback transfer allocates.
    * @note Callback targets must synchronize their own shared mutable state.
    */
@@ -548,7 +549,7 @@ class RecordingPollingRuntime {
   /** @brief Immutable hook invoked immediately before async publication. */
   std::function<void()> before_async_completion_;
 
-  /** @brief Immutable image artifact consumer. */
+  /** @brief Immutable named-Value artifact consumer. */
   ArtifactConsumer consume_artifact_;
 };
 
@@ -927,9 +928,9 @@ TEST(IpcHostDispatch, MapsEveryCurrentHostVirtualWithoutFallback) {
   Result<std::future<OperationStatus>> async = host->compute_async(compute);
   ASSERT_TRUE(async.status.ok) << async.status.message;
   EXPECT_TRUE(async.value.get().ok);
-  const Result<ImageBuffer> image = host->compute_and_get_image(compute);
-  EXPECT_TRUE(image.status.ok) << image.status.message;
-  EXPECT_EQ(image.value.data, nullptr);
+  const Result<NamedValueResult> values = host->compute_and_get_values(compute);
+  EXPECT_TRUE(values.status.ok) << values.status.message;
+  EXPECT_TRUE(values.value.values().empty());
 
   EXPECT_TRUE(host->timing(session).status.ok);
   EXPECT_TRUE(host->last_io_time(session).status.ok);
@@ -1325,7 +1326,7 @@ TEST(IpcHostFactory, DefersConnectionAndReturnsExactTransportFailure) {
  *
  * @return Nothing; GoogleTest records Graph status and future mismatches.
  * @throws std::bad_alloc if Host or diagnostic allocation fails.
- * @note The deliberately absent socket proves sync, async, and image compute
+ * @note The deliberately absent socket proves sync, async, and Values compute
  *       all apply the public Host `InvalidParameter` contract before opening a
  *       Client connection. Direct typed Client validation remains a protocol
  *       boundary tested separately.
@@ -1343,10 +1344,10 @@ TEST(IpcHostCompute, RejectsZeroMaximumParallelismBeforeTransport) {
   const VoidResult computed = host->compute(request);
   const Result<std::future<OperationStatus>> asynchronous =
       host->compute_async(request);
-  const Result<ImageBuffer> image = host->compute_and_get_image(request);
+  const Result<NamedValueResult> values = host->compute_and_get_values(request);
 
   for (const OperationStatus* status :
-       {&computed.status, &asynchronous.status, &image.status}) {
+       {&computed.status, &asynchronous.status, &values.status}) {
     EXPECT_FALSE(status->ok);
     EXPECT_EQ(status->domain, OperationErrorDomain::Graph);
     EXPECT_EQ(status->code,
@@ -1853,10 +1854,10 @@ ArtifactMappingOperations post_map_tamper_operations() noexcept {
 }
 
 /**
- * @brief Creates one protected tight-row UINT8 artifact and exact metadata.
- * @tparam Size Compile-time nonzero payload byte count.
+ * @brief Creates one protected canonical Value archive and exact metadata.
+ * @tparam Size Compile-time nonzero logical payload byte count.
  * @param path Absolute path below a mode-0700 temporary directory.
- * @param bytes Exact artifact payload.
+ * @param bytes Exact logical DenseTensor payload.
  * @return Metadata matching the new same-user mode-0600 regular file.
  * @throws std::bad_alloc or std::system_error if path storage or file IO fails.
  */
@@ -1865,18 +1866,28 @@ template <std::size_t Size>
     const std::filesystem::path& path,
     const std::array<std::uint8_t, Size>& bytes) {
   static_assert(Size > 0, "artifact test payload must not be empty");
-  static_assert(
-      Size <= static_cast<std::size_t>(std::numeric_limits<int>::max()),
-      "artifact test width must fit int");
+  std::vector<std::byte> storage(Size);
+  for (std::size_t index = 0U; index < Size; ++index) {
+    storage[index] = static_cast<std::byte>(bytes[index]);
+  }
+  DenseTensorDescriptor descriptor{{Size},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  Value value =
+      Value::from_cpu_dense_tensor(std::move(descriptor), std::nullopt,
+                                   StridedLayout{{1}}, std::move(storage));
+  const NamedValueArtifactSet values{{capture_value_artifact("image", value)}};
+  const std::vector<std::byte> archive =
+      encode_named_value_artifact_set(values);
   UniqueFd artifact(
       ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600));
   if (!artifact) {
     throw std::system_error(errno, std::generic_category(), "artifact open");
   }
   std::size_t written = 0;
-  while (written < bytes.size()) {
-    const ssize_t count =
-        ::write(artifact.get(), bytes.data() + written, bytes.size() - written);
+  while (written < archive.size()) {
+    const ssize_t count = ::write(artifact.get(), archive.data() + written,
+                                  archive.size() - written);
     if (count < 0 && errno == EINTR) {
       continue;
     }
@@ -1897,16 +1908,31 @@ template <std::size_t Size>
   ::ps::ipc::OutputArtifactMetadata metadata;
   metadata.output_id = OutputArtifactId{std::string(32, 'c')};
   metadata.path = path.string();
-  metadata.width = static_cast<int>(Size);
-  metadata.height = 1;
-  metadata.channels = 1;
-  metadata.data_type = DataType::UINT8;
-  metadata.device = Device::CPU;
-  metadata.row_step = Size;
-  metadata.byte_size = Size;
+  metadata.byte_size = archive.size();
+  metadata.digest = compute_artifact_payload_digest(archive);
+  metadata.archive_version = kNamedValueArtifactSetArchiveVersion;
+  metadata.value_count = static_cast<std::uint32_t>(values.values.size());
   metadata.filesystem_device = static_cast<std::uint64_t>(artifact_stat.st_dev);
   metadata.inode = static_cast<std::uint64_t>(artifact_stat.st_ino);
   return metadata;
+}
+
+/**
+ * @brief Encodes one SHA-256 digest as lowercase hexadecimal wire text.
+ * @param digest Exact binary artifact digest.
+ * @return Sixty-four lowercase hexadecimal characters.
+ * @throws std::bad_alloc when result storage cannot allocate.
+ */
+std::string artifact_digest_hex(const ArtifactPayloadDigest& digest) {
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string encoded;
+  encoded.reserve(digest.bytes.size() * 2U);
+  for (const std::byte byte : digest.bytes) {
+    const std::uint8_t value = std::to_integer<std::uint8_t>(byte);
+    encoded.push_back(kHex[value >> 4U]);
+    encoded.push_back(kHex[value & 0x0FU]);
+  }
+  return encoded;
 }
 
 /**
@@ -1918,13 +1944,14 @@ template <std::size_t Size>
 void expect_artifact_mapping_rejected(
     const ::ps::ipc::OutputArtifactMetadata& metadata) {
   reset_observed_mapping_lifetime();
-  const Result<ImageBuffer> mapped = consume_artifact_readonly_mapping(
-      metadata, observed_mapping_operations());
+  const Result<NamedValueArtifactSet> mapped =
+      consume_artifact_readonly_mapping(metadata,
+                                        observed_mapping_operations());
   EXPECT_FALSE(mapped.status.ok);
   EXPECT_EQ(mapped.status.domain, OperationErrorDomain::Protocol);
   EXPECT_EQ(mapped.status.code, kInvalidRequestCode);
   EXPECT_EQ(mapped.status.name, "invalid_request");
-  EXPECT_TRUE(mapped.value.data == nullptr);
+  EXPECT_TRUE(mapped.value.values.empty());
   EXPECT_EQ(observed_map_calls.load(), 0U);
   EXPECT_EQ(observed_unmap_calls.load(), 0U);
   EXPECT_EQ(observed_close_calls.load(), 0U);
@@ -1963,7 +1990,10 @@ TEST(IpcHostArtifact, RejectsEveryProtectedArtifactIdentityTamperBeforeMmap) {
 
   ::ps::ipc::OutputArtifactMetadata wrong_size =
       write_test_artifact(temp.path() / "size.bin", bytes);
-  ASSERT_EQ(::truncate(wrong_size.path.c_str(), 5), 0);
+  ASSERT_GT(wrong_size.byte_size, 1U);
+  ASSERT_EQ(::truncate(wrong_size.path.c_str(),
+                       static_cast<off_t>(wrong_size.byte_size - 1U)),
+            0);
   expect_artifact_mapping_rejected(wrong_size);
 }
 
@@ -1980,14 +2010,14 @@ TEST(IpcHostArtifact, PostMapIdentityMismatchUnmapsBeforeExposingBytes) {
   const ::ps::ipc::OutputArtifactMetadata metadata =
       write_test_artifact(temp.path() / "image.bin", bytes);
   reset_observed_mapping_lifetime();
-  const Result<ImageBuffer> mapped =
+  const Result<NamedValueArtifactSet> mapped =
       consume_artifact_readonly_mapping(metadata, post_map_tamper_operations());
 
   EXPECT_FALSE(mapped.status.ok);
   EXPECT_EQ(mapped.status.domain, OperationErrorDomain::Protocol);
   EXPECT_EQ(mapped.status.code, kInvalidRequestCode);
   EXPECT_EQ(mapped.status.name, "invalid_request");
-  EXPECT_TRUE(mapped.value.data == nullptr);
+  EXPECT_TRUE(mapped.value.values.empty());
   EXPECT_EQ(observed_map_calls.load(), 1U);
   EXPECT_EQ(observed_unmap_calls.load(), 1U);
   EXPECT_EQ(observed_unmap_result.load(), 0);
@@ -1995,13 +2025,13 @@ TEST(IpcHostArtifact, PostMapIdentityMismatchUnmapsBeforeExposingBytes) {
 }
 
 /**
- * @brief Verifies shared mappings unmap and close once at final release.
- * @return Nothing; GoogleTest assertions report bytes, reference lifetime,
- *         syscall count/result/order, or source-unlink survival.
+ * @brief Verifies mappings detach bytes and close once before return.
+ * @return Nothing; GoogleTest assertions report bytes, cleanup count/order, or
+ *         source-unlink survival.
  * @throws std::bad_alloc, std::filesystem::filesystem_error, or
  *         std::system_error if artifact or shared-owner setup fails.
  */
-TEST(IpcHostArtifact, SharedMappingUnmapsAndClosesExactlyOnceAtLastReference) {
+TEST(IpcHostArtifact, MappingDetachesArchiveAndClosesExactlyOnceBeforeReturn) {
   ScopedTempDirectory temp("ps-ipc-map-life");
   const std::filesystem::path artifact_path = temp.path() / "image.bin";
   const std::array<std::uint8_t, 6> expected = {0x10, 0x20, 0x30,
@@ -2009,75 +2039,48 @@ TEST(IpcHostArtifact, SharedMappingUnmapsAndClosesExactlyOnceAtLastReference) {
   const ::ps::ipc::OutputArtifactMetadata metadata =
       write_test_artifact(artifact_path, expected);
   reset_observed_mapping_lifetime();
-  Result<ImageBuffer> mapped = consume_artifact_readonly_mapping(
+  Result<NamedValueArtifactSet> mapped = consume_artifact_readonly_mapping(
       metadata, observed_mapping_operations());
   ASSERT_TRUE(mapped.status.ok) << mapped.status.message;
-  ASSERT_NE(mapped.value.data, nullptr);
-  const auto page_size = ::sysconf(_SC_PAGESIZE);
-  ASSERT_GT(page_size, 0);
-  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(mapped.value.data.get()) %
-                static_cast<std::uintptr_t>(page_size),
-            0U);
+  ASSERT_EQ(mapped.value.values.size(), 1U);
+  ASSERT_EQ(mapped.value.values[0].payloads.size(), 1U);
   EXPECT_EQ(observed_map_calls.load(), 1U);
-  EXPECT_EQ(observed_unmap_calls.load(), 0U);
-  EXPECT_EQ(observed_close_calls.load(), 0U);
-
-  ImageBuffer first = std::move(mapped.value);
-  ImageBuffer second = first;
-  std::shared_ptr<void> last = second.data;
-  ASSERT_EQ(::unlink(artifact_path.c_str()), 0);
-  first.data.reset();
-  EXPECT_EQ(observed_unmap_calls.load(), 0U);
-  EXPECT_EQ(observed_close_calls.load(), 0U);
-  second.data.reset();
-  EXPECT_EQ(observed_unmap_calls.load(), 0U);
-  EXPECT_EQ(observed_close_calls.load(), 0U);
-  EXPECT_EQ(std::memcmp(last.get(), expected.data(), expected.size()), 0);
-
-  last.reset();
   EXPECT_EQ(observed_unmap_calls.load(), 1U);
   EXPECT_EQ(observed_close_calls.load(), 1U);
   EXPECT_EQ(observed_unmap_result.load(), 0);
   EXPECT_EQ(observed_close_result.load(), 0);
   EXPECT_EQ(observed_unmap_order.load(), 1U);
   EXPECT_EQ(observed_close_order.load(), 2U);
+
+  ASSERT_EQ(::unlink(artifact_path.c_str()), 0);
+  const std::vector<std::byte>& detached = mapped.value.values[0].payloads[0];
+  ASSERT_EQ(detached.size(), expected.size());
+  EXPECT_EQ(std::memcmp(detached.data(), expected.data(), expected.size()), 0);
 }
 
 /**
- * @brief Verifies the public IPC Host maps image bytes before lease release.
+ * @brief Verifies the public IPC Host reconstructs Values before lease release.
  *
  * A production factory consumes one exact mode-0600 same-user regular artifact
- * advertised by a scripted terminal result. It must validate identity/layout,
- * map the tight CPU payload, release with the matching delivery lease, and
- * retain readable bytes after the source path is unlinked.
+ * advertised by a scripted terminal result. It must validate identity/digest,
+ * decode the canonical archive, reconstruct a fresh local Value, release with
+ * the matching delivery lease, and retain readable bytes after source unlink.
  *
  * @return Nothing; GoogleTest assertions report metadata, ownership, request,
- *         or image mismatch.
+ *         or Value mismatch.
  * @throws std::bad_alloc, std::runtime_error, or std::system_error if file,
  *         socket, JSON, Host, or peer setup cannot complete.
  * @note Request order proves mapping finishes before the cleanup guard sends
  *       the lease-aware release; source unlink then models store cleanup.
  */
 TEST(IpcHostArtifact,
-     ProductionFactoryMapsProtectedImageBeforeLeaseAwareRelease) {
+     ProductionFactoryReconstructsValuesBeforeLeaseAwareRelease) {
   ScopedTempDirectory temp("ps-ipc-artifact");
   const std::filesystem::path artifact_path = temp.path() / "image.bin";
   const std::array<std::uint8_t, 6> expected = {0x10, 0x20, 0x30,
                                                 0x40, 0x50, 0x60};
-  UniqueFd artifact(::open(artifact_path.c_str(),
-                           O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600));
-  ASSERT_TRUE(artifact);
-  std::size_t written = 0;
-  while (written < expected.size()) {
-    const ssize_t count = ::write(artifact.get(), expected.data() + written,
-                                  expected.size() - written);
-    ASSERT_GT(count, 0);
-    written += static_cast<std::size_t>(count);
-  }
-  ASSERT_EQ(::fchmod(artifact.get(), 0600), 0);
-  struct stat artifact_stat{};
-  ASSERT_EQ(::fstat(artifact.get(), &artifact_stat), 0);
-  artifact.reset();
+  const ::ps::ipc::OutputArtifactMetadata metadata =
+      write_test_artifact(artifact_path, expected);
 
   const std::string socket_path = (temp.path() / "peer.sock").string();
   UniqueFd listener = create_test_listener(socket_path);
@@ -2086,19 +2089,15 @@ TEST(IpcHostArtifact,
   const std::string output_id(32, 'c');
   const std::string delivery_id(32, 'd');
   const Json success = encode_operation_status(ok_status());
-  const Json output{
-      {"output_id", output_id},
-      {"delivery_id", delivery_id},
-      {"path", artifact_path.string()},
-      {"width", 2},
-      {"height", 1},
-      {"channels", 3},
-      {"data_type", "uint8"},
-      {"device", "cpu"},
-      {"row_step", 6},
-      {"byte_size", 6},
-      {"filesystem_device", static_cast<std::uint64_t>(artifact_stat.st_dev)},
-      {"inode", static_cast<std::uint64_t>(artifact_stat.st_ino)}};
+  const Json output{{"output_id", output_id},
+                    {"delivery_id", delivery_id},
+                    {"path", artifact_path.string()},
+                    {"byte_size", metadata.byte_size},
+                    {"digest_sha256", artifact_digest_hex(metadata.digest)},
+                    {"archive_version", metadata.archive_version},
+                    {"value_count", metadata.value_count},
+                    {"filesystem_device", metadata.filesystem_device},
+                    {"inode", metadata.inode}};
   const std::vector<ShortConnectionReply> replies = {
       {"compute.submit",
        compute_job_result(compute_id, session_id, "queued", nullptr)},
@@ -2120,26 +2119,23 @@ TEST(IpcHostArtifact,
   HostComputeRequest request;
   request.session = GraphSessionId{session_id};
   request.node = NodeId{7};
-  const Result<ImageBuffer> image = host->compute_and_get_image(request);
+  const Result<NamedValueResult> values = host->compute_and_get_values(request);
   (void)::shutdown(listener.get(), SHUT_RDWR);
   listener.reset();
   peer.join();
 
   ASSERT_TRUE(served);
   EXPECT_FALSE(std::filesystem::exists(artifact_path));
-  ASSERT_TRUE(image.status.ok) << image.status.message;
-  ASSERT_NE(image.value.data, nullptr);
-  EXPECT_EQ(image.value.width, 2);
-  EXPECT_EQ(image.value.height, 1);
-  EXPECT_EQ(image.value.channels, 3);
-  EXPECT_EQ(image.value.type, DataType::UINT8);
-  EXPECT_EQ(image.value.device, Device::CPU);
-  EXPECT_EQ(image.value.step, 6U);
-  EXPECT_EQ(image.value.context, nullptr);
-  EXPECT_EQ(
-      std::memcmp(image.value.data.get(), expected.data(), expected.size()), 0);
+  ASSERT_TRUE(values.status.ok) << values.status.message;
+  const Value* image = values.value.find("image");
+  ASSERT_NE(image, nullptr);
+  EXPECT_EQ(image->dense_tensor_descriptor().shape,
+            std::vector<std::size_t>{expected.size()});
+  const ReadLease lease = image->buffer_handle().acquire_read();
+  ASSERT_EQ(lease.size(), expected.size());
+  EXPECT_EQ(std::memcmp(lease.data(), expected.data(), expected.size()), 0);
   ASSERT_EQ(requests.size(), 4U);
-  EXPECT_EQ(requests[0]["params"]["result_mode"], "image");
+  EXPECT_EQ(requests[0]["params"]["result_mode"], "values");
   EXPECT_EQ(requests[3]["method"], "compute.release");
   EXPECT_EQ(requests[3]["params"]["compute_id"], compute_id);
   EXPECT_EQ(requests[3]["params"]["delivery_id"], delivery_id);

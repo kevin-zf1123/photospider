@@ -32,13 +32,13 @@
 #include "compute/dispatch/run_group.hpp"
 #include "compute/execution/execution_service.hpp"
 #include "compute/execution/resource_demand_estimator.hpp"
-#include "core/image_buffer_processing.hpp"
 #include "core/pending_value.hpp"
 #include "execution/execution_task_runtime.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "photospider/core/graph_error.hpp"
+#include "photospider/data/image_view.hpp"
 #include "photospider/data/value.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/graph_event_service.hpp"
@@ -52,6 +52,29 @@
 
 namespace ps::compute {
 namespace {
+
+/**
+ * @brief Publishes one zero-filled Ready CPU FP32 ordinary image Value.
+ * @param width Positive image width.
+ * @param height Positive image height.
+ * @param channels Positive channel count.
+ * @return Fresh tightly packed zero-origin Value.
+ * @throws Value validation, arithmetic, or allocation failures unchanged.
+ */
+Value make_zero_float_image(std::size_t width, std::size_t height,
+                            std::size_t channels) {
+  DenseTensorDescriptor descriptor{{height, width, channels},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  const std::size_t row_bytes = width * channels * sizeof(float);
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{{static_cast<std::ptrdiff_t>(row_bytes),
+                     static_cast<std::ptrdiff_t>(channels * sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float))}},
+      std::vector<std::byte>(row_bytes * height));
+}
 
 /**
  * @brief Builds deterministic descriptor input for ComputeRun unit tests.
@@ -892,8 +915,8 @@ Node make_tiled_constraint_cached_input_node(int id) {
   node.parameters["width"] = 32;
   node.parameters["height"] = 16;
   node.cached_output_high_precision = NodeOutput{};
-  node.cached_output_high_precision->image_buffer =
-      make_aligned_cpu_image_buffer(32, 16, 1, DataType::FLOAT32);
+  node.cached_output_high_precision->publish_image_value(
+      make_zero_float_image(32U, 16U, 1U));
   node.hp_region =
       RegionSet::from_image_rect({image_region_domain(), 0, 32, 0, 16});
   node.hp_version = 1;
@@ -1143,6 +1166,193 @@ std::atomic_int g_issue75_gpu_operation_calls{0};
 /** @brief Records the worker id that entered the latest fake-Metal callback. */
 std::atomic_int g_issue75_gpu_worker_id{-1};
 
+/**
+ * @brief Declares the seeded image-plus-data fixture defined below.
+ * @param value Named scalar retained with its deterministic image.
+ * @return Owned 8-by-8 FLOAT32 output.
+ * @throws GraphError or allocation exceptions from image publication.
+ * @note The definition remains next to the other resource-product helpers.
+ */
+NodeOutput make_resource_dirty_output(int value);
+
+/**
+ * @brief Declares the seeded dirty-product node builder defined below.
+ * @param node_id Graph-local node identity.
+ * @param subtype Registered operation subtype.
+ * @return Node with complete 8-by-8 HP output and Region.
+ * @throws GraphError or allocation exceptions from fixture construction.
+ * @note The definition remains next to the resource-product helpers.
+ */
+Node make_resource_dirty_product_node(int node_id, const std::string& subtype);
+
+/**
+ * @brief Shared handoff for one registered dirty pending-native source.
+ *
+ * @throws Standard allocation and synchronization exceptions from members.
+ * @note Each probe belongs to one fresh Graph/Run and exactly one source
+ * callback. The move-only producer remains test-owned only after provider
+ * publication; the immutable Value is also retained for identity evidence.
+ */
+struct DirtyPendingNativeProbe final {
+  /** @brief Serializes immutable Value and terminal producer handoff. */
+  std::mutex mutex;
+  /** @brief Announces that the provider published its Pending candidate. */
+  std::promise<void> published;
+  /** @brief Exact candidate copied before staging. */
+  Value value;
+  /** @brief Unique source-private terminal publication authority. */
+  std::optional<PendingDeviceValueProducer> producer;
+  /** @brief Number of source callback entries. */
+  std::atomic_int source_entries{0};
+  /** @brief Number of dependent callback entries. */
+  std::atomic_int dependent_entries{0};
+};
+
+/**
+ * @brief Mutable source-private staging seam for replaced-Value continuation.
+ *
+ * @throws Standard mutex, output-copy, and promise exceptions from members.
+ * @note The production dirty context sees this state only through the same
+ * copied-output function-pointer boundary used by HP/RT write buffers. The
+ * owning test alone replaces the staged immutable Value after registration.
+ */
+struct DirtyReplaceableStagingProbe final {
+  /** @brief Serializes the staged output copied by continuation callbacks. */
+  mutable std::mutex mutex;
+  /** @brief Current request-local output, absent before source execution. */
+  std::optional<NodeOutput> output;
+  /** @brief Announces that the initial Pending output is staged. */
+  std::promise<void> staged;
+};
+
+/**
+ * @brief Copies one replaceable dirty output through the production callback.
+ * @param context Non-null `DirtyReplaceableStagingProbe` owner.
+ * @param node_id Planned source node, accepted for the test's two-node plan.
+ * @return Mutex-protected current staged output.
+ * @throws std::invalid_argument for a null context.
+ * @throws std::bad_alloc when output metadata copying cannot allocate.
+ * @note This function neither waits on readiness nor authorizes the result.
+ */
+std::optional<NodeOutput> snapshot_replaceable_dirty_output(const void* context,
+                                                            int node_id) {
+  (void)node_id;
+  if (context == nullptr) {
+    throw std::invalid_argument(
+        "Replaceable dirty staging snapshot requires a context.");
+  }
+  auto* probe = static_cast<const DirtyReplaceableStagingProbe*>(context);
+  std::lock_guard<std::mutex> lock(probe->mutex);
+  return probe->output;
+}
+
+/**
+ * @brief Publishes one 8-by-8 HostPinned Metal Value that remains Pending.
+ *
+ * @param probe Shared source handoff receiving the exact Value and producer.
+ * @return Image-plus-`value` output matching the registered dirty declaration.
+ * @throws Value publication, allocation, promise, or synchronization
+ * exceptions unchanged.
+ * @note The temporary Host image contributes only trusted test metadata. The
+ * source-private publisher creates the actual candidate and retains the same
+ * owner/identities later observed through dirty staging and formal commit.
+ */
+NodeOutput make_pending_dirty_native_output(
+    const std::shared_ptr<DirtyPendingNativeProbe>& probe) {
+  if (!probe) {
+    throw std::invalid_argument("Dirty pending probe must not be null.");
+  }
+  const NodeOutput template_output = make_resource_dirty_output(130);
+  const Value& template_value = template_output.image_value();
+  auto owner =
+      std::make_shared<std::vector<std::byte>>(template_value.storage_size());
+  PendingDeviceValuePublication publication =
+      PendingDeviceValuePublisher::publish_dense_tensor(
+          template_value.dense_tensor_descriptor(),
+          template_value.image_facet(), template_value.strided_layout(), owner,
+          owner->data(), owner->data(), owner->size(),
+          DeviceId(DeviceBackend::Metal), MemoryDomain::HostPinned);
+  NodeOutput output;
+  output.publish_image_value(publication.value);
+  output.data["value"] = 130;
+  {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    probe->value = publication.value;
+    probe->producer.emplace(std::move(publication.producer));
+  }
+  probe->source_entries.fetch_add(1, std::memory_order_release);
+  probe->published.set_value();
+  return output;
+}
+
+/**
+ * @brief Registers one fake-Metal dirty pending source and its dependent.
+ *
+ * @param source_subtype Unique source implementation subtype.
+ * @param dependent_subtype Unique downstream implementation subtype.
+ * @param probe Shared exact-once entry and pending-publication evidence.
+ * @return Nothing after both revisioned implementations are registered.
+ * @throws Registry, callback-copy, or allocation exceptions unchanged.
+ * @note Both declarations require canonical image plus exact `value` data.
+ * The dependent rejects non-Ready source staging, making early dependency
+ * release observable independently of final Graph mutation.
+ */
+void register_pending_dirty_native_chain(
+    const std::string& source_subtype, const std::string& dependent_subtype,
+    const std::shared_ptr<DirtyPendingNativeProbe>& probe) {
+  constexpr char kType[] = "issue130_dirty_pending_native";
+  OpMetadata metadata;
+  metadata.cost_score = 1;
+  metadata.parameter_output_names = {"value"};
+  OpRegistry::instance().register_impl(
+      kType, source_subtype, DeviceBackend::Metal,
+      MonolithicOpFunc(
+          [probe](const Node&, const std::vector<const NodeOutput*>&) {
+            return make_pending_dirty_native_output(probe);
+          }),
+      metadata);
+  OpRegistry::instance().register_impl(
+      kType, dependent_subtype, DeviceBackend::Metal,
+      MonolithicOpFunc(
+          [probe](const Node&, const std::vector<const NodeOutput*>& inputs) {
+            if (inputs.size() != 1U || inputs.front() == nullptr ||
+                !inputs.front()->has_image_value() ||
+                inputs.front()->image_value().ready_fence().poll().state() !=
+                    ReadyFenceState::Ready) {
+              throw std::logic_error(
+                  "Dirty pending dependent entered before source Ready.");
+            }
+            probe->dependent_entries.fetch_add(1, std::memory_order_release);
+            return make_resource_dirty_output(131);
+          }),
+      metadata);
+}
+
+/**
+ * @brief Populates a seeded source-to-dependent dirty HP graph.
+ *
+ * @param graph Empty GraphRuntime model receiving both nodes.
+ * @param source_subtype Registered pending-native source subtype.
+ * @param dependent_subtype Registered downstream subtype.
+ * @return Nothing after topology validation.
+ * @throws Graph, Region, image allocation, or Value exceptions unchanged.
+ * @note Both old outputs are complete and version one. Force-recache later
+ * selects fresh full-frame work while those values witness atomic failure.
+ */
+void populate_pending_dirty_native_graph(GraphModel& graph,
+                                         const std::string& source_subtype,
+                                         const std::string& dependent_subtype) {
+  constexpr char kType[] = "issue130_dirty_pending_native";
+  Node source = make_resource_dirty_product_node(513, source_subtype);
+  source.type = kType;
+  Node dependent = make_resource_dirty_product_node(514, dependent_subtype);
+  dependent.type = kType;
+  dependent.image_inputs.push_back(ImageInput{513, "image"});
+  graph.add_node(std::move(source));
+  graph.add_node(std::move(dependent));
+  graph.validate_topology();
+}
+
 /** @brief Serializes process-global legacy cancellation callback configuration.
  */
 std::mutex g_legacy_cancellation_source_mutex;
@@ -1268,18 +1478,23 @@ NodeOutput execute_legacy_cancellation_source() {
 void ensure_legacy_cancellation_operations_registered() {
   static std::once_flag once;
   std::call_once(once, [] {
+    OpMetadata parameter_output_metadata;
+    parameter_output_metadata.produces_image = false;
+    parameter_output_metadata.parameter_output_names = {"value"};
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_cancel_chain", "source",
         MonolithicOpFunc(
             [](const Node&, const std::vector<const NodeOutput*>&) {
               return execute_legacy_cancellation_source();
-            }));
+            }),
+        parameter_output_metadata);
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_cancel_chain", "source_throw_after_cancel",
         MonolithicOpFunc(
             [](const Node&, const std::vector<const NodeOutput*>&) {
               return execute_legacy_post_cancellation_failure();
-            }));
+            }),
+        parameter_output_metadata);
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_cancel_chain", "dependent",
         MonolithicOpFunc(
@@ -1289,7 +1504,8 @@ void ensure_legacy_cancellation_operations_registered() {
               NodeOutput output;
               output.data["value"] = 2;
               return output;
-            }));
+            }),
+        parameter_output_metadata);
   });
 }
 
@@ -1303,8 +1519,7 @@ void ensure_legacy_cancellation_operations_registered() {
  */
 NodeOutput make_resource_dirty_output(int value) {
   NodeOutput output;
-  output.image_buffer =
-      make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+  output.publish_image_value(make_zero_float_image(8U, 8U, 1U));
   output.data["value"] = value;
   return output;
 }
@@ -1323,8 +1538,9 @@ void ensure_issue75_device_operations_registered() {
   std::call_once(once, [] {
     OpMetadata metadata;
     metadata.cost_score = 1;
+    metadata.parameter_output_names = {"value"};
     OpRegistry::instance().register_impl(
-        "issue75_device_route", "source", Device::CPU,
+        "issue75_device_route", "source", DeviceBackend::CPU,
         MonolithicOpFunc([](const Node&,
                             const std::vector<const NodeOutput*>&) {
           g_issue75_cpu_operation_calls.fetch_add(1, std::memory_order_relaxed);
@@ -1332,7 +1548,7 @@ void ensure_issue75_device_operations_registered() {
         }),
         metadata);
     OpRegistry::instance().register_impl(
-        "issue75_device_route", "source", Device::GPU_METAL,
+        "issue75_device_route", "source", DeviceBackend::Metal,
         MonolithicOpFunc([](const Node&,
                             const std::vector<const NodeOutput*>&) {
           g_issue75_gpu_operation_calls.fetch_add(1, std::memory_order_relaxed);
@@ -1358,6 +1574,8 @@ void ensure_resource_product_operations_registered() {
   std::call_once(once, [] {
     OpMetadata full_metadata;
     full_metadata.exclusive_key = "resource-accounting-full-plan-exclusive-key";
+    full_metadata.produces_image = false;
+    full_metadata.parameter_output_names = {"value"};
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "full_source",
         MonolithicOpFunc(
@@ -1372,6 +1590,8 @@ void ensure_resource_product_operations_registered() {
     OpMetadata parameter_metadata;
     parameter_metadata.exclusive_key =
         "resource-accounting-connected-preflight-exclusive-key";
+    parameter_metadata.produces_image = false;
+    parameter_metadata.parameter_output_names = {"value"};
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "parameter_source",
         MonolithicOpFunc(
@@ -1403,6 +1623,7 @@ void ensure_resource_product_operations_registered() {
     OpMetadata dirty_hp_metadata;
     dirty_hp_metadata.exclusive_key =
         "resource-accounting-dirty-hp-exclusive-key";
+    dirty_hp_metadata.parameter_output_names = {"value"};
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "dirty_hp",
         MonolithicOpFunc(
@@ -1415,6 +1636,7 @@ void ensure_resource_product_operations_registered() {
     OpMetadata dirty_rt_metadata;
     dirty_rt_metadata.exclusive_key =
         "resource-accounting-dirty-rt-exclusive-key";
+    dirty_rt_metadata.parameter_output_names = {"value"};
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "dirty_rt",
         MonolithicOpFunc(
@@ -2207,7 +2429,8 @@ ReadyTaskSubmission make_counted_ready_submission(
         entered.fetch_add(1, std::memory_order_relaxed);
         runtime.dec_tasks_to_complete();
       },
-      priority, resource_demand, Device::CPU, std::move(operation_constraints));
+      priority, resource_demand, DeviceBackend::CPU,
+      std::move(operation_constraints));
 }
 
 /**
@@ -2378,7 +2601,7 @@ AsyncPolicyRun launch_constrained_operation_run(
           runtime.dec_tasks_to_complete();
         },
         ExecutionTaskPriority::Normal,
-        ReadyTaskSubmission::default_resource_demand(), Device::CPU,
+        ReadyTaskSubmission::default_resource_demand(), DeviceBackend::CPU,
         constraints);
   }
 
@@ -3155,8 +3378,8 @@ ResourceVector independently_estimate_large_dirty_phase_resources(
   LargeDirtyPhaseTaskProbe task_probe;
   const std::uint64_t callable_bytes = owned_callable_retained_memory_bytes(
       static_cast<std::uint64_t>(sizeof(LargeDirtyPhaseTask)));
-  const std::vector<Device> task_devices(compute_plan.task_graph.tasks.size(),
-                                         Device::CPU);
+  const std::vector<DeviceBackend> task_devices(
+      compute_plan.task_graph.tasks.size(), DeviceBackend::CPU);
   const std::vector<OperationExecutionConstraints> task_constraints(
       compute_plan.task_graph.tasks.size());
   auto context = std::make_shared<DirtyReadyTaskContext>(
@@ -3217,8 +3440,8 @@ DirtyCallablePhaseRunResult execute_large_dirty_callable_phase_case(
       source_phase ? phase_task_ids : std::vector<int>{};
   std::vector<int> downstream_task_ids =
       source_phase ? std::vector<int>{} : phase_task_ids;
-  const std::vector<Device> task_devices(compute_plan.task_graph.tasks.size(),
-                                         Device::CPU);
+  const std::vector<DeviceBackend> task_devices(
+      compute_plan.task_graph.tasks.size(), DeviceBackend::CPU);
   const std::vector<OperationExecutionConstraints> task_constraints(
       compute_plan.task_graph.tasks.size());
   DirtySourceFirstRunRequest request;
@@ -3560,11 +3783,11 @@ TEST(Issue75DeviceRouting, FullPlanSelectsGpuAndFallsBackToCpu) {
   ASSERT_TRUE(gpu_run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& gpu_plan = gpu_run.emplace_submission_plan(
       gpu_graph, traversal, 501,
-      std::vector<Device>{Device::GPU_METAL, Device::CPU});
+      std::vector<DeviceBackend>{DeviceBackend::Metal, DeviceBackend::CPU});
   std::vector<ReadyTaskSubmission> gpu_ready =
       gpu_plan.make_initial_ready_submissions(gpu_run.acquire_lease());
   ASSERT_EQ(gpu_ready.size(), 1U);
-  EXPECT_EQ(gpu_ready.front().metadata().device(), Device::GPU_METAL);
+  EXPECT_EQ(gpu_ready.front().metadata().device(), DeviceBackend::Metal);
   ASSERT_EQ(gpu_plan.resolved_ops().size(), 1U);
   ASSERT_TRUE(gpu_plan.resolved_ops().front().has_value());
   const OpImplementation& gpu_implementation = *gpu_plan.resolved_ops().front();
@@ -3583,11 +3806,12 @@ TEST(Issue75DeviceRouting, FullPlanSelectsGpuAndFallsBackToCpu) {
                                           cpu_graph.revision().value(), 502));
   ASSERT_TRUE(cpu_run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& cpu_plan = cpu_run.emplace_submission_plan(
-      cpu_graph, traversal, 502, std::vector<Device>{Device::CPU});
+      cpu_graph, traversal, 502,
+      std::vector<DeviceBackend>{DeviceBackend::CPU});
   std::vector<ReadyTaskSubmission> cpu_ready =
       cpu_plan.make_initial_ready_submissions(cpu_run.acquire_lease());
   ASSERT_EQ(cpu_ready.size(), 1U);
-  EXPECT_EQ(cpu_ready.front().metadata().device(), Device::CPU);
+  EXPECT_EQ(cpu_ready.front().metadata().device(), DeviceBackend::CPU);
   ASSERT_TRUE(cpu_plan.resolved_ops().front().has_value());
   const OpImplementation& cpu_implementation = *cpu_plan.resolved_ops().front();
   ASSERT_TRUE(cpu_implementation.is_monolithic());
@@ -3617,9 +3841,11 @@ TEST(OperationMetadataRouting, FullPlanCarriesIdentityConstraintsAndResources) {
   metadata.maximum_parallelism = 2U;
   metadata.retained_memory_bytes = 1234U;
   metadata.scratch_bytes = 5678U;
+  metadata.produces_image = false;
+  metadata.parameter_output_names = {"value"};
   metadata.exclusive_key = "issue82-plan-context";
   registry.register_impl(
-      kType, kSubtype, Device::CPU,
+      kType, kSubtype, DeviceBackend::CPU,
       MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&) {
         NodeOutput output;
         output.data["value"] = 82;
@@ -3638,7 +3864,7 @@ TEST(OperationMetadataRouting, FullPlanCarriesIdentityConstraintsAndResources) {
       make_test_submission("issue82-plan", graph.revision().value(), 582));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
-      graph, traversal, 582, std::vector<Device>{Device::CPU});
+      graph, traversal, 582, std::vector<DeviceBackend>{DeviceBackend::CPU});
   std::vector<ReadyTaskSubmission> ready =
       plan.make_initial_ready_submissions(run.acquire_lease());
 
@@ -3648,7 +3874,7 @@ TEST(OperationMetadataRouting, FullPlanCarriesIdentityConstraintsAndResources) {
   const PlannedOperationRoute& route =
       *plan.compute_plan().planned_work.front().operation_route;
   ASSERT_NE(route.implementation_identity, 0U);
-  EXPECT_EQ(route.device, Device::CPU);
+  EXPECT_EQ(route.device, DeviceBackend::CPU);
   EXPECT_FALSE(route.metadata.reentrant);
   EXPECT_EQ(route.metadata.maximum_parallelism, 2U);
   EXPECT_EQ(route.metadata.retained_memory_bytes, 1234U);
@@ -3666,6 +3892,124 @@ TEST(OperationMetadataRouting, FullPlanCarriesIdentityConstraintsAndResources) {
   EXPECT_EQ(constraints.exclusive_key, "issue82-plan-context");
   EXPECT_EQ(ready.front().resource_demand(), plan.task_resource_demand());
   registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves generic output declarations participate in implementation,
+ * route, authority, and full-task-graph cache identity.
+ *
+ * @return Nothing; GoogleTest reports stale revisions, cache keys, or output
+ * authority.
+ * @throws Registry, graph, route-copy, and allocation exceptions unchanged.
+ * @note Replacing one HP slot is intentional: callback shape and every other
+ * metadata field remain fixed, isolating the generic name-set revision.
+ */
+TEST(OperationMetadataRouting,
+     GenericOutputSchemaRevisionsRouteAndTaskCacheIdentity) {
+  constexpr const char* kType = "issue130_generic_route";
+  constexpr const char* kSubtype = "source";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+
+  GraphModel graph("cache/issue130-generic-route");
+  Node node = make_plan_node(1301);
+  node.type = kType;
+  node.subtype = kSubtype;
+  graph.add_node(std::move(node));
+  graph.validate_topology();
+
+  const MonolithicOpFunc operation = [](const Node&,
+                                        const std::vector<const NodeOutput*>&) {
+    return NodeOutput{};
+  };
+  OpMetadata deep_metadata;
+  deep_metadata.produces_image = false;
+  deep_metadata.named_value_output_names = {"deep"};
+  registry.register_op_hp_monolithic(kType, kSubtype, operation, deep_metadata);
+  const std::uint64_t deep_generation = registry.task_shape_generation();
+  const std::string deep_cache_key = full_task_graph_cache_key(
+      graph, ComputeIntent::GlobalHighPrecision, {DeviceBackend::CPU});
+  const auto deep_implementation =
+      registry.select_implementation(kType, kSubtype, {DeviceBackend::CPU},
+                                     ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(deep_implementation.has_value());
+  const PlannedOperationRoute deep_route =
+      make_planned_operation_route(*deep_implementation);
+  const PlannedOutputAuthority deep_authority =
+      make_planned_output_authority(deep_route, PixelSize{});
+  EXPECT_EQ(deep_authority.named_value_output_names,
+            (std::vector<std::string>{"deep"}));
+  EXPECT_FALSE(deep_authority.image_output_name.has_value());
+
+  OpMetadata latent_metadata = deep_metadata;
+  latent_metadata.named_value_output_names = {"latent"};
+  registry.register_op_hp_monolithic(kType, kSubtype, operation,
+                                     latent_metadata);
+  const auto latent_implementation =
+      registry.select_implementation(kType, kSubtype, {DeviceBackend::CPU},
+                                     ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(latent_implementation.has_value());
+  const PlannedOperationRoute latent_route =
+      make_planned_operation_route(*latent_implementation);
+  const std::string latent_cache_key = full_task_graph_cache_key(
+      graph, ComputeIntent::GlobalHighPrecision, {DeviceBackend::CPU});
+
+  EXPECT_GT(registry.task_shape_generation(), deep_generation);
+  EXPECT_NE(latent_implementation->implementation_identity,
+            deep_implementation->implementation_identity);
+  EXPECT_FALSE(planned_operation_routes_equal(deep_route, latent_route));
+  EXPECT_NE(deep_cache_key, latent_cache_key);
+  EXPECT_EQ(latent_route.metadata.named_value_output_names,
+            (std::vector<std::string>{"latent"}));
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Verifies generic output names and map nodes are charged by retained
+ * accounting for full, dirty, and materialized output ownership.
+ *
+ * @return Nothing; GoogleTest reports an unchanged structural byte estimate.
+ * @throws Value publication, plan-copy, or checked estimator exceptions
+ * unchanged.
+ * @note Opaque payload capacity remains outside the estimator; this test locks
+ * only Host-visible vectors, strings, and ordered-map nodes introduced by the
+ * generic output contract.
+ */
+TEST(OperationMetadataRouting,
+     GenericOutputSchemaAndValuesIncreaseRetainedAccounting) {
+  ComputePlan baseline_plan;
+  PlannedNodeWork baseline_work;
+  baseline_work.node_id = 1302;
+  baseline_work.operation_route = PlannedOperationRoute{};
+  baseline_work.output_authority = PlannedOutputAuthority{};
+  baseline_plan.planned_work.push_back(std::move(baseline_work));
+
+  ComputePlan generic_plan = baseline_plan;
+  generic_plan.planned_work.front()
+      .operation_route->metadata.named_value_output_names = {
+      "deep-generic-output"};
+  generic_plan.planned_work.front()
+      .output_authority->named_value_output_names = {"deep-generic-output"};
+  EXPECT_GT(compute_plan_dynamic_retained_memory_bytes(generic_plan),
+            compute_plan_dynamic_retained_memory_bytes(baseline_plan));
+
+  HighPrecisionDirtyPlan baseline_dirty;
+  DirtyRegionPlannedOperationRoute dirty_route;
+  dirty_route.operation_key = "issue130:generic";
+  baseline_dirty.operation_routes.node_routes.emplace(1302,
+                                                      std::move(dirty_route));
+  HighPrecisionDirtyPlan generic_dirty = baseline_dirty;
+  generic_dirty.operation_routes.node_routes.at(1302)
+      .route.metadata.named_value_output_names = {"deep-generic-output"};
+  EXPECT_GT(high_precision_dirty_plan_retained_memory_bytes(generic_dirty),
+            high_precision_dirty_plan_retained_memory_bytes(baseline_dirty));
+
+  NodeOutput baseline_output = make_resource_dirty_output(130);
+  NodeOutput generic_output = baseline_output;
+  generic_output.publish_named_value("deep-generic-output",
+                                     baseline_output.image_value());
+  EXPECT_GT(node_output_dynamic_retained_memory_bytes(generic_output),
+            node_output_dynamic_retained_memory_bytes(baseline_output));
 }
 
 /**
@@ -3688,17 +4032,23 @@ TEST(OperationMetadataRouting,
 
   const MonolithicOpFunc operation = [](const Node&,
                                         const std::vector<const NodeOutput*>&) {
-    return NodeOutput{};
+    NodeOutput output;
+    output.data["value"] = 82;
+    return output;
   };
   OpMetadata producer_metadata;
   producer_metadata.retained_memory_bytes = 4321U;
   producer_metadata.scratch_bytes = 99U;
-  registry.register_impl(kType, kProducerSubtype, Device::CPU, operation,
+  producer_metadata.produces_image = false;
+  producer_metadata.parameter_output_names = {"value"};
+  registry.register_impl(kType, kProducerSubtype, DeviceBackend::CPU, operation,
                          producer_metadata);
   OpMetadata target_metadata;
   target_metadata.retained_memory_bytes = 1234U;
   target_metadata.scratch_bytes = 5678U;
-  registry.register_impl(kType, kTargetSubtype, Device::CPU, operation,
+  target_metadata.produces_image = false;
+  target_metadata.parameter_output_names = {"value"};
+  registry.register_impl(kType, kTargetSubtype, DeviceBackend::CPU, operation,
                          target_metadata);
 
   GraphModel graph("cache/issue82-mixed-plan");
@@ -3708,7 +4058,7 @@ TEST(OperationMetadataRouting,
   Node target = make_plan_node(584);
   target.type = kType;
   target.subtype = kTargetSubtype;
-  target.image_inputs.push_back(ImageInput{583, "image"});
+  target.parameter_inputs.push_back({583, "value", "planned_value"});
   graph.add_node(std::move(producer));
   graph.add_node(std::move(target));
   graph.validate_topology();
@@ -3718,20 +4068,21 @@ TEST(OperationMetadataRouting,
                                       graph.revision().value(), 584));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
-      graph, traversal, 584, std::vector<Device>{Device::CPU, Device::CPU});
+      graph, traversal, 584,
+      std::vector<DeviceBackend>{DeviceBackend::CPU, DeviceBackend::CPU});
 
   EXPECT_EQ(plan.compute_plan().available_devices,
-            (std::vector<Device>{Device::CPU}));
+            (std::vector<DeviceBackend>{DeviceBackend::CPU}));
   EXPECT_EQ(plan.task_resource_demand().retained_memory_bytes, 4321U);
   EXPECT_EQ(plan.task_resource_demand().scratch_bytes, 5678U);
   EXPECT_EQ(full_task_graph_cache_key(graph, ComputeIntent::GlobalHighPrecision,
-                                      {Device::CPU, Device::CPU}),
+                                      {DeviceBackend::CPU, DeviceBackend::CPU}),
             full_task_graph_cache_key(graph, ComputeIntent::GlobalHighPrecision,
-                                      {Device::CPU}));
+                                      {DeviceBackend::CPU}));
   EXPECT_NE(
       full_task_graph_cache_key(graph, ComputeIntent::GlobalHighPrecision, {}),
       full_task_graph_cache_key(graph, ComputeIntent::GlobalHighPrecision,
-                                {Device::CPU}));
+                                {DeviceBackend::CPU}));
 
   registry.unregister_key(make_key(kType, kProducerSubtype));
   registry.unregister_key(make_key(kType, kTargetSubtype));
@@ -3811,6 +4162,404 @@ TEST(Issue75DeviceRouting, DirtyHpAndRtUseFrozenGpuLane) {
 
   EXPECT_EQ(g_issue75_gpu_operation_calls.load(std::memory_order_relaxed), 2);
   EXPECT_EQ(g_issue75_cpu_operation_calls.load(std::memory_order_relaxed), 0);
+}
+
+/**
+ * @brief Proves a registered fake-Metal dirty source continues its exact
+ * Pending native Value before releasing and committing its dependent.
+ *
+ * @return Nothing; GoogleTest reports early dependency entry, worker
+ * blockage, identity replacement, graph mutation, or ledger residue.
+ * @throws Registry, filesystem, graph, planning, service, pending publication,
+ * future, or synchronization exceptions unchanged.
+ * @note This is production-equivalent lifecycle evidence on all platforms:
+ * the real `gpu_pipeline` lane and private PendingDeviceValuePublisher are
+ * used, while the fake Metal executor supplies only the platform command-lane
+ * context. Separate Darwin tests retain actual Metal command evidence.
+ */
+TEST(DirtyPendingNativeContinuation,
+     ReadyReleasesDependentAndCommitsSameValueWithoutBlockingWorker) {
+  constexpr char kType[] = "issue130_dirty_pending_native";
+  constexpr char kSourceSubtype[] = "ready_source";
+  constexpr char kDependentSubtype[] = "ready_dependent";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+  auto probe = std::make_shared<DirtyPendingNativeProbe>();
+  std::future<void> published = probe->published.get_future();
+  register_pending_dirty_native_chain(kSourceSubtype, kDependentSubtype, probe);
+
+  ScopedResourceRuntimeDirectory directory("issue130-dirty-pending-ready");
+  GraphRuntime::Info info;
+  info.name = "issue130-dirty-pending-ready";
+  info.root = directory.path();
+  info.cache_root = directory.path() / "cache";
+  info.hp_execution_type = "gpu_pipeline";
+  GraphRuntime runtime(info);
+  GraphModel& graph = runtime.model();
+  populate_pending_dirty_native_graph(graph, kSourceSubtype, kDependentSubtype);
+  const ValueRevisionId old_source_revision =
+      graph.node(513).cached_output_high_precision->image_value().revision_id();
+  const ValueRevisionId old_dependent_revision =
+      graph.node(514).cached_output_high_precision->image_value().revision_id();
+
+  DirtyUpdateRequest request;
+  request.node_id = 514;
+  request.cache_precision = "float32";
+  request.disable_disk_cache = true;
+  request.dirty_roi = PixelRect{0, 0, 8, 8};
+  request.suppress_graph_downsample = true;
+  request.force_recache = true;
+  GraphTraversalService traversal;
+  GraphEventService events;
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           ::ps::testing::make_fake_metal_executor_registry());
+  service.configure_worker_count(1U);
+  ComputeRun run(
+      make_dirty_resource_submission(info.name, graph.revision().value(), 514,
+                                     ComputeIntent::GlobalHighPrecision));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  HighPrecisionDirtyExecutor executor(traversal, events);
+
+  auto completion = std::async(std::launch::async, [&] {
+    return &executor.execute(graph, runtime.realtime_proxy_graph(), &runtime,
+                             request, &run, &service);
+  });
+  ASSERT_EQ(published.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(probe->source_entries.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(probe->dependent_entries.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  ASSERT_TRUE(graph.node(513).cached_output_high_precision.has_value());
+  ASSERT_TRUE(graph.node(514).cached_output_high_precision.has_value());
+  EXPECT_EQ(
+      graph.node(513).cached_output_high_precision->image_value().revision_id(),
+      old_source_revision);
+  EXPECT_EQ(
+      graph.node(514).cached_output_high_precision->image_value().revision_id(),
+      old_dependent_revision);
+  EXPECT_EQ(graph.node(513).hp_version, 1);
+  EXPECT_EQ(graph.node(514).hp_version, 1);
+
+  ValueRevisionId expected_revision;
+  AllocationIdentity expected_allocation;
+  ProducerIdentity expected_producer;
+  {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    ASSERT_TRUE(probe->value.valid());
+    ASSERT_TRUE(probe->producer.has_value());
+    expected_revision = probe->value.revision_id();
+    expected_allocation = probe->value.allocation_identity();
+    expected_producer = probe->value.producer_identity();
+    ASSERT_TRUE(
+        probe->producer->matches_pending_fence(probe->value.ready_fence()));
+    ASSERT_TRUE(probe->producer->complete_ready());
+  }
+
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  NodeOutput* result = nullptr;
+  EXPECT_NO_THROW(result = completion.get());
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(probe->dependent_entries.load(std::memory_order_acquire), 1);
+  ASSERT_TRUE(graph.node(513).cached_output_high_precision.has_value());
+  const Value& committed_source =
+      graph.node(513).cached_output_high_precision->image_value();
+  EXPECT_EQ(committed_source.ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+  EXPECT_EQ(committed_source.revision_id(), expected_revision);
+  EXPECT_EQ(committed_source.allocation_identity(), expected_allocation);
+  EXPECT_EQ(committed_source.producer_identity(), expected_producer);
+  const StorageBinding binding = committed_source.storage_binding();
+  EXPECT_EQ(binding.device, DeviceId(DeviceBackend::Metal));
+  EXPECT_EQ(binding.memory_domain, MemoryDomain::HostPinned);
+  EXPECT_TRUE(binding.host_visible);
+  ASSERT_TRUE(result->has_image_value());
+  EXPECT_EQ(result->data.at("value").as_int64(), 131);
+  EXPECT_EQ(graph.node(513).hp_version, 2);
+  EXPECT_EQ(graph.node(514).hp_version, 2);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+}
+
+/**
+ * @brief Proves every dirty Pending terminal failure suppresses dependency and
+ * formal Graph publication without retaining service resources.
+ *
+ * @return Nothing; GoogleTest reports terminal typing, premature mutation,
+ * callback entry, or resource residue.
+ * @throws Registry, filesystem, graph, planning, service, pending publication,
+ * future, or synchronization exceptions unchanged outside expected terminal
+ * failure transport.
+ * @note Failed and ProducerCancelled settle the exact fence callback. Explicit
+ * Run cancellation instead retires the wait owner while leaving the physical
+ * producer Pending until deterministic test cleanup.
+ */
+TEST(DirtyPendingNativeContinuation,
+     FailureProducerCancellationAndRunCancellationFailClosed) {
+  enum class TerminalCase {
+    /** @brief Producer publishes a typed execution failure. */
+    Failed,
+    /** @brief Producer retires without producing the Value. */
+    ProducerCancelled,
+    /** @brief Matching Run cancellation wins while the producer remains live.
+     */
+    RunCancelled,
+  };
+  struct Case final {
+    /** @brief Unique registry/runtime suffix. */
+    const char* suffix;
+    /** @brief Terminal transition applied after Pending observation. */
+    TerminalCase terminal;
+  };
+  constexpr char kType[] = "issue130_dirty_pending_native";
+  const std::array<Case, 3U> cases{{
+      {"failed", TerminalCase::Failed},
+      {"producer_cancelled", TerminalCase::ProducerCancelled},
+      {"run_cancelled", TerminalCase::RunCancelled},
+  }};
+
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.suffix);
+    const std::string source_subtype =
+        std::string(test_case.suffix) + "_source";
+    const std::string dependent_subtype =
+        std::string(test_case.suffix) + "_dependent";
+    OpRegistry& registry = OpRegistry::instance();
+    registry.unregister_key(make_key(kType, source_subtype));
+    registry.unregister_key(make_key(kType, dependent_subtype));
+    auto probe = std::make_shared<DirtyPendingNativeProbe>();
+    std::future<void> published = probe->published.get_future();
+    register_pending_dirty_native_chain(source_subtype, dependent_subtype,
+                                        probe);
+
+    ScopedResourceRuntimeDirectory directory(
+        std::string("issue130-dirty-pending-") + test_case.suffix);
+    GraphRuntime::Info info;
+    info.name = std::string("issue130-dirty-pending-") + test_case.suffix;
+    info.root = directory.path();
+    info.cache_root = directory.path() / "cache";
+    info.hp_execution_type = "gpu_pipeline";
+    GraphRuntime runtime(info);
+    GraphModel& graph = runtime.model();
+    populate_pending_dirty_native_graph(graph, source_subtype,
+                                        dependent_subtype);
+    const ValueRevisionId old_source_revision =
+        graph.node(513)
+            .cached_output_high_precision->image_value()
+            .revision_id();
+    const ValueRevisionId old_dependent_revision =
+        graph.node(514)
+            .cached_output_high_precision->image_value()
+            .revision_id();
+    const RegionSet old_source_region = *graph.node(513).hp_region;
+    const RegionSet old_dependent_region = *graph.node(514).hp_region;
+
+    DirtyUpdateRequest request;
+    request.node_id = 514;
+    request.cache_precision = "float32";
+    request.disable_disk_cache = true;
+    request.dirty_roi = PixelRect{0, 0, 8, 8};
+    request.suppress_graph_downsample = true;
+    request.force_recache = true;
+    GraphTraversalService traversal;
+    GraphEventService events;
+    ExecutionService service(
+        ExecutionService::default_resource_limits(),
+        ::ps::testing::make_fake_metal_executor_registry());
+    service.configure_worker_count(1U);
+    ComputeRun run(
+        make_dirty_resource_submission(info.name, graph.revision().value(), 514,
+                                       ComputeIntent::GlobalHighPrecision));
+    const ComputeRunCancellationSource cancellation = run.cancellation_source();
+    ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+    HighPrecisionDirtyExecutor executor(traversal, events);
+
+    auto completion = std::async(std::launch::async, [&] {
+      return &executor.execute(graph, runtime.realtime_proxy_graph(), &runtime,
+                               request, &run, &service);
+    });
+    ASSERT_EQ(published.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    EXPECT_EQ(probe->dependent_entries.load(std::memory_order_acquire), 0);
+    EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+              std::future_status::timeout);
+
+    if (test_case.terminal == TerminalCase::RunCancelled) {
+      ASSERT_TRUE(cancellation.request_cancellation(
+          ComputeRunCancellationReason::ExplicitRequest));
+    } else {
+      std::lock_guard<std::mutex> lock(probe->mutex);
+      ASSERT_TRUE(probe->producer.has_value());
+      if (test_case.terminal == TerminalCase::Failed) {
+        ASSERT_TRUE(probe->producer->complete_failed(
+            ReadyFenceFailure(ReadyFenceFailureDomain::Execution, 130,
+                              "dirty pending native production failed")));
+      } else {
+        ASSERT_TRUE(probe->producer->cancel());
+      }
+    }
+
+    ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    EXPECT_THROW((void)completion.get(), std::exception);
+    EXPECT_EQ(probe->dependent_entries.load(std::memory_order_acquire), 0);
+    ASSERT_TRUE(graph.node(513).cached_output_high_precision.has_value());
+    ASSERT_TRUE(graph.node(514).cached_output_high_precision.has_value());
+    EXPECT_EQ(graph.node(513)
+                  .cached_output_high_precision->image_value()
+                  .revision_id(),
+              old_source_revision);
+    EXPECT_EQ(graph.node(514)
+                  .cached_output_high_precision->image_value()
+                  .revision_id(),
+              old_dependent_revision);
+    EXPECT_EQ(graph.node(513).hp_region, old_source_region);
+    EXPECT_EQ(graph.node(514).hp_region, old_dependent_region);
+    EXPECT_EQ(graph.node(513).hp_version, 1);
+    EXPECT_EQ(graph.node(514).hp_version, 1);
+    EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+    ASSERT_TRUE(run.terminal_outcome().has_value());
+    EXPECT_EQ(run.terminal_outcome()->kind,
+              test_case.terminal == TerminalCase::RunCancelled
+                  ? ComputeRunTerminalKind::Cancelled
+                  : ComputeRunTerminalKind::Failed);
+
+    if (test_case.terminal == TerminalCase::RunCancelled) {
+      std::lock_guard<std::mutex> lock(probe->mutex);
+      ASSERT_TRUE(probe->producer.has_value());
+      EXPECT_EQ(probe->value.ready_fence().poll().state(),
+                ReadyFenceState::Pending);
+      EXPECT_TRUE(probe->producer->cancel());
+    }
+    registry.unregister_key(make_key(kType, source_subtype));
+    registry.unregister_key(make_key(kType, dependent_subtype));
+  }
+}
+
+/**
+ * @brief Proves a Ready callback rejects replacement of its staged Value.
+ *
+ * @return Nothing; GoogleTest reports dependent entry, terminal typing,
+ * continuation settlement, or resource residue.
+ * @throws Plan, pending publication, service, promise, and future exceptions
+ * unchanged outside the expected stale-identity failure.
+ * @note The test uses a real `DirtyReadyTaskContext`, real `gpu_pipeline`
+ * service admission, and the private PendingDeviceValuePublisher. Its mutable
+ * source-private snapshot seam models an intervening staging replacement that
+ * ordinary production write buffers serialize away, directly locking the
+ * continuation's revision/allocation/producer stale guard.
+ */
+TEST(DirtyPendingNativeContinuation,
+     ReplacedStagedValueFailsBeforeDependentRelease) {
+  constexpr int kSourceNodeId = 515;
+  constexpr int kDependentNodeId = 516;
+  auto pending_probe = std::make_shared<DirtyPendingNativeProbe>();
+  DirtyReplaceableStagingProbe staging_probe;
+  std::future<void> staged = staging_probe.staged.get_future();
+
+  PlannedOperationRoute route;
+  route.implementation_identity = 130U;
+  route.device = DeviceBackend::Metal;
+  route.metadata.device_preference = DeviceBackend::Metal;
+  route.metadata.parameter_output_names = {"value"};
+  const PlannedOutputAuthority authority =
+      make_planned_output_authority(route, PixelSize{8, 8});
+
+  ComputePlan compute_plan;
+  compute_plan.intent = ComputeIntent::GlobalHighPrecision;
+  compute_plan.target_node_id = kDependentNodeId;
+  compute_plan.parallel = true;
+  compute_plan.execution_order = {kSourceNodeId, kDependentNodeId};
+  compute_plan.planned_nodes = compute_plan.execution_order;
+  compute_plan.task_graph.tasks.resize(2U);
+  compute_plan.task_graph.tasks[0].task_id = 0;
+  compute_plan.task_graph.tasks[0].node_id = kSourceNodeId;
+  compute_plan.task_graph.tasks[0].kind = PlannedTaskKind::Monolithic;
+  compute_plan.task_graph.tasks[0].whole_output = true;
+  compute_plan.task_graph.tasks[1].task_id = 1;
+  compute_plan.task_graph.tasks[1].node_id = kDependentNodeId;
+  compute_plan.task_graph.tasks[1].kind = PlannedTaskKind::Monolithic;
+  compute_plan.task_graph.tasks[1].whole_output = true;
+  compute_plan.task_graph.tasks[1].dependency_task_ids = {0};
+  compute_plan.task_graph.initial_task_ids = {0};
+  PlannedNodeWork source_work;
+  source_work.node_id = kSourceNodeId;
+  source_work.whole_output = true;
+  source_work.task_ids = {0};
+  source_work.operation_route = route;
+  source_work.output_authority = authority;
+  PlannedNodeWork dependent_work;
+  dependent_work.node_id = kDependentNodeId;
+  dependent_work.whole_output = true;
+  dependent_work.task_ids = {1};
+  dependent_work.operation_route = route;
+  dependent_work.output_authority = authority;
+  compute_plan.planned_work = {source_work, dependent_work};
+
+  ComputeRun run(make_dirty_resource_submission(
+      "issue130-dirty-replaced-staging", 1U, kDependentNodeId,
+      ComputeIntent::GlobalHighPrecision));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  std::atomic_int dependent_entries{0};
+  const std::vector<DeviceBackend> task_devices(2U, DeviceBackend::Metal);
+  auto context = std::make_shared<DirtyReadyTaskContext>(
+      compute_plan, nullptr, std::vector<int>{0, 1}, task_devices,
+      std::vector<OperationExecutionConstraints>(2U),
+      ReadyTaskSubmission::default_resource_demand(),
+      [pending_probe, &staging_probe, &dependent_entries](int task_id) {
+        if (task_id == 0) {
+          NodeOutput pending = make_pending_dirty_native_output(pending_probe);
+          {
+            std::lock_guard<std::mutex> lock(staging_probe.mutex);
+            staging_probe.output = std::move(pending);
+          }
+          staging_probe.staged.set_value();
+          return;
+        }
+        dependent_entries.fetch_add(1, std::memory_order_release);
+      },
+      owned_callable_retained_memory_bytes(static_cast<std::uint64_t>(
+          sizeof(pending_probe) + sizeof(void*) * 2U)),
+      run.acquire_lease(), true, ExecutionTaskPriority::High, &staging_probe,
+      &snapshot_replaceable_dirty_output);
+  context->install_cancellation_notification();
+  const CpuRunResourceDemand demand = context->run_resource_demand(0U);
+  std::vector<ReadyTaskSubmission> submissions =
+      context->make_submissions({0}, true);
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           ::ps::testing::make_fake_metal_executor_registry());
+  service.configure_worker_count(1U);
+  ExecutionServiceHost host;
+
+  auto completion = std::async(
+      std::launch::async,
+      [&service, &host, ready = std::move(submissions), demand]() mutable {
+        service.execute_run(host, "gpu_pipeline", std::move(ready), 2, demand);
+      });
+  ASSERT_EQ(staged.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  {
+    std::lock_guard<std::mutex> lock(staging_probe.mutex);
+    ASSERT_TRUE(staging_probe.output.has_value());
+    ASSERT_TRUE(staging_probe.output->has_image_value());
+    staging_probe.output = make_resource_dirty_output(999);
+  }
+  {
+    std::lock_guard<std::mutex> lock(pending_probe->mutex);
+    ASSERT_TRUE(pending_probe->producer.has_value());
+    ASSERT_TRUE(pending_probe->producer->complete_ready());
+  }
+
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_THROW(completion.get(), GraphError);
+  EXPECT_EQ(dependent_entries.load(std::memory_order_acquire), 0);
+  ASSERT_TRUE(run.terminal_outcome().has_value());
+  EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Failed);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
 /**
@@ -4621,15 +5370,16 @@ TEST(ComputeRunStorage, OwnsOneFullHpSubmissionPlanAndTemporarySlots) {
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
 
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
-      graph, traversal, 11, std::vector<Device>{Device::CPU});
+      graph, traversal, 11, std::vector<DeviceBackend>{DeviceBackend::CPU});
 
   EXPECT_EQ(run.submission_plan(), &plan);
   ASSERT_EQ(plan.execution_order().size(), 1U);
   EXPECT_EQ(plan.execution_order().front(), 11);
   EXPECT_EQ(plan.temp_results().size(), plan.execution_order().size());
-  EXPECT_THROW((void)run.emplace_submission_plan(
-                   graph, traversal, 11, std::vector<Device>{Device::CPU}),
-               std::logic_error);
+  EXPECT_THROW(
+      (void)run.emplace_submission_plan(
+          graph, traversal, 11, std::vector<DeviceBackend>{DeviceBackend::CPU}),
+      std::logic_error);
 }
 
 /**
@@ -4756,9 +5506,10 @@ TEST(ComputeRunTaskIdentity,
   first.advance_to(ComputeRunPhase::Admitted);
   second.advance_to(ComputeRunPhase::Admitted);
   first.emplace_submission_plan(first_graph, traversal, 21,
-                                std::vector<Device>{Device::CPU});
-  second.emplace_submission_plan(second_graph, traversal, 22,
-                                 std::vector<Device>{Device::CPU});
+                                std::vector<DeviceBackend>{DeviceBackend::CPU});
+  second.emplace_submission_plan(
+      second_graph, traversal, 22,
+      std::vector<DeviceBackend>{DeviceBackend::CPU});
   ComputeRunLease first_lease = first.acquire_lease();
   ComputeRunLease second_lease = second.acquire_lease();
   const ComputeRunTaskIdentity first_zero = first_lease.task_identity(0);
@@ -5058,7 +5809,8 @@ TEST(OperationExecutionGate,
                                             graph.revision().value(), kNodeId));
   ASSERT_TRUE(tiled_run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& plan = tiled_run.emplace_submission_plan(
-      graph, traversal, kNodeId, std::vector<Device>{Device::CPU});
+      graph, traversal, kNodeId,
+      std::vector<DeviceBackend>{DeviceBackend::CPU});
   ASSERT_EQ(plan.size(), 2U);
   for (const PlannedTask& task : plan.compute_plan().task_graph.tasks) {
     EXPECT_EQ(task.node_id, kNodeId);
@@ -5083,6 +5835,8 @@ TEST(OperationExecutionGate,
       false,
       true,
       nullptr,
+      nullptr,
+      &plan.compute_plan().planned_work,
   });
   ASSERT_TRUE(tiled_run.advance_to(ComputeRunPhase::Queued));
   ASSERT_TRUE(tiled_run.advance_to(ComputeRunPhase::Running));
@@ -5746,8 +6500,8 @@ TEST(DirtyExecutionCommon,
 
   const std::uint64_t callable_bytes = owned_callable_retained_memory_bytes(
       static_cast<std::uint64_t>(sizeof(LargeDirtyPhaseTask)));
-  const std::vector<Device> task_devices(compute_plan.task_graph.tasks.size(),
-                                         Device::CPU);
+  const std::vector<DeviceBackend> task_devices(
+      compute_plan.task_graph.tasks.size(), DeviceBackend::CPU);
   LargeDirtyPhaseTaskProbe success_probe;
   MovePreservingDirtyCallableHolder outer_holder{
       LargeDirtyPhaseTask(success_probe)};
@@ -5923,8 +6677,8 @@ TEST(ExecutionServiceProductResources,
   combined_plan.task_graph.initial_task_ids = {0, 1};
   const std::vector<int> source_task_ids{0};
   const std::vector<int> downstream_task_ids{1};
-  const std::vector<Device> task_devices(combined_plan.task_graph.tasks.size(),
-                                         Device::CPU);
+  const std::vector<DeviceBackend> task_devices(
+      combined_plan.task_graph.tasks.size(), DeviceBackend::CPU);
   const std::vector<OperationExecutionConstraints> task_constraints(
       combined_plan.task_graph.tasks.size());
 
@@ -6048,7 +6802,7 @@ TEST(ExecutionServiceProductResources,
       make_test_submission(graph_identity, graph.revision().value(), 101));
   ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& small_plan = small_run.emplace_submission_plan(
-      graph, traversal, 101, std::vector<Device>{Device::CPU});
+      graph, traversal, 101, std::vector<DeviceBackend>{DeviceBackend::CPU});
   TimingCollector small_timings;
   std::mutex small_timing_mutex;
   small_plan.emplace_task_runner(NodeTaskRunnerContext{
@@ -6067,6 +6821,8 @@ TEST(ExecutionServiceProductResources,
       false,
       true,
       nullptr,
+      nullptr,
+      &small_plan.compute_plan().planned_work,
   });
   ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Queued));
   ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Running));
@@ -6122,7 +6878,7 @@ TEST(ExecutionServiceProductResources,
       make_test_submission(graph_identity, graph.revision().value(), 101));
   ASSERT_TRUE(one_short_run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& one_short_plan = one_short_run.emplace_submission_plan(
-      graph, traversal, 101, std::vector<Device>{Device::CPU});
+      graph, traversal, 101, std::vector<DeviceBackend>{DeviceBackend::CPU});
   TimingCollector one_short_timings;
   std::mutex one_short_timing_mutex;
   one_short_plan.emplace_task_runner(NodeTaskRunnerContext{
@@ -6141,6 +6897,8 @@ TEST(ExecutionServiceProductResources,
       false,
       true,
       nullptr,
+      nullptr,
+      &one_short_plan.compute_plan().planned_work,
   });
   ASSERT_TRUE(one_short_run.advance_to(ComputeRunPhase::Queued));
   ASSERT_TRUE(one_short_run.advance_to(ComputeRunPhase::Running));
@@ -6162,7 +6920,7 @@ TEST(ExecutionServiceProductResources,
       make_test_submission(graph_identity, graph.revision().value(), 101));
   ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& large_plan = large_run.emplace_submission_plan(
-      graph, traversal, 101, std::vector<Device>{Device::CPU});
+      graph, traversal, 101, std::vector<DeviceBackend>{DeviceBackend::CPU});
   TimingCollector large_timings;
   std::mutex large_timing_mutex;
   large_plan.emplace_task_runner(NodeTaskRunnerContext{
@@ -6181,6 +6939,8 @@ TEST(ExecutionServiceProductResources,
       false,
       true,
       nullptr,
+      nullptr,
+      &large_plan.compute_plan().planned_work,
   });
   ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Queued));
   ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Running));
@@ -6225,7 +6985,7 @@ TEST(ExecutionServiceProductResources,
               : g_resource_dirty_hp_operation_calls;
     const std::optional<OpImplementation> selected_operation =
         OpRegistry::instance().select_implementation(
-            "compute_run_resource", subtype, {Device::CPU}, intent);
+            "compute_run_resource", subtype, {DeviceBackend::CPU}, intent);
     ASSERT_TRUE(selected_operation.has_value());
     ASSERT_GT(selected_operation->metadata.exclusive_key.capacity(), 15U);
     const std::vector<int> small_owner_ids{node_id};
@@ -6373,8 +7133,8 @@ TEST(ExecutionServiceProductResources,
   compute_plan.task_graph.tasks[1].node_id = kSourceNodeId;
   compute_plan.task_graph.tasks[2].task_id = 2;
   compute_plan.task_graph.tasks[2].node_id = kMissingNodeId;
-  const std::vector<Device> task_devices(compute_plan.task_graph.tasks.size(),
-                                         Device::CPU);
+  const std::vector<DeviceBackend> task_devices(
+      compute_plan.task_graph.tasks.size(), DeviceBackend::CPU);
 
   ComputeRun run(make_test_submission(graph_identity, graph.revision().value(),
                                       kMissingNodeId));
@@ -8755,10 +9515,11 @@ TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
                                        peer_graph.revision().value(), 66));
   failing.advance_to(ComputeRunPhase::Admitted);
   peer.advance_to(ComputeRunPhase::Admitted);
-  failing.emplace_submission_plan(failing_graph, traversal, 65,
-                                  std::vector<Device>{Device::CPU});
+  failing.emplace_submission_plan(
+      failing_graph, traversal, 65,
+      std::vector<DeviceBackend>{DeviceBackend::CPU});
   peer.emplace_submission_plan(peer_graph, traversal, 66,
-                               std::vector<Device>{Device::CPU});
+                               std::vector<DeviceBackend>{DeviceBackend::CPU});
 
   std::promise<void> failing_entered;
   std::future<void> failing_entered_future = failing_entered.get_future();
@@ -9126,8 +9887,9 @@ TEST(ExecutionService, RetainedFenceExecutorExtendsRunSettlementLifetime) {
  * exceptions from complete product-path setup and execution.
  * @note A fake CPU provider publishes a pending image Value and returns. The
  * dependent must remain unentered until the test settles the producer fence;
- * then the Run-scoped continuation materializes ImageBuffer, releases the
- * dependency, and settles every logical/dynamic completion unit.
+ * then the Run-scoped continuation releases the canonical Value dependency
+ * without a compatibility allocation and settles every logical/dynamic
+ * completion unit.
  */
 TEST(TaskSubmissionPlan,
      PendingValueDefersDependentUntilRunScopedContinuation) {
@@ -9160,7 +9922,7 @@ TEST(TaskSubmissionPlan,
   std::future<void> source_published = probe->source_published.get_future();
 
   registry.register_impl(
-      kType, kSourceSubtype, Device::CPU,
+      kType, kSourceSubtype, DeviceBackend::CPU,
       MonolithicOpFunc([probe](const Node&,
                                const std::vector<const NodeOutput*>&) {
         PendingValuePublication publication =
@@ -9170,13 +9932,15 @@ TEST(TaskSubmissionPlan,
                     ElementSemantics::FloatingPoint,
                     StorageEncoding{32U},
                 },
-                ImageFacet{1U, 0U, std::nullopt},
+                ImageFacet{1U, 0U, std::nullopt, ImageBounds{0, 0, 4, 1},
+                           std::nullopt, std::nullopt, std::nullopt,
+                           std::nullopt},
                 StridedLayout{{static_cast<std::ptrdiff_t>(4U * sizeof(float)),
                                static_cast<std::ptrdiff_t>(sizeof(float))},
                               0U},
                 4U * sizeof(float));
         NodeOutput output;
-        output.image_value = publication.value;
+        output.publish_image_value(publication.value);
         {
           std::lock_guard<std::mutex> lock(probe->mutex);
           probe->producer.emplace(std::move(publication.producer));
@@ -9185,22 +9949,30 @@ TEST(TaskSubmissionPlan,
         probe->source_published.set_value();
         return output;
       }));
+  OpMetadata dependent_metadata;
+  dependent_metadata.produces_image = false;
+  dependent_metadata.parameter_output_names = {"value"};
   registry.register_impl(
-      kType, kDependentSubtype, Device::CPU,
+      kType, kDependentSubtype, DeviceBackend::CPU,
       MonolithicOpFunc(
           [probe](const Node&, const std::vector<const NodeOutput*>& inputs) {
             if (inputs.size() != 1U || inputs.front() == nullptr ||
-                inputs.front()->image_buffer.width != 4 ||
-                inputs.front()->image_buffer.height != 1 ||
-                inputs.front()->image_buffer.channels != 1) {
+                !inputs.front()->has_image_value()) {
               throw std::logic_error(
-                  "Pending Value dependent received no materialized image.");
+                  "Pending Value dependent received no canonical image.");
+            }
+            const ImageView input_view(inputs.front()->image_value());
+            if (input_view.width() != 4U || input_view.height() != 1U ||
+                input_view.channels() != 1U) {
+              throw std::logic_error(
+                  "Pending Value dependent received the wrong image shape.");
             }
             probe->dependent_entries.fetch_add(1, std::memory_order_release);
             NodeOutput output;
             output.data["value"] = 85;
             return output;
-          }));
+          }),
+      dependent_metadata);
 
   GraphModel graph("cache/issue85-pending-value-plan");
   Node source = make_plan_node(kSourceNodeId);
@@ -9224,7 +9996,8 @@ TEST(TaskSubmissionPlan,
                                       kDependentNodeId));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
-      graph, traversal, kDependentNodeId, std::vector<Device>{Device::CPU});
+      graph, traversal, kDependentNodeId,
+      std::vector<DeviceBackend>{DeviceBackend::CPU});
   ASSERT_EQ(plan.size(), 2U);
   TimingCollector timings;
   std::mutex timing_mutex;
@@ -9244,6 +10017,8 @@ TEST(TaskSubmissionPlan,
       false,
       true,
       nullptr,
+      nullptr,
+      &plan.compute_plan().planned_work,
   });
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Queued));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Running));
@@ -9277,9 +10052,14 @@ TEST(TaskSubmissionPlan,
   const std::size_t source_index =
       static_cast<std::size_t>(plan.id_to_idx().at(kSourceNodeId));
   ASSERT_TRUE(plan.temp_results().at(source_index).has_value());
-  EXPECT_EQ(plan.temp_results().at(source_index)->image_buffer.width, 4);
-  EXPECT_EQ(plan.temp_results().at(source_index)->image_buffer.height, 1);
-  EXPECT_EQ(plan.temp_results().at(source_index)->image_buffer.channels, 1);
+  ASSERT_TRUE(plan.temp_results().at(source_index)->has_image_value());
+  const ImageView source_view(
+      plan.temp_results().at(source_index)->image_value());
+  EXPECT_EQ(source_view.width(), 4U);
+  EXPECT_EQ(source_view.height(), 1U);
+  EXPECT_EQ(source_view.channels(), 1U);
+  EXPECT_FALSE(
+      plan.temp_results().at(source_index)->has_generic_named_values());
   EXPECT_EQ(host.context_entries(), 3);
   EXPECT_EQ(host.context_exits(), 3);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
@@ -9328,7 +10108,7 @@ TEST(TaskSubmissionPlan,
   auto probe = std::make_shared<CancellationProbe>();
   std::future<void> source_published = probe->source_published.get_future();
   registry.register_impl(
-      kType, kSubtype, Device::CPU,
+      kType, kSubtype, DeviceBackend::CPU,
       MonolithicOpFunc([probe](const Node&,
                                const std::vector<const NodeOutput*>&) {
         PendingValuePublication publication =
@@ -9338,13 +10118,15 @@ TEST(TaskSubmissionPlan,
                     ElementSemantics::FloatingPoint,
                     StorageEncoding{32U},
                 },
-                ImageFacet{1U, 0U, std::nullopt},
+                ImageFacet{1U, 0U, std::nullopt, ImageBounds{0, 0, 4, 1},
+                           std::nullopt, std::nullopt, std::nullopt,
+                           std::nullopt},
                 StridedLayout{{static_cast<std::ptrdiff_t>(4U * sizeof(float)),
                                static_cast<std::ptrdiff_t>(sizeof(float))},
                               0U},
                 4U * sizeof(float));
         NodeOutput output;
-        output.image_value = publication.value;
+        output.publish_image_value(publication.value);
         {
           std::lock_guard<std::mutex> lock(probe->mutex);
           probe->value = publication.value;
@@ -9372,7 +10154,8 @@ TEST(TaskSubmissionPlan,
   const ComputeRunCancellationSource cancellation = run.cancellation_source();
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
-      graph, traversal, kNodeId, std::vector<Device>{Device::CPU});
+      graph, traversal, kNodeId,
+      std::vector<DeviceBackend>{DeviceBackend::CPU});
   ASSERT_EQ(plan.size(), 1U);
   TimingCollector timings;
   std::mutex timing_mutex;
@@ -9392,6 +10175,8 @@ TEST(TaskSubmissionPlan,
       false,
       true,
       nullptr,
+      nullptr,
+      &plan.compute_plan().planned_work,
   });
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Queued));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Running));
@@ -9475,7 +10260,7 @@ TEST(TaskSubmissionPlan, FailedPendingValueFailsMatchingRunAndSettles) {
   auto probe = std::make_shared<FailureProbe>();
   std::future<void> source_published = probe->source_published.get_future();
   registry.register_impl(
-      kType, kSourceSubtype, Device::CPU,
+      kType, kSourceSubtype, DeviceBackend::CPU,
       MonolithicOpFunc([probe](const Node&,
                                const std::vector<const NodeOutput*>&) {
         PendingValuePublication publication =
@@ -9485,13 +10270,15 @@ TEST(TaskSubmissionPlan, FailedPendingValueFailsMatchingRunAndSettles) {
                     ElementSemantics::FloatingPoint,
                     StorageEncoding{32U},
                 },
-                ImageFacet{1U, 0U, std::nullopt},
+                ImageFacet{1U, 0U, std::nullopt, ImageBounds{0, 0, 4, 1},
+                           std::nullopt, std::nullopt, std::nullopt,
+                           std::nullopt},
                 StridedLayout{{static_cast<std::ptrdiff_t>(4U * sizeof(float)),
                                static_cast<std::ptrdiff_t>(sizeof(float))},
                               0U},
                 4U * sizeof(float));
         NodeOutput output;
-        output.image_value = publication.value;
+        output.publish_image_value(publication.value);
         {
           std::lock_guard<std::mutex> lock(probe->mutex);
           probe->value = publication.value;
@@ -9501,7 +10288,7 @@ TEST(TaskSubmissionPlan, FailedPendingValueFailsMatchingRunAndSettles) {
         return output;
       }));
   registry.register_impl(
-      kType, kDependentSubtype, Device::CPU,
+      kType, kDependentSubtype, DeviceBackend::CPU,
       MonolithicOpFunc(
           [probe](const Node&, const std::vector<const NodeOutput*>&) {
             probe->dependent_entries.fetch_add(1, std::memory_order_release);
@@ -9530,7 +10317,8 @@ TEST(TaskSubmissionPlan, FailedPendingValueFailsMatchingRunAndSettles) {
                                       kDependentNodeId));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
-      graph, traversal, kDependentNodeId, std::vector<Device>{Device::CPU});
+      graph, traversal, kDependentNodeId,
+      std::vector<DeviceBackend>{DeviceBackend::CPU});
   ASSERT_EQ(plan.size(), 2U);
   TimingCollector timings;
   std::mutex timing_mutex;
@@ -9550,6 +10338,8 @@ TEST(TaskSubmissionPlan, FailedPendingValueFailsMatchingRunAndSettles) {
       false,
       true,
       nullptr,
+      nullptr,
+      &plan.compute_plan().planned_work,
   });
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Queued));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Running));
@@ -10143,7 +10933,7 @@ TEST(ExecutionService, PreservesExactFailureForMatchingRegisteredTask) {
       make_test_submission("service-failure", graph.revision().value(), 81));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
-      graph, traversal, 81, std::vector<Device>{Device::CPU});
+      graph, traversal, 81, std::vector<DeviceBackend>{DeviceBackend::CPU});
   ASSERT_EQ(plan.size(), 1U);
   ComputeRunLease lease = run.acquire_lease();
   const ComputeRunTaskIdentity identity = lease.task_identity(0);
@@ -10255,7 +11045,7 @@ TEST(ComputeRunCancellation,
     });
     ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
     TaskSubmissionPlan& plan = run.emplace_submission_plan(
-        graph, traversal, 92, std::vector<Device>{Device::CPU});
+        graph, traversal, 92, std::vector<DeviceBackend>{DeviceBackend::CPU});
     ASSERT_EQ(plan.size(), 2U);
     ComputeRunLease lease = run.acquire_lease();
     ScopedLegacyCancellationSource configured_source(run.cancellation_source());
@@ -10276,6 +11066,7 @@ TEST(ComputeRunCancellation,
         true,
         nullptr,
         &lease,
+        &plan.compute_plan().planned_work,
     });
 
     runtime.submit_initial_task_handles({}, 0);
@@ -10340,7 +11131,7 @@ TEST(ComputeRunCompletion,
       make_test_submission("terminal-task", graph.revision().value(), 31));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
-      graph, traversal, 31, std::vector<Device>{Device::CPU});
+      graph, traversal, 31, std::vector<DeviceBackend>{DeviceBackend::CPU});
   ASSERT_EQ(plan.size(), 1U);
   ASSERT_EQ(plan.temp_results().size(), 1U);
 
@@ -10387,7 +11178,7 @@ TEST(ComputeRunCompletion,
       make_test_submission("terminal-bootstrap", graph.revision().value(), 32));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
-      graph, traversal, 32, std::vector<Device>{Device::CPU});
+      graph, traversal, 32, std::vector<DeviceBackend>{DeviceBackend::CPU});
   ASSERT_EQ(plan.size(), 1U);
 
   ComputeRunLease dispatcher_lease = run.acquire_lease();

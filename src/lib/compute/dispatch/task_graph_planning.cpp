@@ -36,13 +36,120 @@ bool operation_metadata_equal(const OpMetadata& lhs,
   return lhs.tile_preference == rhs.tile_preference &&
          lhs.device_preference == rhs.device_preference &&
          lhs.cost_score == rhs.cost_score &&
+         lhs.supports_high_precision == rhs.supports_high_precision &&
+         lhs.supports_realtime == rhs.supports_realtime &&
          lhs.access_pattern == rhs.access_pattern &&
          lhs.data_dependent == rhs.data_dependent &&
          lhs.reentrant == rhs.reentrant &&
          lhs.maximum_parallelism == rhs.maximum_parallelism &&
          lhs.retained_memory_bytes == rhs.retained_memory_bytes &&
          lhs.scratch_bytes == rhs.scratch_bytes &&
+         lhs.produces_image == rhs.produces_image &&
+         lhs.named_value_output_names == rhs.named_value_output_names &&
+         lhs.parameter_output_names == rhs.parameter_output_names &&
          lhs.exclusive_key == rhs.exclusive_key;
+}
+
+/**
+ * @brief Checks one frozen output-name vector for canonical structure.
+ * @param names Sorted generic-Value or parameter-result names to inspect.
+ * @param maximum_count Frozen maximum number of names in the category.
+ * @return True only for a strictly sorted bounded vector of valid non-image
+ * names.
+ * @throws Nothing.
+ * @note Registration owns canonicalization; this defensive execution check
+ * detects malformed manually constructed or stale planning authorities without
+ * allocating or mutating the plan.
+ */
+bool planned_output_names_valid(const std::vector<std::string>& names,
+                                std::size_t maximum_count) noexcept {
+  if (names.size() > maximum_count) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < names.size(); ++index) {
+    const std::string& name = names[index];
+    if (name.empty() || name.size() > OpMetadata::kOutputNameMaxBytes ||
+        name.find('\0') != std::string::npos ||
+        name == NodeOutput::kImageOutputName ||
+        (index != 0U && names[index - 1U] >= name)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * @brief Validates immutable Value identity and phase readiness.
+ * @param value Candidate generic or canonical image Value.
+ * @param readiness Staging or formal readiness policy.
+ * @param image True when diagnostics should identify the canonical image.
+ * @return Nothing when the Value is valid, its publication and every indexed
+ * binding are fully identified, and it is Ready or explicitly allowed Pending.
+ * @throws GraphError with ComputeError for an invalid publication/binding
+ * identity or any readiness state not authorized by the requested phase.
+ * @throws std::logic_error only if a supposedly valid Value violates its own
+ * immutable indexed-binding invariant.
+ * @note The helper polls once, waits on no fence, maps no payload, and mutates
+ * neither the Value nor graph state.
+ */
+void validate_value_identity_and_readiness(const Value& value,
+                                           PlannedOutputReadiness readiness,
+                                           bool image) {
+  if (!value.valid() || !value.revision_id().valid() ||
+      !value.producer_identity().valid() || value.buffer_count() == 0U) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        image ? "Operation image Value lacks required identities."
+              : "Operation generic Value lacks required identities.");
+  }
+  for (std::size_t index = 0U; index < value.buffer_count(); ++index) {
+    const StorageBinding binding = value.storage_binding(index);
+    if (!binding.allocation.valid() || binding.byte_size == 0U) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          image ? "Operation image Value lacks required binding identities."
+                : "Operation generic Value lacks required binding identities.");
+    }
+  }
+  const ReadyFenceState state = value.ready_fence().poll().state();
+  const bool accepted = state == ReadyFenceState::Ready ||
+                        (readiness == PlannedOutputReadiness::AllowPending &&
+                         state == ReadyFenceState::Pending);
+  if (!accepted) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        image ? "Operation image Value readiness violates its planned "
+                "publication stage."
+              : "Operation generic Value readiness violates its planned "
+                "publication stage.");
+  }
+}
+
+/**
+ * @brief Validates the current representation/layout boundary of one generic
+ * named Value.
+ * @param value Valid immutable generic candidate.
+ * @return Nothing for DenseTensor with Strided/Blocked layout or
+ * ProviderDefined with ProviderDefined layout.
+ * @throws GraphError with ComputeError for a mismatched or unknown pair.
+ * @note No DenseTensor descriptor, provider envelope, ImageFacet, image extent,
+ * or payload byte is inspected. Value construction remains the authority for
+ * representation-specific metadata validity.
+ */
+void validate_generic_value_representation(const Value& value) {
+  const ValueRepresentationKind representation = value.representation_kind();
+  const StorageLayoutKind layout = value.storage_layout_kind();
+  const bool accepted =
+      (representation == ValueRepresentationKind::DenseTensor &&
+       (layout == StorageLayoutKind::Strided ||
+        layout == StorageLayoutKind::Blocked)) ||
+      (representation == ValueRepresentationKind::ProviderDefined &&
+       layout == StorageLayoutKind::ProviderDefined);
+  if (!accepted) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Operation generic Value has an unsupported representation/layout.");
+  }
 }
 
 }  // namespace
@@ -77,10 +184,143 @@ bool planned_operation_route_matches(
          operation_metadata_equal(route.metadata, implementation.metadata);
 }
 
+/** @copydoc make_planned_output_authority */
+PlannedOutputAuthority make_planned_output_authority(
+    const PlannedOperationRoute& route, const PixelSize& resolved_extent) {
+  if (route.implementation_identity == 0U) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Output planning requires a nonzero route identity.");
+  }
+  if ((resolved_extent.width > 0) != (resolved_extent.height > 0)) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Output planning received a partially positive image extent.");
+  }
+
+  PlannedOutputAuthority authority;
+  authority.implementation_identity = route.implementation_identity;
+  authority.route_device = route.device;
+  if (route.metadata.produces_image) {
+    authority.image_output_name = std::string(NodeOutput::kImageOutputName);
+    if (resolved_extent.width > 0 && resolved_extent.height > 0) {
+      authority.image_extent = resolved_extent;
+    }
+  }
+  authority.named_value_output_names = route.metadata.named_value_output_names;
+  authority.parameter_output_names = route.metadata.parameter_output_names;
+  return authority;
+}
+
+/** @copydoc validate_planned_output */
+void validate_planned_output(const NodeOutput& output,
+                             const PlannedOutputAuthority& authority,
+                             PlannedOutputReadiness readiness) {
+  if (authority.implementation_identity == 0U ||
+      (authority.image_output_name.has_value() &&
+       *authority.image_output_name != NodeOutput::kImageOutputName) ||
+      !planned_output_names_valid(authority.named_value_output_names,
+                                  OpMetadata::kNamedValueOutputCountMax) ||
+      !planned_output_names_valid(authority.parameter_output_names,
+                                  OpMetadata::kParameterOutputCountMax) ||
+      std::find_first_of(authority.named_value_output_names.begin(),
+                         authority.named_value_output_names.end(),
+                         authority.parameter_output_names.begin(),
+                         authority.parameter_output_names.end()) !=
+          authority.named_value_output_names.end()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Execution received a malformed planned output "
+                     "authority.");
+  }
+  const std::size_t expected_named_values =
+      authority.named_value_output_names.size() +
+      (authority.image_output_name.has_value() ? 1U : 0U);
+  if (output.named_values.size() != expected_named_values) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Operation output does not match the planned named-Value set.");
+  }
+  if (output.data.size() != authority.parameter_output_names.size()) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Operation output does not match the planned parameter-result set.");
+  }
+  for (const std::string& name : authority.parameter_output_names) {
+    if (output.data.find(name) == output.data.end()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Operation output is missing a planned parameter result.");
+    }
+  }
+
+  for (const std::string& name : authority.named_value_output_names) {
+    const auto found = output.named_values.find(name);
+    if (found == output.named_values.end()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Operation output is missing a planned generic Value.");
+    }
+    validate_value_identity_and_readiness(found->second, readiness, false);
+    validate_generic_value_representation(found->second);
+  }
+
+  if (!authority.image_output_name.has_value()) {
+    return;
+  }
+  const auto found = output.named_values.find(*authority.image_output_name);
+  if (found == output.named_values.end()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Operation output is missing its planned image Value.");
+  }
+  const Value& value = found->second;
+  validate_value_identity_and_readiness(value, readiness, true);
+  if (value.representation_kind() != authority.image_representation ||
+      value.storage_layout_kind() != authority.image_layout) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Operation image Value violates its planned representation or "
+        "layout.");
+  }
+  const DenseTensorDescriptor& descriptor = value.dense_tensor_descriptor();
+  const std::optional<ImageFacet>& facet = value.image_facet();
+  if (authority.image_facet_required && !facet.has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Operation image Value lacks its planned ImageFacet.");
+  }
+  if (facet.has_value()) {
+    if (facet->x_axis >= descriptor.shape.size() ||
+        facet->y_axis >= descriptor.shape.size()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Operation image Value has malformed descriptor/facet axes.");
+    }
+    if (authority.image_extent.has_value()) {
+      const std::size_t expected_width =
+          static_cast<std::size_t>(authority.image_extent->width);
+      const std::size_t expected_height =
+          static_cast<std::size_t>(authority.image_extent->height);
+      if (image_bounds_width(facet->data_window) != expected_width ||
+          image_bounds_height(facet->data_window) != expected_height ||
+          descriptor.shape[facet->x_axis] != expected_width ||
+          descriptor.shape[facet->y_axis] != expected_height) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            "Operation image Value does not match its planned "
+            "shape (expected " +
+                std::to_string(expected_width) + "x" +
+                std::to_string(expected_height) + ", window " +
+                std::to_string(image_bounds_width(facet->data_window)) + "x" +
+                std::to_string(image_bounds_height(facet->data_window)) +
+                ", descriptor " +
+                std::to_string(descriptor.shape[facet->x_axis]) + "x" +
+                std::to_string(descriptor.shape[facet->y_axis]) + ").");
+      }
+    }
+  }
+}
+
 namespace {
 
 /** @brief Task-shape config token used by FullTaskGraph cache keys. */
-constexpr const char* kTaskShapeConfigVersion = "task-shape-v3";
+constexpr const char* kTaskShapeConfigVersion = "task-shape-v5";
 
 /** @brief Maximum attempts to observe one stable operation-registry shape. */
 constexpr int kMaxRegistryStableExpansionAttempts = 8;
@@ -100,12 +340,12 @@ constexpr int kMaxRegistryStableExpansionAttempts = 8;
 std::string make_full_task_graph_cache_key(
     const GraphModel& graph, ComputeIntent intent,
     std::uint64_t registry_generation,
-    const std::vector<Device>& available_devices) {
+    const std::vector<DeviceBackend>& available_devices) {
   std::string key = std::to_string(graph.topology_generation()) + ":" +
                     std::to_string(static_cast<int>(intent)) + ":" +
                     std::to_string(registry_generation) + ":" +
                     kTaskShapeConfigVersion + ":devices";
-  for (Device device : available_devices) {
+  for (DeviceBackend device : available_devices) {
     key += ":" + std::to_string(static_cast<int>(device));
   }
   return key;
@@ -120,12 +360,13 @@ std::string make_full_task_graph_cache_key(
  * @note An empty inventory remains empty and therefore selects no operation;
  * the helper never fabricates CPU availability.
  */
-std::vector<Device> canonicalize_available_devices(
-    const std::vector<Device>& available_devices) {
-  std::vector<Device> result = available_devices;
-  std::sort(result.begin(), result.end(), [](Device lhs, Device rhs) {
-    return static_cast<int>(lhs) < static_cast<int>(rhs);
-  });
+std::vector<DeviceBackend> canonicalize_available_devices(
+    const std::vector<DeviceBackend>& available_devices) {
+  std::vector<DeviceBackend> result = available_devices;
+  std::sort(result.begin(), result.end(),
+            [](DeviceBackend lhs, DeviceBackend rhs) {
+              return static_cast<int>(lhs) < static_cast<int>(rhs);
+            });
   result.erase(std::unique(result.begin(), result.end()), result.end());
   return result;
 }
@@ -522,7 +763,7 @@ PixelSize resolve_planned_extent(
  * @throws GraphError or standard exceptions from extent resolution.
  * @throws std::bad_alloc when vector storage allocation fails.
  * @note This captures all graph-known inputs, not only the edge currently being
- *       mapped, so public random-access RoiContext snapshots remain complete.
+ *       mapped, so operation ABI Region/dependency snapshots remain complete.
  */
 std::vector<PixelSize> resolve_planned_input_extents(
     const GraphModel& graph, const Node& node, GraphExtentResolver& resolver,
@@ -592,12 +833,6 @@ PixelRect required_upstream_roi_for_task(
     const PixelSize upstream_extent = resolve_planned_extent(
         *graph, dependency.from_node_id, resolver, extent_cache);
     if (upstream_extent.width > 0 && upstream_extent.height > 0) {
-      ImageBuffer input_buffer;
-      input_buffer.width = upstream_extent.width;
-      input_buffer.height = upstream_extent.height;
-      input_buffer.channels = 1;
-      input_buffer.type = DataType::FLOAT32;
-
       TiledExecutionConfig config;
       config.tile_size = to_task.tile_size > 0 ? to_task.tile_size : 256;
       config.output_roi = to_task.output_roi;
@@ -612,6 +847,21 @@ PixelRect required_upstream_roi_for_task(
                                         extent_cache);
       config.metadata =
           downstream_route ? downstream_route->metadata : OpMetadata{};
+      if (downstream_route != nullptr) {
+        const auto implementation =
+            OpRegistry::instance().get_implementation_by_identity(
+                downstream_node.type, downstream_node.subtype,
+                downstream_route->implementation_identity);
+        if (!implementation || !planned_operation_route_matches(
+                                   *downstream_route, *implementation)) {
+          throw GraphError(
+              GraphErrc::ComputeError,
+              "Planned ROI route no longer names the selected operation.");
+        }
+        config.dirty_propagator = implementation->dirty_propagator;
+        config.implementation_identity =
+            implementation->implementation_identity;
+      }
       std::optional<plugin::ParameterMap> effective_parameters;
       if (config.metadata->access_pattern ==
           OpMetadata::InputAccessPattern::RandomAccess) {
@@ -620,7 +870,7 @@ PixelRect required_upstream_roi_for_task(
       }
       const PixelRect execution_mapped_roi = NodeExecutor::input_roi_for_tile(
           const_cast<GraphModel&>(*graph), downstream_node, to_task.output_roi,
-          input_buffer, config, input_extents,
+          upstream_extent, config, input_extents,
           effective_parameters ? &*effective_parameters : nullptr);
       const PixelRect snapshot_lower_bound =
           clip_rect(dependency.from_roi, upstream_extent);
@@ -644,8 +894,11 @@ PixelRect required_upstream_roi_for_task(
  * @param required_roi Upstream input ROI consumed by the downstream task.
  * @param tasks Dense task list used to verify edge-tile overlap.
  * @throws std::bad_alloc if dependency_ids grows.
- * @note The helper enumerates coordinate ranges directly and performs a final
- * ROI overlap check only for edge tiles.
+ * @note A nonempty ROI enumerates coordinate ranges directly and performs a
+ * final overlap check only for edge tiles. An empty exact mapping consumes no
+ * source bytes, but the runner still resolves the complete upstream
+ * NodeOutput; that case therefore retains the producer node's task set only
+ * as a fail-closed publication join. Nonempty mappings remain spatially exact.
  */
 void append_covering_upstream_tiles(
     std::vector<int>& dependency_ids,
@@ -655,6 +908,9 @@ void append_covering_upstream_tiles(
     return;
   }
   if (!has_roi(required_roi)) {
+    for (int from_task_id : upstream_index.task_ids) {
+      append_unique(dependency_ids, from_task_id);
+    }
     return;
   }
   const int tile_size = upstream_index.tile_size;
@@ -762,11 +1018,14 @@ void append_node_dependency_tasks(
  * @param graph Optional graph used for execution-accurate tile input ROI.
  * @return Dependency task ids aligned with tasks by dense task id.
  * @throws GraphError, std::out_of_range, or standard allocation exceptions.
- * @note Tiled image edges enumerate upstream tile ranges directly. Whole-node,
- * parameter, non-grid, and parameterized random-access producer dependencies
- * attach the upstream node's task ids without constructing a Cartesian task
- * pair scan. The conservative random-access case is required because its
- * request-effective parameter output does not exist at planning time.
+ * @note Tiled image edges retain the exact ROI-covered producer set. An empty
+ * mapped ROI retains a producer-node publication join because execution still
+ * resolves the complete upstream NodeOutput. Runtime batches release of those
+ * original task edges only after the shared Host binding seals, so nonempty
+ * dependency identity remains spatially exact without exposing partially
+ * mutable bytes. Whole-node, parameter, non-grid, and parameterized
+ * random-access dependencies still use a complete node join without
+ * constructing a Cartesian task-pair scan.
  */
 std::vector<std::vector<int>> build_task_dependency_ids(
     const std::vector<PlannedTask>& tasks,
@@ -825,8 +1084,11 @@ std::vector<std::vector<int>> build_task_dependency_ids(
  * @param result Plan whose ComputeTaskGraph task dependency metadata is
  * refreshed.
  * @throws std::bad_alloc if node-to-task lookup or ready ids grow.
- * @note Tile-to-tile image edges depend on the downstream input ROI. Whole-node
- * and parameter dependencies attach producer task ids directly.
+ * @note Tile-to-tile image edges retain exact ROI-derived dependencies, with a
+ * producer publication join only when the exact mapping is empty. Runtime
+ * batches their physical release after complete producer publication.
+ * Whole-node and parameter dependencies retain their complete producer-node
+ * join.
  */
 void populate_task_dependencies(ComputePlan& result, const GraphModel* graph) {
   result.task_graph.initial_task_ids.clear();
@@ -915,7 +1177,7 @@ void clear_dirty_work_metadata(ComputePlan& result) {
 ComputePlan build_plan_from_nodes(
     const ComputeRequest& request, const std::vector<int>& planned_nodes,
     const DirtyRegionSnapshot* snapshot, const GraphModel* graph,
-    const std::vector<Device>& available_devices) {
+    const std::vector<DeviceBackend>& available_devices) {
   ComputePlan result;
   result.intent = request.intent;
   result.target_node_id = request.target_node_id;
@@ -1218,8 +1480,8 @@ std::unordered_set<int> required_nodes_before_satisfied_boundaries(
 
 std::string full_task_graph_cache_key(
     const GraphModel& graph, ComputeIntent intent,
-    const std::vector<Device>& available_devices) {
-  const std::vector<Device> canonical_devices =
+    const std::vector<DeviceBackend>& available_devices) {
+  const std::vector<DeviceBackend> canonical_devices =
       canonicalize_available_devices(available_devices);
   return make_full_task_graph_cache_key(
       graph, intent, OpRegistry::instance().task_shape_generation(),
@@ -1228,9 +1490,9 @@ std::string full_task_graph_cache_key(
 
 std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
     GraphModel& graph, ComputeIntent intent,
-    const std::vector<Device>& available_devices) {
+    const std::vector<DeviceBackend>& available_devices) {
   auto& registry = OpRegistry::instance();
-  const std::vector<Device> canonical_devices =
+  const std::vector<DeviceBackend> canonical_devices =
       canonicalize_available_devices(available_devices);
   for (int attempt = 0; attempt < kMaxRegistryStableExpansionAttempts;
        ++attempt) {
@@ -1353,8 +1615,8 @@ void populate_full_task_graph_indexes(FullTaskGraph& expanded) {
 
 FullTaskGraph FullTaskGraphExpander::expand(
     const GraphModel& graph, ComputeIntent intent,
-    const std::vector<Device>& available_devices) const {
-  const std::vector<Device> canonical_devices =
+    const std::vector<DeviceBackend>& available_devices) const {
+  const std::vector<DeviceBackend> canonical_devices =
       canonicalize_available_devices(available_devices);
   ComputeRequest request;
   request.intent = intent;
@@ -1583,6 +1845,21 @@ DirtyTaskSelectionOverlay DirtySnapshotTaskGraphPruner::select(
     } else {
       selection.downstream_task_ids.push_back(task.task_id);
     }
+  }
+  for (int task_id : selection.active_task_ids) {
+    std::vector<int>& dependencies =
+        selection.dependency_task_ids.at(static_cast<std::size_t>(task_id));
+    dependencies.erase(
+        std::remove_if(
+            dependencies.begin(), dependencies.end(),
+            [&](int dependency_task_id) {
+              return dependency_task_id < 0 ||
+                     static_cast<std::size_t>(dependency_task_id) >=
+                         selection.active_task_flags.size() ||
+                     !selection.active_task_flags.at(
+                         static_cast<std::size_t>(dependency_task_id));
+            }),
+        dependencies.end());
   }
   selection.initial_downstream_task_ids = initial_ready_task_ids_for_view(
       selection.downstream_task_ids, selection.dependency_task_ids);

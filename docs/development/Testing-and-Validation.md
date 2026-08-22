@@ -171,8 +171,8 @@ names, lowercase `OpenCV::opencv_*` targets, and component-specific CamelCase
 targets such as `OpenCV::Core`; partial-name matches remain rejected. This is
 validated through the real exported package/consumer behavior rather than a
 synthetic verifier self-test. With OpenCV discovery disabled, a consumer
-requesting `COMPONENTS operation_sdk OPTIONAL_COMPONENTS operation_opencv`
-must keep the package and `operation_sdk` found, mark `operation_opencv` not
+requesting `COMPONENTS operation_plugin_sdk OPTIONAL_COMPONENTS operation_opencv`
+must keep the package and `operation_plugin_sdk` found, mark `operation_opencv` not
 found, import the dependency-free SDK/runtime targets, and omit
 `Photospider::operation_opencv`. Requiring `operation_opencv` under the same
 condition must fail package discovery. With OpenCV available, the adapter
@@ -230,7 +230,7 @@ surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product,
 `test_cpu_dense_tensor_image_operation`, `test_packed_fp4_dense_tensor`,
 `test_variable_sample_field_extensions`, and `test_value_identity_across_dsos`
-binaries. Before installation it runs all 48 dense-image cases, all four packed
+binaries. Before installation it runs all 55 dense-image cases, all four packed
 FP4 cases, all seventeen provider-defined VariableSampleField cases, and the
 dual-DSO identity case in that actual disabled producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
@@ -259,7 +259,7 @@ capability profile, and already-built dense integration target are validated.
 The same external project requests `data_provider_sdk`, verifies that its
 interface has no link dependency, builds separate exact-name C11 and C++17 v3
 definition producers from the installed header, and links each into a separate
-C++ Host consumer through `Photospider::operation_sdk`. Each consumer derives a
+C++ Host consumer through `Photospider::operation_runtime`. Each consumer derives a
 three-field Schema/Facet/Layout manifest from the active snapshots, publishes
 bounded three-buffer provider-defined Values in compact and repacked forms,
 compiles output-sink/diagnostic/property layout assertions, and exercises pure
@@ -689,7 +689,7 @@ Public non-expansion remains part of existing durable contracts:
 snapshot; `test_policy_registry` locks transactional ABI-v1 load rejection,
 binding-held DSO lifetime, and first-fault stability; and
 `StaticProductConsumerSmoke` compiles and runs the installed 58-virtual Host,
-60-call Client, operation ABI v2, and pure-C policy ABI v1 consumers. These
+60-call Client, pure-C operation ABI v1, and pure-C policy ABI v1 consumers. These
 tests must not gain a compatibility cancellation shim for this private change.
 
 Run the focused cancellation boundary with:
@@ -827,14 +827,22 @@ an exact revision-preserving device replica enters residency. V-9 additionally
 proves upload scratch returns only after completion, persistent memory remains
 through callback return and residency, capacity-one eviction returns the old
 lease, and final manager destruction returns the last lease. A tiny Perlin
-device budget rejects the complete native heap-query plan before its first
-texture/buffer allocation. The sufficient-budget path runs the real repository
-Perlin operation twice through one `ExecutionService` and proves queue
-availability, two operation submissions and executor entries, eight retired
-invocation allocations, one reused pipeline, asynchronous pending-Value
-readback to CPU-owned outputs, the dedicated Metal worker id, and zero settled
-Host and device reservations. Native `allocatedSize` is audited before command
-commit in both upload and download.
+device budget rejects the heap query's aligned persistent minimum before its
+first texture/buffer allocation. Dedicated-heap admission tests then prove
+that the query is only a minimum: one ledger root-mutex transaction reserves
+the complete currently available persistent-memory ceiling with exact
+scratch, the heap's positive `currentAllocatedSize` is the sole persistent
+actual, the heap-backed texture is not counted again, and each scratch
+resource contributes its positive `allocatedSize`. They also prove a fitting
+commit returns all unused ceiling bytes and splits exact leases, while an
+actual heap backing above the admitted plan fails with the typed
+actual-exceeds-reservation category before native retention or command commit
+and unwinds native owners plus the reservation exactly once. The
+sufficient-budget path runs the real repository Perlin operation twice
+through one `ExecutionService` and proves queue availability, two operation
+submissions and executor entries, eight retired invocation allocations, one
+reused pipeline, asynchronous pending-Value readback to CPU-owned outputs, the
+dedicated Metal worker id, and zero settled Host and device reservations.
 
 V-8 and V-9 portable cases in `test_device_residency` lock direct
 host-read versus transfer planning, exact current completion publication, late
@@ -854,15 +862,16 @@ without waiting for its producer, and typed stale failure that never releases
 dependent work. These cases use gates and futures and contain no timing sleep.
 
 `test_cli_policy_execution_config` locks transactional policy/execution config
-parsing and exact Host application. `test_host_adapter` loads real operation
-ABI-v2 and pure-C policy ABI-v1 fixtures, configures both extensions, validates
-their snapshots, and computes through the private CPU route.
+parsing and exact Host application. `test_host_adapter` loads real pure-C
+operation ABI-v1 and pure-C policy ABI-v1 fixtures, configures both extensions,
+validates their snapshots, and computes through the private CPU route.
 `GraphCliPluginComputeSmoke` repeats that vertical slice through the real REPL.
 `test_ipc_protocol` and `test_ipc_daemon` own protocol-v2 routing, process-owned
 policy state, generation-changing replacement, scan, and shared execution
-defaults. `StaticProductConsumerSmoke` independently builds the installed C11
-policy DSO and C++ operation DSO before executing the same external-consumer
-path.
+defaults. `StaticProductConsumerSmoke` independently builds installed C11 and
+C++17 operation ABI consumers plus the C11 policy DSO before executing the
+same external-consumer path. The operation consumers assert every exact v1
+record layout and export only numeric/root pure-C discovery.
 
 The installed Host, CLI, and IPC protocol-v2 surfaces still expose no
 cancellation command. IPC continues to reject `compute.cancel` and publish
@@ -912,10 +921,12 @@ Focused companion regressions own the remaining boundaries:
   independent saturation and exact recovery for all five Host dimensions,
   CPU/duplicate device configuration rejection, zero and exact-boundary
   device plans, atomic memory-plus-scratch rejection, per-device isolation,
-  same-device contention, plan-to-actual shrink, typed underplanning failure,
-  split memory/scratch lifetimes, move-only authority, delayed asynchronous
-  release, bounded Host child grants, deferred Host parent release, and
-  concurrent no-overcommit behavior.
+  same-device contention, minimum-query validation followed by a single-lock
+  complete-currently-available persistent ceiling, exact scratch admission,
+  plan-to-actual shrink and unused-byte return, typed underplanning rollback,
+  split exact memory/scratch lifetimes, move-only authority, delayed
+  asynchronous release, bounded Host child grants, deferred Host parent
+  release, and concurrent no-overcommit behavior.
 - `test_resource_admission` proves the exact private-route vocabulary,
   worker-limit rollback, one fixed pool per Host with independent Host
   compositions, and validation-first session route replacement that preserves
@@ -1243,7 +1254,8 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor, Packed FP4, Provider Extensions, Region, ReadyFence, and Transfer Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
-binary for the implemented V-2 through V-12 boundary. Its 48 durable cases
+binary for the implemented V-2 through V-12 and DI-1 through DI-4 boundaries. Its 55
+durable cases
 verify:
 
 - copyable ReadyFence polling, queued non-inline waits, observer-local waiter
@@ -1273,10 +1285,13 @@ verify:
   lifetime, BufferHandle subranges, process-local identities, and the
   non-liveness meaning of a nonzero `AllocationIdentity`;
 - bounded positive, zero, and negative immutable strides over shared
-  allocations, with distinct Value revisions;
+  allocations, with distinct Value revisions, plus direct `ImageView`
+  coordinate access and independent dense-Value clones for reverse-y,
+  broadcast-y, and planar-channel layouts;
 - immutable Value copy sharing, copy-like DenseTensorView/ImageView moves, and
   allocation-isolated lvalue/rvalue descriptor, layout, and payload inputs;
-- formal HP cache alias preservation, dirty reseal, replacement identity, disk
+- authorized pending-native and validated opaque-imported formal publication,
+  formal HP cache alias preservation, dirty reseal, replacement identity, disk
   reload identity renewal, unchanged cache paths, disk-save Value authority,
   and rejection/purging of exact-partial HP state at whole-read and regionless
   disk boundaries;
@@ -1288,15 +1303,18 @@ verify:
   ImageRect/TensorSlice merge, exact CPU/external/I-O boundary preservation,
   and negative/zero-stride external rejection before Pending publication,
   owner retention, or provider callback; and
-- padded multi-channel full and ImageRect execution, rank-four TensorSlice,
+- padded multi-channel full and ImageRect execution, signed data-window
+  coordinate translation for negative-origin ImageRect selection, rank-four
+  TensorSlice,
   Empty/Whole selection, dirty-plan-to-product staging, recomputation of
   missing or partial intermediate parents, selected-byte merge into an
   existing complete output, and promotion to reusable authority only after a
   Whole commit, callback-free target/upstream Region-route transfer and
-  pre-task-population mutation rejection, externally satisfied no-work
-  acceptance under device-inventory drift, exact-cache dirty and partial-active
-  drift rejection, plus `GraphErrc::ComputeError` when execute returns a valid
-  Value whose descriptor disagrees with inference.
+  pre-task-population mutation rejection, HP/RT ImageRect route-switch
+  rejection before task population, externally satisfied no-work acceptance
+  under device-inventory drift, exact-cache dirty and partial-active drift
+  rejection, plus `GraphErrc::ComputeError` when execute returns a valid Value
+  whose descriptor disagrees with inference.
 
 `test_region_contracts` owns 31 durable Region cases for canonical
 Empty/Whole, keys, intervals, normalization, rank-general TensorSlice,
@@ -1311,13 +1329,23 @@ lifecycle.
 cases. They verify both nibble orders and a nonzero bit offset, exact encoded
 and scale-dequantized E2M1 access, strict descriptor/quantization/layout/
 envelope rejection, block-aligned TensorSlice scale/code projection with fresh
-identities, byte-view and ImageBuffer fail-closed behavior, representation-
+identities, byte-view and ordinary-image-view fail-closed behavior, representation-
 preserving CPU and injected fake-device transfer, exact formal memory-cache
 retention, and typed image disk-cache rejection before executor, filesystem,
 or codec effects. The malformed matrix includes wrong quantization rank/count,
 zero or non-divisible blocks, nonfinite/nonpositive scales, bad layout version/
 alignment/overlap/size, quantized Strided publication, and oversized blocked
 transfer aliases.
+
+DI-4 also has dedicated `test_dense_image_value_contracts`,
+`test_sample_conversion`, `test_value_artifact`, and
+`test_dense_image_processing` unit suites. IPC, Host, worker, durable, static
+package-consumer, OpenCV, and ordinary OpenEXR integration tests cover named
+Value delivery, metadata-only inspection, transactional reconstruction,
+artifact identity joins, adapter lifetime, independent data/display windows,
+exact HALF promotion, UINT32 code values, and fail-closed unsupported shapes or
+implicit conversions. OpenEXR Deep remains covered separately by its provider-
+defined variable-sample suite.
 
 `test_variable_sample_field_extensions` owns seventeen standard-library-only V-14
 integration cases. A synthetic pure-C definition suite publishes versioned
@@ -1384,12 +1412,16 @@ cmake --build build --target test_region_contracts \
   test_cpu_dense_tensor_image_operation \
   test_packed_fp4_dense_tensor \
   test_variable_sample_field_extensions \
+  test_dense_image_value_contracts \
+  test_sample_conversion \
+  test_value_artifact \
+  test_dense_image_processing \
   public_header_self_containment -j 2
 ctest --test-dir build --output-on-failure \
-  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor|VariableSampleFieldExtensions)\.'
+  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor|VariableSampleFieldExtensions|DenseImageValueContracts|SampleConversion|ValueArtifact|DenseImageProcessing)\.'
 ```
 
-`DependencyDisabledInstallSmoke` builds and runs all 48 dense cases plus all
+`DependencyDisabledInstallSmoke` builds and runs all 55 dense cases plus all
 four packed FP4 and seventeen V-14 extension cases in an actual
 OpenCV/YAML/OpenEXR-discovery-disabled
 product before proving the installed consumers.
@@ -1398,7 +1430,7 @@ product before proving the installed consumers.
 Value-using DSOs and proves that they mint from one shared runtime authority.
 Both installed consumers construct and evaluate Region and observe a
 synchronous Ready Value fence without optional dependencies. The
-provider-disabled nested build below also compiles and runs all 48 dense cases
+provider-disabled nested build below also compiles and runs all 55 dense cases
 plus that dual-DSO case, so the real core operation, fence/transfer proof, and
 identity authority do not depend on the optional OpenCV operation provider or
 a native device SDK.
@@ -1409,9 +1441,13 @@ a native device SDK.
 binary built against both provider configurations. In the normal configuration
 it seeds the repository OpenCV provider, executes its real resize callback,
 proves an invalid OpenCV matrix shape is translated to host-owned
-`GraphErrc::ComputeError`, loads a stdlib-only v2 provider that takes complete
-ownership of the resize execution/dirty/forward slots, executes the replacement
-sentinel output, unloads it, and executes the restored OpenCV predecessor.
+`GraphErrc::ComputeError`, and loads a stdlib-only ABI-v1 provider that replaces
+only the HP monolithic resize execution candidate. In the enabled profile the
+remaining OpenCV candidates and planning slots stay active, so both
+`op_sources` and `combined_sources` report the exact `mixed` state; in the
+disabled profile the plugin path owns the complete active key. The test then
+executes the replacement sentinel output, unloads it, and, when enabled,
+executes the restored OpenCV predecessor.
 
 `test_opencv_operation_provider_exceptions` runs in its own process so the
 first provider initialization attempt is deterministic. A private
@@ -1460,13 +1496,19 @@ dependencies, without hard-coding a target count or future target name and
 without deriving expectations from CTest's observed sentinels. The exact CTest
 inventory is the union of that derived set and
 `DependencyDisabledInstallSmoke`,
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 48
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 55
 `CpuDenseTensorImageOperation.*` cases,
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two
 `KernelLifecycleConcurrency.*` cases.
 
-At the current V-14 checkpoint, CMake registers exactly eight active GoogleTest
+DI-1 established the 49-case dense-image subset; the three Issue #130
+regressions raised it to 52 cases, the two Issue #132 HP/RT ImageRect
+route-freeze regressions raised it to 54 cases, and the Issue #131
+metadata-only device-local planning regression raises the current subset to 55
+cases. The following counts remain the historical V-14 checkpoint rather than
+current inventory arithmetic.
+At that V-14 checkpoint, CMake registers exactly eight active GoogleTest
 targets in this profile. The six-target focused build materializes five of
 those registered executables; its sixth target, `test_kernel_contracts`, is
 build-only and deliberately undiscovered. CTest discovers 55 runnable focused
@@ -1816,11 +1858,19 @@ The mandatory I1 phase/drain scenario oracle is:
 | Exact drain anchor | For every episode require `Q_start=S_11=E+183,333,337 ns` and `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`, independent of actual admission and deadline. The window may overlap an active final Run but does not cancel it or extend `D_i`. |
 | Deadline and next-origin guards | With latest legal admission, require `D_11<=E+335,333,337 ns`, exactly 348,000,000 ns from that deadline to `Q_end`, and exactly 66,666,663 ns from `Q_end` to the next origin. Reset/baseline preparation must fit that guard; the last measured episode uses the same guard before `T^I1`. |
 | Boundary tie and settlement | At `Q_start`, nominal marker precedes equal-time admission. At `Q_end`, reserve the first excluded coordinate from the observation sink's causal allocator used by product transitions, not from the accepted-row sequence allocator. An event belongs only when its timestamp is no later than `Q_end` and its causal sequence precedes the cut. Any missing or later terminal/quiescence/root-resource/Host settlement is invalid; an eventual snapshot cannot backdate it. |
-| Independent final golden | Recompute the coordinate-pattern source and four explicit binary32-RNE curve stages without Host, Kernel, cache, scheduler, YAML, or candidate provider code. Require version `i1-coordinate-pattern-curve-chain-fp32-v1` and exact `Sha256CanonicalV1` digest `17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`, then cross-check one exact 2048 real-product result. Missing or substituted expected evidence is Invalid; a candidate mismatch is Fail. |
+| Independent final golden | Recompute the coordinate-pattern source and four explicit binary32-RNE curve stages without Host, Kernel, cache, scheduler, YAML, or candidate provider code. Require version `i1-coordinate-pattern-curve-chain-fp32-v1`, the zero-origin `[0,2048) x [0,2048)` data window, DenseTensor schema/Image facet structural version 2, Sample Domain facet structural version 1 declaring FP32 Normalized `[0,1]`, and exact `Sha256CanonicalV1` digest `b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`, then cross-check one exact 2048 real-product result. Missing or substituted expected evidence is Invalid; a candidate mismatch is Fail. |
 | Guard-safe evidence finalization | Digest each visible output once before `Q_end`, freeze its typed result, and release its `Value`. Evaluation and JSON must not rehash it. Allow at most one Value-free evaluator to overlap next-baseline preparation, require completion before admission, and delay ordered JSON/durable I/O until `T^I1` or an abort that revokes later submission. |
 | Per-Run causal closure | Require a unique Run id per materialized edit, exactly one terminal/quiescence/resource/Host chain, at most one cancellation and visible publication, cancellation iff Cancelled, visibility iff Succeeded, and Host status agreeing with the terminal. Require current generation before every service start, every start before terminal, visible before successful terminal, and terminal before quiescence before resource return before Host settlement. Irreversible service-start commit and cancellation acceptance share the Run-owned terminal arbiter, and service-start observation is delivered outside service/Run locks. `cancellation < start < terminal` is structurally valid evidence but fails Waste; the product path must prevent it. |
 | Lossless service-start capacity | Derive 64 Macro256 tiles per frozen curve node, 257 starts per complete Run from one monolithic source plus four curve nodes, and 3,084 starts per twelve-edit episode. Deterministically prove both pre-route start/cancel orders, zero route/executable leakage when cancellation wins, lower start coordinate when route commitment wins, rollback/reuse of staged authority, success through start 3,084, and fail-closed overflow at start 3,085. |
 | Fail-closed arithmetic/evidence | Reject checked overflow in grid/slot/start/admission/deadline/drain arithmetic, missing or duplicate boundary/event evidence, a moved origin, nonquiescence, or a workload-manifest rule drift under the same id. Existing section/verdict digests bind the evidence without changing the 15/5-field envelope. |
+
+DI-1 changes the DenseTensor schema and Image facet structural records, not
+the `Sha256CanonicalV1` algorithm tag or workload arithmetic.  The frozen I2
+preview logical digest is consequently
+`2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`.
+All 34 compiled B1 logical goldens are regenerated from the independent
+oracle under the same structural and sample-domain versions; their raw-payload
+SHA-256 values and the I1, I2, and B1 workload identifiers remain unchanged.
 
 M1 uses the same per-episode drain rule for
 `E_r=M_0+r*750,000,000 ns`, `r=0..39`, starts exactly 40 measured episodes,
@@ -3117,7 +3167,7 @@ covers `test_propagation`; run the exact manual command separately when needed.
 The provider-dependent default full test suite is registered only when
 `BUILD_TESTING`, OpenCV, YAML, graph CLI, the repository OpenCV operation
 provider, and repository OpenCV operation plugins are all enabled. It registers
-`test_stdlib_image_buffer_processing` and compiles the standard-library
+`test_dense_image_processing` and compiles the dependency-neutral
 implementation directly even though that producer uses OpenCV. The test
 verifies clone independence, stride-safe deterministic bilinear border
 behavior, channel conversions, and ROI copying. The default CTest inventory

@@ -226,8 +226,8 @@ terminator overflow 与少一个 byte 的 retained limit 都会在 provider entr
 与同一会话的活动请求串行化，并发布新的非零代次。同名替换同样推进代次。
 失败时保留旧路由。
 
-操作选择会在 Run 准入前冻结一份 coherent callback、metadata、`Device` 与非零 implementation
-revision。Planning 只保留 callback-free identity/metadata/shape；submission 必须重新解析同一个
+操作选择会在 Run 准入前冻结一份 coherent callback、metadata、`DeviceBackend` 与非零
+implementation revision。Planning 只保留 callback-free identity/metadata/shape；submission 必须重新解析同一个
 identity，之后才能保留 callable/DSO lease。完整 HP、dirty HP/RT 和连接参数预检都使用同一份
 规范化 route-aware inventory；full-task cache identity 会包含该 inventory 与 registry generation。
 Region propagation 与 dirty TensorSlice eligibility 也会使用该 request inventory 和匹配的
@@ -253,6 +253,22 @@ authority 或 per-Graph executor。
 完整 HP、dirty HP/RT、连通性预检、初始就绪工作和依赖释放工作，都会进入同一套
 就绪存储、策略、预留后启动、私有路由及 Run 租约完成路径。
 
+Issue #130 还会把所选 revision 的 output schema 冻结进每个 planned work item。Host 从已注册
+metadata 派生规范 image requirement 与精确 named-data 集合，绝不从 provider return 派生。
+该 schema 会与 implementation/device identity 及任何可信 extent 结合，并在 dependency
+release 前与 formal mutation 前各校验一次。完整 HP route 会把所有中间 cache、Region、
+version、inspection 与 timing write 隔离在 request-owned Graph snapshot 中，因此 policy work
+与 disk-cache staging 都不能让未授权 result 变为可见。既有 no-throw Graph publication 仍是
+唯一 live-state swap。
+
+当已注册 Metal producer 返回 Pending Value 时，dirty work 会保留同一套 authority。一个
+Run-scoped queued continuation 在不占用 CPU worker 的情况下拥有 wait；在精确 revision、
+allocation、producer 与 staged Value 变为 Ready 前，source/dependent task 不会完成或释放。
+Failed、ProducerCancelled、cancelled、stale 或 replaced result 会使 Run 失败且不发生 formal
+mutation。Publication closure 会在 continuation lock 外移除 registration；只有 worker callback
+可以改变 logical task accounting；prepared dirty context 会一直保留到匹配的 service callback
+settlement。
+
 V-6 不新增 configured execution route，也不新增第二套 ready store。
 `ReadyFence::async_wait` 接收一个共享的注入 executor；该 executor 必须入队，而不能 inline
 调用。预先构造的 continuation 会在 pending 或 queued 时保留 executor，并在 callback 进入时
@@ -264,7 +280,7 @@ state 与 source-private `ValueTransferTask` 都不拥有 worker 或 queue。仓
 transfer-destruction/callback-entry 竞争。
 
 V-7 在同一个 `ExecutionService` domain 中增加 source-private 的固定
-`DeviceExecutorRegistry`。仓库 Metal plugin 启用时，Apple entry 拥有一个 device 与 command
+`DeviceExecutorRegistry`。仓库 Metal provider profile 启用时，Apple entry 拥有一个 device 与 command
 queue，提供 invocation-scoped texture/buffer allocator，并保留经过校验的 process-lifetime
 pipeline cache。
 Reserved-start worker 会同步进入该 executor，并通过同一条 Run completion/exception path 调用
@@ -303,11 +319,13 @@ clear residency、用 capacity pressure 代替清理，也不会改变普通 loo
 replacement、capacity 与 eviction 行为。
 
 V-9 把权威 device-memory 与 scratch admission 放入既有 service `ResourceLedger`，而不是
-policy 或 residency。每个已配置非 CPU `DeviceId` 都有隔离 limit。Metal 会在 allocation
-前原子预留 native size/alignment plan、审计 `allocatedSize`，并在 command submission 前提交
-actual byte。Persistent memory 随 native Value owner 跨 residency 延续；scratch 随精确
-command completion 延续。Policy 看不到 native handle 或 token，不排列 byte owner，也不会
-获得第二套 waiting/fairness queue。
+policy 或 residency。每个已配置非 CPU `DeviceId` 都有隔离 limit。对于专用 Metal heap，native
+size/alignment query 是最小需求，而不是 backing 上界，因此 ledger 会在 allocation 前通过一次操作
+原子预留该 account 当时全部可用的 memory 与精确 scratch。创建出的 heap 所报告的正值、可表示
+`currentAllocatedSize` 是唯一 persistent actual；texture `allocatedSize` 不会重复计费。Actual
+校准会在 command submission 前归还未使用的 ceiling。Persistent memory 随 native Value owner
+跨 residency 延续；scratch 随精确 command completion 延续。Policy 看不到 native handle 或 token，
+不排列 byte owner，也不会获得第二套 waiting/fairness queue。
 
 Freshness publication 分为两个阶段。Kernel 先要求 `ExecutionService` 预跟踪 lineage，
 但不指派 managed current identity；该可失败 allocation 会在 coordinator submission 前完成。
@@ -386,6 +404,20 @@ ready store、Graph owner、policy decision surface、Host/device ledger dimensi
 保持不变。Executor 不拥有用户 path、retry、overwrite、receipt 或 durability policy。当前仍无
 组件提供 crash-durable user-output commit，ADR 0009 中 Run publication 之后的独立 cache
 outcome 仍是未来工作。
+
+### DI-2 statistics task 所有权
+
+`GraphCacheService` 拥有一个有界 `ImageStatisticsStore`，但该 store 不拥有 worker、ready
+queue、execution route 或 policy context。其 `schedule_image_statistics()` boundary 接受一个
+可信的单 task ownership receiver。发生 miss 时，callback 会独立保留精确 Ready Value 与完整
+query 直至 settlement；发生 hit 时不会提交 task。receiver 可以 inline 执行 callback，也可将其
+转移给既有内部 scheduler，并且必须恰好一次接收它，或者在 invocation 前抛出异常。
+
+Cancellation 与 result publication 会在 derived-cache mutex 之前，于 request-local state 内
+linearize。cancellation 先胜出时不发布 result；result 先胜出时会保留为普通有界 cache entry。
+scan exception 只会 settle future。该机制不授予 Run、Graph、HP/RT generation、allocation、
+formal-cache、persistence 或 worker authority，也不会改变 policy fairness 或 resource-ledger
+accounting。
 
 ## Host、CLI 与 IPC 接口面
 
@@ -491,9 +523,24 @@ coefficient 舍入一次到 binary32 RNE，每个 sample 使用
 `RNE32(1/RNE32(1+RNE32(input*k32)))`。provider 在这些显式 scalar 截断前后保存、安装并
 恢复 worker 浮点环境。版本为 `i1-coordinate-pattern-curve-chain-fp32-v1` 的独立 oracle
 不依赖 Host/Kernel/cache/scheduler/YAML/provider，独立重建 source 与四个 stage。对 HWC
-`[2048,2048,4]` NativeScalar32 tensor 与冻结 ImageFacet，其精确
+`[2048,2048,4]` NativeScalar32 tensor、零原点 `[0,2048) x [0,2048)` 数据窗口、
+冻结的 DenseTensor schema/Image facet 结构版本 2，以及声明 FP32 Normalized `[0,1]`
+的 Sample Domain facet 结构版本 1，其精确
 `Sha256CanonicalV1` digest 是
-`17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`。
+`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`。
+就本次 oracle 迁移而言，DI-1 的初始实现与 oracle 刷新把 DenseTensor schema 与 Image facet
+结构记录推进到版本 2，但未完整实现已归档的 DI-1 design：它遗漏了 coordinate-pattern 的
+Sample Domain facet，并产生历史上的、不含 Sample Domain 的 I1 logical digest
+`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`。
+后续 coordinate-pattern metadata correction 通过绑定声明 FP32 Normalized `[0,1]` 的
+Sample Domain facet 结构版本 1，完成了该 design 要求；在该完整 descriptor 下重新生成
+独立 oracle 后，产生当前 digest
+`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`。
+这两个阶段都没有改变 `Sha256CanonicalV1` 算法、workload 算术或 workload identity。
+I2 preview golden 仍为
+`2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`；
+34 项 B1 logical golden 均在当前结构记录下重新生成；对 coordinate-pattern 输出，
+它们还绑定 Sample Domain record，而其 raw-payload hash 保持不变。
 
 冻结的 I1 graph、十二项 coefficient/Region、仅成功时产生 accepted coordinate 的 collector 与
 product binding、连续 cold/warmup/measured 221-slot grid、tie/guard rule、canonical DenseTensor
@@ -727,7 +774,7 @@ residency 与 worker execution 分别由对应的
 `execution_service_state.cpp` 负责 retained value lifetime；源码私有的 run-state、ready-store 与
 pool header 共享完全相同的嵌套类型，但不会形成 forwarding contract 或 installed contract。
 
-- `include/photospider/plugin/op_contract.hpp`
+- `include/photospider/plugin/operation_plugin_api.h`
 - `src/lib/core/ps_types.hpp` 与 `.cpp`
 - `src/lib/compute/dispatch/task_graph_planning.hpp` 与 `.cpp`
 - `src/lib/compute/dispatch/compute_task_submission.hpp` 与 `.cpp`
@@ -753,7 +800,7 @@ pool header 共享完全相同的嵌套类型，但不会形成 forwarding contr
 - `src/lib/benchmark/m1/m1_canonical.*`
 - `src/lib/benchmark/common/evidence_envelope.*`
 - `src/lib/compute/execution/progressive_compute.*`
-- `src/lib/core/exact_box_downsample.cpp`
+- `src/lib/core/dense_image_processing.*`
 - `src/lib/runtime/resource_ledger.*`
 - `src/lib/execution/device/compute_io_executor.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`

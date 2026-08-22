@@ -14,8 +14,10 @@
 #include <utility>
 #include <vector>
 
+#include "core/value_test_access.hpp"
 #include "photospider/data/extension.hpp"
 #include "photospider/data/value.hpp"
+#include "photospider/data/value_artifact.hpp"
 #include "photospider/plugin/data_definition_registry.hpp"
 
 namespace ps {
@@ -825,17 +827,19 @@ std::vector<std::byte> make_samples_payload() {
  * @brief Publishes one exact immutable byte vector and returns its sealed
  * range.
  * @param bytes Nonempty payload plus optional padding.
+ * @param alignment Positive power-of-two allocation alignment.
  * @return Copyable BufferHandle retaining the fresh CPU allocation.
  * @throws The same exceptions as Value::from_cpu_dense_tensor.
  */
-BufferHandle make_buffer(std::vector<std::byte> bytes) {
+BufferHandle make_buffer(std::vector<std::byte> bytes,
+                         std::size_t alignment = alignof(std::max_align_t)) {
   DenseTensorDescriptor descriptor;
   descriptor.shape = {bytes.size()};
   descriptor.element_semantics = ElementSemantics::UnsignedInteger;
   descriptor.storage_encoding = {8U, StorageEncodingKind::NativeScalar};
-  Value owner =
-      Value::from_cpu_dense_tensor(std::move(descriptor), std::nullopt,
-                                   StridedLayout{{1}, 0U}, std::move(bytes));
+  Value owner = Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::nullopt, StridedLayout{{1}, 0U},
+      std::move(bytes), alignment);
   return owner.buffer_handle();
 }
 
@@ -868,12 +872,69 @@ struct SyntheticStorage final {
 };
 
 /**
+ * @brief Result of one provider reconstruction allocation injection.
+ * @throws Nothing for ordinary aggregate operations.
+ */
+struct ProviderAllocationFailureObservation final {
+  /** @brief Whether the selected ControlBlock boundary threw. */
+  bool fired = false;
+  /** @brief Whether reconstruction propagated `std::bad_alloc`. */
+  bool propagated = false;
+  /** @brief Whether a complete Value reached the caller. */
+  bool published = false;
+  /** @brief ControlBlock owners completed before the selected failure. */
+  std::size_t successful_allocations = 0U;
+  /** @brief Earlier ControlBlock owners released during stack unwinding. */
+  std::size_t released_allocations = 0U;
+  /** @brief One-based selected ControlBlock allocation number. */
+  std::size_t target_allocation = 0U;
+};
+
+/**
+ * @brief Runs one callable with a selected BufferHandle owner allocation
+ * failed.
+ * @tparam Fn Nullary callable under test.
+ * @param target_allocation One-based ControlBlock allocation to fail.
+ * @param fn Callable invoked exactly once while the probe observes cleanup.
+ * @return Complete failure, propagation, allocation, and release observation.
+ * @throws Any non-`std::bad_alloc` exception from `fn` after disarming.
+ * @note The source-private runtime seam is thread-local and reached directly
+ *       before ControlBlock construction. GoogleTest assertions execute only
+ *       after the probe is cleared.
+ */
+template <typename Fn>
+ProviderAllocationFailureObservation observe_provider_allocation_failure(
+    std::size_t target_allocation, Fn&& fn) {
+  ProviderAllocationFailureObservation observation;
+  observation.target_allocation = target_allocation;
+  testing::arm_buffer_control_block_allocation_failure_for_testing(
+      target_allocation);
+  try {
+    std::forward<Fn>(fn)();
+  } catch (const std::bad_alloc&) {
+    observation.propagated = true;
+  } catch (...) {
+    testing::clear_buffer_control_block_allocation_failure_for_testing();
+    throw;
+  }
+  const testing::BufferControlBlockAllocationObservation runtime_observation =
+      testing::buffer_control_block_allocation_observation_for_testing();
+  observation.fired = runtime_observation.fired;
+  observation.successful_allocations =
+      runtime_observation.successful_allocations;
+  observation.released_allocations = runtime_observation.released_allocations;
+  testing::clear_buffer_control_block_allocation_failure_for_testing();
+  return observation;
+}
+
+/**
  * @brief Creates one logically fixed storage with arbitrary physical ordering.
  * @param roles One permutation of counts, offsets, and samples roles.
  * @param prefixes Ignored prefix length for each physical buffer index.
  * @param malformed_offsets Whether to encode nonmonotonic offsets.
  * @param include_unknown_trailing_bytes Whether Layout payload has unknown
  * trailing bytes.
+ * @param alignments Physical allocation alignment per dense buffer index.
  * @return Complete three-buffer fixture.
  * @throws std::invalid_argument when roles are not the supported three values.
  * @throws std::bad_alloc when fixture storage cannot allocate.
@@ -883,8 +944,10 @@ SyntheticStorage make_storage(
         {kCountsRole, kOffsetsRole,
          kSamplesRole},  // NOLINT(whitespace/indent_namespace)
     std::array<std::size_t, 3U> prefixes = {0U, 0U, 0U},
-    bool malformed_offsets = false,
-    bool include_unknown_trailing_bytes = true) {
+    bool malformed_offsets = false, bool include_unknown_trailing_bytes = true,
+    std::array<std::size_t, 3U> alignments = {alignof(std::max_align_t),
+                                              alignof(std::max_align_t),
+                                              alignof(std::max_align_t)}) {
   const std::vector<std::byte> counts = make_counts_payload();
   const std::vector<std::byte> offsets =
       make_offsets_payload(malformed_offsets);
@@ -913,8 +976,8 @@ SyntheticStorage make_storage(
       default:
         throw std::invalid_argument("Unknown synthetic Layout role.");
     }
-    storage.buffers.push_back(
-        make_buffer(pad_payload(*payload, prefixes[index], index + 1U)));
+    storage.buffers.push_back(make_buffer(
+        pad_payload(*payload, prefixes[index], index + 1U), alignments[index]));
     storage.layout.buffers.push_back({static_cast<std::uint32_t>(index),
                                       roles[index], prefixes[index],
                                       payload->size()});
@@ -1221,6 +1284,202 @@ TEST(VariableSampleFieldExtensions,
     FAIL() << "unknown provider unexpectedly interpreted metadata";
   } catch (const ExtensionContractError& error) {
     EXPECT_EQ(error.code(), ExtensionErrorCode::MissingProvider);
+  }
+}
+
+TEST(VariableSampleFieldExtensions,
+     PortableValueArtifactRevalidatesMultiBufferProviderValue) {
+  DataDefinitionRegistry registry;
+  SyntheticCandidate fixture = make_candidate(23U);
+  const std::shared_ptr<SyntheticCounters> counters = fixture.counters;
+  const DataProviderLoadResult loaded =
+      load_candidate(registry, std::move(fixture));
+  ASSERT_TRUE(loaded.ok()) << loaded.diagnostic;
+  const DataDescriptorEnvelope descriptor = make_descriptor(true);
+  const std::array<std::size_t, 3U> required_alignments{64U, 256U, 4096U};
+  SyntheticStorage storage =
+      make_storage({kOffsetsRole, kSamplesRole, kCountsRole}, {2U, 3U, 4U},
+                   false, true, required_alignments);
+  std::optional<Value> original = Value::from_provider_defined(
+      registry, descriptor, storage.layout, storage.buffers);
+
+  const ValueArtifact captured = capture_value_artifact("deep", *original);
+  ASSERT_EQ(captured.envelope.buffers.size(), required_alignments.size());
+  for (std::size_t index = 0U; index < required_alignments.size(); ++index) {
+    EXPECT_EQ(captured.envelope.buffers[index].required_alignment,
+              required_alignments[index]);
+  }
+  const std::vector<std::byte> archive =
+      encode_named_value_artifact_set(NamedValueArtifactSet{{captured}});
+  const NamedValueArtifactSet decoded =
+      decode_named_value_artifact_set(archive);
+
+  ASSERT_EQ(decoded.values.size(), 1U);
+  const ValueArtifact& artifact = decoded.values.front();
+  EXPECT_EQ(artifact.envelope.output_name, "deep");
+  EXPECT_EQ(artifact.envelope.representation,
+            ValueRepresentationKind::ProviderDefined);
+  EXPECT_EQ(artifact.envelope.layout_kind, StorageLayoutKind::ProviderDefined);
+  EXPECT_EQ(artifact.envelope.provider_descriptor,
+            std::optional<DataDescriptorEnvelope>(descriptor));
+  EXPECT_EQ(artifact.envelope.provider_layout,
+            std::optional<ProviderDefinedLayout>(storage.layout));
+  ASSERT_EQ(artifact.envelope.buffers.size(), storage.buffers.size());
+  ASSERT_EQ(artifact.payloads.size(), storage.buffers.size());
+  EXPECT_EQ(artifact.envelope.buffers[0].logical_role, kOffsetsRole);
+  EXPECT_EQ(artifact.envelope.buffers[1].logical_role, kSamplesRole);
+  EXPECT_EQ(artifact.envelope.buffers[2].logical_role, kCountsRole);
+  for (std::size_t index = 0U; index < required_alignments.size(); ++index) {
+    EXPECT_EQ(artifact.envelope.buffers[index].required_alignment,
+              required_alignments[index]);
+    EXPECT_EQ(artifact.envelope.buffers[index].artifact_offset %
+                  required_alignments[index],
+              0U);
+  }
+
+  try {
+    (void)reconstruct_value_artifact(artifact);
+    FAIL() << "provider-defined artifact reconstructed without a registry";
+  } catch (const ExtensionContractError& error) {
+    EXPECT_EQ(error.code(), ExtensionErrorCode::MissingProvider);
+  }
+
+  std::optional<Value> reconstructed =
+      reconstruct_value_artifact(artifact, &registry);
+  EXPECT_NE(reconstructed->revision_id(), original->revision_id());
+  EXPECT_EQ(reconstructed->provider_generation(), loaded.generation);
+  EXPECT_EQ(reconstructed->provider_defined_descriptor(), descriptor);
+  EXPECT_EQ(reconstructed->provider_defined_layout(), storage.layout);
+  EXPECT_EQ(compute_content_digest(*reconstructed).digest,
+            compute_content_digest(*original).digest);
+  ASSERT_EQ(reconstructed->buffer_count(), original->buffer_count());
+  for (std::size_t index = 0U; index < original->buffer_count(); ++index) {
+    const ProviderReadLease original_read =
+        original->acquire_provider_read(index);
+    const ProviderReadLease reconstructed_read =
+        reconstructed->acquire_provider_read(index);
+    EXPECT_NE(reconstructed_read.allocation_identity(),
+              original_read.allocation_identity());
+    EXPECT_EQ(reconstructed->storage_binding(index).required_alignment,
+              required_alignments[index]);
+    EXPECT_EQ(reinterpret_cast<std::uintptr_t>(reconstructed_read.data()) %
+                  required_alignments[index],
+              0U);
+    ASSERT_EQ(reconstructed_read.size(), original_read.size());
+    EXPECT_TRUE(std::equal(original_read.data(),
+                           original_read.data() + original_read.size(),
+                           reconstructed_read.data()));
+  }
+
+  ValueArtifact corrupted = artifact;
+  corrupted.payloads[1][0] ^= std::byte{0x01};
+  EXPECT_THROW((void)reconstruct_value_artifact(corrupted, &registry),
+               std::invalid_argument);
+
+  std::optional<ProviderReadLease> retained_read =
+      reconstructed->acquire_provider_read(0U);
+  std::optional<ProviderOwner> retained_owner =
+      reconstructed->create_provider_owner();
+  original.reset();
+  EXPECT_TRUE(registry.unload(kProviderIdentity));
+  EXPECT_EQ(counters->provider_destroys.load(), 0U);
+  EXPECT_EQ(reconstructed->query_property({kGenerationProperty}).unsigned_value,
+            23U);
+  reconstructed.reset();
+  EXPECT_EQ(counters->provider_destroys.load(), 0U);
+  retained_read.reset();
+  EXPECT_EQ(counters->provider_destroys.load(), 0U);
+  retained_owner.reset();
+  EXPECT_EQ(counters->owner_creates.load(), 1U);
+  EXPECT_EQ(counters->owner_destroys.load(), 1U);
+  EXPECT_EQ(counters->provider_destroys.load(), 1U);
+  EXPECT_EQ(counters->module_releases.load(), 1U);
+  EXPECT_LT(counters->provider_destroy_order.load(),
+            counters->module_release_order.load());
+}
+
+TEST(VariableSampleFieldExtensions,
+     LaterArtifactAllocationsUnwindBeforeTransactionalRetryPublication) {
+  for (const std::size_t target_buffer : {2U, 3U}) {
+    DataDefinitionRegistry registry;
+    SyntheticCandidate fixture = make_candidate(24U + target_buffer);
+    const std::shared_ptr<SyntheticCounters> counters = fixture.counters;
+    const DataProviderLoadResult loaded =
+        load_candidate(registry, std::move(fixture));
+    ASSERT_TRUE(loaded.ok()) << loaded.diagnostic;
+
+    const DataDescriptorEnvelope descriptor = make_descriptor(true);
+    const std::array<std::size_t, 3U> required_alignments{64U, 256U, 4096U};
+    SyntheticStorage storage =
+        make_storage({kOffsetsRole, kSamplesRole, kCountsRole}, {2U, 3U, 4U},
+                     false, true, required_alignments);
+    std::optional<Value> original = Value::from_provider_defined(
+        registry, descriptor, storage.layout, storage.buffers);
+    const ValueArtifact captured = capture_value_artifact("deep", *original);
+    const std::vector<std::byte> archive =
+        encode_named_value_artifact_set(NamedValueArtifactSet{{captured}});
+    const NamedValueArtifactSet decoded =
+        decode_named_value_artifact_set(archive);
+    ASSERT_EQ(decoded.values.size(), 1U);
+    const ValueArtifact artifact = decoded.values.front();
+    const std::vector<std::byte> envelope_before =
+        encode_value_artifact_envelope(artifact.envelope);
+    const std::vector<std::vector<std::byte>> payloads_before =
+        artifact.payloads;
+    const std::uint64_t validation_before = counters->validate_calls.load();
+
+    original.reset();
+    storage.buffers.clear();
+    std::optional<Value> failed_publication;
+    ProviderAllocationFailureObservation failed =
+        observe_provider_allocation_failure(target_buffer, [&] {
+          failed_publication = reconstruct_value_artifact(artifact, &registry);
+        });
+    failed.published = failed_publication.has_value();
+
+    EXPECT_TRUE(failed.fired);
+    EXPECT_TRUE(failed.propagated);
+    EXPECT_FALSE(failed.published);
+    EXPECT_EQ(failed.target_allocation, target_buffer);
+    EXPECT_EQ(failed.successful_allocations, target_buffer - 1U);
+    EXPECT_EQ(failed.released_allocations, failed.successful_allocations);
+    EXPECT_EQ(counters->validate_calls.load(), validation_before);
+    EXPECT_EQ(counters->provider_destroys.load(), 0U);
+    EXPECT_EQ(counters->module_releases.load(), 0U);
+    EXPECT_EQ(encode_value_artifact_envelope(artifact.envelope),
+              envelope_before);
+    EXPECT_EQ(artifact.payloads, payloads_before);
+
+    std::optional<Value> reconstructed =
+        reconstruct_value_artifact(artifact, &registry);
+    ASSERT_EQ(reconstructed->buffer_count(), required_alignments.size());
+    for (std::size_t index = 0U; index < required_alignments.size(); ++index) {
+      const ProviderReadLease read =
+          reconstructed->acquire_provider_read(index);
+      EXPECT_EQ(reconstructed->storage_binding(index).required_alignment,
+                required_alignments[index]);
+      EXPECT_EQ(reinterpret_cast<std::uintptr_t>(read.data()) %
+                    required_alignments[index],
+                0U);
+      EXPECT_EQ(std::vector<std::byte>(read.data(), read.data() + read.size()),
+                artifact.payloads[index]);
+    }
+    std::optional<ProviderReadLease> retained_read =
+        reconstructed->acquire_provider_read(0U);
+    std::optional<ProviderOwner> retained_owner =
+        reconstructed->create_provider_owner();
+    EXPECT_TRUE(registry.unload(kProviderIdentity));
+    reconstructed.reset();
+    EXPECT_EQ(counters->provider_destroys.load(), 0U);
+    retained_read.reset();
+    EXPECT_EQ(counters->provider_destroys.load(), 0U);
+    retained_owner.reset();
+    EXPECT_EQ(counters->owner_creates.load(), 1U);
+    EXPECT_EQ(counters->owner_destroys.load(), 1U);
+    EXPECT_EQ(counters->provider_destroys.load(), 1U);
+    EXPECT_EQ(counters->module_releases.load(), 1U);
+    EXPECT_LT(counters->provider_destroy_order.load(),
+              counters->module_release_order.load());
   }
 }
 

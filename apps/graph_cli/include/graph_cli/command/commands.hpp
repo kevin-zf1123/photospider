@@ -522,15 +522,16 @@ void print_help_compute(const CliConfig& config);
 
 // save
 /**
- * @brief Computes a node image through Host and saves its CPU view.
- * @param iss Arguments containing `<node_id> <file>`.
- * @param svc Borrowed Host used for compute-and-get-image.
+ * @brief Computes named Values and encodes one ordinary image explicitly.
+ * @param iss Arguments containing node/output/path/storage and all numeric
+ * conversion policies.
+ * @param svc Borrowed Host used for canonical named-Value computation.
  * @param current_graph Active session label.
  * @param modified Borrowed modification state; not modified.
- * @param config Cache precision and image-output settings.
+ * @param config Cache precision applied only to the compute request.
  * @return True after success or a recoverable command/Host failure.
- * @throws std::bad_alloc if parsing, Host image, or save storage allocates.
- * @note The cv::Mat view borrows Host result memory only until this call ends.
+ * @throws std::bad_alloc if parsing, Host Value, or codec storage allocates.
+ * @note Recoverable policy, Host, and codec failures are printed and contained.
  */
 bool handle_save(std::istringstream& iss, ps::Host& svc,
                  std::string& current_graph, bool& modified, CliConfig& config);

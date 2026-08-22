@@ -32,6 +32,7 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/data/value_artifact.hpp"
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker/worker_manager_test_access.hpp"  // NOLINT(build/include_subdir)
@@ -77,12 +78,51 @@ constexpr int kFileSizeEnvelopeResidue = 81;
 constexpr int kFileSizeProbeRaised = 82;
 /** @brief One bulk byte beyond the former aggregate worker-frame ceiling. */
 constexpr std::size_t kBulkPayloadAboveFormerControlBytes = (64U << 20U) + 1U;
+/** @brief Bounded allowance for canonical named-Value archive metadata. */
+constexpr std::size_t kValueArchiveOverheadAllowance = 1U << 20U;
+/** @brief Normal fixture stage bound including one-MiB Value payload metadata.
+ */
+constexpr std::size_t kSupervisorArtifactResourceBytes =
+    (1U << 20U) + kValueArchiveOverheadAllowance;  // NOLINT
+/** @brief Bulk fixture stage bound including canonical archive metadata. */
+constexpr std::size_t kBulkArtifactResourceBytes =
+    kBulkPayloadAboveFormerControlBytes +  // NOLINT
+    kValueArchiveOverheadAllowance;        // NOLINT
 /** @brief Tight liveness bound crossed by the held real bulk transfer. */
 constexpr std::chrono::milliseconds kBulkHeartbeatEvidenceTimeout{2000};
 /** @brief Fixed finite margin beyond one complete Heartbeat timeout. */
 constexpr std::chrono::milliseconds kBulkHeartbeatEvidenceMargin{100};
 /** @brief Isolated hard file-size limit below the normal one-MiB envelope. */
 constexpr rlim_t kLowHardFileSizeLimit = static_cast<rlim_t>(64U << 10U);
+
+/**
+ * @brief Returns the sole logical payload retained by a fixture artifact.
+ * @param artifact Complete decoded named-Value artifact record.
+ * @return Borrowed exact payload byte vector.
+ * @throws std::runtime_error unless exactly one Value and one buffer exist.
+ * @note Logical payload size and durable archive size are intentionally
+ *       distinct; quota assertions use the receipt archive descriptor.
+ */
+const std::vector<std::byte>& fixture_artifact_payload(
+    const ArtifactRecord& artifact) {
+  if (artifact.values.values.size() != 1U ||
+      artifact.values.values[0].payloads.size() != 1U) {
+    throw std::runtime_error(
+        "fixture artifact does not contain one Value buffer");
+  }
+  return artifact.values.values[0].payloads[0];
+}
+
+/**
+ * @brief Encodes one decoded record through the production canonical codec.
+ * @param artifact Complete decoded durable artifact record.
+ * @return Exact canonical named-Value archive bytes.
+ * @throws Artifact validation, overflow, or allocation failures unchanged.
+ */
+std::vector<std::byte> fixture_artifact_archive(
+    const ArtifactRecord& artifact) {
+  return encode_named_value_artifact_set(artifact.values);
+}
 
 /**
  * @brief Process-global descriptor-limit shape exercised by an isolated probe.
@@ -319,32 +359,33 @@ class InProcessCompletionProbeFactory final
 
 /**
  * @brief Builds complete finite resources realistic for a freshly execed image.
- * @return 512-GiB Darwin-compatible address-space envelope and one-MiB
- * artifact bounds.
+ * @return 512-GiB Darwin-compatible address-space envelope and two-MiB
+ * artifact bounds for a one-MiB logical Value payload plus archive metadata.
  * @throws Nothing.
  */
 JobResourceRequest supervisor_resources() {
   JobResourceRequest request;
   request.cpu_slots = 1U;
   request.host_memory_bytes = 512ULL << 30U;
-  request.output_bytes = 1U << 20U;
-  request.staging_bytes = 1U << 20U;
-  request.retention_bytes = 1U << 20U;
+  request.output_bytes = kSupervisorArtifactResourceBytes;
+  request.staging_bytes = kSupervisorArtifactResourceBytes;
+  request.retention_bytes = kSupervisorArtifactResourceBytes;
   return request;
 }
 
 /**
  * @brief Builds resources for a candidate at the former aggregate frame cap.
- * @return Valid request whose image limits are one byte above 64 MiB.
+ * @return Valid request whose archive limits include a payload one byte above
+ * 64 MiB plus bounded canonical metadata.
  * @throws Nothing.
  * @note The candidate cannot fit the former aggregate control frame once
  * report metadata is included, but remains valid bulk data-plane content.
  */
 JobResourceRequest bulk_data_plane_resources() {
   JobResourceRequest request = supervisor_resources();
-  request.output_bytes = kBulkPayloadAboveFormerControlBytes;
-  request.staging_bytes = kBulkPayloadAboveFormerControlBytes;
-  request.retention_bytes = kBulkPayloadAboveFormerControlBytes;
+  request.output_bytes = kBulkArtifactResourceBytes;
+  request.staging_bytes = kBulkArtifactResourceBytes;
+  request.retention_bytes = kBulkArtifactResourceBytes;
   return request;
 }
 
@@ -358,23 +399,23 @@ TenantQuotaLimits supervisor_quota() {
   limits.maximum_active_attempts = 8U;
   limits.capacity.cpu_slots = 8U;
   limits.capacity.host_memory_bytes = 4ULL << 40U;
-  limits.capacity.output_bytes = 8U << 20U;
-  limits.capacity.staging_bytes = 8U << 20U;
-  limits.capacity.retention_bytes = 8U << 20U;
+  limits.capacity.output_bytes = 8U * kSupervisorArtifactResourceBytes;
+  limits.capacity.staging_bytes = 8U * kSupervisorArtifactResourceBytes;
+  limits.capacity.retention_bytes = 8U * kSupervisorArtifactResourceBytes;
   return limits;
 }
 
 /**
  * @brief Builds finite quota for bulk output followed by checkpoint reuse.
- * @return Output/staging capacity one byte above 64 MiB and retention for two
- * such resource envelopes.
+ * @return Output/staging capacity for the bulk canonical archive and retention
+ * for two such resource envelopes.
  * @throws Nothing.
  */
 TenantQuotaLimits bulk_data_plane_quota() {
   TenantQuotaLimits limits = supervisor_quota();
-  limits.capacity.output_bytes = kBulkPayloadAboveFormerControlBytes;
-  limits.capacity.staging_bytes = kBulkPayloadAboveFormerControlBytes;
-  limits.capacity.retention_bytes = 2U * kBulkPayloadAboveFormerControlBytes;
+  limits.capacity.output_bytes = kBulkArtifactResourceBytes;
+  limits.capacity.staging_bytes = kBulkArtifactResourceBytes;
+  limits.capacity.retention_bytes = 2U * kBulkArtifactResourceBytes;
   return limits;
 }
 
@@ -1077,12 +1118,15 @@ std::uint32_t artifact_pid(const SingleTenantJobService& service,
   }
   const std::shared_ptr<const ArtifactRecord> artifact =
       service.find_artifact(snapshot.output_receipt->artifact_id);
-  if (artifact == nullptr ||
-      artifact->payload.size() != sizeof(std::uint32_t)) {
+  if (artifact == nullptr) {
+    throw std::runtime_error("fixture artifact has no encoded PID");
+  }
+  const std::vector<std::byte>& payload = fixture_artifact_payload(*artifact);
+  if (payload.size() != sizeof(std::uint32_t)) {
     throw std::runtime_error("fixture artifact has no encoded PID");
   }
   std::uint32_t pid = 0U;
-  std::memcpy(&pid, artifact->payload.data(), sizeof(pid));
+  std::memcpy(&pid, payload.data(), sizeof(pid));
   return pid;
 }
 
@@ -1362,7 +1406,7 @@ TEST(WorkerSupervisor,
   EXPECT_EQ(quota.active_attempts, 0U);
   EXPECT_EQ(quota.retained_artifacts, 1U);
   EXPECT_EQ(quota.retention_bytes,
-            source_terminal.output_receipt->descriptor.payload_bytes);
+            source_terminal.output_receipt->descriptor.archive_bytes);
   EXPECT_TRUE(SingleTenantJobServiceTestAccess::
                   wait_for_owned_worker_thread_count_at_most(*service, 0U, 2s));
   EXPECT_EQ(
@@ -1463,22 +1507,56 @@ TEST(WorkerSupervisor,
 }
 
 TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {
-  ScopedSupervisorRoot root;
-  auto service = make_service(root.path(), supervisor_options());
-  const JobSubmission unrelated =
-      service->submit(fixture_spec("fixture.slow.success"));
-  const std::vector<std::pair<std::string, JobAttemptFailure>> cases{
-      {"fixture.preaccept.nonzero", JobAttemptFailure::WorkerExit},
-      {"fixture.nonzero", JobAttemptFailure::WorkerExit},
-      {"fixture.signal", JobAttemptFailure::WorkerSignal},
-      {"fixture.channel", JobAttemptFailure::WorkerChannel},
-      {"fixture.malformed", JobAttemptFailure::WorkerProtocol},
-      {"fixture.data.digest-mismatch", JobAttemptFailure::WorkerProtocol},
-      {"fixture.stall", JobAttemptFailure::WorkerHeartbeatTimeout},
-      {"fixture.report.hang", JobAttemptFailure::WorkerProtocol}};
+  constexpr std::array<std::pair<std::string_view, JobAttemptFailure>, 8U>
+      cases{{
+          {"fixture.preaccept.nonzero", JobAttemptFailure::WorkerExit},
+          {"fixture.nonzero", JobAttemptFailure::WorkerExit},
+          {"fixture.signal", JobAttemptFailure::WorkerSignal},
+          {"fixture.channel", JobAttemptFailure::WorkerChannel},
+          {"fixture.malformed", JobAttemptFailure::WorkerProtocol},
+          {"fixture.data.digest-mismatch", JobAttemptFailure::WorkerProtocol},
+          {"fixture.stall", JobAttemptFailure::WorkerHeartbeatTimeout},
+          {"fixture.report.hang", JobAttemptFailure::WorkerProtocol},
+      }};
+
   for (const auto& test_case : cases) {
+    SCOPED_TRACE(std::string(test_case.first));
+    ScopedSupervisorRoot root;
+    auto heartbeat_observed = std::make_shared<std::atomic<bool>>(false);
+    WorkerManagerOptions options = supervisor_options();
+    options.first_external_heartbeat_observed_for_test = heartbeat_observed;
+    auto service = make_service(root.path(), std::move(options));
+    const JobSubmission unrelated =
+        service->submit(fixture_spec("fixture.slow.success"));
+    const bool unrelated_ready = wait_until(
+        [&] { return heartbeat_observed->load(std::memory_order_acquire); },
+        2s);
+    const std::optional<JobSnapshot> readiness_snapshot =
+        service->query(unrelated.job_id);
+    ASSERT_TRUE(readiness_snapshot.has_value());
+    const int readiness_outcome =
+        readiness_snapshot->attempt_outcome.has_value()
+            ? static_cast<int>(*readiness_snapshot->attempt_outcome)
+            : -1;
+    ASSERT_TRUE(unrelated_ready)
+        << "job=" << readiness_snapshot->job_id.value()
+        << " state=" << static_cast<int>(readiness_snapshot->state)
+        << " failure=" << static_cast<int>(readiness_snapshot->failure)
+        << " outcome=" << readiness_outcome
+        << " settled=" << readiness_snapshot->attempt_settled
+        << " cancellation=" << readiness_snapshot->cancellation_requested
+        << " attempt=" << readiness_snapshot->assignment.attempt_id.value()
+        << " worker="
+        << readiness_snapshot->assignment.worker_instance_id.value()
+        << " lease="
+        << readiness_snapshot->assignment.worker_lease_generation.value
+        << " receipt=" << readiness_snapshot->output_receipt.has_value()
+        << " artifact=" << readiness_snapshot->output_artifact_id.value()
+        << " commit=" << readiness_snapshot->output_commit_id.value()
+        << " message=" << readiness_snapshot->message;
+
     const JobSubmission submitted =
-        service->submit(fixture_spec(test_case.first));
+        service->submit(fixture_spec(std::string(test_case.first)));
     const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
     EXPECT_EQ(terminal.state, JobState::Failed) << test_case.first;
     EXPECT_EQ(terminal.failure, test_case.second)
@@ -1489,9 +1567,67 @@ TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {
     EXPECT_FALSE(terminal.output_receipt.has_value()) << test_case.first;
     EXPECT_EQ(service->find_artifact(terminal.output_artifact_id), nullptr)
         << test_case.first;
+
+    const JobSnapshot unrelated_terminal =
+        wait_terminal(*service, unrelated.job_id);
+    const int unrelated_outcome =
+        unrelated_terminal.attempt_outcome.has_value()
+            ? static_cast<int>(*unrelated_terminal.attempt_outcome)
+            : -1;
+    EXPECT_EQ(unrelated_terminal.state, JobState::Succeeded)
+        << "job=" << unrelated_terminal.job_id.value()
+        << " state=" << static_cast<int>(unrelated_terminal.state)
+        << " failure=" << static_cast<int>(unrelated_terminal.failure)
+        << " outcome=" << unrelated_outcome
+        << " settled=" << unrelated_terminal.attempt_settled
+        << " cancellation=" << unrelated_terminal.cancellation_requested
+        << " attempt=" << unrelated_terminal.assignment.attempt_id.value()
+        << " worker="
+        << unrelated_terminal.assignment.worker_instance_id.value() << " lease="
+        << unrelated_terminal.assignment.worker_lease_generation.value
+        << " receipt=" << unrelated_terminal.output_receipt.has_value()
+        << " artifact=" << unrelated_terminal.output_artifact_id.value()
+        << " commit=" << unrelated_terminal.output_commit_id.value()
+        << " message=" << unrelated_terminal.message;
+    EXPECT_EQ(unrelated_terminal.job_id, unrelated.job_id);
+    EXPECT_EQ(unrelated_terminal.assignment, unrelated.assignment);
+    EXPECT_FALSE(unrelated_terminal.cancellation_requested);
+    EXPECT_TRUE(unrelated_terminal.attempt_settled);
+    EXPECT_EQ(unrelated_terminal.attempt_outcome, JobAttemptOutcome::Succeeded);
+    EXPECT_EQ(unrelated_terminal.failure, JobAttemptFailure::None);
+    ASSERT_TRUE(unrelated_terminal.output_receipt.has_value());
+    EXPECT_EQ(unrelated_terminal.output_receipt->attempt, unrelated.assignment);
+    EXPECT_EQ(unrelated_terminal.output_receipt->artifact_id,
+              unrelated_terminal.output_artifact_id);
+    EXPECT_EQ(unrelated_terminal.output_receipt->output_commit_id,
+              unrelated_terminal.output_commit_id);
+    const std::shared_ptr<const ArtifactRecord> unrelated_artifact =
+        service->find_artifact(unrelated_terminal.output_artifact_id);
+    ASSERT_NE(unrelated_artifact, nullptr);
+    EXPECT_EQ(unrelated_artifact->receipt.attempt, unrelated.assignment);
+    EXPECT_EQ(unrelated_artifact->receipt.artifact_id,
+              unrelated_terminal.output_artifact_id);
+    EXPECT_EQ(unrelated_artifact->receipt.output_commit_id,
+              unrelated_terminal.output_commit_id);
+    EXPECT_EQ(unrelated_artifact->receipt.content_digest,
+              unrelated_terminal.output_receipt->content_digest);
+    EXPECT_TRUE(
+        SingleTenantJobServiceTestAccess::
+            wait_for_owned_worker_thread_count_at_most(*service, 0U, 2s));
+    EXPECT_EQ(
+        SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
+        0U);
+    const TenantQuotaSnapshot quota = service->quota_snapshot();
+    EXPECT_EQ(quota.active_attempts, 0U);
+    EXPECT_EQ(quota.cpu_slots, 0U);
+    EXPECT_EQ(quota.host_memory_bytes, 0U);
+    EXPECT_EQ(quota.output_bytes, 0U);
+    EXPECT_EQ(quota.staging_bytes, 0U);
+    EXPECT_EQ(quota.retention_bytes,
+              unrelated_artifact->receipt.descriptor.archive_bytes);
+    EXPECT_EQ(quota.retained_artifacts, 1U);
+    EXPECT_TRUE(quota.device_bytes.empty());
   }
-  EXPECT_EQ(wait_terminal(*service, unrelated.job_id).state,
-            JobState::Succeeded);
 }
 
 TEST(WorkerSupervisor,
@@ -1501,7 +1637,7 @@ TEST(WorkerSupervisor,
           {"fixture.data.reference-mismatch",
            "worker report output metadata exceeds its assigned stage"},
           {"fixture.data.descriptor-mismatch",
-           "worker output-stage size exceeds or differs from metadata"},
+           "worker output-stage Value count is inconsistent"},
           {"fixture.data.stale-attempt",
            "worker report identity does not match its exact lease"},
       }};
@@ -1813,6 +1949,7 @@ TEST(WorkerSupervisor, CooperativeAndForcedCancellationRemainDistinct) {
     auto heartbeat_observed = std::make_shared<std::atomic<bool>>(false);
     WorkerManagerOptions options = supervisor_options();
     options.heartbeat_timeout = 2s;
+    options.await_channel_revocation_exit_for_test = true;
     options.first_external_heartbeat_observed_for_test = heartbeat_observed;
     auto service = make_service(root.path(), std::move(options));
     const JobSubmission ignored =
@@ -2014,12 +2151,19 @@ TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
   auto output_paused = std::make_shared<std::atomic<bool>>(false);
   WorkerManagerOptions options = supervisor_options();
   options.heartbeat_timeout = kBulkHeartbeatEvidenceTimeout;
-  options.attempt_runtime_timeout = 5s;
+  // The case deliberately holds one transfer for 2.1 seconds, then moves an
+  // archive above 64 MiB through both output and checkpoint paths. Its verdict
+  // is data-plane/heartbeat correctness, not tight fixture deadlines. The
+  // checkpoint transfer, worker decode/digest, and AssignmentAccepted share
+  // the manager's single absolute startup deadline, so loaded parallel CTest
+  // workers need the same bounded margin there as runtime and I/O.
+  options.startup_timeout = 15s;
+  options.attempt_runtime_timeout = 15s;
   // This case moves more than 64 MiB twice and validates the data-plane join,
   // not the fixture's 150-ms post-Report close boundary. Preserve a bounded
   // exit while allowing loaded CI workers to schedule the acknowledged child.
   options.post_report_timeout = 500ms;
-  options.io_timeout = 2s;
+  options.io_timeout = 15s;
   options.first_external_heartbeat_observed_for_test = heartbeat_observed;
   options.latest_output_pending_heartbeat_ordinal_for_test =
       pending_heartbeat_ordinal;
@@ -2064,7 +2208,8 @@ TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
   const std::shared_ptr<const ArtifactRecord> artifact =
       service->find_artifact(terminal.output_artifact_id);
   ASSERT_NE(artifact, nullptr);
-  EXPECT_EQ(artifact->payload.size(), kBulkPayloadAboveFormerControlBytes);
+  EXPECT_EQ(fixture_artifact_payload(*artifact).size(),
+            kBulkPayloadAboveFormerControlBytes);
   EXPECT_EQ(artifact->receipt.artifact_id,
             terminal.output_receipt->artifact_id);
   EXPECT_EQ(artifact->receipt.output_commit_id,
@@ -2084,7 +2229,8 @@ TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
   const std::shared_ptr<const ArtifactRecord> consumer_artifact =
       service->find_artifact(consumed.output_artifact_id);
   ASSERT_NE(consumer_artifact, nullptr);
-  EXPECT_EQ(consumer_artifact->payload.size(), sizeof(std::uint32_t));
+  EXPECT_EQ(fixture_artifact_payload(*consumer_artifact).size(),
+            sizeof(std::uint32_t));
 
   const TenantQuotaSnapshot quota = service->quota_snapshot();
   EXPECT_EQ(quota.active_attempts, 0U);
@@ -2093,7 +2239,8 @@ TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
   EXPECT_EQ(quota.output_bytes, 0U);
   EXPECT_EQ(quota.staging_bytes, 0U);
   EXPECT_EQ(quota.retention_bytes,
-            artifact->payload.size() + consumer_artifact->payload.size());
+            artifact->receipt.descriptor.archive_bytes +
+                consumer_artifact->receipt.descriptor.archive_bytes);
   EXPECT_EQ(quota.retained_artifacts, 2U);
   for (const auto& device : quota.device_bytes) {
     EXPECT_EQ(device.second, 0U);
@@ -2198,7 +2345,7 @@ TEST(WorkerSupervisor, RetryCheckpointAndRestartPreserveDurableAuthority) {
   JobId completed_job_id;
   ArtifactId checkpoint_id;
   OutputCommitReceipt checkpoint_receipt;
-  std::vector<std::byte> checkpoint_payload;
+  std::vector<std::byte> checkpoint_archive;
   {
     auto service = make_service(root.path(), supervisor_options());
     const JobSubmission first = service->submit(fixture_spec("fixture.retry"));
@@ -2233,14 +2380,14 @@ TEST(WorkerSupervisor, RetryCheckpointAndRestartPreserveDurableAuthority) {
               checkpoint_receipt.content_digest);
     EXPECT_EQ(artifact->receipt.achieved_durability,
               ArtifactDurability::CrashDurable);
+    checkpoint_archive = fixture_artifact_archive(*artifact);
     EXPECT_EQ(artifact->receipt.content_digest,
-              hash_artifact_content(artifact->payload.data(),
-                                    artifact->payload.size()));
-    checkpoint_payload = artifact->payload;
+              hash_artifact_content(checkpoint_archive.data(),
+                                    checkpoint_archive.size()));
     const TenantQuotaSnapshot quota = service->quota_snapshot();
     EXPECT_EQ(quota.active_attempts, 0U);
     EXPECT_EQ(quota.retained_artifacts, 1U);
-    EXPECT_EQ(quota.retention_bytes, checkpoint_payload.size());
+    EXPECT_EQ(quota.retention_bytes, checkpoint_archive.size());
     EXPECT_TRUE(
         SingleTenantJobServiceTestAccess::
             wait_for_owned_worker_thread_count_at_most(*service, 0U, 2s));
@@ -2263,7 +2410,8 @@ TEST(WorkerSupervisor, RetryCheckpointAndRestartPreserveDurableAuthority) {
     const std::shared_ptr<const ArtifactRecord> recovered_checkpoint =
         recovered->find_artifact(checkpoint_id);
     ASSERT_NE(recovered_checkpoint, nullptr);
-    EXPECT_EQ(recovered_checkpoint->payload, checkpoint_payload);
+    EXPECT_EQ(fixture_artifact_archive(*recovered_checkpoint),
+              checkpoint_archive);
     EXPECT_EQ(recovered_checkpoint->receipt.content_digest,
               checkpoint_receipt.content_digest);
     EXPECT_EQ(recovered_checkpoint->receipt.achieved_durability,
@@ -2271,7 +2419,7 @@ TEST(WorkerSupervisor, RetryCheckpointAndRestartPreserveDurableAuthority) {
     const TenantQuotaSnapshot recovered_quota = recovered->quota_snapshot();
     EXPECT_EQ(recovered_quota.active_attempts, 0U);
     EXPECT_EQ(recovered_quota.retained_artifacts, 1U);
-    EXPECT_EQ(recovered_quota.retention_bytes, checkpoint_payload.size());
+    EXPECT_EQ(recovered_quota.retention_bytes, checkpoint_archive.size());
     const JobSubmission checkpoint =
         recovered->submit(fixture_spec("fixture.checkpoint", checkpoint_id));
     const JobSnapshot terminal = wait_terminal(*recovered, checkpoint.job_id);
@@ -2291,15 +2439,15 @@ TEST(WorkerSupervisor, RetryCheckpointAndRestartPreserveDurableAuthority) {
     const std::shared_ptr<const ArtifactRecord> reused_checkpoint =
         recovered->find_artifact(checkpoint_id);
     ASSERT_NE(reused_checkpoint, nullptr);
-    EXPECT_EQ(reused_checkpoint->payload, checkpoint_payload);
+    EXPECT_EQ(fixture_artifact_archive(*reused_checkpoint), checkpoint_archive);
     EXPECT_EQ(reused_checkpoint->receipt.content_digest,
               checkpoint_receipt.content_digest);
     const TenantQuotaSnapshot final_quota = recovered->quota_snapshot();
     EXPECT_EQ(final_quota.active_attempts, 0U);
     EXPECT_EQ(final_quota.retained_artifacts, 2U);
     EXPECT_EQ(final_quota.retention_bytes,
-              checkpoint_payload.size() +
-                  terminal.output_receipt->descriptor.payload_bytes);
+              checkpoint_archive.size() +
+                  terminal.output_receipt->descriptor.archive_bytes);
     EXPECT_TRUE(
         SingleTenantJobServiceTestAccess::
             wait_for_owned_worker_thread_count_at_most(*recovered, 0U, 2s));

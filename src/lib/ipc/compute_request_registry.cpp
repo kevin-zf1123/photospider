@@ -176,11 +176,11 @@ void ComputeOutputOwnership::reset(
 /** @copydoc ComputeRequestRegistry::ComputeRequestRegistry */
 ComputeRequestRegistry::ComputeRequestRegistry(
     SessionRegistry& sessions, StatusExecutor status_executor,
-    ImageExecutor image_executor, OutputPublisher output_publisher,
+    ValuesExecutor values_executor, OutputPublisher output_publisher,
     ComputeRequestRegistryLimits limits, Clock clock, IdGenerator id_generator)
     : sessions_(sessions),
       status_executor_(std::move(status_executor)),
-      image_executor_(std::move(image_executor)),
+      values_executor_(std::move(values_executor)),
       output_publisher_(std::move(output_publisher)),
       limits_(limits),
       clock_(std::move(clock)),
@@ -190,9 +190,9 @@ ComputeRequestRegistry::ComputeRequestRegistry(
     throw std::invalid_argument(
         "compute registry limits and terminal TTL must be positive");
   }
-  if (!status_executor_ || !image_executor_ || !output_publisher_) {
+  if (!status_executor_ || !values_executor_ || !output_publisher_) {
     throw std::invalid_argument(
-        "compute registry requires status, image, and output callbacks");
+        "compute registry requires status, Values, and output callbacks");
   }
   if (!clock_) {
     clock_ = [] { return std::chrono::steady_clock::now(); };
@@ -500,12 +500,12 @@ void ComputeRequestRegistry::worker_loop() noexcept {
       if (record->mode == ComputeResultMode::Status) {
         outcome = status_executor_(record->request);
       } else {
-        Result<ImageBuffer> image = image_executor_(record->request);
-        if (!image.status.ok) {
-          outcome = std::move(image.status);
+        Result<NamedValueResult> values = values_executor_(record->request);
+        if (!values.status.ok) {
+          outcome = std::move(values.status);
         } else {
           ComputeOutputPublication publication =
-              output_publisher_(record->compute_id, std::move(image.value));
+              output_publisher_(record->compute_id, std::move(values.value));
           outcome = std::move(publication.status);
           if (outcome.ok) {
             output = std::move(publication.output);

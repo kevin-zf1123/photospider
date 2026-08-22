@@ -21,8 +21,10 @@ it as an upstream root of the selected dependency cone.
 **Dirty Region** is normalized logical affected or demanded work represented
 by `RegionSet`. V-4 supports exact ImageRect and rank-general TensorSlice for
 HP; RT accepts only exact ImageRect. Current Host/IPC v2 inspection, operation
-ABI v2, ImageBuffer processing, and physical image tiles use checked derived
-`PixelRect`/`PixelSize`. OpenCV rectangles and sizes are created only locally
+ABI v1 adapters, dense Value processing, and physical image tiles use checked derived
+`PixelRect`/`PixelSize`. Those physical rectangles are zero-based within
+their HP or RT storage allocation and do not inherit a signed logical origin.
+OpenCV rectangles and sizes are created only locally
 inside providers or algorithms at actual matrix or algorithm calls.
 
 **Dirty generation** is the value stored in a `DirtyRegionSnapshot` and copied
@@ -126,16 +128,20 @@ exact-core dense node remains in the plan before its consumer and receives the
 same logical demand. An uncached leaf source is a categorized missing
 dependency. The planner records direct TensorSlice source Regions; it does not
 infer source provenance from an empty PixelRect compatibility projection.
-For every executable target or upstream node, the same route selection that
-passes the exact-core check is reduced immediately to a callback-free
-operation key and complete identity/device/shape/metadata record. The request
-plan retains these revisioned records, not the callable or DSO lease.
+For ImageRect HP, every current ImageRect RT path, and TensorSlice HP, each
+executable target or upstream node immediately reduces its exact selected
+revision to a callback-free operation key and complete
+identity/device/shape/metadata record. That same revision supplies ImageRect
+dirty/dependency behavior and, for TensorSlice, passes the exact-core check.
+The request plan retains these revisioned records, not the callable or DSO
+lease.
 After dirty/external-satisfaction selection identifies active task nodes, dirty
 preparation treats an empty active view as successful no-work before comparing
-intent, device inventory, task ids, or node routes. Otherwise it compares every
-active task-population route with those records before applying ROIs or
-materializing work. Target or upstream replacement for remaining active work
-therefore fails with `NoOperation` before
+intent, device inventory, task ids, or node routes. Otherwise an empty route
+snapshot or missing active-node route is itself a fail-closed mismatch, and
+preparation compares every active task-population route with the retained
+record before applying ROIs or materializing work. Target or upstream
+replacement for remaining active work therefore fails with `NoOperation` before
 provider/gate/grant/reservation/ledger ownership; ordinary execution still
 re-resolves the callable afterward.
 
@@ -157,9 +163,11 @@ is not the traversal used to materialize the current dirty execution plan.
 ## Region Propagation
 
 For exact built-in ImageRect, `RoiPropagationService` converts through the
-checked private adapter, asks the selected current v2 callback for its
-projection, validates the returned rectangle, and wraps it as Exact Region.
-Static formulas still cover identity, neighborhood, crop, resize, and other
+checked private adapter, asks the selected provider-neutral propagation
+callback for its projection, validates the returned rectangle, and wraps it as
+Exact Region. That selected callback may come from the dependency-neutral core,
+an optional provider, or the current pure-C operation ABI v1 adapter. Static
+formulas still cover identity, neighborhood, crop, resize, and other
 image geometry; data-dependent operations may provide a validated dependency
 LUT. Image demands for the same parent retain current bounded rectangular
 behavior.
@@ -293,8 +301,13 @@ or route/runtime epoch into cancellation authority.
 
 HP dirty tasks stage output and Region validity in
 `HighPrecisionDirtyWriteBuffer`; RT dirty tasks stage image output and
-HP-space ImageRect validity in `RealtimeProxyWriteBuffer`. A successful request commits staged
-HP state to `GraphModel` or RT state to `RealtimeProxyGraph` through the
+HP-space ImageRect validity in `RealtimeProxyWriteBuffer`. Each write buffer
+owns at most one unpublished `HostOutputBinding` per node. It freezes the
+number of selected tasks whose immutable HP/RT geometry is actually executable,
+issues disjoint grants from that one binding, and lets the last executable task
+seal exactly once. Selected tasks clipped to empty RT geometry do not inflate
+the retirement count. A successful request commits staged HP state to
+`GraphModel` or RT state to `RealtimeProxyGraph` through the
 intent-specific commit path. A standalone non-realtime HP request owns one
 `ComputeRun`. Each `RealTimeUpdate` creates distinct HP and RT child Runs inside
 one request-owned `RunGroup` before preflight; both capture the same strong
@@ -304,14 +317,30 @@ staging state. No mixed-domain Run is created.
 
 The exact core Region bridge returns a complete-shaped dense result, but only
 the selected coordinates are authoritative for a partial invocation.
-`HighPrecisionDirtyWriteBuffer` merges those coordinates into existing staged
-bytes and reseals one fresh Value; unselected coordinates remain unchanged. If
+`HighPrecisionDirtyWriteBuffer` seeds its binding through a checked whole grant,
+then update grants replace only selected coordinates before one final seal;
+unselected coordinates remain unchanged. If
 the prior output was complete, its complete validity remains true even when a
 full ImageRect proof and TensorSlice update use different Region domains. A
 fresh partial output has only partial validity, so whole-output dependency
 resolution and current regionless disk persistence reject it until a normal
-Whole commit replaces it. Generic ABI v2 monolithic callbacks retain
+Whole commit replaces it. Generic operation ABI v1 monolithic callbacks retain
 complete-output replacement behavior.
+
+The task pruner treats dependencies outside the active selected task flags as
+already satisfied. An active spatial consumer retains its exact ROI-covered
+producer task ids for a nonempty mapping; an empty exact mapping retains the
+selected producer task set only as a publication join because execution still
+resolves the complete `NodeOutput`. Each nonfinal tile retires without releasing
+those edges; after the final selected producer seals and installs the complete
+Value, its unique publisher batches release through every original selected
+sibling task map. A tile therefore cannot consume a sibling's partially written
+binding, while nonempty task identity remains exact and no continuation task is
+manufactured. Whole and parameter dependencies remain complete producer-node
+joins. Overlap,
+out-of-range geometry, an exception, cancellation, duplicate or missing
+retirement, or commit with an undrained binding is sticky failure, releases no
+unpublished tile edges, and leaves the previous formal/proxy Value unchanged.
 
 Kernel's product commit policy materializes publication copies and then checks
 that each child Run is `CommitPending`, owns the exact staged Graph/proxy, and
@@ -352,11 +381,29 @@ The current implementation does not provide:
 Current logical dirty authority uses normalized `RegionSet` across propagation,
 planning, source history, per-node state, edge mappings, HP validity, staging,
 and the Region-aware core dense operation. Checked derived `PixelRect` and
-`PixelSize` remain only at image tile/task, ImageBuffer, Host/IPC v2, and
-operation ABI v2 edges. Region endpoint and tensor-shape arithmetic is checked;
+`PixelSize` remain only at image tile/task, dense Value processing, Host/IPC v2, and
+operation ABI v1 adapter edges. Region endpoint and tensor-shape arithmetic is checked;
 the image adapter rejects uncertainty, TensorSlice, custom domains,
 multi-atom clauses, and narrowing overflow. OpenCV rectangles and sizes are
 created only inside provider or adapter implementations at actual calls.
+
+For an ordinary dense image, an `ImageRect` is expressed in the signed logical
+coordinate domain of the immutable `ImageFacet::data_window`. A full-image
+region is exactly that half-open window, including a non-zero or negative
+origin. Dense storage indices are obtained only after containment has been
+checked, by subtracting the data-window origin. The optional display window
+does not redefine dirty coordinates, and a dynamic `RegionSet` does not mutate
+either window. Provider-defined OpenEXR Deep windows remain a separate
+provider contract and are not ordinary-dense-image authority.
+
+Accordingly, each image `HpPlanEntry`/`RtPlanEntry` retains the HP data window,
+a zero-based `roi_hp`, and a logical `region_hp`; `roi_rt` is separately
+zero-based in the RT proxy allocation. Edge/snapshot Region metadata is built
+from the relevant storage ROI only by checked origin addition. HP dirty writes
+send logical ImageRect validity to downsample; downsample subtracts the current
+committed HP origin for pixel access and stores the logical Region unchanged as
+RT HP-validity metadata. Empty, Whole, stale-generation, failure, and
+cancellation handling never authorize a mismatched coordinate domain.
 
 Keeping dirty facts, static task shape, ready dispatch, and staged commit as
 separate values prevents ROI updates from rewriting topology or transferring
@@ -370,10 +417,10 @@ can currently guarantee.
 - `include/photospider/data/region.hpp`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
-- `src/lib/core/image_buffer_processing.*`
-- `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
+- `src/lib/core/{dense_image_processing,value_region}.*`
+- `src/lib/adapters/opencv/value_adapter_opencv.*`
 - `src/lib/compute/dirty/dirty_region_snapshot.hpp`
-- `tests/unit/test_stdlib_image_buffer_processing.cpp`
+- `tests/unit/test_dense_image_processing.cpp`
 - `src/lib/compute/dirty/dirty_region_snapshot_builder.cpp`
 - `src/lib/compute/dirty/dirty_region_planner.cpp`
 - `src/lib/compute/dirty/dirty_region_planning_policy.hpp`

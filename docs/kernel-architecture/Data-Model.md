@@ -167,13 +167,31 @@ Graph state.
 
 | Field | Meaning |
 | --- | --- |
-| `image_buffer` | Independent current plugin ABI v2, tiled-write, codec, and Host compatibility snapshot. |
-| `image_value` | Immutable sealed or producer-pending Value with explicit allocation/binding/revision identity when valid. Pending state is request-local and cannot enter formal cache or visible commit. |
-| `data` | Named scalar or structured outputs stored as a `plugin::ParameterMap`. |
+| `named_values` | Canonically ordered immutable Values. The current image port is permanently named `image`; every image or generic entry is the sole payload, allocation, readiness, and revision authority for that exact name. |
+| `data` | Named parameter-result scalars or structures stored as a `plugin::ParameterMap`; generic Values never enter this field. |
 | `space` | Spatial transform, scale, and ROI metadata. |
-| `debug` | Worker/device/timing/range diagnostics. Enabled CPU range inspection walks active scalar bytes through `ImageBuffer::step`; padding is excluded and opaque device values retain provider diagnostics. |
+| `debug` | Worker/device/timing/range diagnostics. Enabled CPU range inspection walks active scalar bytes through the canonical Value layout; padding is excluded and opaque device Values retain provider diagnostics. Every valid native signed/unsigned 8/16/32/64-bit integer image is accepted. The binary64 range is exact through 32 bits; wider integers use deterministic nearest-representable, ties-to-even projection and can lose integer precision without changing descriptor, Facet, binding, revision, or payload authority. Sample domains are never normalized. |
 
-Operators may return image data, named data, or both.
+Operators may return a canonical image Value, independently named generic
+Values, parameter results, or an authorized combination of those categories.
+
+Return shape is not authorization. Issue #130 freezes a
+`PlannedOutputAuthority` from the selected registered operation revision before
+execution: it carries the exact canonical-image requirement, exact named-data
+sets for generic Values and parameter results, implementation/device identity,
+required canonical-image DenseTensor/ImageFacet/Strided structure, and any
+trusted finite Graph or dirty extent. Each generic Value must retain valid
+revision/producer identity and valid nonempty indexed storage bindings; its
+representation/layout is either DenseTensor with Strided or Blocked layout, or
+ProviderDefined with ProviderDefined layout. Generic Values do not acquire an
+image-facet requirement. A normal result must match every category exactly;
+missing, extra, malformed, wrong-name, wrong-facet, wrong-layout,
+wrong-identity, or wrong-extent output is rejected before dependent release or
+the first formal Graph mutation. Supervised staging may retain exact Pending
+Values, but every formal boundary requires all declared Values to be Ready.
+Full HP routes stage all computation in a Graph clone and publish the complete
+snapshot only after authorization, so an empty `NodeOutput` can never
+manufacture Whole validity or a cacheable completion.
 
 Persistent `OutputPort::output_parameters` is an optional deep-owned
 `ParameterValue`. An empty optional means the document field was absent; an
@@ -183,11 +201,25 @@ configuration therefore survives parser destruction without retaining
 
 For tiled `image_mixing`, a secondary input that requires crop/pad is
 materialized as a request-local `NodeOutput`: named data, spatial/debug
-provenance, and plugin-library lifetime are copied, while its image descriptor
-is replaced by aligned storage produced through kernel fill/copy primitives.
+provenance, and plugin-library lifetime are copied, while its image Value is
+replaced by aligned storage produced through kernel fill/copy primitives and
+sealed before the normalized output is exposed. “Named data” here includes
+generic named Values and parameter results without moving either category into
+the other.
 Resize and channel conversion remain local OpenCV algorithm calls. The
 normalization context owns these temporary outputs until every synchronous tile
 callback finishes; exact-shape inputs continue to borrow the upstream output.
+
+DI-2 freezes `DenseImageOutputPlan` as the one source-private ordinary-image
+output description. The immutable plan owns the output name, complete
+DenseTensor/ImageFacet facts, exact positive Strided layout, byte envelope,
+base alignment, and full image Region before Host allocation. One
+`HostOutputBinding` owns the aligned allocation and private builder lease.
+Move-only whole or disjoint-tile grants expose only checked row spans; overlap,
+range, alignment, overflow, cancellation, exception, duplicate retirement, or
+omitted retirement fails the binding closed. Only after every grant retires
+successfully may the binding seal and publish one Ready Value exactly once.
+The plan is the sole internal DI-3 mapping source, not an interim ABI record.
 
 ## Cache Fields
 
@@ -280,9 +312,13 @@ propagation.
   Static/effective parameters, output-port configuration, and named operation
   outputs are `ParameterValue` trees. Logical dirty work and cache validity use
   normalized `RegionSet`; current image extents, physical tiles, Host/IPC v2
-  inspection, and operation ABI v2 use checked derived `PixelSize` and
-  `PixelRect` values. OpenCV geometry is created only inside an OpenCV provider
-  or algorithm implementation when a matrix slice or library call requires it.
+  inspection, and operation ABI v1 adapters use checked derived `PixelSize` and
+  `PixelRect` values. In compute/dirty compatibility paths those rectangles are
+  zero-based storage coordinates relative to the owning data window; they are
+  never retained as logical metadata. Conversion to or from a signed logical
+  `ImageRect` requires checked origin translation through that exact
+  `ImageBounds`. OpenCV geometry is created only inside an OpenCV provider or
+  algorithm implementation when a matrix slice or library call requires it.
 
 ### Current persistence identity and completion boundaries
 
@@ -318,11 +354,16 @@ identity:
 
 - installed `DenseTensorDescriptor` keeps concrete shape,
   `ElementSemantics`, `StorageEncoding`, and optional quantization separate;
-- installed `ImageFacet` explicitly assigns distinct x/y and optional channel
-  axes;
+- installed ordinary `ImageFacet` assigns distinct x/y and optional channel
+  axes, requires a signed half-open data window, and may retain an independent
+  display window, stable channel/group schema, declared sample-domain facet,
+  and color facet;
 - `BufferHandle` is a checked immutable nonempty range over one explicit
   storage binding, exposes no raw or native pointer, and creates checked
-  identity-preserving subranges; CPU builders own host bytes, while
+  identity-preserving subranges; a CPU binding records the positive
+  power-of-two alignment guaranteed for that retained range so portable
+  capture can reproduce it without making alignment logical identity; CPU
+  builders own host bytes, while
   source-private device publication may retain an opaque native owner and
   independently record host visibility;
 - `ValueBuilder` owns the only move-only `WriteLease`, refuses seal while a
@@ -338,20 +379,30 @@ identity:
   stride-aware unsigned-8 execution, reuses a sealed input Value when present,
   and publishes its exact sealed result revision.
 
-Private `NodeOutput` retains `image_value` beside `image_buffer`. A valid Value
-is the immutable allocation/binding/revision authority; the ImageBuffer is an
-independent CPU compatibility snapshot. A producer-pending Value may live in
-request-local temporary output only: `TaskSubmissionPlan` holds its Run
-unsettled and releases dependants after terminal Ready, while Failed,
-ProducerCancelled, or stale-typed completion releases none. Ordinary HP commit,
-sequential HP compute, connected-preflight shadow cache, dirty HP commit, and
-disk decode normalize legacy CPU buffers before formal publication. Immutable
-cache copies preserve both identities; dirty clones clear the old Value before
-mutation and reseal final bytes; replacement and disk decode mint fresh
+Private `NodeOutput::named_values` is the only formal Value authority; the
+`image` entry replaces the former image-buffer/value pair. A producer-pending
+Value may live in request-local temporary output only: `TaskSubmissionPlan`
+holds its Run unsettled and releases dependants after terminal Ready, while
+Failed, ProducerCancelled, or stale-typed completion releases none. Ordinary
+HP commit, sequential HP compute, connected-preflight shadow cache, dirty HP
+commit, and disk decode reject or normalize compatibility staging before
+formal publication. Immutable cache copies preserve allocation and revision;
+dirty/tiled execution creates one fresh Host binding and seals once after all
+selected executable grants retire; replacement and disk decode mint fresh
 identities. Allocation and revision tokens remain process-local and never enter
 task-graph keys, cache paths, graph/YAML documents, or artifact bytes.
 The shared operation runtime is the one process-wide minting authority for the
 static Host and every Value-using DSO.
+
+Dirty HP/RT uses the same rule for a source-private Pending Value.
+`DirtyReadyTaskContext` queues a Run-scoped continuation without blocking a
+worker, retains the exact revision/allocation/producer/staged-Value identity,
+and releases dependants only after that same Value becomes Ready and passes the
+frozen plan again. Failure, producer cancellation, Run cancellation,
+supersession, or staged-value replacement publishes no formal output.
+Cancellation callbacks do not decrement worker-owned logical task accounting;
+prepared source/dependent contexts remain retained until their matching service
+callbacks have settled.
 
 V-4 installs `RegionDomainKey`, `ImageRect`, rank-general `TensorSlice`,
 `RegionAtom`, immutable normalized `RegionSet`, bounded algebra, typed
@@ -359,11 +410,35 @@ operation outcomes, and containment. `Node::hp_region` is validity metadata
 published with the one formal HP cache authority. Dirty source history,
 per-node state, monolithic work, and edge mappings retain Region; image-only
 tile rectangles are derived beside their source Region. The core dense invert
-path executes exact ImageRect or TensorSlice selections, while RT rejects
-TensorSlice and operation ABI v2 remains unchanged. Exact one-clause
+  path executes exact ImageRect or TensorSlice selections, while RT rejects
+  TensorSlice. Operation ABI v1 carries the bounded matching Region records.
+  Exact one-clause
 difference preserves every equal constrained-domain atom when only one
 compatible atom varies and the overlap removes one of its edges; differences
 that would split an atom or vary multiple domains remain typed `TooComplex`.
+
+Issue #129 / DI-1 now makes the ordinary built-in DenseImage metadata concrete.
+The required signed half-open `ImageBounds` data window is the immutable logical
+pixel domain; its x/y spans must exactly match the descriptor shape at the
+explicit axes. Negative and nonzero origins are valid. The optional display
+window is presentation metadata, while dynamic dirty/dependency/execution/HP
+validity remains `RegionSet`. `Value::image_bounds()` exposes data-window
+metadata in Pending, Failed, and ProducerCancelled states without weakening
+Ready-only payload leases; `ImageView` separately exposes zero-based storage
+indices and signed logical-coordinate access. Dirty planner entries therefore
+retain both an exact data window and a storage-relative `PixelRect`; their
+`RegionSet` validity is reconstructed only by checked origin addition.
+
+The optional bounded `ChannelSchema` uses stable nonzero `ChannelId` and
+`ChannelGroupId` values; diagnostic names do not select roles or enter semantic
+equality/digests. Version-1 `SampleEncoding`/`SampleDomainFacet` declares
+normalized, legal, or code-value intervals and stable-ID per-channel overrides.
+Version-1 `ColorFacet` binds a valid channel group to explicit transfer function
+and primaries. Storage-representable range remains a property only of element
+semantics and storage encoding; quantization, declared sample meaning, and color
+remain independent. Observed min/max/histogram queries, results, and complete
+revision/content/Region/selector/algorithm cache keys are independent derived
+values and never become Value or descriptor/content identity.
 
 V-6 attaches an installed, copyable `ReadyFence` observer to every Value.
 Synchronous publications start Ready. A source-private pending producer keeps
@@ -403,13 +478,23 @@ maintenance does not clear settled resident replicas.
 
 V-9 adds byte authority without changing logical Value identity or public
 binding facts. `ResourceLedger` owns an isolated memory/scratch account for
-each configured non-CPU `DeviceId`. Native plans use backend size/alignment
-facts; actual allocations use `allocatedSize`. A persistent device `Value`'s
-type-erased external owner holds the unique memory lease beside its native
-allocation, so Value copies and residency retain—not duplicate—the authority.
-Scratch remains outside the Value and follows the exact asynchronous
-completion owner. A completed HostPinned readback retains its shared Metal
-buffer as CPU-owned output storage after the scratch lease ends.
+each configured non-CPU `DeviceId`. A Metal texture size/alignment query
+provides only the aligned minimum request for a dedicated heap descriptor, not
+an upper bound on backing bytes. Before native allocation, the ledger's sole
+root mutex atomically validates that minimum and the exact scratch plan and
+reserves the device's complete currently available persistent-memory ceiling.
+After allocation, the dedicated heap's positive `currentAllocatedSize` is the
+sole persistent actual; the heap-backed texture is not counted again, while
+each scratch resource contributes its positive `allocatedSize`. A fitting
+commit under the same sole mutex returns the unused ceiling and splits exact
+persistent/scratch leases. Invalid or over-plan observations fail with a typed
+error and roll native owners plus the uncommitted reservation back exactly
+once. A persistent device `Value`'s type-erased external owner holds the unique
+memory lease beside its native allocation, so Value copies and residency
+retain—not duplicate—the authority. Scratch remains outside the Value and
+follows the exact asynchronous completion owner. A completed HostPinned
+readback retains its shared Metal buffer as CPU-owned output storage after the
+scratch lease ends.
 
 V-12 verifies this installed model across the dimensions most likely to expose
 image-only assumptions. The dependency-neutral matrix covers 1/3/4/8/16
@@ -489,7 +574,7 @@ DataSpec, canonical-content, owner, and destroy callbacks. Pure callbacks
 receive descriptor/Layout/buffer metadata with every payload pointer cleared;
 validation and canonical-content traversal are the only semantic callbacks
 that receive payload in V-14. Access, mapping, transfer, conversion, inference,
-execution, native-device, and operation ABI v2 authority are absent.
+execution, native-device, and operation-plugin authority are absent.
 
 Borrowed ABI byte views are input-only. Each callback receives one Host-owned
 output sink; diagnostic and BYTES-property records declare scalar lengths, and
@@ -520,12 +605,30 @@ Schema/Facet/Layout unknown bytes and all three optional digest identities
 without a provider, but it is not a graph document, manifest/chunk store,
 filesystem codec, or cache-policy integration.
 
-The same installed `compute_content_digest(Value)` entry now gives built-in
-DenseTensor values a frozen canonical-v1 logical identity without invoking a
-provider callback. Its reserved built-in Schema record encodes rank, shape,
-element semantics, storage encoding kind and width, and optional quantization
-block shape plus binary32 scale bits. An optional reserved `ImageFacet` record
-encodes the x/y axes and optional channel axis. Content traversal follows
+The same installed `compute_content_digest(Value)` entry gives built-in
+DenseTensor values a frozen canonical-v1 stream identity without invoking a
+provider callback. The built-in Schema structural version 2 encodes rank,
+shape, element semantics, storage encoding kind and width, and optional
+quantization block shape plus binary32 scale bits. Image structural version 2
+encodes axes, signed data/display windows, stable channel order, group IDs, and
+members; independent Sample Domain and Color Facets use structural version 1.
+The specification-owned DenseTensor Schema identity is
+`{0x70686f746f737069, 0x6465722d64656e73}`, the optional Image Facet identity
+is `{0x70686f746f737069, 0x6465722d696d6167}`, and the complete Strided Layout
+identity is `{0x70686f746f737069, 0x6465722d73747269}` at structural version 2.
+The installed operation C11 and C++17 SDK publishes these named facts. A
+facet-free DenseTensor uses the zero Facet identity; it does not acquire an
+Image identity from its consumer.
+
+Every operation-produced Strided DenseTensor retains its exact publisher
+Schema, optional Facet, Layout, descriptor/Layout versions, and descriptor,
+logical-content, and Layout digest words in the immutable `Value`. Publication
+attaches that metadata before sealing for trusted and supervised outputs,
+including fresh-process adoption and generic named outputs. Facet presence
+must exactly match the immutable ImageFacet presence. All-zero digests remain
+unavailable, and no DenseImage-only retained-metadata alias exists.
+
+Diagnostic names and observed statistics are absent. Content traversal follows
 row-major logical coordinates: whole-byte scalars are emitted little-endian,
 while blocked FP4 emits one low-nibble code byte per logical element. Strides,
 byte/bit offsets, padding, block placement, nibble order, allocation/binding
@@ -616,7 +719,8 @@ neither document changes the current fields described above.
 - `src/lib/core/dense_tensor_content_digest.*`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/packed_dense_tensor.cpp`
-- `src/lib/core/value_image_adapter.*`
+- `src/lib/core/{value_region,dense_image_processing}.*`
+- `src/lib/adapters/{opencv,openexr}/`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/cpu_dense_image_operation.*`

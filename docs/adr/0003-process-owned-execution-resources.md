@@ -138,14 +138,24 @@ The current #84 through #86 slices realize the CPU executor, one service-owned
 Metal lane, a source-private fixed device-executor registry, explicit
 CPU/Metal transfer, exact process-owned residency, and authoritative
 per-`DeviceId` memory/scratch accounting. In the enabled
-repository Metal-plugin profile, the Apple entry owns and reuses its native
+repository Metal-provider profile, the Apple entry owns and reuses its native
 device/queue and validated pipeline cache, while each entry receives an
 invocation-scoped native allocator. Before native allocation, Perlin and
-CPU-to-Metal upload atomically reserve complete device plans derived from
-Metal heap size/alignment queries. Native `allocatedSize` facts reconcile the
-plans before command commit: unused bytes return immediately, persistent
-memory leases move into the native `Value` owner, and scratch leases move into
-the exact command-completion owner. Perlin publishes a pending native Value,
+CPU-to-Metal upload use the Metal heap size/alignment query only as the aligned
+minimum `MTLHeapDescriptor` request; that query is not an upper bound for the
+dedicated heap backing. In one `ResourceLedger` root-mutex transaction, the
+executor validates that persistent minimum and the exact scratch plan, then
+reserves the complete persistent-memory capacity currently available to the
+exact `DeviceId`. After allocation, the dedicated heap's positive
+`currentAllocatedSize` is the sole persistent actual; the heap-backed
+texture's `allocatedSize` is not counted again, while each scratch resource
+contributes its own positive `allocatedSize`. A fitting actual commit under the
+same sole ledger mutex immediately returns every unused planned byte and
+splits exact persistent and scratch leases between the native `Value` and
+command-completion owners. Invalid or over-plan actual observations fail with
+a typed resource error before command commit or ownership escape, after which
+the local native owners and uncommitted reservation unwind exactly once.
+Perlin publishes a pending native Value,
 encodes texture-to-buffer readback, and returns without a command-buffer wait.
 Completion freshness, applicable producer Ready publication, destination Ready
 publication, and resident insertion are one manager-locked transaction.

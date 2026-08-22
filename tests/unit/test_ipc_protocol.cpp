@@ -33,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/pending_value.hpp"
 #include "ipc/client_collection_budget.hpp"
 #include "ipc/client_interrupt_access.hpp"
 #include "ipc/codec.hpp"
@@ -900,7 +901,7 @@ Json valid_host_routed_params(std::string_view method,
 /**
  * @brief Builds one complete nontrivial compute-submit params object.
  * @param session_id Valid opaque daemon session identity.
- * @param result_mode Exact `status` or `image` selection.
+ * @param result_mode Exact status or values selection.
  * @return Nested public Host request values plus one ignored future field.
  * @throws std::bad_alloc if JSON or string storage cannot allocate.
  * @note Values exercise every task-3.3 known field while demonstrating that
@@ -923,6 +924,50 @@ Json valid_compute_submit_params(const std::string& session_id,
       {"dirty_roi", expected_rect(PixelRect{-4, 5, 6, 7})},
       {"result_mode", std::move(result_mode)},
       {"future_submit_field", true}};
+}
+
+/**
+ * @brief Builds one Ready named u8 DenseTensor result for IPC publication.
+ * @param payload_bytes Positive logical payload width.
+ * @param fill Exact byte copied into every tensor element.
+ * @return One image-named Ready Value result.
+ * @throws std::invalid_argument for a zero payload width.
+ * @throws Value publication, result validation, or allocation failures
+ *         unchanged.
+ * @note The helper exercises the public Value result surface directly and
+ *       creates no removed image-buffer compatibility value.
+ */
+NamedValueResult make_protocol_values(std::size_t payload_bytes,
+                                      std::byte fill = std::byte{0x5a}) {
+  if (payload_bytes == 0U) {
+    throw std::invalid_argument("protocol Value payload is empty");
+  }
+  DenseTensorDescriptor descriptor{{payload_bytes},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  Value value = Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::nullopt, StridedLayout{{1}},
+      std::vector<std::byte>(payload_bytes, fill));
+  return NamedValueResult({NamedValue{"image", std::move(value)}});
+}
+
+/**
+ * @brief Builds one terminally unreadable named Value result.
+ * @return Result whose producer abandonment leaves its Value Failed.
+ * @throws Pending Value publication, result validation, or allocation failures
+ *         unchanged.
+ * @note Construction explicitly permits non-Ready metadata so the router can
+ *       prove artifact capture fails closed after Host success.
+ */
+NamedValueResult make_failed_protocol_values() {
+  DenseTensorDescriptor descriptor{{1U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  PendingValuePublication pending =
+      PendingValuePublisher::allocate_cpu_dense_tensor(
+          std::move(descriptor), std::nullopt, StridedLayout{{1}}, 1U);
+  return NamedValueResult({NamedValue{"image", std::move(pending.value)}},
+                          false);
 }
 
 /**
@@ -1043,6 +1088,19 @@ class ScopedProtocolGateRelease final {
 class HostRoutedGraphStateProtocolTest : public ::testing::Test {
  protected:
   /**
+   * @brief Builds deterministic router limits for artifact quota coverage.
+   * @return Default dependencies with a four-KiB per-archive ceiling.
+   * @throws Nothing.
+   * @note Ordinary fixture Values fit this bound; the quota test publishes a
+   *       larger real archive without allocating hundreds of MiB.
+   */
+  static RequestRouterRuntimeDependencies runtime_dependencies() {
+    RequestRouterRuntimeDependencies dependencies;
+    dependencies.output_limits.artifact_bytes = 4U << 10U;
+    return dependencies;
+  }
+
+  /**
    * @brief Loads one deterministic private Host session through the router.
    * @return Nothing.
    * @throws std::bad_alloc if request, response, registry, or spy storage
@@ -1118,7 +1176,7 @@ class HostRoutedGraphStateProtocolTest : public ::testing::Test {
   ::ps::testing::IpcHostSpy host_;
 
   /** @brief Router under test, borrowing `host_`. */
-  RequestRouter router_{host_, "host-routed-test"};
+  RequestRouter router_{host_, "host-routed-test", runtime_dependencies()};
 
   /** @brief Active snapshot/output/compute runtime for routed calls. */
   ScopedRequestRouterRuntime runtime_{router_, runtime_directory_};
@@ -1636,7 +1694,7 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   ASSERT_EQ(calls.size(), 1U);
   ASSERT_EQ(calls.front().method, "compute.submit");
   ASSERT_TRUE(calls.front().compute_request.has_value());
-  EXPECT_FALSE(calls.front().image_compute);
+  EXPECT_FALSE(calls.front().values_compute);
   const HostComputeRequest& request = *calls.front().compute_request;
   EXPECT_EQ(request.session.value, "ipc-host-spy-session");
   EXPECT_EQ(request.node.value, 37);
@@ -1706,7 +1764,7 @@ TEST_F(HostRoutedGraphStateProtocolTest,
     ASSERT_EQ(calls.size(), 1U);
     ASSERT_EQ(calls.front().method, "compute.submit");
     ASSERT_TRUE(calls.front().compute_request.has_value());
-    EXPECT_FALSE(calls.front().image_compute);
+    EXPECT_FALSE(calls.front().values_compute);
     const HostComputeRequest& request = *calls.front().compute_request;
     EXPECT_EQ(request.session.value, "ipc-host-spy-session");
     EXPECT_EQ(request.node.value, 41 + static_cast<std::int64_t>(index));
@@ -1828,7 +1886,7 @@ TEST_F(HostRoutedGraphStateProtocolTest,
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
-       AcceptedHostAndImageFailuresRemainImmutableNestedResults) {
+       AcceptedHostAndValueFailuresRemainImmutableNestedResults) {
   host_.set_status(
       "compute.submit",
       failure_status(OperationErrorDomain::Graph,
@@ -1859,70 +1917,64 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   ASSERT_TRUE(route("compute.release", Json{{"compute_id", failed_id}})
                   .contains("result"));
 
-  ImageBuffer invalid_image;
-  invalid_image.width = 1;
-  host_.set_compute_image(std::move(invalid_image));
+  host_.set_compute_values(make_failed_protocol_values());
   host_.reset_invocations();
   submitted = route("compute.submit",
-                    valid_compute_submit_params(session_id_, "image"));
+                    valid_compute_submit_params(session_id_, "values"));
   ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
-  const std::string image_id =
+  const std::string values_failure_id =
       submitted["result"]["compute_id"].get<std::string>();
-  Json image_failed = wait_for_compute_terminal(image_id);
-  ASSERT_TRUE(image_failed.contains("result")) << image_failed.dump();
-  EXPECT_EQ(image_failed["result"]["state"], "failed");
-  EXPECT_EQ(image_failed["result"]["status"]["domain"], "daemon");
-  EXPECT_EQ(image_failed["result"]["status"]["name"], "internal_error");
-  EXPECT_TRUE(image_failed["result"]["output"].is_null());
-  const auto image_calls = host_.invocations();
-  ASSERT_EQ(image_calls.size(), 1U);
-  EXPECT_TRUE(image_calls.front().image_compute);
+  Json values_failed = wait_for_compute_terminal(values_failure_id);
+  ASSERT_TRUE(values_failed.contains("result")) << values_failed.dump();
+  EXPECT_EQ(values_failed["result"]["state"], "failed");
+  EXPECT_EQ(values_failed["result"]["status"]["domain"], "daemon");
+  EXPECT_EQ(values_failed["result"]["status"]["name"], "internal_error");
+  EXPECT_TRUE(values_failed["result"]["output"].is_null());
+  const auto failed_value_calls = host_.invocations();
+  ASSERT_EQ(failed_value_calls.size(), 1U);
+  EXPECT_TRUE(failed_value_calls.front().values_compute);
   EXPECT_EQ(host_.call_count("compute.submit"), 1U);
-  const Json image_result =
-      route("compute.result", Json{{"compute_id", image_id}});
-  ASSERT_TRUE(image_result.contains("result")) << image_result.dump();
-  EXPECT_EQ(image_result["result"], image_failed["result"]);
-  ASSERT_TRUE(route("compute.release", Json{{"compute_id", image_id}})
+  const Json values_failure_result =
+      route("compute.result", Json{{"compute_id", values_failure_id}});
+  ASSERT_TRUE(values_failure_result.contains("result"))
+      << values_failure_result.dump();
+  EXPECT_EQ(values_failure_result["result"], values_failed["result"]);
+  ASSERT_TRUE(route("compute.release", Json{{"compute_id", values_failure_id}})
                   .contains("result"));
 
-  ImageBuffer valid_image =
-      make_aligned_cpu_image_buffer(2, 2, 1, DataType::UINT8);
-  ASSERT_NE(valid_image.data, nullptr);
-  host_.set_compute_image(std::move(valid_image));
+  host_.set_compute_values(make_protocol_values(4U));
   host_.reset_invocations();
   submitted = route("compute.submit",
-                    valid_compute_submit_params(session_id_, "image"));
+                    valid_compute_submit_params(session_id_, "values"));
   ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
-  const std::string successful_image_id =
+  const std::string successful_values_id =
       submitted["result"]["compute_id"].get<std::string>();
-  const Json image_succeeded = wait_for_compute_terminal(successful_image_id);
-  ASSERT_TRUE(image_succeeded.contains("result")) << image_succeeded.dump();
-  EXPECT_EQ(image_succeeded["result"]["state"], "succeeded");
-  EXPECT_TRUE(image_succeeded["result"]["status"]["ok"].get<bool>());
-  EXPECT_TRUE(image_succeeded["result"]["output"].is_null());
-  const auto successful_image_calls = host_.invocations();
-  ASSERT_EQ(successful_image_calls.size(), 1U);
-  EXPECT_TRUE(successful_image_calls.front().image_compute);
+  const Json values_succeeded = wait_for_compute_terminal(successful_values_id);
+  ASSERT_TRUE(values_succeeded.contains("result")) << values_succeeded.dump();
+  EXPECT_EQ(values_succeeded["result"]["state"], "succeeded");
+  EXPECT_TRUE(values_succeeded["result"]["status"]["ok"].get<bool>());
+  EXPECT_TRUE(values_succeeded["result"]["output"].is_null());
+  const auto successful_value_calls = host_.invocations();
+  ASSERT_EQ(successful_value_calls.size(), 1U);
+  EXPECT_TRUE(successful_value_calls.front().values_compute);
 
   const Json delivered =
-      route("compute.result", Json{{"compute_id", successful_image_id}});
+      route("compute.result", Json{{"compute_id", successful_values_id}});
   ASSERT_TRUE(delivered.contains("result")) << delivered.dump();
   ASSERT_TRUE(delivered["result"]["output"].is_object());
   const Json& output = delivered["result"]["output"];
-  ASSERT_EQ(output.size(), 12U);
+  ASSERT_EQ(output.size(), 9U);
   ASSERT_TRUE(output["output_id"].is_string());
   ASSERT_TRUE(output["delivery_id"].is_string());
   EXPECT_TRUE(valid_opaque_id(output["output_id"].get<std::string>()));
   EXPECT_TRUE(valid_opaque_id(output["delivery_id"].get<std::string>()));
   EXPECT_TRUE(
       std::filesystem::path(output["path"].get<std::string>()).is_absolute());
-  EXPECT_EQ(output["width"], 2);
-  EXPECT_EQ(output["height"], 2);
-  EXPECT_EQ(output["channels"], 1);
-  EXPECT_EQ(output["data_type"], "uint8");
-  EXPECT_EQ(output["device"], "cpu");
-  EXPECT_EQ(output["row_step"], 2);
-  EXPECT_EQ(output["byte_size"], 4);
+  EXPECT_GT(output["byte_size"].get<std::size_t>(), 4U);
+  ASSERT_TRUE(output["digest_sha256"].is_string());
+  EXPECT_EQ(output["digest_sha256"].get<std::string>().size(), 64U);
+  EXPECT_EQ(output["archive_version"], 1U);
+  EXPECT_EQ(output["value_count"], 1U);
   EXPECT_TRUE(output["filesystem_device"].is_number_unsigned());
   EXPECT_TRUE(output["inode"].is_number_unsigned());
   EXPECT_FALSE(output.contains("output_reference"));
@@ -1930,23 +1982,23 @@ TEST_F(HostRoutedGraphStateProtocolTest,
       std::filesystem::is_regular_file(output["path"].get<std::string>()));
 
   const Json repeated =
-      route("compute.result", Json{{"compute_id", successful_image_id}});
+      route("compute.result", Json{{"compute_id", successful_values_id}});
   ASSERT_TRUE(repeated.contains("result")) << repeated.dump();
   EXPECT_EQ(repeated["result"]["output"], output);
   EXPECT_EQ(host_.call_count("compute.submit"), 1U);
 
   const Json released =
-      route("compute.release", Json{{"compute_id", successful_image_id},
+      route("compute.release", Json{{"compute_id", successful_values_id},
                                     {"delivery_id", output["delivery_id"]}});
   ASSERT_TRUE(released.contains("result")) << released.dump();
   EXPECT_FALSE(std::filesystem::exists(output["path"].get<std::string>()));
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
-       EmptyImageAndArtifactQuotaRemainNormalTerminalOutcomes) {
-  host_.set_compute_image(ImageBuffer{});
+       EmptyValuesAndArtifactQuotaRemainNormalTerminalOutcomes) {
+  host_.set_compute_values(NamedValueResult{});
   Json submitted = route("compute.submit",
-                         valid_compute_submit_params(session_id_, "image"));
+                         valid_compute_submit_params(session_id_, "values"));
   ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
   const std::string empty_id =
       submitted["result"]["compute_id"].get<std::string>();
@@ -1961,18 +2013,9 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   ASSERT_TRUE(route("compute.release", Json{{"compute_id", empty_id}})
                   .contains("result"));
 
-  auto byte = std::make_shared<std::uint8_t>(0x5a);
-  ImageBuffer oversized;
-  oversized.width = 512 * 1024 * 1024 + 1;
-  oversized.height = 1;
-  oversized.channels = 1;
-  oversized.type = DataType::UINT8;
-  oversized.device = Device::CPU;
-  oversized.step = static_cast<std::size_t>(oversized.width);
-  oversized.data = std::shared_ptr<void>(byte, byte.get());
-  host_.set_compute_image(std::move(oversized));
+  host_.set_compute_values(make_protocol_values(4U << 10U));
   submitted = route("compute.submit",
-                    valid_compute_submit_params(session_id_, "image"));
+                    valid_compute_submit_params(session_id_, "values"));
   ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
   const std::string quota_id =
       submitted["result"]["compute_id"].get<std::string>();
@@ -1993,11 +2036,9 @@ TEST_F(HostRoutedGraphStateProtocolTest,
 
 TEST_F(HostRoutedGraphStateProtocolTest,
        ResultTimeTamperIsTopLevelAndLeavesTerminalJobReleasable) {
-  ImageBuffer image = make_aligned_cpu_image_buffer(2, 1, 1, DataType::UINT8);
-  ASSERT_NE(image.data, nullptr);
-  host_.set_compute_image(std::move(image));
+  host_.set_compute_values(make_protocol_values(2U));
   const Json submitted = route(
-      "compute.submit", valid_compute_submit_params(session_id_, "image"));
+      "compute.submit", valid_compute_submit_params(session_id_, "values"));
   ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
   const std::string compute_id =
       submitted["result"]["compute_id"].get<std::string>();
@@ -2038,11 +2079,9 @@ TEST_F(HostRoutedGraphStateProtocolTest,
 
 TEST_F(HostRoutedGraphStateProtocolTest,
        MatchingDeliveryCanReleaseLeaseAfterNormalJobRemoval) {
-  ImageBuffer image = make_aligned_cpu_image_buffer(1, 1, 1, DataType::UINT8);
-  ASSERT_NE(image.data, nullptr);
-  host_.set_compute_image(std::move(image));
+  host_.set_compute_values(make_protocol_values(1U));
   const Json submitted = route(
-      "compute.submit", valid_compute_submit_params(session_id_, "image"));
+      "compute.submit", valid_compute_submit_params(session_id_, "values"));
   ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
   const std::string compute_id =
       submitted["result"]["compute_id"].get<std::string>();
@@ -2102,49 +2141,40 @@ TEST_F(HostRoutedGraphStateProtocolTest,
 }
 
 TEST(IpcOutputDeliveryValidation,
-     BindsPrivateReferenceAndRequiresExactScalarLayout) {
+     BindsPrivateReferenceAndRequiresExactArchiveMetadata) {
   OutputArtifactDelivery delivery;
   delivery.metadata.output_id = "11111111111111111111111111111111";
   delivery.metadata.path = "/tmp/output-validation.bin";
-  delivery.metadata.width = 2;
-  delivery.metadata.height = 3;
-  delivery.metadata.channels = 2;
-  delivery.metadata.device = Device::CPU;
+  delivery.metadata.byte_size = 12U;
+  delivery.metadata.archive_version = kNamedValueArtifactSetArchiveVersion;
+  delivery.metadata.value_count = 2U;
   delivery.delivery_id = "22222222222222222222222222222222";
 
-  const std::vector<std::pair<DataType, std::size_t>> scalar_cases = {
-      {DataType::UINT8, 1}, {DataType::INT8, 1},    {DataType::UINT16, 2},
-      {DataType::INT16, 2}, {DataType::FLOAT32, 4}, {DataType::FLOAT64, 8}};
-  for (const auto& scalar_case : scalar_cases) {
-    delivery.metadata.data_type = scalar_case.first;
-    delivery.metadata.row_step = 4 * scalar_case.second;
-    delivery.metadata.byte_size = 12 * scalar_case.second;
-    EXPECT_TRUE(
-        valid_output_delivery_for_wire(delivery, delivery.metadata.output_id));
-  }
+  EXPECT_TRUE(
+      valid_output_delivery_for_wire(delivery, delivery.metadata.output_id));
 
-  delivery.metadata.data_type = DataType::UINT16;
-  delivery.metadata.row_step = 8;
-  delivery.metadata.byte_size = 24;
   EXPECT_FALSE(valid_output_delivery_for_wire(
       delivery, "33333333333333333333333333333333"));
-  ++delivery.metadata.row_step;
+  delivery.metadata.byte_size = 0U;
   EXPECT_FALSE(
       valid_output_delivery_for_wire(delivery, delivery.metadata.output_id));
-  --delivery.metadata.row_step;
-  ++delivery.metadata.byte_size;
+  delivery.metadata.byte_size = kOutputArtifactMaxBytes + 1U;
   EXPECT_FALSE(
       valid_output_delivery_for_wire(delivery, delivery.metadata.output_id));
-  --delivery.metadata.byte_size;
-  delivery.metadata.data_type = static_cast<DataType>(999);
+  delivery.metadata.byte_size = 12U;
+  ++delivery.metadata.archive_version;
   EXPECT_FALSE(
       valid_output_delivery_for_wire(delivery, delivery.metadata.output_id));
-
-  delivery.metadata.data_type = DataType::FLOAT64;
-  delivery.metadata.width = std::numeric_limits<int>::max();
-  delivery.metadata.channels = std::numeric_limits<int>::max();
-  delivery.metadata.row_step = std::numeric_limits<std::size_t>::max();
-  delivery.metadata.byte_size = std::numeric_limits<std::size_t>::max();
+  delivery.metadata.archive_version = kNamedValueArtifactSetArchiveVersion;
+  delivery.metadata.value_count = 0U;
+  EXPECT_FALSE(
+      valid_output_delivery_for_wire(delivery, delivery.metadata.output_id));
+  delivery.metadata.value_count =
+      static_cast<std::uint32_t>(kMaximumNamedValueArtifacts + 1U);
+  EXPECT_FALSE(
+      valid_output_delivery_for_wire(delivery, delivery.metadata.output_id));
+  delivery.metadata.value_count = 1U;
+  delivery.metadata.path = "relative/output.bin";
   EXPECT_FALSE(
       valid_output_delivery_for_wire(delivery, delivery.metadata.output_id));
 }
@@ -6010,20 +6040,6 @@ TEST(EnumCodec, RoundTripsEveryDefinedVersionTwoLabel) {
       {HostExecutionTraceAction::RethrowException, "rethrow_exception"},
       {HostExecutionTraceAction::Unknown, "unknown"},
   }});
-  expect_enum_codec(std::array<std::pair<DataType, const char*>, 6>{{
-      {DataType::UINT8, "uint8"},
-      {DataType::INT8, "int8"},
-      {DataType::UINT16, "uint16"},
-      {DataType::INT16, "int16"},
-      {DataType::FLOAT32, "float32"},
-      {DataType::FLOAT64, "float64"},
-  }});
-  expect_enum_codec(std::array<std::pair<Device, const char*>, 4>{{
-      {Device::CPU, "cpu"},
-      {Device::GPU_METAL, "gpu_metal"},
-      {Device::GPU_CUDA, "gpu_cuda"},
-      {Device::ASIC_NPU, "asic_npu"},
-  }});
 }
 
 TEST(ProtocolEnvelope, EnforcesRequestAndMethodUtf8ByteBounds) {
@@ -8298,12 +8314,12 @@ TEST(ClientJobValidation, RejectsMalformedStateCouplingWithOneStatusAttempt) {
 }
 
 /**
- * @brief Decodes image-output metadata and releases its matching lease once.
+ * @brief Decodes Value-archive metadata and releases its matching lease once.
  *
- * The peer returns one terminal image job with opaque output and delivery ids,
- * tight CPU layout metadata, and filesystem identity. The Client publishes the
- * owned typed values, then sends exactly one lease-aware release containing the
- * same compute and delivery ids.
+ * The peer returns one terminal Values job with opaque output and delivery ids,
+ * archive identity/version/count, and filesystem identity. The Client
+ * publishes the owned typed values, then sends exactly one lease-aware release
+ * containing the same compute and delivery ids.
  *
  * @return Nothing; GoogleTest assertions report decode or request mismatch.
  * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
@@ -8323,13 +8339,10 @@ TEST(ClientJobValidation, DecodesOutputAndReleasesMatchingLeaseOnce) {
   const Json output{{"output_id", output_id},
                     {"delivery_id", delivery_id},
                     {"path", "/tmp/protected-output.bin"},
-                    {"width", 2},
-                    {"height", 2},
-                    {"channels", 1},
-                    {"data_type", "uint8"},
-                    {"device", "cpu"},
-                    {"row_step", 2},
-                    {"byte_size", 4},
+                    {"byte_size", 512},
+                    {"digest_sha256", std::string(64U, 'a')},
+                    {"archive_version", 1},
+                    {"value_count", 2},
                     {"filesystem_device", 17},
                     {"inode", 23}};
   const Json job{{"compute_id", compute_id.value},
@@ -8355,8 +8368,9 @@ TEST(ClientJobValidation, DecodesOutputAndReleasesMatchingLeaseOnce) {
   ASSERT_TRUE(result.value.output.has_value());
   EXPECT_EQ(result.value.output->metadata.output_id.value, output_id);
   EXPECT_EQ(result.value.output->delivery_id.value, delivery_id);
-  EXPECT_EQ(result.value.output->metadata.row_step, 2U);
-  EXPECT_EQ(result.value.output->metadata.byte_size, 4U);
+  EXPECT_EQ(result.value.output->metadata.byte_size, 512U);
+  EXPECT_EQ(result.value.output->metadata.archive_version, 1U);
+  EXPECT_EQ(result.value.output->metadata.value_count, 2U);
   const IpcResult<ComputeReleaseResult> released =
       client.release_compute(compute_id, result.value.output->delivery_id);
   peer.join();
@@ -8370,12 +8384,11 @@ TEST(ClientJobValidation, DecodesOutputAndReleasesMatchingLeaseOnce) {
 }
 
 /**
- * @brief Rejects terminal image output with a non-tight row layout.
+ * @brief Rejects terminal Values output with an invalid archive count.
  *
- * The scripted result advertises a two-byte logical row but a three-byte row
- * step and corresponding padded total size. The direct Client must reject the
- * entire terminal snapshot as malformed rather than publishing output metadata
- * that violates the version 1 tight-row artifact contract.
+ * The scripted result advertises a nonempty archive but zero named Values. The
+ * direct Client must reject the entire terminal snapshot as malformed rather
+ * than publishing metadata that violates the archive contract.
  *
  * @return Nothing; GoogleTest assertions report status or attempt mismatch.
  * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
@@ -8383,7 +8396,7 @@ TEST(ClientJobValidation, DecodesOutputAndReleasesMatchingLeaseOnce) {
  * @note Validation performs one `compute.result` attempt, publishes no output,
  *       and keeps the connection available for later independent calls.
  */
-TEST(ClientJobValidation, RejectsMalformedOutputByteLayout) {
+TEST(ClientJobValidation, RejectsMalformedOutputArchiveMetadata) {
   ScopedTempDirectory temp("ps-ipc-badout");
   const std::string socket_path = (temp.path() / "server.sock").string();
   UniqueFd listener = create_test_listener(socket_path);
@@ -8397,13 +8410,10 @@ TEST(ClientJobValidation, RejectsMalformedOutputByteLayout) {
       {"output", Json{{"output_id", std::string(32, 'c')},
                       {"delivery_id", std::string(32, 'd')},
                       {"path", "/tmp/protected-output.bin"},
-                      {"width", 2},
-                      {"height", 2},
-                      {"channels", 1},
-                      {"data_type", "uint8"},
-                      {"device", "cpu"},
-                      {"row_step", 3},
-                      {"byte_size", 6},
+                      {"byte_size", 512},
+                      {"digest_sha256", std::string(64U, 'a')},
+                      {"archive_version", 1},
+                      {"value_count", 0},
                       {"filesystem_device", 17},
                       {"inode", 23}}}};
   std::vector<Json> requests;
@@ -8431,10 +8441,9 @@ TEST(ClientJobValidation, RejectsMalformedOutputByteLayout) {
 /**
  * @brief Rejects malicious output metadata above the artifact byte ceiling.
  *
- * The peer advertises a mathematically tight one-row UINT8 artifact whose
- * width, row step, and byte size are exactly 512 MiB plus one. The direct
- * Client must reject the typed metadata before any payload allocation or path
- * consumption and must not retry the result RPC.
+ * The peer advertises a canonical archive byte size exactly 512 MiB plus one.
+ * The direct Client must reject the typed metadata before any payload
+ * allocation or path consumption and must not retry the result RPC.
  *
  * @return Nothing; GoogleTest assertions report status, output, or attempt
  *         mismatch.
@@ -8459,13 +8468,10 @@ TEST(ClientJobValidation,
       {"output", Json{{"output_id", std::string(32, 'c')},
                       {"delivery_id", std::string(32, 'd')},
                       {"path", "/path/must/not/be-opened.bin"},
-                      {"width", oversized},
-                      {"height", 1},
-                      {"channels", 1},
-                      {"data_type", "uint8"},
-                      {"device", "cpu"},
-                      {"row_step", oversized},
                       {"byte_size", oversized},
+                      {"digest_sha256", std::string(64U, 'a')},
+                      {"archive_version", 1},
+                      {"value_count", 1},
                       {"filesystem_device", 17},
                       {"inode", 23}}}};
   std::vector<Json> requests;

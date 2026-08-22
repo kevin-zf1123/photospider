@@ -114,6 +114,11 @@ struct StorageBinding final {
   MemoryDomain memory_domain = MemoryDomain::Host;
   /** @brief Positive checked byte envelope. */
   std::size_t byte_size = 0U;
+  /**
+   * @brief Positive power-of-two alignment guaranteed for the retained range.
+   * @note This is a physical reconstruction fact, not logical Value identity.
+   */
+  std::size_t required_alignment = 1U;
   /** @brief Whether a discharged plan may issue a host read lease. */
   bool host_visible = false;
 
@@ -126,7 +131,9 @@ struct StorageBinding final {
   constexpr bool operator==(const StorageBinding& other) const noexcept {
     return allocation == other.allocation && device == other.device &&
            memory_domain == other.memory_domain &&
-           byte_size == other.byte_size && host_visible == other.host_visible;
+           byte_size == other.byte_size &&
+           required_alignment == other.required_alignment &&
+           host_visible == other.host_visible;
   }
 
   /**
@@ -216,10 +223,12 @@ class BufferHandle final {
 
   /**
    * @brief Returns immutable facts for the complete physical binding.
-   * @return Allocation, device, domain, allocation size, and host visibility.
+   * @return Allocation, device, domain, allocation size, range-start
+   *         alignment, and host visibility.
    * @throws std::logic_error when the handle is invalid.
    * @note The returned byte size covers the complete allocation, while
-   *       `size()` covers this checked range.
+   *       `size()` covers this checked range. Alignment is reduced when a
+   *       subrange offset cannot preserve the allocation-base guarantee.
    */
   StorageBinding storage_binding() const;
 
@@ -275,12 +284,15 @@ class BufferHandle final {
    * @brief Allocates one private writable CPU range for ValueBuilder.
    *
    * @param size Positive allocation size.
+   * @param alignment Requested positive power-of-two base alignment.
    * @return Complete allocation handle not yet exposed outside the builder.
-   * @throws std::invalid_argument when size is zero.
+   * @throws std::invalid_argument when size is zero or alignment is zero or
+   * not a power of two.
    * @throws std::bad_alloc when allocation fails.
    * @throws std::overflow_error when allocation identity space is exhausted.
    */
-  static BufferHandle allocate_for_builder(std::size_t size);
+  static BufferHandle allocate_for_builder(std::size_t size,
+                                           std::size_t alignment);
 
   /**
    * @brief Retains one source-private native or external host allocation.
@@ -347,6 +359,7 @@ class BufferHandle final {
   friend class PendingValueProducer;
   friend class PendingValuePublisher;
   friend class PendingDeviceValuePublisher;
+  friend class Value;
   friend class ValueBuilder;
   friend class WriteLease;
 };
@@ -483,6 +496,16 @@ class WriteLease final {
    * @throws std::logic_error when the lease is invalid or revoked.
    */
   std::size_t size() const;
+
+  /**
+   * @brief Returns the retained builder allocation identity.
+   *
+   * @return Nonzero process-local physical allocation identity.
+   * @throws std::logic_error when the lease is invalid or revoked.
+   * @note This is a physical lifetime fact only; it is not a Value revision,
+   * graph revision, cache key, Region, or persistence identity.
+   */
+  AllocationIdentity allocation_identity() const;
 
  private:
   /** @brief Shared producer authority synchronized with ValueBuilder seal. */

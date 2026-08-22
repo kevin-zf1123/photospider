@@ -196,7 +196,7 @@ class WorkerManager::Impl final {
   /**
    * @brief Performs one fixed nonblocking receive into final output storage.
    * @param process Non-null child/data-plane owner.
-   * @param image Optional exact final image owner for a successful Report.
+   * @param archive Optional exact final archive owner for a successful Report.
    * @param expected_bytes Metadata-declared payload length, possibly zero.
    * @param received_bytes Non-null exact direct-receive offset.
    * @param hasher Non-null allocation-free incremental integrity owner.
@@ -209,7 +209,7 @@ class WorkerManager::Impl final {
    * before any second bulk operation.
    */
   WorkerDataPlaneIoStatus drain_output_slice(
-      ChildProcess* process, const std::optional<ImageBuffer>& image,
+      ChildProcess* process, std::optional<std::vector<std::byte>>& archive,
       std::size_t expected_bytes, std::size_t* received_bytes,
       ArtifactContentHasher* hasher, bool* output_eof,
       std::optional<ArtifactContentDigest>* output_digest);
@@ -458,15 +458,19 @@ class WorkerManager::Impl final {
    * escalation.
    * @throws std::invalid_argument when `process` is null.
    * @throws ManagerFailure when the test-only pre-signal observation expires or
-   * observes an abnormal exit.
+   * observes an abnormal exit, or when the post-revocation test observation
+   * times out.
    * @throws std::overflow_error if a captured monotonic base cannot represent
    * a validated termination or reap deadline.
-   * @note Exact natural exit observed before revocation leaves `control` open
-   * for the caller's bounded report/EOF drain. Every signal revalidates
-   * complete record/PID ownership under mutex. Missing the final reap deadline
-   * or losing exact wait authority fail-stops the authority process; this
-   * function never falls back to an unbounded `waitpid` or a recoverable
-   * manager completion.
+   * @note Exact natural exit observed before escalation leaves `control` open
+   * for the caller's bounded report/EOF drain. Otherwise the manager delivers
+   * owned `SIGTERM` while the control channel is still live, then revokes that
+   * channel before bounded wait/KILL escalation. This ordering prevents peer
+   * EOF from replacing signal-death causality with a normal worker exit. Every
+   * signal revalidates complete record/PID ownership under mutex. Missing the
+   * final reap deadline or losing exact wait authority fail-stops the authority
+   * process; this function never falls back to an unbounded `waitpid` or a
+   * recoverable manager completion.
    */
   TerminateAndReapResult terminate_and_reap(
       const std::shared_ptr<Record>& record, ChildProcess* process);

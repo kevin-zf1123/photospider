@@ -21,6 +21,7 @@
 
 #include "core/pending_value.hpp"
 #include "execution/device/device_execution_context.hpp"
+#include "execution/device/metal_heap_texture_plan.hpp"
 
 namespace ps::execution {
 namespace {
@@ -140,17 +141,24 @@ Float32TransferGeometry checked_float32_transfer_geometry(
  *
  * @throws Nothing after ARC and optional ledger ownership are installed.
  * @note BufferHandle stores this owner type-erased; public Value APIs never
- * expose the Objective-C handle. Member destruction releases the native
- * resource before returning persistent-memory capacity.
+ * expose the Objective-C handles. Member destruction releases the native
+ * resource, then its explicit heap backing, before returning persistent-memory
+ * capacity.
  */
 class MetalResourceOwner final {
  public:
   /**
-   * @brief Retains one non-null native resource.
+   * @brief Retains one non-null native resource and its optional heap backing.
    * @param resource Texture or buffer retained through Value lifetime.
-   * @throws std::invalid_argument when resource is null.
+   * @param heap Exact heap backing for a heap resource, or nil for a direct
+   * resource.
+   * @throws std::invalid_argument when resource is null or its native heap
+   * property does not match `heap`.
+   * @note The explicit heap reference does not rely on undocumented resource-
+   * to-heap lifetime behavior.
    */
-  explicit MetalResourceOwner(id<MTLResource> resource) : resource_(resource) {
+  MetalResourceOwner(id<MTLResource> resource, id<MTLHeap> heap)
+      : heap_(heap), resource_(resource) {
     validate_resource();
   }
 
@@ -159,8 +167,9 @@ class MetalResourceOwner final {
    * @param persistent_memory Active memory-only lease moved into this owner.
    * @return Nothing.
    * @throws Nothing; an invalid or duplicate internal transfer terminates.
-   * @note `resource_` is declared after `persistent_memory_`, so reverse member
-   * destruction releases the ARC owner before the ledger capacity.
+   * @note `resource_` and `heap_` are declared after `persistent_memory_`, so
+   * reverse member destruction releases the resource and then heap before the
+   * ledger capacity.
    */
   void install_persistent_memory_lease(
       ResourceLedger::DeviceLease&& persistent_memory) noexcept {
@@ -177,17 +186,25 @@ class MetalResourceOwner final {
   /**
    * @brief Validates the ARC-retained native allocation.
    * @return Nothing.
-   * @throws std::invalid_argument when `resource_` is null.
+   * @throws std::invalid_argument when `resource_` is null or `heap_` does not
+   * match the resource's native heap property.
    */
   void validate_resource() const {
     if (resource_ == nil) {
       throw std::invalid_argument(
           "Metal Value owner requires a native resource.");
     }
+    if (resource_.heap != heap_) {
+      throw std::invalid_argument(
+          "Metal Value owner requires exact native heap backing.");
+    }
   }
 
   /** @brief Persistent capacity returned after native ARC release. */
   std::optional<ResourceLedger::DeviceLease> persistent_memory_;
+
+  /** @brief Explicit ARC-retained heap backing, or nil for a direct buffer. */
+  id<MTLHeap> __strong heap_;
 
   /** @brief ARC-retained texture or buffer. */
   id<MTLResource> __strong resource_;
@@ -577,7 +594,9 @@ class MetalDeviceExecutor final : public DeviceExecutor {
   }
 
   /** @copydoc DeviceExecutor::device */
-  Device device() const noexcept override { return Device::GPU_METAL; }
+  DeviceBackend device() const noexcept override {
+    return DeviceBackend::Metal;
+  }
 
   /** @copydoc DeviceExecutor::execute_impl */
   void execute_impl(DeviceExecutorInvocation& invocation) override {
@@ -597,7 +616,7 @@ class MetalDeviceExecutor final : public DeviceExecutor {
   DeviceExecutorDiagnostics diagnostics() const override {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return DeviceExecutorDiagnostics{
-        Device::GPU_METAL,       command_queue_ != nil, submission_count_,
+        DeviceBackend::Metal,    command_queue_ != nil, submission_count_,
         invocation_count_,       total_allocations_,    live_allocations_,
         pipeline_cache_entries_,
     };
@@ -801,33 +820,41 @@ class MetalDeviceExecutor final : public DeviceExecutor {
           checked_float32_transfer_geometry(width, height);
       MTLTextureDescriptor* descriptor =
           make_float32_texture_descriptor(width, height);
-      DeviceResourceVector planned{planned_texture_bytes(descriptor), 0U};
+      const MetalHeapTexturePlan texture_plan =
+          planned_texture_plan(descriptor);
+      DeviceResourceVector minimum_plan{texture_plan.requested_heap_size, 0U};
       for (const std::size_t length : auxiliary_scratch_lengths) {
         if (length == 0U) {
           throw std::invalid_argument(
               "Metal scratch plan lengths must be positive.");
         }
-        planned = checked_accumulate_plan(
-            planned, DeviceResourceVector{0U, planned_buffer_bytes(length)});
+        minimum_plan = checked_accumulate_plan(
+            minimum_plan,
+            DeviceResourceVector{0U, planned_buffer_bytes(length)});
       }
-      planned = checked_accumulate_plan(
-          planned, DeviceResourceVector{
-                       0U, planned_buffer_bytes(geometry.storage_size)});
+      minimum_plan = checked_accumulate_plan(
+          minimum_plan, DeviceResourceVector{
+                            0U, planned_buffer_bytes(geometry.storage_size)});
 
       std::vector<std::size_t> staged_lengths(auxiliary_scratch_lengths);
       std::optional<ResourceLedger::DeviceReservation> reservation =
-          resource_ledger_.try_reserve_device(device_id(), planned);
+          resource_ledger_.try_reserve_device_with_memory_ceiling(device_id(),
+                                                                  minimum_plan);
       if (!reservation.has_value()) {
         throw DeviceResourceError(
-            DeviceResourceErrorCode::AdmissionRejected, device_id(), planned,
-            {}, "Metal device account rejected the complete allocation plan.");
+            DeviceResourceErrorCode::AdmissionRejected, device_id(),
+            minimum_plan, {},
+            "Metal device account rejected the minimum allocation plan or "
+            "complete available memory ceiling.");
       }
       planned_width_ = width;
       planned_height_ = height;
+      planned_texture_plan_ = texture_plan;
       planned_auxiliary_scratch_lengths_ = std::move(staged_lengths);
-      planned_resources_ = planned;
+      planned_resources_ = reservation->planned_resources();
       actual_resources_ = {};
       next_auxiliary_scratch_ = 0U;
+      persistent_heap_ = nil;
       persistent_texture_ = nil;
       readback_allocated_ = false;
       device_reservation_.emplace(std::move(*reservation));
@@ -848,15 +875,7 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       }
       MTLTextureDescriptor* descriptor =
           make_float32_texture_descriptor(width, height);
-      id<MTLTexture> texture =
-          [executor_.device_ newTextureWithDescriptor:descriptor];
-      if (texture == nil) {
-        throw std::runtime_error(
-            "Metal executor failed to allocate an R32Float texture.");
-      }
-      record_actual_resource(texture, false);
-      retain_resource(texture, false);
-      persistent_texture_ = texture;
+      id<MTLTexture> texture = allocate_planned_heap_texture(descriptor);
       return (__bridge void*)texture;
     }
 
@@ -883,7 +902,7 @@ class MetalDeviceExecutor final : public DeviceExecutor {
         throw std::runtime_error(
             "Metal executor failed to allocate a shared buffer.");
       }
-      record_actual_resource(buffer, true);
+      record_actual_scratch_resource(buffer);
       retain_resource(buffer, true);
       ++next_auxiliary_scratch_;
       return (__bridge void*)buffer;
@@ -948,10 +967,10 @@ class MetalDeviceExecutor final : public DeviceExecutor {
     }
 
     /** @copydoc MetalExecutionContext::publish_float32_texture_to_host */
-    void publish_float32_texture_to_host(NativeHandle command_buffer_handle,
-                                         NativeHandle texture_handle,
-                                         std::uint32_t width,
-                                         std::uint32_t height) override {
+    void publish_float32_texture_to_host(
+        NativeHandle command_buffer_handle, NativeHandle texture_handle,
+        std::uint32_t width, std::uint32_t height,
+        const SampleDomainFacet& sample_domain) override {
       if (command_buffer_handle == nullptr || texture_handle == nullptr ||
           width == 0U || height == 0U) {
         throw std::invalid_argument(
@@ -991,6 +1010,19 @@ class MetalDeviceExecutor final : public DeviceExecutor {
             "Metal transfer texture does not match R32Float dimensions.");
       }
 
+      DenseTensorDescriptor descriptor{
+          {static_cast<std::size_t>(height), static_cast<std::size_t>(width)},
+          ElementSemantics::FloatingPoint,
+          StorageEncoding{32U},
+      };
+      std::optional<ImageFacet> image_facet =
+          make_zero_origin_image_facet(descriptor, 1U, 0U, std::nullopt);
+      image_facet->sample_domain = sample_domain;
+      validate_dense_tensor_image_metadata(descriptor, image_facet);
+      const StridedLayout layout{{static_cast<std::ptrdiff_t>(bytes_per_row),
+                                  static_cast<std::ptrdiff_t>(sizeof(float))},
+                                 0U};
+
       id<MTLBuffer> host_buffer =
           [executor_.device_ newBufferWithLength:storage_size
                                          options:MTLResourceStorageModeShared];
@@ -998,7 +1030,7 @@ class MetalDeviceExecutor final : public DeviceExecutor {
         throw std::runtime_error(
             "Metal executor failed to allocate host-visible transfer buffer.");
       }
-      record_actual_resource(host_buffer, true);
+      record_actual_scratch_resource(host_buffer);
       retain_resource(host_buffer, true);
       readback_allocated_ = true;
 
@@ -1018,28 +1050,20 @@ class MetalDeviceExecutor final : public DeviceExecutor {
           destinationBytesPerImage:storage_size];
       [blit endEncoding];
 
-      DenseTensorDescriptor descriptor{
-          {static_cast<std::size_t>(height), static_cast<std::size_t>(width)},
-          ElementSemantics::FloatingPoint,
-          StorageEncoding{32U},
-      };
-      const std::optional<ImageFacet> image_facet =
-          ImageFacet{1U, 0U, std::nullopt};
-      const StridedLayout layout{{static_cast<std::ptrdiff_t>(bytes_per_row),
-                                  static_cast<std::ptrdiff_t>(sizeof(float))},
-                                 0U};
       NSArray<id<MTLResource>>* completion_scratch_resources =
           [scratch_resources_ copy];
       if (completion_scratch_resources == nil) {
         throw std::bad_alloc{};
       }
-      auto texture_owner = std::make_shared<MetalResourceOwner>(texture);
+      auto texture_owner =
+          std::make_shared<MetalResourceOwner>(texture, persistent_heap_);
       PendingDeviceValuePublication source =
           PendingDeviceValuePublisher::publish_dense_tensor(
               descriptor, image_facet, layout, texture_owner,
               (__bridge void*)texture, nullptr, storage_size,
               DeviceId(DeviceBackend::Metal), MemoryDomain::DeviceLocal);
-      auto buffer_owner = std::make_shared<MetalResourceOwner>(host_buffer);
+      auto buffer_owner =
+          std::make_shared<MetalResourceOwner>(host_buffer, nil);
       PendingDeviceValuePublication destination =
           PendingDeviceValuePublisher::publish_dense_tensor(
               descriptor, image_facet, layout, buffer_owner,
@@ -1113,7 +1137,10 @@ class MetalDeviceExecutor final : public DeviceExecutor {
           descriptor.shape[0] == static_cast<std::size_t>(height) &&
           descriptor.shape[1] == static_cast<std::size_t>(width) &&
           descriptor.shape[2] > 0U && source.image_facet().has_value() &&
-          *source.image_facet() == ImageFacet{1U, 0U, 2U} &&
+          source.image_facet()->x_axis == 1U &&
+          source.image_facet()->y_axis == 0U &&
+          source.image_facet()->channel_axis ==
+              std::optional<std::size_t>{2U} &&
           source_layout.byte_strides.size() == 3U &&
           descriptor.shape[2] <=
               std::numeric_limits<std::uint32_t>::max() / width) {
@@ -1160,20 +1187,27 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       const DenseTensorView source_view(source);
       MTLTextureDescriptor* texture_descriptor =
           make_float32_texture_descriptor(native_width, height);
-      const DeviceResourceVector planned{
-          planned_texture_bytes(texture_descriptor),
+      const MetalHeapTexturePlan texture_plan =
+          planned_texture_plan(texture_descriptor);
+      const DeviceResourceVector minimum_plan{
+          texture_plan.requested_heap_size,
           planned_buffer_bytes(geometry.storage_size)};
       std::optional<ResourceLedger::DeviceReservation> reservation =
-          resource_ledger_.try_reserve_device(device_id(), planned);
+          resource_ledger_.try_reserve_device_with_memory_ceiling(device_id(),
+                                                                  minimum_plan);
       if (!reservation.has_value()) {
         throw DeviceResourceError(
-            DeviceResourceErrorCode::AdmissionRejected, device_id(), planned,
-            {}, "Metal device account rejected the upload allocation plan.");
+            DeviceResourceErrorCode::AdmissionRejected, device_id(),
+            minimum_plan, {},
+            "Metal device account rejected the upload minimum plan or "
+            "complete available memory ceiling.");
       }
       planned_width_ = native_width;
       planned_height_ = height;
-      planned_resources_ = planned;
+      planned_texture_plan_ = texture_plan;
+      planned_resources_ = reservation->planned_resources();
       actual_resources_ = {};
+      persistent_heap_ = nil;
       persistent_texture_ = nil;
       readback_allocated_ = false;
       planned_auxiliary_scratch_lengths_.clear();
@@ -1190,7 +1224,7 @@ class MetalDeviceExecutor final : public DeviceExecutor {
         throw std::runtime_error(
             "Metal executor failed to allocate upload staging buffer.");
       }
-      record_actual_resource(staging_buffer, true);
+      record_actual_scratch_resource(staging_buffer);
       retain_resource(staging_buffer, true);
       check_deadline(
           DeviceExecutorDeadlineCheckpoint::UploadPreparation,
@@ -1220,14 +1254,7 @@ class MetalDeviceExecutor final : public DeviceExecutor {
           "Metal execution deadline expired after chunked upload copy.");
 
       id<MTLTexture> texture =
-          [executor_.device_ newTextureWithDescriptor:texture_descriptor];
-      if (texture == nil) {
-        throw std::runtime_error(
-            "Metal executor failed to allocate upload texture.");
-      }
-      record_actual_resource(texture, false);
-      retain_resource(texture, false);
-      persistent_texture_ = texture;
+          allocate_planned_heap_texture(texture_descriptor);
       check_deadline(
           DeviceExecutorDeadlineCheckpoint::UploadPreparation,
           "Metal execution deadline expired after upload texture allocation.");
@@ -1269,7 +1296,8 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       if (completion_scratch_resources == nil) {
         throw std::bad_alloc{};
       }
-      auto texture_owner = std::make_shared<MetalResourceOwner>(texture);
+      auto texture_owner =
+          std::make_shared<MetalResourceOwner>(texture, persistent_heap_);
       PendingDeviceValuePublication destination =
           PendingDeviceValuePublisher::publish_dense_tensor(
               descriptor, source.image_facet(), destination_layout,
@@ -1287,15 +1315,15 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       texture_owner->install_persistent_memory_lease(
           std::move(lease_guard->persistent_memory));
       completion->install_scratch_lease(std::move(lease_guard->scratch));
-      [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
-        completion->settle(completed);
-      }];
       ScopedTransferAdmission admission(executor_.residency_manager_, identity);
       published_value_ = std::move(published_destination);
       check_deadline(
           DeviceExecutorDeadlineCheckpoint::NativeCommit,
           "Metal execution deadline expired before native command-buffer "
           "commit.");
+      [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        completion->settle(completed);
+      }];
       [command_buffer commit];
       admission.release();
     }
@@ -1334,7 +1362,8 @@ class MetalDeviceExecutor final : public DeviceExecutor {
      * @brief Builds the exact descriptor used for planned/native textures.
      * @param width Positive texture width.
      * @param height Positive texture height.
-     * @return Non-null autoreleased R32Float read/write descriptor.
+     * @return Non-null autoreleased R32Float shader-read/write descriptor with
+     * private tracked resource options.
      * @throws std::invalid_argument for zero dimensions.
      * @throws std::bad_alloc when descriptor construction fails.
      */
@@ -1353,6 +1382,8 @@ class MetalDeviceExecutor final : public DeviceExecutor {
         throw std::bad_alloc{};
       }
       descriptor.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
+      descriptor.resourceOptions =
+          MTLResourceStorageModePrivate | MTLResourceHazardTrackingModeTracked;
       return descriptor;
     }
 
@@ -1377,12 +1408,16 @@ class MetalDeviceExecutor final : public DeviceExecutor {
     }
 
     /**
-     * @brief Queries the native heap plan for one exact texture descriptor.
+     * @brief Builds a checked plan for one dedicated heap-backed texture.
      * @param descriptor Non-null descriptor later used for allocation.
-     * @return Positive native physical plan bytes.
-     * @throws DeviceResourceError when the native query is invalid.
+     * @return Validated query requirements and an aligned minimum heap
+     * descriptor request.
+     * @throws DeviceResourceError when native size/alignment facts are invalid
+     * or alignment rounding overflows the ledger scalar.
+     * @note The identical descriptor later creates a texture from a dedicated
+     * `MTLHeap`; this query is never used to budget a direct device texture.
      */
-    std::uint64_t planned_texture_bytes(
+    MetalHeapTexturePlan planned_texture_plan(
         MTLTextureDescriptor* descriptor) const {
       if (descriptor == nil) {
         throw std::invalid_argument(
@@ -1390,7 +1425,87 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       }
       const MTLSizeAndAlign size_and_align =
           [executor_.device_ heapTextureSizeAndAlignWithDescriptor:descriptor];
-      return checked_native_size(size_and_align.size, "texture plan");
+      const std::uint64_t size =
+          checked_native_size(size_and_align.size, "texture plan");
+      const std::uint64_t query_alignment =
+          checked_native_size(size_and_align.align, "texture alignment");
+      try {
+        return checked_metal_heap_texture_plan(size, query_alignment);
+      } catch (const std::invalid_argument&) {
+        throw DeviceResourceError(DeviceResourceErrorCode::InvalidNativeSize,
+                                  device_id(), planned_resources_,
+                                  actual_resources_,
+                                  "Metal reported an invalid heap texture "
+                                  "size or alignment.");
+      } catch (const std::overflow_error&) {
+        throw DeviceResourceError(
+            DeviceResourceErrorCode::InvalidNativeSize, device_id(),
+            planned_resources_, actual_resources_,
+            "Metal heap texture plan overflowed native alignment.");
+      }
+    }
+
+    /**
+     * @brief Creates and retains the texture for the active heap plan.
+     * @param descriptor Descriptor identical to the admitted native query.
+     * @return Non-null texture backed by a dedicated tracked heap.
+     * @throws std::logic_error without an active matching texture plan.
+     * @throws DeviceResourceError when the heap request or actual backing is
+     * invalid, or the heap's actual bytes exceed the reservation.
+     * @throws std::bad_alloc when the heap descriptor cannot allocate.
+     * @throws std::runtime_error when heap/texture allocation or exact backing
+     * validation fails.
+     * @note The complete currently available persistent-memory ceiling and
+     * exact scratch plan are already reserved. After texture creation, the
+     * dedicated heap's `currentAllocatedSize` is the sole persistent actual;
+     * the texture's `allocatedSize` is not added again. On success the
+     * invocation retains both objects until durable Value ownership exists.
+     * Any throw destroys the local texture before the local heap, then leaves
+     * reservation rollback to the invocation context.
+     */
+    id<MTLTexture> allocate_planned_heap_texture(
+        MTLTextureDescriptor* descriptor) {
+      if (descriptor == nil || !planned_texture_plan_.has_value() ||
+          persistent_heap_ != nil || persistent_texture_ != nil) {
+        throw std::logic_error(
+            "Metal heap texture allocation requires one active plan.");
+      }
+      if (planned_texture_plan_->requested_heap_size >
+          static_cast<std::uint64_t>(std::numeric_limits<NSUInteger>::max())) {
+        throw DeviceResourceError(
+            DeviceResourceErrorCode::InvalidNativeSize, device_id(),
+            planned_resources_, actual_resources_,
+            "Metal heap texture size is not representable by NSUInteger.");
+      }
+      MTLHeapDescriptor* heap_descriptor = [[MTLHeapDescriptor alloc] init];
+      if (heap_descriptor == nil) {
+        throw std::bad_alloc{};
+      }
+      heap_descriptor.size =
+          static_cast<NSUInteger>(planned_texture_plan_->requested_heap_size);
+      heap_descriptor.resourceOptions = descriptor.resourceOptions;
+      heap_descriptor.type = MTLHeapTypeAutomatic;
+      id<MTLHeap> heap =
+          [executor_.device_ newHeapWithDescriptor:heap_descriptor];
+      if (heap == nil) {
+        throw std::runtime_error(
+            "Metal executor failed to allocate a texture heap.");
+      }
+      id<MTLTexture> texture = [heap newTextureWithDescriptor:descriptor];
+      if (texture == nil) {
+        throw std::runtime_error(
+            "Metal executor failed to allocate a heap-backed R32Float "
+            "texture.");
+      }
+      if (texture.heap != heap) {
+        throw std::runtime_error(
+            "Metal executor received mismatched texture heap backing.");
+      }
+      record_actual_persistent_heap(heap);
+      retain_resource(texture, false);
+      persistent_heap_ = heap;
+      persistent_texture_ = texture;
+      return texture;
     }
 
     /**
@@ -1430,21 +1545,24 @@ class MetalDeviceExecutor final : public DeviceExecutor {
     }
 
     /**
-     * @brief Audits one native allocation's `allocatedSize`.
-     * @param resource Non-null newly allocated texture or buffer.
+     * @brief Adds one checked native allocation fact to invocation actuals.
+     * @param bytes Positive representable native byte count.
      * @param scratch True for scratch, false for persistent memory.
+     * @param role Stable diagnostic role for overflow or plan exceedance.
      * @return Nothing after the matching actual dimension advances.
      * @throws DeviceResourceError for zero, overflowing, or underplanned
      * native allocation sizes.
-     * @note The caller has not yet published or committed GPU work.
+     * @note The caller has not yet published or committed GPU work. One update
+     * is copied through the read-only invocation observer after validation.
      */
-    void record_actual_resource(id<MTLResource> resource, bool scratch) {
-      if (resource == nil) {
-        throw std::invalid_argument(
-            "Metal actual-byte audit requires a native resource.");
+    void record_actual_bytes(std::uint64_t bytes, bool scratch,
+                             const char* role) {
+      if (bytes == 0U || role == nullptr) {
+        throw DeviceResourceError(
+            DeviceResourceErrorCode::InvalidNativeSize, device_id(),
+            planned_resources_, actual_resources_,
+            "Metal actual-byte audit requires a positive value and role.");
       }
-      const std::uint64_t bytes =
-          checked_native_size(resource.allocatedSize, "allocated resource");
       const DeviceResourceVector addition =
           scratch ? DeviceResourceVector{0U, bytes}
                   : DeviceResourceVector{bytes, 0U};
@@ -1454,15 +1572,66 @@ class MetalDeviceExecutor final : public DeviceExecutor {
         throw DeviceResourceError(
             DeviceResourceErrorCode::InvalidNativeSize, device_id(),
             planned_resources_, actual_resources_,
-            "Metal allocated-size accumulation overflowed.");
+            std::string("Metal ") + role + " accumulation overflowed.");
       }
       if (!device_resources_fit(*next, planned_resources_)) {
         throw DeviceResourceError(
             DeviceResourceErrorCode::ActualExceedsReservation, device_id(),
             planned_resources_, *next,
-            "Metal allocatedSize exceeded the admitted native plan.");
+            std::string("Metal ") + role +
+                " exceeded the admitted native plan.");
       }
       actual_resources_ = *next;
+      invocation_.observe_device_resource_accounting(planned_resources_,
+                                                     actual_resources_);
+    }
+
+    /**
+     * @brief Audits one scratch resource's native `allocatedSize`.
+     * @param resource Non-null newly allocated scratch buffer.
+     * @return Nothing after scratch actual advances.
+     * @throws std::invalid_argument for a null resource.
+     * @throws DeviceResourceError for zero, unrepresentable, overflowing, or
+     * underplanned native allocation sizes.
+     * @note Persistent textures never use this path because their dedicated
+     * heap is the unique persistent backing allocation.
+     */
+    void record_actual_scratch_resource(id<MTLResource> resource) {
+      if (resource == nil) {
+        throw std::invalid_argument(
+            "Metal scratch audit requires a native resource.");
+      }
+      record_actual_bytes(checked_native_size(resource.allocatedSize,
+                                              "scratch resource allocatedSize"),
+                          true, "scratch allocatedSize");
+    }
+
+    /**
+     * @brief Audits the one dedicated persistent heap's current allocation.
+     * @param heap Non-null newly allocated heap containing the persistent
+     * texture.
+     * @return Nothing after the unique persistent actual is recorded.
+     * @throws std::invalid_argument for a null heap.
+     * @throws std::logic_error when persistent actual was already recorded.
+     * @throws DeviceResourceError for zero, unrepresentable, or underplanned
+     * `currentAllocatedSize`.
+     * @note The texture suballocation's `allocatedSize` is deliberately not
+     * added: the heap remains alive and is the sole backing owner represented
+     * by the persistent-memory lease.
+     */
+    void record_actual_persistent_heap(id<MTLHeap> heap) {
+      if (heap == nil) {
+        throw std::invalid_argument(
+            "Metal persistent accounting requires a native heap.");
+      }
+      if (actual_resources_.device_memory_bytes != 0U) {
+        throw std::logic_error(
+            "Metal persistent heap actual was already recorded.");
+      }
+      record_actual_bytes(
+          checked_native_size(heap.currentAllocatedSize,
+                              "persistent heap currentAllocatedSize"),
+          false, "heap currentAllocatedSize");
     }
 
     /**
@@ -1488,13 +1657,15 @@ class MetalDeviceExecutor final : public DeviceExecutor {
      * @return Nothing.
      * @throws Nothing.
      * @note The caller retains every native resource through Value/completion
-     * owners before this call. Diagnostic counters still retire at context
-     * destruction, independently of native resource lifetime.
+     * owners before this call. Texture and arrays release before the explicit
+     * heap; diagnostic counters still retire at context destruction,
+     * independently of native resource lifetime.
      */
     void release_invocation_resource_retentions() noexcept {
       persistent_texture_ = nil;
       [scratch_resources_ removeAllObjects];
       [resources_ removeAllObjects];
+      persistent_heap_ = nil;
     }
 
     /**
@@ -1541,10 +1712,13 @@ class MetalDeviceExecutor final : public DeviceExecutor {
     /** @brief Live atomic plan returned on unwind until actual commit. */
     std::optional<ResourceLedger::DeviceReservation> device_reservation_;
 
-    /** @brief Native heap-query plan admitted before first allocation. */
+    /** @brief Complete device ceiling admitted before first allocation. */
     DeviceResourceVector planned_resources_;
 
-    /** @brief Sum of native `allocatedSize` facts for the active plan. */
+    /** @brief Exact native plan for the one dedicated persistent heap. */
+    std::optional<MetalHeapTexturePlan> planned_texture_plan_;
+
+    /** @brief Heap current allocation plus scratch `allocatedSize` facts. */
     DeviceResourceVector actual_resources_;
 
     /** @brief Planned persistent texture width. */
@@ -1564,6 +1738,9 @@ class MetalDeviceExecutor final : public DeviceExecutor {
 
     /** @brief Pending host replica taken once by the Host adapter. */
     Value published_value_;
+
+    /** @brief Explicit heap backing for `persistent_texture_`. */
+    id<MTLHeap> __strong persistent_heap_;
 
     /** @brief Strong owners for all invocation-created textures and buffers. */
     NSMutableArray<id<MTLResource>>* __strong resources_;

@@ -387,6 +387,9 @@ class ComputeService {
     /** @brief Off-registry operation lookup keyed by planned node id. */
     const std::unordered_map<int, OpImplementation>& resolved_operations;
 
+    /** @brief Frozen per-node output authorities from the retained plan. */
+    const std::vector<compute::PlannedNodeWork>& planned_work;
+
     /** @brief Retained read-only Run lease observed at recursive boundaries. */
     const compute::ComputeRunLease& run_lease;
   };
@@ -406,9 +409,13 @@ class ComputeService {
    * cancellation translated from the retained Run.
    * @note The context and its references must outlive the recursive call tree.
    * Effective parameters and execution-facing node state remain on a
-   * request-local Node snapshot. Before HP publication, a nonempty legacy CPU
-   * image result is normalized to a sealed identity-bearing Value. The method
-   * commits only the resolved graph-owned input-size hint, HP cache/version,
+   * request-local Node snapshot. Before HP publication, every named output is
+   * required to be a valid Ready Value and compatibility image staging is
+   * rejected. A frozen schema containing any generic named Value treats the
+   * current image disk cache as an incompatible miss before filesystem or
+   * codec inspection and recomputes through the provider. The method commits
+   * only the resolved graph-owned input-size
+   * hint, HP cache/version,
    * disk-cache effects, and telemetry on the calling thread. Cooperative
    * observations surround recursive dependency resolution, disk cache,
    * provider/tile execution, cache publication, and return; a monolithic
@@ -417,7 +424,7 @@ class ComputeService {
    * planned implementation identity, exclusive key, and declared
    * retained/scratch bytes; dependency recursion completes before acquisition.
    * The lease is destroyed immediately after NodeExecutor returns, before
-   * cancellation observation, result normalization, Graph cache publication,
+   * cancellation observation, named-Value validation, Graph cache publication,
    * or disk persistence. Provider exceptions release it by RAII during
    * unwinding, and Host post-processing exceptions therefore occur after
    * release.

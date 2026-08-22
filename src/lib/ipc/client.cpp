@@ -1770,25 +1770,48 @@ enum class ComputeJobResponseKind {
 };
 
 /**
- * @brief Returns the exact channel byte width for one known data type.
- * @param data_type Public image scalar type.
- * @return One, two, four, or eight; zero for an invalid future enum value.
+ * @brief Decodes one lowercase hexadecimal digit.
+ * @param value Candidate ASCII byte.
+ * @return Nibble value, or 255 when invalid.
  * @throws Nothing.
  */
-std::size_t channel_bytes(DataType data_type) noexcept {
-  switch (data_type) {
-    case DataType::UINT8:
-    case DataType::INT8:
-      return 1;
-    case DataType::UINT16:
-    case DataType::INT16:
-      return 2;
-    case DataType::FLOAT32:
-      return 4;
-    case DataType::FLOAT64:
-      return 8;
+std::uint8_t lowercase_hex_nibble(char value) noexcept {
+  if (value >= '0' && value <= '9') {
+    return static_cast<std::uint8_t>(value - '0');
   }
-  return 0;
+  if (value >= 'a' && value <= 'f') {
+    return static_cast<std::uint8_t>(value - 'a' + 10);
+  }
+  return 0xFFU;
+}
+
+/**
+ * @brief Decodes one exact lowercase SHA-256 hexadecimal string.
+ * @param value Candidate JSON string.
+ * @param digest Receives bytes only after complete validation.
+ * @return True only for exactly 64 lowercase hexadecimal characters.
+ * @throws std::bad_alloc if temporary string ownership cannot allocate.
+ */
+bool decode_artifact_digest(const internal::Json& value,
+                            ArtifactPayloadDigest* digest) {
+  std::string encoded;
+  if (digest == nullptr ||
+      !internal::decode_bounded_string(value, 64U, &encoded) ||
+      encoded.size() != digest->bytes.size() * 2U) {
+    return false;
+  }
+  ArtifactPayloadDigest decoded;
+  for (std::size_t index = 0U; index < decoded.bytes.size(); ++index) {
+    const std::uint8_t high = lowercase_hex_nibble(encoded[index * 2U]);
+    const std::uint8_t low = lowercase_hex_nibble(encoded[index * 2U + 1U]);
+    if (high == 0xFFU || low == 0xFFU) {
+      return false;
+    }
+    decoded.bytes[index] = std::byte{
+        static_cast<std::uint8_t>(static_cast<std::uint8_t>(high << 4U) | low)};
+  }
+  *digest = decoded;
+  return true;
 }
 
 /**
@@ -1796,19 +1819,19 @@ std::size_t channel_bytes(DataType data_type) noexcept {
  * @param value Candidate flat output object.
  * @param delivery Receives structured public metadata and lease id.
  * @param message Receives a diagnostic on failure.
- * @return True when identities, path, image layout, and filesystem values are
- *         exact and overflow-safe.
+ * @return True when identities, path, archive summary, and filesystem values
+ *         are exact and bounded.
  * @throws std::bad_alloc if copied ids, path, or diagnostics allocate.
  * @note This direct Client validates metadata only. The IPC Host consumer owns
- *       protected opening, identity revalidation, and image memory lifetime.
+ *       protected opening, identity revalidation, and Value reconstruction.
  */
 bool decode_output_delivery(const internal::Json& value,
                             OutputArtifactDelivery* delivery,
                             std::string* message) {
-  static constexpr std::array<const char*, 12> kFields = {
-      "output_id",         "delivery_id", "path",   "width",    "height",
-      "channels",          "data_type",   "device", "row_step", "byte_size",
-      "filesystem_device", "inode"};
+  static constexpr std::array<const char*, 9> kFields = {
+      "output_id",   "delivery_id",       "path",
+      "byte_size",   "digest_sha256",     "archive_version",
+      "value_count", "filesystem_device", "inode"};
   if (delivery == nullptr || message == nullptr || !value.is_object() ||
       std::any_of(kFields.begin(), kFields.end(), [&value](const char* field) {
         return !value.contains(field);
@@ -1828,36 +1851,20 @@ bool decode_output_delivery(const internal::Json& value,
           value["path"], internal::kPathTextMaxBytes, &metadata.path) ||
       metadata.path.empty() || metadata.path.front() != '/' ||
       metadata.path.find('\0') != std::string::npos ||
-      !internal::decode_integer(value["width"], &metadata.width) ||
-      !internal::decode_integer(value["height"], &metadata.height) ||
-      !internal::decode_integer(value["channels"], &metadata.channels) ||
-      metadata.width <= 0 || metadata.height <= 0 || metadata.channels <= 0 ||
-      !internal::decode_enum(value["data_type"], &metadata.data_type) ||
-      !internal::decode_enum(value["device"], &metadata.device) ||
-      metadata.device != Device::CPU ||
-      !internal::decode_integer(value["row_step"], &metadata.row_step) ||
       !internal::decode_integer(value["byte_size"], &metadata.byte_size) ||
+      metadata.byte_size == 0U ||
       metadata.byte_size > internal::kOutputArtifactMaxBytes ||
+      !decode_artifact_digest(value["digest_sha256"], &metadata.digest) ||
+      !internal::decode_integer(value["archive_version"],
+                                &metadata.archive_version) ||
+      metadata.archive_version != 1U ||
+      !internal::decode_integer(value["value_count"], &metadata.value_count) ||
+      metadata.value_count == 0U ||
+      metadata.value_count > kMaximumNamedValueArtifacts ||
       !internal::decode_integer(value["filesystem_device"],
                                 &metadata.filesystem_device) ||
       !internal::decode_integer(value["inode"], &metadata.inode)) {
     *message = "compute output contains an invalid typed value";
-    return false;
-  }
-  const std::size_t scalar_bytes = channel_bytes(metadata.data_type);
-  const std::size_t width = static_cast<std::size_t>(metadata.width);
-  const std::size_t height = static_cast<std::size_t>(metadata.height);
-  const std::size_t channels = static_cast<std::size_t>(metadata.channels);
-  const std::size_t maximum = std::numeric_limits<std::size_t>::max();
-  if (scalar_bytes == 0 || width > maximum / channels ||
-      width * channels > maximum / scalar_bytes) {
-    *message = "compute output row width overflows";
-    return false;
-  }
-  const std::size_t expected_step = width * channels * scalar_bytes;
-  if (height > maximum / expected_step || metadata.row_step != expected_step ||
-      metadata.byte_size != expected_step * height) {
-    *message = "compute output byte layout is inconsistent";
     return false;
   }
   *delivery = std::move(decoded);
@@ -3225,7 +3232,7 @@ IpcResult<ComputeJobSnapshot> Client::submit_compute(
       {"session_id", request.session_id.value},
       {"node_id", request.node.value},
       {"result_mode",
-       request.result_mode == ComputeResultMode::Status ? "status" : "image"},
+       request.result_mode == ComputeResultMode::Status ? "status" : "values"},
       {"cache",
        internal::Json{{"precision", request.cache.precision},
                       {"force_recache", request.cache.force_recache},
@@ -3240,7 +3247,7 @@ IpcResult<ComputeJobSnapshot> Client::submit_compute(
         *request.execution.maximum_parallelism;
   }
   if (request.result_mode != ComputeResultMode::Status &&
-      request.result_mode != ComputeResultMode::Image) {
+      request.result_mode != ComputeResultMode::Values) {
     return failed_result<ComputeJobSnapshot>(internal::failure_status(
         OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
         "invalid_params", "compute result mode has no version 2 label"));

@@ -11,7 +11,8 @@
 #include <type_traits>
 #include <vector>
 
-#include "photospider/core/image_buffer.hpp"
+#include "core/canonical_ieee754.hpp"
+#include "photospider/data/image_view.hpp"
 #include "runtime/graph_runtime.hpp"
 
 namespace ps::compute {
@@ -64,18 +65,43 @@ bool is_default_space(const SpatialContext& ctx) {
 }
 
 /**
- * @brief Completes an empty absolute ROI from output image dimensions.
+ * @brief Completes an empty absolute ROI from canonical Value image bounds.
  * @param ctx Spatial metadata to update.
- * @param buffer Output image descriptor supplying the fallback extent.
+ * @param output Output whose named image Value supplies the fallback extent.
  * @return Nothing.
- * @throws Nothing.
- * @note Existing positive ROI dimensions are preserved unchanged.
+ * @throws std::invalid_argument when a signed image endpoint or span cannot
+ * enter the current PixelRect representation.
+ * @throws std::overflow_error when immutable data-window arithmetic overflows.
+ * @note Existing positive ROI dimensions are preserved unchanged. Fallback
+ *       validation completes before `ctx` receives the synthesized ROI.
  */
-void ensure_absolute_roi(SpatialContext& ctx, const ImageBuffer& buffer) {
-  if ((ctx.absolute_roi.width <= 0 || ctx.absolute_roi.height <= 0) &&
-      buffer.width > 0 && buffer.height > 0) {
-    ctx.absolute_roi = PixelRect{0, 0, buffer.width, buffer.height};
+void ensure_absolute_roi(SpatialContext& ctx, const NodeOutput& output) {
+  if (ctx.absolute_roi.width > 0 && ctx.absolute_roi.height > 0) {
+    return;
   }
+  if (!output.has_image_value() ||
+      !output.image_value().image_facet().has_value()) {
+    return;
+  }
+  const ImageBounds& bounds = output.image_value().image_bounds();
+  const std::size_t width = image_bounds_width(bounds);
+  const std::size_t height = image_bounds_height(bounds);
+  const auto int_min =
+      static_cast<std::int64_t>(std::numeric_limits<int>::min());
+  const auto int_max =
+      static_cast<std::int64_t>(std::numeric_limits<int>::max());
+  if (bounds.x_begin < int_min || bounds.x_begin > int_max ||
+      bounds.y_begin < int_min || bounds.y_begin > int_max ||
+      bounds.x_end < int_min || bounds.x_end > int_max ||
+      bounds.y_end < int_min || bounds.y_end > int_max ||
+      width > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+      height > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument(
+        "Canonical image bounds exceed SpatialContext PixelRect geometry.");
+  }
+  ctx.absolute_roi = PixelRect{
+      static_cast<int>(bounds.x_begin), static_cast<int>(bounds.y_begin),
+      static_cast<int>(width), static_cast<int>(height)};
 }
 
 /**
@@ -83,45 +109,51 @@ void ensure_absolute_roi(SpatialContext& ctx, const ImageBuffer& buffer) {
  * @param output Computed output whose default spatial state may be replaced.
  * @param inputs Destination-indexed inputs, including disconnected null slots.
  * @return Nothing.
- * @throws Nothing under current fixed-size spatial value assignment.
+ * @throws std::invalid_argument or std::overflow_error when canonical image
+ * bounds cannot enter SpatialContext.
  * @note Null placeholders are skipped without compressing callback-visible
- * input ordering. The output absolute ROI is always completed afterwards.
+ *       input ordering. The output absolute ROI is always completed
+ *       afterwards. Inheritance and fallback validation finish in a local
+ *       value, so either exception leaves the original output space unchanged.
  */
 void inherit_spatial_context(NodeOutput& output,
                              const std::vector<const NodeOutput*>& inputs) {
-  if (is_default_space(output.space)) {
+  SpatialContext resolved_space = output.space;
+  if (is_default_space(resolved_space)) {
     const auto first_connected =
         std::find_if(inputs.begin(), inputs.end(),
                      [](const NodeOutput* input) { return input != nullptr; });
     if (first_connected != inputs.end()) {
-      output.space = (*first_connected)->space;
-      output.space.local_inverse_matrix = {1.0, 0.0, 0.0, 0.0, 1.0,
-                                           0.0, 0.0, 0.0, 1.0};
+      resolved_space = (*first_connected)->space;
+      resolved_space.local_inverse_matrix = {1.0, 0.0, 0.0, 0.0, 1.0,
+                                             0.0, 0.0, 0.0, 1.0};
     }
   }
-  ensure_absolute_roi(output.space, output.image_buffer);
+  ensure_absolute_roi(resolved_space, output);
+  output.space = resolved_space;
 }
 
 /**
  * @brief Converts every public device label to stable diagnostic text.
- * @param device Device enumerator returned by an operation.
+ * @param backend Backend family retained by a canonical Value binding.
  * @return Owned uppercase label, or `UNKNOWN` for an invalid value.
  * @throws std::bad_alloc if result string storage cannot allocate.
  * @note This function does not imply that pixel storage is host-addressable.
  */
-std::string device_to_string(Device device) {
-  switch (device) {
-    case Device::CPU:
+std::string device_to_string(DeviceBackend backend) {
+  switch (backend) {
+    case DeviceBackend::CPU:
       return "CPU";
-    case Device::GPU_METAL:
+    case DeviceBackend::Metal:
       return "GPU_METAL";
-    case Device::GPU_CUDA:
+    case DeviceBackend::CUDA:
       return "GPU_CUDA";
-    case Device::ASIC_NPU:
+    case DeviceBackend::Vulkan:
+      return "GPU_VULKAN";
+    case DeviceBackend::NPU:
       return "ASIC_NPU";
-    default:
-      return "UNKNOWN";
   }
+  return "UNKNOWN";
 }
 
 /**
@@ -129,7 +161,8 @@ std::string device_to_string(Device device) {
  * @throws Nothing for value operations.
  * @note `has_non_finite` preserves the legacy `has_nan` diagnostic behavior
  * that also flagged infinities through OpenCV checkRange. NaN samples do not
- * participate in min/max comparisons.
+ * participate in min/max comparisons. The accumulator is stack-local to one
+ * inspection and owns no payload, cache, or shared state.
  */
 struct PixelStatistics {
   /** @brief Whether at least one non-NaN value initialized the range. */
@@ -181,12 +214,12 @@ void observe_pixel_value(double value, bool floating_point,
 
 /**
  * @brief Reads one potentially unaligned scalar without aliasing assumptions.
- * @tparam Scalar Declared ImageBuffer scalar storage type.
+ * @tparam Scalar Declared whole-byte Value scalar storage type.
  * @param bytes Address of sizeof(Scalar) readable bytes.
  * @return Scalar copied from the row.
  * @throws Nothing.
- * @note memcpy keeps row inspection valid for externally owned CPU snapshots
- * whose base alignment is weaker than kernel allocation alignment.
+ * @note memcpy keeps inspection valid for arbitrary validated Value strides
+ * and base alignment.
  */
 template <typename Scalar>
 Scalar read_scalar(const std::byte* bytes) noexcept {
@@ -196,64 +229,179 @@ Scalar read_scalar(const std::byte* bytes) noexcept {
 }
 
 /**
- * @brief Inspects all active samples of one declared scalar type.
- * @tparam Scalar C++ type corresponding to ImageBuffer::type.
- * @param buffer Valid nonempty CPU image.
- * @param statistics Mutable range/non-finite accumulator.
- * @return Nothing.
- * @throws std::invalid_argument for malformed/non-CPU row access.
- * @throws std::out_of_range only if internal validated row iteration diverges
- * from the descriptor.
- * @note Every row begins at ImageBuffer::step; padding bytes are skipped.
- * Channel values are flattened only logically, without allocating or
- * reshaping an adapter matrix.
+ * @brief Projects one unsigned integer magnitude to nearest-even binary64.
+ * @param magnitude Exact nonnegative magnitude to project.
+ * @param negative Whether the nonzero result carries a negative sign.
+ * @return Nearest representable finite binary64 value, with ties to even.
+ * @throws Nothing; the constructed canonical word is always finite and valid.
+ * @note The algorithm uses only integer shifts, division-free remainder bits,
+ *       and the repository's numeric canonical-word decoder. It performs no
+ *       inexact integer-to-floating conversion and is independent of the
+ *       ambient floating-point rounding mode. Zero is always positive.
+ */
+double project_integer_magnitude_to_binary64(std::uint64_t magnitude,
+                                             bool negative) {
+  if (magnitude == 0U) {
+    return 0.0;
+  }
+
+  unsigned int exponent = 0U;
+  for (std::uint64_t remaining = magnitude; remaining > 1U; remaining >>= 1U) {
+    ++exponent;
+  }
+
+  constexpr unsigned int kFractionBits = 52U;
+  constexpr std::uint64_t kImplicitBit = std::uint64_t{1U} << kFractionBits;
+  constexpr std::uint64_t kSignificandOverflow = kImplicitBit << 1U;
+  std::uint64_t significand = 0U;
+  if (exponent <= kFractionBits) {
+    significand = magnitude << (kFractionBits - exponent);
+  } else {
+    const unsigned int discarded_bits = exponent - kFractionBits;
+    significand = magnitude >> discarded_bits;
+    const std::uint64_t remainder_mask =
+        (std::uint64_t{1U} << discarded_bits) - 1U;
+    const std::uint64_t remainder = magnitude & remainder_mask;
+    const std::uint64_t halfway = std::uint64_t{1U} << (discarded_bits - 1U);
+    if (remainder > halfway ||
+        (remainder == halfway && (significand & 1U) != 0U)) {
+      ++significand;
+    }
+    if (significand == kSignificandOverflow) {
+      significand >>= 1U;
+      ++exponent;
+    }
+  }
+
+  constexpr std::uint64_t kFractionMask = kImplicitBit - 1U;
+  constexpr std::uint64_t kSignBit = std::uint64_t{1U} << 63U;
+  constexpr std::uint64_t kExponentBias = 1023U;
+  const std::uint64_t bits = (negative ? kSignBit : 0U) |
+                             ((kExponentBias + exponent) << kFractionBits) |
+                             (significand & kFractionMask);
+  return internal::decode_canonical_binary64(bits);
+}
+
+/**
+ * @brief Projects one native integer sample to nearest-even binary64.
+ * @tparam Scalar Signed or unsigned native integer no wider than uint64.
+ * @param value Exact native payload value.
+ * @return Exact binary64 for every value through INT32 and nearest-even
+ *         binary64 for wider values that are not representable.
+ * @throws Nothing for the supported native integer types.
+ * @note Negative magnitude extraction avoids negating `INT64_MIN`. The helper
+ *       changes neither payload nor declared sample-domain metadata and is
+ *       independent of the ambient floating-point rounding mode.
  */
 template <typename Scalar>
-void inspect_typed_pixels(const ImageBuffer& buffer,
-                          PixelStatistics* statistics) {
-  const std::size_t row_bytes = image_buffer_row_bytes(buffer);
-  const std::size_t sample_count = row_bytes / sizeof(Scalar);
-  for (int row_index = 0; row_index < buffer.height; ++row_index) {
-    const std::byte* row = image_buffer_row_data(buffer, row_index);
-    for (std::size_t sample = 0; sample < sample_count; ++sample) {
-      const Scalar value = read_scalar<Scalar>(row + sample * sizeof(Scalar));
-      observe_pixel_value(static_cast<double>(value),
-                          std::is_floating_point_v<Scalar>, statistics);
+double project_integer_to_binary64(Scalar value) {
+  static_assert(std::is_integral_v<Scalar> && !std::is_same_v<Scalar, bool>,
+                "pixel projection requires a native integer scalar");
+  static_assert(sizeof(Scalar) <= sizeof(std::uint64_t),
+                "pixel projection supports integers through 64 bits");
+
+  bool negative = false;
+  std::uint64_t magnitude = 0U;
+  if constexpr (std::is_signed_v<Scalar>) {
+    const std::int64_t widened = static_cast<std::int64_t>(value);
+    negative = widened < 0;
+    magnitude = negative ? static_cast<std::uint64_t>(-(widened + 1)) + 1U
+                         : static_cast<std::uint64_t>(widened);
+  } else {
+    magnitude = static_cast<std::uint64_t>(value);
+  }
+  return project_integer_magnitude_to_binary64(magnitude, negative);
+}
+
+/**
+ * @brief Inspects all logical image samples of one declared scalar type.
+ * @tparam Scalar C++ type corresponding to Value element facts.
+ * @param view Valid retaining host-readable ImageView.
+ * @param statistics Mutable range/non-finite accumulator.
+ * @return Nothing.
+ * @throws std::out_of_range only if internal validated coordinate iteration
+ * diverges from the immutable descriptor.
+ * @throws std::bad_alloc when ImageView::channel_data cannot allocate its
+ * per-sample full-rank logical-coordinate vector.
+ * @note ImageView resolves arbitrary signed strides and skips every padding or
+ * non-logical byte. Native integers use deterministic nearest-even binary64
+ * diagnostics; floating-point samples preserve their native value. No sample
+ * normalization or compatibility projection is allocated.
+ */
+template <typename Scalar>
+void inspect_typed_pixels(const ImageView& view, PixelStatistics* statistics) {
+  for (std::size_t y = 0U; y < view.height(); ++y) {
+    for (std::size_t x = 0U; x < view.width(); ++x) {
+      for (std::size_t channel = 0U; channel < view.channels(); ++channel) {
+        const Scalar value =
+            read_scalar<Scalar>(view.channel_data(x, y, channel));
+        if constexpr (std::is_integral_v<Scalar>) {
+          observe_pixel_value(project_integer_to_binary64(value), false,
+                              statistics);
+        } else {
+          observe_pixel_value(static_cast<double>(value), true, statistics);
+        }
+      }
     }
   }
 }
 
 /**
- * @brief Dispatches CPU pixel inspection by the public DataType enum.
- * @param buffer Valid nonempty CPU descriptor.
+ * @brief Dispatches CPU pixel inspection by immutable Value element facts.
+ * @param value Valid Ready host-readable image Value.
  * @return Accumulated active-pixel statistics.
- * @throws std::invalid_argument for an invalid descriptor or DataType.
- * @throws std::out_of_range if validated row iteration cannot be represented.
- * @note The switch is exhaustive for the public scalar contract and performs
- * no provider conversion.
+ * @throws std::invalid_argument for an unsupported semantics/width pair.
+ * @throws ReadyFenceAccessError, BufferAccessError, or std::out_of_range from
+ * checked view access.
+ * @throws std::bad_alloc when ImageView cannot copy complete ImageFacet
+ * metadata or ImageView::channel_data cannot allocate a per-sample full-rank
+ * logical-coordinate vector.
+ * @note No provider conversion, sample-domain normalization, or compatibility
+ * snapshot is performed. Native 8/16/32-bit integers project exactly;
+ * signed/unsigned 64-bit values use deterministic nearest-representable
+ * binary64 diagnostics with ties to even and may lose integer precision.
  */
-PixelStatistics inspect_cpu_pixels(const ImageBuffer& buffer) {
-  validate_image_buffer(buffer);
+PixelStatistics inspect_cpu_pixels(const Value& value) {
+  ImageView view(value);
+  const DenseTensorDescriptor& descriptor = view.descriptor();
+  const std::uint32_t bits = descriptor.storage_encoding.bit_width;
   PixelStatistics statistics;
-  switch (buffer.type) {
-    case DataType::UINT8:
-      inspect_typed_pixels<std::uint8_t>(buffer, &statistics);
-      break;
-    case DataType::INT8:
-      inspect_typed_pixels<std::int8_t>(buffer, &statistics);
-      break;
-    case DataType::UINT16:
-      inspect_typed_pixels<std::uint16_t>(buffer, &statistics);
-      break;
-    case DataType::INT16:
-      inspect_typed_pixels<std::int16_t>(buffer, &statistics);
-      break;
-    case DataType::FLOAT32:
-      inspect_typed_pixels<float>(buffer, &statistics);
-      break;
-    case DataType::FLOAT64:
-      inspect_typed_pixels<double>(buffer, &statistics);
-      break;
+  if (descriptor.element_semantics == ElementSemantics::UnsignedInteger &&
+      bits == 8U) {
+    inspect_typed_pixels<std::uint8_t>(view, &statistics);
+  } else if (descriptor.element_semantics == ElementSemantics::SignedInteger &&
+             bits == 8U) {
+    inspect_typed_pixels<std::int8_t>(view, &statistics);
+  } else if (descriptor.element_semantics ==
+                 ElementSemantics::UnsignedInteger &&
+             bits == 16U) {
+    inspect_typed_pixels<std::uint16_t>(view, &statistics);
+  } else if (descriptor.element_semantics == ElementSemantics::SignedInteger &&
+             bits == 16U) {
+    inspect_typed_pixels<std::int16_t>(view, &statistics);
+  } else if (descriptor.element_semantics ==
+                 ElementSemantics::UnsignedInteger &&
+             bits == 32U) {
+    inspect_typed_pixels<std::uint32_t>(view, &statistics);
+  } else if (descriptor.element_semantics == ElementSemantics::SignedInteger &&
+             bits == 32U) {
+    inspect_typed_pixels<std::int32_t>(view, &statistics);
+  } else if (descriptor.element_semantics ==
+                 ElementSemantics::UnsignedInteger &&
+             bits == 64U) {
+    inspect_typed_pixels<std::uint64_t>(view, &statistics);
+  } else if (descriptor.element_semantics == ElementSemantics::SignedInteger &&
+             bits == 64U) {
+    inspect_typed_pixels<std::int64_t>(view, &statistics);
+  } else if (descriptor.element_semantics == ElementSemantics::FloatingPoint &&
+             bits == 32U) {
+    inspect_typed_pixels<float>(view, &statistics);
+  } else if (descriptor.element_semantics == ElementSemantics::FloatingPoint &&
+             bits == 64U) {
+    inspect_typed_pixels<double>(view, &statistics);
+  } else {
+    throw std::invalid_argument(
+        "Debug statistics do not support this Value element type.");
   }
   return statistics;
 }
@@ -262,22 +410,29 @@ PixelStatistics inspect_cpu_pixels(const ImageBuffer& buffer) {
  * @brief Populates pixel statistics when generic CPU access is valid.
  * @param output Output whose debug fields may receive min/max/non-finite data.
  * @return Nothing.
- * @throws std::invalid_argument for malformed image descriptors.
- * @throws std::out_of_range if validated row iteration is inconsistent.
- * @note Valid non-CPU/context-only and canonical-empty images retain their
- * operation-provided statistics because only a device adapter may map opaque
- * resources safely. Active rows are scanned through kernel primitives; padding
- * is never interpreted as pixels. An all-NaN active payload retains the legacy
- * positive/negative infinity empty-range sentinels.
+ * @throws std::invalid_argument for unsupported image element facts.
+ * @throws ReadyFenceAccessError, BufferAccessError, or std::out_of_range from
+ * checked Value access.
+ * @throws std::bad_alloc when ImageView cannot copy complete ImageFacet
+ * metadata or ImageView::channel_data cannot allocate a per-sample full-rank
+ * logical-coordinate vector.
+ * @note Absent, pending, failed, cancelled, or non-host-visible Values retain
+ * operation-provided statistics. Ready host-visible samples are scanned
+ * through ImageView and padding is never interpreted. An all-NaN active
+ * payload retains the legacy positive/negative infinity empty-range sentinels.
+ * Integer observations project to nearest-even binary64 without consulting
+ * sample-domain metadata or the ambient floating-point rounding mode.
  */
 void populate_debug_statistics(NodeOutput& output) {
-  const ImageBuffer& buffer = output.image_buffer;
-  validate_image_buffer(buffer);
-  if (buffer.device != Device::CPU || !buffer.data || buffer.width <= 0 ||
-      buffer.height <= 0) {
+  if (!output.has_image_value()) {
     return;
   }
-  const PixelStatistics statistics = inspect_cpu_pixels(buffer);
+  const Value& value = output.image_value();
+  if (!value.ready_fence().poll().ready() ||
+      !value.buffer_handle().host_visible()) {
+    return;
+  }
+  const PixelStatistics statistics = inspect_cpu_pixels(value);
   output.debug.min_val = statistics.min_value;
   output.debug.max_val = statistics.max_value;
   output.debug.has_nan = statistics.has_non_finite;
@@ -295,15 +450,31 @@ void populate_debug_statistics(NodeOutput& output) {
  * @param execution_ms Measured duration, clamped to zero and rounded to whole
  *        milliseconds.
  * @return Nothing.
- * @throws std::invalid_argument if enabled statistics receive a malformed
- * image descriptor.
- * @throws std::out_of_range if validated row iteration is inconsistent.
- * @throws std::bad_alloc if the device label cannot be stored.
+ * @throws std::invalid_argument if enabled statistics receive unsupported
+ * immutable image element facts or signed image endpoints/spans cannot enter
+ * the SpatialContext representation.
+ * @throws std::overflow_error when immutable image-window arithmetic is
+ * unrepresentable.
+ * @throws ReadyFenceAccessError, BufferAccessError, or std::out_of_range when
+ * a Ready host-visible Value cannot provide a checked logical sample.
+ * @throws std::bad_alloc if ImageView cannot copy complete ImageFacet metadata
+ * or ImageView::channel_data cannot allocate a per-sample full-rank
+ * logical-coordinate vector, or if diagnostic device-label storage cannot
+ * allocate.
  * @note Spatial inheritance occurs before timestamp, worker, duration, and
- *       device publication. Debug identity fields are always updated; only
- *       CPU-addressable pixel statistics depend on `enable_timing`. Those
- *       statistics walk active bytes by ImageBuffer::step and ignore padding;
- *       opaque backend statistics remain untouched without a device adapter.
+ *       device publication. A spatial fallback conversion failure leaves the
+ *       original space, debug metadata, and named Values unchanged. Debug
+ *       identity fields are always updated after successful spatial
+ *       completion; only Ready host-visible pixel statistics depend on
+ *       `enable_timing`. Pending Values expose device metadata through
+ *       representation-neutral indexed StorageBinding inspection without
+ *       payload access and retain callback-provided statistics until a later
+ *       Ready observation. Native 8/16/32-bit integers project exactly to
+ *       binary64; signed/unsigned 64-bit integers use deterministic
+ *       nearest-even binary64 diagnostics and may lose integer precision.
+ *       No sample-domain normalization occurs. ImageView walks logical
+ *       samples and ignores padding; opaque backend statistics remain
+ *       untouched without a device adapter.
  */
 void ComputeMetricsRecorder::finalize_output_metadata(
     NodeOutput& output, const std::vector<const NodeOutput*>& inputs,
@@ -319,7 +490,15 @@ void ComputeMetricsRecorder::finalize_output_metadata(
     execution_ms = 0.0;
   output.debug.execution_time_ms =
       static_cast<uint64_t>(std::llround(execution_ms));
-  output.debug.compute_device = device_to_string(output.image_buffer.device);
+  DeviceBackend backend = DeviceBackend::CPU;
+  if (output.has_image_value()) {
+    backend = output.image_value().storage_binding().device.backend();
+  } else if (!output.named_values.empty()) {
+    backend = output.named_values.begin()
+                  ->second.storage_binding(0U)
+                  .device.backend();
+  }
+  output.debug.compute_device = device_to_string(backend);
   if (enable_timing)
     populate_debug_statistics(output);
 }

@@ -42,7 +42,8 @@ callback 可能活跃时重新配置 OpenCV threading。
 `std::bad_alloc` 重新抛出；其他每个 `cv::Exception` 都会翻译为携带
 `GraphErrc::ComputeError` 的 host-owned `GraphError`。只有启用
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` 时才会包含该 provider。禁用时，依赖中立 core
-operation 与 v2 registrar 仍然可用；启用时，v2 provider 可以替换相同 registry slot。
+operation 与 pure-C ABI v1 publication 仍然可用；启用时，ABI-v1 provider 可以替换相同
+registry slot。
 
 真实共享可变状态的同步仍由 backend owner 局部负责。进程 Metal executor（而不是 Perlin
 provider）会串行化其共享 command queue、invocation allocator counter 与 pipeline cache。

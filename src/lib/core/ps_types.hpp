@@ -8,23 +8,25 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
 
-#include "compute/image_buffer.hpp"
+#include "compute/tile_task.hpp"
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/geometry.hpp"
 #include "photospider/core/graph_error.hpp"
+#include "photospider/data/parameter_value.hpp"
 #include "photospider/data/value.hpp"
-#include "photospider/plugin/node_view.hpp"
 
 namespace ps {
 /** @brief Private filesystem namespace shorthand used by backend contracts. */
@@ -118,11 +120,21 @@ struct DebugMeta {
   uint64_t timestamp_us{0};
   /** @brief Execution duration in milliseconds. */
   uint64_t execution_time_ms{0};
-  /** @brief Minimum observed output value. */
+  /**
+   * @brief Minimum observed output value represented as binary64.
+   * @note Native integers through 32 bits are exact. Wider integer diagnostics
+   *       may use a documented nearest-representable projection; the native
+   *       Value payload remains authoritative.
+   */
   double min_val{0.0};
-  /** @brief Maximum observed output value. */
+  /**
+   * @brief Maximum observed output value represented as binary64.
+   * @note Native integers through 32 bits are exact. Wider integer diagnostics
+   *       may use a documented nearest-representable projection; the native
+   *       Value payload remains authoritative.
+   */
   double max_val{0.0};
-  /** @brief Whether output inspection observed a NaN. */
+  /** @brief Whether output inspection observed NaN or infinity. */
   bool has_nan{false};
   /** @brief Owned execution-device label. */
   std::string compute_device{"UNKNOWN"};
@@ -132,10 +144,12 @@ struct DebugMeta {
  * @brief Owns one operation result and its plugin-derived value lifetime.
  *
  * Private operation callbacks and compute services exchange this value after
- * the operation host adapter has converted the public `OperationOutput`.
- * Besides the current ImageBuffer compatibility snapshot, an identity-bearing
- * sealed CPU image Value, format-neutral named data, spatial, and debug state,
- * the host may attach a dynamic-library lease so plugin-provided image deleters
+ * the operation Host has validated pure-C output records or source-private
+ * providers have produced canonical Values.
+ * The canonical named-Value collection is the only payload, allocation,
+ * readiness, and revision authority. Format-neutral parameter data, spatial,
+ * and debug state remain separate.
+ * The host may attach a dynamic-library lease so plugin-provided deleters
  * cannot run after their library is unmapped.
  *
  * Copy construction first retains the source lease and then copies payload
@@ -143,8 +157,8 @@ struct DebugMeta {
  * move construction and move assignment transfer complete states only through
  * no-throw swaps. Retired state is always destroyed in reverse member order.
  *
- * @throws std::bad_alloc when copied image/parameter/debug storage cannot
- * allocate.
+ * @throws std::bad_alloc when copied named-Value, parameter, or debug
+ * storage cannot allocate.
  * @note `plugin_library_lifetime` is declared first and therefore destroyed
  *       last. Operation plugins must leave it empty; the host registrar wrapper
  *       owns lease attachment after the callback returns. This declaration
@@ -241,16 +255,14 @@ struct NodeOutput {
    */
   void swap(NodeOutput& other) noexcept {
     static_assert(std::is_nothrow_swappable_v<std::shared_ptr<void>> &&
-                      std::is_nothrow_swappable_v<ImageBuffer> &&
-                      std::is_nothrow_swappable_v<Value> &&
+                      std::is_nothrow_swappable_v<decltype(named_values)> &&
                       std::is_nothrow_swappable_v<decltype(data)> &&
                       std::is_nothrow_swappable_v<SpatialContext> &&
                       std::is_nothrow_swappable_v<DebugMeta>,
                   "NodeOutput assignment requires no-throw member swaps");
     using std::swap;
     plugin_library_lifetime.swap(other.plugin_library_lifetime);
-    swap(image_buffer, other.image_buffer);
-    swap(image_value, other.image_value);
+    named_values.swap(other.named_values);
     data.swap(other.data);
     swap(space, other.space);
     swap(debug, other.debug);
@@ -259,7 +271,7 @@ struct NodeOutput {
   /**
    * @brief Host-attached lease for plugin-derived return-value internals.
    *
-   * The host registrar wrapper attaches the same shared dynamic-library owner
+   * The operation Host adapter attaches the same shared dynamic-library owner
    * retained by the callback. Copy operations share it; move operations
    * transfer it only together with all payload members.
    *
@@ -269,29 +281,156 @@ struct NodeOutput {
   std::shared_ptr<void> plugin_library_lifetime;
 
   /**
-   * @brief Optional image result and its storage owners.
+   * @brief Canonically ordered named immutable Value outputs.
    *
-   * @note Plugin-defined `data` or `context` deleters execute before the
-   * result's dynamic-library lease is released.
+   * @note Names are exact byte strings and the permanent current graph image
+   * port is `image`. Each valid Value is the sole payload/allocation/readiness/
+   * revision authority for that output. Generic entries must match the frozen
+   * `OpMetadata::named_value_output_names` set exactly; formal publication
+   * requires every declared entry to be Ready. Map ordering is deterministic
+   * but is not a graph, cache, content, or persistence identity. Parameter
+   * results never enter this map.
    */
-  ps::ImageBuffer image_buffer;
+  std::map<std::string, ps::Value, std::less<>> named_values;
+
+  /** @brief Permanent canonical name of the current graph image output. */
+  static constexpr std::string_view kImageOutputName = "image";
 
   /**
-   * @brief Sealed CPU image Value and formal cache memory identity authority.
-   *
-   * @note A valid value is authoritative for allocation/revision identity and
-   * disk-cache image bytes. `image_buffer` remains an independent plugin ABI
-   * v2, tiled-write, codec, Host, and legacy-operation compatibility snapshot.
-   * Dirty staging must clear this member before mutating cloned CPU bytes and
-   * reseal at the HP commit boundary.
+   * @brief Frozen internal byte bound for one named Value publication name.
+   * @note This remains synchronized with `OpMetadata::kOutputNameMaxBytes` and
+   * the provisional public `OperationMetadata::kOutputNameMaxBytes` contract.
    */
-  ps::Value image_value;
+  static constexpr std::size_t kMaximumNamedValueNameBytes = 128U;
 
   /**
-   * @brief Named non-image outputs represented as owned ParameterValue values.
+   * @brief Reports whether the canonical image Value is present.
+   * @return True exactly when the `image` entry exists and is valid.
+   * @throws Nothing.
+   */
+  bool has_image_value() const noexcept {
+    const auto found = named_values.find(kImageOutputName);
+    return found != named_values.end() && found->second.valid();
+  }
+
+  /**
+   * @brief Reports whether any named Value is outside the canonical image
+   * slot.
+   * @return True when at least one exact key differs from `image`.
+   * @throws Nothing.
+   * @note This classification inspects names only; planned output validation
+   * separately proves the exact generic schema, immutable Value identities,
+   * representation, and readiness. Portable named-Value persistence accepts
+   * these entries after full artifact validation.
+   */
+  bool has_generic_named_values() const noexcept {
+    return std::any_of(
+        named_values.begin(), named_values.end(),
+        [](const auto& entry) { return entry.first != kImageOutputName; });
+  }
+
+  /**
+   * @brief Returns the canonical immutable image Value.
+   * @return Borrowed valid Value stored under `image`.
+   * @throws std::logic_error when the image output is absent or invalid.
+   * @note The borrowed handle remains valid until this NodeOutput is mutated or
+   * destroyed; it is the only formal image identity authority.
+   */
+  const ps::Value& image_value() const {
+    const auto found = named_values.find(kImageOutputName);
+    if (found == named_values.end() || !found->second.valid()) {
+      throw std::logic_error("NodeOutput has no canonical image Value.");
+    }
+    return found->second;
+  }
+
+  /**
+   * @brief Publishes one previously absent named immutable Value.
+   * @param name Exact nonempty output name of at most the frozen byte bound.
+   * @param value Valid immutable Value to retain.
+   * @return Nothing.
+   * @throws std::invalid_argument for an invalid name, embedded NUL, invalid
+   * Value, or duplicate output.
+   * @throws std::bad_alloc when name or map storage cannot allocate.
+   * @note Validation failure and allocation failure leave this output
+   * unchanged. This operation changes only request-local result assembly;
+   * graph and formal cache publication remain separate commit operations. The
+   * caller must exclusively own the NodeOutput while mutating it.
+   */
+  void publish_named_value(std::string name, ps::Value value) {
+    if (name.empty() || name.size() > kMaximumNamedValueNameBytes ||
+        name.find('\0') != std::string::npos || !value.valid()) {
+      throw std::invalid_argument(
+          "NodeOutput named Value requires a bounded name and valid Value.");
+    }
+    const auto inserted =
+        named_values.emplace(std::move(name), std::move(value));
+    if (!inserted.second) {
+      throw std::invalid_argument(
+          "NodeOutput cannot publish a duplicate named Value.");
+    }
+  }
+
+  /**
+   * @brief Publishes the previously absent canonical image Value.
+   * @param value Valid immutable image Value.
+   * @return Nothing.
+   * @throws The same exceptions as publish_named_value().
+   * @note The canonical name is reserved for this helper; generic metadata
+   * declarations and parameter results may not claim it. The caller must
+   * exclusively own the NodeOutput while mutating it.
+   */
+  void publish_image_value(ps::Value value) {
+    publish_named_value(std::string(kImageOutputName), std::move(value));
+  }
+
+  /**
+   * @brief Replaces one existing canonical image Value during private merge.
+   * @param value Valid replacement Value with a fresh or deliberately retained
+   * revision selected by the caller.
+   * @return Nothing.
+   * @throws std::invalid_argument when value is invalid.
+   * @throws std::logic_error when the canonical image output is absent.
+   * @note Formal cache commit remains responsible for Region/generation
+   * publication; this helper never synthesizes a fallback compatibility image.
+   * The caller must exclusively own the NodeOutput while mutating it.
+   */
+  void replace_image_value(ps::Value value) {
+    if (!value.valid()) {
+      throw std::invalid_argument(
+          "NodeOutput replacement image Value must be valid.");
+    }
+    const auto found = named_values.find(kImageOutputName);
+    if (found == named_values.end()) {
+      throw std::logic_error(
+          "NodeOutput cannot replace an absent image Value.");
+    }
+    found->second = std::move(value);
+  }
+
+  /**
+   * @brief Removes the canonical image output from request-local staging.
+   * @return True when an entry was removed.
+   * @throws Nothing.
+   * @note Dirty staging may remove immutable authority only before constructing
+   * a fresh Host binding; formal cache state is never mutated through this
+   * helper. The caller must exclusively own the NodeOutput while mutating it.
+   */
+  bool clear_image_value() noexcept {
+    const auto found = named_values.find(kImageOutputName);
+    if (found == named_values.end()) {
+      return false;
+    }
+    named_values.erase(found);
+    return true;
+  }
+
+  /**
+   * @brief Named parameter-result outputs represented as ParameterValue values.
    *
-   * @note Values are copied or moved without YAML conversion and retire before
-   *       `plugin_library_lifetime`.
+   * @note Generic immutable Values never enter this map; they belong in
+   * `named_values`. Parameter values are copied or moved without YAML
+   * conversion and retire before `plugin_library_lifetime`.
    */
   plugin::ParameterMap data;
 
@@ -601,12 +740,25 @@ struct OpMetadata {
   /** @brief Maximum accepted bytes in a nonempty process exclusive key. */
   static constexpr std::size_t kExclusiveKeyMaxBytes = 128U;
 
+  /** @brief Maximum accepted bytes in one declared non-image output name. */
+  static constexpr std::size_t kOutputNameMaxBytes = 128U;
+
+  /** @brief Maximum exact generic named-Value names in one implementation. */
+  static constexpr std::size_t kNamedValueOutputCountMax = 64U;
+
+  /** @brief Maximum exact parameter-output names in one implementation. */
+  static constexpr std::size_t kParameterOutputCountMax = 64U;
+
   /** @brief Preferred private tile granularity. */
   TileSizePreference tile_preference = TileSizePreference::UNDEFINED;
   /** @brief Preferred execution device. */
-  Device device_preference = Device::CPU;
+  DeviceBackend device_preference = DeviceBackend::CPU;
   /** @brief Relative scheduling cost; lower values are preferred. */
   int cost_score = 100;
+  /** @brief Whether this exact candidate may satisfy high-precision intent. */
+  bool supports_high_precision = true;
+  /** @brief Whether this exact candidate may satisfy real-time intent. */
+  bool supports_realtime = true;
 
   /** @brief Private image-input access pattern used during planning. */
   enum class InputAccessPattern {
@@ -630,6 +782,30 @@ struct OpMetadata {
   std::uint64_t retained_memory_bytes = 0U;
   /** @brief Additional scratch bytes held for each in-flight callback. */
   std::uint64_t scratch_bytes = 0U;
+
+  /**
+   * @brief Whether the callback must publish the canonical named image Value.
+   * @note True is the fail-closed default for existing image operations. A
+   * data-only producer or deliberate side effect must explicitly set false.
+   */
+  bool produces_image = true;
+
+  /**
+   * @brief Sorted exact names of legal generic Value outputs excluding image.
+   * @note Registration validates bounded unique names, rejects the reserved
+   * `image` name and parameter-result overlap, and freezes this vector with
+   * the callback revision. A callback must publish exactly this set.
+   */
+  std::vector<std::string> named_value_output_names;
+
+  /**
+   * @brief Sorted exact names of legal non-image parameter results.
+   * @note Registration validates nonempty bounded unique names, rejects the
+   * reserved `image` name and generic-output overlap, and sorts this vector. A
+   * callback may publish exactly this set, no more and no less.
+   */
+  std::vector<std::string> parameter_output_names;
+
   /**
    * @brief Optional process-domain mutual-exclusion key.
    * @note Registration validates bounded length and rejects embedded NUL.
@@ -671,13 +847,16 @@ using MonolithicOpFunc = std::function<NodeOutput(
  * @return Nothing.
  * @throws Any exception emitted by the callback provider propagates through
  *         invocation.
- * @note InputTile carries const ImageBuffer pointers so tiled operators cannot
- * replace or mutate upstream ImageBuffer metadata through the tile API. Pixel
- * data returned by adapter views must still be treated as read-only by
+ * @note InputTile carries const Value pointers so tiled operators cannot
+ * replace or mutate upstream Value metadata through the tile API. Pixel data
+ * returned by adapter views must still be treated as read-only by
  * convention when sourced from InputTile. Registry locking does not serialize
  * callback execution; providers must make shared callback state reentrant or
  * synchronize it because execution workers and independent snapshots may invoke
- * the same logical target concurrently.
+ * the same logical target concurrently. Every current registration surface
+ * rejects metadata other than exactly one canonical image and no generic Value
+ * or parameter-result outputs before registry mutation; additional outputs
+ * require a separately versioned callback shape.
  */
 // NOLINTBEGIN(whitespace/indent_namespace)
 using TileOpFunc =
@@ -787,6 +966,30 @@ enum class PropagationContractStatus {
 };
 
 /**
+ * @brief Owns optional planning callbacks paired with one exact implementation.
+ *
+ * Scalar registration entry points move this record into the same
+ * `OpImplementation` snapshot as the execution callback and scheduling
+ * metadata. This preserves one selected revision across execution, backward
+ * propagation, forward propagation, and data-dependent dependency planning.
+ *
+ * @throws std::bad_alloc or callback-defined copy exceptions when copied.
+ * @note An absent callback selects the exact implementation's documented
+ *       identity/absence fallback. Consumers must never fill an absent field
+ *       from an operation-level sibling registration.
+ */
+struct OpPlanningCallbacks {
+  /** @brief Optional backward Region callback for the exact implementation. */
+  std::optional<DirtyRoiPropFunc> dirty_propagator;
+
+  /** @brief Optional forward Region callback for the exact implementation. */
+  std::optional<ForwardRoiPropFunc> forward_propagator;
+
+  /** @brief Optional dependency-LUT builder for the exact implementation. */
+  std::optional<DependencyLutBuilder> dependency_builder;
+};
+
+/**
  * @brief Owns one callable implementation and its scheduling metadata.
  *
  * The registry stores these values in per-operation device lists and returns
@@ -827,6 +1030,29 @@ struct OpImplementation {
    * predecessor's recorded revision.
    */
   std::uint64_t implementation_identity = 0U;
+
+  /**
+   * @brief Backward Region callback owned by this exact implementation.
+   * @note Absence selects this implementation's conservative identity
+   * fallback. Consumers must not borrow an operation-level callback after this
+   * implementation has been selected.
+   */
+  std::optional<DirtyRoiPropFunc> dirty_propagator;
+
+  /**
+   * @brief Forward Region callback owned by this exact implementation.
+   * @note Absence selects this implementation's conservative identity
+   * fallback. Consumers must not borrow an operation-level callback after this
+   * implementation has been selected.
+   */
+  std::optional<ForwardRoiPropFunc> forward_propagator;
+
+  /**
+   * @brief Data-dependent LUT builder owned by this exact implementation.
+   * @note Presence is meaningful only when `metadata.data_dependent` is true.
+   * Absence never selects another implementation's operation-level builder.
+   */
+  std::optional<DependencyLutBuilder> dependency_builder;
 
   /**
    * @brief Checks whether the callable consumes complete NodeOutput values.
@@ -1078,6 +1304,11 @@ class OpRegistry {
     /** @brief Revision owning the builder-specific dependency contribution. */
     std::uint64_t data_dependent = 0;
     /**
+     * @brief Revision owning an atomically replaced complete candidate set.
+     * @note Zero denotes legacy append-owned device entries.
+     */
+    std::uint64_t device_impl_set = 0;
+    /**
      * @brief Revisions parallel to active device implementation entries.
      * @note Whole-key unregister removes this vector with the implementation
      *       vector; unload compacts both vectors with identical indices.
@@ -1146,11 +1377,17 @@ class OpRegistry {
    *        the HP implementation slot.
    * @param meta Metadata copied into legacy and HP metadata tables.
    * @return Nothing.
+   * @throws std::invalid_argument when the exclusive key or either output-name
+   * declaration is malformed, duplicated, over its count/byte limit, reserved
+   * as `image`, or overlaps the other output category.
    * @throws std::bad_alloc if key, callback, metadata, or table storage cannot
    *         allocate.
    * @throws Any exception raised while copying the callback target or metadata.
-   * @note Mutation is serialized by the registry state lock and participates in
-   *       an active registration capture before any table write.
+   * @note Metadata is validated and output names are canonically sorted before
+   * key construction, revision allocation, capture, or table mutation. A
+   * validation exception therefore leaves generation and all registry slots
+   * unchanged. Successful mutation is lock-serialized; returned callback
+   * snapshots retain their target independently of later replacement/unload.
    */
   void register_op(const std::string& type, const std::string& subtype,
                    MonolithicOpFunc fn, OpMetadata meta = {});
@@ -1164,11 +1401,18 @@ class OpRegistry {
    *        tiled implementation slot.
    * @param meta Required tiled metadata copied into legacy and HP tables.
    * @return Nothing.
+   * @throws std::invalid_argument for malformed, duplicate, over-limit,
+   * reserved, or cross-category-overlapping output declarations, or when the
+   * schema is not exactly the canonical image (`produces_image == true` and
+   * both non-image output vectors empty).
    * @throws std::bad_alloc if key, callback, metadata, or table storage cannot
    *         allocate.
    * @throws Any exception raised while copying the callback target or metadata.
-   * @note An undefined tile preference remains valid; registration does not
-   *       synthesize a preference.
+   * @note Complete validation precedes key construction, capture, generation/
+   * revision allocation, replacement, and insertion, providing a strong
+   * no-mutation guarantee on rejection. An undefined tile preference remains
+   * valid. Successful mutation is lock-serialized; callback snapshots own
+   * their callable/plugin lifetime and may be invoked concurrently afterward.
    */
   void register_op(const std::string& type, const std::string& subtype,
                    TileOpFunc fn, OpMetadata meta);
@@ -1265,15 +1509,25 @@ class OpRegistry {
    * @param subtype Operation subtype.
    * @param fn Monolithic callback moved into the HP slot.
    * @param meta HP metadata associated with the callback.
+   * @param planning_callbacks Optional callbacks moved into the same exact HP
+   *        implementation snapshot.
    * @return Nothing.
+   * @throws std::invalid_argument when the exclusive key or either output-name
+   * declaration is malformed, duplicated, over its count/byte limit, reserved
+   * as `image`, overlaps the other output category, or a present planning
+   * callback is empty.
    * @throws std::bad_alloc if key, capture, or table storage cannot allocate.
    * @throws Any exception raised while copying metadata or captured callbacks.
-   * @note Mutation is lock-serialized and records the key's predecessor before
-   *       replacing the HP slot.
+   * @note Metadata validation/canonicalization precedes key construction and
+   * every observable mutation. Successful replacement is lock-serialized and
+   * captures the predecessor before assigning one new revision; copied
+   * snapshots retain callback and plugin lifetime after replacement. Execution
+   * and planning callbacks remain paired with that exact revision.
    */
   void register_op_hp_monolithic(const std::string& type,
                                  const std::string& subtype,
-                                 MonolithicOpFunc fn, OpMetadata meta = {});
+                                 MonolithicOpFunc fn, OpMetadata meta = {},
+                                 OpPlanningCallbacks planning_callbacks = {});
 
   /**
    * @brief Registers a high-precision tiled implementation.
@@ -1282,13 +1536,24 @@ class OpRegistry {
    * @param subtype Operation subtype.
    * @param fn Tiled callback moved into the HP tiled slot.
    * @param meta HP tiled metadata associated with the callback.
+   * @param planning_callbacks Optional callbacks moved into the same exact HP
+   *        tiled implementation snapshot.
    * @return Nothing.
+   * @throws std::invalid_argument for malformed, duplicate, over-limit,
+   * reserved, or cross-category-overlapping output declarations, or when the
+   * schema is not exactly the canonical image, or a present planning callback
+   * is empty.
    * @throws std::bad_alloc if key, capture, or table storage cannot allocate.
    * @throws Any exception raised while copying metadata or captured callbacks.
-   * @note The complete predecessor is captured before the slot is replaced.
+   * @note Validation precedes key construction, generation/revision changes,
+   * capture, and slot replacement. Rejection therefore preserves the complete
+   * predecessor atomically. Successful replacement is lock-serialized;
+   * snapshots retain callable/plugin lifetime and may execute concurrently.
+   * Execution and planning callbacks remain paired with that exact revision.
    */
   void register_op_hp_tiled(const std::string& type, const std::string& subtype,
-                            TileOpFunc fn, OpMetadata meta);
+                            TileOpFunc fn, OpMetadata meta,
+                            OpPlanningCallbacks planning_callbacks = {});
 
   /**
    * @brief Registers a real-time tiled implementation.
@@ -1297,14 +1562,24 @@ class OpRegistry {
    * @param subtype Operation subtype.
    * @param fn Tiled callback moved into the RT slot.
    * @param meta RT metadata associated with the callback.
+   * @param planning_callbacks Optional callbacks moved into the same exact RT
+   *        implementation snapshot.
    * @return Nothing.
+   * @throws std::invalid_argument for malformed, duplicate, over-limit,
+   * reserved, or cross-category-overlapping output declarations, or when the
+   * schema is not exactly the canonical image, or a present planning callback
+   * is empty.
    * @throws std::bad_alloc if key, capture, or table storage cannot allocate.
    * @throws Any exception raised while copying metadata or captured callbacks.
-   * @note Registration updates only the RT callback and metadata slots. The
-   * metadata contribution is aggregated when a dependency snapshot is read.
+   * @note Validation precedes key construction, generation/revision changes,
+   * capture, and replacement, so rejection leaves the RT predecessor intact.
+   * Successful mutation is lock-serialized and updates only the RT callback/
+   * metadata/planning slot; snapshots retain callable/plugin lifetime
+   * independently.
    */
   void register_op_rt_tiled(const std::string& type, const std::string& subtype,
-                            TileOpFunc fn, OpMetadata meta);
+                            TileOpFunc fn, OpMetadata meta,
+                            OpPlanningCallbacks planning_callbacks = {});
 
   /**
    * @brief Registers an explicit backward dirty-ROI propagator.
@@ -1478,20 +1753,26 @@ class OpRegistry {
    * @param meta Candidate metadata; device preference is overwritten by
    *        `device` before storage.
    * @return Nothing.
+   * @throws std::invalid_argument when the exclusive key/output declarations
+   * are malformed, duplicated, over their count/byte limits, reserved as
+   * `image`, or overlap categories.
    * @throws std::bad_alloc if key, capture, callback, or vector storage cannot
    *         allocate.
    * @throws Any exception raised while copying metadata or captured callbacks.
-   * @note The first CPU monolithic candidate also initializes the HP monolithic
-   *       compatibility slot without replacing an existing slot. That bridge
-   *       forwards through the same stable owner instead of copying the
-   *       original target. The immutable device value and bridge are
-   *       constructed before lock acquisition; vector growth moves only stable
-   *       shared owners, never callback targets. The device path and HP bridge
-   *       may invoke the same target concurrently, so `fn` must be reentrant or
-   *       synchronize its shared state; the registry does not serialize calls.
+   * @note Metadata validation/canonicalization and stable target construction
+   * precede key capture and mutation; rejection leaves generation and registry
+   * state unchanged. The first CPU monolithic candidate also initializes the
+   * HP monolithic compatibility slot without replacing an existing slot. That
+   * bridge forwards through the same stable owner instead of copying the
+   * original target. The immutable device value and bridge are constructed
+   * before lock acquisition; vector growth moves only stable shared owners,
+   * never callback targets. The device path and HP bridge may invoke the same
+   * target concurrently, so `fn` must be reentrant or synchronize its shared
+   * state; the registry does not serialize calls.
    */
   void register_impl(const std::string& type, const std::string& subtype,
-                     Device device, MonolithicOpFunc fn, OpMetadata meta = {});
+                     DeviceBackend device, MonolithicOpFunc fn,
+                     OpMetadata meta = {});
 
   /**
    * @brief Registers a device-specific tiled implementation candidate.
@@ -1503,21 +1784,48 @@ class OpRegistry {
    * @param meta Candidate metadata; device preference is overwritten by
    *        `device` before storage.
    * @return Nothing.
+   * @throws std::invalid_argument for malformed, duplicate, over-limit,
+   * reserved, or cross-category-overlapping output declarations, or when the
+   * schema is not exactly the canonical image.
    * @throws std::bad_alloc if key, capture, callback, or vector storage cannot
    *         allocate.
    * @throws Any exception raised while copying metadata or captured callbacks.
-   * @note The first CPU tiled candidate also initializes the HP tiled
-   *       compatibility slot without replacing an existing slot. That bridge
-   *       forwards through the same stable owner instead of copying the
-   *       original target. Device-owner and revision vectors are reserved
-   *       before either append and remain parallel on every successful
-   *       mutation; callback targets and bridges are built before lock
-   *       acquisition. The device path and HP bridge may invoke the same target
-   *       concurrently, so `fn` must be reentrant or synchronize its shared
-   *       state; the registry does not serialize calls.
+   * @note Complete metadata and image-only validation precedes stable target
+   * construction, key capture, generation/revision allocation, and vector
+   * append; rejection therefore leaves every predecessor and parallel
+   * ownership vector unchanged. The first CPU tiled candidate also initializes
+   * the HP tiled compatibility slot without replacing an existing slot. That
+   * bridge forwards through the same stable owner instead of copying the
+   * original target. Device-owner and revision vectors are reserved before
+   * either append and remain parallel on every successful mutation; callback
+   * targets and bridges are built before lock acquisition. The device path and
+   * HP bridge may invoke the same target concurrently, so `fn` must be
+   * reentrant or synchronize its shared state; the registry does not serialize
+   * calls.
    */
   void register_impl(const std::string& type, const std::string& subtype,
-                     Device device, TileOpFunc fn, OpMetadata meta);
+                     DeviceBackend device, TileOpFunc fn, OpMetadata meta);
+
+  /**
+   * @brief Atomically replaces one operation's complete implementation set.
+   *
+   * @param type Operation type.
+   * @param subtype Operation subtype.
+   * @param candidates Nonempty complete same-generation candidate inventory.
+   * @return Nothing.
+   * @throws std::invalid_argument when the set is empty, a callback is empty,
+   *         intent eligibility is empty, or candidate metadata is malformed.
+   * @throws std::bad_alloc when stable owners, revisions, capture, or table
+   *         storage cannot allocate.
+   * @throws Any exception raised while copying callback targets.
+   * @note Validation and stable-owner construction finish before mutation. One
+   *       set revision replaces every predecessor candidate under the registry
+   *       lock; capture, reverse unload, and middle-generation splice restore
+   *       the whole predecessor set without mixing generations.
+   */
+  void replace_implementation_candidates(
+      const std::string& type, const std::string& subtype,
+      std::vector<OpImplementation> candidates);
 
   /**
    * @brief Copies implementations for one operation and device.
@@ -1536,7 +1844,8 @@ class OpRegistry {
    *       synchronization.
    */
   std::vector<OpImplementation> get_implementations_by_device(
-      const std::string& type, const std::string& subtype, Device device) const;
+      const std::string& type, const std::string& subtype,
+      DeviceBackend device) const;
 
   /**
    * @brief Copies all device implementations for one operation.
@@ -1554,6 +1863,23 @@ class OpRegistry {
    */
   std::vector<OpImplementation> get_all_implementations(
       const std::string& type, const std::string& subtype) const;
+
+  /**
+   * @brief Copies one exact currently active implementation revision.
+   * @param type Operation type.
+   * @param subtype Operation subtype.
+   * @param implementation_identity Nonzero selected registry revision.
+   * @return Exact device candidate, scalar compatibility slot, or legacy
+   * callback; nullopt after replacement/unload.
+   * @throws std::bad_alloc or callback-copy failures from snapshot
+   * materializing.
+   * @note Identity lookup covers every selectable registry surface but never
+   * substitutes another revision, shape, intent, cost, or propagation
+   * contract; stale plans therefore fail closed.
+   */
+  std::optional<OpImplementation> get_implementation_by_identity(
+      const std::string& type, const std::string& subtype,
+      std::uint64_t implementation_identity) const;
 
   /**
    * @brief Selects the best registered implementation for an intent.
@@ -1579,7 +1905,8 @@ class OpRegistry {
    */
   std::optional<OpImplementation> select_best_implementation(
       const std::string& type, const std::string& subtype,
-      const std::vector<Device>& available_devices, ComputeIntent intent) const;
+      const std::vector<DeviceBackend>& available_devices,
+      ComputeIntent intent) const;
 
   /**
    * @brief Selects the best registered implementation after caller filtering.
@@ -1610,40 +1937,64 @@ class OpRegistry {
    */
   std::optional<OpImplementation> select_best_implementation(
       const std::string& type, const std::string& subtype,
-      const std::vector<Device>& available_devices, ComputeIntent intent,
+      const std::vector<DeviceBackend>& available_devices, ComputeIntent intent,
       const std::function<bool(const OpImplementation&)>& candidate_filter)
       const;
 
   /**
    * @brief Selects one coherent revisioned implementation including fallbacks.
    *
-   * Device-specific candidates retain the existing intent/device/cost ordering.
-   * When no device candidate survives, the method selects the matching HP/RT
-   * scalar slot and its metadata/ownership revision, then the legacy slot.
+   * The registry first snapshots device, scalar, legacy, metadata, auxiliary
+   * propagation, and ownership-revision state under its lock. Device candidates
+   * must have a nonzero identity, expose the requested device, satisfy the
+   * intent eligibility bit, and pass `candidate_filter`. HP ranks GPU, then
+   * ASIC/NPU, then CPU or other devices. RT ranks tiled CPU, then GPU, then
+   * remaining device/shape combinations. Lower `cost_score` wins within one
+   * priority, while an exact tie preserves first-seen registration order.
+   *
+   * Only when no device candidate survives does scalar fallback run. HP tries
+   * monolithic HP then tiled HP; RT tries tiled RT, tiled HP, then monolithic
+   * HP. Each scalar candidate must pass the same identity, intent, device, and
+   * filter checks. A coherent legacy callback/metadata/ownership candidate is
+   * considered last.
    *
    * @param type Operation type.
    * @param subtype Operation subtype.
-   * @param available_devices Route-visible devices.
-   * @param intent HP or RT selection policy.
-   * @param candidate_filter Optional task-shape compatibility predicate.
-   * @return Selected callback, metadata, device, and nonzero identity, or
-   * nullopt when no coherent candidate exists.
-   * @throws std::bad_alloc or callback-copy exceptions from snapshot creation.
+   * @param available_devices Route-visible device membership; caller order
+   *        does not override registry ordering.
+   * @param intent HP or RT selection and eligibility policy.
+   * @param candidate_filter Optional task-shape compatibility predicate. It is
+   *        invoked outside the registry lock for every otherwise eligible
+   *        device or fallback candidate.
+   * @return One selected execution callback plus metadata, exact nonzero
+   *         revision identity, device, callback shape, and the dirty, forward,
+   *         and dependency callbacks belonging to that same revision; or
+   *         nullopt when no coherent candidate exists.
+   * @throws std::bad_alloc or any callback-copy exception from coherent
+   *         snapshot materialization.
    * @throws Any exception raised by candidate_filter.
-   * @note The selected value owns its callback and any plugin DSO lease. A
-   * missing metadata record or ownership identity is not silently synthesized.
+   * @note The selected value owns its callbacks and any plugin DSO lease, so it
+   *       remains callable after concurrent replacement or unload. Invocation
+   *       and filtering occur outside registry locking and providers own
+   *       synchronization. A selected revision whose dirty or forward callback
+   *       is absent uses identity propagation at its consumer; an absent
+   *       dependency builder means no dependency contribution. Consumers must
+   *       never borrow those callbacks from a sibling revision. Missing
+   *       metadata or ownership identity is not synthesized. Long-lived plans
+   *       must immediately copy callback-free route fields and release this
+   *       callback-bearing value.
    */
   std::optional<OpImplementation> select_implementation(
       const std::string& type, const std::string& subtype,
-      const std::vector<Device>& available_devices, ComputeIntent intent,
+      const std::vector<DeviceBackend>& available_devices, ComputeIntent intent,
       const std::function<bool(const OpImplementation&)>& candidate_filter = {})
       const;
 
   /**
    * @brief Runs a registration callback while capturing touched keys.
    *
-   * @param registration Callback that calls one or more OpRegistry register
-   * APIs, usually a plugin's `register_photospider_ops_v2` entry point.
+   * @param registration Callback that calls one or more source-private
+   * OpRegistry registration APIs after pure-C records are validated.
    * @param capture Output capture receiving touched keys and prior table state.
    * @return Nothing.
    * @throws std::bad_alloc if key recording or snapshot copying cannot

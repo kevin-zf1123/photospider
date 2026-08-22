@@ -65,7 +65,7 @@ connected-parameter preflight 会具化 heap-owned context 和 move-only
 `ReadyTaskSubmission`，因此没有 stack `TaskExecutor*` 跨越 service 边界。三条私有 route 都使用
 同一条 ready-store、policy、reserved-start、Run-lease 与 completion path。
 
-Route-aware planning 会在准入前冻结选中的 implementation 与 `Device`。`cpu` 和
+Route-aware planning 会在准入前冻结选中的 implementation 与 `DeviceBackend`。`cpu` 和
 `serial_debug` 只暴露 CPU；固定 registry 包含 Metal executor 时，`gpu_pipeline` 依次暴露
 Metal、CPU，否则只暴露 CPU。CPU 与 Metal submission 进入彼此独立的固定 lane，但共用 Run grant
 与 maximum-parallelism ceiling。Reserved start 后，Metal submission 会同步进入该 registry
@@ -356,10 +356,16 @@ child grant。Service 从 general admission ceiling 中减去配置的 interacti
 active Throughput root reservation 计入该 ceiling。Interactive Run 不会扣减这项 class quota，但
 每个 reservation 与 grant 仍必须由 ledger 授权，ledger 也仍是唯一物理容量 authority。
 
-Device allocation 在同一个 root mutex 下遵循独立的两阶段事务。`try_reserve_device()` 对一个精确的
-已配置 device 准入完整 memory/scratch plan，或者什么也不准入。Metal 会在 allocation 前根据
-native heap size/alignment query 得到该 plan，审计每个 allocation 的 `allocatedSize`，并在
-command submission 前提交 actual byte。未使用的 planned byte 会立即归还。得到的 memory lease
+Device allocation 在 ledger 的唯一 root mutex 下遵循独立的两阶段事务。对于 dedicated Metal
+heap，native texture size/alignment query 只提供对齐后的 descriptor minimum，不是 backing
+allocation 的上界。在第一项 native allocation 前，
+`try_reserve_device_with_memory_ceiling()` 会原子校验该 minimum 与精确 scratch plan，然后预留
+该确切 configured device 当前全部可用的 persistent-memory capacity。Native allocation fact
+出现后，heap 的正值 `currentAllocatedSize` 是唯一 persistent actual；不会再加上其 texture
+suballocation，而每项 scratch resource 都贡献自己的正值 `allocatedSize`。适配 plan 的 actual
+commit 会在同一套唯一 mutex 下归还每个未使用的 planned byte，并在 command submission 前拆分
+精确 memory/scratch lease。无效或超过 plan 的 actual fact 会产生 typed failure，退役局部 native
+owner，并让尚未 commit 的 reservation 准确 rollback 一次，且不发布 lease。得到的 memory lease
 会随 type-erased native `Value` owner 跨副本与 residency 延续，而 scratch lease 会随精确的
 command-completion owner 延续。两种 lease 都不以 Run 为作用域，而且任何 device account 都不能
 借用 Host 或其他 device 的容量。Queue 与 pipeline-cache 基础设施仍不属于这些 per-invocation

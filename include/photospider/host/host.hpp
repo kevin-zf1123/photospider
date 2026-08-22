@@ -10,12 +10,12 @@
 #include <vector>
 
 #include "photospider/core/export.hpp"
-#include "photospider/core/image_buffer.hpp"
 #include "photospider/core/inspection_types.hpp"
 #include "photospider/core/result_types.hpp"
 #include "photospider/host/compute_request.hpp"
 #include "photospider/host/event_stream.hpp"
 #include "photospider/host/graph_session.hpp"
+#include "photospider/host/value_result.hpp"
 
 /**
  * @file host.hpp
@@ -539,34 +539,29 @@ class PHOTOSPIDER_API Host {
       HostComputeRequest request) = 0;
 
   /**
-   * @brief Computes one node and returns an image snapshot descriptor.
+   * @brief Computes one node and returns its exact named immutable Values.
    *
    * @param request Host compute request.
-   * @return ImageBuffer descriptor on success, an ok empty descriptor when the
-   *         compute succeeds without image output, `GraphErrc::NotFound` when
-   *         the graph session is missing or closed, or a compute failure status
-   *         for existing sessions. A present zero `maximum_parallelism`
-   *         returns `GraphErrc::InvalidParameter` before session access.
-   * @throws std::bad_alloc if request processing, compute/image execution,
-   *         backend-to-status translation, or copied result construction
+   * @return Canonically name-ordered Values on success, including a valid empty
+   *         collection when the node declares no Value outputs;
+   *         `GraphErrc::NotFound` when the graph session is missing or closed;
+   *         or the exact compute failure status for an existing session. A
+   *         present zero `maximum_parallelism` returns
+   *         `GraphErrc::InvalidParameter` before session access.
+   * @throws std::bad_alloc if request processing, compute execution, Value
+   *         retention, backend-to-status translation, or result construction
    *         exhausts memory.
    * @throws std::system_error if IPC polling mutex or condition-variable
    *         operations fail.
-   * @note The embedded adapter admits the complete image compute and result
-   *       mapping against concurrent close, checks session existence before
-   *       dispatch, and consults LastError only to distinguish handled failure
-   *       from successful empty output.
-   * @note Backend GraphError classifications such as `GraphErrc::NoOperation`
-   *       are preserved when image compute fails after session validation, and
-   *       successful backend image memory is cloned into the public descriptor.
-   * @note Callers must treat the returned payload as a read-only snapshot
-   *       unless they own an adapter-specific writable contract. The IPC Host
-   *       returns tight rows over a page-aligned-base
-   *       `PROT_READ|MAP_PRIVATE` mapping; only its base is page aligned, so
-   *       later row starts need not satisfy the kernel-owned 64-byte alignment
-   *       contract. Copies share that mapping until the final reference.
+   * @note The embedded adapter retains the exact immutable publications. The
+   *       IPC adapter reconstructs fresh local Values only after complete
+   *       framing, payload-digest, descriptor/Facet/Layout, and local
+   *       publication validation. Runtime allocation, producer, fence,
+   *       binding, provider owner, and revision identities never cross IPC.
+   * @note `NamedValueResult::inspect()` is the payload-free metadata path; it
+   *       performs no wait, map, transfer, lease acquisition, or payload read.
    */
-  virtual Result<ImageBuffer> compute_and_get_image(
+  virtual Result<NamedValueResult> compute_and_get_values(
       const HostComputeRequest& request) = 0;
 
   /**
@@ -914,7 +909,9 @@ class PHOTOSPIDER_API Host {
    * @brief Clears all cache layers for a session.
    *
    * @param session Session whose caches should be cleared.
-   * @return Success or `GraphErrc::NotFound` for a missing or closing session.
+   * @return Success, `GraphErrc::NotFound` for a missing/closing session, or
+   * `GraphErrc::InvalidParameter` when the backend rejects a nonempty-root
+   * Windows GraphCache disk request before either cache layer changes.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note This mirrors the existing `clear-cache all` behavior. The embedded
@@ -928,7 +925,8 @@ class PHOTOSPIDER_API Host {
    * @brief Clears disk cache for a session.
    *
    * @param session Session whose disk cache should be cleared.
-   * @return Success or failure status.
+   * @return Success or failure status; a backend without GraphCache disk
+   * persistence reports `GraphErrc::InvalidParameter` before mutation.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note The first Host slice returns status only; detailed cache counts can
@@ -952,7 +950,9 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session whose nodes should be cached.
    * @param precision Cache precision label.
-   * @return Success or failure status.
+   * @return Success or failure status; a backend without GraphCache disk
+   * persistence reports `GraphErrc::InvalidParameter` before codec, executor,
+   * or cache effects for a nonempty root.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note Precision semantics are backend-defined and match existing CLI
@@ -977,7 +977,9 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session whose cache should be synchronized.
    * @param precision Cache precision label.
-   * @return Success or failure status.
+   * @return Success or failure status; a backend without GraphCache disk
+   * persistence reports `GraphErrc::InvalidParameter` before save, cleanup,
+   * or diagnostic effects for a nonempty root.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note The first Host slice returns status only.

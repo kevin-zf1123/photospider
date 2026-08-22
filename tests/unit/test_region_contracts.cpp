@@ -78,6 +78,33 @@ Value make_region_rank_four_tensor() {
 }
 
 /**
+ * @brief Creates a legal DenseImage whose width exceeds PixelSize.
+ *
+ * @return Rank-three unsigned-8 image with width `INT_MAX + 1`, zero strides,
+ *         and a one-byte immutable backing allocation.
+ * @throws std::invalid_argument, std::overflow_error, or std::bad_alloc from
+ *         descriptor, facet, layout, or Value validation.
+ * @note Every logical element aliases the same retained byte. This keeps the
+ *       fixture deterministic while proving ImageView preserves its size_t
+ *       extent beyond the current signed-int planning boundary.
+ */
+Value make_region_oversized_zero_stride_image() {
+  const std::size_t oversized_extent =
+      static_cast<std::size_t>(std::numeric_limits<int>::max()) + 1U;
+  const Value storage = Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{{1U},
+                            ElementSemantics::UnsignedInteger,
+                            StorageEncoding{8U}},
+      std::nullopt, StridedLayout{{1}}, {std::byte{7U}});
+  const DenseTensorDescriptor descriptor{{1U, oversized_extent, 1U},
+                                         ElementSemantics::UnsignedInteger,
+                                         StorageEncoding{8U}};
+  const ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  return Value::from_cpu_dense_tensor(
+      descriptor, image, StridedLayout{{0, 0, 0}}, storage.buffer_handle());
+}
+
+/**
  * @brief Returns complete validity for make_region_rank_four_tensor().
  * @return Exact rank-four TensorSlice covering shape `[1,3,4,3]`.
  * @throws std::bad_alloc when Region storage cannot allocate.
@@ -230,6 +257,55 @@ TEST(RegionContract, IntersectsAndClipsImageRectExactly) {
   ASSERT_EQ(clipped.region()->atoms().size(), 1U);
   EXPECT_EQ(std::get<ImageRect>(clipped.region()->atoms().front()),
             (ImageRect{image_region_domain(), 0, 8, 2, 6}));
+}
+
+/**
+ * @brief Verifies checked translation between signed logical image coordinates
+ * and zero-based storage PixelRects, including finite sentinel semantics.
+ *
+ * @return Nothing; GoogleTest reports translation and fail-closed behavior.
+ * @throws Region allocation exceptions only if fixture construction fails.
+ * @note Empty stays empty, Whole uses the explicit finite data window, partial
+ * logical overlap clips before origin subtraction, and unrepresentable bounds
+ * never produce a compatibility rectangle.
+ */
+TEST(RegionImageAdapter,
+     TranslatesSignedDataWindowAndPreservesEmptyWholeBoundaries) {
+  const ImageBounds bounds{-10, -20, 6, 12};
+  const PixelRect storage_roi{3, 4, 5, 6};
+  const RegionSet logical =
+      region_image_adapter::from_storage_pixel_rect(storage_roi, bounds);
+  EXPECT_EQ(logical, RegionSet::from_image_rect(
+                         {image_region_domain(), -7, -2, -16, -10}));
+  EXPECT_EQ(region_image_adapter::to_storage_pixel_rect(logical, bounds),
+            storage_roi);
+
+  EXPECT_TRUE(region_image_adapter::from_storage_pixel_rect(PixelRect{}, bounds)
+                  .is_empty());
+  EXPECT_EQ(
+      region_image_adapter::to_storage_pixel_rect(RegionSet::empty(), bounds),
+      PixelRect{});
+  EXPECT_EQ(
+      region_image_adapter::to_storage_pixel_rect(RegionSet::whole(), bounds),
+      (PixelRect{0, 0, 16, 32}));
+  const RegionSet partially_outside =
+      RegionSet::from_image_rect({image_region_domain(), -30, -6, -25, -15});
+  EXPECT_EQ(
+      region_image_adapter::to_storage_pixel_rect(partially_outside, bounds),
+      (PixelRect{0, 0, 4, 5}));
+
+  EXPECT_THROW(region_image_adapter::from_storage_pixel_rect(
+                   (PixelRect{15, 0, 2, 1}), bounds),
+               std::invalid_argument);
+  EXPECT_THROW(
+      region_image_adapter::to_storage_pixel_rect(
+          RegionSet::from_image_rect({{77U, 1U}, -7, -2, -16, -10}), bounds),
+      std::invalid_argument);
+  EXPECT_THROW(
+      region_image_adapter::to_storage_pixel_rect(
+          logical, ImageBounds{std::numeric_limits<std::int64_t>::min(), 0,
+                               std::numeric_limits<std::int64_t>::max(), 1}),
+      std::overflow_error);
 }
 
 TEST(RegionContract, CanonicalizesDisjointIntersectionsToEmpty) {
@@ -563,18 +639,19 @@ TEST_F(RegionRouteSelection,
   OpMetadata gpu_metadata;
   gpu_metadata.cost_score = 1;
   OpRegistry::instance().register_impl(
-      "image_process", "invert_dense", Device::GPU_METAL,
+      "image_process", "invert_dense", DeviceBackend::Metal,
       MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&) {
         return NodeOutput{};
       }),
       gpu_metadata);
-  const std::vector<Device> routed_devices{Device::GPU_METAL, Device::CPU};
+  const std::vector<DeviceBackend> routed_devices{DeviceBackend::Metal,
+                                                  DeviceBackend::CPU};
   const auto selected = OpRegistry::instance().select_implementation(
       "image_process", "invert_dense", routed_devices,
       ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(selected.has_value());
   ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(selected->func));
-  EXPECT_EQ(selected->metadata.device_preference, Device::GPU_METAL);
+  EXPECT_EQ(selected->metadata.device_preference, DeviceBackend::Metal);
   EXPECT_FALSE(ops::find_core_region_monolithic_operation(
                    "image_process", "invert_dense",
                    std::get<MonolithicOpFunc>(selected->func))
@@ -583,8 +660,8 @@ TEST_F(RegionRouteSelection,
   GraphModel graph("");
   Node source = make_region_source(1);
   source.cached_output_high_precision = NodeOutput{};
-  source.cached_output_high_precision->image_value =
-      make_region_rank_four_tensor();
+  source.cached_output_high_precision->publish_image_value(
+      make_region_rank_four_tensor());
   source.hp_region = full_region_rank_four_tensor();
   graph.add_node(std::move(source));
   graph.add_node(make_region_child(2, 1, "invert_dense"));
@@ -629,17 +706,18 @@ TEST_F(RegionRouteSelection, UsesRequestIntentWhenSelectingTensorIdentity) {
   OpMetadata cpu_metadata;
   cpu_metadata.cost_score = 1;
   OpRegistry::instance().register_impl("image_process", "invert_dense",
-                                       Device::CPU, core_operation_,
+                                       DeviceBackend::CPU, core_operation_,
                                        cpu_metadata);
   OpMetadata accelerator_metadata;
   accelerator_metadata.cost_score = 100;
   OpRegistry::instance().register_impl(
-      "image_process", "invert_dense", Device::ASIC_NPU,
+      "image_process", "invert_dense", DeviceBackend::NPU,
       MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&) {
         return NodeOutput{};
       }),
       accelerator_metadata);
-  const std::vector<Device> routed_devices{Device::CPU, Device::ASIC_NPU};
+  const std::vector<DeviceBackend> routed_devices{DeviceBackend::CPU,
+                                                  DeviceBackend::NPU};
   const auto hp_selected = OpRegistry::instance().select_implementation(
       "image_process", "invert_dense", routed_devices,
       ComputeIntent::GlobalHighPrecision);
@@ -650,8 +728,8 @@ TEST_F(RegionRouteSelection, UsesRequestIntentWhenSelectingTensorIdentity) {
   ASSERT_TRUE(rt_selected.has_value());
   ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(hp_selected->func));
   ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(rt_selected->func));
-  EXPECT_EQ(hp_selected->metadata.device_preference, Device::ASIC_NPU);
-  EXPECT_EQ(rt_selected->metadata.device_preference, Device::CPU);
+  EXPECT_EQ(hp_selected->metadata.device_preference, DeviceBackend::NPU);
+  EXPECT_EQ(rt_selected->metadata.device_preference, DeviceBackend::CPU);
   EXPECT_FALSE(ops::find_core_region_monolithic_operation(
                    "image_process", "invert_dense",
                    std::get<MonolithicOpFunc>(hp_selected->func))
@@ -728,8 +806,8 @@ TEST(RegionPlanning, ClipsRankGeneralTensorAndRejectsRtProjection) {
   GraphModel graph("");
   Node source = make_region_source(1);
   source.cached_output_high_precision = NodeOutput{};
-  source.cached_output_high_precision->image_value =
-      make_region_rank_four_tensor();
+  source.cached_output_high_precision->publish_image_value(
+      make_region_rank_four_tensor());
   source.hp_region = full_region_rank_four_tensor();
   graph.add_node(std::move(source));
   graph.add_node(make_region_child(2, 1, "invert_dense"));
@@ -786,13 +864,87 @@ TEST(RegionPlanning, ClipsRankGeneralTensorAndRejectsRtProjection) {
   EXPECT_THROW(planner.plan_real_time(graph, 2, requested), GraphError);
 }
 
+/**
+ * @brief Proves TensorSlice planning rejects an unrepresentable image extent.
+ *
+ * @return Nothing; GoogleTest reports the exception or Graph-state mutation.
+ * @throws GraphError, std::invalid_argument, std::overflow_error, or
+ *         std::bad_alloc if fixture or graph setup fails before the expected
+ *         planner rejection is inspected.
+ * @note The planner must fail before allocating another dirty generation or
+ *       changing the previously published last/recent lifecycle snapshots.
+ */
+TEST(RegionPlanning,
+     RejectsOversizedTensorImageExtentBeforePlannerStateMutation) {
+  ops::register_core_operations();
+  GraphModel graph("");
+  Node target;
+  target.id = 1;
+  target.name = "oversized_tensor_image";
+  target.type = "image_process";
+  target.subtype = "invert_dense";
+  target.cached_output_high_precision = NodeOutput{};
+  target.cached_output_high_precision->publish_image_value(
+      make_region_oversized_zero_stride_image());
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  RoiPropagationService propagation;
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+  const RegionSet requested = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 1U}, {0U, 1U}, {0U, 1U}}});
+  const compute::DirtyRegionSnapshot seeded = planner.begin_dirty_source(
+      graph, 1, compute::DirtyDomain::HighPrecision, requested);
+  const std::uint64_t generation_before = graph.dirty_generation_counter;
+  const std::optional<std::string> debug_before =
+      graph.last_dirty_region_snapshot_debug;
+  const std::size_t recent_size_before =
+      graph.recent_dirty_region_snapshots.size();
+  const std::string last_snapshot_before =
+      compute::DirtyRegionPlanner::describe_snapshot(seeded);
+  const std::string recent_snapshot_before =
+      compute::DirtyRegionPlanner::describe_snapshot(
+          graph.recent_dirty_region_snapshots.back());
+
+  bool rejected = false;
+  try {
+    (void)planner.plan_high_precision(graph, 1, requested);
+  } catch (const GraphError& error) {
+    rejected = true;
+    EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+    EXPECT_STREQ(error.what(),
+                 "TensorSlice planning image extent exceeds PixelSize for "
+                 "node 1.");
+  }
+
+  EXPECT_TRUE(rejected)
+      << "Oversized ImageView extent must fail before PixelSize narrowing";
+  EXPECT_EQ(graph.dirty_generation_counter, generation_before);
+  EXPECT_EQ(graph.last_dirty_region_snapshot_debug, debug_before);
+  ASSERT_TRUE(graph.last_dirty_region_snapshot.has_value());
+  EXPECT_EQ(compute::DirtyRegionPlanner::describe_snapshot(
+                *graph.last_dirty_region_snapshot),
+            last_snapshot_before);
+  ASSERT_EQ(graph.recent_dirty_region_snapshots.size(), recent_size_before);
+  EXPECT_EQ(compute::DirtyRegionPlanner::describe_snapshot(
+                graph.recent_dirty_region_snapshots.back()),
+            recent_snapshot_before);
+  ASSERT_EQ(
+      graph.last_dirty_region_snapshot->source_region_records.at(1).size(), 1U);
+  EXPECT_EQ(graph.last_dirty_region_snapshot->source_region_records.at(1)
+                .front()
+                .source_region,
+            requested);
+}
+
 TEST(RegionPlanning, RejectsRankMismatchAndMissingTensorContract) {
   ops::register_core_operations();
   GraphModel graph("");
   Node source = make_region_source(1);
   source.cached_output_high_precision = NodeOutput{};
-  source.cached_output_high_precision->image_value =
-      make_region_rank_four_tensor();
+  source.cached_output_high_precision->publish_image_value(
+      make_region_rank_four_tensor());
   source.hp_region = full_region_rank_four_tensor();
   graph.add_node(std::move(source));
   graph.add_node(make_region_child(2, 1, "invert_dense"));
@@ -819,8 +971,8 @@ TEST(RegionLifecycle, RetainsTensorSourceFactsWithoutPixelProjection) {
   GraphModel graph("");
   Node source = make_region_source(1);
   source.cached_output_high_precision = NodeOutput{};
-  source.cached_output_high_precision->image_value =
-      make_region_rank_four_tensor();
+  source.cached_output_high_precision->publish_image_value(
+      make_region_rank_four_tensor());
   source.hp_region = full_region_rank_four_tensor();
   graph.add_node(std::move(source));
   graph.add_node(make_region_child(2, 1, "invert_dense"));

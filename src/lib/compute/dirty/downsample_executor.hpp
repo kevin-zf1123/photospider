@@ -18,11 +18,13 @@ class ComputeRunLease;
  * @brief Refreshes real-time proxy buffers from committed HP dirty outputs.
  *
  * DownsampleExecutor owns the HP-to-RT refresh that follows high-precision
- * dirty execution when a GraphRuntime is present. Each request records the HP
- * ROI and HP version committed for a node. Execution skips stale requests,
- * allocates or reuses proxy buffers, copies non-image payloads, and records the
- * same downsample/downsample_passthrough events used before the dirty executor
- * split.
+ * dirty execution when a GraphRuntime is present. Each request records the
+ * signed logical HP Region and HP version committed for a node. Execution
+ * translates that Region through the current HP data-window origin only at the
+ * image Value boundary, skips stale requests, creates a fresh Host binding,
+ * copies prior immutable RT bytes when valid, downsamples through a checked
+ * grant, seals a transient Value, and records the same events used before the
+ * dirty executor split.
  *
  * @note Instances borrow GraphModel, RealtimeProxyGraph, GraphRuntime, and
  * GraphEventService for a single call chain. RT output is committed only to the
@@ -36,6 +38,7 @@ class DownsampleExecutor {
   /**
    * @brief One pending HP-to-RT refresh request.
    *
+   * @throws std::bad_alloc when copied Region storage cannot allocate.
    * @note hp_version is compared against the node's current HP and RT versions
    * to avoid overwriting newer proxy state with stale downsample work.
    */
@@ -43,8 +46,8 @@ class DownsampleExecutor {
     /** @brief Node whose HP output should refresh the RT proxy. */
     int node_id = -1;
 
-    /** @brief HP-space region that changed during dirty execution. */
-    PixelRect roi_hp;
+    /** @brief Signed logical HP Region changed during dirty execution. */
+    RegionSet region_hp = RegionSet::empty();
 
     /** @brief HP version captured after the dirty node update. */
     int hp_version = 0;
@@ -112,16 +115,20 @@ class DownsampleExecutor {
   Node* find_current_node(const Request& request);
 
   /**
-   * @brief Clips the HP request ROI to the HP output extent.
+   * @brief Translates and clips one logical HP request to storage coordinates.
    *
-   * @param request_roi HP-space ROI from the dirty update.
-   * @param hp_size HP output extent.
-   * @return Clipped ROI, or full output when the requested ROI is empty.
-   * @throws Nothing directly.
+   * @param request_region Signed logical HP Region from the dirty update.
+   * @param hp_bounds Current signed HP data window.
+   * @param hp_size Zero-based HP storage extent matching hp_bounds.
+   * @return Clipped zero-based storage ROI, or full output when the requested
+   * Region is Empty or clips to no pixels.
+   * @throws std::invalid_argument for unsupported Region/domain/bounds facts.
+   * @throws std::overflow_error when origin translation cannot fit PixelRect.
    * @note Empty HP outputs remain empty so passthrough payloads keep their
-   * previous metadata behavior.
+   * previous metadata behavior. Whole maps to the full finite data window.
    */
-  PixelRect normalize_hp_roi(const PixelRect& request_roi,
+  PixelRect normalize_hp_roi(const RegionSet& request_region,
+                             const ImageBounds& hp_bounds,
                              const PixelSize& hp_size) const;
 
   /**
@@ -129,8 +136,7 @@ class DownsampleExecutor {
    *
    * @param node Node whose HP output is copied.
    * @param proxy_state Proxy node state receiving RT output and metadata.
-   * @param roi_hp HP-space region represented by the update.
-   * @param hp_size HP output extent used to merge RT ROI metadata.
+   * @param region_hp Signed logical HP Region represented by the update.
    * @param hp_version HP version that becomes the RT version.
    * @throws std::bad_alloc if optional cache assignment allocates.
    * @note This path handles empty image buffers, zero-sized RT proxy extents,
@@ -139,37 +145,23 @@ class DownsampleExecutor {
    * extent.
    */
   void apply_passthrough(Node& node, RealtimeProxyGraph::NodeState& proxy_state,
-                         const PixelRect& roi_hp, const PixelSize& hp_size,
-                         int hp_version);
+                         const RegionSet& region_hp, int hp_version);
 
   /**
-   * @brief Ensures the RT image buffer matches the downscaled HP image shape.
+   * @brief Downsamples one HP ROI through a checked RT output grant.
    *
-   * @param proxy_state Proxy node state whose RT buffer is allocated.
-   * @param hp_buffer Source HP image buffer.
-   * @param rt_size Downscaled RT image extent.
-   * @return Mutable RT image buffer with matching dimensions and format.
-   * @throws GraphError or std::bad_alloc if allocation fails.
-   * @note Existing proxy payload data map is preserved by reusing NodeOutput.
-   */
-  ImageBuffer& ensure_rt_buffer(RealtimeProxyGraph::NodeState& proxy_state,
-                                const ImageBuffer& hp_buffer,
-                                const PixelSize& rt_size);
-
-  /**
-   * @brief Downsamples one HP ROI into the matching RT ROI.
-   *
-   * @param hp_buffer Source HP image buffer.
-   * @param rt_buffer Destination RT image buffer.
-   * @param roi_hp HP-space ROI to resize.
+   * @param hp_value Source HP ordinary image Value.
+   * @param output_binding Fresh Host RT output binding.
+   * @param roi_hp Zero-based HP storage ROI to resize.
    * @param rt_size Full RT image extent.
    * @return RT-space ROI that received the resized pixels.
-   * @throws OpenCV exceptions from Mat conversion, ROI slicing, resize, or
-   * copy.
-   * @note Empty RT ROI is widened to the full RT extent, matching previous
-   * dirty downsample behavior.
+   * @throws OpenCV, validation, allocation, or grant exceptions from scratch
+   * resize and checked row publication.
+   * @note Empty RT ROI is widened to the full RT extent. The binding is the
+   * only mutable output and the caller seals it after successful retirement.
    */
-  PixelRect downsample_roi(const ImageBuffer& hp_buffer, ImageBuffer& rt_buffer,
+  PixelRect downsample_roi(const Value& hp_value,
+                           HostOutputBinding& output_binding,
                            const PixelRect& roi_hp,
                            const PixelSize& rt_size) const;
 
@@ -177,9 +169,8 @@ class DownsampleExecutor {
    * @brief Updates RT ROI/version metadata after a successful image refresh.
    *
    * @param proxy_state Proxy node state whose Region metadata is updated.
-   * @param roi_hp Checked HP-space image ROI represented by the RT update.
-   * @param hp_size Retained current-boundary extent parameter; the planner has
-   *        already clipped roi_hp to this extent.
+   * @param region_hp Checked signed logical HP Region represented by the RT
+   * update.
    * @param hp_version HP version copied into RT metadata.
    * @throws std::bad_alloc when Region construction or algebra allocates.
    * @note Exact representable validity is merged. A non-representable union
@@ -187,8 +178,7 @@ class DownsampleExecutor {
    *       authorizes a bounding superset.
    */
   void commit_rt_metadata(RealtimeProxyGraph::NodeState& proxy_state,
-                          const PixelRect& roi_hp, const PixelSize& hp_size,
-                          int hp_version);
+                          const RegionSet& region_hp, int hp_version);
 
   /**
    * @brief Emits a stale-generation execution trace event when possible.

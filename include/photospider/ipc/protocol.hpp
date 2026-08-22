@@ -7,8 +7,8 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/core/image_buffer.hpp"
 #include "photospider/core/result_types.hpp"
+#include "photospider/data/value_artifact.hpp"
 #include "photospider/host/compute_request.hpp"
 
 /**
@@ -136,11 +136,11 @@ struct ComputeRequestId {
 };
 
 /**
- * @brief Opaque identity of one protected daemon image artifact.
+ * @brief Opaque identity of one protected daemon Value artifact set.
  *
  * @throws std::bad_alloc when copied or mutated storage cannot be allocated.
  * @note This id names daemon-owned output-store state; it is not a backend
- *       cache key, filesystem path, or image-library handle.
+ *       cache key, filesystem path, or native-library handle.
  */
 struct OutputArtifactId {
   /** @brief Opaque output identifier copied from validated result metadata. */
@@ -164,16 +164,16 @@ struct DeliveryLeaseId {
  * @brief Selects the result retained for one polling compute job.
  *
  * @throws Nothing.
- * @note Status jobs invoke the daemon Host status compute path. Image jobs
- *       invoke the Host image compute path exactly once and may publish one
- *       protected artifact after terminal success.
+ * @note Status jobs invoke the daemon Host status compute path. Values jobs
+ *       invoke the Host named-Value compute path exactly once and may publish
+ *       one protected complete artifact set after terminal success.
  */
 enum class ComputeResultMode {
   /** @brief Retain only the exact terminal operation status. */
   Status,
 
-  /** @brief Retain an optional protected image artifact after success. */
-  Image,
+  /** @brief Retain an optional protected named-Value artifact set. */
+  Values,
 };
 
 /**
@@ -236,19 +236,19 @@ struct ComputeSubmitRequest {
   /** @brief Optional HP-space dirty ROI for intent-aware compute. */
   std::optional<PixelRect> dirty_roi;
 
-  /** @brief Status-only or protected-image result selection. */
+  /** @brief Status-only or protected named-Value result selection. */
   ComputeResultMode result_mode = ComputeResultMode::Status;
 };
 
 /**
- * @brief Immutable metadata for one protected tight-row CPU image artifact.
+ * @brief Immutable metadata for one protected named-Value artifact archive.
  *
  * @throws std::bad_alloc when copied path or identifier storage cannot be
  *         allocated.
- * @note The value contains no pixel bytes, descriptor, mutable mapping,
- *       backend cache path, or image-library object. An IPC Host consumer owns
- *       protected opening and image lifetime while the associated delivery
- *       lease protects result-to-open.
+ * @note The value contains no payload bytes, descriptor, mutable mapping,
+ *       runtime binding, or native object. An IPC Host consumer owns protected
+ *       opening and complete local reconstruction while the associated
+ *       delivery lease protects result-to-open.
  */
 struct OutputArtifactMetadata {
   /** @brief Stable daemon artifact identity. */
@@ -257,26 +257,17 @@ struct OutputArtifactMetadata {
   /** @brief Absolute protected artifact path advertised by the daemon. */
   std::string path;
 
-  /** @brief Image width in pixels. */
-  int width = 0;
-
-  /** @brief Image height in pixels. */
-  int height = 0;
-
-  /** @brief Number of tightly interleaved channels per pixel. */
-  int channels = 0;
-
-  /** @brief Validated channel scalar type. */
-  DataType data_type = DataType::FLOAT32;
-
-  /** @brief Materialized memory domain; version 2 requires CPU. */
-  Device device = Device::CPU;
-
-  /** @brief Exact tight row width in bytes. */
-  std::size_t row_step = 0;
-
   /** @brief Exact regular-file byte size. */
   std::size_t byte_size = 0;
+
+  /** @brief SHA-256 identity of the complete exact archive bytes. */
+  ArtifactPayloadDigest digest;
+
+  /** @brief Exact named-artifact-set archive structural version. */
+  std::uint32_t archive_version = 1U;
+
+  /** @brief Number of canonical named Values encoded by the archive. */
+  std::uint32_t value_count = 0U;
 
   /** @brief Filesystem device captured at daemon publication. */
   std::uint64_t filesystem_device = 0;
@@ -309,7 +300,7 @@ struct OutputArtifactDelivery {
  *         or optional value storage cannot be allocated.
  * @note `status` is absent for Queued/Running and present for both terminal
  *       states. `output` is present only for a successful terminal nonempty
- *       image result; status polling and submission never publish it.
+ *       named-Value result; status polling and submission never publish it.
  */
 struct ComputeJobSnapshot {
   /** @brief Opaque identity of the accepted job. */

@@ -14,15 +14,22 @@ namespace ps {
 /**
  * @brief Retaining read-only image view over one DenseTensor Value.
  *
- * ImageView requires an explicit ImageFacet, rejects guessed axes, and derives
- * every address from the validated tensor layout. Axes not named by the facet
- * must be singleton in V-2.
+ * ImageView requires an explicit complete ImageFacet, rejects guessed axes,
+ * and derives every address from the validated tensor layout. Axes not named
+ * by the facet must be singleton in V-2. Zero-based storage coordinates and
+ * signed logical data-window coordinates are separate checked APIs.
  *
  * @throws std::invalid_argument when construction receives an invalid or
  *         non-image Value.
- * @note Width, height, and channel count are bounded to the current
- *       ImageBuffer adapter's positive int domain for this implementation
- *       slice. No mutable access, color role, or channel role is implied.
+ * @throws ReadyFenceAccessError when construction receives a Value whose
+ *         producer has not completed successfully.
+ * @throws BufferAccessError when construction receives a Value without a
+ *         host-readable binding.
+ * @throws std::bad_alloc when owned image metadata cannot be copied.
+ * @note Logical extents follow the validated tensor and signed data window;
+ *       narrower provider limits are enforced only by those explicit
+ *       adapters. No mutable access or semantic conversion is
+ *       implied.
  */
 class ImageView final {
  public:
@@ -30,8 +37,13 @@ class ImageView final {
    * @brief Retains and validates one Value-backed image.
    *
    * @param value CPU DenseTensor Value with an explicit valid ImageFacet.
-   * @throws std::invalid_argument for a missing facet, non-singleton unassigned
-   *         axes, or extents outside the current image-adapter domain.
+   * @throws std::invalid_argument for a missing facet or non-singleton
+   *         unassigned axes.
+   * @throws ReadyFenceAccessError when the Value producer has not completed
+   *         successfully.
+   * @throws BufferAccessError when the Value has no host-readable binding.
+   * @throws std::bad_alloc when copying the complete ImageFacet cannot
+   *         allocate owned metadata storage.
    * @note Descriptor, facet, layout, and byte-envelope validation has already
    *       completed at Value publication.
    */
@@ -41,43 +53,45 @@ class ImageView final {
    * @brief Copies an image view retaining the same immutable Value.
    *
    * @param other Valid image view whose retained Value and image metadata are
-   *        shared or copied.
-   * @throws Nothing.
+   *        shared and copied, respectively.
+   * @throws std::bad_alloc when copying owned image metadata cannot allocate.
    * @note Both views remain complete, valid, and independently assignable.
    */
-  ImageView(const ImageView& other) noexcept = default;
+  ImageView(const ImageView& other) = default;
 
   /**
    * @brief Copy-assigns another image view's retained Value and metadata.
    *
    * @param other Valid image view replacing the current retained state.
    * @return This complete retaining image view.
-   * @throws Nothing.
-   * @note Both views remain complete and valid, including during
-   *       self-assignment.
+   * @throws std::bad_alloc when staging owned image metadata cannot allocate.
+   * @note Allocation completes before retained state changes, so failure
+   *       leaves the target unchanged. Both views remain complete and valid,
+   *       including during self-assignment.
    */
-  ImageView& operator=(const ImageView& other) noexcept = default;
+  ImageView& operator=(const ImageView& other);
 
   /**
    * @brief Move-constructs an image view without invalidating the source.
    *
    * @param other Valid image view whose retained state is shared or copied.
-   * @throws Nothing.
+   * @throws std::bad_alloc when copying owned image metadata cannot allocate.
    * @note Move is intentionally copy-like because ImageView has no public
    *       invalid state. Source and destination both remain fully readable.
    */
-  ImageView(ImageView&& other) noexcept : ImageView(other) {}
+  ImageView(ImageView&& other) : ImageView(other) {}
 
   /**
    * @brief Move-assigns an image view without invalidating the source.
    *
    * @param other Valid image view replacing the current retained state.
    * @return This complete retaining image view.
-   * @throws Nothing.
+   * @throws std::bad_alloc when staging owned image metadata cannot allocate.
    * @note Move assignment intentionally delegates to copy assignment. Source
-   *       and destination both remain fully readable, including for self-move.
+   *       and destination both remain fully readable, including for self-move;
+   *       allocation failure leaves the destination unchanged.
    */
-  ImageView& operator=(ImageView&& other) noexcept { return *this = other; }
+  ImageView& operator=(ImageView&& other) { return *this = other; }
 
   /**
    * @brief Returns the retained immutable Value.
@@ -96,7 +110,7 @@ class ImageView final {
   const DenseTensorDescriptor& descriptor() const noexcept;
 
   /**
-   * @brief Returns the retained explicit image-axis mapping.
+   * @brief Returns the retained complete ordinary-image interpretation.
    *
    * @return Borrowed validated facet.
    * @throws Nothing.
@@ -169,11 +183,33 @@ class ImageView final {
   const std::byte* channel_data(std::size_t x, std::size_t y,
                                 std::size_t channel) const;
 
+  /**
+   * @brief Returns one channel address by signed logical image coordinates.
+   * @param x Signed x coordinate in `ImageFacet::data_window`.
+   * @param y Signed y coordinate in `ImageFacet::data_window`.
+   * @param channel Zero-based channel coordinate; must be zero when the facet
+   *        has no channel axis.
+   * @return Read-only pointer to the requested element's first byte.
+   * @throws std::out_of_range when x/y are outside the signed data window or
+   *         channel is outside its explicit extent.
+   * @throws std::bad_alloc when temporary full-rank coordinate storage cannot
+   *         allocate.
+   * @note The method subtracts the immutable data-window origin only after
+   *       containment checks, avoiding signed overflow and preserving the
+   *       separate zero-based `channel_data()` storage-index API.
+   */
+  const std::byte* channel_data_at(std::int64_t x, std::int64_t y,
+                                   std::size_t channel) const;
+
  private:
   /** @brief Retaining checked tensor view that owns the Value lifetime. */
   DenseTensorView tensor_;
 
-  /** @brief Explicit validated image-axis assignment. */
+  /**
+   * @brief Owned copy of complete validated ordinary-image metadata.
+   * @note Copy and copy-like move operations may allocate for nested strings
+   *       and vectors.
+   */
   ImageFacet image_facet_;
 
   /** @brief Cached positive x-axis extent. */

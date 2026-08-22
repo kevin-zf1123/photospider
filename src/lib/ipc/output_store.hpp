@@ -12,18 +12,18 @@
 
 #include "ipc/compute_request_registry.hpp"
 #include "ipc/protocol_bounds.hpp"
-#include "photospider/core/image_buffer.hpp"
+#include "photospider/host/value_artifact_result.hpp"
 #include "photospider/ipc/protocol.hpp"
 
 namespace ps::ipc::internal {
 
 /**
- * @brief Immutable metadata for one private tight-row CPU image artifact.
+ * @brief Immutable metadata for one private named-Value artifact archive.
  *
  * @throws std::bad_alloc when copied string storage cannot be allocated.
- * @note The value contains no pixel bytes, backend cache path, descriptor, or
- *       image-library object. Filesystem identity is captured after atomic
- *       publication and revalidated before every delivery.
+ * @note The value contains no payload bytes, runtime binding, descriptor, or
+ *       native object. Filesystem identity is captured after atomic publication
+ *       and revalidated before every delivery.
  */
 struct OutputArtifactMetadata {
   /** @brief Stable 32-lowercase-hex artifact identity. */
@@ -32,26 +32,17 @@ struct OutputArtifactMetadata {
   /** @brief Absolute path below the socket-specific private instance. */
   std::string path;
 
-  /** @brief Image width in pixels. */
-  int width = 0;
-
-  /** @brief Image height in pixels. */
-  int height = 0;
-
-  /** @brief Number of tightly interleaved channels per pixel. */
-  int channels = 0;
-
-  /** @brief Validated channel scalar type. */
-  DataType data_type = DataType::FLOAT32;
-
-  /** @brief Materialized memory domain; always CPU for version one. */
-  Device device = Device::CPU;
-
-  /** @brief Exact tight row width in bytes. */
-  std::size_t row_step = 0;
-
   /** @brief Exact regular-file byte size. */
   std::size_t byte_size = 0;
+
+  /** @brief SHA-256 identity of the complete exact archive bytes. */
+  ArtifactPayloadDigest digest;
+
+  /** @brief Exact named-artifact-set archive structural version. */
+  std::uint32_t archive_version = 1U;
+
+  /** @brief Number of canonical named Values encoded by the archive. */
+  std::uint32_t value_count = 0U;
 
   /** @brief Filesystem device captured from the published regular file. */
   std::uint64_t filesystem_device = 0;
@@ -100,15 +91,16 @@ struct OutputStoreLimits {
 };
 
 /**
- * @brief Private socket-specific secure store for compute image artifacts.
+ * @brief Private socket-specific secure store for compute Value artifacts.
  *
  * Startup validates or creates a same-owner exact-mode `0700` base, removes
  * only recognized safe stale artifacts through directory descriptors, and
  * opens one `instance-<server_instance_id>` child without following symlinks.
- * Publication validates one CPU image, reserves quota transactionally, writes
- * tight rows to a private `0600` file, atomically renames it, revalidates its
- * identity, and only then publishes one job-owned record. Delivery validates
- * live ancestry and file identity before refreshing the stable lease.
+ * Publication captures and validates one complete canonical named-Value set,
+ * reserves quota transactionally, writes its portable archive to a private
+ * `0600` file, atomically renames it, revalidates identity, and only then
+ * publishes one job-owned record. Delivery validates live ancestry and file
+ * identity before refreshing the stable lease.
  *
  * @throws std::bad_alloc when constructor callback or policy storage cannot be
  *         allocated.
@@ -201,11 +193,11 @@ class OutputStore {
   void stop_leases() noexcept;
 
   /**
-   * @brief Materializes one valid image and publishes move-only job ownership.
+   * @brief Materializes one valid Value set and publishes job ownership.
    *
-   * @param compute_id Stable identity of the accepted image job.
-   * @param image Exact result of the single matching Host image compute.
-   * @return Canonical success without ownership for an empty image, success
+   * @param compute_id Stable identity of the accepted Values job.
+   * @param values Exact result of the single matching Host Values compute.
+   * @return Canonical success without ownership for an empty set, success
    *         with ownership for a nonempty artifact, nested daemon
    *         `artifact_limit_exceeded` for quota denial, or nested daemon
    *         `internal_error` for validation/publication failure.
@@ -217,7 +209,7 @@ class OutputStore {
    *       record, or quota reservation remains after any failed return.
    */
   ComputeOutputPublication publish(const ComputeRequestId& compute_id,
-                                   ImageBuffer image);
+                                   NamedValueResult values);
 
   /**
    * @brief Revalidates one job-owned artifact and refreshes its stable lease.
@@ -251,7 +243,7 @@ class OutputStore {
   /**
    * @brief Releases a matching active lease after its job may have disappeared.
    *
-   * @param compute_id Original image-job identity bound at publication.
+   * @param compute_id Original Values-job identity bound at publication.
    * @param delivery_id Stable lease identity returned by delivery.
    * @return True only when an active matching lease was released.
    * @throws Nothing; filesystem failures are contained.
@@ -286,7 +278,7 @@ class OutputStore {
   std::size_t artifact_count() const noexcept;
 
   /**
-   * @brief Returns total quota-accounted tight-row bytes.
+   * @brief Returns total quota-accounted archive bytes.
    * @return Current retained byte count.
    * @throws Nothing.
    */

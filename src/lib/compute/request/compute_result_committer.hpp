@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "compute/dispatch/task_graph_planning.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
@@ -18,7 +19,7 @@ namespace ps::compute {
  *
  * ComputeResultCommitter owns the post-dispatch mutation phase that workers
  * deliberately avoid: timing total calculation, GraphModel high-precision
- * cache updates, CPU image Value normalization, exact full-validity Region
+ * cache updates, named Ready-Value validation, exact full-validity Region
  * derivation, HP version increments, and configured disk cache writes.
  *
  * @note commit() holds the graph mutex while moving temp outputs into node
@@ -57,16 +58,20 @@ class ComputeResultCommitter {
    *
    * @param graph Graph whose high-precision node caches are updated.
    * @param execution_order Dense planned node id order.
+   * @param planned_work Frozen per-node route and output authorities.
    * @param temp_results Temporary outputs aligned with execution_order.
-   * @throws Exceptions from CPU image Value normalization, GraphModel mutation,
+   * @throws GraphError with ComputeError for absent authority, compatibility
+   * staging, an unauthorized name, or an invalid/non-Ready/mismatched Value.
+   * @throws Exceptions from immutable Region derivation, GraphModel mutation,
    * or GraphCacheService writes.
    * @note temp_results values are moved. After commit(), populated slots no
-   * longer own valid output values. CPU normalization completes before the
-   * graph mutex is acquired, so Value/Region allocation does not occur during
-   * publication. Output, version, and Region are then moved into the same
-   * GraphModel runtime-state mutation.
+   * longer own valid output values. Value validation and Region derivation
+   * complete before the graph mutex is acquired; formal commit never imports
+   * or synthesizes a compatibility image. Output, version, and Region are then
+   * moved into the same GraphModel runtime-state mutation.
    */
   void commit(GraphModel& graph, const std::vector<int>& execution_order,
+              const std::vector<PlannedNodeWork>& planned_work,
               std::vector<std::optional<NodeOutput>>& temp_results) const;
 
  private:

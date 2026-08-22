@@ -13,10 +13,11 @@ runs the repository Metal Perlin operation through its owned queue, invocation
 allocator, and pipeline cache. V-8 adds explicit device/binding facts,
 nonblocking access plans, revision-preserving CPU/Metal transfers, exact
 process residency, Run-scoped pending-Value continuations, and stale native
-completion rejection before destination readiness. `ImageBuffer`, `DataType`, `Device`,
-`ParameterMap`, and operation plugin ABI v2 remain compatibility contracts at
-their role-specific edges; the unimplemented portions of this ADR remain
-evolution targets.
+completion rejection before destination readiness. DI-4 removed the former
+`ImageBuffer`, `DataType`, and `Device` compatibility contracts from every
+active edge; `ParameterMap` remains configuration only. Operation plugins use
+the complete pure-C ABI v1.
+The unimplemented portions of this ADR remain evolution targets.
 
 V-9 adds source-private per-device memory/scratch plans, native actual-byte
 reconciliation, and leases following native Value and completion ownership
@@ -42,7 +43,7 @@ injected `DataDefinitionRegistry`, the exact pure-C definition-suite ABI v3,
 pure property/DataSpec/Region evaluation, canonical descriptor/content/layout
 SHA-256 identities, artifact-envelope round-trip, and generation-retaining
 replacement/unload. It intentionally adds no access, conversion, inference,
-execution, codec, OpenEXR, or operation-ABI-v2 replacement suite.
+execution, codec, OpenEXR, or operation-plugin replacement suite.
 
 V-15 adds the optional repository OpenEXR single-part deep-scanline
 provider/codec vertical. It maps explicitly identified, unit-sampled FP32
@@ -54,7 +55,8 @@ validated this bounded slice. Deep tiled, multipart, mixed shallow/deep parts,
 sampled or non-FP32 channels, streaming decode/encode, broader import mapping,
 and public Host/frontend provider selection remain future work. V-15 does not
 add the remaining access/conversion/inference/execution suites, generic
-graph/cache persistence, or operation ABI v2/Host migration.
+graph/cache persistence, or operation-plugin/Host migration; DI-3 later
+implemented the separately scoped operation boundary.
 
 Issue #78 ratified this contract. Issues #79 through #90 delivered the bounded
 V-2 through V-13 implementation and decision slices. Issue #117 implemented the
@@ -67,7 +69,8 @@ records remain the delivery-status authority; this ADR does not claim that PR
 
 ## Context
 
-The current `ImageBuffer` contract is a useful two-dimensional image payload,
+At this decision's starting point, the `ImageBuffer` contract was a useful
+two-dimensional image payload,
 but it cannot be extended into the general graph value model by appending
 fields. Logical meaning, physical storage, device access, readiness, cache
 identity, and region reasoning have different owners and version lifetimes.
@@ -164,6 +167,21 @@ the sealed `Value` generally writable. `ImageView` and `DenseTensorView` are
 checked final facades that retain the complete `Value`. Their construction
 either validates the required Schema and Facets or returns a typed failure.
 They never borrow a naked descriptor or allocation.
+
+DI-2 realizes this rule for dense-image outputs through one immutable
+`DenseImageOutputPlan` and one Host-owned `HostOutputBinding`. The plan freezes
+the exact descriptor, layout, byte envelope, allocation alignment, output name,
+and producer count before execution. The binding alone owns the `ValueBuilder`
+and issues move-only whole-output or tile grants. Grant construction rejects
+empty, overlapping, out-of-bounds, misaligned, or overflowed envelopes before
+exposing writable bytes. A grant retirement is exact and idempotence is not
+inferred: duplicate retirement, sealing with an active or omitted grant, and
+publication after failure are rejected. The final successful retirement makes
+all writes happen-before one seal and one named-`Value` publication; any
+exception, cancellation, abandoned grant, or explicit failure instead revokes
+all grants and preserves one sticky failure. This is the sole internal output
+allocation and publication authority that DI-3 may project into operation ABI
+v1; it is not a compatibility wrapper around `ImageBuffer`.
 
 `StructuredValueSchema` v1 is self-contained. Its descriptor may recursively
 describe fields, but one v1 `Value` does not contain runtime child `Value`
@@ -363,7 +381,7 @@ source readiness and publishes a distinct destination.
 
 The implemented V-7 subset adds a separate source-private
 `DeviceExecutorRegistry` under `ExecutionService`. In the enabled repository
-Metal-plugin profile, its Apple executor owns one native device and queue, one
+Metal-provider profile, its Apple executor owns one native device and queue, one
 callback-scoped texture/buffer allocator, and a validated persistent pipeline
 cache. Reserved-start work invokes the
 Metal Perlin provider inside that borrowed context and returns an independent
@@ -390,13 +408,21 @@ encodes an explicit texture-to-shared-buffer blit, installs the completion
 handler, commits, and returns without `waitUntilCompleted` or `getBytes`.
 V-9 keeps the Host `ResourceVector` unchanged and adds isolated immutable
 memory/scratch accounts for each configured non-CPU `DeviceId`. Perlin and
-CPU-to-Metal upload query native heap size/alignment and reserve their complete
-plans before allocation. They audit `allocatedSize`, return unused plan bytes,
-and commit exact actual bytes before command submission. The memory lease is
-owned by the same type-erased native owner that `BufferHandle` copies and
-residency retains; scratch is owned by the exact completion object until
-terminal native handling. Residency remains a count-bounded retention owner,
-not a byte-budget authority.
+CPU-to-Metal upload treat the native heap size/alignment query as an aligned
+descriptor minimum, never as an upper bound for the dedicated heap backing.
+Before allocation, one ledger root-mutex transaction validates that minimum
+and the exact scratch plan and reserves the device's complete currently
+available persistent-memory ceiling. The dedicated heap's positive
+`currentAllocatedSize` is the sole persistent actual; its texture
+suballocation is not counted again, while each scratch resource contributes
+its own positive `allocatedSize`. A fitting commit under the same sole ledger
+mutex returns unused plan bytes and splits exact actual leases before command
+submission. Invalid or over-plan actual observations fail with a typed error,
+retire local native owners, and roll the uncommitted reservation back exactly
+once. The memory lease is owned by the same type-erased native owner that
+`BufferHandle` copies and residency retains; scratch is owned by the exact
+completion object until terminal native handling. Residency remains a
+count-bounded retention owner, not a byte-budget authority.
 
 The current-generation handoff is staged rather than allocating in the
 coordinator critical section. Kernel pretracks a zero-generation lineage row
@@ -457,9 +483,11 @@ built-in image and dense-tensor domain keys, signed 64-bit `ImageRect`
 intervals, rank-general unsigned 64-bit `TensorSlice` intervals, a hard limit
 of eight atoms in the single nonempty clause, and explicit caller budgets.
 Dirty source facts, per-node affected work, edge mappings, HP/RT validity, and
-the core dense operation retain normalized `RegionSet`. Current image tiling,
-ImageBuffer helpers, Host/IPC inspection, and operation ABI v2 retain checked
-derived `PixelRect` projections. RT is image-only; TensorSlice is HP
+the core dense operation retain normalized `RegionSet`. At the V-4 delivery
+boundary, image tiling, predecessor image helpers, Host/IPC inspection, and
+operation adapters retained checked derived `PixelRect` projections. DI-4
+removed the predecessor image helpers without changing `PixelRect`'s physical-
+geometry role. RT is image-only; TensorSlice is HP
 monolithic work and is never reinterpreted as two-dimensional geometry.
 
 ### DataSpec, capabilities, properties, and output inference
@@ -633,19 +661,31 @@ The final replacement is:
 ImageBuffer     -> Value + ImageFacet + ImageView
 PixelRect       -> RegionSet atom ImageRect
 Device          -> DeviceBackend + DeviceId + MemoryDomain
-OperationOutput -> named Value outputs
+Operation result -> named Value outputs
 ParameterMap    -> configuration only, never a data payload
 ```
 
-Repository-owned operations and providers migrate first. Owned adapters,
-cache, graph documents, Host values, CLI/IPC translation, tests, installed
-consumers, and documentation then migrate in dependency order. Only after all
-owned operation plugins and consumers have the separately versioned pure-C
-operation-plugin ABI v1 replacement accepted by ADR 0012 is operation ABI v2,
-its entry point, SDK, fixtures, and package surface deleted.
+Repository-owned operations and providers migrated first. Owned adapters,
+tests, installed consumers, and documentation then migrated in dependency
+order. DI-3 installed the separately versioned pure-C operation-plugin ABI v1
+accepted by ADR 0012 and deleted the predecessor entry point, SDK, fixtures,
+and package surface in the same breaking change. DI-4 subsequently completed
+the public Host, IPC, worker, durable, codec, and CLI migration and removed the
+former image compatibility type.
+
+The delivered conversion engine preserves same-storage/equal-endpoint 64-bit
+integer identity through type-aware domain checks and native sample copies.
+Non-identity wide-integer affine work fails before arithmetic when the
+platform cannot prove exact source promotion, and destination casts use exact
+open integer bounds. OpenCV encode uses a closed unsigned 8/16-bit
+extension/depth/channel matrix before file mutation; ordinary OpenEXR uses the
+separate UINT32/FP32 path. Durable restart bounds control records and validates
+frozen/archive/quota/exact-length/non-sparse facts before payload allocation.
+The former direct side-effecting `io:save` operation is absent; CLI/cache save
+reuse the configured codec boundary with explicit policy.
 
 The final state has no permanent compatibility wrapper, alias class, duplicate
-old/new API, forwarding header, dual loader, v2-to-v1 shim, or dual
+old/new API, forwarding header, dual loader, predecessor shim, or dual
 descriptor/cache/ABI authority. Temporary edge adaptation may exist only
 inside an explicitly bounded implementation slice and must be deleted by that
 slice's completion boundary.
@@ -725,7 +765,7 @@ visibility, and actual consumer access are different facts.
 Rejected because it loses tensor and sparse logical domains and conceals
 approximation from callers.
 
-### Reuse operation ABI v2 with new C++ Value objects
+### Reuse the provisional C++ operation registration generation with new Value objects
 
 Rejected because a C-linkage entry symbol does not stabilize C++ layout,
 allocators, exceptions, RTTI, standard-library ownership, or toolchain ABI.
@@ -740,7 +780,7 @@ and memory-envelope flaws and would violate the dependency-neutral foundation.
 The following maintained documents remain authoritative for current behavior:
 
 - [Kernel Data Model](../kernel-architecture/Data-Model.md);
-- [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md);
+- [Dense Image Value Memory Contract](../kernel-architecture/Dense-Image-Value-Memory-Contract.md);
 - [Plugin ABI](../kernel-architecture/Plugin-ABI.md); and
 - [Kernel Cache Model](../kernel-architecture/Cache-Model.md).
 
@@ -748,4 +788,9 @@ The [general data and regions roadmap](../roadmap/Kernel-Evolution.md#general-da
 is authoritative for the accepted target and implementation dependency order.
 Live issue and Project state remain authoritative for delivery status. Neither
 this ADR nor the roadmap promotes an unimplemented target object into current
-runtime documentation.
+runtime documentation. The DI-2 output plan, binding, grant, and publication
+authority described above and the DI-3 pure-C operation ABI v1 projection are
+implemented current behavior. DI-4's Host/IPC/worker/durable/cache/codec/CLI
+Value boundaries are also implemented current behavior. Only separately
+scoped future provider suites, broader import policy, and unsupported Deep
+shapes remain later slices.

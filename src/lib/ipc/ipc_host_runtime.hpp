@@ -131,18 +131,19 @@ struct IpcHostRuntimeDependencies {
   std::function<void()> before_async_completion;
 
   /**
-   * @brief Converts one lease-protected artifact into an owned CPU image.
+   * @brief Converts one lease-protected artifact into detached named artifacts.
    *
    * @param metadata Strictly decoded daemon artifact metadata.
-   * @return Read-only mapped image or an exact local Transport/Protocol
+   * @return Decoded artifact set or an exact local Transport/Protocol
    *         failure.
    * @throws std::bad_alloc if failure-status diagnostics or shared mapping
    *         ownership cannot allocate.
    * @note The callback runs while the delivery lease still protects
    *       result-to-open. Production validates same-user file identity and
-   *       returns a shared mapping whose final owner unmaps and closes once.
+   *       copies exact bytes before unmapping and closing once.
    */
-  std::function<Result<ImageBuffer>(const OutputArtifactMetadata& metadata)>
+  std::function<Result<NamedValueArtifactSet>(
+      const OutputArtifactMetadata& metadata)>
       consume_artifact;
 };
 
@@ -150,7 +151,7 @@ struct IpcHostRuntimeDependencies {
  * @brief Validates and maps one lease-protected output artifact read-only.
  * @param metadata Strictly decoded daemon artifact metadata.
  * @param operations Complete nonthrowing POSIX mapping operation table.
- * @return Shared mapped CPU image or an exact local Transport/Protocol failure.
+ * @return Detached decoded artifact set or exact local failure.
  * @throws std::bad_alloc if failure-status diagnostics or shared mapping
  *         ownership cannot allocate.
  * @note This source-tree-private seam exists so lifetime tests can count exact
@@ -158,7 +159,7 @@ struct IpcHostRuntimeDependencies {
  *       installed header. The caller must retain the delivery lease until this
  *       function returns.
  */
-Result<ImageBuffer> consume_artifact_readonly_mapping(
+Result<NamedValueArtifactSet> consume_artifact_readonly_mapping(
     const OutputArtifactMetadata& metadata,
     ArtifactMappingOperations operations);
 
@@ -167,6 +168,7 @@ Result<ImageBuffer> consume_artifact_readonly_mapping(
  *
  * @param socket_path Absolute daemon Unix socket path.
  * @param dependencies Nonempty clock/wait/wake/completion/artifact callbacks.
+ * @param data_definitions Optional local registry for provider reconstruction.
  * @return Unique complete IPC Host implementation.
  * @throws std::invalid_argument if any required callback is absent.
  * @throws std::bad_alloc if adapter allocation or callback transfer fails.
@@ -174,6 +176,7 @@ Result<ImageBuffer> consume_artifact_readonly_mapping(
  *       tests. It performs no daemon connection or embedded fallback.
  */
 std::unique_ptr<Host> create_ipc_host_with_dependencies(
-    const std::string& socket_path, IpcHostRuntimeDependencies dependencies);
+    const std::string& socket_path, IpcHostRuntimeDependencies dependencies,
+    DataDefinitionRegistry* data_definitions = nullptr);
 
 }  // namespace ps::ipc::internal

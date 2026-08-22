@@ -35,6 +35,7 @@
 #include "ipc/codec.hpp"
 #include "ipc/ipc_host_runtime.hpp"
 #include "ipc/unix_socket.hpp"
+#include "photospider/host/value_artifact_result.hpp"
 #include "photospider/ipc/client.hpp"
 
 namespace ps::ipc {
@@ -477,7 +478,7 @@ IpcResult<Value> tracked_value_call(
 /**
  * @brief Copies one Host compute request into an opaque-session submission.
  * @param request Existing public Host request.
- * @param mode Status-only or image result mode.
+ * @param mode Status-only or named-Value result mode.
  * @return Complete typed submission preserving every compute option.
  * @throws std::bad_alloc if copied strings allocate.
  */
@@ -617,7 +618,7 @@ TerminalPollResult poll_to_terminal(
  * @param submitted Original accepted queued snapshot.
  * @param terminal Last terminal status snapshot.
  * @param result Terminal `compute.result` snapshot.
- * @param allow_output Whether image output metadata is valid for this request.
+ * @param allow_output Whether Value output metadata is valid for this request.
  * @return Canonical success or local Protocol failure.
  * @throws std::bad_alloc if failure diagnostics allocate.
  * @note This binds the session omitted from direct Client status/result
@@ -639,7 +640,7 @@ OperationStatus validate_terminal_result(const ComputeJobSnapshot& submitted,
   }
   if (!allow_output && result.output) {
     return invalid_adapter_response(
-        "status compute.result unexpectedly returned image output");
+        "status compute.result unexpectedly returned Value output");
   }
   return internal::ok_status();
 }
@@ -1030,14 +1031,17 @@ class IpcHost final : public Host {
    * @brief Creates one adapter with complete validated dependencies.
    * @param socket_path Absolute daemon socket path retained by value.
    * @param dependencies Clock, waiter, wake, and artifact callbacks.
+   * @param data_definitions Optional local provider-definition registry.
    * @throws std::invalid_argument if any callback is absent.
    * @throws std::bad_alloc if retained state allocation fails.
    */
   IpcHost(std::string socket_path,
-          internal::IpcHostRuntimeDependencies dependencies)
+          internal::IpcHostRuntimeDependencies dependencies,
+          DataDefinitionRegistry* data_definitions)
       : socket_path_(socket_path),
         runtime_(std::make_shared<PollingRuntimeState>(
-            std::move(socket_path), std::move(dependencies))) {
+            std::move(socket_path), std::move(dependencies))),
+        data_definitions_(data_definitions) {
     const internal::IpcHostRuntimeDependencies& runtime_dependencies =
         runtime_->dependencies();
     if (!runtime_dependencies.monotonic_now ||
@@ -1157,8 +1161,8 @@ class IpcHost final : public Host {
   Result<std::future<OperationStatus>> compute_async(
       HostComputeRequest request) override;
 
-  /** @copydoc Host::compute_and_get_image */
-  Result<ImageBuffer> compute_and_get_image(
+  /** @copydoc Host::compute_and_get_values */
+  Result<NamedValueResult> compute_and_get_values(
       const HostComputeRequest& request) override;
 
   /** @copydoc Host::timing */
@@ -1609,6 +1613,9 @@ class IpcHost final : public Host {
   /** @brief Shared stop, descriptor, polling, and artifact runtime. */
   std::shared_ptr<PollingRuntimeState> runtime_;
 
+  /** @brief Optional borrowed provider registry for reconstructed Values. */
+  DataDefinitionRegistry* data_definitions_ = nullptr;
+
   /** @brief Adapter-owned joinable async workers awaiting reap/destruction. */
   std::list<AsyncWorkerRecord> workers_;
 };
@@ -1702,8 +1709,8 @@ Result<std::future<OperationStatus>> IpcHost::compute_async(
   return {internal::ok_status(), std::move(future)};
 }
 
-/** @copydoc IpcHost::compute_and_get_image */
-Result<ImageBuffer> IpcHost::compute_and_get_image(
+/** @copydoc IpcHost::compute_and_get_values */
+Result<NamedValueResult> IpcHost::compute_and_get_values(
     const HostComputeRequest& request) {
   OperationStatus validation =
       validate_host_compute_execution(request.execution);
@@ -1711,7 +1718,7 @@ Result<ImageBuffer> IpcHost::compute_and_get_image(
     return {std::move(validation), {}};
   }
   const ComputeSubmitRequest submit_request =
-      compute_submission(request, ComputeResultMode::Image);
+      compute_submission(request, ComputeResultMode::Values);
   IpcResult<ComputeJobSnapshot> submitted = call_value<ComputeJobSnapshot>(
       [&](Client& client) { return client.submit_compute(submit_request); });
   if (!submitted.status.ok) {
@@ -1747,8 +1754,23 @@ Result<ImageBuffer> IpcHost::compute_and_get_image(
 
   const DeliveryLeaseId& delivery_id = result.value.output->delivery_id;
   cleanup.set_delivery(delivery_id);
-  return runtime_->dependencies().consume_artifact(
-      result.value.output->metadata);
+  Result<NamedValueArtifactSet> artifacts =
+      runtime_->dependencies().consume_artifact(result.value.output->metadata);
+  if (!artifacts.status.ok) {
+    return {std::move(artifacts.status), {}};
+  }
+  try {
+    return {internal::ok_status(), reconstruct_named_value_artifact_set(
+                                       artifacts.value, data_definitions_)};
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& error) {
+    return {invalid_adapter_response(error.what()), {}};
+  } catch (...) {
+    return {invalid_adapter_response(
+                "unexpected Value artifact reconstruction failure"),
+            {}};
+  }
 }
 
 /**
@@ -1799,30 +1821,6 @@ class DefaultPollingWaiter {
   /** @brief Shared wake channel for every polling worker. */
   std::condition_variable changed_;
 };
-
-/**
- * @brief Returns scalar channel bytes without linking the embedded product.
- * @param type Public artifact data type.
- * @return Exact bytes for each current DataType value, or zero if unknown.
- * @throws Nothing.
- * @note This private switch keeps the installed IPC static archive independent
- *       from `image_buffer.cpp` and all backend libraries.
- */
-std::size_t artifact_channel_bytes(DataType type) noexcept {
-  switch (type) {
-    case DataType::UINT8:
-    case DataType::INT8:
-      return 1;
-    case DataType::UINT16:
-    case DataType::INT16:
-      return 2;
-    case DataType::FLOAT32:
-      return 4;
-    case DataType::FLOAT64:
-      return 8;
-  }
-  return 0;
-}
 
 /**
  * @brief Validates one opened artifact descriptor against daemon metadata.
@@ -1943,19 +1941,19 @@ class ArtifactMappingDeleter {
 };
 
 /**
- * @brief Strictly validates and maps one lease-protected artifact.
+ * @brief Strictly validates and decodes one lease-protected artifact set.
  * @param metadata Daemon output metadata already validated by typed Client.
  * @param operations Complete nonthrowing mapping operation table.
- * @return Shared read-only mapped CPU ImageBuffer or exact local failure.
+ * @return Detached named artifacts or exact local failure.
  * @throws std::bad_alloc if failure-status diagnostics or shared mapping
  *         ownership cannot allocate.
  * @note `O_NONBLOCK` prevents a same-uid path replacement with a FIFO from
  *       blocking before `fstat`; non-regular descriptors are then rejected.
  *       The delivery lease remains active throughout open, validation, mmap,
- *       and final descriptor revalidation. The returned shared owner unmaps
- *       and closes exactly once after its last copy is destroyed.
+ *       digest verification, decoding, and final descriptor revalidation.
+ *       Exact bytes are detached before the mapping owner releases once.
  */
-Result<ImageBuffer> consume_artifact_readonly_mapping_impl(
+Result<NamedValueArtifactSet> consume_artifact_readonly_mapping_impl(
     const OutputArtifactMetadata& metadata,
     internal::ArtifactMappingOperations operations) {
   if (operations.map_read_only == nullptr || operations.unmap == nullptr ||
@@ -1965,27 +1963,13 @@ Result<ImageBuffer> consume_artifact_readonly_mapping_impl(
         {}};
   }
   if (metadata.path.empty() || metadata.path.front() != '/' ||
-      metadata.path.find('\0') != std::string::npos || metadata.width <= 0 ||
-      metadata.height <= 0 || metadata.channels <= 0 ||
-      metadata.device != Device::CPU || metadata.byte_size == 0 ||
-      metadata.byte_size > internal::kOutputArtifactMaxBytes) {
+      metadata.path.find('\0') != std::string::npos ||
+      metadata.byte_size == 0U ||
+      metadata.byte_size > internal::kOutputArtifactMaxBytes ||
+      metadata.archive_version != 1U || metadata.value_count == 0U ||
+      metadata.value_count > kMaximumNamedValueArtifacts) {
     return {invalid_adapter_response(
-                "artifact metadata cannot describe a protected CPU file"),
-            {}};
-  }
-  const std::size_t scalar_bytes = artifact_channel_bytes(metadata.data_type);
-  const std::size_t width = static_cast<std::size_t>(metadata.width);
-  const std::size_t height = static_cast<std::size_t>(metadata.height);
-  const std::size_t channels = static_cast<std::size_t>(metadata.channels);
-  const std::size_t maximum = std::numeric_limits<std::size_t>::max();
-  if (scalar_bytes == 0 || width > maximum / channels ||
-      width * channels > maximum / scalar_bytes) {
-    return {invalid_adapter_response("artifact row layout overflows"), {}};
-  }
-  const std::size_t expected_step = width * channels * scalar_bytes;
-  if (height > maximum / expected_step || metadata.row_step != expected_step ||
-      metadata.byte_size != expected_step * height) {
-    return {invalid_adapter_response("artifact byte layout is inconsistent"),
+                "artifact metadata cannot describe a protected Value file"),
             {}};
   }
   internal::UniqueFd file(::open(
@@ -2029,17 +2013,25 @@ Result<ImageBuffer> consume_artifact_readonly_mapping_impl(
   const int mapped_fd = file.release();
   std::shared_ptr<void> storage(
       mapping, ArtifactMappingDeleter(mapped_size, mapped_fd, operations));
-
-  ImageBuffer image;
-  image.width = metadata.width;
-  image.height = metadata.height;
-  image.channels = metadata.channels;
-  image.type = metadata.data_type;
-  image.device = Device::CPU;
-  image.step = metadata.row_step;
-  image.data = std::move(storage);
-  image.context.reset();
-  return {internal::ok_status(), std::move(image)};
+  try {
+    const auto* begin = static_cast<const std::byte*>(mapping);
+    std::vector<std::byte> archive(begin, begin + mapped_size);
+    if (!(compute_artifact_payload_digest(archive) == metadata.digest)) {
+      return {invalid_adapter_response("artifact archive digest mismatched"),
+              {}};
+    }
+    NamedValueArtifactSet decoded = decode_named_value_artifact_set(archive);
+    if (decoded.values.size() != metadata.value_count) {
+      return {invalid_adapter_response("artifact Value count mismatched"), {}};
+    }
+    return {internal::ok_status(), std::move(decoded)};
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& error) {
+    return {invalid_adapter_response(error.what()), {}};
+  } catch (...) {
+    return {invalid_adapter_response("unexpected artifact decode failure"), {}};
+  }
 }
 
 /**
@@ -2072,7 +2064,7 @@ internal::IpcHostRuntimeDependencies default_runtime_dependencies() {
 namespace internal {
 
 /** @copydoc consume_artifact_readonly_mapping */
-Result<ImageBuffer> consume_artifact_readonly_mapping(
+Result<NamedValueArtifactSet> consume_artifact_readonly_mapping(
     const OutputArtifactMetadata& metadata,
     ArtifactMappingOperations operations) {
   return consume_artifact_readonly_mapping_impl(metadata, operations);
@@ -2080,16 +2072,19 @@ Result<ImageBuffer> consume_artifact_readonly_mapping(
 
 /** @copydoc create_ipc_host_with_dependencies */
 std::unique_ptr<Host> create_ipc_host_with_dependencies(
-    const std::string& socket_path, IpcHostRuntimeDependencies dependencies) {
-  return std::make_unique<IpcHost>(socket_path, std::move(dependencies));
+    const std::string& socket_path, IpcHostRuntimeDependencies dependencies,
+    DataDefinitionRegistry* data_definitions) {
+  return std::make_unique<IpcHost>(socket_path, std::move(dependencies),
+                                   data_definitions);
 }
 
 }  // namespace internal
 
 /** @copydoc create_ipc_host */
-std::unique_ptr<Host> create_ipc_host(const std::string& socket_path) {
+std::unique_ptr<Host> create_ipc_host(
+    const std::string& socket_path, DataDefinitionRegistry* data_definitions) {
   return internal::create_ipc_host_with_dependencies(
-      socket_path, default_runtime_dependencies());
+      socket_path, default_runtime_dependencies(), data_definitions);
 }
 
 }  // namespace ps::ipc

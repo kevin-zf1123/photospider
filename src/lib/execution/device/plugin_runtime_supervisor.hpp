@@ -193,7 +193,7 @@ class PluginRuntimeSupervisor final {
    * @param resource_ledger Attempt-local Host resource authority; nonnull.
    * @param resource_policy Positive admission and child rlimit policy.
    * @param options Positive monotonic lifecycle bounds.
-   * @param limits Protocol-v1 request/response validation bounds.
+   * @param limits Protocol-v2 request/response validation bounds.
    * @throws std::invalid_argument for invalid authority, policy, limit, or
    * duration.
    * @throws PluginTrustError when the executable is not signed for the
@@ -287,11 +287,20 @@ class PluginRuntimeSupervisor final {
    */
   PluginRuntimeSupervisorOptions options() const noexcept;
   /**
-   * @brief Returns the retained protocol-v1 limits by value.
-   * @return Complete validated protocol-v1 bounds.
+   * @brief Returns the retained protocol-v2 limits by value.
+   * @return Complete validated protocol-v2 bounds.
    * @throws Nothing.
    */
   IsolatedCpuInvocationLimits limits() const noexcept;
+
+  /**
+   * @brief Returns the signed retained runtime package identity.
+   * @return Exact manifest package id and generation.
+   * @throws Nothing.
+   * @note The value is a comparison fact and does not transfer executable or
+   * process authority out of this supervisor.
+   */
+  PluginPackageIdentity package_identity() const noexcept;
 
  private:
   /** @brief Address-stable private synchronization and recovery state. */
@@ -313,7 +322,7 @@ class PluginInvocationExecutor final {
    * @param resource_ledger Attempt-local Host resource authority; nonnull.
    * @param resource_policy Positive admission and child rlimit policy.
    * @param options Positive lifecycle bounds.
-   * @param limits Protocol-v1 endpoint bounds.
+   * @param limits Protocol-v2 endpoint bounds.
    * @throws Construction failures from `PluginRuntimeSupervisor` unchanged.
    */
   explicit PluginInvocationExecutor(
@@ -332,6 +341,13 @@ class PluginInvocationExecutor final {
    */
   IsolatedCpuHostInvocationResult invoke(
       const IsolatedCpuHostInvocation& invocation);
+
+  /**
+   * @brief Returns the signed package identity selected by this route.
+   * @return Exact manifest package id and generation.
+   * @throws Nothing.
+   */
+  PluginPackageIdentity package_identity() const noexcept;
 
  private:
   /** @brief Sole supervised process-lifecycle route. */
@@ -380,7 +396,7 @@ using PluginRuntimeLifecycleHook = std::function<void(
  * @brief Serves one authenticated, heartbeat-emitting runtime invocation.
  * @param control_fd Connected #102 framed data socket, normally fd 3.
  * @param supervision_fd Connected fixed lifecycle socket, normally fd 5.
- * @param limits Runtime-local protocol-v1 hard bounds.
+ * @param limits Runtime-local protocol-v2 hard bounds.
  * @param callback Nonempty process-local CPU callback.
  * @param startup_behavior Deterministic startup behavior.
  * @param lifecycle_hook Optional process-local milestone instrumentation.

@@ -1539,7 +1539,7 @@ bool ComputeRun::is_terminal() const {
  */
 TaskSubmissionPlan& ComputeRun::emplace_submission_plan(
     GraphModel& graph, GraphTraversalService& traversal, int node_id,
-    std::vector<Device> available_devices, bool publish_plan_inspection,
+    std::vector<DeviceBackend> available_devices, bool publish_plan_inspection,
     bool allow_reusable_cache) {
   std::lock_guard<std::mutex> lock(control_->mutex);
   if (control_->arbiter_state != ComputeRunArbiterState::Open) {
@@ -1841,6 +1841,16 @@ bool ComputeRunLease::publish_task_failure(
         !control_->submission_plan->contains_task_identity(identity)) {
       return false;
     }
+  }
+  return control_->publish_terminal(ComputeRunTerminalOutcome{
+      ComputeRunTerminalKind::Failed, std::move(failure), std::nullopt});
+}
+
+/** @copydoc ComputeRunLease::publish_failure */
+bool ComputeRunLease::publish_failure(std::exception_ptr failure) {
+  if (!failure) {
+    throw std::invalid_argument(
+        "ComputeRun lease failure requires an exception.");
   }
   return control_->publish_terminal(ComputeRunTerminalOutcome{
       ComputeRunTerminalKind::Failed, std::move(failure), std::nullopt});

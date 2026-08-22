@@ -1368,11 +1368,11 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                         ),
                         (
                             "find_package(Photospider CONFIG REQUIRED\n"
-                            "  COMPONENTS embedded operation_sdk "
-                            "data_provider_sdk)",
+                            "  COMPONENTS embedded operation_plugin_sdk\n"
+                            "             operation_runtime data_provider_sdk)",
                             "add_library(Photospider::photospider "
                             "INTERFACE IMPORTED)\n"
-                            "add_library(Photospider::operation_sdk "
+                            "add_library(Photospider::operation_plugin_sdk "
                             "INTERFACE IMPORTED)\n"
                             "add_library(Photospider::data_provider_sdk "
                             "INTERFACE IMPORTED)\n"
@@ -1471,7 +1471,8 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
             )
             provider_setup = (
                 "find_package(Photospider CONFIG REQUIRED\n"
-                "  COMPONENTS embedded operation_sdk data_provider_sdk)\n"
+                "  COMPONENTS embedded operation_plugin_sdk\n"
+                "             operation_runtime data_provider_sdk)\n"
                 "get_target_property(_data_provider_links\n"
                 "  Photospider::data_provider_sdk INTERFACE_LINK_LIBRARIES)\n"
                 "if(_data_provider_links)\n"
@@ -1494,13 +1495,14 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
             target_specific_links = (
                 "target_link_libraries(dependency_disabled_consumer\n"
                 "  PRIVATE Photospider::photospider\n"
-                "          Photospider::operation_sdk)\n"
+                "          Photospider::operation_plugin_sdk\n"
+                "          Photospider::operation_runtime)\n"
                 "target_link_libraries(installed_c11_data_provider_consumer\n"
                 "  PRIVATE installed_c11_data_provider\n"
-                "          Photospider::operation_sdk)\n"
+                "          Photospider::operation_runtime)\n"
                 "target_link_libraries(installed_cpp17_data_provider_consumer\n"
                 "  PRIVATE installed_cpp17_data_provider\n"
-                "          Photospider::operation_sdk)"
+                "          Photospider::operation_runtime)"
             )
             replacements = (
                 (
@@ -2347,7 +2349,7 @@ class ConfiguredPublicHeaderInventoryTest(unittest.TestCase):
             manifest.parent.mkdir(parents=True)
             write_exact_text(
                 manifest,
-                "include/photospider/plugin/plugin_api.hpp\n"
+                "include/photospider/plugin/operation_plugin_api.h\n"
                 "include/photospider/data/arbitrary_future_value.hpp\n"
                 "include/photospider/data/path with space.hpp\n"
                 "include/photospider/policy/policy_plugin_api.h\n",
@@ -2358,7 +2360,7 @@ class ConfiguredPublicHeaderInventoryTest(unittest.TestCase):
                 [
                     "#include <photospider/data/arbitrary_future_value.hpp>",
                     "#include <photospider/data/path with space.hpp>",
-                    "#include <photospider/plugin/plugin_api.hpp>",
+                    "#include <photospider/plugin/operation_plugin_api.h>",
                     "#include <photospider/policy/policy_plugin_api.h>",
                 ],
             )

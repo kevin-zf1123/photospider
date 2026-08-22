@@ -1,13 +1,13 @@
 #include "compute/request/compute_cache_policy.hpp"
 
-#include "core/value_image_adapter.hpp"
+#include "core/value_region.hpp"
 
 namespace ps::compute {
 
 bool ComputeCachePolicy::has_reusable_output(const Node& node) {
   return node.cached_output_high_precision.has_value() &&
          node.hp_region.has_value() &&
-         value_image_adapter::node_output_region_is_complete(
+         value_region::node_output_region_is_complete(
              *node.cached_output_high_precision, *node.hp_region);
 }
 

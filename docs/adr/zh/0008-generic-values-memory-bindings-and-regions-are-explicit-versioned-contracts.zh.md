@@ -10,9 +10,10 @@ Value-copy 证明也已成为当前行为。V-7 新增一套 source-private 的�
 registry，并让仓库 Metal Perlin operation 经过其自有 queue、invocation allocator 与 pipeline
 cache。V-8 新增显式 device/binding 事实、非阻塞 access plan、保留 revision 的 CPU/Metal
 transfer、精确的进程级 residency、Run-scoped pending-Value continuation，以及在 destination
-Ready 前拒绝 stale native completion。`ImageBuffer`、`DataType`、`Device`、`ParameterMap`
-与 operation plugin ABI v2 仍是各自
-角色边缘上的兼容契约；本 ADR 中尚未实现的部分仍是演进目标。
+Ready 前拒绝 stale native completion。DI-4 已从所有 active edge 删除此前的 `ImageBuffer`、
+`DataType` 与 `Device` 兼容契约；`ParameterMap` 只保留为 configuration。Operation plugin
+现在使用完整纯 C ABI v1。本 ADR 中尚未实现的
+部分仍是演进目标。
 
 V-9 新增 source-private 的 per-device memory/scratch plan、native actual-byte 校准，以及随
 native Value 与 completion ownership 延续的 lease，而不改变上述 public contract。
@@ -32,7 +33,7 @@ provider-defined `Value` 纵向路径：保留字节的 Schema/Facet/Layout enve
 buffer、一个注入的 `DataDefinitionRegistry`、精确的纯 C definition-suite ABI v3、纯
 property/DataSpec/Region 求值、canonical descriptor/content/layout SHA-256 identity、artifact
 envelope round-trip，以及保留 generation 的 replacement/unload。它有意不加入 access、
-conversion、inference、execution、codec、OpenEXR 或 operation ABI v2 replacement suite。
+conversion、inference、execution、codec、OpenEXR 或 operation-plugin replacement suite。
 
 V-15 新增仓库可选的 OpenEXR single-part deep-scanline provider/codec 纵向路径。它把具有
 显式 identity、unit-sampled 的 FP32 channel 映射为
@@ -42,7 +43,7 @@ dependency 限定在默认关闭的 component 后。Issue #118 已实现并独�
 Deep tiled、multipart、mixed shallow/deep part、sampled 或 non-FP32 channel、streaming
 decode/encode、更宽泛的 import mapping 与公开 Host/frontend provider selection 仍属未来工作。
 V-15 不新增余下 access/conversion/inference/execution suite、generic graph/cache persistence，
-也不迁移 operation ABI v2/Host。
+也不迁移 operation-plugin/Host；DI-3 后续实现了单独范围的 operation 边界。
 
 Issue #78 批准了本契约。Issue #79 至 #90 交付了有界的 V-2 至 V-13 实现与决策切片。
 Issue #117 已实现独立的合成 `VariableSampleField` V-14 证明，不依赖可选 codec。Issue #118
@@ -52,7 +53,7 @@ Issue #117 已实现独立的合成 `VariableSampleField` V-14 证明，不依�
 
 ## 背景
 
-当前 `ImageBuffer` 契约是有用的二维图像 payload，但不能通过持续追加字段而扩展成通用图
+在本决策的起始时点，`ImageBuffer` 契约是有用的二维图像 payload，但不能通过持续追加字段而扩展成通用图
 value model。逻辑含义、物理存储、设备访问、就绪状态、缓存身份与 Region 推理具有不同的
 owner 和版本生命周期。混合这些事实会让存储搬移改变逻辑身份、让单个 device enum 暗示
 可访问性、把 padding 变成内容身份的一部分，并强迫未来数据族进入一个封闭枚举。
@@ -130,6 +131,18 @@ producer 正通过其受限 capability 完成已承诺的 payload，不会使 se
 `ImageView` 与 `DenseTensorView` 是经过检查的 final facade，并保留完整 `Value`。构造时要么
 验证必需的 Schema 与 Facet，要么返回 typed failure。它们绝不借用可能失去 owner 的裸
 descriptor 或 allocation。
+
+DI-2 通过一个 immutable `DenseImageOutputPlan` 与一个 Host-owned `HostOutputBinding`，为
+dense-image output 实现这条规则。plan 会在 execution 前冻结精确 descriptor、layout、byte
+envelope、allocation alignment、output name 与 producer count。binding 独占
+`ValueBuilder`，并签发 move-only whole-output grant 或 tile grant。grant 构造会在暴露 writable
+byte 前拒绝 empty、overlap、out-of-bounds、misaligned 或 overflowed envelope。grant
+retirement 必须精确，且不会推断 idempotence：duplicate retirement、存在 active 或 omitted
+grant 时 seal，以及 failure 后 publication 都会被拒绝。最后一次成功 retirement 使全部 write
+happen-before 一次 seal 与一次 named-`Value` publication；任何 exception、cancellation、
+abandoned grant 或 explicit failure 都会撤销所有 grant，并保留一个 sticky failure。这是 DI-3
+可以投影到 operation ABI v1 的唯一内部 output allocation/publication authority；它不是
+`ImageBuffer` 的 compatibility wrapper。
 
 `StructuredValueSchema` v1 是自包含的。它的 descriptor 可以递归描述字段，但一个 v1
 `Value` 不包含 runtime child `Value` object。独立结果使用命名 output port 或不带 identity 的
@@ -298,7 +311,7 @@ source-private pending CPU producer。其 source-private `ValueTransferTask` 只
 ready 后复制一个已验证的 CPU envelope，并发布独立 destination。
 
 已实现的 V-7 子集在 `ExecutionService` 下增加一套单独的 source-private
-`DeviceExecutorRegistry`。在仓库 Metal plugin 已启用的 profile 中，其中的 Apple executor
+`DeviceExecutorRegistry`。在仓库 Metal provider 已启用的 profile 中，其中的 Apple executor
 拥有一个 native device 与 queue、一个 callback-scoped texture/buffer allocator，以及经过校验的
 持久 pipeline cache。经过 reserved start 的 work 会在该借用 context 内调用 Metal Perlin
 provider，并返回独立的 CPU compatibility image。
@@ -319,11 +332,17 @@ Mismatched 与 duplicate identity 不能消费或重新发布另一条 admission
 显式 texture-to-shared-buffer blit、安装 completion handler、commit 并立即返回，不再调用
 `waitUntilCompleted` 或 `getBytes`。V-9 保持 Host `ResourceVector` 不变，并为每个已配置的
 非 CPU `DeviceId` 新增隔离且 immutable 的 memory/scratch account。Perlin 与 CPU-to-Metal
-upload 会查询 native heap size/alignment，并在 allocation 前预留完整 plan。它们会审计
-`allocatedSize`、归还未使用的 plan byte，并在 command submission 前提交精确 actual byte。
-Memory lease 由 `BufferHandle` 会复制、residency 会保留的同一个 type-erased native owner
-拥有；scratch 由精确 completion object 保留到 terminal native handling 结束。Residency
-仍是按 entry 数量有界的 retention owner，不是 byte-budget authority。
+upload 只把 native heap size/alignment query 视为对齐后的 descriptor minimum，绝不把它当作
+dedicated heap backing 的上界。在 allocation 前，一次 ledger root-mutex transaction 会校验该
+minimum 与精确 scratch plan，并预留该 device 当前全部可用的 persistent-memory ceiling。
+Dedicated heap 的正值 `currentAllocatedSize` 是唯一 persistent actual；不会再次计入其 texture
+suballocation，而每项 scratch resource 都贡献自身的正值 `allocatedSize`。适配 plan 的 commit
+会在同一套唯一 ledger mutex 下归还未使用的 plan byte，并在 command submission 前拆分精确
+actual lease。无效或超过 plan 的 actual observation 会以 typed error 失败，退役局部 native
+owner，并让尚未 commit 的 reservation 准确 rollback 一次。Memory lease 由 `BufferHandle` 会
+复制、residency 会保留的同一个 type-erased native owner 拥有；scratch 由精确 completion object
+保留到 terminal native handling 结束。Residency 仍是按 entry 数量有界的 retention owner，不是
+byte-budget authority。
 
 Current-generation handoff 会分阶段完成，而不会在 coordinator critical section 中
 allocation。Kernel 会在提交 publication 前预跟踪一个零 generation lineage row。只有
@@ -375,8 +394,9 @@ invalidation 或 execution。
 key、signed 64-bit `ImageRect` interval、rank-general unsigned 64-bit `TensorSlice`
 interval、单个 nonempty clause 最多八个 atom 的硬上限，以及显式 caller budget。Dirty
 source fact、per-node affected work、edge mapping、HP/RT validity 和 core dense operation
-都保留规范化 `RegionSet`。当前 image tiling、ImageBuffer helper、Host/IPC inspection 与
-operation ABI v2 仍保留 checked derived `PixelRect` projection。RT 只支持 image；
+都保留规范化 `RegionSet`。在 V-4 交付边界，image tiling、前身图像 helper、Host/IPC inspection
+与 operation adapter 仍保留 checked derived `PixelRect` projection。DI-4 删除前身图像 helper，
+但不改变 `PixelRect` 的 physical-geometry 角色。RT 只支持 image；
 TensorSlice 是 HP monolithic work，绝不被重新解释成二维 geometry。
 
 ### DataSpec、capability、property 与 output inference
@@ -522,18 +542,25 @@ include/photospider/plugin/
 ImageBuffer     -> Value + ImageFacet + ImageView
 PixelRect       -> RegionSet atom ImageRect
 Device          -> DeviceBackend + DeviceId + MemoryDomain
-OperationOutput -> named Value outputs
+Operation result -> named Value outputs
 ParameterMap    -> configuration only, never a data payload
 ```
 
-仓库自有 operation 与 provider 首先迁移。随后按依赖顺序迁移自有 adapter、cache、graph
-document、Host value、CLI/IPC translation、test、installed consumer 与文档。只有全部自有
-operation plugin 与 consumer 都迁移到 ADR 0012 接受的独立版本化 pure-C operation-plugin
-ABI v1 replacement 后，才删除 operation ABI v2、其 entry point、SDK、fixture 与 package
-surface。
+仓库自有 operation 与 provider 已首先迁移，随后按依赖顺序迁移自有 adapter、test、installed
+consumer 与文档。DI-3 安装 ADR 0012 接受的独立版本化 pure-C operation-plugin ABI v1，并在同一
+breaking change 中删除 predecessor entry point、SDK、fixture 与 package surface。DI-4 随后
+完成 public Host、IPC、worker、durable、codec 与 CLI 迁移，并删除此前的图像兼容类型。
+
+已交付 conversion engine 通过 type-aware domain check 与 native sample copy 保留 same-storage/
+equal-endpoint 的 64-bit integer identity。若平台无法证明 source promotion 精确，non-identity
+wide-integer affine work 会在 arithmetic 前失败；destination cast 使用精确的 open integer upper
+bound。OpenCV encode 会在文件 mutation 前使用封闭的 unsigned 8/16-bit extension/depth/channel
+matrix；普通 OpenEXR 使用独立 UINT32/FP32 路径。durable restart 在 payload allocation 前约束
+control record，并验证 frozen/archive/quota/exact-length/non-sparse 事实。原 direct side-effecting
+`io:save` operation 已不存在；CLI/cache save 通过显式策略复用 configured codec boundary。
 
 最终状态不存在永久 compatibility wrapper、alias class、重复 old/new API、forwarding header、
-dual loader、v2-to-v1 shim 或双重 descriptor/cache/ABI authority。Temporary edge adaptation
+dual loader、predecessor shim 或双重 descriptor/cache/ABI authority。Temporary edge adaptation
 只能存在于显式限定的实现切片内，并且必须在该切片的 completion boundary 删除。
 
 ### 验证边界
@@ -596,7 +623,7 @@ payload 无法忠实保留。
 
 拒绝，因为这会丢失 Tensor 和稀疏逻辑 domain，并向 caller 隐藏 approximation。
 
-### 复用 operation ABI v2 并传递新的 C++ Value object
+### 复用临时 C++ operation registration generation 并传递新的 Value object
 
 拒绝，因为 C-linkage entry symbol 不能稳定 C++ layout、allocator、exception、RTTI、
 standard-library ownership 或 toolchain ABI。
@@ -611,10 +638,13 @@ standard-library ownership 或 toolchain ABI。
 下列维护中文档仍是当前行为的权威来源：
 
 - [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)；
-- [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)；
+- [稠密图像 Value 内存契约](../../kernel-architecture/zh/Dense-Image-Value-Memory-Contract.zh.md)；
 - [插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)；以及
 - [内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)。
 
 [通用数据与 Region 路线图](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)是已接受
 目标和实现依赖顺序的权威来源。Live Issue 与 Project state 仍是交付状态的权威来源。本 ADR
-和路线图都不会把未实现的目标对象提升成当前 runtime 文档中的事实。
+和路线图都不会把未实现的目标对象提升成当前 runtime 文档中的事实。上述 DI-2 output plan、
+binding、grant 与 publication authority，以及 DI-3 pure-C operation ABI v1 投影，均已是
+当前实现行为。DI-4 的 Host/IPC/worker/durable/cache/codec/CLI Value boundary 也已是当前实现
+行为。只有独立范围的未来 provider suite、更广泛 import policy 与未支持 Deep shape 仍属于后续切片。

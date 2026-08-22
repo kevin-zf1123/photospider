@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run graph_cli through external operation/policy plugin compute flow."""
+"""Run graph_cli through the zero-port operation/policy plugin compute flow."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def require_output(output: str, fragment: str) -> None:
 
 
 def main() -> int:
-    """Create isolated inputs, run the real CLI, and validate the full flow."""
+    """Run the real CLI and validate zero-port compute plus plugin lifecycle."""
 
     args = parse_args()
     binary = args.binary.resolve()
@@ -136,7 +136,7 @@ def main() -> int:
     require_output(transcript, "hp: cpu - ")
     require_output(transcript, "rt: cpu - ")
     require_output(transcript, "Computation finished.")
-    require_output(transcript, "ROI:       (0, 0, 11x7)")
+    require_output(transcript, "ROI:       (0, 0, 0x0)")
     if "Computation failed." in transcript:
         raise RuntimeError(f"graph_cli reported failed compute\n{transcript}")
     return 0

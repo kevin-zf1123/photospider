@@ -348,7 +348,9 @@ struct ChildProcess final {
   /**
    * @brief Parent side of the one-assignment private socket.
    * @note May outlive exact natural reaping only through the monitor's bounded
-   * buffered report/EOF drain; revocation clears it before escalation.
+   * buffered report/EOF drain. Forced escalation delivers owned `SIGTERM`
+   * while this descriptor remains live, then revocation clears it before
+   * bounded wait/`SIGKILL` handling and exact reaping.
    */
   UniqueFd control;
   /**
@@ -560,7 +562,8 @@ inline bool escalation_matches_wait_status(const ChildProcess& process,
  * bounded poll slice.
  * @note This source-private seam is reached only when explicitly enabled by a
  * test option. The later production `waitpid` remains the sole exact reaper;
- * inability to observe this owned child fail-stops as authority loss.
+ * deterministic deadline expiry raises `ManagerFailure`, while a `waitid`
+ * error that loses exact child-observation authority fail-stops.
  */
 inline void await_pre_signal_zero_exit_for_test(
     pid_t pid, std::chrono::steady_clock::time_point deadline) {
@@ -600,7 +603,8 @@ inline void await_pre_signal_zero_exit_for_test(
  * bounded poll slice.
  * @note This source-private seam is reached only when explicitly enabled by a
  * test option. The later production `waitpid` remains the sole exact reaper;
- * inability to observe this owned child fail-stops as authority loss.
+ * deterministic deadline expiry raises `ManagerFailure`, while a `waitid`
+ * error that loses exact child-observation authority fail-stops.
  */
 inline void await_any_exit_for_test(
     pid_t pid, std::chrono::steady_clock::time_point deadline) {

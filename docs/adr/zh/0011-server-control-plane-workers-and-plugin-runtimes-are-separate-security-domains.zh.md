@@ -7,27 +7,32 @@ tenant、Job、authentication、quota、artifact、worker 与 plugin 边界。�
 server、worker-manager、独立 artifact data plane、sandbox 或 isolated-plugin 目标已是当前软件行为。
 实时交付状态仍由所链接的 Issue 与 Project 维护。
 
-当前 `photospiderd` 与 plugin loader 均保持不变。Issues #99、#100 和 #105 现在实现了源码私有的
-本地 JobSpec 纵向路径，其中包含 complete-envelope tenant quota accounting、durable
-Job/image artifact recovery、显式 retry/checkpoint identity，以及每个 attempt 一个全新 exec
+当前 `photospiderd` 保持不变。DI-3 另行以 pure-C ABI v1 替换 operation-plugin registrar
+边界，并允许每份从已签名 package 准入且经过验证的 operation descriptor 选择 trusted
+in-process 或 supervised isolated CPU 路径。Data-definition 与 policy loader 仍是彼此独立的
+版本化契约。Issues #99、#100 和 #105 现在实现了源码私有的本地 JobSpec 纵向路径，其中包含
+complete-envelope tenant quota accounting、durable
+Job/named-Value archive recovery、显式 retry/checkpoint identity，以及每个 attempt 一个全新 exec
 的 Embedded Host worker process。一个同进程 `WorkerManager` object 拥有 private socket、
 PID、heartbeat、cancellation escalation、精确 reaping 与 supervision handle；control-plane
 Job service 仍是唯一 durable/quota/artifact/retry authority。Host memory 以 POSIX
 `RLIMIT_AS` 执行；configured device capacity 仍仅用于 admission。Private closed protocol 与
 精确 lease fencing 会把 startup、exit、signal、channel、protocol、heartbeat、runtime 与
 forced-cancellation failure 隔离到拥有它的 attempt。
-Private worker protocol v2 把 control frame 限制为 128 KiB 的 attempt/Job/artifact-reference
-metadata。Checkpoint 与 candidate image bytes 改用 manager 创建且方向被裁剪的本地 Unix
+Private worker protocol v3 把 control frame 限制为 128 KiB 的 attempt/Job/aggregate-archive
+metadata。Checkpoint 与 canonical named-Value archive bytes 改用 manager 创建且方向被裁剪的本地 Unix
 stream descriptor。注册 supervisor 只会在 record/thread ownership 建立后、service mutex 外创建
 它们；manager endpoint 为 nonblocking，而阻塞 transfer 保留在可杀 worker 内。Manager 只有在
-clean-reap completion handoff 前完成 reference、descriptor、stream EOF/size、resource 与
-SHA-256 精确复核后才接受 candidate。worker 先发送精确且只含 metadata 的 Report，在 stream
+clean-reap completion handoff 前完成 reference、archive version/Value count、stream EOF/size、
+resource、whole-archive SHA-256 与每个嵌入 Value artifact 精确复核后才接受 candidate。worker 先发送精确且只含 metadata 的 Report，在 stream
 期间保持已认证 heartbeat 活跃，并且只在精确 bytes 后关闭 output lane。manager 为尚未 reap 的
 当前 PID 创建一份精确、惰性的匿名最终 owner，在 lifecycle 检查之间直接接收一个不超过
 64-KiB 的 slice，且绝不把 output progress 当作 heartbeat。worker 会保持存活且可被终止，直到
 manager 完成该关联并返回一次只含 identity 的
 `CompletionReady`；该确认不授予 Job、quota、artifact、commit 或 publication authority。
-reap 后绝不再读取 bulk lane，也不执行 data-plane filesystem I/O。
+reap 后绝不再读取 bulk lane，也不执行 data-plane filesystem I/O。durable restart 还会在 payload
+allocation 前约束 manifest/Job control file，并证明 frozen/archive/quota/exact-length/non-sparse
+事实。
 
 该本地切片保留本决策的身份与权威顺序，并提供真实的 quota admission、crash durability、
 process-crash containment 与 bounded cancellation/shutdown。它保留共享的
@@ -61,12 +66,13 @@ quarantine，并且只在有界 backoff 后于新进程中启动后续 invocatio
 会把 executor 组合进既有 `ExecutionService` callback/request boundary，并证明失败 Run 不会
 终止其固定 worker 或后续无关 Run。
 
-上述 #103 boundary 是经过认证的私有 session supervision，不是 hostile-child attestation、
-package trust、sandboxing、resource enforcement 或已选择的最终用户 operation route。Issue #104
-现在会用签名 package admission、一次性 Host resource admission 与 process rlimit 包裹长期维护的
-直接/受监督入口。当前没有 `ExecutionService`、`WorkerManager`、embedded Host/CLI、
-`photospider-worker` 或 operation loader 会为最终用户 Graph operation 构造该路径；完整
-operation-ABI migration 仍负责最终选择，通用 syscall/network sandbox 仍是独立工作。
+上述 #103 boundary 是经过认证的私有 session supervision，本身并不是 hostile-child
+attestation、package trust、sandboxing、resource enforcement 或已选择的最终用户 operation
+route。Issue #104 会用签名 package admission、一次性 Host resource admission 与 process
+rlimit 包裹长期维护的直接/受监督入口。DI-3 现在允许 operation loader 在经过验证的 pure-C
+operation descriptor 选择 supervised 模式且签名 runtime route 完整时构造该路径；不存在
+trusted fallback。`WorkerManager`、`photospider-worker` 与通用 syscall/network sandbox 仍是
+彼此独立的边界。
 
 ## 背景
 
@@ -272,19 +278,21 @@ drain 保留 parent socket 与 stateful decoder，而不是虚构 channel loss �
 authentication、syscall sandbox、device isolation，也不是 Issues #101-#104 分配的 isolated
 tenant-plugin runtime。
 
-Issue #105 以 private protocol v2 取代了上述历史 bulk-control transport。每份完整 Report
-都限制为不超过 128 KiB 的 identity、outcome、diagnostic、image descriptor、reference、size
-与 digest metadata，并且不包含 tight image bytes。Checkpoint 与 candidate bytes 只经 manager
+Issue #105 引入 bulk-control separation；DI-4 把当前 worker contract 推进到 private protocol v3。
+每份完整 Report 都限制为不超过 128 KiB 的 identity、outcome、diagnostic、aggregate archive
+version/Value count/reference/size/digest metadata，并且不包含 archive bytes。Checkpoint 与
+candidate archive bytes 只经 manager
 创建且方向被裁剪的本地 Unix stream 传输。manager endpoint 为 nonblocking，并在 attempt
 绝对 lifecycle deadline 下按有界 slice 推进；阻塞 receive/send 保留在受精确拥有的 worker 内。超过
 accepted output/staging/retention envelope 的 candidate 会变成一个有界、保留 identity 且没有
-image 的 `Failed/Compute` Report；若有限 hard `RLIMIT_FSIZE` 低于 accepted output-stage
+archive 的 `Failed/Compute` Report；若有限 hard `RLIMIT_FSIZE` 低于 accepted output-stage
 maximum，则所属 attempt 会在 `fork` 前以 `WorkerStartup` 失败，而不是静默缩窄该 envelope。
 不存在 64-MiB compatibility 或 transport-size fallback。worker 会发送一份只含 metadata 的
 Report，在 stream 期间保留 source 与真实 heartbeat loop，只在精确 bytes 后关闭 output lane，
 并在同一精确 process lifecycle 下等待匹配的、只含 identity 的
-`CompletionReady`。WorkerManager 只有在 EOF、size/hash/reference/descriptor/resource 校验与独立
-image owner 的精确匿名最终形态 O(1) 转移完成后才发送该确认。manager 每次 receive 都是一个
+`CompletionReady`。WorkerManager 只有在 EOF、size/hash/reference/archive/resource 校验、
+每个 named Value artifact 的严格 decode，以及 already-final exact
+anonymous archive owner 的 O(1) 转移完成后才发送该确认。manager 每次 receive 都是一个
 不超过 64-KiB 的直接 slice，随后执行绝对 runtime/heartbeat/cancel/shutdown 仲裁；连续或预缓冲
 output 都不会续期或复活 heartbeat。若已经失败的 cancellation channel 使回复不可能，一份已经完整
 关联的 Report 可以保留其普通分类，但精确 reap 会终止所有 bulk-lane 访问。在已经尝试
@@ -361,7 +369,7 @@ byte/range limit、content/descriptor binding 与 expiry/revocation。
 
 ### Plugin Trust 与 Isolation
 
-Operation v2、data-definition-provider v3 与 policy v1 DSO 只要加载到 Host process，就属于
+Operation v1、data-definition-provider v3 与 policy v1 DSO 只要加载到 Host process，就属于
 trusted native code。Pure-C record 与最小化合法 authority 并不能 sandbox native code。
 Server control plane 与 WorkerManager 不加载任何 DSO。当前 operation/policy 候选必须在 native
 mapping 前通过进程不可变的 Ed25519 签名 kind/package/generation/content 决定；获批 DSO 在进程内
@@ -385,14 +393,13 @@ permission、byte size、descriptor/content binding、readiness、ownership、pl
 invocation identity、current worker lease 与 declared resource bound。返回的 descriptor、handle、
 offset、digest、status 与 diagnostic 均为 untrusted data，绝不 mint authority。
 
-当前 Issue #102 切片已经实现首个 CPU shared-memory/FD record，但不迁移 operation ABI
-v2，也不实现仍为目标态的 operation ABI v1。其 callback seam 是 process-local runtime
-code；两个 ABI family 的 pointer-bearing record 都不会被序列化。该实现把 canonical request
-与每个已声明的 physical tensor range 绑定到 invocation identity，只授予声明方向的
-capability，并对 malformed 或已变更的 request、response、descriptor、header、FD 或 content
-state 进行 fail-closed 处理。One-shot process 与 RAII owner 在正常/错误路径提供精确
-transport retirement。直接使用准确命名的 non-supervised adapter 时，永不返回的 callback
-仍没有时间边界。
+Issue #102 在 operation boundary 迁移前实现首个 CPU shared-memory/FD record。其 callback
+seam 是 process-local runtime code，且没有序列化任何 pointer-bearing record。该实现把
+canonical request 与每个已声明的 physical tensor range 绑定到 invocation identity，只授予
+声明方向的 capability，并对 malformed 或已变更的 request、response、descriptor、header、
+FD 或 content state 进行 fail-closed 处理。One-shot process 与 RAII owner 在正常/错误路径
+提供精确 transport retirement。直接使用准确命名的 non-supervised adapter 时，永不返回的
+callback 仍没有时间边界。
 
 这些 source-private Issue #102 object 会编入 installable product archive，并由真实 exec
 fixture 从该 archive 加以验证。Issue #103 增加 product-archive 中的
@@ -404,10 +411,10 @@ response、TERM、KILL 与 reap bound；保留类型化可观测 failure fact；
 
 长期 integration 还会从真实 `ExecutionService` ready callback 调用该 executor。原始
 `PluginRuntimeFault` 会到达 request boundary，该 boundary 把 owning Run 发布为 Failed，固定
-service worker 随后会执行无关 Run。这是链接产品的 Run-failure composition proof，不是最终
-用户路径：当前没有 `ExecutionService`、`WorkerManager`、embedded Host/CLI、
-`photospider-worker` 或 operation loader 会从 Graph operation 构造 isolated request。接入当前
-ABI v2，或实现、shim 仍为目标态的 ABI v1，均不属于 #102 或 #103。
+service worker 随后会执行无关 Run。DI-3 后续让纯 C operation ABI v1 supervised descriptor 通过
+该精确 executor 与 isolation protocol v2 路由，且没有 direct callback fallback。Public
+`ExecutionService`、`WorkerManager`、embedded Host/CLI 与 `photospider-worker` 仍不暴露最终用户
+runtime selector。
 
 Issue #104 现在通过 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`、
 `PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE` 与
@@ -441,8 +448,10 @@ Issue #101 拥有 pure-C operation ABI 决策，Issue #102 拥有首个 invocati
 拥有 authenticated private-session supervision，Issue #104 拥有当前签名 admission 与 resource-
 token 组合。Session authentication 证明私有 launch 的 binding/liveness；签名 content approval
 建立 package admission；二者都不证明 returned output truth。本 ADR 冻结这些 authority/process
-boundary。Atomic operation-ABI migration 与最终用户 selection、通用 syscall/network sandbox、
-cross-process GPU handle/fence、长期 fuzz/audit evidence 都留给后续决策。
+boundary。DI-3 后续完成了到 pure-C operation ABI v1 的原子迁移，并通过精确 signed-package
+executor 路由 supervised CPU descriptor。Public 最终用户 isolated-runtime selector、通用
+syscall/network sandbox、cross-process GPU handle/fence 与长期 fuzz/audit evidence 都留给后续
+决策。
 
 ### Failure、Revocation 与 Replay
 

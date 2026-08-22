@@ -6,14 +6,22 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <new>
 #include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
 
 #include "core/dense_tensor_content_digest.hpp"
 #include "core/pending_value.hpp"
+#include "core/value_descriptor_metadata.hpp"
 #include "core/value_validation.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+#include "core/value_test_access.hpp"
+#endif
 #include "photospider/data/image_view.hpp"
 
 namespace ps {
@@ -126,6 +134,95 @@ ProcessIdentityAuthority& process_identity_authority() noexcept {
   return authority;
 }
 
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+/**
+ * @brief Calling-thread state for one deterministic ControlBlock allocation
+ * observation.
+ *
+ * @throws Nothing for construction and destruction.
+ * @note This state exists only in BUILD_TESTING runtime images. Thread-local
+ *       ownership isolates concurrently running tests without adding a lock or
+ *       allocation to the production path.
+ */
+struct BufferControlBlockAllocationTestState final {
+  /** @brief Whether a future allocation boundary remains armed. */
+  bool armed = false;
+
+  /** @brief Whether completed owners belong to the current observation. */
+  bool observing = false;
+
+  /** @brief Whether the selected one-shot boundary has thrown. */
+  bool fired = false;
+
+  /** @brief Remaining one-based ControlBlock boundary count. */
+  std::size_t remaining = 0U;
+
+  /** @brief Owners completed inside the current observation window. */
+  std::size_t successful_allocations = 0U;
+
+  /** @brief Observed owners destroyed before the current snapshot. */
+  std::size_t released_allocations = 0U;
+};
+
+/** @brief Calling thread's source-private allocation-test state. */
+thread_local BufferControlBlockAllocationTestState buffer_allocation_test_state;
+
+/**
+ * @brief Applies the selected one-shot failure before ControlBlock allocation.
+ *
+ * @return Nothing when disabled or before the selected boundary.
+ * @throws std::bad_alloc exactly when the calling thread reaches its selected
+ *         one-based allocation number.
+ * @note The failpoint disarms itself before throwing, while observation stays
+ *       active so synchronous stack unwinding can report prior owner release.
+ */
+void inject_buffer_control_block_allocation_failure_for_testing() {
+  BufferControlBlockAllocationTestState& state = buffer_allocation_test_state;
+  if (!state.armed) {
+    return;
+  }
+  if (state.remaining == 1U) {
+    state.armed = false;
+    state.fired = true;
+    throw std::bad_alloc{};
+  }
+  --state.remaining;
+}
+
+/**
+ * @brief Records one completed ControlBlock owner in the active observation.
+ *
+ * @return True when the owner must report its later destruction.
+ * @throws Nothing.
+ * @note The returned flag belongs to the private ControlBlock instance and
+ *       prevents destruction of preexisting owners from entering the count.
+ */
+bool record_buffer_control_block_allocation_for_testing() noexcept {
+  BufferControlBlockAllocationTestState& state = buffer_allocation_test_state;
+  if (!state.observing) {
+    return false;
+  }
+  ++state.successful_allocations;
+  return true;
+}
+
+/**
+ * @brief Records destruction of one owner created in the active observation.
+ *
+ * @param observed True only for a ControlBlock whose construction was counted.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note The targeted artifact reconstruction is synchronous, so its earlier
+ *       owners unwind on the same thread before the test captures a snapshot.
+ */
+void record_buffer_control_block_release_for_testing(bool observed) noexcept {
+  BufferControlBlockAllocationTestState& state = buffer_allocation_test_state;
+  if (observed && state.observing) {
+    ++state.released_allocations;
+  }
+}
+#endif
+
 /**
  * @brief Multiplies address-envelope components with overflow checking.
  *
@@ -179,11 +276,270 @@ std::size_t stride_magnitude(std::ptrdiff_t stride) {
 }
 
 /**
+ * @brief Computes one positive signed-coordinate span without signed overflow.
+ * @param begin Inclusive signed endpoint.
+ * @param end Exclusive signed endpoint.
+ * @param axis Diagnostic axis name used in exceptions.
+ * @return Positive span representable by both int64 and size_t.
+ * @throws std::invalid_argument when the interval is empty or reversed.
+ * @throws std::overflow_error when the mathematical span exceeds either
+ *         supported scalar domain.
+ * @note Unsigned modular subtraction is exact after `end > begin` is proven.
+ */
+std::size_t checked_image_bounds_span(std::int64_t begin, std::int64_t end,
+                                      const char* axis) {
+  if (end <= begin) {
+    throw std::invalid_argument(std::string("ImageBounds ") + axis +
+                                " interval must be nonempty and ordered.");
+  }
+  const std::uint64_t span =
+      static_cast<std::uint64_t>(end) - static_cast<std::uint64_t>(begin);
+  if (span > static_cast<std::uint64_t>(
+                 std::numeric_limits<std::int64_t>::max()) ||
+      span > std::numeric_limits<std::size_t>::max()) {
+    throw std::overflow_error(std::string("ImageBounds ") + axis +
+                              " span exceeds the supported signed extent.");
+  }
+  return static_cast<std::size_t>(span);
+}
+
+/**
+ * @brief Validates one closed sample-domain enum value.
+ * @param kind Candidate enum value.
+ * @return Nothing.
+ * @throws std::invalid_argument when the value is outside version 1.
+ */
+void validate_sample_domain_kind(SampleDomainKind kind) {
+  switch (kind) {
+    case SampleDomainKind::Normalized:
+    case SampleDomainKind::Legal:
+    case SampleDomainKind::CodeValue:
+      return;
+  }
+  throw std::invalid_argument("SampleDomain kind is unsupported.");
+}
+
+/**
+ * @brief Validates one finite inclusive declared sample interval.
+ * @param domain Candidate declared domain.
+ * @return Nothing.
+ * @throws std::invalid_argument for nonfinite, reversed, or unknown values.
+ * @note Equal endpoints are a valid single-value inclusive domain.
+ */
+void validate_sample_domain(const SampleDomain& domain) {
+  validate_sample_domain_kind(domain.kind);
+  if (!std::isfinite(domain.minimum) || !std::isfinite(domain.maximum) ||
+      domain.minimum > domain.maximum) {
+    throw std::invalid_argument(
+        "SampleDomain endpoints must form a finite inclusive interval.");
+  }
+}
+
+/**
+ * @brief Validates one closed sample-encoding enum value.
+ * @param kind Candidate enum value.
+ * @return Nothing.
+ * @throws std::invalid_argument when the value is outside version 1.
+ */
+void validate_sample_encoding_kind(SampleEncodingKind kind) {
+  switch (kind) {
+    case SampleEncodingKind::Value:
+    case SampleEncodingKind::Normalized:
+    case SampleEncodingKind::CodeValue:
+      return;
+  }
+  throw std::invalid_argument("SampleEncoding kind is unsupported.");
+}
+
+/**
+ * @brief Validates the closed transfer-function enum.
+ * @param transfer Candidate transfer value.
+ * @return Nothing.
+ * @throws std::invalid_argument when the value is outside version 1.
+ */
+void validate_color_transfer(ColorTransferFunction transfer) {
+  switch (transfer) {
+    case ColorTransferFunction::SceneLinear:
+    case ColorTransferFunction::Srgb:
+    case ColorTransferFunction::Rec709:
+    case ColorTransferFunction::Pq:
+    case ColorTransferFunction::Hlg:
+      return;
+  }
+  throw std::invalid_argument("ColorFacet transfer function is unsupported.");
+}
+
+/**
+ * @brief Validates the closed color-primary enum.
+ * @param primaries Candidate primaries value.
+ * @return Nothing.
+ * @throws std::invalid_argument when the value is outside version 1.
+ */
+void validate_color_primaries(ColorPrimaries primaries) {
+  switch (primaries) {
+    case ColorPrimaries::Rec709:
+    case ColorPrimaries::DisplayP3D65:
+    case ColorPrimaries::Rec2020:
+    case ColorPrimaries::AcesAp0:
+    case ColorPrimaries::AcesAp1:
+      return;
+  }
+  throw std::invalid_argument("ColorFacet primaries are unsupported.");
+}
+
+/**
+ * @brief Validates stable channel records and returns their scalar ID set.
+ * @param schema Candidate channel/group authority.
+ * @param expected_channels Exact channel count derived from tensor axes.
+ * @return Set containing every validated stable channel scalar.
+ * @throws std::invalid_argument for invalid/duplicate IDs, bad ordering,
+ *         missing group members, or diagnostic names over the byte limit.
+ * @throws std::length_error for a frozen record-count violation.
+ * @throws std::bad_alloc when validation set allocation fails.
+ * @note Channel order remains the channel-axis order; only groups and group
+ *       members require scalar ordering for one canonical spelling.
+ */
+std::unordered_set<std::uint64_t> validate_channel_schema(
+    const ChannelSchema& schema, std::size_t expected_channels) {
+  if (schema.channels.size() > kMaximumImageChannels ||
+      schema.groups.size() > kMaximumImageChannelGroups) {
+    throw std::length_error("ChannelSchema exceeds its frozen record bound.");
+  }
+  if (schema.channels.size() != expected_channels) {
+    throw std::invalid_argument(
+        "ChannelSchema cardinality must match the image channel extent.");
+  }
+
+  std::unordered_set<std::uint64_t> channel_ids;
+  channel_ids.reserve(schema.channels.size());
+  for (const ChannelDescription& channel : schema.channels) {
+    if (!channel.id.valid() || !channel_ids.insert(channel.id.value).second) {
+      throw std::invalid_argument(
+          "ChannelSchema channel IDs must be nonzero and unique.");
+    }
+    if (channel.diagnostic_name.size() > kMaximumImageDiagnosticNameBytes) {
+      throw std::invalid_argument(
+          "Channel diagnostic name exceeds its frozen byte bound.");
+    }
+  }
+
+  ChannelGroupId previous_group;
+  std::size_t total_members = 0U;
+  for (const ChannelGroupDescription& group : schema.groups) {
+    if (!group.id.valid() ||
+        (previous_group.valid() && !(previous_group < group.id))) {
+      throw std::invalid_argument(
+          "Channel group IDs must be nonzero, unique, and increasing.");
+    }
+    previous_group = group.id;
+    if (group.diagnostic_name.size() > kMaximumImageDiagnosticNameBytes) {
+      throw std::invalid_argument(
+          "Channel group diagnostic name exceeds its frozen byte bound.");
+    }
+    if (group.members.empty()) {
+      throw std::invalid_argument("Channel groups must contain a channel.");
+    }
+    if (group.members.size() > kMaximumImageChannelGroupMembers) {
+      throw std::length_error("Channel group exceeds its frozen member bound.");
+    }
+    if (group.members.size() >
+        kMaximumImageChannelGroupMemberships - total_members) {
+      throw std::length_error(
+          "ChannelSchema exceeds its frozen total membership bound.");
+    }
+    total_members += group.members.size();
+    ChannelId previous_member;
+    for (const ChannelId member : group.members) {
+      if (!member.valid() || channel_ids.count(member.value) == 0U ||
+          (previous_member.valid() && !(previous_member < member))) {
+        throw std::invalid_argument(
+            "Channel group members must exist, be unique, and increase.");
+      }
+      previous_member = member;
+    }
+  }
+  return channel_ids;
+}
+
+/**
+ * @brief Validates one versioned declared sample-domain facet.
+ * @param facet Candidate sample interpretation.
+ * @param channel_ids Stable channel IDs, or null without a ChannelSchema.
+ * @return Nothing.
+ * @throws std::invalid_argument for version, interval, ordering, or reference
+ *         failures.
+ * @throws std::length_error when override count exceeds its frozen bound.
+ */
+void validate_sample_domain_facet(
+    const SampleDomainFacet& facet,
+    const std::unordered_set<std::uint64_t>* channel_ids) {
+  if (facet.structural_version != 1U ||
+      facet.encoding.structural_version != 1U) {
+    throw std::invalid_argument(
+        "SampleDomainFacet structural version is unsupported.");
+  }
+  validate_sample_encoding_kind(facet.encoding.kind);
+  validate_sample_domain(facet.default_domain);
+  if (facet.per_channel.size() > kMaximumImageChannels) {
+    throw std::length_error(
+        "SampleDomainFacet exceeds its frozen override bound.");
+  }
+  if (!facet.per_channel.empty() && channel_ids == nullptr) {
+    throw std::invalid_argument(
+        "Per-channel sample domains require a ChannelSchema.");
+  }
+  ChannelId previous;
+  for (const ChannelSampleDomain& override_domain : facet.per_channel) {
+    if (!override_domain.channel.valid() ||
+        channel_ids->count(override_domain.channel.value) == 0U ||
+        (previous.valid() && !(previous < override_domain.channel))) {
+      throw std::invalid_argument(
+          "Sample-domain override IDs must exist, be unique, and increase.");
+    }
+    validate_sample_domain(override_domain.domain);
+    previous = override_domain.channel;
+  }
+}
+
+/**
+ * @brief Validates one versioned color facet against stable channel groups.
+ * @param color Candidate color interpretation.
+ * @param schema Channel authority required by the binding.
+ * @return Nothing.
+ * @throws std::invalid_argument for unsupported version/enums or missing group.
+ */
+void validate_color_facet(const ColorFacet& color,
+                          const ChannelSchema* schema) {
+  if (color.structural_version != 1U || !color.channel_group.valid()) {
+    throw std::invalid_argument(
+        "ColorFacet version and channel group must be valid.");
+  }
+  validate_color_transfer(color.transfer);
+  validate_color_primaries(color.primaries);
+  if (schema == nullptr) {
+    throw std::invalid_argument("ColorFacet requires a ChannelSchema.");
+  }
+  const auto group =
+      std::find_if(schema->groups.begin(), schema->groups.end(),
+                   [&color](const ChannelGroupDescription& candidate) {
+                     return candidate.id == color.channel_group;
+                   });
+  if (group == schema->groups.end() || group->members.empty()) {
+    throw std::invalid_argument(
+        "ColorFacet must reference a nonempty ChannelSchema group.");
+  }
+}
+
+/**
  * @brief Validates the common logical DenseTensor descriptor and image facet.
  *
  * @param descriptor Logical descriptor to validate.
- * @param facet Optional explicit image-axis mapping.
- * @throws std::invalid_argument for empty/zero shape or malformed image axes.
+ * @param facet Optional complete ordinary-image interpretation.
+ * @throws std::invalid_argument for empty/zero shape or malformed image
+ *         coordinates, axes, channels, sample domains, or colors.
+ * @throws std::overflow_error when a signed window span cannot be represented.
+ * @throws std::length_error when bounded image metadata exceeds frozen limits.
+ * @throws std::bad_alloc when validation set allocation fails.
  * @note Element encoding, quantization, layout, and allocation ranges are
  * validated separately.
  */
@@ -215,15 +571,48 @@ void validate_shape_and_facet(const DenseTensorDescriptor& descriptor,
     throw std::invalid_argument(
         "ImageFacet channel axis must be distinct and in rank.");
   }
+
+  const std::size_t width = image_bounds_width(facet->data_window);
+  const std::size_t height = image_bounds_height(facet->data_window);
+  if (width != descriptor.shape[facet->x_axis] ||
+      height != descriptor.shape[facet->y_axis]) {
+    throw std::invalid_argument(
+        "ImageFacet data-window spans must match x/y tensor extents.");
+  }
+  if (facet->display_window.has_value()) {
+    (void)image_bounds_width(*facet->display_window);
+    (void)image_bounds_height(*facet->display_window);
+  }
+
+  const std::size_t channel_count = facet->channel_axis.has_value()
+                                        ? descriptor.shape[*facet->channel_axis]
+                                        : 1U;
+  std::optional<std::unordered_set<std::uint64_t>> channel_ids;
+  if (facet->channel_schema.has_value()) {
+    channel_ids =
+        validate_channel_schema(*facet->channel_schema, channel_count);
+  }
+  if (facet->sample_domain.has_value()) {
+    validate_sample_domain_facet(*facet->sample_domain, channel_ids.has_value()
+                                                            ? &*channel_ids
+                                                            : nullptr);
+  }
+  if (facet->color.has_value()) {
+    validate_color_facet(*facet->color, facet->channel_schema.has_value()
+                                            ? &*facet->channel_schema
+                                            : nullptr);
+  }
 }
 
 /**
  * @brief Validates one currently supported whole-byte Strided descriptor.
  * @param descriptor Logical descriptor to validate.
- * @param facet Optional explicit image-axis mapping.
+ * @param facet Optional complete ordinary-image interpretation.
  * @return Positive whole-byte element width.
  * @throws std::invalid_argument for malformed shape/facet, quantization on a
  * Strided V-13 value, or unsupported whole-byte encoding.
+ * @throws std::overflow_error, std::length_error, or std::bad_alloc from
+ * bounded ImageFacet validation.
  * @note Packed FP4 uses the separate Blocked descriptor authority.
  */
 std::size_t validate_descriptor_and_facet(
@@ -550,7 +939,7 @@ void validate_blocked_producer_envelope(const DenseTensorDescriptor& descriptor,
 /**
  * @brief Reports whether one axis is explicitly assigned by an image facet.
  *
- * @param facet Valid explicit image-axis mapping.
+ * @param facet Valid complete ordinary-image interpretation.
  * @param axis Logical axis to inspect.
  * @return True when axis is x, y, or the optional channel axis.
  * @throws Nothing.
@@ -608,6 +997,53 @@ std::size_t resolve_coordinate_offset(const StridedLayout& layout,
 
 }  // namespace
 
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+namespace testing {
+
+/** @copydoc arm_buffer_control_block_allocation_failure_for_testing */
+void arm_buffer_control_block_allocation_failure_for_testing(
+    std::size_t allocation_number) noexcept {
+  BufferControlBlockAllocationTestState& state = buffer_allocation_test_state;
+  state = {};
+  state.armed = allocation_number != 0U;
+  state.observing = true;
+  state.remaining = allocation_number;
+}
+
+/** @copydoc buffer_control_block_allocation_observation_for_testing */
+BufferControlBlockAllocationObservation
+buffer_control_block_allocation_observation_for_testing() noexcept {
+  const BufferControlBlockAllocationTestState& state =
+      buffer_allocation_test_state;
+  return {state.fired, state.successful_allocations,
+          state.released_allocations};
+}
+
+/** @copydoc clear_buffer_control_block_allocation_failure_for_testing */
+void clear_buffer_control_block_allocation_failure_for_testing() noexcept {
+  buffer_allocation_test_state = {};
+}
+
+}  // namespace testing
+#endif
+
+/** @copydoc ps::image_bounds_width */
+std::size_t image_bounds_width(const ImageBounds& bounds) {
+  return checked_image_bounds_span(bounds.x_begin, bounds.x_end, "x");
+}
+
+/** @copydoc ps::image_bounds_height */
+std::size_t image_bounds_height(const ImageBounds& bounds) {
+  return checked_image_bounds_span(bounds.y_begin, bounds.y_end, "y");
+}
+
+/** @copydoc ps::validate_dense_tensor_image_metadata */
+void validate_dense_tensor_image_metadata(
+    const DenseTensorDescriptor& descriptor,
+    const std::optional<ImageFacet>& image_facet) {
+  validate_shape_and_facet(descriptor, image_facet);
+}
+
 /** @copydoc ps::validate_dense_tensor_producer_envelope */
 void validate_dense_tensor_producer_envelope(
     const DenseTensorDescriptor& descriptor, const StridedLayout& layout,
@@ -641,8 +1077,12 @@ struct BufferHandle::ControlBlock final {
   /** @brief Explicit allocation memory domain. */
   MemoryDomain memory_domain = MemoryDomain::Host;
 
-  /** @brief Owned CPU bytes, empty for external/native bindings. */
-  std::vector<std::byte> storage;
+  /**
+   * @brief Shared owner of aligned CPU bytes, null for external bindings.
+   * @note The deleter retains the exact aligned-delete argument and therefore
+   * remains independent from BufferHandle copies and subranges.
+   */
+  std::shared_ptr<void> owned_cpu_storage;
 
   /** @brief Shared external/native allocation owner, or null for CPU storage.
    */
@@ -657,18 +1097,46 @@ struct BufferHandle::ControlBlock final {
   /** @brief Positive complete allocation byte size. */
   std::size_t byte_size = 0U;
 
+  /** @brief Positive power-of-two allocation-base alignment guarantee. */
+  std::size_t required_alignment = 1U;
+
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+  /** @brief Whether this owner belongs to the active test observation. */
+  bool observed_allocation_for_testing = false;
+#endif
+
   /**
    * @brief Allocates one zero-initialized CPU byte range.
    *
    * @param identity_in Already minted nonzero allocation identity.
    * @param size Positive allocation size.
+   * @param alignment Valid power-of-two allocation alignment.
    * @throws std::bad_alloc when byte allocation fails.
+   * @throws std::invalid_argument when alignment cannot be represented by the
+   * aligned allocation contract.
+   * @note The physical allocation is elevated to at least max_align_t while
+   *       `required_alignment` retains the caller's exact portable contract;
+   *       the owner deleter captures the elevated allocation argument.
    */
-  ControlBlock(AllocationIdentity identity_in, std::size_t size)
-      : identity(identity_in),
-        storage(size, std::byte{0}),
-        host_data(storage.data()),
-        byte_size(size) {}
+  ControlBlock(AllocationIdentity identity_in, std::size_t size,
+               std::size_t alignment)
+      : identity(identity_in), byte_size(size) {
+    const std::size_t effective_alignment =
+        std::max(alignment, alignof(std::max_align_t));
+    required_alignment = alignment;
+    void* allocation =
+        ::operator new(size, std::align_val_t(effective_alignment));
+    owned_cpu_storage = std::shared_ptr<void>(
+        allocation, [effective_alignment](void* pointer) noexcept {
+          ::operator delete(pointer, std::align_val_t(effective_alignment));
+        });
+    host_data = static_cast<std::byte*>(allocation);
+    std::memset(host_data, 0, size);
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+    observed_allocation_for_testing =
+        record_buffer_control_block_allocation_for_testing();
+#endif
+  }
 
   /**
    * @brief Retains one external/native allocation and optional host pointer.
@@ -691,6 +1159,24 @@ struct BufferHandle::ControlBlock final {
         native(native_in),
         host_data(host_data_in),
         byte_size(size) {}
+
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+  /**
+   * @brief Releases retained storage and reports test-observed owner cleanup.
+   *
+   * @throws Nothing.
+   * @note Resetting the mutually exclusive storage owners first guarantees the
+   *       matching aligned deleter or external owner has completed before the
+   *       observation is counted. Production runtime images use the implicit
+   *       destructor and compile no observer field or callback.
+   */
+  ~ControlBlock() noexcept {
+    owned_cpu_storage.reset();
+    external_owner.reset();
+    record_buffer_control_block_release_for_testing(
+        observed_allocation_for_testing);
+  }
+#endif
 };
 
 /** @copydoc BufferHandle::BufferHandle */
@@ -699,14 +1185,23 @@ BufferHandle::BufferHandle(std::shared_ptr<ControlBlock> control,
     : control_(std::move(control)), offset_(offset), length_(length) {}
 
 /** @copydoc BufferHandle::allocate_for_builder */
-BufferHandle BufferHandle::allocate_for_builder(std::size_t size) {
+BufferHandle BufferHandle::allocate_for_builder(std::size_t size,
+                                                std::size_t alignment) {
   if (size == 0U) {
     throw std::invalid_argument(
         "BufferHandle allocation size must be positive.");
   }
+  if (alignment == 0U || (alignment & (alignment - 1U)) != 0U) {
+    throw std::invalid_argument(
+        "BufferHandle allocation alignment must be a power of two.");
+  }
   const AllocationIdentity identity(
       process_identity_authority().mint_allocation_identity());
-  return BufferHandle(std::make_shared<ControlBlock>(identity, size), 0U, size);
+#if defined(PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
+  inject_buffer_control_block_allocation_failure_for_testing();
+#endif
+  return BufferHandle(std::make_shared<ControlBlock>(identity, size, alignment),
+                      0U, size);
 }
 
 /** @copydoc BufferHandle::retain_external_binding */
@@ -765,9 +1260,13 @@ StorageBinding BufferHandle::storage_binding() const {
   if (!valid()) {
     throw std::logic_error("Invalid BufferHandle has no storage binding.");
   }
-  return StorageBinding{control_->identity, control_->device,
-                        control_->memory_domain, control_->byte_size,
-                        control_->host_data != nullptr};
+  std::size_t retained_alignment = control_->required_alignment;
+  while (retained_alignment > 1U && offset_ % retained_alignment != 0U) {
+    retained_alignment /= 2U;
+  }
+  return StorageBinding{
+      control_->identity,  control_->device,   control_->memory_domain,
+      control_->byte_size, retained_alignment, control_->host_data != nullptr};
 }
 
 /** @copydoc BufferHandle::host_visible */
@@ -926,11 +1425,21 @@ std::size_t WriteLease::size() const {
   return handle_.size();
 }
 
+/** @copydoc WriteLease::allocation_identity */
+AllocationIdentity WriteLease::allocation_identity() const {
+  if (!valid()) {
+    throw std::logic_error(
+        "WriteLease has no active producer allocation identity.");
+  }
+  return handle_.allocation_identity();
+}
+
 /**
  * @brief Immutable implementation for one validated generic Value.
  *
- * @throws std::bad_alloc when copied descriptor/Layout/buffer storage cannot
- * allocate.
+ * @throws std::bad_alloc when complete descriptor, allocation-owning
+ *         ImageFacet, Layout, provider metadata, or buffer-vector copies cannot
+ *         allocate.
  * @note Instances are published only through shared_ptr<const Impl>. Ordinary
  * synchronous publication uses an already-Ready fence; source-private pending
  * publication closes ordinary builder authority before the Value escapes.
@@ -943,8 +1452,12 @@ struct Value::Impl final {
   /** @brief Validated concrete logical descriptor. */
   DenseTensorDescriptor descriptor;
 
-  /** @brief Optional validated explicit image-axis mapping. */
+  /** @brief Optional validated complete ordinary-image interpretation. */
   std::optional<ImageFacet> image_facet;
+
+  /** @brief Optional exact pure-C operation descriptor identity. */
+  std::optional<DenseTensorValueDescriptorMetadata>
+      dense_tensor_descriptor_metadata;
 
   /** @brief Optional byte-preserved provider-defined logical descriptor. */
   std::optional<DataDescriptorEnvelope> provider_descriptor;
@@ -974,14 +1487,18 @@ struct Value::Impl final {
    * @brief Stores one completely validated immutable publication.
    *
    * @param descriptor_in Logical descriptor to retain.
-   * @param image_facet_in Optional image facet to retain.
+   * @param image_facet_in Optional complete ordinary-image interpretation to
+   *        retain.
    * @param layout_in Tagged checked layout to retain.
    * @param buffer_in Sealed checked allocation range to retain.
    * @param ready_fence_in Valid producer-completion observer.
    * @param revision_in Fresh nonzero publication revision.
    * @param producer_in Fresh nonzero producer identity.
-   * @throws std::bad_alloc when descriptor or layout vector moves must
-   * allocate.
+   * @param descriptor_metadata_in Optional exact operation-ABI identity,
+   * versions, and digest words retained before publication.
+   * @throws std::bad_alloc when the by-value complete descriptor/ImageFacet or
+   *         layout copies used to construct this immutable state cannot
+   *         allocate.
    * @note Inputs are already validated. Before the Value escapes, the caller
    *       either retires ordinary builder authority for an already-Ready
    *       publication or transfers the sole mutable path to the matching
@@ -990,10 +1507,13 @@ struct Value::Impl final {
   Impl(DenseTensorDescriptor descriptor_in,
        std::optional<ImageFacet> image_facet_in, ValueLayout layout_in,
        BufferHandle buffer_in, ReadyFence ready_fence_in,
-       ValueRevisionId revision_in, ProducerIdentity producer_in)
+       ValueRevisionId revision_in, ProducerIdentity producer_in,
+       std::optional<DenseTensorValueDescriptorMetadata>
+           descriptor_metadata_in = std::nullopt)
       : representation(ValueRepresentationKind::DenseTensor),
         descriptor(std::move(descriptor_in)),
         image_facet(std::move(image_facet_in)),
+        dense_tensor_descriptor_metadata(std::move(descriptor_metadata_in)),
         layout(std::move(layout_in)),
         buffer(std::move(buffer_in)),
         ready_fence(std::move(ready_fence_in)),
@@ -1038,11 +1558,15 @@ struct ValueBuilder::Impl final {
   /** @brief Validated logical descriptor. */
   DenseTensorDescriptor descriptor;
 
-  /** @brief Optional validated explicit image facet. */
+  /** @brief Optional validated complete ordinary-image interpretation. */
   std::optional<ImageFacet> image_facet;
 
   /** @brief Validated exact Strided or Blocked producer layout. */
   ValueLayout layout;
+
+  /** @brief Optional exact operation metadata installed before publication. */
+  std::optional<DenseTensorValueDescriptorMetadata>
+      dense_tensor_descriptor_metadata;
 
   /** @brief Private complete allocation handle. */
   BufferHandle buffer;
@@ -1073,6 +1597,51 @@ struct ValueBuilder::Impl final {
         buffer(std::move(buffer_in)),
         authority(std::move(authority_in)) {}
 };
+
+/** @copydoc DenseTensorValueDescriptorMetadataAccess::attach */
+void DenseTensorValueDescriptorMetadataAccess::attach(
+    ValueBuilder* builder, DenseTensorValueDescriptorMetadata metadata) {
+  if (builder == nullptr) {
+    throw std::invalid_argument(
+        "DenseTensor descriptor metadata requires a nonnull builder.");
+  }
+  if (!builder->impl_ || builder->impl_->sealed ||
+      !builder->impl_->authority->builder_open.load(
+          std::memory_order_acquire)) {
+    throw std::logic_error(
+        "DenseTensor descriptor metadata requires an open builder.");
+  }
+  if (!metadata.schema_identity.valid() || !metadata.layout_identity.valid() ||
+      metadata.descriptor_version == 0U || metadata.layout_version == 0U) {
+    throw std::invalid_argument(
+        "DenseTensor Schema/Layout identities and versions must be "
+        "nonzero.");
+  }
+  if (metadata.facet_identity.valid() !=
+      builder->impl_->image_facet.has_value()) {
+    throw std::invalid_argument(
+        "DenseTensor descriptor Facet identity presence must match its Facet.");
+  }
+  if (builder->impl_->dense_tensor_descriptor_metadata.has_value()) {
+    if (*builder->impl_->dense_tensor_descriptor_metadata == metadata) {
+      return;
+    }
+    throw std::logic_error(
+        "DenseTensor builder already carries different descriptor metadata.");
+  }
+  builder->impl_->dense_tensor_descriptor_metadata = std::move(metadata);
+}
+
+/** @copydoc DenseTensorValueDescriptorMetadataAccess::get */
+const DenseTensorValueDescriptorMetadata*
+DenseTensorValueDescriptorMetadataAccess::get(const Value& value) noexcept {
+  if (!value.impl_ ||
+      value.impl_->representation != ValueRepresentationKind::DenseTensor ||
+      !value.impl_->dense_tensor_descriptor_metadata.has_value()) {
+    return nullptr;
+  }
+  return &*value.impl_->dense_tensor_descriptor_metadata;
+}
 
 /**
  * @brief Exclusive source-private producer implementation for a pending Value.
@@ -1109,7 +1678,9 @@ std::size_t dense_tensor_element_bits(const DenseTensorDescriptor& descriptor) {
       if (descriptor.storage_encoding.kind ==
               StorageEncodingKind::NativeScalar &&
           (descriptor.storage_encoding.bit_width == 8U ||
-           descriptor.storage_encoding.bit_width == 16U)) {
+           descriptor.storage_encoding.bit_width == 16U ||
+           descriptor.storage_encoding.bit_width == 32U ||
+           descriptor.storage_encoding.bit_width == 64U)) {
         return descriptor.storage_encoding.bit_width;
       }
       break;
@@ -1142,6 +1713,84 @@ std::size_t dense_tensor_element_bytes(
   return element_bits / 8U;
 }
 
+/** @copydoc ps::storage_representable_range */
+StorageRepresentableRange storage_representable_range(
+    const DenseTensorDescriptor& descriptor) {
+  const std::size_t bits = dense_tensor_element_bits(descriptor);
+  if (descriptor.storage_encoding.kind == StorageEncodingKind::Fp4E2M1) {
+    return StorageRepresentableRange{-6.0, 6.0, false, false, false};
+  }
+  switch (descriptor.element_semantics) {
+    case ElementSemantics::UnsignedInteger: {
+      const std::uint64_t maximum =
+          bits == 64U ? std::numeric_limits<std::uint64_t>::max()
+                      : (std::uint64_t{1U} << bits) - 1U;
+      return StorageRepresentableRange{0.0, static_cast<double>(maximum), false,
+                                       false, false};
+    }
+    case ElementSemantics::SignedInteger: {
+      const std::int64_t maximum =
+          bits == 64U ? std::numeric_limits<std::int64_t>::max()
+                      : (std::int64_t{1} << (bits - 1U)) - 1;
+      const std::int64_t minimum = -maximum - 1;
+      return StorageRepresentableRange{static_cast<double>(minimum),
+                                       static_cast<double>(maximum), false,
+                                       false, false};
+    }
+    case ElementSemantics::FloatingPoint:
+      if (bits == 32U) {
+        return StorageRepresentableRange{
+            -static_cast<double>(std::numeric_limits<float>::max()),
+            static_cast<double>(std::numeric_limits<float>::max()), true, true,
+            true};
+      }
+      if (bits == 64U) {
+        return StorageRepresentableRange{-std::numeric_limits<double>::max(),
+                                         std::numeric_limits<double>::max(),
+                                         true, true, true};
+      }
+      break;
+  }
+  throw std::invalid_argument(
+      "DenseTensor storage range is unavailable for this encoding.");
+}
+
+/** @copydoc ps::make_zero_origin_image_facet */
+ImageFacet make_zero_origin_image_facet(
+    const DenseTensorDescriptor& descriptor, std::size_t x_axis,
+    std::size_t y_axis, std::optional<std::size_t> channel_axis) {
+  if (descriptor.shape.empty() || x_axis >= descriptor.shape.size() ||
+      y_axis >= descriptor.shape.size() || x_axis == y_axis ||
+      (channel_axis.has_value() &&
+       (*channel_axis >= descriptor.shape.size() || *channel_axis == x_axis ||
+        *channel_axis == y_axis))) {
+    throw std::invalid_argument(
+        "Zero-origin ImageFacet axes must be distinct and in rank.");
+  }
+  for (const std::size_t extent : descriptor.shape) {
+    if (extent == 0U) {
+      throw std::invalid_argument(
+          "Zero-origin ImageFacet requires positive tensor extents.");
+    }
+  }
+  const std::size_t maximum_signed_extent =
+      static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max());
+  if (descriptor.shape[x_axis] > maximum_signed_extent ||
+      descriptor.shape[y_axis] > maximum_signed_extent) {
+    throw std::overflow_error(
+        "Zero-origin ImageFacet extent exceeds signed coordinates.");
+  }
+
+  ImageFacet facet;
+  facet.x_axis = x_axis;
+  facet.y_axis = y_axis;
+  facet.channel_axis = channel_axis;
+  facet.data_window.x_end = static_cast<std::int64_t>(descriptor.shape[x_axis]);
+  facet.data_window.y_end = static_cast<std::int64_t>(descriptor.shape[y_axis]);
+  validate_shape_and_facet(descriptor, facet);
+  return facet;
+}
+
 /** @copydoc ValueBuilder::ValueBuilder */
 ValueBuilder::ValueBuilder(std::unique_ptr<Impl> impl) noexcept
     : impl_(std::move(impl)) {}
@@ -1158,14 +1807,15 @@ ValueBuilder::~ValueBuilder() noexcept = default;
 /** @copydoc ValueBuilder::allocate_cpu_dense_tensor */
 ValueBuilder ValueBuilder::allocate_cpu_dense_tensor(
     DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
-    StridedLayout layout, std::size_t storage_size) {
+    StridedLayout layout, std::size_t storage_size, std::size_t alignment) {
   (void)validate_descriptor_and_facet(descriptor, image_facet);
   validate_dense_tensor_producer_envelope(descriptor, layout, storage_size);
 
   DenseTensorDescriptor isolated_descriptor = descriptor;
   const std::optional<ImageFacet> isolated_image_facet = image_facet;
   StridedLayout isolated_layout = layout;
-  BufferHandle buffer = BufferHandle::allocate_for_builder(storage_size);
+  BufferHandle buffer =
+      BufferHandle::allocate_for_builder(storage_size, alignment);
   auto authority = std::make_shared<WriteLease::Authority>();
   return ValueBuilder(std::make_unique<Impl>(
       std::move(isolated_descriptor), isolated_image_facet,
@@ -1175,12 +1825,13 @@ ValueBuilder ValueBuilder::allocate_cpu_dense_tensor(
 /** @copydoc ValueBuilder::allocate_cpu_blocked_dense_tensor */
 ValueBuilder ValueBuilder::allocate_cpu_blocked_dense_tensor(
     DenseTensorDescriptor descriptor, BlockedLayout layout,
-    std::size_t storage_size) {
+    std::size_t storage_size, std::size_t alignment) {
   validate_dense_tensor_producer_envelope(descriptor, layout, storage_size);
 
   DenseTensorDescriptor isolated_descriptor = descriptor;
   BlockedLayout isolated_layout = layout;
-  BufferHandle buffer = BufferHandle::allocate_for_builder(storage_size);
+  BufferHandle buffer =
+      BufferHandle::allocate_for_builder(storage_size, alignment);
   auto authority = std::make_shared<WriteLease::Authority>();
   return ValueBuilder(
       std::make_unique<Impl>(std::move(isolated_descriptor), std::nullopt,
@@ -1226,7 +1877,8 @@ Value ValueBuilder::seal() {
       process_identity_authority().mint_producer_identity());
   auto published = std::make_shared<const Value::Impl>(
       impl_->descriptor, impl_->image_facet, impl_->layout, impl_->buffer,
-      ReadyFence::already_ready(), revision, producer);
+      ReadyFence::already_ready(), revision, producer,
+      impl_->dense_tensor_descriptor_metadata);
 
   impl_->authority->builder_open.store(false, std::memory_order_release);
   impl_->sealed = true;
@@ -1523,10 +2175,11 @@ Value::Value(std::shared_ptr<const Impl> impl) noexcept
 Value Value::from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
                                    std::optional<ImageFacet> image_facet,
                                    StridedLayout layout,
-                                   std::vector<std::byte> storage) {
+                                   std::vector<std::byte> storage,
+                                   std::size_t alignment) {
   ValueBuilder builder = ValueBuilder::allocate_cpu_dense_tensor(
       std::move(descriptor), std::move(image_facet), std::move(layout),
-      storage.size());
+      storage.size(), alignment);
   {
     WriteLease lease = builder.acquire_write();
     std::memcpy(lease.data(), storage.data(), storage.size());
@@ -1567,9 +2220,10 @@ Value Value::from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
 /** @copydoc Value::from_cpu_blocked_dense_tensor */
 Value Value::from_cpu_blocked_dense_tensor(DenseTensorDescriptor descriptor,
                                            BlockedLayout layout,
-                                           std::vector<std::byte> storage) {
+                                           std::vector<std::byte> storage,
+                                           std::size_t alignment) {
   ValueBuilder builder = ValueBuilder::allocate_cpu_blocked_dense_tensor(
-      std::move(descriptor), std::move(layout), storage.size());
+      std::move(descriptor), std::move(layout), storage.size(), alignment);
   {
     WriteLease lease = builder.acquire_write();
     std::memcpy(lease.data(), storage.data(), storage.size());
@@ -1646,6 +2300,39 @@ Value Value::from_provider_defined(DataDefinitionRegistry& registry,
       producer));
 }
 
+/** @copydoc Value::from_provider_defined_payloads */
+Value Value::from_provider_defined_payloads(
+    DataDefinitionRegistry& registry, DataDescriptorEnvelope descriptor,
+    ProviderDefinedLayout layout, std::vector<std::vector<std::byte>> payloads,
+    std::vector<std::size_t> required_alignments) {
+  if (payloads.size() != required_alignments.size()) {
+    throw std::invalid_argument(
+        "Provider-defined payload alignment cardinality must match bytes.");
+  }
+  for (std::size_t index = 0U; index < payloads.size(); ++index) {
+    if (payloads[index].empty()) {
+      throw std::invalid_argument(
+          "Provider-defined artifact payloads must be nonempty.");
+    }
+    const std::size_t alignment = required_alignments[index];
+    if (alignment == 0U || (alignment & (alignment - 1U)) != 0U) {
+      throw std::invalid_argument(
+          "Provider-defined artifact alignment must be a power of two.");
+    }
+  }
+  std::vector<BufferHandle> buffers;
+  buffers.reserve(payloads.size());
+  for (std::size_t index = 0U; index < payloads.size(); ++index) {
+    const std::vector<std::byte>& payload = payloads[index];
+    BufferHandle buffer = BufferHandle::allocate_for_builder(
+        payload.size(), required_alignments[index]);
+    std::memcpy(buffer.write_pointer(), payload.data(), payload.size());
+    buffers.push_back(std::move(buffer));
+  }
+  return from_provider_defined(registry, std::move(descriptor),
+                               std::move(layout), std::move(buffers));
+}
+
 /** @copydoc Value::valid */
 bool Value::valid() const noexcept {
   return impl_ != nullptr;
@@ -1680,6 +2367,15 @@ const std::optional<ImageFacet>& Value::image_facet() const {
     throw std::logic_error("Provider-defined Value has no ImageFacet.");
   }
   return impl_->image_facet;
+}
+
+/** @copydoc Value::image_bounds */
+const ImageBounds& Value::image_bounds() const {
+  const std::optional<ImageFacet>& facet = image_facet();
+  if (!facet.has_value()) {
+    throw std::logic_error("DenseTensor Value has no image data window.");
+  }
+  return facet->data_window;
 }
 
 /** @copydoc Value::provider_defined_descriptor */
@@ -2111,14 +2807,24 @@ ImageView::ImageView(Value value) : tensor_(std::move(value)) {
   channels_ = image_facet_.channel_axis.has_value()
                   ? tensor_descriptor.shape[*image_facet_.channel_axis]
                   : 1U;
-  const std::size_t maximum_image_extent =
-      static_cast<std::size_t>(std::numeric_limits<int>::max());
-  if (width_ > maximum_image_extent || height_ > maximum_image_extent ||
-      channels_ > maximum_image_extent) {
-    throw std::invalid_argument(
-        "ImageView extent exceeds the current ImageBuffer adapter domain.");
-  }
   element_bytes_ = dense_tensor_element_bytes(tensor_descriptor);
+}
+
+/** @copydoc ImageView::operator=(const ImageView&) */
+ImageView& ImageView::operator=(const ImageView& other) {
+  if (this == &other) {
+    return *this;
+  }
+
+  static_assert(std::is_nothrow_move_assignable_v<ImageFacet>);
+  ImageFacet staged_image_facet(other.image_facet_);
+  tensor_ = other.tensor_;
+  image_facet_ = std::move(staged_image_facet);
+  width_ = other.width_;
+  height_ = other.height_;
+  channels_ = other.channels_;
+  element_bytes_ = other.element_bytes_;
+  return *this;
 }
 
 /** @copydoc ImageView::value */
@@ -2179,6 +2885,23 @@ const std::byte* ImageView::channel_data(std::size_t x, std::size_t y,
     coordinates[*image_facet_.channel_axis] = channel;
   }
   return tensor_.element_data(coordinates);
+}
+
+/** @copydoc ImageView::channel_data_at */
+const std::byte* ImageView::channel_data_at(std::int64_t x, std::int64_t y,
+                                            std::size_t channel) const {
+  const ImageBounds& bounds = image_facet_.data_window;
+  if (x < bounds.x_begin || x >= bounds.x_end || y < bounds.y_begin ||
+      y >= bounds.y_end || channel >= channels_) {
+    throw std::out_of_range(
+        "ImageView logical coordinate is outside its data window.");
+  }
+  const std::uint64_t x_index = static_cast<std::uint64_t>(x) -
+                                static_cast<std::uint64_t>(bounds.x_begin);
+  const std::uint64_t y_index = static_cast<std::uint64_t>(y) -
+                                static_cast<std::uint64_t>(bounds.y_begin);
+  return channel_data(static_cast<std::size_t>(x_index),
+                      static_cast<std::size_t>(y_index), channel);
 }
 
 }  // namespace ps

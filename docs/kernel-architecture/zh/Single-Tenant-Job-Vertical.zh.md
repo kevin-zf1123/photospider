@@ -9,7 +9,7 @@ boundary、独立 WorkerManager/artifact service、remote data plane 或 untrust
 ## 当前剖面与身份
 
 受支持的剖面是规范 `jobspec-v2`、`embedded-cpu-v1` execution 与
-`crash-durable` image artifact。一个 `SingleTenantJobService` 拥有一个已配置
+`crash-durable` named-Value artifact archive。一个 `SingleTenantJobService` 拥有一个已配置
 `TenantId`、一个可信 durable state root、一套有限 quota 配置、任意数量的 retained Job，
 并为每个显式接受的 attempt 创建一个全新的 worker process 与 Embedded Host。Service
 authority 内一个源码私有 `WorkerManager` 拥有每个 process 与 supervision handle。
@@ -24,9 +24,9 @@ authority 内一个源码私有 `WorkerManager` 拥有每个 process 与 supervi
 | `JobAttemptId` | Job retry history 中一个不复用的 attempt | Job identity 或本地 Run identity |
 | `WorkerInstanceId` + `WorkerLeaseGeneration` | 精确的全新 process assignment 与 manager-fenced lease | Raw PID capability、Job identity 或单独构成 authorization |
 | `GraphArtifactId` | 由可信配置解析的 graph material key | Host path 或本地 `GraphSessionId` |
-| `ArtifactId` | 稳定、不可变的 durable image identity | Content digest、path 或 IPC `OutputArtifactId` |
+| `ArtifactId` | 稳定、不可变的 durable named-Value artifact identity | Content digest、path 或 IPC `OutputArtifactId` |
 | `OutputCommitId` | 一个 Job output 的稳定幂等 transaction identity | Attempt identity 或 delivery lease |
-| `ArtifactContentDigest` | 精确紧密 payload 字节的 SHA-256 | Artifact 或 commit identity |
+| `ArtifactContentDigest` | 精确 canonical archive 字节的 SHA-256 | Artifact 或 commit identity |
 
 初始 Job、artifact 与 commit id 包含抗碰撞 service namespace 和 checked local
 sequence。Retry 保留 `JobId`、JobSpec digest、checkpoint、`ArtifactId` 与
@@ -75,13 +75,18 @@ reservation 并完成全部 charge，要么什么都不改变。Worker、plugin�
 `ResourceLedger` token 都不能生成、放大或释放该 server reservation。
 
 失败和取消的 attempt 恰好一次释放完整 envelope。成功 artifact commit 把已预留的
-retention 转换为紧密 payload 的精确 charge，并释放所有 active-attempt dimension。Durable
+retention 转换为 canonical archive 的精确 charge，并释放所有 active-attempt dimension。Durable
 artifact deletion 只有在 artifact directory、artifacts directory 与 root barrier 确认
 manifest visibility removal 后，才释放 quota authority 所记录的精确 retained charge。
 Visibility 尚未确认的失败会保留 charge；visibility 已确认时，即使之后的 private
 payload/directory cleanup 失败也会释放 charge。启动时会从已校验 artifact 重建 retained
 charge；如果 configured retention 低于 recovered data，则 fail closed。Active attempt
 reservation 永不重建。
+任何 recovery allocation 前，authoritative/private manifest 与 Job record 都必须通过 small fixed
+byte limit。每个 archive 随后还必须符合 frozen representation ceiling 与剩余 aggregate retention
+quota；其 physical file 必须精确匹配 manifest `archive_bytes`，且不得为 sparse。oversize、sparse、
+short、long 或 digest-inconsistent state 都是 typed durable corruption，不能触发 speculative
+payload-proportional allocation。
 
 Active-attempt release 会在首次 mutation 前校验完整 subtraction，并提供强异常保证。如果
 release 抛出异常，service 会把精确 reservation owner 保留在 terminal Job control 上；若
@@ -130,9 +135,10 @@ durable-state mutex 下 swap 到 replacement，再执行 filesystem mutation；�
 durable mutation，并要求重启。重启会重新校验 record；除非 stable artifact 证明成功，否则
 仍存活的 nonterminal attempt 会被转换为 `RecoveryInterrupted`。
 
-Artifact commit 会校验 server-owned request 与 CPU image，把 active row 复制成紧密
-payload，校验 output/staging/retention bound，并 reconcile 已存在的 durable occurrence 或
-安全 residue。新的 publication 随后会：
+Artifact commit 会校验 server-owned request 与 canonical nonempty
+`NamedValueArtifactSet`，把每个 envelope 绑定到稳定 artifact/commit/slot identity，编码并重验
+完整 archive，校验 output/staging/retention bound，并 reconcile 已存在的 durable occurrence
+或安全 residue。新的 publication 随后会：
 
 1. 准备完整的 private `ArtifactId` 与 `OutputCommitId` index 副本，以及一个以 ArtifactId 为键的
    durability-confirmation 副本，然后以可回滚方式同时安装三者；
@@ -268,8 +274,8 @@ data-plane filesystem I/O。Fork child 只执行 descriptor
 setup、`RLIMIT_AS`、`RLIMIT_FSIZE`、descriptor closure 与 `exec`；全新 exec 的 worker 会校验
 Assignment metadata 与 JobSpec digest，通过 fd 5 接收并校验 optional checkpoint，创建并 seed
 一个全新的 Embedded Host，打开并加载 attempt-local Graph，在已预留 CPU parallelism 内
-compute，通过 fd 6 发送紧密 candidate row，关闭 Graph，销毁 Host ownership，最后只返回 typed
-attempt 与 staged-output metadata。
+compute，通过 fd 6 发送 canonical named-Value candidate archive，关闭 Graph，销毁 Host
+ownership，最后只返回 typed attempt 与 staged-output metadata。
 
 Exec 前的 descriptor ownership 是精确的：fd 0-2 是标准 stream，fd 3 是 private control
 socket，close-on-exec fd 4 用于向 parent 传递 setup `errno`。Darwin parent 在 `fork` 前查询
@@ -321,22 +327,21 @@ child-error 或 exec-success 分类；既有精确 PID owner 会执行 TERM→KI
 `std::overflow_error`，而不求值一个溢出的 sum。因此 `milliseconds::max()` 无法进入 conversion
 或 deadline arithmetic，validation 也不会相对于之后的时钟观察变得陈旧。
 
-Private bounded protocol 现在具有固定 magic、唯一支持的 version 2、封闭 message kind、
+Private bounded protocol 现在具有固定 magic、唯一支持的 version 3、封闭 message kind、
 128-KiB control-payload 上限、deadline-aware partial I/O，以及严格的 trailing-byte、enum、
-identity、digest、descriptor 与 Job-resource 校验。Version 1 会被拒绝，没有 compatibility
-decoder 或 bulk fallback。唯一的 source-private `kMaximumWorkerTextFieldBytes` 常量在 catalog
+identity、digest、descriptor 与 Job-resource 校验。Version 1 与 2 都会被拒绝，没有
+compatibility decoder 或 bulk fallback。唯一的 source-private `kMaximumWorkerTextFieldBytes` 常量在 catalog
 admission、Assignment/Report encoding 与 decoding 中统一约束五个 prepared graph string 及
 Report diagnostic。精确上限是包含式的；本地 prepared value 超界是 `std::length_error`，wire
 content 超界则是 `WorkerProtocolError`。
 
 Assignment 传输完整 attempt/JobSpec 与有界 graph metadata、optional checkpoint receipt/
-descriptor/digest/size/reference、output-stage reference/maximum 与 cadence。Report 传输 outcome
-fact，并且只在 settled success 时传输 output reference/slot/descriptor/size/digest。两者都不能
-编码 checkpoint bytes、candidate row、`ImageBuffer`、blob、`Value`、path 或 raw file
-descriptor。完整声明的最大 metadata envelope 能放入 control 上限。只要符合已接受的
-output/staging/retention
-与 file-size envelope，超过原 64-MiB aggregate frame 上限的 candidate 仍然有效。file-size
-limit 会与 accepted maximum 精确匹配；若继承的有限 hard limit 更低，则会在 fork 前成为
+artifact-set descriptor/digest/reference、output-stage reference/maximum 与 cadence。Report 传输
+outcome fact，并且只在 settled success 时传输 output reference/slot/artifact-set descriptor/
+digest。两者都不能编码 checkpoint 或 candidate archive byte、runtime Value、path、native handle
+或 raw file descriptor。完整声明的最大 metadata envelope 能放入 control 上限。只要符合已接受的
+output/staging/retention 与 archive-size envelope，超过原 64-MiB aggregate frame 上限的
+candidate 仍然有效。archive-size limit 会与 accepted maximum 精确匹配；若继承的有限 hard limit 更低，则会在 fork 前成为
 `WorkerStartup`，而不是一个更小的 runtime envelope。超过 resource envelope 会变成一个保留
 identity、已 settled 的 `Failed(Compute)` metadata Report，携带固定
 有界 diagnostic 与空 stage；不存在 transport-size fallback。
@@ -345,14 +350,14 @@ WorkerManager 只有在收到 current-identity Report、精确 stream EOF、clea
 与 control-channel EOF 后才暴露 staged output。worker 在 output byte 前发送
 reference/descriptor/exact-size/digest metadata，并保留 source，同时让真实 heartbeat thread
 保持活跃。当精确 child 仍受 lifecycle ownership 约束且尚未 reap 时，manager 会创建一份与最终
-image size 精确一致、惰性、无 path 的匿名 owner，并在每次 monitor 迭代中最多把一个 64-KiB
+archive size 精确一致、惰性、无 path 的匿名 owner，并在每次 monitor 迭代中最多把一个 64-KiB
 nonblocking slice 直接接收到该 owner，同时强制 accepted maximum 并增量计算 SHA-256。每个后续
 slice 都要先经过 cancellation/shutdown/runtime/heartbeat 仲裁。包括连续或预缓冲 byte 在内的
 output progress 都不能续期或复活 heartbeat deadline；只有合法且 current-identity 的 Heartbeat
 frame 可以。不存在累计 accumulator 扩容、whole-payload reconstruction copy 或 post-reap bulk
-access。Reference、slot、tight descriptor、精确 stream byte count、resource bound 与 digest 必须
+access。Reference、slot、规范 artifact-set descriptor、精确 stream byte count、resource bound 与 digest 必须
 在 completion handoff 前全部连接。worker 只在精确 bytes 后关闭 output lane，并保持存活且可被
-终止，直到 manager 完成关联并以 O(1) 移动已经是最终形态的 image owner，再返回一次匹配且只含
+终止，直到 manager 完成关联并以 O(1) 移动已经是最终形态的 archive owner，再返回一次匹配且只含
 identity 的 `CompletionReady`。该确认不授予 Job、quota、artifact、commit 或 publication
 authority。若先前的 cancellation-channel failure 使回复不可能，已经完整关联的 Report 可以
 保留其普通分类。Post-reap drain 只处理 control metadata：它绝不读取 bulk lane，也不执行
@@ -418,8 +423,10 @@ durability barrier 或 completion observer 失败，service 会保留 `Cancellin
 并进入相同 journal fail-stop。Intent 被接受后，WorkerManager 先发送精确 cooperative
 cancellation。发送失败会继续有界排空 report/EOF/wait status，并保留真实 Failed report、
 nonzero exit、signal death 或 channel close；发送失败本身不会 mint forced cancellation。
-Cooperative deadline 时仍存活的 worker 会先被关闭/撤销 channel，再在 configured bound 下接收
-owner-validated `SIGTERM`/`SIGKILL` escalation，最后精确 reap。Deadline 决策会再执行一次
+对于 cooperative deadline 时仍存活的 worker，WorkerManager 会在 control channel 仍存活时
+先投递 owned `SIGTERM`，随后在 terminate grace period 开始前立即关闭/撤销该 channel。
+这一顺序防止 EOF 驱动的 worker exit 取代已成功投递 owned signal 的 wait-status 因果事实。
+仍然存活的 worker 会在 configured bound 下接收 owned `SIGKILL`，最后精确 reap。Deadline 决策会再执行一次
 精确的 nonblocking exit observation。如果该观察在 channel 撤销前 reap 了自然退出，reaping
 不得被当作 channel EOF：WorkerManager 会在独立且有界的 post-reap drain 期间保留 parent
 socket 与 stateful decoder，使已经进入缓冲区的 Report 与 EOF 仍按普通 report/channel/exit
@@ -464,13 +471,15 @@ child 的策略。
   `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` gate 在其他系统默认关闭，拒绝在不支持的系统显式
   启用；CMake 会同时断言 enabled 与 disabled profile 的 target inventory。
 - `photospiderd` 与 local IPC protocol v2 保持不变，不序列化这些 Job、quota、checkpoint 或
-  durable artifact contract；private worker protocol v2 是另一个源码私有 wire。
+  durable artifact contract；private worker protocol v3 是另一个源码私有 wire。
 - 配置的 `TenantId` 是可信配置，不是 authentication。
 - 此纵向路径中的可信仓库 CPU operation 在 attempt process 内运行。Tenant plugin
   ABI/network security、syscall isolation 与 isolated hostile-plugin runtime 仍不存在。
-- 当前 artifact format 是一个必需的紧密 CPU `ImageBuffer`。本地 direction-reduced stream adapter 是
-  针对该 format 的 attempt-scoped bulk data plane，不是通用 runtime `Value` format、remote
-  transport、object store 或 standalone artifact service。
+- 当前 artifact format 是一个规范且非空的 named-Value artifact set。每个 envelope 都保留完整
+  descriptor、Facet、Layout、owner join、payload-digest 与可选 statistics-reference metadata；
+  reconstruction 会在 publication 前执行同等本地 Value validation。本地 direction-reduced
+  stream adapter 是针对该 archive 的 attempt-scoped bulk data plane，不是 remote transport、
+  object store 或 standalone artifact service。
 
 长期维护入口包括：
 

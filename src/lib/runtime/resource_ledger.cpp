@@ -1159,6 +1159,39 @@ ResourceLedger::try_reserve_device(DeviceId device,
   return DeviceReservation(state_, device, planned);
 }
 
+/** @copydoc ResourceLedger::try_reserve_device_with_memory_ceiling */
+std::optional<ResourceLedger::DeviceReservation>
+ResourceLedger::try_reserve_device_with_memory_ceiling(
+    DeviceId device, const DeviceResourceVector& minimum) {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  const auto account = state_->devices.find(device);
+  if (account == state_->devices.end()) {
+    return std::nullopt;
+  }
+  if (!device_resources_fit(account->second.reserved, account->second.limits)) {
+    throw std::logic_error(
+        "Device resource account exceeds its configured limits.");
+  }
+  const DeviceResourceVector available = subtract_device_resources(
+      account->second.limits, account->second.reserved);
+  if (minimum.device_memory_bytes > available.device_memory_bytes ||
+      minimum.device_scratch_bytes > available.device_scratch_bytes) {
+    return std::nullopt;
+  }
+  const DeviceResourceVector planned{available.device_memory_bytes,
+                                     minimum.device_scratch_bytes};
+  const std::optional<DeviceResourceVector> next_reserved =
+      checked_add_device_resources(account->second.reserved, planned);
+  if (!next_reserved.has_value() ||
+      !device_resources_fit(*next_reserved, account->second.limits)) {
+    return std::nullopt;
+  }
+  account->second.reserved = *next_reserved;
+  account->second.high_water = maximum_device_resources(
+      account->second.high_water, account->second.reserved);
+  return DeviceReservation(state_, device, planned);
+}
+
 /** @copydoc ResourceLedger::issue_plugin_invocation */
 ResourceLedger::PluginResourceToken ResourceLedger::issue_plugin_invocation(
     const PluginInvocationIdentityDigest& identity,

@@ -13,8 +13,8 @@ That glossary defines the vocabulary of the current implementation, including:
 - graph-state operations and `GraphStateExecutor`;
 - `ComputeIntent`, `ComputeRun`, `ComputePlan`, `DirtyRegionSnapshot`, and
   `ComputeTaskDispatcher`;
-- `ReadyTaskSubmission`, `IScheduler`, cache, `ImageBuffer`, providers, and
-  adapters.
+- `ReadyTaskSubmission`, `IScheduler`, cache, named `Value` outputs, providers,
+  and adapters.
 
 Use the maintained domain documents indexed by
 `docs/kernel-architecture/README.md` for observable behavior, implementation
@@ -84,8 +84,9 @@ settlement retires its local queue, callable, lease, and grant owners before
 publishing quiescence;
 persistent finalization authority and irreversible close/shutdown cancellation
 fail stop rather than silently lose cleanup obligations. The general `Value`
-model, heterogeneous executors, server control plane, and isolated plugin
-workers remain later target work.
+model, heterogeneous executors, single-tenant server control plane, isolated
+plugin workers, named IPC results, and durable Value artifacts are current. A
+remote network/multi-tenant service remains later target work.
 The detailed Run/process-execution ownership decision is
 `docs/adr/0007-compute-runs-and-process-execution-have-separate-owners.md`;
 the combined accepted direction remains
@@ -102,7 +103,8 @@ context document.
 - `ComputeIntent` is not resource policy or commit policy.
 - `DirtyRegionSnapshot` is not `ComputeTaskGraph`.
 - HP cache is not RT proxy state.
-- `ImageBuffer` is not a general Tensor, Deep Image, or vector-scene model.
+- An ordinary DenseImage `Value` is not a provider-defined Deep image,
+  variable-sample field, or vector-scene model.
 - A legacy worker-owning `IScheduler` is neither the current Host-composed CPU
   `ExecutionService` nor the target policy-only scheduler generation.
 - A scheduler epoch is neither a `RunId` nor a completion identity. Current

@@ -1,13 +1,40 @@
 #include "compute/request/compute_result_committer.hpp"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "core/value_image_adapter.hpp"
+#include "core/value_region.hpp"
 #include "graph/graph_cache_service.hpp"
 
 namespace ps::compute {
+namespace {
+
+/**
+ * @brief Resolves one node's frozen authority before graph mutation.
+ * @param planned_work Immutable per-node planning records.
+ * @param node_id Graph node whose authority is required.
+ * @return Borrowed exact output authority.
+ * @throws GraphError with ComputeError when the plan omitted the node or its
+ * authority.
+ * @note The lookup consumes only callback-free planning state and cannot use a
+ * provider result to invent authorization.
+ */
+const PlannedOutputAuthority& authority_for_node(
+    const std::vector<PlannedNodeWork>& planned_work, int node_id) {
+  const auto found = std::find_if(planned_work.begin(), planned_work.end(),
+                                  [node_id](const PlannedNodeWork& work) {
+                                    return work.node_id == node_id;
+                                  });
+  if (found == planned_work.end() || !found->output_authority.has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Formal commit is missing frozen output authority.");
+  }
+  return *found->output_authority;
+}
+
+}  // namespace
 
 ComputeResultCommitter::ComputeResultCommitter(
     GraphCacheService& cache, std::mutex& graph_mutex,
@@ -31,13 +58,20 @@ void ComputeResultCommitter::finalize_timing(TimingCollector& timing_results,
 
 void ComputeResultCommitter::commit(
     GraphModel& graph, const std::vector<int>& execution_order,
+    const std::vector<PlannedNodeWork>& planned_work,
     std::vector<std::optional<NodeOutput>>& temp_results) const {
+  if (temp_results.size() < execution_order.size()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Formal commit received incomplete result storage.");
+  }
   std::vector<std::optional<RegionSet>> full_regions(temp_results.size());
   for (size_t i = 0; i < execution_order.size(); ++i) {
     if (temp_results[i].has_value()) {
-      value_image_adapter::normalize_node_output_image_value(&*temp_results[i]);
-      full_regions[i] =
-          value_image_adapter::full_node_output_region(*temp_results[i]);
+      validate_planned_output(
+          *temp_results[i],
+          authority_for_node(planned_work, execution_order[i]),
+          PlannedOutputReadiness::RequireReady);
+      full_regions[i] = value_region::full_node_output_region(*temp_results[i]);
     }
   }
 

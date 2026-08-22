@@ -498,6 +498,9 @@ PixelRect i2_preview_region(std::size_t edit_index);
  * @brief Returns the independently frozen edit-eleven preview digest.
  * @return Typed canonical-v1 SHA-256 digest for the exact preview contract.
  * @throws Nothing.
+ * @note The golden binds the zero-origin preview descriptor with DenseTensor
+ * schema/Image facet structural version 2; payload arithmetic and the
+ * `I2-progressive-v1` workload identity remain unchanged.
  */
 ContentDigest i2_frozen_preview_content_digest() noexcept;
 

@@ -9,12 +9,16 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "graph/node.hpp"     // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"      // NOLINT(build/include_subdir)
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "graph/node.hpp"         // NOLINT(build/include_subdir)
 
 namespace ps {
 namespace {
@@ -59,8 +63,9 @@ void dummy_tiled_metal_op(const Node&, const OutputTile&,
  * @param exclusive_key Expected process-exclusive context key.
  * @return Nothing; GoogleTest records every mismatch.
  * @throws Nothing directly.
- * @note Device, cost, callback shape, and identity are asserted by callers so
- * this helper remains focused on the fields consumed by ExecutionService.
+ * @note DeviceBackend, cost, callback shape, and identity are asserted by
+ * callers so this helper remains focused on the fields consumed by
+ * ExecutionService.
  */
 void expect_execution_metadata(const OpImplementation& implementation,
                                bool reentrant,
@@ -87,7 +92,9 @@ void expect_execution_metadata(const OpImplementation& implementation,
  * @throws Registry allocation or callback-copy exceptions unchanged.
  * @note Ordinary HP selection must choose the monolithic slot after both
  * registrations, while a tiled-only filter must choose the tiled slot. The
- * first slot's identity must survive publication of the second slot.
+ * first slot's identity must survive publication of the second slot. Each slot
+ * also retains distinct dirty, forward, and dependency callbacks so selection
+ * cannot borrow planning semantics from its sibling.
  */
 void verify_atomic_scalar_slots(const std::string& subtype,
                                 bool monolithic_first) {
@@ -112,34 +119,75 @@ void verify_atomic_scalar_slots(const std::string& subtype,
   };
 
   OpMetadata monolithic_metadata;
-  monolithic_metadata.device_preference = Device::CPU;
+  monolithic_metadata.device_preference = DeviceBackend::CPU;
   monolithic_metadata.reentrant = false;
   monolithic_metadata.maximum_parallelism = 1U;
   monolithic_metadata.retained_memory_bytes = 101U;
   monolithic_metadata.scratch_bytes = 202U;
   monolithic_metadata.exclusive_key = "atomic-monolithic-context";
   monolithic_metadata.cost_score = 11;
+  monolithic_metadata.data_dependent = true;
   monolithic_metadata.tile_preference = TileSizePreference::UNDEFINED;
   monolithic_metadata.access_pattern =
       OpMetadata::InputAccessPattern::SpatialAligned;
 
   OpMetadata tiled_metadata;
-  tiled_metadata.device_preference = Device::CPU;
+  tiled_metadata.device_preference = DeviceBackend::CPU;
   tiled_metadata.reentrant = true;
   tiled_metadata.maximum_parallelism = 4U;
   tiled_metadata.retained_memory_bytes = 303U;
   tiled_metadata.scratch_bytes = 404U;
   tiled_metadata.exclusive_key = "atomic-tiled-context";
   tiled_metadata.cost_score = 22;
+  tiled_metadata.data_dependent = true;
   tiled_metadata.tile_preference = TileSizePreference::MACRO;
   tiled_metadata.access_pattern = OpMetadata::InputAccessPattern::RandomAccess;
 
+  OpPlanningCallbacks monolithic_planning;
+  monolithic_planning.dirty_propagator = DirtyRoiPropFunc(
+      [](const Node&, const PixelRect&, const GraphModel&, const PixelSize&,
+         const std::vector<PixelSize>&, const plugin::ParameterMap&,
+         const std::vector<const NodeOutput*>*) {
+        return PixelRect{101, 1, 1, 1};
+      });
+  monolithic_planning.forward_propagator = ForwardRoiPropFunc(
+      [](const Node&, const PixelRect&, const GraphModel&, const PixelSize&,
+         const PixelSize&, std::size_t, const std::vector<PixelSize>&,
+         const plugin::ParameterMap&) { return PixelRect{201, 1, 1, 1}; });
+  monolithic_planning.dependency_builder = DependencyLutBuilder(
+      [](const Node&, const GraphModel&, const std::vector<PixelSize>&,
+         const PixelSize&, const plugin::ParameterMap&) {
+        SpatialDependencyMap map;
+        map.upstream_input_index = 301U;
+        return map;
+      });
+
+  OpPlanningCallbacks tiled_planning;
+  tiled_planning.dirty_propagator = DirtyRoiPropFunc(
+      [](const Node&, const PixelRect&, const GraphModel&, const PixelSize&,
+         const std::vector<PixelSize>&, const plugin::ParameterMap&,
+         const std::vector<const NodeOutput*>*) {
+        return PixelRect{102, 1, 1, 1};
+      });
+  tiled_planning.forward_propagator = ForwardRoiPropFunc(
+      [](const Node&, const PixelRect&, const GraphModel&, const PixelSize&,
+         const PixelSize&, std::size_t, const std::vector<PixelSize>&,
+         const plugin::ParameterMap&) { return PixelRect{202, 1, 1, 1}; });
+  tiled_planning.dependency_builder = DependencyLutBuilder(
+      [](const Node&, const GraphModel&, const std::vector<PixelSize>&,
+         const PixelSize&, const plugin::ParameterMap&) {
+        SpatialDependencyMap map;
+        map.upstream_input_index = 302U;
+        return map;
+      });
+
   const auto register_monolithic = [&]() {
-    registry.register_op_hp_monolithic(kType, subtype, monolithic,
-                                       monolithic_metadata);
+    registry.register_op_hp_monolithic(
+        kType, subtype, monolithic, monolithic_metadata, monolithic_planning);
   };
   const auto register_tiled = [&]() {
-    registry.register_op_hp_tiled(kType, subtype, tiled, tiled_metadata);
+    registry.register_op_hp_tiled(kType, subtype, tiled, tiled_metadata,
+                                  tiled_planning);
   };
   if (monolithic_first) {
     register_monolithic();
@@ -147,7 +195,7 @@ void verify_atomic_scalar_slots(const std::string& subtype,
     register_tiled();
   }
   const auto first = registry.select_implementation(
-      kType, subtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+      kType, subtype, {DeviceBackend::CPU}, ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(first.has_value());
   ASSERT_NE(first->implementation_identity, 0U);
   const std::uint64_t first_identity = first->implementation_identity;
@@ -159,9 +207,9 @@ void verify_atomic_scalar_slots(const std::string& subtype,
   }
 
   const auto selected_monolithic = registry.select_implementation(
-      kType, subtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+      kType, subtype, {DeviceBackend::CPU}, ComputeIntent::GlobalHighPrecision);
   const auto selected_tiled = registry.select_implementation(
-      kType, subtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision,
+      kType, subtype, {DeviceBackend::CPU}, ComputeIntent::GlobalHighPrecision,
       [](const OpImplementation& candidate) { return candidate.is_tiled(); });
   ASSERT_TRUE(selected_monolithic.has_value());
   ASSERT_TRUE(selected_tiled.has_value());
@@ -188,7 +236,39 @@ void verify_atomic_scalar_slots(const std::string& subtype,
   EXPECT_EQ(selected_tiled->metadata.access_pattern,
             OpMetadata::InputAccessPattern::RandomAccess);
 
-  Node node;
+  ASSERT_TRUE(selected_monolithic->dirty_propagator.has_value());
+  ASSERT_TRUE(selected_monolithic->forward_propagator.has_value());
+  ASSERT_TRUE(selected_monolithic->dependency_builder.has_value());
+  ASSERT_TRUE(selected_tiled->dirty_propagator.has_value());
+  ASSERT_TRUE(selected_tiled->forward_propagator.has_value());
+  ASSERT_TRUE(selected_tiled->dependency_builder.has_value());
+  GraphModel graph("");
+  const Node node;
+  const PixelRect roi{1, 2, 3, 4};
+  const PixelSize extent{8, 8};
+  const std::vector<PixelSize> extents;
+  const plugin::ParameterMap parameters;
+  EXPECT_EQ((*selected_monolithic->dirty_propagator)(
+                node, roi, graph, extent, extents, parameters, nullptr),
+            (PixelRect{101, 1, 1, 1}));
+  EXPECT_EQ((*selected_monolithic->forward_propagator)(
+                node, roi, graph, extent, extent, 0U, extents, parameters),
+            (PixelRect{201, 1, 1, 1}));
+  EXPECT_EQ((*selected_monolithic->dependency_builder)(node, graph, extents,
+                                                       extent, parameters)
+                .upstream_input_index,
+            301U);
+  EXPECT_EQ((*selected_tiled->dirty_propagator)(node, roi, graph, extent,
+                                                extents, parameters, nullptr),
+            (PixelRect{102, 1, 1, 1}));
+  EXPECT_EQ((*selected_tiled->forward_propagator)(
+                node, roi, graph, extent, extent, 0U, extents, parameters),
+            (PixelRect{202, 1, 1, 1}));
+  EXPECT_EQ((*selected_tiled->dependency_builder)(node, graph, extents, extent,
+                                                  parameters)
+                .upstream_input_index,
+            302U);
+
   const NodeOutput monolithic_output =
       std::get<MonolithicOpFunc>(selected_monolithic->func)(node, {});
   const OutputTile output_tile;
@@ -242,16 +322,16 @@ TEST_F(OpRegistryM31Test, RegisterMultiDeviceImplementations) {
 
   // 注册 CPU 版本
   OpMetadata cpu_meta;
-  cpu_meta.device_preference = Device::CPU;
+  cpu_meta.device_preference = DeviceBackend::CPU;
   cpu_meta.cost_score = 100;
-  registry.register_impl("m31_test", "gaussian_blur", Device::CPU, dummy_cpu_op,
-                         cpu_meta);
+  registry.register_impl("m31_test", "gaussian_blur", DeviceBackend::CPU,
+                         dummy_cpu_op, cpu_meta);
 
   // 注册 Metal 版本（更低的 cost_score 表示更高优先级）
   OpMetadata metal_meta;
-  metal_meta.device_preference = Device::GPU_METAL;
+  metal_meta.device_preference = DeviceBackend::Metal;
   metal_meta.cost_score = 50;  // GPU 更优
-  registry.register_impl("m31_test", "gaussian_blur", Device::GPU_METAL,
+  registry.register_impl("m31_test", "gaussian_blur", DeviceBackend::Metal,
                          dummy_metal_op, metal_meta);
 
   // 验证两个版本都已注册
@@ -266,42 +346,42 @@ TEST_F(OpRegistryM31Test, GetImplementationsByDevice) {
 
   // 注册多个设备版本
   OpMetadata cpu_meta;
-  cpu_meta.device_preference = Device::CPU;
+  cpu_meta.device_preference = DeviceBackend::CPU;
   cpu_meta.cost_score = 100;
-  registry.register_impl("m31_test", "invert", Device::CPU, dummy_cpu_op,
+  registry.register_impl("m31_test", "invert", DeviceBackend::CPU, dummy_cpu_op,
                          cpu_meta);
 
   OpMetadata metal_meta;
-  metal_meta.device_preference = Device::GPU_METAL;
+  metal_meta.device_preference = DeviceBackend::Metal;
   metal_meta.cost_score = 50;
-  registry.register_impl("m31_test", "invert", Device::GPU_METAL,
+  registry.register_impl("m31_test", "invert", DeviceBackend::Metal,
                          dummy_metal_op, metal_meta);
 
   OpMetadata cuda_meta;
-  cuda_meta.device_preference = Device::GPU_CUDA;
+  cuda_meta.device_preference = DeviceBackend::CUDA;
   cuda_meta.cost_score = 60;
-  registry.register_impl("m31_test", "invert", Device::GPU_CUDA, dummy_cuda_op,
-                         cuda_meta);
+  registry.register_impl("m31_test", "invert", DeviceBackend::CUDA,
+                         dummy_cuda_op, cuda_meta);
 
   // 按设备检索
-  auto cpu_impls =
-      registry.get_implementations_by_device("m31_test", "invert", Device::CPU);
+  auto cpu_impls = registry.get_implementations_by_device("m31_test", "invert",
+                                                          DeviceBackend::CPU);
   ASSERT_EQ(cpu_impls.size(), 1);
-  EXPECT_EQ(cpu_impls[0].metadata.device_preference, Device::CPU);
+  EXPECT_EQ(cpu_impls[0].metadata.device_preference, DeviceBackend::CPU);
 
   auto metal_impls = registry.get_implementations_by_device(
-      "m31_test", "invert", Device::GPU_METAL);
+      "m31_test", "invert", DeviceBackend::Metal);
   ASSERT_EQ(metal_impls.size(), 1);
-  EXPECT_EQ(metal_impls[0].metadata.device_preference, Device::GPU_METAL);
+  EXPECT_EQ(metal_impls[0].metadata.device_preference, DeviceBackend::Metal);
 
   auto cuda_impls = registry.get_implementations_by_device("m31_test", "invert",
-                                                           Device::GPU_CUDA);
+                                                           DeviceBackend::CUDA);
   ASSERT_EQ(cuda_impls.size(), 1);
-  EXPECT_EQ(cuda_impls[0].metadata.device_preference, Device::GPU_CUDA);
+  EXPECT_EQ(cuda_impls[0].metadata.device_preference, DeviceBackend::CUDA);
 
   // 检索不存在的设备
   auto npu_impls = registry.get_implementations_by_device("m31_test", "invert",
-                                                          Device::ASIC_NPU);
+                                                          DeviceBackend::NPU);
   EXPECT_TRUE(npu_impls.empty());
 }
 
@@ -311,14 +391,14 @@ TEST_F(OpRegistryM31Test, GetMetadataWithCostScore) {
 
   // 注册带有不同 cost_score 的实现
   OpMetadata meta;
-  meta.device_preference = Device::CPU;
+  meta.device_preference = DeviceBackend::CPU;
   meta.cost_score = 150;
   meta.tile_preference = TileSizePreference::MACRO;
-  registry.register_impl("m31_test", "contrast", Device::CPU, dummy_cpu_op,
-                         meta);
+  registry.register_impl("m31_test", "contrast", DeviceBackend::CPU,
+                         dummy_cpu_op, meta);
 
   auto impls = registry.get_implementations_by_device("m31_test", "contrast",
-                                                      Device::CPU);
+                                                      DeviceBackend::CPU);
   ASSERT_EQ(impls.size(), 1);
   EXPECT_EQ(impls[0].metadata.cost_score, 150);
   EXPECT_EQ(impls[0].metadata.tile_preference, TileSizePreference::MACRO);
@@ -330,25 +410,26 @@ TEST_F(OpRegistryM31Test, SelectBestImplementationForHP) {
 
   // 注册 CPU 和 Metal 版本
   OpMetadata cpu_meta;
-  cpu_meta.device_preference = Device::CPU;
+  cpu_meta.device_preference = DeviceBackend::CPU;
   cpu_meta.cost_score = 100;
-  registry.register_impl("m31_test", "sharpen", Device::CPU, dummy_cpu_op,
-                         cpu_meta);
+  registry.register_impl("m31_test", "sharpen", DeviceBackend::CPU,
+                         dummy_cpu_op, cpu_meta);
 
   OpMetadata metal_meta;
-  metal_meta.device_preference = Device::GPU_METAL;
+  metal_meta.device_preference = DeviceBackend::Metal;
   metal_meta.cost_score = 50;
-  registry.register_impl("m31_test", "sharpen", Device::GPU_METAL,
+  registry.register_impl("m31_test", "sharpen", DeviceBackend::Metal,
                          dummy_metal_op, metal_meta);
 
   // HP 模式下，当 GPU 可用时应选择 GPU
-  std::vector<Device> available_devices = {Device::CPU, Device::GPU_METAL};
+  std::vector<DeviceBackend> available_devices = {DeviceBackend::CPU,
+                                                  DeviceBackend::Metal};
   auto best = registry.select_best_implementation(
       "m31_test", "sharpen", available_devices,
       ComputeIntent::GlobalHighPrecision);
 
   ASSERT_TRUE(best.has_value());
-  EXPECT_EQ(best->metadata.device_preference, Device::GPU_METAL);
+  EXPECT_EQ(best->metadata.device_preference, DeviceBackend::Metal);
 }
 
 // 测试：选择最优实现（HP 模式：仅 CPU 可用）
@@ -357,25 +438,25 @@ TEST_F(OpRegistryM31Test, SelectBestImplementationHPCpuOnly) {
 
   // 注册 CPU 和 Metal 版本
   OpMetadata cpu_meta;
-  cpu_meta.device_preference = Device::CPU;
+  cpu_meta.device_preference = DeviceBackend::CPU;
   cpu_meta.cost_score = 100;
-  registry.register_impl("m31_test", "denoise", Device::CPU, dummy_cpu_op,
-                         cpu_meta);
+  registry.register_impl("m31_test", "denoise", DeviceBackend::CPU,
+                         dummy_cpu_op, cpu_meta);
 
   OpMetadata metal_meta;
-  metal_meta.device_preference = Device::GPU_METAL;
+  metal_meta.device_preference = DeviceBackend::Metal;
   metal_meta.cost_score = 50;
-  registry.register_impl("m31_test", "denoise", Device::GPU_METAL,
+  registry.register_impl("m31_test", "denoise", DeviceBackend::Metal,
                          dummy_metal_op, metal_meta);
 
   // 仅 CPU 可用时应选择 CPU
-  std::vector<Device> available_devices = {Device::CPU};
+  std::vector<DeviceBackend> available_devices = {DeviceBackend::CPU};
   auto best = registry.select_best_implementation(
       "m31_test", "denoise", available_devices,
       ComputeIntent::GlobalHighPrecision);
 
   ASSERT_TRUE(best.has_value());
-  EXPECT_EQ(best->metadata.device_preference, Device::CPU);
+  EXPECT_EQ(best->metadata.device_preference, DeviceBackend::CPU);
 }
 
 // 测试：选择最优实现（RT 模式：Tiled CPU 优先）
@@ -384,26 +465,27 @@ TEST_F(OpRegistryM31Test, SelectBestImplementationForRT) {
 
   // 注册 Tiled CPU 和 Monolithic Metal 版本
   OpMetadata cpu_tiled_meta;
-  cpu_tiled_meta.device_preference = Device::CPU;
+  cpu_tiled_meta.device_preference = DeviceBackend::CPU;
   cpu_tiled_meta.cost_score = 80;
   cpu_tiled_meta.tile_preference = TileSizePreference::MICRO;
-  registry.register_impl("m31_test", "levels", Device::CPU, dummy_tiled_cpu_op,
-                         cpu_tiled_meta);
+  registry.register_impl("m31_test", "levels", DeviceBackend::CPU,
+                         dummy_tiled_cpu_op, cpu_tiled_meta);
 
   OpMetadata metal_meta;
-  metal_meta.device_preference = Device::GPU_METAL;
+  metal_meta.device_preference = DeviceBackend::Metal;
   metal_meta.cost_score = 50;
-  registry.register_impl("m31_test", "levels", Device::GPU_METAL,
+  registry.register_impl("m31_test", "levels", DeviceBackend::Metal,
                          dummy_metal_op, metal_meta);
 
   // RT 模式下，Tiled CPU 应优先（低延迟）
-  std::vector<Device> available_devices = {Device::CPU, Device::GPU_METAL};
+  std::vector<DeviceBackend> available_devices = {DeviceBackend::CPU,
+                                                  DeviceBackend::Metal};
   auto best = registry.select_best_implementation(
       "m31_test", "levels", available_devices, ComputeIntent::RealTimeUpdate);
 
   ASSERT_TRUE(best.has_value());
   // RT 模式优先选择 Tiled CPU
-  EXPECT_EQ(best->metadata.device_preference, Device::CPU);
+  EXPECT_EQ(best->metadata.device_preference, DeviceBackend::CPU);
   EXPECT_TRUE(best->is_tiled());
 }
 
@@ -413,25 +495,25 @@ TEST_F(OpRegistryM31Test, OpImplementationHelperMethods) {
 
   // 注册 Monolithic 实现
   OpMetadata mono_meta;
-  mono_meta.device_preference = Device::CPU;
-  registry.register_impl("m31_test", "mono_op", Device::CPU, dummy_cpu_op,
-                         mono_meta);
+  mono_meta.device_preference = DeviceBackend::CPU;
+  registry.register_impl("m31_test", "mono_op", DeviceBackend::CPU,
+                         dummy_cpu_op, mono_meta);
 
   // 注册 Tiled 实现
   OpMetadata tiled_meta;
-  tiled_meta.device_preference = Device::GPU_METAL;
+  tiled_meta.device_preference = DeviceBackend::Metal;
   tiled_meta.tile_preference = TileSizePreference::MACRO;
-  registry.register_impl("m31_test", "tiled_op", Device::GPU_METAL,
+  registry.register_impl("m31_test", "tiled_op", DeviceBackend::Metal,
                          dummy_tiled_metal_op, tiled_meta);
 
   auto mono_impls = registry.get_implementations_by_device(
-      "m31_test", "mono_op", Device::CPU);
+      "m31_test", "mono_op", DeviceBackend::CPU);
   ASSERT_EQ(mono_impls.size(), 1);
   EXPECT_TRUE(mono_impls[0].is_monolithic());
   EXPECT_FALSE(mono_impls[0].is_tiled());
 
   auto tiled_impls = registry.get_implementations_by_device(
-      "m31_test", "tiled_op", Device::GPU_METAL);
+      "m31_test", "tiled_op", DeviceBackend::Metal);
   ASSERT_EQ(tiled_impls.size(), 1);
   EXPECT_FALSE(tiled_impls[0].is_monolithic());
   EXPECT_TRUE(tiled_impls[0].is_tiled());
@@ -444,12 +526,13 @@ TEST_F(OpRegistryM31Test, NonExistentOpReturnsEmpty) {
   auto impls = registry.get_all_implementations("nonexistent", "op");
   EXPECT_TRUE(impls.empty());
 
-  auto by_device =
-      registry.get_implementations_by_device("nonexistent", "op", Device::CPU);
+  auto by_device = registry.get_implementations_by_device("nonexistent", "op",
+                                                          DeviceBackend::CPU);
   EXPECT_TRUE(by_device.empty());
 
   auto best = registry.select_best_implementation(
-      "nonexistent", "op", {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+      "nonexistent", "op", {DeviceBackend::CPU},
+      ComputeIntent::GlobalHighPrecision);
   EXPECT_FALSE(best.has_value());
 }
 
@@ -459,19 +542,19 @@ TEST_F(OpRegistryM31Test, MultipleSameDeviceImplsSortedByCost) {
 
   // 同一设备上注册多个实现（不同 cost_score）
   OpMetadata meta1;
-  meta1.device_preference = Device::CPU;
+  meta1.device_preference = DeviceBackend::CPU;
   meta1.cost_score = 200;  // 较高成本
-  registry.register_impl("m31_test", "multi_cpu", Device::CPU, dummy_cpu_op,
-                         meta1);
+  registry.register_impl("m31_test", "multi_cpu", DeviceBackend::CPU,
+                         dummy_cpu_op, meta1);
 
   OpMetadata meta2;
-  meta2.device_preference = Device::CPU;
+  meta2.device_preference = DeviceBackend::CPU;
   meta2.cost_score = 50;  // 较低成本（更优）
-  registry.register_impl("m31_test", "multi_cpu", Device::CPU, dummy_cpu_op,
-                         meta2);
+  registry.register_impl("m31_test", "multi_cpu", DeviceBackend::CPU,
+                         dummy_cpu_op, meta2);
 
   // 选择最优时应返回 cost_score 较低的
-  std::vector<Device> available_devices = {Device::CPU};
+  std::vector<DeviceBackend> available_devices = {DeviceBackend::CPU};
   auto best = registry.select_best_implementation(
       "m31_test", "multi_cpu", available_devices,
       ComputeIntent::GlobalHighPrecision);
@@ -487,33 +570,33 @@ TEST_F(OpRegistryM31Test, FilteredSelectionKeepsHpDevicePriority) {
   registry.unregister_key(make_key(kType, kSubtype));
 
   OpMetadata gpu_monolithic_meta;
-  gpu_monolithic_meta.device_preference = Device::GPU_METAL;
+  gpu_monolithic_meta.device_preference = DeviceBackend::Metal;
   gpu_monolithic_meta.cost_score = 1;
-  registry.register_impl(kType, kSubtype, Device::GPU_METAL, dummy_metal_op,
+  registry.register_impl(kType, kSubtype, DeviceBackend::Metal, dummy_metal_op,
                          gpu_monolithic_meta);
 
   OpMetadata cpu_tiled_meta;
-  cpu_tiled_meta.device_preference = Device::CPU;
+  cpu_tiled_meta.device_preference = DeviceBackend::CPU;
   cpu_tiled_meta.cost_score = 5;
   cpu_tiled_meta.tile_preference = TileSizePreference::MICRO;
-  registry.register_impl(kType, kSubtype, Device::CPU, dummy_tiled_cpu_op,
-                         cpu_tiled_meta);
+  registry.register_impl(kType, kSubtype, DeviceBackend::CPU,
+                         dummy_tiled_cpu_op, cpu_tiled_meta);
 
   OpMetadata gpu_tiled_meta;
-  gpu_tiled_meta.device_preference = Device::GPU_METAL;
+  gpu_tiled_meta.device_preference = DeviceBackend::Metal;
   gpu_tiled_meta.cost_score = 100;
   gpu_tiled_meta.tile_preference = TileSizePreference::MICRO;
-  registry.register_impl(kType, kSubtype, Device::GPU_METAL,
+  registry.register_impl(kType, kSubtype, DeviceBackend::Metal,
                          dummy_tiled_metal_op, gpu_tiled_meta);
 
-  const std::vector<Device> available_devices = {Device::CPU,
-                                                 Device::GPU_METAL};
+  const std::vector<DeviceBackend> available_devices = {DeviceBackend::CPU,
+                                                        DeviceBackend::Metal};
   const auto best = registry.select_best_implementation(
       kType, kSubtype, available_devices, ComputeIntent::GlobalHighPrecision,
       [](const OpImplementation& impl) { return impl.is_tiled(); });
 
   ASSERT_TRUE(best.has_value());
-  EXPECT_EQ(best->metadata.device_preference, Device::GPU_METAL);
+  EXPECT_EQ(best->metadata.device_preference, DeviceBackend::Metal);
   EXPECT_TRUE(best->is_tiled());
   EXPECT_EQ(best->metadata.cost_score, 100);
 
@@ -527,12 +610,13 @@ TEST_F(OpRegistryM31Test, FilteredSelectionReturnsNullWhenAllRejected) {
   registry.unregister_key(make_key(kType, kSubtype));
 
   OpMetadata cpu_meta;
-  cpu_meta.device_preference = Device::CPU;
+  cpu_meta.device_preference = DeviceBackend::CPU;
   cpu_meta.cost_score = 10;
-  registry.register_impl(kType, kSubtype, Device::CPU, dummy_cpu_op, cpu_meta);
+  registry.register_impl(kType, kSubtype, DeviceBackend::CPU, dummy_cpu_op,
+                         cpu_meta);
 
   const auto best = registry.select_best_implementation(
-      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision,
+      kType, kSubtype, {DeviceBackend::CPU}, ComputeIntent::GlobalHighPrecision,
       [](const OpImplementation&) { return false; });
 
   EXPECT_FALSE(best.has_value());
@@ -555,10 +639,11 @@ TEST_F(OpRegistryM31Test, CandidateFilterCanInspectRegistrySnapshot) {
 
   OpMetadata metadata;
   metadata.cost_score = 7;
-  registry.register_impl(kType, kSubtype, Device::CPU, dummy_cpu_op, metadata);
+  registry.register_impl(kType, kSubtype, DeviceBackend::CPU, dummy_cpu_op,
+                         metadata);
 
   const auto best = registry.select_best_implementation(
-      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision,
+      kType, kSubtype, {DeviceBackend::CPU}, ComputeIntent::GlobalHighPrecision,
       [&](const OpImplementation& candidate) {
         const auto observed = registry.get_metadata(kType, kSubtype);
         return observed.has_value() &&
@@ -591,13 +676,15 @@ TEST_F(OpRegistryM31Test, UnifiedSelectionCarriesSchedulingResourceMetadata) {
   metadata.scratch_bytes = 8192U;
   metadata.exclusive_key = "issue82-shared-context";
   metadata.cost_score = 17;
-  registry.register_impl(kType, kSubtype, Device::CPU, dummy_cpu_op, metadata);
+  registry.register_impl(kType, kSubtype, DeviceBackend::CPU, dummy_cpu_op,
+                         metadata);
 
-  const auto selected = registry.select_implementation(
-      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  const auto selected =
+      registry.select_implementation(kType, kSubtype, {DeviceBackend::CPU},
+                                     ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(selected.has_value());
   EXPECT_NE(selected->implementation_identity, 0U);
-  EXPECT_EQ(selected->metadata.device_preference, Device::CPU);
+  EXPECT_EQ(selected->metadata.device_preference, DeviceBackend::CPU);
   EXPECT_FALSE(selected->metadata.reentrant);
   EXPECT_EQ(selected->metadata.maximum_parallelism, 3U);
   EXPECT_EQ(selected->metadata.retained_memory_bytes, 4096U);
@@ -632,8 +719,9 @@ TEST_F(OpRegistryM31Test, PluginOverrideRestoresExactCoreIdentityAndMetadata) {
   core_metadata.retained_memory_bytes = 101U;
   core_metadata.exclusive_key = "core-context";
   registry.register_op(kType, kSubtype, dummy_cpu_op, core_metadata);
-  const auto core = registry.select_implementation(
-      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  const auto core =
+      registry.select_implementation(kType, kSubtype, {DeviceBackend::CPU},
+                                     ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(core.has_value());
   ASSERT_NE(core->implementation_identity, 0U);
 
@@ -649,8 +737,9 @@ TEST_F(OpRegistryM31Test, PluginOverrideRestoresExactCoreIdentityAndMetadata) {
         registry.register_op(kType, kSubtype, dummy_metal_op, plugin_metadata);
       },
       plugin_capture);
-  const auto plugin = registry.select_implementation(
-      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  const auto plugin =
+      registry.select_implementation(kType, kSubtype, {DeviceBackend::CPU},
+                                     ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(plugin.has_value());
   EXPECT_NE(plugin->implementation_identity, core->implementation_identity);
   EXPECT_TRUE(plugin->metadata.reentrant);
@@ -660,8 +749,9 @@ TEST_F(OpRegistryM31Test, PluginOverrideRestoresExactCoreIdentityAndMetadata) {
   EXPECT_EQ(plugin->metadata.exclusive_key, "plugin-context");
 
   registry.restore_registration_capture(plugin_capture);
-  const auto restored = registry.select_implementation(
-      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  const auto restored =
+      registry.select_implementation(kType, kSubtype, {DeviceBackend::CPU},
+                                     ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(restored.has_value());
   EXPECT_EQ(restored->implementation_identity, core->implementation_identity);
   EXPECT_FALSE(restored->metadata.reentrant);
@@ -687,19 +777,214 @@ TEST_F(OpRegistryM31Test, RejectsMalformedExclusiveKeysWithoutRegistration) {
 
   OpMetadata oversized;
   oversized.exclusive_key.assign(OpMetadata::kExclusiveKeyMaxBytes + 1U, 'x');
-  EXPECT_THROW(registry.register_impl(kType, kSubtype, Device::CPU,
+  EXPECT_THROW(registry.register_impl(kType, kSubtype, DeviceBackend::CPU,
                                       dummy_cpu_op, oversized),
                std::invalid_argument);
 
   OpMetadata embedded_nul;
   embedded_nul.exclusive_key = std::string("invalid\0key", 11U);
-  EXPECT_THROW(registry.register_impl(kType, kSubtype, Device::CPU,
+  EXPECT_THROW(registry.register_impl(kType, kSubtype, DeviceBackend::CPU,
                                       dummy_cpu_op, embedded_nul),
                std::invalid_argument);
   EXPECT_FALSE(registry
-                   .select_implementation(kType, kSubtype, {Device::CPU},
+                   .select_implementation(kType, kSubtype, {DeviceBackend::CPU},
                                           ComputeIntent::GlobalHighPrecision)
                    .has_value());
+}
+
+/**
+ * @brief Verifies private generic/parameter output declarations are sorted and
+ * every malformed or ambiguous replacement is rejected before mutation.
+ *
+ * @return Nothing; GoogleTest reports canonicalization, generation, identity,
+ * or predecessor drift.
+ * @throws Registry validation exceptions are consumed by GoogleTest.
+ * @note Monolithic registration permits generic outputs and therefore isolates
+ * the shared schema validator from the stricter tiled image-only boundary.
+ */
+TEST_F(OpRegistryM31Test,
+       CanonicalizesAndRejectsGenericOutputMetadataBeforeReplacement) {
+  constexpr const char* kType = "issue130_generic_metadata";
+  constexpr const char* kSubtype = "validation";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+
+  OpMetadata legal;
+  legal.produces_image = false;
+  legal.named_value_output_names = {"z-depth", "deep"};
+  legal.parameter_output_names = {"variance", "score"};
+  registry.register_op_hp_monolithic(kType, kSubtype, dummy_cpu_op, legal);
+  const auto predecessor =
+      registry.select_implementation(kType, kSubtype, {DeviceBackend::CPU},
+                                     ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(predecessor.has_value());
+  EXPECT_EQ(predecessor->metadata.named_value_output_names,
+            (std::vector<std::string>{"deep", "z-depth"}));
+  EXPECT_EQ(predecessor->metadata.parameter_output_names,
+            (std::vector<std::string>{"score", "variance"}));
+  const std::uint64_t identity = predecessor->implementation_identity;
+  const std::uint64_t generation = registry.task_shape_generation();
+
+  std::vector<OpMetadata> invalid(7U);
+  invalid[0].named_value_output_names = {""};
+  invalid[1].named_value_output_names = {"image"};
+  invalid[2].named_value_output_names = {"deep", "deep"};
+  invalid[3].named_value_output_names.assign(
+      OpMetadata::kNamedValueOutputCountMax + 1U, "deep");
+  invalid[4].named_value_output_names = {
+      std::string(OpMetadata::kOutputNameMaxBytes + 1U, 'x')};
+  invalid[5].named_value_output_names = {std::string("deep\0value", 10U)};
+  invalid[6].named_value_output_names = {"score"};
+  invalid[6].parameter_output_names = {"score"};
+  for (const OpMetadata& metadata : invalid) {
+    EXPECT_THROW(registry.register_op_hp_monolithic(kType, kSubtype,
+                                                    dummy_cpu_op, metadata),
+                 std::invalid_argument);
+    EXPECT_EQ(registry.task_shape_generation(), generation);
+    const auto current =
+        registry.select_implementation(kType, kSubtype, {DeviceBackend::CPU},
+                                       ComputeIntent::GlobalHighPrecision);
+    ASSERT_TRUE(current.has_value());
+    EXPECT_EQ(current->implementation_identity, identity);
+    EXPECT_EQ(current->metadata.named_value_output_names,
+              (std::vector<std::string>{"deep", "z-depth"}));
+    EXPECT_EQ(current->metadata.parameter_output_names,
+              (std::vector<std::string>{"score", "variance"}));
+  }
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves an output-incompatible tiled schema fails before registry and
+ * task-shape revision mutation.
+ *
+ * @return Nothing; GoogleTest reports accepted metadata, generation drift, or
+ * leaked registry state.
+ * @throws Registry validation exceptions are consumed by GoogleTest.
+ * @note The current tiled callback has only a canonical image grant. A schema
+ * that omits that image therefore cannot be repaired at execution time.
+ */
+TEST_F(OpRegistryM31Test,
+       RejectsEveryIncompatibleTiledSchemaOnEveryRegistrationSurface) {
+  constexpr const char* kType = "issue130_tiled_schema";
+  auto& registry = OpRegistry::instance();
+
+  const std::array<
+      std::pair<const char*, std::function<void(const OpMetadata&)>>, 4U>
+      registrations{{
+          {"legacy",
+           [&](const OpMetadata& metadata) {
+             registry.register_op(kType, "legacy",
+                                  TileOpFunc{dummy_tiled_cpu_op}, metadata);
+           }},
+          {"hp",
+           [&](const OpMetadata& metadata) {
+             registry.register_op_hp_tiled(kType, "hp", dummy_tiled_cpu_op,
+                                           metadata);
+           }},
+          {"rt",
+           [&](const OpMetadata& metadata) {
+             registry.register_op_rt_tiled(kType, "rt", dummy_tiled_cpu_op,
+                                           metadata);
+           }},
+          {"device",
+           [&](const OpMetadata& metadata) {
+             registry.register_impl(kType, "device", DeviceBackend::Metal,
+                                    TileOpFunc{dummy_tiled_metal_op}, metadata);
+           }},
+      }};
+
+  std::array<OpMetadata, 3U> incompatible;
+  incompatible[0].produces_image = false;
+  incompatible[1].named_value_output_names = {"deep"};
+  incompatible[2].parameter_output_names = {"score"};
+
+  for (const auto& [subtype, registration] : registrations) {
+    const std::string key = make_key(kType, subtype);
+    registry.unregister_key(key);
+    for (const OpMetadata& metadata : incompatible) {
+      const std::uint64_t generation_before = registry.task_shape_generation();
+      EXPECT_THROW(registration(metadata), std::invalid_argument);
+      EXPECT_EQ(registry.task_shape_generation(), generation_before);
+      EXPECT_FALSE(registry.find(kType, subtype).has_value());
+      EXPECT_FALSE(registry.get_implementations(kType, subtype).has_value());
+    }
+    registry.unregister_key(key);
+  }
+}
+
+/**
+ * @brief Proves failed tiled replacement and append attempts preserve the
+ * complete predecessor and that the compatible image-only schema succeeds.
+ *
+ * @return Nothing; GoogleTest records generation, identity, metadata, or slot
+ * drift.
+ * @throws Registry validation exceptions are consumed by GoogleTest.
+ * @note HP replacement and device append exercise the two mutation shapes used
+ * by core, plugin override, and device-specific registration paths.
+ */
+TEST_F(OpRegistryM31Test,
+       TiledSchemaRejectionIsAtomicForReplacementAndDeviceAppend) {
+  constexpr const char* kType = "issue130_tiled_atomic";
+  auto& registry = OpRegistry::instance();
+
+  constexpr const char* kReplacementSubtype = "replacement";
+  registry.unregister_key(make_key(kType, kReplacementSubtype));
+  OpMetadata image_only;
+  image_only.cost_score = 17;
+  registry.register_op_hp_tiled(kType, kReplacementSubtype, dummy_tiled_cpu_op,
+                                image_only);
+  const auto before_replacement =
+      registry.get_implementations(kType, kReplacementSubtype);
+  ASSERT_TRUE(before_replacement.has_value());
+  ASSERT_TRUE(before_replacement->tiled_hp.has_value());
+  const std::uint64_t replacement_generation = registry.task_shape_generation();
+  const std::uint64_t replacement_identity =
+      before_replacement->tiled_hp->implementation_identity;
+
+  OpMetadata generic_output;
+  generic_output.named_value_output_names = {"deep"};
+  EXPECT_THROW(
+      registry.register_op_hp_tiled(kType, kReplacementSubtype,
+                                    dummy_tiled_metal_op, generic_output),
+      std::invalid_argument);
+  const auto after_replacement =
+      registry.get_implementations(kType, kReplacementSubtype);
+  ASSERT_TRUE(after_replacement.has_value());
+  ASSERT_TRUE(after_replacement->tiled_hp.has_value());
+  EXPECT_EQ(registry.task_shape_generation(), replacement_generation);
+  EXPECT_EQ(after_replacement->tiled_hp->implementation_identity,
+            replacement_identity);
+  EXPECT_EQ(after_replacement->tiled_hp->metadata.cost_score, 17);
+
+  constexpr const char* kAppendSubtype = "device_append";
+  registry.unregister_key(make_key(kType, kAppendSubtype));
+  registry.register_impl(kType, kAppendSubtype, DeviceBackend::Metal,
+                         TileOpFunc{dummy_tiled_metal_op}, image_only);
+  const auto before_append =
+      registry.get_implementations(kType, kAppendSubtype);
+  ASSERT_TRUE(before_append.has_value());
+  ASSERT_EQ(before_append->device_impls.size(), 1U);
+  const std::uint64_t append_generation = registry.task_shape_generation();
+  const std::uint64_t append_identity =
+      before_append->device_impls.front().implementation_identity;
+
+  OpMetadata parameter_output;
+  parameter_output.parameter_output_names = {"score"};
+  EXPECT_THROW(
+      registry.register_impl(kType, kAppendSubtype, DeviceBackend::Metal,
+                             TileOpFunc{dummy_tiled_cpu_op}, parameter_output),
+      std::invalid_argument);
+  const auto after_append = registry.get_implementations(kType, kAppendSubtype);
+  ASSERT_TRUE(after_append.has_value());
+  ASSERT_EQ(after_append->device_impls.size(), 1U);
+  EXPECT_EQ(registry.task_shape_generation(), append_generation);
+  EXPECT_EQ(after_append->device_impls.front().implementation_identity,
+            append_identity);
+  EXPECT_EQ(after_append->device_impls.front().metadata.cost_score, 17);
+
+  registry.unregister_key(make_key(kType, kReplacementSubtype));
+  registry.unregister_key(make_key(kType, kAppendSubtype));
 }
 
 // 测试：向后兼容性 - 传统 API 仍然可用
@@ -708,7 +993,7 @@ TEST_F(OpRegistryM31Test, BackwardCompatibilityWithLegacyAPI) {
 
   // 使用传统 API 注册
   OpMetadata meta;
-  meta.device_preference = Device::CPU;
+  meta.device_preference = DeviceBackend::CPU;
   registry.register_op("m31_compat", "legacy_op", dummy_cpu_op, meta);
 
   // 传统 API 仍然可以检索
@@ -717,7 +1002,7 @@ TEST_F(OpRegistryM31Test, BackwardCompatibilityWithLegacyAPI) {
 
   auto metadata = registry.get_metadata("m31_compat", "legacy_op");
   EXPECT_TRUE(metadata.has_value());
-  EXPECT_EQ(metadata->device_preference, Device::CPU);
+  EXPECT_EQ(metadata->device_preference, DeviceBackend::CPU);
 }
 
 }  // namespace

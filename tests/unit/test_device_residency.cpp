@@ -89,7 +89,7 @@ class FakeLeasedDeviceAllocation final {
  * @throws Nothing after both publications are constructed.
  */
 struct PendingReplicaPair final {
-  /** @brief Device-local source publication and terminal capability. */
+  /** @brief DeviceBackend-local source publication and terminal capability. */
   PendingDeviceValuePublication source;
   /** @brief Host-visible destination publication and terminal capability. */
   PendingDeviceValuePublication destination;

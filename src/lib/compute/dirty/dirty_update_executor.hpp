@@ -33,7 +33,7 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     GraphModel&, GraphTraversalService&, int, uint64_t, uint64_t,
     ExecutionTaskRuntime*, ExecutionService*, ExecutionHostContext*,
     ComputeRun*, const ComputeRunLease*, const std::string&,
-    const std::vector<Device>*, ExecutionService*);
+    const std::vector<DeviceBackend>*, ExecutionService*);
 std::shared_ptr<const StabilizedDirtyParameters>
 execute_prepared_connected_dirty_parameters(
     PreparedConnectedDirtyParameters prepared);
@@ -304,7 +304,7 @@ class StabilizedDirtyParameters {
       GraphModel&, GraphTraversalService&, int, uint64_t, uint64_t,
       ExecutionTaskRuntime*, ExecutionService*, ExecutionHostContext*,
       ComputeRun*, const ComputeRunLease*, const std::string&,
-      const std::vector<Device>*, ExecutionService*);
+      const std::vector<DeviceBackend>*, ExecutionService*);
   friend std::shared_ptr<const StabilizedDirtyParameters>
   execute_prepared_connected_dirty_parameters(
       PreparedConnectedDirtyParameters prepared);
@@ -391,7 +391,7 @@ class PreparedConnectedDirtyParameters final {
       GraphModel&, GraphTraversalService&, int, uint64_t, uint64_t,
       ExecutionTaskRuntime*, ExecutionService*, ExecutionHostContext*,
       ComputeRun*, const ComputeRunLease*, const std::string&,
-      const std::vector<Device>*, ExecutionService*);
+      const std::vector<DeviceBackend>*, ExecutionService*);
   friend std::shared_ptr<const StabilizedDirtyParameters>
   execute_prepared_connected_dirty_parameters(
       PreparedConnectedDirtyParameters prepared);
@@ -447,7 +447,7 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     ExecutionHostContext* host = nullptr, ComputeRun* run = nullptr,
     const ComputeRunLease* run_lease = nullptr,
     const std::string& execution_type = "cpu",
-    const std::vector<Device>* available_devices_override = nullptr,
+    const std::vector<DeviceBackend>* available_devices_override = nullptr,
     ExecutionService* direct_execution_service = nullptr);
 
 /**
@@ -509,7 +509,11 @@ struct DirtyUpdateRequest {
   /** @brief Optional benchmark sink borrowed for the active request only. */
   std::vector<BenchmarkEvent>* benchmark_events = nullptr;
 
-  /** @brief Dirty ROI in high-precision graph coordinates. */
+  /**
+   * @brief Zero-based HP storage/compatibility ROI for the target output.
+   * @note Signed logical callers must translate through the target ImageBounds
+   * before constructing this private executor request.
+   */
   PixelRect dirty_roi;
 
   /**

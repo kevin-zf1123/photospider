@@ -21,8 +21,8 @@ namespace ops {
  * @return Independently owned complete output.
  * @throws Any validation, allocation, or compute exception from the core
  *         operation.
- * @note This callback type is not installed, serialized, or added to operation
- *       plugin ABI v2 and carries no resource/device metadata.
+ * @note This callback type is not installed, serialized, or added to the
+ *       operation-plugin ABI and carries no resource/device metadata.
  */
 using CoreRegionMonolithicOpFunc = std::function<NodeOutput(
     const Node& node, const std::vector<const NodeOutput*>& inputs,

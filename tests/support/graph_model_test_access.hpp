@@ -14,6 +14,20 @@ namespace ps::testing {
 class GraphModelTestAccess {
  public:
   /**
+   * @brief Returns one mutable Node while the graph-state lane is held.
+   * @param graph Graph whose private node storage is serialized by the caller.
+   * @param node_id Existing node identifier to resolve.
+   * @return Mutable reference to the requested Node.
+   * @throws std::out_of_range when `node_id` is absent.
+   * @note This bridge exists only so Kernel product-composition tests can call
+   * the real GraphCacheService load path without exposing mutable graph state
+   * through a production API.
+   */
+  static Node& mutable_node(GraphModel& graph, int node_id) {
+    return graph.mutable_node(node_id);
+  }
+
+  /**
    * @brief Replaces the authoritative revision for an exhaustion test.
    * @param graph Isolated Graph whose graph-state lane is held by the caller.
    * @param revision Nonzero test revision to publish.

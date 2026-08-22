@@ -56,7 +56,8 @@ class ComputeDispatchPlanBuilder {
    */
   ComputePlan build_high_precision_plan(
       GraphModel& graph, int node_id,
-      const std::vector<Device>& available_devices = {Device::CPU},
+      const std::vector<DeviceBackend>& available_devices =
+          {DeviceBackend::CPU},
       bool publish_inspection = true, bool allow_reusable_cache = true) const;
 
   /**

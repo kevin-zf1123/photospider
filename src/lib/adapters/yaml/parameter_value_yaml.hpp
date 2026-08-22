@@ -2,7 +2,7 @@
 
 #include <yaml-cpp/yaml.h>
 
-#include "photospider/plugin/node_view.hpp"
+#include "photospider/data/parameter_value.hpp"
 
 namespace ps::adapters::yaml::internal {
 

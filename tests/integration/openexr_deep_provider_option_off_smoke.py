@@ -533,7 +533,8 @@ def write_consumer(source: Path, enabled: bool) -> None:
                 endif()
                 set(_neutral_target_surface "")
                 foreach(_neutral_target
-                    data_provider_sdk operation_sdk operation_runtime policy_sdk)
+                    data_provider_sdk operation_plugin_sdk operation_runtime
+                    policy_sdk)
                   if(TARGET Photospider::${_neutral_target})
                     foreach(_property
                         INTERFACE_INCLUDE_DIRECTORIES
@@ -579,11 +580,14 @@ def write_consumer(source: Path, enabled: bool) -> None:
         dedent(
             """\
             cmake_minimum_required(VERSION 3.16)
-            project(openexr_provider_enabled_consumer LANGUAGES C)
+            project(openexr_provider_enabled_consumer LANGUAGES C CXX)
             find_package(Photospider CONFIG REQUIRED
-              COMPONENTS data_provider_sdk openexr_deep_provider)
+              COMPONENTS data_provider_sdk openexr_deep_provider embedded)
             if(NOT TARGET Photospider::openexr_deep_provider)
               message(FATAL_ERROR "enabled OpenEXR provider target is absent")
+            endif()
+            if(NOT TARGET Photospider::photospider)
+              message(FATAL_ERROR "OpenEXR-enabled embedded target is absent")
             endif()
             file(GENERATE
               OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/provider-$<CONFIG>.txt"

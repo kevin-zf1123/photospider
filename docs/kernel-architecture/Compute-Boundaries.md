@@ -18,15 +18,17 @@ graph, or physical executor/policy pointer. A public compute request may carry
 an optional positive `maximum_parallelism` Run ceiling; it cannot resize or
 select the process executor. Logical dirty work and cache validity remain
 normalized `RegionSet` through planning, staging, and the Region-aware core
-dense path. Current image tile shapes, Host/IPC v2 inspection, ImageBuffer
-helpers, and operation ABI v2 use checked derived `PixelRect`/`PixelSize`.
+dense path. Current image tile shapes, Host/IPC v2 inspection, dense Value
+helpers, and operation ABI v1 adapters use checked derived `PixelRect`/`PixelSize`.
+Private dirty/tile PixelRects are zero-based storage geometry; logical Regions
+and Host grants use the signed data-window domain. Crossing that boundary
+requires containment plus checked origin subtraction/addition.
 OpenCV geometry exists only inside a provider or algorithm implementation at
 the library call that consumes it.
 
 [ADR 0012](../adr/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md)
-also freezes the accepted operation-plugin ABI v1 target. Target paragraphs in
-this document are explicitly labeled and do not override the current v2 facts
-above or imply an installed v1 loader.
+defines the implemented pure-C operation ABI v1, its Host-owned output grants,
+and its trusted/supervised routing boundary.
 
 ## Ownership Map
 
@@ -149,7 +151,7 @@ reserved-start transaction.
 | `IntentUpdateCoordinator` | HP-only or HP/RT sibling semantics | Physical priority or worker ownership |
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, policy ranking, or physical execution |
 | `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, frozen implementation/device snapshots, result slots, callback owner, and cancellation owner for pending-Value fence waits for one full HP request | Execution-route workers, Run terminal state, native completion freshness, or dirty-path execution |
-| `ReadyTaskSubmission` | Move-only immutable metadata, selected `Device`, exact operation constraints, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
+| `ReadyTaskSubmission` | Move-only immutable metadata, selected `DeviceBackend`, exact operation constraints, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
 | `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, one fixed `DeviceExecutorRegistry` with process-owned native resources and shared exact `ResidencyManager`, private `serial_debug` and `gpu_pipeline` routes, one Host/device-authoritative `ResourceLedger`, one process-domain operation gate, one private lifecycle-admission registry, policy-aware bounded ready storage, Run-scoped ReadyFence continuation routing, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, visible commit, access-plan selection, residency eviction, or resource ordering/fairness |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Execution-trace ownership |
@@ -165,34 +167,47 @@ not form an installable API. The only installed extension contract in this
 area is the pure-C policy ABI declared by
 `include/photospider/policy/policy_plugin_api.h`.
 
-V-4 kept the public monolithic registry slot, registrar entry, and callback
-signatures unchanged while one source-private core lookup bridge recognizes
-only the exact selected core dense callback. V-5 retains those entry/callback
-shapes but intentionally extends the provisional C++ v2 metadata layout; an
-operation DSO therefore requires a matching-SDK rebuild. Each scalar HP/RT
+V-4 and V-5 established the private monolithic registry slots and the
+source-private lookup bridge that recognizes only the exact selected core
+dense callback. DI-3 now projects validated pure-C operation ABI v1 suites into
+those private slots; every operation DSO therefore requires the current SDK
+and no C++ registrar or callback object crosses the boundary. Each scalar HP/RT
 registry slot now owns callback, metadata, and nonzero identity as one atomic
 implementation value; registering another callback shape cannot overwrite its
-sibling's scheduling declarations. The private core
-runner reuses a
-valid sealed CPU image Value or snapshots the legacy ImageBuffer when no Value
-exists, deep-copies the request-effective ParameterMap into a configuration
+sibling's scheduling declarations. The private core runner requires the
+canonical named sealed CPU image Value and deep-copies the request-effective
+ParameterMap into a configuration
 that omits Node output/cache/topology state, invokes pure inference with only
 that configuration and logical DenseTensor/Image descriptors, invokes execute
 with the same configuration, checked ImageViews, and inferred descriptor, and
 validates the complete Value result. It also receives the normalized Region
 from planning/`NodeExecutor`, copies unselected logical coordinates, and
 inverts exact ImageRect or rank-general TensorSlice coordinates through
-checked strides. A same-key plugin override cannot inherit this private
-contract; generic v2 monolithic callbacks retain complete-output behavior.
-Publication preserves the exact sealed result allocation/revision and derives
-a separate ImageBuffer compatibility snapshot.
+checked strides. A same-key plugin override uses its own validated operation
+ABI v1 descriptor, Region, plan, and grant contract rather than inheriting this
+private core contract. Publication preserves the exact sealed result
+allocation/revision. Host and codec adapters retain that exact Value or capture
+a portable artifact; they do not derive an alternate image snapshot.
 
-HP compute-service, result-committer, dirty-write, and disk-load boundaries
-normalize missing CPU image Values before formal publication. Mutable dirty
-clones clear old Value authority and reseal settled bytes. V-5 adds no new
-callback slot or general planner inference. It does add a callback-free
-implementation identity/metadata route to planned work and requires exact
-identity re-resolution before provider entry.
+DI-2 makes HP compute-service, result-committer, dirty-write, RT, and disk-load
+boundaries Value-only before formal publication. One immutable
+`DenseImageOutputPlan` fixes name, descriptor/facet, layout, storage,
+alignment, and Region before one Host binding allocation. Whole/tile producer
+entry uses checked move-only grants over that binding; all executable grants
+must retire successfully before one seal. A validation, overlap, range,
+alignment, overflow, exception, cancellation, duplicate, or omitted-retirement
+failure is sticky and prevents publication. Operation ABI v1 and codec staging
+are normalized at their inbound adapters; formal commit never synthesizes a missing
+Value. V-5 adds no new callback slot or general planner inference. It does add
+a callback-free implementation identity/metadata route to planned work and
+requires exact identity re-resolution before provider entry.
+
+`OutputTile::roi` remains a zero-based storage-relative callback projection,
+while `HostOutputWriteGrant::image_region()` remains a signed logical
+data-window Region. Adapters validate the former against plan width/height,
+translate both endpoints through the plan origin with checked arithmetic, and
+only then compare it with the grant. Byte offsets and OpenCV matrix views keep
+using the zero-based ROI and planned strides.
 
 V-6 adds a bounded source-private physical task without inserting transfer
 nodes into graph planning or a `ComputeRun`. `ValueTransferTask` prepares a
@@ -208,7 +223,7 @@ The deterministic thread-safe fake executor and test-only C++17 mutex/CV race
 rendezvous are test-owned.
 
 V-7 adds a source-private fixed `DeviceExecutorRegistry` to
-`ExecutionService`. In the enabled repository Metal-plugin profile, the Apple
+`ExecutionService`. In the enabled repository Metal-provider profile, the Apple
 executor owns and reuses its device, command queue, and validated
 compute-pipeline cache; one callback-scoped
 allocator retains textures and buffers until provider return. A reserved-start
@@ -235,9 +250,13 @@ the general native publisher's checked signed immutable aliases.
 the production ReadyFence executor retains the exact Run, lease, task, and
 ready-store route, parks an early callback until the original QueueEntry and
 grant retire, and keeps terminal settlement blocked until every continuation
-owner retires. A successful continuation materializes the CPU compatibility
-snapshot and only then releases dependants. Failed, ProducerCancelled, stale,
-or mismatched completion releases none.
+owner retires. A successful continuation revalidates the canonical named Value
+plus every declared generic named Value and releases dependants without
+creating compatibility storage. Multiple Pending names are waited in canonical
+order, and all exact staged Values must be Ready before release. Generic Values
+retain their own representation and indexed binding identities and never enter
+parameter data. Failed, ProducerCancelled, stale, or mismatched completion
+releases none.
 
 V-13 extends the same explicit task boundary by layout family rather than by
 implicit conversion. A packed FP4 source is validated against the version-1
@@ -249,7 +268,7 @@ nibble bits, and logical revision while receiving fresh binding/producer
 identity. An oversized immutable BufferHandle alias remains a valid bounded
 view but is not an exact transfer producer; preparation rejects it before
 destination publication or provider effects. The transfer performs no
-dequantization, requantization, ImageBuffer adaptation, or implicit wait.
+dequantization, requantization, alternate image adaptation, or implicit wait.
 
 The registry's shared `ResidencyManager` admits complete Graph/target/intent/
 generation/Run/task/producer/revision/binding identity before native commit.
@@ -283,17 +302,34 @@ blit. `GraphRuntime` still owns no native Metal state, #74 remains the final
 visible-commit gate, and #86 keeps device-memory/scratch authority inside the
 service ledger rather than residency or the Run.
 
-Metal obtains a complete preallocation plan from native heap texture/buffer
-size-and-alignment queries before its first allocation. Actual
-`MTLResource::allocatedSize` values must fit that atomic plan before command
-commit. The plan then becomes two unique owners: persistent memory follows the
-type-erased native `Value` owner across copies and residency, while scratch
-follows the exact command-completion object across success, native failure,
-stale/rejected publication, and callback unwind. Unused planned bytes return
-at actual commit. Device accounts are isolated by complete `DeviceId`, do not
-borrow Host capacity, and provide copied limits/reserved/available snapshots.
-Command queues, fixed lanes, and pipeline cache entries remain infrastructure,
-not per-invocation scratch.
+Metal obtains checked texture and buffer minimum requirements from native heap
+size-and-alignment queries before its first allocation. The texture query does
+not predict device-specific rounding of the dedicated `MTLHeap`: Metal exposes
+the created heap's `size` and `currentAllocatedSize` only after creation. The
+service ledger therefore performs one linearizable operation that requires the
+texture minimum to fit, reserves all persistent memory currently available in
+the isolated device account, and reserves the exact scratch plan. A concurrent
+heap attempt cannot pass that account until actual reconciliation returns the
+unused ceiling; an already committed heap remains charged and reduces the next
+ceiling. No allocation occurs before admission, and no direct-texture,
+process-page, or sampled-device heuristic is used.
+
+The identical descriptor then creates a dedicated tracked `MTLHeap` and its
+heap-backed texture. Positive, representable `MTLHeap::currentAllocatedSize`
+is the sole persistent actual because the heap is the long-lived backing owner;
+the texture suballocation's `allocatedSize` is not added again. Scratch buffers
+use their own `MTLResource::allocatedSize` values. Each cumulative actual must
+fit the atomic plan before command commit; otherwise a typed failure releases
+the local texture, then heap, then the uncommitted reservation. A fitting
+actual commit returns unused planned bytes and creates two unique owners:
+persistent memory follows a type-erased native `Value` owner that retains both
+texture and heap across copies and residency, releasing the texture and then
+heap before its lease, while scratch follows the exact command-completion
+object across success, native failure, stale/rejected publication, and callback
+unwind. Device accounts are isolated by complete `DeviceId`, do not borrow Host
+capacity, and provide copied limits/reserved/available snapshots. Command
+queues, fixed lanes, and pipeline cache entries remain infrastructure, not
+per-invocation scratch.
 
 Current built-in CPU admission combines a mandatory checked service envelope
 with an auditable adapter envelope. Shared Run/control/plan or phase-context
@@ -356,10 +392,11 @@ remain excluded. Concurrent HP/RT siblings conservatively include the same
 shared synchronization object in both independent phase reservations. This
 intentional double reservation lets either sibling settle first without
 leaving the surviving Run's shared ownership unaccounted. The estimator counts
-only visible Host-owned C++ storage; future operation-produced image pixels,
-named-value growth, and opaque backend, device, plugin, or allocator-owned
-allocations are not fabricated. Current built-in adapters declare zero scratch
-only because they own no separately metered fixed Host scratch.
+only visible Host-owned C++ storage; operation-produced image pixels and named-
+value growth that are not represented by the current demand record, plus opaque
+backend, device, plugin, or allocator-owned allocations, are not fabricated.
+Current built-in adapters declare zero scratch only because they own no
+separately metered fixed Host scratch.
 
 During a process-service dirty source segment, the outer task
 `std::function` remains live while its lvalue copy is owned by the source
@@ -375,7 +412,7 @@ temporaries normally. Downstream demand consequently covers only the
 context-owned target without relying on a standard-library moved-from
 representation. A durable regression invokes that same production helper with
 an adversarial holder whose move preserves its source target, so deleting the
-explicit release fails independently of the active standard library.
+explicit release fails independently of moved-from implementation details.
 
 The former installed `kSchedulerWorkerProcessMax` constant and worker-owning
 scheduler ABI are removed. Source consumers receive no compatibility alias or
@@ -383,9 +420,9 @@ installed replacement. Composition limits use the private source-tree
 `ExecutionResourceLimits`; third-party policy selection uses the independent
 pure-C policy ABI v1 and receives no execution resource.
 
-### Accepted operation-plugin v1 compute adapter target
+### Current operation-plugin v1 compute adapter
 
-The future operation-v1 loader still publishes immutable implementations into
+The operation-v1 loader publishes immutable implementations into
 the process-owned registry; the plugin receives no `ComputeService`,
 `ExecutionService`, `OpRegistry`, scheduler, cache, Graph, Run, ledger, device
 owner, or commit callback. One Host adapter converts private compute snapshots
@@ -430,7 +467,7 @@ sticky. The Host validates and deep-copies emitted records before return and
 rejects missing, duplicate, stale, malformed, out-of-plan, out-of-range, or
 overlapping writes before any cache or Run-visible commit.
 
-Future v1 publication preserves the current strong transaction and per-slot
+Current v1 publication preserves the strong transaction and per-slot
 revision/predecessor rules. Every callback and configured context retains its
 exact DSO generation through validation, status normalization, and exactly one
 destroy attempt. Retirement removes visibility before waiting, destroys in
@@ -440,16 +477,19 @@ publication lock is held while plugin code runs.
 An in-process callback can still ignore cancellation forever. The Host may
 make its result ineligible, but cannot fabricate return, reclaim its write
 grant, destroy its context, or unload its DSO safely. Operation v1 is therefore
-an operator-trusted compatibility boundary. Issue #102 now implements a
-source-private, pointer-free Darwin/Linux protocol-v1 invocation slice over a
-framed Unix stream, ordered `SCM_RIGHTS` descriptors, and unlinked POSIX shared
-memory. Issue #103 now implements the source-private bounded supervision
-composition around that transport. Issue #104 now adds signed immutable-
-snapshot admission and enforceable Host resource policy to the maintained
-direct and supervised entries. Linux supports those runtime entries through a
-sealed descriptor; Darwin rejects their construction before invocation
-effects. ABI pointer records and Host-minted resource tokens are never their
-wire protocol. A general syscall/network sandbox remains outside this slice.
+an operator-trusted compatibility boundary. Issue #102 originally introduced
+the source-private, pointer-free Darwin/Linux protocol-v1 invocation slice over
+a framed Unix stream, ordered `SCM_RIGHTS` descriptors, and unlinked POSIX
+shared memory. DI-3 subsequently advanced that separate wire contract to
+isolation protocol v2 so supervised operation ABI v1 records preserve exact
+descriptor identities, versions, digests, Regions, and immutable plans. Issue
+#103 supplies the source-private bounded supervision composition around that
+transport, while Issue #104 adds signed immutable-snapshot admission and
+enforceable Host resource policy to the maintained direct and supervised
+entries. Linux supports those runtime entries through a sealed descriptor;
+Darwin rejects their construction before invocation effects. ABI pointer
+records and Host-minted resource tokens are never their wire protocol. A
+general syscall/network sandbox remains outside this slice.
 
 `NonSupervisedIsolatedCpuInvocationExecutor` validates the invocation identity,
 generation/operation binding, scalar parameters, resource declarations,
@@ -576,13 +616,12 @@ independent Host checks. They neither establish a syscall/network sandbox nor
 turn `SIGKILL` into proof of OOM.
 
 The adapter, runtime endpoint, supervisor, and executor are compiled into the
-installable product archive, but this remains an internal composition proof,
-not an end-user route. No current `ExecutionService`, `WorkerManager`, embedded
-Host/CLI, `photospider-worker`, or operation loader constructs an isolated
-request from a Graph operation. Current operation ABI v2 cannot cross this
-wire, target-only operation ABI v1 is neither implemented nor shimmed here, and
-atomic operation-ABI migration, end-user selection, and stronger platform
-sandbox profiles remain separate work. Issue #106 now owns narrow long-lived
+installable product archive. Operation ABI v1 supervised descriptors now route
+through the matching signed-package `PluginInvocationExecutor`; request and
+response use isolation protocol v2 and no direct callback fallback. Public
+`ExecutionService`, `WorkerManager`, embedded Host/CLI, and
+`photospider-worker` still expose no end-user runtime selector, and stronger
+platform sandbox profiles remain separate work. Issue #106 owns narrow long-lived
 codec evidence through two manual opt-in production-decoder harnesses and owns
 the execution observation join `(page session, GraphRevision, RunId,
 RunLocalTaskId)`. The tuple is optional per event, fixed-size, copied from a
@@ -714,9 +753,11 @@ cancellation, retry choice, settlement, quota, artifact, or commit authority.
   selected core dense monolithic callback has the private tensor contract; a
   selected same-key device replacement is Unsupported, without scalar
   fallback.
-- Current image tiling, ImageBuffer processing, Host/IPC v2 inspection, and
-  operation ABI v2 carry checked derived `PixelRect`/`PixelSize`, never OpenCV
-  geometry. TensorSlice is HP-only monolithic work and never gets a rectangle.
+- Current image tiling, dense Value processing, Host/IPC v2 inspection, and
+  operation ABI v1 adapters carry checked derived `PixelRect`/`PixelSize`, never OpenCV
+  geometry. Dirty/tile rectangles are zero-based storage projections; signed
+  logical Region metadata is translated through the owning data window.
+  TensorSlice is HP-only monolithic work and never gets a rectangle.
 - Tiled input normalization occurs once per node invocation where possible,
   rather than once per tile callback.
 - The V-3 dense invert inference callback cannot inspect payload bytes, and its
@@ -1147,10 +1188,10 @@ parallelism layer, while OpenCV internal CPU parallelism remains disabled.
 
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` omits this provider's
 callbacks but leaves dependency-neutral core operations registered. The
-registry and v2 registrar do not depend on OpenCV: another provider can publish
-the absent operation, or replace an enabled OpenCV operation through the same
-slots. Manager-driven unload retires the replacement and restores the captured
-predecessor.
+registry and pure-C ABI v1 publication transaction do not depend on OpenCV:
+another provider can publish the absent operation, or replace an enabled
+OpenCV operation through the same slots. Manager-driven unload retires the
+replacement and restores the captured predecessor.
 
 Synchronization around genuine backend state remains backend-owned. The
 process Metal executor serializes access to its command queue, invocation
@@ -1208,6 +1249,21 @@ Graph/proxy publication is a no-throw state swap and preserves the revision.
 The contender resolves `Succeeded` after publication or preserves the exact
 predicate/persistence failure as `Failed` before the work item returns.
 
+Formal output validation accepts only Ready Values across the exact declared
+canonical-image-plus-generic set. Parameter results are checked as a separate
+exact set.
+Image-free successful targets remain valid and publish no fabricated image
+identity. Tiled/dirty tasks share one
+per-node binding; the last executable tile retires and seals it, while planning
+retains exact ROI-covered task dependencies. Nonfinal tiles do not release
+their original edges. Only after the unique final publisher seals, finalizes,
+and installs the complete request-local Value does dispatch batch release
+through every sibling task map. This preserves exact logical task identity and
+adds neither another Value/readiness authority nor another provider callback;
+whole and parameter dependencies remain complete node joins. Commit rejects an
+undrained binding and publishes the already sealed Value once with independent
+Graph revision, HP generation, and Region facts.
+
 RT applies that predicate and publishes its proxy before opening the sibling
 gate. HP later validates independently. A newer Graph revision can therefore
 reject HP without rolling back an RT publication that already won. RT
@@ -1251,13 +1307,13 @@ descriptor, optional Image Facet, layout, binding, allocation, logical
 revision, and complete storage envelope, then returns both budgets at typed
 settlement. This proves that the bounded execution mechanism does not itself
 narrow FP64, channels, rank, or strides. It does not define generic
-serialization: the current product cache still crosses an image-only
-`ImageBuffer`/selected-precision codec boundary, and latent Values have no such
-artifact path.
+serialization. The shared portable Value artifact contract owns generic
+serialization; the configured image codec remains an ordinary-image-only path,
+while worker and durable artifact paths can retain supported latent Values.
 
 V-13 does not widen that persistence boundary. Formal HP memory-cache state may
 retain a packed Value and exact TensorSlice validity, but configured image disk
-save validates ImageBuffer compatibility before estimating or admitting a
+save validates explicit ordinary-image codec compatibility before estimating or admitting a
 `ComputeIoExecutor` task. Packed, quantized, or latent formal Values raise
 `GraphError{InvalidParameter}` before filesystem paths or codecs are touched.
 This fail-closed result is a typed boundary observation, not a generic artifact
@@ -1269,15 +1325,16 @@ save, and user-visible file side effects are separate observations. In
 particular:
 
 - a pending producer can return before `ValueReady`;
-- an operation callback such as legacy `io/save` can expose an external side
-  effect before the enclosing staged Run commits;
+- the explicit CLI save command can report codec/output failure independently
+  of the Run that produced its input Value; the removed `io:save` plugin no
+  longer exposes a file from inside an operation callback;
 - protocol-v2 `compute.submit` reports only accepted queued work;
-- an image daemon job becomes terminal after Host compute and protected
-  artifact publication, but that artifact is process-scoped and lease/TTL
+- a values-mode daemon job becomes terminal after Host compute and protected
+  named-Value archive publication, but that artifact is process-scoped and lease/TTL
   retained rather than crash durable; and
 - the source-private Issue #99/#105 Job becomes `Succeeded` only after its
   fresh Embedded Host closes, its metadata-only worker Report and separate
-  attempt-local output stage are revalidated after exact reap, the durable
+  attempt-local canonical archive are revalidated after exact reap, the durable
   artifact authority returns a fully bound crash-durable receipt, retained
   quota is settled, and durable Job truth is published; this receipt is neither
   daemon delivery nor cache persistence; and
@@ -1287,7 +1344,8 @@ particular:
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
 accepts a target in which optional cache persistence and durable output commit
 have independent outcomes after Run publication. The source-private Issue #99
-Job vertical now implements one narrow restart-persistent image-output path:
+Job vertical now implements one narrow restart-persistent named-Value
+artifact-set output path:
 stable artifact/commit identity, manifest-last filesystem publication,
 idempotent reconciliation, retained quota, durable Job records, and restart
 recovery. This does not turn cache save, daemon delivery, Graph-document save,
@@ -1380,9 +1438,10 @@ attempt runs in one fresh, never-reused `photospider-worker` process that owns
 one attempt-local instance of the process execution domain described here.
 WorkerManager owns its private bounded protocol, heartbeat/runtime deadlines,
 exact lease/PID fencing, cooperative cancellation, TERM/KILL escalation, and
-exact nonblocking `waitpid` reaping. Issue #105 makes that private protocol v2
-metadata-only under a 128-KiB control bound: checkpoint and candidate bytes use
-separate manager-created direction-reduced stream descriptors. Their manager
+exact nonblocking `waitpid` reaping. DI-4 advances that private protocol to v3
+aggregate named-Value metadata under the existing 128-KiB control bound:
+checkpoint and canonical named-Value archive bytes use separate manager-created
+direction-reduced stream descriptors. Their manager
 endpoints are nonblocking, and a worker endpoint may block only while its exact
 PID remains under lifecycle deadlines and TERM/KILL/reap ownership. Checkpoint
 size/EOF/SHA-256 validation occurs inside that worker. The worker sends exact
@@ -1397,6 +1456,9 @@ SHA-256 validation. The worker closes its output lane only after exact bytes and
 remains alive and terminable until the manager completes validation and O(1)
 owner transfer, then returns one
 identity-only `CompletionReady` that grants no service or artifact authority.
+Archive hydration verifies exact size/digest/EOF and every embedded Value
+artifact before atomic handoff; no single-image descriptor or compatibility
+payload remains.
 Post-reap processing never reads the bulk lane and performs no filesystem I/O,
 blocking bulk transfer, bulk allocation, or content hash. The worker receives no
 artifact root, stable output transaction, quota, retry, or publication
@@ -1515,7 +1577,7 @@ The physical compute layout follows the same ownership vocabulary as this
 contract: request arbitration lives in `compute/request/`, task population and
 release in `compute/dispatch/`, dirty-region work in `compute/dirty/`, and Run
 admission/execution lifecycle in `compute/execution/`. The `compute/` root is
-reserved for the core `ComputeService`, `ComputeRun`, geometry, and image-buffer
+reserved for the core `ComputeService`, `ComputeRun`, geometry, and Value
 composition boundaries. This is a source ownership split only; it changes no
 Host method, Run identity, scheduler contract, or installed ABI.
 
@@ -1551,10 +1613,9 @@ Host method, Run identity, scheduler contract, or installed ABI.
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
-- `src/lib/core/exact_box_downsample.cpp`
+- `src/lib/core/dense_image_processing.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/ipc/output_store.*`
-- `plugins/ops/save_op.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/execution/device/device_completion.*`
 - `src/lib/execution/device/residency_manager.*`
