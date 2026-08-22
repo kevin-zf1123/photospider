@@ -660,13 +660,16 @@ HWC `[2048,2048,4]` NativeScalar32 tensor, zero-origin
 structural version 2, and Sample Domain facet structural version 1 declaring
 FP32 Normalized `[0,1]`, its exact `Sha256CanonicalV1` digest is
 `b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`.
-For this oracle migration, DI-1 advanced only the DenseTensor schema and Image
-facet structural records to version 2, producing the pre-Sample-Domain I1
-logical digest
+For this oracle migration, the initial DI-1 implementation and oracle refresh
+advanced the DenseTensor schema and Image facet structural records to version 2
+but did not fully implement the archived DI-1 design: it omitted the
+coordinate-pattern Sample Domain facet and produced the historical
+pre-Sample-Domain I1 logical digest
 `18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`.
-A later coordinate-pattern metadata correction bound Sample Domain facet
-structural version 1 declaring FP32 Normalized `[0,1]`; regenerating the
-independent oracle under that complete descriptor produced the current digest
+The later coordinate-pattern metadata correction completed that design
+requirement by binding Sample Domain facet structural version 1 declaring FP32
+Normalized `[0,1]`; regenerating the independent oracle under that complete
+descriptor produced the current digest
 `b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`.
 Neither stage changed the `Sha256CanonicalV1` algorithm, workload arithmetic,
 or workload identities. The I2 preview golden remains

@@ -528,12 +528,13 @@ coefficient 舍入一次到 binary32 RNE，每个 sample 使用
 的 Sample Domain facet 结构版本 1，其精确
 `Sha256CanonicalV1` digest 是
 `b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`。
-就本次 oracle 迁移而言，DI-1 只把 DenseTensor schema 与 Image facet 结构记录推进到
-版本 2，并产生不含 Sample Domain 的 I1 logical digest
+就本次 oracle 迁移而言，DI-1 的初始实现与 oracle 刷新把 DenseTensor schema 与 Image facet
+结构记录推进到版本 2，但未完整实现已归档的 DI-1 design：它遗漏了 coordinate-pattern 的
+Sample Domain facet，并产生历史上的、不含 Sample Domain 的 I1 logical digest
 `18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`。
-后续 coordinate-pattern metadata correction 才绑定声明 FP32 Normalized `[0,1]` 的
-Sample Domain facet 结构版本 1；在该完整 descriptor 下重新生成独立 oracle 后，产生
-当前 digest
+后续 coordinate-pattern metadata correction 通过绑定声明 FP32 Normalized `[0,1]` 的
+Sample Domain facet 结构版本 1，完成了该 design 要求；在该完整 descriptor 下重新生成
+独立 oracle 后，产生当前 digest
 `b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`。
 这两个阶段都没有改变 `Sha256CanonicalV1` 算法、workload 算术或 workload identity。
 I2 preview golden 仍为
