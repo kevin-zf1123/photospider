@@ -245,10 +245,13 @@ void write_empty_output_graph(const std::filesystem::path& path) {
  * @brief Writes constants at and beyond the normalized legal-domain endpoints.
  *
  * @param path YAML file path to create.
+ * @return Nothing after the complete graph fixture has been written.
  * @throws std::filesystem::filesystem_error if parent-directory creation
  *         fails.
  * @throws std::ios_base::failure if the destination cannot be opened or a
  *         YAML write fails.
+ * @throws std::bad_alloc if path, stream, or YAML text construction exhausts
+ *         memory.
  * @note Nodes 1 and 2 produce the normalized endpoints through integer values
  *       0 and 255. Nodes 3 and 4 use adjacent integers -1 and 256, which the
  *       maintained producer accepts as out-of-domain payload samples. Every
