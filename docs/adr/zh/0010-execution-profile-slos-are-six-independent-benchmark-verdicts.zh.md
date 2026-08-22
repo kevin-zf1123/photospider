@@ -83,11 +83,18 @@ facet 结构版本 1，冻结的 `Sha256CanonicalV1` digest 是
 expected value 在候选执行前固定；product-path test 会交叉校验它，但绝不能用候选结果
 bootstrap 它。
 
-DI-1 改变 canonical descriptor 结构记录，而不改变 `Sha256CanonicalV1` 算法标签、
-workload 算术或 workload identity。I2 preview logical golden 是
+就本次 oracle 迁移而言，DI-1 只把 DenseTensor schema 与 Image facet 结构记录推进到
+版本 2，并产生不含 Sample Domain 的 I1 logical digest
+`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`。
+后续 coordinate-pattern metadata correction 才绑定声明 FP32 Normalized `[0,1]` 的
+Sample Domain facet 结构版本 1；在该完整 descriptor 下重新生成独立 oracle 后，产生
+当前 digest
+`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`。
+这两个阶段都没有改变 `Sha256CanonicalV1` 算法标签、workload 算术或 workload
+identity。I2 preview logical golden 仍为
 `2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`。
-全部 34 项 B1 logical golden 均在相同结构记录和 sample-domain 记录下由独立
-oracle 重新生成，而 B1 raw-payload hash 保持不变。
+全部 34 项 B1 logical golden 均在当前结构记录下重新生成；对 coordinate-pattern
+输出，它们还绑定 Sample Domain record，而 B1 raw-payload hash 保持不变。
 
 规范 workload matrix 如下：
 

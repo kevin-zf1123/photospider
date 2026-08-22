@@ -528,11 +528,18 @@ coefficient 舍入一次到 binary32 RNE，每个 sample 使用
 的 Sample Domain facet 结构版本 1，其精确
 `Sha256CanonicalV1` digest 是
 `b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`。
-DI-1 改变的是这些 descriptor 结构记录，而不是 `Sha256CanonicalV1` 算法或 workload
-算术。I2 preview golden 是
+就本次 oracle 迁移而言，DI-1 只把 DenseTensor schema 与 Image facet 结构记录推进到
+版本 2，并产生不含 Sample Domain 的 I1 logical digest
+`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`。
+后续 coordinate-pattern metadata correction 才绑定声明 FP32 Normalized `[0,1]` 的
+Sample Domain facet 结构版本 1；在该完整 descriptor 下重新生成独立 oracle 后，产生
+当前 digest
+`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`。
+这两个阶段都没有改变 `Sha256CanonicalV1` 算法、workload 算术或 workload identity。
+I2 preview golden 仍为
 `2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`；
-34 项 B1 logical golden 由其独立 oracle 在相同 sample-domain 记录下重新生成，而其
-raw-payload hash 与三个 workload 标识保持不变。
+34 项 B1 logical golden 均在当前结构记录下重新生成；对 coordinate-pattern 输出，
+它们还绑定 Sample Domain record，而其 raw-payload hash 保持不变。
 
 冻结的 I1 graph、十二项 coefficient/Region、仅成功时产生 accepted coordinate 的 collector 与
 product binding、连续 cold/warmup/measured 221-slot grid、tie/guard rule、canonical DenseTensor

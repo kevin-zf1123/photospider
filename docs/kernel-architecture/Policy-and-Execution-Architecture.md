@@ -660,12 +660,20 @@ HWC `[2048,2048,4]` NativeScalar32 tensor, zero-origin
 structural version 2, and Sample Domain facet structural version 1 declaring
 FP32 Normalized `[0,1]`, its exact `Sha256CanonicalV1` digest is
 `b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`.
-DI-1 changes those descriptor structural records rather than the
-`Sha256CanonicalV1` algorithm or workload arithmetic.  The I2 preview golden
-is `2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`;
-the 34 B1 logical goldens are regenerated from their independent oracle under
-the same sample-domain record, while their raw-payload hashes and all three
-workload identifiers remain unchanged.
+For this oracle migration, DI-1 advanced only the DenseTensor schema and Image
+facet structural records to version 2, producing the pre-Sample-Domain I1
+logical digest
+`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`.
+A later coordinate-pattern metadata correction bound Sample Domain facet
+structural version 1 declaring FP32 Normalized `[0,1]`; regenerating the
+independent oracle under that complete descriptor produced the current digest
+`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`.
+Neither stage changed the `Sha256CanonicalV1` algorithm, workload arithmetic,
+or workload identities. The I2 preview golden remains
+`2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`;
+the 34 B1 logical goldens were regenerated under the current structural
+records and, for coordinate-pattern outputs, the Sample Domain record, while
+their raw-payload hashes remain unchanged.
 
 The frozen I1 graph, twelve coefficients/Regions, success-only accepted
 coordinate collector and product binding, continuous cold/warmup/measured
