@@ -114,10 +114,11 @@ class B1SlotExistsError final : public std::runtime_error {
 };
 
 /**
- * @brief Validates the exact frozen candidate descriptor.
+ * @brief Validates the exact frozen candidate descriptor and image facets.
  * @param image Candidate image.
- * @return Nothing for exact Ready CPU FP32 RGBA B1 state.
- * @throws std::invalid_argument for descriptor drift.
+ * @return Nothing for exact Ready CPU FP32 normalized `[0,1]` RGBA B1 state.
+ * @throws std::invalid_argument for descriptor, layout, binding, or facet
+ * drift.
  * @throws ReadyFenceAccessError or BufferAccessError when payload access is
  * unavailable.
  */
@@ -129,8 +130,13 @@ void validate_b1_candidate_image(const Value& image) {
        static_cast<std::size_t>(kB1ChannelCount)},
       ElementSemantics::FloatingPoint,
       StorageEncoding{32U}};
-  const ImageFacet expected_facet =
+  ImageFacet expected_facet =
       make_zero_origin_image_facet(expected_descriptor, 1U, 0U, 2U);
+  expected_facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                        {}};
   const StorageBinding binding = image.storage_binding();
   if (!(view.descriptor() == expected_descriptor) ||
       !(view.image_facet() == expected_facet) ||

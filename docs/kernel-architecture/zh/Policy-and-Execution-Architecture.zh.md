@@ -523,15 +523,16 @@ coefficient 舍入一次到 binary32 RNE，每个 sample 使用
 `RNE32(1/RNE32(1+RNE32(input*k32)))`。provider 在这些显式 scalar 截断前后保存、安装并
 恢复 worker 浮点环境。版本为 `i1-coordinate-pattern-curve-chain-fp32-v1` 的独立 oracle
 不依赖 Host/Kernel/cache/scheduler/YAML/provider，独立重建 source 与四个 stage。对 HWC
-`[2048,2048,4]` NativeScalar32 tensor、零原点 `[0,2048) x [0,2048)` 数据窗口，
-以及冻结的 DenseTensor schema/Image facet 结构版本 2，其精确
+`[2048,2048,4]` NativeScalar32 tensor、零原点 `[0,2048) x [0,2048)` 数据窗口、
+冻结的 DenseTensor schema/Image facet 结构版本 2，以及声明 FP32 Normalized `[0,1]`
+的 Sample Domain facet 结构版本 1，其精确
 `Sha256CanonicalV1` digest 是
-`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`。
+`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`。
 DI-1 改变的是这些 descriptor 结构记录，而不是 `Sha256CanonicalV1` 算法或 workload
 算术。I2 preview golden 是
 `2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`；
-34 项 B1 logical golden 由其独立 oracle 重新生成，而其 raw-payload hash 与三个
-workload 标识保持不变。
+34 项 B1 logical golden 由其独立 oracle 在相同 sample-domain 记录下重新生成，而其
+raw-payload hash 与三个 workload 标识保持不变。
 
 冻结的 I1 graph、十二项 coefficient/Region、仅成功时产生 accepted coordinate 的 collector 与
 product binding、连续 cold/warmup/measured 221-slot grid、tie/guard rule、canonical DenseTensor

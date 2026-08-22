@@ -88,9 +88,10 @@ The independent I1 final oracle is versioned
 four stages without Host, Kernel, cache, scheduler, YAML, or the candidate
 provider. For the HWC `[2048,2048,4]` FloatingPoint/NativeScalar32 tensor with
 ImageFacet `(x=1,y=0,channel=2)`, zero-origin `[0,2048) x [0,2048)` data
-window, and DenseTensor schema/Image facet structural version 2, the frozen
+window, DenseTensor schema/Image facet structural version 2, and Sample Domain
+facet structural version 1 declaring FP32 Normalized `[0,1]`, the frozen
 `Sha256CanonicalV1` digest is
-`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`.
+`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`.
 The expected value is fixed before candidate execution; a product-path test
 cross-checks it but can never bootstrap it.
 
@@ -99,7 +100,8 @@ DI-1 changes canonical descriptor structural records, not the
 The I2 preview logical golden is
 `2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`.
 All 34 B1 logical goldens are regenerated from the independent oracle under
-the same structural records, while B1 raw-payload hashes remain unchanged.
+the same structural and sample-domain records, while B1 raw-payload hashes
+remain unchanged.
 
 The canonical workload matrix is:
 

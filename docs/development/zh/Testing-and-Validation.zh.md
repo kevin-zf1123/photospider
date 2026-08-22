@@ -1481,7 +1481,7 @@ test，不是模拟 I1 collector return。
 | 精确 drain anchor | 每个 episode 要求 `Q_start=S_11=E+183,333,337 ns` 与 `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`，不受 actual admission 或 deadline 变化影响。Window 可以与 active final Run 重叠，但不会取消它或延长 `D_i`。 |
 | Deadline 与 next-origin guard | 在最晚合法 admission 下，要求 `D_11<=E+335,333,337 ns`、从该 deadline 到 `Q_end` 精确 348,000,000 ns，以及从 `Q_end` 到下一 origin 精确 66,666,663 ns。Reset/baseline preparation 必须容纳在该 guard 中；最后一个 measured episode 在 `T^I1` 前使用相同 guard。 |
 | Boundary tie 与 settlement | 在 `Q_start`，nominal marker 先于同 timestamp admission；在 `Q_end`，从 product transition 使用的 observation sink causal allocator（而非 accepted-row sequence allocator）中预留首个被排除的 coordinate。只有 timestamp 不晚于 `Q_end` 且 causal sequence 位于 cut 之前的 event 才属于该 history。任何缺失或更晚的 terminal/quiescence/root-resource/Host settlement 都是 invalid；eventual snapshot 不能回填。 |
-| 独立最终 golden | 不经过 Host、Kernel、cache、scheduler、YAML 或候选 provider code，独立重算 coordinate-pattern source 与四个显式 binary32-RNE curve stage。要求 version 为 `i1-coordinate-pattern-curve-chain-fp32-v1`、数据窗口为零原点 `[0,2048) x [0,2048)`、DenseTensor schema/Image facet 结构版本为 2，且精确 `Sha256CanonicalV1` digest 为 `18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`，再交叉校验一个精确 2048 真实产品结果。expected evidence 缺失或被替换属于 Invalid；候选不匹配属于 Fail。 |
+| 独立最终 golden | 不经过 Host、Kernel、cache、scheduler、YAML 或候选 provider code，独立重算 coordinate-pattern source 与四个显式 binary32-RNE curve stage。要求 version 为 `i1-coordinate-pattern-curve-chain-fp32-v1`、数据窗口为零原点 `[0,2048) x [0,2048)`、DenseTensor schema/Image facet 结构版本为 2、Sample Domain facet 结构版本为 1 并声明 FP32 Normalized `[0,1]`，且精确 `Sha256CanonicalV1` digest 为 `b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`，再交叉校验一个精确 2048 真实产品结果。expected evidence 缺失或被替换属于 Invalid；候选不匹配属于 Fail。 |
 | Guard-safe evidence finalization | 在 `Q_end` 前对每个 visible output 只计算一次 digest，冻结其类型化 result，并释放其 `Value`。evaluation 与 JSON 不得重新计算 hash。最多允许一个不含 Value 的 evaluator 与下一 baseline preparation 重叠，要求在 admission 前完成，并把有序 JSON/durable I/O 延迟到 `T^I1`，或延迟到撤销 later submission 的 abort。 |
 | 逐 Run causal closure | 每个 materialized edit 必须使用唯一 Run id，且精确具有一条 terminal/quiescence/resource/Host chain；cancellation 与 visible publication 各自至多一次，只有 Cancelled 才有 cancellation，只有 Succeeded 才有 visibility，Host status 必须与 terminal 一致。Current generation 必须早于每个 service start，每个 start 必须早于 terminal，visible 必须先于 successful terminal，随后严格为 terminal、quiescence、resource return、Host settlement。不可逆 service-start commit 与 cancellation acceptance 共用 Run-owned terminal arbiter，service-start observation 在 service/Run lock 外投递。`cancellation < start < terminal` 是结构上有效的证据，但会使 Waste 失败；产品路径必须阻止它。 |
 | 无缺口 service-start capacity | 从冻结 curve node 的 Macro256 切片派生每个 node 64 个 tile，从一个 monolithic source 加四个 curve node 派生每个完整 Run 257 个 start，并派生每个十二次 edit episode 3,084 个 start。确定性证明 pre-route 两个方向的 start/cancel 顺序、cancellation 获胜时 route/executable 零泄漏、route commit 获胜时 start coordinate 更小、暂存权威可回滚/复用、第 3,084 个 start 仍成功，以及第 3,085 个 start fail closed。 |
@@ -1491,8 +1491,8 @@ DI-1 改变的是 DenseTensor schema 与 Image facet 结构记录，而不是
 `Sha256CanonicalV1` 算法标签或 workload 算术。因此，冻结的 I2 preview logical
 digest 为
 `2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`。
-全部 34 项已编译 B1 logical golden 都在相同结构版本下由独立 oracle 重新生成；
-其 raw-payload SHA-256 值以及 I1、I2、B1 workload 标识保持不变。
+全部 34 项已编译 B1 logical golden 都在相同结构版本和 sample-domain 版本下由独立
+oracle 重新生成；其 raw-payload SHA-256 值以及 I1、I2、B1 workload 标识保持不变。
 
 M1 对 `r=0..39` 使用相同逐 episode drain 规则
 `E_r=M_0+r*750,000,000 ns`，共精确启动 40 个 measured episode，并持续提供

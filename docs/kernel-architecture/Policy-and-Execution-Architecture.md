@@ -656,14 +656,16 @@ explicit scalar cuts. An independent oracle versioned
 `i1-coordinate-pattern-curve-chain-fp32-v1` reconstructs the source and four
 stages without Host/Kernel/cache/scheduler/YAML/provider dependencies. For the
 HWC `[2048,2048,4]` NativeScalar32 tensor, zero-origin
-`[0,2048) x [0,2048)` data window, and frozen DenseTensor schema/Image facet
-structural version 2, its exact `Sha256CanonicalV1` digest is
-`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`.
+`[0,2048) x [0,2048)` data window, frozen DenseTensor schema/Image facet
+structural version 2, and Sample Domain facet structural version 1 declaring
+FP32 Normalized `[0,1]`, its exact `Sha256CanonicalV1` digest is
+`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`.
 DI-1 changes those descriptor structural records rather than the
 `Sha256CanonicalV1` algorithm or workload arithmetic.  The I2 preview golden
 is `2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`;
-the 34 B1 logical goldens are regenerated from their independent oracle, while
-their raw-payload hashes and all three workload identifiers remain unchanged.
+the 34 B1 logical goldens are regenerated from their independent oracle under
+the same sample-domain record, while their raw-payload hashes and all three
+workload identifiers remain unchanged.
 
 The frozen I1 graph, twelve coefficients/Regions, success-only accepted
 coordinate collector and product binding, continuous cold/warmup/measured

@@ -218,6 +218,13 @@ TEST(B1ProductPath, ExactJobClosesLifecycleResourcesGoldenAndDurableOutput) {
             ElementSemantics::FloatingPoint);
   EXPECT_EQ(computed_view.descriptor().storage_encoding,
             (StorageEncoding{32U}));
+  ASSERT_TRUE(computed_view.image_facet().sample_domain.has_value());
+  EXPECT_EQ(
+      computed_view.image_facet().sample_domain,
+      (SampleDomainFacet{1U,
+                         SampleEncoding{1U, SampleEncodingKind::Normalized},
+                         SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
+                         {}}));
   EXPECT_EQ(computed_image->storage_binding().device.backend(),
             DeviceBackend::CPU);
 
