@@ -674,6 +674,8 @@ M1EnvelopeFixture make_m1_fixture(
 /**
  * @brief Proves deterministic exact bytes, domains, parsing, and M1 pairing.
  * @throws GoogleTest assertion control and fixture construction failures.
+ * @note The frozen row and root addresses transitively bind the current I1/B1
+ * logical goldens, including curve-output metadata authority.
  */
 TEST(EvidenceEnvelope, MaterializesCanonicalM1RowAndBundle) {
   const M1EnvelopeFixture fixture = make_m1_fixture();
@@ -699,9 +701,9 @@ TEST(EvidenceEnvelope, MaterializesCanonicalM1RowAndBundle) {
             fixture.m1_row_digest);
   EXPECT_EQ(digest_evidence_bundle(root.manifest_bytes), fixture.root_digest);
   EXPECT_EQ(fixture.m1_row_digest,
-            "dcda529977939baa56fde0e7e7f111c28b3622e720252457498f4822bc6de1f1");
+            "592d3e0de0055e08e494a780f24a7c274dff3b6cc43530b5f4ded865276d71a4");
   EXPECT_EQ(fixture.root_digest,
-            "5447340a7fe74e24bc1cca444b761072d32a9f04186c702c28ebaf556d2072e3");
+            "282ca403dbe82e07949e818b506a77d50a439f427a0b40466875d2060af3ea22");
   EXPECT_EQ(
       digest_evidence_section(
           fixture.corpus.rows.back().source.workload_manifest.section_name,

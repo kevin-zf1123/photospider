@@ -281,10 +281,10 @@ static ImageFacet project_selected_channel_facet(const Value& source,
 }
 
 /**
- * @brief Projects two weighted-blend sources onto their result channels.
+ * @brief Projects common channel and color facts for one binary image result.
  *
  * @param primary Primary source whose signed windows remain output authority.
- * @param secondary Secondary source contributing mapped sample values.
+ * @param secondary Secondary source contributing paired channel values.
  * @param output_channels Positive destination channel count.
  * @param has_channel_mapping Whether explicit source-to-destination channel
  *        mapping contributed to the result.
@@ -293,22 +293,21 @@ static ImageFacet project_selected_channel_facet(const Value& source,
  *         requested count is smaller than the primary channel extent.
  * @throws std::bad_alloc when copied metadata cannot allocate.
  * @note Stable channel and color authority survives only for unchanged,
- *       unmapped channels when both sources declare equal semantic facts.
- *       Expanded or explicitly mapped destinations have no proven stable
- *       identity, so those facts are removed rather than synthesized. A sample
- *       facet survives only when both sources declare the same uniform
- *       endpoint without stable-ID overrides. Signed data and display windows
- *       remain independent primary spatial facts and are preserved. No payload
- *       inspection, sample conversion, or channel-role inference occurs.
+ * unmapped channels when both sources declare equal semantic facts. Expanded
+ * or explicitly mapped destinations have no proven stable identity, so those
+ * facts are removed rather than synthesized. Sample authority is deliberately
+ * left unchanged for the caller to decide independently. Signed data/display
+ * windows remain primary spatial facts. No payload inspection, sample
+ * conversion, or channel-role inference occurs.
  */
-static ImageFacet project_weighted_blend_facet(const Value& primary,
-                                               const Value& secondary,
-                                               std::size_t output_channels,
-                                               bool has_channel_mapping) {
+static ImageFacet project_binary_common_facet(const Value& primary,
+                                              const Value& secondary,
+                                              std::size_t output_channels,
+                                              bool has_channel_mapping) {
   if (!primary.image_facet().has_value() ||
       !secondary.image_facet().has_value()) {
     throw std::invalid_argument(
-        "OpenCV weighted-blend source lacks ordinary-image metadata.");
+        "OpenCV binary image source lacks ordinary-image metadata.");
   }
   const ImageFacet& primary_facet = *primary.image_facet();
   const std::size_t primary_channels =
@@ -317,7 +316,7 @@ static ImageFacet project_weighted_blend_facet(const Value& primary,
           : 1U;
   if (output_channels < primary_channels) {
     throw std::invalid_argument(
-        "OpenCV weighted-blend facet projection cannot shrink primary "
+        "OpenCV binary facet projection cannot shrink primary "
         "channels.");
   }
 
@@ -339,14 +338,102 @@ static ImageFacet project_weighted_blend_facet(const Value& primary,
     projected.color.reset();
   }
 
-  const auto& primary_samples = primary_facet.sample_domain;
-  const auto& secondary_samples = secondary_facet.sample_domain;
+  return projected;
+}
+
+/**
+ * @brief Proves that one uniform declared interval is closed under multiply.
+ *
+ * @param primary Primary sample declaration.
+ * @param secondary Secondary sample declaration.
+ * @param scale Explicit scalar used by `cv::multiply`.
+ * @return True only when declarations are identical, uniform, and every
+ * endpoint product remains inside that same declared interval.
+ * @throws Nothing.
+ * @note The proof uses only finite declared endpoints and the configured
+ * scalar. It never observes payload extrema or synthesizes a replacement
+ * domain. A non-finite intermediate fails closed.
+ */
+static bool multiply_preserves_uniform_sample_domain(
+    const std::optional<SampleDomainFacet>& primary,
+    const std::optional<SampleDomainFacet>& secondary, double scale) noexcept {
+  if (!primary.has_value() || !secondary.has_value() ||
+      !primary->per_channel.empty() || !secondary->per_channel.empty() ||
+      !(*primary == *secondary) || !std::isfinite(scale)) {
+    return false;
+  }
+  const SampleDomain& domain = primary->default_domain;
+  const long double minimum = static_cast<long double>(domain.minimum);
+  const long double maximum = static_cast<long double>(domain.maximum);
+  const long double multiplier = static_cast<long double>(scale);
+  const std::array<long double, 4U> products{
+      minimum * minimum * multiplier, minimum * maximum * multiplier,
+      maximum * minimum * multiplier, maximum * maximum * multiplier};
+  if (!std::all_of(products.begin(), products.end(),
+                   [](long double value) { return std::isfinite(value); })) {
+    return false;
+  }
+  const auto bounds = std::minmax_element(products.begin(), products.end());
+  return *bounds.first >= minimum && *bounds.second <= maximum;
+}
+
+/**
+ * @brief Projects two weighted-blend sources onto their result channels.
+ *
+ * @param primary Primary source whose signed windows remain output authority.
+ * @param secondary Secondary source contributing mapped sample values.
+ * @param output_channels Positive destination channel count.
+ * @param has_channel_mapping Whether explicit source-to-destination channel
+ * mapping contributed to the result.
+ * @return Copied primary facet containing only facts valid for the result.
+ * @throws std::invalid_argument when either source lacks image metadata or the
+ * requested count is smaller than the primary channel extent.
+ * @throws std::bad_alloc when copied metadata cannot allocate.
+ * @note Channel/color intersection is independent from sample intersection.
+ * The established blend sample rule retains only an identical uniform facet.
+ */
+static ImageFacet project_weighted_blend_facet(const Value& primary,
+                                               const Value& secondary,
+                                               std::size_t output_channels,
+                                               bool has_channel_mapping) {
+  ImageFacet projected = project_binary_common_facet(
+      primary, secondary, output_channels, has_channel_mapping);
+  const auto& primary_samples = primary.image_facet()->sample_domain;
+  const auto& secondary_samples = secondary.image_facet()->sample_domain;
   const bool common_uniform_samples = primary_samples.has_value() &&
                                       secondary_samples.has_value() &&
                                       primary_samples->per_channel.empty() &&
                                       secondary_samples->per_channel.empty() &&
                                       *primary_samples == *secondary_samples;
   if (!common_uniform_samples) {
+    projected.sample_domain.reset();
+  }
+  return projected;
+}
+
+/**
+ * @brief Projects pointwise multiply metadata with an interval-closure proof.
+ *
+ * @param primary Primary source whose signed geometry remains authoritative.
+ * @param secondary Secondary source contributing pointwise values.
+ * @param output_channels Positive unchanged destination channel count.
+ * @param scale Explicit scalar passed unchanged to `cv::multiply`.
+ * @return Primary geometry plus independent proven channel/color/sample facts.
+ * @throws std::invalid_argument or std::bad_alloc from common projection.
+ * @note Equal stable channel and color facts may survive independently. Sample
+ * authority survives only when the exact uniform input declaration is closed
+ * under the configured product; otherwise it is omitted. No payload inference,
+ * implicit conversion, or replacement domain is introduced.
+ */
+static ImageFacet project_multiply_facet(const Value& primary,
+                                         const Value& secondary,
+                                         std::size_t output_channels,
+                                         double scale) {
+  ImageFacet projected =
+      project_binary_common_facet(primary, secondary, output_channels, false);
+  if (!multiply_preserves_uniform_sample_domain(
+          primary.image_facet()->sample_domain,
+          secondary.image_facet()->sample_domain, scale)) {
     projected.sample_domain.reset();
   }
   return projected;
@@ -1013,6 +1100,284 @@ static void apply_channel_mapping(const plugin::ParameterValue::Object* mapping,
               destination_planes[*index]);
     }
   }
+}
+
+/**
+ * @brief Requires one ordinary-image Value for pure tiled output inference.
+ *
+ * @param inputs Exact operation inputs in destination-index order.
+ * @param index Required connected slot.
+ * @param operation_key Stable operation key used in diagnostics.
+ * @return Borrowed immutable image Value.
+ * @throws std::invalid_argument when the slot is absent or lacks a valid
+ * ordinary DenseImage facet.
+ * @note The helper reads metadata only and never polls readiness, acquires a
+ * payload lease, or retains the input beyond the inference callback.
+ */
+static const Value& require_tiled_inference_input(
+    const std::vector<const NodeOutput*>& inputs, std::size_t index,
+    const char* operation_key) {
+  if (index >= inputs.size() || inputs[index] == nullptr ||
+      !inputs[index]->has_image_value() ||
+      !inputs[index]->image_value().image_facet().has_value()) {
+    throw std::invalid_argument(std::string(operation_key) +
+                                " output inference requires input " +
+                                std::to_string(index) + ".");
+  }
+  return inputs[index]->image_value();
+}
+
+/**
+ * @brief Returns the validated logical channel count of one ordinary image.
+ *
+ * @param value Borrowed ordinary DenseImage Value.
+ * @return Positive channel count.
+ * @throws std::invalid_argument when metadata is malformed or exceeds the
+ * maintained channel bound.
+ * @note Diagnostic names and payload bytes never affect the count.
+ */
+static std::size_t tiled_inference_channel_count(const Value& value) {
+  const DenseTensorDescriptor& descriptor = value.dense_tensor_descriptor();
+  const ImageFacet& facet = *value.image_facet();
+  validate_dense_tensor_image_metadata(descriptor, facet);
+  const std::size_t channels = facet.channel_axis.has_value()
+                                   ? descriptor.shape[*facet.channel_axis]
+                                   : 1U;
+  if (channels == 0U || channels > kMaximumImageChannels) {
+    throw std::invalid_argument(
+        "OpenCV tiled output inference channel count is unsupported.");
+  }
+  return channels;
+}
+
+/**
+ * @brief Validates semantic safety of tiled secondary channel normalization.
+ *
+ * @param primary Primary image whose channel count defines the output base.
+ * @param secondary Secondary image normalized before tiled callbacks.
+ * @return Nothing when no channel conversion occurs or the secondary carries
+ * no channel-specific facts that conversion would need to remap.
+ * @throws std::invalid_argument when conversion would guess stable channel,
+ * color-group, or per-channel sample authority.
+ * @note This mirrors TiledInputNormalizer's fail-closed conversion boundary
+ * before Host output allocation. Uniform sample declarations remain valid for
+ * positional channel replication/reduction because they bind no stable ID.
+ */
+static void validate_tiled_secondary_channel_normalization(
+    const Value& primary, const Value& secondary) {
+  if (tiled_inference_channel_count(primary) ==
+      tiled_inference_channel_count(secondary)) {
+    return;
+  }
+  const ImageFacet& facet = *secondary.image_facet();
+  if (facet.channel_schema.has_value() || facet.color.has_value() ||
+      (facet.sample_domain.has_value() &&
+       !facet.sample_domain->per_channel.empty())) {
+    throw std::invalid_argument(
+        "OpenCV tiled channel normalization requires an explicit semantic "
+        "mapping.");
+  }
+}
+
+/**
+ * @brief Builds one exact HWC tiled logical result from a projected facet.
+ *
+ * @param primary Primary input supplying scalar storage facts.
+ * @param output_size Positive task-planned extent.
+ * @param output_channels Positive operation-proven channel count.
+ * @param facet Operation-specific projected interpretation.
+ * @return Complete logical result for NodeExecutor validation and allocation.
+ * @throws std::invalid_argument for unsupported storage, dimensions, channels,
+ * or projected metadata.
+ * @throws std::overflow_error when signed window endpoints overflow.
+ * @throws std::bad_alloc when descriptor or metadata storage allocates.
+ * @note The function performs no output allocation, payload access, sample
+ * conversion, or provider callback entry.
+ */
+static TiledOutputInferenceResult make_opencv_tiled_output_inference(
+    const Value& primary, const PixelSize& output_size,
+    std::size_t output_channels, ImageFacet facet) {
+  if (output_size.width <= 0 || output_size.height <= 0 ||
+      output_channels == 0U || output_channels > kMaximumImageChannels) {
+    throw std::invalid_argument(
+        "OpenCV tiled output inference requires bounded positive geometry.");
+  }
+  const DenseTensorDescriptor& source = primary.dense_tensor_descriptor();
+  if (source.quantization.has_value() ||
+      source.storage_encoding.kind != StorageEncodingKind::NativeScalar) {
+    throw std::invalid_argument(
+        "OpenCV tiled output inference requires native unquantized storage.");
+  }
+  DenseTensorDescriptor descriptor{
+      {static_cast<std::size_t>(output_size.height),
+       static_cast<std::size_t>(output_size.width), output_channels},
+      source.element_semantics,
+      source.storage_encoding};
+  facet.x_axis = 1U;
+  facet.y_axis = 0U;
+  facet.channel_axis = 2U;
+  const std::int64_t width = static_cast<std::int64_t>(output_size.width);
+  const std::int64_t height = static_cast<std::int64_t>(output_size.height);
+  if (facet.data_window.x_begin >
+          std::numeric_limits<std::int64_t>::max() - width ||
+      facet.data_window.y_begin >
+          std::numeric_limits<std::int64_t>::max() - height) {
+    throw std::overflow_error(
+        "OpenCV tiled output data window overflows int64.");
+  }
+  facet.data_window.x_end = facet.data_window.x_begin + width;
+  facet.data_window.y_end = facet.data_window.y_begin + height;
+  validate_dense_tensor_image_metadata(descriptor, facet);
+  return TiledOutputInferenceResult{std::move(descriptor), std::move(facet)};
+}
+
+/**
+ * @brief Infers interpretation-preserving Gaussian-blur tiled output.
+ *
+ * @param node Unused effective operation node.
+ * @param inputs Exact operation inputs.
+ * @param output_size Positive planned extent.
+ * @return Primary scalar, signed geometry, channel, sample, and color facts.
+ * @throws Metadata validation, arithmetic, or allocation failures unchanged.
+ * @note Gaussian convolution changes neither channel roles, declared sample
+ * convention, nor color interpretation; no payload is inspected.
+ */
+static TiledOutputInferenceResult infer_gaussian_blur_tiled_output(
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size) {
+  static_cast<void>(node);
+  const Value& primary =
+      require_tiled_inference_input(inputs, 0U, "image_process:gaussian_blur");
+  return make_opencv_tiled_output_inference(
+      primary, output_size, tiled_inference_channel_count(primary),
+      *primary.image_facet());
+}
+
+/**
+ * @brief Infers conservative metadata for nonlinear curve-transform output.
+ *
+ * @param node Unused effective operation node.
+ * @param inputs Exact operation inputs.
+ * @param output_size Positive planned extent.
+ * @return Primary signed geometry and stable channel schema with sample/color
+ * authority omitted.
+ * @throws Metadata validation, arithmetic, or allocation failures unchanged.
+ * @note The nonlinear reciprocal transform proves positional channel identity
+ * but does not prove preservation of a declared sample interval or transfer
+ * function. It never derives replacements from payload values.
+ */
+static TiledOutputInferenceResult infer_curve_transform_tiled_output(
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size) {
+  static_cast<void>(node);
+  const Value& primary = require_tiled_inference_input(
+      inputs, 0U, "image_process:curve_transform");
+  ImageFacet facet = *primary.image_facet();
+  facet.sample_domain.reset();
+  facet.color.reset();
+  return make_opencv_tiled_output_inference(
+      primary, output_size, tiled_inference_channel_count(primary),
+      std::move(facet));
+}
+
+/**
+ * @brief Infers the established two-source weighted-blend metadata projection.
+ *
+ * @param node Effective mapping and channel-expansion parameters.
+ * @param inputs Exact two operation inputs.
+ * @param output_size Positive planned extent.
+ * @return Primary geometry and the independently proven semantic intersection.
+ * @throws Metadata, parameter, arithmetic, or allocation failures unchanged.
+ * @note Explicit mapping determines output channel cardinality before Host
+ * allocation. It never reallocates a borrowed output tile or guesses roles.
+ */
+static TiledOutputInferenceResult infer_add_weighted_tiled_output(
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size) {
+  const Value& primary =
+      require_tiled_inference_input(inputs, 0U, "image_mixing:add_weighted");
+  const Value& secondary =
+      require_tiled_inference_input(inputs, 1U, "image_mixing:add_weighted");
+  validate_tiled_secondary_channel_normalization(primary, secondary);
+  const std::size_t primary_channels = tiled_inference_channel_count(primary);
+  const plugin::ParameterMap& parameters = effective_parameters(node);
+  const plugin::ParameterValue::Object* channel_mapping =
+      parameter_object(parameters, "channel_mapping");
+  const plugin::ParameterValue::Object* input0 =
+      nested_parameter_object(channel_mapping, "input0");
+  const plugin::ParameterValue::Object* input1 =
+      nested_parameter_object(channel_mapping, "input1");
+  const int maximum_destination = std::max(max_destination_channel(input0),
+                                           max_destination_channel(input1));
+  const std::size_t mapped_channels =
+      maximum_destination < 0
+          ? 0U
+          : static_cast<std::size_t>(maximum_destination) + 1U;
+  const std::size_t output_channels =
+      std::max(primary_channels, mapped_channels);
+  ImageFacet facet = project_weighted_blend_facet(
+      primary, secondary, output_channels, channel_mapping != nullptr);
+  return make_opencv_tiled_output_inference(primary, output_size,
+                                            output_channels, std::move(facet));
+}
+
+/**
+ * @brief Infers conservative absolute-difference tiled output metadata.
+ *
+ * @param node Unused alpha-strategy owner; all strategies share this policy.
+ * @param inputs Exact two operation inputs.
+ * @param output_size Positive planned extent.
+ * @return Primary geometry and common stable channel schema, with color and
+ * sample authority omitted.
+ * @throws Metadata, arithmetic, or allocation failures unchanged.
+ * @note Absolute differences and mixed alpha strategies do not prove that
+ * output values retain source color transfer or sample-domain meaning.
+ */
+static TiledOutputInferenceResult infer_abs_diff_tiled_output(
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size) {
+  static_cast<void>(node);
+  const Value& primary =
+      require_tiled_inference_input(inputs, 0U, "image_mixing:diff");
+  const Value& secondary =
+      require_tiled_inference_input(inputs, 1U, "image_mixing:diff");
+  validate_tiled_secondary_channel_normalization(primary, secondary);
+  const std::size_t output_channels = tiled_inference_channel_count(primary);
+  ImageFacet facet =
+      project_binary_common_facet(primary, secondary, output_channels, false);
+  facet.sample_domain.reset();
+  facet.color.reset();
+  return make_opencv_tiled_output_inference(primary, output_size,
+                                            output_channels, std::move(facet));
+}
+
+/**
+ * @brief Infers pointwise multiply metadata using configured interval closure.
+ *
+ * @param node Effective multiply scale.
+ * @param inputs Exact two operation inputs.
+ * @param output_size Positive planned extent.
+ * @return Primary geometry plus independently proven channel/color/sample
+ * facts.
+ * @throws Metadata, parameter, arithmetic, or allocation failures unchanged.
+ * @note Different or non-closed sample declarations are omitted before Host
+ * allocation; raw callback arithmetic and scale remain unchanged.
+ */
+static TiledOutputInferenceResult infer_multiply_tiled_output(
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size) {
+  const Value& primary =
+      require_tiled_inference_input(inputs, 0U, "image_mixing:multiply");
+  const Value& secondary =
+      require_tiled_inference_input(inputs, 1U, "image_mixing:multiply");
+  validate_tiled_secondary_channel_normalization(primary, secondary);
+  const std::size_t output_channels = tiled_inference_channel_count(primary);
+  const double scale =
+      as_double_flexible(effective_parameters(node), "scale", 1.0);
+  ImageFacet facet =
+      project_multiply_facet(primary, secondary, output_channels, scale);
+  return make_opencv_tiled_output_inference(primary, output_size,
+                                            output_channels, std::move(facet));
 }
 
 /**
@@ -2906,8 +3271,14 @@ static NodeOutput op_abs_diff_monolithic(
  * @throws std::bad_alloc if parameter or output allocation fails.
  * @throws GraphError for missing inputs or unsupported normalization.
  * @throws cv::Exception if OpenCV normalization or multiplication fails.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error when
+ *         projected output metadata is invalid.
  * @note Callback-local matrices provide reentrant execution across independent
- *       execution work.
+ *       execution work. Primary signed geometry survives. Stable channel/color
+ *       authority requires semantic equality across both inputs, while sample
+ *       authority additionally requires an identical uniform interval closed
+ *       under scale. Unproven facts are omitted without payload inference or
+ *       implicit conversion.
  */
 static NodeOutput op_multiply_monolithic(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -2930,7 +3301,10 @@ static NodeOutput op_multiply_monolithic(
   cv::Mat output;
   cv::multiply(input_a, input_b, output, scale);
   NodeOutput out;
-  publish_opencv_output(&out, output, &inputs[0]->image_value());
+  ImageFacet projected = project_multiply_facet(
+      inputs[0]->image_value(), inputs[1]->image_value(),
+      static_cast<std::size_t>(output.channels()), scale);
+  publish_opencv_output_with_facet(&out, output, std::move(projected));
   return out;
 }
 
@@ -2943,22 +3317,47 @@ void register_provider() {
   const ForwardRoiPropFunc identity_forward(identity_forward_roi);
   const OpPlanningCallbacks identity_planning{identity_roi,
                                               identity_forward,
+                                              {},
                                               {}};
   const OpPlanningCallbacks convolve_planning{
       DirtyRoiPropFunc(convolve_dirty_roi),
       ForwardRoiPropFunc(convolve_forward_roi),
+      {},
       {}};
   const OpPlanningCallbacks resize_planning{
       DirtyRoiPropFunc(resize_dirty_roi),
       ForwardRoiPropFunc(resize_forward_roi),
+      {},
       {}};
   const OpPlanningCallbacks crop_planning{DirtyRoiPropFunc(crop_dirty_roi),
                                           ForwardRoiPropFunc(crop_forward_roi),
+                                          {},
                                           {}};
   const OpPlanningCallbacks gaussian_blur_planning{
       DirtyRoiPropFunc(gaussian_blur_dirty_roi),
       ForwardRoiPropFunc(gaussian_blur_forward_roi),
-      {}};
+      {},
+      TiledOutputInferenceFunc(infer_gaussian_blur_tiled_output)};
+  const OpPlanningCallbacks curve_transform_planning{
+      identity_roi,
+      identity_forward,
+      {},
+      TiledOutputInferenceFunc(infer_curve_transform_tiled_output)};
+  const OpPlanningCallbacks add_weighted_planning{
+      identity_roi,
+      identity_forward,
+      {},
+      TiledOutputInferenceFunc(infer_add_weighted_tiled_output)};
+  const OpPlanningCallbacks diff_planning{
+      identity_roi,
+      identity_forward,
+      {},
+      TiledOutputInferenceFunc(infer_abs_diff_tiled_output)};
+  const OpPlanningCallbacks multiply_planning{
+      identity_roi,
+      identity_forward,
+      {},
+      TiledOutputInferenceFunc(infer_multiply_tiled_output)};
 
   registry.register_op_hp_monolithic(
       "image_source", "path",
@@ -3074,7 +3473,7 @@ void register_provider() {
       "image_process", "curve_transform",
       fence_tiled_operation("image_process:curve_transform",
                             TileOpFunc(op_curve_transform_tiled)),
-      tiled_meta, identity_planning);
+      tiled_meta, curve_transform_planning);
 
   registry.register_op_hp_monolithic(
       "image_mixing", "add_weighted",
@@ -3084,9 +3483,9 @@ void register_provider() {
   const TileOpFunc add_weighted = fence_tiled_operation(
       "image_mixing:add_weighted", TileOpFunc(op_add_weighted_tiled));
   registry.register_op_hp_tiled("image_mixing", "add_weighted", add_weighted,
-                                tiled_meta, identity_planning);
+                                tiled_meta, add_weighted_planning);
   registry.register_op_rt_tiled("image_mixing", "add_weighted", add_weighted,
-                                rt_meta, identity_planning);
+                                rt_meta, add_weighted_planning);
 
   registry.register_op_hp_monolithic(
       "image_mixing", "diff",
@@ -3096,7 +3495,7 @@ void register_provider() {
   registry.register_op_hp_tiled(
       "image_mixing", "diff",
       fence_tiled_operation("image_mixing:diff", TileOpFunc(op_abs_diff_tiled)),
-      tiled_meta, identity_planning);
+      tiled_meta, diff_planning);
 
   registry.register_op_hp_monolithic(
       "image_mixing", "multiply",
@@ -3107,7 +3506,7 @@ void register_provider() {
       "image_mixing", "multiply",
       fence_tiled_operation("image_mixing:multiply",
                             TileOpFunc(op_multiply_tiled)),
-      tiled_meta, identity_planning);
+      tiled_meta, multiply_planning);
 }
 
 #undef PHOTOSPIDER_OBSERVE_OPENCV_OPERATION

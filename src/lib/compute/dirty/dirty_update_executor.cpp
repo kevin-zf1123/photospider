@@ -243,10 +243,13 @@ std::optional<DirtyResolvedOperation> select_dirty_operation(
           ? *planned_output_authority
           : make_planned_output_authority(
                 make_planned_operation_route(*selected), PixelSize{});
-  return DirtyResolvedOperation{
-      std::move(selected->func),         selected->metadata.device_preference,
-      selected->implementation_identity, std::move(selected->metadata),
-      std::move(output_authority),       std::move(selected->dirty_propagator)};
+  return DirtyResolvedOperation{std::move(selected->func),
+                                selected->metadata.device_preference,
+                                selected->implementation_identity,
+                                std::move(selected->metadata),
+                                std::move(output_authority),
+                                std::move(selected->dirty_propagator),
+                                std::move(selected->tiled_output_inference)};
 }
 
 /**
@@ -1362,6 +1365,8 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     OpMetadata operation_metadata = selected_operation->metadata;
     std::optional<DirtyRoiPropFunc> dirty_propagator =
         selected_operation->dirty_propagator;
+    std::optional<TiledOutputInferenceFunc> tiled_output_inference =
+        selected_operation->tiled_output_inference;
     const std::uint64_t implementation_identity =
         selected_operation->implementation_identity;
     OpRegistry::OpVariant operation = std::move(selected_operation->operation);
@@ -1373,6 +1378,8 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
                                        std::move(operation_metadata),
                                    dirty_propagator =
                                        std::move(dirty_propagator),
+                                   tiled_output_inference =
+                                       std::move(tiled_output_inference),
                                    implementation_identity,
                                    output_authority =
                                        std::move(output_authority)]() {
@@ -1398,6 +1405,7 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
       TiledExecutionConfig tiled_config;
       tiled_config.metadata = operation_metadata;
       tiled_config.dirty_propagator = dirty_propagator;
+      tiled_config.tiled_output_inference = tiled_output_inference;
       tiled_config.implementation_identity = implementation_identity;
       tiled_config.on_tile = [state_ptr](const PixelRect&) {
         const ComputeRunLease* lease =

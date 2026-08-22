@@ -67,6 +67,14 @@ struct DirtyResolvedOperation {
    * operation-level registry callback after admission.
    */
   std::optional<DirtyRoiPropFunc> dirty_propagator;
+
+  /**
+   * @brief Pure tiled output inference frozen with the exact implementation.
+   * @note Tiled allocation invokes this callback before Host binding creation
+   * and provider entry. Absence selects the conservative no-optional-facts
+   * fallback and never borrows an operation-level sibling policy.
+   */
+  std::optional<TiledOutputInferenceFunc> tiled_output_inference;
 };
 
 /** @brief Node-id index of immutable dirty operation/device snapshots. */

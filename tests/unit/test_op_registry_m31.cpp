@@ -93,8 +93,8 @@ void expect_execution_metadata(const OpImplementation& implementation,
  * @note Ordinary HP selection must choose the monolithic slot after both
  * registrations, while a tiled-only filter must choose the tiled slot. The
  * first slot's identity must survive publication of the second slot. Each slot
- * also retains distinct dirty, forward, and dependency callbacks so selection
- * cannot borrow planning semantics from its sibling.
+ * also retains distinct dirty, forward, dependency, and tiled-output callbacks
+ * so selection cannot borrow planning semantics from its sibling.
  */
 void verify_atomic_scalar_slots(const std::string& subtype,
                                 bool monolithic_first) {
@@ -180,6 +180,18 @@ void verify_atomic_scalar_slots(const std::string& subtype,
         map.upstream_input_index = 302U;
         return map;
       });
+  tiled_planning.tiled_output_inference = TiledOutputInferenceFunc(
+      [](const Node&, const std::vector<const NodeOutput*>&,
+         const PixelSize& output_size) {
+        DenseTensorDescriptor descriptor{
+            {static_cast<std::size_t>(output_size.height),
+             static_cast<std::size_t>(output_size.width), 2U},
+            ElementSemantics::FloatingPoint,
+            StorageEncoding{32U}};
+        ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+        return TiledOutputInferenceResult{std::move(descriptor),
+                                          std::move(facet)};
+      });
 
   const auto register_monolithic = [&]() {
     registry.register_op_hp_monolithic(
@@ -242,6 +254,8 @@ void verify_atomic_scalar_slots(const std::string& subtype,
   ASSERT_TRUE(selected_tiled->dirty_propagator.has_value());
   ASSERT_TRUE(selected_tiled->forward_propagator.has_value());
   ASSERT_TRUE(selected_tiled->dependency_builder.has_value());
+  EXPECT_FALSE(selected_monolithic->tiled_output_inference.has_value());
+  ASSERT_TRUE(selected_tiled->tiled_output_inference.has_value());
   GraphModel graph("");
   const Node node;
   const PixelRect roi{1, 2, 3, 4};
@@ -268,6 +282,11 @@ void verify_atomic_scalar_slots(const std::string& subtype,
                                                   parameters)
                 .upstream_input_index,
             302U);
+  const TiledOutputInferenceResult tiled_output =
+      (*selected_tiled->tiled_output_inference)(node, {}, extent);
+  EXPECT_EQ(tiled_output.descriptor.shape,
+            (std::vector<std::size_t>{8U, 8U, 2U}));
+  EXPECT_EQ(tiled_output.image_facet.data_window, (ImageBounds{0, 0, 8, 8}));
 
   const NodeOutput monolithic_output =
       std::get<MonolithicOpFunc>(selected_monolithic->func)(node, {});

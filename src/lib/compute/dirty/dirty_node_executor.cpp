@@ -53,26 +53,6 @@ void publish_staged_image_value(NodeOutput* output, Value value) {
 }
 
 /**
- * @brief Builds allocation-inference inputs with prior output precedence.
- * @param preferred Prior staged output whose format should be retained.
- * @param inputs Destination-indexed execution inputs.
- * @return Pointer vector used only before Host binding allocation.
- * @throws std::bad_alloc when vector storage cannot allocate.
- * @note Execution still receives the original input vector. The preferred
- * pointer is added only when it carries a canonical image Value.
- */
-std::vector<const NodeOutput*> output_plan_inputs(
-    const NodeOutput& preferred, const std::vector<const NodeOutput*>& inputs) {
-  std::vector<const NodeOutput*> result;
-  result.reserve(inputs.size() + (preferred.has_image_value() ? 1U : 0U));
-  if (preferred.has_image_value()) {
-    result.push_back(&preferred);
-  }
-  result.insert(result.end(), inputs.begin(), inputs.end());
-  return result;
-}
-
-/**
  * @brief Seeds a fresh Host output binding from one immutable staged Value.
  *
  * @param source Prior request-local or committed output.
@@ -349,17 +329,16 @@ void HighPrecisionDirtyNodeExecutor::execute_operation(
     const std::vector<const NodeOutput*>& image_inputs_ready,
     const DirtyResolvedOperation& operation) const {
   if (std::holds_alternative<TileOpFunc>(operation.operation)) {
-    NodeOutput staged_output;
     {
       std::lock_guard<std::mutex> lock(node_mutex(node.id));
-      staged_output = hp_write_buffer_.ensure_output(node);
+      static_cast<void>(hp_write_buffer_.ensure_output(node));
     }
-    const std::vector<const NodeOutput*> plan_inputs =
-        output_plan_inputs(staged_output, image_inputs_ready);
     HostOutputBinding& output_binding =
         hp_write_buffer_.ensure_tiled_output_binding(
             node,
-            NodeExecutor::freeze_tiled_output_plan(plan_inputs, entry.hp_size),
+            NodeExecutor::freeze_tiled_output_plan(
+                node, image_inputs_ready, entry.hp_size,
+                operation.tiled_output_inference),
             frozen_tiled_task_count(tiled_task_counts_, node.id));
     {
       OperationExecutionLease operation_lease = acquire_direct_dirty_operation(
@@ -387,6 +366,7 @@ void HighPrecisionDirtyNodeExecutor::execute_tiled(
   config.forced_halo = entry.halo_hp;
   config.metadata = operation.metadata;
   config.dirty_propagator = operation.dirty_propagator;
+  config.tiled_output_inference = operation.tiled_output_inference;
   config.implementation_identity = operation.implementation_identity;
   config.on_tile = [this](const PixelRect&) {
     observe_dirty_node_cancellation(run_lease_);
@@ -521,11 +501,12 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
                             PlannedOutputReadiness::RequireReady);
     bool preserved_existing_bytes = staged_output.has_image_value();
     if (result.has_image_value()) {
-      const std::vector<const NodeOutput*> plan_inputs =
-          output_plan_inputs(result, {});
+      const std::vector<const NodeOutput*> plan_inputs = {&result};
       HostOutputBinding output_binding =
-          NodeExecutor::allocate_tiled_output_binding(plan_inputs,
-                                                      entry.rt_size);
+          NodeExecutor::allocate_tiled_output_binding(
+              node_for_exec, plan_inputs, entry.rt_size,
+              TiledOutputInferenceFunc(
+                  NodeExecutor::infer_interpretation_preserving_output));
       preserved_existing_bytes =
           seed_output_binding(staged_output, output_binding);
       copy_monolithic_image_roi(result, entry, output_binding,
@@ -541,12 +522,12 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
     rt_write_buffer_.stage_output(node.id, std::move(staged_output),
                                   preserved_existing_bytes);
   } else {
-    const std::vector<const NodeOutput*> plan_inputs =
-        output_plan_inputs(staged_output, resolved_inputs.image_inputs);
     HostOutputBinding& output_binding =
         rt_write_buffer_.ensure_tiled_output_binding(
             node.id,
-            NodeExecutor::freeze_tiled_output_plan(plan_inputs, entry.rt_size),
+            NodeExecutor::freeze_tiled_output_plan(
+                node_for_exec, resolved_inputs.image_inputs, entry.rt_size,
+                selected_operation.tiled_output_inference),
             frozen_tiled_task_count(tiled_task_counts_, node.id));
     {
       OperationExecutionLease operation_lease = acquire_direct_dirty_operation(
@@ -635,6 +616,7 @@ void RealTimeDirtyNodeExecutor::execute_tiled(
   config.forced_halo = entry.halo_rt;
   config.metadata = operation.metadata;
   config.dirty_propagator = operation.dirty_propagator;
+  config.tiled_output_inference = operation.tiled_output_inference;
   config.implementation_identity = operation.implementation_identity;
   config.on_tile = [this](const PixelRect&) {
     observe_dirty_node_cancellation(run_lease_);

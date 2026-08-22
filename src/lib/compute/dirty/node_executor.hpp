@@ -57,6 +57,15 @@ struct TiledExecutionConfig {
   std::optional<OpMetadata> metadata;
 
   /**
+   * @brief Exact tiled output metadata inference from the selected revision.
+   * @note The callback is invoked synchronously before Host allocation and
+   * must be copied from the same implementation snapshot as metadata,
+   * dirty_propagator, and implementation_identity. Absence selects a
+   * conservative plan with no optional interpretation facts.
+   */
+  std::optional<TiledOutputInferenceFunc> tiled_output_inference;
+
+  /**
    * @brief Optional dirty-ROI callback from the exact selected implementation.
    * @note When present this callback is authoritative for RandomAccess input
    * mapping. It must be copied from the same registry snapshot as metadata so
@@ -119,9 +128,13 @@ class NodeExecutor {
   /**
    * @brief Freezes the sole internal Host plan for one tiled image output.
    *
-   * @param inputs Canonical named-Value inputs used only for channel/type
-   * inference; disconnected slots may be null.
+   * @param node Execution-local node whose effective parameters are visible to
+   * the selected inference policy.
+   * @param inputs Exact operation inputs in destination-index order;
+   * disconnected slots may be null and prior staged output must not be added.
    * @param output_size Positive output extent fixed by the task plan.
+   * @param output_inference Optional callback copied from the exact selected
+   * implementation revision.
    * @return Complete immutable zero-origin, interleaved, 64-byte-aligned plan.
    * @throws std::invalid_argument for missing/unsupported image facts or
    * invalid extents.
@@ -129,19 +142,23 @@ class NodeExecutor {
    * unrepresentable.
    * @throws std::bad_alloc when plan metadata storage cannot allocate.
    * @note This is the unique DI-2 internal output-plan derivation used by
-   * full, dirty HP, and RT tiled execution. It allocates no payload, mints no
-   * identity or revision, and enters no producer callback.
+   * full, dirty HP, and RT tiled execution. It invokes only pure metadata
+   * inference, allocates no payload, mints no identity or revision, and enters
+   * no producer callback. Absent inference retains scalar/channel allocation
+   * facts only and omits optional channel/sample/color/display authority.
    */
   static DenseImageOutputPlan freeze_tiled_output_plan(
-      const std::vector<const NodeOutput*>& inputs,
-      const PixelSize& output_size);
+      const Node& node, const std::vector<const NodeOutput*>& inputs,
+      const PixelSize& output_size,
+      const std::optional<TiledOutputInferenceFunc>& output_inference);
 
   /**
    * @brief Allocates the frozen Host binding for one tiled output.
    *
-   * @param inputs Canonical named-Value inputs used only for channel/type
-   * inference; disconnected slots may be null.
+   * @param node Execution-local node supplied to pure metadata inference.
+   * @param inputs Exact operation inputs; disconnected slots may be null.
    * @param output_size Positive output extent fixed by the task plan.
+   * @param output_inference Optional exact selected inference callback.
    * @return Open aligned binding with one immutable interleaved image plan.
    * @throws std::invalid_argument for missing/unsupported image facts or
    * invalid extents.
@@ -151,7 +168,27 @@ class NodeExecutor {
    * must cancel or seal the returned binding exactly once.
    */
   static HostOutputBinding allocate_tiled_output_binding(
-      const std::vector<const NodeOutput*>& inputs,
+      const Node& node, const std::vector<const NodeOutput*>& inputs,
+      const PixelSize& output_size,
+      const std::optional<TiledOutputInferenceFunc>& output_inference);
+
+  /**
+   * @brief Infers a tiled output that provably preserves one primary image.
+   *
+   * @param node Unused execution-local node required by the callback shape.
+   * @param inputs Exact operation inputs in destination-index order.
+   * @param output_size Positive output extent.
+   * @return HWC logical descriptor and complete primary ImageFacet with the
+   * signed data-window end adjusted to output_size.
+   * @throws std::invalid_argument for missing/unsupported primary image facts.
+   * @throws std::overflow_error for unrepresentable signed endpoints.
+   * @throws std::bad_alloc when copied metadata cannot allocate.
+   * @note Callers use this only for operations such as blur or downsample whose
+   * interpretation-preserving contract is independently proven. The helper
+   * reads no payload and performs no sample or color conversion.
+   */
+  static TiledOutputInferenceResult infer_interpretation_preserving_output(
+      const Node& node, const std::vector<const NodeOutput*>& inputs,
       const PixelSize& output_size);
 
   /**

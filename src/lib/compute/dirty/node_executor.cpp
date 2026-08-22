@@ -80,106 +80,42 @@ std::int64_t checked_image_coordinate(std::int64_t origin, int offset) {
 }
 
 /**
- * @brief Complete immutable logical format selected for tiled output planning.
- * @throws std::bad_alloc when copied image metadata storage cannot allocate.
- * @note Physical layout, allocation, revision, and readiness are absent.
+ * @brief Immutable primary allocation facts extracted without payload access.
+ * @throws std::bad_alloc when copied ImageFacet storage cannot allocate.
+ * @note The record owns no output interpretation decision, physical layout,
+ * allocation, revision, readiness, or callback lifetime.
  */
-struct TiledOutputFormat final {
+struct TiledPrimaryFormat final {
   /** @brief Exact logical scalar semantics. */
   ElementSemantics semantics = ElementSemantics::FloatingPoint;
+
   /** @brief Exact whole-byte native scalar encoding. */
   StorageEncoding encoding{32U};
+
   /** @brief Positive output channel count. */
   std::size_t channels = 1U;
-  /** @brief Optional complete interpretation copied from the source image. */
+
+  /** @brief Complete primary interpretation available for explicit policy. */
   std::optional<ImageFacet> source_facet;
 };
 
 /**
- * @brief Freezes the current zero-origin interleaved tiled output plan.
- * @param output_size Positive planned image extent.
- * @param channels Positive channel count.
- * @param format Complete scalar/channel/image meaning inferred from canonical
- * input Value facts or the generator default.
- * @return Complete immutable 64-byte-aligned Host output plan.
- * @throws std::invalid_argument for invalid extents/type or unrepresentable
- * signed strides.
- * @throws std::overflow_error when row/envelope arithmetic overflows.
- * @throws std::bad_alloc when descriptor, layout, or Region storage allocates.
- * @note The plan is created before Host allocation or tiled callback entry and
- * cannot be replaced by callback-returned metadata.
- */
-DenseImageOutputPlan freeze_tiled_output_plan_impl(const PixelSize& output_size,
-                                                   TiledOutputFormat format) {
-  if (output_size.width <= 0 || output_size.height <= 0 ||
-      format.channels == 0U || format.channels > kMaximumImageChannels) {
-    throw std::invalid_argument(
-        "Tiled output plan requires positive image dimensions.");
-  }
-  DenseTensorDescriptor descriptor{
-      {static_cast<std::size_t>(output_size.height),
-       static_cast<std::size_t>(output_size.width), format.channels},
-      format.semantics,
-      format.encoding};
-  const std::size_t element_bytes = dense_tensor_element_bytes(descriptor);
-  const std::size_t pixel_bytes =
-      checked_output_multiply(format.channels, element_bytes);
-  const std::size_t row_bytes = checked_output_multiply(
-      static_cast<std::size_t>(output_size.width), pixel_bytes);
-  constexpr std::size_t kAlignment = 64U;
-  const std::size_t padded = checked_output_add(row_bytes, kAlignment - 1U);
-  const std::size_t row_stride = padded & ~(kAlignment - 1U);
-  if (element_bytes > static_cast<std::size_t>(
-                          std::numeric_limits<std::ptrdiff_t>::max()) ||
-      pixel_bytes > static_cast<std::size_t>(
-                        std::numeric_limits<std::ptrdiff_t>::max()) ||
-      row_stride > static_cast<std::size_t>(
-                       std::numeric_limits<std::ptrdiff_t>::max())) {
-    throw std::invalid_argument("Tiled output plan stride exceeds ptrdiff_t.");
-  }
-  const std::size_t storage_size = checked_output_add(
-      checked_output_multiply(static_cast<std::size_t>(output_size.height - 1),
-                              row_stride),
-      row_bytes);
-  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
-  if (format.source_facet.has_value()) {
-    const ImageFacet& source = *format.source_facet;
-    facet.data_window.x_begin = source.data_window.x_begin;
-    facet.data_window.y_begin = source.data_window.y_begin;
-    facet.data_window.x_end =
-        checked_image_coordinate(facet.data_window.x_begin, output_size.width);
-    facet.data_window.y_end =
-        checked_image_coordinate(facet.data_window.y_begin, output_size.height);
-    facet.display_window = source.display_window;
-    facet.channel_schema = source.channel_schema;
-    facet.sample_domain = source.sample_domain;
-    facet.color = source.color;
-    validate_dense_tensor_image_metadata(descriptor, facet);
-  }
-  StridedLayout layout{{static_cast<std::ptrdiff_t>(row_stride),
-                        static_cast<std::ptrdiff_t>(pixel_bytes),
-                        static_cast<std::ptrdiff_t>(element_bytes)}};
-  return DenseImageOutputPlan::create(
-      std::string(NodeOutput::kImageOutputName), std::move(descriptor),
-      std::move(facet), std::move(layout), storage_size, kAlignment);
-}
-
-/**
- * @brief Infers the complete logical output format for tiled allocation.
+ * @brief Extracts scalar, channel, and optional image facts from input zero.
  *
- * @param inputs Normalized tiled inputs in execution order.
- * @return Source scalar/channel/image meaning, or FP32 one-channel format when
- * every slot is disconnected.
- * @throws std::invalid_argument for unsupported representation or storage.
- * @throws std::bad_alloc when complete image metadata copying allocates.
- * @note Slot identity remains unchanged; this helper only skips null entries
- * while choosing an allocation hint.
+ * @param inputs Exact operation inputs in destination-index order.
+ * @return Valid primary facts, or FP32 one-channel defaults when disconnected.
+ * @throws std::invalid_argument for unsupported representation, storage,
+ * channel count, or missing ordinary-image metadata.
+ * @throws std::bad_alloc when ImageFacet copying allocates.
+ * @note The first connected slot is an allocation fallback only. No optional
+ * output fact is authorized until a selected inference policy explicitly
+ * projects source_facet.
  */
-TiledOutputFormat infer_output_format(
+TiledPrimaryFormat primary_output_format(
     const std::vector<const NodeOutput*>& inputs) {
   const NodeOutput* input = first_connected_input(inputs);
   if (input == nullptr) {
-    return TiledOutputFormat{};
+    return TiledPrimaryFormat{};
   }
   if (!input->has_image_value() ||
       !input->image_value().image_facet().has_value()) {
@@ -203,11 +139,124 @@ TiledOutputFormat infer_output_format(
   const std::size_t channels = facet.channel_axis.has_value()
                                    ? descriptor.shape[*facet.channel_axis]
                                    : 1U;
-  if (channels > kMaximumImageChannels) {
+  if (channels == 0U || channels > kMaximumImageChannels) {
     throw std::invalid_argument("Tiled input channel count exceeds its bound.");
   }
-  return TiledOutputFormat{descriptor.element_semantics,
-                           descriptor.storage_encoding, channels, facet};
+  return TiledPrimaryFormat{descriptor.element_semantics,
+                            descriptor.storage_encoding, channels, facet};
+}
+
+/**
+ * @brief Builds one HWC logical inference from primary allocation facts.
+ *
+ * @param output_size Positive planned extent.
+ * @param format Valid primary allocation facts.
+ * @param preserve_interpretation Whether the complete primary ImageFacet is
+ * operation-proven and may be projected.
+ * @return Complete logical descriptor and conservative or preserved facet.
+ * @throws std::invalid_argument for invalid extents or channel counts.
+ * @throws std::overflow_error when a preserved signed endpoint overflows.
+ * @throws std::bad_alloc when descriptor or facet storage cannot allocate.
+ * @note A conservative result keeps only allocation type/channel facts and a
+ * zero-origin required data window. It omits display, channel schema, sample,
+ * and color authority rather than treating the primary as semantic truth.
+ */
+TiledOutputInferenceResult make_primary_output_inference(
+    const PixelSize& output_size, TiledPrimaryFormat format,
+    bool preserve_interpretation) {
+  if (output_size.width <= 0 || output_size.height <= 0 ||
+      format.channels == 0U || format.channels > kMaximumImageChannels) {
+    throw std::invalid_argument(
+        "Tiled output inference requires positive image dimensions.");
+  }
+  DenseTensorDescriptor descriptor{
+      {static_cast<std::size_t>(output_size.height),
+       static_cast<std::size_t>(output_size.width), format.channels},
+      format.semantics,
+      format.encoding};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  if (preserve_interpretation) {
+    if (!format.source_facet.has_value()) {
+      throw std::invalid_argument(
+          "Interpretation-preserving tiled inference requires an image input.");
+    }
+    facet = std::move(*format.source_facet);
+    facet.x_axis = 1U;
+    facet.y_axis = 0U;
+    facet.channel_axis = 2U;
+    facet.data_window.x_end =
+        checked_image_coordinate(facet.data_window.x_begin, output_size.width);
+    facet.data_window.y_end =
+        checked_image_coordinate(facet.data_window.y_begin, output_size.height);
+  }
+  validate_dense_tensor_image_metadata(descriptor, facet);
+  return TiledOutputInferenceResult{std::move(descriptor), std::move(facet)};
+}
+
+/**
+ * @brief Freezes the current zero-origin interleaved tiled output plan.
+ * @param output_size Positive planned image extent.
+ * @param inference Complete logical result frozen by selected metadata
+ * inference or the conservative fallback.
+ * @return Complete immutable 64-byte-aligned Host output plan.
+ * @throws std::invalid_argument for invalid extents/type or unrepresentable
+ * signed strides.
+ * @throws std::overflow_error when row/envelope arithmetic overflows.
+ * @throws std::bad_alloc when descriptor, layout, or Region storage allocates.
+ * @note The plan is created before Host allocation or tiled callback entry and
+ * cannot be replaced by callback-returned metadata.
+ */
+DenseImageOutputPlan freeze_tiled_output_plan_impl(
+    const PixelSize& output_size, TiledOutputInferenceResult inference) {
+  if (output_size.width <= 0 || output_size.height <= 0) {
+    throw std::invalid_argument(
+        "Tiled output plan requires positive image dimensions.");
+  }
+  DenseTensorDescriptor descriptor = std::move(inference.descriptor);
+  ImageFacet facet = std::move(inference.image_facet);
+  if (descriptor.shape.size() != 3U ||
+      descriptor.shape[0] != static_cast<std::size_t>(output_size.height) ||
+      descriptor.shape[1] != static_cast<std::size_t>(output_size.width) ||
+      descriptor.shape[2] == 0U ||
+      descriptor.shape[2] > kMaximumImageChannels || facet.y_axis != 0U ||
+      facet.x_axis != 1U ||
+      facet.channel_axis != std::optional<std::size_t>(2U)) {
+    throw std::invalid_argument(
+        "Tiled output inference must provide one exact HWC descriptor.");
+  }
+  if (descriptor.quantization.has_value() ||
+      descriptor.storage_encoding.kind != StorageEncodingKind::NativeScalar) {
+    throw std::invalid_argument(
+        "Tiled output inference requires unquantized native storage.");
+  }
+  validate_dense_tensor_image_metadata(descriptor, facet);
+  const std::size_t channels = descriptor.shape[2];
+  const std::size_t element_bytes = dense_tensor_element_bytes(descriptor);
+  const std::size_t pixel_bytes =
+      checked_output_multiply(channels, element_bytes);
+  const std::size_t row_bytes = checked_output_multiply(
+      static_cast<std::size_t>(output_size.width), pixel_bytes);
+  constexpr std::size_t kAlignment = 64U;
+  const std::size_t padded = checked_output_add(row_bytes, kAlignment - 1U);
+  const std::size_t row_stride = padded & ~(kAlignment - 1U);
+  if (element_bytes > static_cast<std::size_t>(
+                          std::numeric_limits<std::ptrdiff_t>::max()) ||
+      pixel_bytes > static_cast<std::size_t>(
+                        std::numeric_limits<std::ptrdiff_t>::max()) ||
+      row_stride > static_cast<std::size_t>(
+                       std::numeric_limits<std::ptrdiff_t>::max())) {
+    throw std::invalid_argument("Tiled output plan stride exceeds ptrdiff_t.");
+  }
+  const std::size_t storage_size = checked_output_add(
+      checked_output_multiply(static_cast<std::size_t>(output_size.height - 1),
+                              row_stride),
+      row_bytes);
+  StridedLayout layout{{static_cast<std::ptrdiff_t>(row_stride),
+                        static_cast<std::ptrdiff_t>(pixel_bytes),
+                        static_cast<std::ptrdiff_t>(element_bytes)}};
+  return DenseImageOutputPlan::create(
+      std::string(NodeOutput::kImageOutputName), std::move(descriptor),
+      std::move(facet), std::move(layout), storage_size, kAlignment);
 }
 
 /**
@@ -590,8 +639,9 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
             const PixelSize output_size =
                 infer_output_size(node, input_context.inputs, config);
             HostOutputBinding output_binding = HostOutputBinding::allocate(
-                NodeExecutor::freeze_tiled_output_plan(input_context.inputs,
-                                                       output_size));
+                NodeExecutor::freeze_tiled_output_plan(
+                    node, input_context.inputs, output_size,
+                    config.tiled_output_inference));
             NodeOutput output;
             execute_tiled_context_into(graph, node, op_func, input_context,
                                        output_binding, config);
@@ -626,18 +676,33 @@ void NodeExecutor::execute_tiled_into_binding(
 
 /** @copydoc NodeExecutor::freeze_tiled_output_plan */
 DenseImageOutputPlan NodeExecutor::freeze_tiled_output_plan(
-    const std::vector<const NodeOutput*>& inputs,
-    const PixelSize& output_size) {
-  return freeze_tiled_output_plan_impl(output_size,
-                                       infer_output_format(inputs));
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size,
+    const std::optional<TiledOutputInferenceFunc>& output_inference) {
+  TiledOutputInferenceResult inference =
+      output_inference.has_value()
+          ? (*output_inference)(node, inputs, output_size)
+          : make_primary_output_inference(output_size,
+                                          primary_output_format(inputs), false);
+  return freeze_tiled_output_plan_impl(output_size, std::move(inference));
 }
 
 /** @copydoc NodeExecutor::allocate_tiled_output_binding */
 HostOutputBinding NodeExecutor::allocate_tiled_output_binding(
-    const std::vector<const NodeOutput*>& inputs,
-    const PixelSize& output_size) {
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size,
+    const std::optional<TiledOutputInferenceFunc>& output_inference) {
   return HostOutputBinding::allocate(
-      freeze_tiled_output_plan(inputs, output_size));
+      freeze_tiled_output_plan(node, inputs, output_size, output_inference));
+}
+
+/** @copydoc NodeExecutor::infer_interpretation_preserving_output */
+TiledOutputInferenceResult NodeExecutor::infer_interpretation_preserving_output(
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size) {
+  static_cast<void>(node);
+  return make_primary_output_inference(output_size,
+                                       primary_output_format(inputs), true);
 }
 
 /** @copydoc NodeExecutor::input_roi_for_tile */

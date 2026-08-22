@@ -364,8 +364,8 @@ NodeTaskRunner::TaskDependencyRelease NodeTaskRunner::compute_tile_task(
     return TaskDependencyRelease::CurrentTask;
   }
 
-  HostOutputBinding* output_binding =
-      ensure_tile_output_binding(node_idx, target_node, inputs_ready);
+  HostOutputBinding* output_binding = ensure_tile_output_binding(
+      node_idx, node_for_exec, *op_opt, inputs_ready);
   if (!output_binding) {
     return TaskDependencyRelease::CurrentTask;
   }
@@ -409,6 +409,7 @@ bool NodeTaskRunner::try_satisfy_tile_from_disk_cache(const Node& target_node,
 
 HostOutputBinding* NodeTaskRunner::ensure_tile_output_binding(
     int node_idx, const Node& target_node,
+    const OpImplementation& implementation,
     const std::vector<const NodeOutput*>& image_inputs) {
   std::lock_guard<std::mutex> lock(*output_mutexes_.at(node_idx));
   if (node_precomputed_[node_idx].load(std::memory_order_acquire)) {
@@ -424,7 +425,9 @@ HostOutputBinding* NodeTaskRunner::ensure_tile_output_binding(
                   as_int_flexible(target_node.runtime_parameters, "height",
                                   256)};
     tile_output_bindings_[node_idx] = std::make_unique<HostOutputBinding>(
-        NodeExecutor::allocate_tiled_output_binding(image_inputs, output_size));
+        NodeExecutor::allocate_tiled_output_binding(
+            target_node, image_inputs, output_size,
+            implementation.tiled_output_inference));
   }
   return tile_output_bindings_[node_idx].get();
 }
@@ -554,6 +557,7 @@ TiledExecutionConfig NodeTaskRunner::tiled_config_for(
   }
   tiled_config.metadata = implementation.metadata;
   tiled_config.dirty_propagator = implementation.dirty_propagator;
+  tiled_config.tiled_output_inference = implementation.tiled_output_inference;
   tiled_config.implementation_identity = implementation.implementation_identity;
   if (implementation.metadata.tile_preference == TileSizePreference::MICRO) {
     tiled_config.tile_size = 16;

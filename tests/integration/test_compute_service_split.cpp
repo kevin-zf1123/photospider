@@ -3479,6 +3479,7 @@ void register_split_ops() {
                 0U,
                 {},
                 {},
+                {},
                 {}},
             OpImplementation{
                 OpRegistry::OpVariant{
@@ -3486,6 +3487,7 @@ void register_split_ops() {
                 exact_sibling_tiled_meta,
                 0U,
                 DirtyRoiPropFunc(propagate_exact_sibling_full_input),
+                {},
                 {},
                 {}}});
     registry.register_op_hp_tiled(
@@ -3513,6 +3515,7 @@ void register_split_ops() {
                              0U,
                              {},
                              {},
+                             {},
                              {}},
             OpImplementation{OpRegistry::OpVariant{TileOpFunc(
                                  [](const Node&, const OutputTile& output_tile,
@@ -3522,6 +3525,7 @@ void register_split_ops() {
                              rt_random_meta,
                              0U,
                              DirtyRoiPropFunc(propagate_parameter_radius),
+                             {},
                              {},
                              {}}});
     registry.register_op_hp_tiled(
@@ -3745,7 +3749,8 @@ void execute_selected_dirty_providers(
         node_id, compute::DirtyResolvedOperation{
                      selected->func, selected->metadata.device_preference,
                      selected->implementation_identity, selected->metadata,
-                     *planned->output_authority, selected->dirty_propagator});
+                     *planned->output_authority, selected->dirty_propagator,
+                     selected->tiled_output_inference});
   }
 
   GraphEventService events;

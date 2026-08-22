@@ -240,7 +240,10 @@ void DownsampleExecutor::execute_one(const Request& request) {
 
   const std::vector<const NodeOutput*> plan_inputs{&hp_output};
   HostOutputBinding output_binding =
-      NodeExecutor::allocate_tiled_output_binding(plan_inputs, rt_size);
+      NodeExecutor::allocate_tiled_output_binding(
+          node, plan_inputs, rt_size,
+          TiledOutputInferenceFunc(
+              NodeExecutor::infer_interpretation_preserving_output));
   const bool preserved_existing_bytes =
       seed_downsample_binding(proxy_state, output_binding);
   downsample_roi(hp_value, output_binding, roi_hp, rt_size);

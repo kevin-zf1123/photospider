@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <new>
 #include <opencv2/core.hpp>
@@ -14,13 +15,16 @@
 #include <variant>
 #include <vector>
 
-#include "core/pending_value.hpp"  // NOLINT(build/include_subdir)
-#include "core/ps_types.hpp"       // NOLINT(build/include_subdir)
-#include "graph/graph_model.hpp"   // NOLINT(build/include_subdir)
+#include "compute/dirty/node_executor.hpp"  // NOLINT(build/include_subdir)
+#include "core/pending_value.hpp"           // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"                // NOLINT(build/include_subdir)
+#include "graph/graph_model.hpp"            // NOLINT(build/include_subdir)
 #include "photospider/core/graph_error.hpp"
 #include "photospider/data/image_view.hpp"
+#include "providers/configured_image_artifact_codec.hpp"
 #include "providers/opencv/opencv_operation_provider.hpp"
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
+#include "support/scoped_test_resources.hpp"
 
 namespace ps::providers::opencv {
 namespace {
@@ -117,6 +121,8 @@ NodeOutput execute_channel_extract(const Value& source,
  * @param default_sample_domain Uniform default sample declaration.
  * @param stable_id_offset Offset applied to every channel and group identity.
  * @param color_transfer Explicit transfer function bound to the channel group.
+ * @param diagnostic_suffix Optional non-authoritative suffix for channel and
+ * group display names.
  * @return Fresh host-readable FP32 Value with channel schema, sample
  *         interpretation, color authority, display metadata, and row padding.
  * @throws std::invalid_argument, std::overflow_error, or std::length_error
@@ -130,7 +136,8 @@ Value make_weighted_blend_primary(
     SampleDomain default_sample_domain =
         SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
     std::uint64_t stable_id_offset = 0U,
-    ColorTransferFunction color_transfer = ColorTransferFunction::Rec709) {
+    ColorTransferFunction color_transfer = ColorTransferFunction::Rec709,
+    const std::string& diagnostic_suffix = {}) {
   constexpr std::array<float, 18U> kSamples{0.2F, 0.4F, 0.6F, 0.3F, 0.5F, 0.7F,
                                             0.4F, 0.6F, 0.8F, 0.5F, 0.7F, 0.9F,
                                             0.6F, 0.8F, 1.0F, 0.7F, 0.9F, 0.1F};
@@ -151,9 +158,11 @@ Value make_weighted_blend_primary(
   const ChannelId middle{12U + stable_id_offset};
   const ChannelId right{13U + stable_id_offset};
   const ChannelGroupId triple{20U + stable_id_offset};
-  facet.channel_schema =
-      ChannelSchema{{{left, "left"}, {middle, "middle"}, {right, "right"}},
-                    {{triple, "triple", {left, middle, right}}}};
+  facet.channel_schema = ChannelSchema{
+      {{left, "left" + diagnostic_suffix},
+       {middle, "middle" + diagnostic_suffix},
+       {right, "right" + diagnostic_suffix}},
+      {{triple, "triple" + diagnostic_suffix, {left, middle, right}}}};
   SampleDomainFacet sample_domain{
       1U,
       SampleEncoding{1U, SampleEncodingKind::Normalized},
@@ -302,6 +311,188 @@ NodeOutput execute_same_channel_weighted_blend(Value primary, Value secondary) {
   secondary_input.publish_image_value(std::move(secondary));
   return std::get<MonolithicOpFunc>(resolved.value())(
       node, {&primary_input, &secondary_input});
+}
+
+/**
+ * @brief Executes the registered full-image pointwise multiply callback.
+ *
+ * @param primary Three-channel primary Value moved into callback-local input.
+ * @param secondary Three-channel secondary Value moved into callback-local
+ * input.
+ * @param scale Explicit OpenCV multiply scale.
+ * @return Fresh provider output after all callback-local matrix headers retire.
+ * @throws GraphError when the production callback is absent or rejects input.
+ * @throws Metadata, allocation, or OpenCV provider exceptions unchanged.
+ * @note The helper supplies no sample conversion, channel mapping, or payload-
+ * derived interpretation.
+ */
+NodeOutput execute_same_channel_multiply(Value primary, Value secondary,
+                                         double scale) {
+  auto resolved = OpRegistry::instance().resolve_for_intent(
+      "image_mixing", "multiply", ComputeIntent::GlobalHighPrecision);
+  if (!resolved ||
+      !std::holds_alternative<MonolithicOpFunc>(resolved.value())) {
+    throw GraphError(GraphErrc::NoOperation,
+                     "image_mixing:multiply is not monolithic");
+  }
+
+  Node node;
+  node.id = 208;
+  node.type = "image_mixing";
+  node.subtype = "multiply";
+  node.runtime_parameters["scale"] = scale;
+  node.runtime_parameters["merge_strategy"] = "resize";
+
+  NodeOutput primary_input;
+  primary_input.publish_image_value(std::move(primary));
+  NodeOutput secondary_input;
+  secondary_input.publish_image_value(std::move(secondary));
+  return std::get<MonolithicOpFunc>(resolved.value())(
+      node, {&primary_input, &secondary_input});
+}
+
+/**
+ * @brief Executes one exact registered tiled implementation through
+ * NodeExecutor.
+ *
+ * @param node Execution-local node containing effective parameters.
+ * @param inputs Destination-indexed immutable image inputs.
+ * @return Fresh sealed tiled output Value.
+ * @throws GraphError when no CPU tiled implementation exists or execution
+ * fails.
+ * @throws Metadata, allocation, and provider exceptions unchanged.
+ * @note Selection freezes callback, metadata, output inference, planning
+ * callbacks, and identity in one registry snapshot.
+ */
+NodeOutput execute_registered_tiled(
+    Node node, const std::vector<const NodeOutput*>& inputs) {
+  auto selected = OpRegistry::instance().select_implementation(
+      node.type, node.subtype, {DeviceBackend::CPU},
+      ComputeIntent::GlobalHighPrecision,
+      [](const OpImplementation& candidate) { return candidate.is_tiled(); });
+  if (!selected.has_value()) {
+    throw GraphError(GraphErrc::NoOperation,
+                     "registered tiled implementation is unavailable");
+  }
+  compute::TiledExecutionConfig config;
+  config.metadata = selected->metadata;
+  config.dirty_propagator = selected->dirty_propagator;
+  config.tiled_output_inference = selected->tiled_output_inference;
+  config.implementation_identity = selected->implementation_identity;
+  GraphModel graph("opencv-tiled-metadata-contract");
+  return compute::NodeExecutor::execute(graph, node, selected->func, inputs,
+                                        config);
+}
+
+/**
+ * @brief Executes one same-channel registered tiled binary image_mixing op.
+ *
+ * @param subtype Exact registered subtype.
+ * @param primary Primary Value moved into invocation-local input ownership.
+ * @param secondary Secondary Value moved into invocation-local input ownership.
+ * @param parameters Effective operation parameters.
+ * @return Fresh sealed tiled output.
+ * @throws Provider selection, normalization, planning, or execution failures.
+ * @note No prior staged output participates in the semantic input set.
+ */
+NodeOutput execute_same_channel_tiled_binary(
+    const std::string& subtype, Value primary, Value secondary,
+    plugin::ParameterMap parameters = {}) {
+  Node node;
+  node.id = 209;
+  node.type = "image_mixing";
+  node.subtype = subtype;
+  node.runtime_parameters = std::move(parameters);
+  NodeOutput primary_input;
+  primary_input.publish_image_value(std::move(primary));
+  NodeOutput secondary_input;
+  secondary_input.publish_image_value(std::move(secondary));
+  return execute_registered_tiled(node, {&primary_input, &secondary_input});
+}
+
+/**
+ * @brief Executes the registered tiled nonlinear curve transform.
+ *
+ * @param source Source Value moved into invocation-local input ownership.
+ * @param coefficient Explicit curve coefficient.
+ * @return Fresh sealed tiled output.
+ * @throws Provider selection, planning, or execution failures unchanged.
+ * @note The helper performs no payload-driven metadata inference.
+ */
+NodeOutput execute_tiled_curve_transform(Value source, double coefficient) {
+  Node node;
+  node.id = 210;
+  node.type = "image_process";
+  node.subtype = "curve_transform";
+  node.runtime_parameters["k"] = coefficient;
+  NodeOutput input;
+  input.publish_image_value(std::move(source));
+  return execute_registered_tiled(node, {&input});
+}
+
+/**
+ * @brief Executes the registered interpretation-preserving tiled blur.
+ *
+ * @param source Source Value moved into invocation-local input ownership.
+ * @return Fresh sealed tiled output produced with a three-pixel kernel.
+ * @throws Provider selection, halo planning, allocation, or execution failures
+ * unchanged.
+ * @note The helper supplies no metadata override; the selected provider
+ * inference must freeze the complete source interpretation before allocation.
+ */
+NodeOutput execute_tiled_gaussian_blur(Value source) {
+  Node node;
+  node.id = 212;
+  node.type = "image_process";
+  node.subtype = "gaussian_blur";
+  node.runtime_parameters["ksize"] = 3;
+  node.runtime_parameters["sigmaX"] = 0.0;
+  NodeOutput input;
+  input.publish_image_value(std::move(source));
+  return execute_registered_tiled(node, {&input});
+}
+
+/**
+ * @brief Executes a tiled weighted blend that expands three channels to four.
+ *
+ * @param primary Three-channel primary source.
+ * @param secondary Single-channel secondary source normalized by the executor.
+ * @return Fresh four-channel sealed tiled output.
+ * @throws Provider selection, normalization, planning, or execution failures.
+ * @note Destination mapping matches the monolithic expansion fixture and must
+ * be frozen before Host allocation rather than reallocating a borrowed
+ * OpenCV output header inside the callback.
+ */
+NodeOutput execute_channel_expanding_tiled_weighted_blend(Value primary,
+                                                          Value secondary) {
+  plugin::ParameterValue::Object input0_mapping;
+  input0_mapping.emplace(
+      "0", plugin::ParameterValue::Array{plugin::ParameterValue{0}});
+  input0_mapping.emplace(
+      "1", plugin::ParameterValue::Array{plugin::ParameterValue{1}});
+  input0_mapping.emplace(
+      "2", plugin::ParameterValue::Array{plugin::ParameterValue{2}});
+  plugin::ParameterValue::Object input1_mapping;
+  input1_mapping.emplace(
+      "0", plugin::ParameterValue::Array{plugin::ParameterValue{3}});
+  plugin::ParameterValue::Object channel_mapping;
+  channel_mapping.emplace("input0", std::move(input0_mapping));
+  channel_mapping.emplace("input1", std::move(input1_mapping));
+
+  Node node;
+  node.id = 211;
+  node.type = "image_mixing";
+  node.subtype = "add_weighted";
+  node.runtime_parameters["alpha"] = 0.5;
+  node.runtime_parameters["beta"] = 0.25;
+  node.runtime_parameters["gamma"] = 0.0;
+  node.runtime_parameters["merge_strategy"] = "resize";
+  node.runtime_parameters["channel_mapping"] = std::move(channel_mapping);
+  NodeOutput primary_input;
+  primary_input.publish_image_value(std::move(primary));
+  NodeOutput secondary_input;
+  secondary_input.publish_image_value(std::move(secondary));
+  return execute_registered_tiled(node, {&primary_input, &secondary_input});
 }
 
 /**
@@ -692,6 +883,220 @@ TEST(OpenCvOperationProviderMetadataContract,
   EXPECT_EQ(incompatible_color_facet.sample_domain,
             color_primary_facet.sample_domain);
   EXPECT_FALSE(incompatible_color_facet.color.has_value());
+}
+
+/**
+ * @brief Proves monolithic multiply projects only operation-valid facts.
+ *
+ * @return Nothing; GoogleTest reports metadata, payload, codec, or identity
+ * drift.
+ * @throws Provider, Value, codec, filesystem, and allocation failures to the
+ * test runner.
+ * @note Equal normalized domains survive only when the declared input interval
+ * is closed under the configured product scale. Incompatible or out-of-range
+ * products retain raw pixels and spatial/channel/color facts but omit sample
+ * authority so direct configured-codec save fails before destination mutation.
+ * Stable IDs/groups remain semantic while differing diagnostic names do not
+ * prevent retention.
+ */
+TEST(OpenCvOperationProviderMetadataContract,
+     MultiplyProjectsSemanticIntersectionAndScale) {
+  ASSERT_NO_THROW(register_provider());
+
+  Value primary = make_weighted_blend_primary(false);
+  const Value retained_primary = primary;
+  const ValueRevisionId primary_revision = primary.revision_id();
+  const ImageFacet primary_facet = *primary.image_facet();
+  const NodeOutput incompatible = execute_same_channel_multiply(
+      std::move(primary),
+      make_weighted_blend_primary(
+          false, SampleDomain{SampleDomainKind::Legal, -1.0, 1.0}),
+      1.0);
+  ASSERT_TRUE(incompatible.has_image_value());
+  const Value& incompatible_value = incompatible.image_value();
+  EXPECT_NE(incompatible_value.revision_id(), primary_revision);
+  ASSERT_TRUE(incompatible_value.image_facet().has_value());
+  const ImageFacet& incompatible_facet = *incompatible_value.image_facet();
+  EXPECT_EQ(incompatible_facet.data_window, primary_facet.data_window);
+  EXPECT_EQ(incompatible_facet.display_window, primary_facet.display_window);
+  EXPECT_EQ(incompatible_facet.channel_schema, primary_facet.channel_schema);
+  EXPECT_EQ(incompatible_facet.color, primary_facet.color);
+  EXPECT_FALSE(incompatible_facet.sample_domain.has_value());
+
+  float input_first = 0.0F;
+  float output_first = 0.0F;
+  const ImageView input_view(retained_primary);
+  const ImageView incompatible_view(incompatible_value);
+  std::memcpy(&input_first, input_view.channel_data(0U, 0U, 0U),
+              sizeof(input_first));
+  std::memcpy(&output_first, incompatible_view.channel_data(0U, 0U, 0U),
+              sizeof(output_first));
+  EXPECT_FLOAT_EQ(input_first, 0.2F);
+  EXPECT_FLOAT_EQ(output_first, 0.04F);
+
+  const NodeOutput closed =
+      execute_same_channel_multiply(make_weighted_blend_primary(false),
+                                    make_weighted_blend_primary(false), 1.0);
+  ASSERT_TRUE(closed.image_value().image_facet().has_value());
+  EXPECT_EQ(*closed.image_value().image_facet(), primary_facet);
+
+  Value diagnostic_secondary = make_weighted_blend_primary(
+      false, SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0}, 0U,
+      ColorTransferFunction::Rec709, "-secondary");
+  ASSERT_TRUE(diagnostic_secondary.image_facet()->channel_schema.has_value());
+  EXPECT_EQ(diagnostic_secondary.image_facet()
+                ->channel_schema->channels.front()
+                .diagnostic_name,
+            "left-secondary");
+  const NodeOutput diagnostic_equal = execute_same_channel_multiply(
+      make_weighted_blend_primary(false), std::move(diagnostic_secondary), 1.0);
+  ASSERT_TRUE(diagnostic_equal.image_value().image_facet().has_value());
+  EXPECT_EQ(*diagnostic_equal.image_value().image_facet(), primary_facet);
+  ASSERT_TRUE(
+      diagnostic_equal.image_value().image_facet()->channel_schema.has_value());
+  EXPECT_EQ(diagnostic_equal.image_value()
+                .image_facet()
+                ->channel_schema->channels.front()
+                .diagnostic_name,
+            "left");
+
+  const NodeOutput contracted =
+      execute_same_channel_multiply(make_weighted_blend_primary(false),
+                                    make_weighted_blend_primary(false), 0.5);
+  ASSERT_TRUE(contracted.image_value().image_facet().has_value());
+  EXPECT_EQ(*contracted.image_value().image_facet(), primary_facet);
+  const ImageView contracted_view(contracted.image_value());
+  float contracted_first = 0.0F;
+  std::memcpy(&contracted_first, contracted_view.channel_data(0U, 0U, 0U),
+              sizeof(contracted_first));
+  EXPECT_FLOAT_EQ(contracted_first, 0.02F);
+
+  const NodeOutput scaled_out =
+      execute_same_channel_multiply(make_weighted_blend_primary(false),
+                                    make_weighted_blend_primary(false), 2.0);
+  ASSERT_TRUE(scaled_out.image_value().image_facet().has_value());
+  EXPECT_EQ(scaled_out.image_value().image_facet()->channel_schema,
+            primary_facet.channel_schema);
+  EXPECT_EQ(scaled_out.image_value().image_facet()->color, primary_facet.color);
+  EXPECT_FALSE(
+      scaled_out.image_value().image_facet()->sample_domain.has_value());
+
+  test_support::ScopedTempDir temp("photospider-multiply-codec");
+  const std::filesystem::path destination = temp.root() / "multiply.png";
+  const auto codec = make_configured_image_artifact_codec();
+  EXPECT_THROW(codec->encode(destination.string(), incompatible_value,
+                             ImageArtifactEncodeRequest{}),
+               std::invalid_argument);
+  EXPECT_FALSE(std::filesystem::exists(destination));
+}
+
+/**
+ * @brief Proves each registered tiled semantic policy freezes before callback.
+ *
+ * @return Nothing; GoogleTest reports facet, raw-payload, channel-plan, or
+ * identity drift.
+ * @throws Provider selection, normalization, output planning, callback, and
+ * Value failures unchanged to the test runner.
+ * @note Weighted blend uses its established semantic intersection, multiply
+ * additionally proves product-domain closure, nonlinear curve keeps only
+ * stable channel identity, and explicit channel expansion is planned before
+ * allocation. Signed primary windows and fresh Value ownership remain intact.
+ */
+TEST(OpenCvOperationProviderMetadataContract,
+     TiledOperationsFreezeOperationSpecificMetadataBeforeCallback) {
+  ASSERT_NO_THROW(register_provider());
+  const ImageFacet primary_facet =
+      *make_weighted_blend_primary(false).image_facet();
+
+  Value blend_primary = make_weighted_blend_primary(false);
+  const ValueRevisionId blend_revision = blend_primary.revision_id();
+  const NodeOutput blend = execute_same_channel_tiled_binary(
+      "add_weighted", std::move(blend_primary),
+      make_weighted_blend_primary(
+          false, SampleDomain{SampleDomainKind::Legal, -1.0, 1.0}),
+      {{"alpha", 0.5}, {"beta", 0.5}, {"gamma", 0.0}});
+  ASSERT_TRUE(blend.has_image_value());
+  EXPECT_NE(blend.image_value().revision_id(), blend_revision);
+  ASSERT_TRUE(blend.image_value().image_facet().has_value());
+  EXPECT_EQ(blend.image_value().image_facet()->data_window,
+            primary_facet.data_window);
+  EXPECT_EQ(blend.image_value().image_facet()->channel_schema,
+            primary_facet.channel_schema);
+  EXPECT_EQ(blend.image_value().image_facet()->color, primary_facet.color);
+  EXPECT_FALSE(blend.image_value().image_facet()->sample_domain.has_value());
+
+  const NodeOutput multiplied = execute_same_channel_tiled_binary(
+      "multiply", make_weighted_blend_primary(false),
+      make_weighted_blend_primary(false), {{"scale", 2.0}});
+  ASSERT_TRUE(multiplied.image_value().image_facet().has_value());
+  EXPECT_EQ(multiplied.image_value().image_facet()->channel_schema,
+            primary_facet.channel_schema);
+  EXPECT_EQ(multiplied.image_value().image_facet()->color, primary_facet.color);
+  EXPECT_FALSE(
+      multiplied.image_value().image_facet()->sample_domain.has_value());
+  const ImageView multiplied_view(multiplied.image_value());
+  float multiplied_first = 0.0F;
+  std::memcpy(&multiplied_first, multiplied_view.channel_data(0U, 0U, 0U),
+              sizeof(multiplied_first));
+  EXPECT_FLOAT_EQ(multiplied_first, 0.08F);
+
+  const NodeOutput closed_multiply = execute_same_channel_tiled_binary(
+      "multiply", make_weighted_blend_primary(false),
+      make_weighted_blend_primary(false), {{"scale", 0.5}});
+  ASSERT_TRUE(closed_multiply.image_value().image_facet().has_value());
+  EXPECT_EQ(*closed_multiply.image_value().image_facet(), primary_facet);
+
+  const NodeOutput curve =
+      execute_tiled_curve_transform(make_weighted_blend_primary(false), 1.0);
+  ASSERT_TRUE(curve.image_value().image_facet().has_value());
+  EXPECT_EQ(curve.image_value().image_facet()->data_window,
+            primary_facet.data_window);
+  EXPECT_EQ(curve.image_value().image_facet()->display_window,
+            primary_facet.display_window);
+  EXPECT_EQ(curve.image_value().image_facet()->channel_schema,
+            primary_facet.channel_schema);
+  EXPECT_FALSE(curve.image_value().image_facet()->sample_domain.has_value());
+  EXPECT_FALSE(curve.image_value().image_facet()->color.has_value());
+
+  const NodeOutput difference = execute_same_channel_tiled_binary(
+      "diff", make_weighted_blend_primary(false),
+      make_weighted_blend_primary(false));
+  ASSERT_TRUE(difference.image_value().image_facet().has_value());
+  EXPECT_EQ(difference.image_value().image_facet()->data_window,
+            primary_facet.data_window);
+  EXPECT_EQ(difference.image_value().image_facet()->display_window,
+            primary_facet.display_window);
+  EXPECT_EQ(difference.image_value().image_facet()->channel_schema,
+            primary_facet.channel_schema);
+  EXPECT_FALSE(
+      difference.image_value().image_facet()->sample_domain.has_value());
+  EXPECT_FALSE(difference.image_value().image_facet()->color.has_value());
+
+  const NodeOutput blur =
+      execute_tiled_gaussian_blur(make_weighted_blend_primary(false));
+  ASSERT_TRUE(blur.image_value().image_facet().has_value());
+  EXPECT_EQ(*blur.image_value().image_facet(), primary_facet);
+
+  const NodeOutput expanded = execute_channel_expanding_tiled_weighted_blend(
+      make_weighted_blend_primary(false), make_weighted_blend_secondary());
+  ASSERT_TRUE(expanded.has_image_value());
+  EXPECT_EQ(expanded.image_value().dense_tensor_descriptor().shape,
+            (std::vector<std::size_t>{2U, 3U, 4U}));
+  ASSERT_TRUE(expanded.image_value().image_facet().has_value());
+  EXPECT_FALSE(
+      expanded.image_value().image_facet()->channel_schema.has_value());
+  EXPECT_FALSE(expanded.image_value().image_facet()->color.has_value());
+  ASSERT_TRUE(expanded.image_value().image_facet()->sample_domain.has_value());
+  const ImageView expanded_view(expanded.image_value());
+  std::array<float, 4U> expanded_first{};
+  for (std::size_t channel = 0U; channel < expanded_first.size(); ++channel) {
+    std::memcpy(&expanded_first[channel],
+                expanded_view.channel_data(0U, 0U, channel), sizeof(float));
+  }
+  EXPECT_FLOAT_EQ(expanded_first[0], 0.1F);
+  EXPECT_FLOAT_EQ(expanded_first[1], 0.2F);
+  EXPECT_FLOAT_EQ(expanded_first[2], 0.3F);
+  EXPECT_FLOAT_EQ(expanded_first[3], 0.2F);
 }
 
 /**

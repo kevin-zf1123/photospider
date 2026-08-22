@@ -285,21 +285,27 @@ class NodeTaskRunner {
    * @brief Ensures one Host output binding exists for the planned tiled node.
    *
    * @param node_idx Dense planned-node index for output staging state.
-   * @param target_node Node whose fallback dimensions may seed allocation.
-   * @param image_inputs Ready image inputs used to infer channels and type.
+   * @param target_node Execution-local node whose effective parameters are
+   * visible to output inference and whose fallback dimensions seed allocation.
+   * @param implementation Exact selected tiled callback revision carrying the
+   * output inference policy.
+   * @param image_inputs Ready operation inputs used for pure metadata
+   * inference.
    * @return Borrowed open binding for checked tile grants, or nullptr when the
    * node became precomputed before allocation.
    * @throws std::invalid_argument or std::overflow_error for invalid canonical
-   * input facts or output-plan arithmetic.
+   * input facts, selected inference output, or output-plan arithmetic.
    * @throws std::bad_alloc when creating plan, aligned Value allocation, or
    * binding state fails.
    * @note Callers must treat nullptr as a successful skip, not as a compute
    * error, because another tile task has already provided whole-node output.
-   * The returned pointer remains stable until the last successful sibling
-   * moves and seals the binding.
+   * The selected inference runs before allocation or provider entry. The
+   * returned pointer remains stable until the last successful sibling moves
+   * and seals the binding.
    */
   HostOutputBinding* ensure_tile_output_binding(
       int node_idx, const Node& target_node,
+      const OpImplementation& implementation,
       const std::vector<const NodeOutput*>& image_inputs);
 
   /**

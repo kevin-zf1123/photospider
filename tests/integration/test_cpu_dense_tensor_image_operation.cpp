@@ -915,7 +915,8 @@ OpImplementation make_rectangular_route_candidate(
                           0U,
                           std::move(dirty),
                           {},
-                          std::move(dependency)};
+                          std::move(dependency),
+                          {}};
 }
 
 /**
@@ -1039,7 +1040,8 @@ bool execute_rectangular_target_from_current_route(
       compute::DirtyResolvedOperation{
           selected->func, selected->metadata.device_preference,
           selected->implementation_identity, selected->metadata,
-          make_dynamic_output_authority(*selected), selected->dirty_propagator},
+          make_dynamic_output_authority(*selected), selected->dirty_propagator,
+          selected->tiled_output_inference},
   }};
   GraphEventService events;
   compute::DirtyNodeSynchronization synchronization(graph.node_ids());
@@ -1294,7 +1296,7 @@ TensorRouteMutationPreparationResult prepare_after_tensor_route_mutation(
             selected->func, selected->metadata.device_preference,
             selected->implementation_identity, selected->metadata,
             make_dynamic_output_authority(*selected),
-            selected->dirty_propagator},
+            selected->dirty_propagator, selected->tiled_output_inference},
     }};
     compute::ComputeRun run(compute::ComputeRunSubmission{
         "tensor-route-mutation", graph.instance_id(), graph.revision(),
@@ -4691,7 +4693,8 @@ TEST(CpuDenseTensorImageOperation,
       compute::DirtyResolvedOperation{
           resolved->func, resolved->metadata.device_preference,
           resolved->implementation_identity, resolved->metadata,
-          make_dynamic_output_authority(*resolved), resolved->dirty_propagator},
+          make_dynamic_output_authority(*resolved), resolved->dirty_propagator,
+          resolved->tiled_output_inference},
   }};
   GraphEventService events;
   compute::DirtyNodeSynchronization synchronization(graph.node_ids());
@@ -4995,12 +4998,13 @@ TEST(CpuDenseTensorImageOperation,
              resolved->func, resolved->metadata.device_preference,
              resolved->implementation_identity, resolved->metadata,
              make_dynamic_output_authority(*resolved),
-             resolved->dirty_propagator}},
-        {92, compute::DirtyResolvedOperation{
-                 resolved->func, resolved->metadata.device_preference,
-                 resolved->implementation_identity, resolved->metadata,
-                 make_dynamic_output_authority(*resolved),
-                 resolved->dirty_propagator}}};
+             resolved->dirty_propagator, resolved->tiled_output_inference}},
+        {92,
+         compute::DirtyResolvedOperation{
+             resolved->func, resolved->metadata.device_preference,
+             resolved->implementation_identity, resolved->metadata,
+             make_dynamic_output_authority(*resolved),
+             resolved->dirty_propagator, resolved->tiled_output_inference}}};
     GraphEventService events;
     compute::DirtyNodeSynchronization synchronization(graph.node_ids());
     compute::HighPrecisionDirtyWriteBuffer staging;
@@ -5165,7 +5169,8 @@ TEST(CpuDenseTensorImageOperation,
       compute::DirtyResolvedOperation{
           resolved->func, resolved->metadata.device_preference,
           resolved->implementation_identity, resolved->metadata,
-          make_dynamic_output_authority(*resolved), resolved->dirty_propagator},
+          make_dynamic_output_authority(*resolved), resolved->dirty_propagator,
+          resolved->tiled_output_inference},
   }};
   GraphEventService events;
   compute::DirtyNodeSynchronization synchronization(graph.node_ids());
@@ -5257,7 +5262,8 @@ TEST(CpuDenseTensorImageOperation,
       compute::DirtyResolvedOperation{
           resolved->func, resolved->metadata.device_preference,
           resolved->implementation_identity, resolved->metadata,
-          make_dynamic_output_authority(*resolved), resolved->dirty_propagator},
+          make_dynamic_output_authority(*resolved), resolved->dirty_propagator,
+          resolved->tiled_output_inference},
   }};
   GraphEventService events;
   compute::DirtyNodeSynchronization synchronization(graph.node_ids());
