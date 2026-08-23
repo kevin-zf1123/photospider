@@ -719,7 +719,13 @@ The inference callback belongs to the same revisioned snapshot as execution
 and is used by full, dirty HP, and dirty RT paths. Full parallel preparation
 publishes one node-level context only after matching its pre-admission effective
 Node owner with the borrowed exact plan implementation; all sibling tasks share
-that context until the runner settles. `TiledInputContext` deletes copy,
+that context until the runner settles. Stable connected parameter values and
+their source identities are deep-owned and charged in that context before root
+admission. A source that becomes stable only through same-Run work consumes a
+root-charged inactive owner slot; unique preparation admits the actual recursive
+map delta and performs a no-throw ownership swap before inference/provider
+entry. Already materialized values are validated, not recopied, and replacement
+of either content or source identity fails closed. `TiledInputContext` deletes copy,
 transfers both vectors through explicit no-throw movement, and exposes only
 read-only accessors, so movement preserves every pointer into normalized
 storage and callers cannot reallocate it. Dirty HP/RT retain one

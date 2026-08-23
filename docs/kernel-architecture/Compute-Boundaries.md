@@ -368,16 +368,30 @@ its input after acquisition returns without changing active gate identity.
 For each full-plan tiled node, the runner also constructs its retained
 execution owner before Run admission. That owner contains the actual copied
 effective `Node`, pre-established static `ParameterMap` nodes and connected
-destination keys, and preallocated input-pointer and maximum normalized-output
-vector storage. Admission charges every visible Node string, vector, map,
-recursive static parameter, cache/LUT structure, and both vector capacities.
+destination keys, preallocated connected-source identity slots, and
+preallocated input-pointer and maximum normalized-output vector storage. When
+every connected source is already reachable, the owner also deep-copies the
+actual recursive `ParameterValue` tree and freezes each exact source-value
+identity before the root demand is calculated. Admission charges every visible
+Node string, vector, map, recursive static or connected parameter, cache/LUT
+structure, and vector capacity.
 The context borrows the exact `TaskSubmissionPlan::resolved_ops_` value, whose
 callback wrapper already retains the selected DSO, so it creates neither a
-second `OpImplementation` nor a second metadata/exclusive-key charge. Later
-connected `ParameterValue` payload and normalization-created immutable image
-payload remain operation-produced growth under the existing resource model;
-this exclusion does not cover the Host-owned Node, ParameterMap key/map, or
-TiledInputContext vector structure established before admission.
+second `OpImplementation` nor a second metadata/exclusive-key charge. If a
+connected value can exist only after a same-Run producer publishes its stable
+temporary output, the primary Run root instead preallocates and charges one
+inactive supplemental-reservation owner for that tiled context. Unique tiled
+preparation builds an unpublished candidate, admits the positive difference
+between its actual recursive map capacity and the already charged placeholder
+map, and only then transfers long-lived ownership through a no-throw map swap,
+before output inference or provider entry. A pre-materialized map is not copied
+again: preparation validates both recursive content and the frozen source-value
+identities, so even equal-content source replacement fails closed. After every
+callback and fence continuation drains, the service clears maps covered by
+supplemental roots before releasing those roots and the primary reservation.
+Normalization-created immutable image payload remains a separately stated
+operation-produced boundary; it does not exempt any Host-owned connected
+parameter copy from admission.
 After every initial value and ready grant has moved into a staged queue entry,
 `ExecutionService` destroys the caller-side submission-vector backing before
 active-Run publication and settlement waiting; only the staged entries and then
@@ -410,9 +424,13 @@ remain excluded. Concurrent HP/RT siblings conservatively include the same
 shared synchronization object in both independent phase reservations. This
 intentional double reservation lets either sibling settle first without
 leaving the surviving Run's shared ownership unaccounted. The estimator counts
-only visible Host-owned C++ storage; operation-produced image pixels and named-
-value growth that are not represented by the current demand record, plus opaque
-backend, device, plugin, or allocator-owned allocations, are not fabricated.
+only visible Host-owned C++ storage. Operation-produced image pixels and named
+values that remain solely inside their producer-owned immutable output and are
+not represented by the current demand record, plus opaque backend, device,
+plugin, or allocator-owned allocations, are not fabricated. Once a named value
+is copied into a long-lived Host-owned connected-parameter map, however, its
+actual recursive capacity is part of initial or supplemental admission and is
+not covered by that producer-output exclusion.
 Current built-in adapters declare zero scratch only because they own no
 separately metered fixed Host scratch.
 

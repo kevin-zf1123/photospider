@@ -563,7 +563,12 @@ subscription surface 都不属于当前软件契约。
 Inference callback 与 execution 属于同一个 revisioned snapshot，并由 full、dirty HP 与 dirty
 RT path 使用。Full parallel preparation 只有在 admission 前 effective Node owner 与借用的精确
 plan implementation 匹配后才发布 node-level context；全部 sibling task 会共享该 context，直到
-runner settle。`TiledInputContext` 删除 copy 操作，通过显式 `noexcept` move 把两份 vector 作为
+runner settle。稳定的 connected parameter value 及其 source identity 会在 root admission 前
+由该 context 深度拥有并计费。只有经 same-Run work 才稳定的 source 会占用一个已由 root 计费的
+inactive owner slot；唯一 preparation 会在 inference/provider entry 前 admit 实际递归 map 差值，
+并通过不抛异常的 ownership swap 安装它。已经物化的 value 只会被验证而不会再次复制；内容或
+source identity 任一发生替换都会 fail closed。`TiledInputContext` 删除 copy 操作，通过显式
+`noexcept` move 把两份 vector 作为
 整体转移，并且只暴露只读 accessor；因此 movement 会保留指向 normalized storage 的全部 pointer，
 调用方也无法让其重新分配。Dirty HP/RT 则让一份 invocation-local context 从 plan freeze 一直
 存活到全部同步 callback 结束。

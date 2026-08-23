@@ -287,13 +287,22 @@ state-owned 副本，因此 helper-local caller 可以在 acquisition 返回后�
 
 对于每个 full-plan tiled node，runner 还会在 Run admission 前构造 retained execution owner。
 该 owner 包含实际复制的 effective `Node`、预先建立的 static `ParameterMap` node 与 connected
-destination key，以及预先分配的 input-pointer 与最大 normalized-output vector storage。
-Admission 会计入每个可见 Node string、vector、map、递归 static parameter、cache/LUT 结构及两份
+destination key、预先分配的 connected-source identity slot，以及预先分配的 input-pointer 与最大
+normalized-output vector storage。当所有 connected source 已经可达时，该 owner 还会在计算根
+demand 前深拷贝实际递归 `ParameterValue` tree，并冻结每个精确 source-value identity。Admission
+会计入每个可见 Node string、vector、map、递归 static 或 connected parameter、cache/LUT 结构及
 vector capacity。Context 借用精确的 `TaskSubmissionPlan::resolved_ops_` value；后者的 callback
 wrapper 已保留 selected DSO，因此既不会创建第二份 `OpImplementation`，也不会创建第二份
-metadata/exclusive-key charge。晚到的 connected `ParameterValue` payload 与 normalization 创建的
-immutable image payload 仍属于既有资源模型中的 operation-produced growth；该排除不覆盖
-admission 前已经建立的 Host-owned Node、ParameterMap key/map 或 TiledInputContext vector 结构。
+metadata/exclusive-key charge。如果 connected value 只能在 same-Run producer 发布稳定临时
+output 后才存在，主 Run root 会改为给该 tiled context 预分配一个 inactive supplemental-
+reservation owner，并对其计费。唯一 tiled preparation 会先构造未发布 candidate，admit 其实际
+递归 map capacity 与已计费 placeholder map 之间的正差值，然后才通过不抛异常的 map swap 转移
+长寿命所有权；这一切发生在 output inference 或 provider entry 前。已预先物化的 map 不会再次
+复制：preparation 会同时验证递归内容与冻结的 source-value identity，因此即使等值替换 source
+也会 fail closed。全部 callback 与 fence continuation 排空后，service 会先清空 supplemental root
+覆盖的 map，再释放这些 root 与主 reservation。Normalization 创建的 immutable image payload
+仍是单独陈述的 operation-produced 边界；它不会免除任何 Host-owned connected parameter 副本的
+admission 责任。
 在所有 initial value 与 ready grant 都移动到暂存 queue entry 后，`ExecutionService` 会在发布
 active Run 和等待 settlement 之前销毁 caller-side submission
 vector 的 backing；此后只有暂存 entry 以及 bounded store 保留这些 submission。在每个 dirty
@@ -318,10 +327,12 @@ allocation、unordered-map bucket、value 与 linkage、每个由 `unique_ptr` �
 mutex allocation 仍排除在外。并发 HP/RT sibling 会在两个独立 phase reservation 中保守地
 计入同一个 shared synchronization object。这种有意的双 reservation 允许任一 sibling 先
 settle，同时不会让仍存活 Run 的 shared ownership 失去计费覆盖。Estimator 只计算所有权与
-大小均可见的 Host-owned C++ storage；当前 demand record 未表示的 operation-produced image
-pixel 与 named-value 增长，以及不透明的 backend、device、plugin 或 allocator-owned
-allocation，都不会被虚构。当前内建 adapter 声明 scratch 为零，仅因为它们不拥有需要独立计量
-的固定 Host scratch。
+大小均可见的 Host-owned C++ storage。只要 operation-produced image pixel 与 named value
+始终仅位于 producer-owned immutable output 内，且当前 demand record 未表示它们，就不会虚构
+其大小；不透明的 backend、device、plugin 或 allocator-owned allocation 同样不会被虚构。
+但是，一旦 named value 被复制进长寿命 Host-owned connected-parameter map，其实际递归 capacity
+就是 initial 或 supplemental admission 的组成部分，不属于上述 producer-output 排除项。当前
+内建 adapter 声明 scratch 为零，仅因为它们不拥有需要独立计量的固定 Host scratch。
 
 在 process-service dirty source segment 期间，source context 拥有外层 task
 `std::function` 的左值副本，而该外层 function 仍保持存活。因此 source demand
