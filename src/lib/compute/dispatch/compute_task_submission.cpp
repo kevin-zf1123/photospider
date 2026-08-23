@@ -432,6 +432,22 @@ void TaskSubmissionPlan::emplace_task_runner(NodeTaskRunnerContext context) {
   task_runner_ = std::make_unique<NodeTaskRunner>(context);
 }
 
+/** @copydoc TaskSubmissionPlan::supplemental_retained_reservation_count */
+std::uint64_t TaskSubmissionPlan::supplemental_retained_reservation_count()
+    const noexcept {
+  return task_runner_ ? task_runner_->supplemental_retained_reservation_count()
+                      : 0U;
+}
+
+/** @copydoc TaskSubmissionPlan::release_supplemental_runtime_parameters */
+bool TaskSubmissionPlan::release_supplemental_runtime_parameters() noexcept {
+  if (task_runner_) {
+    task_runner_->release_supplemental_runtime_parameters();
+    return true;
+  }
+  return false;
+}
+
 /**
  * @copydoc TaskSubmissionPlan::
  * tiled_context_borrows_resolved_operation_for_testing
@@ -1180,7 +1196,8 @@ void dispatch_planned_tasks(GraphModel& graph,
   }
 
   const CpuRunResourceDemand resource_demand{
-      dispatcher_lease.retained_memory_bytes(), plan.task_resource_demand()};
+      dispatcher_lease.retained_memory_bytes(), plan.task_resource_demand(),
+      plan.supplemental_retained_reservation_count()};
   std::vector<ReadyTaskSubmission> initial_submissions =
       plan.make_initial_ready_submissions(dispatcher_lease);
   execution_service.execute_run(host, execution_type,

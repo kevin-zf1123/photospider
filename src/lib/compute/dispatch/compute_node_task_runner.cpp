@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -14,6 +15,7 @@
 
 #include "compute/compute_run.hpp"
 #include "compute/dirty/node_executor.hpp"
+#include "compute/execution/execution_service.hpp"
 #include "compute/execution/resource_demand_estimator.hpp"
 #include "compute/request/compute_cache_policy.hpp"
 #include "compute/request/compute_metrics_recorder.hpp"
@@ -122,6 +124,112 @@ void observe_runner_cancellation(const ComputeRunLease* run_lease) {
   }
 }
 
+/**
+ * @brief Reports whether one node declares any live parameter connection.
+ * @param node Immutable node whose parameter edges are inspected.
+ * @return True when at least one parameter source has a nonnegative node id.
+ * @throws Nothing.
+ * @note Disconnected declarations remain explicit topology but never require a
+ * destination key, a source value, or a supplemental reservation slot.
+ */
+bool has_connected_parameter_inputs(const Node& node) noexcept {
+  return std::any_of(
+      node.parameter_inputs.begin(), node.parameter_inputs.end(),
+      [](const ParameterInput& input) { return input.from_node_id >= 0; });
+}
+
+/**
+ * @brief Compares recursive values at the retained-snapshot validation edge.
+ * @param admitted Deep-owned value frozen before retained admission.
+ * @param current Current static value or value still published by the exact
+ * captured connected source owner.
+ * @return True only when alternatives, array order, object keys, and recursive
+ * content match, except that paired double NaN leaves compare reflexively.
+ * @throws Nothing; inspection is read-only and performs no allocation.
+ * @note This private equivalence does not change public
+ * `ParameterValue::operator==`, which retains ordinary IEEE NaN behavior.
+ * Exact connected source identity is validated separately before this helper.
+ * Inputs must remain alive and immutable for the call; recursion uses only the
+ * caller thread's stack and acquires no lock or lifetime ownership.
+ */
+bool retained_parameter_snapshot_equivalent(
+    const plugin::ParameterValue& admitted,
+    const plugin::ParameterValue& current) noexcept {
+  if (admitted.kind() != current.kind()) {
+    return false;
+  }
+  switch (admitted.kind()) {
+    case plugin::ParameterKind::Null:
+      return true;
+    case plugin::ParameterKind::Bool: {
+      const auto* admitted_value = std::get_if<bool>(&admitted.storage());
+      const auto* current_value = std::get_if<bool>(&current.storage());
+      return admitted_value != nullptr && current_value != nullptr &&
+             *admitted_value == *current_value;
+    }
+    case plugin::ParameterKind::Int64: {
+      const auto* admitted_value =
+          std::get_if<std::int64_t>(&admitted.storage());
+      const auto* current_value = std::get_if<std::int64_t>(&current.storage());
+      return admitted_value != nullptr && current_value != nullptr &&
+             *admitted_value == *current_value;
+    }
+    case plugin::ParameterKind::Double: {
+      const auto* admitted_value = std::get_if<double>(&admitted.storage());
+      const auto* current_value = std::get_if<double>(&current.storage());
+      return admitted_value != nullptr && current_value != nullptr &&
+             (*admitted_value == *current_value ||
+              (std::isnan(*admitted_value) && std::isnan(*current_value)));
+    }
+    case plugin::ParameterKind::String: {
+      const auto* admitted_value =
+          std::get_if<std::string>(&admitted.storage());
+      const auto* current_value = std::get_if<std::string>(&current.storage());
+      return admitted_value != nullptr && current_value != nullptr &&
+             *admitted_value == *current_value;
+    }
+    case plugin::ParameterKind::Array: {
+      const auto* admitted_value =
+          std::get_if<plugin::ParameterValue::Array>(&admitted.storage());
+      const auto* current_value =
+          std::get_if<plugin::ParameterValue::Array>(&current.storage());
+      if (admitted_value == nullptr || current_value == nullptr ||
+          admitted_value->size() != current_value->size()) {
+        return false;
+      }
+      for (std::size_t index = 0U; index < admitted_value->size(); ++index) {
+        if (!retained_parameter_snapshot_equivalent((*admitted_value)[index],
+                                                    (*current_value)[index])) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case plugin::ParameterKind::Object: {
+      const auto* admitted_value =
+          std::get_if<plugin::ParameterValue::Object>(&admitted.storage());
+      const auto* current_value =
+          std::get_if<plugin::ParameterValue::Object>(&current.storage());
+      if (admitted_value == nullptr || current_value == nullptr ||
+          admitted_value->size() != current_value->size()) {
+        return false;
+      }
+      auto admitted_entry = admitted_value->begin();
+      auto current_entry = current_value->begin();
+      for (; admitted_entry != admitted_value->end();
+           ++admitted_entry, ++current_entry) {
+        if (admitted_entry->first != current_entry->first ||
+            !retained_parameter_snapshot_equivalent(admitted_entry->second,
+                                                    current_entry->second)) {
+          return false;
+        }
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 /** @copydoc NodeTaskRunner::retained_memory_bytes */
@@ -157,6 +265,10 @@ std::uint64_t NodeTaskRunner::retained_memory_bytes() const {
       estimate.add_objects<TiledNodeExecutionContext>();
       estimate.add_bytes(node_dynamic_retained_memory_bytes(
           state->execution_context->node_for_exec));
+      estimate.add_objects<const plugin::ParameterValue*>(
+          static_cast<std::uint64_t>(
+              state->execution_context->connected_parameter_sources
+                  .capacity()));
       estimate.add_objects<const NodeOutput*>(static_cast<std::uint64_t>(
           state->execution_context->input_context.inputs().capacity()));
       estimate.add_objects<NodeOutput>(static_cast<std::uint64_t>(
@@ -206,7 +318,9 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
       disable_disk_cache_(context.disable_disk_cache),
       benchmark_events_(context.benchmark_events),
       run_lease_(context.run_lease),
-      planned_work_(context.planned_work) {
+      planned_work_(context.planned_work),
+      execution_service_(
+          dynamic_cast<ExecutionService*>(&context.task_runtime)) {
   planned_output_sizes_.assign(execution_order_.size(), PixelSize{});
   tile_task_counts_.assign(execution_order_.size(), 0);
   completed_tile_counts_ =
@@ -239,7 +353,8 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
     if (tile_task_counts_.at(index) <= 0) {
       continue;
     }
-    Node node_for_exec = graph_.node(execution_order_.at(index));
+    const Node& target_node = graph_.node(execution_order_.at(index));
+    Node node_for_exec = target_node;
     node_for_exec.runtime_parameters = node_for_exec.parameters;
     for (const ParameterInput& input : node_for_exec.parameter_inputs) {
       if (input.from_node_id < 0) {
@@ -258,8 +373,26 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
         std::make_unique<TiledNodeExecutionContext>(TiledNodeExecutionContext{
             std::move(node_for_exec),
             resolved.has_value() ? &*resolved : nullptr,
-            TiledInputNormalizer::preallocate(
-                graph_.node(execution_order_.at(index)).image_inputs.size())});
+            TiledInputNormalizer::preallocate(target_node.image_inputs.size()),
+            {},
+            false,
+            false});
+    const std::size_t connected_parameter_count = static_cast<std::size_t>(
+        std::count_if(target_node.parameter_inputs.begin(),
+                      target_node.parameter_inputs.end(),
+                      [](const ParameterInput& input) {
+                        return input.from_node_id >= 0;
+                      }));
+    state.execution_context->connected_parameter_sources.reserve(
+        connected_parameter_count);
+    if (has_connected_parameter_inputs(target_node)) {
+      if (!try_materialize_runtime_parameters_before_admission(
+              target_node, state.execution_context.get())) {
+        ++supplemental_retained_reservation_count_;
+      }
+    } else {
+      state.execution_context->runtime_parameters_materialized = true;
+    }
   }
 }  // NOLINT(whitespace/indent_namespace)
 
@@ -369,6 +502,9 @@ const NodeOutput* NodeTaskRunner::upstream_output(int up_id) const {
     const int up_idx = it_idx->second;
     if (temp_results_[up_idx].has_value()) {
       return &*temp_results_[up_idx];
+    }
+    if (force_recache_) {
+      return nullptr;
     }
   }
   return ComputeCachePolicy::reusable_output(*upstream);
@@ -488,8 +624,7 @@ NodeTaskRunner::prepare_tiled_node_execution(
           "Tiled node preparation lost its admitted execution owner.");
     }
     TiledNodeExecutionContext& execution_context = *state.execution_context;
-    overlay_runtime_parameters(
-        target_node, &execution_context.node_for_exec.runtime_parameters);
+    materialize_or_validate_runtime_parameters(target_node, &execution_context);
     const std::vector<const NodeOutput*> image_inputs =
         resolve_image_inputs(target_node);
     execution_context.input_context = NodeExecutor::prepare_tiled_input_context(
@@ -615,13 +750,25 @@ void NodeTaskRunner::try_load_disk_cache(const Node& target_node,
 /**
  * @brief Builds execution parameters from static and same-request outputs.
  * @param target_node Node whose effective parameters are resolved.
+ * @param captured_sources Optional destination cleared and filled with the
+ * exact borrowed address of every connected source value in declaration order.
  * @return Deep ParameterMap copy with connected parameter values overlaid.
  * @throws GraphError when a connected parameter output is unavailable.
- * @throws std::bad_alloc from recursive value copying.
+ * @throws std::logic_error, std::invalid_argument, or std::overflow_error when
+ * reusable formal-output validity cannot be checked.
+ * @throws std::bad_alloc from recursive value copying, map growth, formal
+ * validity checking, or captured-source vector growth.
  * @note The result is request-local and does not mutate committed node state.
+ * Captured pointers freeze source-object identity rather than value equality
+ * and borrow graph or same-Run temporary output lifetime. Product callers
+ * pre-reserve the complete vector capacity before Run admission.
  */
 plugin::ParameterMap NodeTaskRunner::resolve_runtime_parameters(
-    const Node& target_node) const {
+    const Node& target_node,
+    std::vector<const plugin::ParameterValue*>* captured_sources) const {
+  if (captured_sources != nullptr) {
+    captured_sources->clear();
+  }
   plugin::ParameterMap runtime_params = target_node.parameters;
   for (const auto& p_input : target_node.parameter_inputs) {
     if (p_input.from_node_id < 0) {
@@ -640,41 +787,269 @@ plugin::ParameterMap NodeTaskRunner::resolve_runtime_parameters(
                            " missing output '" + p_input.from_output_name +
                            "'");
     }
+    if (captured_sources != nullptr) {
+      captured_sources->push_back(&it->second);
+    }
     runtime_params.insert_or_assign(p_input.to_parameter_name, it->second);
   }
   return runtime_params;
 }
 
-/** @copydoc NodeTaskRunner::overlay_runtime_parameters */
-void NodeTaskRunner::overlay_runtime_parameters(
-    const Node& target_node, plugin::ParameterMap* runtime_parameters) const {
-  if (runtime_parameters == nullptr) {
-    throw std::invalid_argument(
-        "Tiled runtime-parameter overlay requires an owned map.");
-  }
-  for (const ParameterInput& input : target_node.parameter_inputs) {
+/**
+ * @brief Validates an admitted effective map and captured source identities.
+ * @param target_node Current graph node providing static values and edges.
+ * @param execution_context Frozen map and exact source addresses to validate.
+ * @return Nothing when map shape, snapshot-equivalent recursive values, and
+ * source identities still match.
+ * @throws GraphError when a dependency/output is missing, the map changed, or
+ * an equal-content source owner replaced the admitted identity.
+ * @throws std::logic_error, std::invalid_argument, or std::overflow_error when
+ * reusable formal-output validity cannot be checked.
+ * @throws std::bad_alloc when formal validity checking or failure-diagnostic
+ * construction cannot allocate.
+ * @note Connected declarations apply in order and the last repeated
+ * destination wins. The equivalence traversal allocates nothing, and
+ * successful validation copies no payload or mutates the admitted map; formal
+ * validity checks and failure diagnostics may allocate. Paired double NaN
+ * leaves compare reflexively only at this validation boundary; all other
+ * alternatives and recursive structure remain exact. Address comparison
+ * deliberately keeps equal-content replacement fail closed.
+ */
+void NodeTaskRunner::validate_materialized_runtime_parameters(
+    const Node& target_node,
+    const TiledNodeExecutionContext& execution_context) const {
+  const plugin::ParameterMap& admitted_parameters =
+      execution_context.node_for_exec.runtime_parameters;
+  std::size_t expected_parameter_count = target_node.parameters.size();
+  std::size_t connected_source_index = 0U;
+  for (std::size_t input_index = 0U;
+       input_index < target_node.parameter_inputs.size(); ++input_index) {
+    const ParameterInput& input = target_node.parameter_inputs.at(input_index);
     if (input.from_node_id < 0) {
       continue;
     }
+    bool destination_already_counted =
+        target_node.parameters.find(input.to_parameter_name) !=
+        target_node.parameters.end();
+    for (std::size_t prior_index = 0U;
+         !destination_already_counted && prior_index < input_index;
+         ++prior_index) {
+      const ParameterInput& prior =
+          target_node.parameter_inputs.at(prior_index);
+      destination_already_counted =
+          prior.from_node_id >= 0 &&
+          prior.to_parameter_name == input.to_parameter_name;
+    }
+    if (!destination_already_counted) {
+      if (expected_parameter_count == std::numeric_limits<std::size_t>::max()) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "Runtime parameter count overflow.");
+      }
+      ++expected_parameter_count;
+    }
+
     const NodeOutput* upstream = upstream_output(input.from_node_id);
     if (upstream == nullptr) {
       throw GraphError(GraphErrc::MissingDependency,
                        "Parameter input not ready for node " +
                            std::to_string(target_node.id));
     }
-    const auto found = upstream->data.find(input.from_output_name);
-    if (found == upstream->data.end()) {
+    const auto source = upstream->data.find(input.from_output_name);
+    if (source == upstream->data.end()) {
       throw GraphError(GraphErrc::MissingDependency,
                        "Node " + std::to_string(input.from_node_id) +
                            " missing output '" + input.from_output_name + "'");
     }
-    const auto destination = runtime_parameters->find(input.to_parameter_name);
-    if (destination == runtime_parameters->end()) {
+    if (connected_source_index >=
+            execution_context.connected_parameter_sources.size() ||
+        execution_context.connected_parameter_sources.at(
+            connected_source_index) != &source->second) {
       throw GraphError(
           GraphErrc::ComputeError,
-          "Tiled runtime-parameter key was not admitted before execution.");
+          "Connected runtime parameter source identity changed after retained "
+          "admission.");
     }
-    destination->second = found->second;
+    ++connected_source_index;
+
+    bool later_destination = false;
+    for (std::size_t later_index = input_index + 1U;
+         later_index < target_node.parameter_inputs.size(); ++later_index) {
+      const ParameterInput& later =
+          target_node.parameter_inputs.at(later_index);
+      if (later.from_node_id >= 0 &&
+          later.to_parameter_name == input.to_parameter_name) {
+        later_destination = true;
+        break;
+      }
+    }
+    if (!later_destination) {
+      const auto destination =
+          admitted_parameters.find(input.to_parameter_name);
+      if (destination == admitted_parameters.end() ||
+          !retained_parameter_snapshot_equivalent(destination->second,
+                                                  source->second)) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            "Connected runtime parameters changed after retained admission.");
+      }
+    }
+  }
+  if (connected_source_index !=
+      execution_context.connected_parameter_sources.size()) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Connected runtime parameter source set changed after retained "
+        "admission.");
+  }
+  for (const auto& static_parameter : target_node.parameters) {
+    const bool connected_destination =
+        std::any_of(target_node.parameter_inputs.begin(),
+                    target_node.parameter_inputs.end(),
+                    [&static_parameter](const ParameterInput& input) {
+                      return input.from_node_id >= 0 &&
+                             input.to_parameter_name == static_parameter.first;
+                    });
+    if (connected_destination) {
+      continue;
+    }
+    const auto admitted = admitted_parameters.find(static_parameter.first);
+    if (admitted == admitted_parameters.end() ||
+        !retained_parameter_snapshot_equivalent(admitted->second,
+                                                static_parameter.second)) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Static runtime parameters changed after retained admission.");
+    }
+  }
+  if (admitted_parameters.size() != expected_parameter_count) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Runtime parameter map shape changed after retained "
+                     "admission.");
+  }
+}
+
+/** @copydoc NodeTaskRunner::try_materialize_runtime_parameters_before_admission
+ */
+bool NodeTaskRunner::try_materialize_runtime_parameters_before_admission(
+    const Node& target_node,
+    TiledNodeExecutionContext* execution_context) const {
+  if (execution_context == nullptr) {
+    throw std::invalid_argument(
+        "Tiled runtime-parameter materialization requires an owned context.");
+  }
+  try {
+    plugin::ParameterMap materialized = resolve_runtime_parameters(
+        target_node, &execution_context->connected_parameter_sources);
+    execution_context->node_for_exec.runtime_parameters.swap(materialized);
+    execution_context->runtime_parameters_materialized = true;
+    return true;
+  } catch (const GraphError& error) {
+    if (error.code() == GraphErrc::MissingDependency) {
+      execution_context->connected_parameter_sources.clear();
+      return false;
+    }
+    throw;
+  }
+}
+
+/**
+ * @brief Validates an early map or admits and installs one late connected map.
+ * @param target_node Immutable graph node whose ready sources are resolved.
+ * @param execution_context Non-null stable tiled context owned by this runner.
+ * @return Nothing after exact validation, optional service supplemental
+ * admission, and a no-throw map swap.
+ * @throws std::invalid_argument when execution_context is null, retained formal
+ * image/tensor facts violate their declared contracts, or a service-backed
+ * supplemental call crosses an invalid service/worker/Run boundary.
+ * @throws std::logic_error when reusable formal-output validity cannot be
+ * checked through a valid Value accessor, a service-backed supplemental path
+ * lacks its Run lease or current worker Run, service shutdown prevents
+ * admission, or no pre-accounted owner slot remains.
+ * @throws std::overflow_error when a retained formal logical extent exceeds
+ * Region bounds.
+ * @throws GraphError when a dependency/value/source identity changed, retained
+ * arithmetic overflowed, cancellation/failure won, or service policy/ledger
+ * admission rejects the delta.
+ * @throws std::bad_alloc from recursive candidate materialization,
+ * connected-source or diagnostic storage, formal validity checking, or
+ * service supplemental reservation preparation.
+ * @throws std::system_error from service supplemental reservation preparation
+ * or synchronization.
+ * @note The candidate remains unpublished during fallible preparation.
+ * Recursive resolution and formal validity/diagnostic work may allocate. A
+ * service-backed route compares actual recursive map bytes with the already
+ * charged placeholder owner and admits only the positive delta through a
+ * distinct retained-only root. A generic `ExecutionTaskRuntime` has no
+ * `ExecutionService` Run-ledger authority, so its completed candidate instead
+ * transfers directly into the runner-owned map. In both routes, statically
+ * no-throw `clear()` and `swap()` release placeholder nodes before installing
+ * the candidate, so two retained destination owners never coexist.
+ * Disconnected declarations remain inert.
+ */
+void NodeTaskRunner::materialize_or_validate_runtime_parameters(
+    const Node& target_node,
+    TiledNodeExecutionContext* execution_context) const {
+  if (execution_context == nullptr) {
+    throw std::invalid_argument(
+        "Tiled runtime-parameter preparation requires an owned context.");
+  }
+  if (execution_context->runtime_parameters_materialized) {
+    validate_materialized_runtime_parameters(target_node, *execution_context);
+    return;
+  }
+  plugin::ParameterMap materialized = resolve_runtime_parameters(
+      target_node, &execution_context->connected_parameter_sources);
+  plugin::ParameterMap& admitted_parameters =
+      execution_context->node_for_exec.runtime_parameters;
+
+  const std::uint64_t admitted_bytes =
+      parameter_map_dynamic_retained_memory_bytes(admitted_parameters);
+  const std::uint64_t materialized_bytes =
+      parameter_map_dynamic_retained_memory_bytes(materialized);
+  const std::uint64_t supplemental_bytes =
+      materialized_bytes > admitted_bytes ? materialized_bytes - admitted_bytes
+                                          : 0U;
+  if (supplemental_bytes != 0U && execution_service_ != nullptr) {
+    if (run_lease_ == nullptr) {
+      throw std::logic_error(
+          "Deferred connected-parameter admission requires a Run lease.");
+    }
+    execution_service_->retain_current_run_shared_reservation(
+        *run_lease_, supplemental_bytes);
+    execution_context->runtime_parameters_supplementally_admitted = true;
+  }
+  static_assert(noexcept(std::declval<plugin::ParameterMap&>().swap(
+                    std::declval<plugin::ParameterMap&>())),
+                "Connected parameter installation requires no-throw map swap");
+  static_assert(noexcept(std::declval<plugin::ParameterMap&>().clear()),
+                "Connected parameter replacement requires no-throw map clear");
+  admitted_parameters.clear();
+  admitted_parameters.swap(materialized);
+  execution_context->runtime_parameters_materialized = true;
+}
+
+/** @copydoc NodeTaskRunner::release_supplemental_runtime_parameters */
+void NodeTaskRunner::release_supplemental_runtime_parameters() noexcept {
+  try {
+    for (const std::unique_ptr<TiledNodePreparationState>& state :
+         tiled_node_preparation_states_) {
+      if (!state) {
+        continue;
+      }
+      std::lock_guard<std::mutex> preparation_lock(state->preparation_mutex);
+      if (!state->execution_context ||
+          !state->execution_context
+               ->runtime_parameters_supplementally_admitted) {
+        continue;
+      }
+      state->execution_context->node_for_exec.runtime_parameters.clear();
+      state->execution_context->connected_parameter_sources.clear();
+      state->execution_context->runtime_parameters_materialized = false;
+      state->execution_context->runtime_parameters_supplementally_admitted =
+          false;
+    }
+  } catch (...) {
+    std::terminate();
   }
 }
 

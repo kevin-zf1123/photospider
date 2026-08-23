@@ -109,6 +109,176 @@ std::atomic_int g_partial_cache_consumer_calls{0};
  */
 std::atomic_int g_partial_cache_consumer_observed_value{0};
 
+/**
+ * @brief Holds deterministic payload selection and callback observations.
+ * @throws Nothing from construction and atomic observation.
+ * @note Generation changes only between synchronous requests. Atomic counters
+ * remain valid if sibling tiles execute concurrently.
+ */
+struct ForceRecacheConnectedParameterProbe final {
+  /** @brief Byte count retained by the formal-cache seed payload. */
+  static constexpr std::size_t kSeedPayloadBytes = 4096U;
+
+  /** @brief Byte count requiring actual supplemental retained admission. */
+  static constexpr std::size_t kRecachePayloadBytes = 16384U;
+
+  /**
+   * @brief Returns the selected generation's exact payload byte count.
+   * @return Seed/recache byte count, or zero for an unsupported generation.
+   * @throws Nothing.
+   */
+  std::size_t selected_payload_bytes() const noexcept {
+    const int selected_generation = generation.load(std::memory_order_acquire);
+    if (selected_generation == 1) {
+      return kSeedPayloadBytes;
+    }
+    return selected_generation == 2 ? kRecachePayloadBytes : 0U;
+  }
+
+  /**
+   * @brief Returns the selected generation's exact repeated payload byte.
+   * @return `a`, `b`, or the NUL sentinel for an unsupported generation.
+   * @throws Nothing.
+   */
+  char selected_payload_fill() const noexcept {
+    const int selected_generation = generation.load(std::memory_order_acquire);
+    if (selected_generation == 1) {
+      return 'a';
+    }
+    return selected_generation == 2 ? 'b' : '\0';
+  }
+
+  /**
+   * @brief Compares one effective parameter with the selected exact payload.
+   * @param node Execution-local node whose runtime map is inspected.
+   * @return True only for the expected string length and every expected byte.
+   * @throws Nothing.
+   * @note The comparison allocates nothing and does not retain the borrowed
+   * string beyond the callback.
+   */
+  bool matches_selected_payload(const Node& node) const noexcept {
+    const auto found = node.runtime_parameters.find("payload");
+    if (found == node.runtime_parameters.end() || !found->second.is_string()) {
+      return false;
+    }
+    const std::string& payload = found->second.as_string();
+    const std::size_t expected_bytes = selected_payload_bytes();
+    const char expected_fill = selected_payload_fill();
+    return expected_bytes != 0U && expected_fill != '\0' &&
+           payload.size() == expected_bytes &&
+           std::all_of(
+               payload.begin(), payload.end(),
+               [expected_fill](char value) { return value == expected_fill; });
+  }
+
+  /** @brief Generation selected between synchronous product requests. */
+  std::atomic_int generation{1};
+  /** @brief Complete producer outputs returned to the product route. */
+  std::atomic_int producer_entries{0};
+  /** @brief Consumer output-inference callback entries. */
+  std::atomic_int inference_entries{0};
+  /** @brief Inference callbacks observing the exact selected payload. */
+  std::atomic_int inference_matches{0};
+  /** @brief Consumer tiled provider callback entries. */
+  std::atomic_int provider_entries{0};
+  /** @brief Provider callbacks observing the exact selected payload. */
+  std::atomic_int provider_matches{0};
+};
+
+/**
+ * @brief Captures the primary resource root of one real service Run.
+ * @throws Nothing from construction or observation.
+ * @note A release-store publishes the copied vector to the synchronous test.
+ */
+struct FullRunInitialReservationProbe final {
+  /** @brief Complete primary Run root before any supplemental reservation. */
+  ResourceVector admitted_resources;
+
+  /** @brief Number of observed production Run admissions. */
+  std::atomic_int observation_count{0};
+
+  /**
+   * @brief Records one initial-submission retirement boundary.
+   * @param context Opaque pointer to this probe.
+   * @param resources Complete primary Run vector admitted by the service.
+   * @param staged_size Moved-from initial submission count before release.
+   * @param staged_capacity Moved-from initial submission capacity.
+   * @param released_size Initial submission count after release.
+   * @param released_capacity Initial submission capacity after release.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void observe(void* context, const ResourceVector& resources,
+                      std::size_t staged_size, std::size_t staged_capacity,
+                      std::size_t released_size,
+                      std::size_t released_capacity) noexcept {
+    (void)staged_size;
+    (void)staged_capacity;
+    (void)released_size;
+    (void)released_capacity;
+    auto* probe = static_cast<FullRunInitialReservationProbe*>(context);
+    if (probe == nullptr) {
+      return;
+    }
+    probe->admitted_resources = resources;
+    probe->observation_count.fetch_add(1, std::memory_order_release);
+  }
+};
+
+/**
+ * @brief Installs one scoped primary-Run reservation observer.
+ * @throws Nothing from construction and destruction.
+ * @note The owning service call is synchronous and must settle before the
+ * probe and guard leave scope.
+ */
+class ScopedFullRunInitialReservationObservation final {
+ public:
+  /**
+   * @brief Installs the observer on one isolated service.
+   * @param service Service whose next full Run is observed.
+   * @param probe Probe outliving this guard.
+   * @throws Nothing.
+   */
+  ScopedFullRunInitialReservationObservation(
+      compute::ExecutionService& service,
+      FullRunInitialReservationProbe& probe) noexcept
+      : service_(&service) {
+    testing::ExecutionServiceTestAccess::
+        set_initial_submission_storage_observer(
+            service, &FullRunInitialReservationProbe::observe, &probe);
+  }
+
+  /**
+   * @brief Clears the observer after synchronous Run settlement.
+   * @throws Nothing.
+   */
+  ~ScopedFullRunInitialReservationObservation() noexcept {
+    testing::ExecutionServiceTestAccess::
+        clear_initial_submission_storage_observer(*service_);
+  }
+
+  /**
+   * @brief Prevents duplicate observer-clearing ownership.
+   * @param other Guard retaining sole clearing responsibility.
+   * @throws Nothing because copying is unavailable.
+   */
+  ScopedFullRunInitialReservationObservation(
+      const ScopedFullRunInitialReservationObservation& other) = delete;
+
+  /**
+   * @brief Prevents replacing observer-clearing ownership.
+   * @param other Guard that remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedFullRunInitialReservationObservation& operator=(
+      const ScopedFullRunInitialReservationObservation& other) = delete;
+
+ private:
+  /** @brief Borrowed service whose observer is cleared at scope exit. */
+  compute::ExecutionService* service_ = nullptr;
+};
+
 /** @brief Counts selected tiled sibling callbacks in exact-metadata tests. */
 std::atomic_int g_exact_sibling_tiled_calls{0};
 
@@ -10654,6 +10824,235 @@ TEST(DownsampleExecutorSplit,
   ASSERT_EQ(rt_pixels.rows, 2);
   ASSERT_EQ(rt_pixels.cols, 2);
   EXPECT_FLOAT_EQ(rt_pixels.at<float>(1, 1), 555.5F);
+}
+
+/**
+ * @brief Proves force-recache defers a planned connected source to same-Run
+ * output instead of freezing its old formal-cache identity.
+ *
+ * @return Nothing; GoogleTest reports stale identity, value, admission,
+ * operation-gate, lifecycle, or ledger failures.
+ * @throws Registry, graph, runtime, service, allocation, image-adaptation, or
+ * synchronization exceptions when valid fixture setup cannot execute.
+ * @note A producer-only product Run first commits a large string as exact
+ * formal HP cache. A fresh service then runs the real prepared full-parallel
+ * force-recache path for a two-tile consumer. The producer and consumer share
+ * one capped exclusive key, so producer-to-tile, tile-to-tile, and a recovery
+ * Run also prove exact gate release. The captured primary root must be smaller
+ * than the service high-water because the same-Run string requires positive
+ * supplemental actual admission before inference or provider entry.
+ */
+TEST(ComputeTaskRunnerSplit,
+     FullParallelForceRecacheDefersConnectedSourceToSameRunOutput) {
+  register_split_ops();
+  constexpr char kType[] = "issue131_force_recache_connected";
+  constexpr char kProducerSubtype[] = "large_parameter_source";
+  constexpr char kConsumerSubtype[] = "tiled_parameter_consumer";
+  constexpr char kExclusiveKey[] = "issue131-force-recache-connected-key";
+  constexpr int kProducerId = 1;
+  constexpr int kConsumerId = 2;
+  constexpr int kImageSourceId = 3;
+
+  auto probe = std::make_shared<ForceRecacheConnectedParameterProbe>();
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kProducerSubtype));
+  registry.unregister_key(make_key(kType, kConsumerSubtype));
+
+  OpMetadata producer_metadata =
+      declare_test_outputs(OpMetadata{}, false, {"payload"});
+  producer_metadata.maximum_parallelism = 1U;
+  producer_metadata.exclusive_key = kExclusiveKey;
+  registry.register_op_hp_monolithic(
+      kType, kProducerSubtype,
+      MonolithicOpFunc(
+          [probe](const Node&, const std::vector<const NodeOutput*>&) {
+            const std::size_t bytes = probe->selected_payload_bytes();
+            const char fill = probe->selected_payload_fill();
+            if (bytes == 0U || fill == '\0') {
+              throw std::logic_error(
+                  "Force-recache probe has an invalid generation.");
+            }
+            NodeOutput output;
+            output.data.emplace("payload", std::string(bytes, fill));
+            probe->producer_entries.fetch_add(1, std::memory_order_release);
+            return output;
+          }),
+      std::move(producer_metadata));
+
+  OpMetadata consumer_metadata;
+  consumer_metadata.tile_preference = TileSizePreference::MICRO;
+  consumer_metadata.maximum_parallelism = 1U;
+  consumer_metadata.exclusive_key = kExclusiveKey;
+  OpPlanningCallbacks consumer_planning;
+  consumer_planning.tiled_output_inference = TiledOutputInferenceFunc(
+      [probe](const Node& node,
+              const std::vector<const NodeOutput*>& image_inputs,
+              const PixelSize& output_size) {
+        (void)image_inputs;
+        probe->inference_entries.fetch_add(1, std::memory_order_relaxed);
+        if (!probe->matches_selected_payload(node)) {
+          throw GraphError(GraphErrc::ComputeError,
+                           "Force-recache inference saw a stale payload.");
+        }
+        probe->inference_matches.fetch_add(1, std::memory_order_release);
+        if (output_size.width <= 0 || output_size.height <= 0) {
+          throw std::invalid_argument(
+              "Force-recache inference requires a positive extent.");
+        }
+        DenseTensorDescriptor descriptor{
+            {static_cast<std::size_t>(output_size.height),
+             static_cast<std::size_t>(output_size.width), 1U},
+            ElementSemantics::FloatingPoint,
+            StorageEncoding{32U}};
+        ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+        return TiledOutputInferenceResult{std::move(descriptor),
+                                          std::move(facet)};
+      });
+  registry.register_op_hp_tiled(
+      kType, kConsumerSubtype,
+      TileOpFunc([probe](const Node& node, const OutputTile& output,
+                         const std::vector<InputTile>& inputs) {
+        (void)inputs;
+        probe->provider_entries.fetch_add(1, std::memory_order_relaxed);
+        if (!probe->matches_selected_payload(node)) {
+          throw GraphError(GraphErrc::ComputeError,
+                           "Force-recache provider saw a stale payload.");
+        }
+        probe->provider_matches.fetch_add(1, std::memory_order_release);
+        toCvMat(output).setTo(
+            static_cast<double>(probe->selected_payload_bytes()));
+      }),
+      std::move(consumer_metadata), std::move(consumer_planning));
+
+  const ScopedTestDirectory root(
+      std::filesystem::temp_directory_path() /
+      "photospider-force-recache-connected-same-run");
+  GraphRuntime::Info info;
+  info.name = "force-recache-connected-same-run";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+
+  GraphModel& graph = runtime.model();
+  graph.add_node(make_node(kProducerId, kType, kProducerSubtype));
+  Node image_source = make_node(kImageSourceId, "split_plan", "source");
+  image_source.parameters["width"] = 32;
+  image_source.parameters["height"] = 16;
+  graph.add_node(std::move(image_source));
+  Node consumer = make_node(kConsumerId, kType, kConsumerSubtype);
+  consumer.parameters["width"] = 32;
+  consumer.parameters["height"] = 16;
+  consumer.image_inputs.push_back({kImageSourceId, "image"});
+  consumer.parameter_inputs.push_back({kProducerId, "payload", "payload"});
+  graph.add_node(std::move(consumer));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+
+  {
+    compute::ExecutionService seed_authority(1U);
+    ComputeService seed_service(traversal, cache, events, seed_authority);
+    testing::ScopedExecutionGraphLifecycle seed_lifecycle(seed_authority,
+                                                          graph);
+    ComputeService::Request seed_request;
+    seed_request.node_id = kProducerId;
+    seed_request.cache.precision = "float32";
+    seed_request.cache.disable_disk_cache = true;
+    NodeOutput* seeded = nullptr;
+    EXPECT_NO_THROW(
+        seeded = &seed_service.compute_parallel(graph, runtime, seed_request));
+    EXPECT_NE(seeded, nullptr);
+    EXPECT_EQ(probe->producer_entries.load(std::memory_order_acquire), 1);
+    if (seeded != nullptr) {
+      const auto payload = seeded->data.find("payload");
+      ASSERT_NE(payload, seeded->data.end());
+      ASSERT_TRUE(payload->second.is_string());
+      EXPECT_EQ(payload->second.as_string().size(),
+                ForceRecacheConnectedParameterProbe::kSeedPayloadBytes);
+    }
+    EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(
+        graph.node(kProducerId)));
+    expect_direct_authority_settled(seed_authority);
+  }
+
+  probe->generation.store(2, std::memory_order_release);
+  compute::ExecutionService authority(2U);
+  ComputeService service(traversal, cache, events, authority);
+  testing::ScopedExecutionGraphLifecycle lifecycle(authority, graph);
+  ComputeService::Request request;
+  request.node_id = kConsumerId;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  FullRunInitialReservationProbe initial_root;
+  NodeOutput* forced_output = nullptr;
+  {
+    ScopedFullRunInitialReservationObservation root_observation(authority,
+                                                                initial_root);
+    EXPECT_NO_THROW(forced_output =
+                        &service.compute_parallel(graph, runtime, request));
+  }
+
+  EXPECT_EQ(initial_root.observation_count.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(probe->producer_entries.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(probe->inference_entries.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(probe->inference_matches.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(probe->provider_entries.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(probe->provider_matches.load(std::memory_order_acquire), 2);
+  EXPECT_NE(forced_output, nullptr);
+  if (forced_output != nullptr) {
+    double minimum = 0.0;
+    double maximum = 0.0;
+    cv::minMaxLoc(project_image_mat(*forced_output), &minimum, &maximum);
+    EXPECT_DOUBLE_EQ(
+        minimum,
+        static_cast<double>(
+            ForceRecacheConnectedParameterProbe::kRecachePayloadBytes));
+    EXPECT_DOUBLE_EQ(minimum, maximum);
+  }
+
+  ASSERT_TRUE(graph.node(kProducerId).cached_output_high_precision.has_value());
+  const auto current_payload =
+      graph.node(kProducerId)
+          .cached_output_high_precision->data.find("payload");
+  ASSERT_NE(current_payload,
+            graph.node(kProducerId).cached_output_high_precision->data.end());
+  ASSERT_TRUE(current_payload->second.is_string());
+  EXPECT_EQ(current_payload->second.as_string().size(),
+            ForceRecacheConnectedParameterProbe::kRecachePayloadBytes);
+  EXPECT_TRUE(std::all_of(current_payload->second.as_string().begin(),
+                          current_payload->second.as_string().end(),
+                          [](char value) { return value == 'b'; }));
+  EXPECT_TRUE(graph.node(kConsumerId).runtime_parameters.empty());
+
+  const ResourceLedger::Snapshot first_forced_resources =
+      authority.resource_snapshot();
+  EXPECT_GT(first_forced_resources.high_water.retained_memory_bytes,
+            initial_root.admitted_resources.retained_memory_bytes);
+  EXPECT_EQ(first_forced_resources.reserved, ResourceVector{});
+  expect_direct_authority_settled(authority);
+
+  NodeOutput* recovery_output = nullptr;
+  EXPECT_NO_THROW(recovery_output =
+                      &service.compute_parallel(graph, runtime, request));
+  EXPECT_NE(recovery_output, nullptr);
+  EXPECT_EQ(probe->producer_entries.load(std::memory_order_acquire), 3);
+  EXPECT_EQ(probe->inference_entries.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(probe->inference_matches.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(probe->provider_entries.load(std::memory_order_acquire), 4);
+  EXPECT_EQ(probe->provider_matches.load(std::memory_order_acquire), 4);
+  EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+  expect_direct_authority_settled(authority);
+
+  runtime.stop();
+  registry.unregister_key(make_key(kType, kProducerSubtype));
+  registry.unregister_key(make_key(kType, kConsumerSubtype));
 }
 
 /**

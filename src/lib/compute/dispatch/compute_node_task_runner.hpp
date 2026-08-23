@@ -24,6 +24,8 @@ class GraphEventService;
 namespace ps::compute {
 
 class ComputeRunLease;
+class ExecutionService;
+class TaskSubmissionPlan;
 
 /**
  * @brief Borrowed state required by NodeTaskRunner worker closures.
@@ -141,11 +143,25 @@ class NodeTaskRunner {
    * @param context Borrowed graph, service, timing, plan, and option state.
    * @throws GraphError when checked preparation arithmetic or graph lookup
    * fails.
+   * @throws std::logic_error when reusable formal-output validity cannot be
+   * checked through a valid Value accessor.
+   * @throws std::invalid_argument when retained formal image/tensor facts
+   * violate their declared contracts.
+   * @throws std::overflow_error when a retained formal logical extent exceeds
+   * Region bounds.
    * @throws std::bad_alloc when per-node state, execution-local Node copies,
+   * recursive connected-parameter snapshots, formal output validity checks,
    * or fixed input-context structure cannot be established.
    * @note The constructor stores service/plan references but also materializes
-   * every tiled execution owner before Run admission. Callers must keep all
-   * referenced objects alive until runtime completion.
+   * every tiled execution owner before Run admission. Connected values already
+   * reachable through complete request or reusable output are deep-owned here
+   * before the Run estimate freezes. Values that can exist only after a same-
+   * Run producer retain a service pre-accounted supplemental-reservation slot
+   * when `context.task_runtime` is an `ExecutionService`; that route admits the
+   * actual positive delta before its later no-throw map swap. A generic runtime
+   * has no service Run-ledger authority and transfers the completed candidate
+   * directly into its runner-owned map. Callers must keep all referenced
+   * objects alive until runtime completion.
    */
   explicit NodeTaskRunner(NodeTaskRunnerContext context);
 
@@ -189,10 +205,27 @@ class NodeTaskRunner {
    * @throws GraphError when checked structural arithmetic overflows.
    * @note Borrowed Graph/services/plan vectors, the plan-owned implementation
    * snapshot, and normalization-created image payload bytes are excluded. The
-   * execution-local Node and both input-context vector allocations already
-   * exist when this estimate is frozen; their actual capacities are charged.
+   * execution-local Node, connected source-identity slots, and both
+   * input-context vector allocations already exist when this estimate is
+   * frozen; their actual capacities are charged. Stable connected recursive
+   * values are part of the Node estimate. An unresolved same-Run value retains
+   * placeholder ownership here and advertises a separately pre-accounted
+   * supplemental owner slot for service-backed admission. Generic runtimes
+   * have no `ExecutionService` root and do not consume that advertised count.
    */
   std::uint64_t retained_memory_bytes() const;
+
+  /**
+   * @brief Returns the maximum deferred connected-payload reservation count.
+   * @return Number of tiled node contexts whose connected values were not
+   * reachable during construction.
+   * @throws Nothing.
+   * @note ExecutionService preallocates exactly this many inactive owner slots
+   * in the Run root. A target memory/disk-cache hit may leave a slot unused.
+   */
+  std::uint64_t supplemental_retained_reservation_count() const noexcept {
+    return supplemental_retained_reservation_count_;
+  }
 
   /**
    * @brief Reports whether one settled tiled context borrows the plan snapshot.
@@ -226,6 +259,28 @@ class NodeTaskRunner {
 
     /** @brief Sole normalized input owner shared by all sibling callbacks. */
     TiledInputContext input_context;
+
+    /**
+     * @brief Exact connected source-value identities frozen with the map.
+     * @note Pointer storage is allocated before root admission. Values remain
+     * borrowed from graph or temporary outputs whose lifetime spans physical
+     * settlement; validation rejects equal-content source replacement.
+     */
+    std::vector<const plugin::ParameterValue*> connected_parameter_sources;
+
+    /**
+     * @brief Whether runtime_parameters owns every connected value snapshot.
+     * @note False means only the pre-admission static/placeholder structure is
+     * present and the unique late preparation must materialize it.
+     */
+    bool runtime_parameters_materialized = false;
+
+    /**
+     * @brief Whether a service-owned supplemental root covers the live map.
+     * @note The service clears this payload after every callback drains and
+     * before releasing that supplemental reservation.
+     */
+    bool runtime_parameters_supplementally_admitted = false;
   };
 
   /**
@@ -280,13 +335,17 @@ class NodeTaskRunner {
    * @param up_id Connected upstream node id, or a negative disconnected
    * sentinel.
    * @return Current-request temporary output when present, otherwise complete
-   * reusable formal HP output; nullptr for disconnected, missing, absent, or
-   * partial persistent output.
+   * reusable formal HP output for an allowed boundary; nullptr for
+   * disconnected, missing, absent, partial persistent output, or a planned
+   * force-recache producer whose same-Run result is not published yet.
    * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
    * std::bad_alloc when committed output validity cannot be checked.
    * @note Dependency release makes a temporary producer result complete before
-   * a downstream task reads it. Persistent output is always filtered through
-   * ComputeCachePolicy so exact partial Region state cannot reach a whole read.
+   * a downstream task reads it. Force-recache never pre-materializes a planned
+   * producer from formal cache before that result exists; a non-planned
+   * boundary may still use exact reusable output. Persistent output is always
+   * filtered through ComputeCachePolicy so exact partial Region state cannot
+   * reach a whole read.
    */
   const NodeOutput* upstream_output(int up_id) const;
 
@@ -430,32 +489,126 @@ class NodeTaskRunner {
   /**
    * @brief Builds request-local runtime parameters from ready upstream values.
    * @param target_node Node whose static parameters and bindings are read.
+   * @param captured_sources Optional destination cleared and then filled with
+   * each borrowed connected source-value address in declaration order. The
+   * caller may pre-reserve its complete capacity before Run admission.
    * @return Owned ParameterMap with parameter-input values overlaid.
    * @throws GraphError when a connected parameter output is unavailable.
-   * @throws std::bad_alloc from recursive value copying.
-   * @note The committed node parameter state is never mutated.
+   * @throws std::logic_error, std::invalid_argument, or std::overflow_error
+   * when reusable formal-output validity cannot be checked.
+   * @throws std::bad_alloc from recursive value copying, map growth, formal
+   * validity checking, or captured-source vector growth.
+   * @note The committed node parameter state is never mutated. Captured
+   * pointers are identity observations, not owners, and remain valid only
+   * while the selected graph or same-Run temporary output remains alive. The
+   * product pre-admission path reserves every connected slot, while a general
+   * caller with insufficient capacity may allocate while appending.
    */
   plugin::ParameterMap resolve_runtime_parameters(
-      const Node& target_node) const;
+      const Node& target_node,
+      std::vector<const plugin::ParameterValue*>* captured_sources =
+          nullptr) const;
 
   /**
-   * @brief Overlays connected values into one preallocated effective map.
-   * @param target_node Node whose parameter edges identify upstream values.
-   * @param runtime_parameters Non-null map copied and structurally prepared
-   * before Run admission.
-   * @return Nothing after every connected value replaces its stable key.
-   * @throws std::invalid_argument when runtime_parameters is nullptr.
-   * @throws GraphError when a connected parameter output is unavailable.
-   * @throws std::bad_alloc when an operation-produced recursive value
-   * allocates.
-   * @note Disconnected declarations are inert and do not materialize a
-   * destination key. For connected declarations, all map nodes and key strings
-   * already exist. Only the copied operation-produced ParameterValue payload
-   * may grow at this late boundary, which remains outside the current
-   * structural Run estimator.
+   * @brief Validates one admitted effective map without copying its payload.
+   * @param target_node Current graph node providing static values and edges.
+   * @param execution_context Frozen map and source identities to validate.
+   * @return Nothing when map shape, snapshot-equivalent recursive values, and
+   * every source identity still match exactly.
+   * @throws GraphError when a dependency/output is missing, map content/shape
+   * changed, or an equal-content source owner replaced the admitted identity.
+   * @throws std::logic_error, std::invalid_argument, or std::overflow_error
+   * when reusable formal-output validity cannot be checked.
+   * @throws std::bad_alloc when formal validity checking or construction of a
+   * failure diagnostic cannot allocate.
+   * @note Connected declarations are applied in order, so only the last edge
+   * for a repeated destination determines its effective value. Disconnected
+   * declarations remain inert. Source addresses are compared as identities in
+   * addition to recursive value equality, so equal-content replacement fails
+   * closed. At this private snapshot boundary only, paired double NaN leaves
+   * compare reflexively; public `ParameterValue::operator==` keeps ordinary
+   * IEEE NaN behavior, while types, finite values, array order, object keys,
+   * and recursive structure remain exact. The equivalence traversal allocates
+   * nothing; successful validation performs no payload copy or map mutation,
+   * while formal-validity checks or a failing diagnostic may allocate.
    */
-  void overlay_runtime_parameters(
-      const Node& target_node, plugin::ParameterMap* runtime_parameters) const;
+  void validate_materialized_runtime_parameters(
+      const Node& target_node,
+      const TiledNodeExecutionContext& execution_context) const;
+
+  /**
+   * @brief Materializes connected values when every source is already stable.
+   * @param target_node Immutable graph node supplying static parameters and
+   * connected edge declarations.
+   * @param execution_context Non-null pre-admission context whose owned map is
+   * replaced only after complete resolution succeeds.
+   * @return True when the map now owns every effective connected value; false
+   * only when a connected producer/output is not yet reachable.
+   * @throws std::invalid_argument when execution_context is null or retained
+   * formal image/tensor facts violate their declared contracts.
+   * @throws std::logic_error when reusable formal-output validity cannot be
+   * checked through a valid Value accessor.
+   * @throws std::overflow_error when a retained formal logical extent exceeds
+   * Region bounds.
+   * @throws GraphError for non-missing graph/parameter contract failures.
+   * @throws std::bad_alloc from recursive candidate materialization,
+   * connected-source storage, formal validity checking, or diagnostics.
+   * @note `MissingDependency` is intentionally deferred so a target memory or
+   * disk-cache hit and a same-Run producer preserve their existing paths. A
+   * successful candidate is swapped without allocation before Run admission.
+   */
+  bool try_materialize_runtime_parameters_before_admission(
+      const Node& target_node,
+      TiledNodeExecutionContext* execution_context) const;
+
+  /**
+   * @brief Validates or admits the unique effective connected-parameter map.
+   * @param target_node Immutable graph node whose now-ready sources are read.
+   * @param execution_context Non-null stable context owned by this runner.
+   * @return Nothing after exact pre-admission content validation, optional
+   * service actual-capacity admission, and a no-throw map swap.
+   * @throws std::invalid_argument when execution_context is null, retained
+   * formal image/tensor facts violate their declared contracts, or a
+   * service-backed supplemental call crosses an invalid service/worker/Run
+   * boundary.
+   * @throws std::logic_error when reusable formal-output validity cannot be
+   * checked through a valid Value accessor, a service-backed supplemental path
+   * lacks its Run lease or current worker Run, service shutdown prevents
+   * admission, or no pre-accounted owner slot remains.
+   * @throws std::overflow_error when a retained formal logical extent exceeds
+   * Region bounds.
+   * @throws GraphError when a dependency/value/source identity changed,
+   * retained arithmetic overflowed, cancellation/failure won, or service
+   * policy/ledger admission rejects the delta.
+   * @throws std::bad_alloc from recursive candidate materialization,
+   * connected-source or diagnostic storage, formal validity checking, or
+   * service supplemental reservation preparation.
+   * @throws std::system_error when service supplemental reservation
+   * preparation or synchronization fails.
+   * @note The candidate remains unpublished during fallible preparation.
+   * Recursive resolution and formal validity/diagnostic work may allocate. A
+   * service-backed route compares actual recursive map bytes with the already
+   * charged placeholder owner and admits only the positive delta through a
+   * distinct retained-only root. A generic `ExecutionTaskRuntime` has no
+   * `ExecutionService` Run-ledger authority, so its completed candidate
+   * transfers directly into the runner-owned map. In both routes, statically
+   * no-throw `clear()` and `swap()` release placeholder nodes before installing
+   * the candidate, so two retained destination owners never coexist.
+   * Disconnected declarations remain inert.
+   */
+  void materialize_or_validate_runtime_parameters(
+      const Node& target_node,
+      TiledNodeExecutionContext* execution_context) const;
+
+  /**
+   * @brief Releases payloads covered by service supplemental reservations.
+   * @return Nothing.
+   * @throws Nothing; impossible synchronization failure terminates.
+   * @note ExecutionService calls this only after the exact physical Run has no
+   * in-flight callback or pending continuation, and before releasing its
+   * retained-only supplemental roots. Root-admitted early snapshots remain.
+   */
+  void release_supplemental_runtime_parameters() noexcept;
 
   /**
    * @brief Resolves image bindings without compressing destination slots.
@@ -594,6 +747,18 @@ class NodeTaskRunner {
 
   /** @brief Borrowed frozen per-node work and output-authority records. */
   const std::vector<PlannedNodeWork>* planned_work_;
+
+  /**
+   * @brief Process service used for late retained-only payload admission.
+   * @note Null for generic runtimes without Host ledger authority; those
+   * routes transfer a completed late candidate directly into runner ownership.
+   */
+  ExecutionService* execution_service_ = nullptr;
+
+  /** @brief Pre-accounted owner slots for unresolved connected tiled maps. */
+  std::uint64_t supplemental_retained_reservation_count_ = 0U;
+
+  friend class TaskSubmissionPlan;
 };
 
 }  // namespace ps::compute

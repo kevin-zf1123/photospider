@@ -462,6 +462,14 @@ std::uint64_t node_output_dynamic_retained_memory_bytes(
   return estimate.bytes();
 }
 
+/** @copydoc parameter_map_dynamic_retained_memory_bytes */
+std::uint64_t parameter_map_dynamic_retained_memory_bytes(
+    const plugin::ParameterMap& parameters) {
+  RetainedMemoryEstimator estimate("ParameterMap");
+  add_parameter_object_dynamic(parameters, &estimate);
+  return estimate.bytes();
+}
+
 /** @copydoc node_dynamic_retained_memory_bytes */
 std::uint64_t node_dynamic_retained_memory_bytes(const Node& node) {
   RetainedMemoryEstimator estimate("Node");

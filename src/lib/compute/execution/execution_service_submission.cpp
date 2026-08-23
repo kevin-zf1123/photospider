@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
@@ -60,6 +61,27 @@ void ExecutionService::execute_prepared_run(PreparedExecutionRun prepared) {
     run->accepting = false;
     failure = run->first_exception;
   }
+
+  std::uint64_t supplemental_reservation_size = 0U;
+  {
+    std::lock_guard<std::mutex> run_lock(run->mutex);
+    supplemental_reservation_size = run->supplemental_retained_reservation_size;
+  }
+  if (supplemental_reservation_size != 0U &&
+      (!run->payload_cleanup_lease.has_value() ||
+       !run->payload_cleanup_lease
+            ->release_supplemental_runtime_parameters())) {
+    std::terminate();
+  }
+  std::unique_ptr<PreparedExecutionSharedReservation[]>
+      supplemental_reservations;
+  {
+    std::lock_guard<std::mutex> run_lock(run->mutex);
+    supplemental_reservations =
+        std::move(run->supplemental_retained_reservations);
+    run->supplemental_retained_reservation_size = 0U;
+  }
+  supplemental_reservations.reset();
 
   {
     std::lock_guard<std::mutex> pool_lock(pool_->mutex);

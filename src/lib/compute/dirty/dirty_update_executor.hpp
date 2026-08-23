@@ -292,9 +292,11 @@ class StabilizedDirtyParameters {
    * @throws GraphError when checked structural arithmetic overflows.
    * @throws std::bad_alloc when temporary deduplication storage cannot grow.
    * @note The deterministic empty `NodeOutput` metadata retained by every
-   * result is included. Future operation-produced pixels, named-value growth,
-   * and opaque backend/plugin allocations remain outside pre-admission
-   * accounting.
+   * result is included. Future operation-produced image pixels and named values
+   * that remain solely inside producer-owned staged output, plus opaque
+   * backend/plugin allocations, remain outside this preflight estimate. A
+   * value later copied into a long-lived connected-parameter map requires its
+   * own actual-capacity initial or supplemental admission.
    */
   std::uint64_t missing_staged_output_entry_retained_memory_bytes(
       const std::vector<int>& anticipated_node_ids) const;

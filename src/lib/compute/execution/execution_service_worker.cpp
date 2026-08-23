@@ -1,6 +1,8 @@
+#include <cstdint>
 #include <limits>
 #include <list>
 #include <memory>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -59,6 +61,66 @@ ExecutionService::RunState& ExecutionService::current_worker_run() {
         "ExecutionService runtime operation requires a worker Run.");
   }
   return *tls_run_state_;
+}
+
+/** @copydoc ExecutionService::retain_current_run_shared_reservation */
+void ExecutionService::retain_current_run_shared_reservation(
+    const ComputeRunLease& run_lease, std::uint64_t retained_memory_bytes) {
+  if (retained_memory_bytes == 0U) {
+    throw std::invalid_argument(
+        "Current Run shared reservation requires retained memory.");
+  }
+  if (tls_service_ != this) {
+    throw std::invalid_argument(
+        "Current Run shared reservation requires this service worker.");
+  }
+  RunState& run = current_worker_run();
+  if (run_lease.descriptor().id() != run.id) {
+    throw std::invalid_argument(
+        "Current Run shared reservation lease does not match its worker.");
+  }
+  if (run_lease.observe_cancellation().has_value()) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "ComputeRun cancelled before connected payload admission.");
+  }
+  {
+    std::lock_guard<std::mutex> lock(run.mutex);
+    if (run.cancelled || run.first_exception || !run.published) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "ExecutionService Run cannot admit connected parameter payload.");
+    }
+    if (run.supplemental_retained_reservation_size >=
+            run.supplemental_retained_reservation_capacity ||
+        !run.supplemental_retained_reservations) {
+      throw std::logic_error(
+          "ExecutionService Run exhausted supplemental reservation slots.");
+    }
+  }
+
+  PreparedExecutionSharedReservation prepared =
+      prepare_shared_reservation(run_lease, retained_memory_bytes);
+  if (run_lease.observe_cancellation().has_value()) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "ComputeRun cancelled during connected payload admission.");
+  }
+
+  std::lock_guard<std::mutex> lock(run.mutex);
+  if (run.cancelled || run.first_exception || !run.published) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "ExecutionService Run closed during connected payload admission.");
+  }
+  if (run.supplemental_retained_reservation_size >=
+          run.supplemental_retained_reservation_capacity ||
+      !run.supplemental_retained_reservations) {
+    throw std::logic_error(
+        "ExecutionService Run exhausted supplemental reservation slots.");
+  }
+  run.supplemental_retained_reservations
+      [run.supplemental_retained_reservation_size++] = std::move(prepared);
 }
 
 /** @copydoc ExecutionService::set_exception */

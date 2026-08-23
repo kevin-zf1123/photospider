@@ -1557,6 +1557,19 @@ class ComputeRunLease {
   std::uint64_t retained_memory_bytes() const;
 
   /**
+   * @brief Clears tiled parameter maps covered by supplemental service roots.
+   * @return True when the matching Run-owned submission plan existed and was
+   * asked to clear its covered maps; false for an empty lease or missing plan.
+   * @throws Nothing; impossible control or runner synchronization failure
+   * terminates.
+   * @note ExecutionService invokes this only after the exact physical Run has
+   * zero in-flight callbacks and pending fence continuations. The retained
+   * lease keeps Run-owned plan storage stable while the control mutex is
+   * released before runner locks, preserving the preparation lock order.
+   */
+  bool release_supplemental_runtime_parameters() const noexcept;
+
+  /**
    * @brief Estimates one cancellation-notification allocation envelope.
    *
    * @param callback_capture_bytes Structural bytes captured by the registered

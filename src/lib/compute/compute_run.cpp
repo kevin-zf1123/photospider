@@ -1765,6 +1765,24 @@ std::uint64_t ComputeRunLease::retained_memory_bytes() const {
   return estimate.bytes();
 }
 
+/** @copydoc ComputeRunLease::release_supplemental_runtime_parameters */
+bool ComputeRunLease::release_supplemental_runtime_parameters() const noexcept {
+  if (!control_) {
+    return false;
+  }
+  TaskSubmissionPlan* plan = nullptr;
+  try {
+    std::lock_guard<std::mutex> lock(control_->mutex);
+    plan = control_->submission_plan.get();
+  } catch (...) {
+    std::terminate();
+  }
+  if (plan != nullptr) {
+    return plan->release_supplemental_runtime_parameters();
+  }
+  return false;
+}
+
 /**
  * @brief Estimates one heap-owned cancellation notification registration.
  *
