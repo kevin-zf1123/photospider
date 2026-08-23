@@ -322,13 +322,17 @@ ResolvedNodeInputs HighPrecisionDirtyNodeExecutor::resolve_inputs(
  * memory.
  * @throws GraphError when the frozen operation fails or returns no output.
  * @note Device-aware selection, including tiled preference, completed before
- * Run admission. Output stays staged until the dirty write buffer commits.
+ * Run admission. The tiled branch prepares and retains one normalized context
+ * before output-buffer creation or plan freezing. Output stays staged until
+ * the dirty write buffer commits.
  */
 void HighPrecisionDirtyNodeExecutor::execute_operation(
     Node& node, const HpPlanEntry& entry,
     const std::vector<const NodeOutput*>& image_inputs_ready,
     const DirtyResolvedOperation& operation) const {
   if (std::holds_alternative<TileOpFunc>(operation.operation)) {
+    const TiledInputContext input_context =
+        NodeExecutor::prepare_tiled_input_context(node, image_inputs_ready);
     {
       std::lock_guard<std::mutex> lock(node_mutex(node.id));
       static_cast<void>(hp_write_buffer_.ensure_output(node));
@@ -337,14 +341,14 @@ void HighPrecisionDirtyNodeExecutor::execute_operation(
         hp_write_buffer_.ensure_tiled_output_binding(
             node,
             NodeExecutor::freeze_tiled_output_plan(
-                node, image_inputs_ready, entry.hp_size,
+                node, input_context.inputs, entry.hp_size,
                 operation.tiled_output_inference),
             frozen_tiled_task_count(tiled_task_counts_, node.id));
     {
       OperationExecutionLease operation_lease = acquire_direct_dirty_operation(
           direct_execution_service_, run_lease_, operation);
       execute_tiled(node, std::get<TileOpFunc>(operation.operation), entry,
-                    operation, image_inputs_ready, output_binding);
+                    operation, input_context, output_binding);
     }
     return;
   }
@@ -357,7 +361,7 @@ void HighPrecisionDirtyNodeExecutor::execute_operation(
 void HighPrecisionDirtyNodeExecutor::execute_tiled(
     Node& node, const TileOpFunc& tile_fn, const HpPlanEntry& entry,
     const DirtyResolvedOperation& operation,
-    const std::vector<const NodeOutput*>& image_inputs_ready,
+    const TiledInputContext& input_context,
     HostOutputBinding& output_binding) const {
   TiledExecutionConfig config;
   config.tile_size = kHpMicroTileSize;
@@ -376,8 +380,8 @@ void HighPrecisionDirtyNodeExecutor::execute_tiled(
     runtime_->log_event(
         GraphRuntime::ExecutionEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE, node.id);
   }
-  NodeExecutor::execute_tiled_into_binding(
-      graph_, node, tile_fn, image_inputs_ready, output_binding, config);
+  NodeExecutor::execute_tiled_context_into_binding(
+      graph_, node, tile_fn, input_context, output_binding, config);
 }
 
 void HighPrecisionDirtyNodeExecutor::execute_monolithic(
@@ -522,19 +526,21 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
     rt_write_buffer_.stage_output(node.id, std::move(staged_output),
                                   preserved_existing_bytes);
   } else {
+    const TiledInputContext input_context =
+        NodeExecutor::prepare_tiled_input_context(node_for_exec,
+                                                  resolved_inputs.image_inputs);
     HostOutputBinding& output_binding =
         rt_write_buffer_.ensure_tiled_output_binding(
             node.id,
             NodeExecutor::freeze_tiled_output_plan(
-                node_for_exec, resolved_inputs.image_inputs, entry.rt_size,
+                node_for_exec, input_context.inputs, entry.rt_size,
                 selected_operation.tiled_output_inference),
             frozen_tiled_task_count(tiled_task_counts_, node.id));
     {
       OperationExecutionLease operation_lease = acquire_direct_dirty_operation(
           direct_execution_service_, run_lease_, selected_operation);
       execute_tiled(node_for_exec, std::get<TileOpFunc>(operation), entry,
-                    selected_operation, resolved_inputs.image_inputs,
-                    output_binding);
+                    selected_operation, input_context, output_binding);
     }
   }
 
@@ -607,7 +613,7 @@ void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
 void RealTimeDirtyNodeExecutor::execute_tiled(
     Node& node, const TileOpFunc& tile_fn, const RtPlanEntry& entry,
     const DirtyResolvedOperation& operation,
-    const std::vector<const NodeOutput*>& image_inputs_ready,
+    const TiledInputContext& input_context,
     HostOutputBinding& output_binding) const {
   TiledExecutionConfig config;
   config.tile_size = kRtTileSize;
@@ -621,8 +627,8 @@ void RealTimeDirtyNodeExecutor::execute_tiled(
   config.on_tile = [this](const PixelRect&) {
     observe_dirty_node_cancellation(run_lease_);
   };
-  NodeExecutor::execute_tiled_into_binding(
-      graph_, node, tile_fn, image_inputs_ready, output_binding, config);
+  NodeExecutor::execute_tiled_context_into_binding(
+      graph_, node, tile_fn, input_context, output_binding, config);
   if (runtime_) {
     runtime_->log_event(GraphRuntime::ExecutionEvent::EXECUTE_TILE, node.id);
     runtime_->log_event(

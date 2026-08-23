@@ -194,6 +194,50 @@ class NodeExecutor {
       const PixelSize& output_size);
 
   /**
+   * @brief Prepares the sole normalized input context for tiled execution.
+   *
+   * @param node Execution-local node whose effective parameters control
+   * image_mixing normalization.
+   * @param inputs Resolved upstream outputs in destination-index order.
+   * @return Owned normalized context whose pointers remain stable until the
+   * context is destroyed.
+   * @throws std::bad_alloc when normalization storage cannot allocate.
+   * @throws GraphError when required inputs, merge strategy, or channel
+   * conversion are invalid.
+   * @throws Dense-image metadata, arithmetic, readiness, or access failures
+   * unchanged.
+   * @note Route owners call this before output inference or Host allocation,
+   * then retain the returned context through every synchronous tile callback.
+   * The method performs no inference, allocation, provider entry, or graph
+   * mutation.
+   */
+  static TiledInputContext prepare_tiled_input_context(
+      const Node& node, const std::vector<const NodeOutput*>& inputs);
+
+  /**
+   * @brief Executes a tiled operator using one already prepared input context.
+   *
+   * @param graph Graph used for random-access ROI propagation.
+   * @param node Execution-local node paired with the selected callback.
+   * @param tiled_op Exact selected tiled operation implementation.
+   * @param input_context Prepared context previously used for output inference.
+   * @param output_binding Open Host binding frozen from input_context.inputs.
+   * @param config Optional tiled execution controls.
+   * @return Nothing.
+   * @throws std::bad_alloc when tile-view storage or provider work exhausts
+   * memory.
+   * @throws GraphError when inputs, tile geometry, or provider execution fail.
+   * @note The method neither normalizes again nor seals the binding. The caller
+   * must keep input_context, node, callback snapshot, and binding alive for the
+   * complete synchronous call and later seal or cancel at its publication
+   * boundary.
+   */
+  static void execute_tiled_context_into_binding(
+      GraphModel& graph, Node& node, const TileOpFunc& tiled_op,
+      const TiledInputContext& input_context, HostOutputBinding& output_binding,
+      const TiledExecutionConfig& config = {});
+
+  /**
    * @brief Executes a tiled operator into an existing Host binding.
    *
    * @param graph Graph used for random-access ROI propagation.
@@ -204,13 +248,14 @@ class NodeExecutor {
    * allocation, layout, extent, and identity.
    * @param config Optional tiled execution controls.
    * @return Nothing.
-   * @throws std::bad_alloc if normalization, allocation, or tile execution
+   * @throws std::bad_alloc if normalization or tile execution
    *         exhausts memory.
    * @throws GraphError when required inputs are missing or tile execution
    *         otherwise fails.
-   * @note Used by task, dirty HP, and RT paths that already own the destination
-   * binding. The method retires each issued tile grant but never seals;
-   * callers seal only at their atomic publication boundary.
+   * @note Compatibility entry for callers that do not need pre-allocation
+   * inference. It prepares one local context, executes synchronously, and
+   * retires each issued tile grant but never seals. Routes that infer or
+   * allocate externally must instead prepare and retain a context explicitly.
    */
   static void execute_tiled_into_binding(
       GraphModel& graph, Node& node, const TileOpFunc& tiled_op,

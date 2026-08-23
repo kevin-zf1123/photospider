@@ -520,10 +520,11 @@ void populate_input_tiles(GraphModel& graph, const Node& node,
  * @param output_binding Destination Host binding whose plan is frozen.
  * @param config Tiled execution controls.
  * @throws GraphError for invalid tile size or propagated operation failures.
- * @note This helper is shared by execute() and
- * execute_tiled_into_binding() so normalization happens once per node
- * invocation. Each callback receives one exact tile grant; any exception
- * fails the shared binding before propagating.
+ * @note This helper consumes the route-owned context shared by execute(),
+ * execute_tiled_context_into_binding(), and the compatibility
+ * execute_tiled_into_binding() wrapper; it never normalizes. Each callback
+ * receives one exact tile grant, and any exception fails the shared binding
+ * before propagating.
  */
 void execute_tiled_context_into(GraphModel& graph, Node& node,
                                 const TileOpFunc& tiled_op,
@@ -634,8 +635,7 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
             return op_func(node, inputs);
           } else {
             TiledInputContext input_context =
-                TiledInputNormalizer::normalize(node, inputs);
-            require_tiled_inputs(node, input_context);
+                NodeExecutor::prepare_tiled_input_context(node, inputs);
 
             const PixelSize output_size =
                 infer_output_size(node, input_context.inputs, config);
@@ -644,8 +644,8 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
                     node, input_context.inputs, output_size,
                     config.tiled_output_inference));
             NodeOutput output;
-            execute_tiled_context_into(graph, node, op_func, input_context,
-                                       output_binding, config);
+            NodeExecutor::execute_tiled_context_into_binding(
+                graph, node, op_func, input_context, output_binding, config);
             output.publish_image_value(output_binding.seal());
             return output;
           }
@@ -664,15 +664,34 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
   }
 }
 
+/** @copydoc NodeExecutor::prepare_tiled_input_context */
+TiledInputContext NodeExecutor::prepare_tiled_input_context(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  TiledInputContext input_context =
+      TiledInputNormalizer::normalize(node, inputs);
+  require_tiled_inputs(node, input_context);
+  return input_context;
+}
+
+/** @copydoc NodeExecutor::execute_tiled_context_into_binding */
+void NodeExecutor::execute_tiled_context_into_binding(
+    GraphModel& graph, Node& node, const TileOpFunc& tiled_op,
+    const TiledInputContext& input_context, HostOutputBinding& output_binding,
+    const TiledExecutionConfig& config) {
+  require_tiled_inputs(node, input_context);
+  execute_tiled_context_into(graph, node, tiled_op, input_context,
+                             output_binding, config);
+}
+
+/** @copydoc NodeExecutor::execute_tiled_into_binding */
 void NodeExecutor::execute_tiled_into_binding(
     GraphModel& graph, Node& node, const TileOpFunc& tiled_op,
     const std::vector<const NodeOutput*>& inputs,
     HostOutputBinding& output_binding, const TiledExecutionConfig& config) {
   TiledInputContext input_context =
-      TiledInputNormalizer::normalize(node, inputs);
-  require_tiled_inputs(node, input_context);
-  execute_tiled_context_into(graph, node, tiled_op, input_context,
-                             output_binding, config);
+      NodeExecutor::prepare_tiled_input_context(node, inputs);
+  NodeExecutor::execute_tiled_context_into_binding(
+      graph, node, tiled_op, input_context, output_binding, config);
 }
 
 /** @copydoc NodeExecutor::freeze_tiled_output_plan */

@@ -140,9 +140,23 @@ std::uint64_t NodeTaskRunner::retained_memory_bytes() const {
       static_cast<std::uint64_t>(output_mutexes_.capacity()));
   estimate.add_objects<std::unique_ptr<HostOutputBinding>>(
       static_cast<std::uint64_t>(tile_output_bindings_.capacity()));
+  estimate.add_objects<std::unique_ptr<TiledNodePreparationState>>(
+      static_cast<std::uint64_t>(tiled_node_preparation_states_.capacity()));
   for (const std::unique_ptr<std::mutex>& mutex : output_mutexes_) {
     if (mutex) {
       estimate.add_objects<std::mutex>();
+    }
+  }
+  for (const std::unique_ptr<TiledNodePreparationState>& state :
+       tiled_node_preparation_states_) {
+    if (!state) {
+      continue;
+    }
+    estimate.add_objects<TiledNodePreparationState>();
+  }
+  for (int tile_count : tile_task_counts_) {
+    if (tile_count > 0) {
+      estimate.add_objects<TiledNodeExecutionContext>();
     }
   }
   return estimate.bytes();
@@ -173,11 +187,14 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
       std::vector<std::atomic<int>>(execution_order_.size());
   node_precomputed_ = std::vector<std::atomic<bool>>(execution_order_.size());
   tile_output_bindings_.resize(execution_order_.size());
+  tiled_node_preparation_states_.reserve(execution_order_.size());
   output_mutexes_.reserve(execution_order_.size());
   for (size_t i = 0; i < execution_order_.size(); ++i) {
     completed_tile_counts_[i].store(0, std::memory_order_relaxed);
     node_precomputed_[i].store(false, std::memory_order_relaxed);
     output_mutexes_.push_back(std::make_unique<std::mutex>());
+    tiled_node_preparation_states_.push_back(
+        std::make_unique<TiledNodePreparationState>());
   }
   for (const PlannedTask& task : task_graph_.tasks) {
     if (task.kind != PlannedTaskKind::Tile) {
@@ -351,40 +368,92 @@ NodeTaskRunner::TaskDependencyRelease NodeTaskRunner::compute_tile_task(
         "No tiled op for " + target_node.type + ":" + target_node.subtype);
   }
 
-  Node node_for_exec;
-  {
-    std::lock_guard<std::mutex> lock(*output_mutexes_.at(node_idx));
-    node_for_exec = target_node;
-    node_for_exec.runtime_parameters = resolve_runtime_parameters(target_node);
-  }
-  std::vector<const NodeOutput*> inputs_ready =
-      resolve_image_inputs(target_node);
-
-  if (try_satisfy_tile_from_disk_cache(target_node, node_idx)) {
+  TiledNodeExecutionContext* execution_context =
+      prepare_tiled_node_execution(node_idx, target_node, *op_opt);
+  if (execution_context == nullptr) {
     return TaskDependencyRelease::CurrentTask;
   }
-
-  HostOutputBinding* output_binding = ensure_tile_output_binding(
-      node_idx, node_for_exec, *op_opt, inputs_ready);
-  if (!output_binding) {
-    return TaskDependencyRelease::CurrentTask;
+  HostOutputBinding* output_binding = tile_output_bindings_.at(node_idx).get();
+  if (output_binding == nullptr) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Prepared tiled node has no Host output binding.");
   }
-  TiledExecutionConfig tiled_config = tiled_config_for(target_node, *op_opt);
+  TiledExecutionConfig tiled_config =
+      tiled_config_for(target_node, execution_context->implementation);
   tiled_config.tile_size =
       task.tile_size > 0 ? task.tile_size : tiled_config.tile_size;
   tiled_config.output_roi = task.output_roi;
   tiled_config.output_size = planned_output_sizes_.at(node_idx);
 
   BenchmarkEvent current_event = start_event(target_node);
-  NodeExecutor::execute_tiled_into_binding(
-      graph_, node_for_exec, std::get<TileOpFunc>(op_opt->func), inputs_ready,
-      *output_binding, tiled_config);
-  return finalize_tiled_node_if_complete(node_idx, target_node, inputs_ready,
-                                         current_event)
+  NodeExecutor::execute_tiled_context_into_binding(
+      graph_, execution_context->node_for_exec,
+      std::get<TileOpFunc>(execution_context->implementation.func),
+      execution_context->input_context, *output_binding, tiled_config);
+  return finalize_tiled_node_if_complete(
+             node_idx, target_node, execution_context->input_context.inputs,
+             current_event)
              ? TaskDependencyRelease::CompleteTiledNode
              : TaskDependencyRelease::DeferTiledNode;
 }
 
+/** @copydoc NodeTaskRunner::prepare_tiled_node_execution */
+NodeTaskRunner::TiledNodeExecutionContext*
+NodeTaskRunner::prepare_tiled_node_execution(
+    int node_idx, const Node& target_node,
+    const OpImplementation& implementation) {
+  TiledNodePreparationState& state =
+      *tiled_node_preparation_states_.at(node_idx);
+  std::lock_guard<std::mutex> preparation_lock(state.preparation_mutex);
+  if (node_precomputed_[node_idx].load(std::memory_order_acquire)) {
+    return nullptr;
+  }
+  if (state.execution_context) {
+    if (state.execution_context->implementation.implementation_identity !=
+        implementation.implementation_identity) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Tiled node preparation disagrees with selected implementation.");
+    }
+    return state.execution_context.get();
+  }
+  if (state.initialization_failure) {
+    std::rethrow_exception(state.initialization_failure);
+  }
+  if (state.initialization_attempted) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Tiled node preparation has incomplete state.");
+  }
+  state.initialization_attempted = true;
+  try {
+    if (try_satisfy_tile_from_disk_cache(target_node, node_idx)) {
+      return nullptr;
+    }
+    auto execution_context = std::make_unique<TiledNodeExecutionContext>(
+        TiledNodeExecutionContext{target_node, implementation, {}});
+    execution_context->node_for_exec.runtime_parameters =
+        resolve_runtime_parameters(target_node);
+    const std::vector<const NodeOutput*> image_inputs =
+        resolve_image_inputs(target_node);
+    execution_context->input_context =
+        NodeExecutor::prepare_tiled_input_context(
+            execution_context->node_for_exec, image_inputs);
+    HostOutputBinding* output_binding =
+        ensure_tile_output_binding(node_idx, execution_context->node_for_exec,
+                                   execution_context->implementation,
+                                   execution_context->input_context.inputs);
+    if (output_binding == nullptr) {
+      return nullptr;
+    }
+    state.execution_context = std::move(execution_context);
+    return state.execution_context.get();
+  } catch (...) {
+    state.initialization_failure = std::current_exception();
+    throw;
+  }
+}
+
+/** @copydoc NodeTaskRunner::try_satisfy_tile_from_disk_cache */
 bool NodeTaskRunner::try_satisfy_tile_from_disk_cache(const Node& target_node,
                                                       int node_idx) {
   if (!allow_disk_cache()) {
@@ -407,6 +476,7 @@ bool NodeTaskRunner::try_satisfy_tile_from_disk_cache(const Node& target_node,
   return false;
 }
 
+/** @copydoc NodeTaskRunner::ensure_tile_output_binding */
 HostOutputBinding* NodeTaskRunner::ensure_tile_output_binding(
     int node_idx, const Node& target_node,
     const OpImplementation& implementation,
@@ -432,6 +502,7 @@ HostOutputBinding* NodeTaskRunner::ensure_tile_output_binding(
   return tile_output_bindings_[node_idx].get();
 }
 
+/** @copydoc NodeTaskRunner::finalize_tiled_node_if_complete */
 bool NodeTaskRunner::finalize_tiled_node_if_complete(
     int node_idx, const Node& target_node,
     const std::vector<const NodeOutput*>& image_inputs,

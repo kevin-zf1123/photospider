@@ -1615,3 +1615,5 @@ TEST(OpenCvOperationProviderMetadataContract,
 
 }  // namespace
 }  // namespace ps::providers::opencv
+
+#include "integration/opencv_route_normalization_cases.hpp"  // NOLINT(build/include)
