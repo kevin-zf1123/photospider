@@ -325,13 +325,17 @@ class NodeTaskRunner {
    * @param up_id Connected upstream node id, or a negative disconnected
    * sentinel.
    * @return Current-request temporary output when present, otherwise complete
-   * reusable formal HP output; nullptr for disconnected, missing, absent, or
-   * partial persistent output.
+   * reusable formal HP output for an allowed boundary; nullptr for
+   * disconnected, missing, absent, partial persistent output, or a planned
+   * force-recache producer whose same-Run result is not published yet.
    * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
    * std::bad_alloc when committed output validity cannot be checked.
    * @note Dependency release makes a temporary producer result complete before
-   * a downstream task reads it. Persistent output is always filtered through
-   * ComputeCachePolicy so exact partial Region state cannot reach a whole read.
+   * a downstream task reads it. Force-recache never pre-materializes a planned
+   * producer from formal cache before that result exists; a non-planned
+   * boundary may still use exact reusable output. Persistent output is always
+   * filtered through ComputeCachePolicy so exact partial Region state cannot
+   * reach a whole read.
    */
   const NodeOutput* upstream_output(int up_id) const;
 
@@ -475,15 +479,20 @@ class NodeTaskRunner {
   /**
    * @brief Builds request-local runtime parameters from ready upstream values.
    * @param target_node Node whose static parameters and bindings are read.
-   * @param captured_sources Optional preallocated destination receiving each
-   * connected source-value identity in declaration order.
+   * @param captured_sources Optional destination cleared and then filled with
+   * each borrowed connected source-value address in declaration order. The
+   * caller may pre-reserve its complete capacity before Run admission.
    * @return Owned ParameterMap with parameter-input values overlaid.
    * @throws GraphError when a connected parameter output is unavailable.
-   * @throws std::bad_alloc from recursive value copying.
-   * @note The committed node parameter state is never mutated. A capture
-   * destination must reserve for every connected declaration before Run
-   * admission; this helper clears it before filling and performs no intentional
-   * capacity growth on that path.
+   * @throws std::logic_error, std::invalid_argument, or std::overflow_error
+   * when reusable formal-output validity cannot be checked.
+   * @throws std::bad_alloc from recursive value copying, map growth, formal
+   * validity checking, or captured-source vector growth.
+   * @note The committed node parameter state is never mutated. Captured
+   * pointers are identity observations, not owners, and remain valid only
+   * while the selected graph or same-Run temporary output remains alive. The
+   * product pre-admission path reserves every connected slot, while a general
+   * caller with insufficient capacity may allocate while appending.
    */
   plugin::ParameterMap resolve_runtime_parameters(
       const Node& target_node,
@@ -498,11 +507,16 @@ class NodeTaskRunner {
    * still match exactly.
    * @throws GraphError when a dependency/output is missing, map content/shape
    * changed, or an equal-content source owner replaced the admitted identity.
-   * @throws Nothing else; validation performs no allocation or map mutation.
+   * @throws std::logic_error, std::invalid_argument, or std::overflow_error
+   * when reusable formal-output validity cannot be checked.
+   * @throws std::bad_alloc when formal validity checking or construction of a
+   * failure diagnostic cannot allocate.
    * @note Connected declarations are applied in order, so only the last edge
    * for a repeated destination determines its effective value. Disconnected
-   * declarations remain inert. This check prevents any second destination
-   * deep copy during tiled execution preparation.
+   * declarations remain inert. Source addresses are compared as identities in
+   * addition to recursive value equality, so equal-content replacement fails
+   * closed. Successful validation performs no payload copy or map mutation;
+   * a failing diagnostic may allocate.
    */
   void validate_materialized_runtime_parameters(
       const Node& target_node,
@@ -537,6 +551,8 @@ class NodeTaskRunner {
    * @throws GraphError when a dependency is missing, a pre-admission value
    * changed, cancellation won, or supplemental capacity cannot be admitted.
    * @throws std::bad_alloc from recursive candidate materialization.
+   * @throws std::system_error when supplemental reservation preparation or
+   * service synchronization fails.
    * @throws std::logic_error when a service path lacks its Run lease.
    * @note The candidate remains unpublished during fallible preparation. Its
    * actual recursive map bytes are compared with the already charged

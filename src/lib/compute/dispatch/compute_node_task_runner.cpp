@@ -410,6 +410,9 @@ const NodeOutput* NodeTaskRunner::upstream_output(int up_id) const {
     if (temp_results_[up_idx].has_value()) {
       return &*temp_results_[up_idx];
     }
+    if (force_recache_) {
+      return nullptr;
+    }
   }
   return ComputeCachePolicy::reusable_output(*upstream);
 }
@@ -654,10 +657,18 @@ void NodeTaskRunner::try_load_disk_cache(const Node& target_node,
 /**
  * @brief Builds execution parameters from static and same-request outputs.
  * @param target_node Node whose effective parameters are resolved.
+ * @param captured_sources Optional destination cleared and filled with the
+ * exact borrowed address of every connected source value in declaration order.
  * @return Deep ParameterMap copy with connected parameter values overlaid.
  * @throws GraphError when a connected parameter output is unavailable.
- * @throws std::bad_alloc from recursive value copying.
+ * @throws std::logic_error, std::invalid_argument, or std::overflow_error when
+ * reusable formal-output validity cannot be checked.
+ * @throws std::bad_alloc from recursive value copying, map growth, formal
+ * validity checking, or captured-source vector growth.
  * @note The result is request-local and does not mutate committed node state.
+ * Captured pointers freeze source-object identity rather than value equality
+ * and borrow graph or same-Run temporary output lifetime. Product callers
+ * pre-reserve the complete vector capacity before Run admission.
  */
 plugin::ParameterMap NodeTaskRunner::resolve_runtime_parameters(
     const Node& target_node,
@@ -691,7 +702,23 @@ plugin::ParameterMap NodeTaskRunner::resolve_runtime_parameters(
   return runtime_params;
 }
 
-/** @copydoc NodeTaskRunner::validate_materialized_runtime_parameters */
+/**
+ * @brief Validates an admitted effective map and captured source identities.
+ * @param target_node Current graph node providing static values and edges.
+ * @param execution_context Frozen map and exact source addresses to validate.
+ * @return Nothing when map shape, recursive values, and source identities
+ * still match.
+ * @throws GraphError when a dependency/output is missing, the map changed, or
+ * an equal-content source owner replaced the admitted identity.
+ * @throws std::logic_error, std::invalid_argument, or std::overflow_error when
+ * reusable formal-output validity cannot be checked.
+ * @throws std::bad_alloc when formal validity checking or failure-diagnostic
+ * construction cannot allocate.
+ * @note Connected declarations apply in order and the last repeated
+ * destination wins. Successful validation copies no payload and mutates no
+ * map, but failure diagnostics may allocate. Address comparison deliberately
+ * keeps equal-content replacement fail closed.
+ */
 void NodeTaskRunner::validate_materialized_runtime_parameters(
     const Node& target_node,
     const TiledNodeExecutionContext& execution_context) const {
@@ -827,7 +854,27 @@ bool NodeTaskRunner::try_materialize_runtime_parameters_before_admission(
   }
 }
 
-/** @copydoc NodeTaskRunner::materialize_or_validate_runtime_parameters */
+/**
+ * @brief Validates an early map or admits and installs one late connected map.
+ * @param target_node Immutable graph node whose ready sources are resolved.
+ * @param execution_context Non-null stable tiled context owned by this runner.
+ * @return Nothing after exact validation or one supplemental actual-capacity
+ * reservation and no-throw map swap.
+ * @throws std::invalid_argument for a null context or invalid service
+ * reservation boundary.
+ * @throws GraphError when a dependency/value/identity changed, cancellation
+ * won, retained arithmetic overflowed, or the ledger rejects the delta.
+ * @throws std::bad_alloc from recursive materialization or reservation
+ * preparation.
+ * @throws std::system_error from supplemental reservation preparation or
+ * service synchronization.
+ * @throws std::logic_error when the service, Run lease, worker Run, or
+ * pre-accounted owner slot is unavailable.
+ * @note The fallible candidate remains local until the positive retained delta
+ * has a stored service root. Only then does an allocation-free clear and swap
+ * install it. Reservation failure leaves the context map unchanged; physical
+ * settlement clears any installed supplemental payload before root release.
+ */
 void NodeTaskRunner::materialize_or_validate_runtime_parameters(
     const Node& target_node,
     TiledNodeExecutionContext* execution_context) const {
