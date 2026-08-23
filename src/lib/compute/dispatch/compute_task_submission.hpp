@@ -103,9 +103,12 @@ class TaskSubmissionPlan {
    * Service admission freezes this estimate before constraint allocations move
    * into their one ready submission, so the same storage remains charged
    * exactly once throughout its ownership transfer. Graph/cache/services are
-   * borrowed. Image pixels plus opaque operation, plugin, backend, and
-   * callable allocations are excluded because their sizes are not available
-   * from the host-side planning contract.
+   * borrowed. Stable connected recursive values and source-identity storage
+   * owned by tiled contexts are included. Same-Run connected values retain a
+   * placeholder plus an advertised supplemental owner slot until actual
+   * capacity can be admitted. Image pixels plus opaque operation, plugin,
+   * backend, and callable allocations are excluded because their sizes are not
+   * available from the host-side planning contract.
    */
   std::uint64_t retained_memory_bytes() const;
 
@@ -177,6 +180,16 @@ class TaskSubmissionPlan {
    * stack.
    */
   void emplace_task_runner(NodeTaskRunnerContext context);
+
+  /**
+   * @brief Returns service owner slots for deferred connected payloads.
+   * @return Zero before runner construction or the exact number of tiled node
+   * contexts whose connected sources were not yet reachable at construction.
+   * @throws Nothing.
+   * @note The service charges and allocates these inactive slots in the Run
+   * root. Each context may consume at most one retained-only reservation.
+   */
+  std::uint64_t supplemental_retained_reservation_count() const noexcept;
 
   /**
    * @brief Forwards settled tiled implementation-borrow evidence from runner.
@@ -283,6 +296,17 @@ class TaskSubmissionPlan {
   void close_publication() noexcept;
 
  private:
+  /**
+   * @brief Clears maps covered by service supplemental reservations.
+   * @return True when the owned runner existed and cleared its covered maps;
+   * false when no runner was installed.
+   * @throws Nothing; impossible synchronization failure terminates.
+   * @note ComputeRunLease invokes this only after ExecutionService observes no
+   * in-flight callback or pending fence continuation. Clearing precedes
+   * release of every retained-only supplemental root.
+   */
+  bool release_supplemental_runtime_parameters() noexcept;
+
   /**
    * @brief Exact-once entry state for one registered local task.
    *

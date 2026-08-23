@@ -347,7 +347,8 @@ PreparedComputeDispatch ComputeTaskDispatcher::prepare(
 
   const CpuRunResourceDemand resource_demand{
       state->lifecycle_lease.retained_memory_bytes(),
-      plan.task_resource_demand()};
+      plan.task_resource_demand(),
+      plan.supplemental_retained_reservation_count()};
   std::vector<ReadyTaskSubmission> initial_submissions =
       plan.make_initial_ready_submissions(state->lifecycle_lease);
   state->physical_run = execution_service.prepare_run(

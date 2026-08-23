@@ -1,4 +1,5 @@
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -74,6 +75,9 @@ PreparedExecutionRun ExecutionService::prepare_run(
       representative.identity().run_id().value(),
       representative.identity().local_task_id().value());
   ComputeRunLease service_lease = initial_submissions.front().lease_;
+  std::unique_ptr<PreparedExecutionSharedReservation[]>
+      supplemental_reservations;
+  std::optional<ComputeRunLease> payload_cleanup_lease;
   for (const ReadyTaskSubmission& submission : initial_submissions) {
     if (submission.metadata().run_id() != run_id) {
       throw std::invalid_argument(
@@ -135,13 +139,23 @@ PreparedExecutionRun ExecutionService::prepare_run(
   }
   service_lease.commit_resource_settlement_observation();
 
+  if (run_resource_demand.supplemental_retained_reservation_count != 0U) {
+    supplemental_reservations =
+        std::make_unique<PreparedExecutionSharedReservation[]>(
+            run_resource_demand.supplemental_retained_reservation_count);
+    payload_cleanup_lease.emplace(service_lease);
+  }
+
   auto run = std::make_shared<RunState>(
       run_id, std::move(admission.policy_graph_identity),
       std::move(admission.policy_graph_key),
       initial_submissions.front().metadata().qos(), host, execution_type,
       route_metal_registered, total_task_count, run_resource_demand.task,
       admission.ready_bytes_per_task,
-      admission.execution_retained_bytes_per_task, std::move(*reservation));
+      admission.execution_retained_bytes_per_task,
+      std::move(payload_cleanup_lease), std::move(*reservation),
+      std::move(supplemental_reservations),
+      run_resource_demand.supplemental_retained_reservation_count);
 
   const std::weak_ptr<RunState> weak_run(run);
   ComputeRunCancellationRegistration cancellation_registration =

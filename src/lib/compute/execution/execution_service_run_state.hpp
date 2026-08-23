@@ -396,7 +396,12 @@ struct ExecutionService::RunState final
    * @param task_resources Uniform adapter declaration for every submission.
    * @param ready_task_bytes Complete service-plus-adapter ready charge.
    * @param execution_task_bytes Complete service-plus-adapter retained charge.
+   * @param retained_payload_cleanup_lease Optional matching lease used only
+   * after physical settlement to clear supplementally admitted payloads.
    * @param run_reservation Complete admitted vector transferred into this Run.
+   * @param supplemental_reservations Preallocated inactive retained-only owner
+   * slots, or null when no deferred connected payload is possible.
+   * @param supplemental_capacity Exact allocated owner-slot count.
    * @throws Nothing.
    */
   RunState(ComputeRunId run_id, std::string graph_identity,
@@ -405,7 +410,11 @@ struct ExecutionService::RunState final
            bool metal_registered, int total_task_count,
            ReadyTaskResourceDemand task_resources,
            std::uint64_t ready_task_bytes, std::uint64_t execution_task_bytes,
-           ResourceLedger::Reservation run_reservation) noexcept
+           std::optional<ComputeRunLease> retained_payload_cleanup_lease,
+           ResourceLedger::Reservation run_reservation,
+           std::unique_ptr<PreparedExecutionSharedReservation[]>
+               supplemental_reservations,
+           std::uint64_t supplemental_capacity) noexcept
       : id(run_id),
         graph(std::move(graph_identity)),
         available_graph_key(std::move(graph_key)),
@@ -416,7 +425,11 @@ struct ExecutionService::RunState final
         resource_demand(task_resources),
         ready_bytes_per_task(ready_task_bytes),
         execution_retained_bytes_per_task(execution_task_bytes),
+        payload_cleanup_lease(std::move(retained_payload_cleanup_lease)),
         reservation(std::move(run_reservation)),
+        supplemental_retained_reservations(
+            std::move(supplemental_reservations)),
+        supplemental_retained_reservation_capacity(supplemental_capacity),
         tasks_to_complete(total_task_count) {}
 
   /**
@@ -486,11 +499,32 @@ struct ExecutionService::RunState final
   const std::uint64_t execution_retained_bytes_per_task;
 
   /**
+   * @brief Matching lease used only for post-drain payload cleanup.
+   * @note Present exactly when the root preallocated supplemental owner slots.
+   * The external RunState owns this lease, so it cannot form a Run-plan cycle.
+   */
+  std::optional<ComputeRunLease> payload_cleanup_lease;
+
+  /**
    * @brief Complete Run vector closed explicitly after synchronous settlement.
    * @note Optional ownership lets `execute_run()` return Host capacity before
    * a worker releases its final non-authoritative `shared_ptr<RunState>`.
    */
   std::optional<ResourceLedger::Reservation> reservation;
+
+  /**
+   * @brief Preallocated service owners for deferred retained-memory roots.
+   * @note Destruction order releases these roots before the primary root and
+   * payload_cleanup_lease. Only the prefix named by the size field is active.
+   */
+  std::unique_ptr<PreparedExecutionSharedReservation[]>
+      supplemental_retained_reservations;
+
+  /** @brief Fixed number of owner slots charged in the initial Run root. */
+  const std::uint64_t supplemental_retained_reservation_capacity = 0U;
+
+  /** @brief Active prefix length in supplemental_retained_reservations. */
+  std::uint64_t supplemental_retained_reservation_size = 0U;
 
   /** @brief Guards completion, failure, admission, and in-flight state. */
   mutable std::mutex mutex;

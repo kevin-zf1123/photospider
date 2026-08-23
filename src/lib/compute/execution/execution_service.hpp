@@ -233,7 +233,9 @@ ReadyTaskResourceDemand owned_callback_resource_demand(
  * concurrency for retained/scratch and by logical task count for ready bytes.
  * Work units are not ledger capacity; policy charges them when selecting each
  * ready submission. Mandatory service structural envelopes are added
- * independently.
+ * independently. Optional supplemental-owner slots are allocated and charged
+ * in that root before publication; actual late retained bytes still require a
+ * separate policy/ledger reservation before long-lived installation.
  *
  * @throws Nothing for value construction.
  * @note Callers must not place the same shared context in the per-task field;
@@ -246,6 +248,14 @@ struct CpuRunResourceDemand final {
 
   /** @brief Uniform additional demand carried by every logical task. */
   ReadyTaskResourceDemand task;
+
+  /**
+   * @brief Inactive service-owned slots for late retained-only reservations.
+   * @note Each slot is charged in the initial shared Run envelope and may own
+   * at most one supplemental root after a same-Run connected parameter becomes
+   * stable. Actual payload bytes are admitted separately before installation.
+   */
+  std::uint64_t supplemental_retained_reservation_count = 0U;
 };
 
 class ExecutionService;
@@ -1541,7 +1551,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param total_task_count Positive complete logical task count.
    * @param run_resource_demand Shared and per-task adapter declarations.
    * @return Checked CPU, retained, scratch, ready-entry, and ready-byte vector.
-   * @throws std::invalid_argument for a nonpositive task count.
+   * @throws std::invalid_argument for a nonpositive task count or more
+   * supplemental owner slots than logical tasks.
    * @throws std::logic_error before fixed worker configuration.
    * @throws GraphError when any structural aggregation overflows.
    * @note This diagnostic mints no authority. `execute_run()` uses the same
@@ -1564,7 +1575,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param initial_submissions Dispatcher-discovered initial ready values from
    * one Run.
    * @param total_task_count Complete positive logical planned-task count.
-   * @param run_resource_demand Shared and per-task structural demand.
+   * @param run_resource_demand Shared/per-task demand plus preallocated
+   * supplemental retained-owner slots.
    * @return Move-only reservation/publication staging consumed after lifecycle
    * installation.
    * @throws The validation, route, checked-estimation, policy, ledger,
@@ -1572,7 +1584,9 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @note This performs every fallible initial-publication preparation:
    * complete root reservation, cancellation registration, RunState creation,
    * ready grants/QueueEntry construction, and ready-store map/list node
-   * allocation. It publishes no ready entry or worker notification.
+   * allocation. Supplemental owner storage and its matching cleanup lease are
+   * established only after the complete root reservation succeeds. It
+   * publishes no ready entry or worker notification.
    * Multi-root adapters must put once-per-phase ownership in
    * prepare_shared_reservation() and retain only unique per-root ownership in
    * each call.
@@ -1599,6 +1613,28 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * ready work; it therefore cannot start provider code.
    */
   PreparedExecutionSharedReservation prepare_shared_reservation(
+      const ComputeRunLease& run_lease, std::uint64_t retained_memory_bytes);
+
+  /**
+   * @brief Retains one actual late payload root in the current worker Run.
+   * @param run_lease Matching Run lease borrowed by the active ready callback.
+   * @param retained_memory_bytes Positive actual-capacity delta not covered by
+   * the initial Run root.
+   * @return Nothing after the retained-only reservation is stored in one
+   * pre-accounted inactive owner slot.
+   * @throws std::invalid_argument for zero bytes, a mismatched Run, or a call
+   * outside this service's current worker.
+   * @throws std::logic_error when no owner slot remains or service shutdown
+   * prevents admission.
+   * @throws GraphError when cancellation/failure wins or the policy/ledger
+   * cannot admit the complete retained delta.
+   * @throws std::bad_alloc or std::system_error from reservation preparation.
+   * @note The caller must finish every fallible deep copy before this call but
+   * must not publish that candidate into long-lived Run state until return.
+   * Storage of the prepared root is allocation-free. Run settlement clears
+   * the covered payload after all callbacks drain, then releases every root.
+   */
+  void retain_current_run_shared_reservation(
       const ComputeRunLease& run_lease, std::uint64_t retained_memory_bytes);
 
   /**
@@ -1639,6 +1675,10 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @note Lifecycle installation must already have succeeded. Initial ready
    * publication consumes only preallocated store nodes and grants. Cancellation
    * visible before publication discards the prepared batch without visibility.
+   * After published work reaches zero in-flight callbacks and pending fence
+   * continuations, the service clears every tiled map covered by a supplemental
+   * root, releases those retained-only roots, and only then returns the primary
+   * Run reservation.
    */
   void execute_prepared_run(PreparedExecutionRun prepared);
 
@@ -1918,9 +1958,11 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param graph_identity Stable metadata copied by every logical task.
    * @param total_task_count Positive complete task count.
    * @param maximum_parallelism Optional positive Run callback-concurrency cap.
-   * @param demand Shared and uniform per-task adapter declaration.
+   * @param demand Shared/uniform per-task declaration plus supplemental owner
+   * slots.
    * @return Root vector and uniform ready/execution child envelopes.
-   * @throws std::invalid_argument for a nonpositive task count.
+   * @throws std::invalid_argument for a nonpositive task count or more
+   * supplemental owner slots than logical tasks.
    * @throws GraphError when any structural arithmetic overflows.
    * @note CPU slots and per-task retained/scratch bytes scale by the minimum
    * of fixed workers, logical tasks, and the optional Run cap. Ready entries

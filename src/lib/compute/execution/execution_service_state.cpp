@@ -72,7 +72,8 @@ std::uint64_t ExecutionService::calculate_policy_service_cost(
  * @param maximum_parallelism Optional positive Run callback-concurrency cap.
  * @param demand Shared once-per-Run and uniform per-task declarations.
  * @return Complete root vector and reusable child-grant envelopes.
- * @throws std::invalid_argument for a nonpositive task count.
+ * @throws std::invalid_argument for a nonpositive task count or more
+ * supplemental owner slots than logical tasks.
  * @throws GraphError when any addition or multiplication overflows.
  * @note Retained and scratch task bytes scale with maximum callback
  * concurrency: the minimum of fixed workers, logical tasks, and the optional
@@ -87,6 +88,11 @@ ExecutionService::calculate_cpu_run_admission(
   if (total_task_count <= 0) {
     throw std::invalid_argument(
         "ExecutionService requires a positive total task count.");
+  }
+  if (demand.supplemental_retained_reservation_count >
+      static_cast<std::uint64_t>(total_task_count)) {
+    throw std::invalid_argument(
+        "ExecutionService supplemental reservation slots exceed task count.");
   }
 
   const std::uint64_t service_task_bytes =
@@ -111,6 +117,8 @@ ExecutionService::calculate_cpu_run_admission(
   shared_estimate.add_bytes(
       service_run_envelope_bytes(policy_graph_identity, policy_graph_key));
   shared_estimate.add_bytes(demand.shared_retained_memory_bytes);
+  shared_estimate.add_objects<PreparedExecutionSharedReservation>(
+      demand.supplemental_retained_reservation_count);
 
   const std::uint64_t logical_task_count =
       static_cast<std::uint64_t>(total_task_count);

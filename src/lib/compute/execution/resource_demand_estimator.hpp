@@ -202,6 +202,18 @@ std::uint64_t node_output_dynamic_retained_memory_bytes(
     const NodeOutput& output);
 
 /**
+ * @brief Estimates complete dynamic storage owned by one parameter map.
+ * @param parameters Map whose ordered nodes, key capacities, recursive string,
+ * array, and object payloads are inspected.
+ * @return Checked dynamic bytes excluding the inline `ParameterMap` object.
+ * @throws GraphError when recursive structural arithmetic overflows.
+ * @note Each call describes one independent deep owner. Borrowed source maps
+ * and ownership transfers must not be charged again through this function.
+ */
+std::uint64_t parameter_map_dynamic_retained_memory_bytes(
+    const plugin::ParameterMap& parameters);
+
+/**
  * @brief Estimates every visible dynamic allocation owned by one Node copy.
  * @param node Node whose strings, containers, parameters, cache metadata, and
  * optional request state are inspected.
