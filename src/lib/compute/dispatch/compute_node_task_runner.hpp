@@ -444,12 +444,15 @@ class NodeTaskRunner {
    * @param runtime_parameters Non-null map copied and structurally prepared
    * before Run admission.
    * @return Nothing after every connected value replaces its stable key.
+   * @throws std::invalid_argument when runtime_parameters is nullptr.
    * @throws GraphError when a connected parameter output is unavailable.
    * @throws std::bad_alloc when an operation-produced recursive value
    * allocates.
-   * @note All map nodes and key strings already exist. Only the copied
-   * operation-produced ParameterValue payload may grow at this late boundary,
-   * which remains outside the current structural Run estimator.
+   * @note Disconnected declarations are inert and do not materialize a
+   * destination key. For connected declarations, all map nodes and key strings
+   * already exist. Only the copied operation-produced ParameterValue payload
+   * may grow at this late boundary, which remains outside the current
+   * structural Run estimator.
    */
   void overlay_runtime_parameters(
       const Node& target_node, plugin::ParameterMap* runtime_parameters) const;
