@@ -143,9 +143,15 @@ class NodeTaskRunner {
    * @param context Borrowed graph, service, timing, plan, and option state.
    * @throws GraphError when checked preparation arithmetic or graph lookup
    * fails.
+   * @throws std::logic_error when reusable formal-output validity cannot be
+   * checked through a valid Value accessor.
+   * @throws std::invalid_argument when retained formal image/tensor facts
+   * violate their declared contracts.
+   * @throws std::overflow_error when a retained formal logical extent exceeds
+   * Region bounds.
    * @throws std::bad_alloc when per-node state, execution-local Node copies,
-   * connected parameter snapshots, or fixed input-context structure cannot be
-   * established.
+   * recursive connected-parameter snapshots, formal output validity checks,
+   * or fixed input-context structure cannot be established.
    * @note The constructor stores service/plan references but also materializes
    * every tiled execution owner before Run admission. Connected values already
    * reachable through complete request or reusable output are deep-owned here
@@ -530,9 +536,15 @@ class NodeTaskRunner {
    * replaced only after complete resolution succeeds.
    * @return True when the map now owns every effective connected value; false
    * only when a connected producer/output is not yet reachable.
-   * @throws std::invalid_argument when execution_context is null.
+   * @throws std::invalid_argument when execution_context is null or retained
+   * formal image/tensor facts violate their declared contracts.
+   * @throws std::logic_error when reusable formal-output validity cannot be
+   * checked through a valid Value accessor.
+   * @throws std::overflow_error when a retained formal logical extent exceeds
+   * Region bounds.
    * @throws GraphError for non-missing graph/parameter contract failures.
-   * @throws std::bad_alloc from recursive candidate materialization.
+   * @throws std::bad_alloc from recursive candidate materialization,
+   * connected-source storage, formal validity checking, or diagnostics.
    * @note `MissingDependency` is intentionally deferred so a target memory or
    * disk-cache hit and a same-Run producer preserve their existing paths. A
    * successful candidate is swapped without allocation before Run admission.
@@ -547,20 +559,32 @@ class NodeTaskRunner {
    * @param execution_context Non-null stable context owned by this runner.
    * @return Nothing after exact pre-admission content validation or one late
    * actual-capacity reservation and no-throw map swap.
-   * @throws std::invalid_argument when execution_context is null.
-   * @throws GraphError when a dependency is missing, a pre-admission value
-   * changed, cancellation won, or supplemental capacity cannot be admitted.
-   * @throws std::bad_alloc from recursive candidate materialization.
+   * @throws std::invalid_argument when execution_context is null, retained
+   * formal image/tensor facts violate their declared contracts, or a
+   * supplemental call crosses an invalid service/worker/Run boundary.
+   * @throws std::logic_error when reusable formal-output validity cannot be
+   * checked through a valid Value accessor, a supplemental path lacks its Run
+   * lease or current worker Run, service shutdown prevents admission, or no
+   * pre-accounted owner slot remains.
+   * @throws std::overflow_error when a retained formal logical extent exceeds
+   * Region bounds.
+   * @throws GraphError when a dependency/value/source identity changed,
+   * retained arithmetic overflowed, the execution service is unavailable,
+   * cancellation/failure won, or policy/ledger admission rejects the delta.
+   * @throws std::bad_alloc from recursive candidate materialization,
+   * connected-source or diagnostic storage, formal validity checking, or
+   * supplemental reservation preparation.
    * @throws std::system_error when supplemental reservation preparation or
    * service synchronization fails.
-   * @throws std::logic_error when a service path lacks its Run lease.
-   * @note The candidate remains unpublished during fallible preparation. Its
-   * actual recursive map bytes are compared with the already charged
-   * placeholder owner; only the positive delta receives a distinct retained-
-   * only root. After that root is stored in service Run state, a no-throw clear
-   * releases placeholder nodes before `map::swap` installs the value without
-   * allocation, so the charged placeholder and actual map do not coexist as
-   * two retained destination owners. Disconnected declarations remain inert.
+   * @note The candidate remains unpublished during fallible preparation.
+   * Recursive resolution, formal validity/diagnostic work, and supplemental
+   * preparation may allocate. Its actual recursive map bytes are compared with
+   * the already charged placeholder owner; only the positive delta receives a
+   * distinct retained-only root. After that root is stored in service Run
+   * state, statically no-throw `clear()` and `swap()` release placeholder nodes
+   * and install the value, so the charged placeholder and actual map do not
+   * coexist as two retained destination owners. Disconnected declarations
+   * remain inert.
    */
   void materialize_or_validate_runtime_parameters(
       const Node& target_node,

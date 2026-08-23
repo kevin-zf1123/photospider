@@ -860,20 +860,31 @@ bool NodeTaskRunner::try_materialize_runtime_parameters_before_admission(
  * @param execution_context Non-null stable tiled context owned by this runner.
  * @return Nothing after exact validation or one supplemental actual-capacity
  * reservation and no-throw map swap.
- * @throws std::invalid_argument for a null context or invalid service
- * reservation boundary.
- * @throws GraphError when a dependency/value/identity changed, cancellation
- * won, retained arithmetic overflowed, or the ledger rejects the delta.
- * @throws std::bad_alloc from recursive materialization or reservation
- * preparation.
+ * @throws std::invalid_argument when execution_context is null, retained formal
+ * image/tensor facts violate their declared contracts, or a supplemental call
+ * crosses an invalid service/worker/Run boundary.
+ * @throws std::logic_error when reusable formal-output validity cannot be
+ * checked through a valid Value accessor, a supplemental path lacks its Run
+ * lease or current worker Run, service shutdown prevents admission, or no
+ * pre-accounted owner slot remains.
+ * @throws std::overflow_error when a retained formal logical extent exceeds
+ * Region bounds.
+ * @throws GraphError when a dependency/value/source identity changed, retained
+ * arithmetic overflowed, the execution service is unavailable,
+ * cancellation/failure won, or policy/ledger admission rejects the delta.
+ * @throws std::bad_alloc from recursive candidate materialization,
+ * connected-source or diagnostic storage, formal validity checking, or
+ * supplemental reservation preparation.
  * @throws std::system_error from supplemental reservation preparation or
  * service synchronization.
- * @throws std::logic_error when the service, Run lease, worker Run, or
- * pre-accounted owner slot is unavailable.
- * @note The fallible candidate remains local until the positive retained delta
- * has a stored service root. Only then does an allocation-free clear and swap
- * install it. Reservation failure leaves the context map unchanged; physical
- * settlement clears any installed supplemental payload before root release.
+ * @note The candidate remains unpublished during fallible preparation.
+ * Recursive resolution, formal validity/diagnostic work, and supplemental
+ * preparation may allocate. Its actual recursive map bytes are compared with
+ * the already charged placeholder owner; only the positive delta receives a
+ * distinct retained-only root. After that root is stored in service Run state,
+ * statically no-throw `clear()` and `swap()` release placeholder nodes and
+ * install the value, so the charged placeholder and actual map do not coexist
+ * as two retained destination owners. Disconnected declarations remain inert.
  */
 void NodeTaskRunner::materialize_or_validate_runtime_parameters(
     const Node& target_node,
