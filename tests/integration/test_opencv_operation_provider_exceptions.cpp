@@ -10,6 +10,7 @@
 #include <new>
 #include <opencv2/core.hpp>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <typeinfo>
 #include <utility>
@@ -217,6 +218,82 @@ Value make_weighted_blend_secondary() {
 }
 
 /**
+ * @brief Publishes one tightly packed FP32 image with a uniform sample domain.
+ *
+ * @param width Positive test image width.
+ * @param height Positive test image height.
+ * @param channels Positive test image channel count.
+ * @param samples Exact interleaved row-major sample payload.
+ * @param domain Uniform declaration attached to every image channel.
+ * @return Fresh Ready CPU Value with no channel-schema or color authority.
+ * @throws std::invalid_argument when shape and payload cardinality disagree.
+ * @throws Value validation, arithmetic, or allocation failures unchanged.
+ * @note The helper performs no sample conversion; declared endpoints and raw
+ *       FP32 values are intentionally independent test inputs.
+ */
+Value make_uniform_domain_fp32_image(std::size_t width, std::size_t height,
+                                     std::size_t channels,
+                                     const std::vector<float>& samples,
+                                     SampleDomain domain) {
+  if (width == 0U || height == 0U || channels == 0U ||
+      samples.size() != width * height * channels) {
+    throw std::invalid_argument(
+        "Uniform-domain FP32 fixture shape does not match its payload.");
+  }
+  std::vector<std::byte> storage(samples.size() * sizeof(float));
+  std::memcpy(storage.data(), samples.data(), storage.size());
+  DenseTensorDescriptor descriptor{{height, width, channels},
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{32U}};
+  ImageFacet facet = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+  facet.sample_domain =
+      SampleDomainFacet{1U,
+                        SampleEncoding{1U, SampleEncodingKind::Normalized},
+                        domain,
+                        {}};
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), std::move(facet),
+      StridedLayout{
+          {static_cast<std::ptrdiff_t>(width * channels * sizeof(float)),
+           static_cast<std::ptrdiff_t>(channels * sizeof(float)),
+           static_cast<std::ptrdiff_t>(sizeof(float))}},
+      std::move(storage));
+}
+
+/**
+ * @brief Checks one FP32 image's complete active payload in storage order.
+ *
+ * @param value Ready host-readable FP32 ordinary image.
+ * @param width Expected positive width.
+ * @param height Expected positive height.
+ * @param channels Expected positive channel count.
+ * @param expected Exact interleaved row-major samples.
+ * @return Nothing; GoogleTest reports shape or raw-value drift.
+ * @throws ImageView validation or payload access failures unchanged.
+ * @note Only active samples are read; allocation padding never participates.
+ */
+void expect_fp32_image_samples(const Value& value, std::size_t width,
+                               std::size_t height, std::size_t channels,
+                               const std::vector<float>& expected) {
+  const ImageView view(value);
+  ASSERT_EQ(view.width(), width);
+  ASSERT_EQ(view.height(), height);
+  ASSERT_EQ(view.channels(), channels);
+  ASSERT_EQ(expected.size(), width * height * channels);
+  std::size_t sample = 0U;
+  for (std::size_t y = 0U; y < height; ++y) {
+    for (std::size_t x = 0U; x < width; ++x) {
+      for (std::size_t channel = 0U; channel < channels; ++channel) {
+        float actual = 0.0F;
+        std::memcpy(&actual, view.channel_data(x, y, channel), sizeof(actual));
+        EXPECT_FLOAT_EQ(actual, expected[sample]);
+        ++sample;
+      }
+    }
+  }
+}
+
+/**
  * @brief Executes a weighted blend that maps three primary channels to four.
  *
  * @param primary Three-channel primary Value moved into callback-local input
@@ -284,6 +361,7 @@ NodeOutput execute_channel_expanding_weighted_blend(Value primary,
  * @param beta Secondary-input blend coefficient.
  * @param gamma Constant added to every destination channel.
  * @param channel_mapping Optional explicit source-to-destination mapping.
+ * @param merge_strategy Secondary size-normalization strategy.
  * @return Fresh three-channel provider output after local inputs retire.
  * @throws GraphError when the configured production callback is unavailable or
  *         rejects the request.
@@ -297,7 +375,8 @@ NodeOutput execute_same_channel_weighted_blend(
     Value primary, Value secondary, double alpha = 0.5, double beta = 0.5,
     double gamma = 0.0,
     std::optional<plugin::ParameterValue::Object> channel_mapping =
-        std::nullopt) {
+        std::nullopt,
+    const std::string& merge_strategy = "resize") {
   auto resolved = OpRegistry::instance().resolve_for_intent(
       "image_mixing", "add_weighted", ComputeIntent::GlobalHighPrecision);
   if (!resolved ||
@@ -313,7 +392,7 @@ NodeOutput execute_same_channel_weighted_blend(
   node.runtime_parameters["alpha"] = alpha;
   node.runtime_parameters["beta"] = beta;
   node.runtime_parameters["gamma"] = gamma;
-  node.runtime_parameters["merge_strategy"] = "resize";
+  node.runtime_parameters["merge_strategy"] = merge_strategy;
   if (channel_mapping.has_value()) {
     node.runtime_parameters["channel_mapping"] = std::move(*channel_mapping);
   }
@@ -353,14 +432,16 @@ plugin::ParameterValue::Object make_accumulating_channel_mapping() {
  * @param secondary Three-channel secondary Value moved into callback-local
  * input.
  * @param scale Explicit OpenCV multiply scale.
+ * @param merge_strategy Secondary size-normalization strategy.
  * @return Fresh provider output after all callback-local matrix headers retire.
  * @throws GraphError when the production callback is absent or rejects input.
  * @throws Metadata, allocation, or OpenCV provider exceptions unchanged.
  * @note The helper supplies no sample conversion, channel mapping, or payload-
  * derived interpretation.
  */
-NodeOutput execute_same_channel_multiply(Value primary, Value secondary,
-                                         double scale) {
+NodeOutput execute_same_channel_multiply(
+    Value primary, Value secondary, double scale,
+    const std::string& merge_strategy = "resize") {
   auto resolved = OpRegistry::instance().resolve_for_intent(
       "image_mixing", "multiply", ComputeIntent::GlobalHighPrecision);
   if (!resolved ||
@@ -374,7 +455,7 @@ NodeOutput execute_same_channel_multiply(Value primary, Value secondary,
   node.type = "image_mixing";
   node.subtype = "multiply";
   node.runtime_parameters["scale"] = scale;
-  node.runtime_parameters["merge_strategy"] = "resize";
+  node.runtime_parameters["merge_strategy"] = merge_strategy;
 
   NodeOutput primary_input;
   primary_input.publish_image_value(std::move(primary));
@@ -1028,6 +1109,205 @@ TEST(OpenCvOperationProviderMetadataContract,
   ASSERT_TRUE(safe_mapping.image_value().image_facet().has_value());
   EXPECT_TRUE(
       safe_mapping.image_value().image_facet()->sample_domain.has_value());
+}
+
+/**
+ * @brief Proves zero padding invalidates an excluding uniform declaration.
+ *
+ * @return Nothing; GoogleTest reports metadata or raw-normalization drift.
+ * @throws Provider selection, normalization, planning, allocation, and
+ *         execution failures unchanged to the test runner.
+ * @note Monolithic callbacks and production NodeExecutor tiled execution run
+ *       both weighted blend and multiply from exact `[1,1]` declarations.
+ *       Crop padding still emits raw zero, but no output may publish that
+ *       excluding Sample Domain.
+ */
+TEST(OpenCvOperationProviderMetadataContract,
+     NormalizationZeroPaddingFailsClosedOutsideUniformSampleDomain) {
+  ASSERT_NO_THROW(register_provider());
+  const SampleDomain domain{SampleDomainKind::Legal, 1.0, 1.0};
+  const std::vector<float> primary_samples(4U, 1.0F);
+  const std::vector<float> secondary_samples{1.0F};
+  const std::vector<float> expected{1.0F, 0.0F, 0.0F, 0.0F};
+
+  const NodeOutput monolithic_blend = execute_same_channel_weighted_blend(
+      make_uniform_domain_fp32_image(2U, 2U, 1U, primary_samples, domain),
+      make_uniform_domain_fp32_image(1U, 1U, 1U, secondary_samples, domain),
+      0.0, 1.0, 0.0, std::nullopt, "crop");
+  ASSERT_TRUE(monolithic_blend.image_value().image_facet().has_value());
+  EXPECT_FALSE(
+      monolithic_blend.image_value().image_facet()->sample_domain.has_value());
+  expect_fp32_image_samples(monolithic_blend.image_value(), 2U, 2U, 1U,
+                            expected);
+
+  const NodeOutput tiled_blend = execute_same_channel_tiled_binary(
+      "add_weighted",
+      make_uniform_domain_fp32_image(2U, 2U, 1U, primary_samples, domain),
+      make_uniform_domain_fp32_image(1U, 1U, 1U, secondary_samples, domain),
+      {{"alpha", 0.0},
+       {"beta", 1.0},
+       {"gamma", 0.0},
+       {"merge_strategy", "crop"}});
+  ASSERT_TRUE(tiled_blend.image_value().image_facet().has_value());
+  EXPECT_FALSE(
+      tiled_blend.image_value().image_facet()->sample_domain.has_value());
+  expect_fp32_image_samples(tiled_blend.image_value(), 2U, 2U, 1U, expected);
+
+  const NodeOutput monolithic_multiply = execute_same_channel_multiply(
+      make_uniform_domain_fp32_image(2U, 2U, 1U, primary_samples, domain),
+      make_uniform_domain_fp32_image(1U, 1U, 1U, secondary_samples, domain),
+      1.0, "crop");
+  ASSERT_TRUE(monolithic_multiply.image_value().image_facet().has_value());
+  EXPECT_FALSE(monolithic_multiply.image_value()
+                   .image_facet()
+                   ->sample_domain.has_value());
+  expect_fp32_image_samples(monolithic_multiply.image_value(), 2U, 2U, 1U,
+                            expected);
+
+  const NodeOutput tiled_multiply = execute_same_channel_tiled_binary(
+      "multiply",
+      make_uniform_domain_fp32_image(2U, 2U, 1U, primary_samples, domain),
+      make_uniform_domain_fp32_image(1U, 1U, 1U, secondary_samples, domain),
+      {{"scale", 1.0}, {"merge_strategy", "crop"}});
+  ASSERT_TRUE(tiled_multiply.image_value().image_facet().has_value());
+  EXPECT_FALSE(
+      tiled_multiply.image_value().image_facet()->sample_domain.has_value());
+  expect_fp32_image_samples(tiled_multiply.image_value(), 2U, 2U, 1U, expected);
+}
+
+/**
+ * @brief Proves 3-to-4 opaque alpha invalidates an excluding declaration.
+ *
+ * @return Nothing; GoogleTest reports metadata or raw-channel drift.
+ * @throws Provider selection, normalization, planning, allocation, and
+ *         execution failures unchanged to the test runner.
+ * @note Both execution modes and both binary operations consume uniform
+ *       `[0,0.5]` inputs. Positional 3-to-4 normalization emits raw alpha one;
+ *       weighted blend exposes one and multiply exposes one times 0.5, while
+ *       metadata must fail closed before either operation-specific proof.
+ */
+TEST(OpenCvOperationProviderMetadataContract,
+     NormalizationOpaqueAlphaFailsClosedOutsideUniformSampleDomain) {
+  ASSERT_NO_THROW(register_provider());
+  const SampleDomain domain{SampleDomainKind::Legal, 0.0, 0.5};
+  const std::vector<float> primary_samples(4U, 0.5F);
+  const std::vector<float> secondary_samples(3U, 0.5F);
+  const std::vector<float> blended_expected{0.5F, 0.5F, 0.5F, 1.0F};
+  const std::vector<float> multiplied_expected{0.25F, 0.25F, 0.25F, 0.5F};
+
+  const NodeOutput monolithic_blend = execute_same_channel_weighted_blend(
+      make_uniform_domain_fp32_image(1U, 1U, 4U, primary_samples, domain),
+      make_uniform_domain_fp32_image(1U, 1U, 3U, secondary_samples, domain),
+      0.0, 1.0, 0.0);
+  ASSERT_TRUE(monolithic_blend.image_value().image_facet().has_value());
+  EXPECT_FALSE(
+      monolithic_blend.image_value().image_facet()->sample_domain.has_value());
+  expect_fp32_image_samples(monolithic_blend.image_value(), 1U, 1U, 4U,
+                            blended_expected);
+
+  const NodeOutput tiled_blend = execute_same_channel_tiled_binary(
+      "add_weighted",
+      make_uniform_domain_fp32_image(1U, 1U, 4U, primary_samples, domain),
+      make_uniform_domain_fp32_image(1U, 1U, 3U, secondary_samples, domain),
+      {{"alpha", 0.0}, {"beta", 1.0}, {"gamma", 0.0}});
+  ASSERT_TRUE(tiled_blend.image_value().image_facet().has_value());
+  EXPECT_FALSE(
+      tiled_blend.image_value().image_facet()->sample_domain.has_value());
+  expect_fp32_image_samples(tiled_blend.image_value(), 1U, 1U, 4U,
+                            blended_expected);
+
+  const NodeOutput monolithic_multiply = execute_same_channel_multiply(
+      make_uniform_domain_fp32_image(1U, 1U, 4U, primary_samples, domain),
+      make_uniform_domain_fp32_image(1U, 1U, 3U, secondary_samples, domain),
+      1.0);
+  ASSERT_TRUE(monolithic_multiply.image_value().image_facet().has_value());
+  EXPECT_FALSE(monolithic_multiply.image_value()
+                   .image_facet()
+                   ->sample_domain.has_value());
+  expect_fp32_image_samples(monolithic_multiply.image_value(), 1U, 1U, 4U,
+                            multiplied_expected);
+
+  const NodeOutput tiled_multiply = execute_same_channel_tiled_binary(
+      "multiply",
+      make_uniform_domain_fp32_image(1U, 1U, 4U, primary_samples, domain),
+      make_uniform_domain_fp32_image(1U, 1U, 3U, secondary_samples, domain),
+      {{"scale", 1.0}});
+  ASSERT_TRUE(tiled_multiply.image_value().image_facet().has_value());
+  EXPECT_FALSE(
+      tiled_multiply.image_value().image_facet()->sample_domain.has_value());
+  expect_fp32_image_samples(tiled_multiply.image_value(), 1U, 1U, 4U,
+                            multiplied_expected);
+}
+
+/**
+ * @brief Proves in-domain zero and opaque-one constants retain authority.
+ *
+ * @return Nothing; GoogleTest reports conservative metadata or raw drift.
+ * @throws Provider selection, normalization, planning, allocation, and
+ *         execution failures unchanged to the test runner.
+ * @note A smaller three-channel secondary is crop-padded and then expanded to
+ *       four channels under `[0,1]`. Both synthesized constants are legal, so
+ *       the existing blend and product closure proofs remain eligible in both
+ *       production execution modes.
+ */
+TEST(OpenCvOperationProviderMetadataContract,
+     NormalizationConstantsInsideUniformSampleDomainRemainAuthoritative) {
+  ASSERT_NO_THROW(register_provider());
+  const SampleDomain domain{SampleDomainKind::Normalized, 0.0, 1.0};
+  const std::vector<float> primary_samples(16U, 0.5F);
+  const std::vector<float> secondary_samples(3U, 0.5F);
+  const std::vector<float> blended_expected{0.5F, 0.5F, 0.5F, 1.0F, 0.0F, 0.0F,
+                                            0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F,
+                                            0.0F, 0.0F, 0.0F, 1.0F};
+  const std::vector<float> multiplied_expected{
+      0.25F, 0.25F, 0.25F, 0.5F, 0.0F, 0.0F, 0.0F, 0.5F,
+      0.0F,  0.0F,  0.0F,  0.5F, 0.0F, 0.0F, 0.0F, 0.5F};
+
+  const NodeOutput monolithic_blend = execute_same_channel_weighted_blend(
+      make_uniform_domain_fp32_image(2U, 2U, 4U, primary_samples, domain),
+      make_uniform_domain_fp32_image(1U, 1U, 3U, secondary_samples, domain),
+      0.0, 1.0, 0.0, std::nullopt, "crop");
+  ASSERT_TRUE(monolithic_blend.image_value().image_facet().has_value());
+  EXPECT_TRUE(
+      monolithic_blend.image_value().image_facet()->sample_domain.has_value());
+  expect_fp32_image_samples(monolithic_blend.image_value(), 2U, 2U, 4U,
+                            blended_expected);
+
+  const NodeOutput tiled_blend = execute_same_channel_tiled_binary(
+      "add_weighted",
+      make_uniform_domain_fp32_image(2U, 2U, 4U, primary_samples, domain),
+      make_uniform_domain_fp32_image(1U, 1U, 3U, secondary_samples, domain),
+      {{"alpha", 0.0},
+       {"beta", 1.0},
+       {"gamma", 0.0},
+       {"merge_strategy", "crop"}});
+  ASSERT_TRUE(tiled_blend.image_value().image_facet().has_value());
+  EXPECT_TRUE(
+      tiled_blend.image_value().image_facet()->sample_domain.has_value());
+  expect_fp32_image_samples(tiled_blend.image_value(), 2U, 2U, 4U,
+                            blended_expected);
+
+  const NodeOutput monolithic_multiply = execute_same_channel_multiply(
+      make_uniform_domain_fp32_image(2U, 2U, 4U, primary_samples, domain),
+      make_uniform_domain_fp32_image(1U, 1U, 3U, secondary_samples, domain),
+      1.0, "crop");
+  ASSERT_TRUE(monolithic_multiply.image_value().image_facet().has_value());
+  EXPECT_TRUE(monolithic_multiply.image_value()
+                  .image_facet()
+                  ->sample_domain.has_value());
+  expect_fp32_image_samples(monolithic_multiply.image_value(), 2U, 2U, 4U,
+                            multiplied_expected);
+
+  const NodeOutput tiled_multiply = execute_same_channel_tiled_binary(
+      "multiply",
+      make_uniform_domain_fp32_image(2U, 2U, 4U, primary_samples, domain),
+      make_uniform_domain_fp32_image(1U, 1U, 3U, secondary_samples, domain),
+      {{"scale", 1.0}, {"merge_strategy", "crop"}});
+  ASSERT_TRUE(tiled_multiply.image_value().image_facet().has_value());
+  EXPECT_TRUE(
+      tiled_multiply.image_value().image_facet()->sample_domain.has_value());
+  expect_fp32_image_samples(tiled_multiply.image_value(), 2U, 2U, 4U,
+                            multiplied_expected);
 }
 
 /**

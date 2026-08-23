@@ -145,6 +145,10 @@ Value normalize_size(const Value& value, const ImageShape& required,
  * @return Empty when already matching; otherwise copied output with a fresh
  * image Value and preserved parameter/spatial/debug/plugin-lifetime state.
  * @throws GraphError or dense-image processing failures unchanged.
+ * @note Dense normalization keeps raw algorithms unchanged and retains Sample
+ * Domain only when every synthesized zero/opaque constant is declared. The
+ * resulting immutable facet is the exact semantic input used by output
+ * inference before Host allocation.
  */
 std::optional<NodeOutput> normalize_secondary(const NodeOutput* input,
                                               const ImageShape& required,

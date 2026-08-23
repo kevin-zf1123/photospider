@@ -32,17 +32,20 @@ struct TiledInputContext {
  * defines the base extent/channel count, secondary inputs are resized or
  * cropped according to merge_strategy, and supported channel conversions are
  * materialized into temporary NodeOutput storage. Crop/pad, resize, and
- * channel work publish fresh locally validated Values. Non-mixing nodes and
- * mixing nodes with fewer than two inputs pass through unchanged.
+ * channel work publish fresh locally validated Values. Sample Domain authority
+ * survives only when any zero-padding or opaque-alpha constant belongs to the
+ * declarations; otherwise the complete optional facet is omitted. Non-mixing
+ * nodes and mixing nodes with fewer than two inputs pass through unchanged.
  *
  * @note This class owns no graph state. Returned temporary storage belongs to
  * the returned TiledInputContext and must outlive any tile dispatch that uses
- * the normalized inputs. Normalization replaces only image descriptors;
+ * the normalized inputs. Normalization replaces only the canonical image Value;
  * named-data, spatial/debug provenance, and plugin DSO leases remain copied
- * from each upstream NodeOutput. Every materialized normalized image is
- * sealed before it enters the context. Non-host-readable inputs pass through
- * only while their shape already matches; normalization fails closed without
- * an explicit access plan.
+ * from each upstream NodeOutput. Image interpretation is preserved except for
+ * authority explicitly invalidated by the payload-free normalization proof.
+ * Every materialized normalized image is sealed before it enters the context.
+ * Non-host-readable inputs pass through only while their shape already
+ * matches; normalization fails closed without an explicit access plan.
  */
 class TiledInputNormalizer {
  public:
@@ -60,7 +63,9 @@ class TiledInputNormalizer {
    * @throws ReadyFenceAccessError or BufferAccessError when normalization
    *         requires payload access without an explicit access plan.
    * @note The method performs whole-input normalization only when needed; tile
-   * ROI clipping remains NodeExecutor's responsibility.
+   * ROI clipping remains NodeExecutor's responsibility. Any normalized Sample
+   * Domain is decided before output inference and Host allocation without
+   * observing payload extrema.
    */
   static TiledInputContext normalize(
       const Node& node, const std::vector<const NodeOutput*>& inputs);

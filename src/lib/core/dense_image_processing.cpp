@@ -483,6 +483,39 @@ long double opaque_alpha(const DenseTensorDescriptor& descriptor) {
 }
 
 /**
+ * @brief Tests one declared interval against a synthesized raw constant.
+ * @param domain Valid finite inclusive declared interval.
+ * @param constant Finite raw constant produced by normalization.
+ * @return True only when `constant` is inside the inclusive endpoints.
+ * @throws Nothing after metadata validation and maintained scalar selection.
+ */
+bool contains_raw_constant(const SampleDomain& domain,
+                           long double constant) noexcept {
+  return std::isfinite(constant) &&
+         constant >= static_cast<long double>(domain.minimum) &&
+         constant <= static_cast<long double>(domain.maximum);
+}
+
+/**
+ * @brief Tests every applicable declaration against one raw constant.
+ * @param facet Valid default and optional per-channel sample declarations.
+ * @param constant Finite raw constant produced by normalization.
+ * @return True only when the default and every override contain `constant`.
+ * @throws Nothing for bounded metadata iteration.
+ * @note Checking every override is conservative for geometry padding and
+ * prevents a whole-facet authority claim when any channel excludes the value.
+ */
+bool contains_raw_constant(const SampleDomainFacet& facet,
+                           long double constant) noexcept {
+  return contains_raw_constant(facet.default_domain, constant) &&
+         std::all_of(facet.per_channel.begin(), facet.per_channel.end(),
+                     [constant](const ChannelSampleDomain& override_domain) {
+                       return contains_raw_constant(override_domain.domain,
+                                                    constant);
+                     });
+}
+
+/**
  * @brief Restores the complete caller floating-point environment by RAII.
  * @throws std::runtime_error when capture or round-mode selection fails.
  * @note Destruction terminates on restoration failure because returning with a
@@ -530,6 +563,70 @@ class ScopedRoundToNearest final {
 };
 
 }  // namespace
+
+/** @copydoc project_normalized_sample_domain */
+std::optional<SampleDomainFacet> project_normalized_sample_domain(
+    const DenseTensorDescriptor& source_descriptor,
+    const ImageFacet& source_facet, const PixelSize& destination_size,
+    std::size_t destination_channels, SizeNormalizationMode size_mode) {
+  validate_dense_tensor_image_metadata(source_descriptor, source_facet);
+  if (source_descriptor.quantization.has_value() ||
+      source_descriptor.storage_encoding.kind !=
+          StorageEncodingKind::NativeScalar) {
+    throw std::invalid_argument(
+        "Dense image normalization proof requires native unquantized storage.");
+  }
+  if (destination_size.width <= 0 || destination_size.height <= 0 ||
+      destination_channels == 0U ||
+      destination_channels > kMaximumImageChannels) {
+    throw std::invalid_argument(
+        "Dense image normalization requires bounded positive output facts.");
+  }
+  const std::size_t source_width = image_bounds_width(source_facet.data_window);
+  const std::size_t source_height =
+      image_bounds_height(source_facet.data_window);
+  const std::size_t source_channels =
+      source_facet.channel_axis.has_value()
+          ? source_descriptor.shape[*source_facet.channel_axis]
+          : 1U;
+  const std::size_t destination_width =
+      static_cast<std::size_t>(destination_size.width);
+  const std::size_t destination_height =
+      static_cast<std::size_t>(destination_size.height);
+  switch (size_mode) {
+    case SizeNormalizationMode::Unchanged:
+    case SizeNormalizationMode::Resize:
+    case SizeNormalizationMode::CropOrPad:
+      break;
+    default:
+      throw std::invalid_argument(
+          "Dense image size normalization mode is unsupported.");
+  }
+  if (size_mode == SizeNormalizationMode::Unchanged &&
+      (source_width != destination_width ||
+       source_height != destination_height)) {
+    throw std::invalid_argument(
+        "Unchanged dense image normalization cannot alter the extent.");
+  }
+  if (!source_facet.sample_domain.has_value()) {
+    return std::nullopt;
+  }
+
+  const SampleDomainFacet& samples = *source_facet.sample_domain;
+  const bool synthesizes_zero =
+      size_mode == SizeNormalizationMode::CropOrPad &&
+      (destination_width > source_width || destination_height > source_height);
+  if (synthesizes_zero && !contains_raw_constant(samples, 0.0L)) {
+    return std::nullopt;
+  }
+  const bool synthesizes_opaque_alpha =
+      source_channels == 3U && destination_channels == 4U;
+  if (synthesizes_opaque_alpha &&
+      !contains_raw_constant(samples, opaque_alpha(source_descriptor))) {
+    return std::nullopt;
+  }
+  return samples;
+}
 
 /** @copydoc clone */
 Value clone(const Value& source) {
@@ -588,7 +685,10 @@ Value resize_region(const Value& source, const PixelRect& source_roi,
 /** @copydoc crop_or_pad */
 Value crop_or_pad(const Value& source, const PixelSize& destination_size) {
   const ImageView view(source);
-  const PreparedImage output = prepare_output(view, destination_size);
+  PreparedImage output = prepare_output(view, destination_size);
+  output.facet.sample_domain = project_normalized_sample_domain(
+      view.descriptor(), view.image_facet(), destination_size, view.channels(),
+      SizeNormalizationMode::CropOrPad);
   ValueBuilder builder = ValueBuilder::allocate_cpu_dense_tensor(
       output.descriptor, output.facet, output.layout, output.storage_size);
   {
@@ -626,8 +726,11 @@ Value convert_channels(const Value& source, std::size_t destination_channels) {
     throw std::invalid_argument(
         "Dense image channel conversion is unsupported.");
   }
-  const PreparedImage output =
+  PreparedImage output =
       prepare_output(view, checked_pixel_size(view), destination_channels);
+  output.facet.sample_domain = project_normalized_sample_domain(
+      view.descriptor(), view.image_facet(), checked_pixel_size(view),
+      destination_channels, SizeNormalizationMode::Unchanged);
   ValueBuilder builder = ValueBuilder::allocate_cpu_dense_tensor(
       output.descriptor, output.facet, output.layout, output.storage_size);
   {
