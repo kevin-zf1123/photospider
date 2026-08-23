@@ -247,7 +247,10 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
  * runner through a composite identity and a matching lease; the execution
  * runtime remains borrowed through the current synchronous wait. Cooperative
  * observations bracket planning, dispatch, phase transitions, and result
- * commit; cancellation that wins before commit leaves temp outputs unpublished.
+ * commit; cancellation that wins before commit leaves temp outputs
+ * unpublished. This generic route has no `ExecutionService` Run ledger, so a
+ * fully resolved late connected-parameter candidate transfers directly into
+ * runner ownership; the service overload retains positive-delta admission.
  */
 NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, ExecutionTaskRuntime& task_runtime,
@@ -448,8 +451,11 @@ NodeOutput& ComputeTaskDispatcher::execute_prepared(
  * stored on the target graph node.
  * @throws GraphError or standard exceptions from the selected route and shared
  * semantic stages, including missing or partial final target validity.
- * @note Only dispatch selection differs; plan, runner, temporary results, and
- * commit remain shared and Run/dispatcher-owned. Exact complete formal HP
+ * @note Dispatch selection also determines whether an `ExecutionService` Run
+ * ledger exists: the generic route owns a completed late connected-parameter
+ * map directly, while the service route admits its positive retained delta.
+ * Plan, runner, temporary results, and commit remain shared and
+ * Run/dispatcher-owned. Exact complete formal HP
  * cache may cut a node and upstream work needed only through that boundary;
  * force-recache keeps the request cone executable. Empty-plan validation,
  * upstream dependency reads, tile-cache skips, and final return all share

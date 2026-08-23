@@ -156,9 +156,12 @@ class NodeTaskRunner {
    * every tiled execution owner before Run admission. Connected values already
    * reachable through complete request or reusable output are deep-owned here
    * before the Run estimate freezes. Values that can exist only after a same-
-   * Run producer retain a pre-accounted supplemental-reservation slot and are
-   * admitted before their later no-throw map swap. Callers must keep all
-   * referenced objects alive until runtime completion.
+   * Run producer retain a service pre-accounted supplemental-reservation slot
+   * when `context.task_runtime` is an `ExecutionService`; that route admits the
+   * actual positive delta before its later no-throw map swap. A generic runtime
+   * has no service Run-ledger authority and transfers the completed candidate
+   * directly into its runner-owned map. Callers must keep all referenced
+   * objects alive until runtime completion.
    */
   explicit NodeTaskRunner(NodeTaskRunnerContext context);
 
@@ -207,7 +210,8 @@ class NodeTaskRunner {
    * frozen; their actual capacities are charged. Stable connected recursive
    * values are part of the Node estimate. An unresolved same-Run value retains
    * placeholder ownership here and advertises a separately pre-accounted
-   * supplemental owner slot.
+   * supplemental owner slot for service-backed admission. Generic runtimes
+   * have no `ExecutionService` root and do not consume that advertised count.
    */
   std::uint64_t retained_memory_bytes() const;
 
@@ -557,34 +561,36 @@ class NodeTaskRunner {
    * @brief Validates or admits the unique effective connected-parameter map.
    * @param target_node Immutable graph node whose now-ready sources are read.
    * @param execution_context Non-null stable context owned by this runner.
-   * @return Nothing after exact pre-admission content validation or one late
-   * actual-capacity reservation and no-throw map swap.
+   * @return Nothing after exact pre-admission content validation, optional
+   * service actual-capacity admission, and a no-throw map swap.
    * @throws std::invalid_argument when execution_context is null, retained
    * formal image/tensor facts violate their declared contracts, or a
-   * supplemental call crosses an invalid service/worker/Run boundary.
+   * service-backed supplemental call crosses an invalid service/worker/Run
+   * boundary.
    * @throws std::logic_error when reusable formal-output validity cannot be
-   * checked through a valid Value accessor, a supplemental path lacks its Run
-   * lease or current worker Run, service shutdown prevents admission, or no
-   * pre-accounted owner slot remains.
+   * checked through a valid Value accessor, a service-backed supplemental path
+   * lacks its Run lease or current worker Run, service shutdown prevents
+   * admission, or no pre-accounted owner slot remains.
    * @throws std::overflow_error when a retained formal logical extent exceeds
    * Region bounds.
    * @throws GraphError when a dependency/value/source identity changed,
-   * retained arithmetic overflowed, the execution service is unavailable,
-   * cancellation/failure won, or policy/ledger admission rejects the delta.
+   * retained arithmetic overflowed, cancellation/failure won, or service
+   * policy/ledger admission rejects the delta.
    * @throws std::bad_alloc from recursive candidate materialization,
    * connected-source or diagnostic storage, formal validity checking, or
-   * supplemental reservation preparation.
-   * @throws std::system_error when supplemental reservation preparation or
-   * service synchronization fails.
+   * service supplemental reservation preparation.
+   * @throws std::system_error when service supplemental reservation
+   * preparation or synchronization fails.
    * @note The candidate remains unpublished during fallible preparation.
-   * Recursive resolution, formal validity/diagnostic work, and supplemental
-   * preparation may allocate. Its actual recursive map bytes are compared with
-   * the already charged placeholder owner; only the positive delta receives a
-   * distinct retained-only root. After that root is stored in service Run
-   * state, statically no-throw `clear()` and `swap()` release placeholder nodes
-   * and install the value, so the charged placeholder and actual map do not
-   * coexist as two retained destination owners. Disconnected declarations
-   * remain inert.
+   * Recursive resolution and formal validity/diagnostic work may allocate. A
+   * service-backed route compares actual recursive map bytes with the already
+   * charged placeholder owner and admits only the positive delta through a
+   * distinct retained-only root. A generic `ExecutionTaskRuntime` has no
+   * `ExecutionService` Run-ledger authority, so its completed candidate
+   * transfers directly into the runner-owned map. In both routes, statically
+   * no-throw `clear()` and `swap()` release placeholder nodes before installing
+   * the candidate, so two retained destination owners never coexist.
+   * Disconnected declarations remain inert.
    */
   void materialize_or_validate_runtime_parameters(
       const Node& target_node,
@@ -740,7 +746,8 @@ class NodeTaskRunner {
 
   /**
    * @brief Process service used for late retained-only payload admission.
-   * @note Null for legacy/injected runtimes without Host ledger authority.
+   * @note Null for generic runtimes without Host ledger authority; those
+   * routes transfer a completed late candidate directly into runner ownership.
    */
   ExecutionService* execution_service_ = nullptr;
 

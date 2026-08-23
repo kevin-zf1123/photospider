@@ -858,33 +858,35 @@ bool NodeTaskRunner::try_materialize_runtime_parameters_before_admission(
  * @brief Validates an early map or admits and installs one late connected map.
  * @param target_node Immutable graph node whose ready sources are resolved.
  * @param execution_context Non-null stable tiled context owned by this runner.
- * @return Nothing after exact validation or one supplemental actual-capacity
- * reservation and no-throw map swap.
+ * @return Nothing after exact validation, optional service supplemental
+ * admission, and a no-throw map swap.
  * @throws std::invalid_argument when execution_context is null, retained formal
- * image/tensor facts violate their declared contracts, or a supplemental call
- * crosses an invalid service/worker/Run boundary.
+ * image/tensor facts violate their declared contracts, or a service-backed
+ * supplemental call crosses an invalid service/worker/Run boundary.
  * @throws std::logic_error when reusable formal-output validity cannot be
- * checked through a valid Value accessor, a supplemental path lacks its Run
- * lease or current worker Run, service shutdown prevents admission, or no
- * pre-accounted owner slot remains.
+ * checked through a valid Value accessor, a service-backed supplemental path
+ * lacks its Run lease or current worker Run, service shutdown prevents
+ * admission, or no pre-accounted owner slot remains.
  * @throws std::overflow_error when a retained formal logical extent exceeds
  * Region bounds.
  * @throws GraphError when a dependency/value/source identity changed, retained
- * arithmetic overflowed, the execution service is unavailable,
- * cancellation/failure won, or policy/ledger admission rejects the delta.
+ * arithmetic overflowed, cancellation/failure won, or service policy/ledger
+ * admission rejects the delta.
  * @throws std::bad_alloc from recursive candidate materialization,
  * connected-source or diagnostic storage, formal validity checking, or
- * supplemental reservation preparation.
- * @throws std::system_error from supplemental reservation preparation or
- * service synchronization.
+ * service supplemental reservation preparation.
+ * @throws std::system_error from service supplemental reservation preparation
+ * or synchronization.
  * @note The candidate remains unpublished during fallible preparation.
- * Recursive resolution, formal validity/diagnostic work, and supplemental
- * preparation may allocate. Its actual recursive map bytes are compared with
- * the already charged placeholder owner; only the positive delta receives a
- * distinct retained-only root. After that root is stored in service Run state,
- * statically no-throw `clear()` and `swap()` release placeholder nodes and
- * install the value, so the charged placeholder and actual map do not coexist
- * as two retained destination owners. Disconnected declarations remain inert.
+ * Recursive resolution and formal validity/diagnostic work may allocate. A
+ * service-backed route compares actual recursive map bytes with the already
+ * charged placeholder owner and admits only the positive delta through a
+ * distinct retained-only root. A generic `ExecutionTaskRuntime` has no
+ * `ExecutionService` Run-ledger authority, so its completed candidate instead
+ * transfers directly into the runner-owned map. In both routes, statically
+ * no-throw `clear()` and `swap()` release placeholder nodes before installing
+ * the candidate, so two retained destination owners never coexist.
+ * Disconnected declarations remain inert.
  */
 void NodeTaskRunner::materialize_or_validate_runtime_parameters(
     const Node& target_node,
@@ -909,12 +911,7 @@ void NodeTaskRunner::materialize_or_validate_runtime_parameters(
   const std::uint64_t supplemental_bytes =
       materialized_bytes > admitted_bytes ? materialized_bytes - admitted_bytes
                                           : 0U;
-  if (supplemental_bytes != 0U) {
-    if (execution_service_ == nullptr) {
-      throw GraphError(
-          GraphErrc::ComputeError,
-          "Execution runtime cannot admit connected parameter payload.");
-    }
+  if (supplemental_bytes != 0U && execution_service_ != nullptr) {
     if (run_lease_ == nullptr) {
       throw std::logic_error(
           "Deferred connected-parameter admission requires a Run lease.");

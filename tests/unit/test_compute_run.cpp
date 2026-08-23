@@ -28,6 +28,7 @@
 #include "compute/dirty/dirty_execution_common.hpp"
 #include "compute/dirty/dirty_update_executor.hpp"
 #include "compute/dirty/dirty_write_buffers.hpp"
+#include "compute/dispatch/compute_task_dispatcher.hpp"
 #include "compute/dispatch/compute_task_submission.hpp"
 #include "compute/dispatch/run_group.hpp"
 #include "compute/execution/execution_service.hpp"
@@ -7738,6 +7739,98 @@ TEST(ExecutionServiceProductResources,
   EXPECT_FALSE(exact.inference_phantom_destination_present);
   EXPECT_FALSE(exact.provider_phantom_destination_present);
   EXPECT_EQ(exact.reserved_after, ResourceVector{});
+}
+
+/**
+ * @brief Executes late recursive connected parameters through the generic
+ * runtime overload.
+ *
+ * @return Nothing; assertions report rejected generic dispatch, recursive
+ * value drift, provider/inference omission, or disconnected-key mutation.
+ * @throws Registry, graph, codec, Run, runtime, or allocation exceptions from
+ * the real producer-to-tiled-consumer product fixture.
+ * @note The generic `ExecutionTaskRuntime` owns a synchronous single-batch
+ * completion interval but no `ExecutionService` Run ledger. The same-Run
+ * producer publishes a large string and nested array/object map before the
+ * consumer's unique tiled preparation installs that exact runner-owned map.
+ * The service-backed supplemental-admission regression above remains the
+ * separate resource-ledger authority.
+ */
+TEST(ComputeTaskDispatcherGenericRuntime,
+     FullTiledSameRunConnectedPayloadUsesRunnerOwnedMap) {
+  ensure_tiled_constraint_operation_registered();
+  plugin::ParameterMap source_outputs = make_connected_parameter_outputs(true);
+  std::promise<void> callback_release;
+  const std::shared_future<void> callback_release_future =
+      callback_release.get_future().share();
+  callback_release.set_value();
+  auto callback_probe = std::make_shared<TiledConstraintGateProbe>(
+      callback_release_future, source_outputs);
+  ScopedTiledConstraintProbeBinding probe_binding(callback_probe);
+
+  constexpr int kImageInputNodeId = 243;
+  constexpr int kParameterSourceNodeId = 244;
+  constexpr int kTargetNodeId = 245;
+  GraphModel graph("cache/generic-runtime-connected-payload");
+  graph.add_node(make_tiled_constraint_cached_input_node(kImageInputNodeId));
+  graph.add_node(make_tiled_connected_parameter_source_node(
+      kParameterSourceNodeId, source_outputs, false));
+  graph.add_node(make_tiled_connected_parameter_node(
+      kTargetNodeId, kImageInputNodeId, kParameterSourceNodeId));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  CompletionTrackingRuntime runtime;
+  ComputeTaskDispatcher dispatcher(traversal, cache, events);
+  ComputeRun run(make_test_submission("generic-runtime-connected-payload",
+                                      graph.revision().value(), kTargetNodeId));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  ComputeRunLease lease = run.acquire_lease();
+  ComputeTaskDispatcher::ComputeDispatchRequest request;
+  request.node_id = kTargetNodeId;
+  request.cache_precision = "fp32";
+  request.disable_disk_cache = true;
+
+  NodeOutput* output = nullptr;
+  ASSERT_NO_THROW(output =
+                      &dispatcher.execute(graph, runtime, request, run, lease));
+  ASSERT_NE(output, nullptr);
+  EXPECT_TRUE(output->has_image_value());
+
+  const Node& committed_source = graph.node(kParameterSourceNodeId);
+  ASSERT_TRUE(committed_source.cached_output_high_precision.has_value());
+  EXPECT_EQ(committed_source.cached_output_high_precision->data,
+            source_outputs);
+  EXPECT_EQ(
+      callback_probe->source_parameter_entries.load(std::memory_order_acquire),
+      1);
+  EXPECT_EQ(callback_probe->inference_parameter_entries.load(
+                std::memory_order_acquire),
+            1);
+  EXPECT_EQ(callback_probe->inference_connected_parameter_matches.load(
+                std::memory_order_acquire),
+            1);
+  EXPECT_EQ(callback_probe->provider_parameter_entries.load(
+                std::memory_order_acquire),
+            2);
+  EXPECT_EQ(callback_probe->provider_connected_parameter_matches.load(
+                std::memory_order_acquire),
+            2);
+  EXPECT_FALSE(callback_probe->inference_phantom_destination_present.load(
+      std::memory_order_acquire));
+  EXPECT_FALSE(callback_probe->provider_phantom_destination_present.load(
+      std::memory_order_acquire));
+
+  const Node& committed_target = graph.node(kTargetNodeId);
+  EXPECT_EQ(committed_target.parameters.find(kDisconnectedParameterDestination),
+            committed_target.parameters.end());
+  EXPECT_EQ(committed_target.runtime_parameters.find(
+                kDisconnectedParameterDestination),
+            committed_target.runtime_parameters.end());
+  EXPECT_EQ(runtime.tasks_to_complete(), 0);
 }
 
 /**

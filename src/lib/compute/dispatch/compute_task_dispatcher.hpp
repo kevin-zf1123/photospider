@@ -200,8 +200,12 @@ class ComputeTaskDispatcher {
    * entered is non-preemptible, while tiled providers observe between tiles.
    * Full-HP callbacks own Run leases and carry
    * `(ComputeRunId, ComputeRunLocalTaskId)` identity; they contain no borrowed
-   * ExecutionTaskExecutor pointer. The current graph/runtime lifetime and
-   * visible commit still require synchronous wait.
+   * ExecutionTaskExecutor pointer. This generic overload has no
+   * `ExecutionService` Run-ledger authority: a late connected-parameter
+   * candidate becomes runner-owned through no-throw replacement after complete
+   * resolution, while the service overload separately admits its positive
+   * retained delta. The current graph/runtime lifetime and visible commit still
+   * require synchronous wait.
    */
   NodeOutput& execute(GraphModel& graph, ExecutionTaskRuntime& task_runtime,
                       const ComputeDispatchRequest& request, ComputeRun& run,
@@ -345,11 +349,13 @@ class ComputeTaskDispatcher {
    * @return Mutable committed target output.
    * @throws GraphError or standard exceptions from planning, execution,
    * service/runtime settlement, cache, telemetry, or commit.
-   * @note The optional route pointers select only physical dispatch; every
-   * semantic planning and visible commit stage is shared. Cooperative
-   * observations bracket planning, dispatch, phase transitions, and final
-   * result commit so cancellation that wins before commit leaves temporary
-   * outputs unpublished.
+   * @note The optional route pointers select physical dispatch and whether a
+   * process `ExecutionService` Run ledger exists; every semantic planning and
+   * visible commit stage is shared. The generic route directly owns any fully
+   * resolved late connected map, while the service route admits its positive
+   * retained delta. Cooperative observations bracket planning, dispatch,
+   * phase transitions, and final result commit so cancellation that wins
+   * before commit leaves temporary outputs unpublished.
    */
   NodeOutput& execute_impl(
       GraphModel& graph, ExecutionTaskRuntime& task_runtime,
