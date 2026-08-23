@@ -900,6 +900,7 @@ void register_host_adapter_ops() {
            const plugin::ParameterMap&) { return roi; });
     const OpPlanningCallbacks identity_planning{identity_dirty,
                                                 identity_forward,
+                                                {},
                                                 {}};
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "identity",
@@ -927,7 +928,7 @@ void register_host_adapter_ops() {
            const plugin::ParameterMap&, const std::vector<const NodeOutput*>*) {
           return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
         });
-    const OpPlanningCallbacks offset_planning{offset_dirty, {}, {}};
+    const OpPlanningCallbacks offset_planning{offset_dirty, {}, {}, {}};
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "offset_identity",
         MonolithicOpFunc([](const Node& node,

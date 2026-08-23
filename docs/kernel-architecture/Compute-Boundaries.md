@@ -197,10 +197,15 @@ entry uses checked move-only grants over that binding; all executable grants
 must retire successfully before one seal. A validation, overlap, range,
 alignment, overflow, exception, cancellation, duplicate, or omitted-retirement
 failure is sticky and prevents publication. Operation ABI v1 and codec staging
-are normalized at their inbound adapters; formal commit never synthesizes a missing
-Value. V-5 adds no new callback slot or general planner inference. It does add
-a callback-free implementation identity/metadata route to planned work and
-requires exact identity re-resolution before provider entry.
+are normalized at their inbound adapters; formal commit never synthesizes a
+missing Value. Planned work retains a callback-free implementation
+identity/metadata route and requires exact identity re-resolution before
+provider entry. After that re-resolution, a source-private tiled
+output-inference callback is copied from the same exact implementation snapshot
+as the execution callback, scheduling metadata, dirty propagator, and identity.
+It freezes the logical descriptor/facet before Host allocation; it is not an
+installed ABI callback and cannot be obtained from a sibling operation-level
+registration.
 
 `OutputTile::roi` remains a zero-based storage-relative callback projection,
 while `HostOutputWriteGrant::image_region()` remains a signed logical
@@ -360,6 +365,19 @@ instead of duplicating the string. A queued gate view borrows from the owning
 returned lease state; every gate query, wait predicate, start, and finish then
 borrows that state-owned copy, so a helper-local caller may retire or mutate
 its input after acquisition returns without changing active gate identity.
+For each full-plan tiled node, the runner also constructs its retained
+execution owner before Run admission. That owner contains the actual copied
+effective `Node`, pre-established static `ParameterMap` nodes and connected
+destination keys, and preallocated input-pointer and maximum normalized-output
+vector storage. Admission charges every visible Node string, vector, map,
+recursive static parameter, cache/LUT structure, and both vector capacities.
+The context borrows the exact `TaskSubmissionPlan::resolved_ops_` value, whose
+callback wrapper already retains the selected DSO, so it creates neither a
+second `OpImplementation` nor a second metadata/exclusive-key charge. Later
+connected `ParameterValue` payload and normalization-created immutable image
+payload remain operation-produced growth under the existing resource model;
+this exclusion does not cover the Host-owned Node, ParameterMap key/map, or
+TiledInputContext vector structure established before admission.
 After every initial value and ready grant has moved into a staged queue entry,
 `ExecutionService` destroys the caller-side submission-vector backing before
 active-Run publication and settlement waiting; only the staged entries and then
@@ -715,7 +733,10 @@ cancellation, retry choice, settlement, quota, artifact, or commit authority.
   from it may still execute.
 - Planned node work retains only selected implementation identity, device,
   metadata, and callback shape. Submission must re-resolve the same nonzero
-  identity before retaining a callback, so cached plans own no DSO lease.
+  identity before retaining execution, propagation, or tiled output-inference
+  callbacks, so cached plans own no DSO lease. The selected tiled inference
+  receives exact operation inputs and effective parameters before allocation;
+  prior staged output can seed matching bytes later but is not semantic input.
 - TensorSlice HP Region planning uses its eligibility selection once per
   executable target/upstream node and retains a callback-free operation key
   plus complete identity/device/shape/metadata route. Immediately after dirty
@@ -758,8 +779,20 @@ cancellation, retry choice, settlement, quota, artifact, or commit authority.
   geometry. Dirty/tile rectangles are zero-based storage projections; signed
   logical Region metadata is translated through the owning data window.
   TensorSlice is HP-only monolithic work and never gets a rectangle.
-- Tiled input normalization occurs once per node invocation where possible,
-  rather than once per tile callback.
+- Tiled input normalization occurs before revision-paired inference and Host
+  allocation, rather than after a raw-input plan has been frozen. Before Run
+  admission, full parallel execution owns one stable per-node context with an
+  execution-local `Node` and frozen input-container capacities, and borrows the
+  exact plan-owned selected implementation snapshot; preparation is attempted
+  at most once for that node/Run, and every concurrent sibling callback
+  borrows the same `context.inputs()` until settlement. Sequential and
+  dirty HP/RT invocations retain their prepared context across their own
+  synchronous inference, allocation, and callbacks. The shared payload-free
+  metadata proof preserves a secondary Sample Domain only when raw
+  zero-padding and three-to-four opaque alpha remain inside the declaration;
+  otherwise it omits that complete optional authority without changing raw
+  bytes. The resulting immutable normalized Values are the exact operation
+  inputs used by both inference and producer callbacks.
 - The V-3 dense invert inference callback cannot inspect payload bytes, and its
   execute result must match the inferred DenseTensor descriptor and Image
   Facet before publication preserves the exact sealed result revision.
@@ -1263,6 +1296,14 @@ adds neither another Value/readiness authority nor another provider callback;
 whole and parameter dependencies remain complete node joins. Commit rejects an
 undrained binding and publishes the already sealed Value once with independent
 Graph revision, HP generation, and Region facts.
+
+The per-node binding plan is already operation-specific at this point. For the
+current OpenCV tiled set, revision-paired inference preserves complete blur
+interpretation, projects blend/multiply facts independently, omits
+sample/color authority for difference and nonlinear curve output, and computes
+mapped blend channel cardinality before allocation. A tiled implementation
+without exact inference receives the conservative scalar/channel allocation
+fallback with no optional display/channel/sample/color authority.
 
 RT applies that predicate and publishes its proxy before opening the sibling
 gate. HP later validates independently. A newer Graph revision can therefore

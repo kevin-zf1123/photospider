@@ -33,16 +33,46 @@ coordinate；逻辑访问仅在完成 containment 检查后才减去 data-window
 `ChannelId` 和 `ChannelGroupId` record 承担该职责。观测 extrema、histogram、NaN/Inf count
 及其他 statistics 永远不会成为 descriptor、Facet 或 content identity。
 
-OpenCV provider 的 monolithic weighted-blend（`image_mixing:add_weighted`）发布边界把
-output metadata 视为两个 input 的语义交集，而不是从某个偏好的 input 直接复制。output
-geometry 不变时，可以保留 primary input 的有符号 data window 与 display window。只有
-output channel cardinality 不变、没有应用显式 channel mapping，且两个 input 都声明语义
-相等的 schema 时，channel 事实才能保留。color 还要求保留该 schema，且两个 input 都
-声明语义相等的 color interpretation。只有两个 input 都声明完全相同的 uniform domain，且
-均没有 per-channel override 时，sample-domain 事实才能保留。未经证明或不兼容的 optional
-fact 必须省略；该边界不得从 payload extrema 推断它、猜测 channel role，也不得执行隐式
-sample conversion。该规则不覆盖 `diff`、`multiply` 或 tiled output planning/publication，
-包括 tiled `add_weighted`；本文不声称更广泛的 multi-input metadata 交集保证。
+OpenCV provider 使用 operation-specific semantic projection，而不是从某个偏好的 input 直接
+复制。Monolithic 与 tiled `image_mixing:add_weighted` 分别保留已证明的 channel、color 与
+uniform sample 交集；显式 channel mapping 或 expansion 会移除稳定 channel/color authority。
+Blend sample authority 还要求相同的 uniform input facet。
+在 blend 或 multiply closure 前，共享的 payload-free normalization 规则会针对同一个声明证明
+每个合成 raw 常量：只有 destination 扩展时 crop/pad 才贡献零；三到四通道转换对浮点 storage
+贡献 opaque one，对整数 storage 贡献物理最大值。常量越出声明时，整份 Sample Domain 都必须
+移除；常量仍在域内时，声明保持不变并继续进入 operation 证明。Resize、纯 crop、一到三/四
+通道 replication、三/四到一通道 reduction 与四到三通道 reduction 不增加固定常量。Raw
+normalization、geometry、storage ownership 与 Value revision 规则都不改变。Blend closure 随后
+要求有限的 `alpha`/`beta`/`gamma`。没有 mapping 时，`alpha*x + beta*y + gamma` 的四种声明 endpoint
+组合都必须位于同一区间内。有 mapping 时，monolithic 与 tiled 共享的 payload-free 规则会镜像
+destination reset-to-gamma、有效及重复的 source accumulation、invalid-source skip 与 padded
+zero plane；任何 destination 不闭包，整份 uniform facet 都必须缺席。对于包含 channel three
+的 mapped output，`weighted` 以外的 alpha strategy 因超出已保留证明而 fail closed。
+Monolithic 与 tiled `image_mixing:multiply` 保留同样的 channel/color 交集，而 sample authority
+还要求完全相同的 uniform facet，以及一个有限 scale，其声明区间四个端点乘积都仍位于同一区间
+内。Tiled `image_mixing:diff` 只保留共同的稳定 channel 事实，并省略
+sample/color authority。Tiled `image_process:gaussian_blur` 保留完整 interpretation；非线性的
+tiled `image_process:curve_transform` 则保留 primary 的有符号 geometry 与稳定 channel 事实，
+同时省略 sample/color authority。未经证明的 optional fact 必须缺失；任何路径都不得从
+payload extrema 推断替代事实、猜测 role 或执行隐式 sample conversion。
+
+对于 tiled execution，selected implementation 的 pure source-private output inference 会在
+allocation 与 callback entry 前冻结唯一 descriptor/facet。`NodeExecutor` 会先为每次 node
+invocation 一次性物化所需 secondary normalization，并把 normalization 投影后的 Sample Domain
+写入 immutable temporary Value。这些 normalized Value 是 revision-paired inference 的精确
+operation input；旧的
+staged output 只能在匹配 frozen plan 后 seed byte，永远不能成为 semantic evidence。没有精确
+inference 的 implementation 会保留 scalar/channel allocation 事实与必需的 zero-origin data
+window，但省略可选 display/channel/sample/color authority。该范围覆盖上面列出的当前五个
+registered tiled OpenCV operation；本文不为 monolithic `diff` 或未列出的 provider path 声明
+policy。
+
+拥有这些 Value 的 context 本身也是 execution boundary 的一部分。Full parallel execution 只有
+在 effective `Node` 与精确 implementation snapshot 配对后，才会为每个 node/Run 发布一个稳定
+owner，全部 sibling tile 都借用它的同一组 input vector。Sequential 与 dirty HP/RT execution
+则让一份 prepared context 覆盖本次同步 plan freeze、allocation 与全部 callback。任何 route
+都不得先根据 raw secondary metadata inference，再只为 producer entry normalization 出另一份
+Value。
 
 ## Layout、binding 与所有权
 
@@ -195,7 +225,7 @@ equal endpoint/storage identity 通过 type-aware 比较读取 integer domain，
 - `include/photospider/data/{value,image_metadata,image_view}.hpp`
 - `include/photospider/data/{sample_conversion,value_artifact}.hpp`
 - `include/photospider/host/{host,value_result,value_artifact_result}.hpp`
-- `src/lib/core/{value,sample_conversion,value_artifact}.cpp`
+- `src/lib/core/{value,sample_conversion,value_artifact,dense_image_processing}.cpp`
 - `src/lib/adapters/opencv/{value_adapter_opencv,image_artifact_codec_opencv}.*`
 - `src/lib/adapters/openexr/openexr_dense_image_codec.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
@@ -205,6 +235,9 @@ equal endpoint/storage identity 通过 type-aware 比较读取 integer domain，
 Host result、IPC lease、worker/durable replay、OpenCV lifetime、普通 OpenEXR round trip 和
 provider-defined Deep 行为。source-residue search 仅是 migration evidence，不注册为 CTest 或 CI
 behavior test。
+Production-route OpenCV 回归还会覆盖 full parallel、dirty HP 与 dirty RT 在
+inference/allocation 前完成 normalization，包括 multi-sibling context identity、zero/opaque 常量、
+raw pixel 与 `[0,1]` authority retention。
 later-buffer artifact 回归使用仅在 BUILD_TESTING 中编译的 source-private runtime failpoint，并在
 选定的 `BufferHandle::ControlBlock` allocation 之前立即触发。production build 不编译 test-access
 seam，测试也不替换 process 或 shared-library 的 global allocation 符号。

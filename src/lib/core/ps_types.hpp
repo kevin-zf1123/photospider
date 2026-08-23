@@ -931,6 +931,44 @@ using DependencyLutBuilder = std::function<SpatialDependencyMap(
     const plugin::ParameterMap& effective_parameters)>;
 
 /**
+ * @brief Complete logical DenseImage result inferred before tiled allocation.
+ *
+ * @throws std::bad_alloc when owned descriptor or ImageFacet metadata cannot
+ * allocate.
+ * @note This source-private value owns no layout, binding, payload, revision,
+ * readiness, provider name, or callback lifetime. NodeExecutor validates it
+ * and derives the sole Host layout only after the selected implementation has
+ * frozen this result.
+ */
+struct TiledOutputInferenceResult final {
+  /** @brief Exact concrete logical tensor descriptor for the output. */
+  DenseTensorDescriptor descriptor;
+
+  /** @brief Complete ordinary-image interpretation authorized for the output.
+   */
+  ImageFacet image_facet;
+};
+
+/**
+ * @brief Pure metadata inference for one selected tiled implementation.
+ *
+ * @param node Borrowed execution-local node with effective parameters.
+ * @param image_inputs Borrowed operation inputs in destination-index order;
+ * null entries remain disconnected and no prior staged output is inserted.
+ * @param output_size Positive extent frozen by task or dirty planning.
+ * @return Complete logical descriptor and ImageFacet for Host allocation.
+ * @throws Any validation, arithmetic, or allocation exception emitted by the
+ * implementation-specific inference policy.
+ * @note The callback must inspect immutable metadata only. It must not read
+ * payload bytes, wait on readiness, allocate output storage, infer facts from
+ * observed samples, perform sample/color conversion, or enter the execution
+ * callback. Registry snapshots pair it with the exact callback identity.
+ */
+using TiledOutputInferenceFunc = std::function<TiledOutputInferenceResult(
+    const Node& node, const std::vector<const NodeOutput*>& image_inputs,
+    const PixelSize& output_size)>;
+
+/**
  * @brief Coherent dependency-builder callback, flag, and ownership revisions.
  *
  * @throws std::bad_alloc or callback-defined copy exceptions when copied.
@@ -971,7 +1009,8 @@ enum class PropagationContractStatus {
  * Scalar registration entry points move this record into the same
  * `OpImplementation` snapshot as the execution callback and scheduling
  * metadata. This preserves one selected revision across execution, backward
- * propagation, forward propagation, and data-dependent dependency planning.
+ * propagation, forward propagation, data-dependent dependency planning, and
+ * pre-allocation tiled output inference.
  *
  * @throws std::bad_alloc or callback-defined copy exceptions when copied.
  * @note An absent callback selects the exact implementation's documented
@@ -987,6 +1026,15 @@ struct OpPlanningCallbacks {
 
   /** @brief Optional dependency-LUT builder for the exact implementation. */
   std::optional<DependencyLutBuilder> dependency_builder;
+
+  /**
+   * @brief Optional exact tiled output metadata inference callback.
+   * @note Absence selects NodeExecutor's conservative legacy allocation facts,
+   * which never copy optional channel/sample/color authority. Maintained tiled
+   * implementations must register an operation-specific callback whenever
+   * richer interpretation or channel projection is valid.
+   */
+  std::optional<TiledOutputInferenceFunc> tiled_output_inference;
 };
 
 /**
@@ -1053,6 +1101,13 @@ struct OpImplementation {
    * Absence never selects another implementation's operation-level builder.
    */
   std::optional<DependencyLutBuilder> dependency_builder;
+
+  /**
+   * @brief Tiled output metadata inference owned by this implementation.
+   * @note The callback is invoked before Host allocation or execution entry.
+   * Absence never borrows another implementation's or operation-level policy.
+   */
+  std::optional<TiledOutputInferenceFunc> tiled_output_inference;
 
   /**
    * @brief Checks whether the callable consumes complete NodeOutput values.

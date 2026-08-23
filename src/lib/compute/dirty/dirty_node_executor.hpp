@@ -24,6 +24,7 @@ namespace ps::compute {
 class ComputeRunLease;
 class ExecutionService;
 class StabilizedDirtyParameters;
+class TiledInputContext;
 
 /**
  * @brief Immutable operation/device snapshot for one dirty-plan node.
@@ -67,6 +68,14 @@ struct DirtyResolvedOperation {
    * operation-level registry callback after admission.
    */
   std::optional<DirtyRoiPropFunc> dirty_propagator;
+
+  /**
+   * @brief Pure tiled output inference frozen with the exact implementation.
+   * @note Tiled allocation invokes this callback before Host binding creation
+   * and provider entry. Absence selects the conservative no-optional-facts
+   * fallback and never borrows an operation-level sibling policy.
+   */
+  std::optional<TiledOutputInferenceFunc> tiled_output_inference;
 };
 
 /** @brief Node-id index of immutable dirty operation/device snapshots. */
@@ -219,6 +228,8 @@ class HighPrecisionDirtyNodeExecutor {
    * memory.
    * @throws GraphError when an operation returns no output.
    * @note Selection and device routing already completed before admission.
+   * The tiled branch prepares one normalized context before output-buffer
+   * creation or plan freezing and retains it through all synchronous tiles.
    */
   void execute_operation(
       Node& node, const HpPlanEntry& entry,
@@ -232,7 +243,8 @@ class HighPrecisionDirtyNodeExecutor {
    * @param tile_fn Tiled HP operation implementation.
    * @param entry HP ROI, extent, and halo metadata.
    * @param operation Exact selected implementation metadata and ROI callback.
-   * @param image_inputs_ready Resolved HP image inputs.
+   * @param input_context Exact normalized inputs already used to freeze the
+   * output plan.
    * @param output_binding Open request-local destination binding.
    * @return Nothing.
    * @throws GraphError or operation exceptions from NodeExecutor.
@@ -243,7 +255,7 @@ class HighPrecisionDirtyNodeExecutor {
   void execute_tiled(Node& node, const TileOpFunc& tile_fn,
                      const HpPlanEntry& entry,
                      const DirtyResolvedOperation& operation,
-                     const std::vector<const NodeOutput*>& image_inputs_ready,
+                     const TiledInputContext& input_context,
                      HostOutputBinding& output_binding) const;
 
   /**
@@ -379,7 +391,9 @@ class RealTimeDirtyNodeExecutor {
    * observe before every tile; a monolithic provider already entered is
    * non-preemptible. Cancellation observed after provider return suppresses
    * ROI/version/event staging, leaving any partial proxy write-buffer data
-   * request-local for outer failure cleanup.
+   * request-local for outer failure cleanup. The tiled branch prepares one
+   * normalized context before plan freezing or Host allocation and retains it
+   * through every synchronous callback.
    */
   void execute(Node& node, const RtPlanEntry& entry);
 
@@ -425,7 +439,8 @@ class RealTimeDirtyNodeExecutor {
    * @param tile_fn Tiled operation implementation.
    * @param entry RT dirty ROI, extent, and halo metadata.
    * @param operation Exact selected implementation metadata and ROI callback.
-   * @param image_inputs_ready Resolved RT image inputs.
+   * @param input_context Exact normalized inputs already used to freeze the
+   * output plan.
    * @param output_binding Open request-local destination binding.
    * @return Nothing.
    * @throws GraphError or operation exceptions from NodeExecutor.
@@ -436,7 +451,7 @@ class RealTimeDirtyNodeExecutor {
   void execute_tiled(Node& node, const TileOpFunc& tile_fn,
                      const RtPlanEntry& entry,
                      const DirtyResolvedOperation& operation,
-                     const std::vector<const NodeOutput*>& image_inputs_ready,
+                     const TiledInputContext& input_context,
                      HostOutputBinding& output_binding) const;
 
   /**

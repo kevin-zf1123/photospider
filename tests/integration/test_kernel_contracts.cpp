@@ -3136,17 +3136,46 @@ TEST(DenseImageValueContract, AlignedCpuRowsAndPaddedStride) {
   }
 }
 
+/**
+ * @brief Proves generic tiled allocation omits optional source authority.
+ *
+ * @return Nothing; GoogleTest reports descriptor or facet fallback drift.
+ * @throws Allocation, metadata validation, or plan arithmetic exceptions to
+ * the test runner.
+ * @note The absent exact-operation inference retains only scalar and channel
+ * allocation facts. It must not treat the first input's sample declaration as
+ * output truth or retain its signed/display geometry implicitly.
+ */
+TEST(DenseImageValueContract,
+     GenericTiledOutputInferenceFallsBackWithoutOptionalFacts) {
+  const NodeOutput input = make_kernel_contract_image_output(3, 2, 3, 0.25F);
+  const Node node;
+  const DenseImageOutputPlan plan =
+      compute::NodeExecutor::freeze_tiled_output_plan(
+          node, {&input}, PixelSize{3, 2}, std::nullopt);
+  EXPECT_EQ(plan.descriptor().shape, (std::vector<std::size_t>{2U, 3U, 3U}));
+  EXPECT_EQ(plan.descriptor().element_semantics,
+            ElementSemantics::FloatingPoint);
+  EXPECT_EQ(plan.image_facet().data_window, (ImageBounds{0, 0, 3, 2}));
+  EXPECT_FALSE(plan.image_facet().display_window.has_value());
+  EXPECT_FALSE(plan.image_facet().channel_schema.has_value());
+  EXPECT_FALSE(plan.image_facet().sample_domain.has_value());
+  EXPECT_FALSE(plan.image_facet().color.has_value());
+}
+
 TEST(DenseImageValueContract, OpenCvAndTileAccessRespectPaddedStride) {
   NodeOutput initial = make_kernel_contract_image_output(17, 4, 1, 0.0F);
   const std::vector<const NodeOutput*> plan_inputs{&initial};
+  const Node node;
   HostOutputBinding binding =
-      compute::NodeExecutor::allocate_tiled_output_binding(plan_inputs,
-                                                           PixelSize{17, 4});
+      compute::NodeExecutor::allocate_tiled_output_binding(
+          node, plan_inputs, PixelSize{17, 4},
+          TiledOutputInferenceFunc(
+              compute::NodeExecutor::infer_interpretation_preserving_output));
   binding.seed_from_value(initial.image_value());
   HostOutputWriteGrant grant =
       binding.grant_tile(ImageRect{image_region_domain(), 3, 8, 1, 3});
 
-  Node node;
   OutputTile output_tile{&binding.plan(), &grant, PixelRect{3, 1, 5, 2}};
   TileOpFunc write_tile = [](const Node&, const OutputTile& tile,
                              const std::vector<InputTile>&) {

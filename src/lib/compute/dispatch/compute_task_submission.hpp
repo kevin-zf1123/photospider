@@ -179,6 +179,18 @@ class TaskSubmissionPlan {
   void emplace_task_runner(NodeTaskRunnerContext context);
 
   /**
+   * @brief Forwards settled tiled implementation-borrow evidence from runner.
+   * @param node_idx Dense execution-order index.
+   * @return True only when the prepared context points at this plan's exact
+   * resolved operation owner.
+   * @throws Nothing; a missing runner or invalid index returns false.
+   * @note This source-private method exists only for long-lived ownership
+   * validation and grants no callback or registry authority.
+   */
+  bool tiled_context_borrows_resolved_operation_for_testing(
+      std::size_t node_idx) const noexcept;
+
+  /**
    * @brief Builds one composite identity in this plan's Run namespace.
    *
    * @param task_id Dense registered PlannedTask id.
@@ -708,9 +720,6 @@ class TaskSubmissionPlan {
   std::vector<std::shared_ptr<RuntimeCompletionRecord>>
       runtime_completion_records_;
 
-  /** @brief Run-owned worker runner retained by callback leases. */
-  std::unique_ptr<NodeTaskRunner> task_runner_;
-
   /** @brief Temporary worker outputs aligned with execution_order_. */
   std::vector<std::optional<NodeOutput>> temp_results_;
 
@@ -720,6 +729,13 @@ class TaskSubmissionPlan {
    * implementation identity, and any plugin lease in one owned snapshot.
    */
   std::vector<std::optional<OpImplementation>> resolved_ops_;
+
+  /**
+   * @brief Run-owned worker runner retained by callback leases.
+   * @note Declaration follows resolved_ops_ so reverse member destruction
+   * retires every borrowing tiled context before its implementation/DSO owner.
+   */
+  std::unique_ptr<NodeTaskRunner> task_runner_;
 
   /**
    * @brief Exact-identity start constraints aligned with dense planned task

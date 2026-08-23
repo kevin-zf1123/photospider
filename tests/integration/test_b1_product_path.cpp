@@ -188,7 +188,8 @@ B1RunObservationSnapshot run_observed_b1_job(Host& host, B1Host& b1_host,
  * @brief Proves an exact cap-eight B1 occurrence uses only real product owners.
  * @throws Product, observer, oracle, output, and filesystem failures unchanged.
  * @note This focused test validates long-lived topology/lifecycle/resource/I/O
- * closure for one exact 2048x2048 occurrence; it makes no timing-SLO claim.
+ * closure and the nonlinear curve-output metadata omission for one exact
+ * 2048x2048 occurrence; it makes no timing-SLO claim.
  */
 TEST(B1ProductPath, ExactJobClosesLifecycleResourcesGoldenAndDurableOutput) {
   ScopedB1ProductRoot temp;
@@ -218,13 +219,11 @@ TEST(B1ProductPath, ExactJobClosesLifecycleResourcesGoldenAndDurableOutput) {
             ElementSemantics::FloatingPoint);
   EXPECT_EQ(computed_view.descriptor().storage_encoding,
             (StorageEncoding{32U}));
-  ASSERT_TRUE(computed_view.image_facet().sample_domain.has_value());
-  EXPECT_EQ(
-      computed_view.image_facet().sample_domain,
-      (SampleDomainFacet{1U,
-                         SampleEncoding{1U, SampleEncodingKind::Normalized},
-                         SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
-                         {}}));
+  const ImageFacet expected_facet =
+      make_zero_origin_image_facet(computed_view.descriptor(), 1U, 0U, 2U);
+  EXPECT_EQ(computed_view.image_facet(), expected_facet);
+  EXPECT_FALSE(computed_view.image_facet().sample_domain.has_value());
+  EXPECT_FALSE(computed_view.image_facet().color.has_value());
   EXPECT_EQ(computed_image->storage_binding().device.backend(),
             DeviceBackend::CPU);
 

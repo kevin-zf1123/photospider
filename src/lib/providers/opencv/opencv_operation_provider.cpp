@@ -31,6 +31,7 @@
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
 #endif
 #include "compute/compute_geometry.hpp"  // NOLINT(build/include_subdir)
+#include "core/dense_image_processing.hpp"
 #include "core/ops.hpp"
 #include "core/param_utils.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
@@ -281,10 +282,10 @@ static ImageFacet project_selected_channel_facet(const Value& source,
 }
 
 /**
- * @brief Projects two weighted-blend sources onto their result channels.
+ * @brief Projects common channel and color facts for one binary image result.
  *
  * @param primary Primary source whose signed windows remain output authority.
- * @param secondary Secondary source contributing mapped sample values.
+ * @param secondary Secondary source contributing paired channel values.
  * @param output_channels Positive destination channel count.
  * @param has_channel_mapping Whether explicit source-to-destination channel
  *        mapping contributed to the result.
@@ -293,22 +294,21 @@ static ImageFacet project_selected_channel_facet(const Value& source,
  *         requested count is smaller than the primary channel extent.
  * @throws std::bad_alloc when copied metadata cannot allocate.
  * @note Stable channel and color authority survives only for unchanged,
- *       unmapped channels when both sources declare equal semantic facts.
- *       Expanded or explicitly mapped destinations have no proven stable
- *       identity, so those facts are removed rather than synthesized. A sample
- *       facet survives only when both sources declare the same uniform
- *       endpoint without stable-ID overrides. Signed data and display windows
- *       remain independent primary spatial facts and are preserved. No payload
- *       inspection, sample conversion, or channel-role inference occurs.
+ * unmapped channels when both sources declare equal semantic facts. Expanded
+ * or explicitly mapped destinations have no proven stable identity, so those
+ * facts are removed rather than synthesized. Sample authority is deliberately
+ * left unchanged for the caller to decide independently. Signed data/display
+ * windows remain primary spatial facts. No payload inspection, sample
+ * conversion, or channel-role inference occurs.
  */
-static ImageFacet project_weighted_blend_facet(const Value& primary,
-                                               const Value& secondary,
-                                               std::size_t output_channels,
-                                               bool has_channel_mapping) {
+static ImageFacet project_binary_common_facet(const Value& primary,
+                                              const Value& secondary,
+                                              std::size_t output_channels,
+                                              bool has_channel_mapping) {
   if (!primary.image_facet().has_value() ||
       !secondary.image_facet().has_value()) {
     throw std::invalid_argument(
-        "OpenCV weighted-blend source lacks ordinary-image metadata.");
+        "OpenCV binary image source lacks ordinary-image metadata.");
   }
   const ImageFacet& primary_facet = *primary.image_facet();
   const std::size_t primary_channels =
@@ -317,7 +317,7 @@ static ImageFacet project_weighted_blend_facet(const Value& primary,
           : 1U;
   if (output_channels < primary_channels) {
     throw std::invalid_argument(
-        "OpenCV weighted-blend facet projection cannot shrink primary "
+        "OpenCV binary facet projection cannot shrink primary "
         "channels.");
   }
 
@@ -339,14 +339,71 @@ static ImageFacet project_weighted_blend_facet(const Value& primary,
     projected.color.reset();
   }
 
-  const auto& primary_samples = primary_facet.sample_domain;
-  const auto& secondary_samples = secondary_facet.sample_domain;
-  const bool common_uniform_samples = primary_samples.has_value() &&
-                                      secondary_samples.has_value() &&
-                                      primary_samples->per_channel.empty() &&
-                                      secondary_samples->per_channel.empty() &&
-                                      *primary_samples == *secondary_samples;
-  if (!common_uniform_samples) {
+  return projected;
+}
+
+/**
+ * @brief Proves that one uniform declared interval is closed under multiply.
+ *
+ * @param primary Primary sample declaration.
+ * @param secondary Secondary sample declaration after input normalization.
+ * @param scale Explicit scalar used by `cv::multiply`.
+ * @return True only when declarations are identical, uniform, and every
+ * endpoint product remains inside that same declared interval.
+ * @throws Nothing.
+ * @note The proof uses only finite declared endpoints and the configured
+ * scalar. It never observes payload extrema or synthesizes a replacement
+ * domain. A non-finite intermediate fails closed.
+ */
+static bool multiply_preserves_uniform_sample_domain(
+    const std::optional<SampleDomainFacet>& primary,
+    const std::optional<SampleDomainFacet>& secondary, double scale) noexcept {
+  if (!primary.has_value() || !secondary.has_value() ||
+      !primary->per_channel.empty() || !secondary->per_channel.empty() ||
+      !(*primary == *secondary) || !std::isfinite(scale)) {
+    return false;
+  }
+  const SampleDomain& domain = primary->default_domain;
+  const long double minimum = static_cast<long double>(domain.minimum);
+  const long double maximum = static_cast<long double>(domain.maximum);
+  const long double multiplier = static_cast<long double>(scale);
+  const std::array<long double, 4U> products{
+      minimum * minimum * multiplier, minimum * maximum * multiplier,
+      maximum * minimum * multiplier, maximum * maximum * multiplier};
+  if (!std::all_of(products.begin(), products.end(),
+                   [](long double value) { return std::isfinite(value); })) {
+    return false;
+  }
+  const auto bounds = std::minmax_element(products.begin(), products.end());
+  return *bounds.first >= minimum && *bounds.second <= maximum;
+}
+
+/**
+ * @brief Projects pointwise multiply metadata with an interval-closure proof.
+ *
+ * @param primary Primary source whose signed geometry remains authoritative.
+ * @param secondary Secondary source contributing pointwise values.
+ * @param output_channels Positive unchanged destination channel count.
+ * @param scale Explicit scalar passed unchanged to `cv::multiply`.
+ * @param normalized_secondary_samples Sample authority after secondary input
+ * normalization.
+ * @return Primary geometry plus independent proven channel/color/sample facts.
+ * @throws std::invalid_argument or std::bad_alloc from common projection.
+ * @note Equal stable channel and color facts may survive independently. Sample
+ * authority survives only when normalization first retained the secondary
+ * declaration and the exact uniform input interval is closed under the
+ * configured product; otherwise it is omitted. No payload inference, implicit
+ * conversion, or replacement domain is introduced.
+ */
+static ImageFacet project_multiply_facet(
+    const Value& primary, const Value& secondary, std::size_t output_channels,
+    double scale,
+    const std::optional<SampleDomainFacet>& normalized_secondary_samples) {
+  ImageFacet projected =
+      project_binary_common_facet(primary, secondary, output_channels, false);
+  if (!multiply_preserves_uniform_sample_domain(
+          primary.image_facet()->sample_domain, normalized_secondary_samples,
+          scale)) {
     projected.sample_domain.reset();
   }
   return projected;
@@ -1013,6 +1070,577 @@ static void apply_channel_mapping(const plugin::ParameterValue::Object* mapping,
               destination_planes[*index]);
     }
   }
+}
+
+/**
+ * @brief Proves the direct weighted formula closes one uniform interval.
+ *
+ * @param domain Finite declared input and candidate output interval.
+ * @param alpha Primary-input coefficient used by `cv::addWeighted`.
+ * @param beta Secondary-input coefficient used by `cv::addWeighted`.
+ * @param gamma Constant added to every destination sample.
+ * @return True only when all four endpoint combinations are finite and remain
+ *         inside `domain`.
+ * @throws Nothing.
+ * @note This is a source-private metadata proof. It reads no payload and does
+ *       not synthesize a narrower replacement domain.
+ */
+static bool direct_weighted_blend_closes_uniform_domain(
+    const SampleDomain& domain, double alpha, double beta,
+    double gamma) noexcept {
+  if (!std::isfinite(domain.minimum) || !std::isfinite(domain.maximum) ||
+      !std::isfinite(alpha) || !std::isfinite(beta) || !std::isfinite(gamma)) {
+    return false;
+  }
+  const long double minimum = static_cast<long double>(domain.minimum);
+  const long double maximum = static_cast<long double>(domain.maximum);
+  const long double primary_weight = static_cast<long double>(alpha);
+  const long double secondary_weight = static_cast<long double>(beta);
+  const long double offset = static_cast<long double>(gamma);
+  const std::array<long double, 4U> endpoints{
+      primary_weight * minimum + secondary_weight * minimum + offset,
+      primary_weight * minimum + secondary_weight * maximum + offset,
+      primary_weight * maximum + secondary_weight * minimum + offset,
+      primary_weight * maximum + secondary_weight * maximum + offset};
+  if (!std::all_of(endpoints.begin(), endpoints.end(),
+                   [](long double value) { return std::isfinite(value); })) {
+    return false;
+  }
+  const auto bounds = std::minmax_element(endpoints.begin(), endpoints.end());
+  return *bounds.first >= minimum && *bounds.second <= maximum;
+}
+
+/**
+ * @brief Tests whether production mapping resets one destination to gamma.
+ *
+ * @param mapping Optional source-keyed destination arrays.
+ * @param destination Valid non-negative destination index.
+ * @return True when any correctly typed destination entry equals
+ *         `destination`, even if its source key is invalid.
+ * @throws Nothing.
+ * @note The source-independent test deliberately mirrors
+ *       `mark_mapped_channels`, which resets covered destinations before
+ *       `apply_channel_mapping` validates individual source keys.
+ */
+static bool mapping_covers_destination(
+    const plugin::ParameterValue::Object* mapping, int destination) noexcept {
+  if (mapping == nullptr) {
+    return false;
+  }
+  for (const auto& [source, destinations] : *mapping) {
+    static_cast<void>(source);
+    if (!destinations.is_array()) {
+      continue;
+    }
+    for (const plugin::ParameterValue& candidate : destinations.as_array()) {
+      const std::optional<int> index = parameter_value_as_int(candidate);
+      if (index.has_value() && *index == destination) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * @brief Adds one scaled uniform source interval to a destination interval.
+ *
+ * @param domain Finite uniform source interval.
+ * @param weight Finite contribution coefficient.
+ * @param destination_minimum Non-null lower bound updated in place.
+ * @param destination_maximum Non-null upper bound updated in place.
+ * @return True when both scaled endpoints and accumulated bounds stay finite.
+ * @throws Nothing.
+ * @note Negative weights exchange endpoint roles. Callers own pointer validity
+ *       and initialize an ordered finite destination interval.
+ */
+static bool accumulate_scaled_uniform_domain(
+    const SampleDomain& domain, double weight, long double* destination_minimum,
+    long double* destination_maximum) noexcept {
+  const long double scaled_minimum = static_cast<long double>(weight) *
+                                     static_cast<long double>(domain.minimum);
+  const long double scaled_maximum = static_cast<long double>(weight) *
+                                     static_cast<long double>(domain.maximum);
+  if (!std::isfinite(scaled_minimum) || !std::isfinite(scaled_maximum)) {
+    return false;
+  }
+  *destination_minimum += std::min(scaled_minimum, scaled_maximum);
+  *destination_maximum += std::max(scaled_minimum, scaled_maximum);
+  return std::isfinite(*destination_minimum) &&
+         std::isfinite(*destination_maximum);
+}
+
+/**
+ * @brief Mirrors mapped source contributions for one destination interval.
+ *
+ * @param mapping Optional source-keyed destination arrays.
+ * @param destination Valid destination index being proved.
+ * @param source_channels Number of real planes before production zero-padding.
+ * @param output_channels Number of planes after production zero-padding.
+ * @param domain Finite uniform source interval.
+ * @param weight Scalar applied to every valid real source contribution.
+ * @param destination_minimum Non-null lower bound updated in place.
+ * @param destination_maximum Non-null upper bound updated in place.
+ * @return True when every actual contribution accumulates to finite bounds.
+ * @throws Nothing.
+ * @note Invalid source keys and destinations are skipped exactly like
+ *       `apply_channel_mapping`. A valid padded source contributes zero;
+ *       duplicate destination entries accumulate repeatedly.
+ */
+static bool accumulate_mapped_uniform_domain(
+    const plugin::ParameterValue::Object* mapping, int destination,
+    std::size_t source_channels, std::size_t output_channels,
+    const SampleDomain& domain, double weight, long double* destination_minimum,
+    long double* destination_maximum) noexcept {
+  if (mapping == nullptr) {
+    return true;
+  }
+  for (const auto& [source_text, destinations] : *mapping) {
+    const std::optional<int> source = parse_channel_index(source_text);
+    if (!source.has_value() || *source < 0 ||
+        static_cast<std::size_t>(*source) >= output_channels ||
+        !destinations.is_array()) {
+      continue;
+    }
+    for (const plugin::ParameterValue& candidate : destinations.as_array()) {
+      const std::optional<int> index = parameter_value_as_int(candidate);
+      if (!index.has_value() || *index != destination ||
+          static_cast<std::size_t>(*source) >= source_channels) {
+        continue;
+      }
+      if (!accumulate_scaled_uniform_domain(domain, weight, destination_minimum,
+                                            destination_maximum)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * @brief Proves weighted-blend closure from declared metadata and parameters.
+ *
+ * @param primary Primary uniform sample declaration.
+ * @param secondary Secondary uniform sample declaration after normalization.
+ * @param source_channels Number of normalized real source planes.
+ * @param output_channels Number of produced destination planes.
+ * @param channel_mapping Optional production channel-mapping object.
+ * @param alpha Primary contribution coefficient.
+ * @param beta Secondary contribution coefficient.
+ * @param gamma Destination initialization constant.
+ * @param alpha_strategy Production alpha-channel strategy text.
+ * @param normalized_secondary_samples Sample authority after secondary input
+ * normalization.
+ * @return True only when identical uniform declarations close every actual
+ *         destination interval under the configured production formula.
+ * @throws Nothing.
+ * @note Input-normalization constants must already be proven by the shared
+ *       dense-image rule. With mapping, this mirrors default initialization,
+ *       coverage reset, padded zero planes, invalid-entry skipping, duplicate
+ *       accumulation, and gamma behavior. A mapped output with channel three
+ *       conservatively accepts only `weighted`; other alpha strategies are
+ *       deliberately not modeled and therefore fail closed. No payload is
+ *       read.
+ */
+static bool weighted_blend_preserves_uniform_sample_domain(
+    const std::optional<SampleDomainFacet>& primary,
+    const std::optional<SampleDomainFacet>& secondary,
+    std::size_t source_channels, std::size_t output_channels,
+    const plugin::ParameterValue::Object* channel_mapping, double alpha,
+    double beta, double gamma, std::string_view alpha_strategy) noexcept {
+  if (!primary.has_value() || !secondary.has_value() ||
+      !primary->per_channel.empty() || !secondary->per_channel.empty() ||
+      !(*primary == *secondary) || source_channels == 0U ||
+      output_channels < source_channels ||
+      output_channels >
+          static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+      !std::isfinite(primary->default_domain.minimum) ||
+      !std::isfinite(primary->default_domain.maximum) ||
+      !std::isfinite(alpha) || !std::isfinite(beta) || !std::isfinite(gamma)) {
+    return false;
+  }
+  const SampleDomain& domain = primary->default_domain;
+  if (channel_mapping == nullptr) {
+    return direct_weighted_blend_closes_uniform_domain(domain, alpha, beta,
+                                                       gamma);
+  }
+  if (output_channels >= 4U && alpha_strategy != "weighted") {
+    return false;
+  }
+
+  const long double declared_minimum = static_cast<long double>(domain.minimum);
+  const long double declared_maximum = static_cast<long double>(domain.maximum);
+  const plugin::ParameterValue::Object* input0 =
+      nested_parameter_object(channel_mapping, "input0");
+  const plugin::ParameterValue::Object* input1 =
+      nested_parameter_object(channel_mapping, "input1");
+  for (std::size_t destination = 0U; destination < output_channels;
+       ++destination) {
+    const int destination_index = static_cast<int>(destination);
+    const bool covered =
+        mapping_covers_destination(input0, destination_index) ||
+        mapping_covers_destination(input1, destination_index);
+    long double destination_minimum = static_cast<long double>(gamma);
+    long double destination_maximum = static_cast<long double>(gamma);
+    if (!covered && destination < source_channels &&
+        (!accumulate_scaled_uniform_domain(domain, alpha, &destination_minimum,
+                                           &destination_maximum) ||
+         !accumulate_scaled_uniform_domain(domain, beta, &destination_minimum,
+                                           &destination_maximum))) {
+      return false;
+    }
+    if (covered &&
+        (!accumulate_mapped_uniform_domain(
+             input0, destination_index, source_channels, output_channels,
+             domain, alpha, &destination_minimum, &destination_maximum) ||
+         !accumulate_mapped_uniform_domain(
+             input1, destination_index, source_channels, output_channels,
+             domain, beta, &destination_minimum, &destination_maximum))) {
+      return false;
+    }
+    if (!std::isfinite(destination_minimum) ||
+        !std::isfinite(destination_maximum) ||
+        destination_minimum < declared_minimum ||
+        destination_maximum > declared_maximum) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * @brief Projects two weighted-blend sources onto their result channels.
+ *
+ * @param primary Primary source whose signed windows remain output authority.
+ * @param secondary Secondary source contributing mapped sample values.
+ * @param output_channels Positive destination channel count.
+ * @param channel_mapping Optional production channel-mapping object.
+ * @param alpha Primary contribution coefficient.
+ * @param beta Secondary contribution coefficient.
+ * @param gamma Destination initialization constant.
+ * @param alpha_strategy Production alpha-channel strategy text.
+ * @return Copied primary facet containing only facts valid for the result.
+ * @throws std::invalid_argument when either source lacks image metadata or the
+ *         requested count is smaller than the primary channel extent.
+ * @throws std::bad_alloc when copied metadata cannot allocate.
+ * @note Channel/color intersection is independent from sample closure. The
+ *       source-private proof consumes the already projected normalization
+ *       authority, immutable metadata, and effective parameters; it never
+ *       inspects payload or changes OpenCV arithmetic.
+ */
+static ImageFacet project_weighted_blend_facet(
+    const Value& primary, const Value& secondary, std::size_t output_channels,
+    const plugin::ParameterValue::Object* channel_mapping, double alpha,
+    double beta, double gamma, std::string_view alpha_strategy,
+    const std::optional<SampleDomainFacet>& normalized_secondary_samples) {
+  ImageFacet projected = project_binary_common_facet(
+      primary, secondary, output_channels, channel_mapping != nullptr);
+  const ImageFacet& primary_facet = *primary.image_facet();
+  const std::size_t source_channels =
+      primary_facet.channel_axis.has_value()
+          ? primary.dense_tensor_descriptor().shape[*primary_facet.channel_axis]
+          : 1U;
+  if (!weighted_blend_preserves_uniform_sample_domain(
+          primary_facet.sample_domain, normalized_secondary_samples,
+          source_channels, output_channels, channel_mapping, alpha, beta, gamma,
+          alpha_strategy)) {
+    projected.sample_domain.reset();
+  }
+  return projected;
+}
+
+/**
+ * @brief Requires one ordinary-image Value for pure tiled output inference.
+ *
+ * @param inputs Exact operation inputs in destination-index order.
+ * @param index Required connected slot.
+ * @param operation_key Stable operation key used in diagnostics.
+ * @return Borrowed immutable image Value.
+ * @throws std::invalid_argument when the slot is absent or lacks a valid
+ * ordinary DenseImage facet.
+ * @note The helper reads metadata only and never polls readiness, acquires a
+ * payload lease, or retains the input beyond the inference callback.
+ */
+static const Value& require_tiled_inference_input(
+    const std::vector<const NodeOutput*>& inputs, std::size_t index,
+    const char* operation_key) {
+  if (index >= inputs.size() || inputs[index] == nullptr ||
+      !inputs[index]->has_image_value() ||
+      !inputs[index]->image_value().image_facet().has_value()) {
+    throw std::invalid_argument(std::string(operation_key) +
+                                " output inference requires input " +
+                                std::to_string(index) + ".");
+  }
+  return inputs[index]->image_value();
+}
+
+/**
+ * @brief Returns the validated logical channel count of one ordinary image.
+ *
+ * @param value Borrowed ordinary DenseImage Value.
+ * @return Positive channel count.
+ * @throws std::invalid_argument when metadata is malformed or exceeds the
+ * maintained channel bound.
+ * @note Diagnostic names and payload bytes never affect the count.
+ */
+static std::size_t tiled_inference_channel_count(const Value& value) {
+  const DenseTensorDescriptor& descriptor = value.dense_tensor_descriptor();
+  const ImageFacet& facet = *value.image_facet();
+  validate_dense_tensor_image_metadata(descriptor, facet);
+  const std::size_t channels = facet.channel_axis.has_value()
+                                   ? descriptor.shape[*facet.channel_axis]
+                                   : 1U;
+  if (channels == 0U || channels > kMaximumImageChannels) {
+    throw std::invalid_argument(
+        "OpenCV tiled output inference channel count is unsupported.");
+  }
+  return channels;
+}
+
+/**
+ * @brief Validates semantic safety of tiled secondary channel normalization.
+ *
+ * @param primary Primary image whose channel count defines the output base.
+ * @param secondary Secondary image normalized before tiled callbacks.
+ * @return Nothing when no channel conversion occurs or the secondary carries
+ * no channel-specific facts that conversion would need to remap.
+ * @throws std::invalid_argument when conversion would guess stable channel,
+ * color-group, or per-channel sample authority.
+ * @note NodeExecutor supplies the exact normalized inputs before Host output
+ * allocation. Dense normalization has already omitted a uniform declaration
+ * when zero/opaque constants escape it. This guard independently rejects any
+ * still-unresolved channel conversion carrying stable-ID authority; positional
+ * replication/reduction remains legal only without schema, color-group, or
+ * per-channel sample facts.
+ */
+static void validate_tiled_secondary_channel_normalization(
+    const Value& primary, const Value& secondary) {
+  if (tiled_inference_channel_count(primary) ==
+      tiled_inference_channel_count(secondary)) {
+    return;
+  }
+  const ImageFacet& facet = *secondary.image_facet();
+  if (facet.channel_schema.has_value() || facet.color.has_value() ||
+      (facet.sample_domain.has_value() &&
+       !facet.sample_domain->per_channel.empty())) {
+    throw std::invalid_argument(
+        "OpenCV tiled channel normalization requires an explicit semantic "
+        "mapping.");
+  }
+}
+
+/**
+ * @brief Builds one exact HWC tiled logical result from a projected facet.
+ *
+ * @param primary Primary input supplying scalar storage facts.
+ * @param output_size Positive task-planned extent.
+ * @param output_channels Positive operation-proven channel count.
+ * @param facet Operation-specific projected interpretation.
+ * @return Complete logical result for NodeExecutor validation and allocation.
+ * @throws std::invalid_argument for unsupported storage, dimensions, channels,
+ * or projected metadata.
+ * @throws std::overflow_error when signed window endpoints overflow.
+ * @throws std::bad_alloc when descriptor or metadata storage allocates.
+ * @note The function performs no output allocation, payload access, sample
+ * conversion, or provider callback entry.
+ */
+static TiledOutputInferenceResult make_opencv_tiled_output_inference(
+    const Value& primary, const PixelSize& output_size,
+    std::size_t output_channels, ImageFacet facet) {
+  if (output_size.width <= 0 || output_size.height <= 0 ||
+      output_channels == 0U || output_channels > kMaximumImageChannels) {
+    throw std::invalid_argument(
+        "OpenCV tiled output inference requires bounded positive geometry.");
+  }
+  const DenseTensorDescriptor& source = primary.dense_tensor_descriptor();
+  if (source.quantization.has_value() ||
+      source.storage_encoding.kind != StorageEncodingKind::NativeScalar) {
+    throw std::invalid_argument(
+        "OpenCV tiled output inference requires native unquantized storage.");
+  }
+  DenseTensorDescriptor descriptor{
+      {static_cast<std::size_t>(output_size.height),
+       static_cast<std::size_t>(output_size.width), output_channels},
+      source.element_semantics,
+      source.storage_encoding};
+  facet.x_axis = 1U;
+  facet.y_axis = 0U;
+  facet.channel_axis = 2U;
+  const std::int64_t width = static_cast<std::int64_t>(output_size.width);
+  const std::int64_t height = static_cast<std::int64_t>(output_size.height);
+  if (facet.data_window.x_begin >
+          std::numeric_limits<std::int64_t>::max() - width ||
+      facet.data_window.y_begin >
+          std::numeric_limits<std::int64_t>::max() - height) {
+    throw std::overflow_error(
+        "OpenCV tiled output data window overflows int64.");
+  }
+  facet.data_window.x_end = facet.data_window.x_begin + width;
+  facet.data_window.y_end = facet.data_window.y_begin + height;
+  validate_dense_tensor_image_metadata(descriptor, facet);
+  return TiledOutputInferenceResult{std::move(descriptor), std::move(facet)};
+}
+
+/**
+ * @brief Infers interpretation-preserving Gaussian-blur tiled output.
+ *
+ * @param node Unused effective operation node.
+ * @param inputs Exact operation inputs.
+ * @param output_size Positive planned extent.
+ * @return Primary scalar, signed geometry, channel, sample, and color facts.
+ * @throws Metadata validation, arithmetic, or allocation failures unchanged.
+ * @note Gaussian convolution changes neither channel roles, declared sample
+ * convention, nor color interpretation; no payload is inspected.
+ */
+static TiledOutputInferenceResult infer_gaussian_blur_tiled_output(
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size) {
+  static_cast<void>(node);
+  const Value& primary =
+      require_tiled_inference_input(inputs, 0U, "image_process:gaussian_blur");
+  return make_opencv_tiled_output_inference(
+      primary, output_size, tiled_inference_channel_count(primary),
+      *primary.image_facet());
+}
+
+/**
+ * @brief Infers conservative metadata for nonlinear curve-transform output.
+ *
+ * @param node Unused effective operation node.
+ * @param inputs Exact operation inputs.
+ * @param output_size Positive planned extent.
+ * @return Primary signed geometry and stable channel schema with sample/color
+ * authority omitted.
+ * @throws Metadata validation, arithmetic, or allocation failures unchanged.
+ * @note The nonlinear reciprocal transform proves positional channel identity
+ * but does not prove preservation of a declared sample interval or transfer
+ * function. It never derives replacements from payload values.
+ */
+static TiledOutputInferenceResult infer_curve_transform_tiled_output(
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size) {
+  static_cast<void>(node);
+  const Value& primary = require_tiled_inference_input(
+      inputs, 0U, "image_process:curve_transform");
+  ImageFacet facet = *primary.image_facet();
+  facet.sample_domain.reset();
+  facet.color.reset();
+  return make_opencv_tiled_output_inference(
+      primary, output_size, tiled_inference_channel_count(primary),
+      std::move(facet));
+}
+
+/**
+ * @brief Infers parameter-closed two-source weighted-blend metadata.
+ *
+ * @param node Effective mapping and channel-expansion parameters.
+ * @param inputs Exact two operation inputs.
+ * @param output_size Positive planned extent.
+ * @return Primary geometry and independently proven semantic authority.
+ * @throws Metadata, parameter, arithmetic, or allocation failures unchanged.
+ * @note Explicit mapping determines output channel cardinality before Host
+ * allocation. The input is the exact normalized immutable Value, whose Sample
+ * Domain has already passed the shared constant proof. The same source-private
+ * closure used by monolithic execution mirrors per-destination accumulation
+ * without reading payload. It never reallocates a borrowed output tile or
+ * guesses roles.
+ */
+static TiledOutputInferenceResult infer_add_weighted_tiled_output(
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size) {
+  const Value& primary =
+      require_tiled_inference_input(inputs, 0U, "image_mixing:add_weighted");
+  const Value& secondary =
+      require_tiled_inference_input(inputs, 1U, "image_mixing:add_weighted");
+  validate_tiled_secondary_channel_normalization(primary, secondary);
+  const std::size_t primary_channels = tiled_inference_channel_count(primary);
+  const plugin::ParameterMap& parameters = effective_parameters(node);
+  const plugin::ParameterValue::Object* channel_mapping =
+      parameter_object(parameters, "channel_mapping");
+  const plugin::ParameterValue::Object* input0 =
+      nested_parameter_object(channel_mapping, "input0");
+  const plugin::ParameterValue::Object* input1 =
+      nested_parameter_object(channel_mapping, "input1");
+  const int maximum_destination = std::max(max_destination_channel(input0),
+                                           max_destination_channel(input1));
+  const std::size_t mapped_channels =
+      maximum_destination < 0
+          ? 0U
+          : static_cast<std::size_t>(maximum_destination) + 1U;
+  const std::size_t output_channels =
+      std::max(primary_channels, mapped_channels);
+  const double alpha = as_double_flexible(parameters, "alpha", 0.5);
+  const double beta = as_double_flexible(parameters, "beta", 0.5);
+  const double gamma = as_double_flexible(parameters, "gamma", 0.0);
+  const std::string alpha_strategy =
+      as_str(parameters, "alpha_strategy", "weighted");
+  ImageFacet facet = project_weighted_blend_facet(
+      primary, secondary, output_channels, channel_mapping, alpha, beta, gamma,
+      alpha_strategy, secondary.image_facet()->sample_domain);
+  return make_opencv_tiled_output_inference(primary, output_size,
+                                            output_channels, std::move(facet));
+}
+
+/**
+ * @brief Infers conservative absolute-difference tiled output metadata.
+ *
+ * @param node Unused alpha-strategy owner; all strategies share this policy.
+ * @param inputs Exact two operation inputs.
+ * @param output_size Positive planned extent.
+ * @return Primary geometry and common stable channel schema, with color and
+ * sample authority omitted.
+ * @throws Metadata, arithmetic, or allocation failures unchanged.
+ * @note Absolute differences and mixed alpha strategies do not prove that
+ * output values retain source color transfer or sample-domain meaning.
+ */
+static TiledOutputInferenceResult infer_abs_diff_tiled_output(
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size) {
+  static_cast<void>(node);
+  const Value& primary =
+      require_tiled_inference_input(inputs, 0U, "image_mixing:diff");
+  const Value& secondary =
+      require_tiled_inference_input(inputs, 1U, "image_mixing:diff");
+  validate_tiled_secondary_channel_normalization(primary, secondary);
+  const std::size_t output_channels = tiled_inference_channel_count(primary);
+  ImageFacet facet =
+      project_binary_common_facet(primary, secondary, output_channels, false);
+  facet.sample_domain.reset();
+  facet.color.reset();
+  return make_opencv_tiled_output_inference(primary, output_size,
+                                            output_channels, std::move(facet));
+}
+
+/**
+ * @brief Infers pointwise multiply metadata using configured interval closure.
+ *
+ * @param node Effective multiply scale.
+ * @param inputs Exact two operation inputs.
+ * @param output_size Positive planned extent.
+ * @return Primary geometry plus independently proven channel/color/sample
+ * facts.
+ * @throws Metadata, parameter, arithmetic, or allocation failures unchanged.
+ * @note The exact normalized secondary declaration already reflects
+ * synthesized constants. Different, normalization-invalid, or product-
+ * non-closed declarations are omitted before Host allocation; raw callback
+ * arithmetic and scale remain unchanged.
+ */
+static TiledOutputInferenceResult infer_multiply_tiled_output(
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    const PixelSize& output_size) {
+  const Value& primary =
+      require_tiled_inference_input(inputs, 0U, "image_mixing:multiply");
+  const Value& secondary =
+      require_tiled_inference_input(inputs, 1U, "image_mixing:multiply");
+  validate_tiled_secondary_channel_normalization(primary, secondary);
+  const std::size_t output_channels = tiled_inference_channel_count(primary);
+  const double scale =
+      as_double_flexible(effective_parameters(node), "scale", 1.0);
+  ImageFacet facet =
+      project_multiply_facet(primary, secondary, output_channels, scale,
+                             secondary.image_facet()->sample_domain);
+  return make_opencv_tiled_output_inference(primary, output_size,
+                                            output_channels, std::move(facet));
 }
 
 /**
@@ -2663,7 +3291,9 @@ static void op_multiply_tiled(const Node& node, const OutputTile& output_tile,
  *         conversion failure; the provider fence translates it.
  * @throws std::bad_alloc for temporary channel or matrix ownership allocation.
  * @note Both matrices are callback-local headers; the helper publishes no
- *       shared provider state.
+ *       shared provider state. It changes raw pixels only. A caller publishing
+ *       Sample Domain authority must separately use the shared metadata-only
+ *       normalization proof.
  */
 static void normalize_to_base(cv::Mat& current_mat, const cv::Mat& base_mat,
                               const std::string& strategy) {
@@ -2709,6 +3339,42 @@ static void normalize_to_base(cv::Mat& current_mat, const cv::Mat& base_mat,
 }
 
 /**
+ * @brief Projects monolithic secondary Sample Domain through normalization.
+ *
+ * @param secondary Immutable pre-normalization secondary image Value.
+ * @param base_mat Immutable base header defining destination extent/channels.
+ * @param strategy Exact `resize` or crop/zero-pad `crop` policy already used
+ * by `normalize_to_base`.
+ * @return Retained Sample Domain only when every raw normalization constant is
+ * covered by all applicable declarations; otherwise no authority.
+ * @throws GraphError with `GraphErrc::InvalidParameter` for an unsupported
+ * strategy.
+ * @throws Metadata validation, arithmetic, and allocation failures unchanged.
+ * @note The shared dense-image proof consumes only immutable descriptor/facet
+ * facts and matrix shape metadata. It never reads pixels, widens a domain, or
+ * changes the OpenCV normalization algorithm.
+ */
+static std::optional<SampleDomainFacet>
+project_monolithic_secondary_normalization_sample_domain(
+    const Value& secondary, const cv::Mat& base_mat,
+    const std::string& strategy) {
+  dense_image_processing::SizeNormalizationMode size_mode;
+  if (strategy == "resize") {
+    size_mode = dense_image_processing::SizeNormalizationMode::Resize;
+  } else if (strategy == "crop") {
+    size_mode = dense_image_processing::SizeNormalizationMode::CropOrPad;
+  } else {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Unsupported merge_strategy '" + strategy +
+                         "' for monolithic image_mixing.");
+  }
+  return dense_image_processing::project_normalized_sample_domain(
+      secondary.dense_tensor_descriptor(), *secondary.image_facet(),
+      PixelSize{base_mat.cols, base_mat.rows},
+      static_cast<std::size_t>(base_mat.channels()), size_mode);
+}
+
+/**
  * @brief Blends two full images with optional per-channel value mappings.
  *
  * @param node Operation node providing weights, mapping, and alpha strategy.
@@ -2726,10 +3392,14 @@ static void normalize_to_base(cv::Mat& current_mat, const cv::Mat& base_mat,
  *       Every result preserves primary signed windows. Stable channel/color
  *       authority survives only for unchanged unmapped destinations when both
  *       sources agree; expansion, explicit mapping, or source disagreement
- *       clears it. Sample meaning survives only when both sources share one
- *       uniform endpoint without per-channel overrides. No payload inference
- *       or sample conversion occurs. All mutable matrices and result storage
- *       are callback-local, so independent invocations are reentrant.
+ *       clears it. Identical uniform Sample Domain authority survives only
+ *       when raw normalization first keeps every synthesized zero/opaque
+ *       constant inside that declaration and the shared source-private
+ *       interval proof then closes every actual destination formula under
+ *       weights, gamma, mapping accumulation, and the supported weighted alpha
+ *       strategy. No payload inference or sample conversion occurs. All
+ *       mutable matrices and result storage are callback-local, so independent
+ *       invocations are reentrant.
  */
 static NodeOutput op_add_weighted_monolithic(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -2753,6 +3423,9 @@ static NodeOutput op_add_weighted_monolithic(
   std::string strategy = as_str(P, "merge_strategy", "resize");
 
   normalize_to_base(input_b, input_a, strategy);
+  const std::optional<SampleDomainFacet> normalized_secondary_samples =
+      project_monolithic_secondary_normalization_sample_domain(
+          inputs[1]->image_value(), input_a, strategy);
 
   // Optional per-channel mapping
   const plugin::ParameterValue::Object* channel_mapping =
@@ -2761,6 +3434,7 @@ static NodeOutput op_add_weighted_monolithic(
 
   cv::Mat output(input_a.rows, input_a.cols,
                  CV_MAKETYPE(CV_32F, input_a.channels()));
+  std::string alpha_strategy;
   if (!has_mapping) {
     cv::addWeighted(input_a, alpha, input_b, beta, gamma, output);
   } else {
@@ -2801,7 +3475,7 @@ static NodeOutput op_add_weighted_monolithic(
                    : cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
     apply_channel_mapping(ch_input0, A, alpha, O);
     apply_channel_mapping(ch_input1, B, beta, O);
-    std::string alpha_strategy = as_str(P, "alpha_strategy", "weighted");
+    alpha_strategy = as_str(P, "alpha_strategy", "weighted");
     if ((alpha_strategy != "weighted") && out_ch >= 4) {
       int aidx = 3;
       if (alpha_strategy == "max") {
@@ -2826,7 +3500,8 @@ static NodeOutput op_add_weighted_monolithic(
   NodeOutput out;
   ImageFacet projected = project_weighted_blend_facet(
       inputs[0]->image_value(), inputs[1]->image_value(),
-      static_cast<std::size_t>(output.channels()), has_mapping);
+      static_cast<std::size_t>(output.channels()), channel_mapping, alpha, beta,
+      gamma, alpha_strategy, normalized_secondary_samples);
   publish_opencv_output_with_facet(&out, output, std::move(projected));
   return out;
 }
@@ -2906,8 +3581,15 @@ static NodeOutput op_abs_diff_monolithic(
  * @throws std::bad_alloc if parameter or output allocation fails.
  * @throws GraphError for missing inputs or unsupported normalization.
  * @throws cv::Exception if OpenCV normalization or multiplication fails.
+ * @throws std::invalid_argument, std::overflow_error, or std::length_error when
+ *         projected output metadata is invalid.
  * @note Callback-local matrices provide reentrant execution across independent
- *       execution work.
+ *       execution work. Primary signed geometry survives. Stable channel/color
+ *       authority requires semantic equality across both inputs, while sample
+ *       authority additionally requires normalization constants to remain in
+ *       the identical uniform interval and that interval to close under scale.
+ *       Unproven facts are omitted without payload inference or implicit
+ *       conversion.
  */
 static NodeOutput op_multiply_monolithic(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -2925,12 +3607,19 @@ static NodeOutput op_multiply_monolithic(
   std::string strategy =
       as_str(node.runtime_parameters, "merge_strategy", "resize");
   normalize_to_base(input_b, input_a, strategy);
+  const std::optional<SampleDomainFacet> normalized_secondary_samples =
+      project_monolithic_secondary_normalization_sample_domain(
+          inputs[1]->image_value(), input_a, strategy);
   const auto& P = node.runtime_parameters;
   double scale = as_double_flexible(P, "scale", 1.0);
   cv::Mat output;
   cv::multiply(input_a, input_b, output, scale);
   NodeOutput out;
-  publish_opencv_output(&out, output, &inputs[0]->image_value());
+  ImageFacet projected =
+      project_multiply_facet(inputs[0]->image_value(), inputs[1]->image_value(),
+                             static_cast<std::size_t>(output.channels()), scale,
+                             normalized_secondary_samples);
+  publish_opencv_output_with_facet(&out, output, std::move(projected));
   return out;
 }
 
@@ -2943,22 +3632,47 @@ void register_provider() {
   const ForwardRoiPropFunc identity_forward(identity_forward_roi);
   const OpPlanningCallbacks identity_planning{identity_roi,
                                               identity_forward,
+                                              {},
                                               {}};
   const OpPlanningCallbacks convolve_planning{
       DirtyRoiPropFunc(convolve_dirty_roi),
       ForwardRoiPropFunc(convolve_forward_roi),
+      {},
       {}};
   const OpPlanningCallbacks resize_planning{
       DirtyRoiPropFunc(resize_dirty_roi),
       ForwardRoiPropFunc(resize_forward_roi),
+      {},
       {}};
   const OpPlanningCallbacks crop_planning{DirtyRoiPropFunc(crop_dirty_roi),
                                           ForwardRoiPropFunc(crop_forward_roi),
+                                          {},
                                           {}};
   const OpPlanningCallbacks gaussian_blur_planning{
       DirtyRoiPropFunc(gaussian_blur_dirty_roi),
       ForwardRoiPropFunc(gaussian_blur_forward_roi),
-      {}};
+      {},
+      TiledOutputInferenceFunc(infer_gaussian_blur_tiled_output)};
+  const OpPlanningCallbacks curve_transform_planning{
+      identity_roi,
+      identity_forward,
+      {},
+      TiledOutputInferenceFunc(infer_curve_transform_tiled_output)};
+  const OpPlanningCallbacks add_weighted_planning{
+      identity_roi,
+      identity_forward,
+      {},
+      TiledOutputInferenceFunc(infer_add_weighted_tiled_output)};
+  const OpPlanningCallbacks diff_planning{
+      identity_roi,
+      identity_forward,
+      {},
+      TiledOutputInferenceFunc(infer_abs_diff_tiled_output)};
+  const OpPlanningCallbacks multiply_planning{
+      identity_roi,
+      identity_forward,
+      {},
+      TiledOutputInferenceFunc(infer_multiply_tiled_output)};
 
   registry.register_op_hp_monolithic(
       "image_source", "path",
@@ -3074,7 +3788,7 @@ void register_provider() {
       "image_process", "curve_transform",
       fence_tiled_operation("image_process:curve_transform",
                             TileOpFunc(op_curve_transform_tiled)),
-      tiled_meta, identity_planning);
+      tiled_meta, curve_transform_planning);
 
   registry.register_op_hp_monolithic(
       "image_mixing", "add_weighted",
@@ -3084,9 +3798,9 @@ void register_provider() {
   const TileOpFunc add_weighted = fence_tiled_operation(
       "image_mixing:add_weighted", TileOpFunc(op_add_weighted_tiled));
   registry.register_op_hp_tiled("image_mixing", "add_weighted", add_weighted,
-                                tiled_meta, identity_planning);
+                                tiled_meta, add_weighted_planning);
   registry.register_op_rt_tiled("image_mixing", "add_weighted", add_weighted,
-                                rt_meta, identity_planning);
+                                rt_meta, add_weighted_planning);
 
   registry.register_op_hp_monolithic(
       "image_mixing", "diff",
@@ -3096,7 +3810,7 @@ void register_provider() {
   registry.register_op_hp_tiled(
       "image_mixing", "diff",
       fence_tiled_operation("image_mixing:diff", TileOpFunc(op_abs_diff_tiled)),
-      tiled_meta, identity_planning);
+      tiled_meta, diff_planning);
 
   registry.register_op_hp_monolithic(
       "image_mixing", "multiply",
@@ -3107,7 +3821,7 @@ void register_provider() {
       "image_mixing", "multiply",
       fence_tiled_operation("image_mixing:multiply",
                             TileOpFunc(op_multiply_tiled)),
-      tiled_meta, identity_planning);
+      tiled_meta, multiply_planning);
 }
 
 #undef PHOTOSPIDER_OBSERVE_OPENCV_OPERATION

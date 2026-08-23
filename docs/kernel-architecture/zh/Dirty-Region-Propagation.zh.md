@@ -115,7 +115,9 @@ PixelRect compatibility projection 推断 source provenance。
 upstream node 都会立即把其精确选中的 revision 缩减成 callback-free operation key 与完整
 identity/device/shape/metadata record。同一个 revision 既提供 ImageRect dirty/dependency 行为，
 也在 TensorSlice 情况下通过 exact-core 检查。Request plan 只保留这些带 revision 的 record，
-不保留 callable 或 DSO lease。在
+不保留 callable 或 DSO lease。Dirty preparation 随后会重新解析该精确 revision，并把其 tiled
+output inference 与 execution、propagation callback 一起复制；它永远不会借用 sibling
+operation-level policy。在
 dirty/external-satisfaction selection 识别 active task node 后，若 active view 为空，dirty
 preparation 会在比较 intent、device inventory、task id 或 node route 前把它视为成功 no-work。
 否则，空 route snapshot 或缺失 active-node route 本身就是 fail-closed mismatch；preparation 会在
@@ -218,6 +220,24 @@ gate、policy invocation、physical reservation/grant、provider entry 或 ledge
 stride-aware 内核 fill/copy 原语，因此 active pixel 会通过各 descriptor 的 `step` 复制，padding
 byte 则被排除。临时 normalized `NodeOutput` owner 保持 request-local，并存活到同步 tile callback
 全部结束。该 normalization 不会改变 selected task id 或 dirty ROI geometry。
+
+同一条 metadata-only 证明还会按 raw policy 投影 Sample Domain authority：扩展型 crop/pad
+贡献零，三到四通道转换贡献当前维护的 opaque raw value。排除任一常量的声明会被整体省略；包含
+全部常量的声明则保留到后续 operation-specific 证明。Resize、纯 crop、replication 与 reduction
+在该规则下不增加固定常量。它从不读取 payload extrema，也不改变 raw normalization 算法。
+
+在分配 per-node dirty Host binding 前，精确 selected output inference 会接收这些 operation input，
+包括其投影后的 optional authority，并冻结 descriptor、channel count、有符号 geometry 与已授权
+optional fact。现有 staged output
+只有在精确 plan matching 后才可能成为 byte seed，绝不会作为 semantic operation input 被前置。
+Inference 缺失时会省略可选 display/channel/sample/color 事实，而不是复制 first input。
+
+每个 HP 或 RT dirty tiled invocation 都会在自己的同步 execution stack 上拥有这份 prepared
+context。Context 在 plan freeze 前创建，覆盖 binding lookup/allocation 与全部 provider callback
+的生命周期，并且 callback entry 不会再次执行 normalization。并发 selected task 可以分别根据
+各自精确 prepared context 推导 plan；write buffer 只有在 frozen plan 与其唯一 per-node binding
+匹配时才会接受它们。因此，staged seed byte 只能保留未触及坐标，不能影响 inference 或替换
+`context.inputs()`。
 
 Dispatcher 会提交 selected source group 并等待其 settle，验证所需 source output 已存在于相关
 staged 或 committed store，随后提交 initially-ready downstream group。Dependency completion 会继续
@@ -352,6 +372,7 @@ route。上述明确限制界定了当前 generation 与 epoch check 能够保�
 - `tests/integration/test_resource_admission.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/opencv_route_normalization_cases.hpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/unit/test_compute_run.cpp`

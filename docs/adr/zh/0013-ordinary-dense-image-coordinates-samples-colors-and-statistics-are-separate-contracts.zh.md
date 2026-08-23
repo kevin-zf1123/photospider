@@ -69,18 +69,42 @@ Rec.709/Display-P3-D65/Rec.2020/ACES-AP0/ACES-AP1 色原色。scene linearity
 独立 Image、Sample Domain 与 Color Facet 记录，使这些含义可独立版本化且不
 创建第二 Value 权威。
 
-在 OpenCV provider 的 monolithic weighted-blend
-（`image_mixing:add_weighted`）发布边界内，output metadata 只包含两个参与 input 均已
-证明兼容的事实。output geometry 不变时，该边界可以保留 primary input 的有符号
-data window 与 display window。只有 output channel cardinality 不变、没有发生显式
-channel remapping，且两个 input 都声明语义相等的 channel 事实时，channel schema 才能
-保留。color interpretation 还要求保留该 schema，且两个 input 都声明语义相等的
-color 事实。只有两个 input 都声明完全相同的 sample domain，且均没有 per-channel
-override 时，uniform sample domain 才能保留。否则必须省略对应的 optional fact，使
-downstream consumer fail closed。payload value 绝不暗示 sample domain、不授权 sample
-conversion，也不选择 channel role。该已实现规则仅限 monolithic `add_weighted`；它不覆盖
-`diff`、`multiply` 或 tiled output planning/publication，包括 tiled `add_weighted` callback。
-本文不声称更广泛的 multi-input metadata projection 保证。
+在 OpenCV provider 已实现的 multi-input publication 与 tiled planning 边界内，output
+metadata 只包含根据 immutable input 声明与 effective parameter 对当前 operation 完成证明的
+事实。output geometry 不变时，可以保留 primary input 的有符号 data window 与 display
+window。对于 monolithic 与 tiled `image_mixing:add_weighted`，只有 output channel
+cardinality 不变、没有发生显式 channel mapping，且两个 input 的稳定 channel/group 事实在
+语义上相等时，channel schema 才能保留；color 还要求该 schema 已保留且两个 color fact
+相等；sample authority 首先要求完全相同、不含 per-channel override 的 uniform facet。
+在 operation-specific closure 之前，一条由 monolithic publication 与 tiled normalized Value
+共享的 source-private normalization 证明，会按真实 raw size/channel policy 投影 secondary 声明。
+只有 destination 在至少一个轴上超出 source 时，crop/pad 才会合成零；三到四通道转换会合成当前
+维护的 raw opaque value（浮点 storage 为一，整数 storage 为物理最大值）。只要任一合成常量不在
+同一个 uniform 声明内，secondary 就不再具有 Sample Domain authority，整个 output Sample
+Domain 都必须省略；全部常量均在域内时，原声明才可继续进入既有 operation 证明。Resize、纯
+crop、一到三/四通道 replication、三/四到一通道 reduction 与四到三通道 reduction 在该证明下
+不增加固定常量。该规则只读取 metadata，不检查 payload、不扩宽 domain，也不改变 raw
+normalization。只有有限
+`alpha`、`beta` 与 `gamma` 能使每个实际 destination 公式对声明区间闭包时，该 sample
+authority 才能保留。没有 mapping 时，`alpha*x + beta*y + gamma` 的四种 endpoint 组合都必须
+留在该区间内。有 mapping 时，source-private 证明会镜像 destination coverage/reset-to-gamma、
+每个有效 source contribution（包括重复累积）、invalid-source skip 与 padded zero plane；任何
+destination 不闭包都会省略整份 uniform facet。对于包含 channel three 的 mapped output，只有
+`weighted` alpha strategy 进入该证明；其他策略 fail closed。Monolithic 与 tiled
+`image_mixing:multiply` 使用同样独立的 channel/color 交集，但只有两个 input 声明完全相同的
+uniform facet，且有限 configured scale 使声明区间四个端点乘积都仍位于该同一区间内时，才
+保留 sample authority。Tiled `image_mixing:diff` 只保留共同的稳定
+channel 事实，并省略 sample/color authority。在当前 unary tiled OpenCV callback 中，
+`image_process:gaussian_blur` 保留完整 interpretation；非线性的
+`image_process:curve_transform` 则保留有符号 geometry 与稳定 channel 事实，同时省略
+sample/color authority。
+
+每条 tiled policy 都是 source-private pure callback，与精确 selected implementation revision
+配对，并在 Host allocation 或 provider entry 前冻结 descriptor/facet。没有该 policy 的 tiled
+implementation 会回退到 scalar/channel allocation 事实、必需的 zero-origin data window，且
+不携带任何可选 display/channel/sample/color authority。payload value 绝不暗示 sample domain、
+不授权 sample conversion，也不选择 channel role。当前保证仅限上面列出的 operation path；
+本文不为 monolithic `diff` 或其他未列出的 provider path 声明 policy。
 
 ### 观测统计
 

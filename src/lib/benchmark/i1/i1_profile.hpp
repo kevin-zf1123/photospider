@@ -47,9 +47,10 @@ inline constexpr std::size_t kI1FrozenCurveNodeCount = 4U;
  * @brief Stable production/encoding version of the independent I1 golden.
  * @note The version binds the coordinate-pattern integer numerator, exact
  * binary32 conversion, four curve stages, HWC descriptor, zero-origin data
- * window, DenseTensor schema/Image facet structural version 2, normalized
- * `[0,1]` Sample Domain facet structural version 1, and canonical-v1 logical-
- * content framing documented by the execution-profile contract.
+ * window, DenseTensor schema/Image facet structural version 2, the
+ * operation-specific omission of optional Sample Domain and Color authority
+ * after the nonlinear curve chain, and canonical-v1 logical-content framing
+ * documented by the execution-profile contract.
  */
 inline constexpr char kI1GoldenProductionVersion[] =
     "i1-coordinate-pattern-curve-chain-fp32-v1";  // NOLINT(whitespace/indent_namespace)
@@ -691,8 +692,8 @@ std::string i1_frozen_graph_yaml();
  * They are independently recomputable from `kI1GoldenProductionVersion`, the
  * frozen graph/source formula, IEEE binary32 stage rounding, the HWC
  * zero-origin DenseTensor descriptor with schema/Image structural version 2,
- * normalized `[0,1]` Sample Domain facet structural version 1, and canonical-
- * v1 content framing.
+ * no optional Sample Domain or Color authority after the nonlinear curve
+ * chain, and canonical-v1 content framing.
  */
 ContentDigest i1_frozen_final_content_digest() noexcept;
 

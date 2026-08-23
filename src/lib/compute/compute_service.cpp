@@ -1022,6 +1022,7 @@ NodeOutput& ComputeService::compute_internal(
     const OpImplementation& implementation = resolved_operation->second;
     tiled_config.metadata = implementation.metadata;
     tiled_config.dirty_propagator = implementation.dirty_propagator;
+    tiled_config.tiled_output_inference = implementation.tiled_output_inference;
     tiled_config.implementation_identity =
         implementation.implementation_identity;
     const compute::OperationExecutionConstraints operation_constraints{

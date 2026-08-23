@@ -221,7 +221,8 @@ void validate_tiled_operation_metadata(const OpMetadata& metadata) {
 /**
  * @brief Rejects engaged but empty exact-candidate planning callbacks.
  *
- * @param callbacks Candidate-owned backward, forward, and dependency callbacks.
+ * @param callbacks Candidate-owned propagation, dependency, and tiled output
+ * inference callbacks.
  * @return Nothing when every present `std::function` has a callable target.
  * @throws std::invalid_argument when any present callback is empty.
  * @note Scalar registration invokes this before key construction, capture,
@@ -230,7 +231,9 @@ void validate_tiled_operation_metadata(const OpMetadata& metadata) {
 void validate_planning_callbacks(const OpPlanningCallbacks& callbacks) {
   if ((callbacks.dirty_propagator && !*callbacks.dirty_propagator) ||
       (callbacks.forward_propagator && !*callbacks.forward_propagator) ||
-      (callbacks.dependency_builder && !*callbacks.dependency_builder)) {
+      (callbacks.dependency_builder && !*callbacks.dependency_builder) ||
+      (callbacks.tiled_output_inference &&
+       !*callbacks.tiled_output_inference)) {
     throw std::invalid_argument(
         "operation implementation planning callback is empty");
   }
@@ -1273,7 +1276,7 @@ void OpRegistry::register_op(const std::string& type,
   OpVariant legacy_replacement = fn;
   std::optional<OpImplementation> hp_replacement(
       std::in_place,
-      OpImplementation{OpVariant{std::move(fn)}, meta, 0U, {}, {}, {}});
+      OpImplementation{OpVariant{std::move(fn)}, meta, 0U, {}, {}, {}, {}});
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
@@ -1304,7 +1307,7 @@ void OpRegistry::register_op(const std::string& type,
   OpVariant legacy_replacement = fn;
   std::optional<OpImplementation> hp_replacement(
       std::in_place,
-      OpImplementation{OpVariant{std::move(fn)}, meta, 0U, {}, {}, {}});
+      OpImplementation{OpVariant{std::move(fn)}, meta, 0U, {}, {}, {}, {}});
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
@@ -1472,7 +1475,8 @@ void OpRegistry::register_op_hp_monolithic(
       OpImplementation{OpVariant{std::move(fn)}, std::move(meta), 0U,
                        std::move(planning_callbacks.dirty_propagator),
                        std::move(planning_callbacks.forward_propagator),
-                       std::move(planning_callbacks.dependency_builder)});
+                       std::move(planning_callbacks.dependency_builder),
+                       std::move(planning_callbacks.tiled_output_inference)});
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
@@ -1501,7 +1505,8 @@ void OpRegistry::register_op_hp_tiled(const std::string& type,
       OpImplementation{OpVariant{std::move(fn)}, std::move(meta), 0U,
                        std::move(planning_callbacks.dirty_propagator),
                        std::move(planning_callbacks.forward_propagator),
-                       std::move(planning_callbacks.dependency_builder)});
+                       std::move(planning_callbacks.dependency_builder),
+                       std::move(planning_callbacks.tiled_output_inference)});
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
@@ -1529,7 +1534,8 @@ void OpRegistry::register_op_rt_tiled(const std::string& type,
       OpImplementation{OpVariant{std::move(fn)}, std::move(meta), 0U,
                        std::move(planning_callbacks.dirty_propagator),
                        std::move(planning_callbacks.forward_propagator),
-                       std::move(planning_callbacks.dependency_builder)});
+                       std::move(planning_callbacks.dependency_builder),
+                       std::move(planning_callbacks.tiled_output_inference)});
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
@@ -1785,6 +1791,7 @@ void OpRegistry::register_impl(const std::string& type,
         0U,
         {},
         {},
+        {},
         {}});
   }
   auto key = make_key(type, subtype);
@@ -1846,6 +1853,7 @@ void OpRegistry::register_impl(const std::string& type,
         OpVariant{make_tiled_device_compatibility_bridge(device_slot)},
         meta,
         0U,
+        {},
         {},
         {},
         {}});
@@ -1913,7 +1921,9 @@ void OpRegistry::replace_implementation_candidates(
     }
     if ((candidate.dirty_propagator && !*candidate.dirty_propagator) ||
         (candidate.forward_propagator && !*candidate.forward_propagator) ||
-        (candidate.dependency_builder && !*candidate.dependency_builder)) {
+        (candidate.dependency_builder && !*candidate.dependency_builder) ||
+        (candidate.tiled_output_inference &&
+         !*candidate.tiled_output_inference)) {
       throw std::invalid_argument(
           "operation implementation planning callback is empty");
     }
@@ -2069,7 +2079,7 @@ std::optional<OpImplementation> OpRegistry::get_implementation_by_identity(
   if (legacy && legacy_metadata &&
       revisions.legacy_op == implementation_identity) {
     return OpImplementation{
-        *legacy, *legacy_metadata, revisions.legacy_op, {}, {}, {}};
+        *legacy, *legacy_metadata, revisions.legacy_op, {}, {}, {}, {}};
   }
   return std::nullopt;
 }
@@ -2172,7 +2182,7 @@ std::optional<OpImplementation> OpRegistry::select_implementation(
     return std::nullopt;
   }
   const std::optional<OpImplementation> legacy_candidate = OpImplementation{
-      *legacy, *legacy_metadata, revisions.legacy_op, {}, {}, {}};
+      *legacy, *legacy_metadata, revisions.legacy_op, {}, {}, {}, {}};
   return scalar_candidate(legacy_candidate);
 }
 

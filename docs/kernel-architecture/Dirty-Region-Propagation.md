@@ -134,7 +134,9 @@ revision to a callback-free operation key and complete
 identity/device/shape/metadata record. That same revision supplies ImageRect
 dirty/dependency behavior and, for TensorSlice, passes the exact-core check.
 The request plan retains these revisioned records, not the callable or DSO
-lease.
+lease. Dirty preparation later re-resolves that exact revision and copies its
+tiled output inference together with execution and propagation callbacks; it
+never borrows a sibling operation-level policy.
 After dirty/external-satisfaction selection identifies active task nodes, dirty
 preparation treats an empty active view as successful no-work before comparing
 intent, device inventory, task ids, or node routes. Otherwise an empty route
@@ -267,6 +269,30 @@ fill/copy primitives, so active pixels are copied through each descriptor's
 `step` and padded bytes are excluded. Temporary normalized `NodeOutput` owners
 remain request-local and live until synchronous tile callbacks finish. This
 normalization changes neither the selected task ids nor dirty ROI geometry.
+One shared metadata-only proof also projects Sample Domain authority through
+the raw policy: expanding crop/pad contributes zero and three-to-four channel
+conversion contributes the maintained opaque raw value. An excluding
+declaration is omitted in full, while a containing declaration survives for
+the later operation-specific proof; resize, pure crop, replication, and
+reduction add no fixed constant under this rule. Payload extrema are never
+read, and the raw normalization algorithm is unchanged.
+
+Before the per-node dirty Host binding is allocated, the exact selected output
+inference receives those exact normalized operation inputs, including their
+projected optional authority, and freezes descriptor, channel
+count, signed geometry, and authorized optional facts. Existing staged output
+is only a possible byte seed after exact plan matching and is never prepended
+as a semantic operation input. Absent inference omits optional
+display/channel/sample/color facts rather than copying the first input.
+
+Each HP or RT dirty tiled invocation owns that prepared context on its
+synchronous execution stack. The context is created before plan freeze, remains
+alive through binding lookup/allocation and every provider callback, and is not
+normalized a second time at callback entry. Concurrent selected tasks may each
+derive a plan from their own exact prepared context; the write buffer accepts
+them only when the frozen plans match its one per-node binding. Seeded staged
+bytes therefore preserve untouched coordinates but cannot influence inference
+or replace `context.inputs()`.
 
 The dispatcher submits the selected source group and waits for it to settle,
 validates that required source outputs exist in the relevant staged or committed
@@ -435,6 +461,7 @@ can currently guarantee.
 - `tests/integration/test_resource_admission.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/opencv_route_normalization_cases.hpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/unit/test_compute_run.cpp`

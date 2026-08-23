@@ -137,7 +137,7 @@ void register_cli_command_ops() {
               output.debug.compute_device = "cli-dirty-test-offset-identity";
               return output;
             }),
-        {}, OpPlanningCallbacks{offset_dirty, {}, {}});
+        {}, OpPlanningCallbacks{offset_dirty, {}, {}, {}});
     OpRegistry::instance().register_dirty_propagator(
         "cli_dirty_test", "offset_identity", offset_dirty);
     OpMetadata empty_output_metadata;
@@ -391,6 +391,45 @@ void write_incompatible_weighted_blend_graph(
       << "    - from_node_id: 2\n"
       << "  parameters: {alpha: 0.5, beta: 0.5, gamma: 0.0, "
          "merge_strategy: resize}\n";
+}
+
+/**
+ * @brief Writes a pointwise multiply whose two sample declarations disagree.
+ *
+ * @param path YAML file path to create.
+ * @return Nothing after the complete graph fixture has been written.
+ * @throws std::filesystem::filesystem_error if parent-directory creation
+ *         fails.
+ * @throws std::ios_base::failure if the destination cannot be opened or a
+ *         YAML write fails.
+ * @throws std::bad_alloc if path, stream, or YAML text construction exhausts
+ *         memory.
+ * @note Node 3 reaches the configured monolithic OpenCV multiply candidate at
+ * scale one. No conversion reconciles the normalized and Legal `[-1,1]`
+ * declarations, so output sample authority must be absent before save.
+ */
+void write_incompatible_multiply_graph(const std::filesystem::path& path) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream out;
+  out.exceptions(std::ios::failbit | std::ios::badbit);
+  out.open(path);
+  out << "- id: 1\n"
+      << "  name: normalized_source\n"
+      << "  type: image_generator\n"
+      << "  subtype: constant\n"
+      << "  parameters: {width: 2, height: 1, channels: 1, value: 64}\n"
+      << "- id: 2\n"
+      << "  name: legal_source\n"
+      << "  type: cli_dirty_test\n"
+      << "  subtype: legal_source\n"
+      << "- id: 3\n"
+      << "  name: incompatible_multiply\n"
+      << "  type: image_mixing\n"
+      << "  subtype: multiply\n"
+      << "  image_inputs:\n"
+      << "    - from_node_id: 1\n"
+      << "    - from_node_id: 2\n"
+      << "  parameters: {scale: 1.0, merge_strategy: resize}\n";
 }
 
 /**
@@ -1075,6 +1114,75 @@ TEST(CliSaveCommand,
   ASSERT_EQ(blend_view.width(), 2U);
   ASSERT_EQ(blend_view.height(), 1U);
   ASSERT_EQ(blend_view.channels(), 1U);
+
+  EXPECT_FALSE(std::filesystem::exists(output_path));
+  std::istringstream args(
+      "3 image " + output_path.string() +
+      " uint8 code code 0 255 reject nearest-even reject allow");
+  std::string current_graph = request.session.value;
+  bool modified = false;
+  CliConfig config;
+  std::ostringstream captured;
+  bool handled = false;
+  {
+    ScopedStreamBufferRedirect redirect(std::cout, captured.rdbuf());
+    handled = ::handle_save(args, *host, current_graph, modified, config);
+  }
+
+  const std::string text = captured.str();
+  EXPECT_TRUE(handled);
+  EXPECT_NE(text.find("Failed to save image:"), std::string::npos) << text;
+  EXPECT_NE(text.find("explicit default sample domain"), std::string::npos)
+      << text;
+  EXPECT_FALSE(std::filesystem::exists(output_path));
+}
+
+/**
+ * @brief Proves incompatible multiply metadata fails at the real save command.
+ *
+ * @return Nothing; GoogleTest reports provider, metadata, diagnostic, or
+ *         filesystem disagreement.
+ * @throws Host, filesystem, provider, stream, and allocation exceptions
+ *         unchanged outside the command's maintained diagnostic boundary.
+ * @note Raw configured multiply pixels remain available through Host, but the
+ * operation-specific projection omits false sample authority. The configured
+ * PNG codec therefore rejects before creating the destination.
+ */
+TEST(CliSaveCommand,
+     IncompatibleMultiplySampleDomainsFailClosedBeforeCodecWrite) {
+  register_cli_command_ops();
+  providers::register_configured_operation_providers();
+  ScopedTempDir temp("photospider_cli_multiply_sample_mismatch_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const auto yaml_path = temp.root() / "source" / "multiply_mismatch.yaml";
+  const auto output_path = temp.root() / "multiply-mismatch.png";
+  write_incompatible_multiply_graph(yaml_path);
+
+  GraphLoadRequest request;
+  request.session = GraphSessionId{"cli_multiply_sample_mismatch"};
+  request.root_dir = (temp.root() / "sessions").string();
+  request.yaml_path = yaml_path.string();
+  request.cache_root_dir = (temp.root() / "cache").string();
+  const auto loaded = host->load_graph(request);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  HostComputeRequest compute_request;
+  compute_request.session = request.session;
+  compute_request.node = NodeId{3};
+  compute_request.cache.precision = "fp32";
+  const Result<NamedValueResult> computed =
+      host->compute_and_get_values(compute_request);
+  ASSERT_TRUE(computed.status.ok) << computed.status.message;
+  const Value* multiplied = computed.value.find("image");
+  ASSERT_NE(multiplied, nullptr);
+  ASSERT_TRUE(multiplied->image_facet().has_value());
+  EXPECT_FALSE(multiplied->image_facet()->sample_domain.has_value());
+  const ImageView multiplied_view(*multiplied);
+  ASSERT_EQ(multiplied_view.width(), 2U);
+  ASSERT_EQ(multiplied_view.height(), 1U);
+  ASSERT_EQ(multiplied_view.channels(), 1U);
 
   EXPECT_FALSE(std::filesystem::exists(output_path));
   std::istringstream args(

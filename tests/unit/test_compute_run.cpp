@@ -726,8 +726,14 @@ std::atomic_int g_resource_dirty_rt_operation_calls{0};
 /** @brief Shared process-domain key used by the tiled constraint regression. */
 constexpr char kTiledGateKey[] = "compute-run-tiled-constraint-exclusive-key";
 
+/** @brief Named output on the inert tiled parameter-input declaration. */
+constexpr char kDisconnectedParameterOutput[] = "phantom_output";
+
+/** @brief Phantom destination that must never enter effective parameters. */
+constexpr char kDisconnectedParameterDestination[] = "phantom_destination";
+
 /**
- * @brief Synchronizes and observes blocking tiled provider entries.
+ * @brief Synchronizes provider entries and observes effective parameters.
  *
  * @throws std::invalid_argument when constructed with an invalid release
  * future.
@@ -748,6 +754,48 @@ class TiledConstraintGateProbe final {
       throw std::invalid_argument(
           "Tiled constraint probe requires a valid release future.");
     }
+  }
+
+  /**
+   * @brief Records the effective-parameter state seen by output inference.
+   * @param node Execution-local node supplied to the selected inference.
+   * @return Nothing after publishing exact binding/key observations.
+   * @throws Nothing with the standard string comparator used by ParameterMap.
+   * @note The inference callback remains payload-free; this observation reads
+   * only the immutable parameter declaration and effective map.
+   */
+  void observe_inference_parameters(const Node& node) {
+    if (has_disconnected_parameter_binding(node)) {
+      inference_disconnected_binding_entries.fetch_add(
+          1, std::memory_order_relaxed);
+    }
+    if (node.runtime_parameters.find(kDisconnectedParameterDestination) !=
+        node.runtime_parameters.end()) {
+      inference_phantom_destination_present.store(true,
+                                                  std::memory_order_relaxed);
+    }
+    inference_parameter_entries.fetch_add(1, std::memory_order_release);
+  }
+
+  /**
+   * @brief Records the effective-parameter state seen by one provider tile.
+   * @param node Execution-local node supplied to the tiled provider callback.
+   * @return Nothing after publishing exact binding/key observations.
+   * @throws Nothing with the standard string comparator used by ParameterMap.
+   * @note Each successful full tiled Run must report one observation per tile,
+   * independently from the provider-entry gate counter.
+   */
+  void observe_provider_parameters(const Node& node) {
+    if (has_disconnected_parameter_binding(node)) {
+      provider_disconnected_binding_entries.fetch_add(
+          1, std::memory_order_relaxed);
+    }
+    if (node.runtime_parameters.find(kDisconnectedParameterDestination) !=
+        node.runtime_parameters.end()) {
+      provider_phantom_destination_present.store(true,
+                                                 std::memory_order_relaxed);
+    }
+    provider_parameter_entries.fetch_add(1, std::memory_order_release);
   }
 
   /**
@@ -779,8 +827,45 @@ class TiledConstraintGateProbe final {
   /** @brief Largest concurrently active provider population observed. */
   std::atomic_int maximum_active{0};
 
+  /** @brief Exact number of selected output-inference observations. */
+  std::atomic_int inference_parameter_entries{0};
+
+  /** @brief Inference observations containing the disconnected declaration. */
+  std::atomic_int inference_disconnected_binding_entries{0};
+
+  /** @brief Whether inference ever received the phantom destination key. */
+  std::atomic_bool inference_phantom_destination_present{false};
+
+  /** @brief Exact number of provider effective-parameter observations. */
+  std::atomic_int provider_parameter_entries{0};
+
+  /** @brief Provider observations containing the disconnected declaration. */
+  std::atomic_int provider_disconnected_binding_entries{0};
+
+  /** @brief Whether any provider tile received the phantom destination key. */
+  std::atomic_bool provider_phantom_destination_present{false};
+
   /** @brief Shared release state retained for all tiled provider entries. */
   std::shared_future<void> release_;
+
+ private:
+  /**
+   * @brief Checks that one node retains the exact inert parameter declaration.
+   * @param node Execution-local node observed at inference or provider entry.
+   * @return True only for the expected disconnected source/destination tuple.
+   * @throws Nothing with the standard string comparator.
+   * @note This proves absence is observed on a node that actually carries the
+   * regression binding, rather than on an unrelated parameter-free callback.
+   */
+  static bool has_disconnected_parameter_binding(const Node& node) {
+    return std::any_of(
+        node.parameter_inputs.begin(), node.parameter_inputs.end(),
+        [](const ParameterInput& input) {
+          return input.from_node_id < 0 &&
+                 input.from_output_name == kDisconnectedParameterOutput &&
+                 input.to_parameter_name == kDisconnectedParameterDestination;
+        });
+  }
 };
 
 /** @brief Serializes access to the process-global tiled constraint probe. */
@@ -876,9 +961,10 @@ class ScopedTiledConstraintProbeBinding final {
  * @brief Registers the tiled CPU operation used by the constraint regression.
  * @return Nothing.
  * @throws Registry allocation, metadata-copy, or callback-copy exceptions.
- * @note Registration is process-persistent and idempotent. The callback writes
- * no pixel value because this regression observes gate ownership, not image
- * arithmetic.
+ * @note Registration is process-persistent and idempotent. The selected pure
+ * inference and every provider tile observe the same execution-local Node.
+ * The provider writes no pixel value because this regression observes gate,
+ * admission, and parameter ownership rather than image arithmetic.
  */
 void ensure_tiled_constraint_operation_registered() {
   static std::once_flag once;
@@ -887,13 +973,31 @@ void ensure_tiled_constraint_operation_registered() {
     metadata.tile_preference = TileSizePreference::MICRO;
     metadata.reentrant = true;
     metadata.exclusive_key = kTiledGateKey;
+    OpPlanningCallbacks planning;
+    planning.tiled_output_inference = TiledOutputInferenceFunc(
+        [](const Node& node, const std::vector<const NodeOutput*>&,
+           const PixelSize& output_size) {
+          current_tiled_constraint_probe()->observe_inference_parameters(node);
+          DenseTensorDescriptor descriptor{
+              {static_cast<std::size_t>(output_size.height),
+               static_cast<std::size_t>(output_size.width), 1U},
+              ElementSemantics::FloatingPoint,
+              StorageEncoding{32U}};
+          ImageFacet facet =
+              make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
+          return TiledOutputInferenceResult{std::move(descriptor),
+                                            std::move(facet)};
+        });
     OpRegistry::instance().register_op_hp_tiled(
         "compute_run_tiled_constraint", "filter",
-        TileOpFunc(
-            [](const Node&, const OutputTile&, const std::vector<InputTile>&) {
-              current_tiled_constraint_probe()->enter();
-            }),
-        metadata);
+        TileOpFunc([](const Node& node, const OutputTile&,
+                      const std::vector<InputTile>&) {
+          std::shared_ptr<TiledConstraintGateProbe> probe =
+              current_tiled_constraint_probe();
+          probe->observe_provider_parameters(node);
+          probe->enter();
+        }),
+        metadata, std::move(planning));
   });
 }
 
@@ -931,7 +1035,8 @@ Node make_tiled_constraint_cached_input_node(int id) {
  * @throws std::bad_alloc when node strings, input ownership, or parameters
  * allocate.
  * @note The exact two-task shape makes repeated node-level constraint movement
- * observable on the second task.
+ * observable on the second task. Its disconnected ParameterInput remains an
+ * explicit inert declaration whose destination must not enter runtime state.
  */
 Node make_tiled_constraint_node(int id, int input_id) {
   Node node;
@@ -942,7 +1047,74 @@ Node make_tiled_constraint_node(int id, int input_id) {
   node.parameters["width"] = 32;
   node.parameters["height"] = 16;
   node.image_inputs.push_back(ImageInput{input_id, "image"});
+  node.parameter_inputs.push_back(ParameterInput{
+      -1, kDisconnectedParameterOutput, kDisconnectedParameterDestination});
   return node;
+}
+
+/**
+ * @brief Measures one full-plan tiled runner with small or heap-backed Node
+ * ownership.
+ *
+ * @param large_effective_node Whether to retain a large node name and static
+ * runtime-parameter payload in the future tiled execution context.
+ * @return Complete Run-owned retained-memory estimate after runner creation.
+ * @throws Registry, graph, Run, codec, service, or allocation failures.
+ * @note Both cases have identical topology, task count, operation metadata,
+ * and service collaborators. The only difference is storage that the tiled
+ * runner's execution-local Node independently owns until sibling settlement.
+ */
+std::uint64_t estimate_tiled_execution_context_retained_bytes(
+    bool large_effective_node) {
+  ensure_tiled_constraint_operation_registered();
+  constexpr int kInputNodeId = 220;
+  constexpr int kNodeId = 221;
+  GraphModel graph("cache/tiled-context-retained-estimate");
+  graph.add_node(make_tiled_constraint_cached_input_node(kInputNodeId));
+  Node target = make_tiled_constraint_node(kNodeId, kInputNodeId);
+  if (large_effective_node) {
+    target.name.assign(1024U, 'n');
+    target.parameters["large_effective_parameter"] = std::string(4096U, 'p');
+  }
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ExecutionService service(1U);
+  ComputeRun run(make_test_submission("tiled-context-retained-estimate",
+                                      graph.revision().value(), kNodeId));
+  if (!run.advance_to(ComputeRunPhase::Admitted)) {
+    throw std::logic_error(
+        "Tiled retained estimate could not advance its Run to Admitted.");
+  }
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, kNodeId,
+      std::vector<DeviceBackend>{DeviceBackend::CPU});
+  TimingCollector timings;
+  std::mutex timing_mutex;
+  plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      service,
+      timings,
+      timing_mutex,
+      plan.execution_order(),
+      plan.id_to_idx(),
+      plan.temp_results(),
+      plan.resolved_ops(),
+      plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+      nullptr,
+      &plan.compute_plan().planned_work,
+  });
+  return run.acquire_lease().retained_memory_bytes();
 }
 
 /** @brief Test-product category for one retained operation-string owner. */
@@ -3472,6 +3644,156 @@ DirtyCallablePhaseRunResult execute_large_dirty_callable_phase_case(
   result.reserved_after = service.resource_snapshot().reserved;
   result.callback_entries =
       task_probe.callback_entries.load(std::memory_order_relaxed);
+  return result;
+}
+
+/**
+ * @brief Result of one full tiled context resource-admission endpoint.
+ * @throws Nothing for value construction and movement.
+ */
+struct TiledContextResourceResult final {
+  /** @brief Expected Graph failure category from rejected admission. */
+  std::optional<GraphErrc> failure_code;
+  /** @brief Complete root vector captured after successful admission. */
+  std::optional<ResourceVector> admitted_resources;
+  /** @brief Ledger commitments after synchronous return. */
+  ResourceVector reserved_after;
+  /** @brief Number of provider tile callbacks that entered. */
+  int callback_entries = 0;
+  /** @brief Whether the settled context borrowed the plan implementation. */
+  bool borrowed_resolved_operation = false;
+  /** @brief Exact number of registered inference entries. */
+  int inference_parameter_entries = 0;
+  /** @brief Inference entries carrying the disconnected declaration. */
+  int inference_disconnected_binding_entries = 0;
+  /** @brief Whether inference received the forbidden phantom key. */
+  bool inference_phantom_destination_present = false;
+  /** @brief Exact number of provider parameter observations. */
+  int provider_parameter_entries = 0;
+  /** @brief Provider entries carrying the disconnected declaration. */
+  int provider_disconnected_binding_entries = 0;
+  /** @brief Whether any provider tile received the forbidden phantom key. */
+  bool provider_phantom_destination_present = false;
+};
+
+/**
+ * @brief Executes one fresh full tiled Run with a large effective Node.
+ * @param limits Immutable resource limits applied to the fresh service.
+ * @param retained_string_probe Optional observer of actual string-charge
+ * intervals while the complete shared estimate is frozen.
+ * @return Admission, callback, borrow, and post-settlement evidence.
+ * @throws Unexpected registry, graph, codec, Run, service, or allocation
+ * exceptions unchanged; expected GraphError rejection is captured.
+ * @note The source is a complete cached input, so the two target tiles are the
+ * only executable tasks. The target carries one explicit disconnected
+ * ParameterInput. A pre-released callback gate makes success deterministic
+ * without changing product admission or provider ownership.
+ */
+TiledContextResourceResult execute_tiled_context_resource_case(
+    ExecutionResourceLimits limits,
+    RetainedOperationStringChargeProbe* retained_string_probe = nullptr) {
+  ensure_tiled_constraint_operation_registered();
+  std::promise<void> callback_release;
+  const std::shared_future<void> callback_release_future =
+      callback_release.get_future().share();
+  callback_release.set_value();
+  auto callback_probe =
+      std::make_shared<TiledConstraintGateProbe>(callback_release_future);
+  ScopedTiledConstraintProbeBinding probe_binding(callback_probe);
+
+  constexpr int kInputNodeId = 230;
+  constexpr int kNodeId = 231;
+  GraphModel graph("cache/tiled-context-exact-resource");
+  graph.add_node(make_tiled_constraint_cached_input_node(kInputNodeId));
+  Node target = make_tiled_constraint_node(kNodeId, kInputNodeId);
+  target.name.assign(1024U, 'n');
+  target.parameters["large_effective_parameter"] = std::string(4096U, 'p');
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ExecutionService service(1U, std::move(limits));
+  ExecutionServiceHost host;
+  InitialSubmissionStorageProbe admission;
+  ScopedInitialSubmissionStorageObserver admission_observer(service, admission);
+  ComputeRun run(make_test_submission("tiled-context-exact-resource",
+                                      graph.revision().value(), kNodeId));
+  if (!run.advance_to(ComputeRunPhase::Admitted)) {
+    throw std::logic_error("Tiled context resource Run was not admitted.");
+  }
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, kNodeId,
+      std::vector<DeviceBackend>{DeviceBackend::CPU});
+  TimingCollector timings;
+  std::mutex timing_mutex;
+  plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      service,
+      timings,
+      timing_mutex,
+      plan.execution_order(),
+      plan.id_to_idx(),
+      plan.temp_results(),
+      plan.resolved_ops(),
+      plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+      nullptr,
+      &plan.compute_plan().planned_work,
+  });
+  if (!run.advance_to(ComputeRunPhase::Queued) ||
+      !run.advance_to(ComputeRunPhase::Running)) {
+    throw std::logic_error("Tiled context resource Run did not start.");
+  }
+  ComputeRunLease lease = run.acquire_lease();
+  if (retained_string_probe != nullptr) {
+    ScopedRetainedOperationStringChargeObserver string_observer(
+        service, *retained_string_probe);
+    static_cast<void>(lease.retained_memory_bytes());
+  }
+
+  TiledContextResourceResult result;
+  try {
+    dispatch_planned_tasks(graph, service, host, "cpu", kNodeId, plan, lease);
+  } catch (const GraphError& error) {
+    result.failure_code = error.code();
+  }
+  const int observation_count =
+      admission.observation_count.load(std::memory_order_acquire);
+  if (observation_count > 0) {
+    result.admitted_resources = admission.admitted_resources;
+  }
+  result.reserved_after = service.resource_snapshot().reserved;
+  result.callback_entries =
+      callback_probe->entered.load(std::memory_order_relaxed);
+  result.borrowed_resolved_operation =
+      plan.tiled_context_borrows_resolved_operation_for_testing(
+          static_cast<std::size_t>(plan.id_to_idx().at(kNodeId)));
+  result.inference_parameter_entries =
+      callback_probe->inference_parameter_entries.load(
+          std::memory_order_acquire);
+  result.inference_disconnected_binding_entries =
+      callback_probe->inference_disconnected_binding_entries.load(
+          std::memory_order_acquire);
+  result.inference_phantom_destination_present =
+      callback_probe->inference_phantom_destination_present.load(
+          std::memory_order_acquire);
+  result.provider_parameter_entries =
+      callback_probe->provider_parameter_entries.load(
+          std::memory_order_acquire);
+  result.provider_disconnected_binding_entries =
+      callback_probe->provider_disconnected_binding_entries.load(
+          std::memory_order_acquire);
+  result.provider_phantom_destination_present =
+      callback_probe->provider_phantom_destination_present.load(
+          std::memory_order_acquire);
   return result;
 }
 
@@ -6764,6 +7086,97 @@ TEST(ExecutionServiceProductResources,
 
   EXPECT_GE(one_node_bytes, visible_one_node_minimum);
   EXPECT_GT(many_node_bytes, one_node_bytes);
+}
+
+/**
+ * @brief Proves full tiled admission charges execution-local Node storage.
+ *
+ * @return Nothing; assertions report a retained-memory undercount.
+ * @throws Registry, graph, Run, codec, service, or allocation failures.
+ * @note The large case adds only independently copied Node/ParameterMap
+ * payload. It must therefore increase the pre-admission plan estimate by more
+ * than the 4-KiB parameter payload instead of being hidden behind the fixed
+ * `sizeof(TiledNodeExecutionContext)` charge.
+ */
+TEST(ExecutionServiceProductResources,
+     FullTiledContextChargesLargeEffectiveNodeOwnership) {
+  const std::uint64_t small =
+      estimate_tiled_execution_context_retained_bytes(false);
+  const std::uint64_t large =
+      estimate_tiled_execution_context_retained_bytes(true);
+  ASSERT_GT(large, small);
+  EXPECT_GT(large - small, 4096U);
+}
+
+/**
+ * @brief Exercises a large full tiled context at exact retained boundaries.
+ *
+ * @return Nothing; assertions report undercount, duplicate operation owner,
+ * provider entry before rejection, or ledger residue.
+ * @throws Registry, graph, codec, Run, service, or allocation failures.
+ * @note Calibration observes the real production root. The exact vector then
+ * admits an identical fresh Run while one retained byte less rejects before
+ * inference or either tile callback. Inference and both provider tiles must
+ * see the explicit disconnected declaration without its phantom destination
+ * key. The string observer independently proves the plan has one resolved
+ * metadata/key owner and two moved task-constraint owners; the settled context
+ * points at that resolved owner instead of copying it.
+ */
+TEST(ExecutionServiceProductResources,
+     FullTiledContextUsesExactLimitAndBorrowsResolvedOperation) {
+  RetainedOperationStringChargeProbe string_probe;
+  const TiledContextResourceResult calibration =
+      execute_tiled_context_resource_case(
+          ExecutionService::default_resource_limits(), &string_probe);
+  EXPECT_FALSE(calibration.failure_code.has_value());
+  ASSERT_TRUE(calibration.admitted_resources.has_value());
+  EXPECT_EQ(calibration.callback_entries, 2);
+  EXPECT_TRUE(calibration.borrowed_resolved_operation);
+  EXPECT_EQ(calibration.inference_parameter_entries, 1);
+  EXPECT_EQ(calibration.inference_disconnected_binding_entries, 1);
+  EXPECT_FALSE(calibration.inference_phantom_destination_present);
+  EXPECT_EQ(calibration.provider_parameter_entries, 2);
+  EXPECT_EQ(calibration.provider_disconnected_binding_entries, 2);
+  EXPECT_FALSE(calibration.provider_phantom_destination_present);
+  EXPECT_EQ(calibration.reserved_after, ResourceVector{});
+  ASSERT_NO_FATAL_FAILURE(expect_retained_operation_string_charges(
+      string_probe,
+      {{RetainedOperationStringOwner::ComputePlanOperationRoute, 1U},
+       {RetainedOperationStringOwner::FullPlanResolvedOperation, 1U},
+       {RetainedOperationStringOwner::FullPlanExecutionConstraint, 2U}}));
+
+  ResourceVector one_short = *calibration.admitted_resources;
+  ASSERT_GT(one_short.retained_memory_bytes, 0U);
+  --one_short.retained_memory_bytes;
+  const TiledContextResourceResult rejected =
+      execute_tiled_context_resource_case(execution_limits(one_short));
+  ASSERT_TRUE(rejected.failure_code.has_value());
+  EXPECT_EQ(*rejected.failure_code, GraphErrc::ComputeError);
+  EXPECT_FALSE(rejected.admitted_resources.has_value());
+  EXPECT_EQ(rejected.callback_entries, 0);
+  EXPECT_FALSE(rejected.borrowed_resolved_operation);
+  EXPECT_EQ(rejected.inference_parameter_entries, 0);
+  EXPECT_EQ(rejected.inference_disconnected_binding_entries, 0);
+  EXPECT_FALSE(rejected.inference_phantom_destination_present);
+  EXPECT_EQ(rejected.provider_parameter_entries, 0);
+  EXPECT_EQ(rejected.provider_disconnected_binding_entries, 0);
+  EXPECT_FALSE(rejected.provider_phantom_destination_present);
+  EXPECT_EQ(rejected.reserved_after, ResourceVector{});
+
+  const TiledContextResourceResult exact = execute_tiled_context_resource_case(
+      execution_limits(*calibration.admitted_resources));
+  EXPECT_FALSE(exact.failure_code.has_value());
+  ASSERT_TRUE(exact.admitted_resources.has_value());
+  EXPECT_EQ(*exact.admitted_resources, *calibration.admitted_resources);
+  EXPECT_EQ(exact.callback_entries, 2);
+  EXPECT_TRUE(exact.borrowed_resolved_operation);
+  EXPECT_EQ(exact.inference_parameter_entries, 1);
+  EXPECT_EQ(exact.inference_disconnected_binding_entries, 1);
+  EXPECT_FALSE(exact.inference_phantom_destination_present);
+  EXPECT_EQ(exact.provider_parameter_entries, 2);
+  EXPECT_EQ(exact.provider_disconnected_binding_entries, 2);
+  EXPECT_FALSE(exact.provider_phantom_destination_present);
+  EXPECT_EQ(exact.reserved_after, ResourceVector{});
 }
 
 /**

@@ -215,8 +215,8 @@ float reference_curve_stage(float input, float coefficient) noexcept {
  * @throws std::runtime_error when the complete caller environment cannot be
  * captured, RNE cannot be installed, failed installation cannot restore the
  * captured environment, or the canonical digest is unavailable.
- * @throws std::invalid_argument when the fixed tensor descriptor, image or
- * sample-domain facet, layout, or storage envelope is rejected.
+ * @throws std::invalid_argument when the fixed tensor descriptor, image facet,
+ * layout, or storage envelope is rejected.
  * @throws std::overflow_error when the fixed Value address envelope cannot be
  * represented.
  * @throws std::bad_alloc when oracle storage, immutable Value state, or digest
@@ -224,7 +224,9 @@ float reference_curve_stage(float input, float coefficient) noexcept {
  * @note The oracle constructs HWC bytes directly and never loads the frozen
  * YAML, Host, Kernel, scheduler, cache, or OpenCV provider implementation. It
  * restores the complete caller environment on normal and exceptional exit;
- * destruction-time restoration failure is fail-stop.
+ * destruction-time restoration failure is fail-stop. The output facet keeps
+ * proven zero-origin signed geometry and omits optional Sample Domain and Color
+ * authority after the nonlinear chain.
  */
 ContentDigest recompute_i1_golden_from_reference_contract() {
   ScopedReferenceBinary32RoundToNearest rounding_scope;
@@ -255,12 +257,7 @@ ContentDigest recompute_i1_golden_from_reference_contract() {
   descriptor.shape = {kI1FrozenImageEdge, kI1FrozenImageEdge, kChannels};
   descriptor.element_semantics = ElementSemantics::FloatingPoint;
   descriptor.storage_encoding = StorageEncoding{32U};
-  ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
-  image.sample_domain =
-      SampleDomainFacet{1U,
-                        SampleEncoding{1U, SampleEncodingKind::Normalized},
-                        SampleDomain{SampleDomainKind::Normalized, 0.0, 1.0},
-                        {}};
+  const ImageFacet image = make_zero_origin_image_facet(descriptor, 1U, 0U, 2U);
   const std::ptrdiff_t row_stride = static_cast<std::ptrdiff_t>(
       kI1FrozenImageEdge * kChannels * kElementBytes);
   const std::ptrdiff_t pixel_stride =
@@ -305,6 +302,9 @@ Value make_collector_test_output() {
  * @brief Proves the literal golden is independently recomputable.
  * @throws Nothing when the mathematical oracle and frozen bytes agree;
  * allocation/descriptor failures are reported by GoogleTest as test errors.
+ * @note The independent oracle retains proven signed geometry and deliberately
+ * omits optional Sample Domain and Color authority after the nonlinear curve
+ * chain, matching the frozen operation-specific metadata policy.
  */
 TEST(I1Profile, FrozenGoldenMatchesIndependentReferenceContract) {
   EXPECT_EQ(recompute_i1_golden_from_reference_contract(),

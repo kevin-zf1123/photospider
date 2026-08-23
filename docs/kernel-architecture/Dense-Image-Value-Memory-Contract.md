@@ -40,21 +40,61 @@ equality. Stable `ChannelId` and `ChannelGroupId` records do. Observed extrema,
 histograms, NaN/Inf counts, and other statistics never become descriptor,
 Facet, or content identity.
 
-The OpenCV provider's monolithic weighted-blend
-(`image_mixing:add_weighted`) publication boundary treats output metadata as a
-semantic intersection of its two inputs, not a copy from one favored input.
-Unchanged output geometry may retain the primary input's signed data and
-display windows. Channel facts survive only when output channel cardinality is
-unchanged, no explicit channel mapping was applied, and both inputs declare
-semantically equal schemas. Color additionally requires a retained schema and
-semantically equal color interpretation from both inputs. A sample-domain
-fact survives only when both inputs declare the exact same uniform domain and
-neither has per-channel overrides. An unproven or incompatible optional fact
-is omitted; the boundary does not infer it from payload extrema, guess channel
-roles, or perform implicit sample conversion. This rule does not cover `diff`,
-`multiply`, or tiled output planning/publication, including tiled
-`add_weighted`; this contract makes no broader multi-input metadata-
-intersection claim.
+The OpenCV provider uses operation-specific semantic projection instead of
+copying one favored input. Monolithic and tiled `image_mixing:add_weighted`
+retain independently proven channel, color, and uniform sample intersections;
+an explicit channel mapping or expansion removes stable channel/color
+authority. Blend sample authority additionally requires identical uniform
+input facets. Before blend or multiply closure, the shared payload-free
+normalization rule proves every synthesized raw constant against that same
+declaration: crop/pad contributes zero only for an expanded destination, and
+three-to-four conversion contributes opaque one for floating storage or the
+physical maximum for integer storage. An escaping constant removes the whole
+Sample Domain; a contained constant leaves the declaration unchanged for the
+operation proof. Resize, pure crop, one-to-three/four replication,
+three/four-to-one reduction, and four-to-three reduction add no fixed constant.
+The raw normalization, geometry, storage ownership, and Value revision rules do
+not change. Blend closure then requires finite `alpha`/`beta`/`gamma`. Without
+mapping, all four
+declared endpoint combinations of `alpha*x + beta*y + gamma` must remain in
+the same interval. With mapping, one payload-free rule shared by monolithic and
+tiled paths mirrors destination reset-to-gamma, valid and repeated source
+accumulation, invalid-source skips, and padded zero planes; every destination
+must close or the entire uniform facet is absent. Mapped outputs containing
+channel three fail closed for alpha strategies other than `weighted` because
+those overrides are outside the retained proof. Monolithic and tiled
+`image_mixing:multiply` retain the same channel/color intersection, while
+sample authority additionally requires an identical uniform facet and a finite
+scale whose four declared interval endpoint products remain inside that same
+interval. Tiled
+`image_mixing:diff` retains only common stable channel facts and omits
+sample/color authority. Tiled `image_process:gaussian_blur` preserves the
+complete interpretation, while nonlinear tiled
+`image_process:curve_transform` preserves primary signed geometry and stable
+channel facts but omits sample/color authority. Unproven optional facts are
+absent; no path derives replacements from payload extrema, guesses roles, or
+performs implicit sample conversion.
+
+For tiled execution, the selected implementation's pure source-private output
+inference freezes one descriptor/facet before allocation and callback entry.
+`NodeExecutor` first materializes any required secondary normalization once,
+including the normalization-projected Sample Domain on that immutable
+temporary Value. Those normalized Values are the exact operation inputs to
+revision-paired inference; an old staged output may seed bytes
+only after the frozen plan matches and never becomes semantic evidence. An
+implementation without exact inference keeps scalar/channel allocation facts
+and a required zero-origin data window, but omits optional
+display/channel/sample/color authority. This scope covers the five currently
+registered tiled OpenCV operations listed above and does not claim a policy for
+monolithic `diff` or unlisted provider paths.
+
+The context owning those Values is part of the execution boundary. Full
+parallel execution publishes one stable owner per node/Run only after pairing
+the effective `Node` with the exact implementation snapshot, and all sibling
+tiles borrow its same input vector. Sequential and dirty HP/RT execution retain
+one prepared context across their synchronous plan freeze, allocation, and
+callbacks. No route may infer from raw secondary metadata and normalize a
+different Value only for producer entry.
 
 ## Layout, binding, and ownership
 
@@ -259,7 +299,7 @@ Primary contracts and implementations:
 - `include/photospider/data/{value,image_metadata,image_view}.hpp`
 - `include/photospider/data/{sample_conversion,value_artifact}.hpp`
 - `include/photospider/host/{host,value_result,value_artifact_result}.hpp`
-- `src/lib/core/{value,sample_conversion,value_artifact}.cpp`
+- `src/lib/core/{value,sample_conversion,value_artifact,dense_image_processing}.cpp`
 - `src/lib/adapters/opencv/{value_adapter_opencv,image_artifact_codec_opencv}.*`
 - `src/lib/adapters/openexr/openexr_dense_image_codec.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
@@ -270,6 +310,9 @@ conversion, artifact reconstruction, Host results, IPC leases, worker/durable
 replay, OpenCV lifetime, ordinary OpenEXR round trips, and provider-defined
 Deep behavior. Source-residue searches are migration evidence only and are not
 registered as CTest or CI behavior tests.
+Production-route OpenCV regressions additionally cover full parallel, dirty HP,
+and dirty RT normalization before inference/allocation, including multi-sibling
+context identity, zero/opaque constants, raw pixels, and `[0,1]` retention.
 The later-buffer artifact regression uses a BUILD_TESTING-only source-private
 runtime failpoint immediately before the selected `BufferHandle::ControlBlock`
 allocation. Production builds compile no test-access seam, and the test does

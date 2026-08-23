@@ -57,6 +57,15 @@ struct TiledExecutionConfig {
   std::optional<OpMetadata> metadata;
 
   /**
+   * @brief Exact tiled output metadata inference from the selected revision.
+   * @note The callback is invoked synchronously before Host allocation and
+   * must be copied from the same implementation snapshot as metadata,
+   * dirty_propagator, and implementation_identity. Absence selects a
+   * conservative plan with no optional interpretation facts.
+   */
+  std::optional<TiledOutputInferenceFunc> tiled_output_inference;
+
+  /**
    * @brief Optional dirty-ROI callback from the exact selected implementation.
    * @note When present this callback is authoritative for RandomAccess input
    * mapping. It must be copied from the same registry snapshot as metadata so
@@ -119,9 +128,13 @@ class NodeExecutor {
   /**
    * @brief Freezes the sole internal Host plan for one tiled image output.
    *
-   * @param inputs Canonical named-Value inputs used only for channel/type
-   * inference; disconnected slots may be null.
+   * @param node Execution-local node whose effective parameters are visible to
+   * the selected inference policy.
+   * @param inputs Exact operation inputs in destination-index order;
+   * disconnected slots may be null and prior staged output must not be added.
    * @param output_size Positive output extent fixed by the task plan.
+   * @param output_inference Optional callback copied from the exact selected
+   * implementation revision.
    * @return Complete immutable zero-origin, interleaved, 64-byte-aligned plan.
    * @throws std::invalid_argument for missing/unsupported image facts or
    * invalid extents.
@@ -129,30 +142,117 @@ class NodeExecutor {
    * unrepresentable.
    * @throws std::bad_alloc when plan metadata storage cannot allocate.
    * @note This is the unique DI-2 internal output-plan derivation used by
-   * full, dirty HP, and RT tiled execution. It allocates no payload, mints no
-   * identity or revision, and enters no producer callback.
+   * full, dirty HP, and RT tiled execution. It invokes only pure metadata
+   * inference, allocates no payload, mints no identity or revision, and enters
+   * no producer callback. Absent inference retains scalar/channel allocation
+   * facts only and omits optional channel/sample/color/display authority.
    */
   static DenseImageOutputPlan freeze_tiled_output_plan(
-      const std::vector<const NodeOutput*>& inputs,
-      const PixelSize& output_size);
+      const Node& node, const std::vector<const NodeOutput*>& inputs,
+      const PixelSize& output_size,
+      const std::optional<TiledOutputInferenceFunc>& output_inference);
 
   /**
    * @brief Allocates the frozen Host binding for one tiled output.
    *
-   * @param inputs Canonical named-Value inputs used only for channel/type
-   * inference; disconnected slots may be null.
+   * @param node Execution-local node supplied to pure metadata inference.
+   * @param inputs Exact operation inputs; disconnected slots may be null.
    * @param output_size Positive output extent fixed by the task plan.
+   * @param output_inference Optional exact selected inference callback.
    * @return Open aligned binding with one immutable interleaved image plan.
    * @throws std::invalid_argument for missing/unsupported image facts or
    * invalid extents.
    * @throws std::overflow_error when plan arithmetic is unrepresentable.
    * @throws std::bad_alloc when plan or aligned allocation storage fails.
-   * @note No callback is entered and no mutable address is exposed. The caller
-   * must cancel or seal the returned binding exactly once.
+   * @note The pure metadata inference callback, when supplied, runs
+   * synchronously before allocation. No producer/execution callback is
+   * entered, and no mutable allocation address is exposed. The caller must
+   * cancel or seal the returned binding exactly once.
    */
   static HostOutputBinding allocate_tiled_output_binding(
-      const std::vector<const NodeOutput*>& inputs,
+      const Node& node, const std::vector<const NodeOutput*>& inputs,
+      const PixelSize& output_size,
+      const std::optional<TiledOutputInferenceFunc>& output_inference);
+
+  /**
+   * @brief Infers a tiled output that provably preserves one primary image.
+   *
+   * @param node Unused execution-local node required by the callback shape.
+   * @param inputs Exact operation inputs in destination-index order.
+   * @param output_size Positive output extent.
+   * @return HWC logical descriptor and complete primary ImageFacet with the
+   * signed data-window end adjusted to output_size.
+   * @throws std::invalid_argument for missing/unsupported primary image facts.
+   * @throws std::overflow_error for unrepresentable signed endpoints.
+   * @throws std::bad_alloc when copied metadata cannot allocate.
+   * @note Callers use this only for operations such as blur or downsample whose
+   * interpretation-preserving contract is independently proven. The helper
+   * reads no payload and performs no sample or color conversion.
+   */
+  static TiledOutputInferenceResult infer_interpretation_preserving_output(
+      const Node& node, const std::vector<const NodeOutput*>& inputs,
       const PixelSize& output_size);
+
+  /**
+   * @brief Prepares the sole normalized input context for tiled execution.
+   *
+   * @param node Execution-local node whose effective parameters control
+   * image_mixing normalization.
+   * @param inputs Resolved upstream outputs in destination-index order.
+   * @return Owned normalized context whose pointers remain stable until the
+   * context is destroyed.
+   * @throws std::bad_alloc when normalization storage cannot allocate.
+   * @throws GraphError when required inputs, merge strategy, or channel
+   * conversion are invalid.
+   * @throws Dense-image metadata, arithmetic, readiness, or access failures
+   * unchanged.
+   * @note Route owners call this before output inference or Host allocation,
+   * then retain the returned context through every synchronous tile callback.
+   * The method performs no inference, allocation, provider entry, or graph
+   * mutation.
+   */
+  static TiledInputContext prepare_tiled_input_context(
+      const Node& node, const std::vector<const NodeOutput*>& inputs);
+
+  /**
+   * @brief Populates a structurally preallocated tiled input context.
+   *
+   * @param node Execution-local node carrying exact effective parameters.
+   * @param inputs Resolved upstream outputs in destination-index order.
+   * @param context Empty context preallocated before Run admission.
+   * @return Frozen normalized context with stable pointer ownership.
+   * @throws The same validation, allocation, and access failures as the
+   * two-argument overload, plus std::invalid_argument for a shape mismatch.
+   * @note The vector capacities already belong to the caller's retained-memory
+   * estimate; normalization performs no vector growth.
+   */
+  static TiledInputContext prepare_tiled_input_context(
+      const Node& node, const std::vector<const NodeOutput*>& inputs,
+      TiledInputContext context);
+
+  /**
+   * @brief Executes a tiled operator using one already prepared input context.
+   *
+   * @param graph Graph used for random-access ROI propagation.
+   * @param node Execution-local node paired with the selected callback.
+   * @param tiled_op Exact selected tiled operation implementation.
+   * @param input_context Prepared context previously used for output inference.
+   * @param output_binding Open Host binding frozen from
+   * input_context.inputs().
+   * @param config Optional tiled execution controls.
+   * @return Nothing.
+   * @throws std::bad_alloc when tile-view storage or provider work exhausts
+   * memory.
+   * @throws GraphError when inputs, tile geometry, or provider execution fail.
+   * @note The method neither normalizes again nor seals the binding. The caller
+   * must keep input_context, node, callback snapshot, and binding alive for the
+   * complete synchronous call and later seal or cancel at its publication
+   * boundary.
+   */
+  static void execute_tiled_context_into_binding(
+      GraphModel& graph, Node& node, const TileOpFunc& tiled_op,
+      const TiledInputContext& input_context, HostOutputBinding& output_binding,
+      const TiledExecutionConfig& config = {});
 
   /**
    * @brief Executes a tiled operator into an existing Host binding.
@@ -165,13 +265,14 @@ class NodeExecutor {
    * allocation, layout, extent, and identity.
    * @param config Optional tiled execution controls.
    * @return Nothing.
-   * @throws std::bad_alloc if normalization, allocation, or tile execution
+   * @throws std::bad_alloc if normalization or tile execution
    *         exhausts memory.
    * @throws GraphError when required inputs are missing or tile execution
    *         otherwise fails.
-   * @note Used by task, dirty HP, and RT paths that already own the destination
-   * binding. The method retires each issued tile grant but never seals;
-   * callers seal only at their atomic publication boundary.
+   * @note Compatibility entry for callers that do not need pre-allocation
+   * inference. It prepares one local context, executes synchronously, and
+   * retires each issued tile grant but never seals. Routes that infer or
+   * allocate externally must instead prepare and retain a context explicitly.
    */
   static void execute_tiled_into_binding(
       GraphModel& graph, Node& node, const TileOpFunc& tiled_op,

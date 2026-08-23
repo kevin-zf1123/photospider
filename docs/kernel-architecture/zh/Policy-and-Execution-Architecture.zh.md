@@ -206,6 +206,12 @@ caller 输入不必比返回的 lease 存活更久。该做法既不重复也不
 terminator overflow 与少一个 byte 的 retained limit 都会在 provider entry 前失败，不留下 gate
 或 ledger 残留。
 
+Full tiled preparation 不会创建另一个 selected-implementation owner。在 admission 前，其 context
+拥有并计入 execution-local `Node` 的实际动态结构与冻结的 normalized-input vector capacity，但会
+指向稳定的 `TaskSubmissionPlan::resolved_ops_` snapshot。Plan 会让 callback/DSO 一直存活到
+runner settlement，因此 registry replacement 或 unload 无法让该 borrow 失效，也不会虚构第二份
+metadata/exclusive-key capacity-plus-terminator charge。
+
 ## 私有执行路由
 
 路由词汇表是封闭的：
@@ -523,24 +529,28 @@ coefficient 舍入一次到 binary32 RNE，每个 sample 使用
 `RNE32(1/RNE32(1+RNE32(input*k32)))`。provider 在这些显式 scalar 截断前后保存、安装并
 恢复 worker 浮点环境。版本为 `i1-coordinate-pattern-curve-chain-fp32-v1` 的独立 oracle
 不依赖 Host/Kernel/cache/scheduler/YAML/provider，独立重建 source 与四个 stage。对 HWC
-`[2048,2048,4]` NativeScalar32 tensor、零原点 `[0,2048) x [0,2048)` 数据窗口、
-冻结的 DenseTensor schema/Image facet 结构版本 2，以及声明 FP32 Normalized `[0,1]`
-的 Sample Domain facet 结构版本 1，其精确
+`[2048,2048,4]` NativeScalar32 tensor、required 零原点 `[0,2048) x [0,2048)`
+有符号 data window、缺席的 optional display window，以及冻结的 DenseTensor schema/Image
+facet 结构版本 2，输出会省略可选的 Sample Domain 与 Color 权威。Display-window presence
+参与 canonical descriptor digest，因此这项缺席是可复现的 oracle 事实。Source 仍声明 FP32
+Normalized `[0,1]`；非线性 `curve_transform` 策略在没有证明时不会投影该声明。其精确
 `Sha256CanonicalV1` digest 是
-`b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`。
+`18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`。
 就本次 oracle 迁移而言，DI-1 的初始实现与 oracle 刷新把 DenseTensor schema 与 Image facet
 结构记录推进到版本 2，但未完整实现已归档的 DI-1 design：它遗漏了 coordinate-pattern 的
 Sample Domain facet，并产生历史上的、不含 Sample Domain 的 I1 logical digest
 `18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`。
 后续 coordinate-pattern metadata correction 通过绑定声明 FP32 Normalized `[0,1]` 的
-Sample Domain facet 结构版本 1，完成了该 design 要求；在该完整 descriptor 下重新生成
-独立 oracle 后，产生当前 digest
+Sample Domain facet 结构版本 1，完成了 source design 要求。Generic tiled
+propagation 随后把该声明复制过每个非线性 curve，并产生现已被取代的 digest
 `b8a48c4d31536ef11a8a4b941b1b827f972344ebf03011fffa0a925d4deddeb1`。
-这两个阶段都没有改变 `Sha256CanonicalV1` 算法、workload 算术或 workload identity。
-I2 preview golden 仍为
+operation-specific tiled inference 现在会保留 source 声明，但从 curve 输出省略未经证明的
+Sample Domain 与 Color 权威，使当前输出 digest 回到 `18d88b...eed0`。Digest byte
+相同并不表示历史 source 遗漏重新出现。所有阶段都没有改变 digest 算法、workload
+算术、raw payload 或 workload identity。I2 preview golden 仍为
 `2af5a5b2e88646c541a60a7b437194f16d1bc2c34ff20bc571d37bfd3cac3ae2`；
-34 项 B1 logical golden 均在当前结构记录下重新生成；对 coordinate-pattern 输出，
-它们还绑定 Sample Domain record，而其 raw-payload hash 保持不变。
+34 项 B1 logical golden 均按同一 curve-output 策略重新生成，而其 raw-payload hash
+保持不变。
 
 冻结的 I1 graph、十二项 coefficient/Region、仅成功时产生 accepted coordinate 的 collector 与
 product binding、连续 cold/warmup/measured 221-slot grid、tie/guard rule、canonical DenseTensor

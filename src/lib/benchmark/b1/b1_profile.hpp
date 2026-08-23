@@ -514,14 +514,15 @@ std::vector<B1SemanticRecord> parse_b1_semantic_trace(std::string_view bytes);
 /**
  * @brief Generates the independent frozen B1 oracle image for one job.
  * @param job_index Source seed/fixture selector in `[0,255]`.
- * @return Exact Ready CPU FP32 normalized `[0,1]` RGBA Value after four
- * binary32-RNE stages.
+ * @return Exact Ready CPU FP32 RGBA Value after four binary32-RNE stages.
  * @throws std::out_of_range outside `[0,255]`.
  * @throws std::bad_alloc when the image allocation fails.
  * @throws std::runtime_error when the floating-point environment cannot be
  * captured, changed to RNE, or restored.
  * @note This path invokes no Host, Kernel, Graph, cache, scheduler, YAML, or
- * candidate provider code.
+ * candidate provider code. Its facet preserves the proven zero-origin signed
+ * geometry and omits optional Sample Domain and Color authority because the
+ * nonlinear curve stages do not prove either declaration.
  */
 Value generate_b1_oracle_image(std::uint64_t job_index);
 
@@ -532,9 +533,9 @@ Value generate_b1_oracle_image(std::uint64_t job_index);
  * @throws Oracle, Value validation, digest, or allocation errors unchanged.
  * @note Runners call this before candidate execution; candidate bytes never
  * initialize or replace the expected result. Logical identity binds
- * DenseTensor schema/Image facet structural version 2 and normalized `[0,1]`
- * Sample Domain facet structural version 1, while raw payload identity remains
- * independent of descriptor framing.
+ * DenseTensor schema/Image facet structural version 2 with no optional Sample
+ * Domain or Color authority after the nonlinear curve chain, while raw payload
+ * identity remains independent of descriptor framing.
  */
 B1JobGolden compute_b1_job_golden(std::uint64_t job_index);
 
@@ -547,8 +548,8 @@ B1JobGolden compute_b1_job_golden(std::uint64_t job_index);
  * @note Candidate execution never initializes or updates this table. The
  * independent oracle exists only to regenerate and verify fixture constants;
  * its current logical entries bind DenseTensor schema/Image facet structural
- * version 2 plus normalized `[0,1]` Sample Domain facet structural version 1,
- * and retain the prior raw-payload entries.
+ * version 2 with no optional Sample Domain or Color authority after the
+ * nonlinear curve chain, and retain the prior raw-payload entries.
  */
 B1JobGolden b1_frozen_job_golden(std::uint64_t job_index);
 
