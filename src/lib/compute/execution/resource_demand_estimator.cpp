@@ -15,6 +15,7 @@
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
 #include "compute/execution/execution_service_test_probe.hpp"
 #endif
+#include "graph/node.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/data/parameter_value.hpp"
 #include "photospider/data/region.hpp"
 
@@ -458,6 +459,62 @@ std::uint64_t node_output_dynamic_retained_memory_bytes(
   }
   add_parameter_object_dynamic(output.data, &estimate);
   estimate.add_string_payload(output.debug.compute_device);
+  return estimate.bytes();
+}
+
+/** @copydoc node_dynamic_retained_memory_bytes */
+std::uint64_t node_dynamic_retained_memory_bytes(const Node& node) {
+  RetainedMemoryEstimator estimate("Node");
+  estimate.add_string_payload(node.name);
+  estimate.add_string_payload(node.type);
+  estimate.add_string_payload(node.subtype);
+
+  add_vector_capacity(node.image_inputs, &estimate);
+  for (const ImageInput& input : node.image_inputs) {
+    estimate.add_string_payload(input.from_output_name);
+  }
+  add_vector_capacity(node.parameter_inputs, &estimate);
+  for (const ParameterInput& input : node.parameter_inputs) {
+    estimate.add_string_payload(input.from_output_name);
+    estimate.add_string_payload(input.to_parameter_name);
+  }
+  add_parameter_object_dynamic(node.parameters, &estimate);
+  add_parameter_object_dynamic(node.runtime_parameters, &estimate);
+
+  add_vector_capacity(node.outputs, &estimate);
+  for (const OutputPort& output : node.outputs) {
+    estimate.add_string_payload(output.output_type);
+    if (output.output_parameters.has_value()) {
+      add_parameter_value_dynamic(*output.output_parameters, &estimate);
+    }
+  }
+  add_vector_capacity(node.caches, &estimate);
+  for (const CacheEntry& cache : node.caches) {
+    estimate.add_string_payload(cache.cache_type);
+    estimate.add_string_payload(cache.location);
+  }
+  if (node.cached_output_high_precision.has_value()) {
+    estimate.add_bytes(node_output_dynamic_retained_memory_bytes(
+        *node.cached_output_high_precision));
+  }
+  if (node.hp_region.has_value()) {
+    add_region_dynamic(*node.hp_region, &estimate);
+  }
+  if (node.dependency_lut_cache.has_value()) {
+    const DependencyLutCache& cache = *node.dependency_lut_cache;
+    add_vector_capacity(cache.lut.cell_to_upstream_roi, &estimate);
+    add_parameter_object_dynamic(cache.identity.effective_parameters,
+                                 &estimate);
+    add_vector_capacity(cache.identity.parameter_input_content_revisions,
+                        &estimate);
+    add_vector_capacity(cache.identity.image_input_sources, &estimate);
+    for (const DependencyImageInputIdentity& input :
+         cache.identity.image_input_sources) {
+      estimate.add_string_payload(input.source_output);
+    }
+    add_vector_capacity(cache.identity.input_extents, &estimate);
+    add_vector_capacity(cache.identity.upstream_content_revisions, &estimate);
+  }
   return estimate.bytes();
 }
 

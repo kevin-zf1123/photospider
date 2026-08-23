@@ -24,7 +24,7 @@ namespace ps::compute {
 class ComputeRunLease;
 class ExecutionService;
 class StabilizedDirtyParameters;
-struct TiledInputContext;
+class TiledInputContext;
 
 /**
  * @brief Immutable operation/device snapshot for one dirty-plan node.

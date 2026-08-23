@@ -12,6 +12,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -42,10 +43,57 @@ enum class ObservedRoute {
 };
 
 /**
- * @brief Immutable summary of normalized-input pointer observations.
- * @throws Nothing; this value owns only counters and a Boolean verdict.
- * @note Pointer identity is inspected only as an address token. The snapshot
- * never dereferences a Value after its synchronous callback returns.
+ * @brief Stable process-local identity observed for one secondary Value.
+ * @throws Nothing; both opaque tokens are copied as scalar diagnostics.
+ * @note Revision and allocation answer different questions and are therefore
+ * both required. Neither token is used as cache, task, or cross-process state.
+ */
+struct ObservedValueIdentity final {
+  /** @brief Immutable Value publication identity. */
+  std::uint64_t revision = 0U;
+  /** @brief CPU allocation control-block identity. */
+  std::uint64_t allocation = 0U;
+
+  /**
+   * @brief Orders the complete diagnostic pair for deterministic sets.
+   * @param other Identity to compare.
+   * @return Lexicographic revision/allocation order.
+   * @throws Nothing.
+   */
+  bool operator<(const ObservedValueIdentity& other) const noexcept {
+    return std::tie(revision, allocation) <
+           std::tie(other.revision, other.allocation);
+  }
+
+  /**
+   * @brief Compares both independent identity tokens.
+   * @param other Identity to compare.
+   * @return True only when revision and allocation both match.
+   * @throws Nothing.
+   */
+  bool operator==(const ObservedValueIdentity& other) const noexcept {
+    return revision == other.revision && allocation == other.allocation;
+  }
+};
+
+/**
+ * @brief One callback correlated to its exact pre-allocation inference.
+ * @throws Nothing for scalar and rectangle value construction.
+ */
+struct RouteCallbackObservation final {
+  /** @brief Observer-minted nonzero inference invocation token. */
+  std::uint64_t invocation_token = 0U;
+  /** @brief Exact secondary Value identity consumed by the callback. */
+  ObservedValueIdentity secondary;
+  /** @brief Exact output ROI passed to this provider callback. */
+  PixelRect output_roi;
+};
+
+/**
+ * @brief Immutable summary of normalized-input route identity observations.
+ * @throws std::bad_alloc when copied invocation or callback vectors allocate.
+ * @note The snapshot owns only process-local scalar identities and ROIs. It
+ * retains no Value address or lifetime.
  */
 struct RouteObservationSnapshot final {
   /** @brief Number of pre-allocation inference calls. */
@@ -58,11 +106,15 @@ struct RouteObservationSnapshot final {
   std::size_t callback_secondary_values = 0U;
   /** @brief Whether every callback Value was first used by inference. */
   bool every_callback_value_was_inferred = false;
+  /** @brief Nonzero token for every exact inference invocation. */
+  std::vector<std::uint64_t> inference_invocation_tokens;
+  /** @brief Exact identity and ROI for every provider callback. */
+  std::vector<RouteCallbackObservation> callbacks;
 };
 
 /**
  * @brief Thread-safe observer for exact tiled input-context identity.
- * @throws std::bad_alloc when pointer-set insertion allocates.
+ * @throws std::bad_alloc when identity or callback storage allocates.
  * @note Full parallel siblings may call record_callback concurrently. Dirty
  * HP and RT callbacks may also overlap, so all state is protected by mutex_.
  */
@@ -73,9 +125,9 @@ class RouteNormalizationObserver final {
    * @param route HP or RT implementation revision.
    * @param inputs Exact destination-indexed inputs supplied to inference.
    * @return Nothing.
-   * @throws std::bad_alloc when the pointer set grows.
+   * @throws std::bad_alloc when the identity set or invocation vector grows.
    * @note Missing or non-image secondaries still increment the call counter
-   * but do not create a pointer token.
+   * but do not create an identity record.
    */
   void record_inference(ObservedRoute route,
                         const std::vector<const NodeOutput*>& inputs) {
@@ -84,26 +136,42 @@ class RouteNormalizationObserver final {
     ++state.inference_calls;
     if (inputs.size() > 1U && inputs[1] != nullptr &&
         inputs[1]->has_image_value()) {
-      state.inferred_secondary_values.insert(&inputs[1]->image_value());
+      const ObservedValueIdentity identity =
+          value_identity(inputs[1]->image_value());
+      const std::uint64_t token = state.next_invocation_token++;
+      state.inferred_secondary_values.insert(identity);
+      state.inferences.push_back(InferenceObservation{token, identity});
     }
   }
 
   /**
    * @brief Records the secondary canonical Value used by one tile callback.
    * @param route HP or RT implementation revision.
+   * @param output Exact output tile passed to the provider.
    * @param input_tiles Exact provider input views for the current output tile.
    * @return Nothing.
-   * @throws std::bad_alloc when the pointer set grows.
-   * @note InputTile Values are borrowed only for the callback; this observer
-   * retains their addresses without dereferencing them later.
+   * @throws std::bad_alloc when identity or callback storage grows.
+   * @note InputTile Values are borrowed only for the callback. The observer
+   * immediately copies revision/allocation tokens and retains no address.
    */
-  void record_callback(ObservedRoute route,
+  void record_callback(ObservedRoute route, const OutputTile& output,
                        const std::vector<InputTile>& input_tiles) {
     std::lock_guard<std::mutex> lock(mutex_);
     State& state = state_for(route);
     ++state.callback_calls;
     if (input_tiles.size() > 1U && input_tiles[1].value != nullptr) {
-      state.callback_secondary_values.insert(input_tiles[1].value);
+      const ObservedValueIdentity identity =
+          value_identity(*input_tiles[1].value);
+      const auto matching =
+          std::find_if(state.inferences.rbegin(), state.inferences.rend(),
+                       [&identity](const InferenceObservation& inference) {
+                         return inference.secondary == identity;
+                       });
+      const std::uint64_t token =
+          matching == state.inferences.rend() ? 0U : matching->token;
+      state.callback_secondary_values.insert(identity);
+      state.callbacks.push_back(
+          RouteCallbackObservation{token, identity, output.roi});
     }
   }
 
@@ -120,10 +188,11 @@ class RouteNormalizationObserver final {
   }
 
   /**
-   * @brief Captures one route's counts and pointer-subset verdict.
+   * @brief Captures one route's counts and exact identity/token verdict.
    * @param route HP or RT implementation revision.
-   * @return Immutable address-only observation summary.
+   * @return Immutable scalar-identity observation summary.
    * @throws std::system_error when mutex acquisition fails.
+   * @throws std::bad_alloc when copied vectors allocate.
    */
   RouteObservationSnapshot snapshot(ObservedRoute route) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -132,26 +201,74 @@ class RouteNormalizationObserver final {
         !state.callback_secondary_values.empty() &&
         std::all_of(state.callback_secondary_values.begin(),
                     state.callback_secondary_values.end(),
-                    [&](const Value* value) {
-                      return state.inferred_secondary_values.count(value) != 0U;
+                    [&](const ObservedValueIdentity& identity) {
+                      return state.inferred_secondary_values.count(identity) !=
+                             0U;
                     });
-    return RouteObservationSnapshot{state.inference_calls, state.callback_calls,
+    const bool exact_invocations =
+        all_inferred && !state.callbacks.empty() &&
+        std::all_of(
+            state.callbacks.begin(), state.callbacks.end(),
+            [&](const RouteCallbackObservation& callback) {
+              return callback.invocation_token != 0U &&
+                     std::any_of(
+                         state.inferences.begin(), state.inferences.end(),
+                         [&](const InferenceObservation& inference) {
+                           return inference.token ==
+                                      callback.invocation_token &&
+                                  inference.secondary == callback.secondary;
+                         });
+            });
+    std::vector<std::uint64_t> inference_tokens;
+    inference_tokens.reserve(state.inferences.size());
+    for (const InferenceObservation& inference : state.inferences) {
+      inference_tokens.push_back(inference.token);
+    }
+    return RouteObservationSnapshot{state.inference_calls,
+                                    state.callback_calls,
                                     state.inferred_secondary_values.size(),
                                     state.callback_secondary_values.size(),
-                                    all_inferred};
+                                    exact_invocations,
+                                    std::move(inference_tokens),
+                                    state.callbacks};
   }
 
  private:
-  /** @brief Mutable per-route address and call-count state. */
+  /** @brief One inference identity paired with its observer token. */
+  struct InferenceObservation final {
+    /** @brief Nonzero observer-minted invocation token. */
+    std::uint64_t token = 0U;
+    /** @brief Exact normalized secondary identity used by inference. */
+    ObservedValueIdentity secondary;
+  };
+
+  /**
+   * @brief Copies both process-local identities from one valid Value.
+   * @param value Value observed synchronously during inference or callback.
+   * @return Revision/allocation scalar pair.
+   * @throws Nothing.
+   */
+  static ObservedValueIdentity value_identity(const Value& value) noexcept {
+    return ObservedValueIdentity{value.revision_id().value(),
+                                 value.allocation_identity().value()};
+  }
+
+  /** @brief Mutable per-route identity and call-count state. */
   struct State final {
     /** @brief Number of exact inference callback entries. */
     std::size_t inference_calls = 0U;
     /** @brief Number of exact producer callback entries. */
     std::size_t callback_calls = 0U;
-    /** @brief Secondary Value addresses passed to output inference. */
-    std::set<const Value*> inferred_secondary_values;
-    /** @brief Secondary Value addresses passed to tile providers. */
-    std::set<const Value*> callback_secondary_values;
+    /** @brief Next nonzero route-local inference token. */
+    std::uint64_t next_invocation_token = 1U;
+    /** @brief Exact inference sequence for this route. */
+    std::vector<InferenceObservation> inferences;
+    /** @brief Secondary identities passed to output inference. */
+    std::set<ObservedValueIdentity> inferred_secondary_values;
+    /** @brief Secondary identities passed to tile providers. */
+    std::set<ObservedValueIdentity> callback_secondary_values;
+    /** @brief Exact provider callback identities and output ROIs. */
+    std::vector<RouteCallbackObservation> callbacks;
   };
 
   /**
@@ -314,8 +431,9 @@ OpImplementation require_opencv_tiled(const std::string& subtype,
  * @return Nothing.
  * @throws Registry, callback-copy, or allocation failures unchanged.
  * @note Each wrapper delegates both execution and inference to the same exact
- * repository revision selected before registration. Only address observation
- * is added; pixel and metadata behavior remain production OpenCV behavior.
+ * repository revision selected before registration. Only scalar identity,
+ * invocation-token, and ROI observation is added; pixel and metadata behavior
+ * remain production OpenCV behavior.
  */
 void register_observed_image_mixing(
     const std::string& source_subtype, const std::string& observed_subtype,
@@ -334,7 +452,7 @@ void register_observed_image_mixing(
         [observer, route, operation = std::move(operation)](
             const Node& node, const OutputTile& output,
             const std::vector<InputTile>& inputs) {
-          observer->record_callback(route, inputs);
+          observer->record_callback(route, output, inputs);
           operation(node, output, inputs);
         };
     TiledOutputInferenceFunc observed_inference =
@@ -529,6 +647,43 @@ void expect_route_output(const NodeOutput& output, std::size_t width,
 }
 
 /**
+ * @brief Asserts one inference identity and its exact provider ROI set.
+ * @param observation Route-local immutable identity observations.
+ * @param expected_rois Exact callback ROIs; order is ignored for concurrency.
+ * @return Nothing; GoogleTest records any identity, token, or ROI mismatch.
+ * @throws std::bad_alloc when temporary sorted vectors allocate.
+ * @note Every callback must carry the sole inference token and the same
+ * revision/allocation pair. This does not infer callback arrival order.
+ */
+void expect_exact_route_invocation(
+    const RouteObservationSnapshot& observation,
+    std::vector<std::array<int, 4U>> expected_rois) {
+  ASSERT_EQ(observation.inference_calls, 1U);
+  ASSERT_EQ(observation.inference_invocation_tokens.size(), 1U);
+  ASSERT_NE(observation.inference_invocation_tokens.front(), 0U);
+  ASSERT_EQ(observation.callback_calls, expected_rois.size());
+  ASSERT_EQ(observation.callbacks.size(), expected_rois.size());
+  EXPECT_EQ(observation.inferred_secondary_values, 1U);
+  EXPECT_EQ(observation.callback_secondary_values, 1U);
+  EXPECT_TRUE(observation.every_callback_value_was_inferred);
+
+  std::vector<std::array<int, 4U>> actual_rois;
+  actual_rois.reserve(observation.callbacks.size());
+  for (const RouteCallbackObservation& callback : observation.callbacks) {
+    EXPECT_EQ(callback.invocation_token,
+              observation.inference_invocation_tokens.front());
+    EXPECT_NE(callback.secondary.revision, 0U);
+    EXPECT_NE(callback.secondary.allocation, 0U);
+    actual_rois.push_back({callback.output_roi.x, callback.output_roi.y,
+                           callback.output_roi.width,
+                           callback.output_roi.height});
+  }
+  std::sort(actual_rois.begin(), actual_rois.end());
+  std::sort(expected_rois.begin(), expected_rois.end());
+  EXPECT_EQ(actual_rois, expected_rois);
+}
+
+/**
  * @brief Proves full parallel siblings share one normalized inference owner.
  * @return Nothing; GoogleTest records route, context, metadata, or raw drift.
  * @throws Registry, graph, provider, runtime, and allocation failures
@@ -554,16 +709,17 @@ TEST(OpenCvRouteNormalization,
       {{"scale", 1.0}, {"merge_strategy", "crop"}});
 
   expect_route_output(result.output, kWidth, kHeight, 1U, expected, false);
-  EXPECT_EQ(result.hp_observation.inference_calls, 1U);
-  EXPECT_GT(result.hp_observation.callback_calls, 1U);
-  EXPECT_EQ(result.hp_observation.inferred_secondary_values, 1U);
-  EXPECT_EQ(result.hp_observation.callback_secondary_values, 1U);
-  EXPECT_TRUE(result.hp_observation.every_callback_value_was_inferred);
+  expect_exact_route_invocation(result.hp_observation, {{0, 0, 256, 256},
+                                                        {256, 0, 256, 256},
+                                                        {512, 0, 1, 256},
+                                                        {0, 256, 256, 1},
+                                                        {256, 256, 256, 1},
+                                                        {512, 256, 1, 1}});
 }
 
 /**
  * @brief Proves dirty HP uses normalized inputs for plan and blend callbacks.
- * @return Nothing; GoogleTest records metadata, pointer, or pixel drift.
+ * @return Nothing; GoogleTest records metadata, identity, or pixel drift.
  * @throws Registry, graph, provider, runtime, and allocation failures
  * unchanged.
  * @note 1x1x3 to 2x2x4 crop/opaque expansion synthesizes both zero and one.
@@ -590,9 +746,7 @@ TEST(OpenCvRouteNormalization,
                                 domain),
         parameters);
     expect_route_output(result.output, 2U, 2U, 4U, expected, expect_domain);
-    EXPECT_GT(result.hp_observation.inference_calls, 0U);
-    EXPECT_GT(result.hp_observation.callback_calls, 0U);
-    EXPECT_TRUE(result.hp_observation.every_callback_value_was_inferred);
+    expect_exact_route_invocation(result.hp_observation, {{0, 0, 2, 2}});
   };
   run("dirty-hp-opaque-unsafe", SampleDomain{SampleDomainKind::Legal, 0.0, 0.5},
       false);
@@ -602,7 +756,7 @@ TEST(OpenCvRouteNormalization,
 
 /**
  * @brief Proves dirty RT uses normalized inputs for plan and multiply tiles.
- * @return Nothing; GoogleTest records metadata, pointer, or pixel drift.
+ * @return Nothing; GoogleTest records metadata, identity, or pixel drift.
  * @throws Registry, graph, provider, runtime, and allocation failures
  * unchanged.
  * @note The same zero/opaque normalization pair is exercised through the RT
@@ -627,9 +781,7 @@ TEST(OpenCvRouteNormalization,
                            4U, 4U, 3U, std::vector<float>(48U, 0.5F), domain),
                        parameters);
     expect_route_output(result.output, 2U, 2U, 4U, expected, expect_domain);
-    EXPECT_GT(result.rt_observation.inference_calls, 0U);
-    EXPECT_GT(result.rt_observation.callback_calls, 0U);
-    EXPECT_TRUE(result.rt_observation.every_callback_value_was_inferred);
+    expect_exact_route_invocation(result.rt_observation, {{0, 0, 2, 2}});
   };
   run("dirty-rt-opaque-unsafe", SampleDomain{SampleDomainKind::Legal, 0.0, 0.5},
       false);

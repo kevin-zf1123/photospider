@@ -341,7 +341,7 @@ void HighPrecisionDirtyNodeExecutor::execute_operation(
         hp_write_buffer_.ensure_tiled_output_binding(
             node,
             NodeExecutor::freeze_tiled_output_plan(
-                node, input_context.inputs, entry.hp_size,
+                node, input_context.inputs(), entry.hp_size,
                 operation.tiled_output_inference),
             frozen_tiled_task_count(tiled_task_counts_, node.id));
     {
@@ -533,7 +533,7 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
         rt_write_buffer_.ensure_tiled_output_binding(
             node.id,
             NodeExecutor::freeze_tiled_output_plan(
-                node_for_exec, input_context.inputs, entry.rt_size,
+                node_for_exec, input_context.inputs(), entry.rt_size,
                 selected_operation.tiled_output_inference),
             frozen_tiled_task_count(tiled_task_counts_, node.id));
     {

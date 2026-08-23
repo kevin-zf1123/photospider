@@ -337,7 +337,7 @@ bool needs_gaussian_halo(const Node& node) {
  */
 void require_tiled_inputs(const Node& node,
                           const TiledInputContext& input_context) {
-  if (!first_connected_input(input_context.inputs) &&
+  if (!first_connected_input(input_context.inputs()) &&
       node.type != "image_generator") {
     throw GraphError(
         GraphErrc::MissingDependency,
@@ -359,8 +359,8 @@ void require_tiled_inputs(const Node& node,
 std::vector<PixelSize> actual_input_extents(
     const TiledInputContext& input_context) {
   std::vector<PixelSize> extents;
-  extents.reserve(input_context.inputs.size());
-  for (const NodeOutput* input : input_context.inputs) {
+  extents.reserve(input_context.inputs().size());
+  for (const NodeOutput* input : input_context.inputs()) {
     if (input == nullptr) {
       extents.emplace_back();
       continue;
@@ -493,10 +493,10 @@ void populate_input_tiles(GraphModel& graph, const Node& node,
                           const std::vector<PixelSize>& input_extents,
                           std::vector<InputTile>* input_tiles) {
   input_tiles->clear();
-  input_tiles->reserve(input_context.inputs.size());
-  for (std::size_t input_index = 0U; input_index < input_context.inputs.size();
-       ++input_index) {
-    const NodeOutput* input = input_context.inputs[input_index];
+  input_tiles->reserve(input_context.inputs().size());
+  for (std::size_t input_index = 0U;
+       input_index < input_context.inputs().size(); ++input_index) {
+    const NodeOutput* input = input_context.inputs()[input_index];
     if (!input) {
       input_tiles->emplace_back();
       continue;
@@ -505,7 +505,7 @@ void populate_input_tiles(GraphModel& graph, const Node& node,
         InputTile{&input->image_value(),
                   NodeExecutor::input_roi_for_tile(
                       graph, node, output_roi, input_extents.at(input_index),
-                      config, input_extents, nullptr, &input_context.inputs),
+                      config, input_extents, nullptr, &input_context.inputs()),
                   &input->space});
   }
 }
@@ -542,7 +542,7 @@ void execute_tiled_context_into(GraphModel& graph, Node& node,
   TileTask task;
   task.node = &node;
   task.output_tile.plan = &output_binding.plan();
-  task.input_tiles.reserve(input_context.inputs.size());
+  task.input_tiles.reserve(input_context.inputs().size());
 
   try {
     const std::int64_t work_right =
@@ -638,10 +638,10 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
                 NodeExecutor::prepare_tiled_input_context(node, inputs);
 
             const PixelSize output_size =
-                infer_output_size(node, input_context.inputs, config);
+                infer_output_size(node, input_context.inputs(), config);
             HostOutputBinding output_binding = HostOutputBinding::allocate(
                 NodeExecutor::freeze_tiled_output_plan(
-                    node, input_context.inputs, output_size,
+                    node, input_context.inputs(), output_size,
                     config.tiled_output_inference));
             NodeOutput output;
             NodeExecutor::execute_tiled_context_into_binding(
@@ -669,6 +669,16 @@ TiledInputContext NodeExecutor::prepare_tiled_input_context(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
   TiledInputContext input_context =
       TiledInputNormalizer::normalize(node, inputs);
+  require_tiled_inputs(node, input_context);
+  return input_context;
+}
+
+/** @copydoc NodeExecutor::prepare_tiled_input_context */
+TiledInputContext NodeExecutor::prepare_tiled_input_context(
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    TiledInputContext input_context) {
+  input_context =
+      TiledInputNormalizer::normalize(node, inputs, std::move(input_context));
   require_tiled_inputs(node, input_context);
   return input_context;
 }

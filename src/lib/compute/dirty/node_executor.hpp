@@ -215,13 +215,30 @@ class NodeExecutor {
       const Node& node, const std::vector<const NodeOutput*>& inputs);
 
   /**
+   * @brief Populates a structurally preallocated tiled input context.
+   *
+   * @param node Execution-local node carrying exact effective parameters.
+   * @param inputs Resolved upstream outputs in destination-index order.
+   * @param context Empty context preallocated before Run admission.
+   * @return Frozen normalized context with stable pointer ownership.
+   * @throws The same validation, allocation, and access failures as the
+   * two-argument overload, plus std::invalid_argument for a shape mismatch.
+   * @note The vector capacities already belong to the caller's retained-memory
+   * estimate; normalization performs no vector growth.
+   */
+  static TiledInputContext prepare_tiled_input_context(
+      const Node& node, const std::vector<const NodeOutput*>& inputs,
+      TiledInputContext context);
+
+  /**
    * @brief Executes a tiled operator using one already prepared input context.
    *
    * @param graph Graph used for random-access ROI propagation.
    * @param node Execution-local node paired with the selected callback.
    * @param tiled_op Exact selected tiled operation implementation.
    * @param input_context Prepared context previously used for output inference.
-   * @param output_binding Open Host binding frozen from input_context.inputs.
+   * @param output_binding Open Host binding frozen from
+   * input_context.inputs().
    * @param config Optional tiled execution controls.
    * @return Nothing.
    * @throws std::bad_alloc when tile-view storage or provider work exhausts

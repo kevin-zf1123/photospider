@@ -433,6 +433,17 @@ void TaskSubmissionPlan::emplace_task_runner(NodeTaskRunnerContext context) {
 }
 
 /**
+ * @copydoc TaskSubmissionPlan::
+ * tiled_context_borrows_resolved_operation_for_testing
+ */
+bool TaskSubmissionPlan::tiled_context_borrows_resolved_operation_for_testing(
+    std::size_t node_idx) const noexcept {
+  return task_runner_ &&
+         task_runner_->tiled_context_borrows_resolved_operation_for_testing(
+             node_idx);
+}
+
+/**
  * @brief Builds a registered composite task identity.
  *
  * @param task_id Dense task id.

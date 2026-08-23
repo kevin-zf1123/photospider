@@ -945,6 +945,71 @@ Node make_tiled_constraint_node(int id, int input_id) {
   return node;
 }
 
+/**
+ * @brief Measures one full-plan tiled runner with small or heap-backed Node
+ * ownership.
+ *
+ * @param large_effective_node Whether to retain a large node name and static
+ * runtime-parameter payload in the future tiled execution context.
+ * @return Complete Run-owned retained-memory estimate after runner creation.
+ * @throws Registry, graph, Run, codec, service, or allocation failures.
+ * @note Both cases have identical topology, task count, operation metadata,
+ * and service collaborators. The only difference is storage that the tiled
+ * runner's execution-local Node independently owns until sibling settlement.
+ */
+std::uint64_t estimate_tiled_execution_context_retained_bytes(
+    bool large_effective_node) {
+  ensure_tiled_constraint_operation_registered();
+  constexpr int kInputNodeId = 220;
+  constexpr int kNodeId = 221;
+  GraphModel graph("cache/tiled-context-retained-estimate");
+  graph.add_node(make_tiled_constraint_cached_input_node(kInputNodeId));
+  Node target = make_tiled_constraint_node(kNodeId, kInputNodeId);
+  if (large_effective_node) {
+    target.name.assign(1024U, 'n');
+    target.parameters["large_effective_parameter"] = std::string(4096U, 'p');
+  }
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ExecutionService service(1U);
+  ComputeRun run(make_test_submission("tiled-context-retained-estimate",
+                                      graph.revision().value(), kNodeId));
+  if (!run.advance_to(ComputeRunPhase::Admitted)) {
+    throw std::logic_error(
+        "Tiled retained estimate could not advance its Run to Admitted.");
+  }
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, kNodeId,
+      std::vector<DeviceBackend>{DeviceBackend::CPU});
+  TimingCollector timings;
+  std::mutex timing_mutex;
+  plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      service,
+      timings,
+      timing_mutex,
+      plan.execution_order(),
+      plan.id_to_idx(),
+      plan.temp_results(),
+      plan.resolved_ops(),
+      plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+      nullptr,
+      &plan.compute_plan().planned_work,
+  });
+  return run.acquire_lease().retained_memory_bytes();
+}
+
 /** @brief Test-product category for one retained operation-string owner. */
 using RetainedOperationStringOwner = testing::RetainedOperationStringOwner;
 
@@ -3472,6 +3537,125 @@ DirtyCallablePhaseRunResult execute_large_dirty_callable_phase_case(
   result.reserved_after = service.resource_snapshot().reserved;
   result.callback_entries =
       task_probe.callback_entries.load(std::memory_order_relaxed);
+  return result;
+}
+
+/**
+ * @brief Result of one full tiled context resource-admission endpoint.
+ * @throws Nothing for value construction and movement.
+ */
+struct TiledContextResourceResult final {
+  /** @brief Expected Graph failure category from rejected admission. */
+  std::optional<GraphErrc> failure_code;
+  /** @brief Complete root vector captured after successful admission. */
+  std::optional<ResourceVector> admitted_resources;
+  /** @brief Ledger commitments after synchronous return. */
+  ResourceVector reserved_after;
+  /** @brief Number of provider tile callbacks that entered. */
+  int callback_entries = 0;
+  /** @brief Whether the settled context borrowed the plan implementation. */
+  bool borrowed_resolved_operation = false;
+};
+
+/**
+ * @brief Executes one fresh full tiled Run with a large effective Node.
+ * @param limits Immutable resource limits applied to the fresh service.
+ * @param retained_string_probe Optional observer of actual string-charge
+ * intervals while the complete shared estimate is frozen.
+ * @return Admission, callback, borrow, and post-settlement evidence.
+ * @throws Unexpected registry, graph, codec, Run, service, or allocation
+ * exceptions unchanged; expected GraphError rejection is captured.
+ * @note The source is a complete cached input, so the two target tiles are the
+ * only executable tasks. A pre-released callback gate makes success
+ * deterministic without changing product admission or provider ownership.
+ */
+TiledContextResourceResult execute_tiled_context_resource_case(
+    ExecutionResourceLimits limits,
+    RetainedOperationStringChargeProbe* retained_string_probe = nullptr) {
+  ensure_tiled_constraint_operation_registered();
+  std::promise<void> callback_release;
+  const std::shared_future<void> callback_release_future =
+      callback_release.get_future().share();
+  callback_release.set_value();
+  auto callback_probe =
+      std::make_shared<TiledConstraintGateProbe>(callback_release_future);
+  ScopedTiledConstraintProbeBinding probe_binding(callback_probe);
+
+  constexpr int kInputNodeId = 230;
+  constexpr int kNodeId = 231;
+  GraphModel graph("cache/tiled-context-exact-resource");
+  graph.add_node(make_tiled_constraint_cached_input_node(kInputNodeId));
+  Node target = make_tiled_constraint_node(kNodeId, kInputNodeId);
+  target.name.assign(1024U, 'n');
+  target.parameters["large_effective_parameter"] = std::string(4096U, 'p');
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ExecutionService service(1U, std::move(limits));
+  ExecutionServiceHost host;
+  InitialSubmissionStorageProbe admission;
+  ScopedInitialSubmissionStorageObserver admission_observer(service, admission);
+  ComputeRun run(make_test_submission("tiled-context-exact-resource",
+                                      graph.revision().value(), kNodeId));
+  if (!run.advance_to(ComputeRunPhase::Admitted)) {
+    throw std::logic_error("Tiled context resource Run was not admitted.");
+  }
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, kNodeId,
+      std::vector<DeviceBackend>{DeviceBackend::CPU});
+  TimingCollector timings;
+  std::mutex timing_mutex;
+  plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      service,
+      timings,
+      timing_mutex,
+      plan.execution_order(),
+      plan.id_to_idx(),
+      plan.temp_results(),
+      plan.resolved_ops(),
+      plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+      nullptr,
+      &plan.compute_plan().planned_work,
+  });
+  if (!run.advance_to(ComputeRunPhase::Queued) ||
+      !run.advance_to(ComputeRunPhase::Running)) {
+    throw std::logic_error("Tiled context resource Run did not start.");
+  }
+  ComputeRunLease lease = run.acquire_lease();
+  if (retained_string_probe != nullptr) {
+    ScopedRetainedOperationStringChargeObserver string_observer(
+        service, *retained_string_probe);
+    static_cast<void>(lease.retained_memory_bytes());
+  }
+
+  TiledContextResourceResult result;
+  try {
+    dispatch_planned_tasks(graph, service, host, "cpu", kNodeId, plan, lease);
+  } catch (const GraphError& error) {
+    result.failure_code = error.code();
+  }
+  const int observation_count =
+      admission.observation_count.load(std::memory_order_acquire);
+  if (observation_count > 0) {
+    result.admitted_resources = admission.admitted_resources;
+  }
+  result.reserved_after = service.resource_snapshot().reserved;
+  result.callback_entries =
+      callback_probe->entered.load(std::memory_order_relaxed);
+  result.borrowed_resolved_operation =
+      plan.tiled_context_borrows_resolved_operation_for_testing(
+          static_cast<std::size_t>(plan.id_to_idx().at(kNodeId)));
   return result;
 }
 
@@ -6764,6 +6948,77 @@ TEST(ExecutionServiceProductResources,
 
   EXPECT_GE(one_node_bytes, visible_one_node_minimum);
   EXPECT_GT(many_node_bytes, one_node_bytes);
+}
+
+/**
+ * @brief Proves full tiled admission charges execution-local Node storage.
+ *
+ * @return Nothing; assertions report a retained-memory undercount.
+ * @throws Registry, graph, Run, codec, service, or allocation failures.
+ * @note The large case adds only independently copied Node/ParameterMap
+ * payload. It must therefore increase the pre-admission plan estimate by more
+ * than the 4-KiB parameter payload instead of being hidden behind the fixed
+ * `sizeof(TiledNodeExecutionContext)` charge.
+ */
+TEST(ExecutionServiceProductResources,
+     FullTiledContextChargesLargeEffectiveNodeOwnership) {
+  const std::uint64_t small =
+      estimate_tiled_execution_context_retained_bytes(false);
+  const std::uint64_t large =
+      estimate_tiled_execution_context_retained_bytes(true);
+  ASSERT_GT(large, small);
+  EXPECT_GT(large - small, 4096U);
+}
+
+/**
+ * @brief Exercises a large full tiled context at exact retained boundaries.
+ *
+ * @return Nothing; assertions report undercount, duplicate operation owner,
+ * provider entry before rejection, or ledger residue.
+ * @throws Registry, graph, codec, Run, service, or allocation failures.
+ * @note Calibration observes the real production root. The exact vector then
+ * admits an identical fresh Run while one retained byte less rejects before
+ * either tile callback. The string observer independently proves the plan has
+ * one resolved metadata/key owner and two moved task-constraint owners; the
+ * settled context points at that resolved owner instead of copying it.
+ */
+TEST(ExecutionServiceProductResources,
+     FullTiledContextUsesExactLimitAndBorrowsResolvedOperation) {
+  RetainedOperationStringChargeProbe string_probe;
+  const TiledContextResourceResult calibration =
+      execute_tiled_context_resource_case(
+          ExecutionService::default_resource_limits(), &string_probe);
+  EXPECT_FALSE(calibration.failure_code.has_value());
+  ASSERT_TRUE(calibration.admitted_resources.has_value());
+  EXPECT_EQ(calibration.callback_entries, 2);
+  EXPECT_TRUE(calibration.borrowed_resolved_operation);
+  EXPECT_EQ(calibration.reserved_after, ResourceVector{});
+  ASSERT_NO_FATAL_FAILURE(expect_retained_operation_string_charges(
+      string_probe,
+      {{RetainedOperationStringOwner::ComputePlanOperationRoute, 1U},
+       {RetainedOperationStringOwner::FullPlanResolvedOperation, 1U},
+       {RetainedOperationStringOwner::FullPlanExecutionConstraint, 2U}}));
+
+  ResourceVector one_short = *calibration.admitted_resources;
+  ASSERT_GT(one_short.retained_memory_bytes, 0U);
+  --one_short.retained_memory_bytes;
+  const TiledContextResourceResult rejected =
+      execute_tiled_context_resource_case(execution_limits(one_short));
+  ASSERT_TRUE(rejected.failure_code.has_value());
+  EXPECT_EQ(*rejected.failure_code, GraphErrc::ComputeError);
+  EXPECT_FALSE(rejected.admitted_resources.has_value());
+  EXPECT_EQ(rejected.callback_entries, 0);
+  EXPECT_FALSE(rejected.borrowed_resolved_operation);
+  EXPECT_EQ(rejected.reserved_after, ResourceVector{});
+
+  const TiledContextResourceResult exact = execute_tiled_context_resource_case(
+      execution_limits(*calibration.admitted_resources));
+  EXPECT_FALSE(exact.failure_code.has_value());
+  ASSERT_TRUE(exact.admitted_resources.has_value());
+  EXPECT_EQ(*exact.admitted_resources, *calibration.admitted_resources);
+  EXPECT_EQ(exact.callback_entries, 2);
+  EXPECT_TRUE(exact.borrowed_resolved_operation);
+  EXPECT_EQ(exact.reserved_after, ResourceVector{});
 }
 
 /**

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <utility>
 #include <vector>
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
@@ -12,17 +14,116 @@ namespace ps::compute {
  * TiledInputContext keeps the original input order while optionally replacing
  * selected entries with normalized temporary named-Value outputs.
  *
- * @note Pointers in inputs either reference upstream NodeOutput objects
- * supplied by the caller or elements owned by normalized_storage. The context
- * must stay alive until all TileTask callbacks using those pointers finish.
+ * @note Pointers returned by inputs() either reference upstream NodeOutput
+ * objects supplied by the caller or elements returned by
+ * normalized_storage(). The context must stay alive until all TileTask
+ * callbacks using those pointers finish.
  */
-struct TiledInputContext {
-  /** @brief Temporary normalized images used by image_mixing secondary inputs.
+class TiledInputContext final {
+ public:
+  /**
+   * @brief Creates one empty frozen input context.
+   * @throws Nothing.
+   * @note Only TiledInputNormalizer may populate the private vectors.
    */
-  std::vector<NodeOutput> normalized_storage;
+  TiledInputContext() noexcept = default;
 
-  /** @brief Ordered input pointers visible to tiled execution. */
-  std::vector<const NodeOutput*> inputs;
+  /**
+   * @brief Prevents copying self-referential input pointers.
+   * @param other Context that cannot be copied.
+   * @throws Nothing because the operation is deleted.
+   */
+  TiledInputContext(const TiledInputContext& other) = delete;
+
+  /**
+   * @brief Prevents copy assignment of self-referential input pointers.
+   * @param other Context that cannot be copied.
+   * @return No value because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  TiledInputContext& operator=(const TiledInputContext& other) = delete;
+
+  /**
+   * @brief Transfers normalized storage and its pointer index as one state.
+   * @param other Source context left empty after movement.
+   * @throws Nothing; default vectors are swapped without moving elements.
+   * @note Swapping the two owned vectors preserves every pointer into the
+   * normalized-storage allocation and avoids allocator-dependent relocation.
+   */
+  TiledInputContext(TiledInputContext&& other) noexcept { swap(other); }
+
+  /**
+   * @brief Replaces this context with one complete moved state.
+   * @param other Source context left empty after movement.
+   * @return This context after replacement.
+   * @throws Nothing; replacement uses only empty construction and vector swap.
+   * @note The old complete state retires only after the new storage and pointer
+   * index have both been installed.
+   */
+  TiledInputContext& operator=(TiledInputContext&& other) noexcept {
+    if (this != &other) {
+      TiledInputContext replacement;
+      replacement.swap(other);
+      swap(replacement);
+    }
+    return *this;
+  }
+
+  /**
+   * @brief Returns immutable destination-indexed operation inputs.
+   * @return Borrowed vector whose self-pointers remain valid for this context.
+   * @throws Nothing.
+   * @note Callers cannot change pointer slots or reallocate their backing.
+   */
+  const std::vector<const NodeOutput*>& inputs() const noexcept {
+    return inputs_;
+  }
+
+  /**
+   * @brief Returns immutable normalized outputs owned by this context.
+   * @return Borrowed vector retaining every self-pointed NodeOutput.
+   * @throws Nothing.
+   * @note The accessor is diagnostic and ownership-oriented; callers cannot
+   * grow, clear, or otherwise reallocate the storage.
+   */
+  const std::vector<NodeOutput>& normalized_storage() const noexcept {
+    return normalized_storage_;
+  }
+
+ private:
+  /** @brief Allows the sole builder to populate the frozen state. */
+  friend class TiledInputNormalizer;
+
+  /**
+   * @brief Exchanges two complete storage/pointer states without relocation.
+   * @param other Context receiving this state.
+   * @return Nothing.
+   * @throws Nothing under default-allocator vector swap.
+   */
+  void swap(TiledInputContext& other) noexcept {
+    normalized_storage_.swap(other.normalized_storage_);
+    inputs_.swap(other.inputs_);
+  }
+
+  /**
+   * @brief Appends one normalized output and rebinds its destination slot.
+   * @param index Existing destination input index.
+   * @param output Complete normalized output to retain.
+   * @return Nothing.
+   * @throws std::bad_alloc only if the builder's prior reserve regresses.
+   * @note TiledInputNormalizer reserves the complete maximum before the first
+   * append, so earlier self-pointers never observe vector reallocation.
+   */
+  void retain_normalized(std::size_t index, NodeOutput output) {
+    normalized_storage_.push_back(std::move(output));
+    inputs_.at(index) = &normalized_storage_.back();
+  }
+
+  /** @brief Temporary normalized images used by mixing secondaries. */
+  std::vector<NodeOutput> normalized_storage_;
+
+  /** @brief Ordered borrowed/self-owned pointers visible to execution. */
+  std::vector<const NodeOutput*> inputs_;
 };
 
 /**
@@ -50,6 +151,17 @@ struct TiledInputContext {
 class TiledInputNormalizer {
  public:
   /**
+   * @brief Preallocates the complete vector structure for one future context.
+   * @param input_count Exact destination input-slot count.
+   * @return Empty-owner context with fixed pointer slots and maximum secondary
+   * NodeOutput capacity.
+   * @throws std::bad_alloc when either vector allocation fails.
+   * @note Full Run preparation uses this before resource admission so actual
+   * vector capacities, including unused normalized slots, are auditable.
+   */
+  static TiledInputContext preallocate(std::size_t input_count);
+
+  /**
    * @brief Builds the tiled input context for one node invocation.
    *
    * @param node Node whose runtime parameters control image_mixing strategy.
@@ -69,6 +181,23 @@ class TiledInputNormalizer {
    */
   static TiledInputContext normalize(
       const Node& node, const std::vector<const NodeOutput*>& inputs);
+
+  /**
+   * @brief Populates one already preallocated tiled input context.
+   * @param node Node whose runtime parameters control normalization.
+   * @param inputs Exact resolved upstream inputs.
+   * @param context Empty preallocated owner whose capacities were admitted.
+   * @return Frozen populated context preserving all self-pointers.
+   * @throws std::invalid_argument when the context shape/capacity is not the
+   * exact preallocated shape or already owns normalized outputs.
+   * @throws The normalization exceptions documented by normalize().
+   * @note The method performs no vector growth when the preallocation contract
+   * holds. NodeOutput-internal payload copying retains its existing operation-
+   * produced allocation boundary.
+   */
+  static TiledInputContext normalize(
+      const Node& node, const std::vector<const NodeOutput*>& inputs,
+      TiledInputContext context);
 };
 
 }  // namespace ps::compute

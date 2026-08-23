@@ -139,9 +139,13 @@ class NodeTaskRunner {
    * @brief Binds one worker runner to a borrowed dispatch context.
    *
    * @param context Borrowed graph, service, timing, plan, and option state.
-   * @throws Nothing directly.
-   * @note The constructor stores references only. Callers must keep every
-   * referenced object alive until runtime completion.
+   * @throws GraphError when checked preparation arithmetic or graph lookup
+   * fails.
+   * @throws std::bad_alloc when per-node state, execution-local Node copies,
+   * or fixed input-context structure cannot be established.
+   * @note The constructor stores service/plan references but also materializes
+   * every tiled execution owner before Run admission. Callers must keep all
+   * referenced objects alive until runtime completion.
    */
   explicit NodeTaskRunner(NodeTaskRunnerContext context);
 
@@ -181,19 +185,30 @@ class NodeTaskRunner {
   /**
    * @brief Estimates complete Host-owned runner structural storage.
    * @return Checked inline object, vector capacities, output/preparation state,
-   * and one potential execution-context object per tiled node.
+   * and the actual pre-admission execution owner for every tiled node.
    * @throws GraphError when checked structural arithmetic overflows.
-   * @note Borrowed Graph/services/plan vectors and normalization-created image
-   * payload bytes are excluded. Context object storage is reserved
-   * conservatively from immutable tile counts without reading live worker
-   * publication state.
+   * @note Borrowed Graph/services/plan vectors, the plan-owned implementation
+   * snapshot, and normalization-created image payload bytes are excluded. The
+   * execution-local Node and both input-context vector allocations already
+   * exist when this estimate is frozen; their actual capacities are charged.
    */
   std::uint64_t retained_memory_bytes() const;
+
+  /**
+   * @brief Reports whether one settled tiled context borrows the plan snapshot.
+   * @param node_idx Dense execution-order index inspected by a long-lived test.
+   * @return True only for a prepared context pointing at resolved_ops_[index].
+   * @throws Nothing; invalid or unsettled indexes return false.
+   * @note Callers use this only after synchronous dispatcher settlement. The
+   * pointer is observation, not callback or registry authority.
+   */
+  bool tiled_context_borrows_resolved_operation_for_testing(
+      std::size_t node_idx) const noexcept;
 
  private:
   /**
    * @brief Stable node-level owner for one exact tiled execution snapshot.
-   * @throws std::bad_alloc when copied node, callback, or normalized storage
+   * @throws std::bad_alloc when the copied Node or normalized vector storage
    * allocates.
    * @note The record is published once under its preparation mutex and remains
    * alive until runner destruction, after every sibling callback settles.
@@ -202,8 +217,12 @@ class NodeTaskRunner {
     /** @brief Execution-local node with one resolved parameter snapshot. */
     Node node_for_exec;
 
-    /** @brief Exact selected callback/metadata/inference revision snapshot. */
-    OpImplementation implementation;
+    /**
+     * @brief Borrowed exact selected callback/metadata/inference snapshot.
+     * @note TaskSubmissionPlan owns this object before the runner and destroys
+     * it only after the runner, so no second metadata/key allocation exists.
+     */
+    const OpImplementation* implementation = nullptr;
 
     /** @brief Sole normalized input owner shared by all sibling callbacks. */
     TiledInputContext input_context;
@@ -223,8 +242,12 @@ class NodeTaskRunner {
     /** @brief Whether this node has begun its sole preparation attempt. */
     bool initialization_attempted = false;
 
-    /** @brief Stable successful execution owner, absent before publication. */
+    /** @brief Pre-admission owner populated once before callback publication.
+     */
     std::unique_ptr<TiledNodeExecutionContext> execution_context;
+
+    /** @brief Whether execution_context has passed complete preparation. */
+    bool execution_context_prepared = false;
 
     /** @brief Exact initialization failure replayed to later siblings. */
     std::exception_ptr initialization_failure;
@@ -323,7 +346,7 @@ class NodeTaskRunner {
    * exception_ptr without retrying normalization.
    * @note The preparation mutex admits at most one attempt per node/run. The
    * first sibling checks disk cache, resolves the exact node and inputs,
-   * normalizes once, then freezes and allocates from input_context.inputs.
+   * normalizes once, then freezes and allocates from input_context.inputs().
    * Siblings borrow the published context only after mutex synchronization.
    */
   TiledNodeExecutionContext* prepare_tiled_node_execution(
@@ -414,6 +437,22 @@ class NodeTaskRunner {
    */
   plugin::ParameterMap resolve_runtime_parameters(
       const Node& target_node) const;
+
+  /**
+   * @brief Overlays connected values into one preallocated effective map.
+   * @param target_node Node whose parameter edges identify upstream values.
+   * @param runtime_parameters Non-null map copied and structurally prepared
+   * before Run admission.
+   * @return Nothing after every connected value replaces its stable key.
+   * @throws GraphError when a connected parameter output is unavailable.
+   * @throws std::bad_alloc when an operation-produced recursive value
+   * allocates.
+   * @note All map nodes and key strings already exist. Only the copied
+   * operation-produced ParameterValue payload may grow at this late boundary,
+   * which remains outside the current structural Run estimator.
+   */
+  void overlay_runtime_parameters(
+      const Node& target_node, plugin::ParameterMap* runtime_parameters) const;
 
   /**
    * @brief Resolves image bindings without compressing destination slots.

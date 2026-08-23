@@ -169,27 +169,38 @@ std::optional<NodeOutput> normalize_secondary(const NodeOutput* input,
   return output;
 }
 
-/**
- * @brief Stores one normalized output and updates its stable pointer slot.
- * @param context Mutable context with pre-reserved normalized storage.
- * @param index Destination input index to replace.
- * @param output Complete temporary result.
- * @return Nothing.
- * @throws std::bad_alloc only if the caller's reservation invariant regresses.
- */
-void retain_normalized(TiledInputContext* context, std::size_t index,
-                       NodeOutput output) {
-  context->normalized_storage.push_back(std::move(output));
-  context->inputs[index] = &context->normalized_storage.back();
-}
-
 }  // namespace
+
+/** @copydoc TiledInputNormalizer::preallocate */
+TiledInputContext TiledInputNormalizer::preallocate(std::size_t input_count) {
+  TiledInputContext context;
+  context.inputs_.resize(input_count, nullptr);
+  if (input_count > 0U) {
+    context.normalized_storage_.reserve(input_count - 1U);
+  }
+  return context;
+}
 
 /** @copydoc TiledInputNormalizer::normalize */
 TiledInputContext TiledInputNormalizer::normalize(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
-  TiledInputContext context;
-  context.inputs = inputs;
+  return normalize(node, inputs, preallocate(inputs.size()));
+}
+
+/** @copydoc TiledInputNormalizer::normalize */
+TiledInputContext TiledInputNormalizer::normalize(
+    const Node& node, const std::vector<const NodeOutput*>& inputs,
+    TiledInputContext context) {
+  const std::size_t normalized_capacity =
+      inputs.empty() ? 0U : inputs.size() - 1U;
+  if (context.inputs_.size() != inputs.size() ||
+      context.inputs_.capacity() < inputs.size() ||
+      !context.normalized_storage_.empty() ||
+      context.normalized_storage_.capacity() < normalized_capacity) {
+    throw std::invalid_argument(
+        "Tiled input context does not match its preallocated input shape.");
+  }
+  std::copy(inputs.begin(), inputs.end(), context.inputs_.begin());
   if (!should_normalize(node, inputs)) {
     return context;
   }
@@ -198,12 +209,11 @@ TiledInputContext TiledInputNormalizer::normalize(
   const ImageShape required = shape_of(base);
   const std::string strategy =
       as_str(node.runtime_parameters, "merge_strategy", "resize");
-  context.normalized_storage.reserve(inputs.size() - 1U);
   for (std::size_t index = 1U; index < inputs.size(); ++index) {
     std::optional<NodeOutput> normalized =
         normalize_secondary(inputs[index], required, strategy, node.id);
     if (normalized.has_value()) {
-      retain_normalized(&context, index, std::move(*normalized));
+      context.retain_normalized(index, std::move(*normalized));
     }
   }
   return context;

@@ -15,6 +15,7 @@
 
 namespace ps {
 
+class Node;
 class RegionSet;
 
 }  // namespace ps
@@ -199,6 +200,18 @@ std::uint64_t real_time_dirty_plan_retained_memory_bytes(
  */
 std::uint64_t node_output_dynamic_retained_memory_bytes(
     const NodeOutput& output);
+
+/**
+ * @brief Estimates every visible dynamic allocation owned by one Node copy.
+ * @param node Node whose strings, containers, parameters, cache metadata, and
+ * optional request state are inspected.
+ * @return Checked dynamic bytes excluding `sizeof(Node)`.
+ * @throws GraphError when recursive structural arithmetic overflows.
+ * @note Immutable Value payload/control storage and allocator-private metadata
+ * remain outside the structural Host estimator. Independently copied map,
+ * vector, and string storage is always included.
+ */
+std::uint64_t node_dynamic_retained_memory_bytes(const Node& node);
 
 /**
  * @brief Returns a conservative owned `std::function` capture allocation.

@@ -153,13 +153,39 @@ std::uint64_t NodeTaskRunner::retained_memory_bytes() const {
       continue;
     }
     estimate.add_objects<TiledNodePreparationState>();
-  }
-  for (int tile_count : tile_task_counts_) {
-    if (tile_count > 0) {
+    if (state->execution_context) {
       estimate.add_objects<TiledNodeExecutionContext>();
+      estimate.add_bytes(node_dynamic_retained_memory_bytes(
+          state->execution_context->node_for_exec));
+      estimate.add_objects<const NodeOutput*>(static_cast<std::uint64_t>(
+          state->execution_context->input_context.inputs().capacity()));
+      estimate.add_objects<NodeOutput>(static_cast<std::uint64_t>(
+          state->execution_context->input_context.normalized_storage()
+              .capacity()));
+      for (const NodeOutput& output :
+           state->execution_context->input_context.normalized_storage()) {
+        estimate.add_bytes(node_output_dynamic_retained_memory_bytes(output));
+      }
     }
   }
   return estimate.bytes();
+}
+
+/**
+ * @copydoc NodeTaskRunner::tiled_context_borrows_resolved_operation_for_testing
+ */
+bool NodeTaskRunner::tiled_context_borrows_resolved_operation_for_testing(
+    std::size_t node_idx) const noexcept {
+  if (node_idx >= tiled_node_preparation_states_.size() ||
+      node_idx >= resolved_ops_.size()) {
+    return false;
+  }
+  const std::unique_ptr<TiledNodePreparationState>& state =
+      tiled_node_preparation_states_[node_idx];
+  const std::optional<OpImplementation>& resolved = resolved_ops_[node_idx];
+  return state && state->execution_context_prepared &&
+         state->execution_context && resolved.has_value() &&
+         state->execution_context->implementation == &*resolved;
 }
 
 /** @copydoc NodeTaskRunner::NodeTaskRunner */
@@ -208,6 +234,32 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
     ++tile_task_counts_[node_idx];
     planned_output_sizes_[node_idx] =
         merge_task_extent(planned_output_sizes_[node_idx], task.output_roi);
+  }
+  for (std::size_t index = 0U; index < execution_order_.size(); ++index) {
+    if (tile_task_counts_.at(index) <= 0) {
+      continue;
+    }
+    Node node_for_exec = graph_.node(execution_order_.at(index));
+    node_for_exec.runtime_parameters = node_for_exec.parameters;
+    for (const ParameterInput& input : node_for_exec.parameter_inputs) {
+      if (input.from_node_id < 0) {
+        continue;
+      }
+      if (node_for_exec.runtime_parameters.find(input.to_parameter_name) ==
+          node_for_exec.runtime_parameters.end()) {
+        node_for_exec.runtime_parameters.emplace(input.to_parameter_name,
+                                                 plugin::ParameterValue{});
+      }
+    }
+    const std::optional<OpImplementation>& resolved = resolved_ops_.at(index);
+    TiledNodePreparationState& state =
+        *tiled_node_preparation_states_.at(index);
+    state.execution_context =
+        std::make_unique<TiledNodeExecutionContext>(TiledNodeExecutionContext{
+            std::move(node_for_exec),
+            resolved.has_value() ? &*resolved : nullptr,
+            TiledInputNormalizer::preallocate(
+                graph_.node(execution_order_.at(index)).image_inputs.size())});
   }
 }  // NOLINT(whitespace/indent_namespace)
 
@@ -379,7 +431,7 @@ NodeTaskRunner::TaskDependencyRelease NodeTaskRunner::compute_tile_task(
                      "Prepared tiled node has no Host output binding.");
   }
   TiledExecutionConfig tiled_config =
-      tiled_config_for(target_node, execution_context->implementation);
+      tiled_config_for(target_node, *execution_context->implementation);
   tiled_config.tile_size =
       task.tile_size > 0 ? task.tile_size : tiled_config.tile_size;
   tiled_config.output_roi = task.output_roi;
@@ -388,10 +440,10 @@ NodeTaskRunner::TaskDependencyRelease NodeTaskRunner::compute_tile_task(
   BenchmarkEvent current_event = start_event(target_node);
   NodeExecutor::execute_tiled_context_into_binding(
       graph_, execution_context->node_for_exec,
-      std::get<TileOpFunc>(execution_context->implementation.func),
+      std::get<TileOpFunc>(execution_context->implementation->func),
       execution_context->input_context, *output_binding, tiled_config);
   return finalize_tiled_node_if_complete(
-             node_idx, target_node, execution_context->input_context.inputs,
+             node_idx, target_node, execution_context->input_context.inputs(),
              current_event)
              ? TaskDependencyRelease::CompleteTiledNode
              : TaskDependencyRelease::DeferTiledNode;
@@ -408,9 +460,9 @@ NodeTaskRunner::prepare_tiled_node_execution(
   if (node_precomputed_[node_idx].load(std::memory_order_acquire)) {
     return nullptr;
   }
-  if (state.execution_context) {
-    if (state.execution_context->implementation.implementation_identity !=
-        implementation.implementation_identity) {
+  if (state.execution_context_prepared) {
+    if (!state.execution_context ||
+        state.execution_context->implementation != &implementation) {
       throw GraphError(
           GraphErrc::ComputeError,
           "Tiled node preparation disagrees with selected implementation.");
@@ -429,23 +481,28 @@ NodeTaskRunner::prepare_tiled_node_execution(
     if (try_satisfy_tile_from_disk_cache(target_node, node_idx)) {
       return nullptr;
     }
-    auto execution_context = std::make_unique<TiledNodeExecutionContext>(
-        TiledNodeExecutionContext{target_node, implementation, {}});
-    execution_context->node_for_exec.runtime_parameters =
-        resolve_runtime_parameters(target_node);
+    if (!state.execution_context ||
+        state.execution_context->implementation != &implementation) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Tiled node preparation lost its admitted execution owner.");
+    }
+    TiledNodeExecutionContext& execution_context = *state.execution_context;
+    overlay_runtime_parameters(
+        target_node, &execution_context.node_for_exec.runtime_parameters);
     const std::vector<const NodeOutput*> image_inputs =
         resolve_image_inputs(target_node);
-    execution_context->input_context =
-        NodeExecutor::prepare_tiled_input_context(
-            execution_context->node_for_exec, image_inputs);
+    execution_context.input_context = NodeExecutor::prepare_tiled_input_context(
+        execution_context.node_for_exec, image_inputs,
+        std::move(execution_context.input_context));
     HostOutputBinding* output_binding =
-        ensure_tile_output_binding(node_idx, execution_context->node_for_exec,
-                                   execution_context->implementation,
-                                   execution_context->input_context.inputs);
+        ensure_tile_output_binding(node_idx, execution_context.node_for_exec,
+                                   *execution_context.implementation,
+                                   execution_context.input_context.inputs());
     if (output_binding == nullptr) {
       return nullptr;
     }
-    state.execution_context = std::move(execution_context);
+    state.execution_context_prepared = true;
     return state.execution_context.get();
   } catch (...) {
     state.initialization_failure = std::current_exception();
@@ -586,6 +643,39 @@ plugin::ParameterMap NodeTaskRunner::resolve_runtime_parameters(
     runtime_params.insert_or_assign(p_input.to_parameter_name, it->second);
   }
   return runtime_params;
+}
+
+/** @copydoc NodeTaskRunner::overlay_runtime_parameters */
+void NodeTaskRunner::overlay_runtime_parameters(
+    const Node& target_node, plugin::ParameterMap* runtime_parameters) const {
+  if (runtime_parameters == nullptr) {
+    throw std::invalid_argument(
+        "Tiled runtime-parameter overlay requires an owned map.");
+  }
+  for (const ParameterInput& input : target_node.parameter_inputs) {
+    if (input.from_node_id < 0) {
+      continue;
+    }
+    const NodeOutput* upstream = upstream_output(input.from_node_id);
+    if (upstream == nullptr) {
+      throw GraphError(GraphErrc::MissingDependency,
+                       "Parameter input not ready for node " +
+                           std::to_string(target_node.id));
+    }
+    const auto found = upstream->data.find(input.from_output_name);
+    if (found == upstream->data.end()) {
+      throw GraphError(GraphErrc::MissingDependency,
+                       "Node " + std::to_string(input.from_node_id) +
+                           " missing output '" + input.from_output_name + "'");
+    }
+    const auto destination = runtime_parameters->find(input.to_parameter_name);
+    if (destination == runtime_parameters->end()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Tiled runtime-parameter key was not admitted before execution.");
+    }
+    destination->second = found->second;
+  }
 }
 
 /**

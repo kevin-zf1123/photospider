@@ -4036,18 +4036,55 @@ TEST(NodeExecutorSplit,
   secondary.space.absolute_roi = (PixelRect{3, 4, 4, 4});
   secondary.plugin_library_lifetime = std::make_shared<int>(42);
   std::vector<const NodeOutput*> tiled_inputs{&base, &secondary};
-  const compute::TiledInputContext normalized_context =
+  compute::TiledInputContext normalized_context =
       compute::TiledInputNormalizer::normalize(tiled, tiled_inputs);
-  ASSERT_EQ(normalized_context.normalized_storage.size(), 1u);
-  EXPECT_EQ(normalized_context.normalized_storage.front()
+  EXPECT_FALSE(std::is_copy_constructible_v<compute::TiledInputContext>);
+  EXPECT_FALSE(std::is_copy_assignable_v<compute::TiledInputContext>);
+  EXPECT_TRUE(std::is_nothrow_move_constructible_v<compute::TiledInputContext>);
+  EXPECT_TRUE(std::is_nothrow_move_assignable_v<compute::TiledInputContext>);
+  ASSERT_EQ(normalized_context.normalized_storage().size(), 1u);
+  EXPECT_EQ(normalized_context.normalized_storage()
+                .front()
                 .data.at("normalization_marker")
                 .as_int64(),
             17);
-  EXPECT_EQ(normalized_context.normalized_storage.front().space.absolute_roi,
+  EXPECT_EQ(normalized_context.normalized_storage().front().space.absolute_roi,
             secondary.space.absolute_roi);
   EXPECT_EQ(
-      normalized_context.normalized_storage.front().plugin_library_lifetime,
+      normalized_context.normalized_storage().front().plugin_library_lifetime,
       secondary.plugin_library_lifetime);
+  const NodeOutput* const normalized_owner_before_move =
+      &normalized_context.normalized_storage().front();
+  const ValueRevisionId normalized_revision_before_move =
+      normalized_owner_before_move->image_value().revision_id();
+  const AllocationIdentity normalized_allocation_before_move =
+      normalized_owner_before_move->image_value().allocation_identity();
+  compute::TiledInputContext moved_context(std::move(normalized_context));
+  ASSERT_EQ(moved_context.normalized_storage().size(), 1U);
+  ASSERT_EQ(moved_context.inputs().size(), tiled_inputs.size());
+  EXPECT_EQ(moved_context.inputs().at(1U),
+            &moved_context.normalized_storage().front());
+  EXPECT_EQ(moved_context.inputs().at(1U), normalized_owner_before_move);
+  EXPECT_EQ(moved_context.inputs().at(1U)->image_value().revision_id(),
+            normalized_revision_before_move);
+  EXPECT_EQ(moved_context.inputs().at(1U)->image_value().allocation_identity(),
+            normalized_allocation_before_move);
+  EXPECT_TRUE(normalized_context.inputs().empty());
+  EXPECT_TRUE(normalized_context.normalized_storage().empty());
+  compute::TiledInputContext assigned_context;
+  assigned_context = std::move(moved_context);
+  ASSERT_EQ(assigned_context.normalized_storage().size(), 1U);
+  ASSERT_EQ(assigned_context.inputs().size(), tiled_inputs.size());
+  EXPECT_EQ(assigned_context.inputs().at(1U),
+            &assigned_context.normalized_storage().front());
+  EXPECT_EQ(assigned_context.inputs().at(1U), normalized_owner_before_move);
+  EXPECT_EQ(assigned_context.inputs().at(1U)->image_value().revision_id(),
+            normalized_revision_before_move);
+  EXPECT_EQ(
+      assigned_context.inputs().at(1U)->image_value().allocation_identity(),
+      normalized_allocation_before_move);
+  EXPECT_TRUE(moved_context.inputs().empty());
+  EXPECT_TRUE(moved_context.normalized_storage().empty());
   compute::TiledExecutionConfig tiled_config;
   tiled_config.tile_size = 4;
   NodeOutput tiled_output = compute::NodeExecutor::execute(
