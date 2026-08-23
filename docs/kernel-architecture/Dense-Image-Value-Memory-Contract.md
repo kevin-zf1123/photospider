@@ -45,7 +45,17 @@ copying one favored input. Monolithic and tiled `image_mixing:add_weighted`
 retain independently proven channel, color, and uniform sample intersections;
 an explicit channel mapping or expansion removes stable channel/color
 authority. Blend sample authority additionally requires identical uniform
-input facets and finite `alpha`/`beta`/`gamma`. Without mapping, all four
+input facets. Before blend or multiply closure, the shared payload-free
+normalization rule proves every synthesized raw constant against that same
+declaration: crop/pad contributes zero only for an expanded destination, and
+three-to-four conversion contributes opaque one for floating storage or the
+physical maximum for integer storage. An escaping constant removes the whole
+Sample Domain; a contained constant leaves the declaration unchanged for the
+operation proof. Resize, pure crop, one-to-three/four replication,
+three/four-to-one reduction, and four-to-three reduction add no fixed constant.
+The raw normalization, geometry, storage ownership, and Value revision rules do
+not change. Blend closure then requires finite `alpha`/`beta`/`gamma`. Without
+mapping, all four
 declared endpoint combinations of `alpha*x + beta*y + gamma` must remain in
 the same interval. With mapping, one payload-free rule shared by monolithic and
 tiled paths mirrors destination reset-to-gamma, valid and repeated source
@@ -67,7 +77,10 @@ performs implicit sample conversion.
 
 For tiled execution, the selected implementation's pure source-private output
 inference freezes one descriptor/facet before allocation and callback entry.
-Its inputs are the exact operation inputs; an old staged output may seed bytes
+`NodeExecutor` first materializes any required secondary normalization once,
+including the normalization-projected Sample Domain on that immutable
+temporary Value. Those normalized Values are the exact operation inputs to
+revision-paired inference; an old staged output may seed bytes
 only after the frozen plan matches and never becomes semantic evidence. An
 implementation without exact inference keeps scalar/channel allocation facts
 and a required zero-origin data window, but omits optional
@@ -278,7 +291,7 @@ Primary contracts and implementations:
 - `include/photospider/data/{value,image_metadata,image_view}.hpp`
 - `include/photospider/data/{sample_conversion,value_artifact}.hpp`
 - `include/photospider/host/{host,value_result,value_artifact_result}.hpp`
-- `src/lib/core/{value,sample_conversion,value_artifact}.cpp`
+- `src/lib/core/{value,sample_conversion,value_artifact,dense_image_processing}.cpp`
 - `src/lib/adapters/opencv/{value_adapter_opencv,image_artifact_codec_opencv}.*`
 - `src/lib/adapters/openexr/openexr_dense_image_codec.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`

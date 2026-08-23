@@ -221,8 +221,14 @@ stride-aware 内核 fill/copy 原语，因此 active pixel 会通过各 descript
 byte 则被排除。临时 normalized `NodeOutput` owner 保持 request-local，并存活到同步 tile callback
 全部结束。该 normalization 不会改变 selected task id 或 dirty ROI geometry。
 
+同一条 metadata-only 证明还会按 raw policy 投影 Sample Domain authority：扩展型 crop/pad
+贡献零，三到四通道转换贡献当前维护的 opaque raw value。排除任一常量的声明会被整体省略；包含
+全部常量的声明则保留到后续 operation-specific 证明。Resize、纯 crop、replication 与 reduction
+在该规则下不增加固定常量。它从不读取 payload extrema，也不改变 raw normalization 算法。
+
 在分配 per-node dirty Host binding 前，精确 selected output inference 会接收这些 operation input，
-并冻结 descriptor、channel count、有符号 geometry 与已授权 optional fact。现有 staged output
+包括其投影后的 optional authority，并冻结 descriptor、channel count、有符号 geometry 与已授权
+optional fact。现有 staged output
 只有在精确 plan matching 后才可能成为 byte seed，绝不会作为 semantic operation input 被前置。
 Inference 缺失时会省略可选 display/channel/sample/color 事实，而不是复制 first input。
 

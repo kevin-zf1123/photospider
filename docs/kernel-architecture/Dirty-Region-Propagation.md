@@ -269,9 +269,17 @@ fill/copy primitives, so active pixels are copied through each descriptor's
 `step` and padded bytes are excluded. Temporary normalized `NodeOutput` owners
 remain request-local and live until synchronous tile callbacks finish. This
 normalization changes neither the selected task ids nor dirty ROI geometry.
+One shared metadata-only proof also projects Sample Domain authority through
+the raw policy: expanding crop/pad contributes zero and three-to-four channel
+conversion contributes the maintained opaque raw value. An excluding
+declaration is omitted in full, while a containing declaration survives for
+the later operation-specific proof; resize, pure crop, replication, and
+reduction add no fixed constant under this rule. Payload extrema are never
+read, and the raw normalization algorithm is unchanged.
 
 Before the per-node dirty Host binding is allocated, the exact selected output
-inference receives those operation inputs and freezes descriptor, channel
+inference receives those exact normalized operation inputs, including their
+projected optional authority, and freezes descriptor, channel
 count, signed geometry, and authorized optional facts. Existing staged output
 is only a possible byte seed after exact plan matching and is never prepended
 as a semantic operation input. Absent inference omits optional

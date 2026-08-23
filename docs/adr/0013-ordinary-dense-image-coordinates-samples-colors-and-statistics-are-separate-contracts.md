@@ -93,7 +93,20 @@ schema only when output channel cardinality is unchanged, no explicit channel
 mapping occurred, and both inputs have semantically equal stable channel/group
 facts; color additionally requires that retained schema and equal color facts,
 while sample authority first requires an identical uniform facet with no
-per-channel overrides. That sample authority survives only when finite
+per-channel overrides. Before the operation-specific closure, one shared
+source-private normalization proof projects the secondary declaration through
+the actual raw size/channel policy. Crop/pad contributes zero only when the
+destination extends beyond the source, and three-to-four conversion contributes
+the maintained opaque raw value (one for floating storage and the physical
+maximum for integer storage). If either synthesized constant is outside the
+same uniform declaration, the secondary has no Sample Domain authority and the
+whole output Sample Domain is omitted. If all constants are contained, the
+unchanged declaration proceeds to the existing operation proof. Resize, pure
+crop, one-to-three/four replication, three/four-to-one reduction, and
+four-to-three reduction add no fixed constant under this proof. Monolithic
+publication and tiled normalized Values use the same metadata-only rule; it
+does not inspect payload, widen a domain, or change raw normalization. That
+sample authority survives only when finite
 `alpha`, `beta`, and `gamma` close the declared interval under every actual
 destination formula. Without mapping, all four endpoint combinations of
 `alpha*x + beta*y + gamma` must remain in the interval. With mapping, the

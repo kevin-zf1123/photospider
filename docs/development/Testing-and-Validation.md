@@ -1462,6 +1462,19 @@ the actual monolithic and tiled exception wrappers directly. Two independent
 `GraphErrc::ComputeError`; no test attempts real memory exhaustion or changes
 the public ABI.
 
+The same binary's `OpenCvOperationProviderMetadataContract.Normalization*`
+cases exercise real monolithic callbacks and real `NodeExecutor` tiled
+execution for both `add_weighted` and `multiply`. They lock raw zero padding
+from a smaller crop secondary, raw floating opaque alpha one from three-to-four
+normalization, and the unchanged arithmetic output while requiring an
+excluding uniform Sample Domain to be absent. A combined `[0,1]` positive
+control contains both zero and one and must retain authority through the
+existing affine/product closure. `DenseImageProcessing` independently locks
+unsigned-byte opaque alpha 255, containing/excluding zero and 255 declarations,
+and one-to-four gray replication so the metadata proof cannot assume every
+fourth channel is synthesized opaque. These are long-lived behavior tests;
+they do not scan source text or replace the production normalization helper.
+
 `OpenCvOperationProviderDisabledBuild` configures a transient nested build with
 `BUILD_TESTING=ON` and
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`, while OpenCV, YAML, graph

@@ -75,7 +75,16 @@ metadata 只包含根据 immutable input 声明与 effective parameter 对当前
 window。对于 monolithic 与 tiled `image_mixing:add_weighted`，只有 output channel
 cardinality 不变、没有发生显式 channel mapping，且两个 input 的稳定 channel/group 事实在
 语义上相等时，channel schema 才能保留；color 还要求该 schema 已保留且两个 color fact
-相等；sample authority 首先要求完全相同、不含 per-channel override 的 uniform facet。只有有限
+相等；sample authority 首先要求完全相同、不含 per-channel override 的 uniform facet。
+在 operation-specific closure 之前，一条由 monolithic publication 与 tiled normalized Value
+共享的 source-private normalization 证明，会按真实 raw size/channel policy 投影 secondary 声明。
+只有 destination 在至少一个轴上超出 source 时，crop/pad 才会合成零；三到四通道转换会合成当前
+维护的 raw opaque value（浮点 storage 为一，整数 storage 为物理最大值）。只要任一合成常量不在
+同一个 uniform 声明内，secondary 就不再具有 Sample Domain authority，整个 output Sample
+Domain 都必须省略；全部常量均在域内时，原声明才可继续进入既有 operation 证明。Resize、纯
+crop、一到三/四通道 replication、三/四到一通道 reduction 与四到三通道 reduction 在该证明下
+不增加固定常量。该规则只读取 metadata，不检查 payload、不扩宽 domain，也不改变 raw
+normalization。只有有限
 `alpha`、`beta` 与 `gamma` 能使每个实际 destination 公式对声明区间闭包时，该 sample
 authority 才能保留。没有 mapping 时，`alpha*x + beta*y + gamma` 的四种 endpoint 组合都必须
 留在该区间内。有 mapping 时，source-private 证明会镜像 destination coverage/reset-to-gamma、

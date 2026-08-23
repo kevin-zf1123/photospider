@@ -36,8 +36,14 @@ coordinate；逻辑访问仅在完成 containment 检查后才减去 data-window
 OpenCV provider 使用 operation-specific semantic projection，而不是从某个偏好的 input 直接
 复制。Monolithic 与 tiled `image_mixing:add_weighted` 分别保留已证明的 channel、color 与
 uniform sample 交集；显式 channel mapping 或 expansion 会移除稳定 channel/color authority。
-Blend sample authority 还要求相同的 uniform input facet，以及有限的
-`alpha`/`beta`/`gamma`。没有 mapping 时，`alpha*x + beta*y + gamma` 的四种声明 endpoint
+Blend sample authority 还要求相同的 uniform input facet。
+在 blend 或 multiply closure 前，共享的 payload-free normalization 规则会针对同一个声明证明
+每个合成 raw 常量：只有 destination 扩展时 crop/pad 才贡献零；三到四通道转换对浮点 storage
+贡献 opaque one，对整数 storage 贡献物理最大值。常量越出声明时，整份 Sample Domain 都必须
+移除；常量仍在域内时，声明保持不变并继续进入 operation 证明。Resize、纯 crop、一到三/四
+通道 replication、三/四到一通道 reduction 与四到三通道 reduction 不增加固定常量。Raw
+normalization、geometry、storage ownership 与 Value revision 规则都不改变。Blend closure 随后
+要求有限的 `alpha`/`beta`/`gamma`。没有 mapping 时，`alpha*x + beta*y + gamma` 的四种声明 endpoint
 组合都必须位于同一区间内。有 mapping 时，monolithic 与 tiled 共享的 payload-free 规则会镜像
 destination reset-to-gamma、有效及重复的 source accumulation、invalid-source skip 与 padded
 zero plane；任何 destination 不闭包，整份 uniform facet 都必须缺席。对于包含 channel three
@@ -51,7 +57,10 @@ tiled `image_process:curve_transform` 则保留 primary 的有符号 geometry �
 payload extrema 推断替代事实、猜测 role 或执行隐式 sample conversion。
 
 对于 tiled execution，selected implementation 的 pure source-private output inference 会在
-allocation 与 callback entry 前冻结唯一 descriptor/facet。其 input 是精确 operation input；旧的
+allocation 与 callback entry 前冻结唯一 descriptor/facet。`NodeExecutor` 会先为每次 node
+invocation 一次性物化所需 secondary normalization，并把 normalization 投影后的 Sample Domain
+写入 immutable temporary Value。这些 normalized Value 是 revision-paired inference 的精确
+operation input；旧的
 staged output 只能在匹配 frozen plan 后 seed byte，永远不能成为 semantic evidence。没有精确
 inference 的 implementation 会保留 scalar/channel allocation 事实与必需的 zero-origin data
 window，但省略可选 display/channel/sample/color authority。该范围覆盖上面列出的当前五个
@@ -209,7 +218,7 @@ equal endpoint/storage identity 通过 type-aware 比较读取 integer domain，
 - `include/photospider/data/{value,image_metadata,image_view}.hpp`
 - `include/photospider/data/{sample_conversion,value_artifact}.hpp`
 - `include/photospider/host/{host,value_result,value_artifact_result}.hpp`
-- `src/lib/core/{value,sample_conversion,value_artifact}.cpp`
+- `src/lib/core/{value,sample_conversion,value_artifact,dense_image_processing}.cpp`
 - `src/lib/adapters/opencv/{value_adapter_opencv,image_artifact_codec_opencv}.*`
 - `src/lib/adapters/openexr/openexr_dense_image_codec.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`

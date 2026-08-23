@@ -1157,6 +1157,16 @@ tiled exception wrapper。两次相互独立的 `cv::Error::StsNoMem` 注入都�
 的 `std::bad_alloc`；tiled 非资源耗尽失败必须表现为 `GraphErrc::ComputeError`。测试不会尝试
 真实内存耗尽，也不会修改 public ABI。
 
+同一 binary 中的 `OpenCvOperationProviderMetadataContract.Normalization*` case 会对
+`add_weighted` 与 `multiply` 同时运行真实 monolithic callback 和真实 `NodeExecutor` tiled
+execution。测试锁定较小 crop secondary 产生的 raw zero padding、三到四通道 normalization 产生
+的 raw 浮点 opaque alpha one，以及未改变的算术 output；同时要求排除这些常量的 uniform Sample
+Domain 缺席。一个同时包含 zero 与 one 的 `[0,1]` 组合正例必须让 authority 继续进入既有
+affine/product closure。`DenseImageProcessing` 还会独立锁定 unsigned-byte opaque alpha 255、
+包含/排除 zero 与 255 的声明，以及一到四通道 gray replication，防止 metadata 证明误以为每个
+第四通道都是合成 opaque。这些是长期 behavior test，不扫描 source text，也不替换 production
+normalization helper。
+
 `OpenCvOperationProviderDisabledBuild` 会使用
 `BUILD_TESTING=ON` 与 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`
 配置一个临时嵌套 build，同时保留 OpenCV、YAML、graph CLI 与 operation-plugin 的默认启用值。

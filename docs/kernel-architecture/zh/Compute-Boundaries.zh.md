@@ -587,7 +587,10 @@ retry choice、settlement、quota、artifact 或 commit authority。
   rectangle 是零基 storage projection；有符号 logical Region metadata 通过所属 data window
   翻译。TensorSlice 是 HP-only monolithic work，绝不会获得 rectangle。
 - 在可行时，tiled input normalization 每次 node invocation 只执行一次，而不是每个 tile callback
-  执行一次。
+  执行一次。其共享 payload-free metadata 证明只有在 raw zero-padding 与三到四通道 opaque alpha
+  都位于声明内时才保留 secondary Sample Domain；否则会在不改变 raw byte 的情况下省略整份可选
+  authority。由此得到的 immutable normalized Value 是 Host allocation 前传给 revision-paired
+  inference 的精确 operation input。
 - V-3 dense invert inference callback 无法检查 payload byte；其 execute result 必须与
   inferred DenseTensor descriptor 及 Image Facet 一致，之后 publication 才可保留精确的
   sealed result revision。

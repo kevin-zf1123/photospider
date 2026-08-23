@@ -767,7 +767,12 @@ cancellation, retry choice, settlement, quota, artifact, or commit authority.
   logical Region metadata is translated through the owning data window.
   TensorSlice is HP-only monolithic work and never gets a rectangle.
 - Tiled input normalization occurs once per node invocation where possible,
-  rather than once per tile callback.
+  rather than once per tile callback. Its shared payload-free metadata proof
+  preserves a secondary Sample Domain only when raw zero-padding and
+  three-to-four opaque alpha remain inside the declaration; otherwise it omits
+  that complete optional authority without changing raw bytes. The resulting
+  immutable normalized Values are the exact operation inputs passed to the
+  revision-paired inference before Host allocation.
 - The V-3 dense invert inference callback cannot inspect payload bytes, and its
   execute result must match the inferred DenseTensor descriptor and Image
   Facet before publication preserves the exact sealed result revision.
