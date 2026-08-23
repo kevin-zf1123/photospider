@@ -87,11 +87,14 @@ The independent I1 final oracle is versioned
 `i1-coordinate-pattern-curve-chain-fp32-v1`. It reconstructs the source and
 four stages without Host, Kernel, cache, scheduler, YAML, or the candidate
 provider. For the HWC `[2048,2048,4]` FloatingPoint/NativeScalar32 tensor with
-ImageFacet `(x=1,y=0,channel=2)`, zero-origin `[0,2048) x [0,2048)` signed
-data/display windows, and DenseTensor schema/Image facet structural version 2,
-the frozen output omits optional Sample Domain and Color authority. The source
-still declares FP32 Normalized `[0,1]`; the nonlinear `curve_transform` output
-policy does not publish that declaration without an operation-specific proof.
+ImageFacet `(x=1,y=0,channel=2)`, the required zero-origin signed data window
+`[0,2048) x [0,2048)`, an absent optional display window, and DenseTensor
+schema/Image facet structural version 2, the frozen output omits optional
+Sample Domain and Color authority. Display-window presence is encoded in the
+canonical descriptor digest, so this absence is part of the reproducible
+oracle rather than an omitted description. The source still declares FP32
+Normalized `[0,1]`; the nonlinear `curve_transform` output policy does not
+publish that declaration without an operation-specific proof.
 The frozen `Sha256CanonicalV1` digest is
 `18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`.
 The expected value is fixed before candidate execution; a product-path test

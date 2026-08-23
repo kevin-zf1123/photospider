@@ -44,10 +44,19 @@ The OpenCV provider uses operation-specific semantic projection instead of
 copying one favored input. Monolithic and tiled `image_mixing:add_weighted`
 retain independently proven channel, color, and uniform sample intersections;
 an explicit channel mapping or expansion removes stable channel/color
-authority. Monolithic and tiled `image_mixing:multiply` retain the same
-channel/color intersection, while sample authority additionally requires an
-identical uniform facet and a finite scale whose four declared interval
-endpoint products remain inside that same interval. Tiled
+authority. Blend sample authority additionally requires identical uniform
+input facets and finite `alpha`/`beta`/`gamma`. Without mapping, all four
+declared endpoint combinations of `alpha*x + beta*y + gamma` must remain in
+the same interval. With mapping, one payload-free rule shared by monolithic and
+tiled paths mirrors destination reset-to-gamma, valid and repeated source
+accumulation, invalid-source skips, and padded zero planes; every destination
+must close or the entire uniform facet is absent. Mapped outputs containing
+channel three fail closed for alpha strategies other than `weighted` because
+those overrides are outside the retained proof. Monolithic and tiled
+`image_mixing:multiply` retain the same channel/color intersection, while
+sample authority additionally requires an identical uniform facet and a finite
+scale whose four declared interval endpoint products remain inside that same
+interval. Tiled
 `image_mixing:diff` retains only common stable channel facts and omits
 sample/color authority. Tiled `image_process:gaussian_blur` preserves the
 complete interpretation, while nonlinear tiled

@@ -655,12 +655,14 @@ installs, and restores the worker floating-point environment around those
 explicit scalar cuts. An independent oracle versioned
 `i1-coordinate-pattern-curve-chain-fp32-v1` reconstructs the source and four
 stages without Host/Kernel/cache/scheduler/YAML/provider dependencies. For the
-HWC `[2048,2048,4]` NativeScalar32 tensor, zero-origin
-`[0,2048) x [0,2048)` signed data/display windows, and frozen DenseTensor
-schema/Image facet structural version 2, the output omits optional Sample
-Domain and Color authority. The source still declares FP32 Normalized
-`[0,1]`; the nonlinear `curve_transform` policy does not project that
-declaration without a proof. Its exact `Sha256CanonicalV1` digest is
+HWC `[2048,2048,4]` NativeScalar32 tensor, the required zero-origin signed data
+window `[0,2048) x [0,2048)`, an absent optional display window, and frozen
+DenseTensor schema/Image facet structural version 2, the output omits optional
+Sample Domain and Color authority. Display-window presence participates in the
+canonical descriptor digest, so the absence is a reproducible oracle fact. The
+source still declares FP32 Normalized `[0,1]`; the nonlinear `curve_transform`
+policy does not project that declaration without a proof. Its exact
+`Sha256CanonicalV1` digest is
 `18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`.
 For this oracle migration, the initial DI-1 implementation and oracle refresh
 advanced the DenseTensor schema and Image facet structural records to version 2

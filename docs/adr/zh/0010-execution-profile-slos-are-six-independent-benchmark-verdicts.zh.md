@@ -76,10 +76,12 @@ reciprocal 近似，并在复用前恢复先前的浮点环境。
 独立 I1 最终 oracle 的版本是 `i1-coordinate-pattern-curve-chain-fp32-v1`。它不经过
 Host、Kernel、cache、scheduler、YAML 或候选 provider，独立重建 source 和四个 stage。
 对 HWC `[2048,2048,4]` FloatingPoint/NativeScalar32 tensor、ImageFacet
-`(x=1,y=0,channel=2)`、零原点 `[0,2048) x [0,2048)` 有符号 data/display
-window，以及 DenseTensor schema/Image facet 结构版本 2，冻结输出会省略可选的
-Sample Domain 与 Color 权威。Source 仍声明 FP32 Normalized `[0,1]`；非线性
-`curve_transform` 输出策略在没有 operation-specific 证明时不会发布该声明。冻结的
+`(x=1,y=0,channel=2)`、required 零原点 `[0,2048) x [0,2048)` 有符号 data
+window、缺席的 optional display window，以及 DenseTensor schema/Image facet 结构版本
+2，冻结输出会省略可选的 Sample Domain 与 Color 权威。Display-window presence 会编码
+进 canonical descriptor digest，因此这项缺席是可复现 oracle 的组成部分，而不是描述遗漏。
+Source 仍声明 FP32 Normalized `[0,1]`；非线性 `curve_transform` 输出策略在没有
+operation-specific 证明时不会发布该声明。冻结的
 `Sha256CanonicalV1` digest 是
 `18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`。
 expected value 在候选执行前固定；product-path test 会交叉校验它，但绝不能用候选结果

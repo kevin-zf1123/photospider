@@ -523,10 +523,11 @@ coefficient 舍入一次到 binary32 RNE，每个 sample 使用
 `RNE32(1/RNE32(1+RNE32(input*k32)))`。provider 在这些显式 scalar 截断前后保存、安装并
 恢复 worker 浮点环境。版本为 `i1-coordinate-pattern-curve-chain-fp32-v1` 的独立 oracle
 不依赖 Host/Kernel/cache/scheduler/YAML/provider，独立重建 source 与四个 stage。对 HWC
-`[2048,2048,4]` NativeScalar32 tensor、零原点 `[0,2048) x [0,2048)` 有符号
-data/display window，以及冻结的 DenseTensor schema/Image facet 结构版本 2，输出会
-省略可选的 Sample Domain 与 Color 权威。Source 仍声明 FP32 Normalized `[0,1]`；
-非线性 `curve_transform` 策略在没有证明时不会投影该声明。其精确
+`[2048,2048,4]` NativeScalar32 tensor、required 零原点 `[0,2048) x [0,2048)`
+有符号 data window、缺席的 optional display window，以及冻结的 DenseTensor schema/Image
+facet 结构版本 2，输出会省略可选的 Sample Domain 与 Color 权威。Display-window presence
+参与 canonical descriptor digest，因此这项缺席是可复现的 oracle 事实。Source 仍声明 FP32
+Normalized `[0,1]`；非线性 `curve_transform` 策略在没有证明时不会投影该声明。其精确
 `Sha256CanonicalV1` digest 是
 `18d88b59782daa7ef92b0aa2acc23c7fec5e61baa5e631d9c1c4c8b6abc2eed0`。
 就本次 oracle 迁移而言，DI-1 的初始实现与 oracle 刷新把 DenseTensor schema 与 Image facet

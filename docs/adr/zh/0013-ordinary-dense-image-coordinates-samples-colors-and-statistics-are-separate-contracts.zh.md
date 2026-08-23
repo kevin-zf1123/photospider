@@ -75,10 +75,16 @@ metadata 只包含根据 immutable input 声明与 effective parameter 对当前
 window。对于 monolithic 与 tiled `image_mixing:add_weighted`，只有 output channel
 cardinality 不变、没有发生显式 channel mapping，且两个 input 的稳定 channel/group 事实在
 语义上相等时，channel schema 才能保留；color 还要求该 schema 已保留且两个 color fact
-相等，sample authority 则要求完全相同、不含 per-channel override 的 uniform facet。
-Monolithic 与 tiled `image_mixing:multiply` 使用同样独立的 channel/color 交集，但只有两个
-input 声明完全相同的 uniform facet，且有限 configured scale 使声明区间四个端点乘积都仍
-位于该同一区间内时，才保留 sample authority。Tiled `image_mixing:diff` 只保留共同的稳定
+相等；sample authority 首先要求完全相同、不含 per-channel override 的 uniform facet。只有有限
+`alpha`、`beta` 与 `gamma` 能使每个实际 destination 公式对声明区间闭包时，该 sample
+authority 才能保留。没有 mapping 时，`alpha*x + beta*y + gamma` 的四种 endpoint 组合都必须
+留在该区间内。有 mapping 时，source-private 证明会镜像 destination coverage/reset-to-gamma、
+每个有效 source contribution（包括重复累积）、invalid-source skip 与 padded zero plane；任何
+destination 不闭包都会省略整份 uniform facet。对于包含 channel three 的 mapped output，只有
+`weighted` alpha strategy 进入该证明；其他策略 fail closed。Monolithic 与 tiled
+`image_mixing:multiply` 使用同样独立的 channel/color 交集，但只有两个 input 声明完全相同的
+uniform facet，且有限 configured scale 使声明区间四个端点乘积都仍位于该同一区间内时，才
+保留 sample authority。Tiled `image_mixing:diff` 只保留共同的稳定
 channel 事实，并省略 sample/color authority。在当前 unary tiled OpenCV callback 中，
 `image_process:gaussian_blur` 保留完整 interpretation；非线性的
 `image_process:curve_transform` 则保留有符号 geometry 与稳定 channel 事实，同时省略

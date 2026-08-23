@@ -92,8 +92,17 @@ windows. Monolithic and tiled `image_mixing:add_weighted` retain a channel
 schema only when output channel cardinality is unchanged, no explicit channel
 mapping occurred, and both inputs have semantically equal stable channel/group
 facts; color additionally requires that retained schema and equal color facts,
-while sample authority requires an identical uniform facet with no per-channel
-overrides. Monolithic and tiled `image_mixing:multiply` use the same independent
+while sample authority first requires an identical uniform facet with no
+per-channel overrides. That sample authority survives only when finite
+`alpha`, `beta`, and `gamma` close the declared interval under every actual
+destination formula. Without mapping, all four endpoint combinations of
+`alpha*x + beta*y + gamma` must remain in the interval. With mapping, the
+source-private proof mirrors destination coverage/reset-to-gamma, every valid
+source contribution (including repeated accumulation), invalid-source skips,
+and padded zero planes; every destination must close or the whole uniform
+facet is omitted. For mapped outputs containing channel three, only the
+`weighted` alpha strategy participates in this proof; other strategies fail
+closed. Monolithic and tiled `image_mixing:multiply` use the same independent
 channel/color intersection, but retain sample authority only when both inputs
 declare the exact same uniform facet and the finite configured scale maps all
 four declared interval endpoint products back inside that same interval.

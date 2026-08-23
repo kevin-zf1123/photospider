@@ -36,9 +36,15 @@ coordinate；逻辑访问仅在完成 containment 检查后才减去 data-window
 OpenCV provider 使用 operation-specific semantic projection，而不是从某个偏好的 input 直接
 复制。Monolithic 与 tiled `image_mixing:add_weighted` 分别保留已证明的 channel、color 与
 uniform sample 交集；显式 channel mapping 或 expansion 会移除稳定 channel/color authority。
-Monolithic 与 tiled `image_mixing:multiply` 保留同样的 channel/color 交集，而 sample
-authority 还要求完全相同的 uniform facet，以及一个有限 scale，其声明区间四个端点乘积都
-仍位于同一区间内。Tiled `image_mixing:diff` 只保留共同的稳定 channel 事实，并省略
+Blend sample authority 还要求相同的 uniform input facet，以及有限的
+`alpha`/`beta`/`gamma`。没有 mapping 时，`alpha*x + beta*y + gamma` 的四种声明 endpoint
+组合都必须位于同一区间内。有 mapping 时，monolithic 与 tiled 共享的 payload-free 规则会镜像
+destination reset-to-gamma、有效及重复的 source accumulation、invalid-source skip 与 padded
+zero plane；任何 destination 不闭包，整份 uniform facet 都必须缺席。对于包含 channel three
+的 mapped output，`weighted` 以外的 alpha strategy 因超出已保留证明而 fail closed。
+Monolithic 与 tiled `image_mixing:multiply` 保留同样的 channel/color 交集，而 sample authority
+还要求完全相同的 uniform facet，以及一个有限 scale，其声明区间四个端点乘积都仍位于同一区间
+内。Tiled `image_mixing:diff` 只保留共同的稳定 channel 事实，并省略
 sample/color authority。Tiled `image_process:gaussian_blur` 保留完整 interpretation；非线性的
 tiled `image_process:curve_transform` 则保留 primary 的有符号 geometry 与稳定 channel 事实，
 同时省略 sample/color authority。未经证明的 optional fact 必须缺失；任何路径都不得从
