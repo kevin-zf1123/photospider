@@ -513,8 +513,8 @@ class NodeTaskRunner {
    * @brief Validates one admitted effective map without copying its payload.
    * @param target_node Current graph node providing static values and edges.
    * @param execution_context Frozen map and source identities to validate.
-   * @return Nothing when map shape, recursive values, and every source identity
-   * still match exactly.
+   * @return Nothing when map shape, snapshot-equivalent recursive values, and
+   * every source identity still match exactly.
    * @throws GraphError when a dependency/output is missing, map content/shape
    * changed, or an equal-content source owner replaced the admitted identity.
    * @throws std::logic_error, std::invalid_argument, or std::overflow_error
@@ -525,8 +525,12 @@ class NodeTaskRunner {
    * for a repeated destination determines its effective value. Disconnected
    * declarations remain inert. Source addresses are compared as identities in
    * addition to recursive value equality, so equal-content replacement fails
-   * closed. Successful validation performs no payload copy or map mutation;
-   * a failing diagnostic may allocate.
+   * closed. At this private snapshot boundary only, paired double NaN leaves
+   * compare reflexively; public `ParameterValue::operator==` keeps ordinary
+   * IEEE NaN behavior, while types, finite values, array order, object keys,
+   * and recursive structure remain exact. The equivalence traversal allocates
+   * nothing; successful validation performs no payload copy or map mutation,
+   * while formal-validity checks or a failing diagnostic may allocate.
    */
   void validate_materialized_runtime_parameters(
       const Node& target_node,

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -135,6 +136,98 @@ bool has_connected_parameter_inputs(const Node& node) noexcept {
   return std::any_of(
       node.parameter_inputs.begin(), node.parameter_inputs.end(),
       [](const ParameterInput& input) { return input.from_node_id >= 0; });
+}
+
+/**
+ * @brief Compares recursive values at the retained-snapshot validation edge.
+ * @param admitted Deep-owned value frozen before retained admission.
+ * @param current Current static value or value still published by the exact
+ * captured connected source owner.
+ * @return True only when alternatives, array order, object keys, and recursive
+ * content match, except that paired double NaN leaves compare reflexively.
+ * @throws Nothing; inspection is read-only and performs no allocation.
+ * @note This private equivalence does not change public
+ * `ParameterValue::operator==`, which retains ordinary IEEE NaN behavior.
+ * Exact connected source identity is validated separately before this helper.
+ * Inputs must remain alive and immutable for the call; recursion uses only the
+ * caller thread's stack and acquires no lock or lifetime ownership.
+ */
+bool retained_parameter_snapshot_equivalent(
+    const plugin::ParameterValue& admitted,
+    const plugin::ParameterValue& current) noexcept {
+  if (admitted.kind() != current.kind()) {
+    return false;
+  }
+  switch (admitted.kind()) {
+    case plugin::ParameterKind::Null:
+      return true;
+    case plugin::ParameterKind::Bool: {
+      const auto* admitted_value = std::get_if<bool>(&admitted.storage());
+      const auto* current_value = std::get_if<bool>(&current.storage());
+      return admitted_value != nullptr && current_value != nullptr &&
+             *admitted_value == *current_value;
+    }
+    case plugin::ParameterKind::Int64: {
+      const auto* admitted_value =
+          std::get_if<std::int64_t>(&admitted.storage());
+      const auto* current_value = std::get_if<std::int64_t>(&current.storage());
+      return admitted_value != nullptr && current_value != nullptr &&
+             *admitted_value == *current_value;
+    }
+    case plugin::ParameterKind::Double: {
+      const auto* admitted_value = std::get_if<double>(&admitted.storage());
+      const auto* current_value = std::get_if<double>(&current.storage());
+      return admitted_value != nullptr && current_value != nullptr &&
+             (*admitted_value == *current_value ||
+              (std::isnan(*admitted_value) && std::isnan(*current_value)));
+    }
+    case plugin::ParameterKind::String: {
+      const auto* admitted_value =
+          std::get_if<std::string>(&admitted.storage());
+      const auto* current_value = std::get_if<std::string>(&current.storage());
+      return admitted_value != nullptr && current_value != nullptr &&
+             *admitted_value == *current_value;
+    }
+    case plugin::ParameterKind::Array: {
+      const auto* admitted_value =
+          std::get_if<plugin::ParameterValue::Array>(&admitted.storage());
+      const auto* current_value =
+          std::get_if<plugin::ParameterValue::Array>(&current.storage());
+      if (admitted_value == nullptr || current_value == nullptr ||
+          admitted_value->size() != current_value->size()) {
+        return false;
+      }
+      for (std::size_t index = 0U; index < admitted_value->size(); ++index) {
+        if (!retained_parameter_snapshot_equivalent((*admitted_value)[index],
+                                                    (*current_value)[index])) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case plugin::ParameterKind::Object: {
+      const auto* admitted_value =
+          std::get_if<plugin::ParameterValue::Object>(&admitted.storage());
+      const auto* current_value =
+          std::get_if<plugin::ParameterValue::Object>(&current.storage());
+      if (admitted_value == nullptr || current_value == nullptr ||
+          admitted_value->size() != current_value->size()) {
+        return false;
+      }
+      auto admitted_entry = admitted_value->begin();
+      auto current_entry = current_value->begin();
+      for (; admitted_entry != admitted_value->end();
+           ++admitted_entry, ++current_entry) {
+        if (admitted_entry->first != current_entry->first ||
+            !retained_parameter_snapshot_equivalent(admitted_entry->second,
+                                                    current_entry->second)) {
+          return false;
+        }
+      }
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace
@@ -706,8 +799,8 @@ plugin::ParameterMap NodeTaskRunner::resolve_runtime_parameters(
  * @brief Validates an admitted effective map and captured source identities.
  * @param target_node Current graph node providing static values and edges.
  * @param execution_context Frozen map and exact source addresses to validate.
- * @return Nothing when map shape, recursive values, and source identities
- * still match.
+ * @return Nothing when map shape, snapshot-equivalent recursive values, and
+ * source identities still match.
  * @throws GraphError when a dependency/output is missing, the map changed, or
  * an equal-content source owner replaced the admitted identity.
  * @throws std::logic_error, std::invalid_argument, or std::overflow_error when
@@ -715,9 +808,12 @@ plugin::ParameterMap NodeTaskRunner::resolve_runtime_parameters(
  * @throws std::bad_alloc when formal validity checking or failure-diagnostic
  * construction cannot allocate.
  * @note Connected declarations apply in order and the last repeated
- * destination wins. Successful validation copies no payload and mutates no
- * map, but failure diagnostics may allocate. Address comparison deliberately
- * keeps equal-content replacement fail closed.
+ * destination wins. The equivalence traversal allocates nothing, and
+ * successful validation copies no payload or mutates the admitted map; formal
+ * validity checks and failure diagnostics may allocate. Paired double NaN
+ * leaves compare reflexively only at this validation boundary; all other
+ * alternatives and recursive structure remain exact. Address comparison
+ * deliberately keeps equal-content replacement fail closed.
  */
 void NodeTaskRunner::validate_materialized_runtime_parameters(
     const Node& target_node,
@@ -790,7 +886,8 @@ void NodeTaskRunner::validate_materialized_runtime_parameters(
       const auto destination =
           admitted_parameters.find(input.to_parameter_name);
       if (destination == admitted_parameters.end() ||
-          destination->second != source->second) {
+          !retained_parameter_snapshot_equivalent(destination->second,
+                                                  source->second)) {
         throw GraphError(
             GraphErrc::ComputeError,
             "Connected runtime parameters changed after retained admission.");
@@ -817,7 +914,8 @@ void NodeTaskRunner::validate_materialized_runtime_parameters(
     }
     const auto admitted = admitted_parameters.find(static_parameter.first);
     if (admitted == admitted_parameters.end() ||
-        admitted->second != static_parameter.second) {
+        !retained_parameter_snapshot_equivalent(admitted->second,
+                                                static_parameter.second)) {
       throw GraphError(
           GraphErrc::ComputeError,
           "Static runtime parameters changed after retained admission.");

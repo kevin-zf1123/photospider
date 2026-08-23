@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +22,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "benchmark/m1/m1_profile.hpp"  // NOLINT(build/include_subdir)
@@ -785,6 +787,123 @@ plugin::ParameterMap make_connected_parameter_outputs(bool large_payload) {
 }
 
 /**
+ * @brief Builds the canonical scalar and nested NaN connected-value fixture.
+ * @param nested_finite_leaf Exact finite sibling stored beside one nested NaN.
+ * @return Two producer outputs containing a scalar NaN plus object/array NaNs.
+ * @throws std::bad_alloc from string, vector, map, or recursive value storage.
+ * @note The adjustable finite sibling lets a separate regression preserve the
+ * exact same connected source-object identity while proving that snapshot
+ * equivalence still rejects real non-NaN content changes. The returned map
+ * owns all recursive storage and shares no thread or external lifetime state.
+ */
+plugin::ParameterMap make_nan_connected_parameter_outputs(
+    double nested_finite_leaf = 42.5) {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  plugin::ParameterMap outputs;
+  outputs.emplace(kConnectedStringOutput, plugin::ParameterValue(nan));
+
+  plugin::ParameterValue::Object root_entry;
+  root_entry.emplace("nan_leaf", plugin::ParameterValue(nan));
+  root_entry.emplace("finite_leaf", plugin::ParameterValue(nested_finite_leaf));
+  plugin::ParameterValue::Array root_array;
+  root_array.emplace_back(std::move(root_entry));
+  root_array.emplace_back(plugin::ParameterValue(std::int64_t{7}));
+
+  plugin::ParameterValue::Object child;
+  child.emplace("nan_leaf", plugin::ParameterValue(nan));
+  child.emplace("finite_leaf", plugin::ParameterValue(-13.25));
+
+  plugin::ParameterValue::Object nested;
+  nested.emplace("root", plugin::ParameterValue(std::move(root_array)));
+  nested.emplace("child", plugin::ParameterValue(std::move(child)));
+  outputs.emplace(kConnectedNestedOutput,
+                  plugin::ParameterValue(std::move(nested)));
+  return outputs;
+}
+
+/**
+ * @brief Checks exact NaN positions and finite siblings in an effective map.
+ * @param parameters Immutable runtime parameter map observed by a callback.
+ * @return True only for the canonical scalar/object/array NaN fixture under
+ * the two connected destination keys, including every finite sibling.
+ * @throws Nothing for standard ordered-map lookup and variant inspection.
+ * @note This test oracle does not call `ParameterValue::operator==`; it checks
+ * each expected alternative and leaf independently so ordinary NaN inequality
+ * cannot turn a correct provider observation into a false negative. It
+ * allocates nothing, borrows `parameters` only for the synchronous call, and
+ * requires the callback owner to keep that map immutable while observed.
+ */
+bool has_canonical_nan_connected_destinations(
+    const plugin::ParameterMap& parameters) {
+  const auto scalar = parameters.find(kConnectedStringDestination);
+  if (scalar == parameters.end()) {
+    return false;
+  }
+  const auto* scalar_value = std::get_if<double>(&scalar->second.storage());
+  if (scalar_value == nullptr || !std::isnan(*scalar_value)) {
+    return false;
+  }
+
+  const auto nested_value = parameters.find(kConnectedNestedDestination);
+  if (nested_value == parameters.end()) {
+    return false;
+  }
+  const auto* nested = std::get_if<plugin::ParameterValue::Object>(
+      &nested_value->second.storage());
+  if (nested == nullptr || nested->size() != 2U) {
+    return false;
+  }
+  const auto root_value = nested->find("root");
+  const auto child_value = nested->find("child");
+  if (root_value == nested->end() || child_value == nested->end()) {
+    return false;
+  }
+
+  const auto* root_array =
+      std::get_if<plugin::ParameterValue::Array>(&root_value->second.storage());
+  if (root_array == nullptr || root_array->size() != 2U) {
+    return false;
+  }
+  const auto* root_entry =
+      std::get_if<plugin::ParameterValue::Object>(&(*root_array)[0U].storage());
+  const auto* root_index =
+      std::get_if<std::int64_t>(&(*root_array)[1U].storage());
+  if (root_entry == nullptr || root_entry->size() != 2U ||
+      root_index == nullptr || *root_index != 7) {
+    return false;
+  }
+  const auto root_nan = root_entry->find("nan_leaf");
+  const auto root_finite = root_entry->find("finite_leaf");
+  if (root_nan == root_entry->end() || root_finite == root_entry->end()) {
+    return false;
+  }
+  const auto* root_nan_value = std::get_if<double>(&root_nan->second.storage());
+  const auto* root_finite_value =
+      std::get_if<double>(&root_finite->second.storage());
+  if (root_nan_value == nullptr || !std::isnan(*root_nan_value) ||
+      root_finite_value == nullptr || *root_finite_value != 42.5) {
+    return false;
+  }
+
+  const auto* child = std::get_if<plugin::ParameterValue::Object>(
+      &child_value->second.storage());
+  if (child == nullptr || child->size() != 2U) {
+    return false;
+  }
+  const auto child_nan = child->find("nan_leaf");
+  const auto child_finite = child->find("finite_leaf");
+  if (child_nan == child->end() || child_finite == child->end()) {
+    return false;
+  }
+  const auto* child_nan_value =
+      std::get_if<double>(&child_nan->second.storage());
+  const auto* child_finite_value =
+      std::get_if<double>(&child_finite->second.storage());
+  return child_nan_value != nullptr && std::isnan(*child_nan_value) &&
+         child_finite_value != nullptr && *child_finite_value == -13.25;
+}
+
+/**
  * @brief Maps producer output names to their execution-local destinations.
  * @param outputs Exact producer-owned value map.
  * @return Deep-owned expected connected subset of runtime parameters.
@@ -836,6 +955,8 @@ class TiledConstraintGateProbe final {
                 ? plugin::ParameterMap{}
                 : make_connected_parameter_destinations(
                       connected_source_outputs_)),
+        expects_nan_snapshot_(has_canonical_nan_connected_destinations(
+            expected_connected_parameters_)),
         fail_provider_(fail_provider) {
     if (!release_.valid()) {
       throw std::invalid_argument(
@@ -866,6 +987,10 @@ class TiledConstraintGateProbe final {
       inference_connected_parameter_matches.fetch_add(
           1, std::memory_order_relaxed);
     }
+    if (expects_nan_snapshot_ &&
+        has_canonical_nan_connected_destinations(node.runtime_parameters)) {
+      inference_nan_snapshot_matches.fetch_add(1, std::memory_order_relaxed);
+    }
     inference_parameter_entries.fetch_add(1, std::memory_order_release);
   }
 
@@ -891,6 +1016,10 @@ class TiledConstraintGateProbe final {
         matches_connected_parameters(node)) {
       provider_connected_parameter_matches.fetch_add(1,
                                                      std::memory_order_relaxed);
+    }
+    if (expects_nan_snapshot_ &&
+        has_canonical_nan_connected_destinations(node.runtime_parameters)) {
+      provider_nan_snapshot_matches.fetch_add(1, std::memory_order_relaxed);
     }
     provider_parameter_entries.fetch_add(1, std::memory_order_release);
   }
@@ -957,6 +1086,9 @@ class TiledConstraintGateProbe final {
   /** @brief Inference entries matching both complete recursive destinations. */
   std::atomic_int inference_connected_parameter_matches{0};
 
+  /** @brief Inference entries preserving every canonical NaN/finite leaf. */
+  std::atomic_int inference_nan_snapshot_matches{0};
+
   /** @brief Exact number of provider effective-parameter observations. */
   std::atomic_int provider_parameter_entries{0};
 
@@ -968,6 +1100,9 @@ class TiledConstraintGateProbe final {
 
   /** @brief Provider entries matching both complete recursive destinations. */
   std::atomic_int provider_connected_parameter_matches{0};
+
+  /** @brief Provider entries preserving every canonical NaN/finite leaf. */
+  std::atomic_int provider_nan_snapshot_matches{0};
 
   /** @brief Same-Run parameter-source callbacks that produced the payload. */
   std::atomic_int source_parameter_entries{0};
@@ -1015,6 +1150,9 @@ class TiledConstraintGateProbe final {
 
   /** @brief Independent destination-key oracle for inference/provider reads. */
   plugin::ParameterMap expected_connected_parameters_;
+
+  /** @brief Whether the independent oracle is the canonical NaN fixture. */
+  bool expects_nan_snapshot_ = false;
 
   /** @brief Whether provider entry throws after observing effective values. */
   bool fail_provider_ = false;
@@ -4041,10 +4179,14 @@ struct TiledConnectedPayloadResourceResult final {
   int inference_parameter_entries = 0;
   /** @brief Inference callbacks matching both exact recursive destinations. */
   int inference_connected_parameter_matches = 0;
+  /** @brief Inference callbacks preserving canonical NaN/finite leaf layout. */
+  int inference_nan_snapshot_matches = 0;
   /** @brief Tiled provider callbacks that received an effective Node. */
   int provider_parameter_entries = 0;
   /** @brief Provider callbacks matching both exact recursive destinations. */
   int provider_connected_parameter_matches = 0;
+  /** @brief Provider callbacks preserving canonical NaN/finite leaf layout. */
+  int provider_nan_snapshot_matches = 0;
   /** @brief Whether inference ever received the disconnected phantom key. */
   bool inference_phantom_destination_present = false;
   /** @brief Whether any provider received the disconnected phantom key. */
@@ -4058,13 +4200,28 @@ struct TiledConnectedPayloadResourceResult final {
 };
 
 /**
- * @brief Executes one cached or same-Run recursive connected payload case.
+ * @brief Selects a post-runner mutation for one precomputed source fixture.
+ * @throws Nothing.
+ * @note Each mutation occurs after retained source addresses and values have
+ * been captured, immediately before real dispatcher execution.
+ */
+enum class PrecomputedConnectedSourceMutation {
+  /** @brief Preserve the admitted source owner and recursive content. */
+  None,
+  /** @brief Replace the complete NodeOutput with equal recursive content. */
+  ReplaceOwnerWithEqualContent,
+  /** @brief Change one nested finite leaf without replacing its map node. */
+  ChangeNestedFiniteLeaf,
+};
+
+/**
+ * @brief Executes one explicit cached or same-Run connected payload case.
  * @param source_precomputed Whether the parameter producer starts as complete
  * reusable output or executes as one same-Run temporary-result task.
- * @param large_payload Whether to use the large string/nested object fixture.
+ * @param source_outputs Exact recursive values published by the producer.
  * @param limits Immutable resource limits for the fresh process service.
- * @param replace_precomputed_source_identity Whether to replace the reusable
- * producer output with equal recursive content after runner construction.
+ * @param source_mutation Optional post-construction source mutation used to
+ * prove exact owner and recursive-content validation independently.
  * @param fail_target_provider Whether the first target tile throws after
  * observing the admitted recursive values.
  * @return Root/supplement admission, exact callback values, and cleanup facts.
@@ -4073,18 +4230,19 @@ struct TiledConnectedPayloadResourceResult final {
  * @note The target is the real registered two-tile operation. Precomputed
  * values must grow the initial Run estimate. Same-Run values first become
  * stable in temp_results and must obtain an actual-capacity supplemental root
- * before output inference or either provider tile.
+ * before output inference or either provider tile. `source_outputs` is copied
+ * into graph/probe ownership before asynchronous service callbacks and need
+ * remain alive only for this synchronous helper call.
  */
 TiledConnectedPayloadResourceResult
 execute_tiled_connected_payload_resource_case(
-    bool source_precomputed, bool large_payload,
+    bool source_precomputed, const plugin::ParameterMap& source_outputs,
     ExecutionResourceLimits limits =
         ExecutionService::default_resource_limits(),
-    bool replace_precomputed_source_identity = false,
+    PrecomputedConnectedSourceMutation source_mutation =
+        PrecomputedConnectedSourceMutation::None,
     bool fail_target_provider = false) {
   ensure_tiled_constraint_operation_registered();
-  plugin::ParameterMap source_outputs =
-      make_connected_parameter_outputs(large_payload);
   std::promise<void> callback_release;
   const std::shared_future<void> callback_release_future =
       callback_release.get_future().share();
@@ -4142,18 +4300,39 @@ execute_tiled_connected_payload_resource_case(
       &lease,
       &plan.compute_plan().planned_work,
   });
-  if (replace_precomputed_source_identity) {
+  if (source_mutation != PrecomputedConnectedSourceMutation::None) {
     if (!source_precomputed) {
       throw std::invalid_argument(
-          "Connected source replacement requires precomputed output.");
+          "Connected source mutation requires precomputed output.");
     }
-    graph.mutate_node_runtime_state(
-        kParameterSourceNodeId,
-        [&source_outputs](GraphModel::NodeRuntimeState& state) {
-          NodeOutput replacement;
-          replacement.data = source_outputs;
-          state.cached_output_high_precision = std::move(replacement);
-        });
+    if (source_mutation ==
+        PrecomputedConnectedSourceMutation::ReplaceOwnerWithEqualContent) {
+      graph.mutate_node_runtime_state(
+          kParameterSourceNodeId,
+          [&source_outputs](GraphModel::NodeRuntimeState& state) {
+            NodeOutput replacement;
+            replacement.data = source_outputs;
+            state.cached_output_high_precision = std::move(replacement);
+          });
+    } else {
+      const plugin::ParameterMap changed_outputs =
+          make_nan_connected_parameter_outputs(43.5);
+      graph.mutate_node_runtime_state(
+          kParameterSourceNodeId,
+          [&changed_outputs](GraphModel::NodeRuntimeState& state) {
+            if (!state.cached_output_high_precision.has_value()) {
+              throw std::logic_error(
+                  "Finite source mutation requires a retained output.");
+            }
+            auto destination = state.cached_output_high_precision->data.find(
+                kConnectedNestedOutput);
+            if (destination == state.cached_output_high_precision->data.end()) {
+              throw std::logic_error(
+                  "Finite source mutation requires the nested output.");
+            }
+            destination->second = changed_outputs.at(kConnectedNestedOutput);
+          });
+    }
   }
   if (!run.advance_to(ComputeRunPhase::Queued) ||
       !run.advance_to(ComputeRunPhase::Running)) {
@@ -4185,11 +4364,17 @@ execute_tiled_connected_payload_resource_case(
   result.inference_connected_parameter_matches =
       callback_probe->inference_connected_parameter_matches.load(
           std::memory_order_acquire);
+  result.inference_nan_snapshot_matches =
+      callback_probe->inference_nan_snapshot_matches.load(
+          std::memory_order_acquire);
   result.provider_parameter_entries =
       callback_probe->provider_parameter_entries.load(
           std::memory_order_acquire);
   result.provider_connected_parameter_matches =
       callback_probe->provider_connected_parameter_matches.load(
+          std::memory_order_acquire);
+  result.provider_nan_snapshot_matches =
+      callback_probe->provider_nan_snapshot_matches.load(
           std::memory_order_acquire);
   result.inference_phantom_destination_present =
       callback_probe->inference_phantom_destination_present.load(
@@ -4203,6 +4388,36 @@ execute_tiled_connected_payload_resource_case(
   result.host_context_entries = host.context_entries();
   result.host_context_exits = host.context_exits();
   return result;
+}
+
+/**
+ * @brief Executes the established small or large finite payload fixture.
+ * @param source_precomputed Whether the producer is reusable before admission.
+ * @param large_payload Whether to use large recursive owned strings/containers.
+ * @param limits Immutable resource limits for the fresh process service.
+ * @param replace_precomputed_source_identity Whether to replace the reusable
+ * producer owner with equal recursive content after runner construction.
+ * @param fail_target_provider Whether the first target provider entry throws.
+ * @return Root/supplement admission, callback, value, and cleanup evidence.
+ * @throws Fixture, graph, service, registry, or allocation failures unchanged.
+ * @note This finite-fixture overload keeps existing exact-resource tests
+ * terse; the explicit-map overload owns all real product-path construction.
+ * It creates no independent thread or lifetime owner.
+ */
+TiledConnectedPayloadResourceResult
+execute_tiled_connected_payload_resource_case(
+    bool source_precomputed, bool large_payload,
+    ExecutionResourceLimits limits =
+        ExecutionService::default_resource_limits(),
+    bool replace_precomputed_source_identity = false,
+    bool fail_target_provider = false) {
+  return execute_tiled_connected_payload_resource_case(
+      source_precomputed, make_connected_parameter_outputs(large_payload),
+      std::move(limits),
+      replace_precomputed_source_identity
+          ? PrecomputedConnectedSourceMutation::ReplaceOwnerWithEqualContent
+          : PrecomputedConnectedSourceMutation::None,
+      fail_target_provider);
 }
 
 /**
@@ -7663,6 +7878,78 @@ TEST(ExecutionServiceProductResources,
 }
 
 /**
+ * @brief Accepts unchanged pre-materialized scalar and nested NaN snapshots.
+ * @return Nothing; assertions report premature validation failure, displaced
+ * NaN leaves, provider omission, or service-resource residue.
+ * @throws Registry, graph, codec, Run, service, or allocation exceptions from
+ * the real cached-producer-to-tiled-consumer product fixture.
+ * @note The public `ParameterValue` equality remains ordinary IEEE equality,
+ * so its generic match counter intentionally stays zero. The independent leaf
+ * oracle proves output inference and both provider tiles receive scalar NaN,
+ * object/array NaNs, and exact finite siblings at their original positions.
+ */
+TEST(ExecutionServiceProductResources,
+     FullTiledPreMaterializedConnectedNaNSnapshotReachesProviders) {
+  const plugin::ParameterMap source_outputs =
+      make_nan_connected_parameter_outputs();
+  const TiledConnectedPayloadResourceResult result =
+      execute_tiled_connected_payload_resource_case(true, source_outputs);
+
+  EXPECT_FALSE(result.failure_code.has_value()) << result.failure_message;
+  ASSERT_TRUE(result.admitted_resources.has_value());
+  EXPECT_EQ(result.supplemental_reservation_count, 0U);
+  EXPECT_EQ(result.high_water, *result.admitted_resources);
+  EXPECT_EQ(result.source_parameter_entries, 0);
+  EXPECT_EQ(result.inference_parameter_entries, 1);
+  EXPECT_EQ(result.inference_connected_parameter_matches, 0);
+  EXPECT_EQ(result.inference_nan_snapshot_matches, 1);
+  EXPECT_EQ(result.provider_parameter_entries, 2);
+  EXPECT_EQ(result.provider_connected_parameter_matches, 0);
+  EXPECT_EQ(result.provider_nan_snapshot_matches, 2);
+  EXPECT_FALSE(result.inference_phantom_destination_present);
+  EXPECT_FALSE(result.provider_phantom_destination_present);
+  EXPECT_TRUE(result.borrowed_resolved_operation);
+  EXPECT_EQ(result.host_context_entries, 2);
+  EXPECT_EQ(result.host_context_entries, result.host_context_exits);
+  EXPECT_EQ(result.reserved_after, ResourceVector{});
+}
+
+/**
+ * @brief Rejects a real finite leaf change beside retained recursive NaNs.
+ * @return Nothing; assertions report source-identity confusion, provider entry,
+ * or service-resource residue after fail-closed validation.
+ * @throws Registry, graph, codec, Run, service, or allocation exceptions from
+ * the real cached-producer-to-tiled-consumer product fixture.
+ * @note The fixture assigns a changed nested value into the existing output
+ * map node after runner construction. Its captured ParameterValue address is
+ * therefore stable; only the finite sibling changes from 42.5 to 43.5.
+ */
+TEST(ExecutionServiceProductResources,
+     FullTiledPreMaterializedConnectedNaNRejectsFiniteLeafChange) {
+  const plugin::ParameterMap source_outputs =
+      make_nan_connected_parameter_outputs();
+  const TiledConnectedPayloadResourceResult result =
+      execute_tiled_connected_payload_resource_case(
+          true, source_outputs, ExecutionService::default_resource_limits(),
+          PrecomputedConnectedSourceMutation::ChangeNestedFiniteLeaf);
+
+  ASSERT_TRUE(result.failure_code.has_value());
+  EXPECT_EQ(*result.failure_code, GraphErrc::ComputeError);
+  EXPECT_NE(result.failure_message.find("runtime parameters changed"),
+            std::string::npos);
+  EXPECT_EQ(result.failure_message.find("source identity changed"),
+            std::string::npos);
+  EXPECT_TRUE(result.admitted_resources.has_value());
+  EXPECT_EQ(result.supplemental_reservation_count, 0U);
+  EXPECT_EQ(result.inference_parameter_entries, 0);
+  EXPECT_EQ(result.inference_nan_snapshot_matches, 0);
+  EXPECT_EQ(result.provider_parameter_entries, 0);
+  EXPECT_EQ(result.provider_nan_snapshot_matches, 0);
+  EXPECT_EQ(result.host_context_entries, result.host_context_exits);
+  EXPECT_EQ(result.reserved_after, ResourceVector{});
+}
+
+/**
  * @brief Proves same-Run recursive output receives actual late admission.
  *
  * @return Nothing; assertions report missing owner slots, under-admitted
@@ -7817,6 +8104,103 @@ TEST(ComputeTaskDispatcherGenericRuntime,
                 std::memory_order_acquire),
             2);
   EXPECT_EQ(callback_probe->provider_connected_parameter_matches.load(
+                std::memory_order_acquire),
+            2);
+  EXPECT_FALSE(callback_probe->inference_phantom_destination_present.load(
+      std::memory_order_acquire));
+  EXPECT_FALSE(callback_probe->provider_phantom_destination_present.load(
+      std::memory_order_acquire));
+
+  const Node& committed_target = graph.node(kTargetNodeId);
+  EXPECT_EQ(committed_target.parameters.find(kDisconnectedParameterDestination),
+            committed_target.parameters.end());
+  EXPECT_EQ(committed_target.runtime_parameters.find(
+                kDisconnectedParameterDestination),
+            committed_target.runtime_parameters.end());
+  EXPECT_EQ(runtime.tasks_to_complete(), 0);
+}
+
+/**
+ * @brief Accepts one unchanged pre-materialized NaN snapshot via generic
+ * dispatcher ownership.
+ * @return Nothing; assertions report validation failure, displaced NaN leaves,
+ * provider omission, disconnected-key mutation, or incomplete task drainage.
+ * @throws Registry, graph, codec, Run, runtime, or allocation exceptions from
+ * the real cached-producer-to-tiled-consumer dispatcher fixture.
+ * @note This route supplies a generic `ExecutionTaskRuntime`, not an
+ * `ExecutionService`. It reaches the same retained validation helper with a
+ * runner-owned early snapshot and proves both scalar and nested NaNs survive
+ * into output inference and both provider tiles.
+ */
+TEST(ComputeTaskDispatcherGenericRuntime,
+     FullTiledPreMaterializedConnectedNaNSnapshotReachesProviders) {
+  ensure_tiled_constraint_operation_registered();
+  const plugin::ParameterMap source_outputs =
+      make_nan_connected_parameter_outputs();
+  std::promise<void> callback_release;
+  const std::shared_future<void> callback_release_future =
+      callback_release.get_future().share();
+  callback_release.set_value();
+  auto callback_probe = std::make_shared<TiledConstraintGateProbe>(
+      callback_release_future, source_outputs);
+  ScopedTiledConstraintProbeBinding probe_binding(callback_probe);
+
+  constexpr int kImageInputNodeId = 246;
+  constexpr int kParameterSourceNodeId = 247;
+  constexpr int kTargetNodeId = 248;
+  GraphModel graph("cache/generic-runtime-connected-nan-snapshot");
+  graph.add_node(make_tiled_constraint_cached_input_node(kImageInputNodeId));
+  graph.add_node(make_tiled_connected_parameter_source_node(
+      kParameterSourceNodeId, source_outputs, true));
+  graph.add_node(make_tiled_connected_parameter_node(
+      kTargetNodeId, kImageInputNodeId, kParameterSourceNodeId));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  CompletionTrackingRuntime runtime;
+  ComputeTaskDispatcher dispatcher(traversal, cache, events);
+  ComputeRun run(make_test_submission("generic-runtime-connected-nan-snapshot",
+                                      graph.revision().value(), kTargetNodeId));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  ComputeRunLease lease = run.acquire_lease();
+  ComputeTaskDispatcher::ComputeDispatchRequest request;
+  request.node_id = kTargetNodeId;
+  request.cache_precision = "fp32";
+  request.disable_disk_cache = true;
+
+  NodeOutput* output = nullptr;
+  ASSERT_NO_THROW(output =
+                      &dispatcher.execute(graph, runtime, request, run, lease));
+  ASSERT_NE(output, nullptr);
+  EXPECT_TRUE(output->has_image_value());
+
+  const Node& committed_source = graph.node(kParameterSourceNodeId);
+  ASSERT_TRUE(committed_source.cached_output_high_precision.has_value());
+  EXPECT_TRUE(has_canonical_nan_connected_destinations(
+      make_connected_parameter_destinations(
+          committed_source.cached_output_high_precision->data)));
+  EXPECT_EQ(
+      callback_probe->source_parameter_entries.load(std::memory_order_acquire),
+      0);
+  EXPECT_EQ(callback_probe->inference_parameter_entries.load(
+                std::memory_order_acquire),
+            1);
+  EXPECT_EQ(callback_probe->inference_connected_parameter_matches.load(
+                std::memory_order_acquire),
+            0);
+  EXPECT_EQ(callback_probe->inference_nan_snapshot_matches.load(
+                std::memory_order_acquire),
+            1);
+  EXPECT_EQ(callback_probe->provider_parameter_entries.load(
+                std::memory_order_acquire),
+            2);
+  EXPECT_EQ(callback_probe->provider_connected_parameter_matches.load(
+                std::memory_order_acquire),
+            0);
+  EXPECT_EQ(callback_probe->provider_nan_snapshot_matches.load(
                 std::memory_order_acquire),
             2);
   EXPECT_FALSE(callback_probe->inference_phantom_destination_present.load(
