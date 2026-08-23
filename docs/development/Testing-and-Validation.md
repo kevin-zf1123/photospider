@@ -1479,14 +1479,30 @@ The same binary also includes `OpenCvRouteNormalization.*`, which does not call
 the direct executor helper as its route oracle. It wraps the exact selected
 repository OpenCV tiled revisions only to observe input identity, then drives
 the real `ComputeService` full-parallel, dirty HP, and dirty RT routes. The full
-case uses a 513x257 macro-tiled multiply and requires one inference plus one
-stable normalized secondary owner across concurrent siblings. Dirty blend and
-multiply cases require every provider secondary Value to have participated in
-the matching pre-allocation inference. Across the matrix, the three routes lock
+case uses a 513x257 macro-tiled multiply and requires exactly one inference,
+exactly six callbacks, and the unordered ROI set `(0,0,256,256)`,
+`(256,0,256,256)`, `(512,0,1,256)`, `(0,256,256,1)`,
+`(256,256,256,1)`, and `(512,256,1,1)`. The observer copies
+`ValueRevisionId`, `AllocationIdentity`, and one inference invocation token;
+every callback must exact-match all three facts rather than merely reuse a raw
+address. Dirty blend and multiply cases require their single HP or RT
+invocation and callback ROI to exact-match the corresponding pre-allocation
+inference identity. Across the matrix, the three routes lock
 unchanged raw zero/opaque behavior and unsafe Sample Domain omission; both
 dirty routes additionally lock `[0,1]` positive retention. This route layer is
 the regression for ordering and lifetime; the older `Normalization*` cases
 remain the direct semantic/provider oracle.
+
+`ExecutionServiceProductResources.FullTiledContext*` independently verifies
+the full-plan resource boundary. A large execution-local Node and heap-backed
+static effective parameter must increase the retained estimate; the real
+product Run admits at the exact complete vector and rejects one retained byte
+short before either tile enters. Per-owner string observations require one
+plan-resolved implementation key and one constraint key per tile, while a
+settled test-only observation proves the context points at the plan owner
+instead of retaining a second implementation copy. The TiledInputContext
+regression separately requires deleted copy operations, no-throw movement, and
+preservation of its self-pointer, Value revision, and allocation identity.
 
 `OpenCvOperationProviderDisabledBuild` configures a transient nested build with
 `BUILD_TESTING=ON` and

@@ -292,7 +292,7 @@ normalized a second time at callback entry. Concurrent selected tasks may each
 derive a plan from their own exact prepared context; the write buffer accepts
 them only when the frozen plans match its one per-node binding. Seeded staged
 bytes therefore preserve untouched coordinates but cannot influence inference
-or replace `context.inputs`.
+or replace `context.inputs()`.
 
 The dispatcher submits the selected source group and waits for it to settle,
 validates that required source outputs exist in the relevant staged or committed

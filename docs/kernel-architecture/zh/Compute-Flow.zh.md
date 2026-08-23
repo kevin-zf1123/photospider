@@ -249,6 +249,13 @@ record，并在 materialize 对应 task 的 submission 时恰好移动一次该 
 `ExecutionService`；dependent completion 会通过同一个 active Run 创建后续 submission，并进入
 同一个有界 store。Tiled 操作可能产生微任务，并减少选中私有 route 的 logical completion count。
 
+在计算完整 Run reservation 前，每个 tiled planned node 还会拥有自己的 execution-local `Node`、
+预先建立的 effective-parameter map 结构，以及完整 input/normalized-slot vector allocation。Run
+estimate 读取这些对象的实际 capacity。Context 会指向精确 plan-owned resolved implementation
+snapshot，而不是复制 callback、metadata、exclusive key 或 DSO lease。Plan 比 runner 与全部
+sibling callback 存活更久，因此该 borrow 不会因 registry replacement 或 DSO unload 失效，也不会
+虚构第二个 retained string owner。
+
 Run 发布前，service 会原子预留完整且经过检查的 CPU、retained-memory、scratch、ready-entry
 与 ready-byte vector。CPU slot 及 uniform per-task retained/scratch envelope 使用固定 worker 数、
 逻辑 task 数与 Run 可选正值 maximum parallelism 三者的最小值；ready entry 与 byte 仍覆盖每个
@@ -541,8 +548,8 @@ subscription surface 都不属于当前软件契约。
 每个普通 dense-image producer 现在都遵循同一个 private lifecycle：
 
 1. `NodeExecutor` 会先完成任何必需的 tiled normalization，并在 output inference 前保留一份
-   精确 immutable input context；
-2. 精确 selected tiled implementation 的 pure output inference 消费 `context.inputs`，再于
+   精确 move-only immutable input context；
+2. 精确 selected tiled implementation 的 pure output inference 消费 `context.inputs()`，再于
    allocation 前根据这些 input 与 effective parameter 冻结完整 `DenseImageOutputPlan`；
 3. 一个 `HostOutputBinding` 创建 aligned allocation，并拥有唯一 builder write authority；
 4. whole-output work 获得一个 whole grant，tiled HP/RT work 则在同一个 per-node binding 上
@@ -554,9 +561,12 @@ subscription surface 都不属于当前软件契约。
    已经 Ready 的 Value。
 
 Inference callback 与 execution 属于同一个 revisioned snapshot，并由 full、dirty HP 与 dirty
-RT path 使用。Full parallel preparation 只有在 effective node 与精确 implementation snapshot
-配对后才发布一个 node-level context；全部 sibling task 会共享该 owner，直到 runner settle。
-Dirty HP/RT 则让一份 invocation-local context 从 plan freeze 一直存活到全部同步 callback 结束。
+RT path 使用。Full parallel preparation 只有在 admission 前 effective Node owner 与借用的精确
+plan implementation 匹配后才发布 node-level context；全部 sibling task 会共享该 context，直到
+runner settle。`TiledInputContext` 删除 copy 操作，通过显式 `noexcept` move 把两份 vector 作为
+整体转移，并且只暴露只读 accessor；因此 movement 会保留指向 normalized storage 的全部 pointer，
+调用方也无法让其重新分配。Dirty HP/RT 则让一份 invocation-local context 从 plan freeze 一直
+存活到全部同步 callback 结束。
 旧 staged output 永远不会插入任一 context；只有 descriptor 与 facet 精确匹配 frozen plan 后，
 它才能 seed byte。Maintained OpenCV tiled operation 会附带 operation-specific policy。没有
 policy 的 implementation 会得到保守的 zero-origin plan：保留 scalar/channel allocation 事实，

@@ -1170,11 +1170,23 @@ normalization helper。
 同一 binary 还包含 `OpenCvRouteNormalization.*`；这些 case 不会把 direct executor helper 当作
 route oracle。它们只包裹仓库中精确 selected OpenCV tiled revision 来观察 input identity，随后
 驱动真实 `ComputeService` full-parallel、dirty HP 与 dirty RT route。Full case 使用 513x257
-macro-tiled multiply，并要求只执行一次 inference、全部并发 sibling 共享一个稳定 normalized
-secondary owner。Dirty blend 与 multiply case 则要求每个 provider secondary Value 都参与了匹配
-的 pre-allocation inference。整个矩阵的三条 route 锁定未改变的 raw zero/opaque 行为与 unsafe
+macro-tiled multiply，并要求恰好一次 inference、恰好六次 callback，以及无序精确 ROI 集合
+`(0,0,256,256)`、`(256,0,256,256)`、`(512,0,1,256)`、`(0,256,256,1)`、
+`(256,256,256,1)`、`(512,256,1,1)`。Observer 会复制 `ValueRevisionId`、
+`AllocationIdentity` 与一个 inference invocation token；每个 callback 都必须精确匹配这三项事实，
+不能只复用裸地址。Dirty blend 与 multiply case 则要求单次 HP 或 RT invocation 及 callback ROI
+精确匹配对应的 pre-allocation inference identity。整个矩阵的三条 route 锁定未改变的 raw
+zero/opaque 行为与 unsafe
 Sample Domain omission；两条 dirty route 还会锁定 `[0,1]` 正例 retention。该 route 层负责回归
 ordering/lifetime；较早的 `Normalization*` case 继续作为 direct semantic/provider oracle。
+
+`ExecutionServiceProductResources.FullTiledContext*` 会独立验证 full-plan resource boundary。
+较大的 execution-local Node 与 heap-backed static effective parameter 必须增加 retained estimate；
+真实 product Run 在精确完整 vector 上 admission，而 retained 少一个 byte 时会在任一 tile entry
+前拒绝。逐 owner string observation 要求一个 plan-resolved implementation key，以及每个 tile
+各一个 constraint key；settled test-only observation 还会证明 context 指向 plan owner，而不是
+保留第二份 implementation copy。TiledInputContext 回归另行要求删除 copy 操作、`noexcept` move，
+并保留 self-pointer、Value revision 与 allocation identity。
 
 `OpenCvOperationProviderDisabledBuild` 会使用
 `BUILD_TESTING=ON` 与 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`

@@ -206,6 +206,12 @@ caller 输入不必比返回的 lease 存活更久。该做法既不重复也不
 terminator overflow 与少一个 byte 的 retained limit 都会在 provider entry 前失败，不留下 gate
 或 ledger 残留。
 
+Full tiled preparation 不会创建另一个 selected-implementation owner。在 admission 前，其 context
+拥有并计入 execution-local `Node` 的实际动态结构与冻结的 normalized-input vector capacity，但会
+指向稳定的 `TaskSubmissionPlan::resolved_ops_` snapshot。Plan 会让 callback/DSO 一直存活到
+runner settlement，因此 registry replacement 或 unload 无法让该 borrow 失效，也不会虚构第二份
+metadata/exclusive-key capacity-plus-terminator charge。
+
 ## 私有执行路由
 
 路由词汇表是封闭的：

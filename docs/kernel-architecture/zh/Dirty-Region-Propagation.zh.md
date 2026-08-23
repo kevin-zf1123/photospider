@@ -237,7 +237,7 @@ context。Context 在 plan freeze 前创建，覆盖 binding lookup/allocation �
 的生命周期，并且 callback entry 不会再次执行 normalization。并发 selected task 可以分别根据
 各自精确 prepared context 推导 plan；write buffer 只有在 frozen plan 与其唯一 per-node binding
 匹配时才会接受它们。因此，staged seed byte 只能保留未触及坐标，不能影响 inference 或替换
-`context.inputs`。
+`context.inputs()`。
 
 Dispatcher 会提交 selected source group 并等待其 settle，验证所需 source output 已存在于相关
 staged 或 committed store，随后提交 initially-ready downstream group。Dependency completion 会继续

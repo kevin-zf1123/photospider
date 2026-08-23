@@ -319,6 +319,15 @@ submissions through the same active Run and bounded store. Tiled operations
 may spawn micro-tasks and retire the selected private route's logical
 completion count.
 
+Before the full Run reservation is calculated, each tiled planned node also
+owns its execution-local `Node`, pre-established effective-parameter map
+structure, and complete input/normalized-slot vector allocations. The Run
+estimate reads their actual capacities. The context points to the exact
+plan-owned resolved implementation snapshot instead of copying its callback,
+metadata, exclusive key, or DSO lease. The plan outlives the runner and every
+sibling callback, so this borrow cannot observe registry replacement or DSO
+unload and does not invent a second retained string owner.
+
 Before a Run is published, the service atomically reserves its complete
 checked CPU, retained-memory, scratch, ready-entry, and ready-byte vector.
 CPU slots and uniform per-task retained/scratch envelopes use the minimum of
@@ -692,9 +701,9 @@ These constants are not permanent ABI.
 Every ordinary dense-image producer now follows one private lifecycle:
 
 1. `NodeExecutor` prepares any required tiled normalization and retains one
-   exact immutable input context before output inference;
+   exact move-only immutable input context before output inference;
 2. the exact selected tiled implementation's pure output inference consumes
-   `context.inputs`, then freezes the complete `DenseImageOutputPlan` from
+   `context.inputs()`, then freezes the complete `DenseImageOutputPlan` from
    those inputs and effective parameters before allocation;
 3. one `HostOutputBinding` creates the aligned allocation and owns the sole
    builder write authority;
@@ -708,9 +717,13 @@ Every ordinary dense-image producer now follows one private lifecycle:
 
 The inference callback belongs to the same revisioned snapshot as execution
 and is used by full, dirty HP, and dirty RT paths. Full parallel preparation
-publishes one node-level context only after pairing the effective node and exact
-implementation snapshot; all sibling tasks share that owner until the runner
-settles. Dirty HP/RT retain one invocation-local context from plan freeze
+publishes one node-level context only after matching its pre-admission effective
+Node owner with the borrowed exact plan implementation; all sibling tasks share
+that context until the runner settles. `TiledInputContext` deletes copy,
+transfers both vectors through explicit no-throw movement, and exposes only
+read-only accessors, so movement preserves every pointer into normalized
+storage and callers cannot reallocate it. Dirty HP/RT retain one
+invocation-local context from plan freeze
 through all synchronous callbacks. An old staged output is never inserted into
 either context; it may seed bytes only after its descriptor and facet exactly
 match the frozen plan. Maintained OpenCV tiled operations attach

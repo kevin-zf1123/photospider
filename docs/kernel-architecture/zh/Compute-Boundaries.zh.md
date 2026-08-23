@@ -283,8 +283,19 @@ lease 对各自独立副本计费，而 operation gate 会借用 stable view，�
 view 借用 owning `QueueEntry` 中的值。Direct acquisition 会先把 caller constraints 复制进
 返回的 lease state；此后的每一次 gate query、wait predicate、start 与 finish 都借用该
 state-owned 副本，因此 helper-local caller 可以在 acquisition 返回后退出或修改自身输入，而
-不会改变 active gate identity。在所有 initial value 与 ready grant 都移动到暂存 queue entry 后，
-`ExecutionService` 会在发布 active Run 和等待 settlement 之前销毁 caller-side submission
+不会改变 active gate identity。
+
+对于每个 full-plan tiled node，runner 还会在 Run admission 前构造 retained execution owner。
+该 owner 包含实际复制的 effective `Node`、预先建立的 static `ParameterMap` node 与 connected
+destination key，以及预先分配的 input-pointer 与最大 normalized-output vector storage。
+Admission 会计入每个可见 Node string、vector、map、递归 static parameter、cache/LUT 结构及两份
+vector capacity。Context 借用精确的 `TaskSubmissionPlan::resolved_ops_` value；后者的 callback
+wrapper 已保留 selected DSO，因此既不会创建第二份 `OpImplementation`，也不会创建第二份
+metadata/exclusive-key charge。晚到的 connected `ParameterValue` payload 与 normalization 创建的
+immutable image payload 仍属于既有资源模型中的 operation-produced growth；该排除不覆盖
+admission 前已经建立的 Host-owned Node、ParameterMap key/map 或 TiledInputContext vector 结构。
+在所有 initial value 与 ready grant 都移动到暂存 queue entry 后，`ExecutionService` 会在发布
+active Run 和等待 settlement 之前销毁 caller-side submission
 vector 的 backing；此后只有暂存 entry 以及 bounded store 保留这些 submission。在每个 dirty
 或 connected-preflight service segment 之前，adapter 会加入当前 staging/snapshot storage 与
 去重后的缺失 staging-map entry，
@@ -587,10 +598,11 @@ retry choice、settlement、quota、artifact 或 commit authority。
   rectangle 是零基 storage projection；有符号 logical Region metadata 通过所属 data window
   翻译。TensorSlice 是 HP-only monolithic work，绝不会获得 rectangle。
 - Tiled input normalization 会在 revision-paired inference 与 Host allocation 前完成，不会先用
-  raw input 冻结 plan、再执行 normalization。Full parallel execution 为每个 node 拥有一个稳定
-  context，并将它与精确 execution-local `Node` 及 selected implementation snapshot 配对；每个
-  node/Run 至多尝试一次 preparation，全部并发 sibling callback 会在 settlement 前借用同一组
-  `context.inputs`。Sequential 与 dirty HP/RT invocation 则让各自 prepared context 覆盖本次同步
+  raw input 冻结 plan、再执行 normalization。在 Run admission 前，full parallel execution 为
+  每个 node 拥有一个稳定 context，其中包含 execution-local `Node` 与冻结的 input-container
+  capacity，并借用精确 plan-owned selected implementation snapshot；每个 node/Run 至多尝试一次
+  preparation，全部并发 sibling callback 会在 settlement 前借用同一组 `context.inputs()`。
+  Sequential 与 dirty HP/RT invocation 则让各自 prepared context 覆盖本次同步
   inference、allocation 与全部 callback。共享 payload-free metadata 证明只有在 raw
   zero-padding 与三到四通道 opaque alpha 都位于声明内时才保留 secondary Sample Domain；否则会
   在不改变 raw byte 的情况下省略整份可选 authority。由此得到的 immutable normalized Value

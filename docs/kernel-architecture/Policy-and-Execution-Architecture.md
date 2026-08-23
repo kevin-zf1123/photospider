@@ -247,6 +247,14 @@ not outlive the returned lease. This neither duplicates nor undercounts string
 ownership. Checked terminator overflow and a one-byte-short retained limit fail
 before provider entry without gate or ledger residue.
 
+Full tiled preparation does not create another selected-implementation owner.
+Before admission, its context owns and charges the actual dynamic structure of
+the execution-local `Node` plus frozen normalized-input vector capacities, but
+points at the stable `TaskSubmissionPlan::resolved_ops_` snapshot. The plan
+retains the callback/DSO through runner settlement, so registry replacement or
+unload cannot invalidate the borrow and no second metadata/exclusive-key
+capacity-plus-terminator charge is fabricated.
+
 ## Private Execution Routes
 
 The route vocabulary is closed:
