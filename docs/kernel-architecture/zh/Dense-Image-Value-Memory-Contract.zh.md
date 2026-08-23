@@ -67,6 +67,13 @@ window，但省略可选 display/channel/sample/color authority。该范围覆�
 registered tiled OpenCV operation；本文不为 monolithic `diff` 或未列出的 provider path 声明
 policy。
 
+拥有这些 Value 的 context 本身也是 execution boundary 的一部分。Full parallel execution 只有
+在 effective `Node` 与精确 implementation snapshot 配对后，才会为每个 node/Run 发布一个稳定
+owner，全部 sibling tile 都借用它的同一组 input vector。Sequential 与 dirty HP/RT execution
+则让一份 prepared context 覆盖本次同步 plan freeze、allocation 与全部 callback。任何 route
+都不得先根据 raw secondary metadata inference，再只为 producer entry normalization 出另一份
+Value。
+
 ## Layout、binding 与所有权
 
 普通内置图像使用经过验证的 whole-byte `StridedLayout`。descriptor shape 和 element width
@@ -228,6 +235,9 @@ equal endpoint/storage identity 通过 type-aware 比较读取 integer domain，
 Host result、IPC lease、worker/durable replay、OpenCV lifetime、普通 OpenEXR round trip 和
 provider-defined Deep 行为。source-residue search 仅是 migration evidence，不注册为 CTest 或 CI
 behavior test。
+Production-route OpenCV 回归还会覆盖 full parallel、dirty HP 与 dirty RT 在
+inference/allocation 前完成 normalization，包括 multi-sibling context identity、zero/opaque 常量、
+raw pixel 与 `[0,1]` authority retention。
 later-buffer artifact 回归使用仅在 BUILD_TESTING 中编译的 source-private runtime failpoint，并在
 选定的 `BufferHandle::ControlBlock` allocation 之前立即触发。production build 不编译 test-access
 seam，测试也不替换 process 或 shared-library 的 global allocation 符号。

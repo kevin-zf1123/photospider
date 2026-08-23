@@ -1475,6 +1475,19 @@ and one-to-four gray replication so the metadata proof cannot assume every
 fourth channel is synthesized opaque. These are long-lived behavior tests;
 they do not scan source text or replace the production normalization helper.
 
+The same binary also includes `OpenCvRouteNormalization.*`, which does not call
+the direct executor helper as its route oracle. It wraps the exact selected
+repository OpenCV tiled revisions only to observe input identity, then drives
+the real `ComputeService` full-parallel, dirty HP, and dirty RT routes. The full
+case uses a 513x257 macro-tiled multiply and requires one inference plus one
+stable normalized secondary owner across concurrent siblings. Dirty blend and
+multiply cases require every provider secondary Value to have participated in
+the matching pre-allocation inference. Across the matrix, the three routes lock
+unchanged raw zero/opaque behavior and unsafe Sample Domain omission; both
+dirty routes additionally lock `[0,1]` positive retention. This route layer is
+the regression for ordering and lifetime; the older `Normalization*` cases
+remain the direct semantic/provider oracle.
+
 `OpenCvOperationProviderDisabledBuild` configures a transient nested build with
 `BUILD_TESTING=ON` and
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`, while OpenCV, YAML, graph

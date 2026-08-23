@@ -232,6 +232,13 @@ optional fact。现有 staged output
 只有在精确 plan matching 后才可能成为 byte seed，绝不会作为 semantic operation input 被前置。
 Inference 缺失时会省略可选 display/channel/sample/color 事实，而不是复制 first input。
 
+每个 HP 或 RT dirty tiled invocation 都会在自己的同步 execution stack 上拥有这份 prepared
+context。Context 在 plan freeze 前创建，覆盖 binding lookup/allocation 与全部 provider callback
+的生命周期，并且 callback entry 不会再次执行 normalization。并发 selected task 可以分别根据
+各自精确 prepared context 推导 plan；write buffer 只有在 frozen plan 与其唯一 per-node binding
+匹配时才会接受它们。因此，staged seed byte 只能保留未触及坐标，不能影响 inference 或替换
+`context.inputs`。
+
 Dispatcher 会提交 selected source group 并等待其 settle，验证所需 source output 已存在于相关
 staged 或 committed store，随后提交 initially-ready downstream group。Dependency completion 会继续
 释放其他 ready downstream work。
@@ -365,6 +372,7 @@ route。上述明确限制界定了当前 generation 与 epoch check 能够保�
 - `tests/integration/test_resource_admission.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/opencv_route_normalization_cases.hpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/unit/test_compute_run.cpp`

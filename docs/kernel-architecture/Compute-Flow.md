@@ -691,23 +691,29 @@ These constants are not permanent ABI.
 
 Every ordinary dense-image producer now follows one private lifecycle:
 
-1. `NodeExecutor` invokes the exact selected tiled implementation's pure output
-   inference, then freezes the complete `DenseImageOutputPlan` from immutable
-   operation inputs and effective parameters before allocation;
-2. one `HostOutputBinding` creates the aligned allocation and owns the sole
+1. `NodeExecutor` prepares any required tiled normalization and retains one
+   exact immutable input context before output inference;
+2. the exact selected tiled implementation's pure output inference consumes
+   `context.inputs`, then freezes the complete `DenseImageOutputPlan` from
+   those inputs and effective parameters before allocation;
+3. one `HostOutputBinding` creates the aligned allocation and owns the sole
    builder write authority;
-3. whole-output work receives one whole grant, while tiled HP/RT work receives
+4. whole-output work receives one whole grant, while tiled HP/RT work receives
    checked pairwise-disjoint tile grants over the same per-node binding;
-4. each producer stops using its pointers and retires its grant exactly once;
-5. the final executable tile seals the binding and installs the canonical
+5. each producer stops using its pointers and retires its grant exactly once;
+6. the final executable tile seals the binding and installs the canonical
    named `image` Value in request-local output; and
-6. Run commit publishes that already Ready Value with independent graph,
+7. Run commit publishes that already Ready Value with independent graph,
    Region, HP-generation, and RT-generation predicates.
 
 The inference callback belongs to the same revisioned snapshot as execution
-and is used by full, dirty HP, and dirty RT paths. An old staged output is never
-inserted into its input vector; it may seed bytes only after its descriptor and
-facet exactly match the frozen plan. Maintained OpenCV tiled operations attach
+and is used by full, dirty HP, and dirty RT paths. Full parallel preparation
+publishes one node-level context only after pairing the effective node and exact
+implementation snapshot; all sibling tasks share that owner until the runner
+settles. Dirty HP/RT retain one invocation-local context from plan freeze
+through all synchronous callbacks. An old staged output is never inserted into
+either context; it may seed bytes only after its descriptor and facet exactly
+match the frozen plan. Maintained OpenCV tiled operations attach
 operation-specific policies. An implementation without one gets a conservative
 zero-origin plan that retains scalar/channel allocation facts but omits
 optional display/channel/sample/color authority.

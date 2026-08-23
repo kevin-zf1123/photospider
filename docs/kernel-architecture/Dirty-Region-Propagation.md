@@ -285,6 +285,15 @@ is only a possible byte seed after exact plan matching and is never prepended
 as a semantic operation input. Absent inference omits optional
 display/channel/sample/color facts rather than copying the first input.
 
+Each HP or RT dirty tiled invocation owns that prepared context on its
+synchronous execution stack. The context is created before plan freeze, remains
+alive through binding lookup/allocation and every provider callback, and is not
+normalized a second time at callback entry. Concurrent selected tasks may each
+derive a plan from their own exact prepared context; the write buffer accepts
+them only when the frozen plans match its one per-node binding. Seeded staged
+bytes therefore preserve untouched coordinates but cannot influence inference
+or replace `context.inputs`.
+
 The dispatcher submits the selected source group and waits for it to settle,
 validates that required source outputs exist in the relevant staged or committed
 store, then submits the initially ready downstream group. Dependency completion
@@ -452,6 +461,7 @@ can currently guarantee.
 - `tests/integration/test_resource_admission.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/opencv_route_normalization_cases.hpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/unit/test_compute_run.cpp`

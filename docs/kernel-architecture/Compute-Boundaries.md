@@ -766,13 +766,19 @@ cancellation, retry choice, settlement, quota, artifact, or commit authority.
   geometry. Dirty/tile rectangles are zero-based storage projections; signed
   logical Region metadata is translated through the owning data window.
   TensorSlice is HP-only monolithic work and never gets a rectangle.
-- Tiled input normalization occurs once per node invocation where possible,
-  rather than once per tile callback. Its shared payload-free metadata proof
-  preserves a secondary Sample Domain only when raw zero-padding and
-  three-to-four opaque alpha remain inside the declaration; otherwise it omits
-  that complete optional authority without changing raw bytes. The resulting
-  immutable normalized Values are the exact operation inputs passed to the
-  revision-paired inference before Host allocation.
+- Tiled input normalization occurs before revision-paired inference and Host
+  allocation, rather than after a raw-input plan has been frozen. Full parallel
+  execution owns one stable per-node context paired with the exact
+  execution-local `Node` and selected implementation snapshot; preparation is
+  attempted at most once for that node/Run, and every concurrent sibling
+  callback borrows the same `context.inputs` until settlement. Sequential and
+  dirty HP/RT invocations retain their prepared context across their own
+  synchronous inference, allocation, and callbacks. The shared payload-free
+  metadata proof preserves a secondary Sample Domain only when raw
+  zero-padding and three-to-four opaque alpha remain inside the declaration;
+  otherwise it omits that complete optional authority without changing raw
+  bytes. The resulting immutable normalized Values are the exact operation
+  inputs used by both inference and producer callbacks.
 - The V-3 dense invert inference callback cannot inspect payload bytes, and its
   execute result must match the inferred DenseTensor descriptor and Image
   Facet before publication preserves the exact sealed result revision.

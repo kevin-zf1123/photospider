@@ -88,6 +88,14 @@ display/channel/sample/color authority. This scope covers the five currently
 registered tiled OpenCV operations listed above and does not claim a policy for
 monolithic `diff` or unlisted provider paths.
 
+The context owning those Values is part of the execution boundary. Full
+parallel execution publishes one stable owner per node/Run only after pairing
+the effective `Node` with the exact implementation snapshot, and all sibling
+tiles borrow its same input vector. Sequential and dirty HP/RT execution retain
+one prepared context across their synchronous plan freeze, allocation, and
+callbacks. No route may infer from raw secondary metadata and normalize a
+different Value only for producer entry.
+
 ## Layout, binding, and ownership
 
 Ordinary built-in images use a validated whole-byte `StridedLayout`.
@@ -302,6 +310,9 @@ conversion, artifact reconstruction, Host results, IPC leases, worker/durable
 replay, OpenCV lifetime, ordinary OpenEXR round trips, and provider-defined
 Deep behavior. Source-residue searches are migration evidence only and are not
 registered as CTest or CI behavior tests.
+Production-route OpenCV regressions additionally cover full parallel, dirty HP,
+and dirty RT normalization before inference/allocation, including multi-sibling
+context identity, zero/opaque constants, raw pixels, and `[0,1]` retention.
 The later-buffer artifact regression uses a BUILD_TESTING-only source-private
 runtime failpoint immediately before the selected `BufferHandle::ControlBlock`
 allocation. Production builds compile no test-access seam, and the test does

@@ -1167,6 +1167,15 @@ affine/product closure。`DenseImageProcessing` 还会独立锁定 unsigned-byte
 第四通道都是合成 opaque。这些是长期 behavior test，不扫描 source text，也不替换 production
 normalization helper。
 
+同一 binary 还包含 `OpenCvRouteNormalization.*`；这些 case 不会把 direct executor helper 当作
+route oracle。它们只包裹仓库中精确 selected OpenCV tiled revision 来观察 input identity，随后
+驱动真实 `ComputeService` full-parallel、dirty HP 与 dirty RT route。Full case 使用 513x257
+macro-tiled multiply，并要求只执行一次 inference、全部并发 sibling 共享一个稳定 normalized
+secondary owner。Dirty blend 与 multiply case 则要求每个 provider secondary Value 都参与了匹配
+的 pre-allocation inference。整个矩阵的三条 route 锁定未改变的 raw zero/opaque 行为与 unsafe
+Sample Domain omission；两条 dirty route 还会锁定 `[0,1]` 正例 retention。该 route 层负责回归
+ordering/lifetime；较早的 `Normalization*` case 继续作为 direct semantic/provider oracle。
+
 `OpenCvOperationProviderDisabledBuild` 会使用
 `BUILD_TESTING=ON` 与 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`
 配置一个临时嵌套 build，同时保留 OpenCV、YAML、graph CLI 与 operation-plugin 的默认启用值。

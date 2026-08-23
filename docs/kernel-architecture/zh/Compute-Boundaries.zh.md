@@ -586,11 +586,15 @@ retry choice、settlement、quota、artifact 或 commit authority。
   携带 checked derived `PixelRect`/`PixelSize`，绝不携带 OpenCV geometry。Dirty/tile
   rectangle 是零基 storage projection；有符号 logical Region metadata 通过所属 data window
   翻译。TensorSlice 是 HP-only monolithic work，绝不会获得 rectangle。
-- 在可行时，tiled input normalization 每次 node invocation 只执行一次，而不是每个 tile callback
-  执行一次。其共享 payload-free metadata 证明只有在 raw zero-padding 与三到四通道 opaque alpha
-  都位于声明内时才保留 secondary Sample Domain；否则会在不改变 raw byte 的情况下省略整份可选
-  authority。由此得到的 immutable normalized Value 是 Host allocation 前传给 revision-paired
-  inference 的精确 operation input。
+- Tiled input normalization 会在 revision-paired inference 与 Host allocation 前完成，不会先用
+  raw input 冻结 plan、再执行 normalization。Full parallel execution 为每个 node 拥有一个稳定
+  context，并将它与精确 execution-local `Node` 及 selected implementation snapshot 配对；每个
+  node/Run 至多尝试一次 preparation，全部并发 sibling callback 会在 settlement 前借用同一组
+  `context.inputs`。Sequential 与 dirty HP/RT invocation 则让各自 prepared context 覆盖本次同步
+  inference、allocation 与全部 callback。共享 payload-free metadata 证明只有在 raw
+  zero-padding 与三到四通道 opaque alpha 都位于声明内时才保留 secondary Sample Domain；否则会
+  在不改变 raw byte 的情况下省略整份可选 authority。由此得到的 immutable normalized Value
+  同时是 inference 与 producer callback 使用的精确 operation input。
 - V-3 dense invert inference callback 无法检查 payload byte；其 execute result 必须与
   inferred DenseTensor descriptor 及 Image Facet 一致，之后 publication 才可保留精确的
   sealed result revision。
