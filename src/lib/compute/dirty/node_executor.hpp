@@ -164,8 +164,10 @@ class NodeExecutor {
    * invalid extents.
    * @throws std::overflow_error when plan arithmetic is unrepresentable.
    * @throws std::bad_alloc when plan or aligned allocation storage fails.
-   * @note No callback is entered and no mutable address is exposed. The caller
-   * must cancel or seal the returned binding exactly once.
+   * @note The pure metadata inference callback, when supplied, runs
+   * synchronously before allocation. No producer/execution callback is
+   * entered, and no mutable allocation address is exposed. The caller must
+   * cancel or seal the returned binding exactly once.
    */
   static HostOutputBinding allocate_tiled_output_binding(
       const Node& node, const std::vector<const NodeOutput*>& inputs,

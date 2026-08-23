@@ -100,7 +100,8 @@ struct TiledPrimaryFormat final {
 };
 
 /**
- * @brief Extracts scalar, channel, and optional image facts from input zero.
+ * @brief Extracts scalar, channel, and optional image facts from the first
+ * connected input.
  *
  * @param inputs Exact operation inputs in destination-index order.
  * @return Valid primary facts, or FP32 one-channel defaults when disconnected.

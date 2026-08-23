@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <new>
 #include <opencv2/core.hpp>
@@ -279,15 +280,24 @@ NodeOutput execute_channel_expanding_weighted_blend(Value primary,
  * @param primary Three-channel primary Value moved into callback-local input.
  * @param secondary Three-channel secondary Value moved into callback-local
  *        input.
+ * @param alpha Primary-input blend coefficient.
+ * @param beta Secondary-input blend coefficient.
+ * @param gamma Constant added to every destination channel.
+ * @param channel_mapping Optional explicit source-to-destination mapping.
  * @return Fresh three-channel provider output after local inputs retire.
  * @throws GraphError when the configured production callback is unavailable or
  *         rejects the request.
  * @throws std::invalid_argument, std::overflow_error, std::length_error, or
  *         std::bad_alloc from metadata projection and Value publication.
- * @note Equal weights and zero gamma keep pixel assertions simple. The helper
- *       supplies no channel mapping, sample conversion, or metadata override.
+ * @note The helper performs no sample conversion or metadata override. When
+ *       present, `channel_mapping` is passed through unchanged so tests can
+ *       exercise the production destination-accumulation semantics.
  */
-NodeOutput execute_same_channel_weighted_blend(Value primary, Value secondary) {
+NodeOutput execute_same_channel_weighted_blend(
+    Value primary, Value secondary, double alpha = 0.5, double beta = 0.5,
+    double gamma = 0.0,
+    std::optional<plugin::ParameterValue::Object> channel_mapping =
+        std::nullopt) {
   auto resolved = OpRegistry::instance().resolve_for_intent(
       "image_mixing", "add_weighted", ComputeIntent::GlobalHighPrecision);
   if (!resolved ||
@@ -300,10 +310,13 @@ NodeOutput execute_same_channel_weighted_blend(Value primary, Value secondary) {
   node.id = 207;
   node.type = "image_mixing";
   node.subtype = "add_weighted";
-  node.runtime_parameters["alpha"] = 0.5;
-  node.runtime_parameters["beta"] = 0.5;
-  node.runtime_parameters["gamma"] = 0.0;
+  node.runtime_parameters["alpha"] = alpha;
+  node.runtime_parameters["beta"] = beta;
+  node.runtime_parameters["gamma"] = gamma;
   node.runtime_parameters["merge_strategy"] = "resize";
+  if (channel_mapping.has_value()) {
+    node.runtime_parameters["channel_mapping"] = std::move(*channel_mapping);
+  }
 
   NodeOutput primary_input;
   primary_input.publish_image_value(std::move(primary));
@@ -311,6 +324,26 @@ NodeOutput execute_same_channel_weighted_blend(Value primary, Value secondary) {
   secondary_input.publish_image_value(std::move(secondary));
   return std::get<MonolithicOpFunc>(resolved.value())(
       node, {&primary_input, &secondary_input});
+}
+
+/**
+ * @brief Builds a mapping that accumulates two primary sources into channel 0.
+ *
+ * @return Fresh `channel_mapping` object mapping input0 sources zero and one
+ *         to destination zero, with no input1 contributions.
+ * @throws std::bad_alloc when parameter-object storage cannot allocate.
+ * @note The production mapping initializes a covered destination with gamma,
+ *       then adds every valid source contribution in mapping order.
+ */
+plugin::ParameterValue::Object make_accumulating_channel_mapping() {
+  plugin::ParameterValue::Object input0_mapping;
+  input0_mapping.emplace(
+      "0", plugin::ParameterValue::Array{plugin::ParameterValue{0}});
+  input0_mapping.emplace(
+      "1", plugin::ParameterValue::Array{plugin::ParameterValue{0}});
+  plugin::ParameterValue::Object channel_mapping;
+  channel_mapping.emplace("input0", std::move(input0_mapping));
+  return channel_mapping;
 }
 
 /**
@@ -731,9 +764,10 @@ TEST(OpenCvOperationProviderMetadataContract,
  * @throws Provider resolution, OpenCV execution, metadata validation, and
  *         allocation exceptions unchanged to the test runner.
  * @note The first pass rejects per-channel/color/schema reuse while retaining
- *       signed spatial facts. The second proves a uniform sample endpoint
- *       shared by both sources remains legal after expansion. Returned Values
- *       are inspected after callback-local inputs and matrices are destroyed.
+ *       signed spatial facts. The second proves every destination interval of
+ *       a mapped expansion remains inside the shared uniform domain. Returned
+ *       Values are inspected after callback-local inputs and matrices are
+ *       destroyed.
  */
 TEST(OpenCvOperationProviderMetadataContract,
      WeightedBlendProjectsExpandedChannelSemantics) {
@@ -794,10 +828,11 @@ TEST(OpenCvOperationProviderMetadataContract,
  * @throws Provider resolution, OpenCV execution, metadata validation, and
  *         allocation exceptions unchanged to the test runner.
  * @note Incompatible sample facts cannot inherit the primary declaration;
- *       identical uniform facts may survive. Stable channel/color authority
- *       survives only when both sources agree exactly. Signed windows and raw
- *       pixels remain primary-shaped, and every output receives a fresh Value
- *       revision after callback-local inputs retire.
+ *       identical uniform facts may survive only when the configured formula
+ *       closes their interval. Stable channel/color authority survives only
+ *       when both sources agree exactly. Signed windows and raw pixels remain
+ *       primary-shaped, and every output receives a fresh Value revision after
+ *       callback-local inputs retire.
  */
 TEST(OpenCvOperationProviderMetadataContract,
      WeightedBlendProjectsSameChannelSemanticIntersection) {
@@ -883,6 +918,116 @@ TEST(OpenCvOperationProviderMetadataContract,
   EXPECT_EQ(incompatible_color_facet.sample_domain,
             color_primary_facet.sample_domain);
   EXPECT_FALSE(incompatible_color_facet.color.has_value());
+}
+
+/**
+ * @brief Proves weighted-blend sample authority requires interval closure.
+ *
+ * @return Nothing; GoogleTest reports coefficient or inference drift.
+ * @throws Provider selection, OpenCV execution, metadata validation, and
+ *         allocation exceptions unchanged to the test runner.
+ * @note Both execution modes consume the same declared normalized inputs.
+ *       Unsafe positive sums, gamma expansion, and non-finite coefficients
+ *       omit Sample Domain; a sign-aware negative-coefficient transform whose
+ *       full endpoint interval remains `[0,1]` retains it.
+ */
+TEST(OpenCvOperationProviderMetadataContract,
+     WeightedBlendRequiresFiniteClosedUniformSampleDomain) {
+  ASSERT_NO_THROW(register_provider());
+
+  const NodeOutput summed = execute_same_channel_weighted_blend(
+      make_weighted_blend_primary(false), make_weighted_blend_primary(false),
+      1.0, 1.0, 0.0);
+  ASSERT_TRUE(summed.image_value().image_facet().has_value());
+  EXPECT_FALSE(summed.image_value().image_facet()->sample_domain.has_value());
+
+  const NodeOutput gamma_expanded = execute_same_channel_weighted_blend(
+      make_weighted_blend_primary(false), make_weighted_blend_primary(false),
+      0.5, 0.5, 0.25);
+  ASSERT_TRUE(gamma_expanded.image_value().image_facet().has_value());
+  EXPECT_FALSE(
+      gamma_expanded.image_value().image_facet()->sample_domain.has_value());
+
+  const NodeOutput negative_closed = execute_same_channel_weighted_blend(
+      make_weighted_blend_primary(false), make_weighted_blend_primary(false),
+      -0.5, 0.5, 0.5);
+  ASSERT_TRUE(negative_closed.image_value().image_facet().has_value());
+  EXPECT_TRUE(
+      negative_closed.image_value().image_facet()->sample_domain.has_value());
+
+  const NodeOutput non_finite = execute_same_channel_weighted_blend(
+      make_weighted_blend_primary(false), make_weighted_blend_primary(false),
+      std::numeric_limits<double>::infinity(), 0.0, 0.0);
+  ASSERT_TRUE(non_finite.image_value().image_facet().has_value());
+  EXPECT_FALSE(
+      non_finite.image_value().image_facet()->sample_domain.has_value());
+
+  const NodeOutput tiled_summed = execute_same_channel_tiled_binary(
+      "add_weighted", make_weighted_blend_primary(false),
+      make_weighted_blend_primary(false),
+      {{"alpha", 1.0}, {"beta", 1.0}, {"gamma", 0.0}});
+  ASSERT_TRUE(tiled_summed.image_value().image_facet().has_value());
+  EXPECT_FALSE(
+      tiled_summed.image_value().image_facet()->sample_domain.has_value());
+
+  const NodeOutput tiled_negative_closed = execute_same_channel_tiled_binary(
+      "add_weighted", make_weighted_blend_primary(false),
+      make_weighted_blend_primary(false),
+      {{"alpha", -0.5}, {"beta", 0.5}, {"gamma", 0.5}});
+  ASSERT_TRUE(tiled_negative_closed.image_value().image_facet().has_value());
+  EXPECT_TRUE(tiled_negative_closed.image_value()
+                  .image_facet()
+                  ->sample_domain.has_value());
+}
+
+/**
+ * @brief Proves mapped source accumulation is part of the closure proof.
+ *
+ * @return Nothing; GoogleTest reports mapped metadata or payload drift.
+ * @throws Provider selection, OpenCV execution, metadata validation, and
+ *         allocation exceptions unchanged to the test runner.
+ * @note Mapping primary sources zero and one to destination zero produces the
+ *       exact interval `[0,2]` from normalized inputs. Both monolithic and
+ *       tiled callbacks still publish the raw sum while omitting the unsafe
+ *       uniform Sample Domain; the established expansion mapping remains a
+ *       closed positive control.
+ */
+TEST(OpenCvOperationProviderMetadataContract,
+     WeightedBlendMappedAccumulationRequiresDestinationClosure) {
+  ASSERT_NO_THROW(register_provider());
+
+  const NodeOutput monolithic = execute_same_channel_weighted_blend(
+      make_weighted_blend_primary(false), make_weighted_blend_primary(false),
+      1.0, 0.0, 0.0, make_accumulating_channel_mapping());
+  ASSERT_TRUE(monolithic.image_value().image_facet().has_value());
+  EXPECT_FALSE(
+      monolithic.image_value().image_facet()->sample_domain.has_value());
+  const ImageView monolithic_view(monolithic.image_value());
+  float monolithic_first = 0.0F;
+  std::memcpy(&monolithic_first, monolithic_view.channel_data(0U, 0U, 0U),
+              sizeof(monolithic_first));
+  EXPECT_FLOAT_EQ(monolithic_first, 0.6F);
+
+  plugin::ParameterMap tiled_parameters{{"alpha", 1.0},
+                                        {"beta", 0.0},
+                                        {"gamma", 0.0}};
+  tiled_parameters["channel_mapping"] = make_accumulating_channel_mapping();
+  const NodeOutput tiled = execute_same_channel_tiled_binary(
+      "add_weighted", make_weighted_blend_primary(false),
+      make_weighted_blend_primary(false), std::move(tiled_parameters));
+  ASSERT_TRUE(tiled.image_value().image_facet().has_value());
+  EXPECT_FALSE(tiled.image_value().image_facet()->sample_domain.has_value());
+  const ImageView tiled_view(tiled.image_value());
+  float tiled_first = 0.0F;
+  std::memcpy(&tiled_first, tiled_view.channel_data(0U, 0U, 0U),
+              sizeof(tiled_first));
+  EXPECT_FLOAT_EQ(tiled_first, 0.6F);
+
+  const NodeOutput safe_mapping = execute_channel_expanding_weighted_blend(
+      make_weighted_blend_primary(false), make_weighted_blend_secondary());
+  ASSERT_TRUE(safe_mapping.image_value().image_facet().has_value());
+  EXPECT_TRUE(
+      safe_mapping.image_value().image_facet()->sample_domain.has_value());
 }
 
 /**
@@ -997,9 +1142,9 @@ TEST(OpenCvOperationProviderMetadataContract,
  * identity drift.
  * @throws Provider selection, normalization, output planning, callback, and
  * Value failures unchanged to the test runner.
- * @note Weighted blend uses its established semantic intersection, multiply
- * additionally proves product-domain closure, nonlinear curve keeps only
- * stable channel identity, and explicit channel expansion is planned before
+ * @note Weighted blend proves parameter- and mapping-specific domain closure,
+ * multiply proves product-domain closure, nonlinear curve keeps only stable
+ * channel identity, and explicit channel expansion is planned before
  * allocation. Signed primary windows and fresh Value ownership remain intact.
  */
 TEST(OpenCvOperationProviderMetadataContract,
