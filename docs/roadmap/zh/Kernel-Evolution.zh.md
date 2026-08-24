@@ -6,6 +6,10 @@
 当前事实仍由 `docs/kernel-architecture/` 说明；架构决策记录在 `docs/adr/`；实施状态只由链接的
 GitHub Project 和 Issue 跟踪。
 
+[下一阶段开发计划](Next-Stage-Development-Program.zh.md) 是 Projects #7 至 #14 的权威交付图。
+它定义这些 Projects 的边界、依赖 DAG、实时 Issues、通用规划字段与完成门禁。在各自有明确范围的
+实现与提升证据完整前，分配给这些 Projects 的所有能力都仍是未来目标。
+
 [ADR 0006](../../adr/zh/0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md)
 定义上述分离与提升流程。每个交付切片都要引用其当前状态基线、governing ADR、精确目标章节、
 实时 Project/Issue 状态和实际验证结果。完成交付项本身不会让目标变成当前行为；只有实现与长期
@@ -27,6 +31,26 @@ GitHub Project 和 Issue 跟踪。
 当前重构的合并门禁继续由
 [codebase-refactor](https://github.com/users/kevin-zf1123/projects/1) 跟踪，并由
 [Issue #42](https://github.com/kevin-zf1123/photospider/issues/42) 聚合。
+
+### 下一阶段项目组合
+
+Projects #7 与 #8 并行开启下一阶段：工程安全与可维护性不会被推迟到产品功能之后，同时先建立
+缺失的编译器/planning seam，再开展下游执行与媒体工作。下表阶段描述预期交付顺序，而不是当前
+行为。
+
+| 阶段 | GitHub Project | 父 Issue | 依赖 |
+| --- | --- | --- | --- |
+| Foundation | [#7 engineering-foundations-plugin-dx](https://github.com/users/kevin-zf1123/projects/7) | [#139](https://github.com/kevin-zf1123/photospider/issues/139) | 无 |
+| Foundation | [#8 graph-ir-optimization-planning](https://github.com/users/kevin-zf1123/projects/8) | [#145](https://github.com/kevin-zf1123/photospider/issues/145) | 无 |
+| Core product | [#9 cost-aware-heterogeneous-execution](https://github.com/users/kevin-zf1123/projects/9) | [#151](https://github.com/kevin-zf1123/photospider/issues/151) | #8 |
+| Core product | [#10 media-semantics-color-time](https://github.com/users/kevin-zf1123/projects/10) | [#157](https://github.com/kevin-zf1123/photospider/issues/157) | #8 |
+| Product vertical | [#11 interactive-viewer-editing](https://github.com/users/kevin-zf1123/projects/11) | [#163](https://github.com/kevin-zf1123/photospider/issues/163) | #8、#9、#10 |
+| Product vertical | [#12 progressive-renderer-outputs](https://github.com/users/kevin-zf1123/projects/12) | [#169](https://github.com/kevin-zf1123/photospider/issues/169) | #8、#9、#10 |
+| Product vertical | [#13 python-testbench-batch-automation](https://github.com/users/kevin-zf1123/projects/13) | [#175](https://github.com/kevin-zf1123/photospider/issues/175) | #8、#10 |
+| Production | [#14 multi-tenant-production-services](https://github.com/users/kevin-zf1123/projects/14) | [#181](https://github.com/kevin-zf1123/photospider/issues/181) | #7、#9、#13 |
+
+每个 Project 都有一个 open 父 Issue 和五个 open、可执行的原生子 Issues。完整 Issue 图、不变量、
+非目标与证据门禁维护在下一阶段计划文档中，不在此处重复。
 
 ### 当前 containment 基线
 
@@ -1597,3 +1621,20 @@ ComputeRun 与 CPU 执行域
 替换 per-graph 物理 worker 所有权时保留当前 bounded-admission error 与 rollback 保证。Issue #70
 通过删除旧 counter 并引入经过 checked arithmetic 的多维 ledger 满足了该规则；后续切片必须扩展
 该 ledger，不能恢复第二个 resource authority。
+
+下一阶段交付 DAG 延续上述已完成基础：
+
+```text
+#7 工程基础 ─────────────────────────────────────────────┐
+                                                         ↓
+#8 graph IR ──┬──> #9 异构执行 ────────────────────────> #14 服务
+              │                    ├──> #11 viewer
+              │                    └──> #12 renderer
+              └──> #10 媒体语义 ───┬──> #11 viewer
+                                   ├──> #12 renderer
+                                   └──> #13 Python/批处理 ─> #14 服务
+```
+
+该顺序防止 UI、renderer、automation 或 server 层发明自己的 graph compiler、media semantics、
+cost model、resource authority 或 durable execution domain。有界研究可以重叠，但在所需上游契约
+和纵向切片通过验证前，下游 Project 不能声明产品完成。

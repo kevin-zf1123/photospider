@@ -9,6 +9,12 @@ implementation checklist. Current facts remain authoritative in
 `docs/adr/`; implementation state is tracked only in the linked GitHub
 Projects and Issues.
 
+[Next-Stage Development Program](Next-Stage-Development-Program.md) is the
+authoritative delivery map for Projects #7 through #14. It defines their
+boundaries, dependency DAG, live Issues, common planning fields, and completion
+gates. All capabilities assigned to those Projects remain future targets until
+their scoped implementation and promotion evidence are complete.
+
 [ADR 0006](../adr/0006-kernel-documentation-separates-facts-decisions-targets-and-status.md)
 defines this separation and the promotion workflow. Each delivery slice cites
 its current-state baseline, governing ADR, exact target section, live
@@ -35,6 +41,28 @@ multi-session server runtime.
 The merge gates for the current refactor remain in
 [codebase-refactor](https://github.com/users/kevin-zf1123/projects/1), aggregated
 by [issue #42](https://github.com/kevin-zf1123/photospider/issues/42).
+
+### Next-stage portfolio
+
+Projects #7 and #8 begin the next stage in parallel: engineering safety and
+maintainability are not deferred behind product features, while the missing
+compiler/planning seam is established before downstream execution and media
+work. The phases below describe intended delivery order, not current behavior.
+
+| Phase | GitHub Project | Parent Issue | Dependencies |
+| --- | --- | --- | --- |
+| Foundation | [#7 engineering-foundations-plugin-dx](https://github.com/users/kevin-zf1123/projects/7) | [#139](https://github.com/kevin-zf1123/photospider/issues/139) | None |
+| Foundation | [#8 graph-ir-optimization-planning](https://github.com/users/kevin-zf1123/projects/8) | [#145](https://github.com/kevin-zf1123/photospider/issues/145) | None |
+| Core product | [#9 cost-aware-heterogeneous-execution](https://github.com/users/kevin-zf1123/projects/9) | [#151](https://github.com/kevin-zf1123/photospider/issues/151) | #8 |
+| Core product | [#10 media-semantics-color-time](https://github.com/users/kevin-zf1123/projects/10) | [#157](https://github.com/kevin-zf1123/photospider/issues/157) | #8 |
+| Product vertical | [#11 interactive-viewer-editing](https://github.com/users/kevin-zf1123/projects/11) | [#163](https://github.com/kevin-zf1123/photospider/issues/163) | #8, #9, #10 |
+| Product vertical | [#12 progressive-renderer-outputs](https://github.com/users/kevin-zf1123/projects/12) | [#169](https://github.com/kevin-zf1123/photospider/issues/169) | #8, #9, #10 |
+| Product vertical | [#13 python-testbench-batch-automation](https://github.com/users/kevin-zf1123/projects/13) | [#175](https://github.com/kevin-zf1123/photospider/issues/175) | #8, #10 |
+| Production | [#14 multi-tenant-production-services](https://github.com/users/kevin-zf1123/projects/14) | [#181](https://github.com/kevin-zf1123/photospider/issues/181) | #7, #9, #13 |
+
+Each Project has one open parent Issue and five open executable native child
+Issues. The complete issue map, invariants, non-goals, and evidence gates are
+maintained in the next-stage program document rather than duplicated here.
 
 ### Current containment baseline
 
@@ -2004,3 +2032,22 @@ rollback guarantees while replacing per-graph physical worker ownership.
 Issue #70 satisfied that rule by deleting the former counter and introducing a
 checked multi-dimensional ledger; subsequent slices must extend that ledger
 without restoring a second resource authority.
+
+The next-stage delivery DAG continues from that completed foundation:
+
+```text
+#7 engineering foundations ───────────────────────────────┐
+                                                         ↓
+#8 graph IR ──┬──> #9 heterogeneous execution ─────────> #14 services
+              │                    ├──> #11 viewer
+              │                    └──> #12 renderer
+              └──> #10 media ──────┬──> #11 viewer
+                                   ├──> #12 renderer
+                                   └──> #13 Python/batch ─> #14 services
+```
+
+This order prevents UI, renderer, automation, or server layers from inventing
+their own graph compiler, media semantics, cost model, resource authority, or
+durable execution domain. Bounded research may overlap, but a downstream
+Project cannot claim product completion until its required upstream contracts
+and vertical slices are verified.
