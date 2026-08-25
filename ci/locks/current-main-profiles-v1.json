@@ -1,0 +1,65 @@
+{
+  "fuzz": {
+    "cmake_args": ["-DBUILD_TESTING=OFF", "-DPHOTOSPIDER_BUILD_FUZZERS=ON", "-DPHOTOSPIDER_BUILD_GRAPH_CLI=OFF", "-DPHOTOSPIDER_BUILD_IPC=OFF", "-DPHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS=OFF", "-DPHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF", "-DPHOTOSPIDER_ENABLE_OPENCV=OFF", "-DPHOTOSPIDER_ENABLE_YAML=OFF"],
+    "corpus_sha256": null,
+    "job_timeout_minutes": 20,
+    "platforms": ["Darwin", "Linux"],
+    "profile": "fuzz-codecs",
+    "runs": 1000,
+    "seed": 1,
+    "vcpkg_dependencies": ["openssl", "utf8proc"],
+    "targets": [
+      {
+        "max_len": 65536,
+        "name": "fuzz_isolated_cpu_invocation_codec",
+        "production_limit": 65536,
+        "production_limit_symbol": "ps::execution::kMaximumIsolatedCpuPacketBytes",
+        "timeout_seconds": 2
+      },
+      {
+        "max_len": 131072,
+        "name": "fuzz_worker_protocol_codec",
+        "production_limit": 131072,
+        "production_limit_symbol": "ps::server::kMaximumWorkerControlPayloadBytes",
+        "timeout_seconds": 2
+      }
+    ]
+  },
+  "sanitizers": [
+    {
+      "cmake_args": ["-DUSE_ASAN=ON", "-DUSE_TSAN=OFF"],
+      "invocations": [
+        {"filter": "ExecutionServicePolicy.*:Issue75DeviceRouting.*", "target": "test_compute_run", "trust_environment": true},
+        {"filter": "ComputeGeometrySplit.*:ComputeCachePolicySplit.*:TaskGraphPlanningSplit.PreservesSequentialParallelPlanParity:IntentUpdateCoordinatorSplit.ValidatesRtDirtyRoiAndCoordinatesRtFirstConcurrency", "target": "test_compute_service_split", "trust_environment": false},
+        {"filter": "PhysicalExecutionIntegration.*:PolicyExecutionFixture.*:ExecutionServiceReservedStart.*", "target": "test_policy_execution", "trust_environment": true},
+        {"filter": "", "target": "test_propagation_contracts", "trust_environment": false},
+        {"filter": "", "target": "test_resource_admission", "trust_environment": true}
+      ],
+      "platforms": ["Darwin", "Linux"],
+      "profile": "sanitizer-asan",
+      "runtime_contract": "policy_execution",
+      "vcpkg_dependencies": ["curl", "gtest", "nlohmann-json", "opencv4", "openssl", "utf8proc", "yaml-cpp"]
+    },
+    {
+      "cmake_args": ["-DUSE_ASAN=OFF", "-DUSE_TSAN=ON"],
+      "invocations": [
+        {"filter": "ExecutionServicePolicy.*:Issue75DeviceRouting.*", "target": "test_compute_run", "trust_environment": true},
+        {"filter": "ComputeGeometrySplit.*:ComputeCachePolicySplit.*:TaskGraphPlanningSplit.PreservesSequentialParallelPlanParity:IntentUpdateCoordinatorSplit.ValidatesRtDirtyRoiAndCoordinatesRtFirstConcurrency", "target": "test_compute_service_split", "trust_environment": false},
+        {"filter": "PhysicalExecutionIntegration.*:PolicyExecutionFixture.*:ExecutionServiceReservedStart.*", "target": "test_policy_execution", "trust_environment": true},
+        {"filter": "", "target": "test_propagation_contracts", "trust_environment": false},
+        {"filter": "", "target": "test_resource_admission", "trust_environment": true}
+      ],
+      "platforms": ["Darwin", "Linux"],
+      "profile": "sanitizer-tsan",
+      "runtime_contract": "policy_execution",
+      "vcpkg_dependencies": ["curl", "gtest", "nlohmann-json", "opencv4", "openssl", "utf8proc", "yaml-cpp"]
+    }
+  ],
+  "schema": "photospider-current-main-profiles-v1",
+  "source_hashes": {
+    "CMakeLists.txt": "b629a20abafbd05e57c3c2dba5273a143b68e0cfd533884577b541911bb95aef",
+    "cmake/PhotospiderCiInventory.cmake": "f783e009537eb50bb0830e97473fc8d8345262720d41054ee6c685694bbc711a",
+    "tests/fuzz/fuzz_isolated_cpu_invocation_codec.cpp": "33f4e02611be14e042f5e7a43da0ce1547f5f1ac42ac6c44a61cc35306e8c128",
+    "tests/fuzz/fuzz_worker_protocol_codec.cpp": "c6e9f0860be4b739e4ace88b7c6b4cb7a37018ddf721f730ee011a3945ed1f0f"
+  }
+}

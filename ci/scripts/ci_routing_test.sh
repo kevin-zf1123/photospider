@@ -243,7 +243,7 @@ validate_local_image_base_fetch() {
     'git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null'
   bash -n "$fetch_script"
 
-  checkout_line=$(grep -nF -- "- uses: actions/checkout@v4" "$job_file" |
+  checkout_line=$(grep -nF -- "- uses: actions/checkout@" "$job_file" |
     head -n 1 | cut -d: -f1)
   fetch_step_line=$(grep -nF -- \
     "- name: Fetch pull request base history" "$job_file" |
@@ -317,7 +317,7 @@ validate_published_image_base_fetch() {
     'git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null'
   bash -n "$fetch_script"
 
-  checkout_line=$(grep -nF -- "- uses: actions/checkout@v4" "$job_file" |
+  checkout_line=$(grep -nF -- "- uses: actions/checkout@" "$job_file" |
     head -n 1 | cut -d: -f1)
   fetch_step_line=$(grep -nF -- \
     "- name: Fetch pull request base history" "$job_file" |
@@ -483,7 +483,7 @@ validate_published_image_workspace_trust() {
     fail "healthcheck-published-image workspace trust must verify HEAD read-only"
   bash -n "$trust_script"
 
-  checkout_line=$(grep -nF -- "- uses: actions/checkout@v4" "$job_file" |
+  checkout_line=$(grep -nF -- "- uses: actions/checkout@" "$job_file" |
     head -n 1 | cut -d: -f1)
   trust_step_line=$(grep -nF -- "- name: Trust checked-out workspace" \
     "$job_file" | head -n 1 | cut -d: -f1)
@@ -603,7 +603,7 @@ validate_ci_branch_healthcheck_base() {
     'git rev-parse --verify "origin/main^{commit}" >/dev/null'
   bash -n "$fetch_script"
 
-  checkout_line=$(grep -nF -- "- uses: actions/checkout@v4" "$job_file" |
+  checkout_line=$(grep -nF -- "- uses: actions/checkout@" "$job_file" |
     head -n 1 | cut -d: -f1)
   fetch_step_line=$(grep -nF -- \
     "- name: Fetch CI branch main history" "$job_file" |
@@ -719,6 +719,7 @@ assert_gate_checks_all_results() {
       assertion_labels=(
         protected-ci-paths
         ci-image-change
+        ci-image-identity
         healthcheck-published-image
         healthcheck-local-image
       )
@@ -728,8 +729,10 @@ assert_gate_checks_all_results() {
         protected-ci-paths
         change-classification
         ci-image-change
+        ci-image-identity
         integration-plan
         build-integrity-default
+        attest-reusable-build-default
         local-image-integration
         full-ctest
         build-smoke
@@ -737,6 +740,10 @@ assert_gate_checks_all_results() {
         propagation-script
         plugin-load
         execution-repeat
+        sanitizer-asan
+        sanitizer-tsan
+        fuzz-codecs
+        security-darwin
       )
       ;;
     *)
@@ -793,7 +800,7 @@ validate_build_smoke_matrix_contract() {
   assert_file_contains "$smoke_job" \
     'name: Build smoke (${{ matrix.test }})'
   assert_file_contains "$smoke_job" \
-    'needs: [integration-plan, build-integrity-default]'
+    'needs: [integration-plan, build-integrity-default, attest-reusable-build-default, ci-image-identity]'
   assert_file_contains "$smoke_job" \
     "needs.integration-plan.result == 'success' &&"
   assert_file_contains "$smoke_job" \
@@ -905,6 +912,191 @@ validate_runtime_capability_routing() {
   pass integration-runtime-capability-routing
 }
 
+# @brief Validate exact-image sanitizer/fuzz routing and generic role readers.
+# @param $1 Integration workflow YAML path.
+# @return Zero when dedicated and local-image security paths feed the stable gate.
+# @throws Nothing; missing, mutable, or hard-coded routes exit through fail.
+# @note Concrete current-main selections may exist only in the protected hash-
+#   bound fallback lock, never in these generic runners or workflow jobs.
+validate_security_profile_routing() {
+  local workflow=$1
+  local job_name
+  local job_file
+  local sanitizer_script="$REPO_ROOT/ci/scripts/sanitizer_test.sh"
+  local fuzz_script="$REPO_ROOT/ci/scripts/fuzz_smoke.sh"
+  local platform_script="$REPO_ROOT/ci/scripts/security_platform_prepare.sh"
+  local local_job="$TEST_ROOT/integration-local-security-job.yml"
+  local darwin_job="$TEST_ROOT/integration-security-darwin-job.yml"
+
+  for job_name in sanitizer-asan sanitizer-tsan fuzz-codecs; do
+    job_file="$TEST_ROOT/integration-$job_name-job.yml"
+    extract_job_block "$workflow" "$job_name" "$job_file" ||
+      fail "$job_name security job could not be extracted"
+    assert_file_contains "$job_file" \
+      'needs: [change-classification, ci-image-change, ci-image-identity, integration-plan]'
+    assert_file_contains "$job_file" \
+      'image: ${{ needs.ci-image-identity.outputs.image }}'
+    assert_file_not_contains "$job_file" ':latest'
+  done
+  assert_file_contains "$TEST_ROOT/integration-sanitizer-asan-job.yml" \
+    'SANITIZER: asan'
+  assert_file_contains "$TEST_ROOT/integration-sanitizer-tsan-job.yml" \
+    'SANITIZER: tsan'
+  assert_file_contains "$TEST_ROOT/integration-fuzz-codecs-job.yml" \
+    'timeout-minutes: 20'
+  assert_file_contains "$TEST_ROOT/integration-fuzz-codecs-job.yml" \
+    'run: bash ci/scripts/fuzz_smoke.sh'
+
+  extract_job_block "$workflow" local-image-integration "$local_job" ||
+    fail "local-image-integration job could not be extracted for security routing"
+  assert_file_contains "$local_job" 'for sanitizer in asan tsan; do'
+  assert_file_contains "$local_job" 'bash ci/scripts/sanitizer_test.sh'
+  assert_file_contains "$local_job" 'bash ci/scripts/fuzz_smoke.sh'
+
+  extract_job_block "$workflow" security-darwin "$darwin_job" ||
+    fail "security-darwin job could not be extracted"
+  assert_file_contains "$darwin_job" 'runs-on: macos-15'
+  assert_file_not_contains "$darwin_job" 'container:'
+  assert_file_contains "$darwin_job" 'for sanitizer in asan tsan; do'
+  assert_file_contains "$darwin_job" 'bash ci/scripts/sanitizer_test.sh'
+  assert_file_contains "$darwin_job" 'bash ci/scripts/fuzz_smoke.sh'
+  assert_file_contains "$darwin_job" 'ci-security-profile-inventory'
+
+  assert_file_contains "$sanitizer_script" \
+    'python3 "$SCRIPT_DIR/ci_profile_manifest.py"'
+  assert_file_contains "$fuzz_script" \
+    'python3 "$SCRIPT_DIR/ci_profile_manifest.py"'
+  assert_file_contains "$sanitizer_script" \
+    'bash "$SCRIPT_DIR/security_platform_prepare.sh"'
+  assert_file_contains "$fuzz_script" \
+    'bash "$SCRIPT_DIR/security_platform_prepare.sh"'
+  assert_file_contains "$platform_script" 'Unsupported security platform:'
+  assert_file_contains "$platform_script" 'darwin-runner-lock.json'
+  assert_file_contains "$platform_script" '"$vcpkg_root/vcpkg" install'
+  assert_file_contains "$fuzz_script" '"-seed=$seed"'
+  assert_file_contains "$fuzz_script" '"-runs=$runs"'
+  assert_file_contains "$fuzz_script" '"-timeout=$timeout"'
+  assert_file_contains "$fuzz_script" '"-max_len=$max_len"'
+  assert_file_not_contains "$sanitizer_script" test_policy_execution
+  assert_file_not_contains "$sanitizer_script" test_compute_run
+  assert_file_not_contains "$fuzz_script" fuzz_worker_protocol_codec
+  assert_file_not_contains "$fuzz_script" fuzz_isolated_cpu_invocation_codec
+
+  pass integration-generic-security-profile-routing
+}
+
+# @brief Validate reusable-build provenance, attestation separation, and consumers.
+# @param $1 Integration workflow YAML path.
+# @return Zero when the producer has no signing authority and every consumer
+#   waits for a separately verified attestation before safe extraction.
+# @throws Nothing; missing or misordered boundaries exit through fail.
+validate_reusable_build_identity_routing() {
+  local workflow=$1
+  local build_job="$TEST_ROOT/reusable-build-producer-job.yml"
+  local attest_job="$TEST_ROOT/reusable-build-attest-job.yml"
+  local consumer_job
+  local consumer_name
+  local verify_line
+  local first_attest_line
+  local -a consumers=(
+    full-ctest
+    build-smoke
+    scripted-cli
+    propagation-script
+    plugin-load
+    execution-repeat
+  )
+
+  extract_job_block "$workflow" build-integrity-default "$build_job" ||
+    fail "reusable-build producer job could not be extracted"
+  extract_job_block "$workflow" attest-reusable-build-default "$attest_job" ||
+    fail "reusable-build attestation job could not be extracted"
+  assert_file_contains "$build_job" 'python3 ci/scripts/reusable_build.py \'
+  assert_file_contains "$build_job" \
+    '--inventory-dir build/ci/generated/ci_inventory create \'
+  assert_file_contains "$build_job" 'path: CI-results/reusable-build-default'
+  assert_file_not_contains "$build_job" 'id-token: write'
+  assert_file_not_contains "$build_job" 'actions/attest@'
+  assert_file_contains "$attest_job" 'artifact-metadata: write'
+  assert_file_contains "$attest_job" 'attestations: write'
+  assert_file_contains "$attest_job" 'id-token: write'
+  assert_file_contains "$attest_job" 'python3 ci/scripts/reusable_build.py verify-only'
+  verify_line=$(grep -nF -- \
+    'python3 ci/scripts/reusable_build.py verify-only' "$attest_job" |
+    head -n 1 | cut -d: -f1)
+  first_attest_line=$(grep -nF -- 'uses: actions/attest@' "$attest_job" |
+    head -n 1 | cut -d: -f1)
+  [[ -n "$verify_line" && -n "$first_attest_line" ]] ||
+    fail "reusable-build attestation job lacks verification or attestation"
+  ((verify_line < first_attest_line)) ||
+    fail "reusable-build subject is attested before protected verification"
+  (($(grep -Fc -- 'uses: actions/attest@' "$attest_job") == 2)) ||
+    fail "reusable-build archive and manifest must each be attested"
+
+  for consumer_name in "${consumers[@]}"; do
+    consumer_job="$TEST_ROOT/reusable-build-$consumer_name-job.yml"
+    extract_job_block "$workflow" "$consumer_name" "$consumer_job" ||
+      fail "$consumer_name reusable-build consumer job could not be extracted"
+    assert_file_contains "$consumer_job" 'attest-reusable-build-default'
+    assert_file_contains "$consumer_job" \
+      'run: bash ci/scripts/reusable_build_consume.sh'
+    assert_file_contains "$consumer_job" \
+      'CI_CANDIDATE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}'
+    assert_file_contains "$consumer_job" \
+      'CI_IMAGE_DIGEST: ${{ needs.ci-image-identity.outputs.digest }}'
+    assert_file_not_contains "$consumer_job" 'tar -C build -xzf'
+  done
+  assert_file_not_contains "$workflow" 'image: ghcr.io/${{ github.repository }}/photospider-ci:latest'
+
+  pass integration-reusable-build-attestation-routing
+}
+
+# @brief Validate canonical image production and verified digest consumption.
+# @param $1 Healthcheck workflow YAML path.
+# @param $2 Integration workflow YAML path.
+# @return Zero when both stable chains verify identity before candidate containers.
+# @throws Nothing; missing attestation, manifest, or digest routes exit through fail.
+validate_ci_image_identity_routing() {
+  local health_workflow=$1
+  local integration_workflow=$2
+  local build_workflow="$REPO_ROOT/.github/workflows/build-ci-image.yml"
+  local workflow
+  local identity_job
+
+  for workflow in "$health_workflow" "$integration_workflow"; do
+    identity_job="$TEST_ROOT/$(basename "$workflow" .yml)-image-identity-job.yml"
+    extract_job_block "$workflow" ci-image-identity "$identity_job" ||
+      fail "$(basename "$workflow") image identity job could not be extracted"
+    assert_file_contains "$identity_job" 'run: bash ci/scripts/ci_image_verify.sh'
+    assert_file_contains "$identity_job" 'image: ${{ steps.identity.outputs.image }}'
+    assert_file_contains "$identity_job" 'digest: ${{ steps.identity.outputs.digest }}'
+    assert_file_contains "$identity_job" 'uses: docker/login-action@'
+  done
+  assert_file_contains "$health_workflow" \
+    'image: ${{ needs.ci-image-identity.outputs.image }}'
+  assert_file_contains "$health_workflow" \
+    '"${{ steps.local-image.outputs.image_id }}" \'
+  assert_file_contains "$integration_workflow" \
+    'image: ${{ needs.ci-image-identity.outputs.image }}'
+  assert_file_contains "$integration_workflow" \
+    '"${{ steps.local-image.outputs.image_id }}" \'
+  assert_file_not_contains "$health_workflow" 'photospider-ci:latest'
+  assert_file_not_contains "$integration_workflow" 'photospider-ci:latest'
+
+  assert_file_contains "$build_workflow" 'artifact-metadata: write'
+  assert_file_contains "$build_workflow" 'attestations: write'
+  assert_file_contains "$build_workflow" 'id-token: write'
+  assert_file_contains "$build_workflow" \
+    'python3 ci/scripts/ci_image_manifest.py create'
+  assert_file_contains "$build_workflow" \
+    'org.photospider.ci.input-manifest-sha256=${{ steps.manifest.outputs.digest }}'
+  assert_file_contains "$build_workflow" \
+    'subject-digest: ${{ steps.push.outputs.digest }}'
+  assert_file_contains "$build_workflow" 'push-to-registry: true'
+
+  pass ci-image-canonical-manifest-attestation-routing
+}
+
 # @brief Validate the canonical protected condition and executable gate contracts.
 # @param $1 Workflow YAML path.
 # @param $2 Exact stable gate step name.
@@ -955,7 +1147,7 @@ validate_workflow_contract() {
 
   reject_line=$(grep -nF -- "- name: Reject fork CI branch pull request" \
     "$workflow" | head -n 1 | cut -d: -f1)
-  checkout_line=$(grep -nF -- "- uses: actions/checkout@v4" \
+  checkout_line=$(grep -nF -- "- uses: actions/checkout@" \
     "$workflow" | head -n 1 | cut -d: -f1)
   [[ -n "$reject_line" && -n "$checkout_line" ]] ||
     fail "$workflow_name lacks the reject-before-checkout boundary"
@@ -987,6 +1179,8 @@ validate_workflow_contract() {
     "if ! mapfile -d '' -t changed_files"
   assert_file_contains "$TEST_ROOT/${workflow_name}-protected.sh" \
     "Protected-path changed-path inventory read failed."
+  assert_file_contains "$TEST_ROOT/${workflow_name}-protected.sh" \
+    "Dockerfile.ci | .dockerignore | ci/* | .github/workflows/*"
   assert_file_not_contains "$TEST_ROOT/${workflow_name}-protected.sh" \
     "awk '"
   bash -n "$TEST_ROOT/${workflow_name}-gate.sh"
@@ -1153,7 +1347,10 @@ exercise_protected_path_guard() {
   local read_failure_artifact_dir="$TEST_ROOT/${workflow_label}-read-failure"
   local read_failure_log="$TEST_ROOT/${workflow_label}-read-failure.log"
   local read_failure_shim_dir="$TEST_ROOT/protected-read-failing-git"
+  local original_head
   local quoted_path
+
+  original_head=$(git -C "$repository" rev-parse HEAD)
 
   run_expect_failure "$workflow_label-newline-protected-path-rejected" \
     "$output_log" \
@@ -1166,6 +1363,20 @@ exercise_protected_path_guard() {
   grep -Fqx -- "$quoted_path" "$artifact_dir/protected-files.txt" ||
     fail "$workflow_label protected artifact omitted the newline path"
   assert_single_nul_path "$artifact_dir/changed-files.z" "$newline_path"
+
+  printf 'build\n' > "$repository/.dockerignore"
+  git -C "$repository" add .dockerignore
+  git -C "$repository" commit -qm "protected docker context input"
+  artifact_dir="$TEST_ROOT/${workflow_label}-dockerignore-protected"
+  output_log="$TEST_ROOT/${workflow_label}-dockerignore-protected.log"
+  run_expect_failure "$workflow_label-dockerignore-protected-path-rejected" \
+    "$output_log" \
+    "Only trusted base-repository CI/** runs may change" \
+    "No protected CI workflow paths changed" \
+    run_protected_path_guard "$guard_script" "$repository" "$artifact_dir"
+  grep -Fqx -- .dockerignore "$artifact_dir/protected-files.txt" ||
+    fail "$workflow_label protected artifact omitted .dockerignore"
+  git -C "$repository" checkout -q --detach "$original_head"
 
   create_failing_git_shim "$shim_dir"
   run_expect_failure "$workflow_label-protected-producer-fails-closed" \
@@ -1479,6 +1690,32 @@ exercise_changed_path_contracts() {
     "$output_log"
   assert_image_route image-empty-comparison false "$artifact_dir" "$output_log"
 
+  git -C "$image_repository" checkout -q -b dockerignore-input "$docs_sha"
+  printf 'build\n' > "$image_repository/.dockerignore"
+  git -C "$image_repository" add .dockerignore
+  git -C "$image_repository" commit -qm "docker context input"
+  run_image_detector "$image_repository" "$docs_sha" "$artifact_dir" \
+    "$output_log"
+  assert_image_route image-dockerignore-input true "$artifact_dir" "$output_log"
+
+  git -C "$image_repository" checkout -q -b dependency-lock-input "$docs_sha"
+  mkdir -p "$image_repository/ci/locks"
+  printf 'locked\n' > "$image_repository/ci/locks/actions.lock"
+  git -C "$image_repository" add ci/locks/actions.lock
+  git -C "$image_repository" commit -qm "protected action lock"
+  run_image_detector "$image_repository" "$docs_sha" "$artifact_dir" \
+    "$output_log"
+  assert_image_route image-action-lock-input true "$artifact_dir" "$output_log"
+
+  git -C "$image_repository" checkout -q -b verifier-input "$docs_sha"
+  mkdir -p "$image_repository/ci/scripts"
+  printf '# verifier\n' > "$image_repository/ci/scripts/ci_lock_verify.py"
+  git -C "$image_repository" add ci/scripts/ci_lock_verify.py
+  git -C "$image_repository" commit -qm "protected lock verifier"
+  run_image_detector "$image_repository" "$docs_sha" "$artifact_dir" \
+    "$output_log"
+  assert_image_route image-lock-verifier-input true "$artifact_dir" "$output_log"
+
   git -C "$image_repository" checkout -q --detach "$newline_sha"
   run_image_detector "$image_repository" "$base_sha" "$artifact_dir" \
     "$output_log"
@@ -1533,6 +1770,9 @@ main() {
   validate_workflow_contract "$integration_workflow" "Report integration gate"
   validate_build_smoke_matrix_contract "$integration_workflow"
   validate_runtime_capability_routing "$integration_workflow"
+  validate_security_profile_routing "$integration_workflow"
+  validate_reusable_build_identity_routing "$integration_workflow"
+  validate_ci_image_identity_routing "$health_workflow" "$integration_workflow"
   validate_published_image_base_fetch "$health_workflow"
   validate_published_image_fetch_shells "$health_workflow"
   validate_published_image_workspace_trust "$health_workflow"

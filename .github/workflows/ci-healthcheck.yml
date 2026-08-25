@@ -11,6 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  attestations: read
   contents: read
   packages: read
 
@@ -22,7 +23,7 @@ jobs:
         !startsWith(github.head_ref, 'CI/') ||
         github.event.pull_request.head.repo.full_name != github.repository
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Reject fork CI branch pull request
         if: >-
@@ -45,7 +46,7 @@ jobs:
           } | tee "$CI_ARTIFACT_DIR/summary.log" >&2
           exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
@@ -132,7 +133,7 @@ jobs:
             printf '%q\n' "$changed_file" \
               >> "$CI_ARTIFACT_DIR/changed-files.txt"
             case "$changed_file" in
-              Dockerfile.ci | ci/* | .github/workflows/*)
+              Dockerfile.ci | .dockerignore | ci/* | .github/workflows/*)
                 printf '%q\n' "$changed_file" \
                   >> "$CI_ARTIFACT_DIR/protected-files.txt"
                 ;;
@@ -141,7 +142,7 @@ jobs:
 
           if [[ -s "$CI_ARTIFACT_DIR/protected-files.txt" ]]; then
             {
-              echo "Only trusted base-repository CI/** runs may change ci/, .github/workflows/, or Dockerfile.ci."
+              echo "Only trusted base-repository CI/** runs may change ci/, .github/workflows/, Dockerfile.ci, or .dockerignore."
               echo "Develop CI workflow changes on a CI/** branch in '$CI_BASE_REPOSITORY'."
             } | tee "$CI_ARTIFACT_DIR/summary.log" >&2
             exit 1
@@ -152,7 +153,7 @@ jobs:
 
       - name: Upload protected path logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: healthcheck-protected-ci-paths
           path: CI-results/protected-ci-paths
@@ -161,11 +162,11 @@ jobs:
   ci-image-change:
     needs: protected-ci-paths
     if: needs.protected-ci-paths.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       changed: ${{ steps.detect.outputs.changed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
@@ -196,23 +197,63 @@ jobs:
         run: bash ci/scripts/ci_image_changed.sh
       - name: Upload CI image change logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: healthcheck-ci-image-change
           path: CI-results/ci-image-change
           if-no-files-found: warn
 
-  healthcheck-published-image:
+  ci-image-identity:
     needs: ci-image-change
-    if: needs.ci-image-change.outputs.changed != 'true'
-    runs-on: ubuntu-latest
+    if: needs.ci-image-change.outputs.changed == 'false'
+    runs-on: ubuntu-24.04
+    outputs:
+      digest: ${{ steps.identity.outputs.digest }}
+      image: ${{ steps.identity.outputs.image }}
+      manifest_digest: ${{ steps.identity.outputs.manifest_digest }}
+      source_commit: ${{ steps.identity.outputs.source_commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify published image identity
+        id: identity
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ci-image-identity
+          CI_IMAGE_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash ci/scripts/ci_image_verify.sh
+      - name: Upload image identity logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: healthcheck-ci-image-identity
+          path: CI-results/ci-image-identity
+          if-no-files-found: warn
+
+  healthcheck-published-image:
+    needs: [ci-image-change, ci-image-identity]
+    if: >-
+      ${{
+        needs.ci-image-change.outputs.changed == 'false' &&
+        needs.ci-image-identity.result == 'success'
+      }}
+    runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      image: ${{ needs.ci-image-identity.outputs.image }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
@@ -257,7 +298,7 @@ jobs:
 
       - name: Upload healthcheck logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: healthcheck-results
           path: CI-results/healthcheck
@@ -266,9 +307,9 @@ jobs:
   healthcheck-local-image:
     needs: ci-image-change
     if: needs.ci-image-change.outputs.changed == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
@@ -297,7 +338,36 @@ jobs:
           git rev-parse --verify "origin/main^{commit}" >/dev/null
 
       - name: Build local CI image
-        run: docker build -t photospider-ci:local -f Dockerfile.ci .
+        id: local-image
+        env:
+          CI_IMAGE_MANIFEST_DIR: ${{ github.workspace }}/CI-results/local-ci-image-identity
+        run: |
+          set -Eeuo pipefail
+          python3 ci/scripts/ci_runner_verify.py --platform Linux
+          python3 ci/scripts/ci_lock_verify.py
+          mkdir -p "$CI_IMAGE_MANIFEST_DIR"
+          source_commit=$(git rev-parse HEAD)
+          manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
+            --source-commit "$source_commit" \
+            --repository "${{ github.repository }}" \
+            --output "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.json" \
+            --digest-output "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.sha256")
+          docker build \
+            --build-arg "CI_IMAGE_INPUT_MANIFEST_SHA256=$manifest_digest" \
+            --build-arg "CI_IMAGE_SOURCE_COMMIT=$source_commit" \
+            -t photospider-ci:local -f Dockerfile.ci .
+          docker image inspect --format '{{json .Config.Labels}}' \
+            photospider-ci:local > "$CI_IMAGE_MANIFEST_DIR/oci-labels.json"
+          python3 ci/scripts/ci_image_manifest.py verify-labels \
+            --manifest "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.json" \
+            --labels-json "$CI_IMAGE_MANIFEST_DIR/oci-labels.json" \
+            --source-commit "$source_commit"
+          image_id=$(docker image inspect --format '{{.Id}}' photospider-ci:local)
+          if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Local image did not produce an immutable image ID." >&2
+            exit 1
+          fi
+          printf 'image_id=%s\n' "$image_id" >> "$GITHUB_OUTPUT"
 
       - name: Run healthcheck in local CI image
         env:
@@ -308,12 +378,12 @@ jobs:
             -w /workspace \
             -e CI_BASE_REF \
             -e CI_ARTIFACT_DIR=/workspace/CI-results/healthcheck \
-            photospider-ci:local \
+            "${{ steps.local-image.outputs.image_id }}" \
             bash ci/scripts/healthcheck.sh
 
       - name: Upload healthcheck logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: healthcheck-results
           path: CI-results/healthcheck
@@ -323,10 +393,11 @@ jobs:
     needs:
       - protected-ci-paths
       - ci-image-change
+      - ci-image-identity
       - healthcheck-published-image
       - healthcheck-local-image
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Report healthcheck gate
         env:
@@ -338,6 +409,7 @@ jobs:
           PROTECTED_RESULT: ${{ needs.protected-ci-paths.result }}
           IMAGE_CHANGE_RESULT: ${{ needs.ci-image-change.result }}
           IMAGE_CHANGED: ${{ needs.ci-image-change.outputs.changed }}
+          IMAGE_IDENTITY_RESULT: ${{ needs.ci-image-identity.result }}
           PUBLISHED_HEALTHCHECK_RESULT: ${{ needs.healthcheck-published-image.result }}
           LOCAL_HEALTHCHECK_RESULT: ${{ needs.healthcheck-local-image.result }}
         run: |
@@ -373,6 +445,7 @@ jobs:
           require_value ci-image-change "$IMAGE_CHANGE_RESULT" success
           case "$IMAGE_CHANGED" in
             true)
+              require_value ci-image-identity "$IMAGE_IDENTITY_RESULT" skipped
               require_value healthcheck-published-image \
                 "$PUBLISHED_HEALTHCHECK_RESULT" skipped
               require_value healthcheck-local-image \
@@ -381,6 +454,7 @@ jobs:
                 tee -a "$GITHUB_STEP_SUMMARY"
               ;;
             false)
+              require_value ci-image-identity "$IMAGE_IDENTITY_RESULT" success
               require_value healthcheck-published-image \
                 "$PUBLISHED_HEALTHCHECK_RESULT" success
               require_value healthcheck-local-image \

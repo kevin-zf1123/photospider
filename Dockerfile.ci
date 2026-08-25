@@ -1,45 +1,69 @@
-FROM ubuntu:24.04
+# The tag is a review hint only; the OCI index digest is authoritative.
+FROM ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
 
-ARG APT_MIRROR=""
-ARG PIP_INDEX_URL=""
-ARG CLANG_FORMAT_VERSION=21.1.5
+# Keep these values synchronized with ci/locks/ci-image-lock.json. The protected
+# lock verifier rejects drift before an image is built.
+ARG APT_SNAPSHOT=20260825T000000Z
+ARG GH_CLI_VERSION=2.98.0
+ARG GH_CLI_AMD64_SHA256=3b8ac6b30336802fc1a858d7c084e11cdf24ac1a761ca90b68022d7d729208de
+ARG GH_CLI_ARM64_SHA256=cf689084f3a3618f7eae4a2420d335d74626d65f5e594b9828d125d69f800d86
+ARG CI_IMAGE_INPUT_MANIFEST_SHA256
+ARG CI_IMAGE_SOURCE_COMMIT
+
+LABEL org.opencontainers.image.revision="$CI_IMAGE_SOURCE_COMMIT" \
+      org.photospider.ci.input-manifest-sha256="$CI_IMAGE_INPUT_MANIFEST_SHA256"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV VENV=/opt/venv
 ENV PATH="$VENV/bin:$PATH"
 
-RUN if [ -n "$APT_MIRROR" ]; then \
-      sed -i \
-        -e "s|http://archive.ubuntu.com/ubuntu/|$APT_MIRROR|g" \
-        -e "s|http://ports.ubuntu.com/ubuntu-ports/|$APT_MIRROR|g" \
-        -e "s|http://security.ubuntu.com/ubuntu/|$APT_MIRROR|g" \
-        /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true; \
-    fi \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ca-certificates \
-    cmake \
-    git \
-    libcurl4-openssl-dev \
-    libgtest-dev \
-    libopencv-dev \
-    libssl-dev \
-    libutf8proc-dev \
-    libyaml-cpp-dev \
-    nlohmann-json3-dev \
-    pkg-config \
-    python3 \
-    python3-venv \
+COPY ci/locks/ubuntu-24.04-packages.lock /tmp/ci-locks/ubuntu-24.04-packages.lock
+COPY ci/locks/requirements-ci.txt /tmp/ci-locks/requirements-ci.txt
+
+# Ubuntu's base image needs the locked CA bundle before HTTPS snapshot access.
+# The subsequent signed immutable snapshot constrains the complete dependency
+# closure while every direct requirement remains exactly versioned.
+RUN test "${#CI_IMAGE_INPUT_MANIFEST_SHA256}" -eq 64 \
+    && case "$CI_IMAGE_INPUT_MANIFEST_SHA256" in \
+      *[!0-9a-f]* ) echo "CI image input manifest digest is malformed." >&2; exit 1 ;; \
+      * ) ;; \
+    esac \
+    && test "${#CI_IMAGE_SOURCE_COMMIT}" -eq 40 \
+    && case "$CI_IMAGE_SOURCE_COMMIT" in \
+      *[!0-9a-f]* ) echo "CI image source commit is malformed." >&2; exit 1 ;; \
+      * ) ;; \
+    esac \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+      ca-certificates=20260601~24.04.1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get -S "$APT_SNAPSHOT" update \
+    && sed -e '/^#/d' -e '/^[[:space:]]*$/d' \
+      /tmp/ci-locks/ubuntu-24.04-packages.lock \
+      | xargs apt-get -S "$APT_SNAPSHOT" install -y --no-install-recommends \
     && python3 -m venv "$VENV" \
-    && if [ -n "$PIP_INDEX_URL" ]; then \
-         pip install --upgrade pip -i "$PIP_INDEX_URL" \
-         && pip install cpplint "clang-format==$CLANG_FORMAT_VERSION" \
-              -i "$PIP_INDEX_URL"; \
-       else \
-         pip install --upgrade pip \
-         && pip install cpplint "clang-format==$CLANG_FORMAT_VERSION"; \
-       fi \
+    && "$VENV/bin/pip" install \
+      --disable-pip-version-check \
+      --no-deps \
+      --only-binary=:all: \
+      --require-hashes \
+      -r /tmp/ci-locks/requirements-ci.txt \
+    && architecture=$(dpkg --print-architecture) \
+    && case "$architecture" in \
+      amd64) gh_sha256=$GH_CLI_AMD64_SHA256 ;; \
+      arm64) gh_sha256=$GH_CLI_ARM64_SHA256 ;; \
+      *) echo "Unsupported GitHub CLI architecture: $architecture" >&2; exit 1 ;; \
+    esac \
+    && gh_archive="gh_${GH_CLI_VERSION}_linux_${architecture}.tar.gz" \
+    && curl --fail --location --proto '=https' --tlsv1.2 \
+      --output "/tmp/$gh_archive" \
+      "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/$gh_archive" \
+    && printf '%s  %s\n' "$gh_sha256" "/tmp/$gh_archive" | sha256sum --check --strict - \
+    && tar -C /tmp -xzf "/tmp/$gh_archive" \
+    && install -m 0755 "/tmp/gh_${GH_CLI_VERSION}_linux_${architecture}/bin/gh" \
+      /usr/local/bin/gh \
     && ln -s "$VENV/bin/cpplint" /usr/local/bin/cpplint \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /tmp/ci-locks "/tmp/$gh_archive" \
+      "/tmp/gh_${GH_CLI_VERSION}_linux_${architecture}"
 
 WORKDIR /workspace

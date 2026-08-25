@@ -1,0 +1,39 @@
+{
+  "apt_snapshot": "20260825T000000Z",
+  "base_image": {
+    "digest": "sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517",
+    "name": "docker.io/library/ubuntu",
+    "tag": "24.04"
+  },
+  "builder": {
+    "action": "docker/build-push-action",
+    "release": "v6"
+  },
+  "github_cli": {
+    "arm64_sha256": "cf689084f3a3618f7eae4a2420d335d74626d65f5e594b9828d125d69f800d86",
+    "amd64_sha256": "3b8ac6b30336802fc1a858d7c084e11cdf24ac1a761ca90b68022d7d729208de",
+    "version": "2.98.0"
+  },
+  "input_paths": [
+    ".dockerignore",
+    ".github/workflows/build-ci-image.yml",
+    "Dockerfile.ci",
+    "ci/locks/actions.lock",
+    "ci/locks/ci-image-lock.json",
+    "ci/locks/linux-runner-lock.json",
+    "ci/locks/requirements-ci.txt",
+    "ci/locks/ubuntu-24.04-packages.lock",
+    "ci/scripts/ci_image_manifest.py",
+    "ci/scripts/ci_image_verify.sh",
+    "ci/scripts/ci_lock_verify.py",
+    "ci/scripts/ci_runner_verify.py"
+  ],
+  "published_image": {
+    "input_manifest_label": "org.photospider.ci.input-manifest-sha256",
+    "locator": "ghcr.io/kevin-zf1123/photospider/photospider-ci:latest",
+    "source_commit_label": "org.opencontainers.image.revision",
+    "source_repository": "kevin-zf1123/photospider",
+    "source_workflow": ".github/workflows/build-ci-image.yml"
+  },
+  "schema": "photospider-ci-image-lock-v1"
+}

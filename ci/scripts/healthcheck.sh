@@ -83,6 +83,10 @@ run_logged build_smoke_inventory_test \
   python3 -B "$SCRIPT_DIR/build_smoke_inventory_test.py"
 run_logged runtime_capability_test \
   bash "$SCRIPT_DIR/runtime_capability_test.sh"
+run_logged protected_ci_lock_verify \
+  python3 -B "$SCRIPT_DIR/ci_lock_verify.py"
+run_logged protected_ci_security_contract_test \
+  python3 -B "$SCRIPT_DIR/security_contract_test.py"
 run_logged ci_routing_test bash "$SCRIPT_DIR/ci_routing_test.sh"
 
 if ((${#cpp_files[@]} == 0)); then

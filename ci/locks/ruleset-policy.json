@@ -1,0 +1,6 @@
+{
+  "allowed_linear_merge_methods": ["rebase", "squash"],
+  "github_actions_integration_id": 15368,
+  "required_checks": ["healthcheck", "integration"],
+  "schema": "photospider-ruleset-policy-v1"
+}

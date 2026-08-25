@@ -1,0 +1,6 @@
+# Generated from the exact PyPI release files listed in ci/locks/README.md.
+clang-format==21.1.5 \
+    --hash=sha256:4b50d3830d145ef1d56f8b893e0a2a5a95f289fe857b39dc164028944692e29e \
+    --hash=sha256:b26a4e8b9066687718fcc2273e697496b7a0ed6512054f9f85e5cdbf795f78ad
+cpplint==2.0.0 \
+    --hash=sha256:f418e1d76a14b44e0757b39faa8bd47543e352ced697afd35a598a0114aec69f

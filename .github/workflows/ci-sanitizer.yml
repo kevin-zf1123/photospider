@@ -13,33 +13,97 @@ on:
           - tsan
 
 permissions:
+  attestations: read
   contents: read
   packages: read
 
 jobs:
-  sanitizer:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+  ci-image-identity:
+    runs-on: ubuntu-24.04
+    outputs:
+      digest: ${{ steps.identity.outputs.digest }}
+      image: ${{ steps.identity.outputs.image }}
+      manifest_digest: ${{ steps.identity.outputs.manifest_digest }}
+      source_commit: ${{ steps.identity.outputs.source_commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify published image identity
+        id: identity
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ci-image-identity
+          CI_IMAGE_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash ci/scripts/ci_image_verify.sh
+
+  profile-inventory:
+    needs: ci-image-identity
+    runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      image: ${{ needs.ci-image-identity.outputs.image }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Configure profile manifest producer
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/profile-bootstrap
+        run: bash ci/scripts/integration_plan.sh
+      - name: Stage versioned security profile inventory
+        run: >-
+          bash ci/scripts/ci_profile_inventory_stage.sh
+          build/ci-plan/generated/ci_inventory
+          CI-results/profile-inventory
+      - name: Upload security profile inventory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-sanitizer-profile-inventory
+          path: CI-results/profile-inventory
+          if-no-files-found: error
+          retention-days: 3
+
+  sanitizer:
+    needs: [ci-image-identity, profile-inventory]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: ${{ needs.ci-image-identity.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           submodules: recursive
 
+      - name: Download security profile inventory
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-sanitizer-profile-inventory
+          path: CI-results/profile-inventory
+
       - name: Run sanitizer tests
         env:
+          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
           SANITIZER: ${{ inputs.sanitizer }}
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-${{ inputs.sanitizer }}
         run: bash ci/scripts/sanitizer_test.sh
 
       - name: Upload sanitizer logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sanitizer-${{ inputs.sanitizer }}-results
           path: CI-results/sanitizer-${{ inputs.sanitizer }}

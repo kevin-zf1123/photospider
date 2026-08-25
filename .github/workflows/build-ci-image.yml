@@ -8,27 +8,70 @@ on:
     paths:
       - Dockerfile.ci
       - .dockerignore
+      - ci/locks/actions.lock
+      - ci/locks/ci-image-lock.json
+      - ci/locks/linux-runner-lock.json
+      - ci/locks/requirements-ci.txt
+      - ci/locks/ubuntu-24.04-packages.lock
+      - ci/scripts/ci_image_manifest.py
+      - ci/scripts/ci_image_verify.sh
+      - ci/scripts/ci_lock_verify.py
+      - ci/scripts/ci_runner_verify.py
       - .github/workflows/build-ci-image.yml
   workflow_dispatch:
     inputs:
       tag:
-        description: Extra image tag to publish.
+        description: Extra image locator tag to publish.
         required: false
         default: manual
         type: string
 
 permissions:
+  artifact-metadata: write
+  attestations: write
   contents: read
+  id-token: write
   packages: write
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify protected locks
+        run: python3 ci/scripts/ci_lock_verify.py
+
+      - name: Verify exact Linux builder image
+        run: python3 ci/scripts/ci_runner_verify.py --platform Linux
+
+      - name: Resolve publishable image source identity
+        id: source
+        run: |
+          set -Eeuo pipefail
+          source_commit=$(python3 ci/scripts/ci_image_manifest.py \
+            publish-source-commit \
+            --workflow-commit "${{ github.sha }}")
+          printf 'commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Create canonical image input manifest
+        id: manifest
+        env:
+          CI_IMAGE_MANIFEST_DIR: ${{ github.workspace }}/CI-results/ci-image-manifest
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$CI_IMAGE_MANIFEST_DIR"
+          digest=$(python3 ci/scripts/ci_image_manifest.py create \
+            --source-commit "${{ steps.source.outputs.commit }}" \
+            --repository "${{ github.repository }}" \
+            --output "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.json" \
+            --digest-output "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.sha256")
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -36,19 +79,41 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ghcr.io/${{ github.repository }}/photospider-ci
           tags: |
             type=raw,value=latest
             type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' }}
             type=sha
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source.outputs.commit }}
+            org.photospider.ci.input-manifest-sha256=${{ steps.manifest.outputs.digest }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - name: Build and push exact image
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile.ci
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CI_IMAGE_INPUT_MANIFEST_SHA256=${{ steps.manifest.outputs.digest }}
+            CI_IMAGE_SOURCE_COMMIT=${{ steps.source.outputs.commit }}
+
+      - name: Attest exact OCI subject
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/photospider-ci
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Upload canonical image input manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-image-input-${{ steps.source.outputs.commit }}
+          path: CI-results/ci-image-manifest
+          if-no-files-found: error
+          retention-days: 7

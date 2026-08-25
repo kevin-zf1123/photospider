@@ -65,7 +65,14 @@ fi
 image_changed=false
 for path in "${changed_paths[@]}"; do
   case "$path" in
-    Dockerfile.ci | .dockerignore | .github/workflows/build-ci-image.yml)
+    Dockerfile.ci | .dockerignore | .github/workflows/build-ci-image.yml | \
+      ci/locks/actions.lock | ci/locks/ci-image-lock.json | \
+      ci/locks/linux-runner-lock.json | \
+      ci/locks/requirements-ci.txt | \
+      ci/locks/ubuntu-24.04-packages.lock | \
+      ci/scripts/ci_image_manifest.py | \
+      ci/scripts/ci_image_verify.sh | ci/scripts/ci_lock_verify.py | \
+      ci/scripts/ci_runner_verify.py)
       image_changed=true
       ;;
   esac
