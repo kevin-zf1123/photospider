@@ -100,13 +100,16 @@ observations。Smoke 也会拒绝已安装的 test product archive、已导出�
 seam definition。该测试继续属于带 label 的 `build-smoke`；普通完整 CTest selection 不会让
 package construction 混入 runtime-test ownership。
 
-`PhotospiderdInstallLayoutSmoke` 会另行配置三个隔离、dependency-disabled 的 producer tree。
-它只构建 `photospiderd` target closure，随后安装已配置 package，分别覆盖嵌套相对目录
-`libexec/photospider` 与 `lib64`、absolute libdir，以及配合相对 libdir 的 absolute
-bindir。每个 case 都使用自身配置的 prefix，通过共享 capability driver 移除 loader override，
-并执行 installed daemon。默认相对 `bin`/`lib` case 仍由 `StaticProductConsumerSmoke`
-覆盖。全部 matrix build/install directory 与 absolute destination 都必须严格位于 CTest work
-root 之下，并在成功或失败后清理。
+`PhotospiderdInstallLayoutNestedRelativeSmoke`、
+`PhotospiderdInstallLayoutAbsoluteLibdirSmoke` 与
+`PhotospiderdInstallLayoutAbsoluteBindirSmoke` 会各自配置一个隔离、dependency-disabled 的
+producer tree。每个注册都会传入一个严格的 `--layout` selector，并拥有独立的 CTest work root。
+每个 driver 都只构建 `photospiderd` target closure，随后安装已配置 package，分别覆盖嵌套相对目录
+`libexec/photospider` 与 `lib64`、absolute libdir，以及配合相对 libdir 的 absolute bindir。
+每个 case 都使用自身配置的 prefix，通过共享 capability driver 移除 loader override，并执行
+installed daemon。默认相对 `bin`/`lib` case 仍由 `StaticProductConsumerSmoke` 覆盖。全部
+build/install directory 与 absolute destination 都必须严格位于各 case 自己的 CTest work root
+之下，并在成功或失败后清理。
 
 配置后的 producer 还会把 `PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS` 序列化为
 build-tree inventory，其中使用安装相对路径 `include/photospider/...`。写入任何 record 前，
@@ -290,7 +293,9 @@ regression 留在完整 CTest 分片。
 `OpenExrDeepProviderInstallConsumerSmoke`、
 `OpenExrDeepProviderOptionOffSmoke`、
 `OpenCvOperationProviderDisabledBuild`、
-`PhotospiderdInstallLayoutSmoke`、
+`PhotospiderdInstallLayoutAbsoluteBindirSmoke`、
+`PhotospiderdInstallLayoutAbsoluteLibdirSmoke`、
+`PhotospiderdInstallLayoutNestedRelativeSmoke`、
 `PublicHeaderSelfContainment` 和
 `StaticProductConsumerSmoke`。`PublicHeaderSelfContainment` 属于该分类，因为它的 CTest command
 会构建专用 self-containment target；普通 GoogleTest binary、daemon/CLI process test 与
@@ -299,6 +304,10 @@ regression 留在完整 CTest 分片。
 safety regression。其唯一的 `project(... NONE)` fixture 会使用 imported executable 执行 production
 manifest generator，但不会启动 compiler、product build、CTest、install、compile target 或生成的
 executable。
+`InstallLayoutCTestContractSafety` 是三个拆分 daemon layout 注册对应的普通 regression。它会在
+mock 掉昂贵 nested build 的前提下验证严格 selector 拒绝、单 case dispatch 与 cleanup，再读取实时
+配置得到的 CTest JSON，要求三个精确注册、互不相同的 work root、label、串行所有权与 timeout。
+它不会启动 product configure、build、install 或 daemon executable。
 `InstallConsumerArchitecturePropagationSafety` 同样留在主分片：它使用可丢弃的 producer cache
 fixture 执行三个 install-consumer driver 的真实命令构造路径，同时替换 subprocess 执行，因此能
 在不启动 product configure、build 或 install 的情况下验证 cache 到 child argv 的传播。其
@@ -324,7 +333,7 @@ tree，并要求三个
 `StaticProductConsumerSmoke` 只在 IPC enabled 时必须精确注册一次，在 IPC disabled 时必须缺席。
 每个预期 entry 还必须保持 enabled、带正确 label，并以精确的 `python -B` driver path 开头。被
 注释或处于 inactive CMake 分支中的源码不会生成 CTest entry，因此无法通过这项生成后 inventory
-检查。该查询不会执行任何真实 smoke，也不会改变现有九项 build-smoke 分类。
+检查。该查询不会执行任何真实 smoke，也不会改变现有十一项 build-smoke 分类。
 
 CTest 会保留每个带标签测试的注册，供本机直接运行。CI 的 `full-ctest` 分片会排除该精确标签；
 配置规划只会把 `ctest --show-only=json-v1` 解析为允许空集合的预检，因为默认
@@ -349,7 +358,10 @@ Docker-capable runner，因此读取同一份构建后 NUL 分隔名称并顺序
 
 Primary repository 中的 CTest 与 CI entry 只用于长期软件行为：正确性、性能、稳定性、多线程
 执行、错误处理、编译边界、package consumption 和运行时 API 边界。
-`PhotospiderdCapabilityHelp`、`PhotospiderdInstallLayoutSmoke`、
+`PhotospiderdCapabilityHelp`、
+`PhotospiderdInstallLayoutNestedRelativeSmoke`、
+`PhotospiderdInstallLayoutAbsoluteLibdirSmoke`、
+`PhotospiderdInstallLayoutAbsoluteBindirSmoke`、
 `StaticProductConsumerSmoke`、`GraphCliOptionBadAlloc`、GoogleTest discovery
 与 `PublicHeaderSelfContainment` 满足这一规则，
 因为它们会执行或编译维护中的产品。Daemon help 测试通过 CMake script driver 运行当前

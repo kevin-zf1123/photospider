@@ -3126,22 +3126,69 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
             RUN_SERIAL TRUE
             TIMEOUT 900)
-        add_test(NAME PhotospiderdInstallLayoutSmoke
+        add_test(NAME PhotospiderdInstallLayoutNestedRelativeSmoke
             COMMAND ${Python3_EXECUTABLE} -B
                 "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_install_layout_smoke.py"
                 --repo "${PROJECT_SOURCE_DIR}"
                 --build-root "${CMAKE_BINARY_DIR}"
                 --work
-                    "${CMAKE_BINARY_DIR}/tests/photospiderd_install_layout_smoke"
+                    "${CMAKE_BINARY_DIR}/tests/photospiderd_install_layout_nested_relative_smoke"
                 --cmake-executable "${CMAKE_COMMAND}"
                 --generator "${CMAKE_GENERATOR}"
                 --config $<CONFIG>
                 --osx-architectures "${CMAKE_OSX_ARCHITECTURES}"
+                --layout nested-relative
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-        set_tests_properties(PhotospiderdInstallLayoutSmoke PROPERTIES
+        set_tests_properties(
+            PhotospiderdInstallLayoutNestedRelativeSmoke PROPERTIES
             LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
             RUN_SERIAL TRUE
-            TIMEOUT 1200)
+            TIMEOUT 900)
+        add_test(NAME PhotospiderdInstallLayoutAbsoluteLibdirSmoke
+            COMMAND ${Python3_EXECUTABLE} -B
+                "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_install_layout_smoke.py"
+                --repo "${PROJECT_SOURCE_DIR}"
+                --build-root "${CMAKE_BINARY_DIR}"
+                --work
+                    "${CMAKE_BINARY_DIR}/tests/photospiderd_install_layout_absolute_libdir_smoke"
+                --cmake-executable "${CMAKE_COMMAND}"
+                --generator "${CMAKE_GENERATOR}"
+                --config $<CONFIG>
+                --osx-architectures "${CMAKE_OSX_ARCHITECTURES}"
+                --layout absolute-libdir
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+        set_tests_properties(
+            PhotospiderdInstallLayoutAbsoluteLibdirSmoke PROPERTIES
+            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+            RUN_SERIAL TRUE
+            TIMEOUT 900)
+        add_test(NAME PhotospiderdInstallLayoutAbsoluteBindirSmoke
+            COMMAND ${Python3_EXECUTABLE} -B
+                "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_install_layout_smoke.py"
+                --repo "${PROJECT_SOURCE_DIR}"
+                --build-root "${CMAKE_BINARY_DIR}"
+                --work
+                    "${CMAKE_BINARY_DIR}/tests/photospiderd_install_layout_absolute_bindir_smoke"
+                --cmake-executable "${CMAKE_COMMAND}"
+                --generator "${CMAKE_GENERATOR}"
+                --config $<CONFIG>
+                --osx-architectures "${CMAKE_OSX_ARCHITECTURES}"
+                --layout absolute-bindir
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+        set_tests_properties(
+            PhotospiderdInstallLayoutAbsoluteBindirSmoke PROPERTIES
+            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+            RUN_SERIAL TRUE
+            TIMEOUT 900)
+        add_test(NAME InstallLayoutCTestContractSafety
+            COMMAND ${Python3_EXECUTABLE} -B
+                "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_install_layout_smoke_test.py"
+            WORKING_DIRECTORY
+                "${PROJECT_SOURCE_DIR}/tests/integration")
+        set_tests_properties(InstallLayoutCTestContractSafety PROPERTIES
+            ENVIRONMENT
+                "PHOTOSPIDER_CTEST_EXECUTABLE=${CMAKE_CTEST_COMMAND};PHOTOSPIDER_BUILD_DIRECTORY=${CMAKE_BINARY_DIR}"
+            TIMEOUT 30)
     endif()
     add_test(NAME IpcDisabledInstallSmoke
         COMMAND ${Python3_EXECUTABLE} -B

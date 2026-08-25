@@ -78,11 +78,13 @@ output 输出紧凑 matrix。Artifact key 由有界 ASCII slug 与测试名 SHA-
 - `IpcDisabledInstallSmoke`
 - `OpenExrDeepProviderOptionOffSmoke`
 - `OpenCvOperationProviderDisabledBuild`
-- `PhotospiderdInstallLayoutSmoke`
+- `PhotospiderdInstallLayoutAbsoluteBindirSmoke`
+- `PhotospiderdInstallLayoutAbsoluteLibdirSmoke`
+- `PhotospiderdInstallLayoutNestedRelativeSmoke`
 - `PublicHeaderSelfContainment`
 - `StaticProductConsumerSmoke`
 
-五个默认 dependency/configuration driver、daemon install-layout driver 与 static-product consumer
+五个默认 dependency/configuration driver、三个 daemon install-layout case 与 static-product consumer
 会创建或校验隔离的 nested build profile；public-header self-containment 会调用专用 compile
 target。它们属于长期 product、package、configuration 与 compile 边界，不是 migration 或
 source-layout 检查。
@@ -90,10 +92,14 @@ source-layout 检查。
 safety regression：其 Python unittest 会在进程内验证 cleanup guard 与 cache-layout helper，
 还会通过 production manifest generator 配置一个无需 compiler 的 `project(... NONE)` fixture；
 它不会启动 child build、install、compile target 或生成的 executable。
+`InstallLayoutCTestContractSafety` 同样留在普通完整 CTest：它要求严格的单 case CLI selector，
+并读取实时配置得到的 CTest JSON，以证明三个稳定注册拥有互不相同的 work root、`build-smoke`
+label、`RUN_SERIAL` 和有界 timeout。其 selector 测试会 mock nested build，不启动 product
+configure、build 或 install。
 
-因此，默认 profile 包含八个带 `build-smoke` 标签的 entry。当
+因此，默认 profile 包含十个带 `build-smoke` 标签的 entry。当
 `PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER=ON` 时，条件式
-`OpenExrDeepProviderInstallConsumerSmoke` 会作为第九个 entry 加入；它不属于默认 inventory。
+`OpenExrDeepProviderInstallConsumerSmoke` 会作为第十一个 entry 加入；它不属于默认 inventory。
 
 两项 nested-profile inventory 无需在 workflow 中维护数量，也仍保持精确。Static-product producer
 会导出已配置的 CMake public-header install allowlist，consumer 要求已安装 include tree 与这些相对

@@ -8,8 +8,17 @@ import platform
 import shlex
 import shutil
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+#: @brief Stable CLI layout selectors and CTest matrix identities.
+#: @note The order is diagnostic only; every invocation selects exactly one.
+INSTALL_LAYOUT_NAMES = (
+    "nested-relative",
+    "absolute-libdir",
+    "absolute-bindir",
+)
 
 
 @dataclass(frozen=True)
@@ -122,21 +131,43 @@ def configured_layouts(work: Path) -> tuple[InstallLayout, ...]:
 
     return (
         InstallLayout(
-            name="nested-relative",
+            name=INSTALL_LAYOUT_NAMES[0],
             bindir="libexec/photospider",
             libdir="lib64",
         ),
         InstallLayout(
-            name="absolute-libdir",
+            name=INSTALL_LAYOUT_NAMES[1],
             bindir="bin",
             libdir=str(work / "absolute-libdir" / "runtime"),
         ),
         InstallLayout(
-            name="absolute-bindir",
+            name=INSTALL_LAYOUT_NAMES[2],
             bindir=str(work / "absolute-bindir" / "daemon"),
             libdir="lib64",
         ),
     )
+
+
+def selected_layout(work: Path, name: str) -> InstallLayout:
+    """@brief Resolve one strict layout selector against the maintained matrix.
+
+    @param work Validated transient root owning absolute layout destinations.
+    @param name Exact stable selector accepted by the command-line interface.
+    @return The single matching immutable layout record.
+    @throws ValueError If the selector is unknown or the matrix is ambiguous.
+    @note The strict cardinality check fails closed if future matrix edits
+      accidentally duplicate a selector, even though argparse already limits
+      ordinary command-line values to ``INSTALL_LAYOUT_NAMES``.
+    """
+
+    matches = tuple(
+        layout for layout in configured_layouts(work) if layout.name == name
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            f"layout selector must resolve exactly once: {name!r}"
+        )
+    return matches[0]
 
 
 def installed_daemon_path(
@@ -186,8 +217,11 @@ def run_layout(
     @return None after installed ``photospiderd --help`` succeeds.
     @throws OSError If filesystem or process startup fails.
     @throws RuntimeError If configure, build, install, or daemon help fails.
-    @note Every child directory is case-local. The shared help driver removes
-      LD/DYLD and related loader overrides immediately before real execution.
+    @note Every child directory is case-local. The build subprocess inherits
+      the caller environment unchanged, including an already supplied
+      ``CMAKE_BUILD_PARALLEL_LEVEL``; this driver does not define a CI job
+      count. The shared help driver removes LD/DYLD and related loader
+      overrides before real execution.
     """
 
     case_root = work / layout.name
@@ -258,15 +292,17 @@ def run_layout(
     print(f"layout {layout.name} installed daemon help passed", flush=True)
 
 
-def main() -> int:
-    """@brief Execute and clean the complete installed-layout matrix.
+def main(argv: Sequence[str] | None = None) -> int:
+    """@brief Execute and clean one selected installed-layout case.
 
-    @return Zero after all maintained layouts execute successfully.
+    @param argv Optional explicit command-line arguments for deterministic tests.
+    @return Zero after the selected maintained layout executes successfully.
     @throws ValueError If caller paths could escape the outer build tree.
     @throws OSError If filesystem or process startup fails.
     @throws RuntimeError If cleanup or one required behavior fails.
     @note Cleanup runs in ``finally`` after the work root is created, so both
-      success and failure discard every child build/install directory.
+      success and failure discard the selected case's build/install directory.
+      Independent CTest registrations own distinct ``--work`` roots.
     """
 
     parser = argparse.ArgumentParser()
@@ -277,7 +313,10 @@ def main() -> int:
     parser.add_argument("--generator", default="")
     parser.add_argument("--config", default="")
     parser.add_argument("--osx-architectures", default="")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--layout", required=True, choices=INSTALL_LAYOUT_NAMES
+    )
+    args = parser.parse_args(argv)
 
     platform_system = platform.system()
     if platform_system not in {"Darwin", "Linux"}:
@@ -296,19 +335,18 @@ def main() -> int:
     strict_remove_tree(work)
     work.mkdir(parents=True)
     try:
-        layouts = configured_layouts(work)
-        for layout in layouts:
-            run_layout(
-                layout,
-                repo=repo,
-                work=work,
-                cmake_executable=args.cmake_executable,
-                generator=args.generator,
-                config=args.config,
-                osx_architectures=args.osx_architectures,
-                platform_system=platform_system,
-            )
-        print(f"all {len(layouts)} install layouts passed", flush=True)
+        layout = selected_layout(work, args.layout)
+        run_layout(
+            layout,
+            repo=repo,
+            work=work,
+            cmake_executable=args.cmake_executable,
+            generator=args.generator,
+            config=args.config,
+            osx_architectures=args.osx_architectures,
+            platform_system=platform_system,
+        )
+        print(f"install layout {layout.name} passed", flush=True)
     finally:
         strict_remove_tree(work)
     return 0
