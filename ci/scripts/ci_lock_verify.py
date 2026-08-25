@@ -2,8 +2,9 @@
 """Validate every repository-protected CI lock and active consumer.
 
 This durable verifier is intentionally independent of candidate product code.
-It rejects floating workflow actions/runners/images, malformed protected locks,
-and Docker installation paths that bypass the immutable snapshot or hash locks.
+It rejects floating workflow actions/runners/images, persisted checkout tokens,
+unsafe pull-request-target trust routing, malformed protected locks, and Docker
+installation paths that bypass the immutable snapshot or hash locks.
 Run it from any directory; ``--repo-root`` is primarily for fixture tests.
 """
 
@@ -131,6 +132,178 @@ def _workflow_files(root: Path) -> list[Path]:
     return workflows
 
 
+def _step_lines(lines: list[str], action_index: int) -> list[str]:
+    """Return the YAML lines owned by one ``- uses`` workflow step.
+
+    Args:
+        lines: Complete workflow text split into physical lines.
+        action_index: Zero-based index of the step's ``uses`` line.
+
+    Returns:
+        Lines after ``uses`` and before the next sibling step or enclosing
+        mapping boundary.
+
+    Raises:
+        ContractError: The indexed line is not a sequence action step.
+
+    Note:
+        This deliberately parses only the exact protected step shape needed by
+        the lock verifier; general YAML semantics remain GitHub's concern.
+    """
+    action_line = lines[action_index]
+    action_indent = len(action_line) - len(action_line.lstrip())
+    if not action_line.lstrip().startswith("- uses:"):
+        raise ContractError("checkout step parser received a non-action line")
+    result: list[str] = []
+    for line in lines[action_index + 1 :]:
+        stripped = line.lstrip()
+        if not stripped:
+            result.append(line)
+            continue
+        indent = len(line) - len(stripped)
+        if indent < action_indent or (
+            indent == action_indent and stripped.startswith("- ")
+        ):
+            break
+        result.append(line)
+    return result
+
+
+def _verify_checkout_step(path: Path, lines: list[str], action_index: int) -> None:
+    """Require one checkout action to refuse credential persistence explicitly.
+
+    Args:
+        path: Workflow path used in diagnostics.
+        lines: Complete workflow physical lines.
+        action_index: Zero-based checkout ``uses`` line index.
+
+    Raises:
+        ContractError: The checkout lacks exactly one literal
+            ``persist-credentials: false`` input.
+    """
+    action_line = lines[action_index]
+    action_indent = len(action_line) - len(action_line.lstrip())
+    step_lines = _step_lines(lines, action_index)
+    with_indent = action_indent + 2
+    with_indices = [
+        index
+        for index, line in enumerate(step_lines)
+        if line == " " * with_indent + "with:"
+    ]
+    if len(with_indices) != 1:
+        raise ContractError(
+            f"{path}:{action_index + 1}: checkout must have one explicit with "
+            "mapping containing persist-credentials: false"
+        )
+    input_indent = with_indent + 2
+    values: list[str] = []
+    pattern = re.compile(r"^\s*persist-credentials:\s*([^#\s]+)\s*(?:#.*)?$")
+    for line in step_lines[with_indices[0] + 1 :]:
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        indent = len(line) - len(stripped)
+        if indent <= with_indent:
+            break
+        match = pattern.match(line)
+        if match and indent == input_indent:
+            values.append(match.group(1))
+    if values != ["false"]:
+        raise ContractError(
+            f"{path}:{action_index + 1}: checkout must set exactly one "
+            "literal persist-credentials: false input"
+        )
+
+
+def _verify_pull_request_target_trust(path: Path, lines: list[str]) -> None:
+    """Require fail-closed fork routing and a base-code ruleset reader.
+
+    Args:
+        path: Workflow path used in diagnostics.
+        lines: Complete workflow physical lines.
+
+    Raises:
+        ContractError: Fork rejection can occur after checkout, is limited to
+            ``CI/**``, or the token-bearing ruleset job consumes head code.
+
+    Note:
+        Same-repository heads remain eligible for the maintained sentinels and
+        push gates. This check owns only the fork/base-token trust boundary.
+    """
+    if not any(line.strip() == "pull_request_target:" for line in lines):
+        return
+    reject_name = "- name: Reject fork pull request before checkout"
+    reject_indices = [
+        index for index, line in enumerate(lines) if line.strip() == reject_name
+    ]
+    checkout_indices = [
+        index
+        for index, line in enumerate(lines)
+        if re.match(r"^\s*- uses:\s*actions/checkout@", line)
+    ]
+    if len(reject_indices) != 1 or not checkout_indices:
+        raise ContractError(
+            f"{path}: pull_request_target fork guard is missing or ambiguous"
+        )
+    reject_index = reject_indices[0]
+    if reject_index >= checkout_indices[0]:
+        raise ContractError(f"{path}: fork guard must precede the first checkout")
+    reject_block = "\n".join(lines[reject_index : checkout_indices[0]])
+    required_reject = (
+        "github.event_name == 'pull_request_target'",
+        "github.event.pull_request.head.repo.full_name != github.repository",
+        "Fork pull requests are rejected before checkout.",
+    )
+    if any(fragment not in reject_block for fragment in required_reject):
+        raise ContractError(f"{path}: fork guard does not reject every fork identity")
+    if "startsWith(github.head_ref, 'CI/')" in reject_block:
+        raise ContractError(f"{path}: fork guard is incorrectly limited to CI/** heads")
+    try:
+        reject_env_index = next(
+            index
+            for index in range(reject_index + 1, checkout_indices[0])
+            if lines[index] == "        env:"
+        )
+    except StopIteration as error:
+        raise ContractError(f"{path}: fork guard condition is not closed by env") from error
+    normalized_condition = re.sub(
+        r"\s+", "", "".join(lines[reject_index + 1 : reject_env_index])
+    )
+    expected_condition = (
+        "if:>-${{github.event_name=='pull_request_target'&&"
+        "github.event.pull_request.head.repo.full_name!=github.repository}}"
+    )
+    if normalized_condition != expected_condition:
+        raise ContractError(f"{path}: fork guard condition does not reject every fork")
+
+    try:
+        job_index = lines.index("  ruleset-readback:")
+    except ValueError as error:
+        raise ContractError(
+            f"{path}: pull_request_target lacks trusted ruleset readback"
+        ) from error
+    job_end = len(lines)
+    for index in range(job_index + 1, len(lines)):
+        if re.match(r"^  [A-Za-z0-9_.-]+:\s*$", lines[index]):
+            job_end = index
+            break
+    ruleset_block = "\n".join(lines[job_index:job_end])
+    required_ruleset = (
+        "persist-credentials: false",
+        "repository: ${{ github.repository }}",
+        "ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.sha }}",
+        "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+        "python3 ci/scripts/ruleset_readback.py",
+    )
+    if any(fragment not in ruleset_block for fragment in required_ruleset):
+        raise ContractError(f"{path}: ruleset readback is not bound to trusted base code")
+    if (
+        "pull_request.head.repo" in ruleset_block
+        or "pull_request.head.sha" in ruleset_block
+    ):
+        raise ContractError(f"{path}: ruleset readback consumes untrusted head identity")
+
+
 def _verify_workflows(root: Path, actions: dict[str, tuple[str, str]]) -> None:
     """Verify every workflow action, runner, and container identity.
 
@@ -155,6 +328,7 @@ def _verify_workflows(root: Path, actions: dict[str, tuple[str, str]]) -> None:
             lines = path.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeError) as error:
             raise ContractError(f"cannot read workflow {path}: {error}") from error
+        _verify_pull_request_target_trust(path, lines)
         for line_number, line in enumerate(lines, 1):
             action_match = uses_pattern.match(line)
             if action_match:
@@ -177,6 +351,8 @@ def _verify_workflows(root: Path, actions: dict[str, tuple[str, str]]) -> None:
                         f"{path}:{line_number}: {action} must retain '# {release}' review hint"
                     )
                 used_actions.add(action)
+                if action == "actions/checkout":
+                    _verify_checkout_step(path, lines, line_number - 1)
             image_match = image_pattern.match(line)
             if image_match:
                 image = image_match.group(1)

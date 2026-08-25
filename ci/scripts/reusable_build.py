@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -30,6 +31,84 @@ from typing import Any
 
 class ReusableBuildError(ValueError):
     """Report an unsafe archive or missing/mismatched reusable-build identity."""
+
+
+class _ArchiveSnapshot:
+    """Own one immutable-by-path regular archive object for verification.
+
+    The snapshot opens the caller-visible path exactly once with link refusal,
+    records type and size from that descriptor, and keeps the descriptor alive
+    through digesting, member validation, archived measurement, and final
+    extraction. Atomic pathname replacement can therefore change only what a
+    later caller sees, never the bytes already accepted by this consumer.
+
+    Args:
+        path: Candidate archive path to open without following its final link.
+
+    Raises:
+        ReusableBuildError: The platform lacks the required no-follow open flag
+            or the opened object is not a regular file.
+        OSError: The path cannot be opened or inspected.
+
+    Note:
+        Darwin and Linux provide ``O_NOFOLLOW`` and are the maintained CI
+        platforms. Each tar reader is sequential and rewinds this same handle;
+        ``tarfile`` does not close a caller-owned file object.
+    """
+
+    def __init__(self, path: Path) -> None:
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise ReusableBuildError(
+                "archive verification requires an O_NOFOLLOW-capable platform"
+            )
+        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(path, flags)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ReusableBuildError(f"expected a regular archive file: {path}")
+            self._handle = os.fdopen(descriptor, "rb", closefd=True)
+        except Exception:
+            os.close(descriptor)
+            raise
+        self.path = path
+        self.size = metadata.st_size
+
+    def __enter__(self) -> "_ArchiveSnapshot":
+        """Return this live snapshot for one verification scope."""
+        return self
+
+    def __exit__(
+        self, exception_type: object, exception: object, traceback: object
+    ) -> None:
+        """Close the retained archive descriptor at scope exit."""
+        self._handle.close()
+
+    def sha256(self) -> str:
+        """Hash the retained archive bytes and rewind for the next reader."""
+        digest = hashlib.sha256()
+        self._handle.seek(0)
+        for chunk in iter(lambda: self._handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+        self._handle.seek(0)
+        return digest.hexdigest()
+
+    def open_tar(self) -> tarfile.TarFile:
+        """Open a gzip tar reader over the retained descriptor.
+
+        Returns:
+            A caller-owned ``TarFile`` positioned at the snapshot start.
+
+        Raises:
+            tarfile.TarError: The retained bytes are not a readable gzip tar.
+
+        Note:
+            Callers must close the returned reader before requesting another;
+            all verification phases are deliberately sequential.
+        """
+        self._handle.seek(0)
+        return tarfile.open(fileobj=self._handle, mode="r:gz")
 
 
 def _load_profile_module(root: Path) -> Any:
@@ -645,12 +724,27 @@ def _extract_members(
 
 
 def _verify_archived_measurement(
-    arguments: argparse.Namespace, manifest: dict[str, Any]
+    arguments: argparse.Namespace,
+    manifest: dict[str, Any],
+    snapshot: _ArchiveSnapshot,
 ) -> None:
-    """Remeasure safely staged archive bytes and match the signed identity."""
+    """Remeasure the retained archive snapshot and match signed identity.
+
+    Args:
+        arguments: Exact expected consumer identities and repository root.
+        manifest: Canonical external reusable-build manifest.
+        snapshot: Once-opened archive object already bound to the manifest
+            digest and size.
+
+    Raises:
+        ReusableBuildError: Members, profile identity, or measured build state
+            differs from the signed manifest.
+        OSError: Safe staging or measurement cannot complete.
+        tarfile.TarError: The retained archive bytes are malformed.
+    """
     with tempfile.TemporaryDirectory(prefix="photospider-reusable-verify-") as stage_text:
         stage = Path(stage_text)
-        with tarfile.open(arguments.archive, mode="r:gz") as archive:
+        with snapshot.open_tar() as archive:
             members = _validated_members(archive)
             _extract_members(archive, members, stage)
         build = stage / "ci"
@@ -679,8 +773,23 @@ def _verify_archived_measurement(
             raise ReusableBuildError("archived build identity differs from protected measurement")
 
 
-def _verify_manifest(arguments: argparse.Namespace) -> dict[str, Any]:
-    """Validate canonical manifest structure, expected identities, and artifact bytes."""
+def _verify_manifest(
+    arguments: argparse.Namespace, snapshot: _ArchiveSnapshot
+) -> dict[str, Any]:
+    """Validate the manifest and bind it to one retained archive object.
+
+    Args:
+        arguments: Exact expected consumer identities and manifest path.
+        snapshot: Once-opened archive whose digest, size, members, and measured
+            build identity must all agree.
+
+    Returns:
+        The validated canonical manifest object.
+
+    Raises:
+        ReusableBuildError: Any manifest, expected identity, or archive object
+            field differs.
+    """
     value = _load_json(arguments.manifest)
     expected_fields = {
         "schema", "artifact", "candidate_commit", "profile", "matrix_sha256",
@@ -718,49 +827,69 @@ def _verify_manifest(arguments: argparse.Namespace) -> dict[str, Any]:
         raise ReusableBuildError("manifest artifact identity is malformed")
     if artifact["name"] != arguments.archive.name:
         raise ReusableBuildError("manifest artifact name mismatch")
-    if artifact["sha256"] != _sha256_file(arguments.archive):
+    if artifact["sha256"] != snapshot.sha256():
         raise ReusableBuildError("manifest artifact digest mismatch")
-    if artifact["size"] != arguments.archive.stat().st_size:
+    if artifact["size"] != snapshot.size:
         raise ReusableBuildError("manifest artifact size mismatch")
-    _verify_archived_measurement(arguments, value)
+    _verify_archived_measurement(arguments, value, snapshot)
     return value
 
 
 def _verify_extract(arguments: argparse.Namespace) -> None:
-    """Verify all identities and archive members, then atomically install ``ci``."""
-    _verify_manifest(arguments)
-    arguments.destination.mkdir(parents=True, exist_ok=True)
-    if arguments.destination.is_symlink():
-        raise ReusableBuildError("extraction destination must not be a symlink")
-    with tarfile.open(arguments.archive, mode="r:gz") as archive:
-        members = _validated_members(archive)
-        with tempfile.TemporaryDirectory(prefix=".ci-reusable-", dir=arguments.destination) as stage_text:
-            stage = Path(stage_text)
-            _extract_members(archive, members, stage)
-            staged_ci = stage / "ci"
-            target_ci = arguments.destination / "ci"
-            backup = arguments.destination / f".ci-reusable-backup-{os.getpid()}"
-            if backup.exists():
-                raise ReusableBuildError(f"unexpected extraction backup exists: {backup}")
-            if target_ci.exists() or target_ci.is_symlink():
-                target_ci.replace(backup)
-            try:
-                staged_ci.replace(target_ci)
-            except Exception:
-                if backup.exists() and not target_ci.exists():
-                    backup.replace(target_ci)
-                raise
-            if backup.exists():
-                if backup.is_dir() and not backup.is_symlink():
-                    shutil.rmtree(backup)
-                else:
-                    backup.unlink()
+    """Verify one retained archive object, then atomically install ``ci``.
+
+    Args:
+        arguments: Exact consumer identities, archive path, and destination.
+
+    Raises:
+        ReusableBuildError: Identity, archive, member, or destination safety
+            checks fail.
+        OSError: Snapshot, staging, or atomic installation cannot complete.
+        tarfile.TarError: The retained archive bytes are malformed.
+
+    Note:
+        The archive pathname is opened once; atomic replacement after digesting
+        cannot alter archived measurement or the final extracted bytes.
+    """
+    with _ArchiveSnapshot(arguments.archive) as snapshot:
+        _verify_manifest(arguments, snapshot)
+        arguments.destination.mkdir(parents=True, exist_ok=True)
+        if arguments.destination.is_symlink():
+            raise ReusableBuildError("extraction destination must not be a symlink")
+        with snapshot.open_tar() as archive:
+            members = _validated_members(archive)
+            with tempfile.TemporaryDirectory(
+                prefix=".ci-reusable-", dir=arguments.destination
+            ) as stage_text:
+                stage = Path(stage_text)
+                _extract_members(archive, members, stage)
+                staged_ci = stage / "ci"
+                target_ci = arguments.destination / "ci"
+                backup = arguments.destination / f".ci-reusable-backup-{os.getpid()}"
+                if backup.exists():
+                    raise ReusableBuildError(
+                        f"unexpected extraction backup exists: {backup}"
+                    )
+                if target_ci.exists() or target_ci.is_symlink():
+                    target_ci.replace(backup)
+                try:
+                    staged_ci.replace(target_ci)
+                except Exception:
+                    if backup.exists() and not target_ci.exists():
+                        backup.replace(target_ci)
+                    raise
+                if backup.exists():
+                    if backup.is_dir() and not backup.is_symlink():
+                        shutil.rmtree(backup)
+                    else:
+                        backup.unlink()
     print("reusable build verification and safe extraction passed")
 
 
 def _verify_only(arguments: argparse.Namespace) -> None:
-    """Verify identities and every archive member without changing a build tree."""
-    _verify_manifest(arguments)
+    """Verify identities and every member of one retained archive object."""
+    with _ArchiveSnapshot(arguments.archive) as snapshot:
+        _verify_manifest(arguments, snapshot)
     print("reusable build identity and archive verification passed")
 
 

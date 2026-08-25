@@ -17,8 +17,9 @@ import tarfile
 import tempfile
 import time
 import unittest
-from unittest import mock
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -709,7 +710,7 @@ class ProfileReaderContractTest(unittest.TestCase):
             self.assertIn("not bytewise sorted", failed.stderr)
 
     def test_versioned_fuzz_matrix_arguments_reach_real_runner_boundary(self) -> None:
-        """Carry the exact three-file matrix CMake args into configure and fuzz."""
+        """Carry matrix arguments through the real CMake fuzz-output boundary."""
         with tempfile.TemporaryDirectory() as temporary_text:
             root = Path(temporary_text)
             inventory = root / "inventory"
@@ -739,9 +740,9 @@ class ProfileReaderContractTest(unittest.TestCase):
                 "printf '%q ' \"$@\" > \"$CI_TEST_CONFIGURE_LOG\"; printf '\\n' >> \"$CI_TEST_CONFIGURE_LOG\"\n"
                 "build_dir=\n"
                 "while (($#)); do [[ $1 == -B ]] && { build_dir=$2; break; }; shift; done\n"
-                "mkdir -p \"$build_dir/tests\"\n"
-                "printf '%s\\n' '#!/usr/bin/env bash' 'printf '\"'\"'%q '\"'\"' \"$@\" >> \"$CI_TEST_FUZZ_LOG\"; printf '\"'\"'\\n'\"'\"' >> \"$CI_TEST_FUZZ_LOG\"' > \"$build_dir/tests/fuzz_codec\"\n"
-                "chmod +x \"$build_dir/tests/fuzz_codec\"\n",
+                "mkdir -p \"$build_dir/fuzzers\"\n"
+                "printf '%s\\n' '#!/usr/bin/env bash' 'printf '\"'\"'%q '\"'\"' \"$@\" >> \"$CI_TEST_FUZZ_LOG\"; printf '\"'\"'\\n'\"'\"' >> \"$CI_TEST_FUZZ_LOG\"' > \"$build_dir/fuzzers/fuzz_codec\"\n"
+                "chmod +x \"$build_dir/fuzzers/fuzz_codec\"\n",
                 encoding="utf-8",
             )
             cmake.chmod(0o755)
@@ -769,6 +770,9 @@ class ProfileReaderContractTest(unittest.TestCase):
             fuzzed = fuzz_log.read_text(encoding="utf-8")
             for argument in ("-seed=1", "-runs=1000", "-timeout=2", "-max_len=65536"):
                 self.assertIn(argument, fuzzed)
+            runner = (SCRIPTS / "fuzz_smoke.sh").read_text(encoding="utf-8")
+            self.assertIn("binary=$BUILD_DIR/fuzzers/$target", runner)
+            self.assertNotIn("binary=$BUILD_DIR/tests/$target", runner)
 
 
 class SecurityPlatformContractTest(unittest.TestCase):
@@ -1003,6 +1007,56 @@ class SecurityPlatformContractTest(unittest.TestCase):
         self.assertIn("CI_RUNNER_TEMP: ${{ runner.temp }}", workflow)
         self.assertNotIn("CI_DARWIN_VCPKG_INSTALLED:", workflow)
 
+    def test_gtest_inventory_uses_canonicalized_actual_ctest_includes(self) -> None:
+        """Accept canonical aliases and reject foreign CTest include records."""
+        module = (REPO_ROOT / "cmake/PhotospiderCiInventory.cmake").as_posix()
+        for foreign_include in (False, True):
+            with self.subTest(foreign_include=foreign_include), tempfile.TemporaryDirectory() as temporary_text:
+                root = Path(temporary_text)
+                source = root / "source"
+                build = root / "build"
+                source.mkdir()
+                (source / "main.cpp").write_text(
+                    "int main() { return 0; }\n", encoding="utf-8"
+                )
+                include_expression = (
+                    "${CMAKE_SOURCE_DIR}/alpha[1]_include.cmake"
+                    if foreign_include
+                    else "${CMAKE_BINARY_DIR}/alias/../alpha[1]_include.cmake"
+                )
+                (source / "CMakeLists.txt").write_text(
+                    "cmake_minimum_required(VERSION 3.16)\n"
+                    "project(ci_inventory_contract LANGUAGES CXX)\n"
+                    f'include("{module}")\n'
+                    "add_executable(alpha main.cpp)\n"
+                    "add_executable(beta main.cpp)\n"
+                    "set_property(TARGET alpha PROPERTY CTEST_DISCOVERED_TEST_COUNTER 1)\n"
+                    "set_property(TARGET beta PROPERTY CTEST_DISCOVERED_TEST_COUNTER 1)\n"
+                    "file(MAKE_DIRECTORY \"${CMAKE_BINARY_DIR}/alias\")\n"
+                    "file(WRITE \"${CMAKE_BINARY_DIR}/alpha[1]_include.cmake\" \"\")\n"
+                    "file(WRITE \"${CMAKE_BINARY_DIR}/beta[1]_include.cmake\" \"\")\n"
+                    f'file(WRITE "{include_expression}" "")\n'
+                    "set_property(DIRECTORY PROPERTY TEST_INCLUDE_FILES\n"
+                    f'  "${{CMAKE_BINARY_DIR}}/beta[1]_include.cmake" "{include_expression}")\n'
+                    "get_property(root_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)\n"
+                    "get_property(ctest_includes DIRECTORY PROPERTY TEST_INCLUDE_FILES)\n"
+                    "photospider_collect_registered_gtest_targets(\n"
+                    "  registered ctest_includes root_targets \"${CMAKE_BINARY_DIR}\")\n"
+                    "if(NOT registered STREQUAL \"alpha;beta\")\n"
+                    "  message(FATAL_ERROR \"unexpected registered target inventory: ${registered}\")\n"
+                    "endif()\n",
+                    encoding="utf-8",
+                )
+                completed = run_command(
+                    "cmake", "-S", source, "-B", build,
+                    expect_success=not foreign_include,
+                )
+                if foreign_include:
+                    self.assertIn(
+                        "CTest include is outside the root binary directory",
+                        completed.stderr,
+                    )
+
 
 class ReusableBuildContractTest(unittest.TestCase):
     """Exercise deterministic packing, exact identity checks, and safe extraction."""
@@ -1164,6 +1218,69 @@ class ReusableBuildContractTest(unittest.TestCase):
                 expect_success=False,
             )
             self.assertIn("unsafe archive member path", failed.stderr)
+
+    def test_atomic_archive_replacement_cannot_change_verified_extraction(self) -> None:
+        """Keep measurement and extraction on the object opened before replacement."""
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            archive, manifest, identity = self._create(root, "accepted")
+            (root / "source/replacement-marker.txt").write_text(
+                "replacement archive\n", encoding="utf-8"
+            )
+            replacement, _, _ = self._create(root, "replacement")
+            destination = root / "restored"
+            arguments = SimpleNamespace(
+                archive=archive,
+                candidate_commit=COMMIT_A,
+                destination=destination,
+                image_digest=IMAGE_DIGEST,
+                manifest=manifest,
+                matrix_sha256=identity["matrix_sha256"],
+                profile="default",
+                repo_root=REPO_ROOT,
+                workflow_commit=COMMIT_B,
+            )
+            module = self._load_reusable_module()
+            original_sha256 = module._ArchiveSnapshot.sha256
+            replaced = False
+
+            def replace_after_digest(snapshot: object) -> str:
+                """Atomically replace the pathname after hashing the open object."""
+                nonlocal replaced
+                digest = original_sha256(snapshot)
+                replacement.replace(archive)
+                replaced = True
+                return digest
+
+            with mock.patch.object(
+                module._ArchiveSnapshot, "sha256", replace_after_digest
+            ):
+                module._verify_extract(arguments)
+
+            self.assertTrue(replaced)
+            self.assertFalse((destination / "ci/replacement-marker.txt").exists())
+            with tarfile.open(archive, mode="r:gz") as replacement_archive:
+                self.assertIn(
+                    "ci/replacement-marker.txt",
+                    [member.name for member in replacement_archive.getmembers()],
+                )
+
+    def test_archive_snapshot_rejects_links_and_special_files(self) -> None:
+        """Reject alias and FIFO archive objects without blocking on the FIFO."""
+        module = self._load_reusable_module()
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            regular = root / "regular.tar.gz"
+            regular.write_bytes(b"not needed for open-boundary validation")
+            link = root / "archive-link.tar.gz"
+            link.symlink_to(regular)
+            with self.assertRaises((OSError, module.ReusableBuildError)):
+                module._ArchiveSnapshot(link)
+
+            fifo = root / "archive-fifo.tar.gz"
+            os.mkfifo(fifo)
+            with self.assertRaises(module.ReusableBuildError):
+                module._ArchiveSnapshot(fifo)
 
     def test_consumer_verifies_two_attestations_before_extraction(self) -> None:
         """Require archive and manifest attestation calls on the generic consumer."""
@@ -1453,6 +1570,55 @@ class LockSurfaceContractTest(unittest.TestCase):
                     root, {"actions/checkout": ("v4", locked_commit)}
                 )
             self.assertIn(f"uses v4, expected {locked_commit}", str(raised.exception))
+
+    def test_checkout_credentials_must_be_explicitly_nonpersistent(self) -> None:
+        """Reject pinned checkout steps that omit or enable persisted tokens."""
+        module = self._load_lock_module()
+        locked_commit = "1" * 40
+        for credential_input in (
+            "",
+            "          persist-credentials: true\n",
+            "        env:\n          persist-credentials: false\n",
+        ):
+            with self.subTest(credential_input=credential_input), tempfile.TemporaryDirectory() as temporary_text:
+                root = Path(temporary_text)
+                workflow_root = root / ".github/workflows"
+                workflow_root.mkdir(parents=True)
+                (workflow_root / "checkout.yml").write_text(
+                    "jobs:\n"
+                    "  test:\n"
+                    "    runs-on: ubuntu-24.04\n"
+                    "    steps:\n"
+                    f"      - uses: actions/checkout@{locked_commit} # v4\n"
+                    "        with:\n"
+                    + credential_input,
+                    encoding="utf-8",
+                )
+                with self.assertRaises(module.ContractError) as raised:
+                    module._verify_workflows(
+                        root, {"actions/checkout": ("v4", locked_commit)}
+                    )
+                self.assertIn("persist-credentials: false", str(raised.exception))
+
+    def test_pull_request_target_requires_universal_precheckout_fork_guard(self) -> None:
+        """Reject a pull-request-target guard limited to protected branch names."""
+        module = self._load_lock_module()
+        lines = (
+            "on:\n"
+            "  pull_request_target:\n"
+            "jobs:\n"
+            "  protected-ci-paths:\n"
+            "    steps:\n"
+            "      - name: Reject fork pull request before checkout\n"
+            "        if: github.event_name == 'pull_request_target' && "
+            "startsWith(github.head_ref, 'CI/') && "
+            "github.event.pull_request.head.repo.full_name != github.repository\n"
+            "        run: echo 'Fork pull requests are rejected before checkout.'\n"
+            "      - uses: actions/checkout@1111111111111111111111111111111111111111 # v4\n"
+        ).splitlines()
+        with self.assertRaises(module.ContractError) as raised:
+            module._verify_pull_request_target_trust(Path("fork.yml"), lines)
+        self.assertIn("incorrectly limited to CI/**", str(raised.exception))
 
     def test_workflow_inventory_rejects_links_specials_and_unknown_entries(self) -> None:
         """Reject every noncanonical directory entry before YAML parsing."""

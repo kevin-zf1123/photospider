@@ -25,11 +25,10 @@ jobs:
       }}
     runs-on: ubuntu-24.04
     steps:
-      - name: Reject fork CI branch pull request
+      - name: Reject fork pull request before checkout
         if: >-
           ${{
             github.event_name == 'pull_request_target' &&
-            startsWith(github.head_ref, 'CI/') &&
             github.event.pull_request.head.repo.full_name != github.repository
           }}
         env:
@@ -48,14 +47,16 @@ jobs:
             exit 1
           fi
           {
-            echo "Fork CI/** pull requests are rejected before checkout."
-            echo "Only CI/** branches in '$CI_BASE_REPOSITORY' are covered by the push-triggered workflow."
+            echo "Fork pull requests are rejected before checkout."
+            echo "A pull_request_target workflow must never execute fork head code with base-repository credentials."
+            echo "Same-repository CI/** branches remain covered by the push-triggered workflow."
             echo "Received head repository: '${CI_HEAD_REPOSITORY:-unavailable}'."
           } | tee "$CI_ARTIFACT_DIR/summary.log" >&2
           exit 1
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
@@ -250,9 +251,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
+          persist-credentials: false
+          repository: ${{ github.repository }}
           fetch-depth: 0
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.sha }}
       - name: Read live default-branch ruleset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -286,6 +288,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
@@ -332,6 +335,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
@@ -379,6 +383,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
@@ -420,6 +425,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
@@ -463,6 +469,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
@@ -523,6 +530,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
@@ -563,6 +571,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
@@ -649,6 +658,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
@@ -699,6 +709,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
@@ -743,6 +754,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
@@ -785,6 +797,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
@@ -827,6 +840,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
@@ -869,6 +883,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
@@ -920,6 +935,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
@@ -966,6 +982,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
@@ -1012,6 +1029,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
@@ -1058,6 +1076,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive

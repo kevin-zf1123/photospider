@@ -204,7 +204,10 @@ PY
 
 for record in "${fuzz_records[@]}"; do
   IFS=$'\t' read -r target seed runs timeout max_len corpus_digest <<<"$record"
-  binary=$BUILD_DIR/tests/$target
+  # CMake owns the harness output identity through the shared
+  # RUNTIME_OUTPUT_DIRECTORY contract. Keep the runner aligned with that
+  # build-tree boundary instead of guessing the ordinary test directory.
+  binary=$BUILD_DIR/fuzzers/$target
   if [[ ! -x "$binary" ]]; then
     echo "Declared fuzz target did not produce an executable: $binary" >&2
     exit 1

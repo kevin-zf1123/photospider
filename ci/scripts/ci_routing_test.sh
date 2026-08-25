@@ -1068,7 +1068,7 @@ validate_reusable_build_identity_routing() {
   assert_file_contains "$REPO_ROOT/ci/scripts/reusable_build.py" \
     'candidate reusable identity differs from protected measurement'
   assert_file_contains "$REPO_ROOT/ci/scripts/reusable_build.py" \
-    '_verify_archived_measurement(arguments, value)'
+    '_verify_archived_measurement(arguments, value, snapshot)'
   assert_file_not_contains "$build_job" 'id-token: write'
   assert_file_not_contains "$build_job" 'actions/attest@'
   assert_file_contains "$attest_job" 'artifact-metadata: write'
@@ -1208,6 +1208,12 @@ validate_live_ruleset_routing() {
   assert_file_contains "$readback_job" \
     "if: needs.protected-ci-paths.result == 'success'"
   assert_file_contains "$readback_job" 'GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}'
+  assert_file_contains "$readback_job" 'persist-credentials: false'
+  assert_file_contains "$readback_job" 'repository: ${{ github.repository }}'
+  assert_file_contains "$readback_job" \
+    "ref: \${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.sha }}"
+  assert_file_not_contains "$readback_job" 'github.event.pull_request.head.repo'
+  assert_file_not_contains "$readback_job" 'github.event.pull_request.head.sha'
   assert_file_contains "$readback_job" \
     'python3 ci/scripts/ruleset_readback.py \'
   assert_file_contains "$readback_job" '--repository "$GITHUB_REPOSITORY" \'
@@ -1274,6 +1280,7 @@ validate_workflow_contract() {
   local gate_step=$2
   local workflow_name
   local protected_job_file
+  local reject_step_file
   local condition_file
   local normalized_condition
   local canonical_condition
@@ -1281,9 +1288,12 @@ validate_workflow_contract() {
   local checkout_line
   local mismatch_count
   local identity_output_count
+  local checkout_count
+  local nonpersistent_checkout_count
   workflow_name=$(basename "$workflow" .yml)
   protected_job_file="$TEST_ROOT/${workflow_name}-protected-job.yml"
   condition_file="$TEST_ROOT/${workflow_name}-protected-condition.yml"
+  reject_step_file="$TEST_ROOT/${workflow_name}-fork-reject-step.yml"
   canonical_condition="if:>-\${{github.event_name!='pull_request_target'||"
   canonical_condition+="!startsWith(github.head_ref,'CI/')||"
   canonical_condition+="github.event.pull_request.head.repo.full_name!="
@@ -1302,7 +1312,7 @@ validate_workflow_contract() {
     "github.event.pull_request.head.repo.full_name != github.repository" \
     "$workflow")
   ((mismatch_count >= 2)) ||
-    fail "$workflow_name does not run and reject fork CI/** pull requests"
+    fail "$workflow_name does not run and reject every fork pull request"
   identity_output_count=$(grep -Fc -- \
     "CI_HEAD_IS_BASE_REPOSITORY:" "$workflow")
   ((identity_output_count >= 2)) ||
@@ -1310,7 +1320,7 @@ validate_workflow_contract() {
   assert_file_contains "$workflow" \
     '"$CI_HEAD_IS_BASE_REPOSITORY" == true'
 
-  reject_line=$(grep -nF -- "- name: Reject fork CI branch pull request" \
+  reject_line=$(grep -nF -- "- name: Reject fork pull request before checkout" \
     "$workflow" | head -n 1 | cut -d: -f1)
   checkout_line=$(grep -nF -- "- uses: actions/checkout@" \
     "$workflow" | head -n 1 | cut -d: -f1)
@@ -1318,6 +1328,21 @@ validate_workflow_contract() {
     fail "$workflow_name lacks the reject-before-checkout boundary"
   ((reject_line < checkout_line)) ||
     fail "$workflow_name checks out fork code before the rejection step"
+  extract_step_block "$protected_job_file" \
+    "Reject fork pull request before checkout" "$reject_step_file" ||
+    fail "$workflow_name fork rejection step could not be extracted"
+  assert_file_contains "$reject_step_file" \
+    "github.event.pull_request.head.repo.full_name != github.repository"
+  assert_file_not_contains "$reject_step_file" \
+    "startsWith(github.head_ref, 'CI/')"
+  assert_file_contains "$reject_step_file" \
+    "Fork pull requests are rejected before checkout."
+
+  checkout_count=$(grep -Fc -- 'uses: actions/checkout@' "$workflow")
+  nonpersistent_checkout_count=$(grep -Fc -- \
+    'persist-credentials: false' "$workflow")
+  ((checkout_count > 0 && checkout_count == nonpersistent_checkout_count)) ||
+    fail "$workflow_name does not refuse credentials on every checkout"
 
   assert_file_contains "$workflow" \
     "Same-repository CI/** pull request intentionally uses the push-triggered workflow."
@@ -1332,7 +1357,7 @@ validate_workflow_contract() {
   extract_step_run_block "$workflow" "$gate_step" \
     "$TEST_ROOT/${workflow_name}-gate.sh" ||
     fail "$workflow_name gate run block could not be extracted"
-  extract_step_run_block "$workflow" "Reject fork CI branch pull request" \
+  extract_step_run_block "$workflow" "Reject fork pull request before checkout" \
     "$TEST_ROOT/${workflow_name}-fork-reject.sh" ||
     fail "$workflow_name fork rejection run block could not be extracted"
   extract_step_run_block "$workflow" "Protect CI workflow paths" \
@@ -1408,14 +1433,14 @@ exercise_gate_identity() {
 # @param $2 Stable workflow label used for artifacts.
 # @return Zero when rejection occurs before any checkout-dependent behavior.
 # @throws Nothing; an unexpected success exits through fail.
-# @note The workflow step condition limits this block to fork CI/** PR events.
+# @note The workflow step condition limits this block to every fork PR event.
 exercise_fork_rejection() {
   local reject_script=$1
   local workflow_label=$2
   local artifact_dir="$TEST_ROOT/${workflow_label}-protected"
   local output_log="$TEST_ROOT/${workflow_label}-reject.log"
   run_expect_failure "$workflow_label-fork-rejected-before-checkout" \
-    "$output_log" "Fork CI/** pull requests are rejected before checkout." "" \
+    "$output_log" "Fork pull requests are rejected before checkout." "" \
     env CI_ARTIFACT_DIR="$artifact_dir" \
     CI_BASE_REPOSITORY=owner/repository \
     CI_HEAD_REPOSITORY=fork/repository bash "$reject_script"
