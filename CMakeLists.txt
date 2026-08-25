@@ -1033,6 +1033,12 @@ endfunction()
 # Apply the public and link interface shared by both complete static archives.
 # Only `photospider` is installed or exported.
 function(configure_photospider_product_archive TARGET_NAME)
+    # Xcode does not create an archive phase for a static target containing
+    # only TARGET_OBJECTS generator expressions. Keep one directly compiled,
+    # symbol-free source on each final embedded product archive so every
+    # supported generator materializes the real object-library aggregation.
+    target_sources(${TARGET_NAME} PRIVATE
+        src/lib/host/embedded_product_archive_anchor.cpp)
     target_compile_definitions(${TARGET_NAME} PUBLIC PHOTOSPIDER_STATIC)
     target_compile_features(${TARGET_NAME} PUBLIC cxx_std_17)
     target_include_directories(${TARGET_NAME}
@@ -1421,7 +1427,8 @@ if(PHOTOSPIDER_BUILD_IPC)
         Threads::Threads)
 
     add_library(photospider_ipc_client STATIC
-        $<TARGET_OBJECTS:photospider_ipc_client_objects>)
+        $<TARGET_OBJECTS:photospider_ipc_client_objects>
+        src/lib/ipc/ipc_client_archive_anchor.cpp)
     target_compile_definitions(photospider_ipc_client PUBLIC PHOTOSPIDER_STATIC)
     target_compile_features(photospider_ipc_client PUBLIC cxx_std_17)
     target_include_directories(photospider_ipc_client
