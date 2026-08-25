@@ -606,6 +606,8 @@ jobs:
           if-no-files-found: warn
 
   integration:
+    name: >-
+      ${{ github.event_name == 'pull_request_target' && startsWith(github.head_ref, 'CI/') && github.event.pull_request.head.repo.full_name == github.repository && 'integration-pr-sentinel' || 'integration' }}
     needs:
       - protected-ci-paths
       - change-classification
