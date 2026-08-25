@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -86,15 +87,75 @@ def _read_actions(path: Path) -> dict[str, tuple[str, str]]:
     return entries
 
 
-def _verify_workflows(root: Path, actions: dict[str, tuple[str, str]]) -> None:
-    """Verify active workflow action, runner, and container identities."""
+def _workflow_files(root: Path) -> list[Path]:
+    """Return the complete canonical workflow inventory without following links.
+
+    Args:
+        root: Repository root containing ``.github/workflows``.
+
+    Returns:
+        Every regular ``*.yml`` and ``*.yaml`` workflow in bytewise name order.
+
+    Raises:
+        ContractError: The workflow root is absent/aliased, an entry is a link
+            or special file, an unexpected filename is present, or the inventory
+            is empty/unreadable.
+    """
     workflow_root = root / ".github" / "workflows"
+    try:
+        root_mode = workflow_root.lstat().st_mode
+    except OSError as error:
+        raise ContractError(f"cannot inspect workflow directory {workflow_root}: {error}") from error
+    if stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode):
+        raise ContractError(f"{workflow_root}: workflow root is not a real directory")
+    try:
+        entries = sorted(workflow_root.iterdir(), key=lambda candidate: candidate.name)
+    except OSError as error:
+        raise ContractError(f"cannot enumerate workflow directory {workflow_root}: {error}") from error
+
+    workflows: list[Path] = []
+    for path in entries:
+        try:
+            mode = path.lstat().st_mode
+        except OSError as error:
+            raise ContractError(f"cannot inspect workflow entry {path}: {error}") from error
+        if stat.S_ISLNK(mode):
+            raise ContractError(f"{path}: workflow entry must not be a link")
+        if not stat.S_ISREG(mode):
+            raise ContractError(f"{path}: workflow entry must be a regular file")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:yml|yaml)", path.name):
+            raise ContractError(f"{path}: unexpected workflow directory entry")
+        workflows.append(path)
+    if not workflows:
+        raise ContractError(f"{workflow_root}: workflow inventory is empty")
+    return workflows
+
+
+def _verify_workflows(root: Path, actions: dict[str, tuple[str, str]]) -> None:
+    """Verify every workflow action, runner, and container identity.
+
+    Both supported YAML suffixes traverse the same parser and lock rules. The
+    inventory helper fails closed before parsing if the directory contains an
+    alias, special file, subdirectory, or unexpected regular entry.
+
+    Args:
+        root: Repository root containing protected workflows.
+        actions: Canonical action name to release/full-SHA lock mapping.
+
+    Raises:
+        ContractError: Any workflow surface or consumed identity is unsafe,
+            floating, unknown, or inconsistent with the lock table.
+    """
     uses_pattern = re.compile(r"^\s*(?:-\s*)?uses:\s*([^#\s]+)(?:\s+#\s*(\S+))?\s*$")
     image_pattern = re.compile(r"^\s*image:\s*(.*?)\s*$")
     runner_pattern = re.compile(r"^\s*runs-on:\s*([^#\s]+)")
     used_actions: set[str] = set()
-    for path in sorted(workflow_root.glob("*.yml")):
-        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for path in _workflow_files(root):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError) as error:
+            raise ContractError(f"cannot read workflow {path}: {error}") from error
+        for line_number, line in enumerate(lines, 1):
             action_match = uses_pattern.match(line)
             if action_match:
                 reference, release_comment = action_match.groups()

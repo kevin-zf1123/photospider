@@ -772,79 +772,236 @@ class ProfileReaderContractTest(unittest.TestCase):
 
 
 class SecurityPlatformContractTest(unittest.TestCase):
-    """Exercise Darwin runner/vcpkg locks and platform eligibility."""
+    """Exercise Darwin runner locks and fresh vcpkg materialization."""
 
-    def test_darwin_exact_runner_and_registry_prepare_toolchain(self) -> None:
-        """Accept exact mocked hosted identities and reject image-version drift."""
+    @staticmethod
+    def _prepare_darwin_fixture(
+        root: Path,
+    ) -> tuple[Path, dict[str, str], Path, Path, Path, Path]:
+        """Create one exact Darwin runner, Git-object, and binary fixture.
+
+        Args:
+            root: Empty temporary directory that owns all fixture state.
+
+        Returns:
+            The resolved profile, base environment, Git log, vcpkg log,
+            runner-temp directory, and deliberately dirty preinstalled source.
+
+        Note:
+            The Git shim implements only the read/fetch/checkout/status boundary
+            used by ``security_platform_prepare.sh``. It reports the source as
+            dirty if a caller inspects worktree diffs, while the exact locked
+            commit object remains available for a clean fresh checkout.
+        """
+        profile = root / "profile.json"
+        run_command(
+            "python3", SCRIPTS / "ci_profile_manifest.py",
+            "--profile", "fuzz-codecs",
+            "--output", profile,
+        )
+        binary_dir = root / "bin"
+        binary_dir.mkdir()
+        uname = binary_dir / "uname"
+        uname.write_text(
+            "#!/usr/bin/env bash\n"
+            "[[ ${1:-} == -s ]] && { echo Darwin; exit 0; }\n"
+            "[[ ${1:-} == -m ]] && { echo arm64; exit 0; }\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        uname.chmod(0o755)
+
+        git_log = root / "git.log"
+        git = binary_dir / "git"
+        git.write_text(
+            f"#!{sys.executable}\n"
+            "import json\n"
+            "import os\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "args = sys.argv[1:]\n"
+            "with open(os.environ['CI_TEST_GIT_LOG'], 'a', encoding='utf-8') as handle:\n"
+            "    handle.write(json.dumps(args, separators=(',', ':')) + '\\n')\n"
+            "worktree = None\n"
+            "index = 0\n"
+            "while index < len(args):\n"
+            "    if args[index] == '-C':\n"
+            "        worktree = Path(args[index + 1])\n"
+            "        index += 2\n"
+            "    elif args[index] == '-c':\n"
+            "        index += 2\n"
+            "    elif args[index].startswith('-'):\n"
+            "        index += 1\n"
+            "    else:\n"
+            "        break\n"
+            "command = args[index] if index < len(args) else ''\n"
+            "command_args = args[index + 1:]\n"
+            "source = Path(os.environ['CI_TEST_VCPKG_SOURCE'])\n"
+            "locked = os.environ['CI_TEST_LOCKED_COMMIT']\n"
+            "if command == 'init':\n"
+            "    target = Path(command_args[-1])\n"
+            "    (target / '.git').mkdir(parents=True)\n"
+            "elif command == 'cat-file':\n"
+            "    raise SystemExit(0 if os.environ.get('CI_TEST_SOURCE_HAS_COMMIT', '1') == '1' else 1)\n"
+            "elif command == 'checkout':\n"
+            "    toolchain = worktree / 'scripts/buildsystems/vcpkg.cmake'\n"
+            "    toolchain.parent.mkdir(parents=True)\n"
+            "    toolchain.write_text('# locked fixture\\n', encoding='utf-8')\n"
+            "    unsafe = os.environ.get('CI_TEST_UNSAFE_FRESH', '')\n"
+            "    if unsafe == 'symlink':\n"
+            "        (worktree / 'unsafe-link').symlink_to(source / 'tracked-dirty')\n"
+            "    elif unsafe == 'fifo':\n"
+            "        os.mkfifo(worktree / 'unsafe-fifo')\n"
+            "    elif unsafe == 'residual':\n"
+            "        (worktree / 'residual-state').write_text('unexpected\\n', encoding='utf-8')\n"
+            "elif command == 'rev-parse':\n"
+            "    print(os.environ.get('CI_TEST_FRESH_COMMIT', locked) if worktree != source else locked)\n"
+            "elif command == 'status':\n"
+            "    if worktree == source:\n"
+            "        print(' M tracked-dirty')\n"
+            "    elif os.environ.get('CI_TEST_UNSAFE_FRESH') == 'residual':\n"
+            "        print('?? residual-state')\n"
+            "elif command == 'diff' and worktree == source:\n"
+            "    raise SystemExit(1)\n",
+            encoding="utf-8",
+        )
+        git.chmod(0o755)
+
+        vcpkg_source = root / "preinstalled-vcpkg"
+        (vcpkg_source / ".git").mkdir(parents=True)
+        (vcpkg_source / "tracked-dirty").write_text("dirty runner source\n", encoding="utf-8")
+        vcpkg_log = root / "vcpkg.log"
+        vcpkg = vcpkg_source / "vcpkg"
+        vcpkg.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -Eeuo pipefail\n"
+            "{\n"
+            "  printf 'executable=%s\\n' \"$0\"\n"
+            "  printf 'root=%s\\n' \"${VCPKG_ROOT:-}\"\n"
+            "  printf 'binary=%s\\n' \"${VCPKG_BINARY_SOURCES:-}\"\n"
+            "  printf 'asset=%s\\n' \"${X_VCPKG_ASSET_SOURCES:-}\"\n"
+            "  for argument in \"$@\"; do printf 'arg=%s\\n' \"$argument\"; done\n"
+            "} > \"$CI_TEST_VCPKG_LOG\"\n",
+            encoding="utf-8",
+        )
+        vcpkg.chmod(0o755)
+        runner_temp = root / "runner-temp"
+        runner_temp.mkdir()
+        output = root / "cmake-args.txt"
+        locked_commit = "6d9d7df564a1ccdaa994e4ad39ccd4a32360867b"
+        environment = {
+            "PATH": f"{binary_dir}:{os.environ['PATH']}",
+            "CI_PLATFORM_CMAKE_ARGS_FILE": str(output),
+            "CI_RUNNER_TEMP": str(runner_temp),
+            "CI_TEST_GIT_LOG": str(git_log),
+            "CI_TEST_LOCKED_COMMIT": locked_commit,
+            "CI_TEST_VCPKG_LOG": str(vcpkg_log),
+            "CI_TEST_VCPKG_SOURCE": str(vcpkg_source),
+            "ImageOS": "macos15",
+            "ImageVersion": "20260727.0256.1",
+            "RUNNER_IMAGE_NAME": "macos-15",
+            "VCPKG_INSTALLATION_ROOT": str(vcpkg_source),
+        }
+        return profile, environment, git_log, vcpkg_log, runner_temp, vcpkg_source
+
+    def test_dirty_source_produces_fresh_clean_checkout_and_exact_install(self) -> None:
+        """Use a dirty image source only as locked objects, then install fresh."""
         with tempfile.TemporaryDirectory() as temporary_text:
             root = Path(temporary_text)
-            profile = root / "profile.json"
-            run_command(
-                "python3", SCRIPTS / "ci_profile_manifest.py",
-                "--profile", "fuzz-codecs",
-                "--output", profile,
+            profile, environment, git_log, vcpkg_log, runner_temp, source = (
+                self._prepare_darwin_fixture(root)
             )
-            binary_dir = root / "bin"
-            binary_dir.mkdir()
-            uname = binary_dir / "uname"
-            uname.write_text(
-                "#!/usr/bin/env bash\n"
-                "[[ ${1:-} == -s ]] && { echo Darwin; exit 0; }\n"
-                "[[ ${1:-} == -m ]] && { echo arm64; exit 0; }\n"
-                "exit 1\n",
-                encoding="utf-8",
-            )
-            uname.chmod(0o755)
-            git = binary_dir / "git"
-            git.write_text(
-                "#!/usr/bin/env bash\n"
-                "echo 6d9d7df564a1ccdaa994e4ad39ccd4a32360867b\n",
-                encoding="utf-8",
-            )
-            git.chmod(0o755)
-            vcpkg_root = root / "vcpkg"
-            (vcpkg_root / ".git").mkdir(parents=True)
-            (vcpkg_root / "scripts/buildsystems").mkdir(parents=True)
-            (vcpkg_root / "scripts/buildsystems/vcpkg.cmake").write_text("# fixture\n", encoding="utf-8")
-            vcpkg_log = root / "vcpkg.log"
-            vcpkg = vcpkg_root / "vcpkg"
-            vcpkg.write_text(
-                "#!/usr/bin/env bash\n"
-                "set -Eeuo pipefail\n"
-                "printf 'binary=%s asset=%s ' \"${VCPKG_BINARY_SOURCES:-}\" \"${X_VCPKG_ASSET_SOURCES:-}\" > \"$CI_TEST_VCPKG_LOG\"\n"
-                "printf '%q ' \"$@\" >> \"$CI_TEST_VCPKG_LOG\"\n",
-                encoding="utf-8",
-            )
-            vcpkg.chmod(0o755)
-            output = root / "cmake-args.txt"
-            environment = {
-                "PATH": f"{binary_dir}:{os.environ['PATH']}",
-                "CI_DARWIN_VCPKG_INSTALLED": str(root / "installed"),
-                "CI_PLATFORM_CMAKE_ARGS_FILE": str(output),
-                "CI_TEST_VCPKG_LOG": str(vcpkg_log),
-                "ImageOS": "macos15",
-                "ImageVersion": "20260727.0256.1",
-                "RUNNER_IMAGE_NAME": "macos-15",
-                "VCPKG_INSTALLATION_ROOT": str(vcpkg_root),
-            }
             run_command(
                 "bash", SCRIPTS / "security_platform_prepare.sh", profile,
                 environment=environment,
             )
-            arguments = output.read_text(encoding="utf-8")
-            self.assertIn("-DCMAKE_TOOLCHAIN_FILE=", arguments)
+            arguments = (root / "cmake-args.txt").read_text(encoding="utf-8")
             self.assertIn("-DVCPKG_TARGET_TRIPLET=arm64-osx", arguments)
-            install = vcpkg_log.read_text(encoding="utf-8")
-            self.assertIn("binary=clear asset=clear", install)
-            self.assertIn("openssl", install)
-            self.assertIn("utf8proc", install)
+            self.assertIn(str(runner_temp), arguments)
+            self.assertNotIn(str(source / "scripts/buildsystems/vcpkg.cmake"), arguments)
+
+            install_lines = vcpkg_log.read_text(encoding="utf-8").splitlines()
+            executable = next(line.removeprefix("executable=") for line in install_lines if line.startswith("executable="))
+            fresh_root = next(line.removeprefix("root=") for line in install_lines if line.startswith("root="))
+            self.assertEqual(executable, f"{fresh_root}/vcpkg")
+            self.assertTrue(Path(fresh_root).is_relative_to(runner_temp.resolve()))
+            self.assertNotEqual(executable, str(source / "vcpkg"))
+            self.assertIn("binary=clear", install_lines)
+            self.assertIn("asset=clear", install_lines)
+            install_arguments = [line.removeprefix("arg=") for line in install_lines if line.startswith("arg=")]
+            self.assertEqual(
+                install_arguments,
+                [
+                    "install",
+                    "--triplet",
+                    "arm64-osx",
+                    "--x-install-root",
+                    f"{fresh_root}/installed",
+                    "--clean-after-build",
+                    "openssl",
+                    "utf8proc",
+                ],
+            )
+            git_calls = [json.loads(line) for line in git_log.read_text(encoding="utf-8").splitlines()]
+            source_identity = str(source.resolve())
+            self.assertTrue(any("cat-file" in call and source_identity in call for call in git_calls))
+            self.assertFalse(any("diff" in call and source_identity in call for call in git_calls))
+            self.assertFalse(any("status" in call and source_identity in call for call in git_calls))
 
             failed = run_command(
                 "bash", SCRIPTS / "security_platform_prepare.sh", profile,
-                environment={**environment, "ImageVersion": "stale", "CI_PLATFORM_CMAKE_ARGS_FILE": str(root / "stale.txt")},
+                environment={
+                    **environment,
+                    "ImageVersion": "stale",
+                    "CI_PLATFORM_CMAKE_ARGS_FILE": str(root / "stale.txt"),
+                },
                 expect_success=False,
             )
             self.assertIn("differs from protected", failed.stderr)
+
+    def test_fresh_checkout_rejects_commit_link_fifo_and_residual_state(self) -> None:
+        """Fail closed for every fresh-checkout identity and filesystem drift."""
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            profile, environment, _, _, _, _ = self._prepare_darwin_fixture(root)
+            cases = (
+                ({"CI_TEST_FRESH_COMMIT": "2" * 40}, "differs from protected"),
+                ({"CI_TEST_UNSAFE_FRESH": "symlink"}, "contains a link"),
+                ({"CI_TEST_UNSAFE_FRESH": "fifo"}, "contains a special entry"),
+                ({"CI_TEST_UNSAFE_FRESH": "residual"}, "contains residual or modified state"),
+            )
+            for index, (override, diagnostic) in enumerate(cases):
+                with self.subTest(diagnostic=diagnostic):
+                    failed = run_command(
+                        "bash", SCRIPTS / "security_platform_prepare.sh", profile,
+                        environment={
+                            **environment,
+                            **override,
+                            "CI_PLATFORM_CMAKE_ARGS_FILE": str(root / f"unsafe-{index}.txt"),
+                        },
+                        expect_success=False,
+                    )
+                    self.assertIn(diagnostic, failed.stderr)
+
+    def test_missing_preinstalled_object_uses_only_explicit_official_source(self) -> None:
+        """Fetch the exact commit from microsoft/vcpkg when local objects lack it."""
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            profile, environment, git_log, _, _, _ = self._prepare_darwin_fixture(root)
+            run_command(
+                "bash", SCRIPTS / "security_platform_prepare.sh", profile,
+                environment={**environment, "CI_TEST_SOURCE_HAS_COMMIT": "0"},
+            )
+            calls = [json.loads(line) for line in git_log.read_text(encoding="utf-8").splitlines()]
+            fetch = next(call for call in calls if "fetch" in call)
+            self.assertIn("https://github.com/microsoft/vcpkg.git", fetch)
+            self.assertIn(environment["CI_TEST_LOCKED_COMMIT"], fetch)
+
+        workflow = (REPO_ROOT / ".github/workflows/ci-integration.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CI_RUNNER_TEMP: ${{ runner.temp }}", workflow)
+        self.assertNotIn("CI_DARWIN_VCPKG_INSTALLED:", workflow)
 
 
 class ReusableBuildContractTest(unittest.TestCase):
@@ -1203,9 +1360,121 @@ class RulesetContractTest(unittest.TestCase):
             )
             self.assertIn("required conversation resolution is disabled", failed.stderr)
 
+    def test_live_readback_aggregates_later_ruleset_pages(self) -> None:
+        """Find a second default-branch ruleset after the first 30 summaries."""
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            binary_dir = root / "bin"
+            binary_dir.mkdir()
+            gh_log = root / "gh.log"
+            gh = binary_dir / "gh"
+            gh.write_text(
+                f"#!{sys.executable}\n"
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "args = sys.argv[1:]\n"
+                "with open(os.environ['CI_TEST_GH_LOG'], 'a', encoding='utf-8') as handle:\n"
+                "    handle.write(json.dumps(args, separators=(',', ':')) + '\\n')\n"
+                "endpoint = args[-1]\n"
+                "if endpoint.endswith('rulesets?includes_parents=false'):\n"
+                "    first = [{'id': identifier} for identifier in range(1, 31)]\n"
+                "    second = [{'id': 31}]\n"
+                "    print(json.dumps([first, second] if '--paginate' in args and '--slurp' in args else first))\n"
+                "else:\n"
+                "    identifier = int(endpoint.rsplit('/', 1)[1])\n"
+                "    active = identifier in (1, 31)\n"
+                "    print(json.dumps({\n"
+                "        'conditions': {'ref_name': {'exclude': [], 'include': ['~DEFAULT_BRANCH'] if active else []}},\n"
+                "        'enforcement': 'active' if active else 'disabled',\n"
+                "        'id': identifier,\n"
+                "        'name': f'ruleset-{identifier}',\n"
+                "        'rules': [],\n"
+                "        'target': 'branch',\n"
+                "    }))\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            failed = run_command(
+                "python3", SCRIPTS / "ruleset_readback.py",
+                "--repository", "kevin-zf1123/photospider",
+                environment={
+                    "CI_TEST_GH_LOG": str(gh_log),
+                    "PATH": f"{binary_dir}:{os.environ['PATH']}",
+                },
+                expect_success=False,
+            )
+            self.assertIn("expected exactly one active default-branch ruleset, found 2", failed.stderr)
+            calls = [json.loads(line) for line in gh_log.read_text(encoding="utf-8").splitlines()]
+            list_call = calls[0]
+            self.assertIn("--paginate", list_call)
+            self.assertIn("--slurp", list_call)
+            self.assertIn(
+                "repos/kevin-zf1123/photospider/rulesets?includes_parents=false",
+                list_call,
+            )
+            self.assertTrue(any(call[-1].endswith("/rulesets/31") for call in calls))
+
 
 class LockSurfaceContractTest(unittest.TestCase):
     """Exercise the complete active protected lock/workflow verifier."""
+
+    @staticmethod
+    def _load_lock_module() -> object:
+        """Load the protected lock verifier for isolated workflow fixtures."""
+        module_path = SCRIPTS / "ci_lock_verify.py"
+        specification = importlib.util.spec_from_file_location(
+            "ci_lock_verify_contract", module_path
+        )
+        if specification is None or specification.loader is None:
+            raise AssertionError("cannot load CI lock verifier")
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        return module
+
+    def test_unpinned_yaml_workflow_fails_the_same_lock_parser(self) -> None:
+        """Reject an unpinned action in the formerly omitted YAML suffix."""
+        module = self._load_lock_module()
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            workflow_root = root / ".github/workflows"
+            workflow_root.mkdir(parents=True)
+            (workflow_root / "unpinned.yaml").write_text(
+                "jobs:\n"
+                "  test:\n"
+                "    runs-on: ubuntu-24.04\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v4 # v4\n",
+                encoding="utf-8",
+            )
+            locked_commit = "1" * 40
+            with self.assertRaises(module.ContractError) as raised:
+                module._verify_workflows(
+                    root, {"actions/checkout": ("v4", locked_commit)}
+                )
+            self.assertIn(f"uses v4, expected {locked_commit}", str(raised.exception))
+
+    def test_workflow_inventory_rejects_links_specials_and_unknown_entries(self) -> None:
+        """Reject every noncanonical directory entry before YAML parsing."""
+        module = self._load_lock_module()
+        cases = ("symlink", "fifo", "directory", "unknown-extension")
+        for unsafe_kind in cases:
+            with self.subTest(unsafe_kind=unsafe_kind), tempfile.TemporaryDirectory() as temporary_text:
+                root = Path(temporary_text)
+                workflow_root = root / ".github/workflows"
+                workflow_root.mkdir(parents=True)
+                if unsafe_kind == "symlink":
+                    outside = root / "outside.yml"
+                    outside.write_text("jobs: {}\n", encoding="utf-8")
+                    (workflow_root / "unsafe.yml").symlink_to(outside)
+                elif unsafe_kind == "fifo":
+                    os.mkfifo(workflow_root / "unsafe.yaml")
+                elif unsafe_kind == "directory":
+                    (workflow_root / "nested.yml").mkdir()
+                else:
+                    (workflow_root / "README.md").write_text("unexpected\n", encoding="utf-8")
+                with self.assertRaises(module.ContractError):
+                    module._workflow_files(root)
 
     def test_repository_lock_surface_is_exact(self) -> None:
         """Reject no active floating actions, runners, images, or install inputs."""

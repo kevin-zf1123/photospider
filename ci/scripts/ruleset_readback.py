@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Validate the exact active default-branch GitHub ruleset contract.
 
-By default this reader obtains repository and detailed ruleset JSON through the
-authenticated GitHub CLI. ``--input`` accepts one fixture array for durable
-offline tests. It never mutates repository settings and rejects ambiguous
-multiple default-branch rulesets, spoofable check publishers, unresolved review
-threads, deletion/force-push gaps, or merge methods incompatible with linear
-history.
+By default this reader obtains the complete paginated repository ruleset list
+and every detailed ruleset JSON through the authenticated GitHub CLI.
+``--input`` accepts one fixture array for durable offline tests. It never
+mutates repository settings and rejects ambiguous multiple default-branch
+rulesets, spoofable check publishers, unresolved review threads,
+deletion/force-push gaps, or merge methods incompatible with linear history.
 """
 
 from __future__ import annotations
@@ -63,18 +63,66 @@ def _gh_json(endpoint: str) -> Any:
     return _decode_json(completed.stdout, endpoint)
 
 
+def _gh_paginated_array(endpoint: str) -> list[Any]:
+    """Read and flatten every authenticated GitHub API array page.
+
+    Args:
+        endpoint: Exact read-only API endpoint, including explicit query policy.
+
+    Returns:
+        All records from every page in API order.
+
+    Raises:
+        RulesetError: ``gh`` fails, emits malformed JSON, or returns anything
+            other than the ``--slurp`` outer array of per-page arrays.
+
+    Note:
+        ``--paginate --slurp`` is required together: pagination follows every
+        Link page, while slurp preserves page boundaries for strict validation
+        before this function flattens the records.
+    """
+    completed = subprocess.run(
+        ["gh", "api", "--method", "GET", "--paginate", "--slurp", endpoint],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise RulesetError(
+            f"GitHub paginated ruleset readback failed for {endpoint}: "
+            f"{completed.stderr.strip()}"
+        )
+    pages = _decode_json(completed.stdout, endpoint)
+    if not isinstance(pages, list) or not pages or not all(isinstance(page, list) for page in pages):
+        raise RulesetError("GitHub paginated ruleset list is not an outer array of page arrays")
+    return [record for page in pages for record in page]
+
+
 def _read_live(repository: str) -> list[dict[str, Any]]:
-    """Read the live ruleset list then fetch every detailed rule collection."""
+    """Read all non-parent summaries then fetch every detailed ruleset.
+
+    Args:
+        repository: Exact GitHub ``owner/name`` identity.
+
+    Returns:
+        Detailed rulesets corresponding to every unique paginated summary.
+
+    Raises:
+        RulesetError: The repository, list pages, summary IDs, or detail
+            responses are malformed, incomplete, or ambiguous.
+    """
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise RulesetError("repository must be an exact owner/name identity")
-    summaries = _gh_json(f"repos/{repository}/rulesets?includes_parents=false")
-    if not isinstance(summaries, list):
-        raise RulesetError("GitHub ruleset list response is not an array")
+    summaries = _gh_paginated_array(f"repos/{repository}/rulesets?includes_parents=false")
     details: list[dict[str, Any]] = []
+    seen_identifiers: set[int] = set()
     for summary in summaries:
         identifier = summary.get("id") if isinstance(summary, dict) else None
         if not isinstance(identifier, int) or identifier <= 0:
             raise RulesetError("GitHub ruleset summary has no canonical numeric ID")
+        if identifier in seen_identifiers:
+            raise RulesetError(f"GitHub ruleset summary repeats canonical ID {identifier}")
+        seen_identifiers.add(identifier)
         detail = _gh_json(f"repos/{repository}/rulesets/{identifier}")
         if not isinstance(detail, dict):
             raise RulesetError(f"GitHub ruleset {identifier} detail is not an object")

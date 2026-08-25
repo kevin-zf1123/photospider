@@ -7,8 +7,11 @@ set -Eeuo pipefail
 #   platform toolchain arguments without executing candidate product code.
 # @note Linux dependencies are supplied by the attested CI image. Darwin uses
 #   the exact GitHub-hosted runner image and vcpkg commit protected by
-#   darwin-runner-lock.json; that registry commit carries source SHA-512 values.
-#   Windows and unknown platforms fail rather than receiving reduced coverage.
+#   darwin-runner-lock.json. It copies the image-bound vcpkg binary into an
+#   unseedable fresh checkout created below runner.temp, while the checkout is
+#   populated from the locked preinstalled Git object or the explicit official
+#   microsoft/vcpkg source. Windows and unknown platforms fail rather than
+#   receiving reduced coverage.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
@@ -78,6 +81,41 @@ PY
 }
 
 read_profile_platform eligible >/dev/null
+
+# @brief Reject links, special files, or unreadable entries in a fresh tree.
+# @param $1 Existing root that must be a real directory containing only real
+#   directories and regular files.
+# @return Zero only when every entry can be inspected without following links.
+# @throws Python exits nonzero for a missing root, a symlink, a FIFO, a socket,
+#   a device, or an entry that cannot be inspected.
+validate_fresh_real_tree() {
+  python3 - "$1" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+try:
+    root_mode = os.lstat(root).st_mode
+except OSError as error:
+    raise SystemExit(f"cannot inspect fresh vcpkg root: {error}") from error
+if not stat.S_ISDIR(root_mode) or stat.S_ISLNK(root_mode):
+    raise SystemExit("fresh vcpkg root is not a real directory")
+for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+    for name in directories + files:
+        candidate = Path(current) / name
+        try:
+            mode = os.lstat(candidate).st_mode
+        except OSError as error:
+            raise SystemExit(f"cannot inspect fresh vcpkg entry {candidate}: {error}") from error
+        if stat.S_ISLNK(mode):
+            raise SystemExit(f"fresh vcpkg checkout contains a link: {candidate}")
+        if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            raise SystemExit(f"fresh vcpkg checkout contains a special entry: {candidate}")
+PY
+}
+
 case "$platform" in
   Linux)
     if [[ "$architecture" != x86_64 && "$architecture" != aarch64 ]]; then
@@ -141,19 +179,102 @@ PY
       echo "Darwin runner label identity is unavailable or mismatched." >&2
       exit 1
     fi
-    vcpkg_root=${VCPKG_INSTALLATION_ROOT:-}
-    if [[ -z "$vcpkg_root" || ! -x "$vcpkg_root/vcpkg" || ! -d "$vcpkg_root/.git" ]]; then
-      echo "GitHub-hosted vcpkg installation is unavailable." >&2
+    vcpkg_source_root=${VCPKG_INSTALLATION_ROOT:-}
+    runner_temp=${CI_RUNNER_TEMP:-}
+    if [[ -z "$vcpkg_source_root" || -L "$vcpkg_source_root" ||
+      ! -d "$vcpkg_source_root" || -L "$vcpkg_source_root/.git" ||
+      ! -d "$vcpkg_source_root/.git" || -L "$vcpkg_source_root/vcpkg" ||
+      ! -f "$vcpkg_source_root/vcpkg" || ! -x "$vcpkg_source_root/vcpkg" ]]; then
+      echo "GitHub-hosted vcpkg Git object source or binary is unavailable or unsafe." >&2
       exit 1
     fi
-    actual_vcpkg_commit=$(git -C "$vcpkg_root" rev-parse HEAD)
+    if [[ -z "$runner_temp" || -L "$runner_temp" || ! -d "$runner_temp" ]]; then
+      echo "Darwin security preparation requires a real CI_RUNNER_TEMP directory." >&2
+      exit 1
+    fi
+    vcpkg_source_root=$(cd -- "$vcpkg_source_root" && pwd -P)
+    runner_temp_real=$(cd -- "$runner_temp" && pwd -P)
+    scratch_root=$(mktemp -d "$runner_temp_real/photospider-vcpkg.XXXXXX")
+    if [[ -L "$scratch_root" || ! -d "$scratch_root" ]]; then
+      echo "Darwin vcpkg scratch root is not a fresh real directory." >&2
+      exit 1
+    fi
+    scratch_root=$(cd -- "$scratch_root" && pwd -P)
+    if [[ ${scratch_root%/*} != "$runner_temp_real" ||
+      ${scratch_root##*/} != photospider-vcpkg.* ]]; then
+      echo "Darwin vcpkg scratch root is not a direct runner.temp child." >&2
+      exit 1
+    fi
+    if [[ -n $(find "$scratch_root" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
+      echo "Darwin vcpkg scratch root contains residual state." >&2
+      exit 1
+    fi
+    fresh_vcpkg_root=$scratch_root/vcpkg
+    if [[ -e "$fresh_vcpkg_root" || -L "$fresh_vcpkg_root" ]]; then
+      echo "Darwin fresh vcpkg checkout target contains residual state." >&2
+      exit 1
+    fi
+
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+      git init --quiet --template= "$fresh_vcpkg_root"
+    fetch_source=https://github.com/microsoft/vcpkg.git
+    if GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+      git -C "$vcpkg_source_root" cat-file -e "$expected_vcpkg_commit^{commit}"; then
+      fetch_source=$vcpkg_source_root
+    fi
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+      git -C "$fresh_vcpkg_root" -c protocol.file.allow=always fetch \
+      --force --no-tags --no-recurse-submodules --depth=1 \
+      "$fetch_source" "$expected_vcpkg_commit"
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+      git -C "$fresh_vcpkg_root" checkout --quiet --detach \
+      "$expected_vcpkg_commit"
+    if ! actual_vcpkg_commit=$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+      git -C "$fresh_vcpkg_root" rev-parse --verify HEAD^{commit}); then
+      echo "Darwin fresh vcpkg checkout has no readable commit identity." >&2
+      exit 1
+    fi
     if [[ "$actual_vcpkg_commit" != "$expected_vcpkg_commit" ]]; then
-      echo "Darwin vcpkg commit '$actual_vcpkg_commit' differs from protected '$expected_vcpkg_commit'." >&2
+      echo "Darwin fresh vcpkg commit '$actual_vcpkg_commit' differs from protected '$expected_vcpkg_commit'." >&2
       exit 1
     fi
-    if ! git -C "$vcpkg_root" diff --quiet --ignore-submodules -- ||
-      ! git -C "$vcpkg_root" diff --cached --quiet --ignore-submodules --; then
-      echo "Darwin vcpkg protected registry checkout has tracked modifications." >&2
+    if ! checkout_status=$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+      git -C "$fresh_vcpkg_root" status --porcelain=v1 \
+      --untracked-files=all --ignore-submodules=none); then
+      echo "Darwin fresh vcpkg checkout cleanliness cannot be verified." >&2
+      exit 1
+    fi
+    if [[ -n "$checkout_status" ]]; then
+      echo "Darwin fresh vcpkg checkout contains residual or modified state." >&2
+      exit 1
+    fi
+    validate_fresh_real_tree "$fresh_vcpkg_root"
+    toolchain_file=$fresh_vcpkg_root/scripts/buildsystems/vcpkg.cmake
+    if [[ -L "$toolchain_file" || ! -f "$toolchain_file" ]]; then
+      echo "Darwin fresh vcpkg checkout lacks a real toolchain file." >&2
+      exit 1
+    fi
+    if [[ -e "$fresh_vcpkg_root/vcpkg" || -L "$fresh_vcpkg_root/vcpkg" ]]; then
+      echo "Darwin fresh vcpkg binary target contains residual state." >&2
+      exit 1
+    fi
+    cp -- "$vcpkg_source_root/vcpkg" "$fresh_vcpkg_root/vcpkg"
+    chmod 700 "$fresh_vcpkg_root/vcpkg"
+    if [[ -L "$fresh_vcpkg_root/vcpkg" || ! -f "$fresh_vcpkg_root/vcpkg" ||
+      ! -x "$fresh_vcpkg_root/vcpkg" ]] ||
+      ! cmp -s -- "$vcpkg_source_root/vcpkg" "$fresh_vcpkg_root/vcpkg"; then
+      echo "Darwin image-bound vcpkg binary was not copied exactly." >&2
+      exit 1
+    fi
+    validate_fresh_real_tree "$fresh_vcpkg_root"
+    if ! checkout_status=$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+      git -C "$fresh_vcpkg_root" status --porcelain=v1 \
+      --untracked-files=all --ignore-submodules=none); then
+      echo "Darwin fresh vcpkg checkout cleanliness cannot be reverified." >&2
+      exit 1
+    fi
+    if [[ -n "$checkout_status" ]]; then
+      echo "Darwin fresh vcpkg checkout changed while binding the runner binary." >&2
       exit 1
     fi
     dependencies=()
@@ -164,15 +285,16 @@ PY
       echo "Darwin security profile resolved no dependencies." >&2
       exit 1
     fi
-    install_root=${CI_DARWIN_VCPKG_INSTALLED:-$REPO_ROOT/build/vcpkg-security}
-    VCPKG_BINARY_SOURCES=clear X_VCPKG_ASSET_SOURCES=clear \
-      "$vcpkg_root/vcpkg" install \
+    install_root=$fresh_vcpkg_root/installed
+    VCPKG_ROOT="$fresh_vcpkg_root" \
+      VCPKG_BINARY_SOURCES=clear X_VCPKG_ASSET_SOURCES=clear \
+      "$fresh_vcpkg_root/vcpkg" install \
       --triplet "$triplet" \
       --x-install-root "$install_root" \
       --clean-after-build \
       "${dependencies[@]}"
     {
-      printf '%s\n' "-DCMAKE_TOOLCHAIN_FILE=$vcpkg_root/scripts/buildsystems/vcpkg.cmake"
+      printf '%s\n' "-DCMAKE_TOOLCHAIN_FILE=$toolchain_file"
       printf '%s\n' "-DVCPKG_INSTALLED_DIR=$install_root"
       printf '%s\n' "-DVCPKG_TARGET_TRIPLET=$triplet"
     } > "$OUTPUT_FILE"

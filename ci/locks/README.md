@@ -28,8 +28,12 @@ The values were refreshed on 2026-08-25 from authoritative upstream services:
   workflow label `macos-15` to its `arm64` architecture and `arm64-osx`
   triplet, and resolves its documented vcpkg commit prefix to the full commit
   in the official `microsoft/vcpkg` repository.
-  Security jobs reject runner-image or registry drift and disable binary/asset
-  caches so the locked port registry's source hashes remain authoritative.
+  Security jobs use the preinstalled tree only as an image-bound binary and
+  locked Git-object source. Each profile creates an unseedable checkout below
+  `runner.temp` (fetching the same exact commit from the official repository if
+  the local object is absent), verifies its commit, clean state, and real-file
+  tree, then disables binary/asset caches so registry source hashes remain
+  authoritative.
 
 Any lock refresh is a protected CI change. Run `python3 ci/scripts/ci_lock_verify.py`
 and the durable security contract tests before accepting it.

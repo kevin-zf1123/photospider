@@ -914,7 +914,7 @@ validate_runtime_capability_routing() {
   pass integration-runtime-capability-routing
 }
 
-# @brief Validate exact-image sanitizer/fuzz routing and generic role readers.
+# @brief Validate exact-image security routing, fresh Darwin vcpkg, and roles.
 # @param $1 Integration workflow YAML path.
 # @return Zero when dedicated and local-image security paths feed the stable gate.
 # @throws Nothing; missing, mutable, or hard-coded routes exit through fail.
@@ -981,6 +981,8 @@ validate_security_profile_routing() {
   assert_file_contains "$darwin_job" 'ci-security-profile-inventory'
   assert_file_contains "$darwin_job" '--platform Darwin'
   assert_file_contains "$darwin_job" '--runner-label macos-15'
+  assert_file_contains "$darwin_job" 'CI_RUNNER_TEMP: ${{ runner.temp }}'
+  assert_file_not_contains "$darwin_job" 'CI_DARWIN_VCPKG_INSTALLED:'
   verify_line=$(grep -nF -- 'python3 ci/scripts/ci_runner_verify.py' \
     "$darwin_job" | head -n 1 | cut -d: -f1)
   candidate_line=$(grep -nF -- 'Download security profile inventory' \
@@ -1013,7 +1015,12 @@ validate_security_profile_routing() {
     'bash "$SCRIPT_DIR/security_platform_prepare.sh"'
   assert_file_contains "$platform_script" 'Unsupported security platform:'
   assert_file_contains "$platform_script" 'darwin-runner-lock.json'
-  assert_file_contains "$platform_script" '"$vcpkg_root/vcpkg" install'
+  assert_file_contains "$platform_script" \
+    'https://github.com/microsoft/vcpkg.git'
+  assert_file_contains "$platform_script" \
+    'git -C "$fresh_vcpkg_root" status --porcelain=v1'
+  assert_file_contains "$platform_script" \
+    '"$fresh_vcpkg_root/vcpkg" install'
   assert_file_contains "$fuzz_script" '"-seed=$seed"'
   assert_file_contains "$fuzz_script" '"-runs=$runs"'
   assert_file_contains "$fuzz_script" '"-timeout=$timeout"'

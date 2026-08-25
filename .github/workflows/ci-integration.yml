@@ -1075,8 +1075,8 @@ jobs:
           path: CI-results/profile-inventory
       - name: Run isolated Darwin security profiles
         env:
-          CI_DARWIN_VCPKG_INSTALLED: ${{ github.workspace }}/build/vcpkg-security
           CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_RUNNER_TEMP: ${{ runner.temp }}
         run: |
           set -Eeuo pipefail
           for sanitizer in asan tsan; do
