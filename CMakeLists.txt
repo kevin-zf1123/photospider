@@ -3555,8 +3555,10 @@ endif()
 
 # GoogleTest.cmake records each gtest_discover_tests registration in the
 # directory TEST_INCLUDE_FILES property and sets CTEST_DISCOVERED_TEST_COUNTER
-# on its executable target. Cross-check those two CMake-owned views, then expose
-# the exact target/configuration executable mapping to nested-profile drivers.
+# on its executable target. Resolve target identities from those actual include
+# records, canonicalize their platform-dependent path spelling, and cross-check
+# them against root targets and counters before exposing the exact
+# target/configuration executable mapping to nested-profile drivers.
 # A driver can consequently derive registered-but-unbuilt `_NOT_BUILT`
 # placeholders from real target existence without maintaining a target count or
 # guessing future target names.
@@ -3565,35 +3567,11 @@ if(BUILD_TESTING)
         PROPERTY TEST_INCLUDE_FILES)
     get_property(PHOTOSPIDER_INVENTORY_ROOT_TARGETS DIRECTORY
         PROPERTY BUILDSYSTEM_TARGETS)
-    set(PHOTOSPIDER_REGISTERED_GTEST_TARGETS "")
-    set(PHOTOSPIDER_EXPECTED_GTEST_INCLUDE_FILES "")
-    foreach(PHOTOSPIDER_INVENTORY_ROOT_TARGET
-            IN LISTS PHOTOSPIDER_INVENTORY_ROOT_TARGETS)
-        get_property(PHOTOSPIDER_GTEST_COUNTER_IS_SET
-            TARGET ${PHOTOSPIDER_INVENTORY_ROOT_TARGET}
-            PROPERTY CTEST_DISCOVERED_TEST_COUNTER SET)
-        if(PHOTOSPIDER_GTEST_COUNTER_IS_SET)
-            get_property(PHOTOSPIDER_GTEST_COUNTER
-                TARGET ${PHOTOSPIDER_INVENTORY_ROOT_TARGET}
-                PROPERTY CTEST_DISCOVERED_TEST_COUNTER)
-            if(NOT PHOTOSPIDER_GTEST_COUNTER EQUAL 1)
-                message(FATAL_ERROR
-                    "GoogleTest target ${PHOTOSPIDER_INVENTORY_ROOT_TARGET} is registered ${PHOTOSPIDER_GTEST_COUNTER} times; inventory requires one registration")
-            endif()
-            list(APPEND PHOTOSPIDER_REGISTERED_GTEST_TARGETS
-                ${PHOTOSPIDER_INVENTORY_ROOT_TARGET})
-            list(APPEND PHOTOSPIDER_EXPECTED_GTEST_INCLUDE_FILES
-                "${CMAKE_CURRENT_BINARY_DIR}/${PHOTOSPIDER_INVENTORY_ROOT_TARGET}[${PHOTOSPIDER_GTEST_COUNTER}]_include.cmake")
-        endif()
-    endforeach()
-    list(SORT PHOTOSPIDER_CTEST_INCLUDE_FILES)
-    list(SORT PHOTOSPIDER_EXPECTED_GTEST_INCLUDE_FILES)
-    list(SORT PHOTOSPIDER_REGISTERED_GTEST_TARGETS)
-    if(NOT PHOTOSPIDER_CTEST_INCLUDE_FILES STREQUAL
-            PHOTOSPIDER_EXPECTED_GTEST_INCLUDE_FILES)
-        message(FATAL_ERROR
-            "CTest include inventory does not match registered GoogleTest targets")
-    endif()
+    photospider_collect_registered_gtest_targets(
+        PHOTOSPIDER_REGISTERED_GTEST_TARGETS
+        PHOTOSPIDER_CTEST_INCLUDE_FILES
+        PHOTOSPIDER_INVENTORY_ROOT_TARGETS
+        "${CMAKE_CURRENT_BINARY_DIR}")
     photospider_generate_registered_gtest_target_inventory(
         "${PHOTOSPIDER_CI_INVENTORY_DIR}/registered_gtest_targets-$<CONFIG>.tsv"
         PHOTOSPIDER_REGISTERED_GTEST_TARGETS)
