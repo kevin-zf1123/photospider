@@ -1238,6 +1238,20 @@ class OpRegistry {
    */
   struct OpImplementations {
     /**
+     * @brief Constructs an empty implementation group for registry retirement.
+     *
+     * All optional callback slots are disengaged, dependency state is false,
+     * and both device lists are empty. Registry rollback uses this state as the
+     * non-allocating swap destination before erasing an active entry.
+     *
+     * @throws Nothing.
+     * @note This declared constructor ensures supported Clang/libstdc++
+     *       combinations expose the same public constructibility to
+     *       `std::optional::emplace` as to the registry's static assertions.
+     */
+    OpImplementations() noexcept = default;
+
+    /**
      * @brief Optional full-output high-precision implementation slot.
      *
      * @note The value always contains a monolithic callback, its exact

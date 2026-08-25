@@ -75,6 +75,109 @@ function(photospider_write_public_header_inventory
         "${PHOTOSPIDER_PUBLIC_HEADER_INVENTORY_CONTENT}")
 endfunction()
 
+# @brief Resolve registered GoogleTest targets from CTest's actual include list.
+#
+# @param OUTPUT_VARIABLE Caller variable receiving a sorted target-name list.
+# @param INCLUDE_LIST_VARIABLE Name of the caller-owned TEST_INCLUDE_FILES list.
+# @param ROOT_TARGET_LIST_VARIABLE Name of the caller-owned root target list.
+# @param BINARY_DIRECTORY Root binary directory that owns every include file.
+# @return None; publishes the validated list through the caller scope.
+# @throws FATAL_ERROR If an include is foreign/malformed, names an unknown or
+#   duplicate target, disagrees with the target registration counter, or a
+#   counter-bearing root target has no corresponding CTest include.
+# @note GoogleTest.cmake owns include-path spelling. This helper canonicalizes
+#   those real paths and derives target identity from the actual registration
+#   record instead of reconstructing a platform-sensitive pathname.
+function(photospider_collect_registered_gtest_targets
+        OUTPUT_VARIABLE INCLUDE_LIST_VARIABLE ROOT_TARGET_LIST_VARIABLE
+        BINARY_DIRECTORY)
+    set(PHOTOSPIDER_CTEST_INCLUDE_FILES
+        ${${INCLUDE_LIST_VARIABLE}})
+    set(PHOTOSPIDER_INVENTORY_ROOT_TARGETS
+        ${${ROOT_TARGET_LIST_VARIABLE}})
+    set(PHOTOSPIDER_REGISTERED_GTEST_TARGETS "")
+    get_filename_component(PHOTOSPIDER_GTEST_BINARY_DIRECTORY_REAL
+        "${BINARY_DIRECTORY}" REALPATH)
+
+    foreach(PHOTOSPIDER_CTEST_INCLUDE_FILE
+            IN LISTS PHOTOSPIDER_CTEST_INCLUDE_FILES)
+        get_filename_component(PHOTOSPIDER_CTEST_INCLUDE_FILE_REAL
+            "${PHOTOSPIDER_CTEST_INCLUDE_FILE}" REALPATH
+            BASE_DIR "${BINARY_DIRECTORY}")
+        get_filename_component(PHOTOSPIDER_CTEST_INCLUDE_DIRECTORY_REAL
+            "${PHOTOSPIDER_CTEST_INCLUDE_FILE_REAL}" DIRECTORY)
+        if(NOT PHOTOSPIDER_CTEST_INCLUDE_DIRECTORY_REAL STREQUAL
+                PHOTOSPIDER_GTEST_BINARY_DIRECTORY_REAL)
+            message(FATAL_ERROR
+                "CTest include is outside the root binary directory: "
+                "${PHOTOSPIDER_CTEST_INCLUDE_FILE}")
+        endif()
+
+        get_filename_component(PHOTOSPIDER_CTEST_INCLUDE_NAME
+            "${PHOTOSPIDER_CTEST_INCLUDE_FILE_REAL}" NAME)
+        if(NOT "${PHOTOSPIDER_CTEST_INCLUDE_NAME}" MATCHES
+                "^([A-Za-z0-9_.+-]+)\\[([1-9][0-9]*)\\]_include\\.cmake$")
+            message(FATAL_ERROR
+                "CTest include does not have a canonical GoogleTest "
+                "registration name: ${PHOTOSPIDER_CTEST_INCLUDE_NAME}")
+        endif()
+        set(PHOTOSPIDER_GTEST_TARGET "${CMAKE_MATCH_1}")
+        set(PHOTOSPIDER_GTEST_COUNTER_FROM_INCLUDE "${CMAKE_MATCH_2}")
+        if(NOT PHOTOSPIDER_GTEST_TARGET IN_LIST
+                PHOTOSPIDER_INVENTORY_ROOT_TARGETS OR
+           NOT TARGET "${PHOTOSPIDER_GTEST_TARGET}")
+            message(FATAL_ERROR
+                "CTest include names an unknown root GoogleTest target: "
+                "${PHOTOSPIDER_GTEST_TARGET}")
+        endif()
+        if(PHOTOSPIDER_GTEST_TARGET IN_LIST
+                PHOTOSPIDER_REGISTERED_GTEST_TARGETS)
+            message(FATAL_ERROR
+                "CTest include inventory duplicates GoogleTest target "
+                "${PHOTOSPIDER_GTEST_TARGET}")
+        endif()
+
+        get_property(PHOTOSPIDER_GTEST_COUNTER_IS_SET
+            TARGET "${PHOTOSPIDER_GTEST_TARGET}"
+            PROPERTY CTEST_DISCOVERED_TEST_COUNTER SET)
+        if(NOT PHOTOSPIDER_GTEST_COUNTER_IS_SET)
+            message(FATAL_ERROR
+                "CTest include target ${PHOTOSPIDER_GTEST_TARGET} has no "
+                "registration counter")
+        endif()
+        get_property(PHOTOSPIDER_GTEST_COUNTER
+            TARGET "${PHOTOSPIDER_GTEST_TARGET}"
+            PROPERTY CTEST_DISCOVERED_TEST_COUNTER)
+        if(NOT PHOTOSPIDER_GTEST_COUNTER EQUAL 1 OR
+           NOT PHOTOSPIDER_GTEST_COUNTER EQUAL
+                PHOTOSPIDER_GTEST_COUNTER_FROM_INCLUDE)
+            message(FATAL_ERROR
+                "GoogleTest target ${PHOTOSPIDER_GTEST_TARGET} registration "
+                "counter does not match its CTest include")
+        endif()
+        list(APPEND PHOTOSPIDER_REGISTERED_GTEST_TARGETS
+            "${PHOTOSPIDER_GTEST_TARGET}")
+    endforeach()
+
+    foreach(PHOTOSPIDER_INVENTORY_ROOT_TARGET
+            IN LISTS PHOTOSPIDER_INVENTORY_ROOT_TARGETS)
+        get_property(PHOTOSPIDER_GTEST_COUNTER_IS_SET
+            TARGET "${PHOTOSPIDER_INVENTORY_ROOT_TARGET}"
+            PROPERTY CTEST_DISCOVERED_TEST_COUNTER SET)
+        if(PHOTOSPIDER_GTEST_COUNTER_IS_SET AND
+           NOT PHOTOSPIDER_INVENTORY_ROOT_TARGET IN_LIST
+                PHOTOSPIDER_REGISTERED_GTEST_TARGETS)
+            message(FATAL_ERROR
+                "Registered GoogleTest target lacks a CTest include: "
+                "${PHOTOSPIDER_INVENTORY_ROOT_TARGET}")
+        endif()
+    endforeach()
+
+    list(SORT PHOTOSPIDER_REGISTERED_GTEST_TARGETS)
+    set(${OUTPUT_VARIABLE}
+        "${PHOTOSPIDER_REGISTERED_GTEST_TARGETS}" PARENT_SCOPE)
+endfunction()
+
 # @brief Generate the configuration-specific registered-GTest TSV manifest.
 #
 # @param OUTPUT_PATH Build-tree output path, normally containing $<CONFIG>.
