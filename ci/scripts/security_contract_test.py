@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,7 +23,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "ci/scripts"
-COMMIT_A = "1" * 40
+COMMIT_A = subprocess.run(
+    ["git", "-C", str(REPO_ROOT), "rev-parse", "--verify", "HEAD^{commit}"],
+    check=True,
+    text=True,
+    capture_output=True,
+).stdout.strip()
 COMMIT_B = "2" * 40
 IMAGE_DIGEST = "sha256:" + "3" * 64
 
@@ -282,7 +288,7 @@ class RunnerIdentityContractTest(unittest.TestCase):
             mock.patch.object(module.platform, "machine", return_value="x86_64"),
             mock.patch.dict(module.os.environ, exact_environment, clear=False),
         ):
-            verified = module.verify(REPO_ROOT, "Linux")
+            verified = module.verify(REPO_ROOT, "Linux", "ubuntu-24.04")
         self.assertEqual(verified["runner_label"], "ubuntu-24.04")
         with (
             mock.patch.object(module.platform, "system", return_value="Linux"),
@@ -294,7 +300,39 @@ class RunnerIdentityContractTest(unittest.TestCase):
             ),
             self.assertRaises(module.RunnerError),
         ):
-            module.verify(REPO_ROOT, "Linux")
+            module.verify(REPO_ROOT, "Linux", "ubuntu-24.04")
+
+        with (
+            mock.patch.object(module.platform, "system", return_value="Linux"),
+            mock.patch.object(module.platform, "machine", return_value="x86_64"),
+            mock.patch.dict(module.os.environ, exact_environment, clear=False),
+            self.assertRaises(module.RunnerError),
+        ):
+            module.verify(REPO_ROOT, "Linux", "ubuntu-latest")
+
+    def test_darwin_runner_uses_one_arm64_label_and_triplet_identity(self) -> None:
+        """Accept macos-15 arm64 and reject the former x86_64 interpretation."""
+        module_path = SCRIPTS / "ci_runner_verify.py"
+        specification = importlib.util.spec_from_file_location("ci_runner_verify_darwin_test", module_path)
+        self.assertIsNotNone(specification)
+        self.assertIsNotNone(specification.loader)
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        exact_environment = {"ImageOS": "macos15", "ImageVersion": "20260727.0256.1"}
+        with (
+            mock.patch.object(module.platform, "system", return_value="Darwin"),
+            mock.patch.object(module.platform, "machine", return_value="arm64"),
+            mock.patch.dict(module.os.environ, exact_environment, clear=False),
+        ):
+            verified = module.verify(REPO_ROOT, "Darwin", "macos-15")
+        self.assertEqual(verified["architecture"], "arm64")
+        with (
+            mock.patch.object(module.platform, "system", return_value="Darwin"),
+            mock.patch.object(module.platform, "machine", return_value="x86_64"),
+            mock.patch.dict(module.os.environ, exact_environment, clear=False),
+            self.assertRaises(module.RunnerError),
+        ):
+            module.verify(REPO_ROOT, "Darwin", "macos-15")
 
 
 class ProfileReaderContractTest(unittest.TestCase):
@@ -311,12 +349,121 @@ class ProfileReaderContractTest(unittest.TestCase):
         Returns:
             The SHA-256 digest binding the matrix and security-role records.
         """
+        matrix_records = {
+            ("capability", "address-sanitizer"): {
+                "default": False,
+                "dependencies": [],
+                "option": "USE_ASAN",
+                "platforms": ["Darwin", "Linux"],
+            },
+            ("capability", "build-fuzzers"): {
+                "default": False,
+                "dependencies": [],
+                "option": "PHOTOSPIDER_BUILD_FUZZERS",
+                "platforms": ["Darwin", "Linux"],
+            },
+            ("capability", "build-testing"): {
+                "default": True,
+                "dependencies": [],
+                "option": "BUILD_TESTING",
+                "platforms": ["Darwin", "Linux"],
+            },
+            ("capability", "thread-sanitizer"): {
+                "default": False,
+                "dependencies": [],
+                "option": "USE_TSAN",
+                "platforms": ["Darwin", "Linux"],
+            },
+            ("component", "security-validation"): {
+                "dependencies": ["openssl", "utf8proc"],
+                "targets": ["fuzz_codec", "test_contract"],
+            },
+            ("dependency", "openssl"): {
+                "cmake_package": "OpenSSL",
+                "lock": "ci/locks/requirements-ci.txt",
+                "mode": "required",
+                "vcpkg_port": "openssl",
+            },
+            ("dependency", "utf8proc"): {
+                "cmake_package": "utf8proc",
+                "lock": "ci/locks/requirements-ci.txt",
+                "mode": "required",
+                "vcpkg_port": "utf8proc",
+            },
+            ("profile", "fuzz-codecs"): {
+                "cmake_args": [
+                    "-DBUILD_TESTING=OFF",
+                    "-DPHOTOSPIDER_BUILD_FUZZERS=ON",
+                    "-DUSE_ASAN=OFF",
+                    "-DUSE_TSAN=OFF",
+                ],
+                "components": ["security-validation"],
+                "dependencies": ["openssl", "utf8proc"],
+                "platforms": ["Darwin", "Linux"],
+                "roles": ["fuzz-artifact", "fuzz-codec"],
+            },
+            ("profile", "sanitizer-asan"): {
+                "cmake_args": [
+                    "-DBUILD_TESTING=ON",
+                    "-DPHOTOSPIDER_BUILD_FUZZERS=OFF",
+                    "-DUSE_ASAN=ON",
+                    "-DUSE_TSAN=OFF",
+                ],
+                "components": ["security-validation"],
+                "dependencies": ["openssl", "utf8proc"],
+                "platforms": ["Darwin", "Linux"],
+                "roles": ["sanitizer-artifact", "sanitizer-target", "security-label"],
+            },
+            ("profile", "sanitizer-tsan"): {
+                "cmake_args": [
+                    "-DBUILD_TESTING=ON",
+                    "-DPHOTOSPIDER_BUILD_FUZZERS=OFF",
+                    "-DUSE_ASAN=OFF",
+                    "-DUSE_TSAN=ON",
+                ],
+                "components": ["security-validation"],
+                "dependencies": ["openssl", "utf8proc"],
+                "platforms": ["Darwin", "Linux"],
+                "roles": ["sanitizer-artifact", "sanitizer-target", "security-label"],
+            },
+            ("role", "fuzz-artifact"): {"kind": "artifact", "selector": "fuzz-smoke"},
+            ("role", "fuzz-codec"): {
+                "corpus_sha256": None,
+                "job_timeout_minutes": 20,
+                "kind": "fuzz-target",
+                "max_len": 65536,
+                "production_limit": 65536,
+                "production_limit_symbol": "ps::codec::kLimit",
+                "runs": 1000,
+                "seed": 1,
+                "selector": "fuzz_codec",
+                "timeout_seconds": 2,
+            },
+            ("role", "sanitizer-artifact"): {
+                "kind": "artifact",
+                "selector": "sanitizer-smoke",
+            },
+            ("role", "sanitizer-target"): {"kind": "target", "selector": "test_contract"},
+            ("role", "security-label"): {"kind": "ctest-label", "selector": "security"},
+            ("target", "fuzz_codec"): {
+                "capabilities": ["build-fuzzers"],
+                "component": "security-validation",
+            },
+            ("target", "test_contract"): {
+                "capabilities": ["build-testing"],
+                "component": "security-validation",
+            },
+        }
+        encoded_records = [
+            f"{kind}\t{identifier}\t"
+            + json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            for (kind, identifier), value in matrix_records.items()
+        ]
         matrix = inventory / "build_profile_matrix_v1.tsv"
         matrix.write_text(
             "schema\tphotospider-build-profile-matrix-v1\n"
-            "profile\tfuzz-codecs\n"
-            "profile\tsanitizer-asan\n"
-            "profile\tsanitizer-tsan\n",
+            + "\n".join(sorted(encoded_records))
+            + "\n",
             encoding="utf-8",
         )
         digest = hashlib.sha256(matrix.read_bytes()).hexdigest()
@@ -325,9 +472,9 @@ class ProfileReaderContractTest(unittest.TestCase):
             encoding="utf-8",
         )
         records = [
-            "fuzz\tfuzz-codecs\t[\"Darwin\",\"Linux\"]\t[\"openssl\",\"utf8proc\"]\tfuzz_codec\t1\t1000\t2\t20\t65536\t65536\tps::codec::kLimit\tnone\tfuzz-smoke",
-            "sanitizer\tsanitizer-asan\t[\"Darwin\",\"Linux\"]\t[\"-DUSE_ASAN=ON\",\"-DUSE_TSAN=OFF\"]\t[\"openssl\",\"utf8proc\"]\t[\"test_contract\"]\t[\"security\"]\tsanitizer-smoke",
-            "sanitizer\tsanitizer-tsan\t[\"Darwin\",\"Linux\"]\t[\"-DUSE_ASAN=OFF\",\"-DUSE_TSAN=ON\"]\t[\"openssl\",\"utf8proc\"]\t[\"test_contract\"]\t[\"security\"]\tsanitizer-smoke",
+            "fuzz\tfuzz-codecs\tfuzz-codec",
+            "sanitizer\tsanitizer-asan\t[\"sanitizer-target\"]\t[\"security-label\"]",
+            "sanitizer\tsanitizer-tsan\t[\"sanitizer-target\"]\t[\"security-label\"]",
         ]
         (inventory / "ci_security_roles_v1.tsv").write_text(
             "schema\tphotospider-ci-security-roles-v1\n"
@@ -335,6 +482,20 @@ class ProfileReaderContractTest(unittest.TestCase):
             + "\n".join(sorted(records)) + "\n",
             encoding="utf-8",
         )
+        return digest
+
+    @staticmethod
+    def _refresh_versioned_digest(inventory: Path) -> str:
+        """Rebind sidecar and roles header after one deliberate matrix mutation."""
+        matrix = inventory / "build_profile_matrix_v1.tsv"
+        digest = hashlib.sha256(matrix.read_bytes()).hexdigest()
+        (inventory / "build_profile_matrix_v1.tsv.sha256").write_text(
+            f"{digest}  build_profile_matrix_v1.tsv\n", encoding="utf-8"
+        )
+        roles = inventory / "ci_security_roles_v1.tsv"
+        lines = roles.read_text(encoding="utf-8").splitlines()
+        lines[1] = f"matrix_sha256\t{digest}"
+        roles.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return digest
 
     def test_current_main_fallback_is_hash_bound(self) -> None:
@@ -443,6 +604,34 @@ class ProfileReaderContractTest(unittest.TestCase):
             )
             self.assertIn("fallback is stale for CMakeLists.txt", failed.stderr)
 
+    def test_fallback_rejects_each_production_packet_limit_drift(self) -> None:
+        """Bind both production size-limit headers to fallback fuzz bounds."""
+        relative_headers = (
+            "src/lib/execution/isolation/isolated_cpu_invocation_protocol.hpp",
+            "src/lib/server/worker/worker_protocol.hpp",
+        )
+        for relative_header in relative_headers:
+            with self.subTest(relative_header=relative_header), tempfile.TemporaryDirectory() as temporary_text:
+                root = Path(temporary_text)
+                lock_source = REPO_ROOT / "ci/locks/current-main-profiles-v1.json"
+                lock_target = root / "ci/locks/current-main-profiles-v1.json"
+                lock_target.parent.mkdir(parents=True)
+                shutil.copyfile(lock_source, lock_target)
+                lock = json.loads(lock_source.read_text(encoding="utf-8"))
+                for relative in lock["source_hashes"]:
+                    destination = root / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(REPO_ROOT / relative, destination)
+                with (root / relative_header).open("a", encoding="utf-8") as handle:
+                    handle.write("\n// packet limit drift\n")
+                failed = run_command(
+                    "python3", SCRIPTS / "ci_profile_manifest.py",
+                    "--repo-root", root,
+                    "--inventory-dir", root / "empty-inventory",
+                    expect_success=False,
+                )
+                self.assertIn(f"fallback is stale for {relative_header}", failed.stderr)
+
     def test_complete_versioned_identity_is_cross_digest_bound(self) -> None:
         """Accept canonical roles only when their matrix sidecar and digest agree."""
         with tempfile.TemporaryDirectory() as temporary_text:
@@ -457,6 +646,16 @@ class ProfileReaderContractTest(unittest.TestCase):
             self.assertFalse(resolved["fallback"])
             self.assertEqual(resolved["matrix_sha256"], digest)
             self.assertEqual(len(resolved["profiles"]), 3)
+            fuzz = next(profile for profile in resolved["profiles"] if profile["profile"] == "fuzz-codecs")
+            self.assertEqual(
+                fuzz["cmake_args"],
+                [
+                    "-DBUILD_TESTING=OFF",
+                    "-DPHOTOSPIDER_BUILD_FUZZERS=ON",
+                    "-DUSE_ASAN=OFF",
+                    "-DUSE_TSAN=OFF",
+                ],
+            )
 
             roles.write_text(roles.read_text(encoding="utf-8").replace(digest, "0" * 64), encoding="utf-8")
             failed = run_command(
@@ -465,6 +664,111 @@ class ProfileReaderContractTest(unittest.TestCase):
                 expect_success=False,
             )
             self.assertIn("matrix digest does not match", failed.stderr)
+
+    def test_versioned_matrix_rejects_malformed_records_and_isolation(self) -> None:
+        """Reject bad fields, IDs, platforms, bounds, references, and isolation."""
+        mutations = (
+            ("\"roles\":[\"fuzz-artifact\",\"fuzz-codec\"]", "\"roles\":[\"fuzz-artifact\",\"unknown-role\"]", "unknown role"),
+            ("-DUSE_ASAN=ON", "-DUSE_ASAN=OFF", "CMake isolation"),
+            ("role\tfuzz-codec\t", "role\tfuzz-codec_\t", "invalid identifier"),
+            ("\"seed\":1", "\"seed\":2", "requires seed 1"),
+            ("\"timeout_seconds\":2}", "\"timeout_seconds\":2,\"unknown\":true}", "fields differ"),
+            ("\"platforms\":[\"Darwin\",\"Linux\"]", "\"platforms\":[\"Linux\",\"Windows\"]", "unsupported capability platform"),
+        )
+        for old, new, diagnostic in mutations:
+            with self.subTest(diagnostic=diagnostic), tempfile.TemporaryDirectory() as temporary_text:
+                inventory = Path(temporary_text)
+                self._write_complete_versioned_identity(inventory)
+                matrix = inventory / "build_profile_matrix_v1.tsv"
+                original = matrix.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                matrix.write_text(original.replace(old, new, 1), encoding="utf-8")
+                self._refresh_versioned_digest(inventory)
+                failed = run_command(
+                    "python3", SCRIPTS / "ci_profile_manifest.py",
+                    "--inventory-dir", inventory,
+                    expect_success=False,
+                )
+                self.assertIn(diagnostic, failed.stderr)
+
+    def test_versioned_matrix_rejects_noncanonical_record_order(self) -> None:
+        """Reject a byte-valid matrix whose semantic records are reordered."""
+        with tempfile.TemporaryDirectory() as temporary_text:
+            inventory = Path(temporary_text)
+            self._write_complete_versioned_identity(inventory)
+            matrix = inventory / "build_profile_matrix_v1.tsv"
+            lines = matrix.read_text(encoding="utf-8").splitlines()
+            lines[1], lines[2] = lines[2], lines[1]
+            matrix.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            self._refresh_versioned_digest(inventory)
+            failed = run_command(
+                "python3", SCRIPTS / "ci_profile_manifest.py",
+                "--inventory-dir", inventory,
+                expect_success=False,
+            )
+            self.assertIn("not bytewise sorted", failed.stderr)
+
+    def test_versioned_fuzz_matrix_arguments_reach_real_runner_boundary(self) -> None:
+        """Carry the exact three-file matrix CMake args into configure and fuzz."""
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            inventory = root / "inventory"
+            inventory.mkdir()
+            self._write_complete_versioned_identity(inventory)
+            binary_dir = root / "bin"
+            binary_dir.mkdir()
+            configure_log = root / "configure.log"
+            fuzz_log = root / "fuzz.log"
+            uname = binary_dir / "uname"
+            uname.write_text(
+                "#!/usr/bin/env bash\n"
+                "[[ ${1:-} == -s ]] && { echo Linux; exit 0; }\n"
+                "[[ ${1:-} == -m ]] && { echo x86_64; exit 0; }\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            uname.chmod(0o755)
+            cmake = binary_dir / "cmake"
+            cmake.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -Eeuo pipefail\n"
+                "if [[ ${1:-} == --build && ${4:-} == help ]]; then\n"
+                "  echo '... fuzz_codec'; exit 0\n"
+                "fi\n"
+                "if [[ ${1:-} == --build ]]; then exit 0; fi\n"
+                "printf '%q ' \"$@\" > \"$CI_TEST_CONFIGURE_LOG\"; printf '\\n' >> \"$CI_TEST_CONFIGURE_LOG\"\n"
+                "build_dir=\n"
+                "while (($#)); do [[ $1 == -B ]] && { build_dir=$2; break; }; shift; done\n"
+                "mkdir -p \"$build_dir/tests\"\n"
+                "printf '%s\\n' '#!/usr/bin/env bash' 'printf '\"'\"'%q '\"'\"' \"$@\" >> \"$CI_TEST_FUZZ_LOG\"; printf '\"'\"'\\n'\"'\"' >> \"$CI_TEST_FUZZ_LOG\"' > \"$build_dir/tests/fuzz_codec\"\n"
+                "chmod +x \"$build_dir/tests/fuzz_codec\"\n",
+                encoding="utf-8",
+            )
+            cmake.chmod(0o755)
+            artifacts = root / "artifacts"
+            run_command(
+                "bash", SCRIPTS / "fuzz_smoke.sh",
+                environment={
+                    "BUILD_DIR": str(root / "build"),
+                    "CI_ARTIFACT_DIR": str(artifacts),
+                    "CI_INVENTORY_DIR": str(inventory),
+                    "CI_JOBS": "1",
+                    "CI_TEST_CONFIGURE_LOG": str(configure_log),
+                    "CI_TEST_FUZZ_LOG": str(fuzz_log),
+                    "PATH": f"{binary_dir}:{os.environ['PATH']}",
+                },
+            )
+            configured = configure_log.read_text(encoding="utf-8")
+            for argument in (
+                "-DBUILD_TESTING=OFF",
+                "-DPHOTOSPIDER_BUILD_FUZZERS=ON",
+                "-DUSE_ASAN=OFF",
+                "-DUSE_TSAN=OFF",
+            ):
+                self.assertIn(argument, configured)
+            fuzzed = fuzz_log.read_text(encoding="utf-8")
+            for argument in ("-seed=1", "-runs=1000", "-timeout=2", "-max_len=65536"):
+                self.assertIn(argument, fuzzed)
 
 
 class SecurityPlatformContractTest(unittest.TestCase):
@@ -486,7 +790,7 @@ class SecurityPlatformContractTest(unittest.TestCase):
             uname.write_text(
                 "#!/usr/bin/env bash\n"
                 "[[ ${1:-} == -s ]] && { echo Darwin; exit 0; }\n"
-                "[[ ${1:-} == -m ]] && { echo x86_64; exit 0; }\n"
+                "[[ ${1:-} == -m ]] && { echo arm64; exit 0; }\n"
                 "exit 1\n",
                 encoding="utf-8",
             )
@@ -519,7 +823,7 @@ class SecurityPlatformContractTest(unittest.TestCase):
                 "CI_PLATFORM_CMAKE_ARGS_FILE": str(output),
                 "CI_TEST_VCPKG_LOG": str(vcpkg_log),
                 "ImageOS": "macos15",
-                "ImageVersion": "20260727.0377.1",
+                "ImageVersion": "20260727.0256.1",
                 "RUNNER_IMAGE_NAME": "macos-15",
                 "VCPKG_INSTALLATION_ROOT": str(vcpkg_root),
             }
@@ -529,7 +833,7 @@ class SecurityPlatformContractTest(unittest.TestCase):
             )
             arguments = output.read_text(encoding="utf-8")
             self.assertIn("-DCMAKE_TOOLCHAIN_FILE=", arguments)
-            self.assertIn("-DVCPKG_TARGET_TRIPLET=x64-osx", arguments)
+            self.assertIn("-DVCPKG_TARGET_TRIPLET=arm64-osx", arguments)
             install = vcpkg_log.read_text(encoding="utf-8")
             self.assertIn("binary=clear asset=clear", install)
             self.assertIn("openssl", install)
@@ -546,18 +850,93 @@ class SecurityPlatformContractTest(unittest.TestCase):
 class ReusableBuildContractTest(unittest.TestCase):
     """Exercise deterministic packing, exact identity checks, and safe extraction."""
 
-    def _create(self, root: Path, suffix: str) -> tuple[Path, Path, dict[str, object]]:
-        """Create one test archive and return its paths and parsed manifest."""
-        source = root / "source"
-        source.mkdir(exist_ok=True)
+    @staticmethod
+    def _load_reusable_module() -> object:
+        """Load the protected producer module for deterministic fixture emission."""
+        module_path = SCRIPTS / "reusable_build.py"
+        specification = importlib.util.spec_from_file_location("reusable_build_contract", module_path)
+        if specification is None or specification.loader is None:
+            raise AssertionError("cannot load reusable build module")
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _prepare_build(source: Path) -> Path:
+        """Materialize one complete fresh CMake/package/generated build fixture."""
+        source.mkdir(parents=True, exist_ok=True)
         executable = source / "bin/tool"
         executable.parent.mkdir(parents=True, exist_ok=True)
         executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         executable.chmod(0o755)
+        (source / "CMakeCache.txt").write_text(
+            "BUILD_TESTING:BOOL=ON\n"
+            "CMAKE_BUILD_TYPE:STRING=RelWithDebInfo\n"
+            "CMAKE_CXX_COMPILER:FILEPATH=/usr/bin/clang++\n"
+            "CMAKE_GENERATOR:INTERNAL=Ninja\n"
+            "CMAKE_PROJECT_NAME:STATIC=photospider\n"
+            "PHOTOSPIDER_BUILD_IPC:BOOL=ON\n"
+            "USE_ASAN:BOOL=OFF\n"
+            "USE_TSAN:BOOL=OFF\n",
+            encoding="utf-8",
+        )
+        module_dir = source / "CMakeFiles/3.31.0"
+        module_dir.mkdir(parents=True, exist_ok=True)
+        (module_dir / "CMakeCXXCompiler.cmake").write_text(
+            'set(CMAKE_CXX_COMPILER "/usr/bin/clang++")\n'
+            'set(CMAKE_CXX_COMPILER_ID "Clang")\n'
+            'set(CMAKE_CXX_COMPILER_VERSION "18.1.8")\n',
+            encoding="utf-8",
+        )
+        (module_dir / "CMakeSystem.cmake").write_text(
+            'set(CMAKE_SYSTEM_NAME "Linux")\n'
+            'set(CMAKE_SYSTEM_PROCESSOR "x86_64")\n',
+            encoding="utf-8",
+        )
+        (source / "PhotospiderConfig.cmake").write_text(
+            "set(Photospider_embedded_FOUND TRUE)\n"
+            "set(Photospider_policy_sdk_FOUND ON)\n",
+            encoding="utf-8",
+        )
+        export = source / "CMakeFiles/Export/fixture/PhotospiderTargets.cmake"
+        export.parent.mkdir(parents=True, exist_ok=True)
+        export.write_text(
+            "add_library(Photospider::photospider_kernel STATIC IMPORTED)\n"
+            "add_library(Photospider::policy_sdk INTERFACE IMPORTED)\n",
+            encoding="utf-8",
+        )
+        inventory = source / "generated/ci_inventory"
+        inventory.mkdir(parents=True, exist_ok=True)
+        (inventory / "installable_public_headers.txt").write_text(
+            "include/photospider/core/graph.hpp\n", encoding="utf-8"
+        )
+        (inventory / "registered_gtest_targets-RelWithDebInfo.tsv").write_text(
+            "# target\tconfigured executable\n"
+            "test_contract\t/tmp/test_contract\n",
+            encoding="utf-8",
+        )
+        (source / ".photospider-ci-build-complete").write_text(
+            f"build_dir={source.resolve()}\n"
+            f"source_dir={REPO_ROOT.resolve()}\n"
+            "profile=default\n"
+            "build_testing=ON\n"
+            "photospider_build_ipc=ON\n"
+            f"candidate_commit={COMMIT_A}\n"
+            "created_at=2026-08-25T12:00:00Z\n",
+            encoding="utf-8",
+        )
+        return inventory
+
+    def _create(self, root: Path, suffix: str) -> tuple[Path, Path, dict[str, object]]:
+        """Create one test archive and return its paths and parsed manifest."""
+        source = root / "source"
+        inventory = self._prepare_build(source)
         archive = root / f"ci-build-{suffix}.tar.gz"
         manifest = root / f"ci-build-{suffix}.manifest.json"
         run_command(
-            "python3", SCRIPTS / "reusable_build.py", "create",
+            "python3", SCRIPTS / "reusable_build.py",
+            "--inventory-dir", inventory,
+            "create",
             "--source", source,
             "--archive", archive,
             "--manifest", manifest,
@@ -634,14 +1013,16 @@ class ReusableBuildContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_text:
             root = Path(temporary_text)
             source = root / "source"
-            source.mkdir()
+            self._prepare_build(source)
             (source / "result.txt").write_text("verified\n", encoding="utf-8")
             reusable = root / "reusable"
             reusable.mkdir()
             archive = reusable / "ci-build.tar.gz"
             manifest = reusable / "ci-build.manifest.json"
             run_command(
-                "python3", SCRIPTS / "reusable_build.py", "create",
+                "python3", SCRIPTS / "reusable_build.py",
+                "--inventory-dir", source / "generated/ci_inventory",
+                "create",
                 "--source", source,
                 "--archive", archive,
                 "--manifest", manifest,
@@ -683,6 +1064,90 @@ class ReusableBuildContractTest(unittest.TestCase):
             attestations = gh_log.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(attestations), 2)
             self.assertTrue(all("--deny-self-hosted-runners" in line for line in attestations))
+
+    def test_producer_rejects_cached_empty_and_caller_forged_identity(self) -> None:
+        """Reject stale origins, missing measured surfaces, and forged compiler data."""
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            source = root / "source"
+            inventory = self._prepare_build(source)
+            common = (
+                "python3", SCRIPTS / "reusable_build.py",
+                "--inventory-dir", inventory,
+                "create",
+                "--source", source,
+                "--archive", root / "candidate.tar.gz",
+                "--manifest", root / "candidate.manifest.json",
+                "--candidate-commit", COMMIT_A,
+                "--profile", "default",
+                "--image-digest", IMAGE_DIGEST,
+                "--workflow-commit", COMMIT_B,
+            )
+
+            stamp = source / ".photospider-ci-build-complete"
+            valid_stamp = stamp.read_text(encoding="utf-8")
+            stamp.write_text(valid_stamp.replace(f"build_dir={source.resolve()}", "build_dir=/cached/tree"), encoding="utf-8")
+            cached = run_command(*common, expect_success=False)
+            self.assertIn("completion stamp build_dir mismatch", cached.stderr)
+            stamp.write_text(valid_stamp, encoding="utf-8")
+
+            package_config = source / "PhotospiderConfig.cmake"
+            valid_config = package_config.read_text(encoding="utf-8")
+            package_config.write_text("# empty package surface\n", encoding="utf-8")
+            empty = run_command(*common, expect_success=False)
+            self.assertIn("component/target inventory is empty", empty.stderr)
+            package_config.write_text(valid_config, encoding="utf-8")
+
+            digest = ProfileReaderContractTest._write_complete_versioned_identity(inventory)
+            module = self._load_reusable_module()
+            measured = module._measured_identity_value(
+                REPO_ROOT,
+                source,
+                inventory,
+                COMMIT_A,
+                "default",
+                digest,
+                False,
+            )
+            measured["compiler"]["cxx_compiler_id"] = "caller-forged"
+            (inventory / "reusable_build_identity_v1.json").write_text(
+                json.dumps(measured, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+            forged = run_command(*common, expect_success=False)
+            self.assertIn("differs from protected measurement", forged.stderr)
+
+    def test_protected_build_entry_rejects_a_preexisting_output_tree(self) -> None:
+        """Execute the maintained freshness helper against cached and empty paths."""
+        source = (SCRIPTS / "build_integrity.sh").read_text(encoding="utf-8")
+        match = re.search(
+            r"(?ms)^prepare_fresh_producer_build\(\) \{.*?^\}\n\nprepare_fresh_producer_build$",
+            source,
+        )
+        self.assertIsNotNone(match)
+        with tempfile.TemporaryDirectory() as temporary_text:
+            repository = Path(temporary_text) / "repository"
+            build = repository / "build/ci"
+            build.mkdir(parents=True)
+            harness = Path(temporary_text) / "fresh-build-contract.sh"
+            harness.write_text(
+                "#!/usr/bin/env bash\nset -Eeuo pipefail\n" + match.group(0) + "\n",
+                encoding="utf-8",
+            )
+            harness.chmod(0o755)
+            cached = run_command(
+                "bash", harness,
+                environment={"REPO_ROOT": str(repository), "BUILD_DIR": str(build)},
+                expect_success=False,
+            )
+            self.assertIn("refuses a cached or residual build directory", cached.stderr)
+            build.rmdir()
+            run_command(
+                "bash", harness,
+                environment={"REPO_ROOT": str(repository), "BUILD_DIR": str(build)},
+            )
+            self.assertTrue(build.is_dir())
+            self.assertFalse(build.is_symlink())
 
 
 class RulesetContractTest(unittest.TestCase):

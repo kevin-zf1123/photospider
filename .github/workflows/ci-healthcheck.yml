@@ -33,12 +33,20 @@ jobs:
             github.event.pull_request.head.repo.full_name != github.repository
           }}
         env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/protected-ci-paths
+          CI_ARTIFACT_DIR: ${{ runner.temp }}/photospider-protected-ci-paths-${{ github.run_id }}-${{ github.run_attempt }}
           CI_BASE_REPOSITORY: ${{ github.repository }}
           CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
         run: |
           set -Eeuo pipefail
-          mkdir -p "$CI_ARTIFACT_DIR"
+          if [[ -e "$CI_ARTIFACT_DIR" || -L "$CI_ARTIFACT_DIR" ]]; then
+            echo "Protected-path artifact directory already exists or aliases another object." >&2
+            exit 1
+          fi
+          mkdir -m 700 -- "$CI_ARTIFACT_DIR"
+          if [[ ! -d "$CI_ARTIFACT_DIR" || -L "$CI_ARTIFACT_DIR" ]]; then
+            echo "Protected-path artifact directory is not a fresh real directory." >&2
+            exit 1
+          fi
           {
             echo "Fork CI/** pull requests are rejected before checkout."
             echo "Only CI/** branches in '$CI_BASE_REPOSITORY' are covered by the push-triggered workflow."
@@ -62,13 +70,77 @@ jobs:
           CI_BASE_BRANCH: ${{ github.base_ref }}
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/protected-ci-paths
+          CI_RUNNER_TEMP: ${{ runner.temp }}
+          CI_ARTIFACT_DIR: ${{ runner.temp }}/photospider-protected-ci-paths-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -Eeuo pipefail
-          mkdir -p "$CI_ARTIFACT_DIR"
-          : > "$CI_ARTIFACT_DIR/changed-files.z"
-          : > "$CI_ARTIFACT_DIR/changed-files.txt"
-          : > "$CI_ARTIFACT_DIR/protected-files.txt"
+
+          # @brief Create the direct runner.temp child used by the protected guard.
+          # @return Zero only for a new mode-0700 real directory with no alias.
+          # @throws Nothing; missing runner.temp, residual paths, links, special
+          #   files, or a resolved directory outside runner.temp return nonzero.
+          prepare_guard_directory() {
+            local runner_temp_real
+            local artifact_real
+            if [[ -L "$CI_RUNNER_TEMP" || ! -d "$CI_RUNNER_TEMP" ]]; then
+              echo "runner.temp is missing or not a real directory." >&2
+              return 1
+            fi
+            runner_temp_real=$(cd -- "$CI_RUNNER_TEMP" && pwd -P)
+            if [[ -e "$CI_ARTIFACT_DIR" || -L "$CI_ARTIFACT_DIR" ]]; then
+              echo "Protected-path artifact directory contains residual or aliased state." >&2
+              return 1
+            fi
+            mkdir -m 700 -- "$CI_ARTIFACT_DIR"
+            if [[ ! -d "$CI_ARTIFACT_DIR" || -L "$CI_ARTIFACT_DIR" ]]; then
+              echo "Protected-path artifact directory is not a fresh real directory." >&2
+              return 1
+            fi
+            artifact_real=$(cd -- "$CI_ARTIFACT_DIR" && pwd -P)
+            if [[ ${artifact_real%/*} != "$runner_temp_real" ]]; then
+              echo "Protected-path artifact directory is not a direct runner.temp child." >&2
+              return 1
+            fi
+          }
+
+          # @brief Create one empty guard-owned evidence file without following links.
+          # @param $1 Exact basename below the verified artifact directory.
+          # @return Zero only after a new regular non-symlink file is created.
+          # @throws Nothing; residual, link, directory, FIFO, or device targets fail.
+          create_guard_file() {
+            local target="$CI_ARTIFACT_DIR/$1"
+            if [[ -e "$target" || -L "$target" ]]; then
+              echo "Protected-path evidence target is residual or aliased: $1" >&2
+              return 1
+            fi
+            (umask 077; : > "$target")
+            if [[ ! -f "$target" || -L "$target" ]]; then
+              echo "Protected-path evidence target is not a regular file: $1" >&2
+              return 1
+            fi
+          }
+
+          # @brief Revalidate one evidence file immediately before or after I/O.
+          # @param $1 Exact basename below the verified artifact directory.
+          # @return Zero only for a regular non-symlink file.
+          # @throws Nothing; replacement by a link or special file returns nonzero.
+          require_guard_file() {
+            local target="$CI_ARTIFACT_DIR/$1"
+            if [[ ! -f "$target" || -L "$target" ]]; then
+              echo "Protected-path evidence file changed type or disappeared: $1" >&2
+              return 1
+            fi
+          }
+
+          prepare_guard_directory
+          for evidence_file in \
+            changed-files.z \
+            changed-files.txt \
+            merge-bases.txt \
+            protected-files.txt \
+            summary.log; do
+            create_guard_file "$evidence_file"
+          done
 
           if [[ "$CI_EVENT_NAME" == "push" && "$CI_BRANCH_NAME" == "main" ]]; then
             echo "main branch push may update CI workflow files." |
@@ -105,11 +177,13 @@ jobs:
 
           git rev-parse --verify "$diff_candidate_base^{commit}" >/dev/null
           git rev-parse --verify "$diff_head^{commit}" >/dev/null
+          require_guard_file merge-bases.txt
           if ! git merge-base --all "$diff_candidate_base" "$diff_head" \
             > "$CI_ARTIFACT_DIR/merge-bases.txt"; then
             echo "Protected-path merge-base detection failed." >&2
             exit 1
           fi
+          require_guard_file merge-bases.txt
           mapfile -t merge_bases < "$CI_ARTIFACT_DIR/merge-bases.txt"
           if ((${#merge_bases[@]} != 1)); then
             echo "Protected-path comparison requires exactly one merge base." >&2
@@ -117,18 +191,22 @@ jobs:
           fi
           diff_base=${merge_bases[0]}
 
+          require_guard_file changed-files.z
           if ! git diff --no-renames --name-only -z \
             "$diff_base" "$diff_head" \
             > "$CI_ARTIFACT_DIR/changed-files.z"; then
             echo "Protected-path changed-path detection failed." >&2
             exit 1
           fi
+          require_guard_file changed-files.z
           changed_files=()
           if ! mapfile -d '' -t changed_files \
             < "$CI_ARTIFACT_DIR/changed-files.z"; then
             echo "Protected-path changed-path inventory read failed." >&2
             exit 1
           fi
+          require_guard_file changed-files.txt
+          require_guard_file protected-files.txt
           for changed_file in "${changed_files[@]}"; do
             printf '%q\n' "$changed_file" \
               >> "$CI_ARTIFACT_DIR/changed-files.txt"
@@ -139,24 +217,62 @@ jobs:
                 ;;
             esac
           done
+          require_guard_file changed-files.txt
+          require_guard_file protected-files.txt
 
           if [[ -s "$CI_ARTIFACT_DIR/protected-files.txt" ]]; then
+            require_guard_file summary.log
             {
               echo "Only trusted base-repository CI/** runs may change ci/, .github/workflows/, Dockerfile.ci, or .dockerignore."
               echo "Develop CI workflow changes on a CI/** branch in '$CI_BASE_REPOSITORY'."
             } | tee "$CI_ARTIFACT_DIR/summary.log" >&2
+            require_guard_file summary.log
             exit 1
           fi
 
+          require_guard_file summary.log
           echo "No protected CI workflow paths changed on '$CI_BRANCH_NAME'." |
             tee "$CI_ARTIFACT_DIR/summary.log"
+          require_guard_file summary.log
 
       - name: Upload protected path logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: healthcheck-protected-ci-paths
-          path: CI-results/protected-ci-paths
+          path: ${{ runner.temp }}/photospider-protected-ci-paths-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+
+  ruleset-readback:
+    needs: protected-ci-paths
+    if: needs.protected-ci-paths.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
+      - name: Read live default-branch ruleset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_RULESET_ARTIFACT_DIR: ${{ runner.temp }}/photospider-ruleset-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -e "$CI_RULESET_ARTIFACT_DIR" || -L "$CI_RULESET_ARTIFACT_DIR" ]]; then
+            echo "Ruleset artifact directory contains residual or aliased state." >&2
+            exit 1
+          fi
+          mkdir -m 700 -- "$CI_RULESET_ARTIFACT_DIR"
+          python3 ci/scripts/ruleset_readback.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --output "$CI_RULESET_ARTIFACT_DIR/ruleset-readback.json"
+      - name: Upload live ruleset readback
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: healthcheck-ruleset-readback
+          path: ${{ runner.temp }}/photospider-ruleset-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
 
   ci-image-change:
@@ -390,8 +506,11 @@ jobs:
           if-no-files-found: warn
 
   healthcheck:
+    name: >-
+      ${{ github.event_name == 'pull_request_target' && startsWith(github.head_ref, 'CI/') && github.event.pull_request.head.repo.full_name == github.repository && 'healthcheck-pr-sentinel' || 'healthcheck' }}
     needs:
       - protected-ci-paths
+      - ruleset-readback
       - ci-image-change
       - ci-image-identity
       - healthcheck-published-image
@@ -407,6 +526,7 @@ jobs:
           CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
           CI_HEAD_IS_BASE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository }}
           PROTECTED_RESULT: ${{ needs.protected-ci-paths.result }}
+          RULESET_RESULT: ${{ needs.ruleset-readback.result }}
           IMAGE_CHANGE_RESULT: ${{ needs.ci-image-change.result }}
           IMAGE_CHANGED: ${{ needs.ci-image-change.outputs.changed }}
           IMAGE_IDENTITY_RESULT: ${{ needs.ci-image-identity.result }}
@@ -442,6 +562,7 @@ jobs:
           fi
 
           require_value protected-ci-paths "$PROTECTED_RESULT" success
+          require_value ruleset-readback "$RULESET_RESULT" success
           require_value ci-image-change "$IMAGE_CHANGE_RESULT" success
           case "$IMAGE_CHANGED" in
             true)

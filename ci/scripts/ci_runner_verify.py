@@ -44,8 +44,23 @@ def _load(path: Path) -> dict[str, Any]:
     return value
 
 
-def verify(root: Path, requested: str) -> dict[str, str]:
-    """Validate runtime OS/architecture and GitHub ImageOS/ImageVersion values."""
+def verify(root: Path, requested: str, runner_label: str | None = None) -> dict[str, str]:
+    """Validate runtime OS, architecture, hosted image, and bound runner label.
+
+    Args:
+        root: Repository root containing the protected platform lock.
+        requested: Exact maintained platform name, ``Darwin`` or ``Linux``.
+        runner_label: Optional protected-workflow ``runs-on`` label. Security
+            consumers provide it explicitly so runtime and workflow identities
+            are cross-bound before candidate-controlled execution.
+
+    Returns:
+        The canonical verified hosted-runner identity.
+
+    Raises:
+        RunnerError: If schema, runtime, image, architecture, or supplied label
+            differs from the protected lock.
+    """
     if requested == "Linux":
         path = root / "ci/locks/linux-runner-lock.json"
         expected_fields = {"schema", "architecture", "image_os", "image_version", "runner_label"}
@@ -75,6 +90,10 @@ def verify(root: Path, requested: str) -> dict[str, str]:
         raise RunnerError(
             f"runtime architecture {actual_architecture!r} differs from protected {lock['architecture']!r}"
         )
+    if runner_label is not None and runner_label != lock["runner_label"]:
+        raise RunnerError(
+            f"runner label {runner_label!r} differs from protected {lock['runner_label']!r}"
+        )
     actual_image_os = os.environ.get("ImageOS", "")
     actual_image_version = os.environ.get("ImageVersion", "")
     if actual_image_os != lock["image_os"] or actual_image_version != lock["image_version"]:
@@ -96,9 +115,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--platform", choices=("Darwin", "Linux"), required=True)
+    parser.add_argument(
+        "--runner-label",
+        help="protected workflow runs-on label to cross-check",
+    )
     arguments = parser.parse_args()
     try:
-        result = verify(arguments.repo_root.resolve(), arguments.platform)
+        result = verify(
+            arguments.repo_root.resolve(), arguments.platform, arguments.runner_label
+        )
     except RunnerError as error:
         print(f"CI runner verification failed: {error}", file=sys.stderr)
         return 1

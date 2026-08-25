@@ -718,6 +718,7 @@ assert_gate_checks_all_results() {
     "Report healthcheck gate")
       assertion_labels=(
         protected-ci-paths
+        ruleset-readback
         ci-image-change
         ci-image-identity
         healthcheck-published-image
@@ -727,6 +728,7 @@ assert_gate_checks_all_results() {
     "Report integration gate")
       assertion_labels=(
         protected-ci-paths
+        ruleset-readback
         change-classification
         ci-image-change
         ci-image-identity
@@ -927,6 +929,10 @@ validate_security_profile_routing() {
   local platform_script="$REPO_ROOT/ci/scripts/security_platform_prepare.sh"
   local local_job="$TEST_ROOT/integration-local-security-job.yml"
   local darwin_job="$TEST_ROOT/integration-security-darwin-job.yml"
+  local manual_workflow="$REPO_ROOT/.github/workflows/ci-sanitizer.yml"
+  local manual_job="$TEST_ROOT/manual-sanitizer-job.yml"
+  local verify_line
+  local candidate_line
 
   for job_name in sanitizer-asan sanitizer-tsan fuzz-codecs; do
     job_file="$TEST_ROOT/integration-$job_name-job.yml"
@@ -937,6 +943,18 @@ validate_security_profile_routing() {
     assert_file_contains "$job_file" \
       'image: ${{ needs.ci-image-identity.outputs.image }}'
     assert_file_not_contains "$job_file" ':latest'
+    assert_file_contains "$job_file" \
+      'python3 ci/scripts/ci_runner_verify.py'
+    assert_file_contains "$job_file" '--platform Linux'
+    assert_file_contains "$job_file" '--runner-label ubuntu-24.04'
+    verify_line=$(grep -nF -- 'python3 ci/scripts/ci_runner_verify.py' \
+      "$job_file" | head -n 1 | cut -d: -f1)
+    candidate_line=$(grep -nF -- 'Download security profile inventory' \
+      "$job_file" | head -n 1 | cut -d: -f1)
+    [[ -n "$verify_line" && -n "$candidate_line" ]] ||
+      fail "$job_name lacks runner verification/candidate boundary"
+    ((verify_line < candidate_line)) ||
+      fail "$job_name consumes candidate profile data before runner verification"
   done
   assert_file_contains "$TEST_ROOT/integration-sanitizer-asan-job.yml" \
     'SANITIZER: asan'
@@ -961,6 +979,29 @@ validate_security_profile_routing() {
   assert_file_contains "$darwin_job" 'bash ci/scripts/sanitizer_test.sh'
   assert_file_contains "$darwin_job" 'bash ci/scripts/fuzz_smoke.sh'
   assert_file_contains "$darwin_job" 'ci-security-profile-inventory'
+  assert_file_contains "$darwin_job" '--platform Darwin'
+  assert_file_contains "$darwin_job" '--runner-label macos-15'
+  verify_line=$(grep -nF -- 'python3 ci/scripts/ci_runner_verify.py' \
+    "$darwin_job" | head -n 1 | cut -d: -f1)
+  candidate_line=$(grep -nF -- 'Download security profile inventory' \
+    "$darwin_job" | head -n 1 | cut -d: -f1)
+  [[ -n "$verify_line" && -n "$candidate_line" ]] ||
+    fail "Darwin security job lacks runner verification/candidate boundary"
+  ((verify_line < candidate_line)) ||
+    fail "Darwin security job consumes candidate profile before runner verification"
+
+  extract_job_block "$manual_workflow" sanitizer "$manual_job" ||
+    fail "manual sanitizer job could not be extracted"
+  assert_file_contains "$manual_job" '--platform Linux'
+  assert_file_contains "$manual_job" '--runner-label ubuntu-24.04'
+  verify_line=$(grep -nF -- 'python3 ci/scripts/ci_runner_verify.py' \
+    "$manual_job" | head -n 1 | cut -d: -f1)
+  candidate_line=$(grep -nF -- 'Download security profile inventory' \
+    "$manual_job" | head -n 1 | cut -d: -f1)
+  [[ -n "$verify_line" && -n "$candidate_line" ]] ||
+    fail "manual sanitizer lacks runner verification/candidate boundary"
+  ((verify_line < candidate_line)) ||
+    fail "manual sanitizer consumes candidate profile before runner verification"
 
   assert_file_contains "$sanitizer_script" \
     'python3 "$SCRIPT_DIR/ci_profile_manifest.py"'
@@ -1015,6 +1056,12 @@ validate_reusable_build_identity_routing() {
   assert_file_contains "$build_job" \
     '--inventory-dir build/ci/generated/ci_inventory create \'
   assert_file_contains "$build_job" 'path: CI-results/reusable-build-default'
+  assert_file_contains "$REPO_ROOT/ci/scripts/build_integrity.sh" \
+    'prepare_fresh_producer_build'
+  assert_file_contains "$REPO_ROOT/ci/scripts/reusable_build.py" \
+    'candidate reusable identity differs from protected measurement'
+  assert_file_contains "$REPO_ROOT/ci/scripts/reusable_build.py" \
+    '_verify_archived_measurement(arguments, value)'
   assert_file_not_contains "$build_job" 'id-token: write'
   assert_file_not_contains "$build_job" 'actions/attest@'
   assert_file_contains "$attest_job" 'artifact-metadata: write'
@@ -1097,6 +1144,117 @@ validate_ci_image_identity_routing() {
   pass ci-image-canonical-manifest-attestation-routing
 }
 
+# @brief Prove only main can publish canonical/manual image locators.
+# @return Zero after exact metadata expressions and a CI-branch negative model.
+# @throws Nothing; missing or broadened tag routes exit through fail.
+# @note The SHA tag remains available to protected CI branches, while their
+#   branch tag is namespaced and neither ``latest`` nor an operator-supplied
+#   canonical tag can be advanced before merge.
+validate_ci_image_tag_routing() {
+  local workflow="$REPO_ROOT/.github/workflows/build-ci-image.yml"
+  local same_sha=0123456789abcdef0123456789abcdef01234567
+  local main_latest=false
+  local ci_latest=false
+  local ci_branch_tag=false
+
+  assert_file_contains "$workflow" \
+    "type=raw,value=latest,enable=\${{ github.ref == 'refs/heads/main' }}"
+  assert_file_contains "$workflow" \
+    "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
+  assert_file_contains "$workflow" \
+    "type=ref,event=branch,prefix=branch-,enable=\${{ startsWith(github.ref, 'refs/heads/CI/') }}"
+  assert_file_contains "$workflow" 'type=sha'
+
+  [[ refs/heads/main == refs/heads/main ]] && main_latest=true
+  [[ refs/heads/CI/security == refs/heads/main ]] && ci_latest=true
+  [[ refs/heads/CI/security == refs/heads/CI/* ]] && ci_branch_tag=true
+  [[ "$main_latest" == true && "$ci_latest" == false &&
+    "$ci_branch_tag" == true && -n "$same_sha" ]] ||
+    fail "CI image tag model permits a protected branch to advance canonical latest"
+
+  pass ci-image-ci-branch-cannot-advance-canonical-tag
+}
+
+# @brief Bind the live ruleset reader into one maintained protected stable gate.
+# @param $1 Workflow YAML path.
+# @param $2 Stable top-level job identifier.
+# @return Zero after checkout/readback/upload and stable dependency checks.
+# @throws Nothing; missing or misordered live execution exits through fail.
+validate_live_ruleset_routing() {
+  local workflow=$1
+  local stable_job_name=$2
+  local workflow_name
+  local readback_job
+  local stable_job
+  local checkout_line
+  local readback_line
+  local upload_line
+  workflow_name=$(basename "$workflow" .yml)
+  readback_job="$TEST_ROOT/$workflow_name-ruleset-readback-job.yml"
+  stable_job="$TEST_ROOT/$workflow_name-$stable_job_name-stable-job.yml"
+
+  extract_job_block "$workflow" ruleset-readback "$readback_job" ||
+    fail "$workflow_name live ruleset job could not be extracted"
+  extract_job_block "$workflow" "$stable_job_name" "$stable_job" ||
+    fail "$workflow_name stable job could not be extracted for ruleset routing"
+  assert_file_contains "$readback_job" 'needs: protected-ci-paths'
+  assert_file_contains "$readback_job" \
+    "if: needs.protected-ci-paths.result == 'success'"
+  assert_file_contains "$readback_job" 'GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}'
+  assert_file_contains "$readback_job" \
+    'python3 ci/scripts/ruleset_readback.py \'
+  assert_file_contains "$readback_job" '--repository "$GITHUB_REPOSITORY" \'
+  assert_file_contains "$readback_job" \
+    '--output "$CI_RULESET_ARTIFACT_DIR/ruleset-readback.json"'
+  assert_file_contains "$stable_job" '      - ruleset-readback'
+  assert_file_contains "$stable_job" \
+    'RULESET_RESULT: ${{ needs.ruleset-readback.result }}'
+  assert_file_contains "$stable_job" \
+    'require_value ruleset-readback "$RULESET_RESULT" success'
+  checkout_line=$(grep -nF -- '- uses: actions/checkout@' "$readback_job" |
+    head -n 1 | cut -d: -f1)
+  readback_line=$(grep -nF -- 'python3 ci/scripts/ruleset_readback.py' \
+    "$readback_job" | head -n 1 | cut -d: -f1)
+  upload_line=$(grep -nF -- '- name: Upload live ruleset readback' \
+    "$readback_job" | head -n 1 | cut -d: -f1)
+  [[ -n "$checkout_line" && -n "$readback_line" && -n "$upload_line" ]] ||
+    fail "$workflow_name live ruleset job lacks a complete execution order"
+  ((checkout_line < readback_line && readback_line < upload_line)) ||
+    fail "$workflow_name live ruleset readback is misordered"
+
+  pass "$workflow_name-live-ruleset-stable-gate-routing"
+}
+
+# @brief Prove same-SHA PR sentinels cannot satisfy stable required contexts.
+# @param $1 Workflow YAML path.
+# @param $2 Stable required context/job identifier.
+# @return Zero after static source and dual-event identity assertions.
+# @throws Nothing; an ambiguous context exits through fail.
+validate_required_context_event_routing() {
+  local workflow=$1
+  local stable_context=$2
+  local stable_job="$TEST_ROOT/$(basename "$workflow" .yml)-$stable_context-context-job.yml"
+  local candidate_sha=0123456789abcdef0123456789abcdef01234567
+  local pr_context
+  local push_context
+
+  extract_job_block "$workflow" "$stable_context" "$stable_job" ||
+    fail "$stable_context job could not be extracted for event identity"
+  assert_file_contains "$stable_job" '    name: >-'
+  assert_file_contains "$stable_job" \
+    "&& '${stable_context}-pr-sentinel' || '${stable_context}' }}"
+  pr_context="${stable_context}-pr-sentinel"
+  push_context=$stable_context
+  [[ -n "$candidate_sha" && "$pr_context" != "$push_context" ]] ||
+    fail "$stable_context same-SHA pull-request sentinel aliases its push context"
+  assert_file_contains "$REPO_ROOT/ci/locks/ruleset-policy.json" \
+    "\"$stable_context\""
+  assert_file_not_contains "$REPO_ROOT/ci/locks/ruleset-policy.json" \
+    "${stable_context}-pr-sentinel"
+
+  pass "$stable_context-same-sha-dual-event-context-isolation"
+}
+
 # @brief Validate the canonical protected condition and executable gate contracts.
 # @param $1 Workflow YAML path.
 # @param $2 Exact stable gate step name.
@@ -1175,6 +1333,14 @@ validate_workflow_contract() {
     fail "$workflow_name protected-path run block could not be extracted"
   assert_file_contains "$TEST_ROOT/${workflow_name}-protected.sh" \
     "git diff --no-renames --name-only -z"
+  assert_file_contains "$TEST_ROOT/${workflow_name}-protected.sh" \
+    'prepare_guard_directory'
+  assert_file_contains "$TEST_ROOT/${workflow_name}-protected.sh" \
+    'runner.temp is missing or not a real directory.'
+  assert_file_contains "$workflow" \
+    'CI_ARTIFACT_DIR: ${{ runner.temp }}/photospider-protected-ci-paths-${{ github.run_id }}-${{ github.run_attempt }}'
+  assert_file_not_contains "$workflow" \
+    'CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/protected-ci-paths'
   assert_file_contains "$TEST_ROOT/${workflow_name}-protected.sh" \
     "if ! mapfile -d '' -t changed_files"
   assert_file_contains "$TEST_ROOT/${workflow_name}-protected.sh" \
@@ -1265,7 +1431,11 @@ create_protected_path_history() {
   git -C "$repository" config user.name "CI Routing Test"
   git -C "$repository" config user.email "ci-routing@example.invalid"
   printf 'baseline\n' > "$repository/seed.txt"
-  git -C "$repository" add seed.txt
+  mkdir -p "$repository/CI-results/protected-ci-paths"
+  ln -s /dev/null \
+    "$repository/CI-results/protected-ci-paths/changed-files.z"
+  git -C "$repository" add seed.txt \
+    CI-results/protected-ci-paths/changed-files.z
   git -C "$repository" commit -qm baseline
 
   git init -q --bare "$origin_repository"
@@ -1284,6 +1454,7 @@ create_protected_path_history() {
 # @param $2 Repository containing origin/main and the feature commit.
 # @param $3 Fresh artifact directory for the guard invocation.
 # @param $4 PATH value, optionally prefixed with a failure-injection shim.
+# @param $5 Whether to preserve a deliberately precreated artifact target.
 # @return The production block's status.
 # @throws Nothing; failures are returned to the calling regression assertion.
 # @note Event variables select the non-authorized push path without evaluating
@@ -1293,8 +1464,10 @@ run_protected_path_guard() {
   local repository=$2
   local artifact_dir=$3
   local command_path=${4:-$PATH}
-  rm -rf -- "$artifact_dir"
-  mkdir -p "$artifact_dir"
+  local preserve_existing=${5:-false}
+  if [[ "$preserve_existing" != true ]]; then
+    rm -rf -- "$artifact_dir"
+  fi
   (
     cd "$repository"
     env PATH="$command_path" CI_ROUTING_TEST_REAL_GIT="$REAL_GIT" \
@@ -1302,6 +1475,7 @@ run_protected_path_guard() {
       CI_BASE_REPOSITORY=owner/repository CI_HEAD_REPOSITORY= \
       CI_HEAD_IS_BASE_REPOSITORY=false CI_BASE_BRANCH=main \
       CI_BASE_SHA=origin/main CI_HEAD_SHA=HEAD \
+      CI_RUNNER_TEMP="${artifact_dir%/*}" \
       CI_ARTIFACT_DIR="$artifact_dir" bash "$guard_script"
   )
 }
@@ -1347,6 +1521,9 @@ exercise_protected_path_guard() {
   local read_failure_artifact_dir="$TEST_ROOT/${workflow_label}-read-failure"
   local read_failure_log="$TEST_ROOT/${workflow_label}-read-failure.log"
   local read_failure_shim_dir="$TEST_ROOT/protected-read-failing-git"
+  local unsafe_artifact_dir
+  local unsafe_log
+  local unsafe_kind
   local original_head
   local quoted_path
 
@@ -1363,6 +1540,39 @@ exercise_protected_path_guard() {
   grep -Fqx -- "$quoted_path" "$artifact_dir/protected-files.txt" ||
     fail "$workflow_label protected artifact omitted the newline path"
   assert_single_nul_path "$artifact_dir/changed-files.z" "$newline_path"
+  [[ -L "$repository/CI-results/protected-ci-paths/changed-files.z" ]] ||
+    fail "$workflow_label fixture lost its tracked workspace symlink"
+  [[ -f "$artifact_dir/changed-files.z" &&
+    ! -L "$artifact_dir/changed-files.z" ]] ||
+    fail "$workflow_label guard did not replace workspace identity with a runner.temp regular file"
+
+  for unsafe_kind in symlink fifo residual; do
+    unsafe_artifact_dir="$TEST_ROOT/${workflow_label}-${unsafe_kind}-artifact"
+    unsafe_log="$TEST_ROOT/${workflow_label}-${unsafe_kind}-artifact.log"
+    rm -rf -- "$unsafe_artifact_dir"
+    case "$unsafe_kind" in
+      symlink)
+        ln -s "$repository/CI-results/protected-ci-paths" \
+          "$unsafe_artifact_dir"
+        ;;
+      fifo)
+        mkfifo "$unsafe_artifact_dir"
+        ;;
+      residual)
+        mkdir -m 700 -- "$unsafe_artifact_dir"
+        ;;
+    esac
+    run_expect_failure \
+      "$workflow_label-runner-temp-$unsafe_kind-artifact-rejected" \
+      "$unsafe_log" \
+      "Protected-path artifact directory contains residual or aliased state." \
+      "No protected CI workflow paths changed" \
+      run_protected_path_guard "$guard_script" "$repository" \
+      "$unsafe_artifact_dir" "$PATH" true
+    if [[ "$unsafe_kind" == fifo ]]; then
+      rm -f -- "$unsafe_artifact_dir"
+    fi
+  done
 
   printf 'build\n' > "$repository/.dockerignore"
   git -C "$repository" add .dockerignore
@@ -1388,7 +1598,7 @@ exercise_protected_path_guard() {
   create_unlinking_git_inventory_shim "$read_failure_shim_dir"
   run_expect_failure "$workflow_label-protected-reader-fails-closed" \
     "$read_failure_log" \
-    "Protected-path changed-path inventory read failed." \
+    "Protected-path evidence file changed type or disappeared: changed-files.z" \
     "No protected CI workflow paths changed" \
     run_protected_path_guard "$guard_script" "$repository" \
     "$read_failure_artifact_dir" "$read_failure_shim_dir:$PATH"
@@ -1773,6 +1983,11 @@ main() {
   validate_security_profile_routing "$integration_workflow"
   validate_reusable_build_identity_routing "$integration_workflow"
   validate_ci_image_identity_routing "$health_workflow" "$integration_workflow"
+  validate_ci_image_tag_routing
+  validate_live_ruleset_routing "$health_workflow" healthcheck
+  validate_live_ruleset_routing "$integration_workflow" integration
+  validate_required_context_event_routing "$health_workflow" healthcheck
+  validate_required_context_event_routing "$integration_workflow" integration
   validate_published_image_base_fetch "$health_workflow"
   validate_published_image_fetch_shells "$health_workflow"
   validate_published_image_workspace_trust "$health_workflow"

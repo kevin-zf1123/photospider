@@ -168,14 +168,19 @@ ci_build_is_reusable() {
 # @brief Stamp a completed profile build for downstream artifact consumers.
 # @return Zero after writing the stamp, or a filesystem command status.
 # @throws Nothing; invalid cache or write failures return nonzero.
-# @note The stamp records configuration identity but contains no credentials.
+# @note The stamp records configuration plus exact candidate identity but
+#   contains no credentials. The protected producer later cross-validates it
+#   against Git HEAD and the freshly measured build tree.
 mark_ci_build_reusable() {
   local build_testing_value
+  local candidate_commit
   local ipc_value
   require_ci_profile_cache || return
   build_testing_value=$(ci_cache_value BUILD_TESTING) || return
   ipc_value=$(ci_cache_value PHOTOSPIDER_BUILD_IPC 2>/dev/null ||
     printf 'not-defined\n')
+  candidate_commit=$(git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}') ||
+    return
   mkdir -p "$BUILD_DIR"
   cat > "$CI_BUILD_STAMP" <<EOF
 build_dir=$BUILD_DIR
@@ -183,6 +188,7 @@ source_dir=$REPO_ROOT
 profile=$CI_BUILD_PROFILE
 build_testing=$build_testing_value
 photospider_build_ipc=$ipc_value
+candidate_commit=$candidate_commit
 created_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
 }

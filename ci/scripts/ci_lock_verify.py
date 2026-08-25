@@ -335,10 +335,10 @@ def _verify_darwin_lock(root: Path) -> None:
     _exact_keys(lock, expected, str(path))
     exact_values = {
         "schema": "photospider-darwin-runner-lock-v1",
-        "architecture": "x86_64",
+        "architecture": "arm64",
         "image_os": "macos15",
         "runner_label": "macos-15",
-        "triplet": "x64-osx",
+        "triplet": "arm64-osx",
     }
     for field, expected_value in exact_values.items():
         if lock[field] != expected_value:

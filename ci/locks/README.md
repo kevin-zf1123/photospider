@@ -23,9 +23,11 @@ The values were refreshed on 2026-08-25 from authoritative upstream services:
 - GitHub CLI `2.98.0` archive hashes are from the official release
   `gh_2.98.0_checksums.txt`. The CLI is needed to verify GitHub artifact and OCI
   attestations; Ubuntu's older package does not provide `gh attestation`.
-- The Darwin host lock records the official `macos-15` runner image version
-  published by `actions/runner-images` and resolves its documented vcpkg commit
-  prefix to the full commit in the official `microsoft/vcpkg` repository.
+- The Darwin host lock records the observed `macos-15-arm64` runner image
+  version `20260727.0256.1` published by `actions/runner-images`, binds the
+  workflow label `macos-15` to its `arm64` architecture and `arm64-osx`
+  triplet, and resolves its documented vcpkg commit prefix to the full commit
+  in the official `microsoft/vcpkg` repository.
   Security jobs reject runner-image or registry drift and disable binary/asset
   caches so the locked port registry's source hashes remain authoritative.
 

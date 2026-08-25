@@ -83,8 +83,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}/photospider-ci
           tags: |
-            type=raw,value=latest
-            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.inputs.tag != '' }}
+            type=ref,event=branch,prefix=branch-,enable=${{ startsWith(github.ref, 'refs/heads/CI/') }}
             type=sha
           labels: |
             org.opencontainers.image.revision=${{ steps.source.outputs.commit }}

@@ -59,6 +59,8 @@
   "source_hashes": {
     "CMakeLists.txt": "b629a20abafbd05e57c3c2dba5273a143b68e0cfd533884577b541911bb95aef",
     "cmake/PhotospiderCiInventory.cmake": "f783e009537eb50bb0830e97473fc8d8345262720d41054ee6c685694bbc711a",
+    "src/lib/execution/isolation/isolated_cpu_invocation_protocol.hpp": "060768f43092dfb6c25a4d4b6c406d7186619debd00ee2e11e267fa8b70bb9e7",
+    "src/lib/server/worker/worker_protocol.hpp": "de791d1eb58968070157ac2e7d1e379fc031d6a7da840c11c696683c03017ede",
     "tests/fuzz/fuzz_isolated_cpu_invocation_codec.cpp": "33f4e02611be14e042f5e7a43da0ce1547f5f1ac42ac6c44a61cc35306e8c128",
     "tests/fuzz/fuzz_worker_protocol_codec.cpp": "c6e9f0860be4b739e4ace88b7c6b4cb7a37018ddf721f730ee011a3945ed1f0f"
   }
