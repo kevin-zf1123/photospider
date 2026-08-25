@@ -397,12 +397,6 @@ is the ordinary safety regression for the OpenCV build-smoke driver. Its one
 `project(... NONE)` fixture exercises the production manifest generator with
 an imported executable, but starts no compiler, product build, CTest, install,
 compile target, or generated executable.
-`InstallLayoutCTestContractSafety` is the corresponding ordinary regression
-for the split daemon layout registrations. It exercises strict selector rejection,
-single-case dispatch, and cleanup with the expensive nested build mocked, then
-reads the live configured CTest JSON to require the three exact registrations,
-distinct work roots, labels, serial ownership, and timeouts. It starts no
-product configure, build, install, or daemon executable.
 `InstallConsumerArchitecturePropagationSafety` likewise remains in the main
 shard: it runs the three install-consumer drivers' real command-construction
 paths against disposable producer cache fixtures while replacing subprocess

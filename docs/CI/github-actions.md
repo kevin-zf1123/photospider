@@ -107,12 +107,6 @@ Python unittest exercises cleanup guards and cache-layout helpers in-process.
 It also configures one compiler-free `project(... NONE)` fixture through the
 production manifest generator; it never starts a child build, install, compile
 target, or generated executable.
-`InstallLayoutCTestContractSafety` likewise remains in ordinary full CTest: it
-requires the strict single-case CLI selectors and reads the live configured
-CTest JSON to prove the three stable registrations have distinct work roots,
-the build-smoke label, `RUN_SERIAL`, and bounded timeouts. It mocks the nested
-build in its selector tests and starts no product configure, build, or install.
-
 This default profile therefore contains ten labelled `build-smoke` entries.
 When `PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER=ON`, the conditional
 `OpenExrDeepProviderInstallConsumerSmoke` entry is added as the eleventh entry;

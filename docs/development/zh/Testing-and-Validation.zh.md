@@ -304,10 +304,6 @@ regression 留在完整 CTest 分片。
 safety regression。其唯一的 `project(... NONE)` fixture 会使用 imported executable 执行 production
 manifest generator，但不会启动 compiler、product build、CTest、install、compile target 或生成的
 executable。
-`InstallLayoutCTestContractSafety` 是三个拆分 daemon layout 注册对应的普通 regression。它会在
-mock 掉昂贵 nested build 的前提下验证严格 selector 拒绝、单 case dispatch 与 cleanup，再读取实时
-配置得到的 CTest JSON，要求三个精确注册、互不相同的 work root、label、串行所有权与 timeout。
-它不会启动 product configure、build、install 或 daemon executable。
 `InstallConsumerArchitecturePropagationSafety` 同样留在主分片：它使用可丢弃的 producer cache
 fixture 执行三个 install-consumer driver 的真实命令构造路径，同时替换 subprocess 执行，因此能
 在不启动 product configure、build 或 install 的情况下验证 cache 到 child argv 的传播。其

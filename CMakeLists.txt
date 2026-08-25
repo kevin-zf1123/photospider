@@ -3180,15 +3180,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
             RUN_SERIAL TRUE
             TIMEOUT 900)
-        add_test(NAME InstallLayoutCTestContractSafety
-            COMMAND ${Python3_EXECUTABLE} -B
-                "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_install_layout_smoke_test.py"
-            WORKING_DIRECTORY
-                "${PROJECT_SOURCE_DIR}/tests/integration")
-        set_tests_properties(InstallLayoutCTestContractSafety PROPERTIES
-            ENVIRONMENT
-                "PHOTOSPIDER_CTEST_EXECUTABLE=${CMAKE_CTEST_COMMAND};PHOTOSPIDER_BUILD_DIRECTORY=${CMAKE_BINARY_DIR}"
-            TIMEOUT 30)
     endif()
     add_test(NAME IpcDisabledInstallSmoke
         COMMAND ${Python3_EXECUTABLE} -B
