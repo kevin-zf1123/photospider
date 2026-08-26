@@ -848,7 +848,8 @@ validate_build_smoke_matrix_contract() {
   assert_file_contains "$suite_gate_job" \
     'CI_OPENEXR_RESULT: ${{ needs.openexr-smoke.result }}'
   assert_file_contains "$suite_gate_job" \
-    'require_success openexr-smoke "$CI_OPENEXR_RESULT"'
+    'python3 .ci-suite-gate-control/ci/scripts/integration_suite_gate.py'
+  assert_file_not_contains "$suite_gate_job" 'require_success '
 
   assert_file_contains "$plan_script" 'build_smoke_inventory.py" plan'
   assert_file_contains "$plan_script" '--allow-empty'
@@ -963,12 +964,13 @@ validate_runtime_capability_routing() {
   pass integration-runtime-capability-targeted-routing
 }
 
-# @brief Validate exact-image security routing, fresh Darwin vcpkg, and roles.
+# @brief Validate exact-image security routing, independent Darwin jobs, and roles.
 # @param $1 Integration workflow YAML path.
 # @return Zero when dedicated and local-image security paths feed the stable gate.
 # @throws Nothing; missing, mutable, or hard-coded routes exit through fail.
 # @note Concrete current-main selections may exist only in the protected hash-
-#   bound fallback lock, never in these generic runners or workflow jobs.
+#   bound fallback lock. Each Darwin profile depends only on integration-plan,
+#   so a sibling failure cannot prevent the other profiles from being scheduled.
 validate_security_profile_routing() {
   local workflow=$1
   local job_name
@@ -976,7 +978,9 @@ validate_security_profile_routing() {
   local sanitizer_script="$REPO_ROOT/ci/scripts/sanitizer_test.sh"
   local fuzz_script="$REPO_ROOT/ci/scripts/fuzz_smoke.sh"
   local platform_script="$REPO_ROOT/ci/scripts/security_platform_prepare.sh"
-  local darwin_job="$TEST_ROOT/integration-security-darwin-job.yml"
+  local darwin_job
+  local suite_gate="$TEST_ROOT/integration-suite-gate-job.yml"
+  local suite_gate_helper="$REPO_ROOT/ci/scripts/integration_suite_gate.py"
   local manual_workflow="$REPO_ROOT/.github/workflows/ci-sanitizer.yml"
   local manual_job="$TEST_ROOT/manual-sanitizer-job.yml"
   local verify_line
@@ -1013,26 +1017,68 @@ validate_security_profile_routing() {
   assert_file_contains "$TEST_ROOT/integration-fuzz-codecs-job.yml" \
     'run: bash ci/scripts/fuzz_smoke.sh'
 
-  extract_job_block "$workflow" security-darwin "$darwin_job" ||
-    fail "security-darwin job could not be extracted"
-  assert_file_contains "$darwin_job" 'runs-on: macos-15'
-  assert_file_not_contains "$darwin_job" 'container:'
-  assert_file_contains "$darwin_job" 'for sanitizer in asan tsan; do'
-  assert_file_contains "$darwin_job" 'bash ci/scripts/sanitizer_test.sh'
-  assert_file_contains "$darwin_job" 'bash ci/scripts/fuzz_smoke.sh'
-  assert_file_contains "$darwin_job" 'ci-security-profile-inventory'
-  assert_file_contains "$darwin_job" '--platform Darwin'
-  assert_file_contains "$darwin_job" '--runner-label macos-15'
-  assert_file_contains "$darwin_job" 'CI_RUNNER_TEMP: ${{ runner.temp }}'
-  assert_file_not_contains "$darwin_job" 'CI_DARWIN_VCPKG_INSTALLED:'
-  verify_line=$(grep -nF -- 'python3 ci/scripts/ci_runner_verify.py' \
-    "$darwin_job" | head -n 1 | cut -d: -f1)
-  candidate_line=$(grep -nF -- 'Download security profile inventory' \
-    "$darwin_job" | head -n 1 | cut -d: -f1)
-  [[ -n "$verify_line" && -n "$candidate_line" ]] ||
-    fail "Darwin security job lacks runner verification/candidate boundary"
-  ((verify_line < candidate_line)) ||
-    fail "Darwin security job consumes candidate profile before runner verification"
+  for job_name in sanitizer-asan-darwin sanitizer-tsan-darwin \
+    fuzz-codecs-darwin; do
+    darwin_job="$TEST_ROOT/integration-$job_name-job.yml"
+    extract_job_block "$workflow" "$job_name" "$darwin_job" ||
+      fail "$job_name security job could not be extracted"
+    assert_file_contains "$darwin_job" 'needs: integration-plan'
+    assert_file_contains "$darwin_job" 'runs-on: macos-15'
+    assert_file_not_contains "$darwin_job" 'container:'
+    assert_file_contains "$darwin_job" 'ci-security-profile-inventory'
+    assert_file_contains "$darwin_job" '--platform Darwin'
+    assert_file_contains "$darwin_job" '--runner-label macos-15'
+    assert_file_contains "$darwin_job" 'CI_RUNNER_TEMP: ${{ runner.temp }}'
+    assert_file_not_contains "$darwin_job" 'CI_DARWIN_VCPKG_INSTALLED:'
+    verify_line=$(grep -nF -- 'python3 ci/scripts/ci_runner_verify.py' \
+      "$darwin_job" | head -n 1 | cut -d: -f1)
+    candidate_line=$(grep -nF -- 'Download security profile inventory' \
+      "$darwin_job" | head -n 1 | cut -d: -f1)
+    [[ -n "$verify_line" && -n "$candidate_line" ]] ||
+      fail "$job_name lacks runner verification/candidate boundary"
+    ((verify_line < candidate_line)) ||
+      fail "$job_name consumes candidate profile before runner verification"
+  done
+  assert_file_contains "$TEST_ROOT/integration-sanitizer-asan-darwin-job.yml" \
+    'SANITIZER: asan'
+  assert_file_contains "$TEST_ROOT/integration-sanitizer-asan-darwin-job.yml" \
+    'run: bash ci/scripts/sanitizer_test.sh'
+  assert_file_contains "$TEST_ROOT/integration-sanitizer-tsan-darwin-job.yml" \
+    'SANITIZER: tsan'
+  assert_file_contains "$TEST_ROOT/integration-sanitizer-tsan-darwin-job.yml" \
+    'run: bash ci/scripts/sanitizer_test.sh'
+  assert_file_contains "$TEST_ROOT/integration-fuzz-codecs-darwin-job.yml" \
+    'timeout-minutes: 30'
+  assert_file_contains "$TEST_ROOT/integration-fuzz-codecs-darwin-job.yml" \
+    'run: bash ci/scripts/fuzz_smoke.sh'
+  assert_file_not_contains "$workflow" '  security-darwin:'
+  assert_file_not_contains "$workflow" 'for sanitizer in asan tsan; do'
+
+  extract_job_block "$workflow" suite-gate "$suite_gate" ||
+    fail "shared suite gate could not be extracted"
+  for job_name in sanitizer-asan-darwin sanitizer-tsan-darwin \
+    fuzz-codecs-darwin; do
+    assert_file_contains "$suite_gate" "      - $job_name"
+  done
+  assert_file_contains "$suite_gate" \
+    'CI_DARWIN_ASAN_RESULT: ${{ needs.sanitizer-asan-darwin.result }}'
+  assert_file_contains "$suite_gate" \
+    'CI_DARWIN_TSAN_RESULT: ${{ needs.sanitizer-tsan-darwin.result }}'
+  assert_file_contains "$suite_gate" \
+    'CI_DARWIN_FUZZ_RESULT: ${{ needs.fuzz-codecs-darwin.result }}'
+  assert_file_contains "$suite_gate" \
+    'CI_ATTESTATION_RESULT: ${{ needs.attest-targeted-artifacts.result }}'
+  assert_file_contains "$suite_gate" \
+    'CI_PUBLISH_REUSABLE_ATTESTATIONS: ${{ inputs.publish_reusable_attestations }}'
+  assert_file_contains "$suite_gate" \
+    'python3 .ci-suite-gate-control/ci/scripts/integration_suite_gate.py'
+  assert_file_not_contains "$suite_gate" 'require_success '
+  assert_file_contains "$suite_gate_helper" \
+    '("sanitizer-asan-darwin", "CI_DARWIN_ASAN_RESULT")'
+  assert_file_contains "$suite_gate_helper" \
+    '("sanitizer-tsan-darwin", "CI_DARWIN_TSAN_RESULT")'
+  assert_file_contains "$suite_gate_helper" \
+    '("fuzz-codecs-darwin", "CI_DARWIN_FUZZ_RESULT")'
 
   extract_job_block "$manual_workflow" sanitizer "$manual_job" ||
     fail "manual sanitizer job could not be extracted"

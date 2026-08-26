@@ -18,52 +18,25 @@ ENV VENV=/opt/venv
 ENV PATH="$VENV/bin:$PATH"
 
 COPY ci/locks/ubuntu-24.04-packages.lock /tmp/ci-locks/ubuntu-24.04-packages.lock
+COPY ci/locks/ubuntu-24.04-snapshot.sources.in /tmp/ci-locks/ubuntu-24.04-snapshot.sources.in
 COPY ci/locks/requirements-ci.txt /tmp/ci-locks/requirements-ci.txt
+COPY ci/scripts/ci_image_install.sh /tmp/ci-image-install.sh
 
-# Ubuntu's base image needs the locked CA bundle before HTTPS snapshot access.
-# The subsequent signed immutable snapshot constrains the complete dependency
-# closure while every direct requirement remains exactly versioned.
-RUN test "${#CI_IMAGE_INPUT_MANIFEST_SHA256}" -eq 64 \
-    && case "$CI_IMAGE_INPUT_MANIFEST_SHA256" in \
-      *[!0-9a-f]* ) echo "CI image input manifest digest is malformed." >&2; exit 1 ;; \
-      * ) ;; \
-    esac \
-    && test "${#CI_IMAGE_SOURCE_COMMIT}" -eq 40 \
-    && case "$CI_IMAGE_SOURCE_COMMIT" in \
-      *[!0-9a-f]* ) echo "CI image source commit is malformed." >&2; exit 1 ;; \
-      * ) ;; \
-    esac \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-      ca-certificates=20260601~24.04.1 \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get -S "$APT_SNAPSHOT" update \
-    && sed -e '/^#/d' -e '/^[[:space:]]*$/d' \
-      /tmp/ci-locks/ubuntu-24.04-packages.lock \
-      | xargs apt-get -S "$APT_SNAPSHOT" install -y --no-install-recommends \
-    && python3 -m venv "$VENV" \
-    && "$VENV/bin/pip" install \
-      --disable-pip-version-check \
-      --no-deps \
-      --only-binary=:all: \
-      --require-hashes \
-      -r /tmp/ci-locks/requirements-ci.txt \
-    && architecture=$(dpkg --print-architecture) \
-    && case "$architecture" in \
-      amd64) gh_sha256=$GH_CLI_AMD64_SHA256 ;; \
-      arm64) gh_sha256=$GH_CLI_ARM64_SHA256 ;; \
-      *) echo "Unsupported GitHub CLI architecture: $architecture" >&2; exit 1 ;; \
-    esac \
-    && gh_archive="gh_${GH_CLI_VERSION}_linux_${architecture}.tar.gz" \
-    && curl --fail --location --proto '=https' --tlsv1.2 \
-      --output "/tmp/$gh_archive" \
-      "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/$gh_archive" \
-    && printf '%s  %s\n' "$gh_sha256" "/tmp/$gh_archive" | sha256sum --check --strict - \
-    && tar -C /tmp -xzf "/tmp/$gh_archive" \
-    && install -m 0755 "/tmp/gh_${GH_CLI_VERSION}_linux_${architecture}/bin/gh" \
-      /usr/local/bin/gh \
-    && ln -s "$VENV/bin/cpplint" /usr/local/bin/cpplint \
-    && rm -rf /var/lib/apt/lists/* /tmp/ci-locks "/tmp/$gh_archive" \
-      "/tmp/gh_${GH_CLI_VERSION}_linux_${architecture}"
+# The minimal Ubuntu base has no TLS trust bundle. Bootstrap only the exact
+# OpenSSL/CA closure from immutable snapshot URLs whose bytes are SHA-256 locked
+# in ci-image-lock.json. No live APT transaction may precede snapshot mode.
+ADD --checksum=sha256:6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7629e50 \
+    https://snapshot.ubuntu.com/ubuntu/20260825T000000Z/pool/main/c/ca-certificates/ca-certificates_20260601~24.04.1_all.deb \
+    /tmp/ci-bootstrap/ca-certificates.deb
+ADD --checksum=sha256:321b30ad5a1c3783cb3d73ae439f824f6d3874d76a93a62f4a984959b490aa7b \
+    https://snapshot.ubuntu.com/ubuntu/20260825T000000Z/pool/main/o/openssl/openssl_3.0.13-0ubuntu3.12_amd64.deb \
+    /tmp/ci-bootstrap/openssl-amd64.deb
+ADD --checksum=sha256:777b636c291fd2a5f269b21c110bf226d2cfde43b2c0d1f3d35ff41c775ef847 \
+    https://snapshot.ubuntu.com/ubuntu/20260825T000000Z/pool/main/o/openssl/openssl_3.0.13-0ubuntu3.12_arm64.deb \
+    /tmp/ci-bootstrap/openssl-arm64.deb
+
+# The protected installer owns the complete active network/install surface.
+# Docker invokes it once; its full bytes and active statement stream are locked.
+RUN bash /tmp/ci-image-install.sh
 
 WORKDIR /workspace

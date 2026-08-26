@@ -15,8 +15,49 @@ The values were refreshed on 2026-08-25 from authoritative upstream services:
   architecture's child manifest.
 - Ubuntu packages were selected from Canonical's signed immutable snapshot
   `20260825T000000Z` at `https://snapshot.ubuntu.com/ubuntu/`. Exact top-level
-  versions are installed with APT snapshot mode, so transitive resolution is
-  constrained by that signed snapshot.
+  versions are installed through the protected
+  `ubuntu-24.04-snapshot.sources.in` Deb822 template. Before the first APT
+  command, Docker replaces the locked base image's archive, security, and ports
+  sources with the template's timestamp-qualified snapshot URI. The same signed
+  archive serves the native amd64 and arm64 indices, so neither architecture can
+  fall back to a live host. Because the minimal base image has no TLS trust
+  bundle, `openssl=3.0.13-0ubuntu3.12` and
+  `ca-certificates=20260601~24.04.1` form the complete offline bootstrap. Their
+  architecture-specific snapshot URLs and SHA-256 values are locked in
+  `ci-image-lock.json`; `dpkg` configures those verified bytes before the first
+  APT command. The first and only APT update/install sequence consumes only that
+  explicit snapshot source, and the main package transaction consumes the same
+  two exact versions again. Lock rows use Debian's package-name grammar with a
+  minimum two-byte name, and the installer places apt's `--` terminator after
+  all fixed options and before every locked `name=version` argument. An
+  option-shaped row therefore fails validation and cannot become an APT flag.
+- `ci-image-lock.json` also binds the version, path, and full-file SHA-256 of
+  `ci_image_install.sh` and `integration_suite_gate.py`. Both paths remain in
+  the canonical image-input manifest. The installer owns the complete image
+  network/install transaction: Docker has one exact helper invocation, while a
+  verifier-owned active-statement identity and explicit command allowlist reject
+  extra APT aliases, downloads, pipe-to-shell paths, bypassed hashes, and early
+  exit. The suite-gate helper similarly has a verifier-owned Python AST identity
+  plus exhaustive behavior tests for every required result and attestation
+  publish/skip mode; updating a JSON helper hash alone cannot authorize drift.
+- The callable image producer is decoded through the restricted YAML parser and
+  compared as one complete mapping: its sole `workflow_call`, write permissions,
+  only build job, ordered steps, environments, commands, outputs, and every
+  action `with` field are exact. Checkout and `ci_lock_verify.py` must precede
+  the unique Buildx build/push action; only the manifest and source-commit build
+  arguments and the event-scoped temporary tag are admitted. The Dockerfile
+  parser separately models BuildKit's BOM removal and first-line shebang removal
+  before frontend detection. A UTF-8 BOM and shebang are themselves forbidden.
+  Hash/C-style directive markers must start at byte zero; after that marker the
+  verifier trims exactly Go `unicode.IsSpace` (the Unicode White_Space set), not
+  Python's wider control-character set. Every active `syntax` frontend in those
+  comment forms or JSON is rejected, including case, Unicode whitespace, tag,
+  digest, and shebang-hidden variants, before the full instruction stream is
+  compared. Marker-leading space/tab remains a non-active ordinary comment.
+  Frontend detection and active logical-instruction parsing share one exact Go
+  `bufio.ScanLines` model: only LF separates tokens and one terminal CR is
+  removed. CR-only, VT/FF, FS/GS/RS, NEL, and Unicode line/paragraph separators
+  therefore cannot reveal a new instruction after an ordinary comment.
 - Python hashes are the official PyPI release-file SHA-256 values for
   `clang-format==21.1.5` (Linux x86-64 and AArch64 wheels) and
   `cpplint==2.0.0` (universal wheel).

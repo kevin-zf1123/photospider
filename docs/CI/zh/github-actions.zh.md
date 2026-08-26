@@ -57,6 +57,13 @@ container 默认 shell。protected-path、change-classification 与稳定结果�
 
 当 pull request 或 push 修改 CI 镜像输入（`Dockerfile.ci`、`.dockerignore` 或 `.github/workflows/build-ci-image.yml`）时，detector 仍会拉取并校验精确 base，而不依赖 fork 中可能不存在的 `origin/<base>`。Fork head 会在 checkout 前被拒绝，同仓库受保护 `CI/**` pull request 则使用其可信 push 路径。Image-change healthcheck job 不构建镜像：它会先校验精确 hosted runner、受保护 lock、canonical publish-source identity 与生成的 image-input manifest，再运行静态 healthcheck。只有符合条件的可信 `main` 或 `CI/**` integration push 可以调用唯一 candidate-image producer 与 shared digest-bound suite。
 
+该 callable producer 本身也是一份完整 parsed-tree 合同：它只暴露 typed `workflow_call`、精确 write
+permission，以及一个带有受审查有序 step 的 `ubuntu-24.04` build job。Checkout 与 prebuild
+`ci_lock_verify.py` 调用必须先于唯一的 `docker/build-push-action`；该 action 不得带 env 或 condition，
+只能 push event-scoped temporary tag，并且只能接收精确 context、Dockerfile、两个 immutable label 以及
+manifest/source-commit build argument。任何额外 step、Docker/Buildx 命令、canonical 或 `latest` 写入、
+build argument、field 或 job 都会在镜像构建前被受保护 verifier 拒绝。
+
 对于每次 `CI/**` push，两条 healthcheck 路径都会在各自 job 内拉取并校验 `origin/main`，再把 `origin/main` 作为 `CI_BASE_REF`。Published-image job 会在 `healthcheck.sh` 前完成校验；image-change job 会在 canonical manifest 生成和 `healthcheck.sh` 前完成校验。因此，静态检查会覆盖从 `main` merge base 开始的累计 branch diff，后续纯文档 push 无法隐藏更早的未格式化 C++ commit。普通 `main` push 则继续把精确的 `github.event.before` 作为 `CI_BASE_REF`，只检查本次 push 增量。任何必需 fetch 或 ref 校验失败都会在 `healthcheck.sh` 使用 fallback base 选择之前终止 job。对于 `CI/**` push，CI 镜像检测同样使用累计 `origin/main` 基线，因此后续纯文档 push 也无法隐藏更早的镜像输入 commit。
 
 镜像输入 detector 使用关闭 rename detection 且不带任何 Git status filter 的清单；删除、type change 与少见 status 都保持可见。Healthcheck 静态范围清单同样关闭 rename detection，但会有意使用 `--diff-filter=d`：由于 formatter 与 linter 要求当前文件，删除路径会被排除，而 type change 与其他少见的非删除 status 仍保持可见。两份清单都使用 NUL 分隔的 Git path，因此含换行的文件名仍保持为一个精确路径，并且都会先把清单写入父 shell 可观察的文件。`git diff` 失败时，脚本会在输出任何 `changed=false` 或“No changed C++ files”摘要前非零退出。这样既避免假路由，也避免另一个 workflow 尚未发布新 `latest` 镜像时产生竞态。
@@ -67,8 +74,29 @@ nlohmann-json、Python、cpplint 和 clang-format。Formatter 通过 PyPI wheel 
 维护机当前使用 21.1.3；在本轮对齐覆盖的 changed C++ 清单上，两者的格式化输出已经过逐字节
 等价验证。后续建议开发环境统一采用 21.1.5。
 
-本次改动只对齐 clang-format 工具版本。这不是版本检测门禁，不会新增专用 CI job，也不会新增
-Ubuntu/CMake 版本锁定；既有 Ubuntu base 与 apt 提供的 CMake 设置保持不变。
+clang-format 对齐不会新增独立的 version-detection job。CI image 会另行通过 digest 绑定 Ubuntu
+base，并在同一个已签名 immutable APT snapshot 中按精确版本绑定每个直接 Ubuntu package。由于
+最小 base 不含 TLS trust bundle，Docker BuildKit 会先通过带 checksum 的 `ADD` instruction，仅获取
+该 snapshot 中精确的 `openssl` 与 `ca-certificates` package。在任何 APT 命令运行前，受保护的
+`ci/locks/ubuntu-24.04-snapshot.sources.in` Deb822 template 会把 base 的 archive、security 与 ports
+source 全部替换为带 timestamp 的 `snapshot.ubuntu.com` URI；同一份已签名 archive 同时服务原生
+amd64 与 arm64 index。随后 `dpkg` 配置已验证的离线 byte，第一且唯一的 APT update/install sequence
+只从该显式 source 消费完整 package lock。任何 live APT bootstrap 或 mirror override 都不是可信
+fallback；checksum 失败或同一 snapshot 的 closure 不可解时，candidate image build 会失败。
+每个 lock row 都带精确 version；Debian package name 至少两个字符，首字符必须为字母数字，其余字符
+只允许小写字母数字与 `+.-`。Installer 会把 apt 的 `--` option terminator 放在全部固定 option 之后、
+locked `name=version` argument 之前，因此 option-shaped row 会被双重拒绝，而不能重新解释成 APT flag。
+在解析 active instruction 前，受限 Docker parser 会建模 BuildKit 对 UTF-8 BOM 与首行 shebang 的移除；
+这两种 preamble 本身均被禁止。Hash/C-style directive marker 必须从 byte zero 开始；只有移除 marker
+以后，detector 才会精确裁剪 Go `unicode.IsSpace` 的 Unicode White_Space 集合，并且刻意不使用 Python
+范围更宽的 `str.isspace()` control。随后，无论 `syntax` frontend 使用这些 comment 形式还是 JSON，
+也无论采用大小写、Unicode whitespace、tag、digest 或 shebang 隐藏变体，都会被拒绝。Marker 前带
+space/tab 时仍是 non-active 普通 comment；普通 comment 仍会关闭传统 Docker directive phase，
+canonical backslash `escape` directive 仍是唯一允许的 parser directive。
+Frontend detection 与 active logical-instruction parsing 会消费同一份 Go `bufio.ScanLines` 等价物理行：
+只有 LF 分隔 token，每个 token 只移除一个尾 CR。CR-only、VT/FF、FS/GS/RS、NEL 与 Unicode
+line/paragraph separator 都保留在前一 token 内，不能暴露隐藏 instruction。Canonical LF、CRLF、
+continuation 与 terminal CR 保持既有文档化行为。
 
 ## Integration 测试分片
 
@@ -267,6 +295,19 @@ package-input 边界运行，在不重建或重新安装 producer 的前提下�
 - ASan 与 TSan 保留共享的 compute/propagation 检查，并选择对应的旧 scheduler 或新
   policy/execution focused tests。
 
+Linux 与 Darwin 都会把 ASan、TSan 和有界 fuzz 调度为不同的 profile result。在 Darwin 上，
+`sanitizer-asan-darwin`、`sanitizer-tsan-darwin` 与 `fuzz-codecs-darwin` 是三个独立的
+`macos-15` job；每个 job 只依赖 `integration-plan`，下载同一份受保护 profile inventory，并拥有
+独立 timeout 与 diagnostic artifact。任何 profile 都不会等待 sibling，因此一个失败不会阻止另外
+两个 job 被调度；shared suite gate 仍要求三个 conclusion 全部成功。
+受保护 lock verifier 会比较每个 Darwin job 的完整 mapping，包括仅有的五个有序 step 与每个允许
+field。Suite gate 会 checkout 精确的受保护 `workflow_commit`，并且只调用带 version/hash 绑定的
+`integration_suite_gate.py`；它的完整 `needs`、result environment、checkout、permissions、output
+与 helper 调用均为精确 mapping。Helper 会拒绝 failed、skipped、missing 或 unknown required
+result，验证 publishing route 的 attestation 为 `success`、read-only route 为 `skipped`，校验
+digest，并且仅在全部检查通过后写 output。未知 step、`continue-on-error`、额外 field/statement、
+注释、no-op、early exit 或 sibling dependency 均不能满足维护中的 routing contract。
+
 这是一个受保护的两阶段过渡。可信 `CI/**` 变更先进入 `main`，并在那里验证旧契约；架构 pull
 request 随后纳入该可信 commit，并删除自身独立的受保护路径差异，其完整标记集合会选择
 policy/execution 契约。当 `main` 与所有维护分支都只使用 policy/execution 后，后续可信 CI 清理
@@ -323,6 +364,8 @@ helper 和 output artifact 不得进入 primary repository，也不得作为 per
 - `ci/scripts/change_classification.sh`：把 event 的精确 revision 分类为纯文档或完整 integration，记录所有改动路径与非文档路径，并在 Git 状态不确定时 fail closed。
 - `ci/scripts/change_classification_test.sh`：覆盖文档、源码、混合、type change、workflow、重命名、删除、重复 `CI/**` push、pull-request merge-base、branch 或 revision 缺失、全零/不可达 revision、手动触发、空 diff 与浅克隆场景，验证长期路由契约。
 - `ci/scripts/ci_routing_test.sh`：对两份生产 `protected-ci-paths.if` 表达式做空白归一化并锁定精确源码，再抽取并执行真实 stable-gate、checkout 前 fork-rejection 与 protected-path shell block。它还会锁定允许空集合的配置期预检、严格构建后 job output、对空 output 安全的 `fromJSON` matrix、逐项 artifact/name binding、full-CTest label exclusion、精确 runner input，以及两两不重叠的四分区 build-smoke routing：`ctest-control` consumer、OpenEXR metadata consumer、专用 installed-package static consumer 和 producer-local 清单。它会验证 role-specific control/runtime/OpenEXR/installed artifact 的生产、attestation 与消费顺序，要求完整 shared suite gate，拒绝串行 `integration_suite.sh` fallback，并保留架构中性 `execution-repeat` job 的环境变量、artifact 和最终 gate 路由。隔离 Git fixture 会证明两份生产门禁都拒绝含换行的 `ci/**` 路径、安全记录该路径，并在 producer 或 reader 失败时 fail closed。一个 job/step-scoped production 断言会抽取 published-image 中两个精确的 history-fetch step，并要求各自拥有顶层 `shell: bash`，因此其他 job 或相邻 step 的元数据无法满足该契约。另一个 job/step-scoped 断言要求恰好一个使用 `shell: bash` 的 `Trust checked-out workspace` step；它唯一可执行的内容必须是启用严格模式、把精确 `$GITHUB_WORKSPACE` 加入 global `safe.directory`，以及校验 `HEAD^{commit}`。其他 job 或相邻 step 中的条目、任何额外或通配的 `safe.directory`，以及晚于任一 fetch 或 `healthcheck.sh` 的位置都无法满足断言。抽取出的 production trust block 会在隔离 HOME 与 Git 仓库中运行，并要求所得 global 配置只包含该仓库的精确路径。Job-scoped 断言还分别锁定 published-image 与 local-image 的 pull-request 精确 base fetch、`CI/**` main fetch/校验、三路 `CI_BASE_REF` 路由及执行顺序。测试会执行两份抽取出的 production main-fetch block；隔离历史会证明累计 `origin/main` 范围保留较早的未格式化 C++ 路径，而 event-before 范围只包含较晚的文档路径。Detector fixture 继续覆盖精确/累计 base、空比较、含换行路径及 changed-path 失败传播。这些本机源码与 shell 检查明确不声称执行 GitHub expression evaluator、复现跨 UID dubious ownership 或模拟托管 container runner。
+- `ci/scripts/ci_image_install.sh`：执行唯一的 Docker image 安装 transaction。它的 version/完整文件 SHA-256、verifier-owned active-statement identity、单一 entrypoint 调用、snapshot/APT/Pip/GitHub-CLI 顺序、下载 authority 与 hash-before-extract boundary 都受保护；alternate APT path、额外 downloader、pipe-to-shell、跳过 hash 或 early success 都会被拒绝。
+- `ci/scripts/integration_suite_gate.py`：校验 shared DAG 每项精确 conclusion、publish/attestation mode 与 image digest，随后安全追加唯一 validated digest output。直接行为回归会让每个 required job 分别使用 failed/skipped/unknown conclusion，并覆盖两种合法 attestation mode。
 - `ci/scripts/runtime_capability_test.sh`：覆盖精确 Make/Ninja target 解析、两种完整契约、不完整/混合/缺失清单的 fail-closed 行为、required-target 校验及互斥 CLI 配置输出。它还证明 direct-consumer trust export 由精确的可选 `test_plugin_trust_bundle` capability 控制，而不是由更宽泛的 policy/execution profile 控制：pre-trust 与 legacy inventory 保持 no-op，缺失或 malformed inventory 以及不完整/非 regular material 均 fail closed，完整的 trust-enabled tuple 则以 canonical path 覆盖 inherited value。
 - `ci/scripts/ci_image_changed.sh`：检测当前 NUL 分隔且不带 status 过滤的 diff 是否修改 CI 镜像输入；workflow 会向它提供已拉取并验证的 pull-request 精确 base SHA，diff 失败时不会输出路由。
 - `ci/scripts/build_smoke_inventory.py`：严格解析 CTest JSON v1，输出确定性 matrix 与 NUL 分隔精确名称，并在基于索引执行前重新校验一个 matrix selection。严格构建后模式拒绝空 selection；只有显式 preflight 模式允许为空。Focused regression 会覆盖 malformed JSON/schema、重复名称/property/label value、非法或缺失 label、disabled/commandless entry、严格空 selection、确定性排序、JSON round trip、安全 artifact key、敌意测试名字符、在执行前停止的 absent/disabled/commandless runner selection，以及真实配置期占位到构建后发现过程。
@@ -407,8 +450,18 @@ docker run --rm -v "$PWD:/workspace" -w /workspace photospider-ci:local \
 ```
 
 其余 Docker build argument 保持 `ci/locks/ci-image-lock.json` 中受保护的 immutable default。本地
-镜像源覆盖不属于维护中的镜像契约；apt 使用锁定的 Ubuntu snapshot，pip 使用带 hash lock 的
-requirements 文件。
+镜像源覆盖不属于维护中的镜像契约。OpenSSL/CA 离线 bootstrap URL 与 SHA-256 值锁定在该文件中；
+两个精确版本也同时出现在 Ubuntu package lock 中；受保护 Deb822 template 会在 APT 运行前，把全部
+base archive/security/ports source 替换为精确 snapshot URI。同一 source 同时服务原生 amd64 与
+arm64，所有 APT update/install 都保持在其中。build 本身就是 dependency-solver 回归：任何不可用的
+直接或传递版本都会在 image 发布前失败。Pip 则单独使用带 hash lock 的 requirements 文件。
+`Dockerfile.ci` 只有一条精确 active instruction stream，并且只调用
+`bash /tmp/ci-image-install.sh`；该 helper 来自 canonical manifest input，且在
+`ci-image-lock.json` 中按 role、version 与完整文件 SHA-256 绑定。独立的 verifier-owned
+active-statement identity 及 network/install allowlist 会阻止 helper 与其 JSON hash 被同步修改后引入
+`/usr/bin/apt-get`、额外下载、`curl | sh`、跳过 GitHub CLI checksum、未调用 entrypoint 或 early
+success。唯一的非 APT 下载是精确 GitHub CLI release URL；其架构专用 hash 会在 extract/install
+之前完成校验。
 
 上述本地 Docker 命令复现的是维护中的 current-toolchain CI 路径，不代表 CMake 3.16 本身已经
 运行。若确实需要针对性旧版本证据，而本机没有原生兼容 executable，应记录该限制，不要用架构

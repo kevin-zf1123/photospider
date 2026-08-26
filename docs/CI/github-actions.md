@@ -64,6 +64,16 @@ change-classification, and stable result-gate jobs remain lightweight
 
 When a pull request or push changes CI image inputs (`Dockerfile.ci`, `.dockerignore`, or `.github/workflows/build-ci-image.yml`), detection still fetches and verifies the exact base instead of relying on a possibly absent fork `origin/<base>`. A fork head is rejected before checkout, and a same-repository protected `CI/**` pull request uses its trusted push route. The image-change healthcheck job does not build an image: it verifies the exact hosted runner, protected locks, canonical publish-source identity, and generated image-input manifest before running the static healthcheck. Only an eligible trusted `main` or `CI/**` integration push may call the one candidate-image producer and shared digest-bound suite.
 
+The callable producer itself is a complete parsed-tree contract: it exposes only
+the typed `workflow_call`, exact write permissions, and one `ubuntu-24.04` build
+job with its reviewed ordered steps. Checkout and the prebuild
+`ci_lock_verify.py` invocation precede the unique `docker/build-push-action`;
+that action has no environment or condition, pushes only the event-scoped
+temporary tag, and accepts exactly the context, Dockerfile, two immutable
+labels, and manifest/source-commit build arguments. Extra steps, Docker/Buildx
+commands, canonical or `latest` writes, build arguments, fields, or jobs fail
+the protected verifier before image construction.
+
 For every `CI/**` push, both healthcheck routes fetch and verify `origin/main` inside their own job, then pass `origin/main` as `CI_BASE_REF`. The published-image job verifies it before `healthcheck.sh`; the image-change job verifies it before canonical manifest generation and `healthcheck.sh`. Static checks therefore cover the cumulative branch diff from the `main` merge base, so a later documentation-only push cannot hide an earlier unformatted C++ commit. An ordinary `main` push retains the exact `github.event.before` value as `CI_BASE_REF` and checks only that push increment. A required fetch or reference verification failure stops the job before `healthcheck.sh` can use fallback base selection. CI-image detection uses the same cumulative `origin/main` basis for `CI/**` pushes, so a later documentation-only push also cannot hide an earlier image-input commit.
 
 The image-input detector uses a no-rename inventory with no Git status filter; deletions, type changes, and uncommon statuses all remain visible. The healthcheck static-scope inventory also disables rename detection but intentionally applies `--diff-filter=d`: deleted paths are excluded because formatters and linters require a current file, while type changes and uncommon non-deletion statuses remain visible. Both inventories use NUL-delimited Git paths, so filenames containing newlines remain one exact path, and both write the inventory to a file visible to the parent shell. A failed `git diff` exits nonzero before any `changed=false` output or “No changed C++ files” summary can be emitted. This avoids a false route as well as a race with another workflow that may still be publishing the new `latest` image.
@@ -76,9 +86,41 @@ breaks. The maintainer machine currently uses 21.1.3; its formatted output was
 verified byte-for-byte equal to 21.1.5 for the changed C++ inventory covered by
 this alignment. Developer environments should adopt 21.1.5 going forward.
 
-clang-format is the only tool version aligned by this change. This is not a
-version-detection gate and adds no dedicated CI job or new Ubuntu/CMake version
-lock; the existing Ubuntu base and apt-provided CMake setup remain unchanged.
+The clang-format alignment does not add a separate version-detection job. The
+CI image independently binds the Ubuntu base by digest and every direct Ubuntu
+package by exact version in one signed immutable APT snapshot. Because the
+minimal base has no TLS trust bundle, Docker BuildKit first fetches only the
+snapshot's exact `openssl` and `ca-certificates` packages through checksum-bound
+`ADD` instructions. Before APT can run, the protected
+`ci/locks/ubuntu-24.04-snapshot.sources.in` Deb822 template replaces every base
+archive, security, and ports source with the timestamp-qualified
+`snapshot.ubuntu.com` URI. That one signed archive serves native amd64 and arm64
+indices. `dpkg` configures the verified offline bytes, and the first and only APT
+update/install sequence then consumes the complete package lock from that
+explicit source. No live APT bootstrap or mirror override is a trusted fallback;
+checksum failure or an unsatisfiable same-snapshot closure fails the candidate
+image build. Every lock row has an exact version and a Debian package name of at
+least two characters whose first character is alphanumeric; the remaining name
+characters are limited to lowercase alphanumerics plus `+.-`. The installer
+places apt's `--` option terminator after all fixed options and before the locked
+`name=version` arguments, so an option-shaped row is rejected twice rather than
+reinterpreted as an APT flag. Before active instructions are parsed, the
+restricted Docker parser models BuildKit's UTF-8 BOM and first-line shebang
+removal. Both preambles are forbidden. A hash/C-style directive marker must
+begin at byte zero; only after that marker does detection trim the exact Go
+`unicode.IsSpace` Unicode White_Space set. It deliberately does not use
+Python's wider `str.isspace()` controls. Every resulting `syntax` frontend in
+those comment forms or JSON is rejected, including case, Unicode whitespace,
+tag, digest, and shebang-hidden variants. Space/tab before a marker remains a
+non-active ordinary comment; ordinary comments still close the traditional
+Docker directive phase, and the canonical backslash `escape` directive remains
+the only permitted parser directive. Frontend detection and active logical
+instruction parsing consume the same Go `bufio.ScanLines`-equivalent physical
+lines: LF is the only separator and one terminal CR is removed from each token.
+CR-only, VT/FF, FS/GS/RS, NEL, and Unicode line/paragraph separators remain
+inside the preceding token and cannot expose a hidden instruction. Canonical LF
+and CRLF input, continuations, and a terminal CR retain their documented
+behavior.
 
 ## Integration Test Sharding
 
@@ -354,6 +396,24 @@ compatibility:
 - ASan and TSan retain the shared compute/propagation checks and select the
   matching legacy scheduler or new policy/execution focused tests.
 
+Linux and Darwin each schedule ASan, TSan, and bounded fuzz as distinct profile
+results. On Darwin, `sanitizer-asan-darwin`, `sanitizer-tsan-darwin`, and
+`fuzz-codecs-darwin` are three independent `macos-15` jobs that each depend only
+on `integration-plan`, download the same protected profile inventory, and own a
+separate timeout and diagnostic artifact. No profile waits for a sibling, so
+one failure cannot prevent the other two jobs from being scheduled; the shared
+suite gate nevertheless requires all three conclusions to be successful.
+The protected lock verifier compares each complete Darwin job mapping, including
+its only five ordered steps and every allowed field. The suite gate checks out
+the exact protected `workflow_commit` and invokes only the version/hash-bound
+`integration_suite_gate.py`; its complete `needs`, result environment, checkout,
+permissions, outputs, and helper call are exact mappings. The helper rejects
+failed, skipped, missing, or unknown required results, validates attestation
+`success` for publishing routes versus `skipped` for read-only routes, validates
+the digest, and writes output only after all checks pass. Unknown steps,
+`continue-on-error`, extra fields/statements, comments, no-ops, early exit, or a
+sibling dependency cannot satisfy the maintained routing contract.
+
 This is a protected two-stage transition. The trusted `CI/**` change lands on
 `main` first and validates the legacy contract there. The architecture pull
 request then incorporates that trusted commit and removes its independent
@@ -433,6 +493,8 @@ personal development content.
 - `ci/scripts/change_classification.sh`: classifies exact event revisions as documentation-only or full-integration, records all changed and non-documentation paths, and fails closed on Git uncertainty.
 - `ci/scripts/change_classification_test.sh`: exercises the long-lived routing contract across documentation, source, mixed, type-change, workflow, rename, deletion, repeated `CI/**` push, pull-request merge-base, missing branch or revision, zero/unavailable revision, manual, empty-diff, and shallow-clone cases.
 - `ci/scripts/ci_routing_test.sh`: whitespace-normalizes and exact-locks both production `protected-ci-paths.if` expressions, then extracts and executes the real stable-gate, pre-checkout fork-rejection, and protected-path shell blocks. It also locks the allow-empty configuration preflight, strict post-build job outputs, empty-output-safe `fromJSON` matrices, per-item artifact/name binding, full-CTest label exclusion, exact runner input, and the pairwise-disjoint four-way build-smoke routing: `ctest-control` consumers, OpenEXR metadata consumers, the dedicated installed-package static consumer, and the producer-local list. It verifies role-specific control/runtime/OpenEXR/installed artifact production, attestation, and consumption ordering; requires the complete shared suite gate; rejects a serial `integration_suite.sh` fallback; and retains the architecture-neutral `execution-repeat` job, environment, artifact, and final-gate routing. Isolated Git fixtures prove that both production guards reject a newline-containing `ci/**` path, safely record it, and fail closed on producer or reader failure. A job/step-scoped production assertion extracts each exact published-image history-fetch step and requires its own top-level `shell: bash`, so metadata on another job or neighboring step cannot satisfy the contract. Another job/step-scoped assertion requires exactly one `Trust checked-out workspace` step with `shell: bash`; its only executable lines must enable strict mode, add the exact `$GITHUB_WORKSPACE` global `safe.directory`, and verify `HEAD^{commit}`. It rejects an entry in another job or adjacent step, any additional or wildcard `safe.directory`, and placement after either fetch or `healthcheck.sh`. The extracted production trust block runs with an isolated HOME and Git repository, where the resulting global configuration must contain exactly that repository path. Job-scoped assertions separately lock the published-image and local-image pull-request exact-base fetch, `CI/**` main fetch/verification, three-way `CI_BASE_REF` route, and execution order. The test executes both extracted production main-fetch blocks; an isolated history proves that cumulative `origin/main` scope retains an early unformatted C++ path while event-before scope contains only the later documentation path. Detector fixtures retain exact/cumulative bases, empty comparisons, newline paths, and changed-path failure propagation. These local source and shell checks deliberately do not claim to execute GitHub's expression evaluator, reproduce cross-UID dubious ownership, or emulate the hosted container runner.
+- `ci/scripts/ci_image_install.sh`: performs the only Docker image installation transaction. Its version/full-file SHA-256, verifier-owned active-statement identity, single entrypoint call, snapshot/APT/Pip/GitHub-CLI sequence, download authority, and hash-before-extract boundary are protected; it rejects an alternate APT path, extra downloader, pipe-to-shell command, bypassed hash, or early success.
+- `ci/scripts/integration_suite_gate.py`: validates every exact shared-DAG conclusion plus the publish/attestation mode and image digest, then safely appends the sole validated digest output. Direct behavior regressions exercise every required job with failed/skipped/unknown conclusions and both legitimate attestation modes.
 - `ci/scripts/runtime_capability_test.sh`: exercises exact Make/Ninja target parsing, both complete contracts, partial/mixed/absent fail-closed behavior, required-target checks, and mutually exclusive CLI configuration output. It also proves that the exact optional `test_plugin_trust_bundle` capability—not the broader policy/execution profile—gates direct-consumer trust export: pre-trust and legacy inventories are no-ops, missing or malformed inventories and incomplete/nonregular material fail closed, and a complete trust-enabled tuple replaces inherited values with canonical paths.
 - `ci/scripts/ci_image_changed.sh`: detects whether the current NUL-delimited, unfiltered diff changes CI image inputs; workflows provide an exact fetched pull-request base SHA, and diff failure exits without a route output.
 - `ci/scripts/build_smoke_inventory.py`: strictly parses CTest JSON v1, emits a deterministic matrix and NUL-delimited exact names, and revalidates one matrix selection before index-based execution. Strict post-build mode rejects an empty selection; only explicit preflight mode permits it. Its focused regression covers malformed JSON/schema, duplicate names/properties/label values, invalid or missing labels, disabled/commandless entries, empty strict selection, deterministic ordering, JSON round trips, safe artifact keys, hostile test-name characters, absent/disabled/commandless runner selections that stop before execution, and real configuration-placeholder-to-post-build discovery.
@@ -519,8 +581,22 @@ docker run --rm -v "$PWD:/workspace" -w /workspace photospider-ci:local \
 
 The remaining Docker build arguments retain their immutable protected defaults
 from `ci/locks/ci-image-lock.json`. Local mirror overrides are not part of the
-maintained image contract; apt uses the locked Ubuntu snapshot and pip uses the
-hash-locked requirements file.
+maintained image contract. The OpenSSL/CA offline bootstrap URLs and SHA-256
+values are locked there, both exact versions also occur in the Ubuntu package
+lock, and the protected Deb822 template replaces all base archive/security/ports
+sources with the exact snapshot URI before APT runs. The same source serves
+native amd64 and arm64, and every APT update/install stays inside it. The build
+itself is the dependency-solver regression: an unavailable direct or transitive
+version fails before the image can be published. Pip separately uses the
+hash-locked requirements file. `Dockerfile.ci` has one exact active instruction
+stream and invokes only `bash /tmp/ci-image-install.sh`; the helper is copied
+from a canonical manifest input and is bound in `ci-image-lock.json` by role,
+version, and full-file SHA-256. A separate verifier-owned active-statement
+identity and network/install allowlist prevent a helper plus its JSON hash from
+being changed together to admit `/usr/bin/apt-get`, an additional download,
+`curl | sh`, a skipped GitHub CLI checksum, an uncalled entrypoint, or early
+success. The only non-APT download is the exact GitHub CLI release URL whose
+architecture-specific hash is checked before extraction and installation.
 
 The local Docker commands above reproduce the maintained current-toolchain CI
 paths. They are not a claim that CMake 3.16 itself ran. If targeted old-version

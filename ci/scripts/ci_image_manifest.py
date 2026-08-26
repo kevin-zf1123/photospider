@@ -3,7 +3,8 @@
 
 The manifest hashes every repository-protected build input named by the image
 lock and binds those bytes to the exact source commit, repository, base image,
-and full-SHA builder action. Before a workflow may publish, the same helper
+full-SHA builder action, and version/full-SHA identities of the installer and
+suite-gate helpers. Before a workflow may publish, the same helper
 requires the workflow commit to equal the newest canonical image-input commit;
 this makes the producer's implicit GitHub attestation source digest identical
 to the source identity expected by consumers. The output is canonical JSON
@@ -70,6 +71,57 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _protected_helpers(
+    root: Path, lock: dict[str, Any], input_paths: list[str]
+) -> dict[str, dict[str, str]]:
+    """Validate and return the exact versioned protected-helper identities.
+
+    Args:
+        root: Repository root containing the helper files.
+        lock: Strict CI-image lock object.
+        input_paths: Canonical image-input path inventory.
+
+    Returns:
+        The two canonical helper identity records for manifest inclusion.
+
+    Raises:
+        ManifestError: A helper record/path/version/hash is malformed, absent
+            from image inputs, aliased, or differs from the protected bytes.
+
+    Note:
+        The explicit helper identity supplements, rather than replaces, the
+        ordinary per-input hash. This binds executable role/version and bytes.
+    """
+    helpers = lock.get("protected_helpers")
+    expected_names = {"ci-image-installer", "integration-suite-gate"}
+    if not isinstance(helpers, dict) or set(helpers) != expected_names:
+        raise ManifestError("protected helper identity set is malformed")
+    result: dict[str, dict[str, str]] = {}
+    for name in sorted(expected_names):
+        record = helpers[name]
+        if not isinstance(record, dict) or set(record) != {
+            "path",
+            "sha256",
+            "version",
+        }:
+            raise ManifestError(f"protected helper {name!r} record is malformed")
+        path = record["path"]
+        sha256 = record["sha256"]
+        version = record["version"]
+        if not isinstance(path, str) or path.startswith("/") or ".." in Path(path).parts:
+            raise ManifestError(f"protected helper {name!r} path is unsafe")
+        if path not in input_paths:
+            raise ManifestError(f"protected helper {name!r} is absent from image inputs")
+        if version != "v1" or not isinstance(sha256, str) or re.fullmatch(
+            r"[0-9a-f]{64}", sha256
+        ) is None:
+            raise ManifestError(f"protected helper {name!r} identity is malformed")
+        if _sha256_file(root / path) != sha256:
+            raise ManifestError(f"protected helper {name!r} bytes differ from the lock")
+        result[name] = {"path": path, "sha256": sha256, "version": version}
+    return result
+
+
 def _read_builder_commit(root: Path, action: str, release: str) -> str:
     """Resolve the declared builder to exactly one protected action-lock row."""
     matches: list[str] = []
@@ -94,13 +146,29 @@ def create_manifest(root: Path, source_commit: str, repository: str) -> dict[str
         raise ManifestError("repository must be an owner/name identity")
     lock_path = root / "ci/locks/ci-image-lock.json"
     lock = _load_json(lock_path)
-    if not isinstance(lock, dict) or lock.get("schema") != "photospider-ci-image-lock-v1":
+    expected_lock_fields = {
+        "apt_bootstrap",
+        "apt_snapshot",
+        "base_image",
+        "builder",
+        "github_cli",
+        "input_paths",
+        "protected_helpers",
+        "published_image",
+        "schema",
+    }
+    if (
+        not isinstance(lock, dict)
+        or set(lock) != expected_lock_fields
+        or lock.get("schema") != "photospider-ci-image-lock-v1"
+    ):
         raise ManifestError("unknown CI image lock schema")
     paths = lock.get("input_paths")
     if not isinstance(paths, list) or not all(isinstance(item, str) for item in paths):
         raise ManifestError("input_paths must be a string array")
     if paths != sorted(paths) or len(paths) != len(set(paths)):
         raise ManifestError("input_paths must be sorted and unique")
+    protected_helpers = _protected_helpers(root, lock, paths)
     inputs: list[dict[str, Any]] = []
     for relative in paths:
         if relative.startswith("/") or ".." in Path(relative).parts:
@@ -134,6 +202,7 @@ def create_manifest(root: Path, source_commit: str, repository: str) -> dict[str
         },
         "builder_runner": runner,
         "inputs": inputs,
+        "protected_helpers": protected_helpers,
         "repository": repository,
         "schema": "photospider-ci-image-input-v1",
         "source_commit": source_commit,

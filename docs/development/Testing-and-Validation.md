@@ -3374,6 +3374,21 @@ The generated CLI configuration is mutually exclusive: CI does not pass
 removed scheduler keys to a policy/execution revision or introduce a product
 compatibility translation.
 
+Darwin ASan, TSan, and bounded fuzz are three independent `macos-15` jobs. Each
+depends only on the common integration plan, consumes the same protected
+profile inventory, and publishes its own diagnostic result under its own
+timeout. They have no sibling dependency, while the complete shared-suite gate
+requires all three results; a failed profile therefore does not suppress the
+other two schedules or disappear behind one serial Darwin aggregate.
+The protected verifier compares the complete YAML job and five-step mapping for
+each profile. The suite gate separately checks out the exact protected
+`workflow_commit` and invokes only the version/hash-bound
+`integration_suite_gate.py`; its complete job, checkout, `needs`, environment,
+outputs, and helper command are exact. The helper executes every ordinary result
+check, the publishing-versus-read-only attestation success/skip rule, and digest
+validation before writing output. Unknown steps/fields, `continue-on-error`,
+comments, no-op helpers, extra statements, or early success therefore fail.
+
 `healthcheck-published-image` is a container job. The protected
 `photospider-ci:latest` value is only the discovery locator; a trusted host
 preflight verifies its exact digest, attestation, OCI revision, and manifest
@@ -3394,7 +3409,13 @@ without relying on the container default shell. If a change modifies an image
 input, healthcheck verifies the hosted runner, locks, publish-source identity,
 and canonical input manifest without building a second image. Only the trusted
 integration push builds one temporary-tag candidate and runs the shared
-digest-bound suite. For pull
+digest-bound suite. The callable producer is parsed as one complete workflow
+mapping: its only `workflow_call`, write permissions, single build job, outputs,
+and every ordered step field are exact. Checkout and the prebuild lock verifier
+must precede the sole Buildx build/push action; its complete `with` mapping
+admits only one temporary tag, two immutable labels, and the manifest/source
+build arguments. Any extra condition, environment, step, Docker/Buildx command,
+tag, build argument, or job fails the static contract. For pull
 requests, the published-image and local-image healthcheck jobs each fetch the
 target branch from the base-repository URL, verify `CI_BASE_SHA` as the event's
 exact base commit inside their own job, and supply that exact SHA as `CI_BASE_REF`
@@ -3409,6 +3430,40 @@ precedes its static healthcheck. Required fetch or parse
 failure therefore stops before the script's fallback base selection.
 `Dockerfile.ci` installs the C++ toolchain, CMake, OpenCV, yaml-cpp, GTest,
 nlohmann-json, clang-format, Python, and cpplint required by those scripts.
+Its minimal-base TLS bootstrap is limited to checksum-bound `openssl` and
+`ca-certificates` packages from the protected immutable snapshot. After `dpkg`
+configures those offline bytes, a protected Deb822 template has already replaced
+the base archive, security, and ports sources with one timestamp-qualified
+snapshot URI shared by native amd64 and arm64. The first and only APT
+update/install sequence solves the complete exact package lock against that
+source; no live APT bootstrap can mutate an already installed transitive
+dependency. Package names follow Debian's minimum-two-character grammar and
+cannot start with `.` or `-`; fixed apt options end with `--` before xargs
+appends any locked `name=version` token. Before active-instruction parsing, the
+Docker verifier models BuildKit's UTF-8 BOM and first-line shebang removal. It
+forbids both preambles. Hash/C-style directive markers are recognized only at
+byte zero; after the marker, the detector trims exactly Go
+`unicode.IsSpace`/Unicode White_Space rather than Python's wider
+`str.isspace()` control set. It rejects every resulting comment or JSON
+`syntax` frontend, including case, Unicode-whitespace, tag, digest, and
+shebang-hidden variants. Space/tab before the marker is an ordinary non-active
+comment. Ordinary comments retain their directive-phase behavior, and only the
+canonical backslash `escape` directive remains allowed. Frontend detection and
+active logical parsing use one Go `bufio.ScanLines`-equivalent physical-line
+sequence: only LF separates tokens and one terminal CR is removed. CR-only,
+VT/FF, FS/GS/RS, NEL, and Unicode line/paragraph separators stay within the
+preceding token, so text after an ordinary comment cannot become a verifier-only
+instruction. LF/CRLF, continuations, and a terminal CR remain valid.
+Docker's complete active instruction stream is exact and contains a single
+`RUN bash /tmp/ci-image-install.sh`. The installer and suite-gate helper both
+carry protected role/version/full-file SHA-256 identities in the CI image lock
+and canonical manifest. The installer additionally has a verifier-owned active
+statement identity and explicit network/install allowlist: only the snapshot
+APT transaction, hash-locked Pip requirements, and the exact GitHub CLI release
+download are admitted, and the architecture-specific CLI SHA-256 must be
+consumed before extraction. Recomputing the JSON helper hash cannot authorize an
+APT alias, extra downloader, pipe-to-shell path, skipped check, uncalled main, or
+early exit.
 The image detector uses no Git status filter. The healthcheck static-scope
 inventory instead uses `--diff-filter=d` to omit deleted formatter/linter
 inputs while retaining type changes and uncommon non-deletion statuses. Both

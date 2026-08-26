@@ -1023,12 +1023,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
-  security-darwin:
+  sanitizer-asan-darwin:
     permissions:
       contents: read
     needs: integration-plan
     runs-on: macos-15
-    timeout-minutes: 240
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -1037,7 +1037,7 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
-      - name: Verify exact Darwin security runner
+      - name: Verify exact Darwin ASan runner
         run: >-
           python3 ci/scripts/ci_runner_verify.py
           --platform Darwin
@@ -1047,33 +1047,104 @@ jobs:
         with:
           name: ci-security-profile-inventory
           path: CI-results/profile-inventory
-      - name: Run isolated Darwin security profiles
+      - name: Run isolated Darwin ASan profile
         env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-asan-darwin
           CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
           CI_RUNNER_TEMP: ${{ runner.temp }}
-        run: |
-          set -Eeuo pipefail
-          for sanitizer in asan tsan; do
-            SANITIZER="$sanitizer" \
-              CI_ARTIFACT_DIR="${{ github.workspace }}/CI-results/sanitizer-$sanitizer-darwin" \
-              bash ci/scripts/sanitizer_test.sh
-          done
-          CI_ARTIFACT_DIR="${{ github.workspace }}/CI-results/fuzz-codecs-darwin" \
-            bash ci/scripts/fuzz_smoke.sh
-      - name: Upload Darwin security diagnostics
+          SANITIZER: asan
+        run: bash ci/scripts/sanitizer_test.sh
+      - name: Upload Darwin ASan diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: security-darwin-results
-          path: |
-            CI-results/sanitizer-asan-darwin
-            CI-results/sanitizer-tsan-darwin
-            CI-results/fuzz-codecs-darwin
+          name: sanitizer-asan-darwin-results
+          path: CI-results/sanitizer-asan-darwin
+          if-no-files-found: warn
+          retention-days: 3
+
+  sanitizer-tsan-darwin:
+    permissions:
+      contents: read
+    needs: integration-plan
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Verify exact Darwin TSan runner
+        run: >-
+          python3 ci/scripts/ci_runner_verify.py
+          --platform Darwin
+          --runner-label macos-15
+      - name: Download security profile inventory
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-security-profile-inventory
+          path: CI-results/profile-inventory
+      - name: Run isolated Darwin TSan profile
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-tsan-darwin
+          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_RUNNER_TEMP: ${{ runner.temp }}
+          SANITIZER: tsan
+        run: bash ci/scripts/sanitizer_test.sh
+      - name: Upload Darwin TSan diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sanitizer-tsan-darwin-results
+          path: CI-results/sanitizer-tsan-darwin
+          if-no-files-found: warn
+          retention-days: 3
+
+  fuzz-codecs-darwin:
+    permissions:
+      contents: read
+    needs: integration-plan
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Verify exact Darwin fuzz runner
+        run: >-
+          python3 ci/scripts/ci_runner_verify.py
+          --platform Darwin
+          --runner-label macos-15
+      - name: Download security profile inventory
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-security-profile-inventory
+          path: CI-results/profile-inventory
+      - name: Run bounded Darwin codec fuzz smoke
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/fuzz-codecs-darwin
+          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_RUNNER_TEMP: ${{ runner.temp }}
+        run: bash ci/scripts/fuzz_smoke.sh
+      - name: Upload transient Darwin fuzz diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-codecs-darwin-results
+          path: CI-results/fuzz-codecs-darwin
           if-no-files-found: warn
           retention-days: 3
 
   suite-gate:
-    permissions: {}
+    permissions:
+      contents: read
     needs:
       - identity-preflight
       - integration-plan
@@ -1092,21 +1163,36 @@ jobs:
       - sanitizer-asan
       - sanitizer-tsan
       - fuzz-codecs
-      - security-darwin
+      - sanitizer-asan-darwin
+      - sanitizer-tsan-darwin
+      - fuzz-codecs-darwin
     if: always()
     runs-on: ubuntu-24.04
     outputs:
       validated_image_digest: ${{ steps.aggregate.outputs.validated_image_digest }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout protected suite gate control
+        with:
+          persist-credentials: false
+          repository: ${{ github.repository }}
+          fetch-depth: 1
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: ci/scripts/integration_suite_gate.py
+          sparse-checkout-cone-mode: false
+          path: .ci-suite-gate-control
       - name: Aggregate the exact shared integration DAG
         id: aggregate
         env:
           CI_ARTIFACT_READY_RESULT: ${{ needs.targeted-artifacts-ready.result }}
           CI_ASAN_RESULT: ${{ needs.sanitizer-asan.result }}
+          CI_ATTESTATION_RESULT: ${{ needs.attest-targeted-artifacts.result }}
           CI_BUILD_RESULT: ${{ needs.build-integrity-default.result }}
           CI_BUILD_SMOKE_RESULT: ${{ needs.build-smoke.result }}
           CI_CTEST_RESULT: ${{ needs.full-ctest.result }}
-          CI_DARWIN_RESULT: ${{ needs.security-darwin.result }}
+          CI_DARWIN_ASAN_RESULT: ${{ needs.sanitizer-asan-darwin.result }}
+          CI_DARWIN_FUZZ_RESULT: ${{ needs.fuzz-codecs-darwin.result }}
+          CI_DARWIN_TSAN_RESULT: ${{ needs.sanitizer-tsan-darwin.result }}
           CI_EXECUTION_RESULT: ${{ needs.execution-repeat.result }}
           CI_FUZZ_RESULT: ${{ needs.fuzz-codecs.result }}
           CI_IDENTITY_RESULT: ${{ needs.identity-preflight.result }}
@@ -1115,46 +1201,11 @@ jobs:
           CI_OPENEXR_RESULT: ${{ needs.openexr-smoke.result }}
           CI_PLAN_RESULT: ${{ needs.integration-plan.result }}
           CI_PLUGIN_RESULT: ${{ needs.plugin-load.result }}
+          CI_PUBLISH_REUSABLE_ATTESTATIONS: ${{ inputs.publish_reusable_attestations }}
           CI_PROPAGATION_RESULT: ${{ needs.propagation-script.result }}
           CI_SCRIPTED_CLI_RESULT: ${{ needs.scripted-cli.result }}
           CI_TSAN_RESULT: ${{ needs.sanitizer-tsan.result }}
           CI_VERIFY_RESULT: ${{ needs.verify-targeted-artifacts.result }}
-        run: |
-          set -Eeuo pipefail
-
-          # @brief Require one shared-suite conclusion to be successful.
-          # @param $1 Stable job identity.
-          # @param $2 Actual GitHub job conclusion.
-          # @return Zero only for literal success.
-          require_success() {
-            local job_name=$1
-            local result=$2
-            if [[ "$result" != success ]]; then
-              echo "$job_name concluded '$result'; expected success." >&2
-              return 1
-            fi
-          }
-
-          require_success identity-preflight "$CI_IDENTITY_RESULT"
-          require_success integration-plan "$CI_PLAN_RESULT"
-          require_success build-integrity-default "$CI_BUILD_RESULT"
-          require_success verify-targeted-artifacts "$CI_VERIFY_RESULT"
-          require_success targeted-artifacts-ready "$CI_ARTIFACT_READY_RESULT"
-          require_success full-ctest "$CI_CTEST_RESULT"
-          require_success build-smoke "$CI_BUILD_SMOKE_RESULT"
-          require_success openexr-smoke "$CI_OPENEXR_RESULT"
-          require_success scripted-cli "$CI_SCRIPTED_CLI_RESULT"
-          require_success propagation-script "$CI_PROPAGATION_RESULT"
-          require_success plugin-load "$CI_PLUGIN_RESULT"
-          require_success execution-repeat "$CI_EXECUTION_RESULT"
-          require_success installed-package-consumer \
-            "$CI_INSTALLED_PACKAGE_RESULT"
-          require_success sanitizer-asan "$CI_ASAN_RESULT"
-          require_success sanitizer-tsan "$CI_TSAN_RESULT"
-          require_success fuzz-codecs "$CI_FUZZ_RESULT"
-          require_success security-darwin "$CI_DARWIN_RESULT"
-          if [[ ! "$CI_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "Shared suite did not retain one canonical image digest." >&2
-            exit 1
-          fi
-          printf 'validated_image_digest=%s\n' "$CI_IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+        run: >-
+          python3 .ci-suite-gate-control/ci/scripts/integration_suite_gate.py
+          --output "$GITHUB_OUTPUT"

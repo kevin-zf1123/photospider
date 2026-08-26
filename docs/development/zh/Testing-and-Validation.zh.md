@@ -2729,6 +2729,17 @@ tree。Full CTest 继续作为普通已注册测试的权威入口；plugin、CL
 sanitizer 分片会选择对应契约的断言。生成的 CLI 配置严格互斥：CI 不会把已删除的 scheduler key
 传给 policy/execution revision，也不会引入产品兼容翻译。
 
+Darwin ASan、TSan 与有界 fuzz 是三个独立的 `macos-15` job。每个 job 只依赖共同的 integration
+plan、消费同一份受保护 profile inventory，并在自身 timeout 下发布独立 diagnostic result。它们之间
+没有 sibling dependency，而完整 shared-suite gate 会要求三个 result 全部成功；因此某个 profile 失败
+不会压制另外两个调度，也不会被隐藏在单个串行 Darwin aggregate 后面。
+受保护 verifier 会比较每个 profile 的完整 YAML job 与五步 mapping。Suite gate 会单独 checkout
+精确的受保护 `workflow_commit`，并且只调用带 version/hash 绑定的
+`integration_suite_gate.py`；它的完整 job、checkout、`needs`、environment、output 与 helper
+command 都是精确合同。Helper 会在写 output 前执行每一项普通 result 检查、publishing/read-only
+attestation success/skip 规则和 digest 校验。未知 step/field、`continue-on-error`、注释、no-op
+helper、额外 statement 或 early success 都会失败。
+
 `healthcheck-published-image` 是 container job。受保护的 `photospider-ci:latest` 值只作为发现
 locator；可信 host preflight 会校验其精确 digest、attestation、OCI revision 与 manifest label，
 所有 published-image healthcheck 与 build/test integration job 都执行所得
@@ -2743,7 +2754,11 @@ history` 与 `Fetch CI branch main history` step 同样绑定 `shell: bash`，�
 `set -Eeuo pipefail` 前导命令无需依赖 container 默认 shell 即可正确执行。如果某项改动修改
 image input，healthcheck 会在不构建第二个镜像的情况下校验 hosted runner、lock、publish-source
 identity 与 canonical input manifest；只有可信 integration push 会构建一个 temporary-tag candidate
-并运行 shared digest-bound suite。
+并运行 shared digest-bound suite。Callable producer 会作为一份完整 workflow mapping 解析：其唯一
+`workflow_call`、write permission、单一 build job、output 以及每个有序 step field 都必须精确。
+Checkout 与 prebuild lock verifier 必须先于唯一 Buildx build/push action；其完整 `with` mapping 只允许
+一个 temporary tag、两个 immutable label 以及 manifest/source build argument。任何额外 condition、
+environment、step、Docker/Buildx 命令、tag、build argument 或 job 都会使静态合同失败。
 对于 pull request，published-image 与 local-image healthcheck job 都会在各自 job 内从
 base-repository URL 拉取目标分支，把 `CI_BASE_SHA` 校验为 event 的精确 base commit，并把该精确
 SHA 作为 `CI_BASE_REF` 传入，不依赖 fork checkout 的 `origin`。对于每次 `CI/**` push，两条路径
@@ -2754,6 +2769,29 @@ Published-image 校验先于 `healthcheck.sh`；image-change contract 校验先�
 任何必需 fetch 或解析失败都会在脚本使用 fallback base 选择前停止。
 `Dockerfile.ci` 会安装这些脚本所需的 C++ toolchain、CMake、OpenCV、yaml-cpp、
 GTest、nlohmann-json、clang-format、Python 和 cpplint。
+最小 base 的 TLS bootstrap 只包含来自受保护 immutable snapshot、且带 checksum 的 `openssl` 与
+`ca-certificates` package。`dpkg` 配置这些离线 byte 时，受保护 Deb822 template 已把 base 的
+archive、security 与 ports source 替换为一条由原生 amd64 与 arm64 共用、带 timestamp 的 snapshot
+URI。第一且唯一的 APT update/install sequence 会在该 source 上求解完整精确 package lock；live APT
+bootstrap 不能先行改变已安装的传递依赖。Package name 遵循 Debian 的最少两个字符 grammar，且不能
+以 `.` 或 `-` 开头；固定 apt option 会以 `--` 结束，随后 xargs 才追加任何 locked
+`name=version` token。在解析 active instruction 前，Docker verifier 会建模 BuildKit 对 UTF-8 BOM 与
+首行 shebang 的移除；这两种 preamble 本身均被禁止。Hash/C-style directive marker 只有从 byte zero
+开始才会被识别；移除 marker 后，detector 只精确裁剪 Go `unicode.IsSpace`/Unicode White_Space，
+而不会采用 Python 范围更宽的 `str.isspace()` control 集合。随后，每个 comment 或 JSON `syntax`
+frontend 都会被拒绝，包括大小写、Unicode whitespace、tag、digest 与 shebang 隐藏变体。Marker 前
+有 space/tab 时属于 non-active 普通 comment。普通 comment 保留既有 directive-phase 行为，只有
+canonical backslash `escape` directive 仍被允许。Frontend detection 与 active logical parsing
+使用同一份 Go `bufio.ScanLines` 等价物理行：只有 LF 分隔 token，每个 token 只移除一个尾 CR。
+CR-only、VT/FF、FS/GS/RS、NEL 与 Unicode line/paragraph separator 都留在前一 token 内，因此普通
+comment 后的文本不能成为 verifier-only instruction。LF/CRLF、continuation 与 terminal CR 仍有效。
+Docker 的完整 active instruction stream 是精确合同，且只包含一个
+`RUN bash /tmp/ci-image-install.sh`。Installer 与 suite-gate helper 都在 CI image lock 和 canonical
+manifest 中带有受保护的 role/version/完整文件 SHA-256 identity。Installer 还拥有 verifier-owned
+active statement identity 与显式 network/install allowlist：只允许 snapshot APT transaction、带 hash
+lock 的 Pip requirement 与精确 GitHub CLI release 下载，且架构专用 CLI SHA-256 必须在 extract 前
+实际消费。仅重算 JSON helper hash 不能授权 APT alias、额外 downloader、pipe-to-shell、跳过检查、
+未调用 main 或 early exit。
 镜像 detector 不使用 Git status filter；healthcheck 静态范围清单则使用 `--diff-filter=d` 排除
 无法交给 formatter/linter 的删除路径，同时保留 type change 与少见的非删除 status。两者都使用
 NUL 分隔的 Git 输出与父 shell 可见的临时文件。因此 `git diff` 失败时，镜像检测或 healthcheck

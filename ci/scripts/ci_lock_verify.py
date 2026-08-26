@@ -5,19 +5,24 @@ This durable verifier is intentionally independent of candidate product code.
 It rejects floating workflow actions/runners/images, persisted checkout tokens,
 unsafe pull-request-target trust routing, reusable-workflow permission
 inheritance drift, malformed protected locks, and Docker installation paths
-that bypass the immutable snapshot or hash locks.
+that select an external frontend or bypass the exact helper identity, immutable
+snapshot, network allowlist, hash locks, or complete Darwin/suite-gate mapping.
 Run it from any directory; ``--repo-root`` is primarily for fixture tests.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import json
+import os
 import re
+import shlex
 import stat
 import sys
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 
 
 class ContractError(ValueError):
@@ -40,6 +45,46 @@ def _load_json(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
     except (OSError, UnicodeError, json.JSONDecodeError, ContractError) as error:
         raise ContractError(f"cannot read strict JSON {path}: {error}") from error
+
+
+def _sha256_regular_file(path: Path, context: str) -> str:
+    """Hash one retained regular file without following its final component.
+
+    Args:
+        path: Exact protected helper or input file.
+        context: Stable diagnostic identity for failure messages.
+
+    Returns:
+        Lowercase SHA-256 of the retained file bytes.
+
+    Raises:
+        ContractError: The path is missing, aliased, non-regular, unreadable, or
+            changes identity while the retained descriptor is being measured.
+
+    Note:
+        Path and descriptor metadata are cross-checked so a helper pathname
+        cannot be replaced between the regular-file decision and hashing.
+    """
+    try:
+        path_stat = path.lstat()
+        if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+            raise ContractError(f"{context}: protected helper must be a regular file")
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            descriptor_stat = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(descriptor_stat.st_mode)
+                or (path_stat.st_dev, path_stat.st_ino)
+                != (descriptor_stat.st_dev, descriptor_stat.st_ino)
+            ):
+                raise ContractError(f"{context}: protected helper identity changed")
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except ContractError:
+        raise
+    except OSError as error:
+        raise ContractError(f"{context}: cannot hash protected helper: {error}") from error
 
 
 def _exact_keys(value: dict[str, Any], expected: set[str], context: str) -> None:
@@ -192,6 +237,380 @@ def _workflow_job_blocks(path: Path) -> dict[str, list[str]]:
     return jobs
 
 
+def _strip_yaml_comment(value: str) -> str:
+    """Remove one YAML plain-scalar comment without touching quoted ``#``.
+
+    Args:
+        value: Scalar tail from one protected workflow mapping entry.
+
+    Returns:
+        The scalar bytes before an unquoted whitespace-delimited comment.
+
+    Raises:
+        ContractError: A quoted scalar is unterminated.
+
+    Note:
+        GitHub expressions used by the maintained workflow contain no YAML
+        quoting escapes. This helper nevertheless tracks both quote styles so
+        action release hints cannot become part of the parsed action identity.
+    """
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(value):
+        if quote == '"' and escaped:
+            escaped = False
+            continue
+        if quote == '"' and character == "\\":
+            escaped = True
+            continue
+        if character in {"'", '"'}:
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+            continue
+        if character == "#" and quote is None and (
+            index == 0 or value[index - 1].isspace()
+        ):
+            return value[:index].rstrip()
+    if quote is not None:
+        raise ContractError("protected workflow contains an unterminated quoted scalar")
+    return value.rstrip()
+
+
+def _yaml_mapping_entry(path: Path, line_number: int, text: str) -> tuple[str, str]:
+    """Parse one canonical key/value entry from the protected YAML subset.
+
+    Args:
+        path: Workflow path used in diagnostics.
+        line_number: One-based physical line number.
+        text: Entry text after its owned indentation has been removed.
+
+    Returns:
+        The exact mapping key and comment-free scalar tail.
+
+    Raises:
+        ContractError: The key, merge/anchor syntax, or entry shape is outside
+            the explicit protected subset.
+    """
+    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_-]*):(?:[ ](.*))?", text)
+    if match is None:
+        raise ContractError(f"{path}:{line_number}: unsupported YAML mapping entry")
+    key, tail = match.groups()
+    if key == "<<" or (tail or "").lstrip().startswith(("&", "*")):
+        raise ContractError(f"{path}:{line_number}: YAML aliases and merges are forbidden")
+    return key, _strip_yaml_comment(tail or "")
+
+
+def _yaml_flow_sequence(path: Path, line_number: int, value: str) -> list[str]:
+    """Parse the maintained plain-scalar ``[a, b]`` YAML sequence form.
+
+    Args:
+        path: Workflow path used in diagnostics.
+        line_number: One-based physical line number.
+        value: Complete bracketed scalar text.
+
+    Returns:
+        Ordered nonempty plain scalar entries.
+
+    Raises:
+        ContractError: The flow value is empty, quoted, nested, or duplicated.
+    """
+    inner = value[1:-1].strip()
+    if not inner:
+        return []
+    entries = [entry.strip() for entry in inner.split(",")]
+    if any(
+        not entry
+        or any(marker in entry for marker in "[]{}'\"")
+        or entry.startswith(("&", "*"))
+        for entry in entries
+    ):
+        raise ContractError(f"{path}:{line_number}: unsupported YAML flow sequence")
+    if len(entries) != len(set(entries)):
+        raise ContractError(f"{path}:{line_number}: duplicate YAML sequence entry")
+    return entries
+
+
+def _yaml_scalar(path: Path, line_number: int, value: str) -> Any:
+    """Decode one scalar from the deliberately small protected YAML grammar.
+
+    Args:
+        path: Workflow path used in diagnostics.
+        line_number: One-based physical line number.
+        value: Comment-free nonempty scalar text.
+
+    Returns:
+        A string, an explicit empty mapping, or a plain flow sequence.
+
+    Raises:
+        ContractError: Complex flow mappings/sequences or alias syntax appears.
+
+    Note:
+        Boolean-looking values intentionally remain strings. GitHub Actions
+        owns expression evaluation; this parser owns only reviewed structure.
+    """
+    if value == "{}":
+        return {}
+    if value.startswith("["):
+        if not value.endswith("]"):
+            raise ContractError(f"{path}:{line_number}: unterminated YAML flow sequence")
+        return _yaml_flow_sequence(path, line_number, value)
+    if value.startswith("{") or value.endswith("}") and not value.endswith("}}"):
+        raise ContractError(f"{path}:{line_number}: unsupported YAML flow mapping")
+    if value.startswith(("&", "*")):
+        raise ContractError(f"{path}:{line_number}: YAML aliases and anchors are forbidden")
+    return value
+
+
+def _yaml_next_content(lines: list[str], index: int) -> int:
+    """Return the next nonblank, non-comment physical-line index."""
+    while index < len(lines):
+        stripped = lines[index].lstrip(" ")
+        if stripped and not stripped.startswith("#"):
+            break
+        index += 1
+    return index
+
+
+def _yaml_block_scalar(
+    path: Path,
+    lines: list[str],
+    index: int,
+    parent_indent: int,
+    style: str,
+) -> tuple[str, int]:
+    """Decode one literal or folded block owned by a workflow mapping field.
+
+    Args:
+        path: Workflow path used in diagnostics.
+        lines: Physical workflow lines for one exact top-level job.
+        index: First physical line after the block-scalar marker.
+        parent_indent: Indentation of the owning mapping key.
+        style: One of ``|``, ``|-``, ``>``, or ``>-``.
+
+    Returns:
+        Decoded text and the first unconsumed physical-line index.
+
+    Raises:
+        ContractError: The block is empty or escapes its owned indentation.
+    """
+    end = index
+    while end < len(lines):
+        stripped = lines[end].lstrip(" ")
+        if stripped and len(lines[end]) - len(stripped) <= parent_indent:
+            break
+        end += 1
+    owned = lines[index:end]
+    content_indents = [
+        len(line) - len(line.lstrip(" ")) for line in owned if line.strip()
+    ]
+    if not content_indents:
+        raise ContractError(f"{path}: protected YAML block scalar is empty")
+    content_indent = min(content_indents)
+    if content_indent <= parent_indent:
+        raise ContractError(f"{path}: protected YAML block scalar escapes its owner")
+    fragments = [
+        "" if not line.strip() else line[content_indent:] for line in owned
+    ]
+    if style.startswith("|"):
+        value = "\n".join(fragments)
+    else:
+        paragraphs: list[str] = []
+        current: list[str] = []
+        for fragment in fragments:
+            if fragment:
+                current.append(fragment)
+            elif current:
+                paragraphs.append(" ".join(current))
+                current = []
+        if current:
+            paragraphs.append(" ".join(current))
+        value = "\n".join(paragraphs)
+    if not style.endswith("-"):
+        value += "\n"
+    return value, end
+
+
+def _parse_yaml_mapping(
+    path: Path,
+    lines: list[str],
+    index: int,
+    indent: int,
+) -> tuple[dict[str, Any], int]:
+    """Parse one indentation-owned mapping from the protected YAML subset."""
+    result: dict[str, Any] = {}
+    while True:
+        index = _yaml_next_content(lines, index)
+        if index >= len(lines):
+            break
+        line = lines[index]
+        if "\t" in line[: len(line) - len(line.lstrip())]:
+            raise ContractError(f"{path}: tabs cannot own protected YAML indentation")
+        stripped = line.lstrip(" ")
+        actual_indent = len(line) - len(stripped)
+        if actual_indent < indent:
+            break
+        if actual_indent != indent or stripped.startswith("- "):
+            raise ContractError(
+                f"{path}:{index + 1}: unsupported protected YAML mapping indentation"
+            )
+        key, tail = _yaml_mapping_entry(path, index + 1, stripped)
+        if key in result:
+            raise ContractError(f"{path}:{index + 1}: duplicate YAML mapping key {key}")
+        index += 1
+        if tail in {"|", "|-", ">", ">-"}:
+            result[key], index = _yaml_block_scalar(
+                path, lines, index, actual_indent, tail
+            )
+            continue
+        if tail:
+            result[key] = _yaml_scalar(path, index, tail)
+            continue
+        child_index = _yaml_next_content(lines, index)
+        if child_index >= len(lines):
+            raise ContractError(f"{path}: YAML mapping {key} has no value")
+        child_line = lines[child_index]
+        child_stripped = child_line.lstrip(" ")
+        child_indent = len(child_line) - len(child_stripped)
+        if child_indent != actual_indent + 2:
+            raise ContractError(
+                f"{path}:{child_index + 1}: YAML child indentation differs for {key}"
+            )
+        if child_stripped.startswith("- "):
+            result[key], index = _parse_yaml_sequence(
+                path, lines, child_index, child_indent
+            )
+        else:
+            result[key], index = _parse_yaml_mapping(
+                path, lines, child_index, child_indent
+            )
+    return result, index
+
+
+def _parse_yaml_sequence(
+    path: Path,
+    lines: list[str],
+    index: int,
+    indent: int,
+) -> tuple[list[Any], int]:
+    """Parse one scalar or mapping sequence from the protected YAML subset."""
+    result: list[Any] = []
+    while True:
+        index = _yaml_next_content(lines, index)
+        if index >= len(lines):
+            break
+        line = lines[index]
+        stripped = line.lstrip(" ")
+        actual_indent = len(line) - len(stripped)
+        if actual_indent < indent:
+            break
+        if actual_indent != indent or not stripped.startswith("- "):
+            raise ContractError(
+                f"{path}:{index + 1}: unsupported protected YAML sequence indentation"
+            )
+        item_text = stripped[2:]
+        index += 1
+        if re.match(r"[A-Za-z_][A-Za-z0-9_-]*:", item_text):
+            key, tail = _yaml_mapping_entry(path, index, item_text)
+            if not tail or tail in {"|", "|-", ">", ">-"}:
+                raise ContractError(
+                    f"{path}:{index}: sequence mapping must start with a scalar field"
+                )
+            item: dict[str, Any] = {key: _yaml_scalar(path, index, tail)}
+            next_index = _yaml_next_content(lines, index)
+            if next_index < len(lines):
+                next_line = lines[next_index]
+                next_stripped = next_line.lstrip(" ")
+                next_indent = len(next_line) - len(next_stripped)
+                if next_indent == indent + 2:
+                    additional, index = _parse_yaml_mapping(
+                        path, lines, next_index, indent + 2
+                    )
+                    overlap = set(item) & set(additional)
+                    if overlap:
+                        raise ContractError(
+                            f"{path}: sequence mapping repeats {sorted(overlap)}"
+                        )
+                    item.update(additional)
+            result.append(item)
+        else:
+            scalar = _strip_yaml_comment(item_text)
+            if not scalar:
+                raise ContractError(f"{path}:{index}: empty YAML sequence entry")
+            result.append(_yaml_scalar(path, index, scalar))
+    if not result:
+        raise ContractError(f"{path}: protected YAML sequence is empty")
+    return result, index
+
+
+def _workflow_job_mappings(
+    path: Path, job_names: Iterable[str]
+) -> dict[str, dict[str, Any]]:
+    """Return exact top-level jobs decoded into protected YAML mappings.
+
+    Args:
+        path: Maintained workflow path.
+        job_names: Exact jobs whose structure is security-authoritative.
+
+    Returns:
+        Each requested job as a nested mapping/list/scalar tree.
+
+    Raises:
+        ContractError: A job is absent, repeats a field, or uses unsupported
+            YAML syntax/indentation in the protected subset.
+
+    Note:
+        Raw blocks are used only to establish top-level ownership. Every field,
+        step, environment, dependency, and run command consumed by a verifier
+        comes from this decoded mapping, never from substring membership.
+    """
+    blocks = _workflow_job_blocks(path)
+    requested = list(job_names)
+    if len(requested) != len(set(requested)):
+        raise ContractError(f"{path}: duplicate protected job request")
+    result: dict[str, dict[str, Any]] = {}
+    for job_name in requested:
+        if job_name not in blocks:
+            raise ContractError(f"{path}: missing protected job {job_name}")
+        mapping, index = _parse_yaml_mapping(path, blocks[job_name], 0, 4)
+        if _yaml_next_content(blocks[job_name], index) != len(blocks[job_name]):
+            raise ContractError(f"{path}: unconsumed YAML content in job {job_name}")
+        result[job_name] = mapping
+    return result
+
+
+def _workflow_mapping(path: Path) -> dict[str, Any]:
+    """Decode one complete protected workflow into the maintained YAML subset.
+
+    Args:
+        path: Regular workflow whose top-level event, permission, and job
+            mappings are security-authoritative.
+
+    Returns:
+        The complete nested mapping with ordered step sequences and exact
+        scalar/block values. YAML boolean-looking values remain strings.
+
+    Raises:
+        ContractError: The workflow is unreadable, empty, only partly consumed,
+            or uses syntax outside the explicit protected YAML grammar.
+
+    Note:
+        Unlike ``_workflow_job_mappings``, this parser owns every top-level key.
+        It is used where an extra trigger, permission, or job is itself unsafe.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise ContractError(f"cannot read workflow {path}: {error}") from error
+    mapping, index = _parse_yaml_mapping(path, lines, 0, 0)
+    if _yaml_next_content(lines, index) != len(lines):
+        raise ContractError(f"{path}: unconsumed top-level YAML content")
+    if not mapping:
+        raise ContractError(f"{path}: protected workflow mapping is empty")
+    return mapping
+
+
 def _job_field_occurrences(lines: list[str], field: str) -> list[tuple[int, str]]:
     """Return exact job-level occurrences of one YAML mapping field.
 
@@ -315,6 +734,59 @@ def _job_scalar(path: Path, job_name: str, lines: list[str], field: str) -> str 
     if not value or value in {">", ">-", "|", "|-"}:
         raise ContractError(f"{path}: job {job_name} {field} is not a scalar")
     return value
+
+
+def _job_sequence(path: Path, job_name: str, lines: list[str], field: str) -> list[str] | None:
+    """Return one strict job-level sequence of plain scalar values.
+
+    Args:
+        path: Workflow path used in fail-closed diagnostics.
+        job_name: Exact owner job identifier.
+        lines: Body lines owned by ``job_name``.
+        field: Literal job-level sequence field to read.
+
+    Returns:
+        ``None`` when the field is absent, otherwise its ordered scalar values.
+
+    Raises:
+        ContractError: The field is duplicated, uses an inline/block value, is
+            empty, repeats an entry, or escapes the maintained indentation shape.
+
+    Note:
+        This deliberately supports only the protected workflow subset. Anchors,
+        aliases, mappings, and expressions cannot conceal a DAG dependency.
+    """
+    occurrences = _job_field_occurrences(lines, field)
+    if not occurrences:
+        return None
+    if len(occurrences) != 1:
+        raise ContractError(f"{path}: job {job_name} repeats {field}")
+    field_index, scalar_tail = occurrences[0]
+    if scalar_tail:
+        raise ContractError(
+            f"{path}: job {job_name} {field} must be an explicit sequence"
+        )
+    values: list[str] = []
+    pattern = re.compile(r"^      - ([A-Za-z0-9][A-Za-z0-9_-]*)$")
+    for line_number, line in enumerate(lines[field_index + 1 :], field_index + 2):
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(stripped)
+        if indent <= 4:
+            break
+        match = pattern.fullmatch(line)
+        if match is None:
+            raise ContractError(
+                f"{path}: job {job_name} has unsupported {field} entry at "
+                f"body line {line_number}"
+            )
+        values.append(match.group(1))
+    if not values:
+        raise ContractError(f"{path}: job {job_name} has an empty {field} sequence")
+    if len(values) != len(set(values)):
+        raise ContractError(f"{path}: job {job_name} repeats a {field} dependency")
+    return values
 
 
 def _job_condition(path: Path, job_name: str, lines: list[str]) -> str | None:
@@ -501,8 +973,10 @@ def _verify_reusable_workflow_permissions(root: Path) -> None:
         "sanitizer-asan": {"contents": "read", "packages": "read"},
         "sanitizer-tsan": {"contents": "read", "packages": "read"},
         "fuzz-codecs": {"contents": "read", "packages": "read"},
-        "security-darwin": {"contents": "read"},
-        "suite-gate": {},
+        "sanitizer-asan-darwin": {"contents": "read"},
+        "sanitizer-tsan-darwin": {"contents": "read"},
+        "fuzz-codecs-darwin": {"contents": "read"},
+        "suite-gate": {"contents": "read"},
     }
     attestation_job = "attest-targeted-artifacts"
     expected_jobs = set(expected_job_permissions) | {attestation_job}
@@ -722,6 +1196,310 @@ def _verify_pull_request_target_trust(path: Path, lines: list[str]) -> None:
         raise ContractError(f"{path}: ruleset readback consumes untrusted head identity")
 
 
+def _verify_ci_image_producer(
+    root: Path, actions: dict[str, tuple[str, str]]
+) -> None:
+    """Require the complete callable CI-image producer workflow mapping.
+
+    Args:
+        root: Repository root containing the protected producer workflow.
+        actions: Canonical action name to release/full-SHA lock mapping.
+
+    Returns:
+        None when the complete trigger, permission, build job, ordered steps,
+        action inputs, commands, environments, outputs, and publication
+        identities equal the reviewed producer contract.
+
+    Raises:
+        ContractError: A required action lock is absent or any top-level/job/
+            step field differs, including an extra build, command, condition,
+            environment, build argument, tag, or publication path.
+
+    Note:
+        Exact parsed-tree equality makes checkout then lock verification a hard
+        pre-build order and admits one Buildx build/push action only. Comments
+        remain review hints; they cannot satisfy or widen an active mapping.
+    """
+    path = root / ".github/workflows/build-ci-image.yml"
+    required_actions = (
+        "actions/attest",
+        "actions/checkout",
+        "actions/upload-artifact",
+        "docker/build-push-action",
+        "docker/login-action",
+    )
+    missing_actions = [name for name in required_actions if name not in actions]
+    if missing_actions:
+        raise ContractError(
+            f"{path}: producer action locks are absent: {missing_actions}"
+        )
+    action_references = {
+        name: f"{name}@{actions[name][1]}" for name in required_actions
+    }
+
+    caller_run = (
+        "set -Eeuo pipefail\n"
+        'if [[ "$CI_EVENT_NAME" != push ||\n'
+        '  ("$CI_EVENT_REF" != refs/heads/main && '
+        '"$CI_EVENT_REF" != refs/heads/CI/*) ]]; then\n'
+        '  echo "CI image candidates may be built only by trusted main or '
+        'CI/** pushes." >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'if [[ ! "$CI_CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ||\n'
+        '  "$CI_CANDIDATE_COMMIT" != "$CI_EVENT_COMMIT" ]]; then\n'
+        '  echo "Candidate image commit differs from the trusted push '
+        'commit." >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'temporary_tag="candidate-$CI_CANDIDATE_COMMIT-$CI_RUN_ID-'
+        '$CI_RUN_ATTEMPT"\n'
+        "printf 'temporary_tag=%s\\n' \"$temporary_tag\" >> \"$GITHUB_OUTPUT\"\n"
+        "printf 'temporary_image=%s:%s\\n' \\\n"
+        '  "$CI_IMAGE_REPOSITORY" "$temporary_tag" >> "$GITHUB_OUTPUT"\n\n'
+    )
+    source_run = (
+        "set -Eeuo pipefail\n"
+        "source_commit=$(python3 ci/scripts/ci_image_manifest.py \\\n"
+        "  publish-source-commit \\\n"
+        '  --workflow-commit "${{ inputs.candidate_commit }}")\n'
+        "printf 'commit=%s\\n' \"$source_commit\" >> \"$GITHUB_OUTPUT\"\n\n"
+    )
+    manifest_run = (
+        "set -Eeuo pipefail\n"
+        'mkdir -p "$CI_IMAGE_MANIFEST_DIR"\n'
+        "digest=$(python3 ci/scripts/ci_image_manifest.py create \\\n"
+        '  --source-commit "${{ steps.source.outputs.commit }}" \\\n'
+        '  --repository "${{ github.repository }}" \\\n'
+        '  --output "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.json" \\\n'
+        '  --digest-output "$CI_IMAGE_MANIFEST_DIR/'
+        'ci-image-input-v1.sha256")\n'
+        "printf 'digest=%s\\n' \"$digest\" >> \"$GITHUB_OUTPUT\"\n\n"
+    )
+    cross_check_run = (
+        "set -Eeuo pipefail\n"
+        '[[ "$CI_VERIFIED_DIGEST" == "$CI_BUILT_DIGEST" ]]\n'
+        '[[ "$CI_VERIFIED_MANIFEST_DIGEST" == '
+        '"$CI_CREATED_MANIFEST_DIGEST" ]]\n'
+        '[[ "$CI_VERIFIED_SOURCE_COMMIT" == "$CI_CREATED_SOURCE_COMMIT" ]]\n\n'
+    )
+    expected = {
+        "name": "Build CI Image Candidate",
+        "on": {
+            "workflow_call": {
+                "inputs": {
+                    "candidate_commit": {
+                        "description": (
+                            "Exact trusted push commit that changed canonical "
+                            "image inputs."
+                        ),
+                        "required": "true",
+                        "type": "string",
+                    }
+                },
+                "outputs": {
+                    "digest": {
+                        "description": (
+                            "Exact attested OCI digest produced by the single build."
+                        ),
+                        "value": "${{ jobs.build.outputs.digest }}",
+                    },
+                    "image_ref": {
+                        "description": "Digest-qualified candidate image reference.",
+                        "value": "${{ jobs.build.outputs.image_ref }}",
+                    },
+                    "manifest_digest": {
+                        "description": "Canonical CI-image input manifest digest.",
+                        "value": "${{ jobs.build.outputs.manifest_digest }}",
+                    },
+                    "source_commit": {
+                        "description": (
+                            "Canonical image-input-changing source commit."
+                        ),
+                        "value": "${{ jobs.build.outputs.source_commit }}",
+                    },
+                    "temporary_tag": {
+                        "description": (
+                            "Event-scoped temporary SHA tag used by the producer."
+                        ),
+                        "value": "${{ jobs.build.outputs.temporary_tag }}",
+                    },
+                },
+            }
+        },
+        "permissions": {
+            "artifact-metadata": "write",
+            "attestations": "write",
+            "contents": "read",
+            "id-token": "write",
+            "packages": "write",
+        },
+        "jobs": {
+            "build": {
+                "runs-on": "ubuntu-24.04",
+                "outputs": {
+                    "digest": "${{ steps.identity.outputs.digest }}",
+                    "image_ref": "${{ steps.identity.outputs.image }}",
+                    "manifest_digest": (
+                        "${{ steps.identity.outputs.manifest_digest }}"
+                    ),
+                    "source_commit": "${{ steps.identity.outputs.source_commit }}",
+                    "temporary_tag": "${{ steps.caller.outputs.temporary_tag }}",
+                },
+                "steps": [
+                    {
+                        "name": "Require a trusted image-input push",
+                        "id": "caller",
+                        "env": {
+                            "CI_CANDIDATE_COMMIT": "${{ inputs.candidate_commit }}",
+                            "CI_EVENT_NAME": "${{ github.event_name }}",
+                            "CI_EVENT_COMMIT": "${{ github.sha }}",
+                            "CI_EVENT_REF": "${{ github.ref }}",
+                            "CI_IMAGE_REPOSITORY": (
+                                "ghcr.io/${{ github.repository }}/photospider-ci"
+                            ),
+                            "CI_RUN_ATTEMPT": "${{ github.run_attempt }}",
+                            "CI_RUN_ID": "${{ github.run_id }}",
+                        },
+                        "run": caller_run,
+                    },
+                    {
+                        "uses": action_references["actions/checkout"],
+                        "with": {
+                            "persist-credentials": "false",
+                            "fetch-depth": "0",
+                            "ref": "${{ inputs.candidate_commit }}",
+                        },
+                    },
+                    {
+                        "name": "Verify protected locks",
+                        "run": "python3 ci/scripts/ci_lock_verify.py",
+                    },
+                    {
+                        "name": "Verify exact Linux builder image",
+                        "run": (
+                            "python3 ci/scripts/ci_runner_verify.py --platform Linux"
+                        ),
+                    },
+                    {
+                        "name": "Resolve publishable image source identity",
+                        "id": "source",
+                        "run": source_run,
+                    },
+                    {
+                        "name": "Create canonical image input manifest",
+                        "id": "manifest",
+                        "env": {
+                            "CI_IMAGE_MANIFEST_DIR": (
+                                "${{ github.workspace }}/CI-results/ci-image-manifest"
+                            )
+                        },
+                        "run": manifest_run,
+                    },
+                    {
+                        "name": "Log in to GHCR",
+                        "uses": action_references["docker/login-action"],
+                        "with": {
+                            "registry": "ghcr.io",
+                            "username": "${{ github.actor }}",
+                            "password": "${{ secrets.GITHUB_TOKEN }}",
+                        },
+                    },
+                    {
+                        "name": "Build and push candidate exactly once",
+                        "id": "push",
+                        "uses": action_references["docker/build-push-action"],
+                        "with": {
+                            "context": ".",
+                            "file": "Dockerfile.ci",
+                            "push": "true",
+                            "tags": "${{ steps.caller.outputs.temporary_image }}",
+                            "labels": (
+                                "org.opencontainers.image.revision="
+                                "${{ steps.source.outputs.commit }}\n"
+                                "org.photospider.ci.input-manifest-sha256="
+                                "${{ steps.manifest.outputs.digest }}\n"
+                            ),
+                            "build-args": (
+                                "CI_IMAGE_INPUT_MANIFEST_SHA256="
+                                "${{ steps.manifest.outputs.digest }}\n"
+                                "CI_IMAGE_SOURCE_COMMIT="
+                                "${{ steps.source.outputs.commit }}\n\n"
+                            ),
+                        },
+                    },
+                    {
+                        "name": "Attest exact temporary OCI subject",
+                        "uses": action_references["actions/attest"],
+                        "with": {
+                            "subject-name": (
+                                "ghcr.io/${{ github.repository }}/photospider-ci"
+                            ),
+                            "subject-digest": "${{ steps.push.outputs.digest }}",
+                            "push-to-registry": "true",
+                        },
+                    },
+                    {
+                        "name": "Verify candidate digest, attestation, and labels",
+                        "id": "identity",
+                        "env": {
+                            "CI_ARTIFACT_DIR": (
+                                "${{ github.workspace }}/CI-results/ci-image-identity"
+                            ),
+                            "CI_IMAGE_EXPECTED_DIGEST": (
+                                "${{ steps.push.outputs.digest }}"
+                            ),
+                            "CI_IMAGE_LOCATOR": (
+                                "${{ steps.caller.outputs.temporary_image }}"
+                            ),
+                            "CI_IMAGE_REPOSITORY": "${{ github.repository }}",
+                            "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+                        },
+                        "run": "bash ci/scripts/ci_image_verify.sh",
+                    },
+                    {
+                        "name": "Cross-check build and verified identities",
+                        "env": {
+                            "CI_BUILT_DIGEST": "${{ steps.push.outputs.digest }}",
+                            "CI_CREATED_MANIFEST_DIGEST": (
+                                "${{ steps.manifest.outputs.digest }}"
+                            ),
+                            "CI_CREATED_SOURCE_COMMIT": (
+                                "${{ steps.source.outputs.commit }}"
+                            ),
+                            "CI_VERIFIED_DIGEST": (
+                                "${{ steps.identity.outputs.digest }}"
+                            ),
+                            "CI_VERIFIED_MANIFEST_DIGEST": (
+                                "${{ steps.identity.outputs.manifest_digest }}"
+                            ),
+                            "CI_VERIFIED_SOURCE_COMMIT": (
+                                "${{ steps.identity.outputs.source_commit }}"
+                            ),
+                        },
+                        "run": cross_check_run,
+                    },
+                    {
+                        "name": "Upload canonical image input manifest",
+                        "uses": action_references["actions/upload-artifact"],
+                        "with": {
+                            "name": (
+                                "ci-image-input-${{ steps.source.outputs.commit }}-"
+                                "${{ github.run_id }}-${{ github.run_attempt }}"
+                            ),
+                            "path": "CI-results/ci-image-manifest",
+                            "if-no-files-found": "error",
+                            "retention-days": "7",
+                        },
+                    },
+                ],
+            }
+        },
+    }
+    if _workflow_mapping(path) != expected:
+        raise ContractError(f"{path}: complete CI-image producer mapping differs")
+
+
 def _verify_workflows(root: Path, actions: dict[str, tuple[str, str]]) -> None:
     """Verify every workflow action, runner, and container identity.
 
@@ -798,18 +1576,39 @@ def _verify_workflows(root: Path, actions: dict[str, tuple[str, str]]) -> None:
         raise ContractError(f"action lock contains unused identities: {unused}")
 
 
-def _verify_packages(path: Path) -> None:
-    """Validate the exact, sorted top-level Ubuntu package lock."""
+def _verify_packages(path: Path) -> dict[str, str]:
+    """Validate and return the exact sorted top-level Ubuntu package lock.
+
+    Args:
+        path: Protected ``name=version`` package lock.
+
+    Returns:
+        A mapping from each unique package name to its exact locked version.
+
+    Raises:
+        ContractError: A row has a non-Debian package name or malformed exact
+            version, ordering/uniqueness differs, or the two-package offline
+            TLS bootstrap is absent.
+
+    Note:
+        The same mapping drives the ordinary snapshot transaction and validates
+        the special pre-APT bootstrap identities; it is not a second package list.
+    """
     packages: list[str] = []
+    versions: dict[str, str] = {}
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line or line.startswith("#"):
             continue
-        if not re.fullmatch(r"[a-z0-9+.-]+=[^\s=]+", line):
+        if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]+=[^\s=]+", line):
             raise ContractError(f"{path}:{line_number}: invalid exact package lock")
-        packages.append(line.split("=", 1)[0])
+        package, version = line.split("=", 1)
+        packages.append(package)
+        versions[package] = version
     _require_sorted_unique(packages, str(path))
-    if "ca-certificates" not in packages:
-        raise ContractError(f"{path}: CA bootstrap package must be locked")
+    for package in ("ca-certificates", "openssl"):
+        if package not in versions:
+            raise ContractError(f"{path}: offline TLS bootstrap package {package} must be locked")
+    return versions
 
 
 def _verify_requirements(path: Path) -> None:
@@ -836,21 +1635,310 @@ def _verify_requirements(path: Path) -> None:
     _require_sorted_unique(names, str(path))
 
 
+def _verify_apt_bootstrap_lock(root: Path, lock: dict[str, Any]) -> tuple[str, ...]:
+    """Validate the hash-locked offline TLS bootstrap and return Docker clauses.
+
+    Args:
+        root: Repository root containing the package and image locks.
+        lock: Strictly decoded protected CI-image lock.
+
+    Returns:
+        The three canonical normalized Docker ``ADD --checksum`` clauses.
+
+    Raises:
+        ContractError: Snapshot, schema, package-version, URL, architecture, or
+            SHA-256 identity differs from the protected two-package closure.
+
+    Note:
+        Ubuntu's minimal base lacks CA certificates. Only ``openssl`` plus
+        ``ca-certificates`` are bootstrapped before APT, and their versions also
+        occur in the ordinary package lock consumed by the snapshot transaction.
+    """
+    snapshot = lock.get("apt_snapshot")
+    if not isinstance(snapshot, str) or not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z", snapshot):
+        raise ContractError("CI image lock has no canonical APT snapshot identity")
+    bootstrap = lock.get("apt_bootstrap")
+    if not isinstance(bootstrap, dict):
+        raise ContractError("CI image lock has no offline APT bootstrap")
+    _exact_keys(bootstrap, {"ca_certificates", "openssl"}, "apt_bootstrap")
+    ca_certificates = bootstrap["ca_certificates"]
+    openssl = bootstrap["openssl"]
+    if not isinstance(ca_certificates, dict) or not isinstance(openssl, dict):
+        raise ContractError("APT bootstrap package identities must be objects")
+    _exact_keys(
+        ca_certificates,
+        {"sha256", "url", "version"},
+        "apt_bootstrap.ca_certificates",
+    )
+    _exact_keys(
+        openssl,
+        {"amd64_sha256", "amd64_url", "arm64_sha256", "arm64_url", "version"},
+        "apt_bootstrap.openssl",
+    )
+    package_versions = _verify_packages(root / "ci/locks/ubuntu-24.04-packages.lock")
+    if ca_certificates["version"] != package_versions["ca-certificates"]:
+        raise ContractError("APT CA bootstrap version differs from the package lock")
+    if openssl["version"] != package_versions["openssl"]:
+        raise ContractError("APT OpenSSL bootstrap version differs from the package lock")
+
+    ca_url = (
+        f"https://snapshot.ubuntu.com/ubuntu/{snapshot}/pool/main/c/ca-certificates/"
+        f"ca-certificates_{ca_certificates['version']}_all.deb"
+    )
+    if ca_certificates["url"] != ca_url:
+        raise ContractError("APT CA bootstrap URL is not the locked snapshot package")
+    clauses = [
+        f"ADD --checksum=sha256:{ca_certificates['sha256']} {ca_url} "
+        "/tmp/ci-bootstrap/ca-certificates.deb"
+    ]
+    for architecture in ("amd64", "arm64"):
+        sha256 = openssl[f"{architecture}_sha256"]
+        url = openssl[f"{architecture}_url"]
+        expected_url = (
+            f"https://snapshot.ubuntu.com/ubuntu/{snapshot}/pool/main/o/openssl/"
+            f"openssl_{openssl['version']}_{architecture}.deb"
+        )
+        if url != expected_url:
+            raise ContractError(
+                f"APT OpenSSL {architecture} bootstrap URL is not the locked snapshot package"
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", str(sha256)):
+            raise ContractError(f"APT OpenSSL {architecture} bootstrap hash is malformed")
+        clauses.append(
+            f"ADD --checksum=sha256:{sha256} {url} "
+            f"/tmp/ci-bootstrap/openssl-{architecture}.deb"
+        )
+    if not re.fullmatch(r"[0-9a-f]{64}", str(ca_certificates["sha256"])):
+        raise ContractError("APT CA bootstrap hash is malformed")
+    return tuple(clauses)
+
+
+def _active_helper_source(path: Path) -> tuple[str, str]:
+    """Return complete text and active-line identity for one protected helper.
+
+    Args:
+        path: Protected helper whose executable text is inspected.
+
+    Returns:
+        Complete UTF-8 source and a normalized stream containing every
+        nonblank, non-full-line-comment source line with outer whitespace
+        removed and one canonical trailing newline.
+
+    Raises:
+        ContractError: The helper cannot be decoded as UTF-8.
+
+    Note:
+        Full-file SHA-256 owns exact bytes. This stream independently owns
+        executable statements so comments cannot forge the semantic allowlist.
+    """
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ContractError(f"{path}: cannot read protected helper source: {error}") from error
+    active_lines = [
+        line.strip()
+        for line in source.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    return source, "\n".join(active_lines) + "\n"
+
+
+def _verify_installer_semantics(path: Path) -> None:
+    """Require the complete canonical CI-image installer active surface.
+
+    Args:
+        path: Exact protected installer source.
+
+    Returns:
+        None after executable identity and network/install allowlist match.
+
+    Raises:
+        ContractError: Active source, entrypoint/control flow, network command
+            set, hash consumption, or package/install sequence differs.
+
+    Note:
+        The active digest is verifier-owned, not copied from the JSON lock.
+        Explicit checks make network and control boundaries reviewable.
+    """
+    source, active = _active_helper_source(path)
+    active_digest = hashlib.sha256(active.encode("utf-8")).hexdigest()
+    expected_active_digest = (
+        "9fcfbcef038034b146468c4f9577b578e08a880cb92b7137f77aeb67208bb373"
+    )
+    if active_digest != expected_active_digest:
+        raise ContractError(f"{path}: installer active statement identity differs")
+    active_lines = active.splitlines()
+    if active_lines[:2] != ["set -Eeuo pipefail", "umask 022"]:
+        raise ContractError(f"{path}: installer strict-mode preamble differs")
+    if active_lines.count("ci_image_install_main() {") != 1 or active_lines[-1] != (
+        'ci_image_install_main "$@"'
+    ):
+        raise ContractError(f"{path}: installer entrypoint invocation differs")
+    if re.search(r"(?:^|[;&|\s])exit(?:[;&|\s]|$)", active):
+        raise ContractError(f"{path}: installer contains an early process exit")
+    apt_commands = re.findall(
+        r"(?:^|[\s|;&])([^\s|;&]*apt-get)(?=[\s|;&]|$)", active
+    )
+    if apt_commands != ["apt-get", "apt-get"]:
+        raise ContractError(f"{path}: installer APT command allowlist differs")
+    if len(re.findall(r"(?:^|[\s|;&])curl(?=[\s|;&]|$)", active)) != 1:
+        raise ContractError(f"{path}: installer curl network allowlist differs")
+    if re.search(r"(?:^|[\s|;&])(?:wget|sh|bash)(?=[\s|;&]|$)", active):
+        raise ContractError(f"{path}: installer invokes an unapproved shell/network command")
+    required_fragments = (
+        'curl --fail --location --proto \'=https\' --tlsv1.2',
+        '"https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/$gh_archive"',
+        "| sha256sum --check --strict -",
+        'tar -C /tmp -xzf "/tmp/$gh_archive"',
+        'install -m 0755 "/tmp/gh_${GH_CLI_VERSION}_linux_${architecture}/bin/gh"',
+        "apt-get update",
+        "| xargs apt-get install -y --no-install-recommends --",
+        '"$VENV/bin/pip" install',
+        "--require-hashes",
+    )
+    for fragment in required_fragments:
+        if active.count(fragment) != 1:
+            raise ContractError(
+                f"{path}: installer required network/install fragment differs at {fragment!r}"
+            )
+    forbidden_fragments = (
+        "curl |",
+        "sha256sum()",
+        "/usr/bin/apt-get",
+        "/bin/apt-get",
+        "--allow-unauthenticated",
+        "Acquire::https::Verify-Peer=false",
+        "trusted=yes",
+    )
+    for fragment in forbidden_fragments:
+        if fragment in active:
+            raise ContractError(f"{path}: installer contains forbidden fragment {fragment!r}")
+    if re.search(r"\|[ \t]*(?:sh|bash)(?:[ \t;]|$)", active):
+        raise ContractError(f"{path}: installer contains a pipe-to-shell command")
+    if re.search(r"(?:^|[;&])[ \t]*(?:alias|eval|source|\.)[ \t]+", active):
+        raise ContractError(f"{path}: installer contains dynamic shell indirection")
+
+
+def _verify_suite_gate_helper_semantics(path: Path) -> None:
+    """Require the verifier-owned semantic identity of the suite-gate helper.
+
+    Args:
+        path: Exact protected Python gate helper.
+
+    Returns:
+        None when its parsed Python syntax tree matches the reviewed contract.
+
+    Raises:
+        ContractError: The helper is invalid Python or its executable syntax
+            changes, including no-op, early-return, or extra-statement drift.
+
+    Note:
+        AST identity excludes comments and formatting while remaining
+        independent of the JSON helper hash. Behavior tests separately execute
+        every result and attestation branch.
+    """
+    try:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+    except (OSError, UnicodeError, SyntaxError) as error:
+        raise ContractError(f"{path}: suite-gate helper syntax is invalid: {error}") from error
+    semantic = ast.dump(tree, annotate_fields=True, include_attributes=False) + "\n"
+    semantic_digest = hashlib.sha256(semantic.encode("utf-8")).hexdigest()
+    expected_digest = (
+        "52f228ff4f3e5b0fd132715bc95ec79d6fd0a11b4685c66de6501c3e635b4c50"
+    )
+    if semantic_digest != expected_digest:
+        raise ContractError(f"{path}: suite-gate executable syntax identity differs")
+
+
+def _verify_protected_helpers(
+    root: Path, lock: dict[str, Any], input_paths: list[str]
+) -> dict[str, dict[str, str]]:
+    """Validate helper roles, versions, paths, hashes, and semantics.
+
+    Args:
+        root: Repository root containing protected helper sources.
+        lock: Strict CI-image lock object.
+        input_paths: Canonical image-input inventory.
+
+    Returns:
+        Canonical helper records keyed by stable role.
+
+    Raises:
+        ContractError: Helper inventory, version, path, hash, file identity, or
+            installer semantic allowlist differs.
+
+    Note:
+        Both helpers are canonical image/control inputs even though only the
+        installer is copied into the image.
+    """
+    helpers = lock.get("protected_helpers")
+    expected = {
+        "ci-image-installer": "ci/scripts/ci_image_install.sh",
+        "integration-suite-gate": "ci/scripts/integration_suite_gate.py",
+    }
+    if not isinstance(helpers, dict) or set(helpers) != set(expected):
+        raise ContractError("protected helper identity set differs")
+    result: dict[str, dict[str, str]] = {}
+    for name, expected_path in expected.items():
+        record = helpers[name]
+        if not isinstance(record, dict):
+            raise ContractError(f"protected helper {name!r} record is not an object")
+        _exact_keys(record, {"path", "sha256", "version"}, f"protected helper {name}")
+        if record["path"] != expected_path or record["version"] != "v1":
+            raise ContractError(f"protected helper {name!r} path/version differs")
+        if expected_path not in input_paths:
+            raise ContractError(f"protected helper {name!r} is absent from image inputs")
+        declared_hash = record["sha256"]
+        if not isinstance(declared_hash, str) or re.fullmatch(
+            r"[0-9a-f]{64}", declared_hash
+        ) is None:
+            raise ContractError(f"protected helper {name!r} hash is malformed")
+        actual_hash = _sha256_regular_file(root / expected_path, f"protected helper {name}")
+        if actual_hash != declared_hash:
+            raise ContractError(f"protected helper {name!r} bytes differ from the lock")
+        result[name] = {
+            "path": expected_path,
+            "sha256": declared_hash,
+            "version": "v1",
+        }
+    _verify_installer_semantics(root / expected["ci-image-installer"])
+    _verify_suite_gate_helper_semantics(root / expected["integration-suite-gate"])
+    return result
+
+
 def _verify_image_lock(root: Path, actions: dict[str, tuple[str, str]]) -> None:
-    """Validate image input schema, paths, digests, and builder identity."""
+    """Validate image inputs, offline bootstrap, digests, and builder identity.
+
+    Args:
+        root: Repository root containing protected image inputs and workflows.
+        actions: Canonical action lock keyed by action name.
+
+    Raises:
+        ContractError: The lock schema, bootstrap closure, input inventory,
+            publisher workflow, base digest, or builder identity differs.
+
+    Note:
+        Bootstrap URLs/hashes are cross-checked against the one package lock and
+        Dockerfile; the complete lock file remains part of the image manifest.
+    """
     path = root / "ci/locks/ci-image-lock.json"
     lock = _load_json(path)
     if not isinstance(lock, dict):
         raise ContractError(f"{path}: root must be an object")
     _exact_keys(
         lock,
-        {"schema", "apt_snapshot", "base_image", "builder", "github_cli", "input_paths", "published_image"},
+        {
+            "schema", "apt_bootstrap", "apt_snapshot", "base_image", "builder",
+            "github_cli", "input_paths", "protected_helpers", "published_image",
+        },
         str(path),
     )
     if lock["schema"] != "photospider-ci-image-lock-v1":
         raise ContractError(f"{path}: unknown schema")
     if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z", str(lock["apt_snapshot"])):
         raise ContractError(f"{path}: invalid immutable snapshot ID")
+    _verify_apt_bootstrap_lock(root, lock)
     base = lock["base_image"]
     _exact_keys(base, {"name", "tag", "digest"}, f"{path}:base_image")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(base["digest"])):
@@ -870,7 +1958,14 @@ def _verify_image_lock(root: Path, actions: dict[str, tuple[str, str]]) -> None:
     if not isinstance(input_paths, list) or not all(isinstance(item, str) for item in input_paths):
         raise ContractError(f"{path}: input_paths must be a string array")
     _require_sorted_unique(input_paths, f"{path}:input_paths")
-    required = {"Dockerfile.ci", ".dockerignore", str(path.relative_to(root))}
+    required = {
+        "Dockerfile.ci",
+        ".dockerignore",
+        "ci/locks/ubuntu-24.04-snapshot.sources.in",
+        str(path.relative_to(root)),
+    }
+    if "ci/locks/ubuntu-24.04-snapshot.sources.in" not in input_paths:
+        raise ContractError(f"{path}: canonical APT source is absent from image inputs")
     if not required.issubset(input_paths):
         raise ContractError(f"{path}: real image inputs are missing")
     for relative in input_paths:
@@ -879,74 +1974,9 @@ def _verify_image_lock(root: Path, actions: dict[str, tuple[str, str]]) -> None:
             raise ContractError(f"{path}: unsafe image input {relative!r}")
         if not candidate.is_file() or candidate.is_symlink():
             raise ContractError(f"{path}: image input is not a regular repository file: {relative}")
+    _verify_protected_helpers(root, lock, input_paths)
 
-    workflow_path = root / ".github/workflows/build-ci-image.yml"
-    workflow_text = workflow_path.read_text(encoding="utf-8")
-    if "  workflow_call:" not in workflow_text:
-        raise ContractError(f"{workflow_path}: image producer is not reusable")
-    if re.search(
-        r"(?m)^  (?:push|pull_request|pull_request_target|workflow_dispatch):",
-        workflow_text,
-    ):
-        raise ContractError(
-            f"{workflow_path}: image producer must be callable only by the protected integration route"
-        )
-    source_contract = (
-        "publish-source-commit",
-        '--workflow-commit "${{ inputs.candidate_commit }}"',
-        '--source-commit "${{ steps.source.outputs.commit }}"',
-        "org.opencontainers.image.revision=${{ steps.source.outputs.commit }}",
-        "CI_IMAGE_SOURCE_COMMIT=${{ steps.source.outputs.commit }}",
-        "name: ci-image-input-${{ steps.source.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}",
-        "CI_IMAGE_EXPECTED_DIGEST: ${{ steps.push.outputs.digest }}",
-        "CI_IMAGE_LOCATOR: ${{ steps.caller.outputs.temporary_image }}",
-        "tags: ${{ steps.caller.outputs.temporary_image }}",
-    )
-    for fragment in source_contract:
-        if workflow_text.count(fragment) != 1:
-            raise ContractError(
-                f"{workflow_path}: canonical publisher source contract differs at {fragment!r}"
-            )
-    direct_head_identities = (
-        '--source-commit "${{ github.sha }}"',
-        "org.opencontainers.image.revision=${{ github.sha }}",
-        "CI_IMAGE_SOURCE_COMMIT=${{ github.sha }}",
-        "name: ci-image-input-${{ github.sha }}",
-    )
-    for fragment in direct_head_identities:
-        if fragment in workflow_text:
-            raise ContractError(
-                f"{workflow_path}: publisher bypasses canonical source guard with {fragment!r}"
-            )
-    guard_index = workflow_text.index("publish-source-commit")
-    for publication_marker in (
-        "uses: docker/login-action@",
-        "uses: docker/build-push-action@",
-    ):
-        marker_index = workflow_text.find(publication_marker)
-        if marker_index < 0 or guard_index > marker_index:
-            raise ContractError(
-                f"{workflow_path}: source identity guard must precede {publication_marker}"
-            )
-    if workflow_text.count("uses: docker/build-push-action@") != 1:
-        raise ContractError(f"{workflow_path}: candidate image must be built exactly once")
-    forbidden_publisher_fragments = (
-        "docker/metadata-action@",
-        "type=raw,value=latest",
-        "type=ref,event=branch",
-        "workflow_dispatch:",
-    )
-    for fragment in forbidden_publisher_fragments:
-        if fragment in workflow_text:
-            raise ContractError(
-                f"{workflow_path}: build step may not publish canonical routing {fragment!r}"
-            )
-    attest_index = workflow_text.find("subject-digest: ${{ steps.push.outputs.digest }}")
-    verify_index = workflow_text.find("Verify candidate digest, attestation, and labels")
-    if attest_index < 0 or verify_index < attest_index:
-        raise ContractError(
-            f"{workflow_path}: exact candidate attestation must precede verified output"
-        )
+    _verify_ci_image_producer(root, actions)
     published = lock["published_image"]
     _exact_keys(
         published,
@@ -956,43 +1986,510 @@ def _verify_image_lock(root: Path, actions: dict[str, tuple[str, str]]) -> None:
     if not str(published["locator"]).endswith(":latest"):
         raise ContractError(f"{path}: published locator must be an explicit locator tag")
 
-    dockerfile = (root / "Dockerfile.ci").read_text(encoding="utf-8")
-    exact_docker_values = (
-        f"FROM ubuntu:{base['tag']}@{base['digest']}",
-        f"ARG APT_SNAPSHOT={lock['apt_snapshot']}",
-        f"ARG GH_CLI_VERSION={cli['version']}",
-        f"ARG GH_CLI_AMD64_SHA256={cli['amd64_sha256']}",
-        f"ARG GH_CLI_ARM64_SHA256={cli['arm64_sha256']}",
+    # Active Dockerfile consumption is parsed and verified independently by
+    # ``_verify_dockerfile``. Keeping raw-text checks here would let review hints
+    # or comments masquerade as executable identities.
+
+
+class _DockerInstruction(NamedTuple):
+    """One active logical Dockerfile instruction and its source location."""
+
+    keyword: str
+    arguments: str
+    line_number: int
+
+
+_GO_UNICODE_WHITE_SPACE_SINGLETONS = frozenset(
+    {
+        0x0009,
+        0x000A,
+        0x000B,
+        0x000C,
+        0x000D,
+        0x0020,
+        0x0085,
+        0x00A0,
+        0x1680,
+        0x2028,
+        0x2029,
+        0x202F,
+        0x205F,
+        0x3000,
+    }
+)
+
+
+def _go_unicode_is_space(character: str) -> bool:
+    """Return whether one character satisfies Go ``unicode.IsSpace``.
+
+    Args:
+        character: Exactly one decoded Unicode code point from a strict UTF-8
+            Dockerfile parser-directive line.
+
+    Returns:
+        ``True`` only for the Unicode White_Space code points recognized by Go:
+        the explicit singleton set above or U+2000 through U+200A inclusive.
+
+    Raises:
+        ContractError: The caller supplies zero or multiple code points rather
+            than the one-character unit required by this predicate.
+
+    Note:
+        The explicit set intentionally does not use Python ``str.isspace``.
+        Python additionally accepts U+001C through U+001F, while BuildKit calls
+        Go ``unicode.IsSpace`` after removing the comment marker at byte zero.
+    """
+    if len(character) != 1:
+        raise ContractError("Go unicode.IsSpace requires exactly one character")
+    code_point = ord(character)
+    return (
+        code_point in _GO_UNICODE_WHITE_SPACE_SINGLETONS
+        or 0x2000 <= code_point <= 0x200A
     )
-    for exact in exact_docker_values:
-        if dockerfile.count(exact) != 1:
-            raise ContractError(f"Dockerfile.ci does not consume exact image lock value {exact!r}")
+
+
+def _go_scan_lines(source: str) -> list[str]:
+    """Split decoded text exactly like Go ``bufio.ScanLines``.
+
+    Args:
+        source: Strictly decoded Dockerfile text. The caller owns byte decoding
+            and any BOM/shebang preprocessing before this physical-line step.
+
+    Returns:
+        Physical line tokens split only at LF. One terminal CR is removed from
+        each token, and a final LF does not create an additional empty token.
+        Empty input produces no tokens.
+
+    Note:
+        CR-only, VT, FF, FS/GS/RS/US, NEL, and Unicode line/paragraph separators
+        remain inside one token. Python ``str.splitlines`` recognizes those as
+        boundaries and therefore cannot model BuildKit's active instruction
+        surface safely.
+    """
+    if not source:
+        return []
+    lines = source.split("\n")
+    if source.endswith("\n"):
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
+def _docker_parser_directive(
+    raw_line: str, comment_prefix: str = "#"
+) -> tuple[str, str] | None:
+    """Decode one Docker-recognized parser-directive comment shape.
+
+    Args:
+        raw_line: Physical line observed while Docker is still accepting parser
+            directives before any blank line, ordinary comment, or instruction.
+        comment_prefix: BuildKit directive comment marker. The maintained
+            Dockerfile parser uses ``#``; frontend detection additionally
+            probes BuildKit's ``//`` fallback without executing that frontend.
+
+    Returns:
+        The ASCII-case-folded directive key and case-preserved nonempty value,
+        or ``None`` when the line is an ordinary comment rather than a valid
+        ``<comment-prefix> key=value`` parser directive.
+
+    Raises:
+        ContractError: ``comment_prefix`` is outside BuildKit's two maintained
+            frontend-detection comment forms.
+
+    Note:
+        BuildKit requires the comment marker at byte zero, then removes exactly
+        the Go ``unicode.IsSpace`` set before applying its ASCII directive
+        expression. Marker-leading whitespace is therefore an ordinary comment,
+        not an active frontend. The value may carry a frontend command line, so
+        detection rejects the whole nonempty value rather than only tag-shaped
+        tokens. Callers own the initial directive-phase boundary.
+    """
+    if comment_prefix not in {"#", "//"}:
+        raise ContractError("unsupported Docker parser-directive comment prefix")
+    if not raw_line.startswith(comment_prefix):
+        return None
+    payload = raw_line[len(comment_prefix) :]
+    first_non_space = 0
+    while first_non_space < len(payload) and _go_unicode_is_space(
+        payload[first_non_space]
+    ):
+        first_non_space += 1
+    payload = payload[first_non_space:]
+    match = re.fullmatch(
+        r"([A-Za-z][A-Za-z0-9]*)[ \t\f\r\n]*="
+        r"[ \t\f\r\n]*(.+?)[ \t\f\r\n]*",
+        payload,
+    )
+    if match is None:
+        return None
+    key, value = match.groups()
+    return key.lower(), value
+
+
+def _buildkit_syntax_directive(source: str) -> tuple[str, int, str] | None:
+    """Detect an external frontend using BuildKit's pre-parse precedence.
+
+    Args:
+        source: Strict UTF-8 Dockerfile text. A decoded BOM may still be present
+            so the detector can model BuildKit before policy rejects the bytes.
+
+    Returns:
+        ``(frontend_value, one_based_line, form)`` for the first syntax identity
+        BuildKit would select after discarding one UTF-8 BOM and one first-line
+        shebang, or ``None`` when no supported frontend form is active.
+
+    Raises:
+        ContractError: Internal directive parsing receives an unsupported
+            comment prefix. Malformed user text simply is not a syntax identity
+            and remains subject to the ordinary restricted Dockerfile parser.
+
+    Note:
+        This is the deliberately narrow security-relevant subset of BuildKit's
+        ``parser.DetectSyntax``: traditional ``#`` directives, its ``//``
+        fallback, and an entire JSON definition with a string ``syntax`` field.
+        The verifier never executes or resolves the returned frontend.
+    """
+    normalized = source.removeprefix("\ufeff")
+    line_offset = 0
+    first_line, separator, remainder = normalized.partition("\n")
+    if first_line.startswith("#!"):
+        normalized = remainder if separator else ""
+        line_offset = 1
+    physical = _go_scan_lines(normalized)
+    valid_keys = {"syntax", "escape", "check"}
+    for comment_prefix, form in (("#", "hash"), ("//", "c-style")):
+        for relative_line, raw_line in enumerate(physical, 1):
+            directive = _docker_parser_directive(raw_line, comment_prefix)
+            if directive is None:
+                break
+            key, value = directive
+            if key not in valid_keys:
+                break
+            if key == "syntax":
+                return value, line_offset + relative_line, form
+    try:
+        json_directive = json.loads(normalized)
+    except (json.JSONDecodeError, UnicodeError):
+        return None
+    if isinstance(json_directive, dict) and isinstance(
+        json_directive.get("syntax"), str
+    ):
+        return json_directive["syntax"], line_offset + 1, "json"
+    return None
+
+
+def _dockerfile_instructions(path: Path) -> list[_DockerInstruction]:
+    """Parse the maintained Dockerfile into active logical instructions.
+
+    Args:
+        path: Dockerfile whose executable structure is protected.
+
+    Returns:
+        Ordered active instructions with continuations joined and ordinary
+        full-line comments excluded.
+
+    Raises:
+        ContractError: Input is unreadable or non-UTF-8, starts with a UTF-8 BOM
+            or shebang, selects an external syntax frontend after BuildKit's
+            BOM/shebang preprocessing, uses an unsupported/duplicate parser
+            directive or non-backslash escape mode, contains an unterminated
+            continuation, unsupported instruction, or JSON/heredoc form on a
+            security-authoritative instruction.
+
+    Note:
+        This is deliberately a restricted Dockerfile parser, not a BuildKit
+        frontend. Frontend selection is rejected before active instructions so
+        a BOM or shebang cannot hide a directive from this policy. It shares the
+        exact Go ``bufio.ScanLines`` physical-line authority with frontend
+        detection, so a non-LF separator cannot reveal an instruction that
+        BuildKit still treats as part of the preceding token. The production file
+        is kept canonical so unsupported syntax fails closed.
+    """
+    try:
+        source_bytes = path.read_bytes()
+    except OSError as error:
+        raise ContractError(f"cannot read Dockerfile {path}: {error}") from error
+    try:
+        source = source_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ContractError(
+            f"{path}: Dockerfile is not strict UTF-8: {error}"
+        ) from error
+    has_bom = source_bytes.startswith(b"\xef\xbb\xbf")
+    normalized = source.removeprefix("\ufeff")
+    first_line = normalized.partition("\n")[0]
+    has_shebang = first_line.startswith("#!")
+    syntax_directive = _buildkit_syntax_directive(source)
+    if has_bom:
+        raise ContractError(
+            f"{path}: UTF-8 BOM is forbidden before Dockerfile frontend detection"
+        )
+    if syntax_directive is not None:
+        frontend, line_number, form = syntax_directive
+        raise ContractError(
+            f"{path}:{line_number}: Docker syntax parser directive is forbidden "
+            f"(BuildKit {form} frontend {frontend!r})"
+        )
+    if has_shebang:
+        raise ContractError(f"{path}: first-line Dockerfile shebang is forbidden")
+    physical = _go_scan_lines(source)
+    instructions: list[_DockerInstruction] = []
+    fragments: list[str] = []
+    start_line = 0
+    directive_phase = True
+    seen_directives: set[str] = set()
+    allowed = {"ADD", "ARG", "COPY", "ENV", "FROM", "LABEL", "RUN", "WORKDIR"}
+    for line_number, raw_line in enumerate(physical, 1):
+        if "\x00" in raw_line:
+            raise ContractError(f"{path}:{line_number}: unsafe Dockerfile NUL byte")
+        stripped = raw_line.strip()
+        if not fragments and (not stripped or stripped.startswith("#")):
+            if directive_phase:
+                directive = _docker_parser_directive(raw_line)
+                if directive is None:
+                    directive_phase = False
+                else:
+                    key, value = directive
+                    if key in seen_directives:
+                        raise ContractError(
+                            f"{path}:{line_number}: duplicate Docker parser directive {key}"
+                        )
+                    seen_directives.add(key)
+                    if key == "syntax":
+                        raise ContractError(
+                            f"{path}:{line_number}: Docker syntax parser directive is forbidden"
+                        )
+                    if key == "escape" and value != "\\":
+                        raise ContractError(
+                            f"{path}:{line_number}: unsupported Docker escape directive"
+                        )
+                    if key == "check":
+                        raise ContractError(
+                            f"{path}:{line_number}: unsupported Docker check directive"
+                        )
+                    if key not in {"escape", "check", "syntax"}:
+                        # Docker treats an unknown directive-shaped line as an
+                        # ordinary comment and stops looking for directives.
+                        directive_phase = False
+            continue
+        if fragments and (not stripped or stripped.startswith("#")):
+            # Docker ignores full-line comments and blank lines inside a
+            # continued instruction; they cannot satisfy the active contract.
+            continue
+        directive_phase = False
+        if "\t" in raw_line[: len(raw_line) - len(raw_line.lstrip())]:
+            raise ContractError(f"{path}:{line_number}: unsafe Dockerfile whitespace")
+        if not fragments:
+            start_line = line_number
+        continued = raw_line.rstrip().endswith("\\")
+        fragment = raw_line.rstrip()
+        if continued:
+            fragment = fragment[:-1]
+        fragments.append(fragment.strip())
+        if continued:
+            continue
+        logical = " ".join(fragment for fragment in fragments if fragment)
+        fragments = []
+        match = re.fullmatch(r"([A-Za-z]+)[ \t]+(.+)", logical)
+        if match is None:
+            raise ContractError(f"{path}:{start_line}: malformed Docker instruction")
+        keyword, arguments = match.groups()
+        keyword = keyword.upper()
+        if keyword not in allowed:
+            raise ContractError(f"{path}:{start_line}: unsupported Docker instruction {keyword}")
+        if keyword in {"ADD", "ARG", "COPY", "FROM", "RUN"}:
+            if arguments.lstrip().startswith("[") or "<<" in arguments:
+                raise ContractError(
+                    f"{path}:{start_line}: unsupported {keyword} JSON/heredoc form"
+                )
+        instructions.append(_DockerInstruction(keyword, arguments, start_line))
+    if fragments:
+        raise ContractError(f"{path}:{start_line}: unterminated Docker continuation")
+    if not instructions:
+        raise ContractError(f"{path}: Dockerfile has no active instructions")
+    return instructions
+
+
+def _docker_words(path: Path, instruction: _DockerInstruction) -> list[str]:
+    """Split one canonical Docker instruction argument vector safely."""
+    try:
+        return shlex.split(instruction.arguments, comments=False, posix=True)
+    except ValueError as error:
+        raise ContractError(
+            f"{path}:{instruction.line_number}: malformed {instruction.keyword} arguments"
+        ) from error
+
+
+def _verify_snapshot_source_template(root: Path, snapshot: str) -> None:
+    """Require one canonical signed snapshot source for both Linux architectures.
+
+    Args:
+        root: Repository root containing the protected Deb822 template.
+        snapshot: Exact lock timestamp substituted during the image build.
+
+    Raises:
+        ContractError: The template is aliased, malformed, duplicated, contains
+            another source, or does not bind the Canonical snapshot authority.
+
+    Note:
+        Docker overwrites the locked base image's ``ubuntu.sources`` with this
+        template, so archive, security, and ports source families cannot retain
+        architecture-specific live behavior.
+    """
+    path = root / "ci/locks/ubuntu-24.04-snapshot.sources.in"
+    try:
+        mode = path.lstat().st_mode
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise ContractError(f"cannot read protected APT source {path}: {error}") from error
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise ContractError(f"{path}: protected APT source must be a regular file")
+    fields: dict[str, str] = {}
+    for line_number, line in enumerate(lines, 1):
+        if not line or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"([A-Za-z][A-Za-z-]*):[ ]+([^\s].*)", line)
+        if match is None:
+            raise ContractError(f"{path}:{line_number}: malformed Deb822 source field")
+        key, value = match.groups()
+        if key in fields:
+            raise ContractError(f"{path}:{line_number}: duplicate Deb822 source field {key}")
+        fields[key] = value
+    expected = {
+        "Types": "deb",
+        "URIs": "https://snapshot.ubuntu.com/ubuntu/@APT_SNAPSHOT@/",
+        "Suites": "noble noble-updates noble-security",
+        "Components": "main restricted universe multiverse",
+        "Signed-By": "/usr/share/keyrings/ubuntu-archive-keyring.gpg",
+    }
+    if fields != expected:
+        raise ContractError(f"{path}: canonical signed snapshot source differs")
+    if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z", snapshot):
+        raise ContractError(f"{path}: APT snapshot substitution is malformed")
 
 
 def _verify_dockerfile(root: Path) -> None:
-    """Check Dockerfile consumption of immutable image and dependency locks."""
-    text = (root / "Dockerfile.ci").read_text(encoding="utf-8")
-    required_fragments = (
-        "FROM ubuntu:24.04@sha256:",
-        "ubuntu-24.04-packages.lock",
-        "requirements-ci.txt",
-        "apt-get -S \"$APT_SNAPSHOT\"",
-        "--require-hashes",
-        "GH_CLI_AMD64_SHA256",
-        "GH_CLI_ARM64_SHA256",
-        "org.photospider.ci.input-manifest-sha256",
+    """Check semantic Docker consumption of immutable image/dependency locks.
+
+    Args:
+        root: Repository root containing Dockerfile and protected locks.
+
+    Raises:
+        ContractError: Active FROM/ARG/COPY/ADD/RUN structure drifts, a remote
+            input lacks its exact checksum, or APT can execute before/beyond the
+            single signed snapshot source and package transaction.
+
+    Note:
+        Full-line Docker comments and shell comments never participate. A valid
+        initial ``syntax`` parser directive is rejected before instruction
+        parsing; unsupported syntax fails closed instead of falling back to
+        raw-text count/index logic.
+    """
+    path = root / "Dockerfile.ci"
+    instructions = _dockerfile_instructions(path)
+    image_lock = _load_json(root / "ci/locks/ci-image-lock.json")
+    if not isinstance(image_lock, dict):
+        raise ContractError("CI image lock root must be an object")
+    bootstrap_clauses = _verify_apt_bootstrap_lock(root, image_lock)
+    snapshot = image_lock.get("apt_snapshot")
+    if not isinstance(snapshot, str):
+        raise ContractError("CI image lock APT snapshot is absent")
+    _verify_snapshot_source_template(root, snapshot)
+    input_paths = image_lock.get("input_paths")
+    if not isinstance(input_paths, list) or not all(
+        isinstance(item, str) for item in input_paths
+    ):
+        raise ContractError("CI image lock input paths are malformed")
+    _verify_protected_helpers(root, image_lock, input_paths)
+
+    expected_from = (
+        f"{image_lock['base_image']['name'].removeprefix('docker.io/library/')}:"
+        f"{image_lock['base_image']['tag']}@{image_lock['base_image']['digest']}"
     )
-    for fragment in required_fragments:
-        if fragment not in text:
-            raise ContractError(f"Dockerfile.ci does not consume {fragment!r}")
-    forbidden = ("APT_MIRROR", "PIP_INDEX_URL", "pip install --upgrade", "ubuntu:latest")
-    for fragment in forbidden:
-        if fragment in text:
-            raise ContractError(f"Dockerfile.ci contains mutable installation path {fragment!r}")
+    expected_arguments = (
+        f"APT_SNAPSHOT={snapshot}",
+        f"GH_CLI_VERSION={image_lock['github_cli']['version']}",
+        f"GH_CLI_AMD64_SHA256={image_lock['github_cli']['amd64_sha256']}",
+        f"GH_CLI_ARM64_SHA256={image_lock['github_cli']['arm64_sha256']}",
+        "CI_IMAGE_INPUT_MANIFEST_SHA256",
+        "CI_IMAGE_SOURCE_COMMIT",
+    )
+    expected_copies = (
+        "ci/locks/ubuntu-24.04-packages.lock /tmp/ci-locks/ubuntu-24.04-packages.lock",
+        "ci/locks/ubuntu-24.04-snapshot.sources.in /tmp/ci-locks/ubuntu-24.04-snapshot.sources.in",
+        "ci/locks/requirements-ci.txt /tmp/ci-locks/requirements-ci.txt",
+        "ci/scripts/ci_image_install.sh /tmp/ci-image-install.sh",
+    )
+    expected_adds = tuple(clause.removeprefix("ADD ") for clause in bootstrap_clauses)
+    expected_instructions = [
+        ("FROM", expected_from),
+        *(("ARG", argument) for argument in expected_arguments),
+        (
+            "LABEL",
+            'org.opencontainers.image.revision="$CI_IMAGE_SOURCE_COMMIT" '
+            'org.photospider.ci.input-manifest-sha256="$CI_IMAGE_INPUT_MANIFEST_SHA256"',
+        ),
+        ("ENV", "DEBIAN_FRONTEND=noninteractive"),
+        ("ENV", "VENV=/opt/venv"),
+        ("ENV", 'PATH="$VENV/bin:$PATH"'),
+        *(("COPY", copy) for copy in expected_copies),
+        *(("ADD", add) for add in expected_adds),
+        ("RUN", "bash /tmp/ci-image-install.sh"),
+        ("WORKDIR", "/workspace"),
+    ]
+    actual_instructions = [
+        (instruction.keyword, instruction.arguments) for instruction in instructions
+    ]
+    if actual_instructions != expected_instructions:
+        mismatch = next(
+            (
+                index
+                for index, (actual, expected) in enumerate(
+                    zip(actual_instructions, expected_instructions)
+                )
+                if actual != expected
+            ),
+            min(len(actual_instructions), len(expected_instructions)),
+        )
+        raise ContractError(
+            f"{path}: canonical active instruction stream differs at index {mismatch}"
+        )
+
+    remote_adds: list[tuple[str, str, str]] = []
+    for instruction in instructions:
+        if instruction.keyword != "ADD":
+            continue
+        words = _docker_words(path, instruction)
+        if len(words) != 3:
+            raise ContractError(f"{path}: remote ADD shape differs")
+        checksum, url, destination = words
+        if re.fullmatch(r"--checksum=sha256:[0-9a-f]{64}", checksum) is None:
+            raise ContractError(f"{path}: remote ADD lacks exact SHA-256")
+        if re.fullmatch(r"https://snapshot\.ubuntu\.com/ubuntu/[A-Za-z0-9_./~+-]+", url) is None:
+            raise ContractError(f"{path}: remote ADD authority differs")
+        remote_adds.append((checksum, url, destination))
+    expected_remote_adds = [
+        tuple(shlex.split(clause, comments=False, posix=True)[1:])
+        for clause in bootstrap_clauses
+    ]
+    if remote_adds != expected_remote_adds:
+        raise ContractError(f"{path}: remote ADD set/order differs from the protected lock")
 
 
 def _verify_darwin_lock(root: Path) -> None:
-    """Validate the exact GitHub-hosted Darwin image and vcpkg registry identity."""
+    """Validate the exact GitHub-hosted Darwin image and vcpkg identity.
+
+    Args:
+        root: Repository root containing the protected Darwin runner lock.
+
+    Raises:
+        ContractError: The schema, arm64 runner/image, triplet, image version, or
+            vcpkg commit is malformed or differs from the maintained identity.
+
+    Note:
+        Workflow consumption is validated separately by
+        ``_verify_darwin_security_dag`` so lock and scheduling failures remain
+        independently diagnosable.
+    """
     path = root / "ci/locks/darwin-runner-lock.json"
     lock = _load_json(path)
     expected = {
@@ -1016,11 +2513,238 @@ def _verify_darwin_lock(root: Path) -> None:
         raise ContractError(f"{path}: malformed GitHub runner image version")
     if not re.fullmatch(r"[0-9a-f]{40}", str(lock["vcpkg_commit"])):
         raise ContractError(f"{path}: vcpkg identity is not a full commit SHA")
-    integration = (root / ".github/workflows/ci-integration-suite.yml").read_text(
-        encoding="utf-8"
+
+
+def _verify_darwin_security_dag(root: Path) -> None:
+    """Require three independently scheduled Darwin security profile jobs.
+
+    Args:
+        root: Repository root containing the protected shared integration DAG.
+
+    Raises:
+        ContractError: A profile is missing, serially loops, depends on a sibling,
+            changes its runner/profile/artifact identity, or escapes suite-gate
+            aggregation.
+
+    Note:
+        Each job depends only on ``integration-plan``. Therefore one profile's
+        failure cannot prevent either sibling from being scheduled, while the
+        stable suite gate still requires all three conclusions to be successful.
+    """
+    path = root / ".github/workflows/ci-integration-suite.yml"
+    profiles = {
+        "sanitizer-asan-darwin": {
+            "timeout": "90",
+            "verify_step": "Verify exact Darwin ASan runner",
+            "run_step": "Run isolated Darwin ASan profile",
+            "run": "bash ci/scripts/sanitizer_test.sh",
+            "env": {
+                "CI_ARTIFACT_DIR": "${{ github.workspace }}/CI-results/sanitizer-asan-darwin",
+                "CI_INVENTORY_DIR": "${{ github.workspace }}/CI-results/profile-inventory",
+                "CI_RUNNER_TEMP": "${{ runner.temp }}",
+                "SANITIZER": "asan",
+            },
+            "upload_step": "Upload Darwin ASan diagnostics",
+            "artifact": "sanitizer-asan-darwin-results",
+            "artifact_path": "CI-results/sanitizer-asan-darwin",
+            "result": "CI_DARWIN_ASAN_RESULT",
+        },
+        "sanitizer-tsan-darwin": {
+            "timeout": "90",
+            "verify_step": "Verify exact Darwin TSan runner",
+            "run_step": "Run isolated Darwin TSan profile",
+            "run": "bash ci/scripts/sanitizer_test.sh",
+            "env": {
+                "CI_ARTIFACT_DIR": "${{ github.workspace }}/CI-results/sanitizer-tsan-darwin",
+                "CI_INVENTORY_DIR": "${{ github.workspace }}/CI-results/profile-inventory",
+                "CI_RUNNER_TEMP": "${{ runner.temp }}",
+                "SANITIZER": "tsan",
+            },
+            "upload_step": "Upload Darwin TSan diagnostics",
+            "artifact": "sanitizer-tsan-darwin-results",
+            "artifact_path": "CI-results/sanitizer-tsan-darwin",
+            "result": "CI_DARWIN_TSAN_RESULT",
+        },
+        "fuzz-codecs-darwin": {
+            "timeout": "30",
+            "verify_step": "Verify exact Darwin fuzz runner",
+            "run_step": "Run bounded Darwin codec fuzz smoke",
+            "run": "bash ci/scripts/fuzz_smoke.sh",
+            "env": {
+                "CI_ARTIFACT_DIR": "${{ github.workspace }}/CI-results/fuzz-codecs-darwin",
+                "CI_INVENTORY_DIR": "${{ github.workspace }}/CI-results/profile-inventory",
+                "CI_RUNNER_TEMP": "${{ runner.temp }}",
+            },
+            "upload_step": "Upload transient Darwin fuzz diagnostics",
+            "artifact": "fuzz-codecs-darwin-results",
+            "artifact_path": "CI-results/fuzz-codecs-darwin",
+            "result": "CI_DARWIN_FUZZ_RESULT",
+        },
+    }
+    requested_jobs = [*profiles, "suite-gate"]
+    jobs = _workflow_job_mappings(path, requested_jobs)
+    raw_job_inventory = _workflow_job_blocks(path)
+    if "security-darwin" in raw_job_inventory:
+        raise ContractError(f"{path}: serial Darwin security aggregate remains")
+
+    actions = _read_actions(root / "ci/locks/actions.lock")
+
+    def action_reference(name: str) -> str:
+        """Return one exact locked action reference for expected step mappings."""
+        if name not in actions:
+            raise ContractError(f"{path}: protected Darwin action {name!r} is absent")
+        return f"{name}@{actions[name][1]}"
+
+    checkout_action = action_reference("actions/checkout")
+    download_action = action_reference("actions/download-artifact")
+    upload_action = action_reference("actions/upload-artifact")
+
+    for job_name, profile in profiles.items():
+        job = jobs[job_name]
+        expected_verify = (
+            "python3 ci/scripts/ci_runner_verify.py --platform Darwin "
+            "--runner-label macos-15"
+        )
+        expected_job = {
+            "permissions": {"contents": "read"},
+            "needs": "integration-plan",
+            "runs-on": "macos-15",
+            "timeout-minutes": profile["timeout"],
+            "steps": [
+                {
+                    "uses": checkout_action,
+                    "with": {
+                        "persist-credentials": "false",
+                        "repository": "${{ inputs.checkout_repository }}",
+                        "fetch-depth": "0",
+                        "submodules": "recursive",
+                        "ref": "${{ inputs.checkout_ref }}",
+                    },
+                },
+                {
+                    "name": profile["verify_step"],
+                    "run": expected_verify,
+                },
+                {
+                    "name": "Download security profile inventory",
+                    "uses": download_action,
+                    "with": {
+                        "name": "ci-security-profile-inventory",
+                        "path": "CI-results/profile-inventory",
+                    },
+                },
+                {
+                    "name": profile["run_step"],
+                    "env": profile["env"],
+                    "run": profile["run"],
+                },
+                {
+                    "name": profile["upload_step"],
+                    "if": "always()",
+                    "uses": upload_action,
+                    "with": {
+                        "name": profile["artifact"],
+                        "path": profile["artifact_path"],
+                        "if-no-files-found": "warn",
+                        "retention-days": "3",
+                    },
+                },
+            ],
+        }
+        if job != expected_job:
+            raise ContractError(f"{path}: {job_name} complete job mapping differs")
+
+    suite_name = "suite-gate"
+    suite = jobs[suite_name]
+    suite_needs = [
+        "identity-preflight",
+        "integration-plan",
+        "build-integrity-default",
+        "verify-targeted-artifacts",
+        "attest-targeted-artifacts",
+        "targeted-artifacts-ready",
+        "full-ctest",
+        "build-smoke",
+        "openexr-smoke",
+        "scripted-cli",
+        "propagation-script",
+        "plugin-load",
+        "execution-repeat",
+        "installed-package-consumer",
+        "sanitizer-asan",
+        "sanitizer-tsan",
+        "fuzz-codecs",
+        "sanitizer-asan-darwin",
+        "sanitizer-tsan-darwin",
+        "fuzz-codecs-darwin",
+    ]
+    result_variables = {
+        "identity-preflight": "CI_IDENTITY_RESULT",
+        "integration-plan": "CI_PLAN_RESULT",
+        "build-integrity-default": "CI_BUILD_RESULT",
+        "verify-targeted-artifacts": "CI_VERIFY_RESULT",
+        "targeted-artifacts-ready": "CI_ARTIFACT_READY_RESULT",
+        "full-ctest": "CI_CTEST_RESULT",
+        "build-smoke": "CI_BUILD_SMOKE_RESULT",
+        "openexr-smoke": "CI_OPENEXR_RESULT",
+        "scripted-cli": "CI_SCRIPTED_CLI_RESULT",
+        "propagation-script": "CI_PROPAGATION_RESULT",
+        "plugin-load": "CI_PLUGIN_RESULT",
+        "execution-repeat": "CI_EXECUTION_RESULT",
+        "installed-package-consumer": "CI_INSTALLED_PACKAGE_RESULT",
+        "sanitizer-asan": "CI_ASAN_RESULT",
+        "sanitizer-tsan": "CI_TSAN_RESULT",
+        "fuzz-codecs": "CI_FUZZ_RESULT",
+        "sanitizer-asan-darwin": "CI_DARWIN_ASAN_RESULT",
+        "sanitizer-tsan-darwin": "CI_DARWIN_TSAN_RESULT",
+        "fuzz-codecs-darwin": "CI_DARWIN_FUZZ_RESULT",
+    }
+    suite_environment = {
+        variable: f"${{{{ needs.{job_name}.result }}}}"
+        for job_name, variable in result_variables.items()
+    }
+    suite_environment.update(
+        {
+            "CI_ATTESTATION_RESULT": "${{ needs.attest-targeted-artifacts.result }}",
+            "CI_IMAGE_DIGEST": "${{ needs.identity-preflight.outputs.image_digest }}",
+            "CI_PUBLISH_REUSABLE_ATTESTATIONS": "${{ inputs.publish_reusable_attestations }}",
+        }
     )
-    if "runs-on: macos-15" not in integration or "security-darwin:" not in integration:
-        raise ContractError("CI integration does not consume the protected Darwin runner identity")
+    expected_suite = {
+        "permissions": {"contents": "read"},
+        "needs": suite_needs,
+        "if": "always()",
+        "runs-on": "ubuntu-24.04",
+        "outputs": {
+            "validated_image_digest": "${{ steps.aggregate.outputs.validated_image_digest }}"
+        },
+        "steps": [
+            {
+                "name": "Checkout protected suite gate control",
+                "uses": checkout_action,
+                "with": {
+                    "persist-credentials": "false",
+                    "repository": "${{ github.repository }}",
+                    "fetch-depth": "1",
+                    "ref": "${{ github.workflow_sha }}",
+                    "sparse-checkout": "ci/scripts/integration_suite_gate.py",
+                    "sparse-checkout-cone-mode": "false",
+                    "path": ".ci-suite-gate-control",
+                },
+            },
+            {
+                "name": "Aggregate the exact shared integration DAG",
+                "id": "aggregate",
+                "env": suite_environment,
+                "run": (
+                    "python3 .ci-suite-gate-control/ci/scripts/integration_suite_gate.py "
+                    '--output "$GITHUB_OUTPUT"'
+                ),
+            },
+        ],
+    }
+    if suite != expected_suite:
+        raise ContractError(f"{path}: suite-gate complete job mapping differs")
 
 
 def _verify_linux_runner_lock(root: Path) -> None:
@@ -1123,7 +2847,11 @@ def _verify_shared_integration_dag(root: Path) -> None:
         "static_product_consumer_test.sh",
         "installed-package-consumer:",
         "openexr-smoke:",
+        "sanitizer-asan-darwin:",
+        "sanitizer-tsan-darwin:",
+        "fuzz-codecs-darwin:",
         "suite-gate:",
+        "integration_suite_gate.py",
     )
     if any(fragment not in shared for fragment in required_shared):
         raise ContractError(f"{shared_path}: targeted shared DAG contract differs")
@@ -1282,13 +3010,26 @@ def _verify_shared_integration_dag(root: Path) -> None:
 
 
 def verify(root: Path) -> None:
-    """Run the complete protected lock and active-consumer validation."""
+    """Run the complete protected lock and active-consumer validation.
+
+    Args:
+        root: Exact repository root whose protected surface is authoritative.
+
+    Raises:
+        ContractError: Any lock, workflow, trust, permission, snapshot, runner,
+            profile-DAG, or active-consumer contract fails closed.
+
+    Note:
+        Validation is read-only and performs no network resolution; the real
+        Docker build remains the same-snapshot transitive dependency solver.
+    """
     actions = _read_actions(root / "ci/locks/actions.lock")
     _verify_packages(root / "ci/locks/ubuntu-24.04-packages.lock")
     _verify_requirements(root / "ci/locks/requirements-ci.txt")
     _verify_image_lock(root, actions)
     _verify_dockerfile(root)
     _verify_darwin_lock(root)
+    _verify_darwin_security_dag(root)
     _verify_linux_runner_lock(root)
     _verify_fuzz_job_timeout(root)
     _verify_reusable_workflow_permissions(root)

@@ -1,4 +1,18 @@
 {
+  "apt_bootstrap": {
+    "ca_certificates": {
+      "sha256": "6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7629e50",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260825T000000Z/pool/main/c/ca-certificates/ca-certificates_20260601~24.04.1_all.deb",
+      "version": "20260601~24.04.1"
+    },
+    "openssl": {
+      "amd64_sha256": "321b30ad5a1c3783cb3d73ae439f824f6d3874d76a93a62f4a984959b490aa7b",
+      "amd64_url": "https://snapshot.ubuntu.com/ubuntu/20260825T000000Z/pool/main/o/openssl/openssl_3.0.13-0ubuntu3.12_amd64.deb",
+      "arm64_sha256": "777b636c291fd2a5f269b21c110bf226d2cfde43b2c0d1f3d35ff41c775ef847",
+      "arm64_url": "https://snapshot.ubuntu.com/ubuntu/20260825T000000Z/pool/main/o/openssl/openssl_3.0.13-0ubuntu3.12_arm64.deb",
+      "version": "3.0.13-0ubuntu3.12"
+    }
+  },
   "apt_snapshot": "20260825T000000Z",
   "base_image": {
     "digest": "sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517",
@@ -23,11 +37,26 @@
     "ci/locks/linux-runner-lock.json",
     "ci/locks/requirements-ci.txt",
     "ci/locks/ubuntu-24.04-packages.lock",
+    "ci/locks/ubuntu-24.04-snapshot.sources.in",
+    "ci/scripts/ci_image_install.sh",
     "ci/scripts/ci_image_manifest.py",
     "ci/scripts/ci_image_verify.sh",
     "ci/scripts/ci_lock_verify.py",
-    "ci/scripts/ci_runner_verify.py"
+    "ci/scripts/ci_runner_verify.py",
+    "ci/scripts/integration_suite_gate.py"
   ],
+  "protected_helpers": {
+    "ci-image-installer": {
+      "path": "ci/scripts/ci_image_install.sh",
+      "sha256": "6d485d66e1a059a886384ae5011794605236b9bb8b9a4ca4f79f561b9030bcf1",
+      "version": "v1"
+    },
+    "integration-suite-gate": {
+      "path": "ci/scripts/integration_suite_gate.py",
+      "sha256": "e7790a57ace6ef052f252d9c084821eec5acb82271449645e3502d097dc9bcf8",
+      "version": "v1"
+    }
+  },
   "published_image": {
     "input_manifest_label": "org.photospider.ci.input-manifest-sha256",
     "locator": "ghcr.io/kevin-zf1123/photospider/photospider-ci:latest",

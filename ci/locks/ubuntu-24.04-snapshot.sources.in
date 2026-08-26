@@ -1,0 +1,9 @@
+# Canonical Ubuntu 24.04 CI source. Dockerfile.ci replaces the placeholder with
+# the protected APT_SNAPSHOT value before the first APT command. The single
+# Canonical snapshot root serves both amd64 and arm64 and replaces every live
+# archive.ubuntu.com, security.ubuntu.com, and ports.ubuntu.com base source.
+Types: deb
+URIs: https://snapshot.ubuntu.com/ubuntu/@APT_SNAPSHOT@/
+Suites: noble noble-updates noble-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
