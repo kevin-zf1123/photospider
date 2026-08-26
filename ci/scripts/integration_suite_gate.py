@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Aggregate the exact shared integration DAG into one validated image digest.
 
-The helper accepts only GitHub-owned job conclusions and the independently
-verified image digest through an exact environment contract. Every maintained
-result must be literal ``success``. The attestation result is special only in
-that a trusted publishing route requires ``success`` while a read-only route
-requires literal ``skipped``. Output is appended only after all checks pass.
+The helper accepts only GitHub-owned job conclusions, the independently
+verified image digest, and the protected build-smoke route digest through an
+exact environment contract. Every maintained result must be literal
+``success``. The attestation result is special only in that a trusted
+publishing route requires ``success`` while a read-only route requires literal
+``skipped``. Output is appended only after all checks pass.
 """
 
 from __future__ import annotations
@@ -27,10 +28,12 @@ REQUIRED_RESULTS: tuple[tuple[str, str], ...] = (
     ("identity-preflight", "CI_IDENTITY_RESULT"),
     ("integration-plan", "CI_PLAN_RESULT"),
     ("build-integrity-default", "CI_BUILD_RESULT"),
+    ("build-smoke-control", "CI_BUILD_SMOKE_CONTROL_RESULT"),
     ("verify-targeted-artifacts", "CI_VERIFY_RESULT"),
     ("targeted-artifacts-ready", "CI_ARTIFACT_READY_RESULT"),
     ("full-ctest", "CI_CTEST_RESULT"),
     ("build-smoke", "CI_BUILD_SMOKE_RESULT"),
+    ("producer-build-smoke", "CI_PRODUCER_BUILD_SMOKE_RESULT"),
     ("openexr-smoke", "CI_OPENEXR_RESULT"),
     ("scripted-cli", "CI_SCRIPTED_CLI_RESULT"),
     ("propagation-script", "CI_PROPAGATION_RESULT"),
@@ -50,15 +53,16 @@ def validate_gate(environment: Mapping[str, str]) -> str:
     """Validate every required result and return the canonical image digest.
 
     Args:
-        environment: Exact GitHub job-result, attestation-mode, and digest
-            environment supplied by the protected workflow mapping.
+        environment: Exact GitHub job-result, attestation-mode, image digest,
+            and protected route digest environment supplied by the workflow.
 
     Returns:
         The validated ``sha256:<64 lowercase hex>`` image digest.
 
     Raises:
         SuiteGateError: A required result is not literal ``success``, the
-            publish/attestation pair is incoherent, or the digest is malformed.
+            publish/attestation pair is incoherent, or either digest is
+            malformed.
 
     Note:
         ``failure``, ``failed``, ``cancelled``, ``skipped``, missing, and any
@@ -85,6 +89,14 @@ def validate_gate(environment: Mapping[str, str]) -> str:
         raise SuiteGateError(
             "attest-targeted-artifacts concluded "
             f"{attestation!r}; expected {expected_attestation!r}"
+        )
+
+    route_digest = environment.get("CI_ROUTE_SHA256")
+    if route_digest is None or re.fullmatch(
+        r"[0-9a-f]{64}", route_digest
+    ) is None:
+        raise SuiteGateError(
+            "shared suite did not retain one canonical build-smoke route digest"
         )
 
     digest = environment.get("CI_IMAGE_DIGEST")

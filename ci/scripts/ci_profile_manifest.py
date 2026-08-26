@@ -560,9 +560,29 @@ def _load_versioned(root: Path, inventory: Path) -> dict[str, Any]:
     }
 
 
-def _load_fallback(root: Path) -> dict[str, Any]:
-    """Load the protected current-main selection after exact source-hash checks."""
-    path = root / "ci/locks/current-main-profiles-v1.json"
+def _load_fallback(
+    control_root: Path, source_root: Path
+) -> dict[str, Any]:
+    """Load protected fallback roles and bind a separate candidate source.
+
+    Args:
+        control_root: Exact trusted checkout containing the fallback lock.
+        source_root: Exact candidate checkout whose hash-bound production
+            sources must still match that protected lock.
+
+    Returns:
+        Canonical resolved fallback profile identity.
+
+    Raises:
+        ProfileError: The protected lock, candidate source hashes, profile
+            schema, ordering, or bounded security values differ.
+
+    Note:
+        Ordinary callers pass the same root twice. The protected routing job
+        deliberately supplies disjoint roots so candidate bytes can never
+        replace the lock or parser that decides their matrix identity.
+    """
+    path = control_root / "ci/locks/current-main-profiles-v1.json"
     value = _load_json(path)
     if not isinstance(value, dict) or set(value) != {"schema", "source_hashes", "sanitizers", "fuzz"}:
         raise ProfileError(f"{path}: malformed fallback root")
@@ -576,7 +596,7 @@ def _load_fallback(root: Path) -> dict[str, Any]:
     for relative, expected in hashes.items():
         if not isinstance(relative, str) or not re.fullmatch(r"[0-9a-f]{64}", str(expected)):
             raise ProfileError(f"{path}: malformed fallback source hash")
-        actual = _hash_file(root / relative)
+        actual = _hash_file(source_root / relative)
         if actual != expected:
             raise ProfileError(
                 f"temporary current-main fallback is stale for {relative}: {actual} != {expected}"
@@ -705,8 +725,35 @@ def _load_fallback(root: Path) -> dict[str, Any]:
     }
 
 
-def resolve(root: Path, inventory: Path) -> dict[str, Any]:
-    """Resolve either the complete versioned candidate set or exact fallback."""
+def resolve(
+    root: Path,
+    inventory: Path,
+    *,
+    control_root: Path | None = None,
+) -> dict[str, Any]:
+    """Resolve one candidate inventory under a separately selectable control.
+
+    Args:
+        root: Exact candidate checkout containing hash-bound fallback sources.
+        inventory: Candidate-generated versioned profile/role inventory.
+        control_root: Optional exact trusted checkout containing protected
+            dependency locks and the current-main fallback. ``None`` preserves
+            the ordinary same-checkout boundary.
+
+    Returns:
+        Canonical resolved versioned or fallback security profile identity.
+
+    Raises:
+        ProfileError: The generated set is partial or any candidate/control
+            identity, schema, digest, ordering, or reference is invalid.
+
+    Note:
+        Versioned candidate records are always parsed from ``inventory`` while
+        protected dependency paths come only from ``control_root``. Fallback
+        role values likewise come from control, but their declared production
+        source hashes are measured in ``root``.
+    """
+    protected_root = root if control_root is None else control_root
     paths = [
         inventory / "build_profile_matrix_v1.tsv",
         inventory / "build_profile_matrix_v1.tsv.sha256",
@@ -716,7 +763,11 @@ def resolve(root: Path, inventory: Path) -> dict[str, Any]:
     if any(present) and not all(present):
         states = ", ".join(f"{path.name}={'present' if exists else 'missing'}" for path, exists in zip(paths, present))
         raise ProfileError(f"partial versioned profile identity: {states}")
-    return _load_versioned(root, inventory) if all(present) else _load_fallback(root)
+    return (
+        _load_versioned(protected_root, inventory)
+        if all(present)
+        else _load_fallback(protected_root, root)
+    )
 
 
 def _write_output(path: Path, value: bytes) -> None:
@@ -733,16 +784,29 @@ def main() -> int:
     """Resolve the selected profile and emit canonical JSON for trusted runners."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument(
+        "--control-root",
+        type=Path,
+        help=(
+            "separate trusted checkout for protected dependency/fallback "
+            "locks; defaults to --repo-root"
+        ),
+    )
     parser.add_argument("--inventory-dir", type=Path, default=Path("build/generated/ci_inventory"))
     parser.add_argument("--profile", help="emit only this exact profile")
     parser.add_argument("--output", type=Path, help="write canonical JSON to this file")
     arguments = parser.parse_args()
     root = arguments.repo_root.resolve()
+    control_root = (
+        root
+        if arguments.control_root is None
+        else arguments.control_root.resolve()
+    )
     inventory = arguments.inventory_dir
     if not inventory.is_absolute():
         inventory = root / inventory
     try:
-        resolved = resolve(root, inventory)
+        resolved = resolve(root, inventory, control_root=control_root)
         if arguments.profile:
             matches = [profile for profile in resolved["profiles"] if profile["profile"] == arguments.profile]
             if len(matches) != 1:

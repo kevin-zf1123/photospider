@@ -61,6 +61,24 @@ class InventoryError(ValueError):
     """
 
 
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """@brief Build a CTest JSON object while rejecting duplicate members.
+
+    @param pairs Ordered member pairs supplied by ``json.loads``.
+    @return Newly owned dictionary containing every unique member.
+    @throws InventoryError If any member name repeats in the same object.
+    @note Duplicate JSON members are otherwise last-value-wins in Python and
+      could make an untrusted raw producer inventory ambiguous.
+    """
+
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise InventoryError(f"CTest inventory repeats JSON member {key!r}.")
+        result[key] = value
+    return result
+
+
 @dataclass(frozen=True)
 class TestRecord:
     """@brief Represent one validated test in CTest's inventory order.
@@ -307,10 +325,14 @@ def parse_inventory(raw_json: bytes | str) -> Inventory:
         raise InventoryError("CTest inventory must be UTF-8 text.")
 
     try:
-        raw_payload = json.loads(inventory_text)
-    except json.JSONDecodeError as error:
+        raw_payload = json.loads(
+            inventory_text, object_pairs_hook=_unique_object
+        )
+    except (json.JSONDecodeError, InventoryError) as error:
+        diagnostic = error.msg if isinstance(error, json.JSONDecodeError) else str(error)
         raise InventoryError(
-            f"CTest inventory is not valid JSON: {error.msg}."
+            "CTest inventory is not valid JSON with unique object members: "
+            f"{diagnostic}."
         ) from error
     payload = _require_mapping(raw_payload, "CTest inventory root")
     if payload.get("kind") != "ctestInfo":

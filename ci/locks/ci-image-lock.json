@@ -53,7 +53,7 @@
     },
     "integration-suite-gate": {
       "path": "ci/scripts/integration_suite_gate.py",
-      "sha256": "e7790a57ace6ef052f252d9c084821eec5acb82271449645e3502d097dc9bcf8",
+      "sha256": "23dfa5d23664c032daee14aa085597a4b8d631ea9b53c9b35b5305d225bc4cdd",
       "version": "v1"
     }
   },

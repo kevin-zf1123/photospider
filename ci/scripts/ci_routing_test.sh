@@ -759,7 +759,9 @@ validate_build_smoke_matrix_contract() {
   local workflow=$1
   local plan_job="$TEST_ROOT/integration-plan-build-smoke-job.yml"
   local build_job="$TEST_ROOT/integration-build-integrity-job.yml"
+  local control_job="$TEST_ROOT/integration-build-smoke-control-job.yml"
   local smoke_job="$TEST_ROOT/integration-build-smoke-job.yml"
+  local producer_job="$TEST_ROOT/integration-producer-build-smoke-job.yml"
   local dedicated_job="$TEST_ROOT/integration-installed-package-job.yml"
   local openexr_job="$TEST_ROOT/integration-openexr-smoke-job.yml"
   local suite_gate_job="$TEST_ROOT/integration-suite-gate-job.yml"
@@ -773,16 +775,18 @@ validate_build_smoke_matrix_contract() {
   local common_script="$REPO_ROOT/ci/scripts/common.sh"
   local required_line
   local build_all_line
-  local inventory_line
-  local route_line
-  local output_line
+  local raw_inventory_line
 
   extract_job_block "$workflow" integration-plan "$plan_job" ||
     fail "integration-plan job could not be extracted for build-smoke routing"
   extract_job_block "$workflow" build-integrity-default "$build_job" ||
-    fail "build-integrity-default job could not be extracted for matrix output"
+    fail "build-integrity-default job could not be extracted for raw inventory"
+  extract_job_block "$workflow" build-smoke-control "$control_job" ||
+    fail "fresh protected build-smoke control job could not be extracted"
   extract_job_block "$workflow" build-smoke "$smoke_job" ||
     fail "build-smoke matrix job could not be extracted"
+  extract_job_block "$workflow" producer-build-smoke "$producer_job" ||
+    fail "producer-designated downstream smoke job could not be extracted"
   extract_job_block "$workflow" full-ctest "$full_ctest_job" ||
     fail "full-ctest job could not be extracted for build-smoke routing"
   extract_job_block "$workflow" installed-package-consumer "$dedicated_job" ||
@@ -794,14 +798,17 @@ validate_build_smoke_matrix_contract() {
 
   assert_file_contains "$plan_job" 'name: Preflight integration inventory'
   assert_file_not_contains "$plan_job" '    outputs:'
+  assert_file_not_contains "$build_job" '    outputs:'
   assert_file_contains "$build_job" \
-    'build_smoke_matrix: ${{ steps.build.outputs.build_smoke_matrix }}'
+    'name: Run same-tree build integrity and retain raw inventory'
   assert_file_contains "$build_job" \
-    'dedicated_build_smoke_matrix: ${{ steps.build.outputs.dedicated_build_smoke_matrix }}'
-  assert_file_contains "$build_job" \
-    'openexr_build_smoke_matrix: ${{ steps.build.outputs.openexr_build_smoke_matrix }}'
-  assert_file_contains "$build_job" \
-    'name: Run same-tree build integrity and producer-local smokes'
+    'name: Package exact raw routing inputs without candidate parsers'
+  assert_file_contains "$build_job" 'name: ci-build-smoke-raw-default'
+  assert_file_contains "$build_job" 'raw-inventory.manifest.json'
+  assert_file_not_contains "$build_job" 'build_smoke_route.py'
+  assert_file_not_contains "$build_job" 'build-smoke-routing.json'
+  assert_file_not_contains "$build_job" 'build_smoke_inventory.py'
+  assert_file_not_contains "$build_job" 'producer_build_smoke_matrix'
   assert_file_contains "$build_job" 'create-targeted'
   assert_file_contains "$build_job" '--role "$role"'
   assert_file_contains "$build_job" '--role installed-package'
@@ -810,10 +817,44 @@ validate_build_smoke_matrix_contract() {
   assert_file_contains "$build_job" 'name: ci-installed-package-default'
   assert_file_contains "$build_job" 'name: ci-openexr-metadata-default'
   assert_file_not_contains "$build_job" 'ci-build-default'
+
+  assert_file_contains "$control_job" \
+    'needs: [identity-preflight, build-integrity-default]'
+  assert_file_contains "$control_job" \
+    'ref: ${{ inputs.workflow_commit }}'
+  assert_file_contains "$control_job" 'persist-credentials: false'
+  assert_file_contains "$control_job" 'path: .ci-protected-route-control'
+  assert_file_contains "$control_job" 'path: .ci-route-candidate-source'
+  assert_file_contains "$control_job" 'path: .ci-untrusted-route-input'
+  assert_file_contains "$control_job" \
+    'name: ci-build-smoke-raw-default'
+  assert_file_contains "$control_job" \
+    'python3 .ci-protected-route-control/ci/scripts/build_smoke_route.py'
+  assert_file_contains "$control_job" 'control \'
+  assert_file_contains "$control_job" \
+    '--control-root .ci-protected-route-control'
+  assert_file_contains "$control_job" \
+    '--candidate-root .ci-route-candidate-source'
+  assert_file_contains "$control_job" \
+    '--raw-dir .ci-untrusted-route-input'
+  assert_file_contains "$control_job" \
+    'build_smoke_matrix: ${{ steps.route.outputs.build_smoke_matrix }}'
+  assert_file_contains "$control_job" \
+    'dedicated_build_smoke_matrix: ${{ steps.route.outputs.dedicated_build_smoke_matrix }}'
+  assert_file_contains "$control_job" \
+    'openexr_build_smoke_matrix: ${{ steps.route.outputs.openexr_build_smoke_matrix }}'
+  assert_file_contains "$control_job" \
+    'producer_build_smoke_matrix: ${{ steps.route.outputs.producer_build_smoke_matrix }}'
+  assert_file_contains "$control_job" \
+    'route_sha256: ${{ steps.route.outputs.route_sha256 }}'
+  assert_file_contains "$control_job" \
+    'name: ci-build-smoke-control-default'
   assert_file_contains "$smoke_job" \
-    'needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]'
+    'needs: [integration-plan, build-integrity-default, build-smoke-control, targeted-artifacts-ready]'
   assert_file_contains "$smoke_job" 'fail-fast: false'
-  assert_file_contains "$smoke_job" 'fromJSON(needs.build-integrity-default.outputs.build_smoke_matrix'
+  assert_file_contains "$smoke_job" 'fromJSON(needs.build-smoke-control.outputs.build_smoke_matrix'
+  assert_file_contains "$smoke_job" \
+    "needs.build-smoke-control.outputs.route_sha256 != ''"
   assert_file_contains "$smoke_job" 'name: ci-control-default'
   assert_file_contains "$smoke_job" \
     'CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}'
@@ -823,7 +864,9 @@ validate_build_smoke_matrix_contract() {
   assert_file_contains "$full_ctest_job" 'name: ci-runtime-default'
   assert_file_contains "$full_ctest_job" 'run: bash ci/scripts/ctest_full.sh'
   assert_file_contains "$dedicated_job" \
-    'fromJSON(needs.build-integrity-default.outputs.dedicated_build_smoke_matrix'
+    'fromJSON(needs.build-smoke-control.outputs.dedicated_build_smoke_matrix'
+  assert_file_contains "$dedicated_job" \
+    "needs.build-smoke-control.outputs.route_sha256 != ''"
   assert_file_contains "$dedicated_job" \
     'CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}'
   assert_file_contains "$dedicated_job" 'image: ${{ inputs.image_ref }}'
@@ -836,7 +879,9 @@ validate_build_smoke_matrix_contract() {
     fail "installed-package evidence re-uploads the restored prefix"
   fi
   assert_file_contains "$openexr_job" \
-    'fromJSON(needs.build-integrity-default.outputs.openexr_build_smoke_matrix'
+    'fromJSON(needs.build-smoke-control.outputs.openexr_build_smoke_matrix'
+  assert_file_contains "$openexr_job" \
+    "needs.build-smoke-control.outputs.route_sha256 != ''"
   assert_file_contains "$openexr_job" 'name: ci-openexr-metadata-default'
   assert_file_contains "$openexr_job" \
     'CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}'
@@ -844,6 +889,23 @@ validate_build_smoke_matrix_contract() {
     'run: bash ci/scripts/openexr_smoke_test.sh'
   assert_file_contains "$openexr_job" \
     'SMOKE_TEST_NAME: ${{ matrix.test }}'
+  assert_file_contains "$producer_job" \
+    'fromJSON(needs.build-smoke-control.outputs.producer_build_smoke_matrix'
+  assert_file_contains "$producer_job" \
+    "needs.build-smoke-control.outputs.route_sha256 != ''"
+  assert_file_contains "$producer_job" 'name: ci-control-default'
+  assert_file_contains "$producer_job" \
+    'run: bash ci/scripts/build_smoke_test.sh'
+  assert_file_contains "$producer_job" \
+    'CI_MATRIX_SHA256: ${{ needs.build-smoke-control.outputs.matrix_sha256 }}'
+  assert_file_contains "$suite_gate_job" '      - build-smoke-control'
+  assert_file_contains "$suite_gate_job" '      - producer-build-smoke'
+  assert_file_contains "$suite_gate_job" \
+    'CI_BUILD_SMOKE_CONTROL_RESULT: ${{ needs.build-smoke-control.result }}'
+  assert_file_contains "$suite_gate_job" \
+    'CI_PRODUCER_BUILD_SMOKE_RESULT: ${{ needs.producer-build-smoke.result }}'
+  assert_file_contains "$suite_gate_job" \
+    'CI_ROUTE_SHA256: ${{ needs.build-smoke-control.outputs.route_sha256 }}'
   assert_file_contains "$suite_gate_job" '      - openexr-smoke'
   assert_file_contains "$suite_gate_job" \
     'CI_OPENEXR_RESULT: ${{ needs.openexr-smoke.result }}'
@@ -853,38 +915,35 @@ validate_build_smoke_matrix_contract() {
 
   assert_file_contains "$plan_script" 'build_smoke_inventory.py" plan'
   assert_file_contains "$plan_script" '--allow-empty'
-  assert_file_contains "$build_script" 'build_smoke_inventory.py" plan'
-  assert_file_contains "$build_script" 'build_smoke_route.py'
-  assert_file_contains "$build_script" \
-    'emit_output build_smoke_matrix "$build_smoke_matrix"'
-  assert_file_contains "$build_script" \
-    'emit_output dedicated_build_smoke_matrix'
-  assert_file_contains "$build_script" \
-    'emit_output openexr_build_smoke_matrix'
+  assert_file_not_contains "$build_script" 'build_smoke_inventory.py'
+  assert_file_not_contains "$build_script" 'build_smoke_route.py'
+  assert_file_not_contains "$build_script" 'build-smoke-routing.json'
+  assert_file_not_contains "$build_script" 'emit_output '
   assert_file_contains "$build_script" 'ctest_runtime_closure.py" create'
-  assert_file_contains "$build_script" 'producer_build_smoke_names_file'
+  assert_file_contains "$build_script" 'capture_raw_ctest_inventory'
   assert_file_contains "$build_script" 'cmake --install "$BUILD_DIR"'
   required_line=$(grep -nF -- 'ensure_ci_targets build_required_targets' \
     "$build_script" | head -n 1 | cut -d: -f1)
   build_all_line=$(grep -nF -- 'ensure_ci_all build_all' "$build_script" |
     head -n 1 | cut -d: -f1)
-  inventory_line=$(grep -nF -- 'build_smoke_inventory.py" plan' "$build_script" |
-    head -n 1 | cut -d: -f1)
-  route_line=$(grep -nF -- 'build_smoke_route.py' "$build_script" |
-    head -n 1 | cut -d: -f1)
-  output_line=$(grep -nF -- \
-    'emit_output build_smoke_matrix "$build_smoke_matrix"' "$build_script" |
+  raw_inventory_line=$(grep -nF -- \
+    'capture_raw_ctest_inventory "$raw_ctest_inventory_file"' "$build_script" |
     head -n 1 | cut -d: -f1)
   [[ -n "$required_line" && -n "$build_all_line" &&
-    -n "$inventory_line" && -n "$route_line" && -n "$output_line" ]] ||
-    fail "build-integrity lacks same-tree targeted routing order"
-  ((required_line < build_all_line && build_all_line < inventory_line &&
-    inventory_line < route_line && route_line < output_line)) ||
-    fail "build-integrity splits producer reuse or exposes an unrouted matrix"
+    -n "$raw_inventory_line" ]] ||
+    fail "build-integrity lacks same-tree raw inventory order"
+  ((required_line < build_all_line && build_all_line < raw_inventory_line)) ||
+    fail "build-integrity splits producer reuse or routes before raw capture"
 
   assert_file_contains "$route_script" 'default_consumer_role'
   assert_file_contains "$route_script" 'dedicated_consumer_roles'
-  assert_file_contains "$route_script" '"artifact_role": lock["default_consumer_role"]'
+  assert_file_contains "$route_script" \
+    '"artifact_role": protected["default_consumer_role"]'
+  assert_file_contains "$route_script" 'raw-inventory.manifest.json'
+  assert_file_contains "$route_script" 'routing boundaries overlap'
+  assert_file_contains "$route_script" \
+    'protected control HEAD differs from workflow commit'
+  assert_file_contains "$route_script" 'raw CTest build-smoke inventory is invalid'
   assert_file_contains "$route_lock" '"PublicHeaderSelfContainment"'
   assert_file_contains "$route_lock" '"StaticProductConsumerSmoke"'
   assert_file_contains "$route_lock" '"OpenExrDeepProviderOptionOffSmoke"'
@@ -1148,6 +1207,7 @@ validate_reusable_build_identity_routing() {
   local -a consumers=(
     full-ctest
     build-smoke
+    producer-build-smoke
     scripted-cli
     propagation-script
     plugin-load
@@ -1176,6 +1236,12 @@ validate_reusable_build_identity_routing() {
   assert_file_not_contains "$build_job" 'id-token: write'
   assert_file_not_contains "$build_job" 'actions/attest@'
   assert_file_contains "$verify_job" 'verify-targeted-only'
+  assert_file_contains "$verify_job" 'build_smoke_route.py'
+  assert_file_contains "$verify_job" 'verify-control'
+  assert_file_contains "$verify_job" \
+    'CI_ROUTE_SHA256: ${{ needs.build-smoke-control.outputs.route_sha256 }}'
+  assert_file_contains "$verify_job" 'path: .ci-targeted-verifier-control'
+  assert_file_not_contains "$verify_job" 'run: python3 ci/scripts/build_smoke_route.py'
   assert_file_contains "$verify_job" \
     'for role in ctest-control ctest-runtime installed-package openexr-metadata; do'
   assert_file_not_contains "$attest_job" 'permissions:'
@@ -1185,9 +1251,15 @@ validate_reusable_build_identity_routing() {
   assert_file_contains "$attest_job" \
     "inputs.publish_reusable_attestations &&"
   assert_file_contains "$attest_job" \
+    "needs.build-smoke-control.outputs.route_sha256 != ''"
+  assert_file_contains "$attest_job" \
     'CI-results/targeted-artifacts/**/*.manifest.json'
   assert_file_contains "$ready_job" \
-    'needs: [verify-targeted-artifacts, attest-targeted-artifacts]'
+    'needs: [build-smoke-control, verify-targeted-artifacts, attest-targeted-artifacts]'
+  assert_file_contains "$ready_job" \
+    'CI_ROUTE_CONTROL_RESULT: ${{ needs.build-smoke-control.result }}'
+  assert_file_contains "$ready_job" \
+    'CI_ROUTE_SHA256: ${{ needs.build-smoke-control.outputs.route_sha256 }}'
   assert_file_contains "$ready_job" \
     '[[ "$CI_ATTESTATION_RESULT" == skipped ]]'
 

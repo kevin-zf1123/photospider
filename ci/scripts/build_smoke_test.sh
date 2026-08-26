@@ -7,9 +7,10 @@ set -Eeuo pipefail
 #   CTest-control artifact produced by the shared build tree.
 # @note SMOKE_TEST_NAME is workflow data, not shell or regex source; the Python
 #   runner resolves it to a fresh validated numeric CTest index.
-# @note The producer-local public-header smoke and the dedicated installed-
-#   package consumer are removed from this control matrix by the protected
-#   routing lock; this driver handles only fresh-build control-role smokes.
+# @note The protected fresh routing job may schedule both ordinary control
+#   smokes and the formerly producer-local public-header smoke through this
+#   same role. The candidate build producer never selects or executes either
+#   matrix; dedicated package/OpenEXR roles retain their own runners.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 

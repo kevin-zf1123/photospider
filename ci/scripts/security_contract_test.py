@@ -804,7 +804,21 @@ class ImageManifestContractTest(unittest.TestCase):
     def test_bilingual_docker_reproduction_separates_local_and_provenance(
         self,
     ) -> None:
-        """Keep local solver markers separate from hosted builder provenance."""
+        """Keep local solver sentinels separate from hosted builder provenance.
+
+        Returns:
+            None after both language blocks parse and the real installer accepts
+            only the independent 64/40-hex shapes before its first external
+            architecture command under every available maintained Bash.
+
+        Raises:
+            AssertionError: Documentation, CLI parsing, sentinel shape/order,
+                nonpublication wording, or installer preflight behavior drifts.
+
+        Note:
+            The ``dpkg`` shim stops at the first external boundary; no snapshot,
+            package, Docker, registry, or network operation is performed.
+        """
         english = (REPO_ROOT / "docs/CI/github-actions.md").read_text(
             encoding="utf-8"
         )
@@ -834,7 +848,20 @@ class ImageManifestContractTest(unittest.TestCase):
         self.assertEqual(local, fenced_block(chinese, local_marker))
         self.assertEqual(hosted, fenced_block(chinese, hosted_marker))
         self.assertIn("docker build --no-cache", local)
-        self.assertIn("local-layer-solver-only-not-publishable", local)
+        manifest_match = re.search(
+            r"^local_ci_manifest_sentinel=([0-9a-f]+)$", local, re.MULTILINE
+        )
+        source_match = re.search(
+            r"^local_ci_source_sentinel=([0-9a-f]+)$", local, re.MULTILINE
+        )
+        self.assertIsNotNone(manifest_match)
+        self.assertIsNotNone(source_match)
+        manifest_sentinel = manifest_match.group(1)
+        source_sentinel = source_match.group(1)
+        self.assertRegex(manifest_sentinel, r"^[0-9a-f]{64}$")
+        self.assertRegex(source_sentinel, r"^[0-9a-f]{40}$")
+        self.assertNotEqual(manifest_sentinel, source_sentinel)
+        self.assertNotIn("local-layer-solver-only-not-publishable", local)
         self.assertNotIn("ci_image_manifest.py create", local)
         self.assertLess(
             hosted.index("ci_runner_verify.py"),
@@ -847,15 +874,26 @@ class ImageManifestContractTest(unittest.TestCase):
         self.assertIn(
             '--builder-runner-identity "$builder_runner_identity"', hosted
         )
-        for block in (local, hosted):
-            syntax = subprocess.run(
-                ["/bin/bash", "-n"],
-                input=block,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(syntax.returncode, 0, msg=syntax.stderr)
+        shell_candidates = [Path("/bin/bash")]
+        path_bash = shutil.which("bash")
+        if path_bash is not None:
+            shell_candidates.append(Path(path_bash))
+        shells: list[Path] = []
+        for candidate in shell_candidates:
+            resolved = candidate.resolve()
+            if candidate.is_file() and resolved not in shells:
+                shells.append(resolved)
+        self.assertTrue(shells)
+        for shell in shells:
+            for block in (local, hosted):
+                syntax = subprocess.run(
+                    [str(shell), "-n"],
+                    input=block,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(syntax.returncode, 0, msg=syntax.stderr)
 
         command_start = hosted.index("ci_image_manifest_digest=$(")
         self.assertTrue(hosted.endswith(")"))
@@ -876,6 +914,96 @@ class ImageManifestContractTest(unittest.TestCase):
         self.assertEqual(
             str(parsed.builder_runner_identity), "$builder_runner_identity"
         )
+
+        with tempfile.TemporaryDirectory() as temporary_text:
+            temporary = Path(temporary_text)
+            binary_directory = temporary / "bin"
+            binary_directory.mkdir()
+            dpkg_log = temporary / "dpkg.log"
+            forbidden_log = temporary / "forbidden.log"
+            dpkg = binary_directory / "dpkg"
+            dpkg.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"${CI_TEST_DPKG_LOG:?}\"\n"
+                "exit 73\n",
+                encoding="utf-8",
+            )
+            dpkg.chmod(0o755)
+            for command_name in ("apt-get", "curl", "sed"):
+                command = binary_directory / command_name
+                command.write_text(
+                    "#!/bin/sh\n"
+                    "printf '%s\\n' \"$0 $*\" >> \"${CI_TEST_FORBIDDEN_LOG:?}\"\n"
+                    "exit 79\n",
+                    encoding="utf-8",
+                )
+                command.chmod(0o755)
+            base_environment = {
+                "APT_SNAPSHOT": "20260825T000000Z",
+                "CI_IMAGE_INPUT_MANIFEST_SHA256": manifest_sentinel,
+                "CI_IMAGE_SOURCE_COMMIT": source_sentinel,
+                "CI_TEST_DPKG_LOG": str(dpkg_log),
+                "CI_TEST_FORBIDDEN_LOG": str(forbidden_log),
+                "GH_CLI_AMD64_SHA256": "a" * 64,
+                "GH_CLI_ARM64_SHA256": "b" * 64,
+                "GH_CLI_VERSION": "2.98.0",
+                "PATH": f"{binary_directory}:/usr/bin:/bin",
+                "VENV": "/opt/venv",
+            }
+            invalid_shapes = (
+                (source_sentinel, manifest_sentinel),
+                (
+                    "local-layer-solver-only-not-publishable",
+                    source_sentinel,
+                ),
+                (
+                    manifest_sentinel,
+                    "local-layer-solver-only-not-publishable",
+                ),
+            )
+            for shell in shells:
+                with self.subTest(shell=str(shell)):
+                    dpkg_log.unlink(missing_ok=True)
+                    forbidden_log.unlink(missing_ok=True)
+                    accepted = subprocess.run(
+                        [str(shell), str(SCRIPTS / "ci_image_install.sh")],
+                        cwd=REPO_ROOT,
+                        env={**os.environ, **base_environment},
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        timeout=10,
+                    )
+                    self.assertEqual(accepted.returncode, 73, msg=accepted.stderr)
+                    self.assertEqual(
+                        dpkg_log.read_text(encoding="utf-8"),
+                        "--print-architecture\n",
+                    )
+                    self.assertFalse(forbidden_log.exists())
+                    for invalid_manifest, invalid_source in invalid_shapes:
+                        with self.subTest(
+                            shell=str(shell),
+                            invalid_manifest=invalid_manifest,
+                            invalid_source=invalid_source,
+                        ):
+                            dpkg_log.unlink(missing_ok=True)
+                            rejected_environment = {
+                                **base_environment,
+                                "CI_IMAGE_INPUT_MANIFEST_SHA256": invalid_manifest,
+                                "CI_IMAGE_SOURCE_COMMIT": invalid_source,
+                            }
+                            rejected = subprocess.run(
+                                [str(shell), str(SCRIPTS / "ci_image_install.sh")],
+                                cwd=REPO_ROOT,
+                                env={**os.environ, **rejected_environment},
+                                text=True,
+                                capture_output=True,
+                                check=False,
+                                timeout=10,
+                            )
+                            self.assertNotEqual(rejected.returncode, 0)
+                            self.assertFalse(dpkg_log.exists())
+                            self.assertFalse(forbidden_log.exists())
 
 
 class ImagePromotionContractTest(unittest.TestCase):
@@ -2145,6 +2273,139 @@ class RunnerIdentityContractTest(unittest.TestCase):
                     verified = module.verify(REPO_ROOT, "Linux", "ubuntu-24.04")
                 self.assertEqual(verified["image_version"], version)
                 self.assertEqual(environment.reads, {"ImageOS": 1, "ImageVersion": 1})
+
+    def test_cli_retains_one_lock_snapshot_across_path_replacement(self) -> None:
+        """Bind Linux and Darwin CLI output to one initially opened lock.
+
+        Returns:
+            None after both platform CLIs read once and emit the first lock's
+            uniquely resolved identity despite deterministic pathname swap.
+
+        Raises:
+            AssertionError: The lock reopens, replacement changes selection, or
+                file/stdout output diverges from the retained first object.
+
+        Note:
+            The replacement is another canonical lock that excludes the actual
+            version, so a hidden second read deterministically fails the case.
+        """
+        module = self._module("ci_runner_verify_single_lock_snapshot_test")
+        cases = (
+            (
+                "Linux",
+                "linux-runner-lock.json",
+                "x86_64",
+                "ubuntu24",
+                LINUX_STABLE_VERSION,
+                "ubuntu-24.04",
+            ),
+            (
+                "Darwin",
+                "darwin-runner-lock.json",
+                "arm64",
+                "macos15",
+                DARWIN_STABLE_VERSION,
+                "macos-15",
+            ),
+        )
+        for (
+            platform_name,
+            lock_name,
+            machine,
+            image_os,
+            image_version,
+            runner_label,
+        ) in cases:
+            with self.subTest(platform=platform_name), tempfile.TemporaryDirectory() as text:
+                root = Path(text)
+                lock_dir = root / "ci/locks"
+                lock_dir.mkdir(parents=True)
+                lock_path = lock_dir / lock_name
+                original_path = REPO_ROOT / "ci/locks" / lock_name
+                original = json.loads(original_path.read_text(encoding="utf-8"))
+                lock_path.write_text(
+                    json.dumps(original, sort_keys=True, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                expected = module.resolve_approved_identity_from_lock(
+                    original, platform_name, image_version
+                )
+                replacement = json.loads(json.dumps(original))
+                if platform_name == "Linux":
+                    replacement["approved_image_versions"] = [
+                        "20990101.001.1"
+                    ]
+                else:
+                    replacement["approved_images"] = [
+                        {
+                            "image_version": "20990101.001.1",
+                            "vcpkg_commit": "f" * 40,
+                        }
+                    ]
+                replacement_path = root / f"replacement-{lock_name}"
+                replacement_path.write_text(
+                    json.dumps(replacement, sort_keys=True, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                real_reader = module._read_regular_bytes
+                lock_reads = 0
+                resolved_lock_path = lock_path.resolve()
+
+                def replace_after_first_read(path: Path) -> bytes:
+                    """Replace the pathname after returning its first bytes."""
+                    nonlocal lock_reads
+                    content = real_reader(path)
+                    if Path(path).resolve() == resolved_lock_path:
+                        lock_reads += 1
+                        if lock_reads == 1:
+                            os.replace(replacement_path, lock_path)
+                    return content
+
+                class CapturedStdout:
+                    """Expose only the binary buffer used by production main."""
+
+                    def __init__(self) -> None:
+                        self.buffer = io.BytesIO()
+
+                output = root / "retained-runner.json"
+                captured = CapturedStdout()
+                with (
+                    mock.patch.object(
+                        module, "_read_regular_bytes", replace_after_first_read
+                    ),
+                    mock.patch.object(
+                        module.platform, "system", return_value=platform_name
+                    ),
+                    mock.patch.object(
+                        module.platform, "machine", return_value=machine
+                    ),
+                    mock.patch.dict(
+                        module.os.environ,
+                        {"ImageOS": image_os, "ImageVersion": image_version},
+                        clear=False,
+                    ),
+                    mock.patch.object(
+                        module.sys,
+                        "argv",
+                        [
+                            "ci_runner_verify.py",
+                            "--repo-root",
+                            str(root),
+                            "--platform",
+                            platform_name,
+                            "--runner-label",
+                            runner_label,
+                            "--output",
+                            str(output),
+                        ],
+                    ),
+                    mock.patch.object(module.sys, "stdout", captured),
+                ):
+                    self.assertEqual(module.main(), 0)
+                expected_bytes = module.canonical_identity_bytes(expected)
+                self.assertEqual(lock_reads, 1)
+                self.assertEqual(output.read_bytes(), expected_bytes)
+                self.assertEqual(captured.buffer.getvalue(), expected_bytes)
 
     def test_linux_runtime_and_unknown_version_fail_closed(self) -> None:
         """Reject unknown version, OS, architecture, platform, and runner label."""
@@ -3430,15 +3691,536 @@ class SecurityPlatformContractTest(unittest.TestCase):
 class BuildSmokeRoutingContractTest(unittest.TestCase):
     """Validate disjoint producer, control, and dedicated smoke routing."""
 
+    @staticmethod
+    def _write_raw_route_bundle(
+        raw_directory: Path,
+        ctest_payload: bytes,
+        *,
+        candidate_commit: str,
+    ) -> str:
+        """Write one canonical producer envelope around raw CTest/profile bytes.
+
+        Args:
+            raw_directory: Fresh directory owned by the isolated producer
+                fixture.
+            ctest_payload: Exact bytes returned by the real CTest JSON query.
+            candidate_commit: Exact temporary candidate ``HEAD`` identity.
+
+        Returns:
+            Matrix digest emitted by the complete versioned profile fixture.
+
+        Note:
+            The fixture deliberately creates only producer-owned raw bytes. It
+            does not import or execute the candidate's routing helper or lock.
+        """
+        raw_directory.mkdir()
+        (raw_directory / "ctest-info-v1.json").write_bytes(ctest_payload)
+        matrix_digest = ProfileReaderContractTest._write_complete_versioned_identity(
+            raw_directory
+        )
+        records = []
+        for name in sorted(
+            (
+                "build_profile_matrix_v1.tsv",
+                "build_profile_matrix_v1.tsv.sha256",
+                "ci_security_roles_v1.tsv",
+                "ctest-info-v1.json",
+            )
+        ):
+            content = (raw_directory / name).read_bytes()
+            records.append(
+                {
+                    "path": name,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size": len(content),
+                }
+            )
+        manifest = {
+            "candidate_commit": candidate_commit,
+            "files": records,
+            "image_digest": IMAGE_DIGEST,
+            "profile": "default",
+            "schema": "photospider-build-smoke-raw-inventory-v1",
+            "workflow_commit": COMMIT_A,
+        }
+        (raw_directory / "raw-inventory.manifest.json").write_text(
+            json.dumps(
+                manifest,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return matrix_digest
+
+    @staticmethod
+    def _run_protected_control(
+        candidate_root: Path,
+        candidate_commit: str,
+        raw_directory: Path,
+        output_directory: Path,
+        github_output: Path,
+        *,
+        expect_success: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        """Execute the real protected control CLI against disjoint fixture roots.
+
+        Args:
+            candidate_root: Isolated Git checkout whose code is not executed.
+            candidate_commit: Exact candidate ``HEAD`` identity.
+            raw_directory: Separate untrusted producer-envelope directory.
+            output_directory: Fresh protected-control output path.
+            github_output: Existing regular step-output fixture.
+            expect_success: Whether ``run_command`` requires zero or nonzero.
+
+        Returns:
+            Captured completed process after expectation enforcement.
+
+        Raises:
+            AssertionError: The process result differs from ``expect_success``.
+
+        Note:
+            The protected helper and lock always come from ``REPO_ROOT`` at
+            ``COMMIT_A``; no candidate pathname can select the evaluator.
+        """
+        return run_command(
+            sys.executable,
+            SCRIPTS / "build_smoke_route.py",
+            "control",
+            "--raw-dir",
+            raw_directory,
+            "--candidate-root",
+            candidate_root,
+            "--control-root",
+            REPO_ROOT,
+            "--output-dir",
+            output_directory,
+            "--candidate-commit",
+            candidate_commit,
+            "--workflow-commit",
+            COMMIT_A,
+            "--image-digest",
+            IMAGE_DIGEST,
+            "--profile",
+            "default",
+            "--github-output",
+            github_output,
+            expect_success=expect_success,
+        )
+
+    def test_fresh_protected_control_ignores_candidate_route_tampering(self) -> None:
+        """Derive routes from real CTest bytes after candidate CMake tampers helpers.
+
+        Returns:
+            None after the real protected CLI creates and verifies the four
+            canonical route partitions.
+
+        Raises:
+            AssertionError: Candidate CMake cannot generate the raw inventory,
+                candidate route code executes, or protected control identity,
+                coverage, output, or verification differs.
+        """
+        with tempfile.TemporaryDirectory() as temporary_text:
+            temporary = Path(temporary_text)
+            candidate = temporary / "candidate"
+            build = temporary / "candidate-build"
+            raw = temporary / "raw-inventory"
+            output = temporary / "protected-output"
+            marker = temporary / "candidate-route-executed"
+            candidate.mkdir()
+            (candidate / "ci/scripts").mkdir(parents=True)
+            (candidate / "ci/locks").mkdir(parents=True)
+            candidate_helper = candidate / "ci/scripts/build_smoke_route.py"
+            candidate_lock = candidate / "ci/locks/build-smoke-routing.json"
+            candidate_helper.write_text("# committed placeholder\n", encoding="utf-8")
+            candidate_lock.write_text("{}\n", encoding="utf-8")
+            test_names = (
+                "DependencyDisabledInstallSmoke",
+                "OpenExrDeepProviderOptionOffSmoke",
+                "PublicHeaderSelfContainment",
+                "StaticProductConsumerSmoke",
+            )
+            registrations = "\n".join(
+                f"add_test(NAME {name} COMMAND \"${{CMAKE_COMMAND}}\" -E true)\n"
+                f"set_tests_properties({name} PROPERTIES LABELS build-smoke)"
+                for name in test_names
+            )
+            candidate_helper_text = (
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('executed\\n', encoding='utf-8')\n"
+                "raise SystemExit(97)\n"
+            )
+            cmake_source = (
+                "cmake_minimum_required(VERSION 3.16)\n"
+                "project(protected_route_fixture LANGUAGES NONE)\n"
+                "enable_testing()\n"
+                f"file(WRITE \"${{CMAKE_SOURCE_DIR}}/ci/scripts/build_smoke_route.py\" [==[{candidate_helper_text}]==])\n"
+                "file(WRITE \"${CMAKE_SOURCE_DIR}/ci/locks/build-smoke-routing.json\" \"{\\\"schema\\\":\\\"candidate-owned-invalid\\\"}\\n\")\n"
+                f"{registrations}\n"
+            )
+            (candidate / "CMakeLists.txt").write_text(
+                cmake_source, encoding="utf-8"
+            )
+            run_command("git", "init", "-q", candidate)
+            run_command("git", "-C", candidate, "config", "user.name", "CI Test")
+            run_command(
+                "git",
+                "-C",
+                candidate,
+                "config",
+                "user.email",
+                "ci-test@example.invalid",
+            )
+            run_command("git", "-C", candidate, "add", ".")
+            run_command(
+                "git", "-C", candidate, "commit", "-q", "-m", "fixture"
+            )
+            candidate_commit = run_command(
+                "git", "-C", candidate, "rev-parse", "HEAD"
+            ).stdout.strip()
+
+            run_command("cmake", "-S", candidate, "-B", build)
+            self.assertIn("candidate-owned-invalid", candidate_lock.read_text())
+            self.assertIn("candidate-route-executed", candidate_helper.read_text())
+            ctest = run_command(
+                "ctest", "--test-dir", build, "--show-only=json-v1"
+            )
+            matrix_digest = self._write_raw_route_bundle(
+                raw,
+                ctest.stdout.encode("utf-8"),
+                candidate_commit=candidate_commit,
+            )
+            github_output = temporary / "github-output"
+            github_output.write_text("", encoding="utf-8")
+            self._run_protected_control(
+                candidate,
+                candidate_commit,
+                raw,
+                output,
+                github_output,
+                expect_success=True,
+            )
+            self.assertFalse(marker.exists())
+            emitted = dict(
+                line.split("=", 1)
+                for line in github_output.read_text(encoding="utf-8").splitlines()
+            )
+            self.assertEqual(emitted["matrix_sha256"], matrix_digest)
+            self.assertEqual(
+                set(emitted),
+                {
+                    "build_smoke_matrix",
+                    "dedicated_build_smoke_matrix",
+                    "matrix_sha256",
+                    "openexr_build_smoke_matrix",
+                    "producer_build_smoke_matrix",
+                    "route_sha256",
+                },
+            )
+            routed_names = {
+                entry["test"]
+                for key in (
+                    "build_smoke_matrix",
+                    "dedicated_build_smoke_matrix",
+                    "openexr_build_smoke_matrix",
+                    "producer_build_smoke_matrix",
+                )
+                for entry in json.loads(emitted[key])["include"]
+            }
+            self.assertEqual(routed_names, set(test_names))
+            run_command(
+                sys.executable,
+                SCRIPTS / "build_smoke_route.py",
+                "verify-control",
+                "--manifest",
+                output / "build-smoke-control.manifest.json",
+                "--route-sha256",
+                emitted["route_sha256"],
+                "--candidate-commit",
+                candidate_commit,
+                "--workflow-commit",
+                COMMIT_A,
+                "--image-digest",
+                IMAGE_DIGEST,
+                "--profile",
+                "default",
+                "--matrix-sha256",
+                matrix_digest,
+            )
+            producer_source = (SCRIPTS / "build_integrity.sh").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("build_smoke_route.py", producer_source)
+            self.assertNotIn("build-smoke-routing.json", producer_source)
+            self.assertNotIn("build_smoke_inventory.py", producer_source)
+
+    def test_fresh_control_fails_before_outputs_on_raw_inventory_drift(self) -> None:
+        """Reject raw coverage, identity, matrix, member, and path-boundary drift.
+
+        Returns:
+            None after every malformed bundle leaves GitHub output unchanged
+            and no canonical route manifest/matrix is created.
+
+        Raises:
+            AssertionError: A missing, duplicate, relabelled, undeclared,
+                identity-forged, matrix-stale, or overlapping input reaches a
+                route output.
+
+        Note:
+            The fixture uses a real temporary Git checkout while keeping all
+            failure cases before artifact attestation or candidate execution.
+        """
+        base_tests = [
+            {
+                "backtrace": 1,
+                "command": ["/usr/bin/true"],
+                "name": name,
+                "properties": [{"name": "LABELS", "value": ["build-smoke"]}],
+            }
+            for name in (
+                "DependencyDisabledInstallSmoke",
+                "OpenExrDeepProviderOptionOffSmoke",
+                "PublicHeaderSelfContainment",
+                "StaticProductConsumerSmoke",
+            )
+        ]
+        with tempfile.TemporaryDirectory() as temporary_text:
+            temporary = Path(temporary_text)
+            candidate = temporary / "candidate"
+            candidate.mkdir()
+            run_command("git", "init", "-q", candidate)
+            run_command("git", "-C", candidate, "config", "user.name", "CI Test")
+            run_command(
+                "git",
+                "-C",
+                candidate,
+                "config",
+                "user.email",
+                "ci-test@example.invalid",
+            )
+            (candidate / "README").write_text("fixture\n", encoding="utf-8")
+            run_command("git", "-C", candidate, "add", "README")
+            run_command("git", "-C", candidate, "commit", "-q", "-m", "fixture")
+            candidate_commit = run_command(
+                "git", "-C", candidate, "rev-parse", "HEAD"
+            ).stdout.strip()
+            cases = {
+                "missing-locked-smoke": base_tests[:-1],
+                "duplicate-locked-smoke": base_tests + [dict(base_tests[-1])],
+                "forged-label": [
+                    *base_tests[:-1],
+                    {
+                        **base_tests[-1],
+                        "properties": [{"name": "LABELS", "value": ["ordinary"]}],
+                    },
+                ],
+            }
+            for label, tests in cases.items():
+                with self.subTest(case=label):
+                    raw = temporary / f"raw-{label}"
+                    output = temporary / f"output-{label}"
+                    github_output = temporary / f"github-output-{label}"
+                    github_output.write_text("sentinel\n", encoding="utf-8")
+                    payload = {
+                        "backtraceGraph": {"commands": [], "files": [], "nodes": []},
+                        "kind": "ctestInfo",
+                        "tests": tests,
+                        "version": {"major": 1, "minor": 0},
+                    }
+                    self._write_raw_route_bundle(
+                        raw,
+                        (json.dumps(payload) + "\n").encode("utf-8"),
+                        candidate_commit=candidate_commit,
+                    )
+                    self._run_protected_control(
+                        candidate,
+                        candidate_commit,
+                        raw,
+                        output,
+                        github_output,
+                        expect_success=False,
+                    )
+                    self.assertFalse(
+                        (output / "build-smoke-control.manifest.json").exists()
+                    )
+                    self.assertFalse(
+                        (output / "build_smoke_matrix.txt").exists()
+                    )
+                    self.assertEqual(
+                        github_output.read_text(encoding="utf-8"), "sentinel\n"
+                    )
+
+            raw = temporary / "raw-undeclared"
+            self._write_raw_route_bundle(
+                raw,
+                (json.dumps(
+                    {
+                        "backtraceGraph": {"commands": [], "files": [], "nodes": []},
+                        "kind": "ctestInfo",
+                        "tests": base_tests,
+                        "version": {"major": 1, "minor": 0},
+                    }
+                ) + "\n").encode("utf-8"),
+                candidate_commit=candidate_commit,
+            )
+            (raw / "candidate-route.py").write_text("untrusted\n", encoding="utf-8")
+            github_output = temporary / "github-output-undeclared"
+            github_output.write_text("sentinel\n", encoding="utf-8")
+            self._run_protected_control(
+                candidate,
+                candidate_commit,
+                raw,
+                temporary / "output-undeclared",
+                github_output,
+                expect_success=False,
+            )
+            self.assertEqual(github_output.read_text(encoding="utf-8"), "sentinel\n")
+
+            valid_payload = (
+                json.dumps(
+                    {
+                        "backtraceGraph": {
+                            "commands": [],
+                            "files": [],
+                            "nodes": [],
+                        },
+                        "kind": "ctestInfo",
+                        "tests": base_tests,
+                        "version": {"major": 1, "minor": 0},
+                    }
+                )
+                + "\n"
+            ).encode("utf-8")
+            identity_cases = (
+                ("candidate-identity", "candidate_commit", COMMIT_B),
+                ("workflow-identity", "workflow_commit", COMMIT_B),
+                ("image-identity", "image_digest", "sha256:" + "5" * 64),
+            )
+            for label, field, forged_value in identity_cases:
+                with self.subTest(raw_identity_drift=label):
+                    raw = temporary / f"raw-{label}"
+                    self._write_raw_route_bundle(
+                        raw,
+                        valid_payload,
+                        candidate_commit=candidate_commit,
+                    )
+                    manifest_path = raw / "raw-inventory.manifest.json"
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    manifest[field] = forged_value
+                    manifest_path.write_text(
+                        json.dumps(
+                            manifest,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=True,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    github_output = temporary / f"github-output-{label}"
+                    github_output.write_text("sentinel\n", encoding="utf-8")
+                    self._run_protected_control(
+                        candidate,
+                        candidate_commit,
+                        raw,
+                        temporary / f"output-{label}",
+                        github_output,
+                        expect_success=False,
+                    )
+                    self.assertEqual(
+                        github_output.read_text(encoding="utf-8"), "sentinel\n"
+                    )
+
+            raw = temporary / "raw-matrix-digest"
+            self._write_raw_route_bundle(
+                raw,
+                valid_payload,
+                candidate_commit=candidate_commit,
+            )
+            sidecar = raw / "build_profile_matrix_v1.tsv.sha256"
+            sidecar.write_text(
+                f"{'6' * 64}  build_profile_matrix_v1.tsv\n", encoding="utf-8"
+            )
+            manifest_path = raw / "raw-inventory.manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for record in manifest["files"]:
+                if record["path"] == sidecar.name:
+                    content = sidecar.read_bytes()
+                    record["sha256"] = hashlib.sha256(content).hexdigest()
+                    record["size"] = len(content)
+            manifest_path.write_text(
+                json.dumps(
+                    manifest,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            github_output = temporary / "github-output-matrix-digest"
+            github_output.write_text("sentinel\n", encoding="utf-8")
+            self._run_protected_control(
+                candidate,
+                candidate_commit,
+                raw,
+                temporary / "output-matrix-digest",
+                github_output,
+                expect_success=False,
+            )
+            self.assertEqual(github_output.read_text(encoding="utf-8"), "sentinel\n")
+
+            overlap_output = temporary / "github-output-overlap"
+            overlap_output.write_text("sentinel\n", encoding="utf-8")
+            overlapped = run_command(
+                sys.executable,
+                SCRIPTS / "build_smoke_route.py",
+                "control",
+                "--raw-dir",
+                candidate,
+                "--candidate-root",
+                candidate,
+                "--control-root",
+                REPO_ROOT,
+                "--output-dir",
+                temporary / "output-overlap",
+                "--candidate-commit",
+                candidate_commit,
+                "--workflow-commit",
+                COMMIT_A,
+                "--image-digest",
+                IMAGE_DIGEST,
+                "--profile",
+                "default",
+                "--github-output",
+                overlap_output,
+                expect_success=False,
+            )
+            self.assertIn("routing boundaries overlap", overlapped.stderr)
+            self.assertEqual(
+                overlap_output.read_text(encoding="utf-8"), "sentinel\n"
+            )
+
     def test_current_main_routing_is_complete_and_role_explicit(self) -> None:
-        """Route all four partitions once and reject a missing locked entry."""
+        """Route all four partitions once and reject a missing locked entry.
+
+        Returns:
+            None after exact role matrices match the reviewed lock.
+
+        Raises:
+            AssertionError: A route overlaps, changes role, or a locked smoke
+                can disappear without fail-closed rejection.
+
+        Note:
+            This low-level partition test complements the real fresh-control
+            workflow fixture without creating any GitHub output.
+        """
         with tempfile.TemporaryDirectory() as temporary_text:
             root = Path(temporary_text)
             matrix = root / "matrix.json"
-            consumers = root / "consumers.json"
-            dedicated = root / "dedicated.json"
-            openexr = root / "openexr.json"
-            producers = root / "producers.z"
             entries = [
                 {"artifact": "dependency-disabled", "test": "DependencyDisabledInstallSmoke"},
                 {
@@ -3452,16 +4234,17 @@ class BuildSmokeRoutingContractTest(unittest.TestCase):
                 json.dumps({"include": entries}, sort_keys=True, separators=(",", ":")) + "\n",
                 encoding="utf-8",
             )
-            run_command(
-                sys.executable, SCRIPTS / "build_smoke_route.py",
-                "--matrix", matrix,
-                "--lock", REPO_ROOT / "ci/locks/build-smoke-routing.json",
-                "--consumer-matrix", consumers,
-                "--dedicated-matrix", dedicated,
-                "--openexr-matrix", openexr,
-                "--producer-names", producers,
+            module_path = SCRIPTS / "build_smoke_route.py"
+            specification = importlib.util.spec_from_file_location(
+                "build_smoke_route_partition_test", module_path
             )
-            routed = json.loads(consumers.read_text(encoding="utf-8"))
+            self.assertIsNotNone(specification)
+            self.assertIsNotNone(specification.loader)
+            module = importlib.util.module_from_spec(specification)
+            specification.loader.exec_module(module)
+            routed, dedicated, openexr, producer = module.route(
+                matrix, REPO_ROOT / "ci/locks/build-smoke-routing.json"
+            )
             self.assertEqual(
                 routed,
                 {
@@ -3475,11 +4258,19 @@ class BuildSmokeRoutingContractTest(unittest.TestCase):
                 },
             )
             self.assertEqual(
-                producers.read_bytes(),
-                b"PublicHeaderSelfContainment\0",
+                producer,
+                {
+                    "include": [
+                        {
+                            "artifact": "public-header",
+                            "artifact_role": "ctest-control",
+                            "test": "PublicHeaderSelfContainment",
+                        }
+                    ]
+                },
             )
             self.assertEqual(
-                json.loads(dedicated.read_text(encoding="utf-8")),
+                dedicated,
                 {
                     "include": [
                         {
@@ -3491,7 +4282,7 @@ class BuildSmokeRoutingContractTest(unittest.TestCase):
                 },
             )
             self.assertEqual(
-                json.loads(openexr.read_text(encoding="utf-8")),
+                openexr,
                 {
                     "include": [
                         {
@@ -3507,17 +4298,11 @@ class BuildSmokeRoutingContractTest(unittest.TestCase):
                 json.dumps({"include": entries[:-1]}, sort_keys=True, separators=(",", ":")) + "\n",
                 encoding="utf-8",
             )
-            failed = run_command(
-                sys.executable, SCRIPTS / "build_smoke_route.py",
-                "--matrix", matrix,
-                "--lock", REPO_ROOT / "ci/locks/build-smoke-routing.json",
-                "--consumer-matrix", consumers,
-                "--dedicated-matrix", dedicated,
-                "--openexr-matrix", openexr,
-                "--producer-names", producers,
-                expect_success=False,
-            )
-            self.assertIn("installed-package tests differ", failed.stderr)
+            with self.assertRaises(module.RoutingError) as raised:
+                module.route(
+                    matrix, REPO_ROOT / "ci/locks/build-smoke-routing.json"
+                )
+            self.assertIn("installed-package tests differ", str(raised.exception))
 
     def test_openexr_metadata_runner_replays_the_exact_source_driver_boundary(self) -> None:
         """Pass only cache metadata and the locked option-off identity to Python."""
@@ -5088,6 +5873,7 @@ class IntegrationSuiteGateContractTest(unittest.TestCase):
                 ),
                 "CI_IMAGE_DIGEST": IMAGE_DIGEST,
                 "CI_PUBLISH_REUSABLE_ATTESTATIONS": publish,
+                "CI_ROUTE_SHA256": "4" * 64,
             }
         )
         return environment
@@ -5401,6 +6187,30 @@ class LockSurfaceContractTest(unittest.TestCase):
                 "caller published-image-integration-trusted permissions differ",
             ),
             (
+                "readonly-selects-control-commit",
+                "caller",
+                "published-image-integration-readonly",
+                "      workflow_commit: ${{ github.workflow_sha }}\n",
+                "      workflow_commit: ${{ github.sha }}\n",
+                "caller published-image-integration-readonly can select its control commit",
+            ),
+            (
+                "trusted-selects-control-commit",
+                "caller",
+                "published-image-integration-trusted",
+                "      workflow_commit: ${{ github.workflow_sha }}\n",
+                "      workflow_commit: ${{ github.sha }}\n",
+                "caller published-image-integration-trusted can select its control commit",
+            ),
+            (
+                "candidate-selects-control-commit",
+                "caller",
+                "candidate-image-integration",
+                "      workflow_commit: ${{ github.workflow_sha }}\n",
+                "      workflow_commit: ${{ github.sha }}\n",
+                "caller candidate-image-integration can select its control commit",
+            ),
+            (
                 "execution-inherits",
                 "shared",
                 "identity-preflight",
@@ -5463,6 +6273,116 @@ class LockSurfaceContractTest(unittest.TestCase):
                 )
                 with self.assertRaises(module.ContractError) as raised:
                     module._verify_reusable_workflow_permissions(root)
+                self.assertIn(diagnostic, str(raised.exception))
+
+    def test_protected_build_smoke_control_rejects_authority_drift(self) -> None:
+        """Reject checkout, path, program, matrix, digest, and attestation drift.
+
+        Returns:
+            None after every isolated workflow mutation is rejected by the real
+            structured protected-control verifier.
+
+        Raises:
+            AssertionError: A candidate-selected commit, overlapping path,
+                wrong artifact, extra candidate command, producer routing,
+                producer matrix, missing route digest, or unbound attestation
+                satisfies the contract.
+
+        Note:
+            Each fixture copies only the workflow and protected action lock;
+            no candidate code, action, or external service executes.
+        """
+        module = self._load_lock_module()
+        module._verify_build_smoke_control_authority(REPO_ROOT)
+        workflow_path = REPO_ROOT / ".github/workflows/ci-integration-suite.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        cases = (
+            (
+                "candidate-selects-control-commit",
+                "build-smoke-control",
+                "          ref: ${{ inputs.workflow_commit }}\n",
+                "          ref: ${{ inputs.candidate_commit }}\n",
+                "protected control/candidate/raw checkout mapping differs",
+            ),
+            (
+                "control-candidate-path-overlap",
+                "build-smoke-control",
+                "          path: .ci-route-candidate-source\n",
+                "          path: .ci-protected-route-control\n",
+                "protected control/candidate/raw checkout mapping differs",
+            ),
+            (
+                "wrong-raw-artifact",
+                "build-smoke-control",
+                "          name: ci-build-smoke-raw-default\n",
+                "          name: ci-control-default\n",
+                "protected control/candidate/raw checkout mapping differs",
+            ),
+            (
+                "candidate-command-before-control",
+                "build-smoke-control",
+                "          set -Eeuo pipefail\n",
+                (
+                    "          set -Eeuo pipefail\n"
+                    "          python3 .ci-route-candidate-source/ci/scripts/"
+                    "build_smoke_route.py\n"
+                ),
+                "protected route program identity differs",
+            ),
+            (
+                "producer-routes-after-cmake",
+                "build-integrity-default",
+                "          set -Eeuo pipefail\n          python3 - <<'PY'\n",
+                (
+                    "          set -Eeuo pipefail\n"
+                    "          python3 ci/scripts/build_smoke_route.py\n"
+                    "          python3 - <<'PY'\n"
+                ),
+                "raw inventory producer program identity differs",
+            ),
+            (
+                "consumer-trusts-producer-matrix",
+                "build-smoke",
+                "needs.build-smoke-control.outputs.build_smoke_matrix",
+                "needs.build-integrity-default.outputs.build_smoke_matrix",
+                "build-smoke matrix authority differs",
+            ),
+            (
+                "consumer-omits-route-digest",
+                "producer-build-smoke",
+                "      needs.build-smoke-control.outputs.route_sha256 != '' &&\n",
+                "",
+                "producer-build-smoke route digest is unbound",
+            ),
+            (
+                "attestation-omits-route-digest",
+                "attest-targeted-artifacts",
+                "        needs.build-smoke-control.outputs.route_sha256 != '' &&\n",
+                "",
+                "artifact attestation omits route digest",
+            ),
+        )
+        for label, job_name, original, replacement, diagnostic in cases:
+            with self.subTest(
+                protected_route_drift=label
+            ), tempfile.TemporaryDirectory() as temporary_text:
+                root = Path(temporary_text)
+                workflow_root = root / ".github/workflows"
+                workflow_root.mkdir(parents=True)
+                lock_root = root / "ci/locks"
+                lock_root.mkdir(parents=True)
+                shutil.copy2(
+                    REPO_ROOT / "ci/locks/actions.lock",
+                    lock_root / "actions.lock",
+                )
+                mutated = self._replace_workflow_job_fragment(
+                    workflow, job_name, original, replacement
+                )
+                (workflow_root / "ci-integration-suite.yml").write_text(
+                    mutated, encoding="utf-8"
+                )
+                with self.assertRaises(module.ContractError) as raised:
+                    module._verify_build_smoke_control_authority(root)
                 self.assertIn(diagnostic, str(raised.exception))
 
     def test_ci_image_producer_complete_mapping_rejects_every_drift(self) -> None:
@@ -6469,6 +7389,33 @@ class LockSurfaceContractTest(unittest.TestCase):
                 "missing-gate-dependency",
                 "suite-gate",
                 "      - fuzz-codecs-darwin\n",
+                "",
+                "suite-gate complete job mapping differs",
+            ),
+            (
+                "missing-protected-control-dependency",
+                "suite-gate",
+                "      - build-smoke-control\n",
+                "",
+                "suite-gate complete job mapping differs",
+            ),
+            (
+                "missing-producer-smoke-result",
+                "suite-gate",
+                (
+                    "          CI_PRODUCER_BUILD_SMOKE_RESULT: "
+                    "${{ needs.producer-build-smoke.result }}\n"
+                ),
+                "",
+                "suite-gate complete job mapping differs",
+            ),
+            (
+                "missing-route-digest-result",
+                "suite-gate",
+                (
+                    "          CI_ROUTE_SHA256: "
+                    "${{ needs.build-smoke-control.outputs.route_sha256 }}\n"
+                ),
                 "",
                 "suite-gate complete job mapping differs",
             ),

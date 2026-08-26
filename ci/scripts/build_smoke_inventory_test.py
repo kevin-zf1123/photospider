@@ -335,6 +335,14 @@ class InventoryParsingTest(unittest.TestCase):
 
         with self.assertRaisesRegex(inventory_module.InventoryError, "not valid JSON"):
             inventory_module.parse_inventory(b"{")
+        duplicate_member = (
+            b'{"kind":"ctestInfo","kind":"ctestInfo","tests":[],'
+            b'"version":{"major":1,"minor":0}}'
+        )
+        with self.assertRaisesRegex(
+            inventory_module.InventoryError, "repeats JSON member"
+        ):
+            inventory_module.parse_inventory(duplicate_member)
         wrong_kind = json.dumps(
             {
                 "kind": "cmakeFiles",

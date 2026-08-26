@@ -343,19 +343,27 @@ tree，并要求三个
 CTest 会保留每个带标签测试的注册，供本机直接运行。CI 的 `full-ctest` 分片会排除该精确标签；
 配置规划只会把 `ctest --show-only=json-v1` 解析为允许空集合的预检，因为默认
 `gtest_discover_tests` entry 此时可能仍是未带标签的 `_NOT_BUILT` 占位项。完整 default build
-结束后，build-integrity 会以严格模式再次查询，并为每个带标签测试发布一个独立 matrix job。因此，
-新增长期 build smoke 只需要注册 CTest 并添加相同 label，不需要修改 workflow 中的测试名。
-Preflight 会对 malformed inventory、duplicate、非法 label 形状或 disabled/commandless 的带标签
-entry fail closed，但不会因空 selection 失败；构建后权威查询还会拒绝空 label set。执行前 runner
-会重新查询 inventory；所选名称 absent、duplicate、disabled、commandless 或不再带标签时都会被
-拒绝。完成该精确 label 校验后，它只使用经过校验的 CTest 数字索引选择测试，因此任意测试名字符
-都不会被 shell 或 regular expression 解释。
+结束后，build-integrity 只捕获 raw JSON，不把它解释为 routing，也不发布任何 matrix。Fresh
+`build-smoke-control` job 会 checkout 精确受保护 `workflow_commit`，让该 control tree 与不执行代码的
+candidate checkout、下载的 untrusted raw envelope 两两隔离，并且只用受保护 parser 与 routing lock
+为每个带标签测试发布独立 downstream matrix item。因此，新增长期 build smoke 只需要注册 CTest 并
+添加相同 label，不需要修改 workflow 中的测试名。Preflight 会对 malformed inventory、duplicate、
+非法 label 形状或 disabled/commandless 的带标签 entry fail closed，但不会因空 selection 失败；
+protected 构建后 control 还会拒绝这些状态与空 label set。执行前 runner 会重新查询 inventory；所选
+名称 absent、duplicate、disabled、commandless 或不再带标签时都会被拒绝。完成该精确 label 校验后，
+它只使用经过校验的 CTest 数字索引选择测试，因此任意测试名字符都不会被 shell 或 regular
+expression 解释。
 
 Published image 与 candidate image 调用同一个 digest-bound reusable DAG。Producer 会在同一 tree
-中依次运行 `build_required_targets` 与 `build_all`，随后只在本地执行
-`PublicHeaderSelfContainment`。其受保护 routing lock 会输出四个两两不重叠且穷尽 inventory 的
-结果：默认 `ctest-control` smoke、专用 `StaticProductConsumerSmoke: installed-package` matrix、精确
-`OpenExrDeepProviderOptionOffSmoke: openexr-metadata` matrix，以及 producer-local 名称。OpenEXR role
+中依次运行 `build_required_targets` 与 `build_all`，随后只上传严格 raw CTest/profile/role envelope
+和 role artifact。Candidate CMake 运行后，它不会 import、执行或授权 candidate route helper/lock，
+不会在本地执行 `PublicHeaderSelfContainment`，也不输出 consumer matrix。Fresh protected control 会
+输出四个两两不重叠且穷尽 inventory 的下游结果：默认 `ctest-control` smoke、专用
+`StaticProductConsumerSmoke: installed-package` matrix、精确
+`OpenExrDeepProviderOptionOffSmoke: openexr-metadata` matrix，以及 producer-designated
+`PublicHeaderSelfContainment: ctest-control` matrix。它还会输出一个 canonical route digest；每个
+consumer、artifact verification/attestation path、readiness check 与 suite gate 都必须依赖该 digest。
+OpenEXR role
 只包含 producer `CMakeCache.txt`；专用 runner 使用原注册中缓存的工具与架构参数直接调用维护中的
 source driver，不携带 CTest graph、generated inventory、stamp、object 或 product library。只有
 producer 被跳过时，空 include fallback 才用于保持 `fromJSON` 可解析；成功 producer 不能发布空或
@@ -2854,10 +2862,12 @@ status。因此 lock 读取或 `git diff` 失败时，镜像检测或 healthchec
   published-image workspace-trust step、精确且不含通配符的 global `safe.directory`、只读 HEAD
   校验，以及 checkout < trust < fetch/healthcheck 的顺序；校验 published/local job-scoped
   pull-request 精确 base、`CI/**` 累计 main 顺序、三路 `CI_BASE_REF` 精确源码路由、
-  允许空集合的配置期预检、严格构建后 matrix job output、对空 output 安全的 `fromJSON`、
-  `ctest-control`、`openexr-metadata`、专用 static `installed-package` 与 producer-local
-  四分区之间两两不重叠且穷尽的 build-smoke 路由、role-specific artifact、完整 shared-suite
-  gate 聚合、对串行 `integration_suite.sh` fallback 的明确拒绝、架构中性 `execution-repeat`
+  允许空集合的配置期预检、只输出 raw input 的 candidate producer、互不重叠的
+  control/candidate/raw path 与 fresh exact-commit protected-control checkout、对空 output 安全的
+  `fromJSON`、普通 `ctest-control`、`openexr-metadata`、专用 static `installed-package` 与
+  producer-designated `ctest-control` 四个下游分区之间两两不重叠且穷尽的 build-smoke 路由、
+  role-specific artifact、绑定 route digest 的 verification/attestation、完整 shared-suite gate 聚合、
+  对串行 `integration_suite.sh` fallback 的明确拒绝、架构中性 `execution-repeat`
   路由、含换行路径 artifact，以及 detector/reader/producer 失败传播。测试会在隔离 HOME/仓库中
   执行 production
   trust block，并要求所得 global trust 清单只包含该仓库；同时还会执行两份 production
@@ -2875,8 +2885,12 @@ status。因此 lock 读取或 `git diff` 失败时，镜像检测或 healthchec
   并证明具备完整 capability 的 build 会用 canonical path 覆盖 inherited trust value。
 - `ci/scripts/integration_plan.sh`：执行允许空集合的精确 label 配置期预检，不输出权威 matrix。
 - `ci/scripts/build_integrity.sh`：构建 default producer profile，包括运行时契约检测、架构中性
-  required-target/full build、严格构建后带标签 CTest inventory 校验、普通 runtime closure 生成，
-  以及两两不重叠的 control/installed-package/OpenEXR-metadata/producer-local matrix output。
+  required-target/full build、未经解释的构建后 CTest 捕获、普通 runtime closure 生成与 fresh
+  installed-package input。它不输出 routing matrix，也不会在 candidate configure 后运行 route helper
+  或 lock。
+- `ci/scripts/build_smoke_route.py`：从精确 protected control checkout 校验严格 raw envelope 与 checkout
+  identity，使用受保护 profile/CTest parser 输出四个穷尽的 downstream matrix，并生成 verifier-bound
+  route digest。
 - `ci/scripts/ctest_runtime_closure.py` 与 reusable-build 回归：覆盖精确递归 CTest include、按
   working directory 解析的相对 command/property input、dynamic library、plugin、trust input、
   禁止 residue 与恢复后 `_NOT_BUILT` 拒绝。

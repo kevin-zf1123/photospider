@@ -30,9 +30,19 @@ from ci_runner_verify import RunnerError, load_runner_lock
 
 
 _SUITE_GATE_HELPER_SOURCE_SHA256 = (
-    "e7790a57ace6ef052f252d9c084821eec5acb82271449645e3502d097dc9bcf8"
+    "23dfa5d23664c032daee14aa085597a4b8d631ea9b53c9b35b5305d225bc4cdd"
 )
 """Verifier-owned exact source-byte identity for the protected suite gate."""
+
+_RAW_ROUTING_PRODUCER_RUN_SHA256 = (
+    "187d6b272900eb98c6a9df51d471c804610a2a98f27b8bdf4a9ce6af25b92310"
+)
+"""Verifier-owned identity for the raw-only producer packaging program."""
+
+_PROTECTED_ROUTE_CONTROL_RUN_SHA256 = (
+    "b0954500215448246cbc475d73470ec259642ac75065dc5a7f0c2e34eab8f267"
+)
+"""Verifier-owned identity for the sole protected routing invocation."""
 
 
 class ContractError(ValueError):
@@ -1032,6 +1042,10 @@ def _verify_reusable_workflow_permissions(root: Path) -> None:
             raise ContractError(
                 f"{caller_path}: caller {job_name} publication mode differs"
             )
+        if publish_inputs.get("workflow_commit") != "${{ github.workflow_sha }}":
+            raise ContractError(
+                f"{caller_path}: caller {job_name} can select its control commit"
+            )
 
     expected_job_permissions: dict[str, dict[str, str]] = {
         "identity-preflight": {
@@ -1041,6 +1055,7 @@ def _verify_reusable_workflow_permissions(root: Path) -> None:
         },
         "integration-plan": {"contents": "read", "packages": "read"},
         "build-integrity-default": {"contents": "read", "packages": "read"},
+        "build-smoke-control": {"contents": "read"},
         "verify-targeted-artifacts": {"contents": "read"},
         "targeted-artifacts-ready": {},
         "full-ctest": {
@@ -1049,6 +1064,11 @@ def _verify_reusable_workflow_permissions(root: Path) -> None:
             "packages": "read",
         },
         "build-smoke": {
+            "attestations": "read",
+            "contents": "read",
+            "packages": "read",
+        },
+        "producer-build-smoke": {
             "attestations": "read",
             "contents": "read",
             "packages": "read",
@@ -1129,6 +1149,8 @@ def _verify_reusable_workflow_permissions(root: Path) -> None:
         r"\s+",
         "",
         "${{ inputs.publish_reusable_attestations && "
+        "needs.build-smoke-control.result == 'success' && "
+        "needs.build-smoke-control.outputs.route_sha256 != '' && "
         "needs.verify-targeted-artifacts.result == 'success' }}",
     )
     if condition != expected_condition:
@@ -2890,11 +2912,13 @@ def _verify_darwin_security_dag(root: Path) -> None:
         "identity-preflight",
         "integration-plan",
         "build-integrity-default",
+        "build-smoke-control",
         "verify-targeted-artifacts",
         "attest-targeted-artifacts",
         "targeted-artifacts-ready",
         "full-ctest",
         "build-smoke",
+        "producer-build-smoke",
         "openexr-smoke",
         "scripted-cli",
         "propagation-script",
@@ -2912,10 +2936,12 @@ def _verify_darwin_security_dag(root: Path) -> None:
         "identity-preflight": "CI_IDENTITY_RESULT",
         "integration-plan": "CI_PLAN_RESULT",
         "build-integrity-default": "CI_BUILD_RESULT",
+        "build-smoke-control": "CI_BUILD_SMOKE_CONTROL_RESULT",
         "verify-targeted-artifacts": "CI_VERIFY_RESULT",
         "targeted-artifacts-ready": "CI_ARTIFACT_READY_RESULT",
         "full-ctest": "CI_CTEST_RESULT",
         "build-smoke": "CI_BUILD_SMOKE_RESULT",
+        "producer-build-smoke": "CI_PRODUCER_BUILD_SMOKE_RESULT",
         "openexr-smoke": "CI_OPENEXR_RESULT",
         "scripted-cli": "CI_SCRIPTED_CLI_RESULT",
         "propagation-script": "CI_PROPAGATION_RESULT",
@@ -2938,6 +2964,7 @@ def _verify_darwin_security_dag(root: Path) -> None:
             "CI_ATTESTATION_RESULT": "${{ needs.attest-targeted-artifacts.result }}",
             "CI_IMAGE_DIGEST": "${{ needs.identity-preflight.outputs.image_digest }}",
             "CI_PUBLISH_REUSABLE_ATTESTATIONS": "${{ inputs.publish_reusable_attestations }}",
+            "CI_ROUTE_SHA256": "${{ needs.build-smoke-control.outputs.route_sha256 }}",
         }
     )
     expected_suite = {
@@ -3167,6 +3194,311 @@ def _verify_fuzz_job_timeout(root: Path) -> None:
             )
 
 
+def _verify_build_smoke_control_authority(root: Path) -> None:
+    """Require fresh protected routing after an untrusted build producer.
+
+    Args:
+        root: Repository root containing the called workflow and protected
+            routing implementation.
+
+    Raises:
+        ContractError: The producer exposes a route, the fresh job can select
+            another control commit, checkout/input/output paths overlap, raw
+            inventory is not uploaded before candidate artifact packing, a
+            matrix consumer trusts producer output, or verification/attestation
+            omits the protected route digest.
+
+    Note:
+        Candidate CMake may write anywhere in its producer checkout. Therefore
+        no post-configure candidate helper/lock measurement can establish
+        routing authority; only the separately checked-out workflow commit may
+        parse the downloaded raw inventory.
+    """
+    path = root / ".github/workflows/ci-integration-suite.yml"
+    job_names = [
+        "build-integrity-default",
+        "build-smoke-control",
+        "verify-targeted-artifacts",
+        "attest-targeted-artifacts",
+        "build-smoke",
+        "producer-build-smoke",
+        "openexr-smoke",
+        "installed-package-consumer",
+    ]
+    jobs = _workflow_job_mappings(path, job_names)
+    actions = _read_actions(root / "ci/locks/actions.lock")
+
+    def action_reference(name: str) -> str:
+        """Return one exact protected action reference."""
+        if name not in actions:
+            raise ContractError(f"{path}: protected action {name!r} is absent")
+        return f"{name}@{actions[name][1]}"
+
+    checkout = action_reference("actions/checkout")
+    download = action_reference("actions/download-artifact")
+    upload = action_reference("actions/upload-artifact")
+
+    producer = jobs["build-integrity-default"]
+    if "outputs" in producer:
+        raise ContractError(f"{path}: candidate producer still exposes route outputs")
+    producer_steps = producer.get("steps")
+    if not isinstance(producer_steps, list):
+        raise ContractError(f"{path}: candidate producer steps are malformed")
+    producer_names = [
+        step.get("name") if isinstance(step, dict) else None
+        for step in producer_steps
+    ]
+    required_order = [
+        "Run same-tree build integrity and retain raw inventory",
+        "Package exact raw routing inputs without candidate parsers",
+        "Upload untrusted raw build-smoke inventory",
+        "Pack role-specific identity-bound artifacts",
+    ]
+    try:
+        positions = [producer_names.index(name) for name in required_order]
+    except ValueError as error:
+        raise ContractError(
+            f"{path}: candidate producer raw-inventory steps are incomplete"
+        ) from error
+    if positions != sorted(positions):
+        raise ContractError(
+            f"{path}: raw inventory must be uploaded before candidate artifact packing"
+        )
+    build_step = producer_steps[positions[0]]
+    raw_step = producer_steps[positions[1]]
+    raw_upload = producer_steps[positions[2]]
+    if build_step != {
+        "name": "Run same-tree build integrity and retain raw inventory",
+        "env": {
+            "CI_ARTIFACT_DIR": "${{ github.workspace }}/CI-results/build-integrity-default",
+            "CI_BUILD_PROFILE": "default",
+        },
+        "run": "bash ci/scripts/build_integrity.sh",
+    }:
+        raise ContractError(f"{path}: producer build boundary differs")
+    if not isinstance(raw_step, dict) or raw_step.get("env") != {
+        "CI_CANDIDATE_COMMIT": "${{ inputs.candidate_commit }}",
+        "CI_IMAGE_DIGEST": "${{ inputs.image_digest }}",
+        "CI_WORKFLOW_COMMIT": "${{ inputs.workflow_commit }}",
+    }:
+        raise ContractError(f"{path}: raw inventory identities differ")
+    raw_run = raw_step.get("run")
+    if not isinstance(raw_run, str):
+        raise ContractError(f"{path}: raw inventory producer command is absent")
+    if (
+        hashlib.sha256(raw_run.encode("utf-8")).hexdigest()
+        != _RAW_ROUTING_PRODUCER_RUN_SHA256
+    ):
+        raise ContractError(
+            f"{path}: raw inventory producer program identity differs"
+        )
+    raw_required = (
+        "photospider-build-smoke-raw-inventory-v1",
+        "ctest-info-v1.json",
+        "build_profile_matrix_v1.tsv",
+        "ci_security_roles_v1.tsv",
+        '"candidate_commit": candidate',
+        '"workflow_commit": workflow',
+        '"image_digest": image',
+    )
+    if any(fragment not in raw_run for fragment in raw_required):
+        raise ContractError(f"{path}: raw inventory envelope contract differs")
+    for forbidden in (
+        "build_smoke_route.py",
+        "build-smoke-routing.json",
+        "fromJSON",
+    ):
+        if forbidden in raw_run:
+            raise ContractError(
+                f"{path}: candidate producer decides routing through {forbidden}"
+            )
+    if raw_upload != {
+        "name": "Upload untrusted raw build-smoke inventory",
+        "uses": upload,
+        "with": {
+            "name": "ci-build-smoke-raw-default",
+            "path": "CI-results/build-smoke-raw-default",
+            "if-no-files-found": "error",
+            "retention-days": "3",
+        },
+    }:
+        raise ContractError(f"{path}: raw inventory upload mapping differs")
+
+    control = jobs["build-smoke-control"]
+    expected_outputs = {
+        "build_smoke_matrix": "${{ steps.route.outputs.build_smoke_matrix }}",
+        "dedicated_build_smoke_matrix": "${{ steps.route.outputs.dedicated_build_smoke_matrix }}",
+        "matrix_sha256": "${{ steps.route.outputs.matrix_sha256 }}",
+        "openexr_build_smoke_matrix": "${{ steps.route.outputs.openexr_build_smoke_matrix }}",
+        "producer_build_smoke_matrix": "${{ steps.route.outputs.producer_build_smoke_matrix }}",
+        "route_sha256": "${{ steps.route.outputs.route_sha256 }}",
+    }
+    if set(control) != {
+        "permissions",
+        "needs",
+        "if",
+        "runs-on",
+        "outputs",
+        "steps",
+    }:
+        raise ContractError(f"{path}: protected routing job fields differ")
+    if control["permissions"] != {"contents": "read"}:
+        raise ContractError(f"{path}: protected routing permissions differ")
+    if control["needs"] != ["identity-preflight", "build-integrity-default"]:
+        raise ContractError(f"{path}: protected routing dependencies differ")
+    expected_control_condition = (
+        "needs.identity-preflight.result=='success'&&"
+        "needs.build-integrity-default.result=='success'"
+    )
+    if re.sub(r"\s+", "", str(control["if"])) != expected_control_condition:
+        raise ContractError(f"{path}: protected routing condition differs")
+    if control["runs-on"] != "ubuntu-24.04" or control["outputs"] != expected_outputs:
+        raise ContractError(f"{path}: protected routing outputs/runner differ")
+    control_steps = control["steps"]
+    if not isinstance(control_steps, list) or len(control_steps) != 5:
+        raise ContractError(f"{path}: protected routing steps differ")
+    expected_control_checkout = {
+        "name": "Checkout exact protected build-smoke control",
+        "uses": checkout,
+        "with": {
+            "persist-credentials": "false",
+            "repository": "${{ github.repository }}",
+            "fetch-depth": "1",
+            "ref": "${{ inputs.workflow_commit }}",
+            "sparse-checkout": (
+                "ci/locks\n"
+                "ci/scripts/build_smoke_inventory.py\n"
+                "ci/scripts/build_smoke_route.py\n"
+                "ci/scripts/ci_profile_manifest.py\n"
+            ),
+            "sparse-checkout-cone-mode": "false",
+            "path": ".ci-protected-route-control",
+        },
+    }
+    expected_candidate_checkout = {
+        "name": "Checkout candidate source without execution",
+        "uses": checkout,
+        "with": {
+            "persist-credentials": "false",
+            "repository": "${{ inputs.checkout_repository }}",
+            "fetch-depth": "1",
+            "ref": "${{ inputs.checkout_ref }}",
+            "path": ".ci-route-candidate-source",
+        },
+    }
+    expected_download = {
+        "name": "Download untrusted raw build-smoke inventory",
+        "uses": download,
+        "with": {
+            "name": "ci-build-smoke-raw-default",
+            "path": ".ci-untrusted-route-input",
+        },
+    }
+    if control_steps[:3] != [
+        expected_control_checkout,
+        expected_candidate_checkout,
+        expected_download,
+    ]:
+        raise ContractError(
+            f"{path}: protected control/candidate/raw checkout mapping differs"
+        )
+    route_step = control_steps[3]
+    if not isinstance(route_step, dict) or set(route_step) != {"name", "id", "run"}:
+        raise ContractError(f"{path}: protected route execution fields differ")
+    if route_step.get("id") != "route":
+        raise ContractError(f"{path}: protected route output owner differs")
+    route_run = route_step.get("run")
+    if not isinstance(route_run, str):
+        raise ContractError(f"{path}: protected route execution is absent")
+    if (
+        hashlib.sha256(route_run.encode("utf-8")).hexdigest()
+        != _PROTECTED_ROUTE_CONTROL_RUN_SHA256
+    ):
+        raise ContractError(f"{path}: protected route program identity differs")
+    route_required = (
+        ".ci-protected-route-control/ci/scripts/build_smoke_route.py",
+        "--raw-dir .ci-untrusted-route-input",
+        "--candidate-root .ci-route-candidate-source",
+        "--control-root .ci-protected-route-control",
+        '--candidate-commit "${{ inputs.candidate_commit }}"',
+        '--workflow-commit "${{ inputs.workflow_commit }}"',
+        '--image-digest "${{ inputs.image_digest }}"',
+        '--github-output "$GITHUB_OUTPUT"',
+    )
+    if any(fragment not in route_run for fragment in route_required):
+        raise ContractError(f"{path}: protected route execution contract differs")
+    expected_control_upload = {
+        "name": "Upload canonical build-smoke control identity",
+        "uses": upload,
+        "with": {
+            "name": "ci-build-smoke-control-default",
+            "path": "CI-results/build-smoke-control",
+            "if-no-files-found": "error",
+            "retention-days": "3",
+        },
+    }
+    if control_steps[4] != expected_control_upload:
+        raise ContractError(f"{path}: protected route upload mapping differs")
+
+    matrix_consumers = {
+        "build-smoke": "build_smoke_matrix",
+        "producer-build-smoke": "producer_build_smoke_matrix",
+        "openexr-smoke": "openexr_build_smoke_matrix",
+        "installed-package-consumer": "dedicated_build_smoke_matrix",
+    }
+    for job_name, output_name in matrix_consumers.items():
+        job = jobs[job_name]
+        needs = job.get("needs")
+        if not isinstance(needs, list) or "build-smoke-control" not in needs:
+            raise ContractError(f"{path}: {job_name} bypasses protected routing")
+        strategy = job.get("strategy")
+        expected_matrix = (
+            "${{ fromJSON(needs.build-smoke-control.outputs."
+            f"{output_name} || '{{\"include\":[]}}') }}}}"
+        )
+        if not isinstance(strategy, dict) or strategy.get("matrix") != expected_matrix:
+            raise ContractError(f"{path}: {job_name} matrix authority differs")
+        condition = re.sub(r"\s+", "", str(job.get("if", "")))
+        if "needs.build-smoke-control.outputs.route_sha256!=''" not in condition:
+            raise ContractError(f"{path}: {job_name} route digest is unbound")
+        steps = job.get("steps")
+        if not isinstance(steps, list) or not any(
+            isinstance(step, dict)
+            and isinstance(step.get("env"), dict)
+            and step["env"].get("CI_MATRIX_SHA256")
+            == "${{ needs.build-smoke-control.outputs.matrix_sha256 }}"
+            for step in steps
+        ):
+            raise ContractError(f"{path}: {job_name} matrix digest is unbound")
+
+    verifier = jobs["verify-targeted-artifacts"]
+    if verifier.get("needs") != ["build-integrity-default", "build-smoke-control"]:
+        raise ContractError(f"{path}: targeted verifier bypasses route control")
+    verifier_text = json.dumps(verifier, sort_keys=True)
+    for fragment in (
+        ".ci-targeted-verifier-control",
+        "${{ inputs.workflow_commit }}",
+        "ci-build-smoke-control-default",
+        "verify-control",
+        "${{ needs.build-smoke-control.outputs.route_sha256 }}",
+        ".ci-targeted-verifier-control/ci/scripts/reusable_build.py",
+    ):
+        if fragment not in verifier_text:
+            raise ContractError(
+                f"{path}: targeted verifier lacks protected route binding {fragment}"
+            )
+    if "${{ inputs.checkout_repository }}" in verifier_text:
+        raise ContractError(f"{path}: targeted verifier executes candidate control")
+
+    attestation = jobs["attest-targeted-artifacts"]
+    attestation_needs = attestation.get("needs")
+    if not isinstance(attestation_needs, list) or "build-smoke-control" not in attestation_needs:
+        raise ContractError(f"{path}: artifact attestation bypasses route control")
+    condition = re.sub(r"\s+", "", str(attestation.get("if", "")))
+    if "needs.build-smoke-control.outputs.route_sha256!=''" not in condition:
+        raise ContractError(f"{path}: artifact attestation omits route digest")
+
+
 def _verify_shared_integration_dag(root: Path) -> None:
     """Require build-once routing and role-minimal shared integration artifacts.
 
@@ -3213,6 +3545,8 @@ def _verify_shared_integration_dag(root: Path) -> None:
         "image_ref:",
         "image_digest:",
         "candidate_commit:",
+        "ci-build-smoke-raw-default",
+        "ci-build-smoke-control-default",
         "ci-control-default",
         "ci-runtime-default",
         "ci-installed-package-default",
@@ -3220,6 +3554,8 @@ def _verify_shared_integration_dag(root: Path) -> None:
         "targeted_artifact_consume.sh",
         "static_product_consumer_test.sh",
         "installed-package-consumer:",
+        "build-smoke-control:",
+        "producer-build-smoke:",
         "openexr-smoke:",
         "sanitizer-asan-darwin:",
         "sanitizer-tsan-darwin:",
@@ -3298,17 +3634,30 @@ def _verify_shared_integration_dag(root: Path) -> None:
             raise ContractError(f"ordinary CTest contract differs at {fragment!r}")
     required_index = build.find("ensure_ci_targets build_required_targets")
     all_index = build.find("ensure_ci_all build_all")
-    route_index = build.find("build_smoke_route.py")
-    if required_index < 0 or all_index < required_index or route_index < all_index:
+    raw_index = build.find(
+        'capture_raw_ctest_inventory "$raw_ctest_inventory_file"'
+    )
+    if required_index < 0 or all_index < required_index or raw_index < all_index:
         raise ContractError("producer phases no longer reuse one sequential build tree")
+    for forbidden in (
+        "build_smoke_route.py",
+        "build-smoke-routing.json",
+        "emit_output",
+        "producer_build_smoke_names",
+        "build_smoke_inventory.py\" plan",
+    ):
+        if forbidden in build:
+            raise ContractError(
+                f"candidate producer retains build-smoke route authority: {forbidden}"
+            )
     closure_contract = (
+        "ctest-info-v1.json",
+        "--show-only=json-v1",
         "ordinary_ctest_closure_v1.json",
         "ctest_runtime_closure.py",
-        "dedicated_build_smoke_matrix",
-        "openexr_build_smoke_matrix",
     )
     if any(fragment not in build for fragment in closure_contract):
-        raise ContractError("producer does not emit complete role/CTest closure routing")
+        raise ContractError("producer does not emit raw CTest and role closure inputs")
     package_contract = (
         "producer/CMakeCache.txt",
         "producer/generated/ci_inventory/",
@@ -3408,6 +3757,7 @@ def verify(root: Path) -> None:
     _verify_runner_identity_handoffs(root)
     _verify_fuzz_job_timeout(root)
     _verify_reusable_workflow_permissions(root)
+    _verify_build_smoke_control_authority(root)
     _verify_shared_integration_dag(root)
     _verify_workflows(root, actions)
 

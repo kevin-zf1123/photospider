@@ -507,7 +507,13 @@ def verify(root: Path, requested: str, runner_label: str) -> dict[str, str]:
 
     Raises:
         RunnerError: Runtime, environment, label, or approved-set resolution
-            fails. ``ImageOS`` and ``ImageVersion`` are each read exactly once.
+            fails. The platform lock pathname, ``ImageOS``, and
+            ``ImageVersion`` are each read exactly once.
+
+    Note:
+        Resolution receives the validated in-memory lock directly; it never
+        reopens the mutable pathname after runtime measurement. The returned
+        record and CLI output therefore bind the same initially read object.
     """
     lock = load_runner_lock(root, requested)
     actual_system = platform.system()
@@ -530,7 +536,9 @@ def verify(root: Path, requested: str, runner_label: str) -> dict[str, str]:
             f"runner image OS {actual_image_os or 'unset'!r} differs from protected "
             f"{lock['image_os']!r}"
         )
-    return resolve_approved_identity(root, requested, actual_image_version)
+    return resolve_approved_identity_from_lock(
+        lock, requested, actual_image_version
+    )
 
 
 def main() -> int:

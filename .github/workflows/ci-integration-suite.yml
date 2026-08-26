@@ -235,11 +235,6 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    outputs:
-      build_smoke_matrix: ${{ steps.build.outputs.build_smoke_matrix }}
-      dedicated_build_smoke_matrix: ${{ steps.build.outputs.dedicated_build_smoke_matrix }}
-      matrix_sha256: ${{ steps.identity.outputs.matrix_sha256 }}
-      openexr_build_smoke_matrix: ${{ steps.build.outputs.openexr_build_smoke_matrix }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -248,12 +243,95 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
-      - name: Run same-tree build integrity and producer-local smokes
-        id: build
+      - name: Run same-tree build integrity and retain raw inventory
         env:
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-integrity-default
           CI_BUILD_PROFILE: default
         run: bash ci/scripts/build_integrity.sh
+      - name: Package exact raw routing inputs without candidate parsers
+        env:
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+
+          candidate = os.environ["CI_CANDIDATE_COMMIT"]
+          workflow = os.environ["CI_WORKFLOW_COMMIT"]
+          image = os.environ["CI_IMAGE_DIGEST"]
+          if re.fullmatch(r"[0-9a-f]{40}", candidate) is None:
+              raise SystemExit("raw routing candidate identity is malformed")
+          if re.fullmatch(r"[0-9a-f]{40}", workflow) is None:
+              raise SystemExit("raw routing workflow identity is malformed")
+          if re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None:
+              raise SystemExit("raw routing image identity is malformed")
+
+          output = Path("CI-results/build-smoke-raw-default")
+          if output.exists() or output.is_symlink():
+              raise SystemExit("raw routing output contains residual state")
+          output.mkdir(mode=0o700)
+          sources = {
+              "ctest-info-v1.json": Path(
+                  "CI-results/build-integrity-default/ctest-info-v1.json"
+              ),
+          }
+          generated = Path("build/ci/generated/ci_inventory")
+          for name in (
+              "build_profile_matrix_v1.tsv",
+              "build_profile_matrix_v1.tsv.sha256",
+              "ci_security_roles_v1.tsv",
+          ):
+              source = generated / name
+              if source.exists() or source.is_symlink():
+                  sources[name] = source
+          records = []
+          for name in sorted(sources):
+              source = sources[name]
+              if not source.is_file() or source.is_symlink():
+                  raise SystemExit(f"raw routing input is unsafe: {name}")
+              content = source.read_bytes()
+              target = output / name
+              target.write_bytes(content)
+              target.chmod(0o600)
+              records.append(
+                  {
+                      "path": name,
+                      "sha256": hashlib.sha256(content).hexdigest(),
+                      "size": len(content),
+                  }
+              )
+          manifest = {
+              "candidate_commit": candidate,
+              "files": records,
+              "image_digest": image,
+              "profile": "default",
+              "schema": "photospider-build-smoke-raw-inventory-v1",
+              "workflow_commit": workflow,
+          }
+          (output / "raw-inventory.manifest.json").write_text(
+              json.dumps(
+                  manifest,
+                  ensure_ascii=True,
+                  separators=(",", ":"),
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Upload untrusted raw build-smoke inventory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-build-smoke-raw-default
+          path: CI-results/build-smoke-raw-default
+          if-no-files-found: error
+          retention-days: 3
       - name: Pack role-specific identity-bound artifacts
         id: identity
         env:
@@ -359,19 +437,103 @@ jobs:
           retention-days: 3
           compression-level: 0
 
-  verify-targeted-artifacts:
+  build-smoke-control:
     permissions:
       contents: read
-    needs: build-integrity-default
-    if: needs.build-integrity-default.result == 'success'
+    needs: [identity-preflight, build-integrity-default]
+    if: >-
+      needs.identity-preflight.result == 'success' &&
+      needs.build-integrity-default.result == 'success'
     runs-on: ubuntu-24.04
+    outputs:
+      build_smoke_matrix: ${{ steps.route.outputs.build_smoke_matrix }}
+      dedicated_build_smoke_matrix: ${{ steps.route.outputs.dedicated_build_smoke_matrix }}
+      matrix_sha256: ${{ steps.route.outputs.matrix_sha256 }}
+      openexr_build_smoke_matrix: ${{ steps.route.outputs.openexr_build_smoke_matrix }}
+      producer_build_smoke_matrix: ${{ steps.route.outputs.producer_build_smoke_matrix }}
+      route_sha256: ${{ steps.route.outputs.route_sha256 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout exact protected build-smoke control
+        with:
+          persist-credentials: false
+          repository: ${{ github.repository }}
+          fetch-depth: 1
+          ref: ${{ inputs.workflow_commit }}
+          sparse-checkout: |
+            ci/locks
+            ci/scripts/build_smoke_inventory.py
+            ci/scripts/build_smoke_route.py
+            ci/scripts/ci_profile_manifest.py
+          sparse-checkout-cone-mode: false
+          path: .ci-protected-route-control
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout candidate source without execution
         with:
           persist-credentials: false
           repository: ${{ inputs.checkout_repository }}
-          fetch-depth: 0
+          fetch-depth: 1
           ref: ${{ inputs.checkout_ref }}
+          path: .ci-route-candidate-source
+      - name: Download untrusted raw build-smoke inventory
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-build-smoke-raw-default
+          path: .ci-untrusted-route-input
+      - name: Derive canonical protected build-smoke routing
+        id: route
+        run: |
+          set -Eeuo pipefail
+          if [[ -e CI-results || -L CI-results ]]; then
+            echo "Protected route output parent contains residual state." >&2
+            exit 1
+          fi
+          mkdir -m 700 CI-results
+          python3 .ci-protected-route-control/ci/scripts/build_smoke_route.py \
+            control \
+            --raw-dir .ci-untrusted-route-input \
+            --candidate-root .ci-route-candidate-source \
+            --control-root .ci-protected-route-control \
+            --output-dir CI-results/build-smoke-control \
+            --candidate-commit "${{ inputs.candidate_commit }}" \
+            --workflow-commit "${{ inputs.workflow_commit }}" \
+            --image-digest "${{ inputs.image_digest }}" \
+            --profile default \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Upload canonical build-smoke control identity
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-build-smoke-control-default
+          path: CI-results/build-smoke-control
+          if-no-files-found: error
+          retention-days: 3
+
+  verify-targeted-artifacts:
+    permissions:
+      contents: read
+    needs: [build-integrity-default, build-smoke-control]
+    if: >-
+      needs.build-integrity-default.result == 'success' &&
+      needs.build-smoke-control.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout exact protected targeted-artifact verifier
+        with:
+          persist-credentials: false
+          repository: ${{ github.repository }}
+          fetch-depth: 1
+          ref: ${{ inputs.workflow_commit }}
+          sparse-checkout: |
+            ci/locks
+            ci/scripts
+          sparse-checkout-cone-mode: false
+          path: .ci-targeted-verifier-control
+      - name: Download canonical build-smoke control identity
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-build-smoke-control-default
+          path: CI-results/build-smoke-control
       - name: Download CTest control artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -394,16 +556,26 @@ jobs:
           path: CI-results/targeted-artifacts/openexr-metadata
       - name: Verify every targeted role before attestation
         env:
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_MATRIX_SHA256: ${{ needs.build-smoke-control.outputs.matrix_sha256 }}
+          CI_ROUTE_SHA256: ${{ needs.build-smoke-control.outputs.route_sha256 }}
           CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-targeted-verifier-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: |
           set -Eeuo pipefail
-          python3 ci/scripts/ci_runner_verify.py \
+          python3 .ci-targeted-verifier-control/ci/scripts/build_smoke_route.py \
+            verify-control \
+            --manifest CI-results/build-smoke-control/build-smoke-control.manifest.json \
+            --route-sha256 "$CI_ROUTE_SHA256" \
+            --candidate-commit "${{ inputs.candidate_commit }}" \
+            --workflow-commit "${{ inputs.workflow_commit }}" \
+            --image-digest "${{ inputs.image_digest }}" \
+            --profile default \
+            --matrix-sha256 "$CI_MATRIX_SHA256"
+          python3 .ci-targeted-verifier-control/ci/scripts/ci_runner_verify.py \
             --platform Linux \
             --runner-label ubuntu-24.04 \
             --output "$CI_RUNNER_IDENTITY_FILE"
           for role in ctest-control ctest-runtime installed-package openexr-metadata; do
-            python3 ci/scripts/reusable_build.py verify-targeted-only \
+            python3 .ci-targeted-verifier-control/ci/scripts/reusable_build.py verify-targeted-only \
               --archive "CI-results/targeted-artifacts/$role/$role.tar.gz" \
               --manifest "CI-results/targeted-artifacts/$role/$role.manifest.json" \
               --role "$role" \
@@ -415,10 +587,12 @@ jobs:
           done
 
   attest-targeted-artifacts:
-    needs: [build-integrity-default, verify-targeted-artifacts]
+    needs: [build-integrity-default, build-smoke-control, verify-targeted-artifacts]
     if: >-
       ${{
         inputs.publish_reusable_attestations &&
+        needs.build-smoke-control.result == 'success' &&
+        needs.build-smoke-control.outputs.route_sha256 != '' &&
         needs.verify-targeted-artifacts.result == 'success'
       }}
     runs-on: ubuntu-24.04
@@ -438,7 +612,7 @@ jobs:
 
   targeted-artifacts-ready:
     permissions: {}
-    needs: [verify-targeted-artifacts, attest-targeted-artifacts]
+    needs: [build-smoke-control, verify-targeted-artifacts, attest-targeted-artifacts]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -446,9 +620,13 @@ jobs:
         env:
           CI_ATTESTATION_RESULT: ${{ needs.attest-targeted-artifacts.result }}
           CI_PUBLISH_REUSABLE_ATTESTATIONS: ${{ inputs.publish_reusable_attestations }}
+          CI_ROUTE_CONTROL_RESULT: ${{ needs.build-smoke-control.result }}
+          CI_ROUTE_SHA256: ${{ needs.build-smoke-control.outputs.route_sha256 }}
           CI_VERIFICATION_RESULT: ${{ needs.verify-targeted-artifacts.result }}
         run: |
           set -Eeuo pipefail
+          [[ "$CI_ROUTE_CONTROL_RESULT" == success ]]
+          [[ "$CI_ROUTE_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$CI_VERIFICATION_RESULT" == success ]]
           if [[ "$CI_PUBLISH_REUSABLE_ATTESTATIONS" == true ]]; then
             [[ "$CI_ATTESTATION_RESULT" == success ]]
@@ -461,7 +639,7 @@ jobs:
       attestations: read
       contents: read
       packages: read
-    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    needs: [integration-plan, build-integrity-default, build-smoke-control, targeted-artifacts-ready]
     runs-on: ubuntu-24.04
     container:
       image: ${{ inputs.image_ref }}
@@ -487,7 +665,7 @@ jobs:
           CI_BUILD_PROFILE: default
           CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
           CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_MATRIX_SHA256: ${{ needs.build-smoke-control.outputs.matrix_sha256 }}
           CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
           CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
           CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
@@ -512,13 +690,16 @@ jobs:
       contents: read
       packages: read
     name: Build smoke (${{ matrix.test }})
-    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    needs: [integration-plan, build-integrity-default, build-smoke-control, targeted-artifacts-ready]
     if: >-
       needs.integration-plan.result == 'success' &&
-      needs.build-integrity-default.result == 'success'
+      needs.build-integrity-default.result == 'success' &&
+      needs.build-smoke-control.result == 'success' &&
+      needs.build-smoke-control.outputs.route_sha256 != '' &&
+      needs.targeted-artifacts-ready.result == 'success'
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.build-integrity-default.outputs.build_smoke_matrix || '{"include":[]}') }}
+      matrix: ${{ fromJSON(needs.build-smoke-control.outputs.build_smoke_matrix || '{"include":[]}') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     container:
@@ -545,7 +726,7 @@ jobs:
           CI_BUILD_PROFILE: default
           CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
           CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_MATRIX_SHA256: ${{ needs.build-smoke-control.outputs.matrix_sha256 }}
           CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
           CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
           CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
@@ -567,20 +748,86 @@ jobs:
           path: CI-results/build-smoke/${{ matrix.artifact }}
           if-no-files-found: warn
 
+  producer-build-smoke:
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    name: Producer-designated smoke (${{ matrix.test }})
+    needs: [integration-plan, build-integrity-default, build-smoke-control, targeted-artifacts-ready]
+    if: >-
+      needs.integration-plan.result == 'success' &&
+      needs.build-integrity-default.result == 'success' &&
+      needs.build-smoke-control.result == 'success' &&
+      needs.build-smoke-control.outputs.route_sha256 != '' &&
+      needs.targeted-artifacts-ready.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build-smoke-control.outputs.producer_build_smoke_matrix || '{"include":[]}') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Download CTest control artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-control-default
+          path: CI-results/targeted-artifact
+      - name: Verify and restore producer-designated control artifact
+        env:
+          CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}
+          CI_BUILD_PROFILE: default
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_MATRIX_SHA256: ${{ needs.build-smoke-control.outputs.matrix_sha256 }}
+          CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
+          CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash ci/scripts/targeted_artifact_consume.sh
+      - name: Run producer-designated build smoke downstream
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/producer-build-smoke/${{ matrix.artifact }}
+          CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}
+          CI_BUILD_PROFILE: default
+          CI_REUSE_BUILD: ON
+          SMOKE_TEST_NAME: ${{ matrix.test }}
+        run: bash ci/scripts/build_smoke_test.sh
+      - name: Upload producer-designated smoke logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: producer-build-smoke-${{ matrix.artifact }}-results
+          path: CI-results/producer-build-smoke/${{ matrix.artifact }}
+          if-no-files-found: warn
+
   openexr-smoke:
     permissions:
       attestations: read
       contents: read
       packages: read
     name: OpenEXR metadata smoke (${{ matrix.test }})
-    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    needs: [integration-plan, build-integrity-default, build-smoke-control, targeted-artifacts-ready]
     if: >-
       needs.integration-plan.result == 'success' &&
       needs.build-integrity-default.result == 'success' &&
+      needs.build-smoke-control.result == 'success' &&
+      needs.build-smoke-control.outputs.route_sha256 != '' &&
       needs.targeted-artifacts-ready.result == 'success'
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.build-integrity-default.outputs.openexr_build_smoke_matrix || '{"include":[]}') }}
+      matrix: ${{ fromJSON(needs.build-smoke-control.outputs.openexr_build_smoke_matrix || '{"include":[]}') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     container:
@@ -607,7 +854,7 @@ jobs:
           CI_BUILD_PROFILE: default
           CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
           CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_MATRIX_SHA256: ${{ needs.build-smoke-control.outputs.matrix_sha256 }}
           CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
           CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
           CI_TARGETED_DESTINATION: ${{ github.workspace }}/CI-results/openexr-metadata-consumer
@@ -634,7 +881,7 @@ jobs:
       attestations: read
       contents: read
       packages: read
-    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    needs: [integration-plan, build-integrity-default, build-smoke-control, targeted-artifacts-ready]
     runs-on: ubuntu-24.04
     container:
       image: ${{ inputs.image_ref }}
@@ -660,7 +907,7 @@ jobs:
           CI_BUILD_PROFILE: default
           CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
           CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_MATRIX_SHA256: ${{ needs.build-smoke-control.outputs.matrix_sha256 }}
           CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
           CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
           CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
@@ -684,7 +931,7 @@ jobs:
       attestations: read
       contents: read
       packages: read
-    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    needs: [integration-plan, build-integrity-default, build-smoke-control, targeted-artifacts-ready]
     runs-on: ubuntu-24.04
     container:
       image: ${{ inputs.image_ref }}
@@ -710,7 +957,7 @@ jobs:
           CI_BUILD_PROFILE: default
           CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
           CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_MATRIX_SHA256: ${{ needs.build-smoke-control.outputs.matrix_sha256 }}
           CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
           CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
           CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
@@ -734,7 +981,7 @@ jobs:
       attestations: read
       contents: read
       packages: read
-    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    needs: [integration-plan, build-integrity-default, build-smoke-control, targeted-artifacts-ready]
     runs-on: ubuntu-24.04
     container:
       image: ${{ inputs.image_ref }}
@@ -760,7 +1007,7 @@ jobs:
           CI_BUILD_PROFILE: default
           CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
           CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_MATRIX_SHA256: ${{ needs.build-smoke-control.outputs.matrix_sha256 }}
           CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
           CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
           CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
@@ -784,7 +1031,7 @@ jobs:
       attestations: read
       contents: read
       packages: read
-    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    needs: [integration-plan, build-integrity-default, build-smoke-control, targeted-artifacts-ready]
     runs-on: ubuntu-24.04
     container:
       image: ${{ inputs.image_ref }}
@@ -810,7 +1057,7 @@ jobs:
           CI_BUILD_PROFILE: default
           CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
           CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_MATRIX_SHA256: ${{ needs.build-smoke-control.outputs.matrix_sha256 }}
           CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
           CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
           CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
@@ -837,14 +1084,16 @@ jobs:
       contents: read
       packages: read
     name: Installed package smoke (${{ matrix.test }})
-    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    needs: [integration-plan, build-integrity-default, build-smoke-control, targeted-artifacts-ready]
     if: >-
       needs.integration-plan.result == 'success' &&
       needs.build-integrity-default.result == 'success' &&
+      needs.build-smoke-control.result == 'success' &&
+      needs.build-smoke-control.outputs.route_sha256 != '' &&
       needs.targeted-artifacts-ready.result == 'success'
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.build-integrity-default.outputs.dedicated_build_smoke_matrix || '{"include":[]}') }}
+      matrix: ${{ fromJSON(needs.build-smoke-control.outputs.dedicated_build_smoke_matrix || '{"include":[]}') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     container:
@@ -871,7 +1120,7 @@ jobs:
           CI_BUILD_PROFILE: default
           CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
           CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_MATRIX_SHA256: ${{ needs.build-smoke-control.outputs.matrix_sha256 }}
           CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
           CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
           CI_TARGETED_DESTINATION: ${{ github.workspace }}/CI-results/installed-package-consumer
@@ -1177,11 +1426,13 @@ jobs:
       - identity-preflight
       - integration-plan
       - build-integrity-default
+      - build-smoke-control
       - verify-targeted-artifacts
       - attest-targeted-artifacts
       - targeted-artifacts-ready
       - full-ctest
       - build-smoke
+      - producer-build-smoke
       - openexr-smoke
       - scripted-cli
       - propagation-script
@@ -1216,6 +1467,7 @@ jobs:
           CI_ASAN_RESULT: ${{ needs.sanitizer-asan.result }}
           CI_ATTESTATION_RESULT: ${{ needs.attest-targeted-artifacts.result }}
           CI_BUILD_RESULT: ${{ needs.build-integrity-default.result }}
+          CI_BUILD_SMOKE_CONTROL_RESULT: ${{ needs.build-smoke-control.result }}
           CI_BUILD_SMOKE_RESULT: ${{ needs.build-smoke.result }}
           CI_CTEST_RESULT: ${{ needs.full-ctest.result }}
           CI_DARWIN_ASAN_RESULT: ${{ needs.sanitizer-asan-darwin.result }}
@@ -1229,10 +1481,12 @@ jobs:
           CI_OPENEXR_RESULT: ${{ needs.openexr-smoke.result }}
           CI_PLAN_RESULT: ${{ needs.integration-plan.result }}
           CI_PLUGIN_RESULT: ${{ needs.plugin-load.result }}
+          CI_PRODUCER_BUILD_SMOKE_RESULT: ${{ needs.producer-build-smoke.result }}
           CI_PUBLISH_REUSABLE_ATTESTATIONS: ${{ inputs.publish_reusable_attestations }}
           CI_PROPAGATION_RESULT: ${{ needs.propagation-script.result }}
           CI_SCRIPTED_CLI_RESULT: ${{ needs.scripted-cli.result }}
           CI_TSAN_RESULT: ${{ needs.sanitizer-tsan.result }}
+          CI_ROUTE_SHA256: ${{ needs.build-smoke-control.outputs.route_sha256 }}
           CI_VERIFY_RESULT: ${{ needs.verify-targeted-artifacts.result }}
         run: >-
           python3 .ci-suite-gate-control/ci/scripts/integration_suite_gate.py

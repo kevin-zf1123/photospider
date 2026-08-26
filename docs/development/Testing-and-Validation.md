@@ -449,26 +449,36 @@ CTest keeps every labelled test registered for direct local use. CI's
 `full-ctest` shard excludes the exact label. Configuration planning parses
 `ctest --show-only=json-v1` only as an allow-empty preflight because default
 `gtest_discover_tests` entries may still be unlabelled `_NOT_BUILT`
-placeholders. After the complete default build, build integrity repeats the
-query in strict mode and publishes one independent matrix job per labelled
+placeholders. After the complete default build, build integrity captures the
+raw JSON but does not interpret it as routing or publish any matrix. A fresh
+`build-smoke-control` job checks out the exact protected `workflow_commit`,
+keeps that control tree disjoint from both a nonexecuted candidate checkout and
+the downloaded untrusted raw envelope, and uses only protected parsers and the
+routing lock to publish one independent downstream matrix item per labelled
 test. Adding another maintained build smoke therefore requires its CTest
 registration and the same label, but no workflow test-name edit. Preflight
 fails closed on malformed inventory, duplicates, invalid label shape, or
 disabled/commandless labelled entries, but not on an empty selection. The
-post-build authority rejects those states and an empty labelled set. Before
-execution, the runner re-queries the inventory and rejects a selected name that
-is absent, duplicate, disabled, commandless, or no longer labelled. After that
-exact label check, it selects only the validated numeric CTest index, so
-arbitrary test-name characters are not interpreted by a shell or regular
+protected post-build control rejects those states and an empty labelled set.
+Before execution, the runner re-queries the inventory and rejects a selected
+name that is absent, duplicate, disabled, commandless, or no longer labelled.
+After that exact label check, it selects only the validated numeric CTest index,
+so arbitrary test-name characters are not interpreted by a shell or regular
 expression.
 
 Published and candidate images call the same digest-bound reusable DAG. The
 producer runs `build_required_targets` and `build_all` sequentially in one tree,
-then executes only `PublicHeaderSelfContainment` locally. Its protected routing
-lock emits four disjoint, exhaustive outputs: default `ctest-control` smokes,
-the dedicated `StaticProductConsumerSmoke: installed-package` matrix, the exact
-`OpenExrDeepProviderOptionOffSmoke: openexr-metadata` matrix, and the
-producer-local name. The OpenEXR role contains only the producer
+then uploads only a strict raw CTest/profile/role envelope and the role
+artifacts. It does not import, execute, or authorize a candidate route helper or
+lock after CMake, does not execute `PublicHeaderSelfContainment` locally, and
+emits no consumer matrix. The fresh protected control emits four disjoint,
+exhaustive downstream outputs: default `ctest-control` smokes, the dedicated
+`StaticProductConsumerSmoke: installed-package` matrix, the exact
+`OpenExrDeepProviderOptionOffSmoke: openexr-metadata` matrix, and a
+producer-designated `PublicHeaderSelfContainment: ctest-control` matrix. It also
+emits one canonical route digest required by every consumer, artifact
+verification/attestation path, readiness check, and suite gate. The OpenEXR
+role contains only the producer
 `CMakeCache.txt`; its dedicated runner invokes the maintained source driver
 with the original cached tool and architecture arguments and no CTest graph,
 generated inventory, stamp, object, or product library. An empty include
@@ -3550,11 +3560,14 @@ The maintained entry points are:
   and checkout-before-trust-before-fetch/healthcheck order;
   published/local job-scoped pull-request exact-base and `CI/**`
   cumulative-main ordering; exact three-way `CI_BASE_REF` source routing;
-  allow-empty configuration preflight, strict post-build matrix job output,
-  empty-output-safe `fromJSON`, mutually disjoint and exhaustive four-way
-  build-smoke routing across the `ctest-control`, `openexr-metadata`, dedicated
-  static `installed-package`, and producer-local partitions; role-specific
-  artifacts, complete shared-suite gate aggregation, explicit rejection of a
+  allow-empty configuration preflight, raw-only candidate producer, fresh
+  exact-commit protected-control checkout with disjoint control/candidate/raw
+  paths, empty-output-safe `fromJSON`, mutually disjoint and exhaustive
+  four-way downstream build-smoke routing across ordinary `ctest-control`,
+  `openexr-metadata`, dedicated static `installed-package`, and
+  producer-designated `ctest-control` partitions; role-specific artifacts,
+  route-digest-bound verification/attestation, complete shared-suite gate
+  aggregation, explicit rejection of a
   serial `integration_suite.sh` fallback, architecture-neutral
   `execution-repeat` routing, newline-path artifacts, and detector/reader/
   producer failure propagation. It
@@ -3582,9 +3595,13 @@ The maintained entry points are:
   preflight without authoritative matrix output.
 - `ci/scripts/build_integrity.sh` for the default producer profile, including
   runtime-contract detection, architecture-neutral required-target/full builds,
-  strict post-build labelled CTest validation, ordinary-runtime closure
-  generation, and disjoint control/installed-package/OpenEXR-metadata/
-  producer-local matrix output.
+  uninterpreted post-build CTest capture, ordinary-runtime closure generation,
+  and fresh installed-package input. It emits no routing matrix and never runs
+  a route helper or lock after candidate configure.
+- `ci/scripts/build_smoke_route.py` for the exact protected control checkout,
+  strict raw-envelope and checkout identity validation, protected profile/CTest
+  parsing, four exhaustive downstream matrices, and a verifier-bound route
+  digest.
 - `ci/scripts/ctest_runtime_closure.py` and reusable-build regressions for exact
   recursive CTest includes, working-directory-relative command/property inputs,
   dynamic libraries, plugins, trust inputs, forbidden residue, and restored
