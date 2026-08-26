@@ -69,7 +69,7 @@ class ImageManifestContractTest(unittest.TestCase):
             manifest = temporary / "manifest.json"
             digest_sidecar = temporary / "manifest.sha256"
             created = run_command(
-                "python3", SCRIPTS / "ci_image_manifest.py", "create",
+                sys.executable, SCRIPTS / "ci_image_manifest.py", "create",
                 "--source-commit", COMMIT_A,
                 "--repository", "kevin-zf1123/photospider",
                 "--output", manifest,
@@ -87,13 +87,19 @@ class ImageManifestContractTest(unittest.TestCase):
             self.assertEqual(
                 manifest_value["protected_helpers"], image_lock["protected_helpers"]
             )
+            linux_runner_lock = json.loads(
+                (REPO_ROOT / "ci/locks/linux-runner-lock.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(manifest_value["builder_runner"], linux_runner_lock)
             manifest_paths = {
                 record["path"] for record in manifest_value["inputs"]
             }
             self.assertIn("ci/scripts/ci_image_install.sh", manifest_paths)
             self.assertIn("ci/scripts/integration_suite_gate.py", manifest_paths)
             run_command(
-                "python3", SCRIPTS / "ci_image_manifest.py", "verify",
+                sys.executable, SCRIPTS / "ci_image_manifest.py", "verify",
                 "--source-commit", COMMIT_A,
                 "--repository", "kevin-zf1123/photospider",
                 "--manifest", manifest,
@@ -111,7 +117,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 encoding="utf-8",
             )
             run_command(
-                "python3", SCRIPTS / "ci_image_manifest.py", "verify-labels",
+                sys.executable, SCRIPTS / "ci_image_manifest.py", "verify-labels",
                 "--manifest", manifest,
                 "--labels-json", labels,
                 "--source-commit", COMMIT_A,
@@ -127,7 +133,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 encoding="utf-8",
             )
             failed = run_command(
-                "python3", SCRIPTS / "ci_image_manifest.py", "verify-labels",
+                sys.executable, SCRIPTS / "ci_image_manifest.py", "verify-labels",
                 "--manifest", manifest,
                 "--labels-json", labels,
                 "--source-commit", COMMIT_A,
@@ -154,7 +160,7 @@ class ImageManifestContractTest(unittest.TestCase):
             run_command("git", "-C", root, "commit", "-q", "-m", "image input")
             image_source = run_command("git", "-C", root, "rev-parse", "HEAD").stdout.strip()
             accepted = run_command(
-                "python3", SCRIPTS / "ci_image_manifest.py",
+                sys.executable, SCRIPTS / "ci_image_manifest.py",
                 "--repo-root", root,
                 "publish-source-commit",
                 "--workflow-commit", image_source,
@@ -167,7 +173,7 @@ class ImageManifestContractTest(unittest.TestCase):
             later_head = run_command("git", "-C", root, "rev-parse", "HEAD").stdout.strip()
             self.assertNotEqual(later_head, image_source)
             failed = run_command(
-                "python3", SCRIPTS / "ci_image_manifest.py",
+                sys.executable, SCRIPTS / "ci_image_manifest.py",
                 "--repo-root", root,
                 "publish-source-commit",
                 "--workflow-commit", later_head,
@@ -189,11 +195,11 @@ class ImageManifestContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_text:
             temporary = Path(temporary_text)
             source = run_command(
-                "python3", SCRIPTS / "ci_image_manifest.py", "source-commit"
+                sys.executable, SCRIPTS / "ci_image_manifest.py", "source-commit"
             ).stdout.strip()
             manifest = temporary / "precomputed.json"
             digest = run_command(
-                "python3", SCRIPTS / "ci_image_manifest.py", "create",
+                sys.executable, SCRIPTS / "ci_image_manifest.py", "create",
                 "--source-commit", source,
                 "--repository", "kevin-zf1123/photospider",
                 "--output", manifest,
@@ -737,7 +743,7 @@ class ImagePromotionContractTest(unittest.TestCase):
             inspect_log = root / "inspect.log"
             docker = binary_dir / "docker"
             docker.write_text(
-                "#!/usr/bin/env python3\n"
+                f"#!{sys.executable}\n"
                 "import json\n"
                 "import os\n"
                 "from pathlib import Path\n"
@@ -1551,7 +1557,7 @@ class CommandTimeoutContractTest(unittest.TestCase):
         """Return 124 promptly when a live child exceeds its declared bound."""
         started = time.monotonic()
         failed = run_command(
-            "python3", SCRIPTS / "ci_command_timeout.py",
+            sys.executable, SCRIPTS / "ci_command_timeout.py",
             "--timeout-seconds", "1",
             "--label", "fuzz-contract-test",
             "--", sys.executable, "-c", "import time; time.sleep(30)",
@@ -1583,7 +1589,7 @@ class RunnerIdentityContractTest(unittest.TestCase):
         self.assertIsNotNone(specification.loader)
         module = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(module)
-        exact_environment = {"ImageOS": "ubuntu24", "ImageVersion": "20260816.277.1"}
+        exact_environment = {"ImageOS": "ubuntu24", "ImageVersion": "20260823.283.1"}
         with (
             mock.patch.object(module.platform, "system", return_value="Linux"),
             mock.patch.object(module.platform, "machine", return_value="x86_64"),
@@ -1619,7 +1625,7 @@ class RunnerIdentityContractTest(unittest.TestCase):
         self.assertIsNotNone(specification.loader)
         module = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(module)
-        exact_environment = {"ImageOS": "macos15", "ImageVersion": "20260727.0256.1"}
+        exact_environment = {"ImageOS": "macos15", "ImageVersion": "20260824.0311.1"}
         with (
             mock.patch.object(module.platform, "system", return_value="Darwin"),
             mock.patch.object(module.platform, "machine", return_value="arm64"),
@@ -1802,7 +1808,7 @@ class ProfileReaderContractTest(unittest.TestCase):
     def test_current_main_fallback_is_hash_bound(self) -> None:
         """Resolve current main only through the explicitly identified fallback."""
         completed = run_command(
-            "python3", SCRIPTS / "ci_profile_manifest.py",
+            sys.executable, SCRIPTS / "ci_profile_manifest.py",
             "--profile", "fuzz-codecs",
         )
         resolved = json.loads(completed.stdout)
@@ -1823,7 +1829,7 @@ class ProfileReaderContractTest(unittest.TestCase):
                 encoding="utf-8",
             )
             failed = run_command(
-                "python3", SCRIPTS / "ci_profile_manifest.py",
+                sys.executable, SCRIPTS / "ci_profile_manifest.py",
                 "--inventory-dir", inventory,
                 expect_success=False,
             )
@@ -1840,7 +1846,7 @@ class ProfileReaderContractTest(unittest.TestCase):
             self._write_complete_versioned_identity(output)
             resolved_path = output / "resolved-security-profiles.json"
             before = run_command(
-                "python3", SCRIPTS / "ci_profile_manifest.py",
+                sys.executable, SCRIPTS / "ci_profile_manifest.py",
                 "--inventory-dir", output,
                 "--output", resolved_path,
             )
@@ -1898,7 +1904,7 @@ class ProfileReaderContractTest(unittest.TestCase):
             with (root / "CMakeLists.txt").open("a", encoding="utf-8") as handle:
                 handle.write("\n# drift\n")
             failed = run_command(
-                "python3", SCRIPTS / "ci_profile_manifest.py",
+                sys.executable, SCRIPTS / "ci_profile_manifest.py",
                 "--repo-root", root,
                 "--inventory-dir", root / "empty-inventory",
                 expect_success=False,
@@ -1926,7 +1932,7 @@ class ProfileReaderContractTest(unittest.TestCase):
                 with (root / relative_header).open("a", encoding="utf-8") as handle:
                     handle.write("\n// packet limit drift\n")
                 failed = run_command(
-                    "python3", SCRIPTS / "ci_profile_manifest.py",
+                    sys.executable, SCRIPTS / "ci_profile_manifest.py",
                     "--repo-root", root,
                     "--inventory-dir", root / "empty-inventory",
                     expect_success=False,
@@ -1940,7 +1946,7 @@ class ProfileReaderContractTest(unittest.TestCase):
             digest = self._write_complete_versioned_identity(inventory)
             roles = inventory / "ci_security_roles_v1.tsv"
             completed = run_command(
-                "python3", SCRIPTS / "ci_profile_manifest.py",
+                sys.executable, SCRIPTS / "ci_profile_manifest.py",
                 "--inventory-dir", inventory,
             )
             resolved = json.loads(completed.stdout)
@@ -1960,7 +1966,7 @@ class ProfileReaderContractTest(unittest.TestCase):
 
             roles.write_text(roles.read_text(encoding="utf-8").replace(digest, "0" * 64), encoding="utf-8")
             failed = run_command(
-                "python3", SCRIPTS / "ci_profile_manifest.py",
+                sys.executable, SCRIPTS / "ci_profile_manifest.py",
                 "--inventory-dir", inventory,
                 expect_success=False,
             )
@@ -1986,7 +1992,7 @@ class ProfileReaderContractTest(unittest.TestCase):
                 matrix.write_text(original.replace(old, new, 1), encoding="utf-8")
                 self._refresh_versioned_digest(inventory)
                 failed = run_command(
-                    "python3", SCRIPTS / "ci_profile_manifest.py",
+                    sys.executable, SCRIPTS / "ci_profile_manifest.py",
                     "--inventory-dir", inventory,
                     expect_success=False,
                 )
@@ -2003,7 +2009,7 @@ class ProfileReaderContractTest(unittest.TestCase):
             matrix.write_text("\n".join(lines) + "\n", encoding="utf-8")
             self._refresh_versioned_digest(inventory)
             failed = run_command(
-                "python3", SCRIPTS / "ci_profile_manifest.py",
+                sys.executable, SCRIPTS / "ci_profile_manifest.py",
                 "--inventory-dir", inventory,
                 expect_success=False,
             )
@@ -2099,7 +2105,7 @@ class SecurityPlatformContractTest(unittest.TestCase):
         """
         profile = root / "profile.json"
         run_command(
-            "python3", SCRIPTS / "ci_profile_manifest.py",
+            sys.executable, SCRIPTS / "ci_profile_manifest.py",
             "--profile", "fuzz-codecs",
             "--output", profile,
         )
@@ -2192,7 +2198,7 @@ class SecurityPlatformContractTest(unittest.TestCase):
         runner_temp = root / "runner-temp"
         runner_temp.mkdir()
         output = root / "cmake-args.txt"
-        locked_commit = "6d9d7df564a1ccdaa994e4ad39ccd4a32360867b"
+        locked_commit = "127402f1c75bb3d5ff6bce04b285faa4930a5aca"
         environment = {
             "PATH": f"{binary_dir}:{os.environ['PATH']}",
             "CI_PLATFORM_CMAKE_ARGS_FILE": str(output),
@@ -2202,7 +2208,7 @@ class SecurityPlatformContractTest(unittest.TestCase):
             "CI_TEST_VCPKG_LOG": str(vcpkg_log),
             "CI_TEST_VCPKG_SOURCE": str(vcpkg_source),
             "ImageOS": "macos15",
-            "ImageVersion": "20260727.0256.1",
+            "ImageVersion": "20260824.0311.1",
             "RUNNER_IMAGE_NAME": "macos-15",
             "VCPKG_INSTALLATION_ROOT": str(vcpkg_source),
         }
@@ -2384,7 +2390,7 @@ class BuildSmokeRoutingContractTest(unittest.TestCase):
                 encoding="utf-8",
             )
             run_command(
-                "python3", SCRIPTS / "build_smoke_route.py",
+                sys.executable, SCRIPTS / "build_smoke_route.py",
                 "--matrix", matrix,
                 "--lock", REPO_ROOT / "ci/locks/build-smoke-routing.json",
                 "--consumer-matrix", consumers,
@@ -2439,7 +2445,7 @@ class BuildSmokeRoutingContractTest(unittest.TestCase):
                 encoding="utf-8",
             )
             failed = run_command(
-                "python3", SCRIPTS / "build_smoke_route.py",
+                sys.executable, SCRIPTS / "build_smoke_route.py",
                 "--matrix", matrix,
                 "--lock", REPO_ROOT / "ci/locks/build-smoke-routing.json",
                 "--consumer-matrix", consumers,
@@ -2761,7 +2767,7 @@ class ReusableBuildContractTest(unittest.TestCase):
         archive = root / f"ci-build-{suffix}.tar.gz"
         manifest = root / f"ci-build-{suffix}.manifest.json"
         run_command(
-            "python3", SCRIPTS / "reusable_build.py",
+            sys.executable, SCRIPTS / "reusable_build.py",
             "--inventory-dir", inventory,
             "create",
             "--source", source,
@@ -2783,7 +2789,7 @@ class ReusableBuildContractTest(unittest.TestCase):
         archive = root / f"{role}.tar.gz"
         manifest = root / f"{role}.manifest.json"
         arguments: list[object] = [
-            "python3", SCRIPTS / "reusable_build.py",
+            sys.executable, SCRIPTS / "reusable_build.py",
             "--inventory-dir", inventory,
             "create-targeted",
             "--source", source,
@@ -2845,14 +2851,14 @@ class ReusableBuildContractTest(unittest.TestCase):
                 "--workflow-commit", COMMIT_B,
             )
             run_command(
-                "python3", SCRIPTS / "reusable_build.py", "verify-extract",
+                sys.executable, SCRIPTS / "reusable_build.py", "verify-extract",
                 *common,
                 "--candidate-commit", COMMIT_A,
                 "--destination", destination,
             )
             self.assertEqual((destination / "ci/bin/tool").read_text(encoding="utf-8"), "#!/bin/sh\nexit 0\n")
             failed = run_command(
-                "python3", SCRIPTS / "reusable_build.py", "verify-only",
+                sys.executable, SCRIPTS / "reusable_build.py", "verify-only",
                 *common,
                 "--candidate-commit", "4" * 40,
                 expect_success=False,
@@ -2949,7 +2955,7 @@ class ReusableBuildContractTest(unittest.TestCase):
             destination = root / "targeted-root"
             shutil.rmtree(destination / "ci")
             run_command(
-                "python3", SCRIPTS / "reusable_build.py", "verify-targeted-extract",
+                sys.executable, SCRIPTS / "reusable_build.py", "verify-targeted-extract",
                 "--archive", archive,
                 "--manifest", manifest,
                 "--role", "ctest-runtime",
@@ -2975,7 +2981,7 @@ class ReusableBuildContractTest(unittest.TestCase):
                 encoding="utf-8",
             )
             failed = run_command(
-                "python3", SCRIPTS / "reusable_build.py", "verify-targeted-only",
+                sys.executable, SCRIPTS / "reusable_build.py", "verify-targeted-only",
                 "--archive", archive,
                 "--manifest", manifest,
                 "--role", "ctest-runtime",
@@ -3042,7 +3048,7 @@ class ReusableBuildContractTest(unittest.TestCase):
                         encoding="utf-8",
                     )
                     failed = run_command(
-                        "python3",
+                        sys.executable,
                         SCRIPTS / "reusable_build.py",
                         "verify-targeted-only",
                         "--archive",
@@ -3075,7 +3081,7 @@ class ReusableBuildContractTest(unittest.TestCase):
             )
             destination = root / "restored-package"
             extract_arguments: tuple[object, ...] = (
-                "python3",
+                sys.executable,
                 SCRIPTS / "reusable_build.py",
                 "verify-targeted-extract",
                 "--archive",
@@ -3098,7 +3104,7 @@ class ReusableBuildContractTest(unittest.TestCase):
                 destination,
             )
             verify_arguments: tuple[object, ...] = (
-                "python3",
+                sys.executable,
                 SCRIPTS / "reusable_build.py",
                 "verify-targeted-tree",
                 "--manifest",
@@ -3179,7 +3185,7 @@ class ReusableBuildContractTest(unittest.TestCase):
             )
             destination = root / "restored-package"
             run_command(
-                "python3",
+                sys.executable,
                 SCRIPTS / "reusable_build.py",
                 "verify-targeted-extract",
                 "--archive",
@@ -3450,7 +3456,7 @@ class ReusableBuildContractTest(unittest.TestCase):
             )
             (installed / "lib/libphotospider.a").write_bytes(b"product")
             failed = run_command(
-                "python3",
+                sys.executable,
                 SCRIPTS / "reusable_build.py",
                 "--inventory-dir",
                 inventory,
@@ -3495,7 +3501,7 @@ class ReusableBuildContractTest(unittest.TestCase):
                 encoding="utf-8",
             )
             failed = run_command(
-                "python3", SCRIPTS / "reusable_build.py", "verify-only",
+                sys.executable, SCRIPTS / "reusable_build.py", "verify-only",
                 "--archive", archive,
                 "--manifest", manifest,
                 "--candidate-commit", COMMIT_A,
@@ -3599,7 +3605,7 @@ class ReusableBuildContractTest(unittest.TestCase):
             archive = reusable / "ci-build.tar.gz"
             manifest = reusable / "ci-build.manifest.json"
             run_command(
-                "python3", SCRIPTS / "reusable_build.py",
+                sys.executable, SCRIPTS / "reusable_build.py",
                 "--inventory-dir", source / "generated/ci_inventory",
                 "create",
                 "--source", source,
@@ -3726,7 +3732,7 @@ class ReusableBuildContractTest(unittest.TestCase):
             source = root / "source"
             inventory = self._prepare_build(source)
             common = (
-                "python3", SCRIPTS / "reusable_build.py",
+                sys.executable, SCRIPTS / "reusable_build.py",
                 "--inventory-dir", inventory,
                 "create",
                 "--source", source,
@@ -3921,11 +3927,11 @@ class RulesetContractTest(unittest.TestCase):
             broken["rules"][3]["parameters"]["allowed_merge_methods"] = ["merge"]
             invalid.write_text(json.dumps([broken]), encoding="utf-8")
             run_command(
-                "python3", SCRIPTS / "ruleset_readback.py",
+                sys.executable, SCRIPTS / "ruleset_readback.py",
                 "--input", valid,
             )
             failed = run_command(
-                "python3", SCRIPTS / "ruleset_readback.py",
+                sys.executable, SCRIPTS / "ruleset_readback.py",
                 "--input", invalid,
                 expect_success=False,
             )
@@ -3967,7 +3973,7 @@ class RulesetContractTest(unittest.TestCase):
             )
             gh.chmod(0o755)
             failed = run_command(
-                "python3", SCRIPTS / "ruleset_readback.py",
+                sys.executable, SCRIPTS / "ruleset_readback.py",
                 "--repository", "kevin-zf1123/photospider",
                 environment={
                     "CI_TEST_GH_LOG": str(gh_log),
@@ -4032,7 +4038,7 @@ class IntegrationSuiteGateContractTest(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         """Execute the real gate CLI against one retained temporary output."""
         return run_command(
-            "python3",
+            sys.executable,
             SCRIPTS / "integration_suite_gate.py",
             "--output",
             output,
@@ -4990,9 +4996,28 @@ class LockSurfaceContractTest(unittest.TestCase):
                 with self.assertRaises(module.ContractError) as raised:
                     module._verify_dockerfile(root)
                 self.assertIn(
-                    "suite-gate executable syntax identity differs",
+                    "suite-gate verifier-owned source identity differs",
                     str(raised.exception),
                 )
+
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            mutated_gate = suite_gate + "# unreviewed source-byte drift\n"
+            self._write_image_fixture(
+                root,
+                dockerfile=dockerfile,
+                image_lock=image_lock_value,
+                package_lock=package_lock,
+                snapshot_source=snapshot_source,
+                installer=installer,
+                suite_gate=mutated_gate,
+            )
+            with self.assertRaises(module.ContractError) as raised:
+                module._verify_dockerfile(root)
+            self.assertIn(
+                "protected helper 'integration-suite-gate' bytes differ from the lock",
+                str(raised.exception),
+            )
 
         with tempfile.TemporaryDirectory() as temporary_text:
             root = Path(temporary_text)
@@ -5479,7 +5504,7 @@ class LockSurfaceContractTest(unittest.TestCase):
 
     def test_repository_lock_surface_is_exact(self) -> None:
         """Reject no active floating actions, runners, images, or install inputs."""
-        run_command("python3", SCRIPTS / "ci_lock_verify.py")
+        run_command(sys.executable, SCRIPTS / "ci_lock_verify.py")
 
 
 if __name__ == "__main__":

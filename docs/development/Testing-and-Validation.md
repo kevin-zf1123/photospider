@@ -3388,14 +3388,33 @@ outputs, and helper command are exact. The helper executes every ordinary result
 check, the publishing-versus-read-only attestation success/skip rule, and digest
 validation before writing output. Unknown steps/fields, `continue-on-error`,
 comments, no-op helpers, extra statements, or early success therefore fail.
+The helper source itself is accepted only when a verifier-owned exact byte
+SHA-256, the protected JSON helper hash, and the retained regular-file
+measurement all agree. This avoids Python-minor-dependent `ast.dump()` or
+`ast.unparse()` identity. The process-boundary regressions launch Python through
+their current `sys.executable`, while independently exercising every result and
+attestation path.
 
 `healthcheck-published-image` is a container job. The protected
 `photospider-ci:latest` value is only the discovery locator; a trusted host
 preflight verifies its exact digest, attestation, OCI revision, and manifest
 labels, and all published-image healthcheck and build/test integration jobs run
 the resulting `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` reference.
-Lightweight routing and result gates remain on `ubuntu-24.04`. Immediately
-after checkout, the published
+Lightweight routing and result gates remain on `ubuntu-24.04`.
+The protected hosted identities are `ubuntu24/20260823.283.1` for the Linux
+builder and `macos15/20260824.0311.1` on `macos-15`/`arm64` for Darwin security;
+the latter binds vcpkg commit
+`127402f1c75bb3d5ff6bce04b285faa4930a5aca`. Linux run `32991073228` supplies
+the observed Linux readback
+([job evidence](https://github.com/kevin-zf1123/photospider/actions/runs/32991073228/job/98248727299)),
+while the official `actions/runner-images`
+[`ubuntu24/20260823.283`](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283)
+and
+[`macos-15-arm64/20260824.0311`](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311)
+releases supply the published identities. The Linux lock is included both as a
+manifest member and as `builder_runner`; Darwin is a separate execution lock.
+Any drift fails before candidate work rather than falling back to the mutable
+label. Immediately after checkout, the published
 container's unique `Trust checked-out workspace` step binds `shell: bash`,
 adds only the exact `$GITHUB_WORKSPACE` to the job-persistent global
 `safe.directory`, and verifies `HEAD^{commit}` read-only. It neither configures

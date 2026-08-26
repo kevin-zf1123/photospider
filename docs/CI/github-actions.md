@@ -64,6 +64,22 @@ change-classification, and stable result-gate jobs remain lightweight
 
 When a pull request or push changes CI image inputs (`Dockerfile.ci`, `.dockerignore`, or `.github/workflows/build-ci-image.yml`), detection still fetches and verifies the exact base instead of relying on a possibly absent fork `origin/<base>`. A fork head is rejected before checkout, and a same-repository protected `CI/**` pull request uses its trusted push route. The image-change healthcheck job does not build an image: it verifies the exact hosted runner, protected locks, canonical publish-source identity, and generated image-input manifest before running the static healthcheck. Only an eligible trusted `main` or `CI/**` integration push may call the one candidate-image producer and shared digest-bound suite.
 
+Hosted labels remain mutable even when their major OS is explicit. The current
+Linux builder lock is `ubuntu24/20260823.283.1`, observed in Photospider run
+[`32991073228`](https://github.com/kevin-zf1123/photospider/actions/runs/32991073228/job/98248727299)
+and matched to the official
+[`ubuntu24/20260823.283` release](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283).
+The Darwin security lock is `macos15/20260824.0311.1` on `macos-15`/`arm64`,
+matched to the official
+[`macos-15-arm64/20260824.0311` release](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311);
+its documented vcpkg prefix resolves to protected commit
+[`127402f1c75bb3d5ff6bce04b285faa4930a5aca`](https://github.com/microsoft/vcpkg/commit/127402f1c75bb3d5ff6bce04b285faa4930a5aca).
+The Linux lock is both an input
+member and the `builder_runner` object in the canonical CI-image manifest.
+Darwin remains a separately protected execution-profile lock rather than a
+Linux image-build input. Any hosted rotation fails before candidate execution
+until the corresponding lock and evidence are reviewed.
+
 The callable producer itself is a complete parsed-tree contract: it exposes only
 the typed `workflow_call`, exact write permissions, and one `ubuntu-24.04` build
 job with its reviewed ordered steps. Checkout and the prebuild
@@ -413,6 +429,12 @@ failed, skipped, missing, or unknown required results, validates attestation
 the digest, and writes output only after all checks pass. Unknown steps,
 `continue-on-error`, extra fields/statements, comments, no-ops, early exit, or a
 sibling dependency cannot satisfy the maintained routing contract.
+The helper source must also match three independent identities: a
+verifier-owned exact byte SHA-256, the protected JSON helper lock, and the
+retained regular-file measurement. It does not depend on Python-version-specific
+`ast.dump()` or `ast.unparse()`. Behavior tests still execute every result and
+attestation branch, and Python children launched directly by the security
+contract use that test process's `sys.executable`.
 
 This is a protected two-stage transition. The trusted `CI/**` change lands on
 `main` first and validates the legacy contract there. The architecture pull

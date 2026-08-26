@@ -13,7 +13,6 @@ Run it from any directory; ``--repo-root`` is primarily for fixture tests.
 from __future__ import annotations
 
 import argparse
-import ast
 import hashlib
 import json
 import os
@@ -23,6 +22,12 @@ import stat
 import sys
 from pathlib import Path
 from typing import Any, Iterable, NamedTuple
+
+
+_SUITE_GATE_HELPER_SOURCE_SHA256 = (
+    "e7790a57ace6ef052f252d9c084821eec5acb82271449645e3502d097dc9bcf8"
+)
+"""Verifier-owned exact source-byte identity for the protected suite gate."""
 
 
 class ContractError(ValueError):
@@ -1819,42 +1824,43 @@ def _verify_installer_semantics(path: Path) -> None:
         raise ContractError(f"{path}: installer contains dynamic shell indirection")
 
 
-def _verify_suite_gate_helper_semantics(path: Path) -> None:
-    """Require the verifier-owned semantic identity of the suite-gate helper.
+def _verify_suite_gate_helper_identity(
+    path: Path, declared_hash: str, actual_hash: str
+) -> None:
+    """Require three-way exact source identity for the suite-gate helper.
 
     Args:
         path: Exact protected Python gate helper.
+        declared_hash: Full-file SHA-256 declared by the protected image lock.
+        actual_hash: SHA-256 measured from the retained regular-file object.
 
     Returns:
-        None when its parsed Python syntax tree matches the reviewed contract.
+        None when verifier constant, lock declaration, and actual bytes match.
 
     Raises:
-        ContractError: The helper is invalid Python or its executable syntax
-            changes, including no-op, early-return, or extra-statement drift.
+        ContractError: Any of the three independently owned identities differs.
 
     Note:
-        AST identity excludes comments and formatting while remaining
-        independent of the JSON helper hash. Behavior tests separately execute
-        every result and attestation branch.
+        Exact source bytes are stable across supported Python minor versions;
+        ``ast.dump`` and ``ast.unparse`` are intentionally not identity
+        authorities. Behavior tests separately execute every required result and
+        attestation branch, while mutation tests prove that changing the helper
+        and recomputing only the ordinary JSON lock hash remains insufficient.
     """
-    try:
-        source = path.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(path))
-    except (OSError, UnicodeError, SyntaxError) as error:
-        raise ContractError(f"{path}: suite-gate helper syntax is invalid: {error}") from error
-    semantic = ast.dump(tree, annotate_fields=True, include_attributes=False) + "\n"
-    semantic_digest = hashlib.sha256(semantic.encode("utf-8")).hexdigest()
-    expected_digest = (
-        "52f228ff4f3e5b0fd132715bc95ec79d6fd0a11b4685c66de6501c3e635b4c50"
-    )
-    if semantic_digest != expected_digest:
-        raise ContractError(f"{path}: suite-gate executable syntax identity differs")
+    if not (
+        declared_hash
+        == actual_hash
+        == _SUITE_GATE_HELPER_SOURCE_SHA256
+    ):
+        raise ContractError(
+            f"{path}: suite-gate verifier-owned source identity differs"
+        )
 
 
 def _verify_protected_helpers(
     root: Path, lock: dict[str, Any], input_paths: list[str]
 ) -> dict[str, dict[str, str]]:
-    """Validate helper roles, versions, paths, hashes, and semantics.
+    """Validate helper roles, versions, paths, hashes, and execution boundaries.
 
     Args:
         root: Repository root containing protected helper sources.
@@ -1865,8 +1871,8 @@ def _verify_protected_helpers(
         Canonical helper records keyed by stable role.
 
     Raises:
-        ContractError: Helper inventory, version, path, hash, file identity, or
-            installer semantic allowlist differs.
+        ContractError: Helper inventory, version, path, hash, retained-file or
+            verifier-owned source identity, or installer allowlist differs.
 
     Note:
         Both helpers are canonical image/control inputs even though only the
@@ -1897,13 +1903,16 @@ def _verify_protected_helpers(
         actual_hash = _sha256_regular_file(root / expected_path, f"protected helper {name}")
         if actual_hash != declared_hash:
             raise ContractError(f"protected helper {name!r} bytes differ from the lock")
+        if name == "integration-suite-gate":
+            _verify_suite_gate_helper_identity(
+                root / expected_path, declared_hash, actual_hash
+            )
         result[name] = {
             "path": expected_path,
             "sha256": declared_hash,
             "version": "v1",
         }
     _verify_installer_semantics(root / expected["ci-image-installer"])
-    _verify_suite_gate_helper_semantics(root / expected["integration-suite-gate"])
     return result
 
 

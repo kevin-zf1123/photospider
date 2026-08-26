@@ -1,9 +1,9 @@
 {
   "architecture": "arm64",
   "image_os": "macos15",
-  "image_version": "20260727.0256.1",
+  "image_version": "20260824.0311.1",
   "runner_label": "macos-15",
   "schema": "photospider-darwin-runner-lock-v1",
   "triplet": "arm64-osx",
-  "vcpkg_commit": "6d9d7df564a1ccdaa994e4ad39ccd4a32360867b"
+  "vcpkg_commit": "127402f1c75bb3d5ff6bce04b285faa4930a5aca"
 }

@@ -6,7 +6,8 @@ The temporary `current-main-profiles-v1.json` lock is accepted only when both
 candidate-owned versioned manifests are absent and every listed source hash
 still matches. It must be removed by the protected cleanup after matrix adoption.
 
-The values were refreshed on 2026-08-25 from authoritative upstream services:
+The dependency/image values were refreshed on 2026-08-25 and the hosted-runner
+identities on 2026-08-27 from authoritative upstream services:
 
 - GitHub action release refs were resolved with `git ls-remote` against each
   action's official GitHub repository and confirmed through the GitHub API.
@@ -37,9 +38,12 @@ The values were refreshed on 2026-08-25 from authoritative upstream services:
   network/install transaction: Docker has one exact helper invocation, while a
   verifier-owned active-statement identity and explicit command allowlist reject
   extra APT aliases, downloads, pipe-to-shell paths, bypassed hashes, and early
-  exit. The suite-gate helper similarly has a verifier-owned Python AST identity
-  plus exhaustive behavior tests for every required result and attestation
-  publish/skip mode; updating a JSON helper hash alone cannot authorize drift.
+  exit. The suite-gate helper instead requires three-way equality between a
+  verifier-owned exact source-byte SHA-256, the protected JSON helper hash, and
+  the retained regular-file measurement. This identity is independent of Python
+  AST serialization changes; exhaustive behavior tests still execute every
+  required result and attestation publish/skip mode, and updating a JSON helper
+  hash alone cannot authorize source drift.
 - The callable image producer is decoded through the restricted YAML parser and
   compared as one complete mapping: its sole `workflow_call`, write permissions,
   only build job, ordered steps, environments, commands, outputs, and every
@@ -64,10 +68,19 @@ The values were refreshed on 2026-08-25 from authoritative upstream services:
 - GitHub CLI `2.98.0` archive hashes are from the official release
   `gh_2.98.0_checksums.txt`. The CLI is needed to verify GitHub artifact and OCI
   attestations; Ubuntu's older package does not provide `gh attestation`.
-- The Darwin host lock records the observed `macos-15-arm64` runner image
-  version `20260727.0256.1` published by `actions/runner-images`, binds the
+- The Linux host lock records `ubuntu24/20260823.283.1`, observed directly in
+  [Photospider run `32991073228`](https://github.com/kevin-zf1123/photospider/actions/runs/32991073228/job/98248727299)
+  and published in the official
+  [`ubuntu24/20260823.283` runner-images release](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283).
+  It is a canonical image input,
+  so rotation changes both the manifest input digest and `builder_runner`.
+- The Darwin host lock records the official `macos-15-arm64` runner image
+  version `20260824.0311.1` published in the
+  [`macos-15-arm64/20260824.0311` runner-images release](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311),
+  binds the
   workflow label `macos-15` to its `arm64` architecture and `arm64-osx`
-  triplet, and resolves its documented vcpkg commit prefix to the full commit
+  triplet, and resolves its documented `127402f1c7` vcpkg prefix to full commit
+  [`127402f1c75bb3d5ff6bce04b285faa4930a5aca`](https://github.com/microsoft/vcpkg/commit/127402f1c75bb3d5ff6bce04b285faa4930a5aca)
   in the official `microsoft/vcpkg` repository.
   Security jobs use the preinstalled tree only as an image-bound binary and
   locked Git-object source. Each profile creates an unseedable checkout below

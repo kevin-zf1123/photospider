@@ -57,6 +57,19 @@ container 默认 shell。protected-path、change-classification 与稳定结果�
 
 当 pull request 或 push 修改 CI 镜像输入（`Dockerfile.ci`、`.dockerignore` 或 `.github/workflows/build-ci-image.yml`）时，detector 仍会拉取并校验精确 base，而不依赖 fork 中可能不存在的 `origin/<base>`。Fork head 会在 checkout 前被拒绝，同仓库受保护 `CI/**` pull request 则使用其可信 push 路径。Image-change healthcheck job 不构建镜像：它会先校验精确 hosted runner、受保护 lock、canonical publish-source identity 与生成的 image-input manifest，再运行静态 healthcheck。只有符合条件的可信 `main` 或 `CI/**` integration push 可以调用唯一 candidate-image producer 与 shared digest-bound suite。
 
+即使 major OS 已明确，hosted label 仍是可变的。当前 Linux builder lock 是
+`ubuntu24/20260823.283.1`，已在 Photospider run
+[`32991073228`](https://github.com/kevin-zf1123/photospider/actions/runs/32991073228/job/98248727299)
+中观察，并与官方
+[`ubuntu24/20260823.283` release](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283)
+匹配。Darwin security lock 是 `macos15/20260824.0311.1`，绑定 `macos-15`/`arm64`，并与官方
+[`macos-15-arm64/20260824.0311` release](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311)
+匹配；其中记录的 vcpkg prefix 会解析为受保护 commit
+[`127402f1c75bb3d5ff6bce04b285faa4930a5aca`](https://github.com/microsoft/vcpkg/commit/127402f1c75bb3d5ff6bce04b285faa4930a5aca)。Linux lock 同时是
+canonical CI-image manifest 的 input member 与 `builder_runner` object。Darwin 则是独立受保护的
+execution-profile lock，而不是 Linux image-build input。Hosted runner 一旦旋转，就必须先审查并更新
+对应 lock 与证据，否则会在 candidate execution 前失败。
+
 该 callable producer 本身也是一份完整 parsed-tree 合同：它只暴露 typed `workflow_call`、精确 write
 permission，以及一个带有受审查有序 step 的 `ubuntu-24.04` build job。Checkout 与 prebuild
 `ci_lock_verify.py` 调用必须先于唯一的 `docker/build-push-action`；该 action 不得带 env 或 condition，
@@ -307,6 +320,10 @@ field。Suite gate 会 checkout 精确的受保护 `workflow_commit`，并且只
 result，验证 publishing route 的 attestation 为 `success`、read-only route 为 `skipped`，校验
 digest，并且仅在全部检查通过后写 output。未知 step、`continue-on-error`、额外 field/statement、
 注释、no-op、early exit 或 sibling dependency 均不能满足维护中的 routing contract。
+Helper source 还必须同时匹配三个独立 identity：verifier-owned 精确 byte SHA-256、受保护 JSON
+helper lock 与 retained regular-file measurement。它不依赖随 Python 版本变化的 `ast.dump()` 或
+`ast.unparse()`。Behavior test 仍会执行每个 result 与 attestation branch；security contract 直接
+启动的 Python child 使用测试进程自己的 `sys.executable`。
 
 这是一个受保护的两阶段过渡。可信 `CI/**` 变更先进入 `main`，并在那里验证旧契约；架构 pull
 request 随后纳入该可信 commit，并删除自身独立的受保护路径差异，其完整标记集合会选择

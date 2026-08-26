@@ -2739,12 +2739,27 @@ plan、消费同一份受保护 profile inventory，并在自身 timeout 下发�
 command 都是精确合同。Helper 会在写 output 前执行每一项普通 result 检查、publishing/read-only
 attestation success/skip 规则和 digest 校验。未知 step/field、`continue-on-error`、注释、no-op
 helper、额外 statement 或 early success 都会失败。
+只有 verifier-owned 精确 byte SHA-256、受保护 JSON helper hash 与 retained regular-file
+measurement 三方一致时，helper source 才会被接受，从而避免使用随 Python minor 变化的
+`ast.dump()` 或 `ast.unparse()` identity。Process-boundary regression 会通过当前 `sys.executable`
+启动 Python，同时独立执行每个 result 与 attestation path。
 
 `healthcheck-published-image` 是 container job。受保护的 `photospider-ci:latest` 值只作为发现
 locator；可信 host preflight 会校验其精确 digest、attestation、OCI revision 与 manifest label，
 所有 published-image healthcheck 与 build/test integration job 都执行所得
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` 引用。轻量路由与结果门禁仍在
-`ubuntu-24.04` 上运行。Checkout 后，published container 中唯一的
+`ubuntu-24.04` 上运行。受保护 hosted identity 是 Linux builder 的
+`ubuntu24/20260823.283.1`，以及 Darwin security 在 `macos-15`/`arm64` 上的
+`macos15/20260824.0311.1`；后者绑定 vcpkg commit
+`127402f1c75bb3d5ff6bce04b285faa4930a5aca`。Linux run `32991073228` 提供实际 Linux
+readback（[job 证据](https://github.com/kevin-zf1123/photospider/actions/runs/32991073228/job/98248727299)），
+官方 `actions/runner-images` 的
+[`ubuntu24/20260823.283`](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283)
+与
+[`macos-15-arm64/20260824.0311`](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311)
+release 提供发布身份。Linux lock 同时作为 manifest member 与
+`builder_runner`，Darwin 则是独立 execution lock。任何漂移都会在 candidate work 前失败，而不会
+回退到 mutable label。Checkout 后，published container 中唯一的
 `Trust checked-out workspace` step 会绑定 `shell: bash`，只把精确的 `$GITHUB_WORKSPACE` 加入
 该 job 持久的 global `safe.directory`，并以只读方式校验 `HEAD^{commit}`。它既不会配置
 `safe.directory=*`，也不会执行 checkout 得到的仓库脚本。该 trust boundary 先于两个条件
