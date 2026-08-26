@@ -88,17 +88,43 @@ if [[ -n "$EXPECTED_WORKFLOW_COMMIT" ]]; then
   fi
 fi
 
-mkdir -p "$ARTIFACT_DIR"
-verifier_runner_path=$ARTIFACT_DIR/verifier-linux-runner-identity.json
-python3 "$SCRIPT_DIR/ci_runner_verify.py" \
-  --platform Linux \
-  --runner-label ubuntu-24.04 \
-  --output "$verifier_runner_path" >/dev/null
-manifest_path=$ARTIFACT_DIR/expected-ci-image-input-v1.json
-manifest_digest_path=$ARTIFACT_DIR/expected-ci-image-input-v1.sha256
-labels_path=$ARTIFACT_DIR/oci-labels.json
-builder_runner_path=$ARTIFACT_DIR/builder-linux-runner-identity.json
-attestation_log=$ARTIFACT_DIR/attestation-verification.json
+# @brief Reject residual formal evidence before remote attestation begins.
+# @return Zero only when the final artifact pathname is completely absent.
+# @throws Nothing; a regular directory, link, dangling link, or other residual
+#   final entry returns nonzero before network or identity work.
+# @note This preflight creates nothing. A second atomic mkdir after successful
+#   attestation closes the check/create race for the workflow-owned final name.
+require_fresh_artifact_path() {
+  if [[ -e "$ARTIFACT_DIR" || -L "$ARTIFACT_DIR" ]]; then
+    echo "CI image identity artifact path must be fresh: $ARTIFACT_DIR" >&2
+    return 1
+  fi
+}
+
+# @brief Create the formal artifact directory only after attestation succeeds.
+# @return Zero after creating one fresh non-link mode-0700 directory.
+# @throws Nothing; an aliased parent, residual final path, or mkdir/type failure
+#   returns nonzero before retained identities or layer pulls are produced.
+prepare_artifact_directory() {
+  local artifact_parent=${ARTIFACT_DIR%/*}
+  if [[ "$artifact_parent" == "$ARTIFACT_DIR" ]]; then
+    artifact_parent=.
+  fi
+  if [[ ! -e "$artifact_parent" ]]; then
+    mkdir -p -- "$artifact_parent"
+  fi
+  if [[ ! -d "$artifact_parent" || -L "$artifact_parent" ]]; then
+    echo "CI image identity artifact parent is not a real directory." >&2
+    return 1
+  fi
+  mkdir -m 0700 -- "$ARTIFACT_DIR"
+  if [[ ! -d "$ARTIFACT_DIR" || -L "$ARTIFACT_DIR" ]]; then
+    echo "CI image identity artifact directory was not created safely." >&2
+    return 1
+  fi
+}
+
+require_fresh_artifact_path
 
 # @brief Read the strict published-image fields without requiring jq.
 # @return Three newline-delimited values: locator, workflow path, repository.
@@ -201,16 +227,33 @@ if [[ -n "$EXPECTED_SOURCE_COMMIT" &&
   exit 1
 fi
 
-# Authenticate the exact registry subject before Docker can pull or expand any
-# of its layers. A failed attestation therefore cannot create builder-label,
-# reconstructed-manifest, or final identity output.
-gh attestation verify "oci://$exact_image" \
+# Authenticate the exact registry subject into process-private memory before
+# creating formal artifacts, retaining runner identity, or letting Docker pull
+# and expand a layer. Failure therefore leaves the upload path absent.
+attestation_json=$(gh attestation verify "oci://$exact_image" \
   --repo "$EXPECTED_REPOSITORY" \
   --signer-workflow "$EXPECTED_REPOSITORY/$source_workflow" \
   --source-digest "$source_commit" \
   --signer-digest "$source_commit" \
   --deny-self-hosted-runners \
-  --format json > "$attestation_log"
+  --format json)
+if [[ -z "$attestation_json" ]]; then
+  echo "GitHub attestation verification returned empty evidence." >&2
+  exit 1
+fi
+
+prepare_artifact_directory
+verifier_runner_path=$ARTIFACT_DIR/verifier-linux-runner-identity.json
+manifest_path=$ARTIFACT_DIR/expected-ci-image-input-v1.json
+manifest_digest_path=$ARTIFACT_DIR/expected-ci-image-input-v1.sha256
+labels_path=$ARTIFACT_DIR/oci-labels.json
+builder_runner_path=$ARTIFACT_DIR/builder-linux-runner-identity.json
+attestation_log=$ARTIFACT_DIR/attestation-verification.json
+printf '%s\n' "$attestation_json" > "$attestation_log"
+python3 "$SCRIPT_DIR/ci_runner_verify.py" \
+  --platform Linux \
+  --runner-label ubuntu-24.04 \
+  --output "$verifier_runner_path" >/dev/null
 
 # The image is not executed. Only after attestation succeeds are its config
 # labels parsed as untrusted discovery data, reduced to one approved builder

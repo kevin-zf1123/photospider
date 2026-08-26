@@ -2061,16 +2061,17 @@ def _verify_protected_helpers(
 
 
 def _verify_ci_image_resolver_order(root: Path) -> None:
-    """Require attestation before image-layer pull and identity reconstruction.
+    """Require attestation before formal artifacts, pull, and reconstruction.
 
     Args:
         root: Repository root containing the protected image resolver.
 
     Raises:
         ContractError: A required active command is missing, duplicated, or
-            ordered so that Docker can pull/inspect layers, builder labels can
-            be retained, a manifest can be reconstructed, or final output can
-            be emitted before exact-subject attestation succeeds.
+            ordered so that formal evidence/runner identity can be created,
+            Docker can pull/inspect layers, builder labels can be retained, a
+            manifest can be reconstructed, or final output can be emitted
+            before exact-subject attestation succeeds.
 
     Note:
         Only exact non-comment command lines are authoritative. The durable
@@ -2093,7 +2094,10 @@ def _verify_ci_image_resolver_order(root: Path) -> None:
     ordered_commands = (
         'inspect_output=$(docker buildx imagetools inspect "$locator")',
         'source_commit=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \\',
-        'gh attestation verify "oci://$exact_image" \\',
+        'attestation_json=$(gh attestation verify "oci://$exact_image" \\',
+        "prepare_artifact_directory",
+        'printf \'%s\\n\' "$attestation_json" > "$attestation_log"',
+        'python3 "$SCRIPT_DIR/ci_runner_verify.py" \\',
         'docker pull "$exact_image" >/dev/null',
         (
             "docker image inspect --format '{{json .Config.Labels}}' "

@@ -40,7 +40,8 @@ python3 "$SCRIPT_DIR/ci_profile_manifest.py" \
 # @note Fallback invocations use one NUL-framed v1 stream. The producer
 #   validates every record before emitting any bytes, so an empty filter remains
 #   an exact empty field on Bash 3.2 and Bash 5 instead of collapsing into the
-#   adjacent trust flag as it would in whitespace-delimited text.
+#   adjacent trust flag as it would in whitespace-delimited text. The caller
+#   captures and checks the producer status before parsing any byte.
 read_sanitizer_profile() {
   local field=$1
   python3 - "$profile_json" "$field" <<'PY'
@@ -113,59 +114,198 @@ else:
 PY
 }
 
+# The producer stream is job-local transient state, never durable evidence.
+# A process exit on any validation failure removes it before artifact upload.
+fallback_invocation_stream=
+
+# @brief Remove the exact fresh fallback stream created by this shell process.
+# @return Always zero; an absent stream is already clean.
+# @throws Nothing; cleanup failure is deliberately diagnosed but cannot select
+#   or preserve an invocation stream as authority.
+cleanup_fallback_invocation_stream() {
+  if [[ -n "$fallback_invocation_stream" ]]; then
+    rm -f -- "$fallback_invocation_stream" || {
+      echo "Could not remove transient sanitizer invocation stream." >&2
+      return 1
+    }
+    fallback_invocation_stream=
+  fi
+}
+trap cleanup_fallback_invocation_stream EXIT
+
+# @brief Capture the validated producer bytes into one fresh job-owned file.
+# @return Zero only when the producer itself exits zero and the output remains
+#   one non-linked regular file.
+# @throws Nothing; producer, mktemp, or output identity failures return nonzero
+#   before configuration, build, evidence, or test execution.
+# @note Redirecting a process substitution cannot expose its exit status. This
+#   explicit command boundary retains the producer status and supplies the sole
+#   byte source later consumed through fixed descriptor 9.
+capture_fallback_invocation_stream() {
+  local producer_status
+  fallback_invocation_stream=$(mktemp \
+    "$CI_ARTIFACT_DIR/.${PROFILE}-invocations.XXXXXX")
+  if read_sanitizer_profile invocations > "$fallback_invocation_stream"; then
+    producer_status=0
+  else
+    producer_status=$?
+  fi
+  if ((producer_status != 0)); then
+    echo "Fallback sanitizer invocation producer failed with status $producer_status." >&2
+    return 1
+  fi
+  if [[ ! -f "$fallback_invocation_stream" || -L "$fallback_invocation_stream" ]]; then
+    echo "Fallback sanitizer invocation stream is not a regular fresh file." >&2
+    return 1
+  fi
+}
+
+# @brief Read one NUL-terminated token from fixed descriptor 9.
+# @return Zero for one complete token, one for clean physical EOF with no bytes,
+#   or two when EOF leaves an unterminated partial token.
+# @throws Nothing; Bash read status is normalized for the framing parser.
+# @note ``fallback_token`` is intentionally caller-visible. Empty tokens remain
+#   valid complete fields when ``read`` consumed their NUL delimiter.
+read_fallback_token() {
+  fallback_token=
+  if IFS= read -r -d '' fallback_token <&9; then
+    return 0
+  fi
+  if [[ -n "$fallback_token" ]]; then
+    return 2
+  fi
+  return 1
+}
+
 # @brief Decode the single canonical fallback invocation stream into arrays.
+# @param $1 Exact fresh stream pathname produced by
+#   `capture_fallback_invocation_stream`.
 # @return Zero only after an exact magic record, one or more complete invocation
-#   records, and a terminal record with no trailing fields.
+#   records, a unique terminal record, and physical EOF with no trailing byte.
 # @throws Nothing; malformed, truncated, duplicate, or ambiguous records return
 #   nonzero before any target is built or executable is launched.
-# @note The loop and nested reads share one process-substitution descriptor and
-#   use Bash's NUL delimiter directly. No field is re-tokenized by whitespace,
-#   evaluated as shell source, or accepted through a legacy text fallback.
+# @note The parser owns fixed descriptor 9. Every failed `read -d ''` is
+#   classified as clean EOF or a partial token, so `end\0UNTERMINATED` cannot be
+#   mistaken for success. No field is whitespace-tokenized, evaluated as shell
+#   source, or accepted through a legacy text fallback.
 load_fallback_invocations() {
+  local stream_path=$1
   local token=
   local target=
   local selected=
   local trust=
-  local magic_seen=false
-  local terminal_seen=false
   local seen_targets_pipe=
   local invocation_count=0
+  local read_status
+  local fallback_token=
   invocation_targets=()
   invocation_filters=()
   invocation_trust=()
 
-  while IFS= read -r -d '' token; do
-    if [[ "$terminal_seen" == true ]]; then
-      echo "Fallback sanitizer invocation stream has trailing fields." >&2
+  if [[ ! -f "$stream_path" || -L "$stream_path" ]]; then
+    echo "Fallback sanitizer invocation stream is not a regular file." >&2
+    return 1
+  fi
+  exec 9< "$stream_path"
+  if read_fallback_token; then
+    token=$fallback_token
+  else
+    read_status=$?
+    exec 9<&-
+    if ((read_status == 2)); then
+      echo "Fallback sanitizer invocation stream starts with a partial token." >&2
+    else
+      echo "Fallback sanitizer invocation stream is empty." >&2
+    fi
+    return 1
+  fi
+  if [[ "$token" != photospider-sanitizer-invocations-v1 ]]; then
+    exec 9<&-
+    echo "Fallback sanitizer invocation stream has an unknown schema." >&2
+    return 1
+  fi
+
+  while true; do
+    if read_fallback_token; then
+      token=$fallback_token
+    else
+      read_status=$?
+      exec 9<&-
+      if ((read_status == 2)); then
+        echo "Fallback sanitizer invocation stream ends with a partial token." >&2
+      else
+        echo "Fallback sanitizer invocation stream lacks its terminal record." >&2
+      fi
       return 1
     fi
-    if [[ "$magic_seen" == false ]]; then
-      if [[ "$token" != photospider-sanitizer-invocations-v1 ]]; then
-        echo "Fallback sanitizer invocation stream has an unknown schema." >&2
+    if [[ "$token" == end ]]; then
+      if ((invocation_count == 0)); then
+        exec 9<&-
+        echo "Fallback sanitizer invocation stream has no invocation records." >&2
         return 1
       fi
-      magic_seen=true
-      continue
+      if read_fallback_token; then
+        exec 9<&-
+        echo "Fallback sanitizer invocation stream has trailing fields." >&2
+        return 1
+      else
+        read_status=$?
+      fi
+      exec 9<&-
+      if ((read_status == 2)); then
+        echo "Fallback sanitizer invocation stream has an unterminated tail." >&2
+        return 1
+      fi
+      return 0
     fi
-    if [[ "$token" == end ]]; then
-      terminal_seen=true
-      continue
+    if [[ "$token" != invocation ]]; then
+      exec 9<&-
+      echo "Fallback sanitizer invocation stream has an unknown record." >&2
+      return 1
     fi
-    if [[ "$token" != invocation ]] ||
-      ! IFS= read -r -d '' target ||
-      ! IFS= read -r -d '' selected ||
-      ! IFS= read -r -d '' trust; then
-      echo "Fallback sanitizer invocation stream is truncated or malformed." >&2
+    if read_fallback_token; then
+      target=$fallback_token
+      read_status=0
+    else
+      read_status=$?
+    fi
+    if ((read_status != 0)); then
+      exec 9<&-
+      echo "Fallback sanitizer invocation target is truncated." >&2
+      return 1
+    fi
+    if read_fallback_token; then
+      selected=$fallback_token
+      read_status=0
+    else
+      read_status=$?
+    fi
+    if ((read_status != 0)); then
+      exec 9<&-
+      echo "Fallback sanitizer invocation filter is truncated." >&2
+      return 1
+    fi
+    if read_fallback_token; then
+      trust=$fallback_token
+      read_status=0
+    else
+      read_status=$?
+    fi
+    if ((read_status != 0)); then
+      exec 9<&-
+      echo "Fallback sanitizer invocation trust flag is truncated." >&2
       return 1
     fi
     if [[ ! "$target" =~ ^[a-z][a-z0-9_]*$ ]] ||
       [[ "$selected" == *$'\t'* || "$selected" == *$'\r'* ||
         "$selected" == *$'\n'* ]] ||
       [[ "$trust" != true && "$trust" != false ]]; then
+      exec 9<&-
       echo "Fallback sanitizer invocation fields are malformed." >&2
       return 1
     fi
     if [[ "|$seen_targets_pipe|" == *"|$target|"* ]]; then
+      exec 9<&-
       echo "Fallback sanitizer invocation target is duplicated: $target" >&2
       return 1
     fi
@@ -178,13 +318,7 @@ load_fallback_invocations() {
     invocation_filters+=("$selected")
     invocation_trust+=("$trust")
     invocation_count=$((invocation_count + 1))
-  done < <(read_sanitizer_profile invocations)
-
-  if [[ "$magic_seen" != true || "$terminal_seen" != true ||
-    $invocation_count -eq 0 ]]; then
-    echo "Fallback sanitizer invocation stream is incomplete." >&2
-    return 1
-  fi
+  done
 }
 
 # @brief Persist the shell-decoded invocation identity as NUL-framed evidence.
@@ -207,6 +341,14 @@ write_fallback_invocation_evidence() {
 }
 
 mode=$(read_sanitizer_profile mode)
+if [[ "$mode" == fallback ]]; then
+  invocation_targets=()
+  invocation_filters=()
+  invocation_trust=()
+  capture_fallback_invocation_stream
+  load_fallback_invocations "$fallback_invocation_stream"
+  cleanup_fallback_invocation_stream
+fi
 cmake_args=()
 while IFS= read -r cmake_argument; do
   cmake_args+=("$cmake_argument")
@@ -241,10 +383,6 @@ if [[ "$mode" == fallback ]]; then
     echo "Temporary fallback runtime '$expected_runtime' does not match '$actual_runtime'." >&2
     exit 1
   fi
-  invocation_targets=()
-  invocation_filters=()
-  invocation_trust=()
-  load_fallback_invocations
   write_fallback_invocation_evidence
   targets=()
   needs_trust=false

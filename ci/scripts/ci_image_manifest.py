@@ -21,11 +21,12 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable, NamedTuple
 
 _SCRIPT_DIRECTORY = Path(__file__).resolve().parent
 if str(_SCRIPT_DIRECTORY) not in sys.path:
@@ -34,13 +35,38 @@ from ci_runner_verify import (
     RunnerError,
     canonical_identity_bytes,
     load_resolved_identity,
+    load_resolved_identity_record,
+    load_runner_lock_bytes,
     resolve_approved_identity,
     validate_resolved_identity,
+    validate_resolved_identity_from_lock,
 )
 
 
 class ManifestError(ValueError):
     """Report malformed, unsafe, or mismatched image-manifest state."""
+
+
+class _InputMeasurement(NamedTuple):
+    """Retain one canonical input's exact bytes, digest, and descriptor size.
+
+    Attributes:
+        content: Byte-for-byte result agreed by both descriptor reads.
+        sha256: Lowercase digest of ``content``.
+        size: Stable ``fstat`` size cross-checked against each read count.
+
+    Note:
+        Instances exist only during one manifest construction and are never a
+        second serialized authority beyond the resulting canonical manifest.
+    """
+
+    content: bytes
+    sha256: str
+    size: int
+
+
+_MeasurementHook = Callable[[str, Path, int], None]
+"""Only-test callback invoked at deterministic retained-measurement phases."""
 
 
 _IMAGE_LOCK_RELATIVE_PATH = "ci/locks/ci-image-lock.json"
@@ -171,26 +197,143 @@ def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
-    """Hash one regular file without following an input-list symlink."""
-    if not path.is_file() or path.is_symlink():
-        raise ManifestError(f"image input is not a regular file: {path}")
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _measure_regular_input(
+    path: Path,
+    *,
+    _test_hook: _MeasurementHook | None = None,
+) -> _InputMeasurement:
+    """Measure one retained canonical input exactly once and fail on drift.
+
+    Args:
+        path: Exact canonical repository input pathname.
+        _test_hook: Optional deterministic test callback receiving phase, path,
+            and retained descriptor. Production callers never provide it.
+
+    Returns:
+        Exact agreeing bytes, lowercase SHA-256, and descriptor-derived size.
+
+    Raises:
+        ManifestError: Linux/Darwin safe-open flags are unavailable; the path
+            is missing, linked, special, unreadable, replaced, or modified; or
+            two complete reads of the retained descriptor disagree.
+
+    Note:
+        ``O_NONBLOCK`` bounds FIFO/device opening before ``fstat`` rejects the
+        type. Pathname and descriptor metadata are compared after open and at
+        both read boundaries. The hook exists only to make replacement and
+        in-place mutation races deterministic in direct ``create_manifest``
+        tests; it is not reachable from the CLI.
+    """
+    required_flags = ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")
+    missing_flags = [
+        name for name in required_flags if not isinstance(getattr(os, name, None), int)
+    ]
+    if missing_flags:
+        raise ManifestError(
+            f"{path}: required safe-open flags are unavailable: "
+            + ", ".join(missing_flags)
+        )
+
+    def stable_identity(value: os.stat_result) -> tuple[int, ...]:
+        """Return metadata whose drift invalidates the retained measurement."""
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_nlink,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+
+    def require_stable(
+        initial: os.stat_result, phase: str
+    ) -> os.stat_result:
+        """Rebind the current pathname and descriptor to the initial identity."""
+        current = os.fstat(descriptor)
+        try:
+            pathname = path.lstat()
+        except OSError as error:
+            raise ManifestError(
+                f"image input pathname is unavailable {phase}: {path}: {error}"
+            ) from error
+        if not stat.S_ISREG(current.st_mode) or not stat.S_ISREG(pathname.st_mode):
+            raise ManifestError(f"image input is not a regular file {phase}: {path}")
+        if (
+            stable_identity(current) != stable_identity(initial)
+            or stable_identity(pathname) != stable_identity(initial)
+        ):
+            raise ManifestError(f"image input identity changed {phase}: {path}")
+        return current
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW")
+        | getattr(os, "O_NONBLOCK")
+        | getattr(os, "O_CLOEXEC")
+    )
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        initial = os.fstat(descriptor)
+        if not stat.S_ISREG(initial.st_mode):
+            raise ManifestError(f"image input is not a regular file: {path}")
+        require_stable(initial, "after open")
+        if _test_hook is not None:
+            _test_hook("after_open", path, descriptor)
+        require_stable(initial, "after open hook")
+
+        reads: list[bytes] = []
+        for pass_number in (1, 2):
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            chunks: list[bytes] = []
+            byte_count = 0
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                byte_count += len(chunk)
+            if byte_count != initial.st_size:
+                raise ManifestError(
+                    f"image input byte count changed during read: {path}"
+                )
+            require_stable(initial, f"after read {pass_number}")
+            content = b"".join(chunks)
+            reads.append(content)
+            if _test_hook is not None:
+                phase = (
+                    "after_first_read" if pass_number == 1 else "after_second_read"
+                )
+                _test_hook(phase, path, descriptor)
+            require_stable(initial, f"after read {pass_number} hook")
+        if reads[0] != reads[1]:
+            raise ManifestError(f"image input bytes changed between reads: {path}")
+        return _InputMeasurement(
+            content=reads[0],
+            sha256=_sha256_bytes(reads[0]),
+            size=initial.st_size,
+        )
+    except ManifestError:
+        raise
+    except OSError as error:
+        raise ManifestError(f"cannot measure canonical image input {path}: {error}") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _protected_helpers(
-    root: Path, lock: dict[str, Any], input_paths: list[str]
+    lock: dict[str, Any],
+    input_paths: list[str],
+    measurements: dict[str, _InputMeasurement],
 ) -> dict[str, dict[str, str]]:
     """Validate and return the exact versioned protected-helper identities.
 
     Args:
-        root: Repository root containing the helper files.
         lock: Strict CI-image lock object.
         input_paths: Canonical image-input path inventory.
+        measurements: One retained authority record per canonical input.
 
     Returns:
         The two canonical helper identity records for manifest inclusion.
@@ -201,7 +344,8 @@ def _protected_helpers(
 
     Note:
         The explicit helper identity supplements, rather than replaces, the
-        ordinary per-input hash. This binds executable role/version and bytes.
+        ordinary per-input hash. This binds executable role/version and bytes
+        without reopening a helper pathname after its manifest measurement.
     """
     helpers = lock.get("protected_helpers")
     expected_names = {"ci-image-installer", "integration-suite-gate"}
@@ -227,16 +371,40 @@ def _protected_helpers(
             r"[0-9a-f]{64}", sha256
         ) is None:
             raise ManifestError(f"protected helper {name!r} identity is malformed")
-        if _sha256_file(root / path) != sha256:
+        measurement = measurements.get(path)
+        if measurement is None or measurement.sha256 != sha256:
             raise ManifestError(f"protected helper {name!r} bytes differ from the lock")
         result[name] = {"path": path, "sha256": sha256, "version": version}
     return result
 
 
-def _read_builder_commit(root: Path, action: str, release: str) -> str:
-    """Resolve the declared builder to exactly one protected action-lock row."""
+def _read_builder_commit(
+    lock_bytes: bytes, action: str, release: str, context: str
+) -> str:
+    """Resolve a builder from one already-retained action-lock measurement.
+
+    Args:
+        lock_bytes: Exact retained canonical input bytes.
+        action: Protected action identifier required by the image lock.
+        release: Human-readable release identity paired with that action.
+        context: Stable input path used for diagnostics.
+
+    Returns:
+        The unique lowercase full commit SHA from the matching action row.
+
+    Raises:
+        ManifestError: UTF-8, row shape, uniqueness, or commit identity fails.
+
+    Note:
+        This function never reopens ``actions.lock``; manifest digest/size and
+        builder semantics share the caller's single retained measurement.
+    """
+    try:
+        lines = lock_bytes.decode("utf-8").splitlines()
+    except UnicodeError as error:
+        raise ManifestError(f"cannot decode retained action lock {context}") from error
     matches: list[str] = []
-    for raw_line in (root / "ci/locks/actions.lock").read_text(encoding="utf-8").splitlines():
+    for raw_line in lines:
         if not raw_line or raw_line.startswith("#"):
             continue
         fields = raw_line.split("\t")
@@ -254,6 +422,8 @@ def create_manifest(
     source_commit: str,
     repository: str,
     builder_runner: dict[str, str],
+    *,
+    _test_hook: _MeasurementHook | None = None,
 ) -> dict[str, Any]:
     """Create the manifest for exact source bytes and measured builder runtime.
 
@@ -263,39 +433,79 @@ def create_manifest(
         repository: Locked GitHub ``owner/name`` source identity.
         builder_runner: Retained Linux runtime record produced by
             ``ci_runner_verify.py`` in the actual build job.
+        _test_hook: Optional deterministic measurement hook for direct tests.
 
     Returns:
         Canonical manifest object whose input list binds the complete reviewed
         rollout lock while ``builder_runner`` binds the one selected member.
 
     Raises:
-        ManifestError: Source, repository, inputs, builder action, or retained
-            runner identity is malformed or no longer approved by this source.
+        ManifestError: Source, repository, safe retained input measurement,
+            builder action, or runner identity is malformed or no longer
+            approved by this exact measured source.
+
+    Note:
+        The self-including lock is decoded from its one retained measurement.
+        Every remaining canonical path is opened exactly once, and all helper,
+        action, runner-lock, digest, and size semantics reuse that path-to-record
+        authority without a second pathname read.
     """
     if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
         raise ManifestError("source commit must be a lowercase full SHA")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ManifestError("repository must be an owner/name identity")
     lock_path = root / "ci/locks/ci-image-lock.json"
-    lock = _load_json(lock_path)
+    lock_measurement = _measure_regular_input(lock_path, _test_hook=_test_hook)
+    lock = _load_json_bytes(lock_measurement.content, str(lock_path))
     paths = _image_input_paths(lock, str(lock_path))
-    protected_helpers = _protected_helpers(root, lock, paths)
-    inputs: list[dict[str, Any]] = []
+    measurements = {
+        _IMAGE_LOCK_RELATIVE_PATH: lock_measurement,
+    }
     for relative in paths:
-        input_path = root / relative
-        inputs.append(
-            {
-                "path": relative,
-                "sha256": _sha256_file(input_path),
-                "size": input_path.stat().st_size,
-            }
+        if relative == _IMAGE_LOCK_RELATIVE_PATH:
+            continue
+        measurements[relative] = _measure_regular_input(
+            root / relative, _test_hook=_test_hook
         )
+    if set(measurements) != set(paths):
+        raise ManifestError("canonical image input measurement set is incomplete")
+    protected_helpers = _protected_helpers(lock, paths, measurements)
+    inputs = [
+        {
+            "path": relative,
+            "sha256": measurements[relative].sha256,
+            "size": measurements[relative].size,
+        }
+        for relative in paths
+    ]
     builder = lock.get("builder")
-    if not isinstance(builder, dict) or set(builder) != {"action", "release"}:
+    if (
+        not isinstance(builder, dict)
+        or set(builder) != {"action", "release"}
+        or not all(isinstance(value, str) and value for value in builder.values())
+    ):
         raise ManifestError("builder lock is malformed")
-    builder_commit = _read_builder_commit(root, builder["action"], builder["release"])
+    actions_path = "ci/locks/actions.lock"
+    actions_measurement = measurements.get(actions_path)
+    if actions_measurement is None:
+        raise ManifestError("canonical action lock is absent from image inputs")
+    builder_commit = _read_builder_commit(
+        actions_measurement.content,
+        builder["action"],
+        builder["release"],
+        actions_path,
+    )
+    runner_lock_path = "ci/locks/linux-runner-lock.json"
+    runner_lock_measurement = measurements.get(runner_lock_path)
+    if runner_lock_measurement is None:
+        raise ManifestError("canonical Linux runner lock is absent from image inputs")
     try:
-        runner = validate_resolved_identity(root, "Linux", builder_runner)
+        runner_lock = load_runner_lock_bytes(
+            runner_lock_measurement.content, "Linux", runner_lock_path
+        )
+        runner = validate_resolved_identity_from_lock(
+            runner_lock, "Linux", builder_runner
+        )
     except RunnerError as error:
         raise ManifestError(f"Linux builder runtime identity is invalid: {error}") from error
     return {
@@ -750,10 +960,15 @@ def _verify_manifest_file(path: Path) -> tuple[dict[str, Any], str]:
 
 
 def _command_create(arguments: argparse.Namespace) -> None:
-    """Create a canonical manifest and optional digest sidecar."""
+    """Create a canonical manifest and optional digest from one retained runner.
+
+    The runner record is decoded canonically here but is semantically rebound
+    only inside ``create_manifest`` to that function's already-retained Linux
+    lock measurement. This avoids reopening a canonical input pathname.
+    """
     try:
-        builder_runner = load_resolved_identity(
-            arguments.builder_runner_identity, arguments.repo_root, "Linux"
+        builder_runner = load_resolved_identity_record(
+            arguments.builder_runner_identity
         )
     except RunnerError as error:
         raise ManifestError(f"cannot consume retained builder identity: {error}") from error
@@ -798,11 +1013,11 @@ def _command_publish_source_commit(arguments: argparse.Namespace) -> None:
 
 
 def _command_verify(arguments: argparse.Namespace) -> None:
-    """Recreate and compare a manifest against expected repository state."""
+    """Recreate and compare a manifest against one retained repository state."""
     actual, actual_digest = _verify_manifest_file(arguments.manifest)
     try:
-        builder_runner = load_resolved_identity(
-            arguments.builder_runner_identity, arguments.repo_root, "Linux"
+        builder_runner = load_resolved_identity_record(
+            arguments.builder_runner_identity
         )
     except RunnerError as error:
         raise ManifestError(f"cannot consume retained builder identity: {error}") from error

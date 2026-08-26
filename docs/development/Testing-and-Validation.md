@@ -3377,10 +3377,13 @@ compatibility translation.
 The temporary current-main ASan/TSan fallback transports every target, possibly
 empty GoogleTest filter, and trust flag through one terminal NUL-framed v1
 stream. Its Bash 3.2/5 reader neither whitespace-splits nor evaluates a field,
-rejects incomplete or trailing records, and writes the exact decoded stream as
-diagnostic evidence before any target executes. Empty filters therefore retain
-their intended whole-binary selection instead of becoming adjacent boolean
-text.
+captures the fully prevalidated producer into one fresh transient file, checks
+the producer status, and parses through one fixed descriptor. Clean EOF is
+distinguished from a partial token; terminal omission/duplication, complete or
+partial tails, truncated fields, duplicate targets, unknown records, and
+nonzero producer output all fail before configure/build/test and success
+evidence. Empty filters therefore retain their intended whole-binary selection
+instead of becoming adjacent boolean text.
 
 Darwin ASan, TSan, and bounded fuzz are three independent `macos-15` jobs. Each
 depends only on the common integration plan, consumes the same protected
@@ -3409,8 +3412,10 @@ attestation path.
 `healthcheck-published-image` is a container job. The protected
 `photospider-ci:latest` value is only the discovery locator; a trusted host
 preflight resolves its exact digest and verifies the exact-subject attestation
-before Docker can pull or expand any image layer. It then pulls that digest,
-validates OCI revision and manifest labels, and all published-image healthcheck
+in process-private memory before formal artifact creation, retained runner
+identity, or Docker layer pull/expansion. Failure leaves the upload path absent
+and final output unchanged. It then persists the successful evidence, pulls
+that digest, validates OCI revision and manifest labels, and all published-image healthcheck
 and build/test integration jobs run the resulting
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` reference.
 Lightweight routing and result gates remain on `ubuntu-24.04`.
@@ -3444,7 +3449,11 @@ re-reading `ImageVersion`. Unknown/tampered members fail closed, and retiring a
 rollout member requires a reviewed lock update and rebuilt image. Runner lock
 and retained-record inputs require `O_NOFOLLOW`, `O_NONBLOCK`, and `O_CLOEXEC`,
 so FIFO/device inputs fail without blocking; fresh retained output uses
-`O_EXCL` and refuses residual state. Immediately after checkout, the published
+`O_EXCL` and refuses residual state.
+Canonical manifest creation applies the same flags to every self-declared image
+input exactly once, gets digest and size from two agreeing reads, and reuses the
+retained lock/helper/action/runner bytes for semantic checks without reopening.
+Immediately after checkout, the published
 container's unique `Trust checked-out workspace` step binds `shell: bash`,
 adds only the exact `$GITHUB_WORKSPACE` to the job-persistent global
 `safe.directory`, and verifies `HEAD^{commit}` read-only. It neither configures

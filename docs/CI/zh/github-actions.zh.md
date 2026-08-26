@@ -40,8 +40,10 @@ integration workflow 会在受保护路径门禁之后运行 `change-classificat
 ## 运行环境
 
 `Dockerfile.ci` 定义 GitHub Linux 测试环境。受保护 lock 中的
-`photospider-ci:latest` 只用于发现 locator。可信 host job 会解析它，并在 Docker 可以拉取或展开任何
-image layer 之前校验精确 subject 的 source/signer workflow attestation。只有此后它才会拉取
+`photospider-ci:latest` 只用于发现 locator。可信 host job 会解析它，并在创建 formal artifact
+directory、保留 runner identity 或允许 Docker 拉取/展开任何 image layer 之前，在 process-private
+memory 中校验精确 subject 的 source/signer workflow attestation。失败会使 always-upload path 保持
+absent、final workflow output 不变。只有成功后它才持久化 attestation evidence、拉取
 digest-qualified image、校验 OCI revision 与 canonical manifest label，并且只输出最终的
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` 引用。Published-image healthcheck 与 build/test
 integration job 都执行该已校验的 digest-qualified 引用；没有 job 直接执行可变 locator。
@@ -88,6 +90,9 @@ record 会在 candidate work 前失败。Runner lock 与 retained-record input �
 `O_NONBLOCK` 和 `O_CLOEXEC`；FIFO 与 device path 会在不阻塞的情况下被拒绝，fresh retained output
 则使用 `O_EXCL` 拒绝任何 residual path。Rollout 完成后，移除 retired member 必须通过 reviewed
 protected-lock update 并生成新镜像。
+Manifest creation 会独立使用 `O_NOFOLLOW`、`O_NONBLOCK` 与 `O_CLOEXEC` 对每个 canonical image
+input 恰好打开一次，从 retained descriptor 的两次一致读取获得 digest 与 size，并复用 retained lock、
+helper、action 与 runner byte 完成 semantic check，不再重新打开。
 
 该 callable producer 本身也是一份完整 parsed-tree 合同：它只暴露 typed `workflow_call`、精确 write
 permission，以及一个带有受审查有序 step 的 `ubuntu-24.04` build job。Checkout 与 prebuild
@@ -327,7 +332,7 @@ package-input 边界运行，在不重建或重新安装 producer 的前提下�
 - ASan 与 TSan 保留共享的 compute/propagation 检查，并选择对应的旧 scheduler 或新
   policy/execution focused tests。
 
-在 candidate-owned matrix 取代 current-main sanitizer fallback 之前，该 fallback 只使用一个带终止记录的 NUL-framed v1 invocation stream。Target、可能为空的 GoogleTest filter 与 trust flag 在 Bash 3.2 和 Bash 5 中仍是三个独立 field；禁止 whitespace splitting、shell evaluation 与 legacy text decoder。Shell 会把解码后的 stream 保存为诊断 evidence，再由 `run_gtest_checked` 在执行前证明每个空或非空 selection 都非零。
+在 candidate-owned matrix 取代 current-main sanitizer fallback 之前，该 fallback 只使用一个带终止记录的 NUL-framed v1 invocation stream。Target、可能为空的 GoogleTest filter 与 trust flag 在 Bash 3.2 和 Bash 5 中仍是三个独立 field；禁止 whitespace splitting、shell evaluation 与 legacy text decoder。Producer 会在发出任何 byte 前校验全部 record；shell 把输出捕获到唯一 fresh transient file、显式检查 producer status，再通过固定 descriptor 解析。NUL read 失败且残留 partial byte、terminal 缺失或重复、完整或不完整 tail、target 重复或 producer 非零，都会在 configure/build/test 前失败且不写 success evidence。Shell 只把完整解码后的 stream 保存为诊断 evidence，再由 `run_gtest_checked` 在执行前证明每个空或非空 selection 都非零。
 
 Linux 与 Darwin 都会把 ASan、TSan 和有界 fuzz 调度为不同的 profile result。在 Darwin 上，
 `sanitizer-asan-darwin`、`sanitizer-tsan-darwin` 与 `fuzz-codecs-darwin` 是三个独立的
@@ -348,6 +353,10 @@ metadata，并要求对同一 descriptor 的两次读取一致。因此 final sy
 hardlink 也会失败，in-place mutation 同样不能改变获授权 helper byte。它不依赖随 Python 版本变化的
 `ast.dump()` 或 `ast.unparse()`。Behavior test 仍会执行每个 result 与 attestation branch；security
 contract 直接启动的 Python child 使用测试进程自己的 `sys.executable`。
+Canonical manifest input measurement 会把同一 retained-descriptor boundary 应用于每个
+self-declared input，而不仅是两个 protected helper。Self-including lock、helper hash、action builder
+identity、runner rollout authority、逐 input digest 与 descriptor size 都来自唯一 path-to-record
+measurement map。
 
 这是一个受保护的两阶段过渡。可信 `CI/**` 变更先进入 `main`，并在那里验证旧契约；架构 pull
 request 随后纳入该可信 commit，并删除自身独立的受保护路径差异，其完整标记集合会选择
@@ -483,21 +492,39 @@ smoke，可使用
 不存在等价的本机串行命令；本机诊断应使用上文聚焦的 role command，而 build-once digest fan-out、
 attestation、聚合与 same-digest promotion 属于 GitHub Actions 门禁。
 
-Docker 复现：
+Docker 复现会把本地 layer solver 与受保护 publication provenance 分开。以下本地命令有意不具备发布资格：
 
 ```bash
-mkdir -p CI-results/local-ci-image
-ci_image_source_commit=$(python3 ci/scripts/ci_image_manifest.py source-commit)
-ci_image_manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
-  --source-commit "$ci_image_source_commit" \
-  --repository kevin-zf1123/photospider \
-  --output CI-results/local-ci-image/ci-image-input-v1.json)
-docker build -t photospider-ci:local -f Dockerfile.ci \
-  --build-arg CI_IMAGE_INPUT_MANIFEST_SHA256="$ci_image_manifest_digest" \
-  --build-arg CI_IMAGE_SOURCE_COMMIT="$ci_image_source_commit" .
+# Local layer-solver reproduction only; never publish or attest this image.
+local_ci_identity=local-layer-solver-only-not-publishable
+docker build --no-cache -t photospider-ci:local -f Dockerfile.ci \
+  --build-arg CI_IMAGE_INPUT_MANIFEST_SHA256="$local_ci_identity" \
+  --build-arg CI_IMAGE_SOURCE_COMMIT="$local_ci_identity" .
 docker run --rm -v "$PWD:/workspace" -w /workspace photospider-ci:local \
   bash ci/scripts/build_integrity.sh
 ```
+
+只有 approved `ubuntu-24.04` GitHub-hosted builder 才能构造用于发布的 manifest。在该 protected job 中，
+真实 retained builder identity 与 source equality 必须按以下方式取得：
+
+```bash
+# Approved Linux hosted runner only; this constructs publish provenance.
+mkdir -p CI-results/hosted-ci-image
+builder_runner_identity="${RUNNER_TEMP:?}/photospider-builder-runner-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}.json"
+python3 ci/scripts/ci_runner_verify.py --platform Linux \
+  --runner-label ubuntu-24.04 --output "$builder_runner_identity"
+ci_image_source_commit=$(python3 ci/scripts/ci_image_manifest.py \
+  publish-source-commit --workflow-commit "${GITHUB_SHA:?}")
+ci_image_manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
+  --source-commit "$ci_image_source_commit" \
+  --repository "${GITHUB_REPOSITORY:?}" \
+  --builder-runner-identity "$builder_runner_identity" \
+  --output CI-results/hosted-ci-image/ci-image-input-v1.json)
+```
+
+上面的本地 marker value 只用于执行 Docker layer 与 snapshot solver；它们不是 canonical manifest、OCI
+provenance 或发布授权，绝不能传给 promotion 或 attestation。受保护 producer 会把第二个 block 的精确
+manifest/source value 作为 immutable Buildx input，并继续应用全部 workflow、attestation 与 digest check。
 
 其余 Docker build argument 保持 `ci/locks/ci-image-lock.json` 中受保护的 immutable default。本地
 镜像源覆盖不属于维护中的镜像契约。OpenSSL/CA 离线 bootstrap URL 与 SHA-256 值锁定在该文件中；
@@ -513,7 +540,8 @@ active-statement identity 及 network/install allowlist 会阻止 helper 与其 
 success。唯一的非 APT 下载是精确 GitHub CLI release URL；其架构专用 hash 会在 extract/install
 之前完成校验。
 
-上述本地 Docker 命令复现的是维护中的 current-toolchain CI 路径，不代表 CMake 3.16 本身已经
+上述本地 Docker 命令复现的是维护中的 current-toolchain layer 与 build 路径，不带 publication
+provenance，也不代表 CMake 3.16 本身已经
 运行。若确实需要针对性旧版本证据，而本机没有原生兼容 executable，应记录该限制，不要用架构
 模拟制造最低版本 PASS。
 

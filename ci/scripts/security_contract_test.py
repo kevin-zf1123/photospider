@@ -93,6 +93,30 @@ def write_runner_identity(path: Path, platform_name: str, image_version: str) ->
 class ImageManifestContractTest(unittest.TestCase):
     """Exercise canonical image-input creation and exact OCI-label binding."""
 
+    @staticmethod
+    def _manifest_module(name: str) -> object:
+        """Load the protected manifest implementation under a unique name."""
+        module_path = SCRIPTS / "ci_image_manifest.py"
+        specification = importlib.util.spec_from_file_location(name, module_path)
+        if specification is None or specification.loader is None:
+            raise AssertionError("ci_image_manifest.py cannot be loaded")
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _copy_canonical_image_inputs(root: Path) -> list[str]:
+        """Copy the complete production image-input authority into one fixture."""
+        lock = json.loads(
+            (REPO_ROOT / "ci/locks/ci-image-lock.json").read_text(encoding="utf-8")
+        )
+        paths = lock["input_paths"]
+        for relative in paths:
+            destination = root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO_ROOT / relative, destination)
+        return paths
+
     def test_manifest_and_labels_bind_exact_inputs(self) -> None:
         """Accept exact manifest/labels and reject a mismatched manifest label."""
         with tempfile.TemporaryDirectory() as temporary_text:
@@ -174,6 +198,189 @@ class ImageManifestContractTest(unittest.TestCase):
                 expect_success=False,
             )
             self.assertIn("expected", failed.stderr)
+
+    def test_manifest_inputs_use_one_retained_descriptor_snapshot(self) -> None:
+        """Reject canonical input aliases and deterministic measurement drift."""
+        module = self._manifest_module("ci_image_manifest_retained_input_test")
+        with tempfile.TemporaryDirectory() as temporary_text:
+            temporary = Path(temporary_text)
+            builder_identity_path = temporary / "builder-runner.json"
+            builder_identity = write_runner_identity(
+                builder_identity_path, "Linux", LINUX_STABLE_VERSION
+            )
+
+            def materialize(name: str) -> tuple[Path, list[str]]:
+                """Create one independent complete canonical input fixture."""
+                root = temporary / name
+                root.mkdir()
+                return root, self._copy_canonical_image_inputs(root)
+
+            root, paths = materialize("ordinary")
+            open_counts = {relative: 0 for relative in paths}
+            real_open = module.os.open
+
+            def tracking_open(path: object, flags: int, *arguments: object) -> int:
+                """Count every canonical pathname open across imported readers."""
+                candidate = Path(path)
+                try:
+                    relative = candidate.relative_to(root).as_posix()
+                except ValueError:
+                    relative = ""
+                if relative in open_counts:
+                    open_counts[relative] += 1
+                return real_open(path, flags, *arguments)
+
+            with mock.patch.object(module.os, "open", side_effect=tracking_open):
+                manifest = module.create_manifest(
+                    root,
+                    COMMIT_A,
+                    "kevin-zf1123/photospider",
+                    builder_identity,
+                )
+            self.assertEqual(set(record["path"] for record in manifest["inputs"]), set(paths))
+            self.assertEqual(open_counts, {relative: 1 for relative in paths})
+            for flag_name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"):
+                with self.subTest(missing_manifest_flag=flag_name), mock.patch.object(
+                    module.os, flag_name, None
+                ), self.assertRaises(module.ManifestError):
+                    module.create_manifest(
+                        root,
+                        COMMIT_A,
+                        "kevin-zf1123/photospider",
+                        builder_identity,
+                    )
+
+            for unsafe_kind in ("symlink", "fifo"):
+                with self.subTest(initial_unsafe=unsafe_kind):
+                    unsafe_root, _ = materialize(f"initial-{unsafe_kind}")
+                    victim = unsafe_root / ".dockerignore"
+                    victim.unlink()
+                    if unsafe_kind == "symlink":
+                        victim.symlink_to(unsafe_root / "Dockerfile.ci")
+                    else:
+                        os.mkfifo(victim)
+                    with self.assertRaises(module.ManifestError):
+                        module.create_manifest(
+                            unsafe_root,
+                            COMMIT_A,
+                            "kevin-zf1123/photospider",
+                            builder_identity,
+                        )
+
+            with self.assertRaises(module.ManifestError):
+                module._measure_regular_input(Path("/dev/null"))
+
+            device_root, _ = materialize("initial-device")
+            device_victim = device_root / ".dockerignore"
+            device_real_open = module.os.open
+
+            def substitute_device(
+                path: object, flags: int, *arguments: object
+            ) -> int:
+                """Return a real character-device descriptor for one input."""
+                if Path(path) == device_victim:
+                    return device_real_open("/dev/null", flags)
+                return device_real_open(path, flags, *arguments)
+
+            with mock.patch.object(
+                module.os, "open", side_effect=substitute_device
+            ), self.assertRaises(module.ManifestError):
+                module.create_manifest(
+                    device_root,
+                    COMMIT_A,
+                    "kevin-zf1123/photospider",
+                    builder_identity,
+                )
+
+            swap_root, _ = materialize("after-open-swap")
+            swap_victim = swap_root / "ci/scripts/ci_image_install.sh"
+            same_inode_alias = swap_root / "same-inode-helper"
+            os.link(swap_victim, same_inode_alias)
+
+            def swap_after_open(phase: str, path: Path, _descriptor: int) -> None:
+                """Replace a helper name with a symlink to its same inode."""
+                if phase == "after_open" and path == swap_victim:
+                    replacement = swap_root / "helper-link-replacement"
+                    replacement.symlink_to(same_inode_alias)
+                    os.replace(replacement, swap_victim)
+
+            with self.assertRaises(module.ManifestError):
+                module.create_manifest(
+                    swap_root,
+                    COMMIT_A,
+                    "kevin-zf1123/photospider",
+                    builder_identity,
+                    _test_hook=swap_after_open,
+                )
+
+            mutation_root, _ = materialize("first-read-mutation")
+            mutation_victim = mutation_root / "Dockerfile.ci"
+
+            def mutate_after_first_read(
+                phase: str, path: Path, _descriptor: int
+            ) -> None:
+                """Rewrite one retained inode after its first complete read."""
+                if phase == "after_first_read" and path == mutation_victim:
+                    value = bytearray(mutation_victim.read_bytes())
+                    value[0] = ord("X") if value[0] != ord("X") else ord("Y")
+                    with mutation_victim.open("r+b") as handle:
+                        handle.write(value)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+
+            with self.assertRaises(module.ManifestError):
+                module.create_manifest(
+                    mutation_root,
+                    COMMIT_A,
+                    "kevin-zf1123/photospider",
+                    builder_identity,
+                    _test_hook=mutate_after_first_read,
+                )
+
+            helper_root, _ = materialize("helper-final-boundary")
+            helper_victim = helper_root / "ci/scripts/integration_suite_gate.py"
+
+            def replace_after_second_read(
+                phase: str, path: Path, _descriptor: int
+            ) -> None:
+                """Replace a helper after measurement but before semantic reuse."""
+                if phase == "after_second_read" and path == helper_victim:
+                    replacement = helper_root / "replacement-helper"
+                    replacement.write_bytes(helper_victim.read_bytes())
+                    os.replace(replacement, helper_victim)
+
+            with self.assertRaises(module.ManifestError):
+                module.create_manifest(
+                    helper_root,
+                    COMMIT_A,
+                    "kevin-zf1123/photospider",
+                    builder_identity,
+                    _test_hook=replace_after_second_read,
+                )
+
+            cli_root, _ = materialize("cli-symlink")
+            cli_victim = cli_root / ".dockerignore"
+            cli_victim.unlink()
+            cli_victim.symlink_to(cli_root / "Dockerfile.ci")
+            cli_output = temporary / "unsafe-cli-manifest.json"
+            failed = run_command(
+                sys.executable,
+                SCRIPTS / "ci_image_manifest.py",
+                "--repo-root",
+                cli_root,
+                "create",
+                "--source-commit",
+                COMMIT_A,
+                "--repository",
+                "kevin-zf1123/photospider",
+                "--builder-runner-identity",
+                builder_identity_path,
+                "--output",
+                cli_output,
+                expect_success=False,
+            )
+            self.assertRegex(failed.stderr, r"regular file|symbolic links")
+            self.assertFalse(cli_output.exists())
 
     def test_publisher_rejects_head_after_last_image_input_commit(self) -> None:
         """Reject a later manual/push HEAD before registry publication can begin."""
@@ -379,6 +586,15 @@ class ImageManifestContractTest(unittest.TestCase):
             }
             run_command("bash", SCRIPTS / "ci_image_verify.sh", environment=environment)
             outputs = output.read_text(encoding="utf-8")
+            self.assertEqual(
+                (temporary / "artifacts/attestation-verification.json").read_text(
+                    encoding="utf-8"
+                ),
+                "[]\n",
+            )
+            self.assertTrue(
+                (temporary / "artifacts/verifier-linux-runner-identity.json").is_file()
+            )
             self.assertIn(f"digest={image_digest}", outputs)
             self.assertIn(
                 f"builder_image_version={LINUX_ROLLOUT_VERSION}", outputs
@@ -397,6 +613,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 "docker-imagetools-inspect",
                 "python-source-commit",
                 "gh-attestation",
+                "python-runner-verify",
                 "docker-pull",
                 "docker-image-inspect",
                 "python-builder-from-labels",
@@ -427,6 +644,7 @@ class ImageManifestContractTest(unittest.TestCase):
             failed_order = command_log.read_text(encoding="utf-8").splitlines()
             self.assertIn("gh-attestation", failed_order)
             for forbidden_event in (
+                "python-runner-verify",
                 "docker-pull",
                 "docker-image-inspect",
                 "python-builder-from-labels",
@@ -434,13 +652,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 "python-verify-labels",
             ):
                 self.assertNotIn(forbidden_event, failed_order)
-            self.assertFalse(
-                (failed_artifact / "builder-linux-runner-identity.json").exists()
-            )
-            self.assertFalse(
-                (failed_artifact / "expected-ci-image-input-v1.json").exists()
-            )
-            self.assertFalse((failed_artifact / "ci-image-identity.env").exists())
+            self.assertFalse(failed_artifact.exists())
             self.assertEqual(
                 failed_output.read_text(encoding="utf-8"), "sentinel=unchanged\n"
             )
@@ -565,7 +777,7 @@ class ImageManifestContractTest(unittest.TestCase):
         module._verify_ci_image_resolver_order(REPO_ROOT)
 
         source = (SCRIPTS / "ci_image_verify.sh").read_text(encoding="utf-8")
-        attestation = 'gh attestation verify "oci://$exact_image" \\'
+        attestation = 'attestation_json=$(gh attestation verify "oci://$exact_image" \\'
         pull = 'docker pull "$exact_image" >/dev/null'
         self.assertEqual(source.count(attestation), 1)
         self.assertEqual(source.count(pull), 1)
@@ -588,6 +800,82 @@ class ImageManifestContractTest(unittest.TestCase):
                 script.write_text(mutation, encoding="utf-8")
                 with self.assertRaises(module.ContractError):
                     module._verify_ci_image_resolver_order(root)
+
+    def test_bilingual_docker_reproduction_separates_local_and_provenance(
+        self,
+    ) -> None:
+        """Keep local solver markers separate from hosted builder provenance."""
+        english = (REPO_ROOT / "docs/CI/github-actions.md").read_text(
+            encoding="utf-8"
+        )
+        chinese = (REPO_ROOT / "docs/CI/zh/github-actions.zh.md").read_text(
+            encoding="utf-8"
+        )
+
+        def fenced_block(text: str, marker: str) -> str:
+            """Extract the unique Bash fence containing one stable marker."""
+            self.assertEqual(text.count(marker), 1)
+            marker_index = text.index(marker)
+            start = text.rfind("```bash\n", 0, marker_index)
+            end = text.index("\n```", marker_index)
+            self.assertGreaterEqual(start, 0)
+            return text[start + len("```bash\n") : end]
+
+        local_marker = (
+            "# Local layer-solver reproduction only; never publish or attest "
+            "this image."
+        )
+        hosted_marker = (
+            "# Approved Linux hosted runner only; this constructs publish "
+            "provenance."
+        )
+        local = fenced_block(english, local_marker)
+        hosted = fenced_block(english, hosted_marker)
+        self.assertEqual(local, fenced_block(chinese, local_marker))
+        self.assertEqual(hosted, fenced_block(chinese, hosted_marker))
+        self.assertIn("docker build --no-cache", local)
+        self.assertIn("local-layer-solver-only-not-publishable", local)
+        self.assertNotIn("ci_image_manifest.py create", local)
+        self.assertLess(
+            hosted.index("ci_runner_verify.py"),
+            hosted.index("ci_image_manifest.py create"),
+        )
+        self.assertLess(
+            hosted.index("publish-source-commit"),
+            hosted.index("ci_image_manifest.py create"),
+        )
+        self.assertIn(
+            '--builder-runner-identity "$builder_runner_identity"', hosted
+        )
+        for block in (local, hosted):
+            syntax = subprocess.run(
+                ["/bin/bash", "-n"],
+                input=block,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(syntax.returncode, 0, msg=syntax.stderr)
+
+        command_start = hosted.index("ci_image_manifest_digest=$(")
+        self.assertTrue(hosted.endswith(")"))
+        command_end = len(hosted) - 1
+        command = hosted[
+            command_start + len("ci_image_manifest_digest=$(") : command_end
+        ]
+        command = re.sub(r"\\\n[ ]*", " ", command)
+        arguments = shlex.split(command)
+        self.assertEqual(
+            arguments[:2], ["python3", "ci/scripts/ci_image_manifest.py"]
+        )
+        parser = self._manifest_module(
+            "ci_image_manifest_documented_command_test"
+        ).build_parser()
+        parsed = parser.parse_args(arguments[2:])
+        self.assertEqual(parsed.command, "create")
+        self.assertEqual(
+            str(parsed.builder_runner_identity), "$builder_runner_identity"
+        )
 
 
 class ImagePromotionContractTest(unittest.TestCase):
@@ -1764,7 +2052,9 @@ class ImagePromotionContractTest(unittest.TestCase):
             manifest_failed, _, calls, inspected = invoke(
                 "CI/missing-input", "missing-input-a", expect_success=False
             )
-            self.assertIn("image input is not a regular file", manifest_failed.stderr)
+            self.assertIn(
+                "cannot measure canonical image input", manifest_failed.stderr
+            )
             self.assertEqual(calls, "")
             self.assertEqual(inspected, [])
 
@@ -2345,7 +2635,18 @@ class ProfileReaderContractTest(unittest.TestCase):
             )
             uname_shim.chmod(0o755)
             python_shim = shim / "python3"
-            python_shim.symlink_to(sys.executable)
+            python_shim.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -Eeuo pipefail\n"
+                "if [[ ${1:-} == - && ${3:-} == invocations && "
+                "-n ${SANITIZER_TEST_STREAM_FILE:-} ]]; then\n"
+                "  cat -- \"$SANITIZER_TEST_STREAM_FILE\"\n"
+                "  exit \"${SANITIZER_TEST_PRODUCER_STATUS:-0}\"\n"
+                "fi\n"
+                f"exec {sys.executable!s} \"$@\"\n",
+                encoding="utf-8",
+            )
+            python_shim.chmod(0o755)
 
             bash_candidates: dict[int, Path] = {}
             for candidate in (
@@ -2446,6 +2747,83 @@ class ProfileReaderContractTest(unittest.TestCase):
                             [f"--gtest_filter={injected_filter}"],
                         ],
                     )
+
+            magic = b"photospider-sanitizer-invocations-v1\0"
+            invocation = b"invocation\0test_compute_run\0\0false\0"
+            complete = magic + invocation + b"end\0"
+            duplicate_target = magic + invocation + invocation + b"end\0"
+            invalid_streams = (
+                ("unterminated-tail", complete + b"UNTERMINATED", 0),
+                ("complete-tail", complete + b"junk\0", 0),
+                ("missing-terminal", magic + invocation, 0),
+                (
+                    "truncated-field",
+                    magic + b"invocation\0test_compute_run\0\0fal",
+                    0,
+                ),
+                ("duplicate-end", complete + b"end\0", 0),
+                ("duplicate-target", duplicate_target, 0),
+                ("unknown-schema", b"unknown-schema\0end\0", 0),
+                ("unknown-record", magic + b"unknown\0", 0),
+                ("producer-nonzero-partial", complete + b"partial", 23),
+            )
+            stream_root = root / "invalid-streams"
+            stream_root.mkdir()
+            for major, bash_executable in sorted(bash_candidates.items()):
+                for label, stream, producer_status in invalid_streams:
+                    with self.subTest(
+                        bash_major=major, invalid_framing=label
+                    ):
+                        stream_path = stream_root / f"{major}-{label}.z"
+                        stream_path.write_bytes(stream)
+                        artifact = root / f"invalid-artifacts-{major}-{label}"
+                        build = root / f"invalid-build-{major}-{label}"
+                        argv_log = root / f"invalid-argv-{major}-{label}.z"
+                        completed = subprocess.run(
+                            [
+                                str(bash_executable),
+                                str(scripts / "sanitizer_test.sh"),
+                            ],
+                            cwd=root,
+                            env={
+                                **os.environ,
+                                "BUILD_DIR": str(build),
+                                "CI_ARTIFACT_DIR": str(artifact),
+                                "CI_JOBS": "2",
+                                "CI_RUNNER_IDENTITY_FILE": str(
+                                    runner_identity_path
+                                ),
+                                "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}",
+                                "SANITIZER": "asan",
+                                "SANITIZER_FAKE_TEST_BINARY": str(fake_test),
+                                "SANITIZER_TEST_ARGV_LOG": str(argv_log),
+                                "SANITIZER_TEST_PRODUCER_STATUS": str(
+                                    producer_status
+                                ),
+                                "SANITIZER_TEST_STREAM_FILE": str(stream_path),
+                            },
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                            timeout=10,
+                        )
+                        self.assertNotEqual(
+                            completed.returncode,
+                            0,
+                            msg=f"Bash {major} accepted {label}",
+                        )
+                        self.assertFalse(build.exists())
+                        self.assertFalse(argv_log.exists())
+                        self.assertFalse(
+                            (
+                                artifact
+                                / "sanitizer-asan-fallback-invocations.v1.z"
+                            ).exists()
+                        )
+                        self.assertFalse((artifact / "summary.log").exists())
+                        self.assertEqual(
+                            list(artifact.glob(".*-invocations.*")), []
+                        )
 
     def test_partial_versioned_identity_fails_closed(self) -> None:
         """Reject any subset of the three required versioned identity files."""

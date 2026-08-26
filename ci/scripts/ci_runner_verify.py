@@ -147,22 +147,29 @@ def _nonempty_string(value: Any, context: str) -> str:
     return value
 
 
-def load_runner_lock(root: Path, requested: str) -> dict[str, Any]:
-    """Load and validate one finite reviewed runner-image rollout set.
+def _validate_runner_lock(
+    lock: Any, requested: str, context: str
+) -> dict[str, Any]:
+    """Validate one decoded finite reviewed runner-image rollout set.
 
     Args:
-        root: Repository root containing ``ci/locks``.
+        lock: Strict unique-member JSON value from a retained source.
         requested: Exact maintained platform, ``Linux`` or ``Darwin``.
+        context: Stable path or retained-source identity for diagnostics.
 
     Returns:
         Strict canonical lock with a nonempty sorted unique approved set.
 
     Raises:
-        RunnerError: Schema, fields, values, record order, uniqueness, or bytes
-            differ from the maintained v2 contract.
+        RunnerError: Schema, fields, values, record order, or uniqueness differ
+            from the maintained v2 contract.
+
+    Note:
+        Filesystem opening and canonical-byte checks belong to the caller. This
+        pure semantic stage lets another protected reader reuse already-retained
+        canonical lock bytes without reopening a mutable pathname.
     """
     if requested == "Linux":
-        path = root / "ci/locks/linux-runner-lock.json"
         expected_fields = {
             "approved_image_versions",
             "architecture",
@@ -172,7 +179,6 @@ def load_runner_lock(root: Path, requested: str) -> dict[str, Any]:
         }
         expected_schema = "photospider-linux-runner-lock-v2"
     elif requested == "Darwin":
-        path = root / "ci/locks/darwin-runner-lock.json"
         expected_fields = {
             "approved_images",
             "architecture",
@@ -184,30 +190,41 @@ def load_runner_lock(root: Path, requested: str) -> dict[str, Any]:
         expected_schema = "photospider-darwin-runner-lock-v2"
     else:
         raise RunnerError(f"unsupported runner platform: {requested}")
-    lock = _decode_object(path, lock_encoding=True)
+    if not isinstance(lock, dict):
+        raise RunnerError(f"{context}: runner lock root must be an object")
     if set(lock) != expected_fields or lock.get("schema") != expected_schema:
-        raise RunnerError(f"{path}: missing, unknown, or version-mismatched fields")
+        raise RunnerError(
+            f"{context}: missing, unknown, or version-mismatched fields"
+        )
     variable_fields = {"schema", "approved_image_versions", "approved_images"}
     for field in expected_fields - variable_fields:
-        _nonempty_string(lock[field], f"{path}: {field}")
+        _nonempty_string(lock[field], f"{context}: {field}")
 
     if requested == "Linux":
         versions = lock["approved_image_versions"]
         if not isinstance(versions, list) or not versions:
-            raise RunnerError(f"{path}: approved_image_versions must be nonempty")
+            raise RunnerError(
+                f"{context}: approved_image_versions must be nonempty"
+            )
         if not all(
             isinstance(item, str) and _VERSION_PATTERN.fullmatch(item)
             for item in versions
         ):
-            raise RunnerError(f"{path}: approved Linux image version is malformed")
+            raise RunnerError(
+                f"{context}: approved Linux image version is malformed"
+            )
         if versions != sorted(versions, key=lambda item: item.encode("utf-8")):
-            raise RunnerError(f"{path}: approved Linux image versions are not bytewise sorted")
+            raise RunnerError(
+                f"{context}: approved Linux image versions are not bytewise sorted"
+            )
         if len(versions) != len(set(versions)):
-            raise RunnerError(f"{path}: approved Linux image versions are not unique")
+            raise RunnerError(
+                f"{context}: approved Linux image versions are not unique"
+            )
     else:
         records = lock["approved_images"]
         if not isinstance(records, list) or not records:
-            raise RunnerError(f"{path}: approved_images must be nonempty")
+            raise RunnerError(f"{context}: approved_images must be nonempty")
         versions: list[str] = []
         commits: list[str] = []
         for index, record in enumerate(records):
@@ -215,27 +232,107 @@ def load_runner_lock(root: Path, requested: str) -> dict[str, Any]:
                 "image_version",
                 "vcpkg_commit",
             }:
-                raise RunnerError(f"{path}: approved Darwin record {index} is malformed")
+                raise RunnerError(
+                    f"{context}: approved Darwin record {index} is malformed"
+                )
             version = record["image_version"]
             commit = record["vcpkg_commit"]
             if not isinstance(version, str) or _VERSION_PATTERN.fullmatch(version) is None:
-                raise RunnerError(f"{path}: approved Darwin image version is malformed")
+                raise RunnerError(
+                    f"{context}: approved Darwin image version is malformed"
+                )
             if not isinstance(commit, str) or _COMMIT_PATTERN.fullmatch(commit) is None:
-                raise RunnerError(f"{path}: approved Darwin vcpkg commit is malformed")
+                raise RunnerError(
+                    f"{context}: approved Darwin vcpkg commit is malformed"
+                )
             versions.append(version)
             commits.append(commit)
         if versions != sorted(versions, key=lambda item: item.encode("utf-8")):
-            raise RunnerError(f"{path}: approved Darwin records are not bytewise sorted")
+            raise RunnerError(
+                f"{context}: approved Darwin records are not bytewise sorted"
+            )
         if len(versions) != len(set(versions)) or len(commits) != len(set(commits)):
-            raise RunnerError(f"{path}: approved Darwin versions and commits must be unique")
+            raise RunnerError(
+                f"{context}: approved Darwin versions and commits must be unique"
+            )
     return lock
 
 
-def resolve_approved_identity(
-    root: Path, requested: str, image_version: str
+def load_runner_lock_bytes(
+    raw: bytes, requested: str, context: str
+) -> dict[str, Any]:
+    """Decode canonical retained lock bytes without reopening their pathname.
+
+    Args:
+        raw: Exact bytes already measured through a protected descriptor.
+        requested: Exact maintained platform, ``Linux`` or ``Darwin``.
+        context: Stable retained source identity used in diagnostics.
+
+    Returns:
+        Strict canonical and semantically validated runner rollout lock.
+
+    Raises:
+        RunnerError: UTF-8, JSON, duplicate-member, canonical-byte, or semantic
+            validation fails.
+    """
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
+    except (UnicodeError, json.JSONDecodeError, RunnerError) as error:
+        raise RunnerError(f"cannot decode runner lock {context}: {error}") from error
+    if not isinstance(value, dict):
+        raise RunnerError(f"{context}: runner lock root must be an object")
+    if raw != _lock_bytes(value):
+        raise RunnerError(f"{context}: runner lock JSON is not bytewise canonical")
+    return _validate_runner_lock(value, requested, context)
+
+
+def load_runner_lock(root: Path, requested: str) -> dict[str, Any]:
+    """Open and validate one canonical finite runner-image rollout lock.
+
+    Args:
+        root: Repository root containing protected runner locks.
+        requested: Exact maintained platform, ``Linux`` or ``Darwin``.
+
+    Returns:
+        Strict canonical lock with one finite reviewed rollout set.
+
+    Raises:
+        RunnerError: Platform selection, safe file reading, canonical JSON, or
+            rollout schema/semantic validation fails.
+    """
+    if requested == "Linux":
+        path = root / "ci/locks/linux-runner-lock.json"
+    elif requested == "Darwin":
+        path = root / "ci/locks/darwin-runner-lock.json"
+    else:
+        raise RunnerError(f"unsupported runner platform: {requested}")
+    return _validate_runner_lock(
+        _decode_object(path, lock_encoding=True), requested, str(path)
+    )
+
+
+def resolve_approved_identity_from_lock(
+    lock: dict[str, Any], requested: str, image_version: str
 ) -> dict[str, str]:
-    """Resolve one exact approved image version without reading runtime state."""
-    lock = load_runner_lock(root, requested)
+    """Resolve one exact image version from an already validated lock.
+
+    Args:
+        lock: Semantically validated platform lock, possibly retained by a
+            different protected reader.
+        requested: Exact maintained platform, ``Linux`` or ``Darwin``.
+        image_version: Runtime version that must select one unique member.
+
+    Returns:
+        Canonical resolved runtime record, including Darwin's vcpkg mapping.
+
+    Raises:
+        RunnerError: The version is absent or ambiguous in the validated set.
+
+    Note:
+        Callers must obtain ``lock`` from ``load_runner_lock`` or
+        ``load_runner_lock_bytes``; this function deliberately performs no
+        pathname access or second semantic-authority lookup.
+    """
     if requested == "Linux":
         matches = [
             version
@@ -269,19 +366,71 @@ def resolve_approved_identity(
     }
 
 
-def validate_resolved_identity(
-    root: Path, requested: str, identity: Any
+def resolve_approved_identity(
+    root: Path, requested: str, image_version: str
 ) -> dict[str, str]:
-    """Require a resolved record to equal one current approved lock member."""
+    """Resolve one exact approved image version without reading runtime state."""
+    return resolve_approved_identity_from_lock(
+        load_runner_lock(root, requested), requested, image_version
+    )
+
+
+def validate_resolved_identity_from_lock(
+    lock: dict[str, Any], requested: str, identity: Any
+) -> dict[str, str]:
+    """Require a resolved record to equal one member of a retained lock.
+
+    Args:
+        lock: Semantically validated platform rollout set.
+        requested: Exact maintained platform, ``Linux`` or ``Darwin``.
+        identity: Untrusted decoded retained runtime record.
+
+    Returns:
+        Canonical expected record after exact equality validation.
+
+    Raises:
+        RunnerError: Identity shape, version selection, or any bound field
+            differs from the corresponding lock member.
+    """
     if not isinstance(identity, dict):
         raise RunnerError("resolved runner identity must be an object")
     version = identity.get("image_version")
     if not isinstance(version, str):
         raise RunnerError("resolved runner image version must be a string")
-    expected = resolve_approved_identity(root, requested, version)
+    expected = resolve_approved_identity_from_lock(lock, requested, version)
     if identity != expected:
         raise RunnerError("resolved runner identity differs from its approved lock member")
     return expected
+
+
+def validate_resolved_identity(
+    root: Path, requested: str, identity: Any
+) -> dict[str, str]:
+    """Require a resolved record to equal one current approved lock member."""
+    return validate_resolved_identity_from_lock(
+        load_runner_lock(root, requested), requested, identity
+    )
+
+
+def load_resolved_identity_record(path: Path) -> dict[str, Any]:
+    """Load one canonical retained record without reopening its platform lock.
+
+    Args:
+        path: Exact retained runtime identity path.
+
+    Returns:
+        Canonical unique-member JSON object whose semantic platform binding is
+        intentionally still untrusted.
+
+    Raises:
+        RunnerError: The retained path or canonical JSON bytes are invalid.
+
+    Note:
+        A caller that already owns retained platform-lock bytes can pass this
+        record to ``validate_resolved_identity_from_lock``. Ordinary callers
+        should continue using ``load_resolved_identity`` for the combined read.
+    """
+    return _decode_object(path, lock_encoding=False)
 
 
 def load_resolved_identity(
@@ -289,7 +438,7 @@ def load_resolved_identity(
 ) -> dict[str, str]:
     """Load a retained canonical runtime identity and rebind it to the lock."""
     return validate_resolved_identity(
-        root, requested, _decode_object(path, lock_encoding=False)
+        root, requested, load_resolved_identity_record(path)
     )
 
 

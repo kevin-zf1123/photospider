@@ -42,9 +42,12 @@ For a documentation-only change, `ci-image-change`, integration planning, all bu
 `Dockerfile.ci` defines the GitHub Linux test environment. The protected
 `photospider-ci:latest` lock value is only a discovery locator. A trusted host
 job resolves it and verifies the exact subject's source/signer workflow
-attestation before Docker may pull or expand any image layer. Only then does it
-pull the digest-qualified image, validate OCI revision and canonical manifest
-labels, and expose only the resulting
+attestation in process-private memory before it creates a formal artifact
+directory, retains runner identity, or lets Docker pull/expand an image layer.
+Failure leaves the always-upload path absent and final workflow output
+unchanged. Only after success does it persist attestation evidence, pull the
+digest-qualified image, validate OCI revision and canonical manifest labels,
+and expose only the resulting
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` reference. Published-image
 healthcheck and build/test integration jobs execute that verified
 digest-qualified reference; none executes the mutable locator directly.
@@ -114,6 +117,10 @@ inputs require `O_NOFOLLOW`, `O_NONBLOCK`, and `O_CLOEXEC`; FIFO and device
 paths are rejected without blocking, while fresh retained output uses
 `O_EXCL` and refuses every residual path. After rollout completes, removing
 the retired member requires a reviewed protected-lock update and new image.
+Manifest creation independently opens every canonical image input exactly once
+with `O_NOFOLLOW`, `O_NONBLOCK`, and `O_CLOEXEC`, obtains digest and size from
+two agreeing reads of that retained descriptor, and reuses the retained lock,
+helper, action, and runner bytes for semantic checks without reopening them.
 
 The callable producer itself is a complete parsed-tree contract: it exposes only
 the typed `workflow_call`, exact write permissions, and one `ubuntu-24.04` build
@@ -461,7 +468,12 @@ Until the candidate-owned matrix replaces the current-main sanitizer fallback,
 that fallback uses one terminal NUL-framed v1 invocation stream. Target,
 possibly empty GoogleTest filter, and trust flag remain separate fields on Bash
 3.2 and Bash 5; whitespace splitting, shell evaluation, and a legacy text
-decoder are forbidden. The shell persists the decoded stream as diagnostic
+decoder are forbidden. The producer validates every record before emission;
+the shell captures it into one fresh transient file, checks the producer status,
+and parses it through a fixed descriptor. A failed NUL read with partial bytes,
+missing/duplicate terminal, complete or partial tail, duplicate target, or
+nonzero producer fails before configure/build/test and writes no success
+evidence. The shell persists only a completely decoded stream as diagnostic
 evidence, then `run_gtest_checked` proves every empty or nonempty selection is
 nonzero before execution.
 
@@ -493,6 +505,11 @@ fails rather than changing the authorized helper bytes. It does not depend on
 Python-version-specific `ast.dump()` or `ast.unparse()`. Behavior tests still
 execute every result and attestation branch, and Python children launched
 directly by the security contract use that test process's `sys.executable`.
+Canonical manifest input measurement applies the same retained-descriptor
+boundary to every self-declared input, not only the two protected helpers. Its
+self-including lock, helper hashes, action builder identity, runner rollout
+authority, per-input digest, and descriptor size all come from the one
+path-to-record measurement map.
 
 This is a protected two-stage transition. The trusted `CI/**` change lands on
 `main` first and validates the legacy contract there. The architecture pull
@@ -654,21 +671,43 @@ There is no serial local command equivalent to the shared reusable DAG. Use the
 focused role commands above for local diagnosis; build-once digest fan-out,
 attestation, aggregation, and same-digest promotion are GitHub Actions gates.
 
-Docker reproduction:
+Docker reproduction separates local layer solving from protected publication
+provenance. The following local command is intentionally not publish-eligible:
 
 ```bash
-mkdir -p CI-results/local-ci-image
-ci_image_source_commit=$(python3 ci/scripts/ci_image_manifest.py source-commit)
-ci_image_manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
-  --source-commit "$ci_image_source_commit" \
-  --repository kevin-zf1123/photospider \
-  --output CI-results/local-ci-image/ci-image-input-v1.json)
-docker build -t photospider-ci:local -f Dockerfile.ci \
-  --build-arg CI_IMAGE_INPUT_MANIFEST_SHA256="$ci_image_manifest_digest" \
-  --build-arg CI_IMAGE_SOURCE_COMMIT="$ci_image_source_commit" .
+# Local layer-solver reproduction only; never publish or attest this image.
+local_ci_identity=local-layer-solver-only-not-publishable
+docker build --no-cache -t photospider-ci:local -f Dockerfile.ci \
+  --build-arg CI_IMAGE_INPUT_MANIFEST_SHA256="$local_ci_identity" \
+  --build-arg CI_IMAGE_SOURCE_COMMIT="$local_ci_identity" .
 docker run --rm -v "$PWD:/workspace" -w /workspace photospider-ci:local \
   bash ci/scripts/build_integrity.sh
 ```
+
+Only an approved `ubuntu-24.04` GitHub-hosted builder may construct the manifest
+used for publication. In that protected job, the genuine retained builder
+identity and source equality are obtained as follows:
+
+```bash
+# Approved Linux hosted runner only; this constructs publish provenance.
+mkdir -p CI-results/hosted-ci-image
+builder_runner_identity="${RUNNER_TEMP:?}/photospider-builder-runner-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}.json"
+python3 ci/scripts/ci_runner_verify.py --platform Linux \
+  --runner-label ubuntu-24.04 --output "$builder_runner_identity"
+ci_image_source_commit=$(python3 ci/scripts/ci_image_manifest.py \
+  publish-source-commit --workflow-commit "${GITHUB_SHA:?}")
+ci_image_manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
+  --source-commit "$ci_image_source_commit" \
+  --repository "${GITHUB_REPOSITORY:?}" \
+  --builder-runner-identity "$builder_runner_identity" \
+  --output CI-results/hosted-ci-image/ci-image-input-v1.json)
+```
+
+The local marker values above exercise Docker layers and the snapshot solver but
+are not a canonical manifest, OCI provenance, or permission to publish. They
+must never be passed to promotion or attestation. The protected producer uses
+the second block's exact manifest/source values as immutable Buildx inputs and
+still applies all workflow, attestation, and digest checks.
 
 The remaining Docker build arguments retain their immutable protected defaults
 from `ci/locks/ci-image-lock.json`. Local mirror overrides are not part of the
@@ -689,8 +728,9 @@ being changed together to admit `/usr/bin/apt-get`, an additional download,
 success. The only non-APT download is the exact GitHub CLI release URL whose
 architecture-specific hash is checked before extraction and installation.
 
-The local Docker commands above reproduce the maintained current-toolchain CI
-paths. They are not a claim that CMake 3.16 itself ran. If targeted old-version
+The local Docker commands above reproduce the maintained current-toolchain layer
+and build paths without publication provenance. They are not a claim that CMake
+3.16 itself ran. If targeted old-version
 evidence is needed and no natively compatible executable exists locally, record
 that limitation rather than using architecture emulation to manufacture a
 minimum-version PASS.

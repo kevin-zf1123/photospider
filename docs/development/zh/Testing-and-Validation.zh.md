@@ -2729,7 +2729,7 @@ tree。Full CTest 继续作为普通已注册测试的权威入口；plugin、CL
 sanitizer 分片会选择对应契约的断言。生成的 CLI 配置严格互斥：CI 不会把已删除的 scheduler key
 传给 policy/execution revision，也不会引入产品兼容翻译。
 
-Temporary current-main ASan/TSan fallback 会通过一个带终止记录的 NUL-framed v1 stream 传输每个 target、可能为空的 GoogleTest filter 与 trust flag。其 Bash 3.2/5 reader 不会按 whitespace 拆分或 evaluate field，会拒绝不完整或带 trailing record 的 stream，并在任何 target 执行前把精确解码结果写为 diagnostic evidence。因此，空 filter 会保留预期的 whole-binary selection，而不会变成相邻 boolean text。
+Temporary current-main ASan/TSan fallback 会通过一个带终止记录的 NUL-framed v1 stream 传输每个 target、可能为空的 GoogleTest filter 与 trust flag。其 Bash 3.2/5 reader 不会按 whitespace 拆分或 evaluate field；它会把完整预校验的 producer 捕获到唯一 fresh transient file、检查 producer status，再通过固定 descriptor 解析。Clean EOF 会与 partial token 区分；terminal 缺失/重复、完整或 partial tail、field 截断、target 重复、unknown record 与 producer 非零都在 configure/build/test 与 success evidence 前失败。因此，空 filter 会保留预期的 whole-binary selection，而不会变成相邻 boolean text。
 
 Darwin ASan、TSan 与有界 fuzz 是三个独立的 `macos-15` job。每个 job 只依赖共同的 integration
 plan、消费同一份受保护 profile inventory，并在自身 timeout 下发布独立 diagnostic result。它们之间
@@ -2749,8 +2749,10 @@ Python minor 变化的 `ast.dump()` 或 `ast.unparse()` identity。Process-bound
 当前 `sys.executable` 启动 Python，同时独立执行每个 result 与 attestation path。
 
 `healthcheck-published-image` 是 container job。受保护的 `photospider-ci:latest` 值只作为发现
-locator；可信 host preflight 会解析精确 digest，并在 Docker 可以拉取或展开任何 image layer 之前
-校验该精确 subject 的 attestation。随后它才拉取该 digest、校验 OCI revision 与 manifest label，所有
+locator；可信 host preflight 会解析精确 digest，并在 formal artifact creation、retained runner identity
+或 Docker layer pull/expansion 之前，在 process-private memory 中校验该精确 subject 的 attestation。
+失败会使 upload path 保持 absent、final output 不变。随后它才持久化成功 evidence、拉取该 digest、
+校验 OCI revision 与 manifest label，所有
 published-image healthcheck 与 build/test integration job 都执行所得
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` 引用。轻量路由与结果门禁仍在
 `ubuntu-24.04` 上运行。GitHub 记录 runner-image deployment 通常需要两到三天，并要求从每个 job 的
@@ -2780,7 +2782,10 @@ build member；在另一个 approved host 上验证时仍会保留该 builder pr
 retained version-to-vcpkg mapping，不再读取 `ImageVersion`。未知或被篡改的 member 会 fail closed；退役
 rollout member 必须经过 reviewed lock update 并重建镜像。Runner lock 与 retained-record input 强制要求
 `O_NOFOLLOW`、`O_NONBLOCK` 和 `O_CLOEXEC`，因此 FIFO/device input 会在不阻塞的情况下失败；fresh
-retained output 使用 `O_EXCL` 拒绝 residual state。Checkout 后，published container 中唯一的
+retained output 使用 `O_EXCL` 拒绝 residual state。
+Canonical manifest creation 会对每个 self-declared image input 恰好一次使用相同 flag，从两次一致读取
+获得 digest 与 size，并复用 retained lock/helper/action/runner byte 完成 semantic check，不再重新打开。
+Checkout 后，published container 中唯一的
 `Trust checked-out workspace` step 会绑定 `shell: bash`，只把精确的 `$GITHUB_WORKSPACE` 加入
 该 job 持久的 global `safe.directory`，并以只读方式校验 `HEAD^{commit}`。它既不会配置
 `safe.directory=*`，也不会执行 checkout 得到的仓库脚本。该 trust boundary 先于两个条件
