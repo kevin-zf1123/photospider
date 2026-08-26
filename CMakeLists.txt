@@ -1033,6 +1033,12 @@ endfunction()
 # Apply the public and link interface shared by both complete static archives.
 # Only `photospider` is installed or exported.
 function(configure_photospider_product_archive TARGET_NAME)
+    # Xcode does not create an archive phase for a static target containing
+    # only TARGET_OBJECTS generator expressions. Keep one directly compiled,
+    # symbol-free source on each final embedded product archive so every
+    # supported generator materializes the real object-library aggregation.
+    target_sources(${TARGET_NAME} PRIVATE
+        src/lib/host/embedded_product_archive_anchor.cpp)
     target_compile_definitions(${TARGET_NAME} PUBLIC PHOTOSPIDER_STATIC)
     target_compile_features(${TARGET_NAME} PUBLIC cxx_std_17)
     target_include_directories(${TARGET_NAME}
@@ -1421,7 +1427,8 @@ if(PHOTOSPIDER_BUILD_IPC)
         Threads::Threads)
 
     add_library(photospider_ipc_client STATIC
-        $<TARGET_OBJECTS:photospider_ipc_client_objects>)
+        $<TARGET_OBJECTS:photospider_ipc_client_objects>
+        src/lib/ipc/ipc_client_archive_anchor.cpp)
     target_compile_definitions(photospider_ipc_client PUBLIC PHOTOSPIDER_STATIC)
     target_compile_features(photospider_ipc_client PUBLIC cxx_std_17)
     target_include_directories(photospider_ipc_client
@@ -3126,22 +3133,60 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
             RUN_SERIAL TRUE
             TIMEOUT 900)
-        add_test(NAME PhotospiderdInstallLayoutSmoke
+        add_test(NAME PhotospiderdInstallLayoutNestedRelativeSmoke
             COMMAND ${Python3_EXECUTABLE} -B
                 "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_install_layout_smoke.py"
                 --repo "${PROJECT_SOURCE_DIR}"
                 --build-root "${CMAKE_BINARY_DIR}"
                 --work
-                    "${CMAKE_BINARY_DIR}/tests/photospiderd_install_layout_smoke"
+                    "${CMAKE_BINARY_DIR}/tests/photospiderd_install_layout_nested_relative_smoke"
                 --cmake-executable "${CMAKE_COMMAND}"
                 --generator "${CMAKE_GENERATOR}"
                 --config $<CONFIG>
                 --osx-architectures "${CMAKE_OSX_ARCHITECTURES}"
+                --layout nested-relative
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-        set_tests_properties(PhotospiderdInstallLayoutSmoke PROPERTIES
+        set_tests_properties(
+            PhotospiderdInstallLayoutNestedRelativeSmoke PROPERTIES
             LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
             RUN_SERIAL TRUE
-            TIMEOUT 1200)
+            TIMEOUT 900)
+        add_test(NAME PhotospiderdInstallLayoutAbsoluteLibdirSmoke
+            COMMAND ${Python3_EXECUTABLE} -B
+                "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_install_layout_smoke.py"
+                --repo "${PROJECT_SOURCE_DIR}"
+                --build-root "${CMAKE_BINARY_DIR}"
+                --work
+                    "${CMAKE_BINARY_DIR}/tests/photospiderd_install_layout_absolute_libdir_smoke"
+                --cmake-executable "${CMAKE_COMMAND}"
+                --generator "${CMAKE_GENERATOR}"
+                --config $<CONFIG>
+                --osx-architectures "${CMAKE_OSX_ARCHITECTURES}"
+                --layout absolute-libdir
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+        set_tests_properties(
+            PhotospiderdInstallLayoutAbsoluteLibdirSmoke PROPERTIES
+            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+            RUN_SERIAL TRUE
+            TIMEOUT 900)
+        add_test(NAME PhotospiderdInstallLayoutAbsoluteBindirSmoke
+            COMMAND ${Python3_EXECUTABLE} -B
+                "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_install_layout_smoke.py"
+                --repo "${PROJECT_SOURCE_DIR}"
+                --build-root "${CMAKE_BINARY_DIR}"
+                --work
+                    "${CMAKE_BINARY_DIR}/tests/photospiderd_install_layout_absolute_bindir_smoke"
+                --cmake-executable "${CMAKE_COMMAND}"
+                --generator "${CMAKE_GENERATOR}"
+                --config $<CONFIG>
+                --osx-architectures "${CMAKE_OSX_ARCHITECTURES}"
+                --layout absolute-bindir
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+        set_tests_properties(
+            PhotospiderdInstallLayoutAbsoluteBindirSmoke PROPERTIES
+            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+            RUN_SERIAL TRUE
+            TIMEOUT 900)
     endif()
     add_test(NAME IpcDisabledInstallSmoke
         COMMAND ${Python3_EXECUTABLE} -B
@@ -3555,8 +3600,10 @@ endif()
 
 # GoogleTest.cmake records each gtest_discover_tests registration in the
 # directory TEST_INCLUDE_FILES property and sets CTEST_DISCOVERED_TEST_COUNTER
-# on its executable target. Cross-check those two CMake-owned views, then expose
-# the exact target/configuration executable mapping to nested-profile drivers.
+# on its executable target. Resolve target identities from those actual include
+# records, canonicalize their platform-dependent path spelling, and cross-check
+# them against root targets and counters before exposing the exact
+# target/configuration executable mapping to nested-profile drivers.
 # A driver can consequently derive registered-but-unbuilt `_NOT_BUILT`
 # placeholders from real target existence without maintaining a target count or
 # guessing future target names.
@@ -3565,35 +3612,11 @@ if(BUILD_TESTING)
         PROPERTY TEST_INCLUDE_FILES)
     get_property(PHOTOSPIDER_INVENTORY_ROOT_TARGETS DIRECTORY
         PROPERTY BUILDSYSTEM_TARGETS)
-    set(PHOTOSPIDER_REGISTERED_GTEST_TARGETS "")
-    set(PHOTOSPIDER_EXPECTED_GTEST_INCLUDE_FILES "")
-    foreach(PHOTOSPIDER_INVENTORY_ROOT_TARGET
-            IN LISTS PHOTOSPIDER_INVENTORY_ROOT_TARGETS)
-        get_property(PHOTOSPIDER_GTEST_COUNTER_IS_SET
-            TARGET ${PHOTOSPIDER_INVENTORY_ROOT_TARGET}
-            PROPERTY CTEST_DISCOVERED_TEST_COUNTER SET)
-        if(PHOTOSPIDER_GTEST_COUNTER_IS_SET)
-            get_property(PHOTOSPIDER_GTEST_COUNTER
-                TARGET ${PHOTOSPIDER_INVENTORY_ROOT_TARGET}
-                PROPERTY CTEST_DISCOVERED_TEST_COUNTER)
-            if(NOT PHOTOSPIDER_GTEST_COUNTER EQUAL 1)
-                message(FATAL_ERROR
-                    "GoogleTest target ${PHOTOSPIDER_INVENTORY_ROOT_TARGET} is registered ${PHOTOSPIDER_GTEST_COUNTER} times; inventory requires one registration")
-            endif()
-            list(APPEND PHOTOSPIDER_REGISTERED_GTEST_TARGETS
-                ${PHOTOSPIDER_INVENTORY_ROOT_TARGET})
-            list(APPEND PHOTOSPIDER_EXPECTED_GTEST_INCLUDE_FILES
-                "${CMAKE_CURRENT_BINARY_DIR}/${PHOTOSPIDER_INVENTORY_ROOT_TARGET}[${PHOTOSPIDER_GTEST_COUNTER}]_include.cmake")
-        endif()
-    endforeach()
-    list(SORT PHOTOSPIDER_CTEST_INCLUDE_FILES)
-    list(SORT PHOTOSPIDER_EXPECTED_GTEST_INCLUDE_FILES)
-    list(SORT PHOTOSPIDER_REGISTERED_GTEST_TARGETS)
-    if(NOT PHOTOSPIDER_CTEST_INCLUDE_FILES STREQUAL
-            PHOTOSPIDER_EXPECTED_GTEST_INCLUDE_FILES)
-        message(FATAL_ERROR
-            "CTest include inventory does not match registered GoogleTest targets")
-    endif()
+    photospider_collect_registered_gtest_targets(
+        PHOTOSPIDER_REGISTERED_GTEST_TARGETS
+        PHOTOSPIDER_CTEST_INCLUDE_FILES
+        PHOTOSPIDER_INVENTORY_ROOT_TARGETS
+        "${CMAKE_CURRENT_BINARY_DIR}")
     photospider_generate_registered_gtest_target_inventory(
         "${PHOTOSPIDER_CI_INVENTORY_DIR}/registered_gtest_targets-$<CONFIG>.tsv"
         PHOTOSPIDER_REGISTERED_GTEST_TARGETS)
