@@ -395,9 +395,13 @@ jobs:
       - name: Verify every targeted role before attestation
         env:
           CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-targeted-verifier-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: |
           set -Eeuo pipefail
-          python3 ci/scripts/ci_runner_verify.py --platform Linux
+          python3 ci/scripts/ci_runner_verify.py \
+            --platform Linux \
+            --runner-label ubuntu-24.04 \
+            --output "$CI_RUNNER_IDENTITY_FILE"
           for role in ctest-control ctest-runtime installed-package openexr-metadata; do
             python3 ci/scripts/reusable_build.py verify-targeted-only \
               --archive "CI-results/targeted-artifacts/$role/$role.tar.gz" \
@@ -912,10 +916,13 @@ jobs:
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
       - name: Verify exact Linux ASan runner
+        env:
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: >-
           python3 ci/scripts/ci_runner_verify.py
           --platform Linux
           --runner-label ubuntu-24.04
+          --output "$CI_RUNNER_IDENTITY_FILE"
       - name: Download security profile inventory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -925,6 +932,7 @@ jobs:
         env:
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-asan
           CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
           SANITIZER: asan
         run: bash ci/scripts/sanitizer_test.sh
       - name: Upload ASan diagnostics
@@ -956,10 +964,13 @@ jobs:
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
       - name: Verify exact Linux TSan runner
+        env:
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: >-
           python3 ci/scripts/ci_runner_verify.py
           --platform Linux
           --runner-label ubuntu-24.04
+          --output "$CI_RUNNER_IDENTITY_FILE"
       - name: Download security profile inventory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -969,6 +980,7 @@ jobs:
         env:
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-tsan
           CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
           SANITIZER: tsan
         run: bash ci/scripts/sanitizer_test.sh
       - name: Upload TSan diagnostics
@@ -1000,10 +1012,13 @@ jobs:
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
       - name: Verify exact Linux fuzz runner
+        env:
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: >-
           python3 ci/scripts/ci_runner_verify.py
           --platform Linux
           --runner-label ubuntu-24.04
+          --output "$CI_RUNNER_IDENTITY_FILE"
       - name: Download security profile inventory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -1013,6 +1028,7 @@ jobs:
         env:
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/fuzz-codecs
           CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: bash ci/scripts/fuzz_smoke.sh
       - name: Upload transient fuzz diagnostics
         if: always()
@@ -1038,10 +1054,13 @@ jobs:
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
       - name: Verify exact Darwin ASan runner
+        env:
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: >-
           python3 ci/scripts/ci_runner_verify.py
           --platform Darwin
           --runner-label macos-15
+          --output "$CI_RUNNER_IDENTITY_FILE"
       - name: Download security profile inventory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -1051,6 +1070,7 @@ jobs:
         env:
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-asan-darwin
           CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
           CI_RUNNER_TEMP: ${{ runner.temp }}
           SANITIZER: asan
         run: bash ci/scripts/sanitizer_test.sh
@@ -1078,10 +1098,13 @@ jobs:
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
       - name: Verify exact Darwin TSan runner
+        env:
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: >-
           python3 ci/scripts/ci_runner_verify.py
           --platform Darwin
           --runner-label macos-15
+          --output "$CI_RUNNER_IDENTITY_FILE"
       - name: Download security profile inventory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -1091,6 +1114,7 @@ jobs:
         env:
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-tsan-darwin
           CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
           CI_RUNNER_TEMP: ${{ runner.temp }}
           SANITIZER: tsan
         run: bash ci/scripts/sanitizer_test.sh
@@ -1118,10 +1142,13 @@ jobs:
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
       - name: Verify exact Darwin fuzz runner
+        env:
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: >-
           python3 ci/scripts/ci_runner_verify.py
           --platform Darwin
           --runner-label macos-15
+          --output "$CI_RUNNER_IDENTITY_FILE"
       - name: Download security profile inventory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -1131,6 +1158,7 @@ jobs:
         env:
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/fuzz-codecs-darwin
           CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
           CI_RUNNER_TEMP: ${{ runner.temp }}
         run: bash ci/scripts/fuzz_smoke.sh
       - name: Upload transient Darwin fuzz diagnostics

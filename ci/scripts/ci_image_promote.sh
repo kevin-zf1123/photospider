@@ -18,6 +18,9 @@ set -Eeuo pipefail
 #   manifest helper fetches the live branch twice around one isolated worktree
 #   measurement. A newer image-input identity makes this run ``superseded``;
 #   force-push, unknown ancestry, manifest failure, or ref drift fails closed.
+# @note Freshness also receives the producer's exact resolved builder image
+#   version. It reconstructs the candidate manifest with that approved member;
+#   the promotion host's own mutable ImageVersion never replaces provenance.
 # @note One job-scoped repository/image promotion lease serializes every
 #   workflow-owned SHA and mutable writer across refs. After freshness succeeds,
 #   the SHA tag is inspected before any write: an exact digest is reused, an
@@ -45,6 +48,7 @@ Usage: ci_image_promote.sh \
   --candidate-commit FULL_SHA \
   --source-commit FULL_SHA \
   --manifest-digest SHA256 \
+  --builder-image-version EXACT_IMAGE_VERSION \
   --event-name push \
   --branch main|CI/NAME
 
@@ -202,6 +206,7 @@ expected_digest=
 candidate_commit=
 source_commit=
 manifest_digest=
+builder_image_version=
 event_name=
 branch_name=
 while (($#)); do
@@ -228,6 +233,10 @@ while (($#)); do
       ;;
     --manifest-digest)
       manifest_digest=${2:-}
+      shift 2
+      ;;
+    --builder-image-version)
+      builder_image_version=${2:-}
       shift 2
       ;;
     --event-name)
@@ -278,6 +287,10 @@ if [[ ! "$manifest_digest" =~ ^[0-9a-f]{64}$ ]]; then
   echo "Promotion manifest digest must be one lowercase SHA-256 value." >&2
   exit 2
 fi
+if [[ ! "$builder_image_version" =~ ^20[0-9]{6}\.[0-9]{3,4}\.[0-9]+$ ]]; then
+  echo "Promotion builder image version must be one exact hosted image identity." >&2
+  exit 2
+fi
 if [[ "$event_name" != push ]]; then
   echo "Only a trusted push may promote a CI image." >&2
   exit 1
@@ -319,6 +332,7 @@ freshness_status=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \
   --candidate-commit "$candidate_commit" \
   --candidate-source-commit "$source_commit" \
   --candidate-manifest-digest "$manifest_digest" \
+  --candidate-builder-image-version "$builder_image_version" \
   --repository "$repository" \
   --branch "$branch_name" \
   --scratch-root "$SCRATCH_ROOT" \

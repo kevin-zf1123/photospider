@@ -4,8 +4,9 @@ set -Eeuo pipefail
 
 # @file ci_image_verify.sh
 # @brief Resolve a protected or explicitly supplied locator, verify GitHub
-#   attestation and canonical input labels, then emit the exact digest-qualified
-#   OCI image for candidate jobs.
+#   attestation before any image-layer pull, then validate canonical input
+#   labels and retained builder runtime before emitting the exact
+#   digest-qualified OCI image for candidate jobs.
 # @note Run only in a trusted host job after protected checkout. The mutable tag
 #   is merely a discovery locator; no candidate command runs until its resolved
 #   digest has passed source-workflow, source-commit, manifest, and label checks.
@@ -37,8 +38,8 @@ Protected callers may set CI_IMAGE_LOCATOR to an exact temporary tag or
 digest-qualified reference in the locked repository. CI_IMAGE_EXPECTED_DIGEST,
 CI_IMAGE_EXPECTED_MANIFEST_DIGEST, CI_IMAGE_EXPECTED_SOURCE_COMMIT, and
 CI_IMAGE_EXPECTED_WORKFLOW_COMMIT bind caller fields to measured state.
-The exact image, digest, source commit, and manifest digest are appended to
-CI_IMAGE_OUTPUT_FILE (or GITHUB_OUTPUT) when provided.
+The exact image, digest, source commit, manifest digest, and builder image
+version are appended to CI_IMAGE_OUTPUT_FILE (or GITHUB_OUTPUT) when provided.
 EOF
 }
 
@@ -88,11 +89,15 @@ if [[ -n "$EXPECTED_WORKFLOW_COMMIT" ]]; then
 fi
 
 mkdir -p "$ARTIFACT_DIR"
-python3 "$SCRIPT_DIR/ci_runner_verify.py" --platform Linux \
-  > "$ARTIFACT_DIR/linux-runner-identity.json"
+verifier_runner_path=$ARTIFACT_DIR/verifier-linux-runner-identity.json
+python3 "$SCRIPT_DIR/ci_runner_verify.py" \
+  --platform Linux \
+  --runner-label ubuntu-24.04 \
+  --output "$verifier_runner_path" >/dev/null
 manifest_path=$ARTIFACT_DIR/expected-ci-image-input-v1.json
 manifest_digest_path=$ARTIFACT_DIR/expected-ci-image-input-v1.sha256
 labels_path=$ARTIFACT_DIR/oci-labels.json
+builder_runner_path=$ARTIFACT_DIR/builder-linux-runner-identity.json
 attestation_log=$ARTIFACT_DIR/attestation-verification.json
 
 # @brief Read the strict published-image fields without requiring jq.
@@ -119,7 +124,8 @@ with open(path, encoding="utf-8") as handle:
 published = lock.get("published_image")
 expected = {
     "locator", "source_repository", "source_workflow",
-    "input_manifest_label", "source_commit_label",
+    "builder_image_version_label", "input_manifest_label",
+    "source_commit_label",
 }
 if not isinstance(published, dict) or set(published) != expected:
     raise SystemExit("published image lock is malformed")
@@ -131,7 +137,10 @@ print(published["source_repository"])
 PY
 }
 
-mapfile -t published_lock < <(read_published_lock)
+published_lock=()
+while IFS= read -r published_value; do
+  published_lock+=("$published_value")
+done < <(read_published_lock)
 if ((${#published_lock[@]} != 3)); then
   echo "Published image lock did not yield exactly three identity fields." >&2
   exit 1
@@ -162,29 +171,11 @@ if [[ -n "$LOCATOR_OVERRIDE" ]]; then
   locator=$LOCATOR_OVERRIDE
 fi
 
-source_commit=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \
-  --repo-root "$REPO_ROOT" source-commit)
-manifest_digest=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \
-  --repo-root "$REPO_ROOT" create \
-  --source-commit "$source_commit" \
-  --repository "$EXPECTED_REPOSITORY" \
-  --output "$manifest_path" \
-  --digest-output "$manifest_digest_path")
-if [[ -n "$EXPECTED_SOURCE_COMMIT" &&
-  "$source_commit" != "$EXPECTED_SOURCE_COMMIT" ]]; then
-  echo "Measured CI image source commit differs from expected source commit." >&2
-  exit 1
-fi
-if [[ -n "$EXPECTED_MANIFEST_DIGEST" &&
-  "$manifest_digest" != "$EXPECTED_MANIFEST_DIGEST" ]]; then
-  echo "Measured CI image manifest digest differs from expected manifest digest." >&2
-  exit 1
-fi
-
 inspect_output=$(docker buildx imagetools inspect "$locator")
-mapfile -t image_digests < <(
-  awk '$1 == "Digest:" { print $2 }' <<<"$inspect_output" | sort -u
-)
+image_digests=()
+while IFS= read -r resolved_digest; do
+  image_digests+=("$resolved_digest")
+done < <(awk '$1 == "Digest:" { print $2 }' <<<"$inspect_output" | sort -u)
 if ((${#image_digests[@]} != 1)) ||
   [[ ! ${image_digests[0]} =~ ^sha256:[0-9a-f]{64}$ ]]; then
   echo "Locator did not resolve to exactly one canonical OCI digest." >&2
@@ -202,6 +193,17 @@ if [[ -n "$EXPECTED_DIGEST" && "$image_digest" != "$EXPECTED_DIGEST" ]]; then
 fi
 exact_image=$expected_image_repository@$image_digest
 
+source_commit=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \
+  --repo-root "$REPO_ROOT" source-commit)
+if [[ -n "$EXPECTED_SOURCE_COMMIT" &&
+  "$source_commit" != "$EXPECTED_SOURCE_COMMIT" ]]; then
+  echo "Measured CI image source commit differs from expected source commit." >&2
+  exit 1
+fi
+
+# Authenticate the exact registry subject before Docker can pull or expand any
+# of its layers. A failed attestation therefore cannot create builder-label,
+# reconstructed-manifest, or final identity output.
 gh attestation verify "oci://$exact_image" \
   --repo "$EXPECTED_REPOSITORY" \
   --signer-workflow "$EXPECTED_REPOSITORY/$source_workflow" \
@@ -210,8 +212,32 @@ gh attestation verify "oci://$exact_image" \
   --deny-self-hosted-runners \
   --format json > "$attestation_log"
 
+# The image is not executed. Only after attestation succeeds are its config
+# labels parsed as untrusted discovery data, reduced to one approved builder
+# version, and retained before the canonical manifest is reconstructed. This
+# allows an approved rollout host to verify an image built by the other
+# approved rollout member without substituting the verifier's own mutable
+# ImageVersion.
 docker pull "$exact_image" >/dev/null
 docker image inspect --format '{{json .Config.Labels}}' "$exact_image" > "$labels_path"
+builder_image_version=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \
+  --repo-root "$REPO_ROOT" builder-from-labels \
+  --labels-json "$labels_path" \
+  --output "$builder_runner_path")
+
+manifest_digest=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \
+  --repo-root "$REPO_ROOT" create \
+  --source-commit "$source_commit" \
+  --repository "$EXPECTED_REPOSITORY" \
+  --builder-runner-identity "$builder_runner_path" \
+  --output "$manifest_path" \
+  --digest-output "$manifest_digest_path")
+if [[ -n "$EXPECTED_MANIFEST_DIGEST" &&
+  "$manifest_digest" != "$EXPECTED_MANIFEST_DIGEST" ]]; then
+  echo "Measured CI image manifest digest differs from expected manifest digest." >&2
+  exit 1
+fi
+
 verified_manifest_digest=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \
   --repo-root "$REPO_ROOT" verify-labels \
   --manifest "$manifest_path" \
@@ -227,6 +253,7 @@ fi
   printf 'digest=%s\n' "$image_digest"
   printf 'source_commit=%s\n' "$source_commit"
   printf 'manifest_digest=%s\n' "$manifest_digest"
+  printf 'builder_image_version=%s\n' "$builder_image_version"
 } | tee "$ARTIFACT_DIR/ci-image-identity.env"
 if [[ -n "$OUTPUT_FILE" ]]; then
   cat "$ARTIFACT_DIR/ci-image-identity.env" >> "$OUTPUT_FILE"

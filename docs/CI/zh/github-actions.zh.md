@@ -40,8 +40,9 @@ integration workflow 会在受保护路径门禁之后运行 `change-classificat
 ## 运行环境
 
 `Dockerfile.ci` 定义 GitHub Linux 测试环境。受保护 lock 中的
-`photospider-ci:latest` 只用于发现 locator。可信 host job 会解析它，校验精确 digest、source/signer
-workflow attestation、OCI revision 与 canonical manifest label，并且只输出最终的
+`photospider-ci:latest` 只用于发现 locator。可信 host job 会解析它，并在 Docker 可以拉取或展开任何
+image layer 之前校验精确 subject 的 source/signer workflow attestation。只有此后它才会拉取
+digest-qualified image、校验 OCI revision 与 canonical manifest label，并且只输出最终的
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` 引用。Published-image healthcheck 与 build/test
 integration job 都执行该已校验的 digest-qualified 引用；没有 job 直接执行可变 locator。
 `healthcheck-published-image` 是 container job，并不依赖 checkout 的临时 HOME 范围 Git trust 在
@@ -55,31 +56,49 @@ integration job 都执行该已校验的 digest-qualified 引用；没有 job �
 container 默认 shell。protected-path、change-classification 与稳定结果门禁仍是轻量
 `ubuntu-24.04` job，不会 configure 或编译项目。
 
-当 pull request 或 push 修改 CI 镜像输入（`Dockerfile.ci`、`.dockerignore` 或 `.github/workflows/build-ci-image.yml`）时，detector 仍会拉取并校验精确 base，而不依赖 fork 中可能不存在的 `origin/<base>`。Fork head 会在 checkout 前被拒绝，同仓库受保护 `CI/**` pull request 则使用其可信 push 路径。Image-change healthcheck job 不构建镜像：它会先校验精确 hosted runner、受保护 lock、canonical publish-source identity 与生成的 image-input manifest，再运行静态 healthcheck。只有符合条件的可信 `main` 或 `CI/**` integration push 可以调用唯一 candidate-image producer 与 shared digest-bound suite。
+当 pull request 或 push 修改 canonical CI-image lock 的 `input_paths` 中任一路径时，detector 仍会拉取并校验精确 base，而不依赖 fork 中可能不存在的 `origin/<base>`。Detector 会分别严格解析 merge base 与 head 的 lock，要求 lock 把自身列为输入，并把 NUL 分隔的 Git path inventory 与两个已验证路径集合的并集比较。因此，lock 增加、删除、重复、路径遍历、JSON 畸形或某个 revision 缺失时，都不能输出 `changed=false`。Fork head 会在 checkout 前被拒绝，同仓库受保护 `CI/**` pull request 则使用其可信 push 路径。Image-change healthcheck job 不构建镜像：它会先校验精确 hosted runner、受保护 lock、canonical publish-source identity 与生成的 image-input manifest，再运行静态 healthcheck。只有符合条件的可信 `main` 或 `CI/**` integration push 可以调用唯一 candidate-image producer 与 shared digest-bound suite。
 
-即使 major OS 已明确，hosted label 仍是可变的。当前 Linux builder lock 是
-`ubuntu24/20260823.283.1`，已在 Photospider run
+即使 major OS 已明确，hosted label 仍是可变的。GitHub 说明 runner image deployment 通常需要两到三天，
+rollout 期间会创建 prerelease，而且具体 job version 必须从 `Set up job` 读取
+（[官方 runner-images 说明](https://github.com/actions/runner-images#what-image-version-is-used-in-my-build)）。
+因此，有限 Linux rollout set 同时包含 stable `ubuntu24/20260816.277.1` 与 rollout
+`ubuntu24/20260823.283.1`。前者已在 exact-head healthcheck run
+[`32997831039`](https://github.com/kevin-zf1123/photospider/actions/runs/32997831039/job/98271915852)
+和 Integration builder run
+[`32997831190`](https://github.com/kevin-zf1123/photospider/actions/runs/32997831190/job/98271974769)
+中观察，并对应官方
+[`ubuntu24/20260816.277` release](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260816.277)。
+后者已在 run
 [`32991073228`](https://github.com/kevin-zf1123/photospider/actions/runs/32991073228/job/98248727299)
-中观察，并与官方
-[`ubuntu24/20260823.283` release](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283)
-匹配。Darwin security lock 是 `macos15/20260824.0311.1`，绑定 `macos-15`/`arm64`，并与官方
-[`macos-15-arm64/20260824.0311` release](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311)
-匹配；其中记录的 vcpkg prefix 会解析为受保护 commit
-[`127402f1c75bb3d5ff6bce04b285faa4930a5aca`](https://github.com/microsoft/vcpkg/commit/127402f1c75bb3d5ff6bce04b285faa4930a5aca)。Linux lock 同时是
-canonical CI-image manifest 的 input member 与 `builder_runner` object。Darwin 则是独立受保护的
-execution-profile lock，而不是 Linux image-build input。Hosted runner 一旦旋转，就必须先审查并更新
-对应 lock 与证据，否则会在 candidate execution 前失败。
+中观察，并对应官方 rollout
+[`ubuntu24/20260823.283` prerelease](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283)。
+Darwin set 同样包含 stable `macos15/20260727.0256.1`，绑定 vcpkg commit
+[`6d9d7df564a1ccdaa994e4ad39ccd4a32360867b`](https://github.com/microsoft/vcpkg/commit/6d9d7df564a1ccdaa994e4ad39ccd4a32360867b)，
+以及 rollout `macos15/20260824.0311.1`，绑定
+[`127402f1c75bb3d5ff6bce04b285faa4930a5aca`](https://github.com/microsoft/vcpkg/commit/127402f1c75bb3d5ff6bce04b285faa4930a5aca)；
+两者分别匹配官方
+[`macos-15-arm64/20260727.0256` release](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260727.0256)
+和
+[`macos-15-arm64/20260824.0311` prerelease](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311)。
+每个 job 只测量一次环境，并保留一份精确 resolved runtime record。Linux allowlist lock byte 继续作为
+image-manifest input，而 manifest 的 `builder_runner` 与 OCI builder-version label 绑定实际 builder member；
+运行在另一个 approved member 上的 verifier 会重建这份 retained provenance，而不会用自身
+`ImageVersion` 替换。Darwin consumer 使用 retained record 中一对一的 vcpkg mapping。未知或被篡改的
+record 会在 candidate work 前失败。Runner lock 与 retained-record input 强制要求 `O_NOFOLLOW`、
+`O_NONBLOCK` 和 `O_CLOEXEC`；FIFO 与 device path 会在不阻塞的情况下被拒绝，fresh retained output
+则使用 `O_EXCL` 拒绝任何 residual path。Rollout 完成后，移除 retired member 必须通过 reviewed
+protected-lock update 并生成新镜像。
 
 该 callable producer 本身也是一份完整 parsed-tree 合同：它只暴露 typed `workflow_call`、精确 write
 permission，以及一个带有受审查有序 step 的 `ubuntu-24.04` build job。Checkout 与 prebuild
 `ci_lock_verify.py` 调用必须先于唯一的 `docker/build-push-action`；该 action 不得带 env 或 condition，
-只能 push event-scoped temporary tag，并且只能接收精确 context、Dockerfile、两个 immutable label 以及
+只能 push event-scoped temporary tag，并且只能接收精确 context、Dockerfile、三个 immutable label 以及
 manifest/source-commit build argument。任何额外 step、Docker/Buildx 命令、canonical 或 `latest` 写入、
 build argument、field 或 job 都会在镜像构建前被受保护 verifier 拒绝。
 
 对于每次 `CI/**` push，两条 healthcheck 路径都会在各自 job 内拉取并校验 `origin/main`，再把 `origin/main` 作为 `CI_BASE_REF`。Published-image job 会在 `healthcheck.sh` 前完成校验；image-change job 会在 canonical manifest 生成和 `healthcheck.sh` 前完成校验。因此，静态检查会覆盖从 `main` merge base 开始的累计 branch diff，后续纯文档 push 无法隐藏更早的未格式化 C++ commit。普通 `main` push 则继续把精确的 `github.event.before` 作为 `CI_BASE_REF`，只检查本次 push 增量。任何必需 fetch 或 ref 校验失败都会在 `healthcheck.sh` 使用 fallback base 选择之前终止 job。对于 `CI/**` push，CI 镜像检测同样使用累计 `origin/main` 基线，因此后续纯文档 push 也无法隐藏更早的镜像输入 commit。
 
-镜像输入 detector 使用关闭 rename detection 且不带任何 Git status filter 的清单；删除、type change 与少见 status 都保持可见。Healthcheck 静态范围清单同样关闭 rename detection，但会有意使用 `--diff-filter=d`：由于 formatter 与 linter 要求当前文件，删除路径会被排除，而 type change 与其他少见的非删除 status 仍保持可见。两份清单都使用 NUL 分隔的 Git path，因此含换行的文件名仍保持为一个精确路径，并且都会先把清单写入父 shell 可观察的文件。`git diff` 失败时，脚本会在输出任何 `changed=false` 或“No changed C++ files”摘要前非零退出。这样既避免假路由，也避免另一个 workflow 尚未发布新 `latest` 镜像时产生竞态。
+镜像输入 detector 使用关闭 rename detection 且不带任何 Git status filter 的清单；删除、type change 与少见 status 都保持可见。它的 Python reader 直接消费 Git 的 NUL 分隔 byte，并写入经 JSON quoting 的诊断路径日志；Bash whitespace 或 newline parser 不参与路径分类。Healthcheck 静态范围清单同样关闭 rename detection，但会有意使用 `--diff-filter=d`：由于 formatter 与 linter 要求当前文件，删除路径会被排除，而 type change 与其他少见的非删除 status 仍保持可见。任何 lock 读取或 `git diff` 失败都会在输出 `changed=false` 或“No changed C++ files”摘要前非零退出。这样既避免假路由，也避免另一个 workflow 尚未发布新 `latest` 镜像时产生竞态。
 
 镜像包含 CMake、C++ 工具链、OpenCV、yaml-cpp、CURL、OpenSSL、GTest、
 nlohmann-json、Python、cpplint 和 clang-format。Formatter 通过 PyPI wheel 安装并固定为
@@ -308,6 +327,8 @@ package-input 边界运行，在不重建或重新安装 producer 的前提下�
 - ASan 与 TSan 保留共享的 compute/propagation 检查，并选择对应的旧 scheduler 或新
   policy/execution focused tests。
 
+在 candidate-owned matrix 取代 current-main sanitizer fallback 之前，该 fallback 只使用一个带终止记录的 NUL-framed v1 invocation stream。Target、可能为空的 GoogleTest filter 与 trust flag 在 Bash 3.2 和 Bash 5 中仍是三个独立 field；禁止 whitespace splitting、shell evaluation 与 legacy text decoder。Shell 会把解码后的 stream 保存为诊断 evidence，再由 `run_gtest_checked` 在执行前证明每个空或非空 selection 都非零。
+
 Linux 与 Darwin 都会把 ASan、TSan 和有界 fuzz 调度为不同的 profile result。在 Darwin 上，
 `sanitizer-asan-darwin`、`sanitizer-tsan-darwin` 与 `fuzz-codecs-darwin` 是三个独立的
 `macos-15` job；每个 job 只依赖 `integration-plan`，下载同一份受保护 profile inventory，并拥有
@@ -321,9 +342,12 @@ result，验证 publishing route 的 attestation 为 `success`、read-only route
 digest，并且仅在全部检查通过后写 output。未知 step、`continue-on-error`、额外 field/statement、
 注释、no-op、early exit 或 sibling dependency 均不能满足维护中的 routing contract。
 Helper source 还必须同时匹配三个独立 identity：verifier-owned 精确 byte SHA-256、受保护 JSON
-helper lock 与 retained regular-file measurement。它不依赖随 Python 版本变化的 `ast.dump()` 或
-`ast.unparse()`。Behavior test 仍会执行每个 result 与 attestation branch；security contract 直接
-启动的 Python child 使用测试进程自己的 `sys.executable`。
+helper lock 与 retained regular-file measurement。Measurement 使用单一带 `O_NOFOLLOW`/`O_CLOEXEC`
+的 retained descriptor，在不阻塞的情况下拒绝 special file，在读取前后复核 pathname 与 descriptor
+metadata，并要求对同一 descriptor 的两次读取一致。因此 final symlink swap 即使指向 same-inode
+hardlink 也会失败，in-place mutation 同样不能改变获授权 helper byte。它不依赖随 Python 版本变化的
+`ast.dump()` 或 `ast.unparse()`。Behavior test 仍会执行每个 result 与 attestation branch；security
+contract 直接启动的 Python child 使用测试进程自己的 `sys.executable`。
 
 这是一个受保护的两阶段过渡。可信 `CI/**` 变更先进入 `main`，并在那里验证旧契约；架构 pull
 request 随后纳入该可信 commit，并删除自身独立的受保护路径差异，其完整标记集合会选择
@@ -384,7 +408,7 @@ helper 和 output artifact 不得进入 primary repository，也不得作为 per
 - `ci/scripts/ci_image_install.sh`：执行唯一的 Docker image 安装 transaction。它的 version/完整文件 SHA-256、verifier-owned active-statement identity、单一 entrypoint 调用、snapshot/APT/Pip/GitHub-CLI 顺序、下载 authority 与 hash-before-extract boundary 都受保护；alternate APT path、额外 downloader、pipe-to-shell、跳过 hash 或 early success 都会被拒绝。
 - `ci/scripts/integration_suite_gate.py`：校验 shared DAG 每项精确 conclusion、publish/attestation mode 与 image digest，随后安全追加唯一 validated digest output。直接行为回归会让每个 required job 分别使用 failed/skipped/unknown conclusion，并覆盖两种合法 attestation mode。
 - `ci/scripts/runtime_capability_test.sh`：覆盖精确 Make/Ninja target 解析、两种完整契约、不完整/混合/缺失清单的 fail-closed 行为、required-target 校验及互斥 CLI 配置输出。它还证明 direct-consumer trust export 由精确的可选 `test_plugin_trust_bundle` capability 控制，而不是由更宽泛的 policy/execution profile 控制：pre-trust 与 legacy inventory 保持 no-op，缺失或 malformed inventory 以及不完整/非 regular material 均 fail closed，完整的 trust-enabled tuple 则以 canonical path 覆盖 inherited value。
-- `ci/scripts/ci_image_changed.sh`：检测当前 NUL 分隔且不带 status 过滤的 diff 是否修改 CI 镜像输入；workflow 会向它提供已拉取并验证的 pull-request 精确 base SHA，diff 失败时不会输出路由。
+- `ci/scripts/ci_image_changed.sh`：把精确 base/head 比较委托给 canonical manifest helper；后者严格验证 self-including `input_paths` lock 的两个 revision，把其并集与 NUL 分隔且不带 status 过滤的 diff 比较，并在 lock 或 Git 失败时不输出路由。
 - `ci/scripts/build_smoke_inventory.py`：严格解析 CTest JSON v1，输出确定性 matrix 与 NUL 分隔精确名称，并在基于索引执行前重新校验一个 matrix selection。严格构建后模式拒绝空 selection；只有显式 preflight 模式允许为空。Focused regression 会覆盖 malformed JSON/schema、重复名称/property/label value、非法或缺失 label、disabled/commandless entry、严格空 selection、确定性排序、JSON round trip、安全 artifact key、敌意测试名字符、在执行前停止的 absent/disabled/commandless runner selection，以及真实配置期占位到构建后发现过程。
 - `ci/scripts/integration_plan.sh`：配置一个启用测试的小型 build tree，并校验允许空集合、非权威的配置期 inventory preview；它不会输出 workflow matrix。
 - `ci/scripts/build_integrity.sh`：检测一种完整运行时契约，在同一 tree 中执行 required-target 与完整 build，写入普通 CTest 闭包并安装 fresh package prefix，再把 build smoke 分成下游 `consumer_build_smoke_matrix.json`（`ctest-control`）、`openexr_build_smoke_matrix.json`（`openexr-metadata`）和 `dedicated_build_smoke_matrix.json`（`installed-package`）三个 matrix，以及 producer-local `producer_build_smoke_names.z` 清单。只有严格校验通过后，它才会暴露这三个下游 matrix 并执行 producer-local 清单。
@@ -398,7 +422,7 @@ helper 和 output artifact 不得进入 primary repository，也不得作为 per
 - `ci/scripts/propagation_script_test.sh`：构建 `test_propagation`，并对线性和复杂 propagation 图运行 `tiles all`。
 - `ci/scripts/plugin_load_test.sh`：检查 operation plugin，并选择 scheduler plugin 加载/列举，或 policy plugin、registry、policy/execution 与 CLI route 检查。
 - `ci/scripts/execution_repeat_test.sh`：重复运行当前运行时契约对应的确定性 scheduler 或 policy/execution 行为测试。
-- `ci/scripts/sanitizer_test.sh`：在独立 build 目录运行共享且按能力选择的聚焦 ASan 或 TSan 测试。
+- `ci/scripts/sanitizer_test.sh`：先消费 profile input 前生成的唯一 retained runner identity，再在独立 build 目录运行共享且按能力选择的聚焦 ASan 或 TSan 测试；其 temporary fallback 只通过带终止记录的 NUL-framed v1 protocol 传输 target/empty-filter/trust record，并记录解码后的 evidence。
 
 ## 本地命令
 
@@ -439,8 +463,17 @@ BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
   CI_ARTIFACT_DIR=CI-results/execution-repeat \
   bash ci/scripts/execution_repeat_test.sh
-SANITIZER=asan CI_ARTIFACT_DIR=CI-results/sanitizer-asan bash ci/scripts/sanitizer_test.sh
+# Security runner 只能在 approved hosted runner 上复现。
+runner_identity="${RUNNER_TEMP:?}/photospider-security-runner-$$.json"
+python3 ci/scripts/ci_runner_verify.py --platform Linux \
+  --runner-label ubuntu-24.04 --output "$runner_identity"
+CI_RUNNER_IDENTITY_FILE="$runner_identity" SANITIZER=asan \
+  CI_ARTIFACT_DIR=CI-results/sanitizer-asan \
+  bash ci/scripts/sanitizer_test.sh
 ```
+
+Sanitizer/fuzz 命令有意不提供未经验证的 workstation fallback。`ci_runner_verify.py` 要求 hosted
+`ImageOS`/`ImageVersion`，只创建一次新的 retained file，后续每个 platform preparation step 都消费同一路径。
 
 可以把 `SMOKE_TEST_NAME` 替换成
 `CI-results/build-integrity-default/consumer_build_smoke_matrix.json` 输出的任一精确名称；runner 会拒绝 absent、

@@ -628,7 +628,8 @@ def _load_fallback(root: Path) -> dict[str, Any]:
                 raise ProfileError(f"{path}: fallback sanitizer invocation is malformed")
             targets.append(_target_identifier(invocation["target"], str(path)))
             if not isinstance(invocation["filter"], str) or any(
-                character in invocation["filter"] for character in ("\t", "\r", "\n")
+                character in invocation["filter"]
+                for character in ("\0", "\t", "\r", "\n")
             ):
                 raise ProfileError(f"{path}: fallback GoogleTest filter is malformed")
             if not isinstance(invocation["trust_environment"], bool):

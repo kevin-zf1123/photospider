@@ -3,11 +3,11 @@
 set -Eeuo pipefail
 
 # @file security_platform_prepare.sh
-# @brief Validate an eligible Darwin/Linux security host and materialize exact
-#   platform toolchain arguments without executing candidate product code.
+# @brief Consume one retained Darwin/Linux runner identity and materialize exact
+#   platform toolchain arguments without re-reading mutable runner environment.
 # @note Linux dependencies are supplied by the attested CI image. Darwin uses
-#   the exact GitHub-hosted runner image and vcpkg commit protected by
-#   darwin-runner-lock.json. It copies the image-bound vcpkg binary into an
+#   the exact vcpkg commit selected for the measured image version in the
+#   retained identity. It copies the image-bound vcpkg binary into an
 #   unseedable fresh checkout created below runner.temp, while the checkout is
 #   populated from the locked preinstalled Git object or the explicit official
 #   microsoft/vcpkg source. Windows and unknown platforms fail rather than
@@ -17,8 +17,9 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 PROFILE_JSON=${1:-}
 OUTPUT_FILE=${CI_PLATFORM_CMAKE_ARGS_FILE:-}
-if [[ -z "$PROFILE_JSON" || -z "$OUTPUT_FILE" || $# -ne 1 ]]; then
-  echo "Usage: CI_PLATFORM_CMAKE_ARGS_FILE=<path> $0 <resolved-profile.json>" >&2
+RUNNER_IDENTITY_FILE=${CI_RUNNER_IDENTITY_FILE:-}
+if [[ -z "$PROFILE_JSON" || -z "$OUTPUT_FILE" || -z "$RUNNER_IDENTITY_FILE" || $# -ne 1 ]]; then
+  echo "Usage: CI_RUNNER_IDENTITY_FILE=<path> CI_PLATFORM_CMAKE_ARGS_FILE=<path> $0 <resolved-profile.json>" >&2
   exit 2
 fi
 if [[ ! -f "$PROFILE_JSON" || -L "$PROFILE_JSON" ]]; then
@@ -34,6 +35,50 @@ mkdir -p "$(dirname -- "$OUTPUT_FILE")"
 
 platform=$(uname -s)
 architecture=$(uname -m)
+
+# @brief Load one canonical runtime record retained by ci_runner_verify.py.
+# @return Six nonempty lines: architecture, image OS/version, runner label,
+#   triplet (or ``-``), and vcpkg commit (or ``-``).
+# @throws Python exits nonzero for non-canonical bytes, a stale allowlist
+#   member, a mismatched platform, a link/special file, or unknown fields.
+# @note The runner environment is deliberately not read here. Every platform
+#   decision is derived from the one file produced before candidate execution.
+read_retained_runner_identity() {
+  python3 - "$SCRIPT_DIR" "$REPO_ROOT" "$RUNNER_IDENTITY_FILE" "$platform" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from ci_runner_verify import load_resolved_identity
+
+identity = load_resolved_identity(Path(sys.argv[3]), Path(sys.argv[2]), sys.argv[4])
+print(identity["architecture"])
+print(identity["image_os"])
+print(identity["image_version"])
+print(identity["runner_label"])
+print(identity.get("triplet", "-"))
+print(identity.get("vcpkg_commit", "-"))
+PY
+}
+
+runtime_identity=()
+while IFS= read -r identity_value; do
+  runtime_identity+=("$identity_value")
+done < <(read_retained_runner_identity)
+if ((${#runtime_identity[@]} != 6)); then
+  echo "Retained runner identity did not yield six exact fields." >&2
+  exit 1
+fi
+expected_architecture=${runtime_identity[0]}
+expected_image_os=${runtime_identity[1]}
+expected_image_version=${runtime_identity[2]}
+expected_runner_label=${runtime_identity[3]}
+triplet=${runtime_identity[4]}
+expected_vcpkg_commit=${runtime_identity[5]}
+if [[ "$architecture" != "$expected_architecture" ]]; then
+  echo "Runtime architecture '$architecture' differs from retained '$expected_architecture'." >&2
+  exit 1
+fi
 
 # @brief Read and validate eligibility/dependencies from the resolved profile.
 # @param $1 `eligible` or `dependencies`.
@@ -118,8 +163,10 @@ PY
 
 case "$platform" in
   Linux)
-    if [[ "$architecture" != x86_64 && "$architecture" != aarch64 ]]; then
-      echo "Unsupported Linux security architecture: $architecture" >&2
+    if [[ "$expected_image_os" != ubuntu24 ||
+      "$expected_runner_label" != ubuntu-24.04 ||
+      "$triplet" != - || "$expected_vcpkg_commit" != - ]]; then
+      echo "Retained Linux runner identity has inconsistent platform fields." >&2
       exit 1
     fi
     # The locked image supplies clang-18. Fuzz selection is profile-driven;
@@ -130,53 +177,11 @@ case "$platform" in
     } > "$OUTPUT_FILE"
     ;;
   Darwin)
-    lock_path=$REPO_ROOT/ci/locks/darwin-runner-lock.json
-    darwin_lock=()
-    while IFS= read -r lock_value; do
-      darwin_lock+=("$lock_value")
-    done < <(python3 - "$lock_path" <<'PY'
-import json
-import re
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    lock = json.load(handle)
-expected = {
-    "schema", "architecture", "image_os", "image_version",
-    "runner_label", "triplet", "vcpkg_commit",
-}
-if not isinstance(lock, dict) or set(lock) != expected:
-    raise SystemExit("Darwin runner lock has missing or unknown fields")
-if lock["schema"] != "photospider-darwin-runner-lock-v1":
-    raise SystemExit("Darwin runner lock schema is unknown")
-if not re.fullmatch(r"[0-9a-f]{40}", lock["vcpkg_commit"]):
-    raise SystemExit("Darwin vcpkg commit is not a full SHA")
-for key in ("architecture", "image_os", "image_version", "runner_label", "triplet", "vcpkg_commit"):
-    print(lock[key])
-PY
-)
-    if ((${#darwin_lock[@]} != 6)); then
-      echo "Darwin runner lock did not yield six exact identities." >&2
-      exit 1
-    fi
-    expected_architecture=${darwin_lock[0]}
-    expected_image_os=${darwin_lock[1]}
-    expected_image_version=${darwin_lock[2]}
-    expected_runner_label=${darwin_lock[3]}
-    triplet=${darwin_lock[4]}
-    expected_vcpkg_commit=${darwin_lock[5]}
-    if [[ "$architecture" != "$expected_architecture" ]]; then
-      echo "Darwin architecture '$architecture' differs from '$expected_architecture'." >&2
-      exit 1
-    fi
-    if [[ ${ImageOS:-} != "$expected_image_os" ||
-      ${ImageVersion:-} != "$expected_image_version" ]]; then
-      echo "Darwin runner image '${ImageOS:-unset}/${ImageVersion:-unset}' differs from protected '$expected_image_os/$expected_image_version'." >&2
-      exit 1
-    fi
-    if [[ ${RUNNER_NAME:-} != *"$expected_runner_label"* &&
-      ${RUNNER_IMAGE_NAME:-$expected_runner_label} != "$expected_runner_label" ]]; then
-      echo "Darwin runner label identity is unavailable or mismatched." >&2
+    if [[ "$expected_image_os" != macos15 ||
+      "$expected_runner_label" != macos-15 ||
+      "$triplet" != arm64-osx ||
+      ! "$expected_vcpkg_commit" =~ ^[0-9a-f]{40}$ ]]; then
+      echo "Retained Darwin runner identity has inconsistent platform fields." >&2
       exit 1
     fi
     vcpkg_source_root=${VCPKG_INSTALLATION_ROOT:-}

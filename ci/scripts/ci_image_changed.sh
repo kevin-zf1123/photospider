@@ -6,7 +6,9 @@ set -Eeuo pipefail
 # @brief Detect whether the current comparison changes a maintained CI image input.
 # @note CI workflows provide the exact pull-request base SHA after fetching it
 #   from the base repository. Local callers may use the documented fallbacks or
-#   CI_IMAGE_REPO_ROOT to exercise the detector in an isolated repository.
+#   CI_IMAGE_REPO_ROOT to exercise the detector in an isolated repository. The
+#   sole path authority is the strictly parsed canonical lock at both comparison
+#   revisions; this script intentionally owns no parallel path list.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=ci/scripts/common.sh
@@ -25,58 +27,68 @@ is_zero_sha() {
   [[ -n "$value" && "$value" =~ ^0+$ ]]
 }
 
-# @brief Write every changed path for CI image input detection as NUL records.
-# @return Git's diff status for the first usable comparison.
-# @throws Nothing; Git failures propagate through the returned status.
-# @note The explicit base is preferred, followed by origin/main, HEAD~1, and the
-#   working tree. Rename and status filtering stay disabled so deletions, type
-#   changes, unknown statuses, and paths containing newlines remain visible.
-changed_files() {
+# @brief Select the first usable comparison without classifying any path.
+# @return Prints `base<TAB>head` or `base<TAB>worktree` for the manifest helper.
+# @throws Nothing; Git reference probes return false and continue to the next
+#   documented fallback.
+# @note The Python reader resolves the merge base, strictly parses both lock
+#   revisions, creates the NUL-safe diff, and classifies it from their union.
+select_comparison() {
   local base=${CI_IMAGE_BASE_REF:-${CI_BASE_REF:-}}
-  if [[ -n "$base" ]] && ! is_zero_sha "$base" &&
-    git rev-parse --verify "$base^{commit}" >/dev/null 2>&1; then
-    git diff --no-renames --name-only -z "$base"...HEAD
-    return
+  if [[ -n "$base" ]] && ! is_zero_sha "$base"; then
+    if git rev-parse --verify "$base^{commit}" >/dev/null 2>&1; then
+      printf '%s\t%s\n' "$base" HEAD
+      return
+    fi
+    echo "Explicit CI image comparison base is unavailable: $base" >&2
+    return 1
   fi
   if git rev-parse --verify origin/main >/dev/null 2>&1; then
-    git diff --no-renames --name-only -z origin/main...HEAD
+    printf '%s\t%s\n' origin/main HEAD
     return
   fi
   if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-    git diff --no-renames --name-only -z HEAD~1...HEAD
+    printf '%s\t%s\n' HEAD~1 HEAD
     return
   fi
-  git diff --no-renames --name-only -z HEAD
+  printf '%s\t%s\n' HEAD worktree
 }
 
-changed_path_file=$(mktemp "$CI_ARTIFACT_DIR/.changed-files.XXXXXX")
-trap 'rm -f -- "$changed_path_file"' EXIT
-if ! changed_files > "$changed_path_file"; then
+if ! comparison=$(select_comparison); then
+  echo "CI image comparison selection failed." >&2
   echo "CI image changed-path detection failed." >&2
   exit 1
 fi
-mapfile -d '' -t changed_paths < "$changed_path_file"
-changed_file_log="$CI_ARTIFACT_DIR/changed-files.txt"
-: > "$changed_file_log"
-if ((${#changed_paths[@]} > 0)); then
-  printf '%q\n' "${changed_paths[@]}" > "$changed_file_log"
+IFS=$'\t' read -r comparison_base comparison_head <<<"$comparison"
+if [[ -z "$comparison_base" ||
+  ("$comparison_head" != HEAD && "$comparison_head" != worktree) ]]; then
+  echo "CI image comparison selection is malformed." >&2
+  exit 1
 fi
-
-image_changed=false
-for path in "${changed_paths[@]}"; do
-  case "$path" in
-    Dockerfile.ci | .dockerignore | .github/workflows/build-ci-image.yml | \
-      ci/locks/actions.lock | ci/locks/ci-image-lock.json | \
-      ci/locks/linux-runner-lock.json | \
-      ci/locks/requirements-ci.txt | \
-      ci/locks/ubuntu-24.04-packages.lock | \
-      ci/scripts/ci_image_manifest.py | \
-      ci/scripts/ci_image_verify.sh | ci/scripts/ci_lock_verify.py | \
-      ci/scripts/ci_runner_verify.py)
-      image_changed=true
-      ;;
-  esac
-done
+changed_file_log=$CI_ARTIFACT_DIR/changed-files.txt
+detector_arguments=(
+  --repo-root "$REPO_ROOT"
+  detect-changed
+  --base "$comparison_base"
+  --changed-files-output "$changed_file_log"
+)
+if [[ "$comparison_head" == worktree ]]; then
+  detector_arguments+=(--worktree)
+else
+  detector_arguments+=(--head "$comparison_head")
+fi
+if ! image_changed=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \
+  "${detector_arguments[@]}"); then
+  echo "CI image changed-path detection failed." >&2
+  exit 1
+fi
+case "$image_changed" in
+  true | false) ;;
+  *)
+    echo "CI image manifest detector returned an invalid route value." >&2
+    exit 1
+    ;;
+esac
 
 printf 'changed=%s\n' "$image_changed" | tee "$CI_ARTIFACT_DIR/ci-image-change.env"
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then

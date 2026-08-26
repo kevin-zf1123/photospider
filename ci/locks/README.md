@@ -68,20 +68,26 @@ identities on 2026-08-27 from authoritative upstream services:
 - GitHub CLI `2.98.0` archive hashes are from the official release
   `gh_2.98.0_checksums.txt`. The CLI is needed to verify GitHub artifact and OCI
   attestations; Ubuntu's older package does not provide `gh attestation`.
-- The Linux host lock records `ubuntu24/20260823.283.1`, observed directly in
-  [Photospider run `32991073228`](https://github.com/kevin-zf1123/photospider/actions/runs/32991073228/job/98248727299)
-  and published in the official
-  [`ubuntu24/20260823.283` runner-images release](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283).
-  It is a canonical image input,
-  so rotation changes both the manifest input digest and `builder_runner`.
-- The Darwin host lock records the official `macos-15-arm64` runner image
-  version `20260824.0311.1` published in the
-  [`macos-15-arm64/20260824.0311` runner-images release](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311),
-  binds the
-  workflow label `macos-15` to its `arm64` architecture and `arm64-osx`
-  triplet, and resolves its documented `127402f1c7` vcpkg prefix to full commit
-  [`127402f1c75bb3d5ff6bce04b285faa4930a5aca`](https://github.com/microsoft/vcpkg/commit/127402f1c75bb3d5ff6bce04b285faa4930a5aca)
-  in the official `microsoft/vcpkg` repository.
+- GitHub documents a two-to-three-day image deployment window and directs exact
+  job diagnosis to `Set up job`. The finite Linux rollout set records stable
+  `ubuntu24/20260816.277.1`, observed in exact-head runs `32997831039` and
+  `32997831190`, plus rollout `ubuntu24/20260823.283.1`, observed in run
+  [`32991073228`](https://github.com/kevin-zf1123/photospider/actions/runs/32991073228/job/98248727299).
+  The official runner-images records are
+  [`ubuntu24/20260816.277`](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260816.277)
+  and
+  [`ubuntu24/20260823.283`](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283).
+  The allowlist bytes are a canonical image input; the resolved runtime record,
+  manifest `builder_runner`, and OCI builder label bind the actual build member.
+- The finite Darwin set binds `macos-15`/`arm64`/`arm64-osx`. Stable
+  `20260727.0256.1` maps to full vcpkg commit
+  [`6d9d7df564a1ccdaa994e4ad39ccd4a32360867b`](https://github.com/microsoft/vcpkg/commit/6d9d7df564a1ccdaa994e4ad39ccd4a32360867b),
+  while rollout `20260824.0311.1` maps to
+  [`127402f1c75bb3d5ff6bce04b285faa4930a5aca`](https://github.com/microsoft/vcpkg/commit/127402f1c75bb3d5ff6bce04b285faa4930a5aca).
+  Their official image records are
+  [`macos-15-arm64/20260727.0256`](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260727.0256)
+  and
+  [`macos-15-arm64/20260824.0311`](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311).
   Security jobs use the preinstalled tree only as an image-bound binary and
   locked Git-object source. Each profile creates an unseedable checkout below
   `runner.temp` (fetching the same exact commit from the official repository if

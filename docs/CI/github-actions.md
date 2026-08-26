@@ -41,8 +41,10 @@ For a documentation-only change, `ci-image-change`, integration planning, all bu
 
 `Dockerfile.ci` defines the GitHub Linux test environment. The protected
 `photospider-ci:latest` lock value is only a discovery locator. A trusted host
-job resolves it, verifies the exact digest, source/signer workflow attestation,
-OCI revision and canonical manifest labels, and exposes only the resulting
+job resolves it and verifies the exact subject's source/signer workflow
+attestation before Docker may pull or expand any image layer. Only then does it
+pull the digest-qualified image, validate OCI revision and canonical manifest
+labels, and expose only the resulting
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` reference. Published-image
 healthcheck and build/test integration jobs execute that verified
 digest-qualified reference; none executes the mutable locator directly.
@@ -62,37 +64,80 @@ Bash instead of relying on the container default shell. Protected-path,
 change-classification, and stable result-gate jobs remain lightweight
 `ubuntu-24.04` jobs and do not configure or compile the project.
 
-When a pull request or push changes CI image inputs (`Dockerfile.ci`, `.dockerignore`, or `.github/workflows/build-ci-image.yml`), detection still fetches and verifies the exact base instead of relying on a possibly absent fork `origin/<base>`. A fork head is rejected before checkout, and a same-repository protected `CI/**` pull request uses its trusted push route. The image-change healthcheck job does not build an image: it verifies the exact hosted runner, protected locks, canonical publish-source identity, and generated image-input manifest before running the static healthcheck. Only an eligible trusted `main` or `CI/**` integration push may call the one candidate-image producer and shared digest-bound suite.
+When a pull request or push changes any path in the canonical CI-image lock's
+`input_paths`, detection still fetches and verifies the exact base instead of
+relying on a possibly absent fork `origin/<base>`. The detector strictly parses
+the lock independently at the merge base and head, requires the lock to include
+itself, and compares the NUL-delimited Git path inventory with the union of both
+validated path sets. Lock additions, removals, duplicates, traversal, malformed
+JSON, or a missing revision therefore cannot emit `changed=false`. A fork head
+is rejected before checkout, and a same-repository protected `CI/**` pull
+request uses its trusted push route. The image-change healthcheck job does not
+build an image: it verifies the exact hosted runner, protected locks, canonical
+publish-source identity, and generated image-input manifest before running the
+static healthcheck. Only an eligible trusted `main` or `CI/**` integration push
+may call the one candidate-image producer and shared digest-bound suite.
 
-Hosted labels remain mutable even when their major OS is explicit. The current
-Linux builder lock is `ubuntu24/20260823.283.1`, observed in Photospider run
+Hosted labels remain mutable even when their major OS is explicit. GitHub says
+runner-image deployment normally takes two to three days, creates a prerelease
+while rollout is in progress, and requires the exact job version to be read
+from `Set up job` ([official runner-images guidance](https://github.com/actions/runner-images#what-image-version-is-used-in-my-build)).
+The finite Linux rollout set therefore contains stable
+`ubuntu24/20260816.277.1` and rollout `ubuntu24/20260823.283.1`. The former was
+observed in exact-head healthcheck run
+[`32997831039`](https://github.com/kevin-zf1123/photospider/actions/runs/32997831039/job/98271915852)
+and Integration builder run
+[`32997831190`](https://github.com/kevin-zf1123/photospider/actions/runs/32997831190/job/98271974769),
+and is the official
+[`ubuntu24/20260816.277` release](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260816.277).
+The latter was observed in run
 [`32991073228`](https://github.com/kevin-zf1123/photospider/actions/runs/32991073228/job/98248727299)
-and matched to the official
-[`ubuntu24/20260823.283` release](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283).
-The Darwin security lock is `macos15/20260824.0311.1` on `macos-15`/`arm64`,
-matched to the official
-[`macos-15-arm64/20260824.0311` release](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311);
-its documented vcpkg prefix resolves to protected commit
-[`127402f1c75bb3d5ff6bce04b285faa4930a5aca`](https://github.com/microsoft/vcpkg/commit/127402f1c75bb3d5ff6bce04b285faa4930a5aca).
-The Linux lock is both an input
-member and the `builder_runner` object in the canonical CI-image manifest.
-Darwin remains a separately protected execution-profile lock rather than a
-Linux image-build input. Any hosted rotation fails before candidate execution
-until the corresponding lock and evidence are reviewed.
+and is the official rollout
+[`ubuntu24/20260823.283` prerelease](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283).
+The Darwin set similarly contains stable `macos15/20260727.0256.1` bound to
+vcpkg commit
+[`6d9d7df564a1ccdaa994e4ad39ccd4a32360867b`](https://github.com/microsoft/vcpkg/commit/6d9d7df564a1ccdaa994e4ad39ccd4a32360867b)
+and rollout `macos15/20260824.0311.1` bound to
+[`127402f1c75bb3d5ff6bce04b285faa4930a5aca`](https://github.com/microsoft/vcpkg/commit/127402f1c75bb3d5ff6bce04b285faa4930a5aca),
+matching the official
+[`macos-15-arm64/20260727.0256` release](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260727.0256)
+and
+[`macos-15-arm64/20260824.0311` prerelease](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311).
+Each job measures the environment once and retains one exact resolved runtime
+record. The Linux allowlist lock bytes remain an image-manifest input, while
+the manifest's `builder_runner` and OCI builder-version label bind the actual
+builder member; a verifier on the other approved member reconstructs this
+retained provenance instead of substituting its own `ImageVersion`. Darwin
+consumers use the retained record's one-to-one vcpkg mapping. Unknown or
+tampered records fail before candidate work. Runner lock and retained-record
+inputs require `O_NOFOLLOW`, `O_NONBLOCK`, and `O_CLOEXEC`; FIFO and device
+paths are rejected without blocking, while fresh retained output uses
+`O_EXCL` and refuses every residual path. After rollout completes, removing
+the retired member requires a reviewed protected-lock update and new image.
 
 The callable producer itself is a complete parsed-tree contract: it exposes only
 the typed `workflow_call`, exact write permissions, and one `ubuntu-24.04` build
 job with its reviewed ordered steps. Checkout and the prebuild
 `ci_lock_verify.py` invocation precede the unique `docker/build-push-action`;
 that action has no environment or condition, pushes only the event-scoped
-temporary tag, and accepts exactly the context, Dockerfile, two immutable
+temporary tag, and accepts exactly the context, Dockerfile, three immutable
 labels, and manifest/source-commit build arguments. Extra steps, Docker/Buildx
 commands, canonical or `latest` writes, build arguments, fields, or jobs fail
 the protected verifier before image construction.
 
 For every `CI/**` push, both healthcheck routes fetch and verify `origin/main` inside their own job, then pass `origin/main` as `CI_BASE_REF`. The published-image job verifies it before `healthcheck.sh`; the image-change job verifies it before canonical manifest generation and `healthcheck.sh`. Static checks therefore cover the cumulative branch diff from the `main` merge base, so a later documentation-only push cannot hide an earlier unformatted C++ commit. An ordinary `main` push retains the exact `github.event.before` value as `CI_BASE_REF` and checks only that push increment. A required fetch or reference verification failure stops the job before `healthcheck.sh` can use fallback base selection. CI-image detection uses the same cumulative `origin/main` basis for `CI/**` pushes, so a later documentation-only push also cannot hide an earlier image-input commit.
 
-The image-input detector uses a no-rename inventory with no Git status filter; deletions, type changes, and uncommon statuses all remain visible. The healthcheck static-scope inventory also disables rename detection but intentionally applies `--diff-filter=d`: deleted paths are excluded because formatters and linters require a current file, while type changes and uncommon non-deletion statuses remain visible. Both inventories use NUL-delimited Git paths, so filenames containing newlines remain one exact path, and both write the inventory to a file visible to the parent shell. A failed `git diff` exits nonzero before any `changed=false` output or “No changed C++ files” summary can be emitted. This avoids a false route as well as a race with another workflow that may still be publishing the new `latest` image.
+The image-input detector uses a no-rename inventory with no Git status filter;
+deletions, type changes, and uncommon statuses all remain visible. Its Python
+reader consumes Git's NUL-delimited bytes directly and writes a JSON-quoted
+diagnostic path log; no Bash whitespace or newline parser classifies paths.
+The healthcheck static-scope inventory also disables rename detection but
+intentionally applies `--diff-filter=d`: deleted paths are excluded because
+formatters and linters require a current file, while type changes and uncommon
+non-deletion statuses remain visible. A failed lock read or `git diff` exits
+nonzero before any `changed=false` output or “No changed C++ files” summary can
+be emitted. This avoids a false route as well as a race with another workflow
+that may still be publishing the new `latest` image.
 
 The image includes CMake, a C++ toolchain, OpenCV, yaml-cpp, CURL, OpenSSL,
 GTest, nlohmann-json, Python, cpplint, and clang-format. The formatter is
@@ -412,6 +457,14 @@ compatibility:
 - ASan and TSan retain the shared compute/propagation checks and select the
   matching legacy scheduler or new policy/execution focused tests.
 
+Until the candidate-owned matrix replaces the current-main sanitizer fallback,
+that fallback uses one terminal NUL-framed v1 invocation stream. Target,
+possibly empty GoogleTest filter, and trust flag remain separate fields on Bash
+3.2 and Bash 5; whitespace splitting, shell evaluation, and a legacy text
+decoder are forbidden. The shell persists the decoded stream as diagnostic
+evidence, then `run_gtest_checked` proves every empty or nonempty selection is
+nonzero before execution.
+
 Linux and Darwin each schedule ASan, TSan, and bounded fuzz as distinct profile
 results. On Darwin, `sanitizer-asan-darwin`, `sanitizer-tsan-darwin`, and
 `fuzz-codecs-darwin` are three independent `macos-15` jobs that each depend only
@@ -431,10 +484,15 @@ the digest, and writes output only after all checks pass. Unknown steps,
 sibling dependency cannot satisfy the maintained routing contract.
 The helper source must also match three independent identities: a
 verifier-owned exact byte SHA-256, the protected JSON helper lock, and the
-retained regular-file measurement. It does not depend on Python-version-specific
-`ast.dump()` or `ast.unparse()`. Behavior tests still execute every result and
-attestation branch, and Python children launched directly by the security
-contract use that test process's `sys.executable`.
+retained regular-file measurement. The measurement uses one
+`O_NOFOLLOW`/`O_CLOEXEC` retained descriptor, rejects special files without
+blocking, rechecks pathname and descriptor metadata before and after reading,
+and requires two reads of that same descriptor to agree. A final symlink swap,
+even when it targets a same-inode hardlink, or an in-place mutation therefore
+fails rather than changing the authorized helper bytes. It does not depend on
+Python-version-specific `ast.dump()` or `ast.unparse()`. Behavior tests still
+execute every result and attestation branch, and Python children launched
+directly by the security contract use that test process's `sys.executable`.
 
 This is a protected two-stage transition. The trusted `CI/**` change lands on
 `main` first and validates the legacy contract there. The architecture pull
@@ -518,7 +576,7 @@ personal development content.
 - `ci/scripts/ci_image_install.sh`: performs the only Docker image installation transaction. Its version/full-file SHA-256, verifier-owned active-statement identity, single entrypoint call, snapshot/APT/Pip/GitHub-CLI sequence, download authority, and hash-before-extract boundary are protected; it rejects an alternate APT path, extra downloader, pipe-to-shell command, bypassed hash, or early success.
 - `ci/scripts/integration_suite_gate.py`: validates every exact shared-DAG conclusion plus the publish/attestation mode and image digest, then safely appends the sole validated digest output. Direct behavior regressions exercise every required job with failed/skipped/unknown conclusions and both legitimate attestation modes.
 - `ci/scripts/runtime_capability_test.sh`: exercises exact Make/Ninja target parsing, both complete contracts, partial/mixed/absent fail-closed behavior, required-target checks, and mutually exclusive CLI configuration output. It also proves that the exact optional `test_plugin_trust_bundle` capability—not the broader policy/execution profile—gates direct-consumer trust export: pre-trust and legacy inventories are no-ops, missing or malformed inventories and incomplete/nonregular material fail closed, and a complete trust-enabled tuple replaces inherited values with canonical paths.
-- `ci/scripts/ci_image_changed.sh`: detects whether the current NUL-delimited, unfiltered diff changes CI image inputs; workflows provide an exact fetched pull-request base SHA, and diff failure exits without a route output.
+- `ci/scripts/ci_image_changed.sh`: delegates the exact base/head comparison to the canonical manifest helper, which strictly validates both revisions of the self-including `input_paths` lock, compares their union with the NUL-delimited unfiltered diff, and exits without a route output on lock or Git failure.
 - `ci/scripts/build_smoke_inventory.py`: strictly parses CTest JSON v1, emits a deterministic matrix and NUL-delimited exact names, and revalidates one matrix selection before index-based execution. Strict post-build mode rejects an empty selection; only explicit preflight mode permits it. Its focused regression covers malformed JSON/schema, duplicate names/properties/label values, invalid or missing labels, disabled/commandless entries, empty strict selection, deterministic ordering, JSON round trips, safe artifact keys, hostile test-name characters, absent/disabled/commandless runner selections that stop before execution, and real configuration-placeholder-to-post-build discovery.
 - `ci/scripts/integration_plan.sh`: configures a small testing-enabled tree and validates an allow-empty, non-authoritative configuration-time inventory preview; it emits no workflow matrix output.
 - `ci/scripts/build_integrity.sh`: detects one complete runtime contract, runs required-target and complete builds in one tree, writes the ordinary CTest closure, installs a fresh package prefix, and partitions build smokes into the downstream `consumer_build_smoke_matrix.json` (`ctest-control`), `openexr_build_smoke_matrix.json` (`openexr-metadata`), and `dedicated_build_smoke_matrix.json` (`installed-package`) matrices plus the producer-local `producer_build_smoke_names.z` list. It exposes those three downstream matrices and executes the producer-local list only after strict validation.
@@ -532,7 +590,7 @@ personal development content.
 - `ci/scripts/propagation_script_test.sh`: builds `test_propagation` and runs `tiles all` on linear and complex propagation graphs.
 - `ci/scripts/plugin_load_test.sh`: checks operation plugins and selects either scheduler plugin loading/listing or policy plugin, registry, policy/execution, and CLI route checks.
 - `ci/scripts/execution_repeat_test.sh`: repeats the configured runtime contract's deterministic scheduler or policy/execution behavior tests.
-- `ci/scripts/sanitizer_test.sh`: runs shared and capability-selected focused ASan or TSan tests from an isolated build directory.
+- `ci/scripts/sanitizer_test.sh`: consumes the one retained runner identity produced before profile input, then runs shared and capability-selected focused ASan or TSan tests from an isolated build directory; its temporary fallback transports target/empty-filter/trust records only through the terminal NUL-framed v1 protocol and records the decoded evidence.
 
 ## Local Commands
 
@@ -573,8 +631,19 @@ BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
   CI_ARTIFACT_DIR=CI-results/execution-repeat \
   bash ci/scripts/execution_repeat_test.sh
-SANITIZER=asan CI_ARTIFACT_DIR=CI-results/sanitizer-asan bash ci/scripts/sanitizer_test.sh
+# Security runners are reproducible only on an approved hosted runner.
+runner_identity="${RUNNER_TEMP:?}/photospider-security-runner-$$.json"
+python3 ci/scripts/ci_runner_verify.py --platform Linux \
+  --runner-label ubuntu-24.04 --output "$runner_identity"
+CI_RUNNER_IDENTITY_FILE="$runner_identity" SANITIZER=asan \
+  CI_ARTIFACT_DIR=CI-results/sanitizer-asan \
+  bash ci/scripts/sanitizer_test.sh
 ```
+
+The sanitizer/fuzz commands intentionally have no unverified workstation
+fallback. `ci_runner_verify.py` requires the hosted `ImageOS`/`ImageVersion`,
+writes a new retained file once, and every downstream platform preparation step
+consumes that same path.
 
 Replace `SMOKE_TEST_NAME` with any exact name emitted by
 `CI-results/build-integrity-default/consumer_build_smoke_matrix.json`; the runner refuses an

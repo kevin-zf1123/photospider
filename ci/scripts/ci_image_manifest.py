@@ -24,12 +24,39 @@ import re
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+
+_SCRIPT_DIRECTORY = Path(__file__).resolve().parent
+if str(_SCRIPT_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIRECTORY))
+from ci_runner_verify import (
+    RunnerError,
+    canonical_identity_bytes,
+    load_resolved_identity,
+    resolve_approved_identity,
+    validate_resolved_identity,
+)
 
 
 class ManifestError(ValueError):
     """Report malformed, unsafe, or mismatched image-manifest state."""
+
+
+_IMAGE_LOCK_RELATIVE_PATH = "ci/locks/ci-image-lock.json"
+_IMAGE_LOCK_FIELDS = frozenset(
+    {
+        "apt_bootstrap",
+        "apt_snapshot",
+        "base_image",
+        "builder",
+        "github_cli",
+        "input_paths",
+        "protected_helpers",
+        "published_image",
+        "schema",
+    }
+)
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -43,11 +70,95 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _load_json(path: Path) -> Any:
-    """Load strict UTF-8 JSON with duplicate-member rejection."""
+    """Load one regular, non-symlink strict JSON file without duplicate keys.
+
+    Args:
+        path: Exact manifest, lock, label, or evidence path to decode.
+
+    Returns:
+        The decoded strict JSON value.
+
+    Raises:
+        ManifestError: The path is not a regular non-symlink file, cannot be
+            read, is not UTF-8/JSON, or contains a duplicate object member.
+    """
     try:
-        return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
-    except (OSError, UnicodeError, json.JSONDecodeError, ManifestError) as error:
+        if not path.is_file() or path.is_symlink():
+            raise ManifestError("path is not a regular non-symlink file")
+        return _load_json_bytes(path.read_bytes(), str(path))
+    except (OSError, ManifestError) as error:
         raise ManifestError(f"cannot read strict JSON {path}: {error}") from error
+
+
+def _load_json_bytes(value: bytes, context: str) -> Any:
+    """Decode strict UTF-8 JSON bytes with duplicate-member rejection.
+
+    Args:
+        value: Exact bytes read from a retained file or Git tree object.
+        context: Stable source identity used in diagnostics.
+
+    Returns:
+        The decoded JSON value.
+
+    Raises:
+        ManifestError: UTF-8, JSON syntax, or object-member uniqueness fails.
+    """
+    try:
+        return json.loads(
+            value.decode("utf-8"), object_pairs_hook=_unique_object
+        )
+    except (UnicodeError, json.JSONDecodeError, ManifestError) as error:
+        raise ManifestError(f"cannot read strict JSON {context}: {error}") from error
+
+
+def _image_input_paths(lock: Any, context: str) -> list[str]:
+    """Return the sole canonical CI-image input inventory after strict checks.
+
+    Args:
+        lock: Decoded candidate CI-image lock.
+        context: Stable tree/path identity used in diagnostics.
+
+    Returns:
+        The nonempty, bytewise sorted, unique canonical POSIX path list.
+
+    Raises:
+        ManifestError: The lock schema, field set, self-inclusion, ordering, or
+            any path identity is malformed or unsafe.
+
+    Note:
+        Requiring the lock to include its own path makes every input-set
+        evolution observable. Base/head classification consumes the union of
+        two independently validated revisions, so removing an old input cannot
+        hide that input's simultaneous deletion or replacement.
+    """
+    if (
+        not isinstance(lock, dict)
+        or set(lock) != _IMAGE_LOCK_FIELDS
+        or lock.get("schema") != "photospider-ci-image-lock-v1"
+    ):
+        raise ManifestError(f"{context}: unknown CI image lock schema")
+    paths = lock.get("input_paths")
+    if not isinstance(paths, list) or not paths or not all(
+        isinstance(item, str) for item in paths
+    ):
+        raise ManifestError(f"{context}: input_paths must be a nonempty string array")
+    if paths != sorted(paths) or len(paths) != len(set(paths)):
+        raise ManifestError(f"{context}: input_paths must be sorted and unique")
+    for relative in paths:
+        pure = PurePosixPath(relative)
+        if (
+            not relative
+            or "\0" in relative
+            or "\\" in relative
+            or pure.is_absolute()
+            or relative != str(pure)
+            or relative in (".", "..")
+            or ".." in pure.parts
+        ):
+            raise ManifestError(f"{context}: unsafe image input path: {relative!r}")
+    if _IMAGE_LOCK_RELATIVE_PATH not in paths:
+        raise ManifestError(f"{context}: image input lock must include itself")
+    return paths
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -138,41 +249,39 @@ def _read_builder_commit(root: Path, action: str, release: str) -> str:
     return matches[0]
 
 
-def create_manifest(root: Path, source_commit: str, repository: str) -> dict[str, Any]:
-    """Create the canonical manifest value for one exact protected source state."""
+def create_manifest(
+    root: Path,
+    source_commit: str,
+    repository: str,
+    builder_runner: dict[str, str],
+) -> dict[str, Any]:
+    """Create the manifest for exact source bytes and measured builder runtime.
+
+    Args:
+        root: Exact repository state supplying canonical image inputs.
+        source_commit: Last commit that changed one canonical image input.
+        repository: Locked GitHub ``owner/name`` source identity.
+        builder_runner: Retained Linux runtime record produced by
+            ``ci_runner_verify.py`` in the actual build job.
+
+    Returns:
+        Canonical manifest object whose input list binds the complete reviewed
+        rollout lock while ``builder_runner`` binds the one selected member.
+
+    Raises:
+        ManifestError: Source, repository, inputs, builder action, or retained
+            runner identity is malformed or no longer approved by this source.
+    """
     if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
         raise ManifestError("source commit must be a lowercase full SHA")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ManifestError("repository must be an owner/name identity")
     lock_path = root / "ci/locks/ci-image-lock.json"
     lock = _load_json(lock_path)
-    expected_lock_fields = {
-        "apt_bootstrap",
-        "apt_snapshot",
-        "base_image",
-        "builder",
-        "github_cli",
-        "input_paths",
-        "protected_helpers",
-        "published_image",
-        "schema",
-    }
-    if (
-        not isinstance(lock, dict)
-        or set(lock) != expected_lock_fields
-        or lock.get("schema") != "photospider-ci-image-lock-v1"
-    ):
-        raise ManifestError("unknown CI image lock schema")
-    paths = lock.get("input_paths")
-    if not isinstance(paths, list) or not all(isinstance(item, str) for item in paths):
-        raise ManifestError("input_paths must be a string array")
-    if paths != sorted(paths) or len(paths) != len(set(paths)):
-        raise ManifestError("input_paths must be sorted and unique")
+    paths = _image_input_paths(lock, str(lock_path))
     protected_helpers = _protected_helpers(root, lock, paths)
     inputs: list[dict[str, Any]] = []
     for relative in paths:
-        if relative.startswith("/") or ".." in Path(relative).parts:
-            raise ManifestError(f"unsafe image input path: {relative!r}")
         input_path = root / relative
         inputs.append(
             {
@@ -185,13 +294,10 @@ def create_manifest(root: Path, source_commit: str, repository: str) -> dict[str
     if not isinstance(builder, dict) or set(builder) != {"action", "release"}:
         raise ManifestError("builder lock is malformed")
     builder_commit = _read_builder_commit(root, builder["action"], builder["release"])
-    runner = _load_json(root / "ci/locks/linux-runner-lock.json")
-    if not isinstance(runner, dict) or set(runner) != {
-        "schema", "architecture", "image_os", "image_version", "runner_label"
-    }:
-        raise ManifestError("Linux builder runner lock is malformed")
-    if runner["schema"] != "photospider-linux-runner-lock-v1":
-        raise ManifestError("Linux builder runner schema is unknown")
+    try:
+        runner = validate_resolved_identity(root, "Linux", builder_runner)
+    except RunnerError as error:
+        raise ManifestError(f"Linux builder runtime identity is invalid: {error}") from error
     return {
         "apt_snapshot": lock["apt_snapshot"],
         "base_image": lock["base_image"],
@@ -211,10 +317,9 @@ def create_manifest(root: Path, source_commit: str, repository: str) -> dict[str
 
 def _git_source_commit(root: Path) -> str:
     """Return the newest commit that changed any canonical image input path."""
-    lock = _load_json(root / "ci/locks/ci-image-lock.json")
-    paths = lock.get("input_paths") if isinstance(lock, dict) else None
-    if not isinstance(paths, list) or not paths:
-        raise ManifestError("image input path lock is empty or malformed")
+    lock_path = root / _IMAGE_LOCK_RELATIVE_PATH
+    lock = _load_json(lock_path)
+    paths = _image_input_paths(lock, str(lock_path))
     command = ["git", "-C", str(root), "log", "-1", "--format=%H", "--", *paths]
     completed = subprocess.run(command, check=False, text=True, capture_output=True)
     commit = completed.stdout.strip()
@@ -222,6 +327,162 @@ def _git_source_commit(root: Path) -> str:
         detail = completed.stderr.strip() or "no exact image-input commit found"
         raise ManifestError(f"cannot resolve image source commit: {detail}")
     return commit
+
+
+def _git_bytes(root: Path, *arguments: str) -> bytes:
+    """Run Git without a shell and return its exact stdout bytes.
+
+    Args:
+        root: Explicit repository whose objects and refs are authoritative.
+        *arguments: Git arguments passed as separate non-shell argv entries.
+
+    Returns:
+        Exact stdout bytes from one successful Git process.
+
+    Raises:
+        ManifestError: Git cannot execute or returns nonzero.
+
+    Note:
+        Byte output preserves NUL path records and filenames not decodable as
+        ordinary text; diagnostics alone use replacement-safe UTF-8 rendering.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            check=False,
+            capture_output=True,
+        )
+    except OSError as error:
+        raise ManifestError(f"cannot execute Git {' '.join(arguments)}: {error}") from error
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="backslashreplace").strip()
+        raise ManifestError(
+            f"Git {' '.join(arguments)} failed: {detail or 'no diagnostic'}"
+        )
+    return completed.stdout
+
+
+def _tree_image_input_paths(root: Path, revision: str) -> list[str]:
+    """Load the strict canonical input lock from one immutable Git tree.
+
+    Args:
+        root: Repository containing the requested tree object.
+        revision: Verified full commit identity used by ``git show``.
+
+    Returns:
+        The validated, self-including canonical input paths.
+
+    Raises:
+        ManifestError: The tree, lock blob, schema, or paths are invalid.
+    """
+    lock_bytes = _git_bytes(root, "show", f"{revision}:{_IMAGE_LOCK_RELATIVE_PATH}")
+    context = f"{revision}:{_IMAGE_LOCK_RELATIVE_PATH}"
+    return _image_input_paths(_load_json_bytes(lock_bytes, context), context)
+
+
+def _changed_path_bytes(
+    root: Path, base: str, head: str | None
+) -> tuple[list[bytes], list[str], list[str]]:
+    """Return one exact diff plus independently validated base/head authorities.
+
+    Args:
+        root: Repository containing the comparison objects and optional worktree.
+        base: Commit used directly for a worktree diff or as the merge-base input.
+        head: Commit comparison head, or ``None`` for the current worktree.
+
+    Returns:
+        Changed Git path bytes, validated base paths, and validated head paths.
+
+    Raises:
+        ManifestError: A ref, lock, diff, or path record is unavailable or
+            malformed. No false route is emitted on failure.
+    """
+    try:
+        base_commit_text = _git_bytes(
+            root, "rev-parse", "--verify", f"{base}^{{commit}}"
+        ).decode("ascii").strip()
+    except UnicodeError as error:
+        raise ManifestError("comparison base is not an ASCII commit") from error
+    if re.fullmatch(r"[0-9a-f]{40}", base_commit_text) is None:
+        raise ManifestError("comparison base did not resolve to one full commit")
+    if head is None:
+        authoritative_base = base_commit_text
+        base_paths = _tree_image_input_paths(root, authoritative_base)
+        head_lock = _load_json(root / _IMAGE_LOCK_RELATIVE_PATH)
+        head_paths = _image_input_paths(
+            head_lock, f"worktree:{_IMAGE_LOCK_RELATIVE_PATH}"
+        )
+        raw_paths = _git_bytes(
+            root, "diff", "--no-renames", "--name-only", "-z", authoritative_base
+        )
+    else:
+        try:
+            head_commit = _git_bytes(
+                root, "rev-parse", "--verify", f"{head}^{{commit}}"
+            ).decode("ascii").strip()
+        except UnicodeError as error:
+            raise ManifestError("comparison head is not an ASCII commit") from error
+        if re.fullmatch(r"[0-9a-f]{40}", head_commit) is None:
+            raise ManifestError("comparison head did not resolve to one full commit")
+        try:
+            authoritative_base = _git_bytes(
+                root, "merge-base", base_commit_text, head_commit
+            ).decode("ascii").strip()
+        except UnicodeError as error:
+            raise ManifestError("comparison merge base is not ASCII") from error
+        if re.fullmatch(r"[0-9a-f]{40}", authoritative_base) is None:
+            raise ManifestError("comparison merge base is not one full commit")
+        base_paths = _tree_image_input_paths(root, authoritative_base)
+        head_paths = _tree_image_input_paths(root, head_commit)
+        raw_paths = _git_bytes(
+            root,
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            f"{authoritative_base}..{head_commit}",
+        )
+    if not raw_paths:
+        return [], base_paths, head_paths
+    if not raw_paths.endswith(b"\0"):
+        raise ManifestError("Git changed-path inventory is not NUL terminated")
+    changed = raw_paths[:-1].split(b"\0")
+    if any(not path for path in changed):
+        raise ManifestError("Git changed-path inventory contains an empty record")
+    return changed, base_paths, head_paths
+
+
+def _command_detect_changed(arguments: argparse.Namespace) -> None:
+    """Classify one comparison from the union of strict base/head lock paths.
+
+    Args:
+        arguments: Parsed repository, base, head/worktree, and diagnostic output
+            options from the protected command line.
+
+    Returns:
+        None after writing the JSON-quoted diagnostic path log and printing one
+        exact ``true`` or ``false`` route value.
+
+    Raises:
+        ManifestError: Any revision, lock, path inventory, or Git operation is
+            unavailable or malformed. No route value is printed on failure.
+    """
+    changed, base_paths, head_paths = _changed_path_bytes(
+        arguments.repo_root,
+        arguments.base,
+        None if arguments.worktree else arguments.head,
+    )
+    canonical = {
+        relative.encode("utf-8") for relative in set(base_paths) | set(head_paths)
+    }
+    image_changed = any(path in canonical for path in changed)
+    log_lines = [
+        json.dumps(os.fsdecode(path), ensure_ascii=True) for path in changed
+    ]
+    arguments.changed_files_output.write_text(
+        "\n".join(log_lines) + ("\n" if log_lines else ""), encoding="utf-8"
+    )
+    print("true" if image_changed else "false")
 
 
 def _run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -319,6 +580,7 @@ def _command_promotion_freshness(arguments: argparse.Namespace) -> None:
     candidate_commit = arguments.candidate_commit
     candidate_source_commit = arguments.candidate_source_commit
     candidate_manifest_digest = arguments.candidate_manifest_digest
+    candidate_builder_image_version = arguments.candidate_builder_image_version
     branch_name = arguments.branch
     repository = arguments.repository
     if re.fullmatch(r"[0-9a-f]{40}", candidate_commit) is None:
@@ -327,6 +589,12 @@ def _command_promotion_freshness(arguments: argparse.Namespace) -> None:
         raise ManifestError("promotion candidate and image source commits must match")
     if re.fullmatch(r"[0-9a-f]{64}", candidate_manifest_digest) is None:
         raise ManifestError("promotion candidate manifest digest is malformed")
+    try:
+        builder_runner = resolve_approved_identity(
+            arguments.repo_root, "Linux", candidate_builder_image_version
+        )
+    except RunnerError as error:
+        raise ManifestError(f"promotion builder runtime is not approved: {error}") from error
     if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None:
         raise ManifestError("promotion repository must be an owner/name identity")
     if branch_name != "main" and not branch_name.startswith("CI/"):
@@ -389,7 +657,10 @@ def _command_promotion_freshness(arguments: argparse.Namespace) -> None:
             worktree_added = True
             branch_source_commit = _git_source_commit(worktree)
             branch_manifest = create_manifest(
-                worktree, branch_source_commit, repository
+                worktree,
+                branch_source_commit,
+                repository,
+                builder_runner,
             )
             branch_manifest_digest = _sha256_bytes(
                 _canonical_bytes(branch_manifest)
@@ -448,6 +719,7 @@ def _command_promotion_freshness(arguments: argparse.Namespace) -> None:
         "candidate_commit": candidate_commit,
         "candidate_manifest_digest": candidate_manifest_digest,
         "candidate_source_commit": candidate_source_commit,
+        "candidate_builder_image_version": candidate_builder_image_version,
         "repository": repository,
         "schema": "photospider-ci-image-promotion-freshness-v1",
         "status": status,
@@ -479,7 +751,18 @@ def _verify_manifest_file(path: Path) -> tuple[dict[str, Any], str]:
 
 def _command_create(arguments: argparse.Namespace) -> None:
     """Create a canonical manifest and optional digest sidecar."""
-    manifest = create_manifest(arguments.repo_root, arguments.source_commit, arguments.repository)
+    try:
+        builder_runner = load_resolved_identity(
+            arguments.builder_runner_identity, arguments.repo_root, "Linux"
+        )
+    except RunnerError as error:
+        raise ManifestError(f"cannot consume retained builder identity: {error}") from error
+    manifest = create_manifest(
+        arguments.repo_root,
+        arguments.source_commit,
+        arguments.repository,
+        builder_runner,
+    )
     canonical = _canonical_bytes(manifest)
     _write_output(arguments.output, canonical)
     digest = _sha256_bytes(canonical)
@@ -517,7 +800,18 @@ def _command_publish_source_commit(arguments: argparse.Namespace) -> None:
 def _command_verify(arguments: argparse.Namespace) -> None:
     """Recreate and compare a manifest against expected repository state."""
     actual, actual_digest = _verify_manifest_file(arguments.manifest)
-    expected = create_manifest(arguments.repo_root, arguments.source_commit, arguments.repository)
+    try:
+        builder_runner = load_resolved_identity(
+            arguments.builder_runner_identity, arguments.repo_root, "Linux"
+        )
+    except RunnerError as error:
+        raise ManifestError(f"cannot consume retained builder identity: {error}") from error
+    expected = create_manifest(
+        arguments.repo_root,
+        arguments.source_commit,
+        arguments.repository,
+        builder_runner,
+    )
     if actual != expected:
         raise ManifestError("manifest does not match current protected inputs and expected identity")
     if arguments.expected_digest and actual_digest != arguments.expected_digest:
@@ -527,19 +821,75 @@ def _command_verify(arguments: argparse.Namespace) -> None:
     print(actual_digest)
 
 
-def _command_verify_labels(arguments: argparse.Namespace) -> None:
-    """Verify inspected OCI labels against an exact manifest and source commit."""
-    _, manifest_digest = _verify_manifest_file(arguments.manifest)
+def _published_image_lock(root: Path) -> dict[str, str]:
+    """Return the exact protected OCI discovery and identity-label contract."""
+    lock = _load_json(root / "ci/locks/ci-image-lock.json")
+    published = lock.get("published_image") if isinstance(lock, dict) else None
+    expected_fields = {
+        "builder_image_version_label",
+        "input_manifest_label",
+        "locator",
+        "source_commit_label",
+        "source_repository",
+        "source_workflow",
+    }
+    if (
+        not isinstance(published, dict)
+        or set(published) != expected_fields
+        or not all(isinstance(value, str) and value for value in published.values())
+    ):
+        raise ManifestError("published image lock is malformed")
+    return published
+
+
+def _command_builder_label(arguments: argparse.Namespace) -> None:
+    """Print the exact approved builder image version for one retained record."""
+    try:
+        identity = load_resolved_identity(
+            arguments.builder_runner_identity, arguments.repo_root, "Linux"
+        )
+    except RunnerError as error:
+        raise ManifestError(f"cannot consume retained builder identity: {error}") from error
+    print(identity["image_version"])
+
+
+def _command_builder_from_labels(arguments: argparse.Namespace) -> None:
+    """Resolve one untrusted OCI builder label into a retained approved record."""
     labels = _load_json(arguments.labels_json)
     if not isinstance(labels, dict) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in labels.items()
     ):
         raise ManifestError("inspected OCI labels must be a string object")
-    lock = _load_json(arguments.repo_root / "ci/locks/ci-image-lock.json")
-    published = lock.get("published_image") if isinstance(lock, dict) else None
-    if not isinstance(published, dict):
-        raise ManifestError("published image lock is malformed")
+    published = _published_image_lock(arguments.repo_root)
+    version = labels.get(published["builder_image_version_label"])
+    if not isinstance(version, str):
+        raise ManifestError("OCI builder image-version label is absent")
+    try:
+        identity = resolve_approved_identity(arguments.repo_root, "Linux", version)
+    except RunnerError as error:
+        raise ManifestError(f"OCI builder image version is not approved: {error}") from error
+    _write_output(arguments.output, canonical_identity_bytes(identity))
+    print(version)
+
+
+def _command_verify_labels(arguments: argparse.Namespace) -> None:
+    """Verify inspected OCI labels against exact manifest/source/builder state."""
+    manifest, manifest_digest = _verify_manifest_file(arguments.manifest)
+    labels = _load_json(arguments.labels_json)
+    if not isinstance(labels, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in labels.items()
+    ):
+        raise ManifestError("inspected OCI labels must be a string object")
+    published = _published_image_lock(arguments.repo_root)
+    builder_runner = manifest.get("builder_runner")
+    try:
+        builder_runner = validate_resolved_identity(
+            arguments.repo_root, "Linux", builder_runner
+        )
+    except RunnerError as error:
+        raise ManifestError(f"manifest builder identity is invalid: {error}") from error
     expected = {
+        published["builder_image_version_label"]: builder_runner["image_version"],
         published["input_manifest_label"]: manifest_digest,
         published["source_commit_label"]: arguments.source_commit,
     }
@@ -564,6 +914,7 @@ def build_parser() -> argparse.ArgumentParser:
     create = subparsers.add_parser("create", help="create a canonical image input manifest")
     create.add_argument("--source-commit", required=True)
     create.add_argument("--repository", required=True)
+    create.add_argument("--builder-runner-identity", type=Path, required=True)
     create.add_argument("--output", type=Path, required=True)
     create.add_argument("--digest-output", type=Path)
     create.set_defaults(handler=_command_create)
@@ -575,6 +926,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     publish_source.add_argument("--workflow-commit", required=True)
     publish_source.set_defaults(handler=_command_publish_source_commit)
+    detect = subparsers.add_parser(
+        "detect-changed",
+        help="classify a Git comparison from strict base/head image-input locks",
+    )
+    detect.add_argument("--base", required=True)
+    comparison = detect.add_mutually_exclusive_group(required=True)
+    comparison.add_argument("--head")
+    comparison.add_argument("--worktree", action="store_true")
+    detect.add_argument("--changed-files-output", type=Path, required=True)
+    detect.set_defaults(handler=_command_detect_changed)
     freshness = subparsers.add_parser(
         "promotion-freshness",
         help="compare a candidate with the freshly fetched live branch identity",
@@ -582,6 +943,7 @@ def build_parser() -> argparse.ArgumentParser:
     freshness.add_argument("--candidate-commit", required=True)
     freshness.add_argument("--candidate-source-commit", required=True)
     freshness.add_argument("--candidate-manifest-digest", required=True)
+    freshness.add_argument("--candidate-builder-image-version", required=True)
     freshness.add_argument("--repository", required=True)
     freshness.add_argument("--branch", required=True)
     freshness.add_argument("--scratch-root", type=Path, required=True)
@@ -590,9 +952,21 @@ def build_parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser("verify", help="verify a canonical manifest")
     verify.add_argument("--source-commit", required=True)
     verify.add_argument("--repository", required=True)
+    verify.add_argument("--builder-runner-identity", type=Path, required=True)
     verify.add_argument("--manifest", type=Path, required=True)
     verify.add_argument("--expected-digest")
     verify.set_defaults(handler=_command_verify)
+    builder_label = subparsers.add_parser(
+        "builder-label", help="print the image version from a retained builder identity"
+    )
+    builder_label.add_argument("--builder-runner-identity", type=Path, required=True)
+    builder_label.set_defaults(handler=_command_builder_label)
+    builder_from_labels = subparsers.add_parser(
+        "builder-from-labels", help="resolve OCI labels to a retained builder identity"
+    )
+    builder_from_labels.add_argument("--labels-json", type=Path, required=True)
+    builder_from_labels.add_argument("--output", type=Path, required=True)
+    builder_from_labels.set_defaults(handler=_command_builder_from_labels)
     labels = subparsers.add_parser("verify-labels", help="verify exact OCI identity labels")
     labels.add_argument("--manifest", type=Path, required=True)
     labels.add_argument("--labels-json", type=Path, required=True)

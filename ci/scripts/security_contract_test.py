@@ -33,6 +33,10 @@ COMMIT_A = subprocess.run(
 ).stdout.strip()
 COMMIT_B = "2" * 40
 IMAGE_DIGEST = "sha256:" + "3" * 64
+LINUX_STABLE_VERSION = "20260816.277.1"
+LINUX_ROLLOUT_VERSION = "20260823.283.1"
+DARWIN_STABLE_VERSION = "20260727.0256.1"
+DARWIN_ROLLOUT_VERSION = "20260824.0311.1"
 
 
 def run_command(
@@ -59,6 +63,33 @@ def run_command(
     return completed
 
 
+def write_runner_identity(path: Path, platform_name: str, image_version: str) -> dict[str, str]:
+    """Write one canonical approved runtime identity for an isolated fixture.
+
+    Args:
+        path: Fresh output path owned by the calling test.
+        platform_name: Exact ``Linux`` or ``Darwin`` lock selection.
+        image_version: Exact approved rollout member to resolve.
+
+    Returns:
+        The resolved identity written to ``path``.
+
+    Raises:
+        AssertionError: The production verifier module cannot be loaded.
+        RunnerError: The requested version is not an approved lock member.
+    """
+    module_path = SCRIPTS / "ci_runner_verify.py"
+    module_name = f"ci_runner_fixture_{platform_name.lower()}_{id(path)}"
+    specification = importlib.util.spec_from_file_location(module_name, module_path)
+    if specification is None or specification.loader is None:
+        raise AssertionError("ci_runner_verify.py cannot be loaded")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    identity = module.resolve_approved_identity(REPO_ROOT, platform_name, image_version)
+    path.write_bytes(module.canonical_identity_bytes(identity))
+    return identity
+
+
 class ImageManifestContractTest(unittest.TestCase):
     """Exercise canonical image-input creation and exact OCI-label binding."""
 
@@ -68,10 +99,15 @@ class ImageManifestContractTest(unittest.TestCase):
             temporary = Path(temporary_text)
             manifest = temporary / "manifest.json"
             digest_sidecar = temporary / "manifest.sha256"
+            builder_identity_path = temporary / "builder-runner.json"
+            builder_identity = write_runner_identity(
+                builder_identity_path, "Linux", LINUX_STABLE_VERSION
+            )
             created = run_command(
                 sys.executable, SCRIPTS / "ci_image_manifest.py", "create",
                 "--source-commit", COMMIT_A,
                 "--repository", "kevin-zf1123/photospider",
+                "--builder-runner-identity", builder_identity_path,
                 "--output", manifest,
                 "--digest-output", digest_sidecar,
             )
@@ -87,12 +123,7 @@ class ImageManifestContractTest(unittest.TestCase):
             self.assertEqual(
                 manifest_value["protected_helpers"], image_lock["protected_helpers"]
             )
-            linux_runner_lock = json.loads(
-                (REPO_ROOT / "ci/locks/linux-runner-lock.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            self.assertEqual(manifest_value["builder_runner"], linux_runner_lock)
+            self.assertEqual(manifest_value["builder_runner"], builder_identity)
             manifest_paths = {
                 record["path"] for record in manifest_value["inputs"]
             }
@@ -102,6 +133,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 sys.executable, SCRIPTS / "ci_image_manifest.py", "verify",
                 "--source-commit", COMMIT_A,
                 "--repository", "kevin-zf1123/photospider",
+                "--builder-runner-identity", builder_identity_path,
                 "--manifest", manifest,
                 "--expected-digest", digest,
             )
@@ -110,6 +142,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "org.opencontainers.image.revision": COMMIT_A,
+                        "org.photospider.ci.builder-image-version": LINUX_STABLE_VERSION,
                         "org.photospider.ci.input-manifest-sha256": digest,
                     },
                     sort_keys=True,
@@ -126,6 +159,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "org.opencontainers.image.revision": COMMIT_A,
+                        "org.photospider.ci.builder-image-version": LINUX_STABLE_VERSION,
                         "org.photospider.ci.input-manifest-sha256": "0" * 64,
                     },
                     sort_keys=True,
@@ -148,7 +182,9 @@ class ImageManifestContractTest(unittest.TestCase):
             lock = root / "ci/locks/ci-image-lock.json"
             lock.parent.mkdir(parents=True)
             lock.write_text(
-                json.dumps({"input_paths": ["Dockerfile.ci"]}, sort_keys=True) + "\n",
+                (REPO_ROOT / "ci/locks/ci-image-lock.json").read_text(
+                    encoding="utf-8"
+                ),
                 encoding="utf-8",
             )
             (root / "Dockerfile.ci").write_text("FROM scratch\n", encoding="utf-8")
@@ -190,6 +226,44 @@ class ImageManifestContractTest(unittest.TestCase):
         self.assertLess(guard, workflow.index("uses: docker/build-push-action@"))
         self.assertNotIn('--source-commit "${{ github.sha }}"', workflow)
 
+    def test_manifest_rejects_builder_removed_from_rollout_authority(self) -> None:
+        """Reject retained builder provenance removed by a reviewed lock update."""
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text) / "repository"
+            image_lock = json.loads(
+                (REPO_ROOT / "ci/locks/ci-image-lock.json").read_text(encoding="utf-8")
+            )
+            for relative in image_lock["input_paths"]:
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(REPO_ROOT / relative, destination)
+            linux_lock_path = root / "ci/locks/linux-runner-lock.json"
+            linux_lock = json.loads(linux_lock_path.read_text(encoding="utf-8"))
+            linux_lock["approved_image_versions"].remove(LINUX_STABLE_VERSION)
+            linux_lock_path.write_text(
+                json.dumps(linux_lock, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            retained = Path(temporary_text) / "removed-builder.json"
+            write_runner_identity(retained, "Linux", LINUX_STABLE_VERSION)
+            failed = run_command(
+                sys.executable,
+                SCRIPTS / "ci_image_manifest.py",
+                "--repo-root",
+                root,
+                "create",
+                "--source-commit",
+                COMMIT_A,
+                "--repository",
+                "kevin-zf1123/photospider",
+                "--builder-runner-identity",
+                retained,
+                "--output",
+                Path(temporary_text) / "manifest.json",
+                expect_success=False,
+            )
+            self.assertIn("not uniquely approved", failed.stderr)
+
     def test_published_identity_requires_attestation_before_output(self) -> None:
         """Exercise the shell resolver with exact mocked registry and gh boundaries."""
         with tempfile.TemporaryDirectory() as temporary_text:
@@ -198,24 +272,36 @@ class ImageManifestContractTest(unittest.TestCase):
                 sys.executable, SCRIPTS / "ci_image_manifest.py", "source-commit"
             ).stdout.strip()
             manifest = temporary / "precomputed.json"
+            builder_identity_path = temporary / "builder-runner.json"
+            write_runner_identity(
+                builder_identity_path, "Linux", LINUX_ROLLOUT_VERSION
+            )
             digest = run_command(
                 sys.executable, SCRIPTS / "ci_image_manifest.py", "create",
                 "--source-commit", source,
                 "--repository", "kevin-zf1123/photospider",
+                "--builder-runner-identity", builder_identity_path,
                 "--output", manifest,
             ).stdout.strip()
             binary_dir = temporary / "bin"
             binary_dir.mkdir()
             docker_log = temporary / "docker.log"
             gh_log = temporary / "gh.log"
+            command_log = temporary / "command-order.log"
             docker = binary_dir / "docker"
             docker.write_text(
                 "#!/usr/bin/env bash\n"
                 "set -Eeuo pipefail\n"
                 "printf '%q ' \"$@\" >> \"$CI_TEST_DOCKER_LOG\"; printf '\\n' >> \"$CI_TEST_DOCKER_LOG\"\n"
                 "case \"${1:-} ${2:-} ${3:-}\" in\n"
+                "  'buildx imagetools inspect') event=docker-imagetools-inspect ;;\n"
+                "  'image inspect --format') event=docker-image-inspect ;;\n"
+                "  *) if [[ ${1:-} == pull ]]; then event=docker-pull; else event=docker-other; fi ;;\n"
+                "esac\n"
+                "printf '%s\\n' \"$event\" >> \"$CI_TEST_COMMAND_LOG\"\n"
+                "case \"${1:-} ${2:-} ${3:-}\" in\n"
                 "  'buildx imagetools inspect') printf 'Name: test\\nDigest: %s\\n' \"$CI_TEST_IMAGE_DIGEST\" ;;\n"
-                "  'image inspect --format') printf '{\"org.opencontainers.image.revision\":\"%s\",\"org.photospider.ci.input-manifest-sha256\":\"%s\"}\\n' \"$CI_TEST_SOURCE_COMMIT\" \"$CI_TEST_MANIFEST_DIGEST\" ;;\n"
+                "  'image inspect --format') printf '{\"org.opencontainers.image.revision\":\"%s\",\"org.photospider.ci.builder-image-version\":\"%s\",\"org.photospider.ci.input-manifest-sha256\":\"%s\"}\\n' \"$CI_TEST_SOURCE_COMMIT\" \"$CI_TEST_BUILDER_IMAGE_VERSION\" \"$CI_TEST_MANIFEST_DIGEST\" ;;\n"
                 "  *) exit 0 ;;\n"
                 "esac\n",
                 encoding="utf-8",
@@ -226,6 +312,11 @@ class ImageManifestContractTest(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 "set -Eeuo pipefail\n"
                 "printf '%q ' \"$@\" >> \"$CI_TEST_GH_LOG\"; printf '\\n' >> \"$CI_TEST_GH_LOG\"\n"
+                "printf 'gh-attestation\\n' >> \"$CI_TEST_COMMAND_LOG\"\n"
+                "if [[ ${CI_TEST_GH_FAIL:-0} == 1 ]]; then\n"
+                "  printf 'mock attestation rejection\\n' >&2\n"
+                "  exit 41\n"
+                "fi\n"
                 "printf '[]\\n'\n",
                 encoding="utf-8",
             )
@@ -234,7 +325,27 @@ class ImageManifestContractTest(unittest.TestCase):
             python.write_text(
                 "#!/usr/bin/env bash\n"
                 "set -Eeuo pipefail\n"
-                "if [[ ${1:-} == */ci_runner_verify.py ]]; then printf '{\"platform\":\"Linux\"}\\n'; exit 0; fi\n"
+                "event=python-other\n"
+                "for argument in \"$@\"; do\n"
+                "  case $argument in\n"
+                "    source-commit) event=python-source-commit ;;\n"
+                "    builder-from-labels) event=python-builder-from-labels ;;\n"
+                "    create) event=python-manifest-create ;;\n"
+                "    verify-labels) event=python-verify-labels ;;\n"
+                "  esac\n"
+                "done\n"
+                "if [[ ${1:-} == */ci_runner_verify.py ]]; then event=python-runner-verify; fi\n"
+                "printf '%s\\n' \"$event\" >> \"$CI_TEST_COMMAND_LOG\"\n"
+                "if [[ ${1:-} == */ci_runner_verify.py ]]; then\n"
+                "  output=\n"
+                "  while (($#)); do\n"
+                "    if [[ $1 == --output ]]; then output=${2:-}; shift 2; else shift; fi\n"
+                "  done\n"
+                "  [[ -n $output ]]\n"
+                "  printf '%s\\n' \"$CI_TEST_VERIFIER_RUNNER_JSON\" > \"$output\"\n"
+                "  printf '%s\\n' \"$CI_TEST_VERIFIER_RUNNER_JSON\"\n"
+                "  exit 0\n"
+                "fi\n"
                 f"exec {sys.executable!s} \"$@\"\n",
                 encoding="utf-8",
             )
@@ -249,15 +360,29 @@ class ImageManifestContractTest(unittest.TestCase):
                 "CI_IMAGE_EXPECTED_WORKFLOW_COMMIT": COMMIT_A,
                 "CI_IMAGE_OUTPUT_FILE": str(output),
                 "CI_IMAGE_REPOSITORY": "kevin-zf1123/photospider",
+                "CI_TEST_BUILDER_IMAGE_VERSION": LINUX_ROLLOUT_VERSION,
+                "CI_TEST_COMMAND_LOG": str(command_log),
                 "CI_TEST_DOCKER_LOG": str(docker_log),
                 "CI_TEST_GH_LOG": str(gh_log),
                 "CI_TEST_IMAGE_DIGEST": image_digest,
                 "CI_TEST_MANIFEST_DIGEST": digest,
                 "CI_TEST_SOURCE_COMMIT": source,
+                "CI_TEST_VERIFIER_RUNNER_JSON": json.dumps(
+                    write_runner_identity(
+                        temporary / "verifier-runner.json",
+                        "Linux",
+                        LINUX_STABLE_VERSION,
+                    ),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
             }
             run_command("bash", SCRIPTS / "ci_image_verify.sh", environment=environment)
             outputs = output.read_text(encoding="utf-8")
             self.assertIn(f"digest={image_digest}", outputs)
+            self.assertIn(
+                f"builder_image_version={LINUX_ROLLOUT_VERSION}", outputs
+            )
             self.assertIn(
                 f"image=ghcr.io/kevin-zf1123/photospider/photospider-ci@{image_digest}",
                 outputs,
@@ -267,6 +392,58 @@ class ImageManifestContractTest(unittest.TestCase):
             self.assertIn("--deny-self-hosted-runners", gh_arguments)
             self.assertIn(f"--source-digest {source}", gh_arguments)
             self.assertIn(f"--signer-digest {source}", gh_arguments)
+            command_order = command_log.read_text(encoding="utf-8").splitlines()
+            required_order = (
+                "docker-imagetools-inspect",
+                "python-source-commit",
+                "gh-attestation",
+                "docker-pull",
+                "docker-image-inspect",
+                "python-builder-from-labels",
+                "python-manifest-create",
+                "python-verify-labels",
+            )
+            self.assertEqual(
+                [command_order.index(event) for event in required_order],
+                sorted(command_order.index(event) for event in required_order),
+            )
+
+            failed_artifact = temporary / "attestation-failed-artifacts"
+            failed_output = temporary / "attestation-failed.env"
+            failed_output.write_text("sentinel=unchanged\n", encoding="utf-8")
+            command_log.write_text("", encoding="utf-8")
+            failed = run_command(
+                "bash",
+                SCRIPTS / "ci_image_verify.sh",
+                environment={
+                    **environment,
+                    "CI_ARTIFACT_DIR": str(failed_artifact),
+                    "CI_IMAGE_OUTPUT_FILE": str(failed_output),
+                    "CI_TEST_GH_FAIL": "1",
+                },
+                expect_success=False,
+            )
+            self.assertEqual(failed.returncode, 41)
+            failed_order = command_log.read_text(encoding="utf-8").splitlines()
+            self.assertIn("gh-attestation", failed_order)
+            for forbidden_event in (
+                "docker-pull",
+                "docker-image-inspect",
+                "python-builder-from-labels",
+                "python-manifest-create",
+                "python-verify-labels",
+            ):
+                self.assertNotIn(forbidden_event, failed_order)
+            self.assertFalse(
+                (failed_artifact / "builder-linux-runner-identity.json").exists()
+            )
+            self.assertFalse(
+                (failed_artifact / "expected-ci-image-input-v1.json").exists()
+            )
+            self.assertFalse((failed_artifact / "ci-image-identity.env").exists())
+            self.assertEqual(
+                failed_output.read_text(encoding="utf-8"), "sentinel=unchanged\n"
+            )
 
             candidate_output = temporary / "candidate-identity.env"
             candidate_locator = (
@@ -326,6 +503,16 @@ class ImageManifestContractTest(unittest.TestCase):
                     "differs from expected",
                 ),
                 (
+                    "builder-unknown",
+                    {"CI_TEST_BUILDER_IMAGE_VERSION": "20991231.999.1"},
+                    "is not approved",
+                ),
+                (
+                    "builder-approved-tamper",
+                    {"CI_TEST_BUILDER_IMAGE_VERSION": LINUX_STABLE_VERSION},
+                    "manifest digest differs",
+                ),
+                (
                     "digest-ref",
                     {
                         "CI_IMAGE_LOCATOR": (
@@ -364,6 +551,43 @@ class ImageManifestContractTest(unittest.TestCase):
                         expect_success=False,
                     )
                     self.assertIn(diagnostic, mismatch.stderr)
+
+    def test_image_resolver_static_order_rejects_pre_attestation_pull(self) -> None:
+        """Reject active layer pull or absent attestation in the protected order."""
+        module_path = SCRIPTS / "ci_lock_verify.py"
+        specification = importlib.util.spec_from_file_location(
+            "ci_lock_verify_image_resolver_order_test", module_path
+        )
+        if specification is None or specification.loader is None:
+            raise AssertionError("ci_lock_verify.py cannot be loaded")
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        module._verify_ci_image_resolver_order(REPO_ROOT)
+
+        source = (SCRIPTS / "ci_image_verify.sh").read_text(encoding="utf-8")
+        attestation = 'gh attestation verify "oci://$exact_image" \\'
+        pull = 'docker pull "$exact_image" >/dev/null'
+        self.assertEqual(source.count(attestation), 1)
+        self.assertEqual(source.count(pull), 1)
+        for label, mutation in (
+            (
+                "pull-before-attestation",
+                source.replace(attestation, "__ATTESTATION_COMMAND__", 1)
+                .replace(pull, attestation, 1)
+                .replace("__ATTESTATION_COMMAND__", pull, 1),
+            ),
+            (
+                "commented-attestation",
+                source.replace(attestation, "# " + attestation, 1),
+            ),
+        ):
+            with self.subTest(mutation=label), tempfile.TemporaryDirectory() as text:
+                root = Path(text)
+                script = root / "ci/scripts/ci_image_verify.sh"
+                script.parent.mkdir(parents=True)
+                script.write_text(mutation, encoding="utf-8")
+                with self.assertRaises(module.ContractError):
+                    module._verify_ci_image_resolver_order(root)
 
 
 class ImagePromotionContractTest(unittest.TestCase):
@@ -431,6 +655,9 @@ class ImagePromotionContractTest(unittest.TestCase):
             "${{ github.sha }}": COMMIT_A,
             "${{ needs.candidate-image-build.outputs.source_commit }}": COMMIT_A,
             "${{ needs.candidate-image-build.outputs.manifest_digest }}": "4" * 64,
+            "${{ needs.candidate-image-build.outputs.builder_image_version }}": (
+                LINUX_ROLLOUT_VERSION
+            ),
             "${{ github.event_name }}": "push",
         }
         executable_source = run_source
@@ -626,6 +853,10 @@ class ImagePromotionContractTest(unittest.TestCase):
                 "always",
                 environment=git_environment,
             )
+            builder_identity_path = root / "promotion-builder-runner.json"
+            write_runner_identity(
+                builder_identity_path, "Linux", LINUX_ROLLOUT_VERSION
+            )
             run_local(
                 real_git,
                 "config",
@@ -689,6 +920,8 @@ class ImagePromotionContractTest(unittest.TestCase):
                     commit,
                     "--repository",
                     "kevin-zf1123/photospider",
+                    "--builder-runner-identity",
+                    builder_identity_path,
                     "--output",
                     manifest,
                 ).stdout.strip()
@@ -964,6 +1197,8 @@ class ImagePromotionContractTest(unittest.TestCase):
                     actual_source,
                     "--manifest-digest",
                     manifest_digest,
+                    "--builder-image-version",
+                    LINUX_ROLLOUT_VERSION,
                     "--event-name",
                     event_name,
                     "--branch",
@@ -1579,67 +1814,254 @@ class CommandTimeoutContractTest(unittest.TestCase):
 
 
 class RunnerIdentityContractTest(unittest.TestCase):
-    """Exercise exact hosted-runner image and architecture readback."""
+    """Exercise finite rollout locks and one-shot retained runtime resolution."""
 
-    def test_linux_runner_exact_identity_passes_and_rotation_fails(self) -> None:
-        """Accept the protected image version and reject one rotated value."""
+    @staticmethod
+    def _module(name: str) -> object:
+        """Load the production verifier under one test-unique module name."""
         module_path = SCRIPTS / "ci_runner_verify.py"
-        specification = importlib.util.spec_from_file_location("ci_runner_verify_test", module_path)
-        self.assertIsNotNone(specification)
-        self.assertIsNotNone(specification.loader)
+        specification = importlib.util.spec_from_file_location(name, module_path)
+        if specification is None or specification.loader is None:
+            raise AssertionError("ci_runner_verify.py cannot be loaded")
         module = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(module)
-        exact_environment = {"ImageOS": "ubuntu24", "ImageVersion": "20260823.283.1"}
-        with (
-            mock.patch.object(module.platform, "system", return_value="Linux"),
-            mock.patch.object(module.platform, "machine", return_value="x86_64"),
-            mock.patch.dict(module.os.environ, exact_environment, clear=False),
-        ):
-            verified = module.verify(REPO_ROOT, "Linux", "ubuntu-24.04")
-        self.assertEqual(verified["runner_label"], "ubuntu-24.04")
-        with (
-            mock.patch.object(module.platform, "system", return_value="Linux"),
-            mock.patch.object(module.platform, "machine", return_value="x86_64"),
-            mock.patch.dict(
-                module.os.environ,
-                {"ImageOS": "ubuntu24", "ImageVersion": "rotated"},
-                clear=False,
-            ),
-            self.assertRaises(module.RunnerError),
-        ):
-            module.verify(REPO_ROOT, "Linux", "ubuntu-24.04")
+        return module
 
-        with (
-            mock.patch.object(module.platform, "system", return_value="Linux"),
-            mock.patch.object(module.platform, "machine", return_value="x86_64"),
-            mock.patch.dict(module.os.environ, exact_environment, clear=False),
-            self.assertRaises(module.RunnerError),
-        ):
-            module.verify(REPO_ROOT, "Linux", "ubuntu-latest")
+    def test_linux_stable_and_rollout_hosts_resolve_once(self) -> None:
+        """Accept both reviewed Linux versions and read each environment key once."""
+        module = self._module("ci_runner_verify_linux_rollout_test")
 
-    def test_darwin_runner_uses_one_arm64_label_and_triplet_identity(self) -> None:
-        """Accept macos-15 arm64 and reject the former x86_64 interpretation."""
-        module_path = SCRIPTS / "ci_runner_verify.py"
-        specification = importlib.util.spec_from_file_location("ci_runner_verify_darwin_test", module_path)
-        self.assertIsNotNone(specification)
-        self.assertIsNotNone(specification.loader)
-        module = importlib.util.module_from_spec(specification)
-        specification.loader.exec_module(module)
-        exact_environment = {"ImageOS": "macos15", "ImageVersion": "20260824.0311.1"}
-        with (
-            mock.patch.object(module.platform, "system", return_value="Darwin"),
-            mock.patch.object(module.platform, "machine", return_value="arm64"),
-            mock.patch.dict(module.os.environ, exact_environment, clear=False),
+        class CountingEnvironment(dict[str, str]):
+            """Count exact environment reads made by the production verifier."""
+
+            def __init__(self, values: dict[str, str]) -> None:
+                super().__init__(values)
+                self.reads: dict[str, int] = {}
+
+            def get(self, key: str, default: str = "") -> str:
+                self.reads[key] = self.reads.get(key, 0) + 1
+                return super().get(key, default)
+
+        for version in (LINUX_STABLE_VERSION, LINUX_ROLLOUT_VERSION):
+            with self.subTest(version=version):
+                environment = CountingEnvironment(
+                    {"ImageOS": "ubuntu24", "ImageVersion": version}
+                )
+                with (
+                    mock.patch.object(module.platform, "system", return_value="Linux"),
+                    mock.patch.object(module.platform, "machine", return_value="x86_64"),
+                    mock.patch.object(module.os, "environ", environment),
+                ):
+                    verified = module.verify(REPO_ROOT, "Linux", "ubuntu-24.04")
+                self.assertEqual(verified["image_version"], version)
+                self.assertEqual(environment.reads, {"ImageOS": 1, "ImageVersion": 1})
+
+    def test_linux_runtime_and_unknown_version_fail_closed(self) -> None:
+        """Reject unknown version, OS, architecture, platform, and runner label."""
+        module = self._module("ci_runner_verify_linux_negative_test")
+        cases = (
+            ("Linux", "x86_64", "ubuntu24", "unapproved", "ubuntu-24.04"),
+            ("Linux", "x86_64", "ubuntu22", LINUX_STABLE_VERSION, "ubuntu-24.04"),
+            ("Linux", "arm64", "ubuntu24", LINUX_STABLE_VERSION, "ubuntu-24.04"),
+            ("Darwin", "x86_64", "ubuntu24", LINUX_STABLE_VERSION, "ubuntu-24.04"),
+            ("Linux", "x86_64", "ubuntu24", LINUX_STABLE_VERSION, "ubuntu-latest"),
+        )
+        for system, machine, image_os, version, label in cases:
+            with self.subTest(system=system, machine=machine, version=version, label=label):
+                with (
+                    mock.patch.object(module.platform, "system", return_value=system),
+                    mock.patch.object(module.platform, "machine", return_value=machine),
+                    mock.patch.dict(
+                        module.os.environ,
+                        {"ImageOS": image_os, "ImageVersion": version},
+                        clear=False,
+                    ),
+                    self.assertRaises(module.RunnerError),
+                ):
+                    module.verify(REPO_ROOT, "Linux", label)
+
+    def test_darwin_versions_map_to_unique_vcpkg_commits(self) -> None:
+        """Resolve both arm64 rollout members and reject cross-bound records."""
+        module = self._module("ci_runner_verify_darwin_rollout_test")
+        expected = {
+            DARWIN_STABLE_VERSION: "6d9d7df564a1ccdaa994e4ad39ccd4a32360867b",
+            DARWIN_ROLLOUT_VERSION: "127402f1c75bb3d5ff6bce04b285faa4930a5aca",
+        }
+        for version, commit in expected.items():
+            with self.subTest(version=version):
+                with (
+                    mock.patch.object(module.platform, "system", return_value="Darwin"),
+                    mock.patch.object(module.platform, "machine", return_value="arm64"),
+                    mock.patch.dict(
+                        module.os.environ,
+                        {"ImageOS": "macos15", "ImageVersion": version},
+                        clear=False,
+                    ),
+                ):
+                    verified = module.verify(REPO_ROOT, "Darwin", "macos-15")
+                self.assertEqual(verified["triplet"], "arm64-osx")
+                self.assertEqual(verified["vcpkg_commit"], commit)
+                forged = dict(verified)
+                forged["vcpkg_commit"] = next(
+                    value for value in expected.values() if value != commit
+                )
+                with self.assertRaises(module.RunnerError):
+                    module.validate_resolved_identity(REPO_ROOT, "Darwin", forged)
+
+        stable = module.resolve_approved_identity(
+            REPO_ROOT, "Darwin", DARWIN_STABLE_VERSION
+        )
+        for field, forged_value in (
+            ("image_os", "macos14"),
+            ("architecture", "x86_64"),
+            ("runner_label", "macos-latest"),
+            ("triplet", "x64-osx"),
         ):
-            verified = module.verify(REPO_ROOT, "Darwin", "macos-15")
-        self.assertEqual(verified["architecture"], "arm64")
-        with (
-            mock.patch.object(module.platform, "system", return_value="Darwin"),
-            mock.patch.object(module.platform, "machine", return_value="x86_64"),
-            mock.patch.dict(module.os.environ, exact_environment, clear=False),
-            self.assertRaises(module.RunnerError),
-        ):
-            module.verify(REPO_ROOT, "Darwin", "macos-15")
+            with self.subTest(forged_field=field):
+                forged = dict(stable)
+                forged[field] = forged_value
+                with self.assertRaises(module.RunnerError):
+                    module.validate_resolved_identity(REPO_ROOT, "Darwin", forged)
+
+        runtime_cases = (
+            ("Darwin", "arm64", "macos14", "macos-15"),
+            ("Darwin", "x86_64", "macos15", "macos-15"),
+            ("Darwin", "arm64", "macos15", "macos-latest"),
+        )
+        for system, machine, image_os, label in runtime_cases:
+            with self.subTest(runtime_field=(system, machine, image_os, label)):
+                with (
+                    mock.patch.object(module.platform, "system", return_value=system),
+                    mock.patch.object(module.platform, "machine", return_value=machine),
+                    mock.patch.dict(
+                        module.os.environ,
+                        {"ImageOS": image_os, "ImageVersion": DARWIN_STABLE_VERSION},
+                        clear=False,
+                    ),
+                    self.assertRaises(module.RunnerError),
+                ):
+                    module.verify(REPO_ROOT, "Darwin", label)
+
+    def test_rollout_lock_schema_order_and_uniqueness_fail_closed(self) -> None:
+        """Reject empty, unsorted, duplicate, unknown-field, and noncanonical locks."""
+        module = self._module("ci_runner_verify_lock_shape_test")
+        sources = {
+            "Linux": REPO_ROOT / "ci/locks/linux-runner-lock.json",
+            "Darwin": REPO_ROOT / "ci/locks/darwin-runner-lock.json",
+        }
+        for platform_name, source in sources.items():
+            original = json.loads(source.read_text(encoding="utf-8"))
+            variants: list[tuple[str, dict[str, object], bool]] = []
+            empty = json.loads(json.dumps(original))
+            key = "approved_image_versions" if platform_name == "Linux" else "approved_images"
+            empty[key] = []
+            variants.append(("empty", empty, True))
+            duplicate = json.loads(json.dumps(original))
+            duplicate[key] = [duplicate[key][0], duplicate[key][0]]
+            variants.append(("duplicate", duplicate, True))
+            unsorted = json.loads(json.dumps(original))
+            unsorted[key] = list(reversed(unsorted[key]))
+            variants.append(("unsorted", unsorted, True))
+            unknown = json.loads(json.dumps(original))
+            unknown["unknown"] = "field"
+            variants.append(("unknown-field", unknown, True))
+            variants.append(("noncanonical-bytes", original, False))
+            for label, value, canonical in variants:
+                with self.subTest(platform=platform_name, mutation=label), tempfile.TemporaryDirectory() as text:
+                    root = Path(text)
+                    lock_path = root / (
+                        "ci/locks/linux-runner-lock.json"
+                        if platform_name == "Linux"
+                        else "ci/locks/darwin-runner-lock.json"
+                    )
+                    lock_path.parent.mkdir(parents=True)
+                    if canonical:
+                        lock_path.write_text(
+                            json.dumps(value, sort_keys=True, indent=2) + "\n",
+                            encoding="utf-8",
+                        )
+                    else:
+                        lock_path.write_text(
+                            json.dumps(value, sort_keys=False, separators=(",", ":"))
+                            + "\n",
+                            encoding="utf-8",
+                        )
+                    with self.assertRaises(module.RunnerError):
+                        module.load_runner_lock(root, platform_name)
+
+    def test_runner_identity_safe_open_is_bounded_and_residual_safe(self) -> None:
+        """Reject aliases, specials, missing flags, and residual output safely."""
+        module = self._module("ci_runner_verify_safe_open_test")
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            ordinary = root / "ordinary.json"
+            content = b'{"identity":"ordinary"}\n'
+            ordinary.write_bytes(content)
+            self.assertEqual(module._read_regular_bytes(ordinary), content)
+
+            symlink = root / "identity-link.json"
+            symlink.symlink_to(ordinary)
+            with self.assertRaises(module.RunnerError):
+                module._read_regular_bytes(symlink)
+
+            bounded_reader = (
+                "import importlib.util,sys\n"
+                "from pathlib import Path\n"
+                f"p=Path({str(SCRIPTS / 'ci_runner_verify.py')!r})\n"
+                "s=importlib.util.spec_from_file_location('bounded_runner_reader',p)\n"
+                "m=importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+                "try:\n"
+                " m._read_regular_bytes(Path(sys.argv[1]))\n"
+                "except m.RunnerError:\n"
+                " raise SystemExit(0)\n"
+                "raise SystemExit(9)\n"
+            )
+            fifo = root / "identity.fifo"
+            os.mkfifo(fifo)
+            for special in (fifo, Path("/dev/null")):
+                with self.subTest(special=special):
+                    started = time.monotonic()
+                    completed = subprocess.run(
+                        [sys.executable, "-c", bounded_reader, str(special)],
+                        cwd=REPO_ROOT,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        timeout=3,
+                    )
+                    self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+                    self.assertLess(time.monotonic() - started, 3)
+
+            for flag_name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"):
+                with self.subTest(missing_input_flag=flag_name), mock.patch.object(
+                    module.os, flag_name, None
+                ), self.assertRaises(module.RunnerError):
+                    module._read_regular_bytes(ordinary)
+
+            identity = module.resolve_approved_identity(
+                REPO_ROOT, "Linux", LINUX_STABLE_VERSION
+            )
+            retained = root / "retained.json"
+            module._write_new_identity(retained, identity)
+            self.assertEqual(
+                module.load_resolved_identity(retained, REPO_ROOT, "Linux"),
+                identity,
+            )
+            with self.assertRaises(module.RunnerError):
+                module._write_new_identity(retained, identity)
+            residual_target = root / "residual-target.json"
+            residual_target.write_text("residual\n", encoding="utf-8")
+            residual_link = root / "residual-output.json"
+            residual_link.symlink_to(residual_target)
+            with self.assertRaises(module.RunnerError):
+                module._write_new_identity(residual_link, identity)
+            for flag_name in ("O_NOFOLLOW", "O_CLOEXEC"):
+                with self.subTest(missing_output_flag=flag_name), mock.patch.object(
+                    module.os, flag_name, None
+                ), self.assertRaises(module.RunnerError):
+                    module._write_new_identity(
+                        root / f"missing-{flag_name}.json", identity
+                    )
 
 
 class ProfileReaderContractTest(unittest.TestCase):
@@ -1819,6 +2241,211 @@ class ProfileReaderContractTest(unittest.TestCase):
             [target["max_len"] for target in resolved["profile"]["targets"]],
             [65536, 131072],
         )
+
+    def test_fallback_sanitizer_shell_preserves_empty_filters_and_trust(self) -> None:
+        """Run the real fallback shell decoder without collapsing empty fields."""
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text) / "repository"
+            scripts = root / "ci/scripts"
+            locks = root / "ci/locks"
+            shim = root / "test-shim"
+            scripts.mkdir(parents=True)
+            locks.mkdir(parents=True)
+            shim.mkdir()
+            for name in (
+                "common.sh",
+                "ci_profile_manifest.py",
+                "ci_runner_verify.py",
+                "sanitizer_test.sh",
+                "security_platform_prepare.sh",
+            ):
+                shutil.copy2(SCRIPTS / name, scripts / name)
+            lock_source = REPO_ROOT / "ci/locks/current-main-profiles-v1.json"
+            lock = json.loads(lock_source.read_text(encoding="utf-8"))
+            marker = root / "filter-must-not-execute"
+            injected_filter = f"Execution.*;$(touch {marker})"
+            lock["sanitizers"][0]["invocations"][0]["filter"] = injected_filter
+            (locks / "current-main-profiles-v1.json").write_text(
+                json.dumps(lock, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            shutil.copy2(
+                REPO_ROOT / "ci/locks/linux-runner-lock.json",
+                locks / "linux-runner-lock.json",
+            )
+            runner_identity_path = root / "linux-runner-identity.json"
+            write_runner_identity(
+                runner_identity_path, "Linux", LINUX_STABLE_VERSION
+            )
+            for relative in lock["source_hashes"]:
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(REPO_ROOT / relative, destination)
+
+            fake_test = shim / "fake-gtest"
+            fake_test.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -Eeuo pipefail\n"
+                "{\n"
+                "  printf 'call\\0%s\\0' \"${0##*/}\"\n"
+                "  for argument in \"$@\"; do printf '%s\\0' \"$argument\"; done\n"
+                "  printf 'end\\0'\n"
+                "} >> \"$SANITIZER_TEST_ARGV_LOG\"\n"
+                "if [[ ${1:-} == --gtest_list_tests ]]; then\n"
+                "  printf 'FixtureSuite.\\n  Runs\\n'\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            fake_test.chmod(0o755)
+            cmake_shim = shim / "cmake"
+            cmake_shim.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -Eeuo pipefail\n"
+                "build_dir=\n"
+                "target_help=false\n"
+                "arguments=(\"$@\")\n"
+                "for ((index = 0; index < ${#arguments[@]}; index++)); do\n"
+                "  if [[ ${arguments[index]} == -B ]]; then\n"
+                "    build_dir=${arguments[index + 1]}\n"
+                "  elif [[ ${arguments[index]} == --build ]]; then\n"
+                "    build_dir=${arguments[index + 1]}\n"
+                "  elif [[ ${arguments[index]} == --target && "
+                "${arguments[index + 1]} == help ]]; then\n"
+                "    target_help=true\n"
+                "  fi\n"
+                "done\n"
+                "if [[ $target_help == true ]]; then\n"
+                "  for target in test_compute_run test_compute_service_split "
+                "test_policy_execution test_policy_registry test_policy_plugin "
+                "test_propagation_contracts test_resource_admission; do\n"
+                "    printf '%s: phony\\n' \"$target\"\n"
+                "  done\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [[ -n $build_dir && ${1:-} != --build ]]; then\n"
+                "  mkdir -p \"$build_dir/tests\"\n"
+                "  for target in test_compute_run test_compute_service_split "
+                "test_policy_execution test_propagation_contracts "
+                "test_resource_admission; do\n"
+                "    cp \"$SANITIZER_FAKE_TEST_BINARY\" "
+                "\"$build_dir/tests/$target\"\n"
+                "  done\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            cmake_shim.chmod(0o755)
+            uname_shim = shim / "uname"
+            uname_shim.write_text(
+                "#!/usr/bin/env bash\n"
+                "case ${1:-} in\n"
+                "  -s) printf 'Linux\\n' ;;\n"
+                "  -m) printf 'x86_64\\n' ;;\n"
+                "  *) printf 'Linux\\n' ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            uname_shim.chmod(0o755)
+            python_shim = shim / "python3"
+            python_shim.symlink_to(sys.executable)
+
+            bash_candidates: dict[int, Path] = {}
+            for candidate in (
+                Path("/bin/bash"),
+                Path("/opt/homebrew/bin/bash"),
+                Path("/usr/local/bin/bash"),
+                Path(shutil.which("bash") or "/missing/bash"),
+            ):
+                if not candidate.is_file():
+                    continue
+                version = subprocess.run(
+                    [str(candidate), "--version"],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                ).stdout
+                matched = re.search(r"version ([0-9]+)\.", version)
+                if matched:
+                    bash_candidates.setdefault(int(matched.group(1)), candidate)
+            self.assertTrue(bash_candidates)
+
+            expected_records: list[bytes] = [
+                b"photospider-sanitizer-invocations-v1"
+            ]
+            for invocation in lock["sanitizers"][0]["invocations"]:
+                expected_records.extend(
+                    (
+                        b"invocation",
+                        invocation["target"].encode(),
+                        invocation["filter"].encode(),
+                        str(invocation["trust_environment"]).lower().encode(),
+                    )
+                )
+            expected_records.append(b"end")
+
+            for major, bash_executable in sorted(bash_candidates.items()):
+                with self.subTest(bash_major=major):
+                    artifact = root / f"artifacts-bash-{major}"
+                    build = root / f"build-bash-{major}"
+                    argv_log = root / f"argv-bash-{major}.z"
+                    completed = subprocess.run(
+                        [str(bash_executable), str(scripts / "sanitizer_test.sh")],
+                        cwd=root,
+                        env={
+                            **os.environ,
+                            "BUILD_DIR": str(build),
+                            "CI_ARTIFACT_DIR": str(artifact),
+                            "CI_JOBS": "2",
+                            "CI_RUNNER_IDENTITY_FILE": str(runner_identity_path),
+                            "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}",
+                            "SANITIZER": "asan",
+                            "SANITIZER_FAKE_TEST_BINARY": str(fake_test),
+                            "SANITIZER_TEST_ARGV_LOG": str(argv_log),
+                        },
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(
+                        completed.returncode,
+                        0,
+                        msg=(
+                            f"Bash {major} fallback failed:\n"
+                            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+                        ),
+                    )
+                    evidence = (
+                        artifact / "sanitizer-asan-fallback-invocations.v1.z"
+                    ).read_bytes()
+                    self.assertEqual(evidence.split(b"\0")[:-1], expected_records)
+                    self.assertFalse(marker.exists())
+
+                    tokens = argv_log.read_bytes().split(b"\0")
+                    calls: dict[str, list[list[str]]] = {}
+                    cursor = 0
+                    while cursor < len(tokens) - 1:
+                        self.assertEqual(tokens[cursor], b"call")
+                        target = tokens[cursor + 1].decode()
+                        cursor += 2
+                        arguments: list[str] = []
+                        while tokens[cursor] != b"end":
+                            arguments.append(tokens[cursor].decode())
+                            cursor += 1
+                        cursor += 1
+                        calls.setdefault(target, []).append(arguments)
+                    self.assertEqual(
+                        calls["test_propagation_contracts"],
+                        [["--gtest_list_tests"], []],
+                    )
+                    self.assertEqual(
+                        calls["test_resource_admission"],
+                        [["--gtest_list_tests"], []],
+                    )
+                    self.assertEqual(
+                        calls["test_compute_run"],
+                        [
+                            ["--gtest_list_tests", f"--gtest_filter={injected_filter}"],
+                            [f"--gtest_filter={injected_filter}"],
+                        ],
+                    )
 
     def test_partial_versioned_identity_fails_closed(self) -> None:
         """Reject any subset of the three required versioned identity files."""
@@ -2053,6 +2680,10 @@ class ProfileReaderContractTest(unittest.TestCase):
             )
             cmake.chmod(0o755)
             artifacts = root / "artifacts"
+            runner_identity_path = root / "linux-runner-identity.json"
+            write_runner_identity(
+                runner_identity_path, "Linux", LINUX_ROLLOUT_VERSION
+            )
             run_command(
                 "bash", SCRIPTS / "fuzz_smoke.sh",
                 environment={
@@ -2060,6 +2691,7 @@ class ProfileReaderContractTest(unittest.TestCase):
                     "CI_ARTIFACT_DIR": str(artifacts),
                     "CI_INVENTORY_DIR": str(inventory),
                     "CI_JOBS": "1",
+                    "CI_RUNNER_IDENTITY_FILE": str(runner_identity_path),
                     "CI_TEST_CONFIGURE_LOG": str(configure_log),
                     "CI_TEST_FUZZ_LOG": str(fuzz_log),
                     "PATH": f"{binary_dir}:{os.environ['PATH']}",
@@ -2087,6 +2719,7 @@ class SecurityPlatformContractTest(unittest.TestCase):
     @staticmethod
     def _prepare_darwin_fixture(
         root: Path,
+        image_version: str = DARWIN_ROLLOUT_VERSION,
     ) -> tuple[Path, dict[str, str], Path, Path, Path, Path]:
         """Create one exact Darwin runner, Git-object, and binary fixture.
 
@@ -2198,18 +2831,20 @@ class SecurityPlatformContractTest(unittest.TestCase):
         runner_temp = root / "runner-temp"
         runner_temp.mkdir()
         output = root / "cmake-args.txt"
-        locked_commit = "127402f1c75bb3d5ff6bce04b285faa4930a5aca"
+        runner_identity_path = root / "darwin-runner-identity.json"
+        runner_identity = write_runner_identity(
+            runner_identity_path, "Darwin", image_version
+        )
+        locked_commit = runner_identity["vcpkg_commit"]
         environment = {
             "PATH": f"{binary_dir}:{os.environ['PATH']}",
             "CI_PLATFORM_CMAKE_ARGS_FILE": str(output),
+            "CI_RUNNER_IDENTITY_FILE": str(runner_identity_path),
             "CI_RUNNER_TEMP": str(runner_temp),
             "CI_TEST_GIT_LOG": str(git_log),
             "CI_TEST_LOCKED_COMMIT": locked_commit,
             "CI_TEST_VCPKG_LOG": str(vcpkg_log),
             "CI_TEST_VCPKG_SOURCE": str(vcpkg_source),
-            "ImageOS": "macos15",
-            "ImageVersion": "20260824.0311.1",
-            "RUNNER_IMAGE_NAME": "macos-15",
             "VCPKG_INSTALLATION_ROOT": str(vcpkg_source),
         }
         return profile, environment, git_log, vcpkg_log, runner_temp, vcpkg_source
@@ -2258,16 +2893,66 @@ class SecurityPlatformContractTest(unittest.TestCase):
             self.assertFalse(any("diff" in call and source_identity in call for call in git_calls))
             self.assertFalse(any("status" in call and source_identity in call for call in git_calls))
 
-            failed = run_command(
+            run_command(
                 "bash", SCRIPTS / "security_platform_prepare.sh", profile,
                 environment={
                     **environment,
                     "ImageVersion": "stale",
                     "CI_PLATFORM_CMAKE_ARGS_FILE": str(root / "stale.txt"),
                 },
-                expect_success=False,
             )
-            self.assertIn("differs from protected", failed.stderr)
+            self.assertTrue((root / "stale.txt").is_file())
+
+    def test_each_darwin_rollout_member_selects_only_its_mapped_commit(self) -> None:
+        """Bind each approved image version to its unique retained vcpkg commit."""
+        expected = {
+            DARWIN_STABLE_VERSION: "6d9d7df564a1ccdaa994e4ad39ccd4a32360867b",
+            DARWIN_ROLLOUT_VERSION: "127402f1c75bb3d5ff6bce04b285faa4930a5aca",
+        }
+        for index, (image_version, commit) in enumerate(expected.items()):
+            with self.subTest(image_version=image_version), tempfile.TemporaryDirectory() as text:
+                root = Path(text)
+                profile, environment, git_log, _, _, _ = self._prepare_darwin_fixture(
+                    root, image_version
+                )
+                environment["CI_PLATFORM_CMAKE_ARGS_FILE"] = str(
+                    root / f"mapped-{index}.txt"
+                )
+                run_command(
+                    "bash",
+                    SCRIPTS / "security_platform_prepare.sh",
+                    profile,
+                    environment=environment,
+                )
+                calls = [
+                    json.loads(line)
+                    for line in git_log.read_text(encoding="utf-8").splitlines()
+                ]
+                fetch = next(call for call in calls if "fetch" in call)
+                self.assertIn(commit, fetch)
+
+                identity_path = Path(environment["CI_RUNNER_IDENTITY_FILE"])
+                identity = json.loads(identity_path.read_text(encoding="utf-8"))
+                identity["vcpkg_commit"] = (
+                    expected[DARWIN_ROLLOUT_VERSION]
+                    if commit == expected[DARWIN_STABLE_VERSION]
+                    else expected[DARWIN_STABLE_VERSION]
+                )
+                identity_path.write_text(
+                    json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+                failed = run_command(
+                    "bash",
+                    SCRIPTS / "security_platform_prepare.sh",
+                    profile,
+                    environment={
+                        **environment,
+                        "CI_PLATFORM_CMAKE_ARGS_FILE": str(root / "crossed.txt"),
+                    },
+                    expect_success=False,
+                )
+                self.assertIn("differs from its approved lock member", failed.stderr)
 
     def test_fresh_checkout_rejects_commit_link_fifo_and_residual_state(self) -> None:
         """Fail closed for every fresh-checkout identity and filesystem drift."""
@@ -4149,9 +4834,12 @@ class LockSurfaceContractTest(unittest.TestCase):
             accidentally satisfying a negative permission fixture.
         """
         start_marker = f"  {job_name}:\n"
-        start = workflow.find(start_marker)
-        if start < 0:
+        matched_start = re.search(
+            rf"(?m)^  {re.escape(job_name)}:\n", workflow
+        )
+        if matched_start is None:
             raise AssertionError(f"workflow job is absent: {job_name}")
+        start = matched_start.start()
         following = re.search(r"(?m)^  [a-z][a-z0-9_-]*:\n", workflow[start + len(start_marker) :])
         end = (
             len(workflow)
@@ -4236,6 +4924,70 @@ class LockSurfaceContractTest(unittest.TestCase):
         helpers = rebound["protected_helpers"]
         helpers[helper_name]["sha256"] = hashlib.sha256(source.encode()).hexdigest()
         return rebound
+
+    def test_protected_helper_retained_snapshot_rejects_path_and_byte_drift(
+        self,
+    ) -> None:
+        """Reject links, special files, path swaps, and in-place read mutation."""
+        module = self._load_lock_module()
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            protected = root / "protected-helper.py"
+            content = b"print('protected helper')\n"
+            protected.write_bytes(content)
+            self.assertEqual(
+                module._sha256_regular_file(protected, "fixture helper"),
+                hashlib.sha256(content).hexdigest(),
+            )
+
+            symlink = root / "initial-symlink.py"
+            symlink.symlink_to(protected)
+            fifo = root / "helper.fifo"
+            os.mkfifo(fifo)
+            unsafe_paths = (symlink, fifo, Path("/dev/null"))
+            for unsafe_path in unsafe_paths:
+                with self.subTest(unsafe_path=unsafe_path), self.assertRaises(
+                    module.ContractError
+                ):
+                    module._sha256_regular_file(unsafe_path, "unsafe helper")
+
+            alias = root / "same-inode-alias.py"
+            os.link(protected, alias)
+
+            def swap_path(phase: str, _descriptor: int) -> None:
+                """Atomically replace the measured name with a same-inode symlink."""
+                if phase != "after_open":
+                    return
+                replacement = root / "replacement-symlink.py"
+                replacement.symlink_to(alias)
+                os.replace(replacement, protected)
+
+            with self.assertRaises(module.ContractError) as swapped:
+                module._sha256_regular_file(
+                    protected, "swapped helper", _test_hook=swap_path
+                )
+            self.assertIn("protected helper", str(swapped.exception))
+
+        with tempfile.TemporaryDirectory() as temporary_text:
+            protected = Path(temporary_text) / "mutable-helper.py"
+            original = b"abcdefgh"
+            replacement = b"ABCDEFGH"
+            protected.write_bytes(original)
+
+            def mutate_bytes(phase: str, _descriptor: int) -> None:
+                """Rewrite the same inode after its first complete retained read."""
+                if phase != "after_first_read":
+                    return
+                with protected.open("r+b") as handle:
+                    handle.write(replacement)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+
+            with self.assertRaises(module.ContractError) as mutated:
+                module._sha256_regular_file(
+                    protected, "mutated helper", _test_hook=mutate_bytes
+                )
+            self.assertIn("changed during retained read", str(mutated.exception))
 
     def test_reusable_permission_ceiling_is_structurally_isolated(self) -> None:
         """Accept three exact callers and reject every inheritance/elevation drift."""
@@ -4441,6 +5193,21 @@ class LockSurfaceContractTest(unittest.TestCase):
                 ),
             ),
             (
+                "builder-runtime-not-retained",
+                '            --output "$CI_RUNNER_IDENTITY_FILE"\n',
+                "",
+            ),
+            (
+                "manifest-uses-no-builder-runtime",
+                '            --builder-runner-identity "${{ runner.temp }}/photospider-builder-runner-${{ github.run_id }}-${{ github.run_attempt }}.json" \\\n',
+                "",
+            ),
+            (
+                "image-omits-builder-version-label",
+                "            org.photospider.ci.builder-image-version=${{ steps.builder.outputs.image_version }}\n",
+                "",
+            ),
+            (
                 "workflow-call-input-downgrade",
                 "        required: true\n",
                 "        required: false\n",
@@ -4479,6 +5246,86 @@ class LockSurfaceContractTest(unittest.TestCase):
                     "complete CI-image producer mapping differs",
                     str(raised.exception),
                 )
+
+    def test_runner_identity_handoffs_reject_path_and_environment_drift(self) -> None:
+        """Reject missing outputs, split paths, candidate paths, and env rereads."""
+        module = self._load_lock_module()
+        module._verify_runner_identity_handoffs(REPO_ROOT)
+        workflows = {
+            name: (REPO_ROOT / f".github/workflows/{name}").read_text(
+                encoding="utf-8"
+            )
+            for name in (
+                "ci-healthcheck.yml",
+                "ci-integration-suite.yml",
+                "ci-sanitizer.yml",
+            )
+        }
+        platform_reader = (SCRIPTS / "security_platform_prepare.sh").read_text(
+            encoding="utf-8"
+        )
+        cases = (
+            (
+                "missing-linux-output",
+                "ci-integration-suite.yml",
+                "sanitizer-asan",
+                '          --output "$CI_RUNNER_IDENTITY_FILE"\n',
+                "",
+                "runner verifier command differs",
+            ),
+            (
+                "split-linux-consumer-path",
+                "ci-integration-suite.yml",
+                "sanitizer-asan",
+                "          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json\n          SANITIZER: asan\n",
+                "          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/forged-other.json\n          SANITIZER: asan\n",
+                "retained runner consumer differs",
+            ),
+            (
+                "candidate-manual-output-path",
+                "ci-sanitizer.yml",
+                "sanitizer",
+                "      - name: Verify exact Linux sanitizer runner\n        env:\n          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-manual-sanitizer-runner-${{ github.run_id }}-${{ github.run_attempt }}.json\n        run: >-\n",
+                "      - name: Verify exact Linux sanitizer runner\n        env:\n          CI_RUNNER_IDENTITY_FILE: ${{ inputs.checkout_ref }}\n        run: >-\n",
+                "resolved runner output differs",
+            ),
+        )
+        for label, filename, job_name, original, replacement, diagnostic in cases:
+            with self.subTest(identity_handoff_drift=label), tempfile.TemporaryDirectory() as text:
+                root = Path(text)
+                workflow_root = root / ".github/workflows"
+                script_root = root / "ci/scripts"
+                workflow_root.mkdir(parents=True)
+                script_root.mkdir(parents=True)
+                for current_name, current_text in workflows.items():
+                    if current_name == filename:
+                        current_text = self._replace_workflow_job_fragment(
+                            current_text, job_name, original, replacement
+                        )
+                    (workflow_root / current_name).write_text(
+                        current_text, encoding="utf-8"
+                    )
+                (script_root / "security_platform_prepare.sh").write_text(
+                    platform_reader, encoding="utf-8"
+                )
+                with self.assertRaises(module.ContractError) as raised:
+                    module._verify_runner_identity_handoffs(root)
+                self.assertIn(diagnostic, str(raised.exception))
+
+        with tempfile.TemporaryDirectory() as text:
+            root = Path(text)
+            workflow_root = root / ".github/workflows"
+            script_root = root / "ci/scripts"
+            workflow_root.mkdir(parents=True)
+            script_root.mkdir(parents=True)
+            for filename, value in workflows.items():
+                (workflow_root / filename).write_text(value, encoding="utf-8")
+            (script_root / "security_platform_prepare.sh").write_text(
+                platform_reader + '\necho "${ImageVersion:-}"\n', encoding="utf-8"
+            )
+            with self.assertRaises(module.ContractError) as raised:
+                module._verify_runner_identity_handoffs(root)
+            self.assertIn("reinterprets mutable runner state", str(raised.exception))
 
     def test_package_lock_names_and_apt_argv_are_option_safe(self) -> None:
         """Require Debian package names and positional post-``--`` APT argv."""
@@ -5291,10 +6138,14 @@ class LockSurfaceContractTest(unittest.TestCase):
                 "sanitizer-asan-darwin",
                 (
                     "      - name: Verify exact Darwin ASan runner\n"
+                    "        env:\n"
+                    "          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json\n"
                     "        run: >-\n"
                 ),
                 (
                     "      - name: Verify exact Darwin ASan runner\n"
+                    "        env:\n"
+                    "          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json\n"
                     "        if: always()\n"
                     "        run: >-\n"
                 ),

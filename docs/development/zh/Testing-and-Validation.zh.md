@@ -2729,6 +2729,8 @@ tree。Full CTest 继续作为普通已注册测试的权威入口；plugin、CL
 sanitizer 分片会选择对应契约的断言。生成的 CLI 配置严格互斥：CI 不会把已删除的 scheduler key
 传给 policy/execution revision，也不会引入产品兼容翻译。
 
+Temporary current-main ASan/TSan fallback 会通过一个带终止记录的 NUL-framed v1 stream 传输每个 target、可能为空的 GoogleTest filter 与 trust flag。其 Bash 3.2/5 reader 不会按 whitespace 拆分或 evaluate field，会拒绝不完整或带 trailing record 的 stream，并在任何 target 执行前把精确解码结果写为 diagnostic evidence。因此，空 filter 会保留预期的 whole-binary selection，而不会变成相邻 boolean text。
+
 Darwin ASan、TSan 与有界 fuzz 是三个独立的 `macos-15` job。每个 job 只依赖共同的 integration
 plan、消费同一份受保护 profile inventory，并在自身 timeout 下发布独立 diagnostic result。它们之间
 没有 sibling dependency，而完整 shared-suite gate 会要求三个 result 全部成功；因此某个 profile 失败
@@ -2740,26 +2742,45 @@ command 都是精确合同。Helper 会在写 output 前执行每一项普通 re
 attestation success/skip 规则和 digest 校验。未知 step/field、`continue-on-error`、注释、no-op
 helper、额外 statement 或 early success 都会失败。
 只有 verifier-owned 精确 byte SHA-256、受保护 JSON helper hash 与 retained regular-file
-measurement 三方一致时，helper source 才会被接受，从而避免使用随 Python minor 变化的
-`ast.dump()` 或 `ast.unparse()` identity。Process-boundary regression 会通过当前 `sys.executable`
-启动 Python，同时独立执行每个 result 与 attestation path。
+measurement 三方一致时，helper source 才会被接受。该 measurement 使用拒绝 final link 且
+close-on-exec 的单一 descriptor，在不阻塞的情况下拒绝 special file，围绕两次读取交叉核验
+pathname/descriptor metadata，并拒绝 pathname replacement 或 in-place byte drift。这也避免使用随
+Python minor 变化的 `ast.dump()` 或 `ast.unparse()` identity。Process-boundary regression 会通过
+当前 `sys.executable` 启动 Python，同时独立执行每个 result 与 attestation path。
 
 `healthcheck-published-image` 是 container job。受保护的 `photospider-ci:latest` 值只作为发现
-locator；可信 host preflight 会校验其精确 digest、attestation、OCI revision 与 manifest label，
-所有 published-image healthcheck 与 build/test integration job 都执行所得
+locator；可信 host preflight 会解析精确 digest，并在 Docker 可以拉取或展开任何 image layer 之前
+校验该精确 subject 的 attestation。随后它才拉取该 digest、校验 OCI revision 与 manifest label，所有
+published-image healthcheck 与 build/test integration job 都执行所得
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` 引用。轻量路由与结果门禁仍在
-`ubuntu-24.04` 上运行。受保护 hosted identity 是 Linux builder 的
-`ubuntu24/20260823.283.1`，以及 Darwin security 在 `macos-15`/`arm64` 上的
-`macos15/20260824.0311.1`；后者绑定 vcpkg commit
-`127402f1c75bb3d5ff6bce04b285faa4930a5aca`。Linux run `32991073228` 提供实际 Linux
-readback（[job 证据](https://github.com/kevin-zf1123/photospider/actions/runs/32991073228/job/98248727299)），
-官方 `actions/runner-images` 的
-[`ubuntu24/20260823.283`](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283)
+`ubuntu-24.04` 上运行。GitHub 记录 runner-image deployment 通常需要两到三天，并要求从每个 job 的
+`Set up job` log 诊断精确版本
+（[官方说明](https://github.com/actions/runner-images#what-image-version-is-used-in-my-build)）。
+受审查 Linux rollout set 是 stable `ubuntu24/20260816.277.1` 加 rollout
+`ubuntu24/20260823.283.1`：exact-head run
+[`32997831039`](https://github.com/kevin-zf1123/photospider/actions/runs/32997831039/job/98271915852)
+和
+[`32997831190`](https://github.com/kevin-zf1123/photospider/actions/runs/32997831190/job/98271974769)
+观察到前者，run
+[`32991073228`](https://github.com/kevin-zf1123/photospider/actions/runs/32991073228/job/98248727299)
+观察到后者；对应官方 identity 是
+[`ubuntu24/20260816.277`](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260816.277)
+与
+[`ubuntu24/20260823.283`](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283)。
+Darwin set 是 stable `macos15/20260727.0256.1` 映射 vcpkg
+`6d9d7df564a1ccdaa994e4ad39ccd4a32360867b`，以及 rollout
+`macos15/20260824.0311.1` 映射
+`127402f1c75bb3d5ff6bce04b285faa4930a5aca`，并分别匹配官方
+[`macos-15-arm64/20260727.0256`](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260727.0256)
 与
 [`macos-15-arm64/20260824.0311`](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311)
-release 提供发布身份。Linux lock 同时作为 manifest member 与
-`builder_runner`，Darwin 则是独立 execution lock。任何漂移都会在 candidate work 前失败，而不会
-回退到 mutable label。Checkout 后，published container 中唯一的
+release record。每个 job 都会在 candidate input 前创建唯一 canonical retained runtime identity。
+Linux manifest input 绑定完整 allowlist byte，而 `builder_runner` 与 OCI builder-version label 绑定实际
+build member；在另一个 approved host 上验证时仍会保留该 builder provenance。Darwin preparation 使用
+retained version-to-vcpkg mapping，不再读取 `ImageVersion`。未知或被篡改的 member 会 fail closed；退役
+rollout member 必须经过 reviewed lock update 并重建镜像。Runner lock 与 retained-record input 强制要求
+`O_NOFOLLOW`、`O_NONBLOCK` 和 `O_CLOEXEC`，因此 FIFO/device input 会在不阻塞的情况下失败；fresh
+retained output 使用 `O_EXCL` 拒绝 residual state。Checkout 后，published container 中唯一的
 `Trust checked-out workspace` step 会绑定 `shell: bash`，只把精确的 `$GITHUB_WORKSPACE` 加入
 该 job 持久的 global `safe.directory`，并以只读方式校验 `HEAD^{commit}`。它既不会配置
 `safe.directory=*`，也不会执行 checkout 得到的仓库脚本。该 trust boundary 先于两个条件
@@ -2772,7 +2793,7 @@ identity 与 canonical input manifest；只有可信 integration push 会构建�
 并运行 shared digest-bound suite。Callable producer 会作为一份完整 workflow mapping 解析：其唯一
 `workflow_call`、write permission、单一 build job、output 以及每个有序 step field 都必须精确。
 Checkout 与 prebuild lock verifier 必须先于唯一 Buildx build/push action；其完整 `with` mapping 只允许
-一个 temporary tag、两个 immutable label 以及 manifest/source build argument。任何额外 condition、
+一个 temporary tag、三个 immutable label 以及 manifest/source build argument。任何额外 condition、
 environment、step、Docker/Buildx 命令、tag、build argument 或 job 都会使静态合同失败。
 对于 pull request，published-image 与 local-image healthcheck job 都会在各自 job 内从
 base-repository URL 拉取目标分支，把 `CI_BASE_SHA` 校验为 event 的精确 base commit，并把该精确
@@ -2807,10 +2828,13 @@ active statement identity 与显式 network/install allowlist：只允许 snapsh
 lock 的 Pip requirement 与精确 GitHub CLI release 下载，且架构专用 CLI SHA-256 必须在 extract 前
 实际消费。仅重算 JSON helper hash 不能授权 APT alias、额外 downloader、pipe-to-shell、跳过检查、
 未调用 main 或 early exit。
-镜像 detector 不使用 Git status filter；healthcheck 静态范围清单则使用 `--diff-filter=d` 排除
-无法交给 formatter/linter 的删除路径，同时保留 type change 与少见的非删除 status。两者都使用
-NUL 分隔的 Git 输出与父 shell 可见的临时文件。因此 `git diff` 失败时，镜像检测或 healthcheck
-静态范围检测会直接终止，不会输出假阴性路由。
+镜像 detector 不使用 Git status filter。其唯一 selection authority 是 strict CI-image lock 中
+self-including 的 `input_paths` array；merge base 与 head 会分别解析。NUL 分隔的 Git path byte 会与
+两个已验证 revision 的并集比较，因此新增或删除的 input 仍保持可见，malformed、duplicate、
+traversal 或 missing lock state 会在无 output 的情况下失败。Healthcheck 静态范围清单则使用
+`--diff-filter=d` 排除无法交给 formatter/linter 的删除路径，同时保留 type change 与少见的非删除
+status。因此 lock 读取或 `git diff` 失败时，镜像检测或 healthcheck 静态范围检测会直接终止，不会
+输出假阴性路由。
 
 当前维护的入口包括：
 

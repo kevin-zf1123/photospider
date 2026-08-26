@@ -37,6 +37,10 @@ python3 "$SCRIPT_DIR/ci_profile_manifest.py" \
 # @brief Emit one validated resolved-profile section for the shell runner.
 # @param $1 `cmake`, `mode`, `targets`, `labels`, `runtime`, or `invocations`.
 # @return Zero for valid data, otherwise nonzero before CMake executes.
+# @note Fallback invocations use one NUL-framed v1 stream. The producer
+#   validates every record before emitting any bytes, so an empty filter remains
+#   an exact empty field on Bash 3.2 and Bash 5 instead of collapsing into the
+#   adjacent trust flag as it would in whitespace-delimited text.
 read_sanitizer_profile() {
   local field=$1
   python3 - "$profile_json" "$field" <<'PY'
@@ -79,6 +83,7 @@ elif field == "invocations":
     if not isinstance(invocations, list) or not invocations:
         raise SystemExit("fallback sanitizer invocations are empty")
     seen = set()
+    records = ["photospider-sanitizer-invocations-v1"]
     for invocation in invocations:
         if not isinstance(invocation, dict) or set(invocation) != {"target", "filter", "trust_environment"}:
             raise SystemExit("fallback sanitizer invocation is malformed")
@@ -90,14 +95,115 @@ elif field == "invocations":
         if target in seen:
             raise SystemExit("fallback sanitizer target is duplicated")
         seen.add(target)
-        if not isinstance(selected, str) or "\t" in selected or "\n" in selected:
+        if not isinstance(selected, str) or any(
+            character in selected for character in ("\0", "\t", "\r", "\n")
+        ):
             raise SystemExit("fallback sanitizer filter is malformed")
         if not isinstance(trust, bool):
             raise SystemExit("fallback sanitizer trust flag is malformed")
-        print(f"{target}\t{selected}\t{'true' if trust else 'false'}")
+        records.extend(
+            ("invocation", target, selected, "true" if trust else "false")
+        )
+    records.append("end")
+    sys.stdout.buffer.write(
+        b"\0".join(record.encode("utf-8") for record in records) + b"\0"
+    )
 else:
     raise SystemExit("unknown sanitizer profile field")
 PY
+}
+
+# @brief Decode the single canonical fallback invocation stream into arrays.
+# @return Zero only after an exact magic record, one or more complete invocation
+#   records, and a terminal record with no trailing fields.
+# @throws Nothing; malformed, truncated, duplicate, or ambiguous records return
+#   nonzero before any target is built or executable is launched.
+# @note The loop and nested reads share one process-substitution descriptor and
+#   use Bash's NUL delimiter directly. No field is re-tokenized by whitespace,
+#   evaluated as shell source, or accepted through a legacy text fallback.
+load_fallback_invocations() {
+  local token=
+  local target=
+  local selected=
+  local trust=
+  local magic_seen=false
+  local terminal_seen=false
+  local seen_targets_pipe=
+  local invocation_count=0
+  invocation_targets=()
+  invocation_filters=()
+  invocation_trust=()
+
+  while IFS= read -r -d '' token; do
+    if [[ "$terminal_seen" == true ]]; then
+      echo "Fallback sanitizer invocation stream has trailing fields." >&2
+      return 1
+    fi
+    if [[ "$magic_seen" == false ]]; then
+      if [[ "$token" != photospider-sanitizer-invocations-v1 ]]; then
+        echo "Fallback sanitizer invocation stream has an unknown schema." >&2
+        return 1
+      fi
+      magic_seen=true
+      continue
+    fi
+    if [[ "$token" == end ]]; then
+      terminal_seen=true
+      continue
+    fi
+    if [[ "$token" != invocation ]] ||
+      ! IFS= read -r -d '' target ||
+      ! IFS= read -r -d '' selected ||
+      ! IFS= read -r -d '' trust; then
+      echo "Fallback sanitizer invocation stream is truncated or malformed." >&2
+      return 1
+    fi
+    if [[ ! "$target" =~ ^[a-z][a-z0-9_]*$ ]] ||
+      [[ "$selected" == *$'\t'* || "$selected" == *$'\r'* ||
+        "$selected" == *$'\n'* ]] ||
+      [[ "$trust" != true && "$trust" != false ]]; then
+      echo "Fallback sanitizer invocation fields are malformed." >&2
+      return 1
+    fi
+    if [[ "|$seen_targets_pipe|" == *"|$target|"* ]]; then
+      echo "Fallback sanitizer invocation target is duplicated: $target" >&2
+      return 1
+    fi
+    if [[ -n "$seen_targets_pipe" ]]; then
+      seen_targets_pipe=$seen_targets_pipe'|'$target
+    else
+      seen_targets_pipe=$target
+    fi
+    invocation_targets+=("$target")
+    invocation_filters+=("$selected")
+    invocation_trust+=("$trust")
+    invocation_count=$((invocation_count + 1))
+  done < <(read_sanitizer_profile invocations)
+
+  if [[ "$magic_seen" != true || "$terminal_seen" != true ||
+    $invocation_count -eq 0 ]]; then
+    echo "Fallback sanitizer invocation stream is incomplete." >&2
+    return 1
+  fi
+}
+
+# @brief Persist the shell-decoded invocation identity as NUL-framed evidence.
+# @return Zero after writing the exact schema and every parallel-array record.
+# @throws Nothing; filesystem failures return nonzero through strict shell mode.
+# @note This is diagnostic evidence, not a second selector authority. Consumers
+#   continue to execute the already decoded arrays from the resolved profile.
+write_fallback_invocation_evidence() {
+  local evidence=$CI_ARTIFACT_DIR/$PROFILE-fallback-invocations.v1.z
+  local index
+  : > "$evidence"
+  printf '%s\0' photospider-sanitizer-invocations-v1 >> "$evidence"
+  for ((index = 0; index < ${#invocation_targets[@]}; index++)); do
+    printf '%s\0%s\0%s\0%s\0' invocation \
+      "${invocation_targets[index]}" \
+      "${invocation_filters[index]}" \
+      "${invocation_trust[index]}" >> "$evidence"
+  done
+  printf '%s\0' end >> "$evidence"
 }
 
 mode=$(read_sanitizer_profile mode)
@@ -135,16 +241,16 @@ if [[ "$mode" == fallback ]]; then
     echo "Temporary fallback runtime '$expected_runtime' does not match '$actual_runtime'." >&2
     exit 1
   fi
-  invocations=()
-  while IFS= read -r invocation; do
-    invocations+=("$invocation")
-  done < <(read_sanitizer_profile invocations)
+  invocation_targets=()
+  invocation_filters=()
+  invocation_trust=()
+  load_fallback_invocations
+  write_fallback_invocation_evidence
   targets=()
   needs_trust=false
-  for invocation in "${invocations[@]}"; do
-    IFS=$'\t' read -r target _ trust <<<"$invocation"
-    targets+=("$target")
-    [[ "$trust" == true ]] && needs_trust=true
+  for ((index = 0; index < ${#invocation_targets[@]}; index++)); do
+    targets+=("${invocation_targets[index]}")
+    [[ "${invocation_trust[index]}" == true ]] && needs_trust=true
   done
   run_logged "validate_sanitizer_targets_$PROFILE" require_ci_targets "${targets[@]}"
   run_logged "build_sanitizer_$PROFILE" cmake --build "$BUILD_DIR" \
@@ -152,8 +258,9 @@ if [[ "$mode" == fallback ]]; then
   if [[ "$needs_trust" == true ]]; then
     export_ci_plugin_trust_environment
   fi
-  for invocation in "${invocations[@]}"; do
-    IFS=$'\t' read -r target selected _ <<<"$invocation"
+  for ((index = 0; index < ${#invocation_targets[@]}; index++)); do
+    target=${invocation_targets[index]}
+    selected=${invocation_filters[index]}
     run_gtest_checked "${PROFILE}_${target}" "$BUILD_DIR/tests/$target" "$selected"
   done
 else

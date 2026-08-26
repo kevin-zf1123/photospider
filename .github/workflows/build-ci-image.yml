@@ -17,6 +17,9 @@ on:
       manifest_digest:
         description: Canonical CI-image input manifest digest.
         value: ${{ jobs.build.outputs.manifest_digest }}
+      builder_image_version:
+        description: Exact approved Linux image version that built the OCI subject.
+        value: ${{ jobs.build.outputs.builder_image_version }}
       source_commit:
         description: Canonical image-input-changing source commit.
         value: ${{ jobs.build.outputs.source_commit }}
@@ -38,6 +41,7 @@ jobs:
       digest: ${{ steps.identity.outputs.digest }}
       image_ref: ${{ steps.identity.outputs.image }}
       manifest_digest: ${{ steps.identity.outputs.manifest_digest }}
+      builder_image_version: ${{ steps.builder.outputs.image_version }}
       source_commit: ${{ steps.identity.outputs.source_commit }}
       temporary_tag: ${{ steps.caller.outputs.temporary_tag }}
     steps:
@@ -78,7 +82,18 @@ jobs:
         run: python3 ci/scripts/ci_lock_verify.py
 
       - name: Verify exact Linux builder image
-        run: python3 ci/scripts/ci_runner_verify.py --platform Linux
+        id: builder
+        env:
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-builder-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
+        run: |
+          set -Eeuo pipefail
+          python3 ci/scripts/ci_runner_verify.py \
+            --platform Linux \
+            --runner-label ubuntu-24.04 \
+            --output "$CI_RUNNER_IDENTITY_FILE"
+          image_version=$(python3 ci/scripts/ci_image_manifest.py builder-label \
+            --builder-runner-identity "$CI_RUNNER_IDENTITY_FILE")
+          printf 'image_version=%s\n' "$image_version" >> "$GITHUB_OUTPUT"
 
       - name: Resolve publishable image source identity
         id: source
@@ -99,6 +114,7 @@ jobs:
           digest=$(python3 ci/scripts/ci_image_manifest.py create \
             --source-commit "${{ steps.source.outputs.commit }}" \
             --repository "${{ github.repository }}" \
+            --builder-runner-identity "${{ runner.temp }}/photospider-builder-runner-${{ github.run_id }}-${{ github.run_attempt }}.json" \
             --output "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.json" \
             --digest-output "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.sha256")
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
@@ -120,6 +136,7 @@ jobs:
           tags: ${{ steps.caller.outputs.temporary_image }}
           labels: |
             org.opencontainers.image.revision=${{ steps.source.outputs.commit }}
+            org.photospider.ci.builder-image-version=${{ steps.builder.outputs.image_version }}
             org.photospider.ci.input-manifest-sha256=${{ steps.manifest.outputs.digest }}
           build-args: |
             CI_IMAGE_INPUT_MANIFEST_SHA256=${{ steps.manifest.outputs.digest }}
@@ -150,11 +167,14 @@ jobs:
           CI_VERIFIED_DIGEST: ${{ steps.identity.outputs.digest }}
           CI_VERIFIED_MANIFEST_DIGEST: ${{ steps.identity.outputs.manifest_digest }}
           CI_VERIFIED_SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+          CI_VERIFIED_BUILDER_IMAGE_VERSION: ${{ steps.identity.outputs.builder_image_version }}
+          CI_CREATED_BUILDER_IMAGE_VERSION: ${{ steps.builder.outputs.image_version }}
         run: |
           set -Eeuo pipefail
           [[ "$CI_VERIFIED_DIGEST" == "$CI_BUILT_DIGEST" ]]
           [[ "$CI_VERIFIED_MANIFEST_DIGEST" == "$CI_CREATED_MANIFEST_DIGEST" ]]
           [[ "$CI_VERIFIED_SOURCE_COMMIT" == "$CI_CREATED_SOURCE_COMMIT" ]]
+          [[ "$CI_VERIFIED_BUILDER_IMAGE_VERSION" == "$CI_CREATED_BUILDER_IMAGE_VERSION" ]]
 
       - name: Upload canonical image input manifest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

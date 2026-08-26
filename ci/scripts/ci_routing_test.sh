@@ -999,6 +999,8 @@ validate_security_profile_routing() {
       'python3 ci/scripts/ci_runner_verify.py'
     assert_file_contains "$job_file" '--platform Linux'
     assert_file_contains "$job_file" '--runner-label ubuntu-24.04'
+    assert_file_contains "$job_file" '--output "$CI_RUNNER_IDENTITY_FILE"'
+    assert_file_contains "$job_file" 'CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/'
     verify_line=$(grep -nF -- 'python3 ci/scripts/ci_runner_verify.py' \
       "$job_file" | head -n 1 | cut -d: -f1)
     candidate_line=$(grep -nF -- 'Download security profile inventory' \
@@ -1028,6 +1030,8 @@ validate_security_profile_routing() {
     assert_file_contains "$darwin_job" 'ci-security-profile-inventory'
     assert_file_contains "$darwin_job" '--platform Darwin'
     assert_file_contains "$darwin_job" '--runner-label macos-15'
+    assert_file_contains "$darwin_job" '--output "$CI_RUNNER_IDENTITY_FILE"'
+    assert_file_contains "$darwin_job" 'CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/'
     assert_file_contains "$darwin_job" 'CI_RUNNER_TEMP: ${{ runner.temp }}'
     assert_file_not_contains "$darwin_job" 'CI_DARWIN_VCPKG_INSTALLED:'
     verify_line=$(grep -nF -- 'python3 ci/scripts/ci_runner_verify.py' \
@@ -1084,6 +1088,8 @@ validate_security_profile_routing() {
     fail "manual sanitizer job could not be extracted"
   assert_file_contains "$manual_job" '--platform Linux'
   assert_file_contains "$manual_job" '--runner-label ubuntu-24.04'
+  assert_file_contains "$manual_job" '--output "$CI_RUNNER_IDENTITY_FILE"'
+  assert_file_contains "$manual_job" 'CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/'
   verify_line=$(grep -nF -- 'python3 ci/scripts/ci_runner_verify.py' \
     "$manual_job" | head -n 1 | cut -d: -f1)
   candidate_line=$(grep -nF -- 'Download security profile inventory' \
@@ -1102,7 +1108,10 @@ validate_security_profile_routing() {
   assert_file_contains "$fuzz_script" \
     'bash "$SCRIPT_DIR/security_platform_prepare.sh"'
   assert_file_contains "$platform_script" 'Unsupported security platform:'
-  assert_file_contains "$platform_script" 'darwin-runner-lock.json'
+  assert_file_contains "$platform_script" 'load_resolved_identity'
+  assert_file_contains "$platform_script" 'CI_RUNNER_IDENTITY_FILE'
+  assert_file_not_contains "$platform_script" 'ImageVersion'
+  assert_file_not_contains "$platform_script" 'darwin-runner-lock.json'
   assert_file_contains "$platform_script" \
     'https://github.com/microsoft/vcpkg.git'
   assert_file_contains "$platform_script" \
@@ -1278,6 +1287,10 @@ validate_ci_image_identity_routing() {
   assert_file_contains "$build_workflow" \
     'org.photospider.ci.input-manifest-sha256=${{ steps.manifest.outputs.digest }}'
   assert_file_contains "$build_workflow" \
+    'org.photospider.ci.builder-image-version=${{ steps.builder.outputs.image_version }}'
+  assert_file_contains "$build_workflow" \
+    '--builder-runner-identity "${{ runner.temp }}/photospider-builder-runner-'
+  assert_file_contains "$build_workflow" \
     'subject-digest: ${{ steps.push.outputs.digest }}'
   assert_file_contains "$build_workflow" 'push-to-registry: true'
   assert_file_contains "$build_workflow" 'workflow_call:'
@@ -1364,6 +1377,8 @@ validate_ci_image_tag_routing() {
   assert_file_contains "$promotion_run" '--branch "$CI_PROMOTION_BRANCH"'
   assert_file_contains "$promotion_run" \
     '--manifest-digest "${{ needs.candidate-image-build.outputs.manifest_digest }}"'
+  assert_file_contains "$promotion_run" \
+    '--builder-image-version "${{ needs.candidate-image-build.outputs.builder_image_version }}"'
   assert_file_not_contains "$promotion_run" 'github.ref_name'
   assert_file_not_contains "$promotion_job" 'docker/build-push-action@'
   assert_file_contains "$promote" 'docker buildx imagetools create'
@@ -2014,7 +2029,19 @@ create_image_history() {
   git -C "$repository" config user.name "CI Routing Test"
   git -C "$repository" config user.email "ci-routing@example.invalid"
   printf 'baseline\n' > "$repository/seed.txt"
-  git -C "$repository" add seed.txt
+  while IFS= read -r relative; do
+    mkdir -p -- "$(dirname -- "$repository/$relative")"
+    cp -- "$REPO_ROOT/$relative" "$repository/$relative"
+  done < <(python3 - "$REPO_ROOT/ci/locks/ci-image-lock.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    lock = json.load(handle)
+print(*lock["input_paths"], sep="\n")
+PY
+)
+  git -C "$repository" add .
   git -C "$repository" commit -qm baseline
   base_sha=$(git -C "$repository" rev-parse HEAD)
 
@@ -2097,17 +2124,207 @@ set -Eeuo pipefail
 
 # @file git
 # @brief Inject a deterministic failure into changed-path Git diff calls.
-if [[ "${1:-}" == diff ]]; then
-  for argument in "$@"; do
-    if [[ "$argument" == --name-only ]]; then
-      echo "injected git diff failure" >&2
-      exit 73
-    fi
-  done
+is_diff=false
+is_name_only=false
+for argument in "$@"; do
+  [[ "$argument" == diff ]] && is_diff=true
+  [[ "$argument" == --name-only ]] && is_name_only=true
+done
+if [[ "$is_diff" == true && "$is_name_only" == true ]]; then
+  echo "injected git diff failure" >&2
+  exit 73
 fi
 exec "$CI_ROUTING_TEST_REAL_GIT" "$@"
 EOF
   chmod +x "$shim_dir/git"
+}
+
+# @brief Require one malformed base/head image lock to fail without route output.
+# @param $1 Stable case label.
+# @param $2 Repository path at the malformed head.
+# @param $3 Known-good comparison base.
+# @return Zero after recording the exact fail-closed boundary.
+# @throws Nothing; a successful route or partial output exits through fail.
+assert_image_detector_failure() {
+  local case_label=$1
+  local repository=$2
+  local base_ref=$3
+  local artifact_dir="$TEST_ROOT/$case_label-artifacts"
+  local output_log="$TEST_ROOT/$case_label.log"
+  if run_image_detector "$repository" "$base_ref" "$artifact_dir" \
+    "$output_log"; then
+    fail "$case_label malformed image lock unexpectedly produced a route"
+  fi
+  assert_file_contains "$output_log" "CI image changed-path detection failed."
+  [[ ! -f "$artifact_dir/ci-image-change.env" ]] ||
+    fail "$case_label wrote a route artifact"
+  [[ ! -s "$artifact_dir/github-output.txt" ]] ||
+    fail "$case_label wrote a GitHub route output"
+  pass "$case_label"
+}
+
+# @brief Exercise every canonical image input and adversarial lock evolution.
+# @param $1 Repository containing a complete canonical-input baseline.
+# @param $2 Baseline commit with the strict canonical lock.
+# @return Zero after all inputs route true and every malformed lock fails closed.
+# @throws Nothing; Git, detector, or assertion failures terminate through fail.
+# @note Each case starts from the same base so one changed input cannot mask
+#   another. Snapshot comments and protected-helper bytes receive ordinary path
+#   treatment because the lock, not a shell case list, is the sole authority.
+exercise_canonical_image_input_routes() {
+  local repository=$1
+  local base_sha=$2
+  local artifact_dir="$TEST_ROOT/canonical-image-input-artifacts"
+  local output_log="$TEST_ROOT/canonical-image-input.log"
+  local lock_path="$repository/ci/locks/ci-image-lock.json"
+  local relative
+  local case_number=0
+  local added_input_base
+  local -a canonical_paths=()
+
+  mapfile -t canonical_paths < <(python3 - \
+    "$REPO_ROOT/ci/locks/ci-image-lock.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    lock = json.load(handle)
+print(*lock["input_paths"], sep="\n")
+PY
+)
+  ((${#canonical_paths[@]} > 0)) ||
+    fail "canonical image-input route fixture is empty"
+  for relative in "${canonical_paths[@]}"; do
+    case_number=$((case_number + 1))
+    git -C "$repository" checkout -q --detach "$base_sha"
+    git -C "$repository" clean -fdq
+    if [[ "$relative" == ci/locks/ci-image-lock.json ]]; then
+      printf '\n' >> "$repository/$relative"
+    else
+      printf '\n# canonical image-input route %d\n' "$case_number" \
+        >> "$repository/$relative"
+    fi
+    git -C "$repository" add -- "$relative"
+    git -C "$repository" commit -qm "canonical image input $case_number"
+    run_image_detector "$repository" "$base_sha" "$artifact_dir" \
+      "$output_log"
+    assert_image_route "image-canonical-input-$case_number" true \
+      "$artifact_dir" "$output_log"
+  done
+
+  git -C "$repository" checkout -q --detach "$base_sha"
+  git -C "$repository" clean -fdq
+  printf 'new canonical input\n' > "$repository/ci/locks/new-image-input.txt"
+  python3 - "$lock_path" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    lock = json.load(handle)
+lock["input_paths"].append("ci/locks/new-image-input.txt")
+lock["input_paths"].sort()
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(lock, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+  git -C "$repository" add ci/locks/ci-image-lock.json \
+    ci/locks/new-image-input.txt
+  git -C "$repository" commit -qm "add canonical image input"
+  run_image_detector "$repository" "$base_sha" "$artifact_dir" "$output_log"
+  assert_image_route image-lock-adds-input true "$artifact_dir" "$output_log"
+  added_input_base=$(git -C "$repository" rev-parse HEAD)
+  printf 'later bytes\n' >> "$repository/ci/locks/new-image-input.txt"
+  git -C "$repository" add ci/locks/new-image-input.txt
+  git -C "$repository" commit -qm "change newly canonical image input"
+  run_image_detector "$repository" "$added_input_base" "$artifact_dir" \
+    "$output_log"
+  assert_image_route image-new-lock-member-becomes-authority true \
+    "$artifact_dir" "$output_log"
+
+  git -C "$repository" checkout -q --detach "$base_sha"
+  git -C "$repository" clean -fdq
+  python3 - "$lock_path" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    lock = json.load(handle)
+lock["input_paths"].remove("ci/locks/ubuntu-24.04-snapshot.sources.in")
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(lock, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+  git -C "$repository" rm -q ci/locks/ubuntu-24.04-snapshot.sources.in
+  git -C "$repository" add ci/locks/ci-image-lock.json
+  git -C "$repository" commit -qm "remove canonical image input"
+  run_image_detector "$repository" "$base_sha" "$artifact_dir" "$output_log"
+  assert_image_route image-lock-removes-input true "$artifact_dir" "$output_log"
+
+  for mutation in malformed duplicate traversal duplicate-member missing; do
+    git -C "$repository" checkout -q --detach "$base_sha"
+    git -C "$repository" clean -fdq
+    case "$mutation" in
+      malformed)
+        printf '{\n' > "$lock_path"
+        git -C "$repository" add ci/locks/ci-image-lock.json
+        ;;
+      duplicate)
+        python3 - "$lock_path" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    lock = json.load(handle)
+lock["input_paths"].append(lock["input_paths"][-1])
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(lock, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+        git -C "$repository" add ci/locks/ci-image-lock.json
+        ;;
+      traversal)
+        python3 - "$lock_path" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    lock = json.load(handle)
+lock["input_paths"].append("../escape")
+lock["input_paths"].sort()
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(lock, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+        git -C "$repository" add ci/locks/ci-image-lock.json
+        ;;
+      duplicate-member)
+        python3 - "$lock_path" <<'PY'
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    source = handle.read()
+needle = '  "schema": "photospider-ci-image-lock-v1"'
+if source.count(needle) != 1:
+    raise SystemExit("fixture schema member is not unique")
+source = source.replace(needle, needle + ",\n" + needle, 1)
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(source)
+PY
+        git -C "$repository" add ci/locks/ci-image-lock.json
+        ;;
+      missing)
+        git -C "$repository" rm -q ci/locks/ci-image-lock.json
+        ;;
+    esac
+    git -C "$repository" commit -qm "malformed image lock $mutation"
+    assert_image_detector_failure "image-lock-$mutation-fails-closed" \
+      "$repository" "$base_sha"
+  done
 }
 
 # @brief Create a Git shim that removes a completed protected-path inventory.
@@ -2216,6 +2433,12 @@ exercise_changed_path_contracts() {
     "$output_log"
   assert_file_contains "$artifact_dir/changed-files.txt" \
     "docs/note\\nDockerfile.ci"
+
+  assert_image_detector_failure image-invalid-explicit-base-fails-closed \
+    "$image_repository" refs/heads/does-not-exist
+
+  exercise_canonical_image_input_routes "$image_repository" "$base_sha"
+  git -C "$image_repository" checkout -q --detach "$docs_sha"
 
   create_failing_git_shim "$shim_dir"
   rm -rf -- "$artifact_dir"

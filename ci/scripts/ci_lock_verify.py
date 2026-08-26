@@ -21,7 +21,12 @@ import shlex
 import stat
 import sys
 from pathlib import Path
-from typing import Any, Iterable, NamedTuple
+from typing import Any, Callable, Iterable, NamedTuple
+
+_SCRIPT_DIRECTORY = Path(__file__).resolve().parent
+if str(_SCRIPT_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIRECTORY))
+from ci_runner_verify import RunnerError, load_runner_lock
 
 
 _SUITE_GATE_HELPER_SOURCE_SHA256 = (
@@ -52,8 +57,13 @@ def _load_json(path: Path) -> Any:
         raise ContractError(f"cannot read strict JSON {path}: {error}") from error
 
 
-def _sha256_regular_file(path: Path, context: str) -> str:
-    """Hash one retained regular file without following its final component.
+def _sha256_regular_file(
+    path: Path,
+    context: str,
+    *,
+    _test_hook: Callable[[str, int], None] | None = None,
+) -> str:
+    """Hash one stable retained regular-file snapshot without following links.
 
     Args:
         path: Exact protected helper or input file.
@@ -63,33 +73,131 @@ def _sha256_regular_file(path: Path, context: str) -> str:
         Lowercase SHA-256 of the retained file bytes.
 
     Raises:
-        ContractError: The path is missing, aliased, non-regular, unreadable, or
-            changes identity while the retained descriptor is being measured.
+        ContractError: Required descriptor flags are unavailable, or the path
+            is missing, aliased, non-regular, unreadable, changes identity, or
+            yields different bytes while the retained descriptor is measured.
 
     Note:
-        Path and descriptor metadata are cross-checked so a helper pathname
-        cannot be replaced between the regular-file decision and hashing.
+        The private hook exists only for deterministic adversarial tests. It is
+        called after the retained descriptor is established and after its first
+        complete read. Production callers never supply it. The descriptor is
+        opened with ``O_NOFOLLOW`` and ``O_CLOEXEC``; ``O_NONBLOCK`` prevents a
+        hostile FIFO from blocking before its type can be rejected. Two reads
+        from the same descriptor plus pathname/descriptor metadata checks catch
+        in-place mutation and final-component replacement at the measured
+        boundaries without reopening a potentially different object.
     """
+    required_flags = ("O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK")
+    missing_flags = [name for name in required_flags if not hasattr(os, name)]
+    if missing_flags:
+        raise ContractError(
+            f"{context}: required safe-open flags are unavailable: "
+            f"{', '.join(missing_flags)}"
+        )
+
+    def stable_identity(value: os.stat_result) -> tuple[int, ...]:
+        """Return metadata whose drift invalidates retained measurement.
+
+        Args:
+            value: One pathname or descriptor stat result.
+
+        Returns:
+            Device, inode, mode, link count, size, and nanosecond write/change
+            timestamps used for exact phase comparisons.
+        """
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_nlink,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+
+    def require_path_matches(
+        descriptor_stat: os.stat_result, phase: str
+    ) -> None:
+        """Require the current pathname to name the retained regular object.
+
+        Args:
+            descriptor_stat: Current retained-descriptor metadata.
+            phase: Stable measurement phase included in diagnostics.
+
+        Returns:
+            None when pathname type and identity exactly match the descriptor.
+
+        Raises:
+            ContractError: The path is missing, nonregular, or differs from the
+                retained descriptor at this measurement phase.
+        """
+        try:
+            path_stat = path.lstat()
+        except OSError as error:
+            raise ContractError(
+                f"{context}: protected helper pathname is unavailable {phase}: {error}"
+            ) from error
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise ContractError(
+                f"{context}: protected helper pathname is not regular {phase}"
+            )
+        if stable_identity(path_stat) != stable_identity(descriptor_stat):
+            raise ContractError(
+                f"{context}: protected helper pathname identity changed {phase}"
+            )
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW")
+        | getattr(os, "O_CLOEXEC")
+        | getattr(os, "O_NONBLOCK")
+    )
+    descriptor = -1
     try:
-        path_stat = path.lstat()
-        if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+        descriptor = os.open(path, flags)
+        initial_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(initial_stat.st_mode):
             raise ContractError(f"{context}: protected helper must be a regular file")
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            descriptor_stat = os.fstat(handle.fileno())
-            if (
-                not stat.S_ISREG(descriptor_stat.st_mode)
-                or (path_stat.st_dev, path_stat.st_ino)
-                != (descriptor_stat.st_dev, descriptor_stat.st_ino)
-            ):
-                raise ContractError(f"{context}: protected helper identity changed")
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        require_path_matches(initial_stat, "after open")
+        if _test_hook is not None:
+            _test_hook("after_open", descriptor)
+
+        digests: list[str] = []
+        for pass_number in (1, 2):
+            digest = hashlib.sha256()
+            byte_count = 0
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                byte_count += len(chunk)
                 digest.update(chunk)
-        return digest.hexdigest()
+            pass_stat = os.fstat(descriptor)
+            if (
+                stable_identity(pass_stat) != stable_identity(initial_stat)
+                or byte_count != initial_stat.st_size
+            ):
+                raise ContractError(
+                    f"{context}: protected helper changed during retained read"
+                )
+            require_path_matches(pass_stat, f"after read {pass_number}")
+            digests.append(digest.hexdigest())
+            if pass_number == 1:
+                if _test_hook is not None:
+                    _test_hook("after_first_read", descriptor)
+                os.lseek(descriptor, 0, os.SEEK_SET)
+        if digests[0] != digests[1]:
+            raise ContractError(
+                f"{context}: protected helper bytes changed during retained read"
+            )
+        return digests[0]
     except ContractError:
         raise
     except OSError as error:
         raise ContractError(f"{context}: cannot hash protected helper: {error}") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _exact_keys(value: dict[str, Any], expected: set[str], context: str) -> None:
@@ -1270,12 +1378,24 @@ def _verify_ci_image_producer(
         '  --workflow-commit "${{ inputs.candidate_commit }}")\n'
         "printf 'commit=%s\\n' \"$source_commit\" >> \"$GITHUB_OUTPUT\"\n\n"
     )
+    builder_run = (
+        "set -Eeuo pipefail\n"
+        "python3 ci/scripts/ci_runner_verify.py \\\n"
+        "  --platform Linux \\\n"
+        "  --runner-label ubuntu-24.04 \\\n"
+        '  --output "$CI_RUNNER_IDENTITY_FILE"\n'
+        "image_version=$(python3 ci/scripts/ci_image_manifest.py builder-label \\\n"
+        '  --builder-runner-identity "$CI_RUNNER_IDENTITY_FILE")\n'
+        "printf 'image_version=%s\\n' \"$image_version\" >> \"$GITHUB_OUTPUT\"\n\n"
+    )
     manifest_run = (
         "set -Eeuo pipefail\n"
         'mkdir -p "$CI_IMAGE_MANIFEST_DIR"\n'
         "digest=$(python3 ci/scripts/ci_image_manifest.py create \\\n"
         '  --source-commit "${{ steps.source.outputs.commit }}" \\\n'
         '  --repository "${{ github.repository }}" \\\n'
+        '  --builder-runner-identity "${{ runner.temp }}/photospider-builder-'
+        'runner-${{ github.run_id }}-${{ github.run_attempt }}.json" \\\n'
         '  --output "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.json" \\\n'
         '  --digest-output "$CI_IMAGE_MANIFEST_DIR/'
         'ci-image-input-v1.sha256")\n'
@@ -1286,7 +1406,9 @@ def _verify_ci_image_producer(
         '[[ "$CI_VERIFIED_DIGEST" == "$CI_BUILT_DIGEST" ]]\n'
         '[[ "$CI_VERIFIED_MANIFEST_DIGEST" == '
         '"$CI_CREATED_MANIFEST_DIGEST" ]]\n'
-        '[[ "$CI_VERIFIED_SOURCE_COMMIT" == "$CI_CREATED_SOURCE_COMMIT" ]]\n\n'
+        '[[ "$CI_VERIFIED_SOURCE_COMMIT" == "$CI_CREATED_SOURCE_COMMIT" ]]\n'
+        '[[ "$CI_VERIFIED_BUILDER_IMAGE_VERSION" == '
+        '"$CI_CREATED_BUILDER_IMAGE_VERSION" ]]\n\n'
     )
     expected = {
         "name": "Build CI Image Candidate",
@@ -1316,6 +1438,12 @@ def _verify_ci_image_producer(
                     "manifest_digest": {
                         "description": "Canonical CI-image input manifest digest.",
                         "value": "${{ jobs.build.outputs.manifest_digest }}",
+                    },
+                    "builder_image_version": {
+                        "description": (
+                            "Exact approved Linux image version that built the OCI subject."
+                        ),
+                        "value": "${{ jobs.build.outputs.builder_image_version }}",
                     },
                     "source_commit": {
                         "description": (
@@ -1347,6 +1475,9 @@ def _verify_ci_image_producer(
                     "image_ref": "${{ steps.identity.outputs.image }}",
                     "manifest_digest": (
                         "${{ steps.identity.outputs.manifest_digest }}"
+                    ),
+                    "builder_image_version": (
+                        "${{ steps.builder.outputs.image_version }}"
                     ),
                     "source_commit": "${{ steps.identity.outputs.source_commit }}",
                     "temporary_tag": "${{ steps.caller.outputs.temporary_tag }}",
@@ -1382,9 +1513,14 @@ def _verify_ci_image_producer(
                     },
                     {
                         "name": "Verify exact Linux builder image",
-                        "run": (
-                            "python3 ci/scripts/ci_runner_verify.py --platform Linux"
-                        ),
+                        "id": "builder",
+                        "env": {
+                            "CI_RUNNER_IDENTITY_FILE": (
+                                "${{ runner.temp }}/photospider-builder-runner-"
+                                "${{ github.run_id }}-${{ github.run_attempt }}.json"
+                            )
+                        },
+                        "run": builder_run,
                     },
                     {
                         "name": "Resolve publishable image source identity",
@@ -1422,6 +1558,8 @@ def _verify_ci_image_producer(
                             "labels": (
                                 "org.opencontainers.image.revision="
                                 "${{ steps.source.outputs.commit }}\n"
+                                "org.photospider.ci.builder-image-version="
+                                "${{ steps.builder.outputs.image_version }}\n"
                                 "org.photospider.ci.input-manifest-sha256="
                                 "${{ steps.manifest.outputs.digest }}\n"
                             ),
@@ -1472,6 +1610,9 @@ def _verify_ci_image_producer(
                             "CI_CREATED_SOURCE_COMMIT": (
                                 "${{ steps.source.outputs.commit }}"
                             ),
+                            "CI_CREATED_BUILDER_IMAGE_VERSION": (
+                                "${{ steps.builder.outputs.image_version }}"
+                            ),
                             "CI_VERIFIED_DIGEST": (
                                 "${{ steps.identity.outputs.digest }}"
                             ),
@@ -1480,6 +1621,9 @@ def _verify_ci_image_producer(
                             ),
                             "CI_VERIFIED_SOURCE_COMMIT": (
                                 "${{ steps.identity.outputs.source_commit }}"
+                            ),
+                            "CI_VERIFIED_BUILDER_IMAGE_VERSION": (
+                                "${{ steps.identity.outputs.builder_image_version }}"
                             ),
                         },
                         "run": cross_check_run,
@@ -1916,6 +2060,64 @@ def _verify_protected_helpers(
     return result
 
 
+def _verify_ci_image_resolver_order(root: Path) -> None:
+    """Require attestation before image-layer pull and identity reconstruction.
+
+    Args:
+        root: Repository root containing the protected image resolver.
+
+    Raises:
+        ContractError: A required active command is missing, duplicated, or
+            ordered so that Docker can pull/inspect layers, builder labels can
+            be retained, a manifest can be reconstructed, or final output can
+            be emitted before exact-subject attestation succeeds.
+
+    Note:
+        Only exact non-comment command lines are authoritative. The durable
+        shell mock separately executes success and attestation-failure paths;
+        this static check makes the reviewed order part of the protected lock
+        verifier without treating comments as executable evidence.
+    """
+    path = root / "ci/scripts/ci_image_verify.sh"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise ContractError(
+            f"cannot read protected CI image resolver {path}: {error}"
+        ) from error
+    active = [
+        line.strip()
+        for line in lines
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    ordered_commands = (
+        'inspect_output=$(docker buildx imagetools inspect "$locator")',
+        'source_commit=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \\',
+        'gh attestation verify "oci://$exact_image" \\',
+        'docker pull "$exact_image" >/dev/null',
+        (
+            "docker image inspect --format '{{json .Config.Labels}}' "
+            '"$exact_image" > "$labels_path"'
+        ),
+        'builder_image_version=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \\',
+        'manifest_digest=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \\',
+        'verified_manifest_digest=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \\',
+        '} | tee "$ARTIFACT_DIR/ci-image-identity.env"',
+    )
+    positions: list[int] = []
+    for command in ordered_commands:
+        matches = [index for index, line in enumerate(active) if line == command]
+        if len(matches) != 1:
+            raise ContractError(
+                f"{path}: protected resolver command is missing or ambiguous: {command}"
+            )
+        positions.append(matches[0])
+    if positions != sorted(positions) or len(positions) != len(set(positions)):
+        raise ContractError(
+            f"{path}: exact-subject attestation must precede layer pull and identity output"
+        )
+
+
 def _verify_image_lock(root: Path, actions: dict[str, tuple[str, str]]) -> None:
     """Validate image inputs, offline bootstrap, digests, and builder identity.
 
@@ -1986,10 +2188,18 @@ def _verify_image_lock(root: Path, actions: dict[str, tuple[str, str]]) -> None:
     _verify_protected_helpers(root, lock, input_paths)
 
     _verify_ci_image_producer(root, actions)
+    _verify_ci_image_resolver_order(root)
     published = lock["published_image"]
     _exact_keys(
         published,
-        {"locator", "source_repository", "source_workflow", "input_manifest_label", "source_commit_label"},
+        {
+            "builder_image_version_label",
+            "input_manifest_label",
+            "locator",
+            "source_commit_label",
+            "source_repository",
+            "source_workflow",
+        },
         f"{path}:published_image",
     )
     if not str(published["locator"]).endswith(":latest"):
@@ -2485,14 +2695,14 @@ def _verify_dockerfile(root: Path) -> None:
 
 
 def _verify_darwin_lock(root: Path) -> None:
-    """Validate the exact GitHub-hosted Darwin image and vcpkg identity.
+    """Validate the exact finite Darwin rollout set and vcpkg mappings.
 
     Args:
         root: Repository root containing the protected Darwin runner lock.
 
     Raises:
-        ContractError: The schema, arm64 runner/image, triplet, image version, or
-            vcpkg commit is malformed or differs from the maintained identity.
+        ContractError: The schema, shared arm64 identity, triplet, ordered
+            version set, or one-to-one vcpkg mapping differs from review.
 
     Note:
         Workflow consumption is validated separately by
@@ -2500,16 +2710,22 @@ def _verify_darwin_lock(root: Path) -> None:
         independently diagnosable.
     """
     path = root / "ci/locks/darwin-runner-lock.json"
-    lock = _load_json(path)
-    expected = {
-        "schema", "architecture", "image_os", "image_version",
-        "runner_label", "triplet", "vcpkg_commit",
-    }
-    if not isinstance(lock, dict):
-        raise ContractError(f"{path}: root must be an object")
-    _exact_keys(lock, expected, str(path))
-    exact_values = {
-        "schema": "photospider-darwin-runner-lock-v1",
+    try:
+        lock = load_runner_lock(root, "Darwin")
+    except RunnerError as error:
+        raise ContractError(f"{path}: {error}") from error
+    exact_values: dict[str, Any] = {
+        "approved_images": [
+            {
+                "image_version": "20260727.0256.1",
+                "vcpkg_commit": "6d9d7df564a1ccdaa994e4ad39ccd4a32360867b",
+            },
+            {
+                "image_version": "20260824.0311.1",
+                "vcpkg_commit": "127402f1c75bb3d5ff6bce04b285faa4930a5aca",
+            },
+        ],
+        "schema": "photospider-darwin-runner-lock-v2",
         "architecture": "arm64",
         "image_os": "macos15",
         "runner_label": "macos-15",
@@ -2518,10 +2734,6 @@ def _verify_darwin_lock(root: Path) -> None:
     for field, expected_value in exact_values.items():
         if lock[field] != expected_value:
             raise ContractError(f"{path}: unexpected {field} identity")
-    if not re.fullmatch(r"20[0-9]{6}\.[0-9]{4}\.[0-9]+", str(lock["image_version"])):
-        raise ContractError(f"{path}: malformed GitHub runner image version")
-    if not re.fullmatch(r"[0-9a-f]{40}", str(lock["vcpkg_commit"])):
-        raise ContractError(f"{path}: vcpkg identity is not a full commit SHA")
 
 
 def _verify_darwin_security_dag(root: Path) -> None:
@@ -2550,6 +2762,7 @@ def _verify_darwin_security_dag(root: Path) -> None:
             "env": {
                 "CI_ARTIFACT_DIR": "${{ github.workspace }}/CI-results/sanitizer-asan-darwin",
                 "CI_INVENTORY_DIR": "${{ github.workspace }}/CI-results/profile-inventory",
+                "CI_RUNNER_IDENTITY_FILE": "${{ runner.temp }}/photospider-darwin-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
                 "CI_RUNNER_TEMP": "${{ runner.temp }}",
                 "SANITIZER": "asan",
             },
@@ -2566,6 +2779,7 @@ def _verify_darwin_security_dag(root: Path) -> None:
             "env": {
                 "CI_ARTIFACT_DIR": "${{ github.workspace }}/CI-results/sanitizer-tsan-darwin",
                 "CI_INVENTORY_DIR": "${{ github.workspace }}/CI-results/profile-inventory",
+                "CI_RUNNER_IDENTITY_FILE": "${{ runner.temp }}/photospider-darwin-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
                 "CI_RUNNER_TEMP": "${{ runner.temp }}",
                 "SANITIZER": "tsan",
             },
@@ -2582,6 +2796,7 @@ def _verify_darwin_security_dag(root: Path) -> None:
             "env": {
                 "CI_ARTIFACT_DIR": "${{ github.workspace }}/CI-results/fuzz-codecs-darwin",
                 "CI_INVENTORY_DIR": "${{ github.workspace }}/CI-results/profile-inventory",
+                "CI_RUNNER_IDENTITY_FILE": "${{ runner.temp }}/photospider-darwin-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
                 "CI_RUNNER_TEMP": "${{ runner.temp }}",
             },
             "upload_step": "Upload transient Darwin fuzz diagnostics",
@@ -2612,8 +2827,9 @@ def _verify_darwin_security_dag(root: Path) -> None:
         job = jobs[job_name]
         expected_verify = (
             "python3 ci/scripts/ci_runner_verify.py --platform Darwin "
-            "--runner-label macos-15"
+            "--runner-label macos-15 --output \"$CI_RUNNER_IDENTITY_FILE\""
         )
+        identity_path = profile["env"]["CI_RUNNER_IDENTITY_FILE"]
         expected_job = {
             "permissions": {"contents": "read"},
             "needs": "integration-plan",
@@ -2632,6 +2848,7 @@ def _verify_darwin_security_dag(root: Path) -> None:
                 },
                 {
                     "name": profile["verify_step"],
+                    "env": {"CI_RUNNER_IDENTITY_FILE": identity_path},
                     "run": expected_verify,
                 },
                 {
@@ -2757,15 +2974,18 @@ def _verify_darwin_security_dag(root: Path) -> None:
 
 
 def _verify_linux_runner_lock(root: Path) -> None:
-    """Validate the hosted Linux builder lock and canonical image-manifest coverage."""
+    """Validate the finite Linux rollout set and image-manifest coverage."""
     path = root / "ci/locks/linux-runner-lock.json"
-    lock = _load_json(path)
-    expected = {"schema", "architecture", "image_os", "image_version", "runner_label"}
-    if not isinstance(lock, dict):
-        raise ContractError(f"{path}: root must be an object")
-    _exact_keys(lock, expected, str(path))
-    exact_values = {
-        "schema": "photospider-linux-runner-lock-v1",
+    try:
+        lock = load_runner_lock(root, "Linux")
+    except RunnerError as error:
+        raise ContractError(f"{path}: {error}") from error
+    exact_values: dict[str, Any] = {
+        "approved_image_versions": [
+            "20260816.277.1",
+            "20260823.283.1",
+        ],
+        "schema": "photospider-linux-runner-lock-v2",
         "architecture": "x86_64",
         "image_os": "ubuntu24",
         "runner_label": "ubuntu-24.04",
@@ -2773,11 +2993,152 @@ def _verify_linux_runner_lock(root: Path) -> None:
     for field, expected_value in exact_values.items():
         if lock[field] != expected_value:
             raise ContractError(f"{path}: unexpected {field} identity")
-    if not re.fullmatch(r"20[0-9]{6}\.[0-9]{3,4}\.[0-9]+", str(lock["image_version"])):
-        raise ContractError(f"{path}: malformed GitHub runner image version")
     image_lock = _load_json(root / "ci/locks/ci-image-lock.json")
     if "ci/locks/linux-runner-lock.json" not in image_lock.get("input_paths", []):
         raise ContractError("Linux builder identity is absent from canonical image inputs")
+
+
+def _verify_runner_identity_handoffs(root: Path) -> None:
+    """Require one retained runner record to cross each security job boundary.
+
+    Args:
+        root: Repository root containing maintained workflows and platform reader.
+
+    Raises:
+        ContractError: A Linux security job does not create its resolved record
+            before profile data, changes paths between producer and consumer,
+            accepts candidate inputs, or the platform reader reinterprets the
+            mutable runner environment.
+
+    Note:
+        Darwin jobs are additionally covered by complete mapping equality. This
+        focused check covers the three containerized Linux jobs, the manual
+        sanitizer, and the local-image manifest producer without duplicating
+        their unrelated workflow fields.
+    """
+    suite_path = root / ".github/workflows/ci-integration-suite.yml"
+    suite_jobs = _workflow_job_mappings(
+        suite_path, ("sanitizer-asan", "sanitizer-tsan", "fuzz-codecs")
+    )
+    suite_contract = {
+        "sanitizer-asan": (
+            "Verify exact Linux ASan runner",
+            "Run isolated ASan profile",
+            "${{ runner.temp }}/photospider-linux-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
+        ),
+        "sanitizer-tsan": (
+            "Verify exact Linux TSan runner",
+            "Run isolated TSan profile",
+            "${{ runner.temp }}/photospider-linux-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
+        ),
+        "fuzz-codecs": (
+            "Verify exact Linux fuzz runner",
+            "Run bounded codec fuzz smoke",
+            "${{ runner.temp }}/photospider-linux-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
+        ),
+    }
+
+    def require_handoff(
+        path: Path,
+        job_name: str,
+        job: dict[str, Any],
+        verify_name: str,
+        execute_name: str,
+        identity_path: str,
+    ) -> None:
+        """Validate one ordered producer/consumer pair inside a parsed job."""
+        steps = job.get("steps")
+        if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):
+            raise ContractError(f"{path}: {job_name} steps are malformed")
+        verify_matches = [
+            (index, step) for index, step in enumerate(steps) if step.get("name") == verify_name
+        ]
+        execute_matches = [
+            (index, step) for index, step in enumerate(steps) if step.get("name") == execute_name
+        ]
+        if len(verify_matches) != 1 or len(execute_matches) != 1:
+            raise ContractError(f"{path}: {job_name} runner handoff steps are ambiguous")
+        verify_index, verify_step = verify_matches[0]
+        execute_index, execute_step = execute_matches[0]
+        expected_run = (
+            "python3 ci/scripts/ci_runner_verify.py --platform Linux "
+            "--runner-label ubuntu-24.04 --output \"$CI_RUNNER_IDENTITY_FILE\""
+        )
+        if verify_step.get("env") != {"CI_RUNNER_IDENTITY_FILE": identity_path}:
+            raise ContractError(f"{path}: {job_name} resolved runner output differs")
+        if verify_step.get("run") != expected_run:
+            raise ContractError(f"{path}: {job_name} runner verifier command differs")
+        execute_environment = execute_step.get("env")
+        if (
+            not isinstance(execute_environment, dict)
+            or execute_environment.get("CI_RUNNER_IDENTITY_FILE") != identity_path
+        ):
+            raise ContractError(f"{path}: {job_name} retained runner consumer differs")
+        if "${{ inputs." in identity_path or verify_index >= execute_index:
+            raise ContractError(f"{path}: {job_name} runner identity order/trust differs")
+
+    for job_name, (verify_name, execute_name, identity_path) in suite_contract.items():
+        require_handoff(
+            suite_path,
+            job_name,
+            suite_jobs[job_name],
+            verify_name,
+            execute_name,
+            identity_path,
+        )
+
+    manual_path = root / ".github/workflows/ci-sanitizer.yml"
+    manual = _workflow_job_mappings(manual_path, ("sanitizer",))["sanitizer"]
+    require_handoff(
+        manual_path,
+        "sanitizer",
+        manual,
+        "Verify exact Linux sanitizer runner",
+        "Run sanitizer tests",
+        "${{ runner.temp }}/photospider-manual-sanitizer-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
+    )
+
+    health_path = root / ".github/workflows/ci-healthcheck.yml"
+    health = _workflow_job_mappings(health_path, ("healthcheck-local-image",))[
+        "healthcheck-local-image"
+    ]
+    manifest_steps = [
+        step
+        for step in health.get("steps", [])
+        if isinstance(step, dict)
+        and step.get("name") == "Verify image-input contract without rebuilding"
+    ]
+    if len(manifest_steps) != 1:
+        raise ContractError(f"{health_path}: local image identity producer is ambiguous")
+    manifest_step = manifest_steps[0]
+    expected_health_path = (
+        "${{ runner.temp }}/photospider-healthcheck-runner-"
+        "${{ github.run_id }}-${{ github.run_attempt }}.json"
+    )
+    environment = manifest_step.get("env")
+    command = manifest_step.get("run")
+    if (
+        not isinstance(environment, dict)
+        or environment.get("CI_RUNNER_IDENTITY_FILE") != expected_health_path
+        or not isinstance(command, str)
+        or command.count("ci_runner_verify.py") != 1
+        or '--output "$CI_RUNNER_IDENTITY_FILE"' not in command
+        or '--builder-runner-identity "$CI_RUNNER_IDENTITY_FILE"' not in command
+        or command.index("ci_runner_verify.py")
+        >= command.index('--builder-runner-identity "$CI_RUNNER_IDENTITY_FILE"')
+    ):
+        raise ContractError(f"{health_path}: local manifest runner provenance differs")
+
+    platform_reader = (root / "ci/scripts/security_platform_prepare.sh").read_text(
+        encoding="utf-8"
+    )
+    if (
+        "load_resolved_identity" not in platform_reader
+        or "CI_RUNNER_IDENTITY_FILE" not in platform_reader
+        or "ImageOS" in platform_reader
+        or "ImageVersion" in platform_reader
+    ):
+        raise ContractError("security platform reader reinterprets mutable runner state")
 
 
 def _verify_fuzz_job_timeout(root: Path) -> None:
@@ -3040,6 +3401,7 @@ def verify(root: Path) -> None:
     _verify_darwin_lock(root)
     _verify_darwin_security_dag(root)
     _verify_linux_runner_lock(root)
+    _verify_runner_identity_handoffs(root)
     _verify_fuzz_job_timeout(root)
     _verify_reusable_workflow_permissions(root)
     _verify_shared_integration_dag(root)

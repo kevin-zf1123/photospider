@@ -546,6 +546,7 @@ jobs:
       - name: Verify exact promotion identities
         env:
           CI_BUILT_DIGEST: ${{ needs.candidate-image-build.outputs.digest }}
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-promotion-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
           CI_SUITE_DIGEST: ${{ needs.candidate-image-integration.outputs.validated_image_digest }}
         run: |
           set -Eeuo pipefail
@@ -553,7 +554,10 @@ jobs:
             echo "Shared suite digest differs from the build-once candidate." >&2
             exit 1
           fi
-          python3 ci/scripts/ci_runner_verify.py --platform Linux
+          python3 ci/scripts/ci_runner_verify.py \
+            --platform Linux \
+            --runner-label ubuntu-24.04 \
+            --output "$CI_RUNNER_IDENTITY_FILE"
           python3 ci/scripts/ci_lock_verify.py
       - name: Log in to GHCR for same-digest promotion
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -574,6 +578,7 @@ jobs:
           --candidate-commit "${{ github.sha }}"
           --source-commit "${{ needs.candidate-image-build.outputs.source_commit }}"
           --manifest-digest "${{ needs.candidate-image-build.outputs.manifest_digest }}"
+          --builder-image-version "${{ needs.candidate-image-build.outputs.builder_image_version }}"
           --event-name "${{ github.event_name }}"
           --branch "$CI_PROMOTION_BRANCH"
       - name: Upload promotion evidence

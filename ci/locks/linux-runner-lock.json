@@ -1,7 +1,10 @@
 {
+  "approved_image_versions": [
+    "20260816.277.1",
+    "20260823.283.1"
+  ],
   "architecture": "x86_64",
   "image_os": "ubuntu24",
-  "image_version": "20260823.283.1",
   "runner_label": "ubuntu-24.04",
-  "schema": "photospider-linux-runner-lock-v1"
+  "schema": "photospider-linux-runner-lock-v2"
 }

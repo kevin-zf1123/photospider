@@ -3374,6 +3374,14 @@ The generated CLI configuration is mutually exclusive: CI does not pass
 removed scheduler keys to a policy/execution revision or introduce a product
 compatibility translation.
 
+The temporary current-main ASan/TSan fallback transports every target, possibly
+empty GoogleTest filter, and trust flag through one terminal NUL-framed v1
+stream. Its Bash 3.2/5 reader neither whitespace-splits nor evaluates a field,
+rejects incomplete or trailing records, and writes the exact decoded stream as
+diagnostic evidence before any target executes. Empty filters therefore retain
+their intended whole-binary selection instead of becoming adjacent boolean
+text.
+
 Darwin ASan, TSan, and bounded fuzz are three independent `macos-15` jobs. Each
 depends only on the common integration plan, consumes the same protected
 profile inventory, and publishes its own diagnostic result under its own
@@ -3390,31 +3398,53 @@ validation before writing output. Unknown steps/fields, `continue-on-error`,
 comments, no-op helpers, extra statements, or early success therefore fail.
 The helper source itself is accepted only when a verifier-owned exact byte
 SHA-256, the protected JSON helper hash, and the retained regular-file
-measurement all agree. This avoids Python-minor-dependent `ast.dump()` or
+measurement all agree. That measurement opens one descriptor with final-link
+refusal and close-on-exec, rejects special files without blocking, cross-checks
+pathname/descriptor metadata around two reads, and rejects path replacement or
+in-place byte drift. This avoids Python-minor-dependent `ast.dump()` or
 `ast.unparse()` identity. The process-boundary regressions launch Python through
 their current `sys.executable`, while independently exercising every result and
 attestation path.
 
 `healthcheck-published-image` is a container job. The protected
 `photospider-ci:latest` value is only the discovery locator; a trusted host
-preflight verifies its exact digest, attestation, OCI revision, and manifest
-labels, and all published-image healthcheck and build/test integration jobs run
-the resulting `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` reference.
+preflight resolves its exact digest and verifies the exact-subject attestation
+before Docker can pull or expand any image layer. It then pulls that digest,
+validates OCI revision and manifest labels, and all published-image healthcheck
+and build/test integration jobs run the resulting
+`ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` reference.
 Lightweight routing and result gates remain on `ubuntu-24.04`.
-The protected hosted identities are `ubuntu24/20260823.283.1` for the Linux
-builder and `macos15/20260824.0311.1` on `macos-15`/`arm64` for Darwin security;
-the latter binds vcpkg commit
-`127402f1c75bb3d5ff6bce04b285faa4930a5aca`. Linux run `32991073228` supplies
-the observed Linux readback
-([job evidence](https://github.com/kevin-zf1123/photospider/actions/runs/32991073228/job/98248727299)),
-while the official `actions/runner-images`
-[`ubuntu24/20260823.283`](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283)
+GitHub documents a two-to-three-day runner-image deployment window and directs
+exact-version diagnosis to each job's `Set up job` log
+([official guidance](https://github.com/actions/runner-images#what-image-version-is-used-in-my-build)).
+The reviewed Linux rollout set is stable `ubuntu24/20260816.277.1` plus rollout
+`ubuntu24/20260823.283.1`: exact-head runs
+[`32997831039`](https://github.com/kevin-zf1123/photospider/actions/runs/32997831039/job/98271915852)
+and
+[`32997831190`](https://github.com/kevin-zf1123/photospider/actions/runs/32997831190/job/98271974769)
+observed the former, while run
+[`32991073228`](https://github.com/kevin-zf1123/photospider/actions/runs/32991073228/job/98248727299)
+observed the latter. Their official identities are
+[`ubuntu24/20260816.277`](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260816.277)
+and
+[`ubuntu24/20260823.283`](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283).
+The Darwin set is stable `macos15/20260727.0256.1` mapped to vcpkg
+`6d9d7df564a1ccdaa994e4ad39ccd4a32360867b` and rollout
+`macos15/20260824.0311.1` mapped to
+`127402f1c75bb3d5ff6bce04b285faa4930a5aca`, matching official
+[`macos-15-arm64/20260727.0256`](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260727.0256)
 and
 [`macos-15-arm64/20260824.0311`](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311)
-releases supply the published identities. The Linux lock is included both as a
-manifest member and as `builder_runner`; Darwin is a separate execution lock.
-Any drift fails before candidate work rather than falling back to the mutable
-label. Immediately after checkout, the published
+release records. Each job creates one canonical retained runtime identity before
+candidate input. Linux manifest inputs bind the complete allowlist bytes, while
+`builder_runner` and the OCI builder-version label bind the actual build member;
+verification on the other approved host preserves that builder provenance.
+Darwin preparation consumes the retained version-to-vcpkg mapping without
+re-reading `ImageVersion`. Unknown/tampered members fail closed, and retiring a
+rollout member requires a reviewed lock update and rebuilt image. Runner lock
+and retained-record inputs require `O_NOFOLLOW`, `O_NONBLOCK`, and `O_CLOEXEC`,
+so FIFO/device inputs fail without blocking; fresh retained output uses
+`O_EXCL` and refuses residual state. Immediately after checkout, the published
 container's unique `Trust checked-out workspace` step binds `shell: bash`,
 adds only the exact `$GITHUB_WORKSPACE` to the job-persistent global
 `safe.directory`, and verifies `HEAD^{commit}` read-only. It neither configures
@@ -3432,7 +3462,7 @@ digest-bound suite. The callable producer is parsed as one complete workflow
 mapping: its only `workflow_call`, write permissions, single build job, outputs,
 and every ordered step field are exact. Checkout and the prebuild lock verifier
 must precede the sole Buildx build/push action; its complete `with` mapping
-admits only one temporary tag, two immutable labels, and the manifest/source
+admits only one temporary tag, three immutable labels, and the manifest/source
 build arguments. Any extra condition, environment, step, Docker/Buildx command,
 tag, build argument, or job fails the static contract. For pull
 requests, the published-image and local-image healthcheck jobs each fetch the
@@ -3483,10 +3513,14 @@ download are admitted, and the architecture-specific CLI SHA-256 must be
 consumed before extraction. Recomputing the JSON helper hash cannot authorize an
 APT alias, extra downloader, pipe-to-shell path, skipped check, uncalled main, or
 early exit.
-The image detector uses no Git status filter. The healthcheck static-scope
-inventory instead uses `--diff-filter=d` to omit deleted formatter/linter
-inputs while retaining type changes and uncommon non-deletion statuses. Both
-use NUL-delimited Git output and a parent-visible temporary file. A failing
+The image detector uses no Git status filter. Its sole selection authority is
+the self-including `input_paths` array from the strict CI-image lock, parsed
+independently at the merge base and head. The NUL-delimited Git path bytes are
+compared with the union of those validated revisions, so a newly added or
+removed input remains visible and malformed, duplicate, traversal, or missing
+lock state fails without output. The healthcheck static-scope inventory instead
+uses `--diff-filter=d` to omit deleted formatter/linter inputs while retaining
+type changes and uncommon non-deletion statuses. A failing lock read or
 `git diff` therefore terminates image detection or healthcheck static-scope
 detection without emitting a false negative route.
 
