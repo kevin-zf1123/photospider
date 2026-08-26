@@ -57,7 +57,7 @@
   ],
   "schema": "photospider-current-main-profiles-v1",
   "source_hashes": {
-    "CMakeLists.txt": "8499d9574e86c6aa97bb0c7941f43d008074d6d67a17ad6740ea59d3ff6d4b2b",
+    "CMakeLists.txt": "399332ca48dc19ae53817c53482012c2d6f1ce772556b265af7d59f09f3652bd",
     "cmake/PhotospiderCiInventory.cmake": "b47c4445d04fb5a1767e2aced88515712bf5d4f45f903f35dd467948bde9e367",
     "src/lib/execution/isolation/isolated_cpu_invocation_protocol.hpp": "060768f43092dfb6c25a4d4b6c406d7186619debd00ee2e11e267fa8b70bb9e7",
     "src/lib/server/worker/worker_protocol.hpp": "de791d1eb58968070157ac2e7d1e379fc031d6a7da840c11c696683c03017ede",

@@ -3,17 +3,27 @@
 set -Eeuo pipefail
 
 # @file ci_image_verify.sh
-# @brief Resolve a locator tag, verify GitHub attestation and canonical input
-#   labels, then emit the exact digest-qualified OCI image for candidate jobs.
+# @brief Resolve a protected or explicitly supplied locator, verify GitHub
+#   attestation and canonical input labels, then emit the exact digest-qualified
+#   OCI image for candidate jobs.
 # @note Run only in a trusted host job after protected checkout. The mutable tag
 #   is merely a discovery locator; no candidate command runs until its resolved
 #   digest has passed source-workflow, source-commit, manifest, and label checks.
+# @note ``CI_IMAGE_LOCATOR`` is reserved for a protected caller and must name
+#   either an exact temporary tag or digest-qualified reference in the locked
+#   repository. Optional expected digest, manifest, source, and workflow values
+#   independently bind reusable-workflow inputs to registry and checkout state.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 OUTPUT_FILE=${CI_IMAGE_OUTPUT_FILE:-${GITHUB_OUTPUT:-}}
 ARTIFACT_DIR=${CI_ARTIFACT_DIR:-$REPO_ROOT/CI-results/ci-image-identity}
 EXPECTED_REPOSITORY=${CI_IMAGE_REPOSITORY:-${GITHUB_REPOSITORY:-}}
+LOCATOR_OVERRIDE=${CI_IMAGE_LOCATOR:-}
+EXPECTED_DIGEST=${CI_IMAGE_EXPECTED_DIGEST:-}
+EXPECTED_MANIFEST_DIGEST=${CI_IMAGE_EXPECTED_MANIFEST_DIGEST:-}
+EXPECTED_SOURCE_COMMIT=${CI_IMAGE_EXPECTED_SOURCE_COMMIT:-}
+EXPECTED_WORKFLOW_COMMIT=${CI_IMAGE_EXPECTED_WORKFLOW_COMMIT:-}
 
 # @brief Print command usage for direct developer and workflow callers.
 # @return Always zero.
@@ -23,6 +33,10 @@ Usage: CI_IMAGE_REPOSITORY=owner/name ci/scripts/ci_image_verify.sh
 
 Required tools: git, docker with buildx, gh 2.49 or newer, and python3.
 Required authentication: GH_TOKEN/GITHUB_TOKEN with package read access.
+Protected callers may set CI_IMAGE_LOCATOR to an exact temporary tag or
+digest-qualified reference in the locked repository. CI_IMAGE_EXPECTED_DIGEST,
+CI_IMAGE_EXPECTED_MANIFEST_DIGEST, CI_IMAGE_EXPECTED_SOURCE_COMMIT, and
+CI_IMAGE_EXPECTED_WORKFLOW_COMMIT bind caller fields to measured state.
 The exact image, digest, source commit, and manifest digest are appended to
 CI_IMAGE_OUTPUT_FILE (or GITHUB_OUTPUT) when provided.
 EOF
@@ -46,6 +60,31 @@ done
 if [[ ! "$EXPECTED_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
   echo "CI_IMAGE_REPOSITORY must be an exact owner/name identity." >&2
   exit 2
+fi
+if [[ -n "$EXPECTED_DIGEST" && ! "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "CI_IMAGE_EXPECTED_DIGEST must be one canonical SHA-256 digest." >&2
+  exit 2
+fi
+if [[ -n "$EXPECTED_MANIFEST_DIGEST" &&
+  ! "$EXPECTED_MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "CI_IMAGE_EXPECTED_MANIFEST_DIGEST must be one lowercase SHA-256 value." >&2
+  exit 2
+fi
+for expected_commit_name in \
+  CI_IMAGE_EXPECTED_SOURCE_COMMIT \
+  CI_IMAGE_EXPECTED_WORKFLOW_COMMIT; do
+  expected_commit=${!expected_commit_name:-}
+  if [[ -n "$expected_commit" && ! "$expected_commit" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "$expected_commit_name must be one lowercase full Git SHA." >&2
+    exit 2
+  fi
+done
+if [[ -n "$EXPECTED_WORKFLOW_COMMIT" ]]; then
+  actual_workflow_commit=$(git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}')
+  if [[ "$actual_workflow_commit" != "$EXPECTED_WORKFLOW_COMMIT" ]]; then
+    echo "Protected checkout differs from CI_IMAGE_EXPECTED_WORKFLOW_COMMIT." >&2
+    exit 1
+  fi
 fi
 
 mkdir -p "$ARTIFACT_DIR"
@@ -104,6 +143,24 @@ if [[ "$EXPECTED_REPOSITORY" != "$locked_repository" ]]; then
   echo "Requested repository '$EXPECTED_REPOSITORY' differs from protected '$locked_repository'." >&2
   exit 1
 fi
+expected_image_repository="ghcr.io/$EXPECTED_REPOSITORY/photospider-ci"
+locator_declared_digest=
+if [[ -n "$LOCATOR_OVERRIDE" ]]; then
+  if [[ "$LOCATOR_OVERRIDE" =~ ^ghcr\.io/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+:[A-Za-z0-9_.-]+$ ]]; then
+    override_image_repository=${LOCATOR_OVERRIDE%:*}
+  elif [[ "$LOCATOR_OVERRIDE" =~ ^ghcr\.io/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@sha256:[0-9a-f]{64}$ ]]; then
+    override_image_repository=${LOCATOR_OVERRIDE%@*}
+    locator_declared_digest=${LOCATOR_OVERRIDE##*@}
+  else
+    echo "CI_IMAGE_LOCATOR must be one exact GHCR tag or digest locator." >&2
+    exit 2
+  fi
+  if [[ "$override_image_repository" != "$expected_image_repository" ]]; then
+    echo "Candidate locator repository differs from the protected repository." >&2
+    exit 1
+  fi
+  locator=$LOCATOR_OVERRIDE
+fi
 
 source_commit=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \
   --repo-root "$REPO_ROOT" source-commit)
@@ -113,6 +170,16 @@ manifest_digest=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \
   --repository "$EXPECTED_REPOSITORY" \
   --output "$manifest_path" \
   --digest-output "$manifest_digest_path")
+if [[ -n "$EXPECTED_SOURCE_COMMIT" &&
+  "$source_commit" != "$EXPECTED_SOURCE_COMMIT" ]]; then
+  echo "Measured CI image source commit differs from expected source commit." >&2
+  exit 1
+fi
+if [[ -n "$EXPECTED_MANIFEST_DIGEST" &&
+  "$manifest_digest" != "$EXPECTED_MANIFEST_DIGEST" ]]; then
+  echo "Measured CI image manifest digest differs from expected manifest digest." >&2
+  exit 1
+fi
 
 inspect_output=$(docker buildx imagetools inspect "$locator")
 mapfile -t image_digests < <(
@@ -124,13 +191,22 @@ if ((${#image_digests[@]} != 1)) ||
   exit 1
 fi
 image_digest=${image_digests[0]}
-image_repository=${locator%:*}
-exact_image=$image_repository@$image_digest
+if [[ -n "$locator_declared_digest" &&
+  "$image_digest" != "$locator_declared_digest" ]]; then
+  echo "Digest-qualified locator resolved to a different OCI digest." >&2
+  exit 1
+fi
+if [[ -n "$EXPECTED_DIGEST" && "$image_digest" != "$EXPECTED_DIGEST" ]]; then
+  echo "Locator digest '$image_digest' differs from expected '$EXPECTED_DIGEST'." >&2
+  exit 1
+fi
+exact_image=$expected_image_repository@$image_digest
 
 gh attestation verify "oci://$exact_image" \
   --repo "$EXPECTED_REPOSITORY" \
   --signer-workflow "$EXPECTED_REPOSITORY/$source_workflow" \
   --source-digest "$source_commit" \
+  --signer-digest "$source_commit" \
   --deny-self-hosted-runners \
   --format json > "$attestation_log"
 

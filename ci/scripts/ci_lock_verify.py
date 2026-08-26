@@ -3,8 +3,9 @@
 
 This durable verifier is intentionally independent of candidate product code.
 It rejects floating workflow actions/runners/images, persisted checkout tokens,
-unsafe pull-request-target trust routing, malformed protected locks, and Docker
-installation paths that bypass the immutable snapshot or hash locks.
+unsafe pull-request-target trust routing, reusable-workflow permission
+inheritance drift, malformed protected locks, and Docker installation paths
+that bypass the immutable snapshot or hash locks.
 Run it from any directory; ``--repo-root`` is primarily for fixture tests.
 """
 
@@ -130,6 +131,423 @@ def _workflow_files(root: Path) -> list[Path]:
     if not workflows:
         raise ContractError(f"{workflow_root}: workflow inventory is empty")
     return workflows
+
+
+def _workflow_job_blocks(path: Path) -> dict[str, list[str]]:
+    """Parse the protected workflow's top-level ``jobs`` mapping.
+
+    Args:
+        path: Regular workflow file whose two-space job layout is protected.
+
+    Returns:
+        A mapping from each exact job identifier to its indented body lines.
+
+    Raises:
+        ContractError: The workflow is unreadable, has no unique ``jobs``
+            mapping, repeats a job, or uses an unsupported top-level job shape.
+
+    Note:
+        This is intentionally a strict parser for the maintained workflow
+        subset, not a general YAML implementation. It interprets indentation
+        and mapping ownership so a matching string in a step cannot satisfy a
+        job-level permission contract.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise ContractError(f"cannot read workflow {path}: {error}") from error
+    jobs_indices = [index for index, line in enumerate(lines) if line == "jobs:"]
+    if len(jobs_indices) != 1:
+        raise ContractError(f"{path}: expected exactly one top-level jobs mapping")
+
+    jobs: dict[str, list[str]] = {}
+    current_name: str | None = None
+    for line_number, line in enumerate(lines[jobs_indices[0] + 1 :], jobs_indices[0] + 2):
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            if current_name is not None:
+                jobs[current_name].append(line)
+            continue
+        indent = len(line) - len(stripped)
+        if indent == 0:
+            break
+        if indent == 2:
+            match = re.fullmatch(r"  ([a-z][a-z0-9_-]*):", line)
+            if match is None:
+                raise ContractError(
+                    f"{path}:{line_number}: unsupported protected job key"
+                )
+            current_name = match.group(1)
+            if current_name in jobs:
+                raise ContractError(f"{path}:{line_number}: duplicate job {current_name}")
+            jobs[current_name] = []
+            continue
+        if current_name is None:
+            raise ContractError(
+                f"{path}:{line_number}: content precedes the first protected job"
+            )
+        jobs[current_name].append(line)
+    if not jobs:
+        raise ContractError(f"{path}: protected jobs mapping is empty")
+    return jobs
+
+
+def _job_field_occurrences(lines: list[str], field: str) -> list[tuple[int, str]]:
+    """Return exact job-level occurrences of one YAML mapping field.
+
+    Args:
+        lines: Body lines owned by one top-level job.
+        field: Literal job-level field name to locate.
+
+    Returns:
+        Zero or more ``(line_index, scalar_tail)`` occurrences at four-space
+        indentation. The scalar tail is empty for a nested mapping.
+
+    Raises:
+        ContractError: ``field`` is not a canonical protected key name.
+
+    Note:
+        Step-level and expression text are deliberately excluded by the exact
+        indentation boundary.
+    """
+    if re.fullmatch(r"[a-z][a-z0-9_-]*", field) is None:
+        raise ContractError(f"invalid protected workflow field {field!r}")
+    pattern = re.compile(rf"^    {re.escape(field)}:\s*(.*?)\s*$")
+    occurrences: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        match = pattern.fullmatch(line)
+        if match is not None:
+            occurrences.append((index, match.group(1)))
+    return occurrences
+
+
+def _job_nested_mapping(
+    path: Path,
+    job_name: str,
+    lines: list[str],
+    field: str,
+) -> dict[str, str] | None:
+    """Parse one strict job-level scalar mapping or literal empty mapping.
+
+    Args:
+        path: Workflow path used in fail-closed diagnostics.
+        job_name: Exact owner job identifier.
+        lines: Body lines owned by ``job_name``.
+        field: Job-level mapping field, such as ``permissions`` or ``with``.
+
+    Returns:
+        ``None`` when the field is absent, otherwise its exact scalar entries.
+        A literal ``{}`` returns an empty mapping.
+
+    Raises:
+        ContractError: The field is duplicated, uses aliases/non-scalar values,
+            repeats a key, or escapes the maintained six-space mapping shape.
+
+    Note:
+        The parser intentionally rejects YAML merge keys and anchors. Protected
+        permission ownership must remain explicit in the reviewed job itself.
+    """
+    occurrences = _job_field_occurrences(lines, field)
+    if not occurrences:
+        return None
+    if len(occurrences) != 1:
+        raise ContractError(f"{path}: job {job_name} repeats {field}")
+    field_index, scalar_tail = occurrences[0]
+    if scalar_tail == "{}":
+        return {}
+    if scalar_tail:
+        raise ContractError(
+            f"{path}: job {job_name} {field} must be an explicit mapping"
+        )
+
+    result: dict[str, str] = {}
+    entry_pattern = re.compile(r"^      ([a-z][a-z0-9_-]*):\s*(.*?)\s*$")
+    for line_number, line in enumerate(lines[field_index + 1 :], field_index + 2):
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(stripped)
+        if indent <= 4:
+            break
+        match = entry_pattern.fullmatch(line)
+        if match is None:
+            raise ContractError(
+                f"{path}: job {job_name} has unsupported {field} entry at "
+                f"body line {line_number}"
+            )
+        key, value = match.groups()
+        if not value:
+            raise ContractError(
+                f"{path}: job {job_name} has an empty {field}.{key} value"
+            )
+        if key in result:
+            raise ContractError(f"{path}: job {job_name} repeats {field}.{key}")
+        result[key] = value
+    if not result:
+        raise ContractError(
+            f"{path}: job {job_name} must use literal {{}} for empty {field}"
+        )
+    return result
+
+
+def _job_scalar(path: Path, job_name: str, lines: list[str], field: str) -> str | None:
+    """Return one exact job-level scalar without interpreting YAML aliases.
+
+    Args:
+        path: Workflow path used in diagnostics.
+        job_name: Exact owner job identifier.
+        lines: Body lines owned by ``job_name``.
+        field: Literal scalar field to read.
+
+    Returns:
+        The scalar text, or ``None`` when the field is absent.
+
+    Raises:
+        ContractError: The field is duplicated or encoded as a nested/block
+            value rather than one explicit scalar.
+    """
+    occurrences = _job_field_occurrences(lines, field)
+    if not occurrences:
+        return None
+    if len(occurrences) != 1:
+        raise ContractError(f"{path}: job {job_name} repeats {field}")
+    _, value = occurrences[0]
+    if not value or value in {">", ">-", "|", "|-"}:
+        raise ContractError(f"{path}: job {job_name} {field} is not a scalar")
+    return value
+
+
+def _job_condition(path: Path, job_name: str, lines: list[str]) -> str | None:
+    """Return one whitespace-normalized job condition expression.
+
+    Args:
+        path: Workflow path used in diagnostics.
+        job_name: Exact owner job identifier.
+        lines: Body lines owned by ``job_name``.
+
+    Returns:
+        The scalar or folded-block condition with all whitespace removed, or
+        ``None`` when the job has no condition.
+
+    Raises:
+        ContractError: ``if`` is duplicated, empty, or uses an unsupported
+            block-scalar shape.
+
+    Note:
+        Normalization is limited to whitespace because the protected condition
+        contains no string literal in which whitespace is semantically owned.
+    """
+    occurrences = _job_field_occurrences(lines, "if")
+    if not occurrences:
+        return None
+    if len(occurrences) != 1:
+        raise ContractError(f"{path}: job {job_name} repeats if")
+    field_index, scalar_tail = occurrences[0]
+    fragments: list[str]
+    if scalar_tail in {">", ">-", "|", "|-"}:
+        fragments = []
+        for line in lines[field_index + 1 :]:
+            stripped = line.lstrip()
+            if not stripped:
+                continue
+            indent = len(line) - len(stripped)
+            if indent <= 4:
+                break
+            fragments.append(stripped)
+    elif scalar_tail:
+        fragments = [scalar_tail]
+    else:
+        raise ContractError(f"{path}: job {job_name} has an empty if condition")
+    if not fragments:
+        raise ContractError(f"{path}: job {job_name} has an empty if condition")
+    return re.sub(r"\s+", "", " ".join(fragments))
+
+
+def _verify_reusable_workflow_permissions(root: Path) -> None:
+    """Validate caller ceilings and per-job isolation in the shared CI DAG.
+
+    Args:
+        root: Repository root containing the protected caller and reusable DAG.
+
+    Raises:
+        ContractError: A caller can publish with insufficient grants, a
+            read-only caller receives write authority, the reusable workflow
+            declares a workflow-wide ceiling, any execution job can inherit
+            caller writes, or the sole attestation job requests an elevation.
+
+    Note:
+        GitHub validates reusable-workflow permission compatibility before a
+        job-level ``if`` can skip execution. The attestation job therefore has
+        no local ``permissions`` declaration and may inherit write grants only
+        from one of the two trusted callers; every other job declares an exact
+        read-only or empty permission mapping and cannot inherit those writes.
+    """
+    caller_path = root / ".github/workflows/ci-integration.yml"
+    shared_path = root / ".github/workflows/ci-integration-suite.yml"
+    shared_text = shared_path.read_text(encoding="utf-8")
+    if any(line.startswith("permissions:") for line in shared_text.splitlines()):
+        raise ContractError(
+            f"{shared_path}: reusable workflow must not set workflow-level permissions"
+        )
+
+    caller_jobs = _workflow_job_blocks(caller_path)
+    shared_jobs = _workflow_job_blocks(shared_path)
+    reusable_callers = {
+        name: lines
+        for name, lines in caller_jobs.items()
+        if _job_scalar(caller_path, name, lines, "uses")
+        == "./.github/workflows/ci-integration-suite.yml"
+    }
+    expected_callers = {
+        "published-image-integration-readonly": (
+            {
+                "attestations": "read",
+                "contents": "read",
+                "packages": "read",
+            },
+            "false",
+        ),
+        "published-image-integration-trusted": (
+            {
+                "artifact-metadata": "write",
+                "attestations": "write",
+                "contents": "read",
+                "id-token": "write",
+                "packages": "read",
+            },
+            "true",
+        ),
+        "candidate-image-integration": (
+            {
+                "artifact-metadata": "write",
+                "attestations": "write",
+                "contents": "read",
+                "id-token": "write",
+                "packages": "read",
+            },
+            "true",
+        ),
+    }
+    if set(reusable_callers) != set(expected_callers):
+        raise ContractError(
+            f"{caller_path}: shared-suite callers differ: "
+            f"expected={sorted(expected_callers)}, actual={sorted(reusable_callers)}"
+        )
+    for job_name, (expected_permissions, expected_publish) in expected_callers.items():
+        lines = reusable_callers[job_name]
+        permissions = _job_nested_mapping(caller_path, job_name, lines, "permissions")
+        publish_inputs = _job_nested_mapping(caller_path, job_name, lines, "with")
+        if permissions != expected_permissions:
+            raise ContractError(
+                f"{caller_path}: caller {job_name} permissions differ: {permissions!r}"
+            )
+        if publish_inputs is None or publish_inputs.get(
+            "publish_reusable_attestations"
+        ) != expected_publish:
+            raise ContractError(
+                f"{caller_path}: caller {job_name} publication mode differs"
+            )
+
+    expected_job_permissions: dict[str, dict[str, str]] = {
+        "identity-preflight": {
+            "attestations": "read",
+            "contents": "read",
+            "packages": "read",
+        },
+        "integration-plan": {"contents": "read", "packages": "read"},
+        "build-integrity-default": {"contents": "read", "packages": "read"},
+        "verify-targeted-artifacts": {"contents": "read"},
+        "targeted-artifacts-ready": {},
+        "full-ctest": {
+            "attestations": "read",
+            "contents": "read",
+            "packages": "read",
+        },
+        "build-smoke": {
+            "attestations": "read",
+            "contents": "read",
+            "packages": "read",
+        },
+        "openexr-smoke": {
+            "attestations": "read",
+            "contents": "read",
+            "packages": "read",
+        },
+        "scripted-cli": {
+            "attestations": "read",
+            "contents": "read",
+            "packages": "read",
+        },
+        "propagation-script": {
+            "attestations": "read",
+            "contents": "read",
+            "packages": "read",
+        },
+        "plugin-load": {
+            "attestations": "read",
+            "contents": "read",
+            "packages": "read",
+        },
+        "execution-repeat": {
+            "attestations": "read",
+            "contents": "read",
+            "packages": "read",
+        },
+        "installed-package-consumer": {
+            "attestations": "read",
+            "contents": "read",
+            "packages": "read",
+        },
+        "sanitizer-asan": {"contents": "read", "packages": "read"},
+        "sanitizer-tsan": {"contents": "read", "packages": "read"},
+        "fuzz-codecs": {"contents": "read", "packages": "read"},
+        "security-darwin": {"contents": "read"},
+        "suite-gate": {},
+    }
+    attestation_job = "attest-targeted-artifacts"
+    expected_jobs = set(expected_job_permissions) | {attestation_job}
+    if set(shared_jobs) != expected_jobs:
+        raise ContractError(
+            f"{shared_path}: shared jobs differ: expected={sorted(expected_jobs)}, "
+            f"actual={sorted(shared_jobs)}"
+        )
+    for job_name, expected_permissions in expected_job_permissions.items():
+        permissions = _job_nested_mapping(
+            shared_path, job_name, shared_jobs[job_name], "permissions"
+        )
+        if permissions != expected_permissions:
+            raise ContractError(
+                f"{shared_path}: job {job_name} read-only permissions differ: "
+                f"{permissions!r}"
+            )
+        if any(value != "read" for value in permissions.values()):
+            raise ContractError(
+                f"{shared_path}: job {job_name} contains a non-read permission"
+            )
+
+    inherited = _job_nested_mapping(
+        shared_path,
+        attestation_job,
+        shared_jobs[attestation_job],
+        "permissions",
+    )
+    if inherited is not None:
+        raise ContractError(
+            f"{shared_path}: {attestation_job} must inherit the trusted caller ceiling"
+        )
+    condition = _job_condition(
+        shared_path, attestation_job, shared_jobs[attestation_job]
+    )
+    expected_condition = re.sub(
+        r"\s+",
+        "",
+        "${{ inputs.publish_reusable_attestations && "
+        "needs.verify-targeted-artifacts.result == 'success' }}",
+    )
+    if condition != expected_condition:
+        raise ContractError(
+            f"{shared_path}: {attestation_job} trust condition differs"
+        )
 
 
 def _step_lines(lines: list[str], action_index: int) -> list[str]:
@@ -358,6 +776,7 @@ def _verify_workflows(root: Path, actions: dict[str, tuple[str, str]]) -> None:
                 image = image_match.group(1)
                 if "${{" in image:
                     trusted_outputs = (
+                        "inputs.image_ref",
                         "needs.ci-image-identity.outputs.image",
                         "steps.identity.outputs.image",
                     )
@@ -462,32 +881,26 @@ def _verify_image_lock(root: Path, actions: dict[str, tuple[str, str]]) -> None:
             raise ContractError(f"{path}: image input is not a regular repository file: {relative}")
 
     workflow_path = root / ".github/workflows/build-ci-image.yml"
-    workflow_lines = workflow_path.read_text(encoding="utf-8").splitlines()
-    trigger_paths: list[str] = []
-    in_paths = False
-    for line in workflow_lines:
-        if line == "    paths:":
-            if in_paths:
-                raise ContractError(f"{workflow_path}: duplicate push path list")
-            in_paths = True
-            continue
-        if in_paths and line.startswith("      - "):
-            trigger_paths.append(line.removeprefix("      - "))
-            continue
-        if in_paths:
-            break
-    if len(trigger_paths) != len(set(trigger_paths)) or sorted(trigger_paths) != input_paths:
-        raise ContractError(
-            f"{workflow_path}: push paths differ from canonical image inputs"
-        )
     workflow_text = workflow_path.read_text(encoding="utf-8")
+    if "  workflow_call:" not in workflow_text:
+        raise ContractError(f"{workflow_path}: image producer is not reusable")
+    if re.search(
+        r"(?m)^  (?:push|pull_request|pull_request_target|workflow_dispatch):",
+        workflow_text,
+    ):
+        raise ContractError(
+            f"{workflow_path}: image producer must be callable only by the protected integration route"
+        )
     source_contract = (
         "publish-source-commit",
-        '--workflow-commit "${{ github.sha }}"',
+        '--workflow-commit "${{ inputs.candidate_commit }}"',
         '--source-commit "${{ steps.source.outputs.commit }}"',
         "org.opencontainers.image.revision=${{ steps.source.outputs.commit }}",
         "CI_IMAGE_SOURCE_COMMIT=${{ steps.source.outputs.commit }}",
-        "name: ci-image-input-${{ steps.source.outputs.commit }}",
+        "name: ci-image-input-${{ steps.source.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}",
+        "CI_IMAGE_EXPECTED_DIGEST: ${{ steps.push.outputs.digest }}",
+        "CI_IMAGE_LOCATOR: ${{ steps.caller.outputs.temporary_image }}",
+        "tags: ${{ steps.caller.outputs.temporary_image }}",
     )
     for fragment in source_contract:
         if workflow_text.count(fragment) != 1:
@@ -515,6 +928,25 @@ def _verify_image_lock(root: Path, actions: dict[str, tuple[str, str]]) -> None:
             raise ContractError(
                 f"{workflow_path}: source identity guard must precede {publication_marker}"
             )
+    if workflow_text.count("uses: docker/build-push-action@") != 1:
+        raise ContractError(f"{workflow_path}: candidate image must be built exactly once")
+    forbidden_publisher_fragments = (
+        "docker/metadata-action@",
+        "type=raw,value=latest",
+        "type=ref,event=branch",
+        "workflow_dispatch:",
+    )
+    for fragment in forbidden_publisher_fragments:
+        if fragment in workflow_text:
+            raise ContractError(
+                f"{workflow_path}: build step may not publish canonical routing {fragment!r}"
+            )
+    attest_index = workflow_text.find("subject-digest: ${{ steps.push.outputs.digest }}")
+    verify_index = workflow_text.find("Verify candidate digest, attestation, and labels")
+    if attest_index < 0 or verify_index < attest_index:
+        raise ContractError(
+            f"{workflow_path}: exact candidate attestation must precede verified output"
+        )
     published = lock["published_image"]
     _exact_keys(
         published,
@@ -584,7 +1016,9 @@ def _verify_darwin_lock(root: Path) -> None:
         raise ContractError(f"{path}: malformed GitHub runner image version")
     if not re.fullmatch(r"[0-9a-f]{40}", str(lock["vcpkg_commit"])):
         raise ContractError(f"{path}: vcpkg identity is not a full commit SHA")
-    integration = (root / ".github/workflows/ci-integration.yml").read_text(encoding="utf-8")
+    integration = (root / ".github/workflows/ci-integration-suite.yml").read_text(
+        encoding="utf-8"
+    )
     if "runs-on: macos-15" not in integration or "security-darwin:" not in integration:
         raise ContractError("CI integration does not consume the protected Darwin runner identity")
 
@@ -635,6 +1069,218 @@ def _verify_fuzz_job_timeout(root: Path) -> None:
             )
 
 
+def _verify_shared_integration_dag(root: Path) -> None:
+    """Require build-once routing and role-minimal shared integration artifacts.
+
+    Args:
+        root: Repository root containing protected workflows, scripts, and lock.
+
+    Raises:
+        ContractError: Ordinary/candidate callers diverge, image production is
+            duplicated, promotion can rebuild or bypass suite success, the
+            serial aggregate remains, or artifact/parallelism boundaries drift.
+    """
+    integration_path = root / ".github/workflows/ci-integration.yml"
+    shared_path = root / ".github/workflows/ci-integration-suite.yml"
+    healthcheck_path = root / ".github/workflows/ci-healthcheck.yml"
+    integration = integration_path.read_text(encoding="utf-8")
+    shared = shared_path.read_text(encoding="utf-8")
+    healthcheck = healthcheck_path.read_text(encoding="utf-8")
+    if integration.count("uses: ./.github/workflows/build-ci-image.yml") != 1:
+        raise ContractError(f"{integration_path}: candidate builder call is not unique")
+    if integration.count("uses: ./.github/workflows/ci-integration-suite.yml") != 3:
+        raise ContractError(
+            f"{integration_path}: published/read-only, published/trusted, and candidate routes must share one workflow"
+        )
+    required_integration = (
+        "needs: [candidate-image-build, candidate-image-integration]",
+        "needs.candidate-image-integration.outputs.validated_image_digest",
+        "bash ci/scripts/ci_image_promote.sh",
+        "packages: write",
+        "github.event_name == 'push'",
+    )
+    if any(fragment not in integration for fragment in required_integration):
+        raise ContractError(f"{integration_path}: same-digest promotion contract differs")
+    if "integration_suite.sh" in integration or "docker build" in healthcheck:
+        raise ContractError("serial integration or duplicate healthcheck image build remains")
+    forbidden_shared = (
+        "ci-build-default",
+        "reusable_build_consume.sh",
+        "integration_suite.sh",
+    )
+    if any(fragment in shared for fragment in forbidden_shared):
+        raise ContractError(f"{shared_path}: coarse reusable artifact path remains")
+    required_shared = (
+        "workflow_call:",
+        "image_ref:",
+        "image_digest:",
+        "candidate_commit:",
+        "ci-control-default",
+        "ci-runtime-default",
+        "ci-installed-package-default",
+        "ci-openexr-metadata-default",
+        "targeted_artifact_consume.sh",
+        "static_product_consumer_test.sh",
+        "installed-package-consumer:",
+        "openexr-smoke:",
+        "suite-gate:",
+    )
+    if any(fragment not in shared for fragment in required_shared):
+        raise ContractError(f"{shared_path}: targeted shared DAG contract differs")
+
+    identity_block = shared.split("  identity-preflight:\n", 1)[1].split(
+        "\n  integration-plan:\n", 1
+    )[0]
+    identity_contract = (
+        "repository: ${{ github.repository }}",
+        "ref: ${{ inputs.workflow_commit }}",
+        "path: .ci-protected-control",
+        "CI_EXPECTED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}",
+        "CI_IMAGE_EXPECTED_DIGEST: ${{ inputs.image_digest }}",
+        "CI_IMAGE_EXPECTED_MANIFEST_DIGEST: ${{ inputs.image_manifest_digest }}",
+        "CI_IMAGE_EXPECTED_SOURCE_COMMIT: ${{ inputs.image_source_commit }}",
+        "CI_IMAGE_EXPECTED_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}",
+        "bash .ci-protected-control/ci/scripts/ci_image_verify.sh",
+    )
+    if any(fragment not in identity_block for fragment in identity_contract):
+        raise ContractError(
+            f"{shared_path}: called-workflow image identity preflight differs"
+        )
+    if "repository: ${{ inputs.checkout_repository }}" in identity_block:
+        raise ContractError(
+            f"{shared_path}: identity preflight checks out candidate repository code"
+        )
+    checkout_index = identity_block.find("Checkout protected reusable workflow control")
+    login_index = identity_block.find("Authenticate exact GHCR identity reader")
+    verify_index = identity_block.find(
+        "bash .ci-protected-control/ci/scripts/ci_image_verify.sh"
+    )
+    if checkout_index < 0 or login_index < checkout_index or verify_index < login_index:
+        raise ContractError(
+            f"{shared_path}: protected image verification order is incomplete"
+        )
+    if (
+        "path: |\n            CI-results/installed-package-consumer"
+        in shared
+    ):
+        raise ContractError(
+            f"{shared_path}: installed evidence re-uploads the restored package tree"
+        )
+
+    targeted_consumer = (root / "ci/scripts/targeted_artifact_consume.sh").read_text(
+        encoding="utf-8"
+    )
+    attestation_contract = (
+        '--source-digest "$CI_CANDIDATE_COMMIT"',
+        '--signer-digest "$CI_WORKFLOW_COMMIT"',
+        "$GITHUB_REPOSITORY/.github/workflows/ci-integration-suite.yml",
+        "snapshot-targeted-manifest",
+        '--expected-manifest-sha256 "$manifest_snapshot_digest"',
+        "CI_STATIC_PACKAGE_MANIFEST_SHA256",
+    )
+    if any(fragment not in targeted_consumer for fragment in attestation_contract):
+        raise ContractError(
+            "targeted artifact source/signer attestation identity differs"
+        )
+    if '--source-digest "$CI_WORKFLOW_COMMIT"' in targeted_consumer:
+        raise ContractError("workflow commit is incorrectly used as artifact source")
+
+    common = (root / "ci/scripts/common.sh").read_text(encoding="utf-8")
+    ctest = (root / "ci/scripts/ctest_full.sh").read_text(encoding="utf-8")
+    build = (root / "ci/scripts/build_integrity.sh").read_text(encoding="utf-8")
+    reusable = (root / "ci/scripts/reusable_build.py").read_text(encoding="utf-8")
+    if "export CMAKE_BUILD_PARALLEL_LEVEL=$CI_JOBS" not in common:
+        raise ContractError("common CI boundary does not export the nested CMake job limit")
+    for fragment in ('--parallel "$CI_JOBS"', '--output-junit "$CI_ARTIFACT_DIR/ctest-full.junit.xml"'):
+        if fragment not in ctest:
+            raise ContractError(f"ordinary CTest contract differs at {fragment!r}")
+    required_index = build.find("ensure_ci_targets build_required_targets")
+    all_index = build.find("ensure_ci_all build_all")
+    route_index = build.find("build_smoke_route.py")
+    if required_index < 0 or all_index < required_index or route_index < all_index:
+        raise ContractError("producer phases no longer reuse one sequential build tree")
+    closure_contract = (
+        "ordinary_ctest_closure_v1.json",
+        "ctest_runtime_closure.py",
+        "dedicated_build_smoke_matrix",
+        "openexr_build_smoke_matrix",
+    )
+    if any(fragment not in build for fragment in closure_contract):
+        raise ContractError("producer does not emit complete role/CTest closure routing")
+    package_contract = (
+        "producer/CMakeCache.txt",
+        "producer/generated/ci_inventory/",
+        "installable_public_headers.txt",
+    )
+    if any(fragment not in reusable for fragment in package_contract):
+        raise ContractError("installed-package producer metadata contract differs")
+    openexr_contract = (
+        '"openexr-metadata"',
+        'PurePosixPath("producer/CMakeCache.txt")',
+        "verify-targeted-tree",
+    )
+    if any(fragment not in reusable for fragment in openexr_contract):
+        raise ContractError("OpenEXR/package targeted role contract differs")
+    static_runner = (root / "ci/scripts/static_product_consumer_test.sh").read_text(
+        encoding="utf-8"
+    )
+    for fragment in (
+        "verify_package_content before",
+        "verify_package_content after",
+        "--content-root \"$PACKAGE_ROOT\"",
+        "ATTESTED_MANIFEST_SHA256",
+        '--expected-manifest-sha256 "$ATTESTED_MANIFEST_SHA256"',
+    ):
+        if fragment not in static_runner:
+            raise ContractError(
+                "installed-package before/after content verification differs"
+            )
+    if "mapfile" in static_runner:
+        raise ContractError(
+            "installed-package runner requires unavailable Darwin Bash mapfile"
+        )
+    openexr_runner = (root / "ci/scripts/openexr_smoke_test.sh").read_text(
+        encoding="utf-8"
+    )
+    for fragment in (
+        "CMAKE_BUILD_TYPE",
+        "CMAKE_CONFIGURATION_TYPES",
+        'build_configuration=$(require_cached_build_configuration)',
+        '--config "$build_configuration"',
+    ):
+        if fragment not in openexr_runner:
+            raise ContractError(
+                "OpenEXR metadata runner does not bind producer configuration"
+            )
+    if '${CMAKE_BUILD_TYPE:-' in openexr_runner:
+        raise ContractError(
+            "OpenEXR metadata runner permits environment configuration override"
+        )
+
+    routing_path = root / "ci/locks/build-smoke-routing.json"
+    routing = _load_json(routing_path)
+    if not isinstance(routing, dict) or set(routing) != {
+        "dedicated_consumer_roles",
+        "default_consumer_role",
+        "producer_tests",
+        "schema",
+    }:
+        raise ContractError(f"{routing_path}: routing fields differ")
+    if routing["schema"] != "photospider-build-smoke-routing-v3":
+        raise ContractError(f"{routing_path}: routing schema is unknown")
+    if routing["default_consumer_role"] != "ctest-control":
+        raise ContractError(f"{routing_path}: default artifact role differs")
+    _require_sorted_unique(routing["producer_tests"], f"{routing_path}:producer_tests")
+    if routing["producer_tests"] != ["PublicHeaderSelfContainment"]:
+        raise ContractError(f"{routing_path}: producer-local role differs")
+    dedicated = routing["dedicated_consumer_roles"]
+    if dedicated != {
+        "OpenExrDeepProviderOptionOffSmoke": "openexr-metadata",
+        "StaticProductConsumerSmoke": "installed-package",
+    }:
+        raise ContractError(f"{routing_path}: dedicated consumer roles differ")
+
+
 def verify(root: Path) -> None:
     """Run the complete protected lock and active-consumer validation."""
     actions = _read_actions(root / "ci/locks/actions.lock")
@@ -645,6 +1291,8 @@ def verify(root: Path) -> None:
     _verify_darwin_lock(root)
     _verify_linux_runner_lock(root)
     _verify_fuzz_job_timeout(root)
+    _verify_reusable_workflow_permissions(root)
+    _verify_shared_integration_dag(root)
     _verify_workflows(root, actions)
 
 

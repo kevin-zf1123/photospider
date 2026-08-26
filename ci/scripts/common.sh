@@ -16,6 +16,19 @@ CI_REUSE_BUILD=${CI_REUSE_BUILD:-OFF}
 CI_BUILD_PROFILE=${CI_BUILD_PROFILE:-default}
 BUILD_TESTING=${BUILD_TESTING:-ON}
 
+# @var CMAKE_BUILD_PARALLEL_LEVEL
+# @brief Canonical parallel bound inherited by every direct or nested CMake
+#   build launched from a maintained CI shell/Python process.
+# @note CI_JOBS is validated once at the shared entry boundary. Individual
+#   profiles may impose a separately documented stricter bound, but nested
+#   consumers must not silently replace this value with hard-coded ``-j``
+#   arguments.
+if [[ ! "$CI_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "CI_JOBS must be a positive canonical integer." >&2
+  exit 2
+fi
+export CMAKE_BUILD_PARALLEL_LEVEL=$CI_JOBS
+
 # @var BUILD_SMOKE_LABEL
 # @brief Exact immutable CTest label used for discovery and full-suite exclusion.
 # @note This process-lifetime value must match build_smoke_inventory.py and is
@@ -83,11 +96,11 @@ configure_ci_build() {
 }
 
 build_ci_targets() {
-  cmake --build "$BUILD_DIR" --target "$@" -j "$CI_JOBS"
+  cmake --build "$BUILD_DIR" --target "$@"
 }
 
 build_ci_all() {
-  cmake --build "$BUILD_DIR" -j "$CI_JOBS"
+  cmake --build "$BUILD_DIR"
 }
 
 ci_reuse_build_enabled() {
@@ -302,8 +315,30 @@ ensure_ci_all() {
 # @throws Nothing; configuration and generator failures return nonzero.
 # @note This read-only query works for both fresh and reusable build trees.
 capture_ci_target_inventory() {
+  local canonical_inventory
+  canonical_inventory=
+  canonical_inventory="$BUILD_DIR/generated/ci_inventory/cmake_target_inventory.log"
+  if ci_reuse_build_enabled; then
+    if [[ ! -f "$canonical_inventory" || -L "$canonical_inventory" ||
+      ! -s "$canonical_inventory" ]]; then
+      echo "Reusable target inventory is unavailable: $canonical_inventory" >&2
+      return 1
+    fi
+    CI_TARGET_INVENTORY_FILE=$canonical_inventory
+    log_reused_step cmake_target_inventory \
+      "Reusing producer-captured target inventory at $canonical_inventory."
+    return
+  fi
   run_logged cmake_target_inventory \
     cmake --build "$BUILD_DIR" --target help
+  mkdir -p -- "${canonical_inventory%/*}"
+  cp -- "$CI_TARGET_INVENTORY_FILE" "$canonical_inventory"
+  if [[ ! -f "$canonical_inventory" || -L "$canonical_inventory" ||
+    ! -s "$canonical_inventory" ]]; then
+    echo "Producer target inventory was not staged safely." >&2
+    return 1
+  fi
+  CI_TARGET_INVENTORY_FILE=$canonical_inventory
 }
 
 # @brief Check one exact target in a valid captured CMake target inventory.

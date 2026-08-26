@@ -459,8 +459,7 @@ jobs:
             "+refs/heads/main:refs/remotes/origin/main"
           git rev-parse --verify "origin/main^{commit}" >/dev/null
 
-      - name: Build local CI image
-        id: local-image
+      - name: Verify image-input contract without rebuilding
         env:
           CI_IMAGE_MANIFEST_DIR: ${{ github.workspace }}/CI-results/local-ci-image-identity
         run: |
@@ -468,40 +467,20 @@ jobs:
           python3 ci/scripts/ci_runner_verify.py --platform Linux
           python3 ci/scripts/ci_lock_verify.py
           mkdir -p "$CI_IMAGE_MANIFEST_DIR"
-          source_commit=$(git rev-parse HEAD)
+          source_commit=$(python3 ci/scripts/ci_image_manifest.py \
+            publish-source-commit --workflow-commit "${{ github.sha }}")
           manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
             --source-commit "$source_commit" \
             --repository "${{ github.repository }}" \
             --output "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.json" \
             --digest-output "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.sha256")
-          docker build \
-            --build-arg "CI_IMAGE_INPUT_MANIFEST_SHA256=$manifest_digest" \
-            --build-arg "CI_IMAGE_SOURCE_COMMIT=$source_commit" \
-            -t photospider-ci:local -f Dockerfile.ci .
-          docker image inspect --format '{{json .Config.Labels}}' \
-            photospider-ci:local > "$CI_IMAGE_MANIFEST_DIR/oci-labels.json"
-          python3 ci/scripts/ci_image_manifest.py verify-labels \
-            --manifest "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.json" \
-            --labels-json "$CI_IMAGE_MANIFEST_DIR/oci-labels.json" \
-            --source-commit "$source_commit"
-          image_id=$(docker image inspect --format '{{.Id}}' photospider-ci:local)
-          if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "Local image did not produce an immutable image ID." >&2
-            exit 1
-          fi
-          printf 'image_id=%s\n' "$image_id" >> "$GITHUB_OUTPUT"
+          [[ "$manifest_digest" =~ ^[0-9a-f]{64}$ ]]
 
-      - name: Run healthcheck in local CI image
+      - name: Run protected healthcheck without a second image build
         env:
           CI_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || (github.event_name == 'push' && startsWith(github.ref_name, 'CI/')) && 'origin/main' || github.event_name == 'push' && github.event.before || 'origin/main' }}
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            -e CI_BASE_REF \
-            -e CI_ARTIFACT_DIR=/workspace/CI-results/healthcheck \
-            "${{ steps.local-image.outputs.image_id }}" \
-            bash ci/scripts/healthcheck.sh
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/healthcheck
+        run: bash ci/scripts/healthcheck.sh
 
       - name: Upload healthcheck logs
         if: always()
@@ -577,7 +556,7 @@ jobs:
                 "$PUBLISHED_HEALTHCHECK_RESULT" skipped
               require_value healthcheck-local-image \
                 "$LOCAL_HEALTHCHECK_RESULT" success
-              echo "Healthcheck passed in the locally built CI image." |
+              echo "Protected healthcheck passed; Integration owns the single candidate image build." |
                 tee -a "$GITHUB_STEP_SUMMARY"
               ;;
             false)

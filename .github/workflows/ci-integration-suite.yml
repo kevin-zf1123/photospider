@@ -1,0 +1,1160 @@
+name: CI Integration Suite
+
+# GitHub validates the permission ceiling of a called workflow before a job's
+# `if` can skip it. Every execution job therefore declares its own read-only
+# token; only the conditionally selected attestation job inherits the trusted
+# caller's write grants.
+
+on:
+  workflow_call:
+    inputs:
+      caller_event:
+        description: Exact top-level event name selected by the protected caller.
+        required: true
+        type: string
+      caller_ref:
+        description: Exact top-level GitHub ref selected by the protected caller.
+        required: true
+        type: string
+      candidate_commit:
+        description: Exact candidate commit tested by every suite job.
+        required: true
+        type: string
+      checkout_ref:
+        description: Exact immutable checkout ref for the candidate.
+        required: true
+        type: string
+      checkout_repository:
+        description: Exact owner/name checkout repository.
+        required: true
+        type: string
+      image_digest:
+        description: Independently expected immutable OCI digest.
+        required: true
+        type: string
+      image_kind:
+        description: Either published or candidate.
+        required: true
+        type: string
+      image_manifest_digest:
+        description: Canonical CI-image input manifest SHA-256.
+        required: true
+        type: string
+      image_ref:
+        description: Exact digest-qualified GHCR image reference.
+        required: true
+        type: string
+      image_source_commit:
+        description: Canonical image-input-changing source commit.
+        required: true
+        type: string
+      profile:
+        description: Exact shared build profile identity.
+        required: true
+        type: string
+      publish_reusable_attestations:
+        description: Whether this trusted push may publish reusable-build attestations.
+        required: true
+        type: boolean
+      workflow_commit:
+        description: Exact protected caller workflow commit.
+        required: true
+        type: string
+    outputs:
+      validated_image_digest:
+        description: Digest consumed successfully by the complete shared DAG.
+        value: ${{ jobs.suite-gate.outputs.validated_image_digest }}
+
+jobs:
+  identity-preflight:
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    runs-on: ubuntu-24.04
+    outputs:
+      image_digest: ${{ steps.verify.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout protected reusable workflow control
+        with:
+          persist-credentials: false
+          repository: ${{ github.repository }}
+          fetch-depth: 0
+          ref: ${{ inputs.workflow_commit }}
+          path: .ci-protected-control
+      - name: Authenticate exact GHCR identity reader
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify reusable integration caller identity
+        id: verify
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/called-image-identity
+          CI_CALLER_EVENT: ${{ inputs.caller_event }}
+          CI_CALLER_REF: ${{ inputs.caller_ref }}
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_CHECKOUT_REF: ${{ inputs.checkout_ref }}
+          CI_CHECKOUT_REPOSITORY: ${{ inputs.checkout_repository }}
+          CI_EXPECTED_CANDIDATE: ${{ github.event.pull_request.head.sha || github.sha }}
+          CI_EXPECTED_EVENT: ${{ github.event_name }}
+          CI_EXPECTED_REF: ${{ github.ref }}
+          CI_EXPECTED_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          CI_EXPECTED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_IMAGE_EXPECTED_DIGEST: ${{ inputs.image_digest }}
+          CI_IMAGE_EXPECTED_MANIFEST_DIGEST: ${{ inputs.image_manifest_digest }}
+          CI_IMAGE_EXPECTED_SOURCE_COMMIT: ${{ inputs.image_source_commit }}
+          CI_IMAGE_EXPECTED_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          CI_IMAGE_KIND: ${{ inputs.image_kind }}
+          CI_IMAGE_LOCATOR: ${{ inputs.image_ref }}
+          CI_IMAGE_MANIFEST_DIGEST: ${{ inputs.image_manifest_digest }}
+          CI_IMAGE_REPOSITORY: ${{ github.repository }}
+          CI_IMAGE_REF: ${{ inputs.image_ref }}
+          CI_IMAGE_SOURCE_COMMIT: ${{ inputs.image_source_commit }}
+          CI_PROFILE: ${{ inputs.profile }}
+          CI_PUBLISH_REUSABLE_ATTESTATIONS: ${{ inputs.publish_reusable_attestations }}
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+
+          # @brief Require one protected reusable-workflow identity to match.
+          # @param $1 Stable diagnostic label.
+          # @param $2 Actual caller value.
+          # @param $3 Expected GitHub-context value.
+          # @return Zero for an exact match, otherwise one.
+          require_identity() {
+            local label=$1
+            local actual=$2
+            local expected=$3
+            if [[ "$actual" != "$expected" ]]; then
+              echo "$label differs from the protected caller context." >&2
+              return 1
+            fi
+          }
+
+          require_identity caller_event "$CI_CALLER_EVENT" "$CI_EXPECTED_EVENT"
+          require_identity caller_ref "$CI_CALLER_REF" "$CI_EXPECTED_REF"
+          require_identity candidate_commit "$CI_CANDIDATE_COMMIT" "$CI_EXPECTED_CANDIDATE"
+          require_identity checkout_ref "$CI_CHECKOUT_REF" "$CI_EXPECTED_CANDIDATE"
+          require_identity checkout_repository "$CI_CHECKOUT_REPOSITORY" "$CI_EXPECTED_REPOSITORY"
+          require_identity workflow_commit "$CI_WORKFLOW_COMMIT" "$CI_EXPECTED_WORKFLOW_COMMIT"
+          if [[ ! "$CI_CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ||
+            ! "$CI_WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ||
+            ! "$CI_IMAGE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ||
+            ! "$CI_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ||
+            ! "$CI_IMAGE_MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Reusable integration identity is non-canonical." >&2
+            exit 1
+          fi
+          require_identity image_ref "$CI_IMAGE_REF"             "ghcr.io/$GITHUB_REPOSITORY/photospider-ci@$CI_IMAGE_DIGEST"
+          require_identity profile "$CI_PROFILE" default
+          case "$CI_IMAGE_KIND" in
+            candidate)
+              require_identity candidate_source                 "$CI_IMAGE_SOURCE_COMMIT" "$CI_CANDIDATE_COMMIT"
+              if [[ "$CI_CALLER_EVENT" != push ||
+                ("$CI_CALLER_REF" != refs/heads/main &&
+                 "$CI_CALLER_REF" != refs/heads/CI/*) ]]; then
+                echo "Candidate images require a trusted main or CI/** push." >&2
+                exit 1
+              fi
+              ;;
+            published)
+              ;;
+            *)
+              echo "Unknown reusable integration image kind: $CI_IMAGE_KIND" >&2
+              exit 1
+              ;;
+          esac
+          if [[ "$CI_PUBLISH_REUSABLE_ATTESTATIONS" == true ]]; then
+            if [[ "$CI_CALLER_EVENT" != push ]]; then
+              echo "Only trusted pushes may publish reusable-build attestations." >&2
+              exit 1
+            fi
+          elif [[ "$CI_PUBLISH_REUSABLE_ATTESTATIONS" != false ]]; then
+            echo "Reusable-build attestation mode is not boolean." >&2
+            exit 1
+          fi
+          bash .ci-protected-control/ci/scripts/ci_image_verify.sh
+
+  integration-plan:
+    permissions:
+      contents: read
+      packages: read
+    needs: identity-preflight
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Preflight integration inventory
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/integration-plan
+        run: bash ci/scripts/integration_plan.sh
+      - name: Stage versioned security profile inventory
+        run: >-
+          bash ci/scripts/ci_profile_inventory_stage.sh
+          build/ci-plan/generated/ci_inventory
+          CI-results/profile-inventory
+      - name: Upload integration plan logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: integration-plan-results
+          path: CI-results/integration-plan
+          if-no-files-found: warn
+      - name: Upload security profile inventory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-security-profile-inventory
+          path: CI-results/profile-inventory
+          if-no-files-found: error
+          retention-days: 3
+
+  build-integrity-default:
+    permissions:
+      contents: read
+      packages: read
+    needs: integration-plan
+    if: needs.integration-plan.result == 'success'
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      build_smoke_matrix: ${{ steps.build.outputs.build_smoke_matrix }}
+      dedicated_build_smoke_matrix: ${{ steps.build.outputs.dedicated_build_smoke_matrix }}
+      matrix_sha256: ${{ steps.identity.outputs.matrix_sha256 }}
+      openexr_build_smoke_matrix: ${{ steps.build.outputs.openexr_build_smoke_matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Run same-tree build integrity and producer-local smokes
+        id: build
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-integrity-default
+          CI_BUILD_PROFILE: default
+        run: bash ci/scripts/build_integrity.sh
+      - name: Pack role-specific identity-bound artifacts
+        id: identity
+        env:
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+        run: |
+          set -Eeuo pipefail
+          artifact_root=CI-results/targeted-artifacts
+          mkdir -p "$artifact_root"/{ctest-control,ctest-runtime,installed-package,openexr-metadata}
+          python3 ci/scripts/ci_profile_manifest.py \
+            --inventory-dir build/ci/generated/ci_inventory \
+            --output "$artifact_root/resolved-profile.json"
+          matrix_sha256=$(python3 -c \
+            'import json; print(json.load(open("CI-results/targeted-artifacts/resolved-profile.json", encoding="utf-8"))["matrix_sha256"])')
+          printf 'matrix_sha256=%s\n' "$matrix_sha256" >> "$GITHUB_OUTPUT"
+          for role in ctest-control ctest-runtime openexr-metadata; do
+            python3 ci/scripts/reusable_build.py \
+              --inventory-dir build/ci/generated/ci_inventory create-targeted \
+              --source build/ci \
+              --role "$role" \
+              --archive "$artifact_root/$role/$role.tar.gz" \
+              --manifest "$artifact_root/$role/$role.manifest.json" \
+              --candidate-commit "${{ inputs.candidate_commit }}" \
+              --profile default \
+              --image-digest "$CI_IMAGE_DIGEST" \
+              --workflow-commit "${{ inputs.workflow_commit }}"
+          done
+          python3 ci/scripts/reusable_build.py \
+            --inventory-dir build/ci/generated/ci_inventory create-targeted \
+            --source build/ci \
+            --payload-source CI-results/installed-prefix-default \
+            --role installed-package \
+            --archive "$artifact_root/installed-package/installed-package.tar.gz" \
+            --manifest "$artifact_root/installed-package/installed-package.manifest.json" \
+            --candidate-commit "${{ inputs.candidate_commit }}" \
+            --profile default \
+            --image-digest "$CI_IMAGE_DIGEST" \
+            --workflow-commit "${{ inputs.workflow_commit }}"
+          python3 - "$artifact_root" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          summary = {}
+          for role in (
+              "ctest-control",
+              "ctest-runtime",
+              "installed-package",
+              "openexr-metadata",
+          ):
+              manifest = json.loads(
+                  (root / role / f"{role}.manifest.json").read_text(encoding="utf-8")
+              )
+              summary[role] = {
+                  "archive_size": manifest["artifact"]["size"],
+                  "member_count": len(manifest["content"]["members"]),
+                  "uncompressed_size": manifest["content"]["uncompressed_size"],
+              }
+          (root / "targeted-artifact-sizes.json").write_text(
+              json.dumps(summary, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Upload build integrity logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-integrity-default-results
+          path: |
+            CI-results/build-integrity-default
+            CI-results/targeted-artifacts/targeted-artifact-sizes.json
+          if-no-files-found: warn
+      - name: Upload CTest control artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-control-default
+          path: CI-results/targeted-artifacts/ctest-control
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+      - name: Upload CTest runtime artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-runtime-default
+          path: CI-results/targeted-artifacts/ctest-runtime
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+      - name: Upload installed package artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-installed-package-default
+          path: CI-results/targeted-artifacts/installed-package
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+      - name: Upload OpenEXR metadata artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-openexr-metadata-default
+          path: CI-results/targeted-artifacts/openexr-metadata
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  verify-targeted-artifacts:
+    permissions:
+      contents: read
+    needs: build-integrity-default
+    if: needs.build-integrity-default.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          ref: ${{ inputs.checkout_ref }}
+      - name: Download CTest control artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-control-default
+          path: CI-results/targeted-artifacts/ctest-control
+      - name: Download CTest runtime artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-runtime-default
+          path: CI-results/targeted-artifacts/ctest-runtime
+      - name: Download installed package artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-installed-package-default
+          path: CI-results/targeted-artifacts/installed-package
+      - name: Download OpenEXR metadata artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-openexr-metadata-default
+          path: CI-results/targeted-artifacts/openexr-metadata
+      - name: Verify every targeted role before attestation
+        env:
+          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+        run: |
+          set -Eeuo pipefail
+          python3 ci/scripts/ci_runner_verify.py --platform Linux
+          for role in ctest-control ctest-runtime installed-package openexr-metadata; do
+            python3 ci/scripts/reusable_build.py verify-targeted-only \
+              --archive "CI-results/targeted-artifacts/$role/$role.tar.gz" \
+              --manifest "CI-results/targeted-artifacts/$role/$role.manifest.json" \
+              --role "$role" \
+              --candidate-commit "${{ inputs.candidate_commit }}" \
+              --profile default \
+              --matrix-sha256 "$CI_MATRIX_SHA256" \
+              --image-digest "${{ inputs.image_digest }}" \
+              --workflow-commit "${{ inputs.workflow_commit }}"
+          done
+
+  attest-targeted-artifacts:
+    needs: [build-integrity-default, verify-targeted-artifacts]
+    if: >-
+      ${{
+        inputs.publish_reusable_attestations &&
+        needs.verify-targeted-artifacts.result == 'success'
+      }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all targeted artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ci-*-default
+          path: CI-results/targeted-artifacts
+          merge-multiple: false
+      - name: Attest exact targeted archives and manifests
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            CI-results/targeted-artifacts/**/*.tar.gz
+            CI-results/targeted-artifacts/**/*.manifest.json
+
+  targeted-artifacts-ready:
+    permissions: {}
+    needs: [verify-targeted-artifacts, attest-targeted-artifacts]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require exact verification and trust-scoped attestation result
+        env:
+          CI_ATTESTATION_RESULT: ${{ needs.attest-targeted-artifacts.result }}
+          CI_PUBLISH_REUSABLE_ATTESTATIONS: ${{ inputs.publish_reusable_attestations }}
+          CI_VERIFICATION_RESULT: ${{ needs.verify-targeted-artifacts.result }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$CI_VERIFICATION_RESULT" == success ]]
+          if [[ "$CI_PUBLISH_REUSABLE_ATTESTATIONS" == true ]]; then
+            [[ "$CI_ATTESTATION_RESULT" == success ]]
+          else
+            [[ "$CI_ATTESTATION_RESULT" == skipped ]]
+          fi
+
+  full-ctest:
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Download CTest runtime artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-runtime-default
+          path: CI-results/targeted-artifact
+      - name: Verify and restore CTest runtime artifact
+        env:
+          CI_ARTIFACT_ROLE: ctest-runtime
+          CI_BUILD_PROFILE: default
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
+          CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash ci/scripts/targeted_artifact_consume.sh
+      - name: Run full ctest
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ctest-full
+          CI_REUSE_BUILD: ON
+        run: bash ci/scripts/ctest_full.sh
+      - name: Upload ctest logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ctest-full-results
+          path: CI-results/ctest-full
+          if-no-files-found: warn
+
+  build-smoke:
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    name: Build smoke (${{ matrix.test }})
+    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    if: >-
+      needs.integration-plan.result == 'success' &&
+      needs.build-integrity-default.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build-integrity-default.outputs.build_smoke_matrix || '{"include":[]}') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Download CTest control artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-control-default
+          path: CI-results/targeted-artifact
+      - name: Verify and restore CTest control artifact
+        env:
+          CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}
+          CI_BUILD_PROFILE: default
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
+          CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash ci/scripts/targeted_artifact_consume.sh
+      - name: Run labelled build smoke
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-smoke/${{ matrix.artifact }}
+          CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}
+          CI_BUILD_PROFILE: default
+          CI_REUSE_BUILD: ON
+          SMOKE_TEST_NAME: ${{ matrix.test }}
+        run: bash ci/scripts/build_smoke_test.sh
+      - name: Upload build smoke logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-smoke-${{ matrix.artifact }}-results
+          path: CI-results/build-smoke/${{ matrix.artifact }}
+          if-no-files-found: warn
+
+  openexr-smoke:
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    name: OpenEXR metadata smoke (${{ matrix.test }})
+    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    if: >-
+      needs.integration-plan.result == 'success' &&
+      needs.build-integrity-default.result == 'success' &&
+      needs.targeted-artifacts-ready.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build-integrity-default.outputs.openexr_build_smoke_matrix || '{"include":[]}') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Download OpenEXR metadata artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-openexr-metadata-default
+          path: CI-results/targeted-artifact
+      - name: Verify OpenEXR metadata artifact
+        env:
+          CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}
+          CI_BUILD_PROFILE: default
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
+          CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
+          CI_TARGETED_DESTINATION: ${{ github.workspace }}/CI-results/openexr-metadata-consumer
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash ci/scripts/targeted_artifact_consume.sh
+      - name: Run exact OpenEXR option-off smoke
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/openexr-smoke/${{ matrix.artifact }}
+          CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}
+          CI_OPENEXR_METADATA_ROOT: ${{ github.workspace }}/CI-results/openexr-metadata-consumer/ci
+          SMOKE_TEST_NAME: ${{ matrix.test }}
+        run: bash ci/scripts/openexr_smoke_test.sh
+      - name: Upload OpenEXR smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: openexr-smoke-${{ matrix.artifact }}-results
+          path: CI-results/openexr-smoke/${{ matrix.artifact }}
+          if-no-files-found: warn
+
+  scripted-cli:
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Download CTest runtime artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-runtime-default
+          path: CI-results/targeted-artifact
+      - name: Verify and restore CTest runtime artifact
+        env:
+          CI_ARTIFACT_ROLE: ctest-runtime
+          CI_BUILD_PROFILE: default
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
+          CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash ci/scripts/targeted_artifact_consume.sh
+      - name: Run graph_cli script test
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/graph-cli
+          CI_REUSE_BUILD: ON
+        run: bash ci/scripts/graph_cli_script_test.sh
+      - name: Upload graph_cli logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: graph-cli-results
+          path: CI-results/graph-cli
+          if-no-files-found: warn
+
+  propagation-script:
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Download CTest runtime artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-runtime-default
+          path: CI-results/targeted-artifact
+      - name: Verify and restore CTest runtime artifact
+        env:
+          CI_ARTIFACT_ROLE: ctest-runtime
+          CI_BUILD_PROFILE: default
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
+          CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash ci/scripts/targeted_artifact_consume.sh
+      - name: Run propagation script test
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/propagation
+          CI_REUSE_BUILD: ON
+        run: bash ci/scripts/propagation_script_test.sh
+      - name: Upload propagation logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: propagation-results
+          path: CI-results/propagation
+          if-no-files-found: warn
+
+  plugin-load:
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Download CTest runtime artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-runtime-default
+          path: CI-results/targeted-artifact
+      - name: Verify and restore CTest runtime artifact
+        env:
+          CI_ARTIFACT_ROLE: ctest-runtime
+          CI_BUILD_PROFILE: default
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
+          CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash ci/scripts/targeted_artifact_consume.sh
+      - name: Run plugin load test
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/plugin-load
+          CI_REUSE_BUILD: ON
+        run: bash ci/scripts/plugin_load_test.sh
+      - name: Upload plugin logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: plugin-load-results
+          path: CI-results/plugin-load
+          if-no-files-found: warn
+
+  execution-repeat:
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Download CTest runtime artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-runtime-default
+          path: CI-results/targeted-artifact
+      - name: Verify and restore CTest runtime artifact
+        env:
+          CI_ARTIFACT_ROLE: ctest-runtime
+          CI_BUILD_PROFILE: default
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
+          CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash ci/scripts/targeted_artifact_consume.sh
+      - name: Run execution repeat test
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/execution-repeat
+          CI_REUSE_BUILD: ON
+          EXECUTION_REPEAT: 5
+          LEGACY_GPU_REPEAT: 3
+        run: bash ci/scripts/execution_repeat_test.sh
+      - name: Upload execution repeat logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: execution-repeat-results
+          path: CI-results/execution-repeat
+          if-no-files-found: warn
+
+  installed-package-consumer:
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    name: Installed package smoke (${{ matrix.test }})
+    needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]
+    if: >-
+      needs.integration-plan.result == 'success' &&
+      needs.build-integrity-default.result == 'success' &&
+      needs.targeted-artifacts-ready.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build-integrity-default.outputs.dedicated_build_smoke_matrix || '{"include":[]}') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Download installed package artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-installed-package-default
+          path: CI-results/targeted-artifact
+      - name: Verify installed package artifact
+        env:
+          CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}
+          CI_BUILD_PROFILE: default
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
+          CI_REQUIRE_REMOTE_ATTESTATION: ${{ inputs.publish_reusable_attestations }}
+          CI_TARGETED_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/targeted-artifact
+          CI_TARGETED_DESTINATION: ${{ github.workspace }}/CI-results/installed-package-consumer
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash ci/scripts/targeted_artifact_consume.sh
+      - name: Run complete installed static-product consumer
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/static-product-consumer
+          CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}
+          CI_STATIC_PACKAGE_MANIFEST: ${{ github.workspace }}/CI-results/targeted-artifact/installed-package.manifest.json
+          CI_STATIC_PACKAGE_ROOT: ${{ github.workspace }}/CI-results/installed-package-consumer/ci
+        run: bash ci/scripts/static_product_consumer_test.sh
+      - name: Upload installed package consumer evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: installed-package-consumer-results
+          path: |
+            CI-results/static-product-consumer
+            CI-results/targeted-artifact/*.attestation.json
+          if-no-files-found: warn
+
+  sanitizer-asan:
+    permissions:
+      contents: read
+      packages: read
+    needs: integration-plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Verify exact Linux ASan runner
+        run: >-
+          python3 ci/scripts/ci_runner_verify.py
+          --platform Linux
+          --runner-label ubuntu-24.04
+      - name: Download security profile inventory
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-security-profile-inventory
+          path: CI-results/profile-inventory
+      - name: Run isolated ASan profile
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-asan
+          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          SANITIZER: asan
+        run: bash ci/scripts/sanitizer_test.sh
+      - name: Upload ASan diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sanitizer-asan-results
+          path: CI-results/sanitizer-asan
+          if-no-files-found: warn
+
+  sanitizer-tsan:
+    permissions:
+      contents: read
+      packages: read
+    needs: integration-plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Verify exact Linux TSan runner
+        run: >-
+          python3 ci/scripts/ci_runner_verify.py
+          --platform Linux
+          --runner-label ubuntu-24.04
+      - name: Download security profile inventory
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-security-profile-inventory
+          path: CI-results/profile-inventory
+      - name: Run isolated TSan profile
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-tsan
+          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          SANITIZER: tsan
+        run: bash ci/scripts/sanitizer_test.sh
+      - name: Upload TSan diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sanitizer-tsan-results
+          path: CI-results/sanitizer-tsan
+          if-no-files-found: warn
+
+  fuzz-codecs:
+    permissions:
+      contents: read
+      packages: read
+    needs: integration-plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: ${{ inputs.image_ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Verify exact Linux fuzz runner
+        run: >-
+          python3 ci/scripts/ci_runner_verify.py
+          --platform Linux
+          --runner-label ubuntu-24.04
+      - name: Download security profile inventory
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-security-profile-inventory
+          path: CI-results/profile-inventory
+      - name: Run bounded codec fuzz smoke
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/fuzz-codecs
+          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+        run: bash ci/scripts/fuzz_smoke.sh
+      - name: Upload transient fuzz diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-codecs-results
+          path: CI-results/fuzz-codecs
+          if-no-files-found: warn
+          retention-days: 3
+
+  security-darwin:
+    permissions:
+      contents: read
+    needs: integration-plan
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+      - name: Verify exact Darwin security runner
+        run: >-
+          python3 ci/scripts/ci_runner_verify.py
+          --platform Darwin
+          --runner-label macos-15
+      - name: Download security profile inventory
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-security-profile-inventory
+          path: CI-results/profile-inventory
+      - name: Run isolated Darwin security profiles
+        env:
+          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -Eeuo pipefail
+          for sanitizer in asan tsan; do
+            SANITIZER="$sanitizer" \
+              CI_ARTIFACT_DIR="${{ github.workspace }}/CI-results/sanitizer-$sanitizer-darwin" \
+              bash ci/scripts/sanitizer_test.sh
+          done
+          CI_ARTIFACT_DIR="${{ github.workspace }}/CI-results/fuzz-codecs-darwin" \
+            bash ci/scripts/fuzz_smoke.sh
+      - name: Upload Darwin security diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: security-darwin-results
+          path: |
+            CI-results/sanitizer-asan-darwin
+            CI-results/sanitizer-tsan-darwin
+            CI-results/fuzz-codecs-darwin
+          if-no-files-found: warn
+          retention-days: 3
+
+  suite-gate:
+    permissions: {}
+    needs:
+      - identity-preflight
+      - integration-plan
+      - build-integrity-default
+      - verify-targeted-artifacts
+      - attest-targeted-artifacts
+      - targeted-artifacts-ready
+      - full-ctest
+      - build-smoke
+      - openexr-smoke
+      - scripted-cli
+      - propagation-script
+      - plugin-load
+      - execution-repeat
+      - installed-package-consumer
+      - sanitizer-asan
+      - sanitizer-tsan
+      - fuzz-codecs
+      - security-darwin
+    if: always()
+    runs-on: ubuntu-24.04
+    outputs:
+      validated_image_digest: ${{ steps.aggregate.outputs.validated_image_digest }}
+    steps:
+      - name: Aggregate the exact shared integration DAG
+        id: aggregate
+        env:
+          CI_ARTIFACT_READY_RESULT: ${{ needs.targeted-artifacts-ready.result }}
+          CI_ASAN_RESULT: ${{ needs.sanitizer-asan.result }}
+          CI_BUILD_RESULT: ${{ needs.build-integrity-default.result }}
+          CI_BUILD_SMOKE_RESULT: ${{ needs.build-smoke.result }}
+          CI_CTEST_RESULT: ${{ needs.full-ctest.result }}
+          CI_DARWIN_RESULT: ${{ needs.security-darwin.result }}
+          CI_EXECUTION_RESULT: ${{ needs.execution-repeat.result }}
+          CI_FUZZ_RESULT: ${{ needs.fuzz-codecs.result }}
+          CI_IDENTITY_RESULT: ${{ needs.identity-preflight.result }}
+          CI_IMAGE_DIGEST: ${{ needs.identity-preflight.outputs.image_digest }}
+          CI_INSTALLED_PACKAGE_RESULT: ${{ needs.installed-package-consumer.result }}
+          CI_OPENEXR_RESULT: ${{ needs.openexr-smoke.result }}
+          CI_PLAN_RESULT: ${{ needs.integration-plan.result }}
+          CI_PLUGIN_RESULT: ${{ needs.plugin-load.result }}
+          CI_PROPAGATION_RESULT: ${{ needs.propagation-script.result }}
+          CI_SCRIPTED_CLI_RESULT: ${{ needs.scripted-cli.result }}
+          CI_TSAN_RESULT: ${{ needs.sanitizer-tsan.result }}
+          CI_VERIFY_RESULT: ${{ needs.verify-targeted-artifacts.result }}
+        run: |
+          set -Eeuo pipefail
+
+          # @brief Require one shared-suite conclusion to be successful.
+          # @param $1 Stable job identity.
+          # @param $2 Actual GitHub job conclusion.
+          # @return Zero only for literal success.
+          require_success() {
+            local job_name=$1
+            local result=$2
+            if [[ "$result" != success ]]; then
+              echo "$job_name concluded '$result'; expected success." >&2
+              return 1
+            fi
+          }
+
+          require_success identity-preflight "$CI_IDENTITY_RESULT"
+          require_success integration-plan "$CI_PLAN_RESULT"
+          require_success build-integrity-default "$CI_BUILD_RESULT"
+          require_success verify-targeted-artifacts "$CI_VERIFY_RESULT"
+          require_success targeted-artifacts-ready "$CI_ARTIFACT_READY_RESULT"
+          require_success full-ctest "$CI_CTEST_RESULT"
+          require_success build-smoke "$CI_BUILD_SMOKE_RESULT"
+          require_success openexr-smoke "$CI_OPENEXR_RESULT"
+          require_success scripted-cli "$CI_SCRIPTED_CLI_RESULT"
+          require_success propagation-script "$CI_PROPAGATION_RESULT"
+          require_success plugin-load "$CI_PLUGIN_RESULT"
+          require_success execution-repeat "$CI_EXECUTION_RESULT"
+          require_success installed-package-consumer \
+            "$CI_INSTALLED_PACKAGE_RESULT"
+          require_success sanitizer-asan "$CI_ASAN_RESULT"
+          require_success sanitizer-tsan "$CI_TSAN_RESULT"
+          require_success fuzz-codecs "$CI_FUZZ_RESULT"
+          require_success security-darwin "$CI_DARWIN_RESULT"
+          if [[ ! "$CI_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Shared suite did not retain one canonical image digest." >&2
+            exit 1
+          fi
+          printf 'validated_image_digest=%s\n' "$CI_IMAGE_DIGEST" >> "$GITHUB_OUTPUT"

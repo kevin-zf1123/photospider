@@ -3,9 +3,10 @@
 ## Workflows
 
 - `.github/workflows/ci-healthcheck.yml`: static healthcheck on pull requests targeting `main` through `pull_request_target`, pushes to `main` and `CI/**`, and manual dispatch, followed by one stable `healthcheck` result gate.
-- `.github/workflows/ci-integration.yml`: documentation-only routing, a configuration-time inventory preflight, one reusable default build that publishes the post-build label-driven matrix, separately sharded full CTest and per-test build-smoke jobs, scripted `graph_cli`, scripted propagation, capability-selected plugin and execution-repeat checks, and one stable `integration` result gate.
+- `.github/workflows/ci-integration.yml`: documentation-only and image-input routing, published/candidate image identity selection, one build-once candidate call, one shared-suite call, same-digest promotion, and one stable `integration` result gate.
+- `.github/workflows/ci-integration-suite.yml`: the typed digest-qualified reusable test DAG shared by published and candidate images, including one same-tree producer, role-specific artifacts, ordinary CTest, default/dedicated/OpenEXR build smokes, scripted runtime shards, and Darwin/Linux security profiles.
 - `.github/workflows/ci-sanitizer.yml`: manual ASan or TSan focused checks.
-- `.github/workflows/build-ci-image.yml`: GHCR image publish for `ghcr.io/<owner>/<repo>/photospider-ci` on image-input pushes and manual dispatch.
+- `.github/workflows/build-ci-image.yml`: reusable trusted-push candidate producer for one event-scoped temporary GHCR tag and its exact digest/attestation; it cannot publish canonical tags or `latest`.
 
 ## Branch and Workflow Guards
 
@@ -18,6 +19,7 @@ The first healthcheck and integration job protects CI workflow inputs before any
 - `ci/**`
 - `.github/workflows/**`
 - `Dockerfile.ci`
+- `.dockerignore`
 
 CI workflow changes must therefore be developed on a `CI/**` branch in the base repository. The branch prefix alone is never authorization: a pull request must also have the base repository as its head-repository identity, while push and manual runs already belong to the base repository. The guard also catches non-`CI/**` pull requests that target `main`, so workflow-related files cannot be merged through an ordinary feature branch or a same-named fork branch.
 
@@ -37,11 +39,32 @@ For a documentation-only change, `ci-image-change`, integration planning, all bu
 
 ## Runtime
 
-`Dockerfile.ci` defines the GitHub Linux test environment. `healthcheck-published-image` is a container job, and the published-image healthcheck execution and build/test integration jobs run inside `ghcr.io/<owner>/<repo>/photospider-ci:latest`. The published-image job does not rely on checkout's temporary HOME-scoped Git trust surviving into later container steps. Immediately after checkout, its unique `Trust checked-out workspace` step explicitly selects `shell: bash`, adds only the exact `$GITHUB_WORKSPACE` value to the job container's persistent global `safe.directory` configuration, and verifies `HEAD^{commit}` with a read-only Git command. It never configures `safe.directory=*`, trusts a parent directory, or executes a checked-out repository script. This boundary completes before both conditional history fetches and `healthcheck.sh`, so it also covers published-image `main` pushes and `workflow_dispatch` runs in which neither fetch step executes. The `Fetch pull request base history` and `Fetch CI branch main history` steps likewise explicitly set `shell: bash`, so their `set -Eeuo pipefail` prologues run under Bash instead of relying on the container default shell. Protected-path, change-classification, and stable result-gate jobs remain lightweight `ubuntu-latest` jobs and do not configure or compile the project.
+`Dockerfile.ci` defines the GitHub Linux test environment. The protected
+`photospider-ci:latest` lock value is only a discovery locator. A trusted host
+job resolves it, verifies the exact digest, source/signer workflow attestation,
+OCI revision and canonical manifest labels, and exposes only the resulting
+`ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` reference. Published-image
+healthcheck and build/test integration jobs execute that verified
+digest-qualified reference; none executes the mutable locator directly.
+`healthcheck-published-image` is a container job and does not rely on checkout's
+temporary HOME-scoped Git trust surviving into later container steps.
+Immediately after checkout, its unique `Trust checked-out workspace` step
+explicitly selects `shell: bash`, adds only the exact `$GITHUB_WORKSPACE` value
+to the job container's persistent global `safe.directory` configuration, and
+verifies `HEAD^{commit}` with a read-only Git command. It never configures
+`safe.directory=*`, trusts a parent directory, or executes a checked-out
+repository script. This boundary completes before both conditional history
+fetches and `healthcheck.sh`, so it also covers published-image `main` pushes
+and `workflow_dispatch` runs in which neither fetch step executes. The `Fetch
+pull request base history` and `Fetch CI branch main history` steps likewise
+explicitly set `shell: bash`, so their `set -Eeuo pipefail` prologues run under
+Bash instead of relying on the container default shell. Protected-path,
+change-classification, and stable result-gate jobs remain lightweight
+`ubuntu-24.04` jobs and do not configure or compile the project.
 
-When a pull request or push changes the CI image inputs (`Dockerfile.ci`, `.dockerignore`, or `.github/workflows/build-ci-image.yml`), the healthcheck and integration workflows build `photospider-ci:local` inside the workflow and run the same scripts there. Pull-request image detection fetches the base repository branch, verifies the event's exact base SHA, and compares from that base rather than relying on a possibly absent fork `origin/<base>`. For pull requests, the published-image and local-image healthcheck jobs each independently bind `CI_BASE_SHA` to the event base, fetch the target branch from the base-repository URL, verify that exact commit inside their own job, and pass the exact event SHA as `CI_BASE_REF`. Published-image verification completes before `healthcheck.sh`; local-image verification completes before the head Dockerfile is built or the mounted workspace is executed. The exact event SHA therefore remains resolvable even when a fork checkout's `origin` lacks the base tip.
+When a pull request or push changes CI image inputs (`Dockerfile.ci`, `.dockerignore`, or `.github/workflows/build-ci-image.yml`), detection still fetches and verifies the exact base instead of relying on a possibly absent fork `origin/<base>`. A fork head is rejected before checkout, and a same-repository protected `CI/**` pull request uses its trusted push route. The image-change healthcheck job does not build an image: it verifies the exact hosted runner, protected locks, canonical publish-source identity, and generated image-input manifest before running the static healthcheck. Only an eligible trusted `main` or `CI/**` integration push may call the one candidate-image producer and shared digest-bound suite.
 
-For every `CI/**` push, both healthcheck jobs instead fetch and verify `origin/main` inside their own job, then pass `origin/main` as `CI_BASE_REF`. The published-image job verifies it before `healthcheck.sh`; the local-image job verifies it before the Docker build and mounted-workspace execution. Static checks therefore cover the cumulative branch diff from the `main` merge base, so a later documentation-only push cannot hide an earlier unformatted C++ commit. An ordinary `main` push retains the exact `github.event.before` value as `CI_BASE_REF` and checks only that push increment. A required fetch or reference verification failure stops the job before `healthcheck.sh` can use fallback base selection. CI-image detection uses the same cumulative `origin/main` basis for `CI/**` pushes, so a later documentation-only push also cannot hide an earlier image-input commit.
+For every `CI/**` push, both healthcheck routes fetch and verify `origin/main` inside their own job, then pass `origin/main` as `CI_BASE_REF`. The published-image job verifies it before `healthcheck.sh`; the image-change job verifies it before canonical manifest generation and `healthcheck.sh`. Static checks therefore cover the cumulative branch diff from the `main` merge base, so a later documentation-only push cannot hide an earlier unformatted C++ commit. An ordinary `main` push retains the exact `github.event.before` value as `CI_BASE_REF` and checks only that push increment. A required fetch or reference verification failure stops the job before `healthcheck.sh` can use fallback base selection. CI-image detection uses the same cumulative `origin/main` basis for `CI/**` pushes, so a later documentation-only push also cannot hide an earlier image-input commit.
 
 The image-input detector uses a no-rename inventory with no Git status filter; deletions, type changes, and uncommon statuses all remain visible. The healthcheck static-scope inventory also disables rename detection but intentionally applies `--diff-filter=d`: deleted paths are excluded because formatters and linters require a current file, while type changes and uncommon non-deletion statuses remain visible. Both inventories use NUL-delimited Git paths, so filenames containing newlines remain one exact path, and both write the inventory to a file visible to the parent shell. A failed `git diff` exits nonzero before any `changed=false` output or “No changed C++ files” summary can be emitted. This avoids a false route as well as a race with another workflow that may still be publishing the new `latest` image.
 
@@ -130,21 +153,76 @@ Both checks reject missing and extra entries, so a new allowlisted header or
 registered GoogleTest target changes the expectation through its authoritative
 CMake declaration rather than a Python number or future-name special case.
 
-`build-integrity-default` builds the complete default profile once and uploads
-`ci-build-default`. The regular test jobs reuse that artifact:
+`build-integrity-default` configures once, runs `build_required_targets` and
+then `build_all` in the same build tree, and never splits those phases across
+runners. It exports four identity-bound role artifacts instead of the former
+2.416 GB complete build tree:
 
-- `full-ctest`, `scripted-cli`, `propagation-script`, `plugin-load`, and `execution-repeat` download only `ci-build-default`.
-- `full-ctest` excludes every exact `build-smoke` label with CTest's label
-  filter. It has no name-based build-smoke exclusion list.
-- `build-smoke` consumes the build-integrity job's post-build JSON include
-  matrix with `fail-fast: false`. A literal empty include fallback keeps
-  `fromJSON` valid when the producer job is intentionally skipped or has no
-  output; the job-level route still requires successful preflight and build
-  integrity, whose strict matrix cannot be empty. Each matrix entry appears as its own
-  `Build smoke (<exact CTest name>)` job, downloads `ci-build-default`, receives
-  a separate 30-minute job timeout and artifact path, and runs only that
-  selected CTest entry. The CTest registrations retain their individual
-  300-to-1200-second timeouts and existing `RUN_SERIAL` semantics.
+- `ci-control-default` contains the exact recursive CTest control graph,
+  producer cache/stamp, and generated inventory needed by ordinary fresh-build
+  smokes; it contains no producer object files or ordinary test executables.
+- `ci-runtime-default` extends that control role with the complete post-build
+  ordinary CTest closure. The producer excludes only the exact `build-smoke`
+  label, records every command and property, recursively follows every CTest
+  include regardless of filename, and resolves relative command, argument,
+  `REQUIRED_FILES`, environment, and environment-modification paths from each
+  test's effective working directory. That directory is only a resolution
+  base and is never copied wholesale. The role selects the referenced
+  executables, build-tree data, shared libraries, plugin trees, and trust
+  material. After restore, the consumer re-runs JSON discovery and rejects
+  `_NOT_BUILT`, a changed inventory, or any missing
+  include/executable/data/runtime input.
+  A versioned DSO alias is accepted only when it resolves to a regular file
+  inside the producer tree; it is materialized as same-byte regular members,
+  so the archive itself contains no link.
+- `ci-installed-package-default` contains only `ci/installed/**`,
+  `ci/producer/CMakeCache.txt`, and
+  `ci/producer/generated/ci_inventory/installable_public_headers.txt`.
+  Static libraries are allowed only inside the installed prefix; CMakeFiles,
+  CTest state, build stamps, objects, dependency files, and unrelated build
+  libraries are forbidden.
+  Installed DSO aliases use the same in-prefix validation and regular-member
+  materialization; dangling, escaping, directory, or special targets fail.
+- `ci-openexr-metadata-default` contains exactly
+  `ci/producer/CMakeCache.txt`. Its dedicated runner executes the source-tree
+  `OpenExrDeepProviderOptionOffSmoke` driver with the original cached Python,
+  CMake, CTest, symbol-tool, configuration, and architecture propagation
+  inputs. The single-config producer's unique, nonempty, control-free
+  `CMAKE_BUILD_TYPE` supplies `--config`; caller environment cannot override
+  it, and a multi-config cache is rejected. The role downloads no CTest graph,
+  stamp, generated inventory, object, or product library.
+
+Every role has a canonical member/digest/size manifest and is verified before
+extraction. A targeted manifest is copied from one no-follow regular-file
+snapshot; its exact SHA-256 is passed from attestation into Python's retained
+snapshot verification, so pathname replacement cannot switch the validated
+identity. `full-ctest` consumes only `ci-runtime-default`, excludes the exact
+label, and runs with `--parallel ${CI_JOBS}` while preserving failure logs and
+JUnit output. Scripted CLI, propagation, plugin, and execution-repeat shards
+consume the same runtime role only where they need the built runtime.
+
+The protected routing lock is versioned and temporary. It sends only
+`PublicHeaderSelfContainment` to the original producer,
+`StaticProductConsumerSmoke` to the `installed-package` role,
+`OpenExrDeepProviderOptionOffSmoke` to the exact `openexr-metadata` role, and
+every other discovered smoke to `ctest-control`. The control, installed,
+OpenEXR, and producer outputs are pairwise disjoint and exhaust the post-build
+CTest inventory. The dedicated installed-package job runs in the
+same digest-qualified image as the producer. Its package-input mode skips the
+producer build/install but still executes daemon help, install/export/symbol
+inspection, every positive consumer compile/link/run probe, and every negative
+component check. Prefix, metadata, and job-owned work are pairwise disjoint;
+only the work directory is deleted. Before and after this execution, the job
+remeasures the exact verified manifest member set, byte sizes, SHA-256 digests,
+and executable attributes. Addition, deletion, rewrite, or mode drift fails,
+and evidence upload contains only consumer/verifier logs plus any attestation
+records—not the restored prefix or producer metadata tree.
+
+The regular `build-smoke` matrix retains `fail-fast: false`. A literal empty
+include fallback keeps `fromJSON` valid only when its producer is skipped; a
+successful producer cannot emit an empty or incomplete partition. Each item
+receives its own 30-minute workflow timeout and preserves the CTest
+registration's timeout and `RUN_SERIAL` semantics.
 
 The runner re-queries CTest JSON immediately before execution and requires the
 selected exact name to remain unique, enabled, executable, and labelled.
@@ -154,14 +232,76 @@ no test name is interpolated into a shell command or regular expression.
 CTest registration and creates its own clean `PHOTOSPIDER_BUILD_IPC=OFF`
 producer instead of depending on a separately hard-coded workflow profile.
 
-If CI image inputs change, the workflow cannot use the previously published
-image and instead runs `local-image-integration` on one Docker-capable runner.
-After building `photospider-ci:local`, `integration_suite.sh` builds the default
-profile, reads the same post-build NUL-delimited exact-name inventory,
-excludes the label from full CTest, and runs every labelled smoke sequentially
-before the CLI, propagation, plugin, and execution-repeat shards. This fallback
-preserves the same discovery and selection contract while accepting that one
-local-image runner cannot fan out into matrix jobs.
+Published-image and image-input-changing routes call the same typed reusable
+suite with one independently expected digest-qualified `image_ref`, candidate,
+profile, manifest, source, and workflow identities. Before any candidate
+checkout, code, or container starts, its host preflight checks out
+`github.repository` at the exact caller `workflow_commit`, binds that value to
+the actual `github.workflow_sha`, and runs the protected image verifier. The
+verifier independently cross-checks the requested digest/reference, GHCR
+attestation signer/source, OCI revision, and canonical manifest digest against
+all caller fields. GitHub permits a called workflow to preserve or reduce the
+caller's `GITHUB_TOKEN` permissions, but never to elevate them. Permission
+compatibility is validated for the reusable call before a later job-level
+`if` can make a job skip, so the shared workflow has no workflow-wide
+permission declaration. Every job that checks out or executes candidate code,
+runs a candidate container, or aggregates results declares an exact read-only
+or empty job-level permission map. The sole exception is
+`attest-targeted-artifacts`: it declares no local permission map, runs only
+when `publish_reusable_attestations` is true and targeted verification has
+succeeded, and inherits the required `artifact-metadata`, `attestations`, and
+`id-token` writes only from one of the two trusted push callers. The
+pull-request caller passes only read permissions and `false`, while all other
+jobs remain unable to inherit a trusted caller's writes.
+
+A trusted image-changing push builds once under an event-scoped temporary SHA
+tag, attests that exact
+digest, and fans it out without also invoking `integration_suite.sh`. Only
+after every suite job succeeds may promotion copy that same digest without
+rebuilding. Promotion first establishes the immutable `sha-<full-commit>`
+reference, then a current run may update its branch tag; only a successful
+trusted `main` push may advance `latest`. `main` retains the exact
+`branch-main` tag. A `CI/**` branch
+tag is `branch-<bounded-readable-slug>-<sha256>`, where the complete 64-hex
+SHA-256 suffix hashes the exact full branch-name bytes without an added
+newline. Git itself validates `refs/heads/<branch>`; the slug is not a second
+ref allowlist. It retains Docker-safe ASCII, deterministically compresses every
+other byte—including legal punctuation or UTF-8—into separators, and truncates
+only that presentation, keeping the tag Docker-safe and at most 128 characters
+without aliasing `CI/a-b` and `CI/a/b`. Pull-request routes remain read-only.
+
+Only the promotion job holds one repository/CI-image-namespace concurrency
+group shared by every ref. It retains queued writers, sets
+`cancel-in-progress: false`, serializes workflow-owned SHA and mutable writers,
+and never cancels the whole Integration workflow or a candidate because a
+documentation-only run arrived. Queue order is not trusted. Before any
+registry write, the protected manifest helper fetches the exact live branch
+twice around an
+isolated worktree measurement, requires the tested candidate to be its
+ancestor, and reuses the canonical image-input path lock, source-commit
+resolver, and manifest digest. A later documentation-only descendant with the
+same source/manifest remains promotable. A later image-input identity reports
+`superseded`. Force-push, unknown ancestry, manifest failure, or ref drift
+during measurement fails with zero registry writes.
+
+After freshness succeeds, promotion strictly parses the SHA tag's unique
+top-level manifest digest. An exact digest is reused without a create call. An
+absent SHA is created alone only when locked Buildx returns its exact not-found
+status and diagnostic, then both creation metadata and immediate registry
+resolution are rechecked before any mutable write. A conflicting, missing, or
+ambiguous digest, or an authentication, network, or unknown inspect failure,
+fails with zero writes. A `superseded` run may create or reuse only that SHA and
+cannot touch branch or `latest`. The global lease closes workflow-owned
+cross-ref check/create races; GHCR offers no tag compare-and-swap guarantee for
+an out-of-band nonworkflow writer, which remains an explicitly governed
+residual boundary. The stable gate reports
+`promoted` and `superseded` separately rather than presenting a skipped write
+as a successful promotion.
+The user-observed
+2.416 GB archive, 4-minute-19-second compression, and greater-than-31-GB
+nominal 13-consumer transfer remain the remote comparison baseline; reduction
+and the 30--45 minute image-change target are not claimed until an exact-head
+remote run measures them.
 
 CMake 3.16 is the project's compatibility floor, not a workflow-pinned version
 for every pull request. Build logic guards policies introduced after that floor,
@@ -188,9 +328,17 @@ contract.
 `build-integrity-default` validates the architecture-neutral
 `photospider_kernel`, `graph_cli`, `test_propagation`, and operation-plugin
 lifecycle targets, then still builds the complete tree. Full CTest remains the
-ordinary-test authority and excludes only the exact `build-smoke` label. The
-label-driven build-smoke matrix, its independent jobs, static product consumer,
-and protected-path/image gates are unchanged.
+ordinary-test authority and excludes only the exact `build-smoke` label.
+Runtime capability selection preserves coverage semantics by choosing the
+applicable legacy or policy/execution targets; it does not preserve the former
+orchestration topology. Current post-build routing emits the downstream
+`consumer_build_smoke_matrix.json` (`ctest-control`),
+`openexr_build_smoke_matrix.json` (`openexr-metadata`), and
+`dedicated_build_smoke_matrix.json` (`installed-package`) matrices plus the
+producer-local `producer_build_smoke_names.z` list. In particular,
+`StaticProductConsumerSmoke` runs through the dedicated installed-prefix
+package-input boundary, retaining the full consumer checks without rebuilding
+or reinstalling its producer.
 
 Runtime-sensitive shards select behavior without introducing product
 compatibility:
@@ -284,15 +432,18 @@ personal development content.
 - `ci/scripts/healthcheck.sh`: builds a NUL-delimited changed-path artifact, runs `git diff --check`, the durable change-classification, build-smoke inventory, runtime-capability, and CI-routing regressions, and `clang-format --dry-run --Werror` plus `cpplint` on every nondeleted changed C++ path; inventory failure terminates the script before a no-C++ summary.
 - `ci/scripts/change_classification.sh`: classifies exact event revisions as documentation-only or full-integration, records all changed and non-documentation paths, and fails closed on Git uncertainty.
 - `ci/scripts/change_classification_test.sh`: exercises the long-lived routing contract across documentation, source, mixed, type-change, workflow, rename, deletion, repeated `CI/**` push, pull-request merge-base, missing branch or revision, zero/unavailable revision, manual, empty-diff, and shallow-clone cases.
-- `ci/scripts/ci_routing_test.sh`: whitespace-normalizes and exact-locks both production `protected-ci-paths.if` expressions, then extracts and executes the real stable-gate, pre-checkout fork-rejection, and protected-path shell blocks. It also locks the allow-empty configuration preflight, strict post-build job output, empty-output-safe `fromJSON` matrix, per-item artifact/name binding, full-CTest label exclusion, exact runner input, local fallback inventory, aggregate build-smoke gate, and the architecture-neutral `execution-repeat` job, environment, artifact, and final-gate routing. Isolated Git fixtures prove that both production guards reject a newline-containing `ci/**` path, safely record it, and fail closed on producer or reader failure. A job/step-scoped production assertion extracts each exact published-image history-fetch step and requires its own top-level `shell: bash`, so metadata on another job or neighboring step cannot satisfy the contract. Another job/step-scoped assertion requires exactly one `Trust checked-out workspace` step with `shell: bash`; its only executable lines must enable strict mode, add the exact `$GITHUB_WORKSPACE` global `safe.directory`, and verify `HEAD^{commit}`. It rejects an entry in another job or adjacent step, any additional or wildcard `safe.directory`, and placement after either fetch or `healthcheck.sh`. The extracted production trust block runs with an isolated HOME and Git repository, where the resulting global configuration must contain exactly that repository path. Job-scoped assertions separately lock the published-image and local-image pull-request exact-base fetch, `CI/**` main fetch/verification, three-way `CI_BASE_REF` route, and execution order. The test executes both extracted production main-fetch blocks; an isolated history proves that cumulative `origin/main` scope retains an early unformatted C++ path while event-before scope contains only the later documentation path. Detector fixtures retain exact/cumulative bases, empty comparisons, newline paths, and changed-path failure propagation. These local source and shell checks deliberately do not claim to execute GitHub's expression evaluator, reproduce cross-UID dubious ownership, or emulate the hosted container runner.
+- `ci/scripts/ci_routing_test.sh`: whitespace-normalizes and exact-locks both production `protected-ci-paths.if` expressions, then extracts and executes the real stable-gate, pre-checkout fork-rejection, and protected-path shell blocks. It also locks the allow-empty configuration preflight, strict post-build job outputs, empty-output-safe `fromJSON` matrices, per-item artifact/name binding, full-CTest label exclusion, exact runner input, and the pairwise-disjoint four-way build-smoke routing: `ctest-control` consumers, OpenEXR metadata consumers, the dedicated installed-package static consumer, and the producer-local list. It verifies role-specific control/runtime/OpenEXR/installed artifact production, attestation, and consumption ordering; requires the complete shared suite gate; rejects a serial `integration_suite.sh` fallback; and retains the architecture-neutral `execution-repeat` job, environment, artifact, and final-gate routing. Isolated Git fixtures prove that both production guards reject a newline-containing `ci/**` path, safely record it, and fail closed on producer or reader failure. A job/step-scoped production assertion extracts each exact published-image history-fetch step and requires its own top-level `shell: bash`, so metadata on another job or neighboring step cannot satisfy the contract. Another job/step-scoped assertion requires exactly one `Trust checked-out workspace` step with `shell: bash`; its only executable lines must enable strict mode, add the exact `$GITHUB_WORKSPACE` global `safe.directory`, and verify `HEAD^{commit}`. It rejects an entry in another job or adjacent step, any additional or wildcard `safe.directory`, and placement after either fetch or `healthcheck.sh`. The extracted production trust block runs with an isolated HOME and Git repository, where the resulting global configuration must contain exactly that repository path. Job-scoped assertions separately lock the published-image and local-image pull-request exact-base fetch, `CI/**` main fetch/verification, three-way `CI_BASE_REF` route, and execution order. The test executes both extracted production main-fetch blocks; an isolated history proves that cumulative `origin/main` scope retains an early unformatted C++ path while event-before scope contains only the later documentation path. Detector fixtures retain exact/cumulative bases, empty comparisons, newline paths, and changed-path failure propagation. These local source and shell checks deliberately do not claim to execute GitHub's expression evaluator, reproduce cross-UID dubious ownership, or emulate the hosted container runner.
 - `ci/scripts/runtime_capability_test.sh`: exercises exact Make/Ninja target parsing, both complete contracts, partial/mixed/absent fail-closed behavior, required-target checks, and mutually exclusive CLI configuration output. It also proves that the exact optional `test_plugin_trust_bundle` capability—not the broader policy/execution profile—gates direct-consumer trust export: pre-trust and legacy inventories are no-ops, missing or malformed inventories and incomplete/nonregular material fail closed, and a complete trust-enabled tuple replaces inherited values with canonical paths.
 - `ci/scripts/ci_image_changed.sh`: detects whether the current NUL-delimited, unfiltered diff changes CI image inputs; workflows provide an exact fetched pull-request base SHA, and diff failure exits without a route output.
 - `ci/scripts/build_smoke_inventory.py`: strictly parses CTest JSON v1, emits a deterministic matrix and NUL-delimited exact names, and revalidates one matrix selection before index-based execution. Strict post-build mode rejects an empty selection; only explicit preflight mode permits it. Its focused regression covers malformed JSON/schema, duplicate names/properties/label values, invalid or missing labels, disabled/commandless entries, empty strict selection, deterministic ordering, JSON round trips, safe artifact keys, hostile test-name characters, absent/disabled/commandless runner selections that stop before execution, and real configuration-placeholder-to-post-build discovery.
 - `ci/scripts/integration_plan.sh`: configures a small testing-enabled tree and validates an allow-empty, non-authoritative configuration-time inventory preview; it emits no workflow matrix output.
-- `ci/scripts/integration_suite.sh`: consumes the strict post-build exact names and runs the resulting integration shards sequentially for the local-image fallback path.
-- `ci/scripts/build_integrity.sh`: detects one complete runtime contract, builds the default profile's architecture-neutral required targets and complete tree, strictly validates the post-build labelled CTest inventory, exposes its matrix as the workflow job output, and stamps the reusable build.
-- `ci/scripts/ctest_full.sh`: reuses or builds the default producer and runs CTest with the exact `build-smoke` label excluded.
-- `ci/scripts/build_smoke_test.sh`: revalidates and runs the exact CTest name in `SMOKE_TEST_NAME` from a reusable default producer.
+- `ci/scripts/build_integrity.sh`: detects one complete runtime contract, runs required-target and complete builds in one tree, writes the ordinary CTest closure, installs a fresh package prefix, and partitions build smokes into the downstream `consumer_build_smoke_matrix.json` (`ctest-control`), `openexr_build_smoke_matrix.json` (`openexr-metadata`), and `dedicated_build_smoke_matrix.json` (`installed-package`) matrices plus the producer-local `producer_build_smoke_names.z` list. It exposes those three downstream matrices and executes the producer-local list only after strict validation.
+- `ci/scripts/ctest_runtime_closure.py`: derives the recursive post-build ordinary CTest control/runtime closure and revalidates restored runtime inventory, executables, dynamic libraries, plugins, trust inputs, and build-tree data before execution.
+- `ci/scripts/ctest_full.sh`: reuses the runtime role and runs ordinary CTest with the exact `build-smoke` label excluded, controlled `${CI_JOBS}` parallelism, failure output, and JUnit evidence.
+- `ci/scripts/build_smoke_test.sh`: revalidates and runs one exact default-role CTest name from `ci-control-default`.
+- `ci/scripts/openexr_smoke_test.sh`: runs the exact default OpenEXR option-off source-tree smoke from the verified cache-only metadata role.
+- `ci/scripts/static_product_consumer_test.sh`: remeasures exact installed-package content before and after running the complete package consumer, without rebuilding or reinstalling the producer.
+- `ci/scripts/targeted_artifact_consume.sh`: verifies archive and manifest attestations with candidate source digest and reusable-workflow signer digest, then verifies and atomically restores one exact role.
 - `ci/scripts/graph_cli_script_test.sh`: runs isolated positive, explicit-missing-source, and invalid-target REPL checks using the pre-execution Graph document capability marker described above.
 - `ci/scripts/propagation_script_test.sh`: builds `test_propagation` and runs `tiles all` on linear and complex propagation graphs.
 - `ci/scripts/plugin_load_test.sh`: checks operation plugins and selects either scheduler plugin loading/listing or policy plugin, registry, policy/execution, and CLI route checks.
@@ -322,6 +473,7 @@ GITHUB_OUTPUT=/tmp/photospider-build-integrity.out \
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
   CI_ARTIFACT_DIR=CI-results/ctest-full bash ci/scripts/ctest_full.sh
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
+  CI_ARTIFACT_ROLE=ctest-control \
   SMOKE_TEST_NAME=DependencyDisabledInstallSmoke \
   CI_ARTIFACT_DIR=CI-results/build-smoke/dependency-disabled \
   bash ci/scripts/build_smoke_test.sh
@@ -341,33 +493,34 @@ SANITIZER=asan CI_ARTIFACT_DIR=CI-results/sanitizer-asan bash ci/scripts/sanitiz
 ```
 
 Replace `SMOKE_TEST_NAME` with any exact name emitted by
-`CI-results/build-integrity-default/build_smoke_matrix.json`; the runner refuses an
+`CI-results/build-integrity-default/consumer_build_smoke_matrix.json`; the runner refuses an
 absent, duplicate, disabled, commandless, or unlabelled selection. To run all
 labelled smokes directly from a configured tree, use
 `ctest --test-dir build/ci-default -L '^build-smoke$' --output-on-failure`.
-To reproduce the entire dynamically selected sequence, use:
-
-```bash
-CI_ARTIFACT_ROOT=CI-results bash ci/scripts/integration_suite.sh
-```
+There is no serial local command equivalent to the shared reusable DAG. Use the
+focused role commands above for local diagnosis; build-once digest fan-out,
+attestation, aggregation, and same-digest promotion are GitHub Actions gates.
 
 Docker reproduction:
 
 ```bash
-docker build -t photospider-ci:local -f Dockerfile.ci .
+mkdir -p CI-results/local-ci-image
+ci_image_source_commit=$(python3 ci/scripts/ci_image_manifest.py source-commit)
+ci_image_manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
+  --source-commit "$ci_image_source_commit" \
+  --repository kevin-zf1123/photospider \
+  --output CI-results/local-ci-image/ci-image-input-v1.json)
+docker build -t photospider-ci:local -f Dockerfile.ci \
+  --build-arg CI_IMAGE_INPUT_MANIFEST_SHA256="$ci_image_manifest_digest" \
+  --build-arg CI_IMAGE_SOURCE_COMMIT="$ci_image_source_commit" .
 docker run --rm -v "$PWD:/workspace" -w /workspace photospider-ci:local \
   bash ci/scripts/build_integrity.sh
 ```
 
-Optional local mirror build:
-
-```bash
-docker build -t photospider-ci:local -f Dockerfile.ci \
-  --build-arg APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ \
-  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple .
-```
-
-Use `ubuntu-ports` for local arm64 builds. Use `http://mirrors.tuna.tsinghua.edu.cn/ubuntu/` for amd64.
+The remaining Docker build arguments retain their immutable protected defaults
+from `ci/locks/ci-image-lock.json`. Local mirror overrides are not part of the
+maintained image contract; apt uses the locked Ubuntu snapshot and pip uses the
+hash-locked requirements file.
 
 The local Docker commands above reproduce the maintained current-toolchain CI
 paths. They are not a claim that CMake 3.16 itself ran. If targeted old-version

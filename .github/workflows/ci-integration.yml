@@ -408,714 +408,181 @@ jobs:
           path: CI-results/ci-image-identity
           if-no-files-found: warn
 
-  integration-plan:
-    needs: [change-classification, ci-image-change, ci-image-identity]
+  candidate-image-build:
+    needs: [change-classification, ci-image-change]
     if: >-
       ${{
         needs.change-classification.outputs.run_integration == 'true' &&
-        needs.ci-image-change.outputs.changed == 'false' &&
-        needs.ci-image-identity.result == 'success'
+        needs.ci-image-change.outputs.changed == 'true' &&
+        github.event_name == 'push' &&
+        (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/CI/'))
       }}
-    runs-on: ubuntu-24.04
-    container:
-      image: ${{ needs.ci-image-identity.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
-          fetch-depth: 0
-          submodules: recursive
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Preflight integration inventory
-        env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/integration-plan
-        run: bash ci/scripts/integration_plan.sh
-      - name: Stage versioned security profile inventory
-        run: >-
-          bash ci/scripts/ci_profile_inventory_stage.sh
-          build/ci-plan/generated/ci_inventory
-          CI-results/profile-inventory
-      - name: Upload integration plan logs
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: integration-plan-results
-          path: CI-results/integration-plan
-          if-no-files-found: warn
-      - name: Upload security profile inventory
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ci-security-profile-inventory
-          path: CI-results/profile-inventory
-          if-no-files-found: error
-          retention-days: 3
-
-  build-integrity-default:
-    needs: [integration-plan, ci-image-identity]
-    if: needs.integration-plan.result == 'success'
-    runs-on: ubuntu-24.04
-    container:
-      image: ${{ needs.ci-image-identity.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    outputs:
-      build_smoke_matrix: ${{ steps.build.outputs.build_smoke_matrix }}
-      matrix_sha256: ${{ steps.identity.outputs.matrix_sha256 }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
-          fetch-depth: 0
-          submodules: recursive
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Run build integrity
-        id: build
-        env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-integrity-default
-          CI_BUILD_PROFILE: default
-        run: bash ci/scripts/build_integrity.sh
-      - name: Pack identity-bound reusable build
-        id: identity
-        env:
-          CI_IMAGE_DIGEST: ${{ needs.ci-image-identity.outputs.digest }}
-        run: |
-          set -Eeuo pipefail
-          mkdir -p CI-results/reusable-build-default
-          python3 ci/scripts/ci_profile_manifest.py \
-            --inventory-dir build/ci/generated/ci_inventory \
-            --output CI-results/reusable-build-default/resolved-profile.json
-          matrix_sha256=$(python3 -c \
-            'import json; print(json.load(open("CI-results/reusable-build-default/resolved-profile.json", encoding="utf-8"))["matrix_sha256"])')
-          printf 'matrix_sha256=%s\n' "$matrix_sha256" >> "$GITHUB_OUTPUT"
-          python3 ci/scripts/reusable_build.py \
-            --inventory-dir build/ci/generated/ci_inventory create \
-            --source build/ci \
-            --archive CI-results/reusable-build-default/ci-build.tar.gz \
-            --manifest CI-results/reusable-build-default/ci-build.manifest.json \
-            --candidate-commit "${{ github.event.pull_request.head.sha || github.sha }}" \
-            --profile default \
-            --image-digest "$CI_IMAGE_DIGEST" \
-            --workflow-commit "${{ github.workflow_sha }}"
-      - name: Upload build integrity logs
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: build-integrity-default-results
-          path: CI-results/build-integrity-default
-          if-no-files-found: warn
-      - name: Upload reusable build
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ci-build-default
-          path: CI-results/reusable-build-default
-          if-no-files-found: error
-          retention-days: 3
-          compression-level: 0
-
-  attest-reusable-build-default:
-    needs: [build-integrity-default, ci-image-identity]
-    if: needs.build-integrity-default.result == 'success'
-    runs-on: ubuntu-24.04
     permissions:
       artifact-metadata: write
       attestations: write
       contents: read
       id-token: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
-          fetch-depth: 0
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Download reusable build candidate
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ci-build-default
-          path: CI-results/reusable-build
-      - name: Verify reusable build before attestation
-        run: |
-          python3 ci/scripts/ci_runner_verify.py --platform Linux
-          python3 ci/scripts/reusable_build.py verify-only \
-            --archive CI-results/reusable-build/ci-build.tar.gz \
-            --manifest CI-results/reusable-build/ci-build.manifest.json \
-            --candidate-commit "${{ github.event.pull_request.head.sha || github.sha }}" \
-            --profile default \
-            --matrix-sha256 "${{ needs.build-integrity-default.outputs.matrix_sha256 }}" \
-            --image-digest "${{ needs.ci-image-identity.outputs.digest }}" \
-            --workflow-commit "${{ github.workflow_sha }}"
-      - name: Attest reusable build archive
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
-        with:
-          subject-path: CI-results/reusable-build/ci-build.tar.gz
-      - name: Attest reusable build manifest
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
-        with:
-          subject-path: CI-results/reusable-build/ci-build.manifest.json
+      packages: write
+    uses: ./.github/workflows/build-ci-image.yml
+    with:
+      candidate_commit: ${{ github.sha }}
 
-  local-image-integration:
-    needs: [change-classification, ci-image-change]
+  published-image-integration-readonly:
+    needs: [change-classification, ci-image-change, ci-image-identity]
     if: >-
       ${{
         needs.change-classification.outputs.run_integration == 'true' &&
-        needs.ci-image-change.outputs.changed == 'true'
+        needs.ci-image-change.outputs.changed == 'false' &&
+        needs.ci-image-identity.result == 'success' &&
+        github.event_name != 'push'
       }}
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    uses: ./.github/workflows/ci-integration-suite.yml
+    with:
+      caller_event: ${{ github.event_name }}
+      caller_ref: ${{ github.ref }}
+      candidate_commit: ${{ github.event.pull_request.head.sha || github.sha }}
+      checkout_ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      checkout_repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+      image_digest: ${{ needs.ci-image-identity.outputs.digest }}
+      image_kind: published
+      image_manifest_digest: ${{ needs.ci-image-identity.outputs.manifest_digest }}
+      image_ref: ${{ needs.ci-image-identity.outputs.image }}
+      image_source_commit: ${{ needs.ci-image-identity.outputs.source_commit }}
+      profile: default
+      publish_reusable_attestations: false
+      workflow_commit: ${{ github.workflow_sha }}
+
+  published-image-integration-trusted:
+    needs: [change-classification, ci-image-change, ci-image-identity]
+    if: >-
+      ${{
+        needs.change-classification.outputs.run_integration == 'true' &&
+        needs.ci-image-change.outputs.changed == 'false' &&
+        needs.ci-image-identity.result == 'success' &&
+        github.event_name == 'push'
+      }}
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+      packages: read
+    uses: ./.github/workflows/ci-integration-suite.yml
+    with:
+      caller_event: ${{ github.event_name }}
+      caller_ref: ${{ github.ref }}
+      candidate_commit: ${{ github.sha }}
+      checkout_ref: ${{ github.sha }}
+      checkout_repository: ${{ github.repository }}
+      image_digest: ${{ needs.ci-image-identity.outputs.digest }}
+      image_kind: published
+      image_manifest_digest: ${{ needs.ci-image-identity.outputs.manifest_digest }}
+      image_ref: ${{ needs.ci-image-identity.outputs.image }}
+      image_source_commit: ${{ needs.ci-image-identity.outputs.source_commit }}
+      profile: default
+      publish_reusable_attestations: true
+      workflow_commit: ${{ github.workflow_sha }}
+
+  candidate-image-integration:
+    needs: [change-classification, ci-image-change, candidate-image-build]
+    if: >-
+      ${{
+        needs.change-classification.outputs.run_integration == 'true' &&
+        needs.ci-image-change.outputs.changed == 'true' &&
+        needs.candidate-image-build.result == 'success' &&
+        github.event_name == 'push'
+      }}
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+      packages: read
+    uses: ./.github/workflows/ci-integration-suite.yml
+    with:
+      caller_event: ${{ github.event_name }}
+      caller_ref: ${{ github.ref }}
+      candidate_commit: ${{ github.sha }}
+      checkout_ref: ${{ github.sha }}
+      checkout_repository: ${{ github.repository }}
+      image_digest: ${{ needs.candidate-image-build.outputs.digest }}
+      image_kind: candidate
+      image_manifest_digest: ${{ needs.candidate-image-build.outputs.manifest_digest }}
+      image_ref: ${{ needs.candidate-image-build.outputs.image_ref }}
+      image_source_commit: ${{ needs.candidate-image-build.outputs.source_commit }}
+      profile: default
+      publish_reusable_attestations: true
+      workflow_commit: ${{ github.workflow_sha }}
+
+  promote-candidate-image:
+    needs: [candidate-image-build, candidate-image-integration]
+    if: >-
+      ${{
+        needs.candidate-image-build.result == 'success' &&
+        needs.candidate-image-integration.result == 'success' &&
+        github.event_name == 'push' &&
+        (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/CI/'))
+      }}
+    outputs:
+      status: ${{ steps.promote.outputs.status }}
+    concurrency:
+      group: photospider-ci-image-promotion-${{ github.repository }}
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
-          submodules: recursive
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-
-      - name: Build local CI image
-        id: local-image
+          ref: ${{ github.sha }}
+      - name: Verify exact promotion identities
         env:
-          CI_IMAGE_MANIFEST_DIR: ${{ github.workspace }}/CI-results/local-ci-image-identity
+          CI_BUILT_DIGEST: ${{ needs.candidate-image-build.outputs.digest }}
+          CI_SUITE_DIGEST: ${{ needs.candidate-image-integration.outputs.validated_image_digest }}
         run: |
           set -Eeuo pipefail
-          python3 ci/scripts/ci_runner_verify.py --platform Linux
-          python3 ci/scripts/ci_lock_verify.py
-          mkdir -p "$CI_IMAGE_MANIFEST_DIR"
-          source_commit=$(git rev-parse HEAD)
-          manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
-            --source-commit "$source_commit" \
-            --repository "${{ github.repository }}" \
-            --output "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.json" \
-            --digest-output "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.sha256")
-          docker build \
-            --build-arg "CI_IMAGE_INPUT_MANIFEST_SHA256=$manifest_digest" \
-            --build-arg "CI_IMAGE_SOURCE_COMMIT=$source_commit" \
-            -t photospider-ci:local -f Dockerfile.ci .
-          docker image inspect --format '{{json .Config.Labels}}' \
-            photospider-ci:local > "$CI_IMAGE_MANIFEST_DIR/oci-labels.json"
-          python3 ci/scripts/ci_image_manifest.py verify-labels \
-            --manifest "$CI_IMAGE_MANIFEST_DIR/ci-image-input-v1.json" \
-            --labels-json "$CI_IMAGE_MANIFEST_DIR/oci-labels.json" \
-            --source-commit "$source_commit"
-          image_id=$(docker image inspect --format '{{.Id}}' photospider-ci:local)
-          if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "Local image did not produce an immutable image ID." >&2
+          if [[ "$CI_BUILT_DIGEST" != "$CI_SUITE_DIGEST" ]]; then
+            echo "Shared suite digest differs from the build-once candidate." >&2
             exit 1
           fi
-          printf 'image_id=%s\n' "$image_id" >> "$GITHUB_OUTPUT"
-
-      - name: Run integration suite in local CI image
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            -e CI_ARTIFACT_ROOT=/workspace/CI-results \
-            -e EXECUTION_REPEAT=5 \
-            -e LEGACY_GPU_REPEAT=3 \
-            "${{ steps.local-image.outputs.image_id }}" \
-            bash ci/scripts/integration_suite.sh
-
-      - name: Run isolated security profiles in local CI image
-        run: |
-          set -Eeuo pipefail
-          for sanitizer in asan tsan; do
-            docker run --rm \
-              -v "${{ github.workspace }}:/workspace" \
-              -w /workspace \
-              -e "SANITIZER=$sanitizer" \
-              -e "CI_ARTIFACT_DIR=/workspace/CI-results/sanitizer-$sanitizer" \
-              "${{ steps.local-image.outputs.image_id }}" \
-              bash ci/scripts/sanitizer_test.sh
-          done
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            -e CI_ARTIFACT_DIR=/workspace/CI-results/fuzz-codecs \
-            "${{ steps.local-image.outputs.image_id }}" \
-            bash ci/scripts/fuzz_smoke.sh
-
-      - name: Upload local image integration logs
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+          python3 ci/scripts/ci_runner_verify.py --platform Linux
+          python3 ci/scripts/ci_lock_verify.py
+      - name: Log in to GHCR for same-digest promotion
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
-          name: integration-local-image-results
-          path: CI-results
-          if-no-files-found: warn
-
-  full-ctest:
-    needs: [integration-plan, build-integrity-default, attest-reusable-build-default, ci-image-identity]
-    runs-on: ubuntu-24.04
-    container:
-      image: ${{ needs.ci-image-identity.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
-          fetch-depth: 0
-          submodules: recursive
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Download reusable build
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ci-build-default
-          path: CI-results/reusable-build
-      - name: Verify and restore reusable build
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote the tested digest without rebuilding
+        id: promote
         env:
-          CI_BUILD_PROFILE: default
-          CI_CANDIDATE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
-          CI_IMAGE_DIGEST: ${{ needs.ci-image-identity.outputs.digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
-          CI_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash ci/scripts/reusable_build_consume.sh
-      - name: Run full ctest
-        env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ctest-full
-          CI_REUSE_BUILD: ON
-        run: bash ci/scripts/ctest_full.sh
-      - name: Upload ctest logs
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ctest-full-results
-          path: CI-results/ctest-full
-          if-no-files-found: warn
-
-  build-smoke:
-    name: Build smoke (${{ matrix.test }})
-    needs: [integration-plan, build-integrity-default, attest-reusable-build-default, ci-image-identity]
-    if: >-
-      needs.integration-plan.result == 'success' &&
-      needs.build-integrity-default.result == 'success'
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.build-integrity-default.outputs.build_smoke_matrix || '{"include":[]}') }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    container:
-      image: ${{ needs.ci-image-identity.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
-          fetch-depth: 0
-          submodules: recursive
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Download reusable build
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ci-build-default
-          path: CI-results/reusable-build
-      - name: Verify and restore reusable build
-        env:
-          CI_BUILD_PROFILE: default
-          CI_CANDIDATE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
-          CI_IMAGE_DIGEST: ${{ needs.ci-image-identity.outputs.digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
-          CI_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash ci/scripts/reusable_build_consume.sh
-      - name: Run labelled build smoke
-        env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-smoke/${{ matrix.artifact }}
-          CI_BUILD_PROFILE: default
-          CI_REUSE_BUILD: ON
-          SMOKE_TEST_NAME: ${{ matrix.test }}
-        run: bash ci/scripts/build_smoke_test.sh
-      - name: Upload build smoke logs
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: build-smoke-${{ matrix.artifact }}-results
-          path: CI-results/build-smoke/${{ matrix.artifact }}
-          if-no-files-found: warn
-
-  scripted-cli:
-    needs: [integration-plan, build-integrity-default, attest-reusable-build-default, ci-image-identity]
-    runs-on: ubuntu-24.04
-    container:
-      image: ${{ needs.ci-image-identity.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
-          fetch-depth: 0
-          submodules: recursive
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Download reusable build
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ci-build-default
-          path: CI-results/reusable-build
-      - name: Verify and restore reusable build
-        env:
-          CI_BUILD_PROFILE: default
-          CI_CANDIDATE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
-          CI_IMAGE_DIGEST: ${{ needs.ci-image-identity.outputs.digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
-          CI_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash ci/scripts/reusable_build_consume.sh
-      - name: Run graph_cli script test
-        env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/graph-cli
-          CI_REUSE_BUILD: ON
-        run: bash ci/scripts/graph_cli_script_test.sh
-      - name: Upload graph_cli logs
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: graph-cli-results
-          path: CI-results/graph-cli
-          if-no-files-found: warn
-
-  propagation-script:
-    needs: [integration-plan, build-integrity-default, attest-reusable-build-default, ci-image-identity]
-    runs-on: ubuntu-24.04
-    container:
-      image: ${{ needs.ci-image-identity.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
-          fetch-depth: 0
-          submodules: recursive
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Download reusable build
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ci-build-default
-          path: CI-results/reusable-build
-      - name: Verify and restore reusable build
-        env:
-          CI_BUILD_PROFILE: default
-          CI_CANDIDATE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
-          CI_IMAGE_DIGEST: ${{ needs.ci-image-identity.outputs.digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
-          CI_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash ci/scripts/reusable_build_consume.sh
-      - name: Run propagation script test
-        env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/propagation
-          CI_REUSE_BUILD: ON
-        run: bash ci/scripts/propagation_script_test.sh
-      - name: Upload propagation logs
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: propagation-results
-          path: CI-results/propagation
-          if-no-files-found: warn
-
-  plugin-load:
-    needs: [integration-plan, build-integrity-default, attest-reusable-build-default, ci-image-identity]
-    runs-on: ubuntu-24.04
-    container:
-      image: ${{ needs.ci-image-identity.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
-          fetch-depth: 0
-          submodules: recursive
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Download reusable build
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ci-build-default
-          path: CI-results/reusable-build
-      - name: Verify and restore reusable build
-        env:
-          CI_BUILD_PROFILE: default
-          CI_CANDIDATE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
-          CI_IMAGE_DIGEST: ${{ needs.ci-image-identity.outputs.digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
-          CI_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash ci/scripts/reusable_build_consume.sh
-      - name: Run plugin load test
-        env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/plugin-load
-          CI_REUSE_BUILD: ON
-        run: bash ci/scripts/plugin_load_test.sh
-      - name: Upload plugin logs
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: plugin-load-results
-          path: CI-results/plugin-load
-          if-no-files-found: warn
-
-  execution-repeat:
-    needs: [integration-plan, build-integrity-default, attest-reusable-build-default, ci-image-identity]
-    runs-on: ubuntu-24.04
-    container:
-      image: ${{ needs.ci-image-identity.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
-          fetch-depth: 0
-          submodules: recursive
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Download reusable build
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ci-build-default
-          path: CI-results/reusable-build
-      - name: Verify and restore reusable build
-        env:
-          CI_BUILD_PROFILE: default
-          CI_CANDIDATE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
-          CI_IMAGE_DIGEST: ${{ needs.ci-image-identity.outputs.digest }}
-          CI_MATRIX_SHA256: ${{ needs.build-integrity-default.outputs.matrix_sha256 }}
-          CI_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash ci/scripts/reusable_build_consume.sh
-      - name: Run execution repeat test
-        env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/execution-repeat
-          CI_REUSE_BUILD: ON
-          EXECUTION_REPEAT: 5
-          LEGACY_GPU_REPEAT: 3
-        run: bash ci/scripts/execution_repeat_test.sh
-      - name: Upload execution repeat logs
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: execution-repeat-results
-          path: CI-results/execution-repeat
-          if-no-files-found: warn
-
-  sanitizer-asan:
-    needs: [change-classification, ci-image-change, ci-image-identity, integration-plan]
-    if: >-
-      ${{
-        needs.change-classification.outputs.run_integration == 'true' &&
-        needs.ci-image-change.outputs.changed == 'false' &&
-        needs.ci-image-identity.result == 'success'
-      }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    container:
-      image: ${{ needs.ci-image-identity.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
-          fetch-depth: 0
-          submodules: recursive
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Verify exact Linux ASan runner
+          CI_IMAGE_PROMOTION_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ci-image-promotion
+          CI_PROMOTION_BRANCH: ${{ github.ref_name }}
         run: >-
-          python3 ci/scripts/ci_runner_verify.py
-          --platform Linux
-          --runner-label ubuntu-24.04
-      - name: Download security profile inventory
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ci-security-profile-inventory
-          path: CI-results/profile-inventory
-      - name: Run isolated ASan profile
-        env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-asan
-          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
-          SANITIZER: asan
-        run: bash ci/scripts/sanitizer_test.sh
-      - name: Upload ASan diagnostics
+          bash ci/scripts/ci_image_promote.sh
+          --repository "${{ github.repository }}"
+          --image-ref "${{ needs.candidate-image-build.outputs.image_ref }}"
+          --expected-digest "${{ needs.candidate-image-build.outputs.digest }}"
+          --candidate-commit "${{ github.sha }}"
+          --source-commit "${{ needs.candidate-image-build.outputs.source_commit }}"
+          --manifest-digest "${{ needs.candidate-image-build.outputs.manifest_digest }}"
+          --event-name "${{ github.event_name }}"
+          --branch "$CI_PROMOTION_BRANCH"
+      - name: Upload promotion evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: sanitizer-asan-results
-          path: CI-results/sanitizer-asan
+          name: ci-image-promotion-results
+          path: CI-results/ci-image-promotion
           if-no-files-found: warn
-
-  sanitizer-tsan:
-    needs: [change-classification, ci-image-change, ci-image-identity, integration-plan]
-    if: >-
-      ${{
-        needs.change-classification.outputs.run_integration == 'true' &&
-        needs.ci-image-change.outputs.changed == 'false' &&
-        needs.ci-image-identity.result == 'success'
-      }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    container:
-      image: ${{ needs.ci-image-identity.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
-          fetch-depth: 0
-          submodules: recursive
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Verify exact Linux TSan runner
-        run: >-
-          python3 ci/scripts/ci_runner_verify.py
-          --platform Linux
-          --runner-label ubuntu-24.04
-      - name: Download security profile inventory
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ci-security-profile-inventory
-          path: CI-results/profile-inventory
-      - name: Run isolated TSan profile
-        env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-tsan
-          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
-          SANITIZER: tsan
-        run: bash ci/scripts/sanitizer_test.sh
-      - name: Upload TSan diagnostics
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: sanitizer-tsan-results
-          path: CI-results/sanitizer-tsan
-          if-no-files-found: warn
-
-  fuzz-codecs:
-    needs: [change-classification, ci-image-change, ci-image-identity, integration-plan]
-    if: >-
-      ${{
-        needs.change-classification.outputs.run_integration == 'true' &&
-        needs.ci-image-change.outputs.changed == 'false' &&
-        needs.ci-image-identity.result == 'success'
-      }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    container:
-      image: ${{ needs.ci-image-identity.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
-          fetch-depth: 0
-          submodules: recursive
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Verify exact Linux fuzz runner
-        run: >-
-          python3 ci/scripts/ci_runner_verify.py
-          --platform Linux
-          --runner-label ubuntu-24.04
-      - name: Download security profile inventory
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ci-security-profile-inventory
-          path: CI-results/profile-inventory
-      - name: Run bounded codec fuzz smoke
-        env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/fuzz-codecs
-          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
-        run: bash ci/scripts/fuzz_smoke.sh
-      - name: Upload transient fuzz diagnostics
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: fuzz-codecs-results
-          path: CI-results/fuzz-codecs
-          if-no-files-found: warn
-          retention-days: 3
-
-  security-darwin:
-    needs: [change-classification, ci-image-change, integration-plan]
-    if: >-
-      ${{
-        always() &&
-        needs.change-classification.result == 'success' &&
-        needs.change-classification.outputs.run_integration == 'true' &&
-        needs.ci-image-change.result == 'success' &&
-        (
-          needs.ci-image-change.outputs.changed == 'true' ||
-          needs.integration-plan.result == 'success'
-        )
-      }}
-    runs-on: macos-15
-    timeout-minutes: 240
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
-          fetch-depth: 0
-          submodules: recursive
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Verify exact Darwin security runner
-        run: >-
-          python3 ci/scripts/ci_runner_verify.py
-          --platform Darwin
-          --runner-label macos-15
-      - name: Download security profile inventory
-        if: needs.ci-image-change.outputs.changed == 'false'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ci-security-profile-inventory
-          path: CI-results/profile-inventory
-      - name: Run isolated Darwin security profiles
-        env:
-          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
-          CI_RUNNER_TEMP: ${{ runner.temp }}
-        run: |
-          set -Eeuo pipefail
-          for sanitizer in asan tsan; do
-            SANITIZER="$sanitizer" \
-              CI_ARTIFACT_DIR="${{ github.workspace }}/CI-results/sanitizer-$sanitizer-darwin" \
-              bash ci/scripts/sanitizer_test.sh
-          done
-          CI_ARTIFACT_DIR="${{ github.workspace }}/CI-results/fuzz-codecs-darwin" \
-            bash ci/scripts/fuzz_smoke.sh
-      - name: Upload Darwin security diagnostics
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: security-darwin-results
-          path: |
-            CI-results/sanitizer-asan-darwin
-            CI-results/sanitizer-tsan-darwin
-            CI-results/fuzz-codecs-darwin
-          if-no-files-found: warn
-          retention-days: 3
 
   integration:
     name: >-
@@ -1126,20 +593,11 @@ jobs:
       - change-classification
       - ci-image-change
       - ci-image-identity
-      - integration-plan
-      - build-integrity-default
-      - attest-reusable-build-default
-      - local-image-integration
-      - full-ctest
-      - build-smoke
-      - scripted-cli
-      - propagation-script
-      - plugin-load
-      - execution-repeat
-      - sanitizer-asan
-      - sanitizer-tsan
-      - fuzz-codecs
-      - security-darwin
+      - candidate-image-build
+      - published-image-integration-readonly
+      - published-image-integration-trusted
+      - candidate-image-integration
+      - promote-candidate-image
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -1159,20 +617,12 @@ jobs:
           IMAGE_CHANGE_RESULT: ${{ needs.ci-image-change.result }}
           IMAGE_CHANGED: ${{ needs.ci-image-change.outputs.changed }}
           IMAGE_IDENTITY_RESULT: ${{ needs.ci-image-identity.result }}
-          PLAN_RESULT: ${{ needs.integration-plan.result }}
-          BUILD_DEFAULT_RESULT: ${{ needs.build-integrity-default.result }}
-          ATTEST_BUILD_RESULT: ${{ needs.attest-reusable-build-default.result }}
-          LOCAL_IMAGE_RESULT: ${{ needs.local-image-integration.result }}
-          FULL_CTEST_RESULT: ${{ needs.full-ctest.result }}
-          BUILD_SMOKE_RESULT: ${{ needs.build-smoke.result }}
-          SCRIPTED_CLI_RESULT: ${{ needs.scripted-cli.result }}
-          PROPAGATION_RESULT: ${{ needs.propagation-script.result }}
-          PLUGIN_LOAD_RESULT: ${{ needs.plugin-load.result }}
-          EXECUTION_REPEAT_RESULT: ${{ needs.execution-repeat.result }}
-          ASAN_RESULT: ${{ needs.sanitizer-asan.result }}
-          TSAN_RESULT: ${{ needs.sanitizer-tsan.result }}
-          FUZZ_RESULT: ${{ needs.fuzz-codecs.result }}
-          DARWIN_SECURITY_RESULT: ${{ needs.security-darwin.result }}
+          CANDIDATE_BUILD_RESULT: ${{ needs.candidate-image-build.result }}
+          CANDIDATE_SUITE_RESULT: ${{ needs.candidate-image-integration.result }}
+          PROMOTION_RESULT: ${{ needs.promote-candidate-image.result }}
+          PROMOTION_STATUS: ${{ needs.promote-candidate-image.outputs.status }}
+          PUBLISHED_READONLY_RESULT: ${{ needs.published-image-integration-readonly.result }}
+          PUBLISHED_TRUSTED_RESULT: ${{ needs.published-image-integration-trusted.result }}
         run: |
           set -Eeuo pipefail
 
@@ -1181,8 +631,6 @@ jobs:
           # @param $2 Actual value being asserted.
           # @param $3 Expected value.
           # @return Zero for an exact match, otherwise one with a diagnostic.
-          # @throws Nothing; mismatches return nonzero to the gate.
-          # @note Labels may identify job conclusions or routed output values.
           require_value() {
             local assertion_label=$1
             local actual=$2
@@ -1193,24 +641,15 @@ jobs:
             fi
           }
 
-          # @brief Require every normal integration shard to be intentionally skipped.
-          # @return Zero only when all build, CTest, and integration jobs are skipped.
-          # @throws Nothing; mismatches return nonzero through require_value.
-          # @note Used for documentation-only and local-image routing assertions.
-          require_normal_shards_skipped() {
-            require_value integration-plan "$PLAN_RESULT" skipped
-            require_value build-integrity-default "$BUILD_DEFAULT_RESULT" skipped
-            require_value attest-reusable-build-default "$ATTEST_BUILD_RESULT" skipped
-            require_value full-ctest "$FULL_CTEST_RESULT" skipped
-            require_value build-smoke "$BUILD_SMOKE_RESULT" skipped
-            require_value scripted-cli "$SCRIPTED_CLI_RESULT" skipped
-            require_value propagation-script "$PROPAGATION_RESULT" skipped
-            require_value plugin-load "$PLUGIN_LOAD_RESULT" skipped
-            require_value execution-repeat "$EXECUTION_REPEAT_RESULT" skipped
-            require_value sanitizer-asan "$ASAN_RESULT" skipped
-            require_value sanitizer-tsan "$TSAN_RESULT" skipped
-            require_value fuzz-codecs "$FUZZ_RESULT" skipped
-            require_value security-darwin "$DARWIN_SECURITY_RESULT" skipped
+          # @brief Require every image-producing or shared-DAG route to skip.
+          # @return Zero only when documentation-only routing performed no build.
+          require_integration_routes_skipped() {
+            require_value ci-image-identity "$IMAGE_IDENTITY_RESULT" skipped
+            require_value candidate-image-build "$CANDIDATE_BUILD_RESULT" skipped
+            require_value candidate-image-integration "$CANDIDATE_SUITE_RESULT" skipped
+            require_value promote-candidate-image "$PROMOTION_RESULT" skipped
+            require_value published-image-integration-readonly               "$PUBLISHED_READONLY_RESULT" skipped
+            require_value published-image-integration-trusted               "$PUBLISHED_TRUSTED_RESULT" skipped
           }
 
           if [[ "$CI_EVENT_NAME" == pull_request_target &&
@@ -1229,12 +668,10 @@ jobs:
           if [[ "$DOCS_ONLY" == true ]]; then
             require_value RUN_INTEGRATION "$RUN_INTEGRATION" false
             require_value ci-image-change "$IMAGE_CHANGE_RESULT" skipped
-            require_value ci-image-identity "$IMAGE_IDENTITY_RESULT" skipped
-            require_normal_shards_skipped
-            require_value local-image-integration "$LOCAL_IMAGE_RESULT" skipped
+            require_integration_routes_skipped
             {
               echo "Documentation-only change detected ($CLASSIFICATION_REASON)."
-              echo "Compilation, CTest, and integration shards were intentionally skipped; healthcheck remains required."
+              echo "Build and shared integration DAG were intentionally skipped; healthcheck remains required."
             } | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -1245,32 +682,39 @@ jobs:
           case "$IMAGE_CHANGED" in
             true)
               require_value ci-image-identity "$IMAGE_IDENTITY_RESULT" skipped
-              require_normal_shards_skipped
-              require_value local-image-integration "$LOCAL_IMAGE_RESULT" success
-              require_value security-darwin "$DARWIN_SECURITY_RESULT" success
-              echo "Full integration passed in the locally built CI image." |
-                tee -a "$GITHUB_STEP_SUMMARY"
+              require_value candidate-image-build "$CANDIDATE_BUILD_RESULT" success
+              require_value candidate-image-integration "$CANDIDATE_SUITE_RESULT" success
+              require_value promote-candidate-image "$PROMOTION_RESULT" success
+              require_value published-image-integration-readonly                 "$PUBLISHED_READONLY_RESULT" skipped
+              require_value published-image-integration-trusted                 "$PUBLISHED_TRUSTED_RESULT" skipped
+              case "$PROMOTION_STATUS" in
+                promoted)
+                  echo "Build-once candidate integration and same-digest promotion passed." |
+                    tee -a "$GITHUB_STEP_SUMMARY"
+                  ;;
+                superseded)
+                  echo "Build-once candidate integration passed; a newer image-input identity superseded mutable-tag promotion." |
+                    tee -a "$GITHUB_STEP_SUMMARY"
+                  ;;
+                *)
+                  echo "Promotion completed without a canonical promoted/superseded status." >&2
+                  exit 1
+                  ;;
+              esac
               ;;
             false)
               require_value ci-image-identity "$IMAGE_IDENTITY_RESULT" success
-              require_value local-image-integration "$LOCAL_IMAGE_RESULT" skipped
-              require_value integration-plan "$PLAN_RESULT" success
-              require_value build-integrity-default \
-                "$BUILD_DEFAULT_RESULT" success
-              require_value attest-reusable-build-default \
-                "$ATTEST_BUILD_RESULT" success
-              require_value full-ctest "$FULL_CTEST_RESULT" success
-              require_value build-smoke "$BUILD_SMOKE_RESULT" success
-              require_value scripted-cli "$SCRIPTED_CLI_RESULT" success
-              require_value propagation-script "$PROPAGATION_RESULT" success
-              require_value plugin-load "$PLUGIN_LOAD_RESULT" success
-              require_value execution-repeat "$EXECUTION_REPEAT_RESULT" success
-              require_value sanitizer-asan "$ASAN_RESULT" success
-              require_value sanitizer-tsan "$TSAN_RESULT" success
-              require_value fuzz-codecs "$FUZZ_RESULT" success
-              require_value security-darwin "$DARWIN_SECURITY_RESULT" success
-
-              echo "Full published-image integration matrix passed." |
+              require_value candidate-image-build "$CANDIDATE_BUILD_RESULT" skipped
+              require_value candidate-image-integration "$CANDIDATE_SUITE_RESULT" skipped
+              require_value promote-candidate-image "$PROMOTION_RESULT" skipped
+              if [[ "$CI_EVENT_NAME" == push ]]; then
+                require_value published-image-integration-trusted                   "$PUBLISHED_TRUSTED_RESULT" success
+                require_value published-image-integration-readonly                   "$PUBLISHED_READONLY_RESULT" skipped
+              else
+                require_value published-image-integration-trusted                   "$PUBLISHED_TRUSTED_RESULT" skipped
+                require_value published-image-integration-readonly                   "$PUBLISHED_READONLY_RESULT" success
+              fi
+              echo "Shared published-image integration DAG passed." |
                 tee -a "$GITHUB_STEP_SUMMARY"
               ;;
             *)

@@ -3,9 +3,13 @@
 set -Eeuo pipefail
 
 # @file build_smoke_test.sh
-# @brief Revalidate and run one exact labelled test from a reusable full build.
+# @brief Revalidate and run one exact fresh-build smoke from the minimal
+#   CTest-control artifact produced by the shared build tree.
 # @note SMOKE_TEST_NAME is workflow data, not shell or regex source; the Python
 #   runner resolves it to a fresh validated numeric CTest index.
+# @note The producer-local public-header smoke and the dedicated installed-
+#   package consumer are removed from this control matrix by the protected
+#   routing lock; this driver handles only fresh-build control-role smokes.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
@@ -20,6 +24,10 @@ if [[ -n "${CI_BUILD_PROFILE:-}" && "$CI_BUILD_PROFILE" != default ]]; then
   echo "Labelled build smokes require CI_BUILD_PROFILE=default." >&2
   exit 2
 fi
+if [[ "${CI_ARTIFACT_ROLE:-}" != ctest-control ]]; then
+  echo "Build smoke requires the exact ctest-control artifact role." >&2
+  exit 2
+fi
 CI_BUILD_PROFILE=default
 BUILD_TESTING=ON
 unset PHOTOSPIDER_BUILD_IPC || true
@@ -30,12 +38,11 @@ source "$SCRIPT_DIR/common.sh"
 cd "$REPO_ROOT"
 
 if ! ci_reuse_build_enabled || ! ci_build_is_reusable; then
-  echo "Build smoke requires a reusable default build at $BUILD_DIR." >&2
+  echo "Build smoke requires a reusable CTest-control tree at $BUILD_DIR." >&2
   exit 1
 fi
 
 ensure_ci_configured cmake_configure
-ensure_ci_all build_all
 run_logged selected_build_smoke \
   python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" run \
     --build-dir "$BUILD_DIR" \

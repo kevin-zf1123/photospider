@@ -33,6 +33,39 @@ class ReusableBuildError(ValueError):
     """Report an unsafe archive or missing/mismatched reusable-build identity."""
 
 
+TARGETED_ARTIFACT_ROLES = frozenset(
+    {"ctest-control", "ctest-runtime", "installed-package", "openexr-metadata"}
+)
+"""Exact consumer roles supported by the targeted reusable artifact format."""
+
+_FORBIDDEN_RUNTIME_SUFFIXES = (
+    ".a",
+    ".d",
+    ".gch",
+    ".lib",
+    ".o",
+    ".obj",
+    ".pch",
+)
+"""Build residue that runtime/control artifacts must never fan out."""
+
+_FORBIDDEN_RUNTIME_NAMES = frozenset(
+    {
+        ".ninja_deps",
+        ".ninja_log",
+        "DependInfo.cmake",
+        "build.make",
+        "compiler_depend.make",
+        "compiler_depend.ts",
+        "depend.make",
+        "flags.make",
+        "link.txt",
+        "progress.make",
+    }
+)
+"""Generated dependency/build records excluded from targeted runtime payloads."""
+
+
 class _ArchiveSnapshot:
     """Own one immutable-by-path regular archive object for verification.
 
@@ -111,12 +144,170 @@ class _ArchiveSnapshot:
         return tarfile.open(fileobj=self._handle, mode="r:gz")
 
 
+class _ManifestSnapshot:
+    """Retain one regular manifest descriptor and its exact immutable bytes.
+
+    The caller-visible pathname is opened once with final-component link
+    refusal. JSON decoding, canonical-byte comparison, SHA-256 calculation,
+    identity/content validation, and evidence generation all consume the same
+    byte string read from that descriptor. A final path-identity check rejects
+    atomic replacement instead of silently reporting evidence for an object no
+    longer named by the accepted path.
+
+    Args:
+        path: Manifest pathname to open without following its final component.
+
+    Raises:
+        ReusableBuildError: The platform lacks ``O_NOFOLLOW``, the object is
+            nonregular, too large, or changes while its bytes are captured.
+        OSError: The pathname cannot be opened or inspected.
+
+    Note:
+        Targeted manifests are bounded control data, not payload archives. A
+        64 MiB limit keeps a malicious JSON file from becoming an unbounded
+        in-memory input while remaining far above the maintained manifests.
+    """
+
+    _MAX_BYTES = 64 * 1024 * 1024
+
+    def __init__(self, path: Path) -> None:
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise ReusableBuildError(
+                "manifest verification requires an O_NOFOLLOW-capable platform"
+            )
+        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(path, flags)
+        try:
+            metadata_before = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata_before.st_mode):
+                raise ReusableBuildError(
+                    f"expected a regular targeted manifest file: {path}"
+                )
+            if metadata_before.st_size > self._MAX_BYTES:
+                raise ReusableBuildError("targeted manifest exceeds 64 MiB")
+            self._handle = os.fdopen(descriptor, "rb", closefd=True)
+            self.bytes = self._handle.read(self._MAX_BYTES + 1)
+            metadata_after = os.fstat(self._handle.fileno())
+            if len(self.bytes) > self._MAX_BYTES:
+                raise ReusableBuildError("targeted manifest exceeds 64 MiB")
+            if self._metadata_identity(metadata_before) != self._metadata_identity(
+                metadata_after
+            ) or len(self.bytes) != metadata_after.st_size:
+                raise ReusableBuildError(
+                    "targeted manifest changed while its snapshot was captured"
+                )
+        except Exception:
+            if "self" in locals() and hasattr(self, "_handle"):
+                self._handle.close()
+            else:
+                os.close(descriptor)
+            raise
+        self.path = path
+        self._metadata = metadata_after
+
+    @staticmethod
+    def _metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+        """Return stable file/type/change fields used by snapshot checks."""
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+
+    def __enter__(self) -> "_ManifestSnapshot":
+        """Return this live manifest snapshot for one verification scope."""
+        return self
+
+    def __exit__(
+        self, exception_type: object, exception: object, traceback: object
+    ) -> None:
+        """Close the retained manifest descriptor at scope exit."""
+        self._handle.close()
+
+    def sha256(self) -> str:
+        """Hash only the retained bytes captured from the opened descriptor."""
+        return hashlib.sha256(self.bytes).hexdigest()
+
+    def json_value(self) -> Any:
+        """Decode strict UTF-8 JSON with duplicate-member rejection.
+
+        Returns:
+            Decoded JSON value from the retained byte string.
+
+        Raises:
+            ReusableBuildError: UTF-8, JSON syntax, or member uniqueness fails.
+        """
+        try:
+            text = self.bytes.decode("utf-8")
+            return json.loads(text, object_pairs_hook=_unique_object)
+        except (UnicodeError, json.JSONDecodeError, ReusableBuildError) as error:
+            raise ReusableBuildError(
+                f"cannot read strict targeted manifest JSON {self.path}: {error}"
+            ) from error
+
+    def require_path_unchanged(self) -> None:
+        """Require the accepted descriptor still owns the caller-visible path.
+
+        Raises:
+            ReusableBuildError: The descriptor changed in place or the path was
+                deleted, linked, replaced, resized, or rewritten.
+            OSError: Descriptor inspection fails unexpectedly.
+        """
+        descriptor_metadata = os.fstat(self._handle.fileno())
+        try:
+            path_metadata = os.stat(self.path, follow_symlinks=False)
+        except OSError as error:
+            raise ReusableBuildError(
+                "targeted manifest pathname disappeared during verification"
+            ) from error
+        expected = self._metadata_identity(self._metadata)
+        if (
+            self._metadata_identity(descriptor_metadata) != expected
+            or self._metadata_identity(path_metadata) != expected
+            or not stat.S_ISREG(path_metadata.st_mode)
+        ):
+            raise ReusableBuildError(
+                "targeted manifest pathname changed during verification"
+            )
+
+
 def _load_profile_module(root: Path) -> Any:
     """Load the adjacent protected profile resolver without package assumptions."""
     module_path = root / "ci/scripts/ci_profile_manifest.py"
     specification = importlib.util.spec_from_file_location("photospider_ci_profile_manifest", module_path)
     if specification is None or specification.loader is None:
         raise ReusableBuildError("cannot load protected CI profile reader")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+def _load_ctest_closure_module(root: Path) -> Any:
+    """Load the adjacent protected ordinary-CTest closure implementation.
+
+    Args:
+        root: Exact checked-out repository containing protected CI scripts.
+
+    Returns:
+        Loaded module exposing role selection and restored-runtime validation.
+
+    Raises:
+        ReusableBuildError: The protected module cannot be located or loaded.
+
+    Note:
+        Loading by exact repository path avoids relying on caller-controlled
+        ``PYTHONPATH`` or an installed package with a matching module name.
+    """
+    module_path = root / "ci/scripts/ctest_runtime_closure.py"
+    specification = importlib.util.spec_from_file_location(
+        "photospider_ctest_runtime_closure", module_path
+    )
+    if specification is None or specification.loader is None:
+        raise ReusableBuildError("cannot load protected CTest closure reader")
     module = importlib.util.module_from_spec(specification)
     specification.loader.exec_module(module)
     return module
@@ -562,6 +753,312 @@ def _measured_identity_value(
     return measured
 
 
+def _runtime_member_is_forbidden(relative: PurePosixPath) -> bool:
+    """Return whether one runtime/control member is build residue.
+
+    Args:
+        relative: Canonical path below the build tree.
+
+    Returns:
+        True for object, dependency, precompiled-header, or static-library
+        outputs that no runtime/control consumer may receive.
+
+    Note:
+        Installed-package artifacts use a separate role because their static
+        product library is intentional package content rather than residue.
+    """
+    name = relative.name
+    return name in _FORBIDDEN_RUNTIME_NAMES or name.endswith(
+        _FORBIDDEN_RUNTIME_SUFFIXES
+    )
+
+
+def _targeted_payload_files(
+    root: Path, build: Path, role: str, payload_source: Path | None
+) -> list[tuple[Path, PurePosixPath]]:
+    """Select exact regular files for one targeted consumer role.
+
+    Args:
+        root: Exact checkout containing the protected closure reader.
+        build: Fresh measured producer build tree.
+        role: One value from :data:`TARGETED_ARTIFACT_ROLES`.
+        payload_source: Installed prefix for ``installed-package``; absent for
+            CTest and OpenEXR metadata roles.
+
+    Returns:
+        Sorted ``(source, destination-relative)`` file tuples. Destination
+        paths are relative to the archive's canonical ``ci`` root.
+
+    Raises:
+        ReusableBuildError: The role/source is invalid, a selected entry is an
+            unsafe link or special file, forbidden residue is selected, or the
+            role has no complete minimal surface.
+
+    Note:
+        CTest membership comes from the producer-written complete ordinary
+        closure rather than suffix guesses or a hand-maintained test-name list.
+        The installed role carries only its prefix plus the exact producer
+        cache and public-header inventory consumed by package-input mode. The
+        OpenEXR role carries only the producer cache needed to propagate its
+        configured Darwin architecture into the fresh source-tree smoke.
+        Versioned shared-library aliases are accepted only when their final
+        target is a regular file inside the same role root; the target bytes
+        are copied under the alias name so the archive itself contains no link.
+    """
+    _identifier(role, "targeted artifact role")
+    if role not in TARGETED_ARTIFACT_ROLES:
+        raise ReusableBuildError(f"unsupported targeted artifact role: {role}")
+    if not build.is_dir() or build.is_symlink():
+        raise ReusableBuildError("targeted artifact producer build is unsafe")
+
+    selected: list[tuple[Path, PurePosixPath]] = []
+    if role == "installed-package":
+        if (
+            payload_source is None
+            or not payload_source.is_dir()
+            or payload_source.is_symlink()
+        ):
+            raise ReusableBuildError("installed-package payload must be a real directory")
+        for path in sorted(
+            payload_source.rglob("*"),
+            key=lambda item: item.relative_to(payload_source).as_posix(),
+        ):
+            payload_relative = PurePosixPath(
+                path.relative_to(payload_source).as_posix()
+            )
+            if path.is_symlink():
+                shared_library = payload_relative.name.endswith(
+                    (".dylib", ".so")
+                ) or ".so." in payload_relative.name
+                if not shared_library:
+                    raise ReusableBuildError(
+                        f"installed package contains a non-library link: {path}"
+                    )
+                try:
+                    resolved = path.resolve(strict=True)
+                    resolved.relative_to(payload_source.resolve())
+                except (OSError, ValueError) as error:
+                    raise ReusableBuildError(
+                        f"installed package link is dangling or escapes: {path}"
+                    ) from error
+                if not resolved.is_file() or resolved.is_symlink():
+                    raise ReusableBuildError(
+                        f"installed package link target is not regular: {path}"
+                    )
+                relative = PurePosixPath("installed") / payload_relative
+                selected.append((resolved, relative))
+                continue
+            if path.is_dir():
+                continue
+            if not path.is_file():
+                raise ReusableBuildError(
+                    f"installed package contains a special file: {path}"
+                )
+            relative = PurePosixPath("installed") / payload_relative
+            selected.append((path, relative))
+        metadata_files = (
+            (
+                build / "CMakeCache.txt",
+                PurePosixPath("producer/CMakeCache.txt"),
+            ),
+            (
+                build
+                / "generated/ci_inventory/installable_public_headers.txt",
+                PurePosixPath(
+                    "producer/generated/ci_inventory/"
+                    "installable_public_headers.txt"
+                ),
+            ),
+        )
+        for source, relative in metadata_files:
+            if not source.is_file() or source.is_symlink():
+                raise ReusableBuildError(
+                    f"installed-package producer metadata is unavailable: {source}"
+                )
+            selected.append((source, relative))
+    elif role == "openexr-metadata":
+        if payload_source is not None:
+            raise ReusableBuildError(
+                "openexr-metadata does not accept a payload source"
+            )
+        cache = build / "CMakeCache.txt"
+        if not cache.is_file() or cache.is_symlink():
+            raise ReusableBuildError(
+                "openexr-metadata producer cache is unavailable"
+            )
+        selected.append((cache, PurePosixPath("producer/CMakeCache.txt")))
+    else:
+        if payload_source is not None:
+            raise ReusableBuildError(
+                "CTest targeted roles do not accept a payload source"
+            )
+        closure = _load_ctest_closure_module(root)
+        try:
+            role_paths = closure.expected_role_paths(build, role)
+        except Exception as error:
+            raise ReusableBuildError(
+                f"ordinary CTest closure selection failed: {error}"
+            ) from error
+        for path_text in role_paths:
+            relative = PurePosixPath(path_text)
+            path = build.joinpath(*relative.parts)
+            if path.is_symlink():
+                shared_library = relative.name.endswith(
+                    (".dylib", ".so")
+                ) or ".so." in relative.name
+                if role != "ctest-runtime" or not shared_library:
+                    raise ReusableBuildError(
+                        f"targeted artifact member is an unsupported link: {path}"
+                    )
+                try:
+                    resolved = path.resolve(strict=True)
+                    resolved.relative_to(build.resolve())
+                except (OSError, ValueError) as error:
+                    raise ReusableBuildError(
+                        f"runtime library link is dangling or escapes: {path}"
+                    ) from error
+                if not resolved.is_file() or resolved.is_symlink():
+                    raise ReusableBuildError(
+                        f"runtime library link target is not regular: {path}"
+                    )
+                path = resolved
+            if not path.is_file():
+                raise ReusableBuildError(
+                    f"targeted artifact member is missing or special: {path}"
+                )
+            if _runtime_member_is_forbidden(relative):
+                raise ReusableBuildError(
+                    f"ordinary CTest closure includes forbidden residue: {relative}"
+                )
+            selected.append((path, relative))
+
+    if not selected:
+        raise ReusableBuildError(f"targeted artifact role {role} is empty")
+    destinations = [relative.as_posix() for _, relative in selected]
+    if destinations != sorted(destinations) or len(destinations) != len(
+        set(destinations)
+    ):
+        raise ReusableBuildError("targeted artifact members are not canonical and unique")
+    _validate_targeted_role_paths(role, destinations)
+    return selected
+
+
+def _validate_targeted_role_paths(role: str, paths: list[str]) -> None:
+    """Require one targeted member inventory to satisfy its role contract.
+
+    Args:
+        role: Exact targeted artifact role.
+        paths: Sorted file paths below the archive's ``ci`` root.
+
+    Raises:
+        ReusableBuildError: Required CTest/package surfaces are absent or a
+            runtime/control role contains forbidden build residue.
+    """
+    if not paths or paths != sorted(paths) or len(paths) != len(set(paths)):
+        raise ReusableBuildError("targeted artifact path inventory is invalid")
+    if role in {"ctest-control", "ctest-runtime"}:
+        relatives = [PurePosixPath(path) for path in paths]
+        if any(_runtime_member_is_forbidden(path) for path in relatives):
+            raise ReusableBuildError(
+                "targeted runtime artifact contains forbidden residue"
+            )
+        required = {".photospider-ci-build-complete", "CMakeCache.txt"}
+        if not required.issubset(paths) or not any(
+            PurePosixPath(path).name == "CTestTestfile.cmake" for path in paths
+        ):
+            raise ReusableBuildError("targeted CTest artifact lacks control metadata")
+        closure_path = "generated/ci_inventory/ordinary_ctest_closure_v1.json"
+        if closure_path not in paths:
+            raise ReusableBuildError("targeted CTest artifact lacks closure metadata")
+    elif role == "installed-package":
+        metadata = {
+            "producer/CMakeCache.txt",
+            "producer/generated/ci_inventory/installable_public_headers.txt",
+        }
+        if not metadata.issubset(paths):
+            raise ReusableBuildError("installed package lacks exact producer metadata")
+        if any(
+            not path.startswith("installed/") and path not in metadata
+            for path in paths
+        ):
+            raise ReusableBuildError("installed-package member escaped its exact roles")
+        for path in paths:
+            relative = PurePosixPath(path)
+            if path.startswith("producer/") and path not in metadata:
+                raise ReusableBuildError(
+                    "installed package contains undeclared producer state"
+                )
+            if path.startswith("producer/") and (
+                "CMakeFiles" in relative.parts
+                or relative.name.endswith(_FORBIDDEN_RUNTIME_SUFFIXES)
+                or relative.name.startswith("CTest")
+            ):
+                raise ReusableBuildError(
+                    "installed package contains forbidden producer residue"
+                )
+        if not any(path.endswith("PhotospiderConfig.cmake") for path in paths):
+            raise ReusableBuildError("installed package lacks PhotospiderConfig.cmake")
+        if not any(path.endswith((".hpp", ".h")) for path in paths):
+            raise ReusableBuildError("installed package lacks public headers")
+        if not any(path.endswith((".a", ".dylib", ".so")) for path in paths):
+            raise ReusableBuildError("installed package lacks a product library")
+    elif role == "openexr-metadata":
+        if paths != ["producer/CMakeCache.txt"]:
+            raise ReusableBuildError(
+                "openexr-metadata must contain only producer/CMakeCache.txt"
+            )
+    else:
+        raise ReusableBuildError(f"unsupported targeted artifact role: {role}")
+
+
+def _copy_targeted_payload(
+    root: Path,
+    build: Path,
+    role: str,
+    payload_source: Path | None,
+    stage: Path,
+) -> None:
+    """Copy one role's exact selected files into a private archive stage."""
+    for source, relative in _targeted_payload_files(
+        root, build, role, payload_source
+    ):
+        target = stage.joinpath(*relative.parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        target.chmod(0o755 if source.stat().st_mode & 0o111 else 0o644)
+
+
+def _targeted_content(root: Path) -> dict[str, Any]:
+    """Measure exact file members and bytes below one targeted ``ci`` root."""
+    members: list[dict[str, Any]] = []
+    total_size = 0
+    for path in sorted(
+        root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()
+    ):
+        if path.is_symlink():
+            raise ReusableBuildError(f"targeted content contains a link: {path}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ReusableBuildError(
+                f"targeted content contains a special file: {path}"
+            )
+        relative = path.relative_to(root).as_posix()
+        size = path.stat().st_size
+        total_size += size
+        members.append(
+            {
+                "executable": bool(path.stat().st_mode & 0o111),
+                "path": relative,
+                "sha256": _sha256_file(path),
+                "size": size,
+            }
+        )
+    if not members:
+        raise ReusableBuildError("targeted content inventory is empty")
+    return {"members": members, "uncompressed_size": total_size}
+
+
 def _archive_entries(source: Path) -> list[Path]:
     """Return sorted regular directories/files and reject links or special entries."""
     if not source.is_dir() or source.is_symlink():
@@ -669,6 +1166,162 @@ def _create(arguments: argparse.Namespace) -> None:
     print(_sha256_file(arguments.manifest))
 
 
+def _create_targeted(arguments: argparse.Namespace) -> None:
+    """Measure one fresh producer and emit a role-minimal reusable artifact.
+
+    Args:
+        arguments: Parsed producer identities, full build source, targeted role,
+            optional installed prefix, and output paths.
+
+    Raises:
+        ReusableBuildError: Producer identity, role selection, or content
+            boundaries are incomplete, unsafe, or mismatched.
+
+    Note:
+        Semantic build identity is always measured from the complete fresh
+        producer. Only the role-selected private stage is archived, so object
+        and dependency residue cannot leak into downstream fan-out.
+    """
+    root = arguments.repo_root
+    inventory = arguments.inventory_dir
+    module = _load_profile_module(root)
+    try:
+        resolved = module.resolve(root, inventory)
+    except Exception as error:  # The loaded module owns its detailed diagnostics.
+        raise ReusableBuildError(f"profile identity is invalid: {error}") from error
+    candidate = _full_sha(arguments.candidate_commit, "candidate commit")
+    workflow = _full_sha(arguments.workflow_commit, "producer workflow commit")
+    profile = _identifier(arguments.profile, "profile")
+    image = _digest(arguments.image_digest, "CI image digest")
+    role = _identifier(arguments.role, "targeted artifact role")
+    if role not in TARGETED_ARTIFACT_ROLES:
+        raise ReusableBuildError(f"unsupported targeted artifact role: {role}")
+    if _git_head(root) != candidate:
+        raise ReusableBuildError("candidate commit differs from checked-out Git HEAD")
+    try:
+        inventory_relative = inventory.resolve().relative_to(arguments.source.resolve())
+    except ValueError as error:
+        raise ReusableBuildError("generated inventory is outside the producer build") from error
+    if inventory_relative != Path("generated/ci_inventory"):
+        raise ReusableBuildError(
+            "generated inventory is not at generated/ci_inventory in the build"
+        )
+    internal = _measure_internal_identity(
+        root,
+        arguments.source,
+        inventory,
+        candidate,
+        profile,
+        resolved["matrix_sha256"],
+        resolved["fallback"],
+        require_fresh_origin=True,
+    )
+    with tempfile.TemporaryDirectory(prefix="photospider-targeted-producer-") as stage_text:
+        stage = Path(stage_text)
+        _copy_targeted_payload(
+            root, arguments.source, role, arguments.payload_source, stage
+        )
+        content = _targeted_content(stage)
+        _validate_targeted_role_paths(
+            role, [member["path"] for member in content["members"]]
+        )
+        if role in {"ctest-control", "ctest-runtime"}:
+            closure = _load_ctest_closure_module(root)
+            try:
+                closure.validate_staged_role(
+                    root,
+                    stage,
+                    role,
+                    [member["path"] for member in content["members"]],
+                )
+            except Exception as error:
+                raise ReusableBuildError(
+                    f"targeted CTest producer closure is invalid: {error}"
+                ) from error
+        _write_archive(stage, arguments.archive)
+    manifest = {
+        "artifact": {
+            "name": arguments.archive.name,
+            "sha256": _sha256_file(arguments.archive),
+            "size": arguments.archive.stat().st_size,
+        },
+        "artifact_role": role,
+        "candidate_commit": candidate,
+        "ci_image_digest": image,
+        "content": content,
+        "identity_mode": (
+            "current-main-fallback" if resolved["fallback"] else "versioned"
+        ),
+        "internal_identity": internal,
+        "matrix_sha256": resolved["matrix_sha256"],
+        "producer_workflow_commit": workflow,
+        "profile": profile,
+        "schema": "photospider-targeted-ci-artifact-manifest-v1",
+    }
+    _write_json(arguments.manifest, manifest)
+    print(_sha256_file(arguments.manifest))
+
+
+def _validate_targeted_content_value(value: Any, role: str) -> dict[str, Any]:
+    """Validate one canonical targeted member/size identity.
+
+    Both member and aggregate sizes require non-boolean, nonnegative integers;
+    Python's ``bool`` subclass relationship must never let JSON ``true`` or
+    ``false`` become an accepted byte count.
+    """
+    if not isinstance(value, dict) or set(value) != {"members", "uncompressed_size"}:
+        raise ReusableBuildError("targeted content identity fields differ")
+    members = value["members"]
+    if not isinstance(members, list) or not members:
+        raise ReusableBuildError("targeted content member inventory is empty")
+    paths: list[str] = []
+    measured_size = 0
+    for member in members:
+        if not isinstance(member, dict) or set(member) != {
+            "executable", "path", "sha256", "size"
+        }:
+            raise ReusableBuildError("targeted content member fields differ")
+        path = member["path"]
+        pure = PurePosixPath(path) if isinstance(path, str) else PurePosixPath()
+        if (
+            not isinstance(path, str)
+            or not path
+            or path.startswith("/")
+            or "\\" in path
+            or any(part in ("", ".", "..") for part in pure.parts)
+            or pure.as_posix() != path
+        ):
+            raise ReusableBuildError("targeted content member path is unsafe")
+        if not isinstance(member["executable"], bool):
+            raise ReusableBuildError("targeted content executable flag is not boolean")
+        if (
+            not isinstance(member["size"], int)
+            or isinstance(member["size"], bool)
+            or member["size"] < 0
+        ):
+            raise ReusableBuildError("targeted content member size is invalid")
+        if not isinstance(member["sha256"], str) or not re.fullmatch(
+            r"[0-9a-f]{64}", member["sha256"]
+        ):
+            raise ReusableBuildError("targeted content member digest is invalid")
+        paths.append(path)
+        measured_size += member["size"]
+    if paths != sorted(paths) or len(paths) != len(set(paths)):
+        raise ReusableBuildError("targeted content members are not sorted and unique")
+    if (
+        not isinstance(value["uncompressed_size"], int)
+        or isinstance(value["uncompressed_size"], bool)
+        or value["uncompressed_size"] < 0
+    ):
+        raise ReusableBuildError(
+            "targeted content uncompressed size is invalid"
+        )
+    if value["uncompressed_size"] != measured_size:
+        raise ReusableBuildError("targeted content uncompressed size mismatch")
+    _validate_targeted_role_paths(role, paths)
+    return value
+
+
 def _validated_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
     """Validate every member before extraction and return the safe inventory."""
     members = archive.getmembers()
@@ -721,6 +1374,351 @@ def _extract_members(
         with target.open("wb") as output:
             shutil.copyfileobj(extracted, output)
         target.chmod(member.mode & 0o777)
+
+
+def _load_targeted_manifest(snapshot: _ManifestSnapshot) -> dict[str, Any]:
+    """Load one canonical targeted manifest from retained descriptor bytes.
+
+    Args:
+        snapshot: Once-opened regular manifest and its exact retained bytes.
+
+    Returns:
+        Canonical decoded manifest. Identity and content values are validated
+        by the consuming operation against its explicit expectations.
+
+    Raises:
+        ReusableBuildError: The JSON, outer fields, schema, or canonical bytes
+            differ from the targeted artifact contract.
+    """
+    value = snapshot.json_value()
+    expected_fields = {
+        "schema",
+        "artifact",
+        "artifact_role",
+        "candidate_commit",
+        "profile",
+        "matrix_sha256",
+        "ci_image_digest",
+        "producer_workflow_commit",
+        "identity_mode",
+        "internal_identity",
+        "content",
+    }
+    if not isinstance(value, dict) or set(value) != expected_fields:
+        raise ReusableBuildError("targeted artifact manifest fields differ")
+    if value["schema"] != "photospider-targeted-ci-artifact-manifest-v1":
+        raise ReusableBuildError("unknown targeted artifact manifest schema")
+    if snapshot.bytes != _canonical_bytes(value):
+        raise ReusableBuildError("targeted artifact manifest is not canonical JSON")
+    return value
+
+
+def _verify_targeted_manifest(
+    arguments: argparse.Namespace,
+    archive_snapshot: _ArchiveSnapshot,
+    manifest_snapshot: _ManifestSnapshot,
+) -> dict[str, Any]:
+    """Bind one targeted manifest to expected identity and retained bytes.
+
+    Args:
+        arguments: Exact consumer identity, role, archive, and manifest paths.
+        archive_snapshot: Once-opened regular archive retained through content
+            remeasurement and extraction.
+        manifest_snapshot: Once-opened regular manifest whose retained bytes
+            own hashing, JSON decoding, validation, and path identity.
+
+    Returns:
+        The validated canonical targeted manifest.
+
+    Raises:
+        ReusableBuildError: Any identity, role, member, size, digest, or
+            forbidden-content boundary differs.
+        OSError: Safe staging or file measurement fails.
+        tarfile.TarError: The retained archive is malformed.
+    """
+    manifest_sha256 = manifest_snapshot.sha256()
+    expected_manifest_sha256 = getattr(
+        arguments, "expected_manifest_sha256", None
+    )
+    if expected_manifest_sha256 is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_sha256):
+            raise ReusableBuildError(
+                "expected targeted manifest SHA-256 is malformed"
+            )
+        if manifest_sha256 != expected_manifest_sha256:
+            raise ReusableBuildError(
+                "targeted manifest differs from the attested snapshot digest"
+            )
+    value = _load_targeted_manifest(manifest_snapshot)
+    expected_values = {
+        "artifact_role": _identifier(arguments.role, "targeted artifact role"),
+        "candidate_commit": _full_sha(arguments.candidate_commit, "candidate commit"),
+        "profile": _identifier(arguments.profile, "profile"),
+        "matrix_sha256": arguments.matrix_sha256,
+        "ci_image_digest": _digest(arguments.image_digest, "CI image digest"),
+        "producer_workflow_commit": _full_sha(
+            arguments.workflow_commit, "workflow commit"
+        ),
+    }
+    if expected_values["artifact_role"] not in TARGETED_ARTIFACT_ROLES:
+        raise ReusableBuildError("unsupported expected targeted artifact role")
+    if not re.fullmatch(r"[0-9a-f]{64}", arguments.matrix_sha256):
+        raise ReusableBuildError("matrix SHA-256 is malformed")
+    for field, expected in expected_values.items():
+        if value[field] != expected:
+            raise ReusableBuildError(f"targeted manifest {field} mismatch")
+    if _git_head(arguments.repo_root) != expected_values["candidate_commit"]:
+        raise ReusableBuildError("expected candidate differs from checked-out Git HEAD")
+    _validate_internal_identity(
+        value["internal_identity"],
+        value["identity_mode"],
+        value["candidate_commit"],
+        value["profile"],
+        value["matrix_sha256"],
+    )
+    content = _validate_targeted_content_value(
+        value["content"], value["artifact_role"]
+    )
+    artifact = value["artifact"]
+    if not isinstance(artifact, dict) or set(artifact) != {"name", "sha256", "size"}:
+        raise ReusableBuildError("targeted manifest artifact identity is malformed")
+    if artifact["name"] != arguments.archive.name:
+        raise ReusableBuildError("targeted manifest artifact name mismatch")
+    if artifact["sha256"] != archive_snapshot.sha256():
+        raise ReusableBuildError("targeted manifest artifact digest mismatch")
+    if artifact["size"] != archive_snapshot.size:
+        raise ReusableBuildError("targeted manifest artifact size mismatch")
+    with tempfile.TemporaryDirectory(prefix="photospider-targeted-verify-") as stage_text:
+        stage = Path(stage_text)
+        with archive_snapshot.open_tar() as archive:
+            members = _validated_members(archive)
+            _extract_members(archive, members, stage)
+        measured = _targeted_content(stage / "ci")
+        if measured != content:
+            raise ReusableBuildError("targeted archived content differs from manifest")
+        if value["artifact_role"] in {"ctest-control", "ctest-runtime"}:
+            closure = _load_ctest_closure_module(arguments.repo_root)
+            try:
+                closure.validate_staged_role(
+                    arguments.repo_root,
+                    stage / "ci",
+                    value["artifact_role"],
+                    [member["path"] for member in content["members"]],
+                )
+            except Exception as error:
+                raise ReusableBuildError(
+                    f"targeted archived CTest closure is invalid: {error}"
+                ) from error
+    manifest_snapshot.require_path_unchanged()
+    return value
+
+
+def _snapshot_targeted_manifest(arguments: argparse.Namespace) -> None:
+    """Copy one validated manifest snapshot into an exclusive private file.
+
+    Args:
+        arguments: Source manifest path and absent destination snapshot path.
+
+    Raises:
+        ReusableBuildError: Source validation, destination ownership, copied
+            bytes, digest, or pathname identity differs.
+        OSError: Secure open, write, sync, mode, or cleanup fails.
+
+    Note:
+        The printed SHA-256 is the exact subject passed from attestation to the
+        later retained-snapshot Python consumer. The destination is created
+        with ``O_EXCL``/``O_NOFOLLOW`` and never overwrites caller state.
+    """
+    destination = arguments.snapshot
+    parent = destination.parent
+    if not parent.is_dir() or parent.is_symlink():
+        raise ReusableBuildError(
+            "targeted manifest snapshot parent is missing or linked"
+        )
+    created = False
+    try:
+        with _ManifestSnapshot(arguments.manifest) as source_snapshot:
+            _load_targeted_manifest(source_snapshot)
+            digest = source_snapshot.sha256()
+            retained_bytes = source_snapshot.bytes
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            flags |= getattr(os, "O_CLOEXEC", 0)
+            descriptor = os.open(destination, flags, 0o400)
+            created = True
+            with os.fdopen(descriptor, "wb", closefd=True) as output:
+                output.write(retained_bytes)
+                output.flush()
+                os.fsync(output.fileno())
+            destination.chmod(0o400)
+            source_snapshot.require_path_unchanged()
+        with _ManifestSnapshot(destination) as copied_snapshot:
+            if copied_snapshot.bytes != retained_bytes:
+                raise ReusableBuildError(
+                    "targeted manifest snapshot copy differs from retained bytes"
+                )
+            if copied_snapshot.sha256() != digest:
+                raise ReusableBuildError(
+                    "targeted manifest snapshot copy digest differs"
+                )
+            copied_snapshot.require_path_unchanged()
+    except Exception:
+        if created and (destination.exists() or destination.is_symlink()):
+            destination.unlink()
+        raise
+    print(digest)
+
+
+def _verify_targeted_tree(arguments: argparse.Namespace) -> None:
+    """Remeasure one restored role tree against its already verified manifest.
+
+    Args:
+        arguments: Exact targeted role, manifest, content root, and optional
+            evidence output.
+
+    Raises:
+        ReusableBuildError: The manifest role/content contract or any current
+            member path, size, digest, or executable attribute differs.
+        OSError: The tree or evidence cannot be inspected or written safely.
+
+    Note:
+        The archive/attestation consumer must run first. This operation is an
+        independent before/after immutability check for a restored tree; it
+        neither repairs inputs nor trusts a sentinel or broad directory path.
+    """
+    role = _identifier(arguments.role, "targeted artifact role")
+    if role not in TARGETED_ARTIFACT_ROLES:
+        raise ReusableBuildError(f"unsupported targeted artifact role: {role}")
+    for expected_name, expected_value in (
+        ("content", arguments.expected_content_sha256),
+        ("manifest", arguments.expected_manifest_sha256),
+    ):
+        if expected_value is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", expected_value
+        ):
+            raise ReusableBuildError(
+                f"expected targeted {expected_name} SHA-256 is malformed"
+            )
+    with _ManifestSnapshot(arguments.manifest) as manifest_snapshot:
+        manifest_sha256 = manifest_snapshot.sha256()
+        if (
+            arguments.expected_manifest_sha256 is not None
+            and manifest_sha256 != arguments.expected_manifest_sha256
+        ):
+            raise ReusableBuildError(
+                "targeted tree manifest differs from the retained manifest identity"
+            )
+        value = _load_targeted_manifest(manifest_snapshot)
+        if value["artifact_role"] != role:
+            raise ReusableBuildError("targeted tree manifest role mismatch")
+        expected = _validate_targeted_content_value(value["content"], role)
+        if not arguments.content_root.is_dir() or arguments.content_root.is_symlink():
+            raise ReusableBuildError("targeted content root is missing or aliased")
+        measured = _targeted_content(arguments.content_root)
+        if measured != expected:
+            raise ReusableBuildError(
+                "targeted content tree differs from its verified manifest"
+            )
+        content_sha256 = hashlib.sha256(_canonical_bytes(measured)).hexdigest()
+        if (
+            arguments.expected_content_sha256 is not None
+            and content_sha256 != arguments.expected_content_sha256
+        ):
+            raise ReusableBuildError(
+                "targeted tree content differs from the retained content identity"
+            )
+        manifest_snapshot.require_path_unchanged()
+        if arguments.evidence_output is not None:
+            _write_json(
+                arguments.evidence_output,
+                {
+                    "content_sha256": content_sha256,
+                    "member_count": len(measured["members"]),
+                    "manifest_sha256": manifest_sha256,
+                    "role": role,
+                    "schema": "photospider-targeted-tree-verification-v1",
+                    "uncompressed_size": measured["uncompressed_size"],
+                },
+            )
+    print(
+        "targeted content tree verification passed: "
+        f"role={role} content_sha256={content_sha256}"
+    )
+
+
+def _verify_targeted_only(arguments: argparse.Namespace) -> None:
+    """Verify one targeted archive and manifest without installing it."""
+    with _ArchiveSnapshot(arguments.archive) as archive_snapshot:
+        with _ManifestSnapshot(arguments.manifest) as manifest_snapshot:
+            _verify_targeted_manifest(
+                arguments, archive_snapshot, manifest_snapshot
+            )
+    print("targeted reusable artifact verification passed")
+
+
+def _verify_targeted_extract(arguments: argparse.Namespace) -> None:
+    """Verify and atomically install one retained targeted ``ci`` snapshot.
+
+    The runtime role is re-discovered at its final canonical build path before
+    the previous tree is discarded. Any ``NOT_BUILT`` placeholder or closure
+    drift removes the rejected tree and restores the previous snapshot.
+    """
+    with _ArchiveSnapshot(arguments.archive) as archive_snapshot:
+        with _ManifestSnapshot(arguments.manifest) as manifest_snapshot:
+            manifest = _verify_targeted_manifest(
+                arguments, archive_snapshot, manifest_snapshot
+            )
+        arguments.destination.mkdir(parents=True, exist_ok=True)
+        if arguments.destination.is_symlink():
+            raise ReusableBuildError("targeted extraction destination is a symlink")
+        with archive_snapshot.open_tar() as archive:
+            members = _validated_members(archive)
+            with tempfile.TemporaryDirectory(
+                prefix=".ci-targeted-", dir=arguments.destination
+            ) as stage_text:
+                stage = Path(stage_text)
+                _extract_members(archive, members, stage)
+                staged_ci = stage / "ci"
+                target_ci = arguments.destination / "ci"
+                backup = arguments.destination / f".ci-targeted-backup-{os.getpid()}"
+                if backup.exists() or backup.is_symlink():
+                    raise ReusableBuildError(
+                        f"unexpected targeted extraction backup exists: {backup}"
+                    )
+                if target_ci.exists() or target_ci.is_symlink():
+                    target_ci.replace(backup)
+                try:
+                    staged_ci.replace(target_ci)
+                    if manifest["artifact_role"] == "ctest-runtime":
+                        closure = _load_ctest_closure_module(arguments.repo_root)
+                        closure.verify_restored_runtime(
+                            arguments.repo_root,
+                            target_ci,
+                            arguments.ctest_executable,
+                        )
+                except Exception as error:
+                    if target_ci.exists() or target_ci.is_symlink():
+                        if target_ci.is_dir() and not target_ci.is_symlink():
+                            shutil.rmtree(target_ci)
+                        else:
+                            target_ci.unlink()
+                    if backup.exists():
+                        backup.replace(target_ci)
+                    if isinstance(error, ReusableBuildError):
+                        raise
+                    raise ReusableBuildError(
+                        f"restored targeted role verification failed: {error}"
+                    ) from error
+                else:
+                    if backup.exists():
+                        if backup.is_dir() and not backup.is_symlink():
+                            shutil.rmtree(backup)
+                        else:
+                            backup.unlink()
+                if backup.exists():
+                    raise ReusableBuildError(
+                        "targeted extraction left an unexpected backup"
+                    )
+    print("targeted reusable artifact verification and extraction passed")
 
 
 def _verify_archived_measurement(
@@ -904,6 +1902,13 @@ def _add_expected(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workflow-commit", required=True)
 
 
+def _add_targeted_expected(parser: argparse.ArgumentParser) -> None:
+    """Add targeted role plus the common exact consumer identities."""
+    _add_expected(parser)
+    parser.add_argument("--role", choices=sorted(TARGETED_ARTIFACT_ROLES), required=True)
+    parser.add_argument("--expected-manifest-sha256")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the producer/consumer command-line interface."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -919,6 +1924,21 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--image-digest", required=True)
     create.add_argument("--workflow-commit", required=True)
     create.set_defaults(handler=_create)
+    create_targeted = subparsers.add_parser(
+        "create-targeted", help="create one role-minimal artifact and manifest"
+    )
+    create_targeted.add_argument("--source", type=Path, required=True)
+    create_targeted.add_argument("--payload-source", type=Path)
+    create_targeted.add_argument("--archive", type=Path, required=True)
+    create_targeted.add_argument("--manifest", type=Path, required=True)
+    create_targeted.add_argument("--candidate-commit", required=True)
+    create_targeted.add_argument("--profile", required=True)
+    create_targeted.add_argument("--image-digest", required=True)
+    create_targeted.add_argument("--workflow-commit", required=True)
+    create_targeted.add_argument(
+        "--role", choices=sorted(TARGETED_ARTIFACT_ROLES), required=True
+    )
+    create_targeted.set_defaults(handler=_create_targeted)
     verify = subparsers.add_parser("verify-extract", help="verify and safely extract archive")
     _add_expected(verify)
     verify.add_argument("--destination", type=Path, required=True)
@@ -926,6 +1946,46 @@ def build_parser() -> argparse.ArgumentParser:
     verify_only = subparsers.add_parser("verify-only", help="verify without extracting archive")
     _add_expected(verify_only)
     verify_only.set_defaults(handler=_verify_only)
+    verify_targeted = subparsers.add_parser(
+        "verify-targeted-extract", help="verify and extract one targeted artifact"
+    )
+    _add_targeted_expected(verify_targeted)
+    verify_targeted.add_argument("--destination", type=Path, required=True)
+    verify_targeted.add_argument("--ctest-executable", default="ctest")
+    verify_targeted.set_defaults(handler=_verify_targeted_extract)
+    verify_targeted_only = subparsers.add_parser(
+        "verify-targeted-only", help="verify one targeted artifact without extraction"
+    )
+    _add_targeted_expected(verify_targeted_only)
+    verify_targeted_only.set_defaults(handler=_verify_targeted_only)
+    snapshot_targeted_manifest = subparsers.add_parser(
+        "snapshot-targeted-manifest",
+        help="retain and copy one canonical targeted manifest",
+    )
+    snapshot_targeted_manifest.add_argument(
+        "--manifest", type=Path, required=True
+    )
+    snapshot_targeted_manifest.add_argument(
+        "--snapshot", type=Path, required=True
+    )
+    snapshot_targeted_manifest.set_defaults(handler=_snapshot_targeted_manifest)
+    verify_targeted_tree = subparsers.add_parser(
+        "verify-targeted-tree",
+        help="remeasure one restored targeted tree against its manifest",
+    )
+    verify_targeted_tree.add_argument(
+        "--manifest", type=Path, required=True
+    )
+    verify_targeted_tree.add_argument(
+        "--role", choices=sorted(TARGETED_ARTIFACT_ROLES), required=True
+    )
+    verify_targeted_tree.add_argument(
+        "--content-root", type=Path, required=True
+    )
+    verify_targeted_tree.add_argument("--evidence-output", type=Path)
+    verify_targeted_tree.add_argument("--expected-content-sha256")
+    verify_targeted_tree.add_argument("--expected-manifest-sha256")
+    verify_targeted_tree.set_defaults(handler=_verify_targeted_tree)
     return parser
 
 
@@ -939,6 +1999,15 @@ def main() -> int:
     arguments.inventory_dir = arguments.inventory_dir.resolve()
     if hasattr(arguments, "source"):
         arguments.source = arguments.source.resolve()
+    if hasattr(arguments, "payload_source") and arguments.payload_source is not None:
+        arguments.payload_source = arguments.payload_source.resolve()
+    if hasattr(arguments, "content_root"):
+        arguments.content_root = arguments.content_root.resolve()
+    if (
+        hasattr(arguments, "evidence_output")
+        and arguments.evidence_output is not None
+    ):
+        arguments.evidence_output = arguments.evidence_output.resolve()
     try:
         arguments.handler(arguments)
     except (ReusableBuildError, OSError, tarfile.TarError) as error:

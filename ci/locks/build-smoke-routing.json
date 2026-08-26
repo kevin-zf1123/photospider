@@ -1,0 +1,11 @@
+{
+  "dedicated_consumer_roles": {
+    "OpenExrDeepProviderOptionOffSmoke": "openexr-metadata",
+    "StaticProductConsumerSmoke": "installed-package"
+  },
+  "default_consumer_role": "ctest-control",
+  "producer_tests": [
+    "PublicHeaderSelfContainment"
+  ],
+  "schema": "photospider-build-smoke-routing-v3"
+}

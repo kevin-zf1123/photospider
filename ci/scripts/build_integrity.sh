@@ -122,14 +122,101 @@ case "$CI_BUILD_PROFILE" in
         --inventory-output "$CI_ARTIFACT_DIR/ctest_inventory.json" \
         --matrix-output "$build_smoke_matrix_file" \
         --names-output "$CI_ARTIFACT_DIR/build_smoke_names.z"
+
+    # @var ordinary_ctest_closure_file
+    # @brief Canonical post-build ordinary CTest control/runtime closure.
+    # @note The closure is written into producer-generated inventory before
+    #   reusable identity measurement. It excludes only the exact build-smoke
+    #   label and binds every ordinary executable/include/data/runtime input.
+    ordinary_ctest_closure_file=
+    ordinary_ctest_closure_file="$BUILD_DIR/generated/ci_inventory/ordinary_ctest_closure_v1.json"
+    run_logged ordinary_ctest_runtime_closure \
+      python3 -B "$SCRIPT_DIR/ctest_runtime_closure.py" create \
+        --source-root "$REPO_ROOT" \
+        --build-root "$BUILD_DIR" \
+        --inventory "$CI_ARTIFACT_DIR/ctest_inventory.json" \
+        --output "$ordinary_ctest_closure_file" \
+        --config "${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
+
+    # @var consumer_build_smoke_matrix_file
+    # @brief Matrix containing only smokes that need the minimal CTest-control
+    #   artifact; producer-local roles remain in the original CTest tree.
+    # @note The protected routing lock is an explicitly temporary current-main
+    #   bridge. The candidate-owned versioned matrix replaces it before cleanup.
+    consumer_build_smoke_matrix_file=
+    consumer_build_smoke_matrix_file="$CI_ARTIFACT_DIR/consumer_build_smoke_matrix.json"
+    # @var dedicated_build_smoke_matrix_file
+    # @brief Exact installed-package build-smoke matrix output.
+    # @note The protected lock requires its current-main identity exactly once.
+    dedicated_build_smoke_matrix_file=
+    dedicated_build_smoke_matrix_file="$CI_ARTIFACT_DIR/dedicated_build_smoke_matrix.json"
+    # @var openexr_build_smoke_matrix_file
+    # @brief Exact cache-only OpenEXR build-smoke matrix output.
+    # @note It is consumed by the dedicated source-tree runner and never by the
+    #   ordinary CTest-control artifact path.
+    openexr_build_smoke_matrix_file=
+    openexr_build_smoke_matrix_file="$CI_ARTIFACT_DIR/openexr_build_smoke_matrix.json"
+    producer_build_smoke_names_file=
+    producer_build_smoke_names_file="$CI_ARTIFACT_DIR/producer_build_smoke_names.z"
+    run_logged route_build_smokes \
+      python3 -B "$SCRIPT_DIR/build_smoke_route.py" \
+        --matrix "$build_smoke_matrix_file" \
+        --lock "$REPO_ROOT/ci/locks/build-smoke-routing.json" \
+        --consumer-matrix "$consumer_build_smoke_matrix_file" \
+        --dedicated-matrix "$dedicated_build_smoke_matrix_file" \
+        --openexr-matrix "$openexr_build_smoke_matrix_file" \
+        --producer-names "$producer_build_smoke_names_file"
+
+    # @var producer_smoke_index
+    # @brief Stable local counter used only to separate producer-smoke logs.
+    # @note Exact test names remain NUL-delimited argv data and are revalidated
+    #   against fresh CTest JSON before numeric-index execution.
+    producer_smoke_index=0
+    while IFS= read -r -d '' producer_smoke_name; do
+      producer_smoke_index=$((producer_smoke_index + 1))
+      run_logged "producer_build_smoke_$producer_smoke_index" \
+        python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" run \
+          --build-dir "$BUILD_DIR" \
+          --ctest-executable "${CTEST_COMMAND:-ctest}" \
+          --config "${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
+          --label "$BUILD_SMOKE_LABEL" \
+          --inventory-output \
+            "$CI_ARTIFACT_DIR/producer-smoke-$producer_smoke_index-inventory.json" \
+          --selection-output \
+            "$CI_ARTIFACT_DIR/producer-smoke-$producer_smoke_index-selection.json" \
+          --test-name "$producer_smoke_name"
+    done < "$producer_build_smoke_names_file"
+    if ((producer_smoke_index == 0)); then
+      echo "Protected routing produced no producer-local build smoke." >&2
+      exit 1
+    fi
+
+    # @var installed_prefix
+    # @brief Fresh package payload archived separately from runtime/CTest data.
+    # @note The producer does not execute StaticProductConsumerSmoke. Its fresh
+    #   installed prefix and exact cache/header metadata are archived for the
+    #   dedicated downstream consumer to exercise in the same image digest.
+    installed_prefix="$REPO_ROOT/CI-results/installed-prefix-default"
+    if [[ -e "$installed_prefix" || -L "$installed_prefix" ]]; then
+      echo "Targeted installed prefix contains residual or aliased state." >&2
+      exit 1
+    fi
+    run_logged create_installed_prefix \
+      cmake --install "$BUILD_DIR" --prefix "$installed_prefix"
     mark_ci_build_reusable
 
     # @var build_smoke_matrix
     # @brief Validated single-line matrix value exposed to downstream CI jobs.
     # @note Command substitution removes the file's trailing newline; embedded
     #   line breaks are forbidden again by emit_output.
-    build_smoke_matrix=$(<"$build_smoke_matrix_file")
+    build_smoke_matrix=$(<"$consumer_build_smoke_matrix_file")
     emit_output build_smoke_matrix "$build_smoke_matrix"
+    dedicated_build_smoke_matrix=$(<"$dedicated_build_smoke_matrix_file")
+    emit_output dedicated_build_smoke_matrix \
+      "$dedicated_build_smoke_matrix"
+    openexr_build_smoke_matrix=$(<"$openexr_build_smoke_matrix_file")
+    emit_output openexr_build_smoke_matrix \
+      "$openexr_build_smoke_matrix"
     {
       echo "Default profile build and build-smoke inventory completed."
       echo "Runtime validation contract: $runtime_contract"

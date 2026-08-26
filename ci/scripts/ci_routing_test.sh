@@ -73,13 +73,14 @@ assert_file_not_contains() {
   fi
 }
 
-# @brief Extract one named GitHub Actions step's literal shell run block.
+# @brief Extract one named GitHub Actions step's shell run scalar body.
 # @param $1 Workflow YAML path.
 # @param $2 Exact step name.
 # @param $3 Destination shell file.
 # @return Zero when a run block is found and written, otherwise nonzero.
 # @throws Nothing; malformed indentation is represented by the return status.
-# @note Maintained workflow run blocks use ten-space literal indentation.
+# @note Maintained literal and folded run scalars use ten-space body indentation;
+#   folded bodies are preserved line-by-line for structural assertions only.
 extract_step_run_block() {
   local workflow=$1
   local step_name=$2
@@ -89,7 +90,7 @@ extract_step_run_block() {
       in_step = 1
       next
     }
-    in_step && $0 == "        run: |" {
+    in_step && ($0 == "        run: |" || $0 == "        run: >-") {
       capture = 1
       next
     }
@@ -197,12 +198,12 @@ extract_job_if_block() {
   ' "$job_file" > "$destination"
 }
 
-# @brief Require the local-image healthcheck to materialize the exact PR base.
+# @brief Require the image-change healthcheck to materialize the exact PR base.
 # @param $1 Healthcheck workflow YAML path.
 # @return Zero after the job-scoped fetch, verification, and order checks pass.
 # @throws Nothing; missing or misordered contracts exit through fail.
 # @note The base-repository fetch must be the job's first shell execution so no
-#   fork-head script or image build runs before the exact base object exists.
+#   fork-head script or contract check runs before the exact base object exists.
 validate_local_image_base_fetch() {
   local workflow=$1
   local job_file="$TEST_ROOT/healthcheck-local-image-job.yml"
@@ -211,7 +212,7 @@ validate_local_image_base_fetch() {
   local fetch_step_line
   local first_run_line
   local verify_line
-  local build_line
+  local contract_line
   local healthcheck_line
 
   extract_job_block "$workflow" healthcheck-local-image "$job_file" ||
@@ -230,9 +231,8 @@ validate_local_image_base_fetch() {
     "if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'"
   assert_file_contains "$job_file" \
     "CI_BASE_REF: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha"
-  assert_file_contains "$job_file" \
-    '-v "${{ github.workspace }}:/workspace" \'
-  assert_file_contains "$job_file" '-e CI_BASE_REF \'
+  assert_file_not_contains "$job_file" 'docker build'
+  assert_file_not_contains "$job_file" 'docker run'
   assert_file_contains "$fetch_script" \
     'git fetch --no-tags --no-recurse-submodules'
   assert_file_contains "$fetch_script" \
@@ -253,23 +253,24 @@ validate_local_image_base_fetch() {
   verify_line=$(grep -nF -- \
     'git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null' "$job_file" |
     head -n 1 | cut -d: -f1)
-  build_line=$(grep -nF -- "- name: Build local CI image" "$job_file" |
+  contract_line=$(grep -nF -- \
+    "- name: Verify image-input contract without rebuilding" "$job_file" |
     head -n 1 | cut -d: -f1)
   healthcheck_line=$(grep -nF -- \
-    "- name: Run healthcheck in local CI image" "$job_file" |
+    "- name: Run protected healthcheck without a second image build" "$job_file" |
     head -n 1 | cut -d: -f1)
   [[ -n "$checkout_line" && -n "$fetch_step_line" &&
-    -n "$first_run_line" && -n "$verify_line" && -n "$build_line" &&
+    -n "$first_run_line" && -n "$verify_line" && -n "$contract_line" &&
     -n "$healthcheck_line" ]] ||
     fail "healthcheck-local-image lacks a complete exact-base execution order"
   ((checkout_line < fetch_step_line &&
     fetch_step_line < first_run_line &&
     first_run_line < verify_line &&
-    verify_line < build_line &&
-    build_line < healthcheck_line)) ||
+    verify_line < contract_line &&
+    contract_line < healthcheck_line)) ||
     fail "healthcheck-local-image executes fork-head work before exact-base verification"
 
-  pass healthcheck-local-image-exact-base-before-execution
+  pass healthcheck-image-change-exact-base-before-contract-execution
 }
 
 # @brief Require the published-image healthcheck to materialize the exact PR base.
@@ -630,23 +631,21 @@ validate_ci_branch_healthcheck_base() {
         fail "$job_name runs healthcheck before CI main verification"
       ;;
     healthcheck-local-image)
-      build_line=$(grep -nF -- "- name: Build local CI image" "$job_file" |
+      build_line=$(grep -nF -- \
+        "- name: Verify image-input contract without rebuilding" "$job_file" |
         head -n 1 | cut -d: -f1)
       healthcheck_step_line=$(grep -nF -- \
-        "- name: Run healthcheck in local CI image" "$job_file" |
+        "- name: Run protected healthcheck without a second image build" "$job_file" |
         head -n 1 | cut -d: -f1)
-      mount_line=$(grep -nF -- \
-        '-v "${{ github.workspace }}:/workspace" \' "$job_file" |
-        head -n 1 | cut -d: -f1)
-      [[ -n "$build_line" && -n "$healthcheck_step_line" &&
-        -n "$mount_line" ]] ||
-        fail "$job_name lacks the Docker build and mounted healthcheck order"
+      assert_file_not_contains "$job_file" 'docker build'
+      assert_file_not_contains "$job_file" 'docker run'
+      [[ -n "$build_line" && -n "$healthcheck_step_line" ]] ||
+        fail "$job_name lacks the contract-only healthcheck order"
       ((checkout_line < fetch_step_line &&
         fetch_step_line < verify_line &&
         verify_line < build_line &&
-        build_line < healthcheck_step_line &&
-        healthcheck_step_line < mount_line)) ||
-        fail "$job_name builds or mounts head content before CI main verification"
+        build_line < healthcheck_step_line)) ||
+        fail "$job_name runs candidate contract before CI main verification"
       ;;
     *)
       fail "unsupported healthcheck job for CI branch routing: $job_name"
@@ -732,20 +731,11 @@ assert_gate_checks_all_results() {
         change-classification
         ci-image-change
         ci-image-identity
-        integration-plan
-        build-integrity-default
-        attest-reusable-build-default
-        local-image-integration
-        full-ctest
-        build-smoke
-        scripted-cli
-        propagation-script
-        plugin-load
-        execution-repeat
-        sanitizer-asan
-        sanitizer-tsan
-        fuzz-codecs
-        security-darwin
+        candidate-image-build
+        candidate-image-integration
+        promote-candidate-image
+        published-image-integration-readonly
+        published-image-integration-trusted
       )
       ;;
     *)
@@ -770,16 +760,21 @@ validate_build_smoke_matrix_contract() {
   local plan_job="$TEST_ROOT/integration-plan-build-smoke-job.yml"
   local build_job="$TEST_ROOT/integration-build-integrity-job.yml"
   local smoke_job="$TEST_ROOT/integration-build-smoke-job.yml"
+  local dedicated_job="$TEST_ROOT/integration-installed-package-job.yml"
+  local openexr_job="$TEST_ROOT/integration-openexr-smoke-job.yml"
+  local suite_gate_job="$TEST_ROOT/integration-suite-gate-job.yml"
   local full_ctest_job="$TEST_ROOT/integration-full-ctest-job.yml"
   local plan_script="$REPO_ROOT/ci/scripts/integration_plan.sh"
   local build_script="$REPO_ROOT/ci/scripts/build_integrity.sh"
   local full_ctest_script="$REPO_ROOT/ci/scripts/ctest_full.sh"
   local smoke_script="$REPO_ROOT/ci/scripts/build_smoke_test.sh"
-  local local_suite="$REPO_ROOT/ci/scripts/integration_suite.sh"
-  local inventory_test="$REPO_ROOT/ci/scripts/build_smoke_inventory_test.py"
-  local healthcheck_script="$REPO_ROOT/ci/scripts/healthcheck.sh"
+  local route_script="$REPO_ROOT/ci/scripts/build_smoke_route.py"
+  local route_lock="$REPO_ROOT/ci/locks/build-smoke-routing.json"
+  local common_script="$REPO_ROOT/ci/scripts/common.sh"
+  local required_line
   local build_all_line
   local inventory_line
+  local route_line
   local output_line
 
   extract_job_block "$workflow" integration-plan "$plan_job" ||
@@ -790,83 +785,148 @@ validate_build_smoke_matrix_contract() {
     fail "build-smoke matrix job could not be extracted"
   extract_job_block "$workflow" full-ctest "$full_ctest_job" ||
     fail "full-ctest job could not be extracted for build-smoke routing"
+  extract_job_block "$workflow" installed-package-consumer "$dedicated_job" ||
+    fail "installed-package dedicated job could not be extracted"
+  extract_job_block "$workflow" openexr-smoke "$openexr_job" ||
+    fail "OpenEXR metadata smoke job could not be extracted"
+  extract_job_block "$workflow" suite-gate "$suite_gate_job" ||
+    fail "shared integration suite gate could not be extracted"
 
-  assert_file_contains "$plan_job" \
-    'name: Preflight integration inventory'
+  assert_file_contains "$plan_job" 'name: Preflight integration inventory'
   assert_file_not_contains "$plan_job" '    outputs:'
   assert_file_contains "$build_job" \
     'build_smoke_matrix: ${{ steps.build.outputs.build_smoke_matrix }}'
-  assert_file_contains "$build_job" 'id: build'
   assert_file_contains "$build_job" \
-    'run: bash ci/scripts/build_integrity.sh'
+    'dedicated_build_smoke_matrix: ${{ steps.build.outputs.dedicated_build_smoke_matrix }}'
+  assert_file_contains "$build_job" \
+    'openexr_build_smoke_matrix: ${{ steps.build.outputs.openexr_build_smoke_matrix }}'
+  assert_file_contains "$build_job" \
+    'name: Run same-tree build integrity and producer-local smokes'
+  assert_file_contains "$build_job" 'create-targeted'
+  assert_file_contains "$build_job" '--role "$role"'
+  assert_file_contains "$build_job" '--role installed-package'
+  assert_file_contains "$build_job" 'name: ci-control-default'
+  assert_file_contains "$build_job" 'name: ci-runtime-default'
+  assert_file_contains "$build_job" 'name: ci-installed-package-default'
+  assert_file_contains "$build_job" 'name: ci-openexr-metadata-default'
+  assert_file_not_contains "$build_job" 'ci-build-default'
   assert_file_contains "$smoke_job" \
-    'name: Build smoke (${{ matrix.test }})'
-  assert_file_contains "$smoke_job" \
-    'needs: [integration-plan, build-integrity-default, attest-reusable-build-default, ci-image-identity]'
-  assert_file_contains "$smoke_job" \
-    "needs.integration-plan.result == 'success' &&"
-  assert_file_contains "$smoke_job" \
-    "needs.build-integrity-default.result == 'success'"
+    'needs: [integration-plan, build-integrity-default, targeted-artifacts-ready]'
   assert_file_contains "$smoke_job" 'fail-fast: false'
+  assert_file_contains "$smoke_job" 'fromJSON(needs.build-integrity-default.outputs.build_smoke_matrix'
+  assert_file_contains "$smoke_job" 'name: ci-control-default'
   assert_file_contains "$smoke_job" \
-    "matrix: \${{ fromJSON(needs.build-integrity-default.outputs.build_smoke_matrix || '{\"include\":[]}') }}"
-  assert_file_contains "$smoke_job" 'name: ci-build-default'
+    'CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}'
   assert_file_contains "$smoke_job" \
+    'run: bash ci/scripts/targeted_artifact_consume.sh'
+  assert_file_contains "$smoke_job" 'SMOKE_TEST_NAME: ${{ matrix.test }}'
+  assert_file_contains "$full_ctest_job" 'name: ci-runtime-default'
+  assert_file_contains "$full_ctest_job" 'run: bash ci/scripts/ctest_full.sh'
+  assert_file_contains "$dedicated_job" \
+    'fromJSON(needs.build-integrity-default.outputs.dedicated_build_smoke_matrix'
+  assert_file_contains "$dedicated_job" \
+    'CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}'
+  assert_file_contains "$dedicated_job" 'image: ${{ inputs.image_ref }}'
+  assert_file_contains "$dedicated_job" \
+    'run: bash ci/scripts/static_product_consumer_test.sh'
+  assert_file_contains "$dedicated_job" \
+    'CI_STATIC_PACKAGE_MANIFEST: ${{ github.workspace }}/CI-results/targeted-artifact/installed-package.manifest.json'
+  if grep -Fqx -- \
+    '            CI-results/installed-package-consumer' "$dedicated_job"; then
+    fail "installed-package evidence re-uploads the restored prefix"
+  fi
+  assert_file_contains "$openexr_job" \
+    'fromJSON(needs.build-integrity-default.outputs.openexr_build_smoke_matrix'
+  assert_file_contains "$openexr_job" 'name: ci-openexr-metadata-default'
+  assert_file_contains "$openexr_job" \
+    'CI_ARTIFACT_ROLE: ${{ matrix.artifact_role }}'
+  assert_file_contains "$openexr_job" \
+    'run: bash ci/scripts/openexr_smoke_test.sh'
+  assert_file_contains "$openexr_job" \
     'SMOKE_TEST_NAME: ${{ matrix.test }}'
-  assert_file_contains "$smoke_job" \
-    'CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-smoke/${{ matrix.artifact }}'
-  assert_file_contains "$smoke_job" \
-    'name: build-smoke-${{ matrix.artifact }}-results'
-  assert_file_contains "$full_ctest_job" \
-    'run: bash ci/scripts/ctest_full.sh'
+  assert_file_contains "$suite_gate_job" '      - openexr-smoke'
+  assert_file_contains "$suite_gate_job" \
+    'CI_OPENEXR_RESULT: ${{ needs.openexr-smoke.result }}'
+  assert_file_contains "$suite_gate_job" \
+    'require_success openexr-smoke "$CI_OPENEXR_RESULT"'
 
-  assert_file_contains "$plan_script" \
-    'python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" plan'
+  assert_file_contains "$plan_script" 'build_smoke_inventory.py" plan'
   assert_file_contains "$plan_script" '--allow-empty'
-  assert_file_contains "$plan_script" 'prebuild_smoke_matrix.json'
-  assert_file_not_contains "$plan_script" 'emit_output build_smoke_matrix'
-  assert_file_not_contains "$plan_script" StaticProductConsumerSmoke
-  assert_file_not_contains "$plan_script" IpcDisabledInstallSmoke
-  assert_file_contains "$build_script" \
-    'python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" plan'
+  assert_file_contains "$build_script" 'build_smoke_inventory.py" plan'
+  assert_file_contains "$build_script" 'build_smoke_route.py'
   assert_file_contains "$build_script" \
     'emit_output build_smoke_matrix "$build_smoke_matrix"'
-  assert_file_not_contains "$build_script" '--allow-empty'
+  assert_file_contains "$build_script" \
+    'emit_output dedicated_build_smoke_matrix'
+  assert_file_contains "$build_script" \
+    'emit_output openexr_build_smoke_matrix'
+  assert_file_contains "$build_script" 'ctest_runtime_closure.py" create'
+  assert_file_contains "$build_script" 'producer_build_smoke_names_file'
+  assert_file_contains "$build_script" 'cmake --install "$BUILD_DIR"'
+  required_line=$(grep -nF -- 'ensure_ci_targets build_required_targets' \
+    "$build_script" | head -n 1 | cut -d: -f1)
   build_all_line=$(grep -nF -- 'ensure_ci_all build_all' "$build_script" |
     head -n 1 | cut -d: -f1)
-  inventory_line=$(grep -nF -- \
-    'python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" plan' "$build_script" |
+  inventory_line=$(grep -nF -- 'build_smoke_inventory.py" plan' "$build_script" |
+    head -n 1 | cut -d: -f1)
+  route_line=$(grep -nF -- 'build_smoke_route.py' "$build_script" |
     head -n 1 | cut -d: -f1)
   output_line=$(grep -nF -- \
     'emit_output build_smoke_matrix "$build_smoke_matrix"' "$build_script" |
     head -n 1 | cut -d: -f1)
-  [[ -n "$build_all_line" && -n "$inventory_line" && -n "$output_line" ]] ||
-    fail "build-integrity lacks complete build-to-matrix output order"
-  ((build_all_line < inventory_line && inventory_line < output_line)) ||
-    fail "build-integrity exposes build-smoke matrix before complete discovery"
+  [[ -n "$required_line" && -n "$build_all_line" &&
+    -n "$inventory_line" && -n "$route_line" && -n "$output_line" ]] ||
+    fail "build-integrity lacks same-tree targeted routing order"
+  ((required_line < build_all_line && build_all_line < inventory_line &&
+    inventory_line < route_line && route_line < output_line)) ||
+    fail "build-integrity splits producer reuse or exposes an unrouted matrix"
+
+  assert_file_contains "$route_script" 'default_consumer_role'
+  assert_file_contains "$route_script" 'dedicated_consumer_roles'
+  assert_file_contains "$route_script" '"artifact_role": lock["default_consumer_role"]'
+  assert_file_contains "$route_lock" '"PublicHeaderSelfContainment"'
+  assert_file_contains "$route_lock" '"StaticProductConsumerSmoke"'
+  assert_file_contains "$route_lock" '"OpenExrDeepProviderOptionOffSmoke"'
+  assert_file_contains "$route_lock" '"installed-package"'
+  assert_file_contains "$route_lock" '"openexr-metadata"'
+  [[ $(grep -Fc -- '"PublicHeaderSelfContainment"' "$route_lock") -eq 1 ]] ||
+    fail "public-header producer route is not unique"
+  [[ $(grep -Fc -- '"StaticProductConsumerSmoke"' "$route_lock") -eq 1 ]] ||
+    fail "static product dedicated route is not unique"
+  [[ $(grep -Fc -- '"OpenExrDeepProviderOptionOffSmoke"' "$route_lock") -eq 1 ]] ||
+    fail "OpenEXR metadata route is not unique"
+  assert_file_contains "$route_lock" '"ctest-control"'
+  assert_file_contains "$common_script" \
+    'export CMAKE_BUILD_PARALLEL_LEVEL=$CI_JOBS'
+  assert_file_contains "$full_ctest_script" '--parallel "$CI_JOBS"'
+  assert_file_contains "$full_ctest_script" \
+    '--output-junit "$CI_ARTIFACT_DIR/ctest-full.junit.xml"'
   assert_file_contains "$full_ctest_script" \
     '--label-exclude "^${BUILD_SMOKE_LABEL}$"'
-  assert_file_not_contains "$full_ctest_script" CTEST_EXCLUDE_REGEX
-  assert_file_contains "$smoke_script" \
-    'python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" run'
-  assert_file_contains "$smoke_script" \
-    '--test-name "$SMOKE_TEST_NAME"'
-  assert_file_contains "$local_suite" \
-    "mapfile -d '' -t build_smoke_tests"
-  assert_file_contains "$local_suite" \
-    'SMOKE_TEST_NAME="$build_smoke_test"'
-  assert_file_contains "$inventory_test" \
-    'class PostBuildDiscoveryTest(unittest.TestCase):'
-  assert_file_contains "$inventory_test" \
-    'gtest_discover_tests(post_build_fixture'
-  assert_file_contains "$healthcheck_script" \
-    'python3 -B "$SCRIPT_DIR/build_smoke_inventory_test.py"'
+  assert_file_contains "$smoke_script" '!= ctest-control'
+  assert_file_not_contains "$smoke_script" 'ensure_ci_all build_all'
+  assert_file_contains "$smoke_script" 'build_smoke_inventory.py" run'
+  assert_file_contains "$REPO_ROOT/ci/scripts/openexr_smoke_test.sh" \
+    'OpenExrDeepProviderOptionOffSmoke'
+  assert_file_contains "$REPO_ROOT/ci/scripts/openexr_smoke_test.sh" \
+    '--producer-build "$BUILD_DIR"'
+  assert_file_contains "$REPO_ROOT/ci/scripts/openexr_smoke_test.sh" \
+    'build_configuration=$(require_cached_build_configuration)'
+  assert_file_contains "$REPO_ROOT/ci/scripts/openexr_smoke_test.sh" \
+    '--config "$build_configuration"'
+  assert_file_not_contains "$REPO_ROOT/ci/scripts/openexr_smoke_test.sh" \
+    '${CMAKE_BUILD_TYPE:-'
+  assert_file_contains "$REPO_ROOT/ci/scripts/static_product_consumer_test.sh" \
+    'verify_package_content before'
+  assert_file_contains "$REPO_ROOT/ci/scripts/static_product_consumer_test.sh" \
+    'verify_package_content after'
+  assert_file_not_contains \
+    "$REPO_ROOT/ci/scripts/static_product_consumer_test.sh" 'mapfile'
+  assert_file_not_contains "$workflow" 'integration_suite.sh'
+  assert_file_not_contains "$workflow" 'ci-build-default'
+  assert_file_not_contains "$workflow" 'reusable_build_consume.sh'
 
-  assert_file_not_contains "$workflow" '  build-integrity-ipc-disabled:'
-  assert_file_not_contains "$workflow" '  static-product-consumer-smoke:'
-  assert_file_not_contains "$workflow" '  ipc-disabled-install-smoke:'
-
-  pass integration-label-driven-build-smoke-matrix
+  pass integration-targeted-label-driven-build-smoke-matrix
 }
 
 # @brief Validate architecture-neutral repeat routing and capability regression.
@@ -878,40 +938,29 @@ validate_build_smoke_matrix_contract() {
 validate_runtime_capability_routing() {
   local workflow=$1
   local repeat_job="$TEST_ROOT/integration-execution-repeat-job.yml"
-  local local_image_job="$TEST_ROOT/integration-local-image-job.yml"
-  local local_suite="$REPO_ROOT/ci/scripts/integration_suite.sh"
   local healthcheck_script="$REPO_ROOT/ci/scripts/healthcheck.sh"
 
   extract_job_block "$workflow" execution-repeat "$repeat_job" ||
     fail "execution-repeat job could not be extracted"
-  extract_job_block "$workflow" local-image-integration "$local_image_job" ||
-    fail "local-image-integration job could not be extracted"
-
   assert_file_contains "$repeat_job" \
     'run: bash ci/scripts/execution_repeat_test.sh'
+  assert_file_contains "$repeat_job" 'name: ci-runtime-default'
+  assert_file_contains "$repeat_job" \
+    'run: bash ci/scripts/targeted_artifact_consume.sh'
   assert_file_contains "$repeat_job" \
     'CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/execution-repeat'
   assert_file_contains "$repeat_job" 'EXECUTION_REPEAT: 5'
   assert_file_contains "$repeat_job" 'LEGACY_GPU_REPEAT: 3'
-  assert_file_contains "$repeat_job" 'name: execution-repeat-results'
-  assert_file_contains "$repeat_job" 'path: CI-results/execution-repeat'
-
-  assert_file_contains "$local_image_job" '-e EXECUTION_REPEAT=5 \'
-  assert_file_contains "$local_image_job" '-e LEGACY_GPU_REPEAT=3 \'
-  assert_file_contains "$local_suite" \
-    'bash "$SCRIPT_DIR/execution_repeat_test.sh"'
-  assert_file_contains "$local_suite" \
-    'CI_ARTIFACT_DIR="$CI_ARTIFACT_ROOT/execution-repeat"'
   assert_file_contains "$healthcheck_script" \
     'bash "$SCRIPT_DIR/runtime_capability_test.sh"'
-
+  assert_file_not_contains "$workflow" 'local-image-integration'
+  assert_file_not_contains "$workflow" 'integration_suite.sh'
   assert_file_not_contains "$workflow" 'scheduler-repeat'
   assert_file_not_contains "$workflow" 'SCHEDULER_REPEAT'
   assert_file_not_contains "$workflow" 'GPU_PIPELINE_REPEAT'
   assert_file_not_contains "$workflow" 'scheduler_repeat_test.sh'
-  assert_file_not_contains "$local_suite" 'scheduler_repeat_test.sh'
 
-  pass integration-runtime-capability-routing
+  pass integration-runtime-capability-targeted-routing
 }
 
 # @brief Validate exact-image security routing, fresh Darwin vcpkg, and roles.
@@ -927,7 +976,6 @@ validate_security_profile_routing() {
   local sanitizer_script="$REPO_ROOT/ci/scripts/sanitizer_test.sh"
   local fuzz_script="$REPO_ROOT/ci/scripts/fuzz_smoke.sh"
   local platform_script="$REPO_ROOT/ci/scripts/security_platform_prepare.sh"
-  local local_job="$TEST_ROOT/integration-local-security-job.yml"
   local darwin_job="$TEST_ROOT/integration-security-darwin-job.yml"
   local manual_workflow="$REPO_ROOT/.github/workflows/ci-sanitizer.yml"
   local manual_job="$TEST_ROOT/manual-sanitizer-job.yml"
@@ -939,9 +987,9 @@ validate_security_profile_routing() {
     extract_job_block "$workflow" "$job_name" "$job_file" ||
       fail "$job_name security job could not be extracted"
     assert_file_contains "$job_file" \
-      'needs: [change-classification, ci-image-change, ci-image-identity, integration-plan]'
+      'needs: integration-plan'
     assert_file_contains "$job_file" \
-      'image: ${{ needs.ci-image-identity.outputs.image }}'
+      'image: ${{ inputs.image_ref }}'
     assert_file_not_contains "$job_file" ':latest'
     assert_file_contains "$job_file" \
       'python3 ci/scripts/ci_runner_verify.py'
@@ -964,12 +1012,6 @@ validate_security_profile_routing() {
     'timeout-minutes: 20'
   assert_file_contains "$TEST_ROOT/integration-fuzz-codecs-job.yml" \
     'run: bash ci/scripts/fuzz_smoke.sh'
-
-  extract_job_block "$workflow" local-image-integration "$local_job" ||
-    fail "local-image-integration job could not be extracted for security routing"
-  assert_file_contains "$local_job" 'for sanitizer in asan tsan; do'
-  assert_file_contains "$local_job" 'bash ci/scripts/sanitizer_test.sh'
-  assert_file_contains "$local_job" 'bash ci/scripts/fuzz_smoke.sh'
 
   extract_job_block "$workflow" security-darwin "$darwin_job" ||
     fail "security-darwin job could not be extracted"
@@ -1029,8 +1071,10 @@ validate_security_profile_routing() {
   assert_file_not_contains "$sanitizer_script" test_compute_run
   assert_file_not_contains "$fuzz_script" fuzz_worker_protocol_codec
   assert_file_not_contains "$fuzz_script" fuzz_isolated_cpu_invocation_codec
+  assert_file_not_contains "$workflow" local-image-integration
+  assert_file_not_contains "$workflow" integration_suite.sh
 
-  pass integration-generic-security-profile-routing
+  pass integration-shared-generic-security-profile-routing
 }
 
 # @brief Validate reusable-build provenance, attestation separation, and consumers.
@@ -1040,12 +1084,12 @@ validate_security_profile_routing() {
 # @throws Nothing; missing or misordered boundaries exit through fail.
 validate_reusable_build_identity_routing() {
   local workflow=$1
-  local build_job="$TEST_ROOT/reusable-build-producer-job.yml"
-  local attest_job="$TEST_ROOT/reusable-build-attest-job.yml"
+  local build_job="$TEST_ROOT/targeted-artifact-producer-job.yml"
+  local verify_job="$TEST_ROOT/targeted-artifact-verify-job.yml"
+  local attest_job="$TEST_ROOT/targeted-artifact-attest-job.yml"
+  local ready_job="$TEST_ROOT/targeted-artifact-ready-job.yml"
   local consumer_job
   local consumer_name
-  local verify_line
-  local first_attest_line
   local -a consumers=(
     full-ctest
     build-smoke
@@ -1053,56 +1097,96 @@ validate_reusable_build_identity_routing() {
     propagation-script
     plugin-load
     execution-repeat
+    installed-package-consumer
+    openexr-smoke
   )
 
   extract_job_block "$workflow" build-integrity-default "$build_job" ||
-    fail "reusable-build producer job could not be extracted"
-  extract_job_block "$workflow" attest-reusable-build-default "$attest_job" ||
-    fail "reusable-build attestation job could not be extracted"
-  assert_file_contains "$build_job" 'python3 ci/scripts/reusable_build.py \'
-  assert_file_contains "$build_job" \
-    '--inventory-dir build/ci/generated/ci_inventory create \'
-  assert_file_contains "$build_job" 'path: CI-results/reusable-build-default'
-  assert_file_contains "$REPO_ROOT/ci/scripts/build_integrity.sh" \
-    'prepare_fresh_producer_build'
-  assert_file_contains "$REPO_ROOT/ci/scripts/reusable_build.py" \
-    'candidate reusable identity differs from protected measurement'
-  assert_file_contains "$REPO_ROOT/ci/scripts/reusable_build.py" \
-    '_verify_archived_measurement(arguments, value, snapshot)'
+    fail "targeted artifact producer job could not be extracted"
+  extract_job_block "$workflow" verify-targeted-artifacts "$verify_job" ||
+    fail "targeted artifact verifier job could not be extracted"
+  extract_job_block "$workflow" attest-targeted-artifacts "$attest_job" ||
+    fail "targeted artifact attestation job could not be extracted"
+  extract_job_block "$workflow" targeted-artifacts-ready "$ready_job" ||
+    fail "targeted artifact readiness job could not be extracted"
+
+  assert_file_contains "$build_job" 'create-targeted'
+  assert_file_contains "$build_job" 'ctest-control'
+  assert_file_contains "$build_job" 'ctest-runtime'
+  assert_file_contains "$build_job" 'installed-package'
+  assert_file_contains "$build_job" 'openexr-metadata'
+  assert_file_contains "$build_job" 'targeted-artifact-sizes.json'
+  assert_file_not_contains "$build_job" 'ci-build.tar.gz'
+  assert_file_not_contains "$build_job" 'ci-build-default'
   assert_file_not_contains "$build_job" 'id-token: write'
   assert_file_not_contains "$build_job" 'actions/attest@'
-  assert_file_contains "$attest_job" 'artifact-metadata: write'
-  assert_file_contains "$attest_job" 'attestations: write'
-  assert_file_contains "$attest_job" 'id-token: write'
-  assert_file_contains "$attest_job" 'python3 ci/scripts/reusable_build.py verify-only'
-  verify_line=$(grep -nF -- \
-    'python3 ci/scripts/reusable_build.py verify-only' "$attest_job" |
-    head -n 1 | cut -d: -f1)
-  first_attest_line=$(grep -nF -- 'uses: actions/attest@' "$attest_job" |
-    head -n 1 | cut -d: -f1)
-  [[ -n "$verify_line" && -n "$first_attest_line" ]] ||
-    fail "reusable-build attestation job lacks verification or attestation"
-  ((verify_line < first_attest_line)) ||
-    fail "reusable-build subject is attested before protected verification"
-  (($(grep -Fc -- 'uses: actions/attest@' "$attest_job") == 2)) ||
-    fail "reusable-build archive and manifest must each be attested"
+  assert_file_contains "$verify_job" 'verify-targeted-only'
+  assert_file_contains "$verify_job" \
+    'for role in ctest-control ctest-runtime installed-package openexr-metadata; do'
+  assert_file_not_contains "$attest_job" 'permissions:'
+  assert_file_not_contains "$attest_job" 'artifact-metadata: write'
+  assert_file_not_contains "$attest_job" 'attestations: write'
+  assert_file_not_contains "$attest_job" 'id-token: write'
+  assert_file_contains "$attest_job" \
+    "inputs.publish_reusable_attestations &&"
+  assert_file_contains "$attest_job" \
+    'CI-results/targeted-artifacts/**/*.manifest.json'
+  assert_file_contains "$ready_job" \
+    'needs: [verify-targeted-artifacts, attest-targeted-artifacts]'
+  assert_file_contains "$ready_job" \
+    '[[ "$CI_ATTESTATION_RESULT" == skipped ]]'
 
   for consumer_name in "${consumers[@]}"; do
-    consumer_job="$TEST_ROOT/reusable-build-$consumer_name-job.yml"
+    consumer_job="$TEST_ROOT/targeted-artifact-$consumer_name-job.yml"
     extract_job_block "$workflow" "$consumer_name" "$consumer_job" ||
-      fail "$consumer_name reusable-build consumer job could not be extracted"
-    assert_file_contains "$consumer_job" 'attest-reusable-build-default'
+      fail "$consumer_name targeted artifact consumer job could not be extracted"
+    assert_file_contains "$consumer_job" 'targeted-artifacts-ready'
     assert_file_contains "$consumer_job" \
-      'run: bash ci/scripts/reusable_build_consume.sh'
+      'run: bash ci/scripts/targeted_artifact_consume.sh'
     assert_file_contains "$consumer_job" \
-      'CI_CANDIDATE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}'
+      'CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}'
     assert_file_contains "$consumer_job" \
-      'CI_IMAGE_DIGEST: ${{ needs.ci-image-identity.outputs.digest }}'
+      'CI_IMAGE_DIGEST: ${{ inputs.image_digest }}'
+    assert_file_not_contains "$consumer_job" 'ci-build-default'
+    assert_file_not_contains "$consumer_job" 'reusable_build_consume.sh'
     assert_file_not_contains "$consumer_job" 'tar -C build -xzf'
   done
-  assert_file_not_contains "$workflow" 'image: ghcr.io/${{ github.repository }}/photospider-ci:latest'
 
-  pass integration-reusable-build-attestation-routing
+  assert_file_contains "$REPO_ROOT/ci/scripts/reusable_build.py" \
+    'photospider-targeted-ci-artifact-manifest-v1'
+  assert_file_contains "$REPO_ROOT/ci/scripts/reusable_build.py" \
+    '_FORBIDDEN_RUNTIME_SUFFIXES'
+  assert_file_contains "$REPO_ROOT/ci/scripts/reusable_build.py" \
+    '"uncompressed_size"'
+  assert_file_contains "$REPO_ROOT/ci/scripts/targeted_artifact_consume.sh" \
+    'ci-integration-suite.yml'
+  assert_file_contains "$REPO_ROOT/ci/scripts/targeted_artifact_consume.sh" \
+    '--source-digest "$CI_CANDIDATE_COMMIT"'
+  assert_file_contains "$REPO_ROOT/ci/scripts/targeted_artifact_consume.sh" \
+    '--signer-digest "$CI_WORKFLOW_COMMIT"'
+  assert_file_contains "$REPO_ROOT/ci/scripts/targeted_artifact_consume.sh" \
+    'snapshot-targeted-manifest'
+  assert_file_contains "$REPO_ROOT/ci/scripts/targeted_artifact_consume.sh" \
+    '--expected-manifest-sha256 "$manifest_snapshot_digest"'
+  assert_file_contains "$REPO_ROOT/ci/scripts/targeted_artifact_consume.sh" \
+    'CI_STATIC_PACKAGE_MANIFEST_SHA256=%s'
+  assert_file_not_contains "$REPO_ROOT/ci/scripts/targeted_artifact_consume.sh" \
+    '--source-digest "$CI_WORKFLOW_COMMIT"'
+  assert_file_contains \
+    "$REPO_ROOT/ci/scripts/static_product_consumer_test.sh" \
+    '--installed-prefix "$installed_prefix"'
+  assert_file_contains \
+    "$REPO_ROOT/ci/scripts/static_product_consumer_test.sh" \
+    '--producer-metadata "$producer_metadata"'
+  assert_file_contains \
+    "$REPO_ROOT/ci/scripts/static_product_consumer_test.sh" \
+    'verify-targeted-tree'
+  assert_file_contains \
+    "$REPO_ROOT/ci/scripts/static_product_consumer_test.sh" \
+    '--expected-manifest-sha256 "$ATTESTED_MANIFEST_SHA256"'
+  assert_file_not_contains "$workflow" 'integration_suite.sh'
+
+  pass integration-targeted-artifact-attestation-routing
 }
 
 # @brief Validate canonical image production and verified digest consumption.
@@ -1114,8 +1198,10 @@ validate_ci_image_identity_routing() {
   local health_workflow=$1
   local integration_workflow=$2
   local build_workflow="$REPO_ROOT/.github/workflows/build-ci-image.yml"
+  local shared_workflow="$REPO_ROOT/.github/workflows/ci-integration-suite.yml"
   local workflow
   local identity_job
+  local called_identity_job="$TEST_ROOT/shared-integration-identity-preflight-job.yml"
 
   for workflow in "$health_workflow" "$integration_workflow"; do
     identity_job="$TEST_ROOT/$(basename "$workflow" .yml)-image-identity-job.yml"
@@ -1128,12 +1214,13 @@ validate_ci_image_identity_routing() {
   done
   assert_file_contains "$health_workflow" \
     'image: ${{ needs.ci-image-identity.outputs.image }}'
-  assert_file_contains "$health_workflow" \
-    '"${{ steps.local-image.outputs.image_id }}" \'
+  assert_file_not_contains "$health_workflow" 'docker build'
   assert_file_contains "$integration_workflow" \
-    'image: ${{ needs.ci-image-identity.outputs.image }}'
+    'uses: ./.github/workflows/build-ci-image.yml'
   assert_file_contains "$integration_workflow" \
-    '"${{ steps.local-image.outputs.image_id }}" \'
+    'uses: ./.github/workflows/ci-integration-suite.yml'
+  assert_file_contains "$shared_workflow" 'image: ${{ inputs.image_ref }}'
+  assert_file_contains "$shared_workflow" 'validated_image_digest:'
   assert_file_not_contains "$health_workflow" 'photospider-ci:latest'
   assert_file_not_contains "$integration_workflow" 'photospider-ci:latest'
 
@@ -1147,39 +1234,157 @@ validate_ci_image_identity_routing() {
   assert_file_contains "$build_workflow" \
     'subject-digest: ${{ steps.push.outputs.digest }}'
   assert_file_contains "$build_workflow" 'push-to-registry: true'
+  assert_file_contains "$build_workflow" 'workflow_call:'
+  assert_file_contains "$build_workflow" \
+    'tags: ${{ steps.caller.outputs.temporary_image }}'
+  assert_file_contains "$build_workflow" \
+    'CI_IMAGE_EXPECTED_DIGEST: ${{ steps.push.outputs.digest }}'
+  (($(grep -Fc -- 'uses: docker/build-push-action@' "$build_workflow") == 1)) ||
+    fail "candidate CI image producer must build exactly once"
 
-  pass ci-image-canonical-manifest-attestation-routing
+  extract_job_block "$shared_workflow" identity-preflight \
+    "$called_identity_job" ||
+    fail "shared integration identity-preflight job could not be extracted"
+  assert_file_contains "$called_identity_job" \
+    'repository: ${{ github.repository }}'
+  assert_file_contains "$called_identity_job" \
+    'ref: ${{ inputs.workflow_commit }}'
+  assert_file_contains "$called_identity_job" 'path: .ci-protected-control'
+  assert_file_contains "$called_identity_job" \
+    'CI_EXPECTED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}'
+  assert_file_contains "$called_identity_job" \
+    'CI_IMAGE_EXPECTED_MANIFEST_DIGEST: ${{ inputs.image_manifest_digest }}'
+  assert_file_contains "$called_identity_job" \
+    'CI_IMAGE_EXPECTED_SOURCE_COMMIT: ${{ inputs.image_source_commit }}'
+  assert_file_contains "$called_identity_job" \
+    'bash .ci-protected-control/ci/scripts/ci_image_verify.sh'
+  assert_file_not_contains "$called_identity_job" \
+    'repository: ${{ inputs.checkout_repository }}'
+  pass reusable-suite-independent-image-identity-preflight
+
+  pass ci-image-build-once-canonical-manifest-attestation-routing
 }
 
-# @brief Prove only main can publish canonical/manual image locators.
-# @return Zero after exact metadata expressions and a CI-branch negative model.
+# @brief Prove one globally leased writer preserves SHA and mutable tag identity.
+# @return Zero after exact lease, freshness, preflight, status, and tag checks.
 # @throws Nothing; missing or broadened tag routes exit through fail.
 # @note The SHA tag remains available to protected CI branches, while their
 #   branch tag is namespaced and neither ``latest`` nor an operator-supplied
-#   canonical tag can be advanced before merge.
+#   canonical tag can be advanced before merge. One repository/image-scoped
+#   promotion lease serializes cross-ref SHA writers without cancelling build,
+#   test, or documentation-only jobs; queue order cannot replace freshness.
 validate_ci_image_tag_routing() {
-  local workflow="$REPO_ROOT/.github/workflows/build-ci-image.yml"
-  local same_sha=0123456789abcdef0123456789abcdef01234567
-  local main_latest=false
-  local ci_latest=false
-  local ci_branch_tag=false
+  local producer="$REPO_ROOT/.github/workflows/build-ci-image.yml"
+  local integration="$REPO_ROOT/.github/workflows/ci-integration.yml"
+  local promote="$REPO_ROOT/ci/scripts/ci_image_promote.sh"
+  local manifest="$REPO_ROOT/ci/scripts/ci_image_manifest.py"
+  local promotion_job="$TEST_ROOT/integration-promotion-job.yml"
+  local promotion_run="$TEST_ROOT/integration-promotion-run.sh"
+  local stable_job="$TEST_ROOT/integration-promotion-stable-job.yml"
+  local freshness_line
+  local mutable_create_line
+  local sha_create_line
+  local sha_preflight_line
 
-  assert_file_contains "$workflow" \
-    "type=raw,value=latest,enable=\${{ github.ref == 'refs/heads/main' }}"
-  assert_file_contains "$workflow" \
-    "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
-  assert_file_contains "$workflow" \
-    "type=ref,event=branch,prefix=branch-,enable=\${{ startsWith(github.ref, 'refs/heads/CI/') }}"
-  assert_file_contains "$workflow" 'type=sha'
+  extract_job_block "$integration" promote-candidate-image "$promotion_job" ||
+    fail "candidate image promotion job could not be extracted"
+  extract_step_run_block "$promotion_job" \
+    "Promote the tested digest without rebuilding" "$promotion_run" ||
+    fail "candidate image promotion run scalar could not be extracted"
+  extract_job_block "$integration" integration "$stable_job" ||
+    fail "stable integration job could not be extracted for promotion status"
+  assert_file_not_contains "$producer" 'latest'
+  assert_file_not_contains "$producer" 'branch-'
+  assert_file_not_contains "$producer" 'workflow_dispatch:'
+  assert_file_contains "$promotion_job" \
+    'needs: [candidate-image-build, candidate-image-integration]'
+  assert_file_contains "$promotion_job" \
+    'needs.candidate-image-integration.outputs.validated_image_digest'
+  assert_file_contains "$promotion_job" \
+    'group: photospider-ci-image-promotion-${{ github.repository }}'
+  assert_file_not_contains "$promotion_job" \
+    'photospider-ci-image-promotion-${{ github.repository }}-${{ github.ref }}'
+  if grep -Eq -- '^concurrency:' "$integration"; then
+    fail "integration workflow must not hold a workflow-wide promotion lease"
+  fi
+  assert_file_contains "$promotion_job" 'cancel-in-progress: false'
+  assert_file_contains "$promotion_job" 'queue: max'
+  assert_file_contains "$promotion_job" \
+    'status: ${{ steps.promote.outputs.status }}'
+  assert_file_contains "$promotion_job" \
+    'bash ci/scripts/ci_image_promote.sh'
+  assert_file_contains "$promotion_job" \
+    'CI_PROMOTION_BRANCH: ${{ github.ref_name }}'
+  assert_file_contains "$promotion_run" '--branch "$CI_PROMOTION_BRANCH"'
+  assert_file_contains "$promotion_run" \
+    '--manifest-digest "${{ needs.candidate-image-build.outputs.manifest_digest }}"'
+  assert_file_not_contains "$promotion_run" 'github.ref_name'
+  assert_file_not_contains "$promotion_job" 'docker/build-push-action@'
+  assert_file_contains "$promote" 'docker buildx imagetools create'
+  assert_file_contains "$promote" '--prefer-index=false'
+  assert_file_contains "$promote" 'canonical_ci_branch_tag()'
+  assert_file_contains "$promote" \
+    'git check-ref-format "refs/heads/$branch_name"'
+  assert_file_contains "$promote" \
+    'branch_identity = os.fsencode(branch_name)'
+  assert_file_contains "$promote" \
+    'digest = hashlib.sha256(branch_identity).hexdigest()'
+  assert_file_contains "$promote" 'safe_slug_bytes = frozenset('
+  assert_file_contains "$promote" \
+    'tag = f"{prefix}{slug[:slug_limit]}{separator}{digest}"'
+  assert_file_not_contains "$promote" 'branch-${branch_name//\//-}'
+  assert_file_not_contains "$promote" 'branch_name.encode("ascii")'
+  assert_file_contains "$promote" \
+    'mutable_tags+=("$image_repository:latest")'
+  assert_file_contains "$promote" 'if [[ "$branch_name" == main ]]'
+  assert_file_contains "$promote" 'if [[ "$event_name" != push ]]'
+  assert_file_contains "$promote" 'promotion-freshness'
+  assert_file_contains "$promote" 'promotion_status=superseded'
+  assert_file_contains "$promote" \
+    'mutable_tags=("$image_repository:$branch_tag")'
+  assert_file_contains "$promote" 'sha_destination="$image_repository:$sha_tag"'
+  assert_file_contains "$promote" \
+    "--format '{{json .Manifest}}' \"\$sha_destination\""
+  assert_file_contains "$promote" 'is_exact_missing_sha_inspection()'
+  assert_file_contains "$promote" 'if ((sha_inspect_status != 1))'
+  assert_file_contains "$promote" 'sha_action=reused'
+  assert_file_contains "$promote" 'sha_action=created'
+  assert_file_contains "$promote" '--tag "$sha_destination"'
+  assert_file_contains "$promote" \
+    'create_arguments=(docker buildx imagetools create --prefer-index=false)'
+  assert_file_contains "$promote" 'printf '\''sha_action=%s\n'\''' \
+    || fail "promotion output must expose immutable SHA create/reuse state"
+  assert_file_not_contains "$promote" \
+    'mutable_tags+=("$image_repository:$sha_tag")'
 
-  [[ refs/heads/main == refs/heads/main ]] && main_latest=true
-  [[ refs/heads/CI/security == refs/heads/main ]] && ci_latest=true
-  [[ refs/heads/CI/security == refs/heads/CI/* ]] && ci_branch_tag=true
-  [[ "$main_latest" == true && "$ci_latest" == false &&
-    "$ci_branch_tag" == true && -n "$same_sha" ]] ||
-    fail "CI image tag model permits a protected branch to advance canonical latest"
+  freshness_line=$(grep -nF -- 'freshness_status=$(python3' "$promote" |
+    cut -d: -f1)
+  sha_preflight_line=$(grep -nF -- \
+    'if docker buildx imagetools inspect \' "$promote" | head -1 | cut -d: -f1)
+  sha_create_line=$(grep -nF -- 'if [[ "$sha_action" == created ]]' \
+    "$promote" | cut -d: -f1)
+  mutable_create_line=$(grep -nF -- \
+    'create_arguments=(docker buildx imagetools create --prefer-index=false)' \
+    "$promote" | cut -d: -f1)
+  [[ -n "$freshness_line" && -n "$sha_preflight_line" &&
+    -n "$sha_create_line" && -n "$mutable_create_line" ]] ||
+    fail "promotion freshness/SHA/mutable write ordering markers are missing"
+  ((freshness_line < sha_preflight_line &&
+    sha_preflight_line < sha_create_line &&
+    sha_create_line < mutable_create_line)) ||
+    fail "promotion must establish freshness and immutable SHA before mutable writes"
+  assert_file_contains "$manifest" 'refs/heads/{branch_name}'
+  assert_file_contains "$manifest" 'merge-base'
+  assert_file_contains "$manifest" \
+    'branch tip changed during promotion freshness measurement'
+  assert_file_contains "$stable_job" \
+    'PROMOTION_STATUS: ${{ needs.promote-candidate-image.outputs.status }}'
+  assert_file_contains "$stable_job" 'case "$PROMOTION_STATUS" in'
+  assert_file_contains "$stable_job" 'superseded)'
+  assert_file_contains "$stable_job" \
+    'a newer image-input identity superseded mutable-tag promotion'
 
-  pass ci-image-ci-branch-cannot-advance-canonical-tag
+  pass ci-image-tested-digest-only-tag-promotion
 }
 
 # @brief Bind the live ruleset reader into one maintained protected stable gate.
@@ -2004,16 +2209,18 @@ exercise_changed_path_contracts() {
 main() {
   local health_workflow="$REPO_ROOT/.github/workflows/ci-healthcheck.yml"
   local integration_workflow="$REPO_ROOT/.github/workflows/ci-integration.yml"
+  local shared_integration_workflow=
+  shared_integration_workflow="$REPO_ROOT/.github/workflows/ci-integration-suite.yml"
   local protected_repository="$TEST_ROOT/protected-repository"
   local protected_origin="$TEST_ROOT/protected-origin.git"
   local protected_newline_path=$'ci/hidden\nscript.sh'
 
   validate_workflow_contract "$health_workflow" "Report healthcheck gate"
   validate_workflow_contract "$integration_workflow" "Report integration gate"
-  validate_build_smoke_matrix_contract "$integration_workflow"
-  validate_runtime_capability_routing "$integration_workflow"
-  validate_security_profile_routing "$integration_workflow"
-  validate_reusable_build_identity_routing "$integration_workflow"
+  validate_build_smoke_matrix_contract "$shared_integration_workflow"
+  validate_runtime_capability_routing "$shared_integration_workflow"
+  validate_security_profile_routing "$shared_integration_workflow"
+  validate_reusable_build_identity_routing "$shared_integration_workflow"
   validate_ci_image_identity_routing "$health_workflow" "$integration_workflow"
   validate_ci_image_tag_routing
   validate_live_ruleset_routing "$health_workflow" healthcheck

@@ -6,4 +6,3 @@ actions/download-artifact	v4	d3f86a106a0bac45b974a628896c90dbdf5c8093
 actions/upload-artifact	v4	ea165f8d65b6e75b540449e92b4886f43607fa02
 docker/build-push-action	v6	10e90e3645eae34f1e60eeb005ba3a3d33f178e8
 docker/login-action	v3	c94ce9fb468520275223c153574b00df6fe4bcc9
-docker/metadata-action	v5	c299e40c65443455700f0fdfc63efafe5b349051

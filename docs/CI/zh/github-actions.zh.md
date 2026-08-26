@@ -3,9 +3,10 @@
 ## Workflow
 
 - `.github/workflows/ci-healthcheck.yml`：通过 `pull_request_target` 处理目标为 `main` 的 pull request，并在推送到 `main` 和 `CI/**`、手动触发时运行静态 healthcheck，最后由一个稳定的 `healthcheck` 结果门禁汇总。
-- `.github/workflows/ci-integration.yml`：运行纯文档路由、配置期 inventory 预检、一个发布构建后 label-driven matrix 的可复用 default build、独立分片的完整 CTest 与逐测试 build-smoke job、`graph_cli` 脚本测试、propagation 脚本测试、按能力选择的 plugin 与 execution-repeat 检查，并由一个稳定的 `integration` 结果门禁汇总。
+- `.github/workflows/ci-integration.yml`：负责纯文档与镜像输入路由、published/candidate 镜像身份选择、唯一 build-once candidate 调用、唯一 shared-suite 调用、same-digest promotion，以及一个稳定的 `integration` 结果门禁。
+- `.github/workflows/ci-integration-suite.yml`：由 published 与 candidate 镜像共用、使用 typed digest-qualified 输入的可复用测试 DAG，包含一个 same-tree producer、角色制品、普通 CTest、default/dedicated/OpenEXR build smoke、脚本式 runtime 分片及 Darwin/Linux security profile。
 - `.github/workflows/ci-sanitizer.yml`：手动运行 ASan 或 TSan 聚焦检查。
-- `.github/workflows/build-ci-image.yml`：在镜像输入相关 push 和手动触发时发布 GHCR 镜像 `ghcr.io/<owner>/<repo>/photospider-ci`。
+- `.github/workflows/build-ci-image.yml`：只接受可信 push 的可复用 candidate producer，为一个 event-scoped 临时 GHCR tag 生成精确 digest/attestation；它不能发布 canonical tag 或 `latest`。
 
 ## 分支与 workflow 保护
 
@@ -18,6 +19,7 @@ healthcheck 和 integration 的第一个 job 会在执行任何仓库脚本或�
 - `ci/**`
 - `.github/workflows/**`
 - `Dockerfile.ci`
+- `.dockerignore`
 
 因此，CI workflow 相关修改必须放在 base repository 的 `CI/**` 分支开发。分支前缀本身绝不是授权：pull request 还必须以 base repository 作为 head-repository identity，而 push 和手动 run 本来就属于 base repository。该保护也覆盖目标为 `main` 的非 `CI/**` pull request，避免 workflow 相关文件通过普通 feature 分支或 fork 中的同名分支合并。
 
@@ -37,11 +39,25 @@ integration workflow 会在受保护路径门禁之后运行 `change-classificat
 
 ## 运行环境
 
-`Dockerfile.ci` 定义 GitHub Linux 测试环境。`healthcheck-published-image` 是 container job，published-image healthcheck 执行 job 与 build/test integration job 会在 `ghcr.io/<owner>/<repo>/photospider-ci:latest` 中运行。Published-image job 不依赖 checkout 的临时 HOME 范围 Git trust 在后续 container step 中继续存在。Checkout 之后，唯一的 `Trust checked-out workspace` step 会显式选择 `shell: bash`，只把精确的 `$GITHUB_WORKSPACE` 值加入该 job container 持久的 global `safe.directory` 配置，并通过只读 Git 命令校验 `HEAD^{commit}`。它绝不会配置 `safe.directory=*`、信任父目录或执行 checkout 得到的仓库脚本。该边界先于两个条件 history fetch 与 `healthcheck.sh` 完成，因此也覆盖两个 fetch 都不执行的 published-image `main` push 与 `workflow_dispatch` run。`Fetch pull request base history` 与 `Fetch CI branch main history` step 同样显式设置 `shell: bash`，因此各自的 `set -Eeuo pipefail` 前导命令会由 Bash 执行，而不是依赖 container 默认 shell。protected-path、change-classification 与稳定结果门禁仍是轻量 `ubuntu-latest` job，不会 configure 或编译项目。
+`Dockerfile.ci` 定义 GitHub Linux 测试环境。受保护 lock 中的
+`photospider-ci:latest` 只用于发现 locator。可信 host job 会解析它，校验精确 digest、source/signer
+workflow attestation、OCI revision 与 canonical manifest label，并且只输出最终的
+`ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` 引用。Published-image healthcheck 与 build/test
+integration job 都执行该已校验的 digest-qualified 引用；没有 job 直接执行可变 locator。
+`healthcheck-published-image` 是 container job，并不依赖 checkout 的临时 HOME 范围 Git trust 在
+后续 container step 中继续存在。Checkout 之后，唯一的 `Trust checked-out workspace` step 会显式
+选择 `shell: bash`，只把精确的 `$GITHUB_WORKSPACE` 值加入该 job container 持久的 global
+`safe.directory` 配置，并通过只读 Git 命令校验 `HEAD^{commit}`。它绝不会配置
+`safe.directory=*`、信任父目录或执行 checkout 得到的仓库脚本。该边界先于两个条件 history fetch
+与 `healthcheck.sh` 完成，因此也覆盖两个 fetch 都不执行的 published-image `main` push 与
+`workflow_dispatch` run。`Fetch pull request base history` 与 `Fetch CI branch main history` step
+同样显式设置 `shell: bash`，因此各自的 `set -Eeuo pipefail` 前导命令会由 Bash 执行，而不是依赖
+container 默认 shell。protected-path、change-classification 与稳定结果门禁仍是轻量
+`ubuntu-24.04` job，不会 configure 或编译项目。
 
-当 pull request 或 push 修改 CI 镜像输入（`Dockerfile.ci`、`.dockerignore` 或 `.github/workflows/build-ci-image.yml`）时，healthcheck 和 integration workflow 会在当前 workflow 内构建 `photospider-ci:local`，并在该镜像中运行相同脚本。Pull-request 镜像检测会拉取 base 仓库分支、校验 event 的精确 base SHA，再从该 base 开始比较，而不依赖 fork 中可能不存在的 `origin/<base>`。对于 pull request，published-image 与 local-image healthcheck job 都会在各自 job 内把 `CI_BASE_SHA` 绑定到 event base，从 base-repository URL 拉取目标分支，校验该精确 commit，并把 event 的精确 SHA 作为 `CI_BASE_REF`。Published-image 的校验先于 `healthcheck.sh`；local-image 的校验先于构建 head Dockerfile 或执行挂载 workspace。因此，即使 fork checkout 的 `origin` 不包含 base tip，event 的精确 SHA 仍然可解析。
+当 pull request 或 push 修改 CI 镜像输入（`Dockerfile.ci`、`.dockerignore` 或 `.github/workflows/build-ci-image.yml`）时，detector 仍会拉取并校验精确 base，而不依赖 fork 中可能不存在的 `origin/<base>`。Fork head 会在 checkout 前被拒绝，同仓库受保护 `CI/**` pull request 则使用其可信 push 路径。Image-change healthcheck job 不构建镜像：它会先校验精确 hosted runner、受保护 lock、canonical publish-source identity 与生成的 image-input manifest，再运行静态 healthcheck。只有符合条件的可信 `main` 或 `CI/**` integration push 可以调用唯一 candidate-image producer 与 shared digest-bound suite。
 
-对于每次 `CI/**` push，两条 healthcheck 路径都会改为在各自 job 内拉取并校验 `origin/main`，再把 `origin/main` 作为 `CI_BASE_REF`。Published-image job 会在 `healthcheck.sh` 前完成校验；local-image job 会在 Docker build 与执行挂载 workspace 前完成校验。因此，静态检查会覆盖从 `main` merge base 开始的累计 branch diff，后续纯文档 push 无法隐藏更早的未格式化 C++ commit。普通 `main` push 则继续把精确的 `github.event.before` 作为 `CI_BASE_REF`，只检查本次 push 增量。任何必需 fetch 或 ref 校验失败都会在 `healthcheck.sh` 使用 fallback base 选择之前终止 job。对于 `CI/**` push，CI 镜像检测同样使用累计 `origin/main` 基线，因此后续纯文档 push 也无法隐藏更早的镜像输入 commit。
+对于每次 `CI/**` push，两条 healthcheck 路径都会在各自 job 内拉取并校验 `origin/main`，再把 `origin/main` 作为 `CI_BASE_REF`。Published-image job 会在 `healthcheck.sh` 前完成校验；image-change job 会在 canonical manifest 生成和 `healthcheck.sh` 前完成校验。因此，静态检查会覆盖从 `main` merge base 开始的累计 branch diff，后续纯文档 push 无法隐藏更早的未格式化 C++ commit。普通 `main` push 则继续把精确的 `github.event.before` 作为 `CI_BASE_REF`，只检查本次 push 增量。任何必需 fetch 或 ref 校验失败都会在 `healthcheck.sh` 使用 fallback base 选择之前终止 job。对于 `CI/**` push，CI 镜像检测同样使用累计 `origin/main` 基线，因此后续纯文档 push 也无法隐藏更早的镜像输入 commit。
 
 镜像输入 detector 使用关闭 rename detection 且不带任何 Git status filter 的清单；删除、type change 与少见 status 都保持可见。Healthcheck 静态范围清单同样关闭 rename detection，但会有意使用 `--diff-filter=d`：由于 formatter 与 linter 要求当前文件，删除路径会被排除，而 type change 与其他少见的非删除 status 仍保持可见。两份清单都使用 NUL 分隔的 Git path，因此含换行的文件名仍保持为一个精确路径，并且都会先把清单写入父 shell 可观察的文件。`git diff` 失败时，脚本会在输出任何 `changed=false` 或“No changed C++ files”摘要前非零退出。这样既避免假路由，也避免另一个 workflow 尚未发布新 `latest` 镜像时产生竞态。
 
@@ -109,29 +125,109 @@ file 的已注册 target 表现为不带 label 的 `*_NOT_BUILT` 占位项。两
 entry，因此新增 allowlisted header 或已注册 GoogleTest target 时，expectation 会通过其权威
 CMake declaration 变化，而不是依赖 Python 数字或针对未来名称的特判。
 
-`build-integrity-default` 会构建一次完整 default profile，并上传 `ci-build-default`。普通测试 job
-会复用该 artifact：
+`build-integrity-default` 只配置一次，在同一 build tree 中先运行
+`build_required_targets`，再运行 `build_all`，绝不为了表面并行而把两个阶段拆到不同 runner。
+它不再向所有消费者发送原先 2.416 GB 的完整 build tree，而会导出四种绑定身份的角色制品：
 
-- `full-ctest`、`scripted-cli`、`propagation-script`、`plugin-load` 和 `execution-repeat` 只下载 `ci-build-default`。
-- `full-ctest` 使用 CTest label filter 排除每个精确 `build-smoke` 标签，不再维护按名称排除的
-  build-smoke 清单。
-- `build-smoke` 通过 `fail-fast: false` 消费 build-integrity job 输出的构建后 JSON include
-  matrix。当 producer job 被有意跳过或没有 output 时，字面量空 include fallback 会保证
-  `fromJSON` 仍有效；job-level 路由仍要求预检与 build-integrity 成功，而后者的严格 matrix
-  不可能为空。每个 matrix entry 都会显示为独立的 `Build smoke (<精确 CTest 名>)` job，下载 `ci-build-default`，获得独立
-  30 分钟 job timeout 与 artifact 路径，并且只运行所选 CTest entry。CTest 注册继续保留各自
-  300 到 1200 秒 timeout 与既有 `RUN_SERIAL` 语义。
+- `ci-control-default` 只包含普通 fresh-build smoke 所需的精确递归 CTest control graph、producer
+  cache/stamp 与 generated inventory；不包含 producer object 或普通测试 executable。
+- `ci-runtime-default` 在 control role 上增加完整的构建后普通 CTest 闭包。Producer 只排除精确
+  `build-smoke` label，记录每个 command/property，不依赖文件名地递归跟随全部 CTest include，并从
+  每项测试的有效 working directory 解析相对 command、argument、`REQUIRED_FILES`、environment 与
+  environment-modification 路径。Working directory 只作为解析 base，不会被整体复制。随后选择被
+  引用的 executable、build-tree data、shared library、plugin tree 与 trust material。
+  恢复后 consumer 会重新运行 JSON discovery，并拒绝 `_NOT_BUILT`、inventory 变化或任何缺失的
+  include/executable/data/runtime input。
+  Versioned DSO alias 只有在指向 producer tree 内的 regular file 时才会被接受，并会物化为同字节
+  regular member，因此 archive 本身不含 link。
+- `ci-installed-package-default` 只包含 `ci/installed/**`、
+  `ci/producer/CMakeCache.txt` 与
+  `ci/producer/generated/ci_inventory/installable_public_headers.txt`。Static library 只允许位于
+  installed prefix 中；CMakeFiles、CTest state、build stamp、object、dependency file 与无关 build
+  library 均被禁止。
+  Installed DSO alias 采用相同的 prefix 内校验与 regular-member 物化；dangling、escape、directory
+  或 special target 都会失败。
+- `ci-openexr-metadata-default` 精确只包含 `ci/producer/CMakeCache.txt`。专用 runner 使用原注册中
+  缓存的 Python、CMake、CTest、symbol tool、configuration 与架构传播输入，直接执行 source-tree
+  `OpenExrDeepProviderOptionOffSmoke` driver。单配置 producer 中唯一、非空且不含控制字符的
+  `CMAKE_BUILD_TYPE` 会提供 `--config`；caller 环境不能覆盖它，multi-config cache 会被拒绝。该 role
+  不下载 CTest graph、stamp、generated inventory、object 或 product library。
+
+每种 role 都有 canonical member/digest/size manifest，并在提取前校验。Targeted manifest 会从一个
+拒绝跟随链接的 regular-file snapshot 复制；attestation 得到的精确 SHA-256 会传入 Python 的 retained
+snapshot 校验，因此 pathname 替换不能切换已验证 identity。`full-ctest` 只消费
+`ci-runtime-default`，排除精确 label，使用 `--parallel ${CI_JOBS}`，同时保留完整失败日志与 JUnit
+output。Scripted CLI、propagation、plugin 与 execution-repeat 只在确需 built runtime 时消费同一个
+runtime role。
+
+受保护 routing lock 是带版本的临时过渡权威：只有 `PublicHeaderSelfContainment` 在原 producer
+执行；`StaticProductConsumerSmoke` 路由到 `installed-package` role；
+`OpenExrDeepProviderOptionOffSmoke` 路由到精确 `openexr-metadata` role；其余发现到的 smoke 全部进入
+`ctest-control`。Control、installed、OpenEXR 与 producer output 两两不重叠，并穷尽构建后 CTest
+inventory。Dedicated installed-package job 与 producer 使用相同 digest-qualified image；
+其 package-input mode 会跳过 producer build/install，但仍完整执行 daemon help、install/export/
+symbol 检查、全部正向 consumer compile/link/run probe 和全部负向 component 检查。Prefix、metadata
+与 job-owned work 两两隔离，只有 work directory 会被删除。执行前后，job 都会按已校验 manifest
+重新测量精确 member set、byte size、SHA-256 digest 与 executable attribute；新增、删除、改写或
+mode 漂移都会失败。Evidence upload 只包含 consumer/verifier log 与可用的 attestation record，
+不会再次上传恢复后的 prefix 或 producer metadata tree。
+
+普通 `build-smoke` matrix 保留 `fail-fast: false`。只有 producer 被跳过时，字面量空 include
+fallback 才用于保持 `fromJSON` 可解析；成功 producer 不能发布空或不完整 partition。每个 item
+仍拥有独立的 30 分钟 workflow timeout，并保留 CTest 注册自身的 timeout 与 `RUN_SERIAL` 语义。
 
 Runner 会在执行前立即重新查询 CTest JSON，并要求选定的精确名称仍然唯一、enabled、可执行且
 带标签。完成该标签校验后，执行只使用校验过的 CTest 数字索引；测试名不会插入 shell command
 或 regular expression。于是 `IpcDisabledInstallSmoke` 会通过长期维护的 CTest 注册执行，
 自行创建 clean `PHOTOSPIDER_BUILD_IPC=OFF` producer，不再依赖 workflow 中单独硬编码的 profile。
 
-如果 CI 镜像输入发生变化，workflow 不能使用此前发布的镜像，而会在一个具备 Docker 能力的 runner
-上运行 `local-image-integration`。构建 `photospider-ci:local` 后，`integration_suite.sh` 会构建
-default profile，读取同一个构建后 NUL 分隔精确名称清单，在 full CTest 中排除该标签，
-再顺序运行每个带标签 smoke，随后运行 CLI、propagation、plugin 与 execution-repeat 分片。该 fallback
-保持相同的发现与选择契约，但接受单个 local-image runner 无法扇出 matrix job 的限制。
+Published-image 与 image-input-changing 路径会调用同一个 typed reusable suite，并传入独立期望的
+digest-qualified `image_ref`、candidate、profile、manifest、source 与 workflow identity。在任何
+candidate checkout、code 或 container 启动前，host preflight 会在精确 caller `workflow_commit`
+checkout `github.repository`，把该值绑定到实际 `github.workflow_sha`，再运行受保护 image verifier。
+Verifier 会独立把请求的 digest/reference、GHCR attestation signer/source、OCI revision 与 canonical
+manifest digest 和全部 caller field 交叉校验。GitHub 允许 called workflow 保持或降低 caller 的
+`GITHUB_TOKEN` 权限，但绝不允许提升。Reusable call 的权限兼容性会先于后续 job-level `if` 导致的
+skip 完成校验，因此 shared workflow 不声明 workflow-wide 权限。每个会 checkout 或执行 candidate
+code、运行 candidate container 或聚合结果的 job，都会声明精确的只读或空 job-level permission
+map。唯一例外是 `attest-targeted-artifacts`：它不声明本地 permission map，只在
+`publish_reusable_attestations` 为 true 且 targeted verification 已成功时运行，并且只从两个可信
+push caller 之一继承所需的 `artifact-metadata`、`attestations` 与 `id-token` write 权限。Pull-request
+caller 只传入 read 权限与 `false`；其余所有 job 都无法继承可信 caller 的 write 权限。
+
+可信镜像变更 push 只在 event-scoped 临时 SHA tag 下构建一次，attest 该精确 digest，并在不重复调用
+`integration_suite.sh` 的前提下扇出。只有全部 suite job 成功后，promotion 才能在不重建的情况下
+复制同一 digest。Promotion 会先建立 immutable `sha-<full-commit>` reference，随后 current run 才能
+更新其 branch tag；只有可信且成功的 `main` push 可以推进 `latest`。`main` 保持精确的
+`branch-main` tag。`CI/**` branch tag 使用
+`branch-<bounded-readable-slug>-<sha256>`：完整 64 位十六进制 SHA-256 后缀会对经过校验的完整分支名
+字节做 hash，且不会附加换行。Git 自身负责校验 `refs/heads/<branch>`；slug 不是第二套 ref
+allowlist。它保留 Docker-safe ASCII，把其余所有字节（包括 Git 允许的标点或 UTF-8）确定性压缩为
+分隔符，并且只截断该展示部分，因此 tag 满足 Docker 语法、最长 128 字符，并且不会把
+`CI/a-b` 与 `CI/a/b` 映射成同一身份。Pull-request 路径保持只读。
+
+只有 promotion job 持有一个由每个 ref 共享、按 repository/CI-image namespace 分组的 concurrency
+group；它会保留排队 writer、设置 `cancel-in-progress: false`、串行化 workflow-owned SHA 与 mutable
+writer，绝不会因纯文档 run 到达而取消整个 Integration workflow 或 candidate。Queue 顺序不受信任。
+在写入任何 registry state 前，受保护 manifest helper 会围绕一个
+隔离 worktree measurement 两次 fetch 精确 live branch，要求已测试 candidate 是其祖先，并复用
+canonical image-input path lock、source-commit resolver 与 manifest digest。较新的纯文档 descendant
+若保持相同 source/manifest，仍可晋升。若存在更晚 image-input identity，则该 run 报告
+`superseded`。Force-push、unknown ancestry、manifest failure 或 measurement 期间 ref drift 都会以
+registry 零写入失败。
+
+Freshness 成功后，promotion 会严格解析 SHA tag 唯一的顶层 manifest digest。精确 digest 会直接复用，
+且不调用 create。只有 locked Buildx 返回精确的 not-found status 与 diagnostic 时，才会单独创建不
+存在的 SHA；随后必须在写入任何 mutable tag 前重新校验 creation metadata 与立即执行的 registry
+resolution。digest 冲突、缺失或有歧义，以及认证、网络或未知 inspect failure 都会以零写入失败。
+`superseded` run 可以创建或复用该 SHA，但不能触碰 branch 或 `latest`。全局 lease 会闭合
+workflow-owned 的跨 ref check/create race；GHCR 不为 out-of-band nonworkflow writer 提供 tag
+compare-and-swap 保证，因此该边界仍需显式治理。稳定 gate 会分别报告 `promoted` 与 `superseded`，
+不会把跳过写入呈现为晋升成功。
+
+用户观察到的 2.416 GB archive、4 分 19 秒压缩以及 13 个消费者名义传输超过
+31 GB 仍是远端比较基线；在 exact-head 远端运行完成量化前，不声称已经实现显著下降或 30--45
+分钟镜像变更目标。
 
 CMake 3.16 是项目兼容性下限，不是每个 pull request 都固定运行的 workflow 版本。维护中的
 构建逻辑会保护晚于该下限引入的 policy，当前 integration 则在受支持 CI toolchain 上执行 fresh
@@ -152,8 +248,13 @@ static package consumer。只有 compatibility-sensitive change 或 release chec
 
 `build-integrity-default` 校验架构中性的 `photospider_kernel`、`graph_cli`、
 `test_propagation` 与 operation-plugin 生命周期 target，随后仍构建完整 tree。Full CTest 继续作为
-普通测试的权威入口，并且只排除精确的 `build-smoke` label。Label 驱动的 build-smoke matrix、
-独立 job、static product consumer 以及受保护路径/镜像门禁均保持不变。
+普通测试的权威入口，并且只排除精确的 `build-smoke` label。Runtime capability 选择只通过选取适用的
+旧 target 或 policy/execution target 来保持覆盖语义，并不保留先前的 orchestration topology。当前
+构建后 routing 会产生下游 `consumer_build_smoke_matrix.json`（`ctest-control`）、
+`openexr_build_smoke_matrix.json`（`openexr-metadata`）和
+`dedicated_build_smoke_matrix.json`（`installed-package`）三个 matrix，以及 producer-local
+`producer_build_smoke_names.z` 清单。特别是 `StaticProductConsumerSmoke` 会通过专用 installed-prefix
+package-input 边界运行，在不重建或重新安装 producer 的前提下保留全部 consumer 检查。
 
 运行时敏感分片会选择对应行为，但不会引入产品兼容层：
 
@@ -221,15 +322,18 @@ helper 和 output artifact 不得进入 primary repository，也不得作为 per
 - `ci/scripts/healthcheck.sh`：建立 NUL 分隔的 changed-path artifact，运行 `git diff --check`、长期 change-classification、build-smoke inventory、runtime-capability 与 CI-routing 回归，并对每个未删除的 changed C++ 路径运行 `clang-format --dry-run --Werror` 与 `cpplint`；清单失败时会在输出无 C++ 摘要前终止。
 - `ci/scripts/change_classification.sh`：把 event 的精确 revision 分类为纯文档或完整 integration，记录所有改动路径与非文档路径，并在 Git 状态不确定时 fail closed。
 - `ci/scripts/change_classification_test.sh`：覆盖文档、源码、混合、type change、workflow、重命名、删除、重复 `CI/**` push、pull-request merge-base、branch 或 revision 缺失、全零/不可达 revision、手动触发、空 diff 与浅克隆场景，验证长期路由契约。
-- `ci/scripts/ci_routing_test.sh`：对两份生产 `protected-ci-paths.if` 表达式做空白归一化并锁定精确源码，再抽取并执行真实 stable-gate、checkout 前 fork-rejection 与 protected-path shell block。它还会锁定允许空集合的配置期预检、严格构建后 job output、对空 output 安全的 `fromJSON` matrix、逐项 artifact/name binding、full-CTest label exclusion、精确 runner input、local fallback inventory、聚合 build-smoke gate，以及架构中性 `execution-repeat` job 的环境变量、artifact 和最终 gate 路由。隔离 Git fixture 会证明两份生产门禁都拒绝含换行的 `ci/**` 路径、安全记录该路径，并在 producer 或 reader 失败时 fail closed。一个 job/step-scoped production 断言会抽取 published-image 中两个精确的 history-fetch step，并要求各自拥有顶层 `shell: bash`，因此其他 job 或相邻 step 的元数据无法满足该契约。另一个 job/step-scoped 断言要求恰好一个使用 `shell: bash` 的 `Trust checked-out workspace` step；它唯一可执行的内容必须是启用严格模式、把精确 `$GITHUB_WORKSPACE` 加入 global `safe.directory`，以及校验 `HEAD^{commit}`。其他 job 或相邻 step 中的条目、任何额外或通配的 `safe.directory`，以及晚于任一 fetch 或 `healthcheck.sh` 的位置都无法满足断言。抽取出的 production trust block 会在隔离 HOME 与 Git 仓库中运行，并要求所得 global 配置只包含该仓库的精确路径。Job-scoped 断言还分别锁定 published-image 与 local-image 的 pull-request 精确 base fetch、`CI/**` main fetch/校验、三路 `CI_BASE_REF` 路由及执行顺序。测试会执行两份抽取出的 production main-fetch block；隔离历史会证明累计 `origin/main` 范围保留较早的未格式化 C++ 路径，而 event-before 范围只包含较晚的文档路径。Detector fixture 继续覆盖精确/累计 base、空比较、含换行路径及 changed-path 失败传播。这些本机源码与 shell 检查明确不声称执行 GitHub expression evaluator、复现跨 UID dubious ownership 或模拟托管 container runner。
+- `ci/scripts/ci_routing_test.sh`：对两份生产 `protected-ci-paths.if` 表达式做空白归一化并锁定精确源码，再抽取并执行真实 stable-gate、checkout 前 fork-rejection 与 protected-path shell block。它还会锁定允许空集合的配置期预检、严格构建后 job output、对空 output 安全的 `fromJSON` matrix、逐项 artifact/name binding、full-CTest label exclusion、精确 runner input，以及两两不重叠的四分区 build-smoke routing：`ctest-control` consumer、OpenEXR metadata consumer、专用 installed-package static consumer 和 producer-local 清单。它会验证 role-specific control/runtime/OpenEXR/installed artifact 的生产、attestation 与消费顺序，要求完整 shared suite gate，拒绝串行 `integration_suite.sh` fallback，并保留架构中性 `execution-repeat` job 的环境变量、artifact 和最终 gate 路由。隔离 Git fixture 会证明两份生产门禁都拒绝含换行的 `ci/**` 路径、安全记录该路径，并在 producer 或 reader 失败时 fail closed。一个 job/step-scoped production 断言会抽取 published-image 中两个精确的 history-fetch step，并要求各自拥有顶层 `shell: bash`，因此其他 job 或相邻 step 的元数据无法满足该契约。另一个 job/step-scoped 断言要求恰好一个使用 `shell: bash` 的 `Trust checked-out workspace` step；它唯一可执行的内容必须是启用严格模式、把精确 `$GITHUB_WORKSPACE` 加入 global `safe.directory`，以及校验 `HEAD^{commit}`。其他 job 或相邻 step 中的条目、任何额外或通配的 `safe.directory`，以及晚于任一 fetch 或 `healthcheck.sh` 的位置都无法满足断言。抽取出的 production trust block 会在隔离 HOME 与 Git 仓库中运行，并要求所得 global 配置只包含该仓库的精确路径。Job-scoped 断言还分别锁定 published-image 与 local-image 的 pull-request 精确 base fetch、`CI/**` main fetch/校验、三路 `CI_BASE_REF` 路由及执行顺序。测试会执行两份抽取出的 production main-fetch block；隔离历史会证明累计 `origin/main` 范围保留较早的未格式化 C++ 路径，而 event-before 范围只包含较晚的文档路径。Detector fixture 继续覆盖精确/累计 base、空比较、含换行路径及 changed-path 失败传播。这些本机源码与 shell 检查明确不声称执行 GitHub expression evaluator、复现跨 UID dubious ownership 或模拟托管 container runner。
 - `ci/scripts/runtime_capability_test.sh`：覆盖精确 Make/Ninja target 解析、两种完整契约、不完整/混合/缺失清单的 fail-closed 行为、required-target 校验及互斥 CLI 配置输出。它还证明 direct-consumer trust export 由精确的可选 `test_plugin_trust_bundle` capability 控制，而不是由更宽泛的 policy/execution profile 控制：pre-trust 与 legacy inventory 保持 no-op，缺失或 malformed inventory 以及不完整/非 regular material 均 fail closed，完整的 trust-enabled tuple 则以 canonical path 覆盖 inherited value。
 - `ci/scripts/ci_image_changed.sh`：检测当前 NUL 分隔且不带 status 过滤的 diff 是否修改 CI 镜像输入；workflow 会向它提供已拉取并验证的 pull-request 精确 base SHA，diff 失败时不会输出路由。
 - `ci/scripts/build_smoke_inventory.py`：严格解析 CTest JSON v1，输出确定性 matrix 与 NUL 分隔精确名称，并在基于索引执行前重新校验一个 matrix selection。严格构建后模式拒绝空 selection；只有显式 preflight 模式允许为空。Focused regression 会覆盖 malformed JSON/schema、重复名称/property/label value、非法或缺失 label、disabled/commandless entry、严格空 selection、确定性排序、JSON round trip、安全 artifact key、敌意测试名字符、在执行前停止的 absent/disabled/commandless runner selection，以及真实配置期占位到构建后发现过程。
 - `ci/scripts/integration_plan.sh`：配置一个启用测试的小型 build tree，并校验允许空集合、非权威的配置期 inventory preview；它不会输出 workflow matrix。
-- `ci/scripts/integration_suite.sh`：消费严格构建后输出的精确名称，为 local-image fallback 顺序运行所得 integration 分片。
-- `ci/scripts/build_integrity.sh`：检测一种完整的运行时契约，构建 default profile 的架构中性 required targets 与完整 tree，严格校验构建后带标签 CTest inventory，将 matrix 暴露为 workflow job output，并为 build 加可复用 stamp。
-- `ci/scripts/ctest_full.sh`：复用或构建 default producer，并在排除精确 `build-smoke` label 后运行 CTest。
-- `ci/scripts/build_smoke_test.sh`：从可复用 default producer 重新校验并运行 `SMOKE_TEST_NAME` 指定的精确 CTest 名称。
+- `ci/scripts/build_integrity.sh`：检测一种完整运行时契约，在同一 tree 中执行 required-target 与完整 build，写入普通 CTest 闭包并安装 fresh package prefix，再把 build smoke 分成下游 `consumer_build_smoke_matrix.json`（`ctest-control`）、`openexr_build_smoke_matrix.json`（`openexr-metadata`）和 `dedicated_build_smoke_matrix.json`（`installed-package`）三个 matrix，以及 producer-local `producer_build_smoke_names.z` 清单。只有严格校验通过后，它才会暴露这三个下游 matrix 并执行 producer-local 清单。
+- `ci/scripts/ctest_runtime_closure.py`：派生递归的构建后普通 CTest control/runtime 闭包，并在执行前重新校验恢复后的 runtime inventory、executable、dynamic library、plugin、trust input 与 build-tree data。
+- `ci/scripts/ctest_full.sh`：复用 runtime role，在排除精确 `build-smoke` label 后，以受控 `${CI_JOBS}` 并行度运行普通 CTest，同时保留失败输出与 JUnit 证据。
+- `ci/scripts/build_smoke_test.sh`：从 `ci-control-default` 重新校验并运行一个精确 default-role CTest 名称。
+- `ci/scripts/openexr_smoke_test.sh`：从已校验、只含 cache 的 metadata role 运行精确 default OpenEXR option-off source-tree smoke。
+- `ci/scripts/static_product_consumer_test.sh`：在不重建或重新安装 producer 的前提下，于完整 package consumer 执行前后重新测量精确 installed-package content。
+- `ci/scripts/targeted_artifact_consume.sh`：分别以 candidate source digest 与 reusable-workflow signer digest 校验 archive/manifest attestation，再校验并原子恢复一个精确 role。
 - `ci/scripts/graph_cli_script_test.sh`：使用上述执行前 Graph 文档能力标记，运行相互隔离的正路径、显式来源缺失和无效 target REPL 检查。
 - `ci/scripts/propagation_script_test.sh`：构建 `test_propagation`，并对线性和复杂 propagation 图运行 `tiles all`。
 - `ci/scripts/plugin_load_test.sh`：检查 operation plugin，并选择 scheduler plugin 加载/列举，或 policy plugin、registry、policy/execution 与 CLI route 检查。
@@ -259,6 +363,7 @@ GITHUB_OUTPUT=/tmp/photospider-build-integrity.out \
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
   CI_ARTIFACT_DIR=CI-results/ctest-full bash ci/scripts/ctest_full.sh
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
+  CI_ARTIFACT_ROLE=ctest-control \
   SMOKE_TEST_NAME=DependencyDisabledInstallSmoke \
   CI_ARTIFACT_DIR=CI-results/build-smoke/dependency-disabled \
   bash ci/scripts/build_smoke_test.sh
@@ -278,33 +383,32 @@ SANITIZER=asan CI_ARTIFACT_DIR=CI-results/sanitizer-asan bash ci/scripts/sanitiz
 ```
 
 可以把 `SMOKE_TEST_NAME` 替换成
-`CI-results/build-integrity-default/build_smoke_matrix.json` 输出的任一精确名称；runner 会拒绝 absent、
+`CI-results/build-integrity-default/consumer_build_smoke_matrix.json` 输出的任一精确名称；runner 会拒绝 absent、
 duplicate、disabled、commandless 或未带标签的选择。要从 configured tree 直接运行全部带标签
 smoke，可使用
-`ctest --test-dir build/ci-default -L '^build-smoke$' --output-on-failure`。要复现动态选择后的
-完整执行顺序，可使用：
-
-```bash
-CI_ARTIFACT_ROOT=CI-results bash ci/scripts/integration_suite.sh
-```
+`ctest --test-dir build/ci-default -L '^build-smoke$' --output-on-failure`。Shared reusable DAG
+不存在等价的本机串行命令；本机诊断应使用上文聚焦的 role command，而 build-once digest fan-out、
+attestation、聚合与 same-digest promotion 属于 GitHub Actions 门禁。
 
 Docker 复现：
 
 ```bash
-docker build -t photospider-ci:local -f Dockerfile.ci .
+mkdir -p CI-results/local-ci-image
+ci_image_source_commit=$(python3 ci/scripts/ci_image_manifest.py source-commit)
+ci_image_manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
+  --source-commit "$ci_image_source_commit" \
+  --repository kevin-zf1123/photospider \
+  --output CI-results/local-ci-image/ci-image-input-v1.json)
+docker build -t photospider-ci:local -f Dockerfile.ci \
+  --build-arg CI_IMAGE_INPUT_MANIFEST_SHA256="$ci_image_manifest_digest" \
+  --build-arg CI_IMAGE_SOURCE_COMMIT="$ci_image_source_commit" .
 docker run --rm -v "$PWD:/workspace" -w /workspace photospider-ci:local \
   bash ci/scripts/build_integrity.sh
 ```
 
-可选本地镜像源构建：
-
-```bash
-docker build -t photospider-ci:local -f Dockerfile.ci \
-  --build-arg APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ \
-  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple .
-```
-
-本机 arm64 构建使用 `ubuntu-ports`。amd64 使用 `http://mirrors.tuna.tsinghua.edu.cn/ubuntu/`。
+其余 Docker build argument 保持 `ci/locks/ci-image-lock.json` 中受保护的 immutable default。本地
+镜像源覆盖不属于维护中的镜像契约；apt 使用锁定的 Ubuntu snapshot，pip 使用带 hash lock 的
+requirements 文件。
 
 上述本地 Docker 命令复现的是维护中的 current-toolchain CI 路径，不代表 CMake 3.16 本身已经
 运行。若确实需要针对性旧版本证据，而本机没有原生兼容 executable，应记录该限制，不要用架构

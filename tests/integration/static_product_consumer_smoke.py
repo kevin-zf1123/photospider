@@ -374,6 +374,141 @@ class SymbolToolResolution:
     sequence: tuple[SymbolToolCandidate | SymbolToolFailure, ...]
 
 
+@dataclass(frozen=True)
+class ConsumerExecutionInputs:
+    """@brief Hold one validated producer-build or package-input boundary.
+
+    @param build_metadata Producer build root in normal mode, or the exact
+      package artifact metadata root in package-input mode.
+    @param installed_prefix Work-owned install destination in producer mode, or
+      the independently restored read-only prefix in package-input mode.
+    @param work Job-owned transient consumer work directory.
+    @param package_input Whether producer build/install commands are forbidden.
+    @throws None Construction retains only already validated immutable paths.
+    @note In package-input mode the three paths are pairwise disjoint and
+      cleanup may remove only ``work``. In producer mode the install prefix is
+      intentionally work-owned below ``work``.
+    """
+
+    build_metadata: Path
+    installed_prefix: Path
+    work: Path
+    package_input: bool
+
+
+def _path_has_symlink_component(path: Path) -> bool:
+    """@brief Check the caller-selected final path component for a link.
+
+    @param path Absolute or relative path whose lexical components are checked.
+    @return ``True`` when the final component is a symbolic link.
+    @throws OSError If the component cannot be inspected.
+    @note Parent components are canonicalized by ``Path.resolve`` before
+      overlap checks. Rejecting them lexically would reject Darwin's standard
+      ``/var`` to ``/private/var`` alias even though all final role inputs are
+      separately verified as real directories by the artifact extractor.
+    """
+
+    return path.is_symlink()
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    """@brief Return whether two canonical paths contain one another.
+
+    @param first First resolved path.
+    @param second Second resolved path.
+    @return ``True`` for equality or either ancestor relationship.
+    @throws None Resolved ``Path.parents`` inspection is pure.
+    @note Sibling paths below one artifact root do not overlap.
+    """
+
+    return first == second or first in second.parents or second in first.parents
+
+
+def resolve_execution_inputs(
+    args: argparse.Namespace, repo: Path
+) -> ConsumerExecutionInputs:
+    """@brief Validate mutually exclusive producer and package-input modes.
+
+    @param args Parsed smoke arguments containing work/build/package paths.
+    @param repo Canonical repository source root.
+    @return Validated execution inputs with one explicit mode bit.
+    @throws ValueError If the CLI modes are incomplete, overlap, contain links,
+      could delete source/input state, or name a missing package input.
+    @throws OSError If filesystem inspection fails.
+    @note Package-input mode requires the pair ``--installed-prefix`` and
+      ``--producer-metadata`` and forbids ``--build`` and fresh configuration.
+      Producer mode requires ``--build`` and creates its prefix below ``work``.
+    """
+
+    raw_work = Path(args.work)
+    if _path_has_symlink_component(raw_work):
+        raise ValueError(f"test work path contains a symlink: {raw_work}")
+    work = raw_work.resolve()
+    package_input = bool(args.installed_prefix or args.producer_metadata)
+    if package_input:
+        if not args.installed_prefix or not args.producer_metadata:
+            raise ValueError(
+                "package-input mode requires paired --installed-prefix and "
+                "--producer-metadata"
+            )
+        if args.build or args.configure_fresh_producer:
+            raise ValueError(
+                "package-input mode is mutually exclusive with --build and "
+                "--configure-fresh-producer"
+            )
+        raw_prefix = Path(args.installed_prefix)
+        raw_metadata = Path(args.producer_metadata)
+        for label, raw_path in (
+            ("installed prefix", raw_prefix),
+            ("producer metadata", raw_metadata),
+        ):
+            if _path_has_symlink_component(raw_path):
+                raise ValueError(f"{label} contains a symlink component: {raw_path}")
+            if not raw_path.is_dir() or raw_path.is_symlink():
+                raise ValueError(f"{label} must be an existing real directory")
+        prefix = raw_prefix.resolve()
+        build_metadata = raw_metadata.resolve()
+        if any(
+            _paths_overlap(first, second)
+            for first, second in (
+                (work, prefix),
+                (work, build_metadata),
+                (prefix, build_metadata),
+            )
+        ):
+            raise ValueError(
+                "package prefix, producer metadata, and consumer work must be "
+                "pairwise disjoint"
+            )
+    else:
+        if not args.build:
+            raise ValueError(
+                "producer mode requires --build when package inputs are absent"
+            )
+        raw_build = Path(args.build)
+        if _path_has_symlink_component(raw_build):
+            raise ValueError(f"producer build contains a symlink component: {raw_build}")
+        build_metadata = raw_build.resolve()
+        prefix = work / "install-prefix"
+
+    if work == repo or work in repo.parents or work == build_metadata:
+        raise ValueError(
+            f"refusing destructive test work path: repo={repo}, "
+            f"metadata={build_metadata}, work={work}"
+        )
+    if args.configure_fresh_producer and build_metadata in work.parents:
+        raise ValueError(
+            "fresh-producer work directory must be outside the build tree: "
+            f"build={build_metadata}, work={work}"
+        )
+    return ConsumerExecutionInputs(
+        build_metadata=build_metadata,
+        installed_prefix=prefix,
+        work=work,
+        package_input=package_input,
+    )
+
+
 def strict_remove_tree(path: Path) -> None:
     """@brief Remove one transient test directory without hiding failure.
 
@@ -3544,7 +3679,10 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
     @throws KeyError If the caller provides an incomplete observation schema.
     @note Results and a strict diagnostic projection are printed for CTest to
       capture; complete observations remain in memory and no report file is
-      created. The projection excludes all transient paths and captured data.
+      created. Package-input mode records producer build/install as ``None``
+      and accepts them only because the role artifact was verified before this
+      process; it never fabricates a successful producer command status.
+      The projection excludes all transient paths and captured data.
     """
 
     install = observations["install_tree"]
@@ -3559,8 +3697,16 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
             not observations["producer"]["configured_by_smoke"]
             or commands["producer_configure"] == 0
         ),
-        "photospider target build succeeded": commands["build_photospider"] == 0,
-        "install command succeeded": commands["install"] == 0,
+        "photospider target build succeeded or verified package input supplied": (
+            observations["producer"]["package_input"]
+            and commands["build_photospider"] is None
+        )
+        or commands["build_photospider"] == 0,
+        "install succeeded or verified installed prefix supplied": (
+            observations["producer"]["package_input"]
+            and commands["install"] is None
+        )
+        or commands["install"] == 0,
         "installed photospiderd help runs from isolated prefix": commands[
             "installed_daemon_help"
         ]
@@ -3760,18 +3906,20 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
 
 
 def main() -> int:
-    """@brief Optionally configure, then build/install/consume the package.
+    """@brief Build/install or consume a verified package-input prefix.
 
     @return Process status 0 when every package invariant passes, else 1.
     @throws OSError If commands cannot start or transient files are inaccessible.
     @throws RuntimeError If transient-path cleanup leaves a path behind.
-    @throws ValueError If fresh-producer mode could delete the source tree or
-      test work directory, or if the work path itself is destructive.
+    @throws ValueError If producer/package modes are mixed, package inputs are
+      incomplete/linked/overlapping, or a destructive work path is requested.
     @note The CTest-facing result covers package behavior only. Commands and
       assertions write directly to the streams captured by CTest; the work
-      directory contains only normal producer/consumer build inputs and
-      outputs. Installed daemon help runs from the non-system prefix through
-      the loader-scrubbing shared capability driver.
+      directory contains only consumer inputs and outputs. Package-input mode
+      never builds or installs the producer; it reads only the restored prefix,
+      exact producer CMake cache, and public-header inventory. Installed daemon
+      help runs from the non-system prefix through the loader-scrubbing shared
+      capability driver.
       On Darwin, every child configure inherits the producer's meaningful
       ``CMAKE_OSX_ARCHITECTURES`` value as one argv element; other platforms
       receive no macOS-specific option.
@@ -3779,7 +3927,9 @@ def main() -> int:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
-    parser.add_argument("--build", required=True)
+    parser.add_argument("--build")
+    parser.add_argument("--installed-prefix")
+    parser.add_argument("--producer-metadata")
     parser.add_argument("--work", required=True)
     parser.add_argument("--config", default="")
     parser.add_argument(
@@ -3796,22 +3946,13 @@ def main() -> int:
     args = parser.parse_args()
 
     repo = Path(args.repo).resolve()
-    build = Path(args.build).resolve()
-    work = Path(args.work).resolve()
-    if work == repo or work in repo.parents or work == build:
-        raise ValueError(
-            f"refusing destructive test work path: repo={repo}, build={build}, "
-            f"work={work}"
-        )
-    if args.configure_fresh_producer and build in work.parents:
-        raise ValueError(
-            "fresh-producer work directory must be outside the build tree: "
-            f"build={build}, work={work}"
-        )
+    inputs = resolve_execution_inputs(args, repo)
+    build = inputs.build_metadata
+    prefix = inputs.installed_prefix
+    work = inputs.work
     strict_remove_tree(work)
     work.mkdir(parents=True, exist_ok=True)
 
-    prefix = work / "install-prefix"
     platform_system = platform.system()
     embedded_consumer_src = work / "embedded-consumer-src"
     embedded_consumer_build = work / "embedded-consumer-build"
@@ -3838,6 +3979,12 @@ def main() -> int:
             args.config,
             args.generator,
             args.producer_build_testing,
+        )
+    elif inputs.package_input:
+        print(
+            "verified installed prefix and producer metadata supplied; "
+            "producer configure/build/install are forbidden",
+            flush=True,
         )
     else:
         print(
@@ -3875,31 +4022,34 @@ def main() -> int:
         optional_opencv_missing_src, required_opencv_missing_src
     )
 
-    build_product_command = [
-        args.cmake_executable,
-        "--build",
-        str(build),
-        "--target",
-        "photospider",
-        "photospider_operation_runtime",
-        "photospider_operation_opencv",
-        "photospider_ipc_client",
-        "photospiderd",
-    ]
-    if args.config:
-        build_product_command.extend(["--config", args.config])
-    build_product_code = run_command(build_product_command, repo)
+    build_product_code: int | None = None
+    install_code: int | None = None
+    if not inputs.package_input:
+        build_product_command = [
+            args.cmake_executable,
+            "--build",
+            str(build),
+            "--target",
+            "photospider",
+            "photospider_operation_runtime",
+            "photospider_operation_opencv",
+            "photospider_ipc_client",
+            "photospiderd",
+        ]
+        if args.config:
+            build_product_command.extend(["--config", args.config])
+        build_product_code = run_command(build_product_command, repo)
 
-    install_command = [
-        args.cmake_executable,
-        "--install",
-        str(build),
-        "--prefix",
-        str(prefix),
-    ]
-    if args.config:
-        install_command.extend(["--config", args.config])
-    install_code = run_command(install_command, repo)
+        install_command = [
+            args.cmake_executable,
+            "--install",
+            str(build),
+            "--prefix",
+            str(prefix),
+        ]
+        if args.config:
+            install_command.extend(["--config", args.config])
+        install_code = run_command(install_command, repo)
     install_bindir = cmake_cache_value(build, "CMAKE_INSTALL_BINDIR") or "bin"
     installed_bindir = Path(install_bindir)
     if not installed_bindir.is_absolute():
@@ -4396,6 +4546,7 @@ def main() -> int:
         },
         "producer": {
             "configured_by_smoke": args.configure_fresh_producer,
+            "package_input": inputs.package_input,
             "build_testing": producer_build_testing,
             "requested_config": args.config,
             "requested_generator": args.generator,

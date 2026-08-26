@@ -7,8 +7,10 @@ and full-SHA builder action. Before a workflow may publish, the same helper
 requires the workflow commit to equal the newest canonical image-input commit;
 this makes the producer's implicit GitHub attestation source digest identical
 to the source identity expected by consumers. The output is canonical JSON
-with a final newline. No candidate-owned script or generated value is trusted
-as an input list.
+with a final newline. Promotion freshness uses the same protected path lock and
+manifest builder against a freshly fetched branch-tip worktree, never a copied
+path list or candidate-provided identity. No candidate-owned script or generated
+value is trusted as an input list.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -152,6 +155,238 @@ def _git_source_commit(root: Path) -> str:
     return commit
 
 
+def _run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run one Git command against the explicit repository without a shell.
+
+    Args:
+        root: Exact repository whose objects and refs are authoritative.
+        *arguments: Git arguments passed as distinct argv entries.
+
+    Returns:
+        The completed successful Git process with captured text streams.
+
+    Raises:
+        ManifestError: Git returns nonzero or the repository cannot execute Git.
+
+    Note:
+        Branch names and URLs remain argv data. Diagnostics are bounded to Git's
+        captured stderr and no fetched checkout content is executed.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+    except OSError as error:
+        raise ManifestError(f"cannot execute Git freshness command: {error}") from error
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "Git failed"
+        raise ManifestError(f"Git freshness command failed: {detail}")
+    return completed
+
+
+def _fetch_branch_tip(
+    root: Path, repository: str, branch_name: str, destination_ref: str
+) -> str:
+    """Fetch one exact GitHub branch into an isolated local freshness ref.
+
+    Args:
+        root: Trusted candidate repository receiving the fetched objects.
+        repository: Canonical ``owner/name`` GitHub repository identity.
+        branch_name: Git-validated full branch name without ``refs/heads/``.
+        destination_ref: Private local ref owned by this measurement.
+
+    Returns:
+        The fetched branch-tip commit as one lowercase full SHA.
+
+    Raises:
+        ManifestError: Fetch, ref resolution, or canonical SHA validation fails.
+
+    Note:
+        The source URL is derived solely from the validated repository identity.
+        A literal refspec argv prevents branch content from becoming shell input.
+    """
+    remote_url = f"https://github.com/{repository}.git"
+    _run_git(
+        root,
+        "fetch",
+        "--no-tags",
+        "--no-recurse-submodules",
+        "--no-write-fetch-head",
+        "--force",
+        remote_url,
+        f"+refs/heads/{branch_name}:{destination_ref}",
+    )
+    commit = _run_git(root, "rev-parse", "--verify", f"{destination_ref}^{{commit}}")
+    value = commit.stdout.strip()
+    if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        raise ManifestError("freshly fetched branch tip is not a lowercase full SHA")
+    return value
+
+
+def _command_promotion_freshness(arguments: argparse.Namespace) -> None:
+    """Compare a candidate with one stable, freshly fetched branch-tip identity.
+
+    Args:
+        arguments: Candidate/source/manifest identity, exact branch/repository,
+            scratch root, output path, and repository root parsed by argparse.
+
+    Returns:
+        None after writing canonical evidence and printing ``current`` or
+        ``superseded``.
+
+    Raises:
+        ManifestError: Identity syntax, checkout binding, ancestry, fetch,
+            worktree creation, manifest measurement, or ref stability fails.
+
+    Note:
+        The branch ref is fetched before and after measurement. A change across
+        that window fails before mutable registry state can be touched. Exact
+        manifest equality allows later documentation-only commits; a later
+        image-input source commit is explicitly ``superseded``.
+    """
+    candidate_commit = arguments.candidate_commit
+    candidate_source_commit = arguments.candidate_source_commit
+    candidate_manifest_digest = arguments.candidate_manifest_digest
+    branch_name = arguments.branch
+    repository = arguments.repository
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_commit) is None:
+        raise ManifestError("promotion candidate commit must be a lowercase full SHA")
+    if candidate_source_commit != candidate_commit:
+        raise ManifestError("promotion candidate and image source commits must match")
+    if re.fullmatch(r"[0-9a-f]{64}", candidate_manifest_digest) is None:
+        raise ManifestError("promotion candidate manifest digest is malformed")
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None:
+        raise ManifestError("promotion repository must be an owner/name identity")
+    if branch_name != "main" and not branch_name.startswith("CI/"):
+        raise ManifestError("promotion branch must be main or CI/**")
+    branch_ref = f"refs/heads/{branch_name}"
+    _run_git(arguments.repo_root, "check-ref-format", branch_ref)
+    checkout_commit = _run_git(
+        arguments.repo_root, "rev-parse", "--verify", "HEAD^{commit}"
+    ).stdout.strip()
+    if checkout_commit != candidate_commit:
+        raise ManifestError("promotion checkout differs from the candidate commit")
+
+    scratch_root = arguments.scratch_root
+    if scratch_root.is_symlink() or not scratch_root.is_dir():
+        raise ManifestError("promotion scratch root must be one real directory")
+    with tempfile.TemporaryDirectory(
+        prefix="photospider-ci-promotion-", dir=str(scratch_root)
+    ) as temporary_text:
+        temporary = Path(temporary_text)
+        token = temporary.name
+        observed_ref = f"refs/photospider/promotion/{token}/observed"
+        verified_ref = f"refs/photospider/promotion/{token}/verified"
+        worktree = temporary / "branch-tip"
+        worktree_added = False
+        try:
+            branch_tip = _fetch_branch_tip(
+                arguments.repo_root, repository, branch_name, observed_ref
+            )
+            ancestry = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(arguments.repo_root),
+                    "merge-base",
+                    "--is-ancestor",
+                    candidate_commit,
+                    branch_tip,
+                ],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            if ancestry.returncode != 0:
+                detail = ancestry.stderr.strip()
+                suffix = f": {detail}" if detail else ""
+                raise ManifestError(
+                    "candidate is not an ancestor of the current branch tip"
+                    f"{suffix}"
+                )
+            _run_git(
+                arguments.repo_root,
+                "-c",
+                "core.hooksPath=/dev/null",
+                "worktree",
+                "add",
+                "--detach",
+                str(worktree),
+                branch_tip,
+            )
+            worktree_added = True
+            branch_source_commit = _git_source_commit(worktree)
+            branch_manifest = create_manifest(
+                worktree, branch_source_commit, repository
+            )
+            branch_manifest_digest = _sha256_bytes(
+                _canonical_bytes(branch_manifest)
+            )
+            verified_tip = _fetch_branch_tip(
+                arguments.repo_root, repository, branch_name, verified_ref
+            )
+            if verified_tip != branch_tip:
+                raise ManifestError(
+                    "branch tip changed during promotion freshness measurement"
+                )
+        finally:
+            if worktree_added:
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(arguments.repo_root),
+                        "worktree",
+                        "remove",
+                        "--force",
+                        str(worktree),
+                    ],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+            for local_ref in (observed_ref, verified_ref):
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(arguments.repo_root),
+                        "update-ref",
+                        "-d",
+                        local_ref,
+                    ],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+
+    if branch_source_commit == candidate_source_commit:
+        if branch_manifest_digest != candidate_manifest_digest:
+            raise ManifestError(
+                "current branch manifest differs for the candidate source commit"
+            )
+        status = "current"
+    else:
+        status = "superseded"
+    evidence = {
+        "branch": branch_name,
+        "branch_manifest_digest": branch_manifest_digest,
+        "branch_source_commit": branch_source_commit,
+        "branch_tip_commit": branch_tip,
+        "candidate_commit": candidate_commit,
+        "candidate_manifest_digest": candidate_manifest_digest,
+        "candidate_source_commit": candidate_source_commit,
+        "repository": repository,
+        "schema": "photospider-ci-image-promotion-freshness-v1",
+        "status": status,
+    }
+    _write_output(arguments.output, _canonical_bytes(evidence))
+    print(status)
+
+
 def _write_output(path: Path, value: bytes) -> None:
     """Write one output atomically without accepting a symlink destination."""
     if path.exists() and path.is_symlink():
@@ -271,6 +506,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     publish_source.add_argument("--workflow-commit", required=True)
     publish_source.set_defaults(handler=_command_publish_source_commit)
+    freshness = subparsers.add_parser(
+        "promotion-freshness",
+        help="compare a candidate with the freshly fetched live branch identity",
+    )
+    freshness.add_argument("--candidate-commit", required=True)
+    freshness.add_argument("--candidate-source-commit", required=True)
+    freshness.add_argument("--candidate-manifest-digest", required=True)
+    freshness.add_argument("--repository", required=True)
+    freshness.add_argument("--branch", required=True)
+    freshness.add_argument("--scratch-root", type=Path, required=True)
+    freshness.add_argument("--output", type=Path, required=True)
+    freshness.set_defaults(handler=_command_promotion_freshness)
     verify = subparsers.add_parser("verify", help="verify a canonical manifest")
     verify.add_argument("--source-commit", required=True)
     verify.add_argument("--repository", required=True)

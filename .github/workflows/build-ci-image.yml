@@ -1,30 +1,28 @@
-name: Build CI Image
+name: Build CI Image Candidate
 
 on:
-  push:
-    branches:
-      - main
-      - 'CI/**'
-    paths:
-      - Dockerfile.ci
-      - .dockerignore
-      - ci/locks/actions.lock
-      - ci/locks/ci-image-lock.json
-      - ci/locks/linux-runner-lock.json
-      - ci/locks/requirements-ci.txt
-      - ci/locks/ubuntu-24.04-packages.lock
-      - ci/scripts/ci_image_manifest.py
-      - ci/scripts/ci_image_verify.sh
-      - ci/scripts/ci_lock_verify.py
-      - ci/scripts/ci_runner_verify.py
-      - .github/workflows/build-ci-image.yml
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      tag:
-        description: Extra image locator tag to publish.
-        required: false
-        default: manual
+      candidate_commit:
+        description: Exact trusted push commit that changed canonical image inputs.
+        required: true
         type: string
+    outputs:
+      digest:
+        description: Exact attested OCI digest produced by the single build.
+        value: ${{ jobs.build.outputs.digest }}
+      image_ref:
+        description: Digest-qualified candidate image reference.
+        value: ${{ jobs.build.outputs.image_ref }}
+      manifest_digest:
+        description: Canonical CI-image input manifest digest.
+        value: ${{ jobs.build.outputs.manifest_digest }}
+      source_commit:
+        description: Canonical image-input-changing source commit.
+        value: ${{ jobs.build.outputs.source_commit }}
+      temporary_tag:
+        description: Event-scoped temporary SHA tag used by the producer.
+        value: ${{ jobs.build.outputs.temporary_tag }}
 
 permissions:
   artifact-metadata: write
@@ -36,11 +34,45 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    outputs:
+      digest: ${{ steps.identity.outputs.digest }}
+      image_ref: ${{ steps.identity.outputs.image }}
+      manifest_digest: ${{ steps.identity.outputs.manifest_digest }}
+      source_commit: ${{ steps.identity.outputs.source_commit }}
+      temporary_tag: ${{ steps.caller.outputs.temporary_tag }}
     steps:
+      - name: Require a trusted image-input push
+        id: caller
+        env:
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_EVENT_COMMIT: ${{ github.sha }}
+          CI_EVENT_REF: ${{ github.ref }}
+          CI_IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}/photospider-ci
+          CI_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CI_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$CI_EVENT_NAME" != push ||
+            ("$CI_EVENT_REF" != refs/heads/main && "$CI_EVENT_REF" != refs/heads/CI/*) ]]; then
+            echo "CI image candidates may be built only by trusted main or CI/** pushes." >&2
+            exit 1
+          fi
+          if [[ ! "$CI_CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ||
+            "$CI_CANDIDATE_COMMIT" != "$CI_EVENT_COMMIT" ]]; then
+            echo "Candidate image commit differs from the trusted push commit." >&2
+            exit 1
+          fi
+          temporary_tag="candidate-$CI_CANDIDATE_COMMIT-$CI_RUN_ID-$CI_RUN_ATTEMPT"
+          printf 'temporary_tag=%s\n' "$temporary_tag" >> "$GITHUB_OUTPUT"
+          printf 'temporary_image=%s:%s\n' \
+            "$CI_IMAGE_REPOSITORY" "$temporary_tag" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
+          ref: ${{ inputs.candidate_commit }}
 
       - name: Verify protected locks
         run: python3 ci/scripts/ci_lock_verify.py
@@ -54,7 +86,7 @@ jobs:
           set -Eeuo pipefail
           source_commit=$(python3 ci/scripts/ci_image_manifest.py \
             publish-source-commit \
-            --workflow-commit "${{ github.sha }}")
+            --workflow-commit "${{ inputs.candidate_commit }}")
           printf 'commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
 
       - name: Create canonical image input manifest
@@ -78,44 +110,56 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
-        with:
-          images: ghcr.io/${{ github.repository }}/photospider-ci
-          tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.inputs.tag != '' }}
-            type=ref,event=branch,prefix=branch-,enable=${{ startsWith(github.ref, 'refs/heads/CI/') }}
-            type=sha
-          labels: |
-            org.opencontainers.image.revision=${{ steps.source.outputs.commit }}
-            org.photospider.ci.input-manifest-sha256=${{ steps.manifest.outputs.digest }}
-
-      - name: Build and push exact image
+      - name: Build and push candidate exactly once
         id: push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile.ci
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.caller.outputs.temporary_image }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source.outputs.commit }}
+            org.photospider.ci.input-manifest-sha256=${{ steps.manifest.outputs.digest }}
           build-args: |
             CI_IMAGE_INPUT_MANIFEST_SHA256=${{ steps.manifest.outputs.digest }}
             CI_IMAGE_SOURCE_COMMIT=${{ steps.source.outputs.commit }}
 
-      - name: Attest exact OCI subject
+      - name: Attest exact temporary OCI subject
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-name: ghcr.io/${{ github.repository }}/photospider-ci
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
+      - name: Verify candidate digest, attestation, and labels
+        id: identity
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ci-image-identity
+          CI_IMAGE_EXPECTED_DIGEST: ${{ steps.push.outputs.digest }}
+          CI_IMAGE_LOCATOR: ${{ steps.caller.outputs.temporary_image }}
+          CI_IMAGE_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash ci/scripts/ci_image_verify.sh
+
+      - name: Cross-check build and verified identities
+        env:
+          CI_BUILT_DIGEST: ${{ steps.push.outputs.digest }}
+          CI_CREATED_MANIFEST_DIGEST: ${{ steps.manifest.outputs.digest }}
+          CI_CREATED_SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          CI_VERIFIED_DIGEST: ${{ steps.identity.outputs.digest }}
+          CI_VERIFIED_MANIFEST_DIGEST: ${{ steps.identity.outputs.manifest_digest }}
+          CI_VERIFIED_SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$CI_VERIFIED_DIGEST" == "$CI_BUILT_DIGEST" ]]
+          [[ "$CI_VERIFIED_MANIFEST_DIGEST" == "$CI_CREATED_MANIFEST_DIGEST" ]]
+          [[ "$CI_VERIFIED_SOURCE_COMMIT" == "$CI_CREATED_SOURCE_COMMIT" ]]
+
       - name: Upload canonical image input manifest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ci-image-input-${{ steps.source.outputs.commit }}
+          name: ci-image-input-${{ steps.source.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: CI-results/ci-image-manifest
           if-no-files-found: error
           retention-days: 7
