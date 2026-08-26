@@ -129,16 +129,19 @@ archive, exported test target, or exported internal seam definition. This
 remains a labelled `build-smoke`; ordinary complete CTest selection does not
 make package construction part of runtime-test ownership.
 
-`PhotospiderdInstallLayoutSmoke` separately configures three isolated
-dependency-disabled producer trees. It builds only the `photospiderd` target
-closure, then installs the configured package with nested relative
-`libexec/photospider` and `lib64` directories, an absolute libdir, or an
-absolute bindir paired with a relative libdir. Every case uses its configured
-prefix, removes loader overrides through the shared capability driver, and
-executes the installed daemon. The default relative `bin`/`lib` case remains
-part of `StaticProductConsumerSmoke`. All matrix build/install directories and
-absolute destinations are strict descendants of the CTest work root and are
-removed after either success or failure.
+`PhotospiderdInstallLayoutNestedRelativeSmoke`,
+`PhotospiderdInstallLayoutAbsoluteLibdirSmoke`, and
+`PhotospiderdInstallLayoutAbsoluteBindirSmoke` each configure one isolated
+dependency-disabled producer tree. Every registration supplies one strict
+`--layout` selector and owns a distinct CTest work root. Each driver builds only
+the `photospiderd` target closure, then installs the configured package with
+nested relative `libexec/photospider` and `lib64` directories, an absolute
+libdir, or an absolute bindir paired with a relative libdir. Every case uses
+its configured prefix, removes loader overrides through the shared capability
+driver, and executes the installed daemon. The default relative `bin`/`lib`
+case remains part of `StaticProductConsumerSmoke`. All build/install
+directories and absolute destinations are strict descendants of their
+case-owned CTest work root and are removed after either success or failure.
 
 The configured producer also serializes
 `PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS` into a build-tree
@@ -381,7 +384,9 @@ The maintained labelled inventory is
 `OpenExrDeepProviderInstallConsumerSmoke`,
 `OpenExrDeepProviderOptionOffSmoke`,
 `OpenCvOperationProviderDisabledBuild`,
-`PhotospiderdInstallLayoutSmoke`,
+`PhotospiderdInstallLayoutAbsoluteBindirSmoke`,
+`PhotospiderdInstallLayoutAbsoluteLibdirSmoke`,
+`PhotospiderdInstallLayoutNestedRelativeSmoke`,
 `PublicHeaderSelfContainment`, and
 `StaticProductConsumerSmoke`. `PublicHeaderSelfContainment` belongs because its
 CTest command builds the dedicated self-containment target; ordinary
@@ -424,7 +429,7 @@ IPC is enabled and absent otherwise, then requires every expected entry to
 remain enabled and labelled and to start with the exact `python -B` driver
 path. Commented or inactive CMake source cannot satisfy this
 generated-inventory check because it produces no CTest entry. The inventory
-query executes none of the real smokes and does not change the nine-test
+query executes none of the real smokes and does not change the eleven-test
 build-smoke classification.
 
 CTest keeps every labelled test registered for direct local use. CI's
@@ -461,7 +466,10 @@ symlink targets.
 Primary-repository CTest and CI entries are reserved for long-lived software
 behavior: correctness, performance, stability, multithreaded execution, error
 handling, compile boundaries, package consumption, and runtime API boundaries.
-`PhotospiderdCapabilityHelp`, `PhotospiderdInstallLayoutSmoke`,
+`PhotospiderdCapabilityHelp`,
+`PhotospiderdInstallLayoutNestedRelativeSmoke`,
+`PhotospiderdInstallLayoutAbsoluteLibdirSmoke`,
+`PhotospiderdInstallLayoutAbsoluteBindirSmoke`,
 `StaticProductConsumerSmoke`, `GraphCliOptionBadAlloc`, GoogleTest discovery,
 and `PublicHeaderSelfContainment` satisfy that rule because they execute or
 compile the maintained product. The daemon help test uses a CMake script driver to run
