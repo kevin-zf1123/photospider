@@ -12,7 +12,8 @@ set -Eeuo pipefail
 #
 # @param $1 Existing configured and completely built CMake binary directory.
 # @param $2 Destination path for the physical ctest-runtime.tar.gz file.
-# @return Zero after validating and atomically moving the archive into place.
+# @return Zero after validating and atomically moving the archive into place,
+#   then reporting its exact physical byte and entry counts.
 # @throws Nothing; invalid arguments, missing runtime roots, tar failures, or a
 #   forbidden archive entry terminate the script with a nonzero status.
 # @note The destination must be outside the packaged build directory. The
@@ -95,5 +96,9 @@ for required_root in \
   fi
 done
 
+archive_bytes=$(wc -c < "$temporary_archive" | tr -d '[:space:]')
+archive_entries=$(wc -l < "$archive_listing" | tr -d '[:space:]')
 mv -- "$temporary_archive" "$archive_path"
 printf 'Packaged CTest runtime: %s\n' "$archive_path"
+printf 'CTest runtime archive bytes: %s\n' "$archive_bytes"
+printf 'CTest runtime archive entries: %s\n' "$archive_entries"

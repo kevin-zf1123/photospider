@@ -291,6 +291,16 @@ Nested driver 必须继续使用互不重叠的 work directory，验证其接受
 cleanup 时不得跟随 symlink 或删除无关 symlink target。它们的临时 compiler object 与生成的
 `CMakeFiles` tree 属于 build job/cache，不会进入轻量 runtime artifact。
 
+GoogleTest discovery 分配 source-role primary label 时不依赖重复 CTest property 行为。仓库 wrapper
+会解析持续维护的 `gtest_discover_tests` argument surface，拒绝未知或缺值的 discovery keyword，
+验证由已知 test-property pair 构成的偶数长度列表，并只向 discovery 传递一个标量 primary
+`LABELS` property。由于 upstream module 不能传递 list-valued property，生成的
+`TEST_INCLUDE_FILES` script 会消费每个 post-discovery `TEST_LIST`，并一次性设置完整、去重后的
+primary-plus-orthogonal list 与全部 caller test property。其他已接受 property（包括
+`ENVIRONMENT`、`RESOURCE_LOCK`、`RUN_SERIAL`、`TIMEOUT` 与 `WORKING_DIRECTORY`）的值会作为
+单一 bracket argument 保留；重复的非 label property 会在
+configure 阶段失败。
+
 ## 验证归属
 
 Primary repository 中的 CTest 与 CI entry 只用于长期软件行为：正确性、性能、稳定性、多线程
@@ -2609,9 +2619,18 @@ scheduler-log workflow、evidence/provenance 层或 result aggregator。
 
 Producer 随后创建唯一一份 `ctest-runtime.tar.gz`。它排除 object file、`CMakeFiles`、Ninja
 dependency/log database 与既有 `Testing` 输出，同时保留 library、plugin、executable、CTest
-metadata 和 package configuration。三个并行 job 会恢复同一份 archive，并分别运行 `unit`、
+metadata 和 package configuration。Packager 会打印验证后 archive 的精确物理 byte count 与 tar
+entry count，用于 warm-cache 和 artifact 体积诊断。三个并行 job 会恢复同一份 archive，并分别运行 `unit`、
 `integration` 或 `verification` label。CMake 负责所有 primary label 以及 `RUN_SERIAL`、
 `RESOURCE_LOCK` 与 `TIMEOUT` 约束；workflow 不维护冗长 test-name 正则。
+
+两个 workflow 使用持续维护的 Node 24 action major：`actions/checkout@v7`、
+`actions/cache@v6`、`actions/upload-artifact@v7`、`actions/download-artifact@v8`、
+`docker/login-action@v4`、`docker/metadata-action@v6` 与
+`docker/build-push-action@v7`。GitHub-hosted runner 满足这些 action 对 Actions Runner 2.327.1
+或更新版本的最低要求。Build job 会打印 cache action 的 exact-hit output，因此 warm rerun 可以在
+比较 configure、Ninja、build-smoke、package 与 post-job cache 耗时前，先区分 exact hit、prefix
+restore 与 miss。
 
 `ci/scripts/build_smoke_inventory.py` 会继续保留，因为长期产品测试
 `InstallConsumerArchitecturePropagationSafety` 会导入它来验证已配置 build-smoke entry。手工

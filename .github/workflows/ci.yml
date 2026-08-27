@@ -25,7 +25,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 2
           submodules: recursive
@@ -63,18 +63,24 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - name: Restore incremental build tree
-        uses: actions/cache@v4
+        id: build-cache
+        uses: actions/cache@v6
         with:
           path: build/ci
           key: >-
             photospider-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}
           restore-keys: |
             photospider-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-
+
+      - name: Report incremental cache match
+        run: >-
+          printf 'Exact build-cache hit: %s\n'
+          '${{ steps.build-cache.outputs.cache-hit }}'
 
       - name: Configure cached build tree
         run: >-
@@ -104,7 +110,7 @@ jobs:
           CI-results/ctest-runtime.tar.gz
 
       - name: Upload CTest runtime
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ctest-runtime
           path: CI-results/ctest-runtime.tar.gz
@@ -130,12 +136,12 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - name: Download CTest runtime
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ctest-runtime
           path: CI-results/runtime

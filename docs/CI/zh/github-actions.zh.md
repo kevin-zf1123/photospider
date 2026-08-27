@@ -34,7 +34,7 @@ protected-path 或 provenance 证明；它绝不使用通配符。
 
 ### 一次缓存构建
 
-Build job 使用 `actions/cache@v4` 恢复 `build/ci`。Cache key 包含：
+Build job 使用 `actions/cache@v6` 恢复 `build/ci`。Cache key 包含：
 
 - 显式 cache epoch；
 - runner 操作系统与 build type；
@@ -42,6 +42,7 @@ Build job 使用 `actions/cache@v4` 恢复 `build/ci`。Cache key 包含：
 - 精确 Git commit SHA。
 
 Restore prefix 在 SHA 前结束，因此一次 push 可以复用最近兼容的旧 build tree。每次运行仍会对恢复后的树执行 CMake configure，随后只调用一次 Ninja 完成主构建。Job 结束时，`actions/cache` 会保存最终完整构建树，其中包括 object file 与 Ninja dependency state，供下一次兼容 push 使用。
+Workflow 还会打印 action 的 `cache-hit` output，因此重跑时可以区分 exact-key hit、prefix restore 与 complete miss，而不改变 cache 行为。
 
 构建完成后，同一个 job 运行 CTest 的 `build-smoke` label。这些测试覆盖嵌套 configure、install、package consumer、option-off 和 public header 构建契约。它们的 `RUN_SERIAL` 与 `TIMEOUT` 属性保存在 `CMakeLists.txt` 中，因此 workflow 不需要维护 smoke test 名称列表。
 
@@ -56,6 +57,7 @@ Restore prefix 在 SHA 前结束，因此一次 push 可以复用最近兼容的
 - `CMakeCache.txt`、生成的 package configuration 和其他 runtime data。
 
 归档排除所有 `.o` 与 `.obj`、所有 `CMakeFiles` tree、`.ninja_deps`、`.ninja_log` 和既有 `Testing` 输出。这些增量构建输入只留在 build cache 中。归档只上传一次，关闭 artifact 二次压缩，并由三个测试 job 共同下载。
+Packager 在验证 closure 后会打印物理 archive byte count 与 tar entry count。这些值只是 cache/artifact 体积实验的 observation，不会放宽 required root 或 forbidden entry 检查。
 
 每个测试 job 都把归档恢复到 producer 使用的相同路径 `build/ci`，随后运行一个精确的 primary label。CI 不会生成重复 runtime package，也不会上传完整 build-tree artifact。
 
@@ -68,7 +70,7 @@ CMake 负责测试选择。默认 push 路径中的每个测试都具有一个 p
 - `verification`：适合日常 CI 的确定性 safety harness；
 - `build-smoke`：在 build job 中运行的嵌套构建、安装和 package 检查。
 
-测试可以继续保留 `execution`、`security`、`kernel-concurrency` 或 `value-runtime` 等正交 label；primary label 会追加而不会替换它们。共享可变 harness 或不能重叠运行的测试在 CMake 中声明 `RESOURCE_LOCK` 或 `RUN_SERIAL`，需要边界的测试在 CMake 中声明 `TIMEOUT`。因此 workflow 只包含 `--label-regex '^<primary-label>$'`，不会编码冗长的包含或排除正则。
+测试可以继续保留 `execution`、`security`、`kernel-concurrency` 或 `value-runtime` 等正交 label。仓库 discovery wrapper 会解析并验证 caller 的每组 property pair，把 source-role primary label 与这些正交 label 去重，并只向 `gtest_discover_tests` 传递一个标量 primary `LABELS` property。由于 upstream module 不能传递 list-valued property，生成的 `TEST_INCLUDE_FILES` script 会在 discovery 后使用各自的 `TEST_LIST`，一次性设置完整 merged list 与全部 caller test property；仓库既不依赖重复 property 的隐式合并，也不依赖 module 的 list-value transport。未知 discovery argument、未知 property、奇数长度 property list 与重复的非 label property 会在 configure 阶段失败。共享可变 harness 或不能重叠运行的测试在 CMake 中声明 `RESOURCE_LOCK` 或 `RUN_SERIAL`，需要边界的测试在 CMake 中声明 `TIMEOUT`。因此 workflow 只包含 `--label-regex '^<primary-label>$'`，不会编码冗长的包含或排除正则。
 
 重型 benchmark、fuzz target 与 sanitizer build 是 opt-in 开发者工具。日常 push 会配置 `USE_ASAN=OFF`、`USE_TSAN=OFF` 和 `PHOTOSPIDER_BUILD_FUZZERS=OFF`；默认 job 不运行这些工作负载。
 
@@ -77,6 +79,8 @@ CMake 负责测试选择。默认 push 路径中的每个测试都具有一个 p
 `Dockerfile.ci` 定义 Linux toolchain，并包含 Ninja 和项目构建依赖。`.github/workflows/build-ci-image.yml` 只在 `main` 的 `Dockerfile.ci` 变更或手工 dispatch 时运行。它向 `ghcr.io/<owner>/<repo>/photospider-ci` 发布 `latest`、commit tag 和可选 manual tag。
 
 日常 CI workflow 消费这份已发布镜像。Dockerfile 变更必须先成功落地并发布，后续 push 才能依赖新 toolchain；日常 CI 本身不会构建或比较镜像。
+
+两个 workflow 都使用持续维护的 Node 24 action major：`actions/checkout@v7`、`actions/cache@v6`、`actions/upload-artifact@v7`、`actions/download-artifact@v8`、`docker/login-action@v4`、`docker/metadata-action@v6` 与 `docker/build-push-action@v7`。这些 major 要求 Actions Runner 2.327.1 或更新版本；当前 workflow 使用 GitHub-hosted runner，而不是仓库自有的 self-hosted runner。
 
 ## 本地检查
 

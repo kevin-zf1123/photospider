@@ -386,6 +386,19 @@ unrelated symlink targets. Their transient compiler objects and generated
 `CMakeFiles` trees belong to the build job/cache and are excluded from the
 lightweight runtime artifact.
 
+GoogleTest discovery assigns the source-role primary label without relying on
+repeated CTest property behavior. The repository wrapper parses the maintained
+`gtest_discover_tests` argument surface, rejects unknown or value-less
+discovery keywords, validates an even list of known test-property pairs, and
+passes exactly one scalar primary `LABELS` property to discovery. Because the
+upstream module cannot transport a list-valued property, a generated
+`TEST_INCLUDE_FILES` script consumes each post-discovery `TEST_LIST` and
+assigns the complete de-duplicated primary-plus-orthogonal list and every
+caller test property once. Values of other accepted properties, including
+`ENVIRONMENT`, `RESOURCE_LOCK`, `RUN_SERIAL`, `TIMEOUT`, and
+`WORKING_DIRECTORY`, are preserved as single bracket arguments; duplicate
+non-label properties fail during configuration.
+
 ## Validation Ownership
 
 Primary-repository CTest and CI entries are reserved for long-lived software
@@ -3212,10 +3225,22 @@ the next compatible push.
 The producer then creates one `ctest-runtime.tar.gz`. It excludes object files,
 `CMakeFiles`, Ninja dependency/log databases, and prior `Testing` output while
 retaining libraries, plugins, executables, CTest metadata, and package
-configuration. Three parallel jobs restore that same archive and run the
+configuration. The packager reports the validated archive's exact physical
+byte count and tar entry count for warm-cache and artifact-size diagnosis.
+Three parallel jobs restore that same archive and run the
 `unit`, `integration`, or `verification` label. CMake owns every primary label
 and all `RUN_SERIAL`, `RESOURCE_LOCK`, and `TIMEOUT` constraints; the workflow
 does not maintain long test-name regular expressions.
+
+The two workflows use the maintained Node 24 action majors:
+`actions/checkout@v7`, `actions/cache@v6`,
+`actions/upload-artifact@v7`, `actions/download-artifact@v8`,
+`docker/login-action@v4`, `docker/metadata-action@v6`, and
+`docker/build-push-action@v7`. GitHub-hosted runners satisfy their minimum
+Actions Runner 2.327.1 requirement. The build job prints the cache action's
+exact-hit output so a warm rerun can distinguish an exact hit from a prefix
+restore or miss before comparing configure, Ninja, build-smoke, packaging, and
+post-job cache timings.
 
 `ci/scripts/build_smoke_inventory.py` remains because the long-lived
 `InstallConsumerArchitecturePropagationSafety` product test imports it to

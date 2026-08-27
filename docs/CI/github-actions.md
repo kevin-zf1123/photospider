@@ -47,7 +47,7 @@ jobs should exist.
 
 ### One cached build
 
-The build job restores `build/ci` with `actions/cache@v4`. Its cache key
+The build job restores `build/ci` with `actions/cache@v6`. Its cache key
 contains:
 
 - an explicit cache epoch;
@@ -60,6 +60,9 @@ compatible earlier build tree. CMake still configures the restored tree on
 every run. Ninja is then invoked exactly once for the primary build. At job
 completion, `actions/cache` saves the resulting complete tree, including
 object files and Ninja dependency state, for the next compatible push.
+The workflow also prints the action's `cache-hit` output, so a rerun can
+distinguish an exact-key hit from a prefix restore or complete miss without
+changing cache behavior.
 
 After the build, the same job runs the `build-smoke` CTest label. These tests
 exercise nested configure, install, package-consumer, option-off, and public
@@ -82,6 +85,10 @@ The archive excludes every `.o` and `.obj`, every `CMakeFiles` tree,
 `.ninja_deps`, `.ninja_log`, and prior `Testing` output. Those incremental
 build inputs remain only in the build cache. The archive is uploaded once with
 artifact recompression disabled and downloaded by all three test jobs.
+After validating the closure, the packager prints the physical archive byte
+count and tar entry count. These diagnostics are observations for cache and
+artifact-size experiments; they do not relax the required roots or forbidden
+entry checks.
 
 Each test job restores the archive at `build/ci`, the same path used by the
 producer, then runs one exact primary label. There are no duplicate runtime
@@ -99,8 +106,17 @@ label:
 - `build-smoke`: nested build/install/package checks run in the build job.
 
 Tests may keep orthogonal labels such as `execution`, `security`,
-`kernel-concurrency`, or `value-runtime`; the primary label is appended without
-replacing them. Tests that share a mutable harness or cannot overlap declare
+`kernel-concurrency`, or `value-runtime`. The repository discovery wrapper
+parses and validates each caller property pair, de-duplicates the source-role
+primary label with those orthogonal labels, and passes one scalar primary
+`LABELS` property to `gtest_discover_tests`. Because the upstream module cannot
+transport a list-valued property, a generated `TEST_INCLUDE_FILES` script uses
+each `TEST_LIST` after discovery to assign the complete merged list and every
+caller test property once; the repository does not depend on repeated-property
+merging or on the module's list-value transport.
+Unknown discovery arguments, unknown properties, odd property lists, and
+duplicate non-label properties fail during configuration. Tests that share a
+mutable harness or cannot overlap declare
 `RESOURCE_LOCK` or `RUN_SERIAL`, and bounded tests declare `TIMEOUT`, in CMake.
 The workflow therefore contains only `--label-regex '^<primary-label>$'` and
 does not encode long inclusion or exclusion regular expressions.
@@ -120,6 +136,13 @@ commit tag, and an optional manual tag to
 The ordinary CI workflow consumes that published image. A Dockerfile change
 must land and publish successfully before later pushes can rely on the new
 toolchain; ordinary CI does not build or compare the image itself.
+
+Both workflows use the maintained Node 24 action majors: `actions/checkout@v7`,
+`actions/cache@v6`, `actions/upload-artifact@v7`,
+`actions/download-artifact@v8`, `docker/login-action@v4`,
+`docker/metadata-action@v6`, and `docker/build-push-action@v7`. These majors
+require Actions Runner 2.327.1 or later; the workflows use GitHub-hosted
+runners rather than a repository-owned self-hosted runner.
 
 ## Local checks
 
