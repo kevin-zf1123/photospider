@@ -368,93 +368,23 @@ durable product boundaries.
 A build smoke is a durable CTest whose primary boundary delegates to a CMake
 configure/build/install, an exported-package or external-consumer build, or a
 dedicated compile target. Every such test carries the exact stable CTest label
-`build-smoke`. A companion that only calls the driver's Python cleanup or
-layout helpers, or configures a compiler-free manifest-generation fixture,
-remains an ordinary safety regression in the full CTest shard when it does not
-delegate to a product build, install, external consumer, compile target, or
-generated executable.
+`build-smoke`. A companion that only validates a driver's cleanup, argument,
+or manifest logic without starting a compiler, product build, install,
+external consumer, compile target, or generated executable remains an ordinary
+`verification` test.
 
-The maintained labelled inventory is
-`DependencyDisabledInstallSmoke`,
-`ImageArtifactCodecDependencyDisabledBuild`,
-`IpcDisabledInstallSmoke`,
-`OpenExrDeepProviderInstallConsumerSmoke`,
-`OpenExrDeepProviderOptionOffSmoke`,
-`OpenCvOperationProviderDisabledBuild`,
-`PhotospiderdInstallLayoutSmoke`,
-`PublicHeaderSelfContainment`, and
-`StaticProductConsumerSmoke`. `PublicHeaderSelfContainment` belongs because its
-CTest command builds the dedicated self-containment target; ordinary
-GoogleTest binaries, daemon/CLI process tests, and
-`PhotospiderdCapabilityHelp` do not create a child build and remain in the main
-CTest shard. `OpenCvOperationProviderBuildSmokeSafety` also remains there: it
-is the ordinary safety regression for the OpenCV build-smoke driver. Its one
-`project(... NONE)` fixture exercises the production manifest generator with
-an imported executable, but starts no compiler, product build, CTest, install,
-compile target, or generated executable.
-`InstallConsumerArchitecturePropagationSafety` likewise remains in the main
-shard: it runs the three install-consumer drivers' real command-construction
-paths against disposable producer cache fixtures while replacing subprocess
-execution, so it verifies cache-to-child-argv propagation without launching a
-product configure, build, or install. Its data-driven command recorder also
-creates arbitrary 0/1/N dependency-disabled target declarations, target-file
-manifests, CMake-authoritative target filenames, and fake executables.
-In-process cases cover Linux/macOS extensionless names, Windows `.exe`, and
-POSIX-Python Cygwin/MSYS2 `.exe` spelling. They require ordered execution and
-pre-runtime failure for empty, duplicate, missing/unexpected, malformed,
-control-bearing, separator-bearing, reserved, foreign,
-filename/path-drifted, unsafe, noncanonical, unexpected-layout, unbuilt,
-non-file, or non-executable inventory records; build and consumer failures lock
-fail-fast ordering. A compiler-free `project(... NONE)` fixture exercises the
-generated target validator and both target filename/path expressions. A
-separate `cmake -P` fixture calls the production public-header writer directly;
-neither fixture starts a compiler, product build, install, or generated
-executable.
-The same process injects executable lookup, validation, and captured-command
-callbacks into the static-product driver's production archive-symbol helpers.
-It locks Darwin xcrun-first fallback, non-Darwin independence, all-candidate
-failure, and canonical path de-duplication without changing process PATH or
-replacing the real installed archive scan. When CMake registers the safety
-test, it also supplies the current build tree, CMake and CTest executables,
-configuration, and Python launcher. The test queries that tree through
-`ctest --show-only=json-v1` and the production inventory parser. It requires
-`DependencyDisabledInstallSmoke` and `IpcDisabledInstallSmoke` exactly once in
-every profile, requires `StaticProductConsumerSmoke` exactly once only when
-IPC is enabled and absent otherwise, then requires every expected entry to
-remain enabled and labelled and to start with the exact `python -B` driver
-path. Commented or inactive CMake source cannot satisfy this
-generated-inventory check because it produces no CTest entry. The inventory
-query executes none of the real smokes and does not change the nine-test
-build-smoke classification.
+CTest keeps every build smoke directly runnable. The daily GitHub Actions build
+job runs the complete label once after the reusable primary build and before
+packaging the CTest runtime. The workflow does not maintain test names, parse a
+matrix inventory, or create one job per smoke. Adding another durable build
+smoke requires only its CTest registration, the `build-smoke` label, and
+appropriate `RUN_SERIAL`, `RESOURCE_LOCK`, and `TIMEOUT` properties in CMake.
 
-CTest keeps every labelled test registered for direct local use. CI's
-`full-ctest` shard excludes the exact label. Configuration planning parses
-`ctest --show-only=json-v1` only as an allow-empty preflight because default
-`gtest_discover_tests` entries may still be unlabelled `_NOT_BUILT`
-placeholders. After the complete default build, build integrity repeats the
-query in strict mode and publishes one independent matrix job per labelled
-test. Adding another maintained build smoke therefore requires its CTest
-registration and the same label, but no workflow test-name edit. Preflight
-fails closed on malformed inventory, duplicates, invalid label shape, or
-disabled/commandless labelled entries, but not on an empty selection. The
-post-build authority rejects those states and an empty labelled set. Before
-execution, the runner re-queries the inventory and rejects a selected name that
-is absent, duplicate, disabled, commandless, or no longer labelled. After that
-exact label check, it selects only the validated numeric CTest index, so
-arbitrary test-name characters are not interpreted by a shell or regular
-expression.
-
-The published-image workflow fans out the strict build-integrity output after
-restoring the same reusable default producer. An empty include fallback keeps
-`fromJSON` well-formed when that producer job is intentionally skipped; a
-successful producer cannot publish an empty strict matrix. Each CTest
-registration retains its own timeout and `RUN_SERIAL` behavior; each matrix
-item also has an independent workflow timeout and result artifact. The
-local-image fallback reads the same post-build NUL-delimited names and executes
-them sequentially because it has only one Docker-capable runner. Nested drivers
-must continue to use disjoint work directories, validate any reusable producer
-identity they accept, and clean up without following or deleting unrelated
-symlink targets.
+Nested drivers must continue to use disjoint work directories, validate any
+reusable producer they accept, and clean up without following or deleting
+unrelated symlink targets. Their transient compiler objects and generated
+`CMakeFiles` trees belong to the build job/cache and are excluded from the
+lightweight runtime artifact.
 
 ## Validation Ownership
 
@@ -1209,11 +1139,13 @@ cmake --build build --target test_run_lifecycle_registry \
 ./build/tests/test_ipc_daemon
 ```
 
-The final delivery pass uses one clean native configure, one full build, one
-ordinary CTest/JUnit run excluding the exact `build-smoke` label, then strictly
-discovers and independently runs every post-build build-smoke entry. It does
-not register lifecycle provenance, stale-term searches, or source-quality
-audits as product tests.
+The final delivery pass uses at most one clean native configure, one full
+build, and one complete CTest/JUnit run. Focused validation may precede that
+frozen pass, but it must not multiply the final full gate. GitHub CI runs
+`build-smoke` in the producer job and the `unit`, `integration`, and
+`verification` labels from the same packaged runtime. It does not register
+lifecycle provenance, stale-term searches, or source-quality audits as product
+tests.
 
 ## Injected Image Artifact Codec Validation
 
@@ -3264,143 +3196,34 @@ fixtures.
 
 ## GitHub/CI Integration Status
 
-GitHub Actions and the Linux CI container are maintained validation paths.
-Pull requests targeting `main` use the base branch's protected workflow through
-`pull_request_target`, while pushes to `main` and `CI/**` also run CI. Ordinary
-feature branches cannot change `ci/**`, `.github/workflows/**`, or
-`Dockerfile.ci`; those inputs require a `CI/**` branch in the base repository.
-Only a same-repository `CI/**` pull request is deduplicated in favor of that
-branch's push run. A fork with the same branch prefix is rejected before
-checkout, and branch spelling alone never authorizes protected-path changes.
-Both production guards write `git diff --name-only -z` to a parent-visible
-artifact, read exact NUL records into Bash, match complete path values, and use
-`%q` for human-readable changed/protected logs. Producer or reader failure is
-fail-closed, and a newline inside a valid `ci/**` filename cannot bypass or
-forge the protected-path inventory.
+GitHub Actions keeps exactly two workflows. `ci.yml` runs for pushes to `main`
+and `CI/**`; `build-ci-image.yml` publishes the custom Linux image for a
+`Dockerfile.ci` change on `main` or manual dispatch. There is no
+`pull_request_target`, protected-path authorization, docs-only routing,
+sanitizer workflow, scheduler-log workflow, evidence/provenance layer, or
+result aggregator.
 
-Every triggered run keeps a stable `healthcheck` conclusion. The integration
-workflow classifies exact event revisions before configuration: changes limited
-to `docs/**`, root Markdown, and the documented root text contracts skip all
-build, CTest, and integration shards intentionally, while the stable
-`integration` gate verifies and reports that route. Any non-documentation path
-or uncertain Git state runs full integration. Type changes and uncommon Git
-statuses stay in the unfiltered path inventory. Every `CI/**` push also forces
-full current-head integration, including a later incremental push that changes
-only documentation. The workflows deliberately avoid `paths-ignore`, which
-could leave a configured required check pending. Stable gates take the same
-repository-identity decision: only a same-repository `CI/**` pull request can
-report intentional deduplication; fork or missing identity fails closed.
+Daily CI checks whitespace, configures CMake, and builds
+`public_header_self_containment` in its healthcheck. One build job restores the
+complete `build/ci` cache, configures it again, invokes Ninja once, and runs the
+`build-smoke` label. The cache retains objects and Ninja incremental state for
+the next compatible push.
 
-During the scheduler-to-policy/execution transition, configured CMake target
-help is the validation capability boundary. Trusted CI accepts only the
-complete legacy marker set (`test_scheduler`,
-`test_scheduler_plugin_loader`, and `destroy_count_scheduler_plugin`) or the
-complete new marker set (`test_policy_execution`, `test_policy_registry`, and
-`test_policy_plugin`), never a partial or mixed set. Build integrity requires
-the stable `photospider_kernel` aggregate rather than architecture-specific
-implementation targets and still builds the complete tree. Full CTest remains
-the authority for ordinary registered tests, while plugin, CLI,
-`execution-repeat`, and sanitizer shards select contract-specific assertions.
-The generated CLI configuration is mutually exclusive: CI does not pass
-removed scheduler keys to a policy/execution revision or introduce a product
-compatibility translation.
+The producer then creates one `ctest-runtime.tar.gz`. It excludes object files,
+`CMakeFiles`, Ninja dependency/log databases, and prior `Testing` output while
+retaining libraries, plugins, executables, CTest metadata, and package
+configuration. Three parallel jobs restore that same archive and run the
+`unit`, `integration`, or `verification` label. CMake owns every primary label
+and all `RUN_SERIAL`, `RESOURCE_LOCK`, and `TIMEOUT` constraints; the workflow
+does not maintain long test-name regular expressions.
 
-`healthcheck-published-image` is a container job, and published-image
-healthcheck execution and build/test integration jobs run in
-`ghcr.io/<owner>/<repo>/photospider-ci:latest`; lightweight routing and result
-gates remain on `ubuntu-latest`. Immediately after checkout, the published
-container's unique `Trust checked-out workspace` step binds `shell: bash`,
-adds only the exact `$GITHUB_WORKSPACE` to the job-persistent global
-`safe.directory`, and verifies `HEAD^{commit}` read-only. It neither configures
-`safe.directory=*` nor executes a checked-out repository script. This trust
-boundary precedes both conditional history fetches and `healthcheck.sh`,
-including `main` push and `workflow_dispatch` routes where neither fetch runs,
-instead of relying on checkout's temporary HOME-scoped configuration. The
-`Fetch pull request base history` and `Fetch CI branch main history` steps each
-also bind `shell: bash`, making their `set -Eeuo pipefail` prologues valid
-without relying on the container default shell. If a change modifies an image
-input, the workflow builds `photospider-ci:local` and runs the same repository
-scripts in that image so validation does not race image publication. For pull
-requests, the published-image and local-image healthcheck jobs each fetch the
-target branch from the base-repository URL, verify `CI_BASE_SHA` as the event's
-exact base commit inside their own job, and supply that exact SHA as `CI_BASE_REF`
-independently of the fork checkout's `origin`. For every `CI/**` push, each job
-instead fetches and verifies `origin/main`, then supplies it as `CI_BASE_REF`
-so the static scope remains cumulative from the `main` merge base across
-successive pushes. A later documentation-only push therefore cannot hide an
-earlier unformatted C++ commit. An ordinary `main` push retains
-`github.event.before` as its incremental `CI_BASE_REF`. Published-image
-verification precedes `healthcheck.sh`; local-image verification precedes the
-head Dockerfile build and mounted-workspace execution. Required fetch or parse
-failure therefore stops before the script's fallback base selection.
-`Dockerfile.ci` installs the C++ toolchain, CMake, OpenCV, yaml-cpp, GTest,
-nlohmann-json, clang-format, Python, and cpplint required by those scripts.
-The image detector uses no Git status filter. The healthcheck static-scope
-inventory instead uses `--diff-filter=d` to omit deleted formatter/linter
-inputs while retaining type changes and uncommon non-deletion statuses. Both
-use NUL-delimited Git output and a parent-visible temporary file. A failing
-`git diff` therefore terminates image detection or healthcheck static-scope
-detection without emitting a false negative route.
-
-The maintained entry points are:
-
-- `ci/scripts/healthcheck.sh` for fail-closed changed-path inventory, diff,
-  format, cpplint, the build-smoke inventory regression, runtime-capability
-  regression, and both durable routing shell regressions.
-- `ci/scripts/change_classification.sh` and
-  `ci/scripts/change_classification_test.sh` for fail-closed documentation-only
-  routing and its durable event/path regression matrix.
-- `ci/scripts/ci_routing_test.sh` for exact canonical locking of both
-  `protected-ci-paths.if` expressions; execution of the real stable-gate,
-  fork-rejection, and protected-path blocks; job/step-scoped locking of both
-  published-image history-fetch steps' own `shell: bash` metadata;
-  job/step-scoped locking of the unique published-image workspace-trust step,
-  its exact non-wildcard global `safe.directory`, read-only HEAD verification,
-  and checkout-before-trust-before-fetch/healthcheck order;
-  published/local job-scoped pull-request exact-base and `CI/**`
-  cumulative-main ordering; exact three-way `CI_BASE_REF` source routing;
-  allow-empty configuration preflight, strict post-build matrix job output,
-  empty-output-safe `fromJSON`, full-CTest/fallback routing,
-  architecture-neutral `execution-repeat` routing; newline-path artifacts; and
-  detector/reader/producer failure propagation. It
-  executes the production trust block with an isolated HOME/repository and
-  requires exactly that repository in the resulting global trust list. It also
-  executes both production main-fetch blocks, while an isolated Git history
-  proves cumulative main scope retains earlier C++ and event-before scope sees
-  only the later docs increment. The local source/shell lock does not emulate
-  GitHub's expression evaluator, cross-UID dubious ownership, or the hosted
-  container runner.
-- `ci/scripts/build_smoke_inventory.py` and its focused regression for strict
-  CTest JSON parsing, deterministic strict or explicit allow-empty matrix
-  generation, duplicate label values, safe artifact keys, NUL-delimited names,
-  exact index-based execution, absent/disabled/commandless selections stopping
-  before a second subprocess, and a real configure-placeholder-to-post-build
-  discovery fixture.
-- `ci/scripts/runtime_capability_test.sh` for exact Make/Ninja target parsing,
-  complete legacy and policy/execution profiles, partial/mixed/absent
-  fail-closed behavior, required-target validation, mutually exclusive CLI
-  configuration, and the exact optional `test_plugin_trust_bundle` gate. Its
-  trust cases preserve pre-trust/legacy no-op behavior, reject missing or
-  malformed inventory and incomplete/nonregular material, and prove that a
-  complete capable build replaces inherited trust values with canonical paths.
-- `ci/scripts/integration_plan.sh` for allow-empty exact-label configuration
-  preflight without authoritative matrix output.
-- `ci/scripts/build_integrity.sh` for the default producer profile, including
-  runtime-contract detection, architecture-neutral required-target/full builds,
-  strict post-build labelled CTest validation, and the authoritative matrix job
-  output.
-- `ci/scripts/ctest_full.sh` for the main CTest suite with the exact
-  `build-smoke` label excluded.
-- `ci/scripts/integration_suite.sh` for sequential integration behavior checks,
-  running every post-build-discovered build smoke alongside full CTest, CLI,
-  propagation, plugin, and capability-selected execution coverage.
-
-CI source inventories and exclusion lists must describe maintained tests and
-current source paths. Migration-only harness names must not be retained as
-permanent exclusions or treated as product behavior. GitHub job status and
-downloadable artifacts report remote integration behavior. The complete
-workflow and artifact download boundary are documented in
-`docs/CI/github-actions.md`.
+`ci/scripts/build_smoke_inventory.py` remains because the long-lived
+`InstallConsumerArchitecturePropagationSafety` product test imports it to
+validate configured build-smoke entries. Manual product-boundary drivers and
+`sanitizer_test.sh` also remain available locally. The former orchestration,
+routing, runtime-capability, duplicate suite, and self-proof scripts are not
+CI entry points. The exact workflow, cache, artifact, and label contract is
+documented in `docs/CI/github-actions.md`.
 
 Architecture evolution goals are intentionally not maintained in this testing
 document. They are recorded in `docs/roadmap/Kernel-Evolution.md`, while each

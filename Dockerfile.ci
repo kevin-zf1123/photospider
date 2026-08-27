@@ -26,6 +26,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     libssl-dev \
     libutf8proc-dev \
     libyaml-cpp-dev \
+    ninja-build \
     nlohmann-json3-dev \
     pkg-config \
     python3 \

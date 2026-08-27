@@ -1966,6 +1966,9 @@ endif()
 # ==============================================================================
 # 8. Tests
 # ==============================================================================
+set(PHOTOSPIDER_UNIT_TEST_LABEL "unit")
+set(PHOTOSPIDER_INTEGRATION_TEST_LABEL "integration")
+set(PHOTOSPIDER_VERIFICATION_TEST_LABEL "verification")
 set(PHOTOSPIDER_BUILD_SMOKE_LABEL "build-smoke")
 if(BUILD_TESTING)
     enable_testing()
@@ -1974,6 +1977,83 @@ if(BUILD_TESTING)
     find_package(GTest REQUIRED)
     set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
     file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
+
+    # @brief Resolve one GoogleTest target's maintained source role.
+    #
+    # Unit and integration ownership follows the repository directory model;
+    # tests/verification remains available for deterministic verification
+    # harnesses that are safe for default CI. The first maintained test source
+    # declares the primary role; support sources added later do not override
+    # it.
+    #
+    # @param TARGET_NAME Existing executable target that will be discovered.
+    # @param OUTPUT_VARIABLE Caller variable that receives the primary label.
+    # @return None; writes unit, integration, or verification to the parent.
+    # @throws FATAL_ERROR If the target is missing or has no maintained test
+    #   source under unit, integration, or verification.
+    # @note Build-smoke tests are registered directly and do not pass through
+    #   this function.
+    function(photospider_test_primary_label TARGET_NAME OUTPUT_VARIABLE)
+        if(NOT TARGET ${TARGET_NAME})
+            message(FATAL_ERROR
+                "Cannot classify missing test target ${TARGET_NAME}")
+        endif()
+        get_target_property(PHOTOSPIDER_TEST_SOURCES ${TARGET_NAME} SOURCES)
+        set(PHOTOSPIDER_RESOLVED_PRIMARY_TEST_LABEL "")
+        foreach(PHOTOSPIDER_TEST_SOURCE IN LISTS PHOTOSPIDER_TEST_SOURCES)
+            if("${PHOTOSPIDER_TEST_SOURCE}" MATCHES
+                    "(^|/)tests/unit/")
+                set(PHOTOSPIDER_RESOLVED_PRIMARY_TEST_LABEL
+                    "${PHOTOSPIDER_UNIT_TEST_LABEL}")
+            elseif("${PHOTOSPIDER_TEST_SOURCE}" MATCHES
+                    "(^|/)tests/integration/")
+                set(PHOTOSPIDER_RESOLVED_PRIMARY_TEST_LABEL
+                    "${PHOTOSPIDER_INTEGRATION_TEST_LABEL}")
+            elseif("${PHOTOSPIDER_TEST_SOURCE}" MATCHES
+                    "(^|/)tests/verification/")
+                set(PHOTOSPIDER_RESOLVED_PRIMARY_TEST_LABEL
+                    "${PHOTOSPIDER_VERIFICATION_TEST_LABEL}")
+            endif()
+            if(PHOTOSPIDER_RESOLVED_PRIMARY_TEST_LABEL)
+                break()
+            endif()
+        endforeach()
+        if(NOT PHOTOSPIDER_RESOLVED_PRIMARY_TEST_LABEL)
+            message(FATAL_ERROR
+                "CTest target ${TARGET_NAME} has no maintained source role")
+        endif()
+        set(${OUTPUT_VARIABLE} "${PHOTOSPIDER_RESOLVED_PRIMARY_TEST_LABEL}"
+            PARENT_SCOPE)
+    endfunction()
+
+    # @brief Discover GoogleTest cases and append one primary CI label.
+    #
+    # The wrapper preserves every native gtest_discover_tests argument and its
+    # existing properties. CTest merges repeated LABELS assignments, so the
+    # unit/integration/verification label can be added without replacing an
+    # orthogonal label already supplied by the caller.
+    #
+    # @param TARGET_NAME Existing GoogleTest executable target.
+    # @param ARGN Unmodified arguments accepted by gtest_discover_tests.
+    # @return None; emits normal discovery rules with the primary label.
+    # @throws FATAL_ERROR If TARGET_NAME lacks a valid primary classification.
+    # @note Appending in CTest preserves orthogonal labels such as execution,
+    #   security, and kernel-concurrency.
+    function(photospider_discover_tests TARGET_NAME)
+        photospider_test_primary_label(${TARGET_NAME}
+            PHOTOSPIDER_PRIMARY_TEST_LABEL)
+        set(PHOTOSPIDER_ALLOWED_PRIMARY_TEST_LABELS
+            "${PHOTOSPIDER_UNIT_TEST_LABEL}"
+            "${PHOTOSPIDER_INTEGRATION_TEST_LABEL}"
+            "${PHOTOSPIDER_VERIFICATION_TEST_LABEL}")
+        if(NOT PHOTOSPIDER_PRIMARY_TEST_LABEL IN_LIST
+                PHOTOSPIDER_ALLOWED_PRIMARY_TEST_LABELS)
+            message(FATAL_ERROR
+                "GoogleTest target ${TARGET_NAME} lacks a primary CTest label")
+        endif()
+        gtest_discover_tests(${TARGET_NAME} ${ARGN}
+            PROPERTIES LABELS "${PHOTOSPIDER_PRIMARY_TEST_LABEL}")
+    endfunction()
     set(PHOTOSPIDER_TEST_PLUGIN_TRUST_DIR
         "${CMAKE_BINARY_DIR}/generated/plugin_trust")
     set(PHOTOSPIDER_TEST_PLUGIN_TRUST_MANIFEST
@@ -2023,7 +2103,7 @@ if(BUILD_TESTING)
         photospider
         GTest::gtest
         GTest::gtest_main)
-    gtest_discover_tests(test_cpu_dense_tensor_image_operation
+    photospider_discover_tests(test_cpu_dense_tensor_image_operation
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
 
@@ -2041,7 +2121,7 @@ if(BUILD_TESTING)
         photospider
         GTest::gtest
         GTest::gtest_main)
-    gtest_discover_tests(test_packed_fp4_dense_tensor
+    photospider_discover_tests(test_packed_fp4_dense_tensor
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
             LABELS value-runtime
@@ -2063,7 +2143,7 @@ if(BUILD_TESTING)
         GTest::gtest_main)
     target_compile_definitions(test_variable_sample_field_extensions PRIVATE
         PHOTOSPIDER_INTERNAL_VALUE_ALLOCATION_TESTING)
-    gtest_discover_tests(test_variable_sample_field_extensions
+    photospider_discover_tests(test_variable_sample_field_extensions
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
             LABELS value-runtime
@@ -2093,7 +2173,7 @@ if(BUILD_TESTING)
             target_link_libraries(test_openexr_dense_image_codec PRIVATE
                 photospider_core_internal)
         endif()
-        gtest_discover_tests(test_openexr_dense_image_codec
+        photospider_discover_tests(test_openexr_dense_image_codec
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
                 LABELS openexr-provider
@@ -2120,7 +2200,7 @@ if(BUILD_TESTING)
             ${CMAKE_DL_LIBS})
         add_dependencies(test_openexr_deep_scanline_provider
             photospider_openexr_deep_provider)
-        gtest_discover_tests(test_openexr_deep_scanline_provider
+        photospider_discover_tests(test_openexr_deep_scanline_provider
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
                 LABELS openexr-provider
@@ -2143,7 +2223,7 @@ if(BUILD_TESTING)
         photospider_operation_runtime
         value_identity_dso_a
         value_identity_dso_b)
-    gtest_discover_tests(test_value_identity_across_dsos
+    photospider_discover_tests(test_value_identity_across_dsos
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
             LABELS value-runtime
@@ -2258,7 +2338,7 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     add_ps_test(test_compute_io_executor
         tests/unit/test_compute_io_executor.cpp
         photospider_execution_internal)
-    gtest_discover_tests(test_compute_io_executor
+    photospider_discover_tests(test_compute_io_executor
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
             LABELS execution
@@ -2268,7 +2348,7 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
         add_ps_test(test_isolated_cpu_invocation_protocol
             tests/unit/test_isolated_cpu_invocation_protocol.cpp
             photospider_execution_internal)
-        gtest_discover_tests(test_isolated_cpu_invocation_protocol
+        photospider_discover_tests(test_isolated_cpu_invocation_protocol
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
                 LABELS execution
@@ -2277,7 +2357,7 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
 
     add_ps_test(test_disk_cache_diagnostic_concurrency
         tests/integration/test_disk_cache_diagnostic_concurrency.cpp)
-    gtest_discover_tests(test_disk_cache_diagnostic_concurrency
+    photospider_discover_tests(test_disk_cache_diagnostic_concurrency
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
             LABELS kernel-concurrency
@@ -2285,7 +2365,7 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
 
     add_ps_test(test_kernel_lifecycle_concurrency
         tests/integration/test_kernel_lifecycle_concurrency.cpp)
-    gtest_discover_tests(test_kernel_lifecycle_concurrency
+    photospider_discover_tests(test_kernel_lifecycle_concurrency
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
             LABELS kernel-concurrency
@@ -2312,7 +2392,7 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     photospider_enable_plugin_trust_test_environment(
         test_optional_opencv_operation_provider)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        gtest_discover_tests(test_optional_opencv_operation_provider
+        photospider_discover_tests(test_optional_opencv_operation_provider
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
     endif()
@@ -2340,7 +2420,7 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
         message(FATAL_ERROR
             "test_operation_plugin_abi requires its trust launcher before GoogleTest discovery")
     endif()
-    gtest_discover_tests(test_operation_plugin_abi
+    photospider_discover_tests(test_operation_plugin_abi
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES RUN_SERIAL TRUE TIMEOUT 20)
 
@@ -2348,13 +2428,13 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
         add_ps_test(test_single_tenant_job_service
             tests/unit/test_single_tenant_job_service.cpp
             photospider_single_tenant_job_internal)
-        gtest_discover_tests(test_single_tenant_job_service
+        photospider_discover_tests(test_single_tenant_job_service
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
         add_ps_test(test_worker_protocol
             tests/unit/test_worker_protocol.cpp
             photospider_single_tenant_job_internal)
-        gtest_discover_tests(test_worker_protocol
+        photospider_discover_tests(test_worker_protocol
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 20)
     endif()
@@ -2439,10 +2519,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 test_isolated_cpu_invocation_darwin_fail_closed
                 PROPERTIES
                     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-                    LABELS execution
+                    LABELS
+                        "${PHOTOSPIDER_INTEGRATION_TEST_LABEL};execution"
                     TIMEOUT 30)
         else()
-            gtest_discover_tests(test_isolated_cpu_invocation
+            photospider_discover_tests(test_isolated_cpu_invocation
                 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
                 PROPERTIES
                     LABELS execution
@@ -2472,10 +2553,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 test_plugin_runtime_supervisor_darwin_fail_closed
                 PROPERTIES
                     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-                    LABELS execution
+                    LABELS
+                        "${PHOTOSPIDER_INTEGRATION_TEST_LABEL};execution"
                     TIMEOUT 30)
         else()
-            gtest_discover_tests(test_plugin_runtime_supervisor
+            photospider_discover_tests(test_plugin_runtime_supervisor
                 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
                 PROPERTIES
                     LABELS execution
@@ -2502,7 +2584,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         target_compile_definitions(test_worker_supervisor PRIVATE
             PS_TEST_WORKER_FIXTURE_PATH="$<TARGET_FILE:test_worker_process_fixture>")
         add_dependencies(test_worker_supervisor test_worker_process_fixture)
-        gtest_discover_tests(test_worker_supervisor
+        photospider_discover_tests(test_worker_supervisor
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
     endif()
@@ -3105,6 +3187,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             "${PROJECT_SOURCE_DIR}/tests/integration")
     set_tests_properties(
         InstallConsumerArchitecturePropagationSafety PROPERTIES
+        LABELS "${PHOTOSPIDER_VERIFICATION_TEST_LABEL}"
+        RESOURCE_LOCK verification-harness
         TIMEOUT 30)
     if(PHOTOSPIDER_BUILD_IPC)
         add_test(NAME PhotospiderdCapabilityHelp
@@ -3112,6 +3196,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 "-DPHOTOSPIDERD=$<TARGET_FILE:photospiderd>"
                 -P "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_capability_help.cmake")
         set_tests_properties(PhotospiderdCapabilityHelp PROPERTIES
+            LABELS "${PHOTOSPIDER_INTEGRATION_TEST_LABEL}"
             TIMEOUT 10)
         add_test(NAME StaticProductConsumerSmoke
             COMMAND ${Python3_EXECUTABLE} -B
@@ -3179,6 +3264,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             OpenCvOperationProviderBuildSmokeSafety PROPERTIES
             ENVIRONMENT
                 "PHOTOSPIDER_CMAKE_EXECUTABLE=${CMAKE_COMMAND}"
+            LABELS "${PHOTOSPIDER_VERIFICATION_TEST_LABEL}"
+            RESOURCE_LOCK verification-harness
             TIMEOUT 30)
         add_test(NAME OpenCvOperationProviderDisabledBuild
             COMMAND ${Python3_EXECUTABLE}
@@ -3202,7 +3289,10 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             --binary "$<TARGET_FILE:graph_cli>"
             --out "${CMAKE_BINARY_DIR}/tests/graph_cli_option_bad_alloc"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    set_tests_properties(GraphCliOptionBadAlloc PROPERTIES RUN_SERIAL TRUE)
+    set_tests_properties(GraphCliOptionBadAlloc PROPERTIES
+        LABELS "${PHOTOSPIDER_INTEGRATION_TEST_LABEL}"
+        RUN_SERIAL TRUE
+        TIMEOUT 60)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_test(NAME GraphCliPluginComputeSmoke
             COMMAND ${Python3_EXECUTABLE}
@@ -3215,6 +3305,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
         set_tests_properties(GraphCliPluginComputeSmoke PROPERTIES
             ENVIRONMENT "${PHOTOSPIDER_TEST_PLUGIN_TRUST_ENVIRONMENT}"
+            LABELS "${PHOTOSPIDER_INTEGRATION_TEST_LABEL}"
             RUN_SERIAL TRUE
             TIMEOUT 60)
     endif()
@@ -3229,213 +3320,219 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
 
     if(PHOTOSPIDER_BUILD_IPC)
         photospider_enable_plugin_trust_test_environment(test_ipc_protocol)
-        gtest_discover_tests(test_ipc_protocol
+        photospider_discover_tests(test_ipc_protocol
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
-        gtest_discover_tests(test_ipc_host
+        photospider_discover_tests(test_ipc_host
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 60)
-        gtest_discover_tests(test_compute_request_registry
+        photospider_discover_tests(test_compute_request_registry
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
-        gtest_discover_tests(test_collection_snapshot_registry
+        photospider_discover_tests(test_collection_snapshot_registry
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
-        gtest_discover_tests(test_output_store
+        photospider_discover_tests(test_output_store
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
         photospider_enable_plugin_trust_test_environment(test_ipc_daemon)
-        gtest_discover_tests(test_ipc_daemon
+        photospider_discover_tests(test_ipc_daemon
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 60)
     endif()
-    gtest_discover_tests(test_op_registry_m31 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    photospider_discover_tests(test_op_registry_m31
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     photospider_enable_plugin_trust_test_environment(test_plugin_manager)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        gtest_discover_tests(test_plugin_manager
+        photospider_discover_tests(test_plugin_manager
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     endif()
     # test_propagation is intentionally a scriptable REPL/tool target rather
     # than a GTest binary. Keep it buildable for CI scripts, but do not run
     # gtest discovery on it.
-    gtest_discover_tests(test_propagation_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_region_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_graph_topology_boundaries WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_graph_document_adapter
+    photospider_discover_tests(test_propagation_contracts
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    photospider_discover_tests(test_region_contracts
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    photospider_discover_tests(test_graph_topology_boundaries
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    photospider_discover_tests(test_graph_document_adapter
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_kernel_contracts
+    photospider_discover_tests(test_kernel_contracts
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_dense_image_value_contracts
+    photospider_discover_tests(test_dense_image_value_contracts
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_sample_conversion
+    photospider_discover_tests(test_sample_conversion
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_value_artifact
+    photospider_discover_tests(test_value_artifact
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_host_output_authorization
+    photospider_discover_tests(test_host_output_authorization
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_image_statistics_store
+    photospider_discover_tests(test_image_statistics_store
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_host_compute_request_contracts
+    photospider_discover_tests(test_host_compute_request_contracts
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_dense_image_processing
+    photospider_discover_tests(test_dense_image_processing
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_event_stream_boundaries
+    photospider_discover_tests(test_event_stream_boundaries
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_cli_compute_event_paging
+    photospider_discover_tests(test_cli_compute_event_paging
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_cli_policy_execution_config
+    photospider_discover_tests(test_cli_policy_execution_config
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     photospider_enable_plugin_trust_test_environment(test_host_adapter)
-    gtest_discover_tests(test_host_adapter
+    photospider_discover_tests(test_host_adapter
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_graph_document_errors
+    photospider_discover_tests(test_graph_document_errors
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_graph_document_injection
+    photospider_discover_tests(test_graph_document_injection
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_resource_admission
+    photospider_discover_tests(test_resource_admission
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
-        gtest_discover_tests(test_opencv_operation_provider_exceptions
+        photospider_discover_tests(test_opencv_operation_provider_exceptions
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
-        gtest_discover_tests(test_opencv_operation_concurrency
+        photospider_discover_tests(test_opencv_operation_concurrency
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 60)
     endif()
-    gtest_discover_tests(test_resource_ledger
+    photospider_discover_tests(test_resource_ledger
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_plugin_resource_token
+    photospider_discover_tests(test_plugin_resource_token
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
             LABELS security
             TIMEOUT 30)
     photospider_enable_plugin_trust_test_environment(test_plugin_trust)
-    gtest_discover_tests(test_plugin_trust
+    photospider_discover_tests(test_plugin_trust
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
             LABELS security
             TIMEOUT 30)
-    gtest_discover_tests(test_i1_evidence
+    photospider_discover_tests(test_i1_evidence
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_i1_profile
+    photospider_discover_tests(test_i1_profile
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_i2_evidence
+    photospider_discover_tests(test_i2_evidence
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_i2_profile
+    photospider_discover_tests(test_i2_profile
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_b1_profile
+    photospider_discover_tests(test_b1_profile
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_b1_environment
+    photospider_discover_tests(test_b1_environment
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_b1_evidence
+    photospider_discover_tests(test_b1_evidence
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_b1_output_store
+    photospider_discover_tests(test_b1_output_store
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_m1_profile
+    photospider_discover_tests(test_m1_profile
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_evidence_envelope
+    photospider_discover_tests(test_evidence_envelope
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_progressive_compute
+    photospider_discover_tests(test_progressive_compute
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_dense_tensor_content_digest
+    photospider_discover_tests(test_dense_tensor_content_digest
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_dense_image_metadata_contracts
+    photospider_discover_tests(test_dense_image_metadata_contracts
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
-        gtest_discover_tests(test_i1_product_path
+        photospider_discover_tests(test_i1_product_path
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
                 LABELS kernel-concurrency
                 TIMEOUT 30)
-        gtest_discover_tests(test_i2_product_path
+        photospider_discover_tests(test_i2_product_path
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
                 LABELS kernel-concurrency
                 TIMEOUT 30)
-        gtest_discover_tests(test_b1_product_path
+        photospider_discover_tests(test_b1_product_path
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
                 LABELS kernel-concurrency
                 TIMEOUT 30)
         if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
-            gtest_discover_tests(test_single_tenant_job_product_path
+            photospider_discover_tests(test_single_tenant_job_product_path
                 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
                 PROPERTIES TIMEOUT 30)
         endif()
-        gtest_discover_tests(test_m1_product_path
+        photospider_discover_tests(test_m1_product_path
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
                 LABELS kernel-concurrency
                 TIMEOUT 30)
     endif()
-    gtest_discover_tests(test_device_executor_registry
+    photospider_discover_tests(test_device_executor_registry
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
             LABELS execution
             TIMEOUT 30)
-    gtest_discover_tests(test_device_residency
+    photospider_discover_tests(test_device_residency
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
             LABELS execution
             TIMEOUT 30)
     photospider_enable_plugin_trust_test_environment(test_policy_registry)
-    gtest_discover_tests(test_policy_registry
+    photospider_discover_tests(test_policy_registry
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     photospider_enable_plugin_trust_test_environment(test_policy_execution)
-    gtest_discover_tests(test_policy_execution
+    photospider_discover_tests(test_policy_execution
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_compute_run
+    photospider_discover_tests(test_compute_run
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_run_lifecycle_registry
+    photospider_discover_tests(test_run_lifecycle_registry
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_execution_lifecycle_telemetry
+    photospider_discover_tests(test_execution_lifecycle_telemetry
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_compute_supersession
+    photospider_discover_tests(test_compute_supersession
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 60)
-    gtest_discover_tests(test_bad_alloc_boundaries
+    photospider_discover_tests(test_bad_alloc_boundaries
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
-        gtest_discover_tests(test_metal_device_executor
+        photospider_discover_tests(test_metal_device_executor
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
                 LABELS metal
                 TIMEOUT 60)
     endif()
-    gtest_discover_tests(test_cli_dirty_snapshot_formatter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_compute_service_split
+    photospider_discover_tests(test_cli_dirty_snapshot_formatter
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    photospider_discover_tests(test_compute_service_split
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 60)
-    gtest_discover_tests(test_stride_aware_compute_paths
+    photospider_discover_tests(test_stride_aware_compute_paths
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 60)
-    gtest_discover_tests(test_node_editor_layout WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    photospider_discover_tests(test_node_editor_layout
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 endif()
 
 # Every configured trust consumer receives a real signed bundle produced from

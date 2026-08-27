@@ -396,10 +396,11 @@ def validate_provider_disabled_inventory(
     @param native_plugin_execution_supported Whether the configured target
       platform registers native operation-DSO execution tests.
     @return None when only the intended focused tests, install smoke, and
-      CMake-derived registered-only sentinels exist.
+      CMake-derived registered-only sentinels exist with their exact primary,
+      orthogonal, and timeout properties.
     @throws RuntimeError If a focused test is missing, a sentinel is malformed
       or has properties, a broad-suite test remains registered, or a required
-      concurrency property drifts.
+      primary/orthogonal label or timeout property drifts.
     @note `test_kernel_contracts` remains a buildable focused target for the
       separate injected-codec smoke but is deliberately not broadly discovered
       in this provider-disabled CTest inventory.
@@ -409,6 +410,9 @@ def validate_provider_disabled_inventory(
     @note Darwin builds the optional provider executable for compile coverage
       but does not register its native operation-DSO execution case because
       every native plugin role fails closed on that platform.
+    @note Disk-cache, lifecycle, and Value-runtime cases each retain exactly
+      one ``integration`` primary label plus their existing orthogonal label;
+      missing, duplicate, replacement, or additional labels fail closed.
     """
 
     disk_cache_tests = {
@@ -705,15 +709,24 @@ def validate_provider_disabled_inventory(
 
     expected_properties = {
         **{
-            name: {"LABELS": ["kernel-concurrency"], "TIMEOUT": 20}
+            name: {
+                "LABELS": ["integration", "kernel-concurrency"],
+                "TIMEOUT": 20,
+            }
             for name in disk_cache_tests
         },
         **{
-            name: {"LABELS": ["kernel-concurrency"], "TIMEOUT": 60}
+            name: {
+                "LABELS": ["integration", "kernel-concurrency"],
+                "TIMEOUT": 60,
+            }
             for name in lifecycle_tests
         },
         **{
-            name: {"LABELS": ["value-runtime"], "TIMEOUT": 30}
+            name: {
+                "LABELS": ["integration", "value-runtime"],
+                "TIMEOUT": 30,
+            }
             for name in value_runtime_tests
         },
     }

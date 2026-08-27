@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'CI/**'
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  CI_BUILD_TYPE: RelWithDebInfo
+  CI_CACHE_EPOCH: v1
+  CI_PARALLEL_LEVEL: 2
+
+jobs:
+  healthcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          submodules: recursive
+
+      - name: Configure Git access to checkout
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" rev-parse --verify 'HEAD^{commit}'
+
+      - name: Check whitespace errors
+        run: git diff --check HEAD^ HEAD
+
+      - name: Configure healthcheck tree
+        run: >-
+          cmake -S . -B build/healthcheck -G Ninja
+          -DCMAKE_BUILD_TYPE=${CI_BUILD_TYPE}
+          -DBUILD_TESTING=ON
+          -DUSE_ASAN=OFF
+          -DUSE_TSAN=OFF
+          -DPHOTOSPIDER_BUILD_FUZZERS=OFF
+
+      - name: Build public header self-containment
+        run: >-
+          cmake --build build/healthcheck
+          --target public_header_self_containment
+          --parallel ${CI_PARALLEL_LEVEL}
+
+  build:
+    needs: healthcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore incremental build tree
+        uses: actions/cache@v4
+        with:
+          path: build/ci
+          key: >-
+            photospider-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}
+          restore-keys: |
+            photospider-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-
+
+      - name: Configure cached build tree
+        run: >-
+          cmake -S . -B build/ci -G Ninja
+          -DCMAKE_BUILD_TYPE=${CI_BUILD_TYPE}
+          -DBUILD_TESTING=ON
+          -DUSE_ASAN=OFF
+          -DUSE_TSAN=OFF
+          -DPHOTOSPIDER_BUILD_FUZZERS=OFF
+
+      - name: Build once
+        run: cmake --build build/ci --parallel ${CI_PARALLEL_LEVEL}
+
+      - name: Run build-smoke tests
+        run: |
+          mkdir -p CI-results
+          ctest --test-dir build/ci \
+            --output-on-failure \
+            --parallel "${CI_PARALLEL_LEVEL}" \
+            --label-regex '^build-smoke$' \
+            --output-junit CI-results/build-smoke.junit.xml
+
+      - name: Package CTest runtime
+        run: >-
+          bash ci/scripts/package_ctest_runtime.sh
+          build/ci
+          CI-results/ctest-runtime.tar.gz
+
+      - name: Upload CTest runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-runtime
+          path: CI-results/ctest-runtime.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  test:
+    name: CTest (${{ matrix.label }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        label:
+          - unit
+          - integration
+          - verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download CTest runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: ctest-runtime
+          path: CI-results/runtime
+
+      - name: Restore CTest runtime
+        run: |
+          mkdir -p build
+          tar -C build -xzf CI-results/runtime/ctest-runtime.tar.gz
+          test -f build/ci/CTestTestfile.cmake
+
+      - name: Run labelled CTest
+        run: |
+          mkdir -p CI-results/ctest
+          ctest --test-dir build/ci \
+            --output-on-failure \
+            --parallel "${CI_PARALLEL_LEVEL}" \
+            --label-regex '^${{ matrix.label }}$' \
+            --output-junit "CI-results/ctest/${{ matrix.label }}.junit.xml"
