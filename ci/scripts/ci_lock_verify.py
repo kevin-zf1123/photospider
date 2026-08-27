@@ -1066,6 +1066,30 @@ def _verify_reusable_workflow_permissions(root: Path) -> None:
             raise ContractError(
                 f"{caller_path}: caller {job_name} can select its control commit"
             )
+        identity_owner = (
+            "candidate-image-build"
+            if job_name == "candidate-image-integration"
+            else "ci-image-identity"
+        )
+        expected_attestation_inputs = {
+            "image_attestation_source_commit": (
+                "${{ needs."
+                f"{identity_owner}"
+                ".outputs.attestation_source_commit }}"
+            ),
+            "image_attestation_signer_commit": (
+                "${{ needs."
+                f"{identity_owner}"
+                ".outputs.attestation_signer_commit }}"
+            ),
+        }
+        if any(
+            publish_inputs.get(key) != value
+            for key, value in expected_attestation_inputs.items()
+        ):
+            raise ContractError(
+                f"{caller_path}: caller {job_name} attestation identities differ"
+            )
 
     expected_job_permissions: dict[str, dict[str, str]] = {
         "identity-preflight": {
@@ -1407,6 +1431,12 @@ def _verify_ci_image_producer(
         'commit." >&2\n'
         "  exit 1\n"
         "fi\n"
+        'if [[ ! "$CI_WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ||\n'
+        '  "$CI_WORKFLOW_COMMIT" != "$CI_EVENT_WORKFLOW_COMMIT" ]]; then\n'
+        '  echo "Protected workflow commit differs from the caller signer '
+        'commit." >&2\n'
+        "  exit 1\n"
+        "fi\n"
         'temporary_tag="candidate-$CI_CANDIDATE_COMMIT-$CI_RUN_ID-'
         '$CI_RUN_ATTEMPT"\n'
         "printf 'temporary_tag=%s\\n' \"$temporary_tag\" >> \"$GITHUB_OUTPUT\"\n"
@@ -1416,8 +1446,9 @@ def _verify_ci_image_producer(
     source_run = (
         "set -Eeuo pipefail\n"
         "source_commit=$(python3 ci/scripts/ci_image_manifest.py \\\n"
-        "  publish-source-commit \\\n"
-        '  --workflow-commit "${{ inputs.candidate_commit }}")\n'
+        "  resolve-source-commit \\\n"
+        '  --candidate-commit "${{ inputs.candidate_commit }}" \\\n'
+        '  --workflow-commit "${{ inputs.workflow_commit }}")\n'
         "printf 'commit=%s\\n' \"$source_commit\" >> \"$GITHUB_OUTPUT\"\n\n"
     )
     builder_run = (
@@ -1449,6 +1480,10 @@ def _verify_ci_image_producer(
         '[[ "$CI_VERIFIED_MANIFEST_DIGEST" == '
         '"$CI_CREATED_MANIFEST_DIGEST" ]]\n'
         '[[ "$CI_VERIFIED_SOURCE_COMMIT" == "$CI_CREATED_SOURCE_COMMIT" ]]\n'
+        '[[ "$CI_VERIFIED_ATTESTATION_SOURCE_COMMIT" == '
+        '"$CI_CREATED_ATTESTATION_SOURCE_COMMIT" ]]\n'
+        '[[ "$CI_VERIFIED_ATTESTATION_SIGNER_COMMIT" == '
+        '"$CI_CREATED_ATTESTATION_SIGNER_COMMIT" ]]\n'
         '[[ "$CI_VERIFIED_BUILDER_IMAGE_VERSION" == '
         '"$CI_CREATED_BUILDER_IMAGE_VERSION" ]]\n\n'
     )
@@ -1458,15 +1493,25 @@ def _verify_ci_image_producer(
             "workflow_call": {
                 "inputs": {
                     "candidate_commit": {
-                        "description": (
-                            "Exact trusted push commit that changed canonical "
-                            "image inputs."
-                        ),
+                        "description": "Exact trusted push candidate whose checkout is tested and tagged.",
                         "required": "true",
                         "type": "string",
-                    }
+                    },
+                    "workflow_commit": {
+                        "description": "Exact protected caller workflow and attestation signer commit.",
+                        "required": "true",
+                        "type": "string",
+                    },
                 },
                 "outputs": {
+                    "attestation_signer_commit": {
+                        "description": "Certificate-bound protected workflow signer commit.",
+                        "value": "${{ jobs.build.outputs.attestation_signer_commit }}",
+                    },
+                    "attestation_source_commit": {
+                        "description": "Certificate-bound tested candidate commit.",
+                        "value": "${{ jobs.build.outputs.attestation_source_commit }}",
+                    },
                     "digest": {
                         "description": (
                             "Exact attested OCI digest produced by the single build."
@@ -1513,6 +1558,12 @@ def _verify_ci_image_producer(
             "build": {
                 "runs-on": "ubuntu-24.04",
                 "outputs": {
+                    "attestation_signer_commit": (
+                        "${{ steps.identity.outputs.attestation_signer_commit }}"
+                    ),
+                    "attestation_source_commit": (
+                        "${{ steps.identity.outputs.attestation_source_commit }}"
+                    ),
                     "digest": "${{ steps.identity.outputs.digest }}",
                     "image_ref": "${{ steps.identity.outputs.image }}",
                     "manifest_digest": (
@@ -1533,11 +1584,13 @@ def _verify_ci_image_producer(
                             "CI_EVENT_NAME": "${{ github.event_name }}",
                             "CI_EVENT_COMMIT": "${{ github.sha }}",
                             "CI_EVENT_REF": "${{ github.ref }}",
+                            "CI_EVENT_WORKFLOW_COMMIT": "${{ github.workflow_sha }}",
                             "CI_IMAGE_REPOSITORY": (
                                 "ghcr.io/${{ github.repository }}/photospider-ci"
                             ),
                             "CI_RUN_ATTEMPT": "${{ github.run_attempt }}",
                             "CI_RUN_ID": "${{ github.run_id }}",
+                            "CI_WORKFLOW_COMMIT": "${{ inputs.workflow_commit }}",
                         },
                         "run": caller_run,
                     },
@@ -1565,7 +1618,7 @@ def _verify_ci_image_producer(
                         "run": builder_run,
                     },
                     {
-                        "name": "Resolve publishable image source identity",
+                        "name": "Resolve candidate image source identity",
                         "id": "source",
                         "run": source_run,
                     },
@@ -1634,6 +1687,21 @@ def _verify_ci_image_producer(
                             "CI_IMAGE_EXPECTED_DIGEST": (
                                 "${{ steps.push.outputs.digest }}"
                             ),
+                            "CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT": (
+                                "${{ inputs.workflow_commit }}"
+                            ),
+                            "CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT": (
+                                "${{ inputs.candidate_commit }}"
+                            ),
+                            "CI_IMAGE_EXPECTED_MANIFEST_DIGEST": (
+                                "${{ steps.manifest.outputs.digest }}"
+                            ),
+                            "CI_IMAGE_EXPECTED_SOURCE_COMMIT": (
+                                "${{ steps.source.outputs.commit }}"
+                            ),
+                            "CI_IMAGE_EXPECTED_WORKFLOW_COMMIT": (
+                                "${{ inputs.workflow_commit }}"
+                            ),
                             "CI_IMAGE_LOCATOR": (
                                 "${{ steps.caller.outputs.temporary_image }}"
                             ),
@@ -1652,6 +1720,12 @@ def _verify_ci_image_producer(
                             "CI_CREATED_SOURCE_COMMIT": (
                                 "${{ steps.source.outputs.commit }}"
                             ),
+                            "CI_CREATED_ATTESTATION_SOURCE_COMMIT": (
+                                "${{ inputs.candidate_commit }}"
+                            ),
+                            "CI_CREATED_ATTESTATION_SIGNER_COMMIT": (
+                                "${{ inputs.workflow_commit }}"
+                            ),
                             "CI_CREATED_BUILDER_IMAGE_VERSION": (
                                 "${{ steps.builder.outputs.image_version }}"
                             ),
@@ -1663,6 +1737,12 @@ def _verify_ci_image_producer(
                             ),
                             "CI_VERIFIED_SOURCE_COMMIT": (
                                 "${{ steps.identity.outputs.source_commit }}"
+                            ),
+                            "CI_VERIFIED_ATTESTATION_SOURCE_COMMIT": (
+                                "${{ steps.identity.outputs.attestation_source_commit }}"
+                            ),
+                            "CI_VERIFIED_ATTESTATION_SIGNER_COMMIT": (
+                                "${{ steps.identity.outputs.attestation_signer_commit }}"
                             ),
                             "CI_VERIFIED_BUILDER_IMAGE_VERSION": (
                                 "${{ steps.identity.outputs.builder_image_version }}"
@@ -2136,9 +2216,11 @@ def _verify_ci_image_resolver_order(root: Path) -> None:
     ordered_commands = (
         'inspect_output=$(docker buildx imagetools inspect "$locator")',
         'source_commit=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \\',
-        'attestation_json=$(gh attestation verify "oci://$exact_image" \\',
+        'attestation_json=$("${attestation_command[@]}")',
+        'printf \'%s\\n\' "$attestation_json" > "$attestation_temp"',
+        '"${attestation_identity_command[@]}" > "$attestation_identity_temp"',
         "prepare_artifact_directory",
-        'printf \'%s\\n\' "$attestation_json" > "$attestation_log"',
+        'cp -- "$attestation_temp" "$attestation_log"',
         'python3 "$SCRIPT_DIR/ci_runner_verify.py" \\',
         'docker pull "$exact_image" >/dev/null',
         (
@@ -2162,6 +2244,28 @@ def _verify_ci_image_resolver_order(root: Path) -> None:
         raise ContractError(
             f"{path}: exact-subject attestation must precede layer pull and identity output"
         )
+    source_text = "\n".join(lines)
+    four_identity_contract = (
+        '--source-digest "$EXPECTED_ATTESTATION_SOURCE_COMMIT"',
+        '--signer-digest "$EXPECTED_ATTESTATION_SIGNER_COMMIT"',
+        '--repo-root "$REPO_ROOT" attestation-identities',
+        '--image-source-commit "$source_commit"',
+        '--consumer-candidate-commit "$verification_candidate_commit"',
+        "attestation_source_commit=%s",
+        "attestation_signer_commit=%s",
+    )
+    if any(fragment not in source_text for fragment in four_identity_contract):
+        raise ContractError(
+            f"{path}: independent image source/candidate/workflow identity contract differs"
+        )
+    for collapsed in (
+        '--source-digest "$source_commit"',
+        '--signer-digest "$source_commit"',
+    ):
+        if collapsed in source_text:
+            raise ContractError(
+                f"{path}: manifest source is incorrectly reused for attestation identity"
+            )
 
 
 def _verify_image_lock(root: Path, actions: dict[str, tuple[str, str]]) -> None:
@@ -3954,6 +4058,10 @@ def _verify_shared_integration_dag(root: Path) -> None:
         "needs: [candidate-image-build, candidate-image-integration]",
         "needs.candidate-image-integration.outputs.validated_image_digest",
         "bash ci/scripts/ci_image_promote.sh",
+        '--workflow-commit "$CI_PROMOTION_WORKFLOW_COMMIT"',
+        "workflow_commit: ${{ github.workflow_sha }}",
+        "image_attestation_source_commit:",
+        "image_attestation_signer_commit:",
         "packages: write",
         "github.event_name == 'push'",
     )
@@ -3972,6 +4080,8 @@ def _verify_shared_integration_dag(root: Path) -> None:
         "workflow_call:",
         "image_ref:",
         "image_digest:",
+        "image_attestation_signer_commit:",
+        "image_attestation_source_commit:",
         "candidate_commit:",
         "ci-build-smoke-raw-default",
         "ci-build-smoke-control-default",
@@ -4003,9 +4113,14 @@ def _verify_shared_integration_dag(root: Path) -> None:
         "path: .ci-protected-control",
         "CI_EXPECTED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}",
         "CI_IMAGE_EXPECTED_DIGEST: ${{ inputs.image_digest }}",
+        "CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT: ${{ inputs.image_attestation_signer_commit }}",
+        "CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT: ${{ inputs.image_attestation_source_commit }}",
         "CI_IMAGE_EXPECTED_MANIFEST_DIGEST: ${{ inputs.image_manifest_digest }}",
         "CI_IMAGE_EXPECTED_SOURCE_COMMIT: ${{ inputs.image_source_commit }}",
         "CI_IMAGE_EXPECTED_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}",
+        "verify-source-binding",
+        '--candidate-commit "$CI_CANDIDATE_COMMIT"',
+        '--source-commit "$CI_IMAGE_SOURCE_COMMIT"',
         "bash .ci-protected-control/ci/scripts/ci_image_verify.sh",
     )
     if any(fragment not in identity_block for fragment in identity_contract):
@@ -4015,6 +4130,10 @@ def _verify_shared_integration_dag(root: Path) -> None:
     if "repository: ${{ inputs.checkout_repository }}" in identity_block:
         raise ContractError(
             f"{shared_path}: identity preflight checks out candidate repository code"
+        )
+    if "require_identity candidate_source" in identity_block:
+        raise ContractError(
+            f"{shared_path}: candidate and image-source identities are collapsed"
         )
     checkout_index = identity_block.find("Checkout protected reusable workflow control")
     login_index = identity_block.find("Authenticate exact GHCR identity reader")

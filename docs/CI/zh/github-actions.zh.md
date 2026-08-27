@@ -47,6 +47,19 @@ absent、final workflow output 不变。只有成功后它才持久化 attestati
 digest-qualified image、校验 OCI revision 与 canonical manifest label，并且只输出最终的
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` 引用。Published-image healthcheck 与 build/test
 integration job 都执行该已校验的 digest-qualified 引用；没有 job 直接执行可变 locator。
+该边界会刻意分离四项 identity：`image_source_commit` 是最后的 canonical-image-input-changing
+ancestor，继续绑定 manifest 与 OCI revision；`candidate_commit` 是被测 checkout、GitHub
+attestation source 与 immutable `sha-<full-candidate>` tag；`workflow_commit` 是受保护 control 与
+attestation signer；`image_digest` 是 suite 与 promotion 消费的精确 subject。resolver 会证明 source
+ancestry、last-change authority，以及直到 candidate 都不存在 canonical input drift。它不会为了强迫
+commit 相等而把 parser、test 或 documentation path 加入 image-input list。
+
+对于已知 candidate，verifier 会向 `gh attestation verify` 传入彼此独立的 source/signer digest
+constraint。对于 published discovery，同一 digest 的多份有效 rerun attestation 会通过受保护 Git
+history 归约为唯一最新的 certificate source；该 source 必须是 current consumer 的 ancestor，且相对
+`image_source_commit` 保持 canonical input 零 drift。incomparable source，或同一个最新 candidate
+对应不同 signer 时，会在拉取 layer 前失败。只有随后才会校验 OCI revision 与 manifest label，而且
+它们继续绑定 `image_source_commit`。
 `healthcheck-published-image` 是 container job，并不依赖 checkout 的临时 HOME 范围 Git trust 在
 后续 container step 中继续存在。Checkout 之后，唯一的 `Trust checked-out workspace` step 会显式
 选择 `shell: bash`，只把精确的 `$GITHUB_WORKSPACE` 值加入该 job container 持久的 global
@@ -58,7 +71,7 @@ integration job 都执行该已校验的 digest-qualified 引用；没有 job �
 container 默认 shell。protected-path、change-classification 与稳定结果门禁仍是轻量
 `ubuntu-24.04` job，不会 configure 或编译项目。
 
-当 pull request 或 push 修改 canonical CI-image lock 的 `input_paths` 中任一路径时，detector 仍会拉取并校验精确 base，而不依赖 fork 中可能不存在的 `origin/<base>`。Detector 会分别严格解析 merge base 与 head 的 lock，要求 lock 把自身列为输入，并把 NUL 分隔的 Git path inventory 与两个已验证路径集合的并集比较。唯一允许 base 缺失的例外，是 head 在精确 diff path 新增一份 strict、self-including 的 regular lock blob 的真实首次引入；它始终路由 `changed=true`。因此，lock 增加、删除、重复、路径遍历、JSON 畸形、head 缺失或 malformed，或未经证明的 bootstrap，都不能输出 `changed=false`。Fork head 会在 checkout 前被拒绝，同仓库受保护 `CI/**` pull request 则使用其可信 push 路径。Image-change healthcheck job 不构建镜像：它会先校验精确 hosted runner、受保护 lock、canonical publish-source identity 与生成的 image-input manifest，再运行静态 healthcheck。只有符合条件的可信 `main` 或 `CI/**` integration push 可以调用唯一 candidate-image producer 与 shared digest-bound suite。
+当 pull request 或 push 修改 canonical CI-image lock 的 `input_paths` 中任一路径时，detector 仍会拉取并校验精确 base，而不依赖 fork 中可能不存在的 `origin/<base>`。Detector 会分别严格解析 merge base 与 head 的 lock，要求 lock 把自身列为输入，并把 NUL 分隔的 Git path inventory 与两个已验证路径集合的并集比较。唯一允许 base 缺失的例外，是 head 在精确 diff path 新增一份 strict、self-including 的 regular lock blob 的真实首次引入；它始终路由 `changed=true`。因此，lock 增加、删除、重复、路径遍历、JSON 畸形、head 缺失或 malformed，或未经证明的 bootstrap，都不能输出 `changed=false`。Fork head 会在 checkout 前被拒绝，同仓库受保护 `CI/**` pull request 则使用其可信 push 路径。Image-change healthcheck job 不构建镜像：它会先校验精确 hosted runner、受保护 lock、canonical candidate/source/workflow binding 与生成的 image-input manifest，再运行静态 healthcheck。只有符合条件的可信 `main` 或 `CI/**` integration push 可以调用唯一 candidate-image producer 与 shared digest-bound suite。
 
 即使 major OS 已明确，hosted label 仍是可变的。GitHub 说明 runner image deployment 通常需要两到三天，
 rollout 期间会创建 prerelease，而且具体 job version 必须从 `Set up job` 读取
@@ -94,12 +107,16 @@ Manifest creation 会独立使用 `O_NOFOLLOW`、`O_NONBLOCK` 与 `O_CLOEXEC` �
 input 恰好打开一次，从 retained descriptor 的两次一致读取获得 digest 与 size，并复用 retained lock、
 helper、action 与 runner byte 完成 semantic check，不再重新打开。
 
-该 callable producer 本身也是一份完整 parsed-tree 合同：它只暴露 typed `workflow_call`、精确 write
-permission，以及一个带有受审查有序 step 的 `ubuntu-24.04` build job。Checkout 与 prebuild
+该 callable producer 本身也是一份完整 parsed-tree 合同：它只暴露 typed `candidate_commit` 与
+`workflow_commit` input、精确 write permission，以及一个带有受审查有序 step 的 `ubuntu-24.04`
+build job。Checkout 与 prebuild
 `ci_lock_verify.py` 调用必须先于唯一的 `docker/build-push-action`；该 action 不得带 env 或 condition，
 只能 push event-scoped temporary tag，并且只能接收精确 context、Dockerfile、三个 immutable label 以及
 manifest/source-commit build argument。任何额外 step、Docker/Buildx 命令、canonical 或 `latest` 写入、
 build argument、field 或 job 都会在镜像构建前被受保护 verifier 拒绝。
+在 registry login 前，受保护 resolver 会把 checkout `HEAD` 绑定到 candidate，独立把 workflow input
+绑定到 `github.workflow_sha`，再证明较早或相同的 image source 正是 candidate 最后的 canonical-input
+change，且中间没有 canonical-input drift。
 
 对于每次 `CI/**` push，两条 healthcheck 路径都会在各自 job 内拉取并校验 `origin/main`，再把 `origin/main` 作为 `CI_BASE_REF`。Published-image job 会在 `healthcheck.sh` 前完成校验；image-change job 会在 canonical manifest 生成和 `healthcheck.sh` 前完成校验。因此，静态检查会覆盖从 `main` merge base 开始的累计 branch diff，后续纯文档 push 无法隐藏更早的未格式化 C++ commit。普通 `main` push 则继续把精确的 `github.event.before` 作为 `CI_BASE_REF`，只检查本次 push 增量。任何必需 fetch 或 ref 校验失败都会在 `healthcheck.sh` 使用 fallback base 选择之前终止 job。对于 `CI/**` push，CI 镜像检测同样使用累计 `origin/main` 基线，因此后续纯文档 push 也无法隐藏更早的镜像输入 commit。
 
@@ -257,11 +274,14 @@ Runner 会在执行前立即重新查询 CTest JSON，并要求选定的精确�
 自行创建 clean `PHOTOSPIDER_BUILD_IPC=OFF` producer，不再依赖 workflow 中单独硬编码的 profile。
 
 Published-image 与 image-input-changing 路径会调用同一个 typed reusable suite，并传入独立期望的
-digest-qualified `image_ref`、candidate、profile、manifest、source 与 workflow identity。在任何
+digest-qualified `image_ref`、candidate、profile、manifest、image source、attestation source、
+attestation signer 与 workflow identity。在任何
 candidate checkout、code 或 container 启动前，host preflight 会在精确 caller `workflow_commit`
 checkout `github.repository`，把该值绑定到实际 `github.workflow_sha`，再运行受保护 image verifier。
-Verifier 会独立把请求的 digest/reference、GHCR attestation signer/source、OCI revision 与 canonical
-manifest digest 和全部 caller field 交叉校验。GitHub 允许 called workflow 保持或降低 caller 的
+Verifier 会独立把请求的 digest/reference、GHCR attestation source 与 image-producing candidate、
+signer 与受保护 producer workflow，以及 OCI revision/manifest 与 content source 交叉校验。Candidate
+image preflight 还会重跑受保护的 ancestry/last-change/zero-drift proof，而不要求 candidate 与 image
+source tip 相等。GitHub 允许 called workflow 保持或降低 caller 的
 `GITHUB_TOKEN` 权限，但绝不允许提升。Reusable call 的权限兼容性会先于后续 job-level `if` 导致的
 skip 完成校验，因此 shared workflow 不声明 workflow-wide 权限。每个会 checkout 或执行 candidate
 code、运行 candidate container 或聚合结果的 job，都会声明精确的只读或空 job-level permission
@@ -286,7 +306,10 @@ group；它会保留排队 writer、设置 `cancel-in-progress: false`、串行�
 writer，绝不会因纯文档 run 到达而取消整个 Integration workflow 或 candidate。Queue 顺序不受信任。
 在写入任何 registry state 前，受保护 manifest helper 会围绕一个
 隔离 worktree measurement 两次 fetch 精确 live branch，要求已测试 candidate 是其祖先，并复用
-canonical image-input path lock、source-commit resolver 与 manifest digest。较新的纯文档 descendant
+canonical image-input path lock；它会先从独立校验过的 image-source ancestor 重建 candidate manifest，
+再对 live tip 复用 source-commit resolver 与 manifest digest。因此，当 A 确实是 B 最后的 image-input
+change 且 canonical input byte 没有 drift 时，candidate B、image source A 与 live protected tip B 是
+有效组合。较新的纯文档 descendant
 若保持相同 source/manifest，仍可晋升。若存在更晚 image-input identity，则该 run 报告
 `superseded`。Force-push、unknown ancestry、manifest failure 或 measurement 期间 ref drift 都会以
 registry 零写入失败。
@@ -529,7 +552,7 @@ docker run --rm -v "$PWD:/workspace" -w /workspace photospider-ci:local \
 ```
 
 只有 approved `ubuntu-24.04` GitHub-hosted builder 才能构造用于发布的 manifest。在该 protected job 中，
-真实 retained builder identity 与 source equality 必须按以下方式取得：
+真实 retained builder identity 与 source/candidate/workflow 四身份分离必须按以下方式取得：
 
 ```bash
 # Approved Linux hosted runner only; this constructs publish provenance.
@@ -538,7 +561,9 @@ builder_runner_identity="${RUNNER_TEMP:?}/photospider-builder-runner-${GITHUB_RU
 python3 ci/scripts/ci_runner_verify.py --platform Linux \
   --runner-label ubuntu-24.04 --output "$builder_runner_identity"
 ci_image_source_commit=$(python3 ci/scripts/ci_image_manifest.py \
-  publish-source-commit --workflow-commit "${GITHUB_SHA:?}")
+  resolve-source-commit \
+  --candidate-commit "${GITHUB_SHA:?}" \
+  --workflow-commit "${GITHUB_WORKFLOW_SHA:?}")
 ci_image_manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
   --source-commit "$ci_image_source_commit" \
   --repository "${GITHUB_REPOSITORY:?}" \
@@ -546,7 +571,9 @@ ci_image_manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
   --output CI-results/hosted-ci-image/ci-image-input-v1.json)
 ```
 
-上面两个不同的全零值只具备 installer 要求的 lowercase 64-hex manifest-digest 与 40-hex Git-commit
+`GITHUB_SHA` 标识被测 candidate，`GITHUB_WORKFLOW_SHA` 标识受保护 workflow version。如果后续
+commit 只改变非 image parser、test 或 documentation byte，`ci_image_source_commit` 可以是更早的
+ancestor；resolver 会在 publication 前证明该关系与 canonical input 零 drift。上面两个不同的全零值只具备 installer 要求的 lowercase 64-hex manifest-digest 与 40-hex Git-commit
 形状。它们仅用于执行 Docker layer 与 snapshot solver，是 null sentinel，而不是 canonical manifest、
 Git object、OCI provenance 或发布授权；所得本地镜像绝不能 push、promote 或 attest。受保护 producer
 会把第二个 block 的真实 manifest/source value 作为 immutable Buildx input，并继续应用全部 workflow、

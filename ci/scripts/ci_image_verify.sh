@@ -9,11 +9,13 @@ set -Eeuo pipefail
 #   digest-qualified OCI image for candidate jobs.
 # @note Run only in a trusted host job after protected checkout. The mutable tag
 #   is merely a discovery locator; no candidate command runs until its resolved
-#   digest has passed source-workflow, source-commit, manifest, and label checks.
+#   digest has passed signer-workflow, independent attestation source/signer,
+#   image-source, manifest, and label checks.
 # @note ``CI_IMAGE_LOCATOR`` is reserved for a protected caller and must name
 #   either an exact temporary tag or digest-qualified reference in the locked
-#   repository. Optional expected digest, manifest, source, and workflow values
-#   independently bind reusable-workflow inputs to registry and checkout state.
+#   repository. Optional expected digest, manifest, and image-source values bind
+#   registry content; attestation source/signer expectations are an all-or-none
+#   pair and remain distinct from the protected checkout/workflow identity.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
@@ -25,6 +27,8 @@ EXPECTED_DIGEST=${CI_IMAGE_EXPECTED_DIGEST:-}
 EXPECTED_MANIFEST_DIGEST=${CI_IMAGE_EXPECTED_MANIFEST_DIGEST:-}
 EXPECTED_SOURCE_COMMIT=${CI_IMAGE_EXPECTED_SOURCE_COMMIT:-}
 EXPECTED_WORKFLOW_COMMIT=${CI_IMAGE_EXPECTED_WORKFLOW_COMMIT:-}
+EXPECTED_ATTESTATION_SOURCE_COMMIT=${CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT:-}
+EXPECTED_ATTESTATION_SIGNER_COMMIT=${CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT:-}
 
 # @brief Print command usage for direct developer and workflow callers.
 # @return Always zero.
@@ -38,8 +42,12 @@ Protected callers may set CI_IMAGE_LOCATOR to an exact temporary tag or
 digest-qualified reference in the locked repository. CI_IMAGE_EXPECTED_DIGEST,
 CI_IMAGE_EXPECTED_MANIFEST_DIGEST, CI_IMAGE_EXPECTED_SOURCE_COMMIT, and
 CI_IMAGE_EXPECTED_WORKFLOW_COMMIT bind caller fields to measured state.
-The exact image, digest, source commit, manifest digest, and builder image
-version are appended to CI_IMAGE_OUTPUT_FILE (or GITHUB_OUTPUT) when provided.
+CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT and
+CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT must be supplied together when the
+caller already knows the producer identities; otherwise one unique verified
+certificate pair is retained. The exact image, digest, image source,
+attestation source/signer, manifest digest, and builder image version are
+appended to CI_IMAGE_OUTPUT_FILE (or GITHUB_OUTPUT) when provided.
 EOF
 }
 
@@ -72,6 +80,8 @@ if [[ -n "$EXPECTED_MANIFEST_DIGEST" &&
   exit 2
 fi
 for expected_commit_name in \
+  CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT \
+  CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT \
   CI_IMAGE_EXPECTED_SOURCE_COMMIT \
   CI_IMAGE_EXPECTED_WORKFLOW_COMMIT; do
   expected_commit=${!expected_commit_name:-}
@@ -80,9 +90,20 @@ for expected_commit_name in \
     exit 2
   fi
 done
+if { [[ -n "$EXPECTED_ATTESTATION_SOURCE_COMMIT" ]] &&
+  [[ -z "$EXPECTED_ATTESTATION_SIGNER_COMMIT" ]]; } ||
+  { [[ -z "$EXPECTED_ATTESTATION_SOURCE_COMMIT" ]] &&
+    [[ -n "$EXPECTED_ATTESTATION_SIGNER_COMMIT" ]]; }; then
+  echo "Attestation source and signer expectations must be supplied together." >&2
+  exit 2
+fi
+verification_candidate_commit=$(git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}')
+if [[ ! "$verification_candidate_commit" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "CI image verifier checkout is not one lowercase full commit." >&2
+  exit 1
+fi
 if [[ -n "$EXPECTED_WORKFLOW_COMMIT" ]]; then
-  actual_workflow_commit=$(git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}')
-  if [[ "$actual_workflow_commit" != "$EXPECTED_WORKFLOW_COMMIT" ]]; then
+  if [[ "$verification_candidate_commit" != "$EXPECTED_WORKFLOW_COMMIT" ]]; then
     echo "Protected checkout differs from CI_IMAGE_EXPECTED_WORKFLOW_COMMIT." >&2
     exit 1
   fi
@@ -227,18 +248,76 @@ if [[ -n "$EXPECTED_SOURCE_COMMIT" &&
   exit 1
 fi
 
-# Authenticate the exact registry subject into process-private memory before
+# Authenticate the exact registry subject into process-private state before
 # creating formal artifacts, retaining runner identity, or letting Docker pull
-# and expand a layer. Failure therefore leaves the upload path absent.
-attestation_json=$(gh attestation verify "oci://$exact_image" \
-  --repo "$EXPECTED_REPOSITORY" \
-  --signer-workflow "$EXPECTED_REPOSITORY/$source_workflow" \
-  --source-digest "$source_commit" \
-  --signer-digest "$source_commit" \
-  --deny-self-hosted-runners \
-  --format json)
+# and expand a layer. Known producer identities are passed as independent
+# constraints; published discovery still requires one unique certificate pair.
+attestation_command=(
+  gh attestation verify "oci://$exact_image"
+  --repo "$EXPECTED_REPOSITORY"
+  --signer-workflow "$EXPECTED_REPOSITORY/$source_workflow"
+)
+if [[ -n "$EXPECTED_ATTESTATION_SOURCE_COMMIT" ]]; then
+  attestation_command+=(
+    --source-digest "$EXPECTED_ATTESTATION_SOURCE_COMMIT"
+    --signer-digest "$EXPECTED_ATTESTATION_SIGNER_COMMIT"
+  )
+fi
+attestation_command+=(--deny-self-hosted-runners --format json)
+attestation_json=$("${attestation_command[@]}")
 if [[ -z "$attestation_json" ]]; then
   echo "GitHub attestation verification returned empty evidence." >&2
+  exit 1
+fi
+
+attestation_temp_root=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
+if [[ ! -d "$attestation_temp_root" || -L "$attestation_temp_root" ]]; then
+  echo "Attestation temporary root must be one real directory." >&2
+  exit 1
+fi
+attestation_temp=$(mktemp "$attestation_temp_root/photospider-attestation.XXXXXX")
+attestation_identity_temp=$(mktemp \
+  "$attestation_temp_root/photospider-attestation-identities.XXXXXX")
+# @brief Remove process-private verified-attestation scratch files on every exit.
+# @return Always zero; cleanup failure is intentionally best-effort at shell exit.
+cleanup_attestation_scratch() {
+  rm -f -- "$attestation_temp" "$attestation_identity_temp"
+}
+trap cleanup_attestation_scratch EXIT
+chmod 0600 "$attestation_temp" "$attestation_identity_temp"
+printf '%s\n' "$attestation_json" > "$attestation_temp"
+attestation_identity_command=(
+  python3 "$SCRIPT_DIR/ci_image_manifest.py"
+  --repo-root "$REPO_ROOT" attestation-identities
+  --attestation-json "$attestation_temp"
+  --image-source-commit "$source_commit"
+  --consumer-candidate-commit "$verification_candidate_commit"
+)
+if [[ -n "$EXPECTED_ATTESTATION_SOURCE_COMMIT" ]]; then
+  attestation_identity_command+=(
+    --expected-source-commit "$EXPECTED_ATTESTATION_SOURCE_COMMIT"
+    --expected-signer-commit "$EXPECTED_ATTESTATION_SIGNER_COMMIT"
+  )
+fi
+"${attestation_identity_command[@]}" > "$attestation_identity_temp"
+attestation_identities=()
+while IFS= read -r attestation_identity; do
+  attestation_identities+=("$attestation_identity")
+done < "$attestation_identity_temp"
+if ((${#attestation_identities[@]} != 2)); then
+  echo "Verified attestation did not yield one source/signer pair." >&2
+  exit 1
+fi
+attestation_source_commit=${attestation_identities[0]}
+attestation_signer_commit=${attestation_identities[1]}
+if [[ -n "$EXPECTED_ATTESTATION_SOURCE_COMMIT" &&
+  "$attestation_source_commit" != "$EXPECTED_ATTESTATION_SOURCE_COMMIT" ]]; then
+  echo "Verified attestation source differs from expected candidate commit." >&2
+  exit 1
+fi
+if [[ -n "$EXPECTED_ATTESTATION_SIGNER_COMMIT" &&
+  "$attestation_signer_commit" != "$EXPECTED_ATTESTATION_SIGNER_COMMIT" ]]; then
+  echo "Verified attestation signer differs from expected workflow commit." >&2
   exit 1
 fi
 
@@ -249,7 +328,7 @@ manifest_digest_path=$ARTIFACT_DIR/expected-ci-image-input-v1.sha256
 labels_path=$ARTIFACT_DIR/oci-labels.json
 builder_runner_path=$ARTIFACT_DIR/builder-linux-runner-identity.json
 attestation_log=$ARTIFACT_DIR/attestation-verification.json
-printf '%s\n' "$attestation_json" > "$attestation_log"
+cp -- "$attestation_temp" "$attestation_log"
 python3 "$SCRIPT_DIR/ci_runner_verify.py" \
   --platform Linux \
   --runner-label ubuntu-24.04 \
@@ -295,6 +374,8 @@ fi
   printf 'image=%s\n' "$exact_image"
   printf 'digest=%s\n' "$image_digest"
   printf 'source_commit=%s\n' "$source_commit"
+  printf 'attestation_source_commit=%s\n' "$attestation_source_commit"
+  printf 'attestation_signer_commit=%s\n' "$attestation_signer_commit"
   printf 'manifest_digest=%s\n' "$manifest_digest"
   printf 'builder_image_version=%s\n' "$builder_image_version"
 } | tee "$ARTIFACT_DIR/ci-image-identity.env"

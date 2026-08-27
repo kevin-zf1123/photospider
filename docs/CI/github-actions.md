@@ -51,6 +51,24 @@ and expose only the resulting
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` reference. Published-image
 healthcheck and build/test integration jobs execute that verified
 digest-qualified reference; none executes the mutable locator directly.
+The boundary deliberately keeps four identities separate:
+`image_source_commit` is the last canonical-image-input-changing ancestor and
+continues to bind the manifest plus OCI revision; `candidate_commit` is the
+tested checkout, GitHub attestation source, and immutable `sha-<full-candidate>`
+tag; `workflow_commit` is protected control and the attestation signer; and
+`image_digest` is the exact subject consumed by the suite and promotion. The
+resolver proves source ancestry, newest-change authority, and zero canonical
+input drift through the candidate. It does not add parser, test, or documentation
+paths to the image-input list to force commit equality.
+
+For a known candidate, the verifier passes independent source/signer digest
+constraints to `gh attestation verify`. For published discovery, multiple
+valid same-digest rerun attestations are reduced through protected Git history
+to the unique newest certificate source that is an ancestor of the current
+consumer and still has zero canonical-input drift from `image_source_commit`.
+Incomparable sources or different signers for the same newest candidate fail
+before layer pull. OCI revision and manifest labels are checked only afterward
+and remain bound to `image_source_commit`.
 `healthcheck-published-image` is a container job and does not rely on checkout's
 temporary HOME-scoped Git trust surviving into later container steps.
 Immediately after checkout, its unique `Trust checked-out workspace` step
@@ -80,7 +98,7 @@ bootstrap therefore cannot emit `changed=false`. A fork head is rejected before
 checkout, and a same-repository protected `CI/**` pull request uses its trusted
 push route. The image-change healthcheck job does not
 build an image: it verifies the exact hosted runner, protected locks, canonical
-publish-source identity, and generated image-input manifest before running the
+candidate/source/workflow binding, and generated image-input manifest before running the
 static healthcheck. Only an eligible trusted `main` or `CI/**` integration push
 may call the one candidate-image producer and shared digest-bound suite.
 
@@ -126,7 +144,8 @@ two agreeing reads of that retained descriptor, and reuses the retained lock,
 helper, action, and runner bytes for semantic checks without reopening them.
 
 The callable producer itself is a complete parsed-tree contract: it exposes only
-the typed `workflow_call`, exact write permissions, and one `ubuntu-24.04` build
+typed `candidate_commit` and `workflow_commit` inputs, exact write permissions,
+and one `ubuntu-24.04` build
 job with its reviewed ordered steps. Checkout and the prebuild
 `ci_lock_verify.py` invocation precede the unique `docker/build-push-action`;
 that action has no environment or condition, pushes only the event-scoped
@@ -134,6 +153,10 @@ temporary tag, and accepts exactly the context, Dockerfile, three immutable
 labels, and manifest/source-commit build arguments. Extra steps, Docker/Buildx
 commands, canonical or `latest` writes, build arguments, fields, or jobs fail
 the protected verifier before image construction.
+Before registry login, its protected resolver binds checkout `HEAD` to the
+candidate, independently binds the workflow input to `github.workflow_sha`,
+and proves the older-or-equal image source is the candidate's exact last
+canonical-input-changing ancestor with no intervening canonical-input drift.
 
 For every `CI/**` push, both healthcheck routes fetch and verify `origin/main` inside their own job, then pass `origin/main` as `CI_BASE_REF`. The published-image job verifies it before `healthcheck.sh`; the image-change job verifies it before canonical manifest generation and `healthcheck.sh`. Static checks therefore cover the cumulative branch diff from the `main` merge base, so a later documentation-only push cannot hide an earlier unformatted C++ commit. An ordinary `main` push retains the exact `github.event.before` value as `CI_BASE_REF` and checks only that push increment. A required fetch or reference verification failure stops the job before `healthcheck.sh` can use fallback base selection. CI-image detection uses the same cumulative `origin/main` basis for `CI/**` pushes, so a later documentation-only push also cannot hide an earlier image-input commit.
 
@@ -390,13 +413,17 @@ producer instead of depending on a separately hard-coded workflow profile.
 
 Published-image and image-input-changing routes call the same typed reusable
 suite with one independently expected digest-qualified `image_ref`, candidate,
-profile, manifest, source, and workflow identities. Before any candidate
+profile, manifest, image source, attestation source, attestation signer, and
+workflow identities. Before any candidate
 checkout, code, or container starts, its host preflight checks out
 `github.repository` at the exact caller `workflow_commit`, binds that value to
 the actual `github.workflow_sha`, and runs the protected image verifier. The
 verifier independently cross-checks the requested digest/reference, GHCR
-attestation signer/source, OCI revision, and canonical manifest digest against
-all caller fields. GitHub permits a called workflow to preserve or reduce the
+attestation source against the image-producing candidate, signer against the
+protected producer workflow, and OCI revision/manifest against the content
+source. Candidate-image preflight also reruns the protected ancestry/newest-
+change/zero-drift proof instead of requiring candidate and image source tips to
+be equal. GitHub permits a called workflow to preserve or reduce the
 caller's `GITHUB_TOKEN` permissions, but never to elevate them. Permission
 compatibility is validated for the reusable call before a later job-level
 `if` can make a job skip, so the shared workflow has no workflow-wide
@@ -434,8 +461,12 @@ documentation-only run arrived. Queue order is not trusted. Before any
 registry write, the protected manifest helper fetches the exact live branch
 twice around an
 isolated worktree measurement, requires the tested candidate to be its
-ancestor, and reuses the canonical image-input path lock, source-commit
-resolver, and manifest digest. A later documentation-only descendant with the
+ancestor, first reconstructs the candidate manifest from its independently
+verified image-source ancestor, and reuses the canonical image-input path lock,
+source-commit resolver, and manifest digest for the live tip. Candidate B with
+image source A and live protected tip B is therefore valid when A is B's exact
+last image-input change and the canonical input bytes do not drift. A later
+documentation-only descendant with the
 same source/manifest remains promotable. A later image-input identity reports
 `superseded`. Force-push, unknown ancestry, manifest failure, or ref drift
 during measurement fails with zero registry writes.
@@ -781,7 +812,7 @@ docker run --rm -v "$PWD:/workspace" -w /workspace photospider-ci:local \
 
 Only an approved `ubuntu-24.04` GitHub-hosted builder may construct the manifest
 used for publication. In that protected job, the genuine retained builder
-identity and source equality are obtained as follows:
+identity and four-way source/candidate/workflow separation are obtained as follows:
 
 ```bash
 # Approved Linux hosted runner only; this constructs publish provenance.
@@ -790,7 +821,9 @@ builder_runner_identity="${RUNNER_TEMP:?}/photospider-builder-runner-${GITHUB_RU
 python3 ci/scripts/ci_runner_verify.py --platform Linux \
   --runner-label ubuntu-24.04 --output "$builder_runner_identity"
 ci_image_source_commit=$(python3 ci/scripts/ci_image_manifest.py \
-  publish-source-commit --workflow-commit "${GITHUB_SHA:?}")
+  resolve-source-commit \
+  --candidate-commit "${GITHUB_SHA:?}" \
+  --workflow-commit "${GITHUB_WORKFLOW_SHA:?}")
 ci_image_manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
   --source-commit "$ci_image_source_commit" \
   --repository "${GITHUB_REPOSITORY:?}" \
@@ -798,7 +831,11 @@ ci_image_manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
   --output CI-results/hosted-ci-image/ci-image-input-v1.json)
 ```
 
-The two distinct all-zero values have only the installer's required lowercase
+`GITHUB_SHA` identifies the tested candidate, while `GITHUB_WORKFLOW_SHA`
+identifies the protected workflow version. `ci_image_source_commit` may be an
+older ancestor when later commits change only non-image parser, test, or
+documentation bytes; the resolver proves that relation and zero canonical-input
+drift before publication. The two distinct all-zero values have only the installer's required lowercase
 64-hex manifest-digest and 40-hex Git-commit shapes. They exercise Docker layers
 and the snapshot solver but are null sentinels, not a canonical manifest, Git
 object, OCI provenance, or permission to publish. The resulting local image

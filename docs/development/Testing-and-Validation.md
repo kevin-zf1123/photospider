@@ -520,7 +520,11 @@ Image promotion has a durable live-state model in
 `security_contract_test.py`, not an issue-replay test. A stateful registry and
 real isolated Git histories prove normal A-then-B promotion, inverse B-then-A
 completion without rollback, a newer unpromoted image-input tip superseding A,
-and a documentation-only descendant retaining A's source/manifest identity.
+and both an older A candidate under a documentation-only descendant and a
+tested candidate B whose image source remains A. The latter proves that
+candidate checkout/attestation source/immutable SHA, protected workflow signer,
+manifest/OCI source, and exact image digest remain independent while protected
+ancestry, newest-image-change, and zero-input-drift checks all succeed.
 They also require force-push, unknown ancestry, missing image input, and ref
 movement across the two-fetch measurement to stop before branch/`latest`
 writes. The stateful registry also proves first-time SHA-only creation and
@@ -3493,6 +3497,13 @@ and final output unchanged. It then persists the successful evidence, pulls
 that digest, validates OCI revision and manifest labels, and all published-image healthcheck
 and build/test integration jobs run the resulting
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` reference.
+Candidate verification supplies independent expected certificate source and
+signer digests. Published verification may encounter several valid attestations
+for one reproducible digest; protected Git history reduces them to the unique
+newest attestation-source ancestor of the current consumer whose canonical
+inputs still resolve to the OCI/manifest image source. An incomparable source,
+same-candidate signer ambiguity, swapped identity, or canonical-input drift
+fails before layer pull.
 Lightweight routing and result gates remain on `ubuntu-24.04`.
 GitHub documents a two-to-three-day runner-image deployment window and directs
 exact-version diagnosis to each job's `Set up job` log
@@ -3539,7 +3550,7 @@ instead of relying on checkout's temporary HOME-scoped configuration. The
 `Fetch pull request base history` and `Fetch CI branch main history` steps each
 also bind `shell: bash`, making their `set -Eeuo pipefail` prologues valid
 without relying on the container default shell. If a change modifies an image
-input, healthcheck verifies the hosted runner, locks, publish-source identity,
+input, healthcheck verifies the hosted runner, locks, candidate/source/workflow identity,
 and canonical input manifest without building a second image. Only the trusted
 integration push builds one temporary-tag candidate and runs the shared
 digest-bound suite. The callable producer is parsed as one complete workflow

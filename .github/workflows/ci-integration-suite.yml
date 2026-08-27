@@ -32,6 +32,14 @@ on:
         description: Independently expected immutable OCI digest.
         required: true
         type: string
+      image_attestation_signer_commit:
+        description: Certificate-bound image producer workflow commit.
+        required: true
+        type: string
+      image_attestation_source_commit:
+        description: Certificate-bound image producer candidate commit.
+        required: true
+        type: string
       image_kind:
         description: Either published or candidate.
         required: true
@@ -105,6 +113,8 @@ jobs:
           CI_EXPECTED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
           CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
           CI_IMAGE_EXPECTED_DIGEST: ${{ inputs.image_digest }}
+          CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT: ${{ inputs.image_attestation_signer_commit }}
+          CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT: ${{ inputs.image_attestation_source_commit }}
           CI_IMAGE_EXPECTED_MANIFEST_DIGEST: ${{ inputs.image_manifest_digest }}
           CI_IMAGE_EXPECTED_SOURCE_COMMIT: ${{ inputs.image_source_commit }}
           CI_IMAGE_EXPECTED_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
@@ -114,6 +124,8 @@ jobs:
           CI_IMAGE_REPOSITORY: ${{ github.repository }}
           CI_IMAGE_REF: ${{ inputs.image_ref }}
           CI_IMAGE_SOURCE_COMMIT: ${{ inputs.image_source_commit }}
+          CI_IMAGE_ATTESTATION_SIGNER_COMMIT: ${{ inputs.image_attestation_signer_commit }}
+          CI_IMAGE_ATTESTATION_SOURCE_COMMIT: ${{ inputs.image_attestation_source_commit }}
           CI_PROFILE: ${{ inputs.profile }}
           CI_PUBLISH_REUSABLE_ATTESTATIONS: ${{ inputs.publish_reusable_attestations }}
           CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
@@ -145,6 +157,8 @@ jobs:
           if [[ ! "$CI_CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ||
             ! "$CI_WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ||
             ! "$CI_IMAGE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ||
+            ! "$CI_IMAGE_ATTESTATION_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ||
+            ! "$CI_IMAGE_ATTESTATION_SIGNER_COMMIT" =~ ^[0-9a-f]{40}$ ||
             ! "$CI_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ||
             ! "$CI_IMAGE_MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
             echo "Reusable integration identity is non-canonical." >&2
@@ -154,13 +168,19 @@ jobs:
           require_identity profile "$CI_PROFILE" default
           case "$CI_IMAGE_KIND" in
             candidate)
-              require_identity candidate_source                 "$CI_IMAGE_SOURCE_COMMIT" "$CI_CANDIDATE_COMMIT"
+              require_identity attestation_source               "$CI_IMAGE_ATTESTATION_SOURCE_COMMIT" "$CI_CANDIDATE_COMMIT"
+              require_identity attestation_signer               "$CI_IMAGE_ATTESTATION_SIGNER_COMMIT" "$CI_WORKFLOW_COMMIT"
               if [[ "$CI_CALLER_EVENT" != push ||
                 ("$CI_CALLER_REF" != refs/heads/main &&
                  "$CI_CALLER_REF" != refs/heads/CI/*) ]]; then
                 echo "Candidate images require a trusted main or CI/** push." >&2
                 exit 1
               fi
+              python3 .ci-protected-control/ci/scripts/ci_image_manifest.py \
+                --repo-root .ci-protected-control verify-source-binding \
+                --candidate-commit "$CI_CANDIDATE_COMMIT" \
+                --source-commit "$CI_IMAGE_SOURCE_COMMIT" \
+                --require-head >/dev/null
               ;;
             published)
               ;;

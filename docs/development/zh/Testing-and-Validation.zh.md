@@ -375,7 +375,10 @@ producer 被跳过时，空 include fallback 才用于保持 `fromJSON` 可解�
 Image promotion 在 `security_contract_test.py` 中具有长期维护的 live-state model，而不是 issue replay
 test。Stateful registry 与真实隔离 Git history 会证明正常 A 后 B 晋升、B 后 A 逆序完成时不发生
 rollback、尚未晋升的更新 image-input tip 会 supersede A，以及纯文档 descendant 会保留 A 的
-source/manifest identity。测试还要求 force-push、unknown ancestry、缺失 image input，以及两次
+source/manifest identity；它同时覆盖纯文档 descendant 下仍运行的旧 candidate A，以及被测 candidate
+B 继续以 A 作为 image source 的路径。后一条证明 candidate checkout/attestation source/immutable
+SHA、受保护 workflow signer、manifest/OCI source 与精确 image digest 彼此独立，同时 ancestry、最后
+image change 与 input-zero-drift 受保护检查全部成功。测试还要求 force-push、unknown ancestry、缺失 image input，以及两次
 fetch measurement 之间的 ref movement 都必须在写 branch/`latest` 前停止。
 Stateful registry 还会证明首次只创建 SHA 并执行 post-create verification、精确 same-SHA 复用且不再
 调用 create、跨 ref 复用，以及同 commit digest 冲突不能移动 SHA、branch 或 `latest`。digest output
@@ -2771,7 +2774,12 @@ locator；可信 host preflight 会解析精确 digest，并在 formal artifact 
 失败会使 upload path 保持 absent、final output 不变。随后它才持久化成功 evidence、拉取该 digest、
 校验 OCI revision 与 manifest label，所有
 published-image healthcheck 与 build/test integration job 都执行所得
-`ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` 引用。轻量路由与结果门禁仍在
+`ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` 引用。Candidate verification 会分别提供预期
+certificate source 与 signer digest。
+Published verification 可能遇到同一个可复现 digest 的多份有效 attestation；受保护 Git history 会把
+它们归约为 current consumer 的祖先中唯一最新的 attestation source，而且该 source 的 canonical input
+仍必须解析到 OCI/manifest image source。incomparable source、同 candidate signer 歧义、swapped
+identity 或 canonical-input drift 都会在拉取 layer 前失败。轻量路由与结果门禁仍在
 `ubuntu-24.04` 上运行。GitHub 记录 runner-image deployment 通常需要两到三天，并要求从每个 job 的
 `Set up job` log 诊断精确版本
 （[官方说明](https://github.com/actions/runner-images#what-image-version-is-used-in-my-build)）。
@@ -2810,8 +2818,8 @@ history fetch 与 `healthcheck.sh`，也覆盖两个 fetch 都不会运行的 `m
 `workflow_dispatch` 路由，而不依赖 checkout 的临时 HOME 范围配置。`Fetch pull request base
 history` 与 `Fetch CI branch main history` step 同样绑定 `shell: bash`，使各自的
 `set -Eeuo pipefail` 前导命令无需依赖 container 默认 shell 即可正确执行。如果某项改动修改
-image input，healthcheck 会在不构建第二个镜像的情况下校验 hosted runner、lock、publish-source
-identity 与 canonical input manifest；只有可信 integration push 会构建一个 temporary-tag candidate
+image input，healthcheck 会在不构建第二个镜像的情况下校验 hosted runner、lock、candidate/source/
+workflow identity 与 canonical input manifest；只有可信 integration push 会构建一个 temporary-tag candidate
 并运行 shared digest-bound suite。Callable producer 会作为一份完整 workflow mapping 解析：其唯一
 `workflow_call`、write permission、单一 build job、output 以及每个有序 step field 都必须精确。
 Checkout 与 prebuild lock verifier 必须先于唯一 Buildx build/push action；其完整 `with` mapping 只允许

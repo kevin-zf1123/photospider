@@ -21,6 +21,10 @@ set -Eeuo pipefail
 # @note Freshness also receives the producer's exact resolved builder image
 #   version. It reconstructs the candidate manifest with that approved member;
 #   the promotion host's own mutable ImageVersion never replaces provenance.
+# @note Candidate, image-source, and protected workflow commits are separate
+#   identities. The protected manifest helper proves source ancestry, newest
+#   canonical-input authority, and zero source-to-candidate input drift before
+#   it admits candidate B/source A/live-tip B.
 # @note One job-scoped repository/image promotion lease serializes every
 #   workflow-owned SHA and mutable writer across refs. After freshness succeeds,
 #   the SHA tag is inspected before any write: an exact digest is reused, an
@@ -47,6 +51,7 @@ Usage: ci_image_promote.sh \
   --expected-digest sha256:DIGEST \
   --candidate-commit FULL_SHA \
   --source-commit FULL_SHA \
+  --workflow-commit FULL_SHA \
   --manifest-digest SHA256 \
   --builder-image-version EXACT_IMAGE_VERSION \
   --event-name push \
@@ -205,6 +210,7 @@ image_ref=
 expected_digest=
 candidate_commit=
 source_commit=
+workflow_commit=
 manifest_digest=
 builder_image_version=
 event_name=
@@ -229,6 +235,10 @@ while (($#)); do
       ;;
     --source-commit)
       source_commit=${2:-}
+      shift 2
+      ;;
+    --workflow-commit)
+      workflow_commit=${2:-}
       shift 2
       ;;
     --manifest-digest)
@@ -279,8 +289,8 @@ if [[ "$image_ref" != "$expected_image" ]]; then
 fi
 if [[ ! "$candidate_commit" =~ ^[0-9a-f]{40}$ ||
   ! "$source_commit" =~ ^[0-9a-f]{40}$ ||
-  "$candidate_commit" != "$source_commit" ]]; then
-  echo "Promotion candidate/source commits must be one identical full SHA." >&2
+  ! "$workflow_commit" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Promotion candidate/source/workflow commits must be full SHAs." >&2
   exit 1
 fi
 if [[ ! "$manifest_digest" =~ ^[0-9a-f]{64}$ ]]; then
@@ -333,6 +343,7 @@ freshness_status=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \
   --candidate-source-commit "$source_commit" \
   --candidate-manifest-digest "$manifest_digest" \
   --candidate-builder-image-version "$builder_image_version" \
+  --workflow-commit "$workflow_commit" \
   --repository "$repository" \
   --branch "$branch_name" \
   --scratch-root "$SCRATCH_ROOT" \

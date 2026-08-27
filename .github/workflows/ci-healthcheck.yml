@@ -327,6 +327,8 @@ jobs:
     if: needs.ci-image-change.outputs.changed == 'false'
     runs-on: ubuntu-24.04
     outputs:
+      attestation_signer_commit: ${{ steps.identity.outputs.attestation_signer_commit }}
+      attestation_source_commit: ${{ steps.identity.outputs.attestation_source_commit }}
       digest: ${{ steps.identity.outputs.digest }}
       image: ${{ steps.identity.outputs.image }}
       manifest_digest: ${{ steps.identity.outputs.manifest_digest }}
@@ -462,7 +464,9 @@ jobs:
       - name: Verify image-input contract without rebuilding
         env:
           CI_IMAGE_MANIFEST_DIR: ${{ github.workspace }}/CI-results/local-ci-image-identity
+          CI_CANDIDATE_COMMIT: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
           CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-healthcheck-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
+          CI_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: |
           set -Eeuo pipefail
           python3 ci/scripts/ci_runner_verify.py \
@@ -472,7 +476,9 @@ jobs:
           python3 ci/scripts/ci_lock_verify.py
           mkdir -p "$CI_IMAGE_MANIFEST_DIR"
           source_commit=$(python3 ci/scripts/ci_image_manifest.py \
-            publish-source-commit --workflow-commit "${{ github.sha }}")
+            resolve-source-commit \
+            --candidate-commit "$CI_CANDIDATE_COMMIT" \
+            --workflow-commit "$CI_WORKFLOW_COMMIT")
           manifest_digest=$(python3 ci/scripts/ci_image_manifest.py create \
             --source-commit "$source_commit" \
             --repository "${{ github.repository }}" \

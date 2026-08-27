@@ -4,10 +4,20 @@ on:
   workflow_call:
     inputs:
       candidate_commit:
-        description: Exact trusted push commit that changed canonical image inputs.
+        description: Exact trusted push candidate whose checkout is tested and tagged.
+        required: true
+        type: string
+      workflow_commit:
+        description: Exact protected caller workflow and attestation signer commit.
         required: true
         type: string
     outputs:
+      attestation_signer_commit:
+        description: Certificate-bound protected workflow signer commit.
+        value: ${{ jobs.build.outputs.attestation_signer_commit }}
+      attestation_source_commit:
+        description: Certificate-bound tested candidate commit.
+        value: ${{ jobs.build.outputs.attestation_source_commit }}
       digest:
         description: Exact attested OCI digest produced by the single build.
         value: ${{ jobs.build.outputs.digest }}
@@ -38,6 +48,8 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     outputs:
+      attestation_signer_commit: ${{ steps.identity.outputs.attestation_signer_commit }}
+      attestation_source_commit: ${{ steps.identity.outputs.attestation_source_commit }}
       digest: ${{ steps.identity.outputs.digest }}
       image_ref: ${{ steps.identity.outputs.image }}
       manifest_digest: ${{ steps.identity.outputs.manifest_digest }}
@@ -52,9 +64,11 @@ jobs:
           CI_EVENT_NAME: ${{ github.event_name }}
           CI_EVENT_COMMIT: ${{ github.sha }}
           CI_EVENT_REF: ${{ github.ref }}
+          CI_EVENT_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
           CI_IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}/photospider-ci
           CI_RUN_ATTEMPT: ${{ github.run_attempt }}
           CI_RUN_ID: ${{ github.run_id }}
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
         run: |
           set -Eeuo pipefail
           if [[ "$CI_EVENT_NAME" != push ||
@@ -65,6 +79,11 @@ jobs:
           if [[ ! "$CI_CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ||
             "$CI_CANDIDATE_COMMIT" != "$CI_EVENT_COMMIT" ]]; then
             echo "Candidate image commit differs from the trusted push commit." >&2
+            exit 1
+          fi
+          if [[ ! "$CI_WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ||
+            "$CI_WORKFLOW_COMMIT" != "$CI_EVENT_WORKFLOW_COMMIT" ]]; then
+            echo "Protected workflow commit differs from the caller signer commit." >&2
             exit 1
           fi
           temporary_tag="candidate-$CI_CANDIDATE_COMMIT-$CI_RUN_ID-$CI_RUN_ATTEMPT"
@@ -95,13 +114,14 @@ jobs:
             --builder-runner-identity "$CI_RUNNER_IDENTITY_FILE")
           printf 'image_version=%s\n' "$image_version" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve publishable image source identity
+      - name: Resolve candidate image source identity
         id: source
         run: |
           set -Eeuo pipefail
           source_commit=$(python3 ci/scripts/ci_image_manifest.py \
-            publish-source-commit \
-            --workflow-commit "${{ inputs.candidate_commit }}")
+            resolve-source-commit \
+            --candidate-commit "${{ inputs.candidate_commit }}" \
+            --workflow-commit "${{ inputs.workflow_commit }}")
           printf 'commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
 
       - name: Create canonical image input manifest
@@ -154,6 +174,11 @@ jobs:
         env:
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ci-image-identity
           CI_IMAGE_EXPECTED_DIGEST: ${{ steps.push.outputs.digest }}
+          CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT: ${{ inputs.workflow_commit }}
+          CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_IMAGE_EXPECTED_MANIFEST_DIGEST: ${{ steps.manifest.outputs.digest }}
+          CI_IMAGE_EXPECTED_SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          CI_IMAGE_EXPECTED_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
           CI_IMAGE_LOCATOR: ${{ steps.caller.outputs.temporary_image }}
           CI_IMAGE_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -164,9 +189,13 @@ jobs:
           CI_BUILT_DIGEST: ${{ steps.push.outputs.digest }}
           CI_CREATED_MANIFEST_DIGEST: ${{ steps.manifest.outputs.digest }}
           CI_CREATED_SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          CI_CREATED_ATTESTATION_SOURCE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_CREATED_ATTESTATION_SIGNER_COMMIT: ${{ inputs.workflow_commit }}
           CI_VERIFIED_DIGEST: ${{ steps.identity.outputs.digest }}
           CI_VERIFIED_MANIFEST_DIGEST: ${{ steps.identity.outputs.manifest_digest }}
           CI_VERIFIED_SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+          CI_VERIFIED_ATTESTATION_SOURCE_COMMIT: ${{ steps.identity.outputs.attestation_source_commit }}
+          CI_VERIFIED_ATTESTATION_SIGNER_COMMIT: ${{ steps.identity.outputs.attestation_signer_commit }}
           CI_VERIFIED_BUILDER_IMAGE_VERSION: ${{ steps.identity.outputs.builder_image_version }}
           CI_CREATED_BUILDER_IMAGE_VERSION: ${{ steps.builder.outputs.image_version }}
         run: |
@@ -174,6 +203,8 @@ jobs:
           [[ "$CI_VERIFIED_DIGEST" == "$CI_BUILT_DIGEST" ]]
           [[ "$CI_VERIFIED_MANIFEST_DIGEST" == "$CI_CREATED_MANIFEST_DIGEST" ]]
           [[ "$CI_VERIFIED_SOURCE_COMMIT" == "$CI_CREATED_SOURCE_COMMIT" ]]
+          [[ "$CI_VERIFIED_ATTESTATION_SOURCE_COMMIT" == "$CI_CREATED_ATTESTATION_SOURCE_COMMIT" ]]
+          [[ "$CI_VERIFIED_ATTESTATION_SIGNER_COMMIT" == "$CI_CREATED_ATTESTATION_SIGNER_COMMIT" ]]
           [[ "$CI_VERIFIED_BUILDER_IMAGE_VERSION" == "$CI_CREATED_BUILDER_IMAGE_VERSION" ]]
 
       - name: Upload canonical image input manifest

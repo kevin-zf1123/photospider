@@ -376,6 +376,8 @@ jobs:
     if: needs.ci-image-change.outputs.changed == 'false'
     runs-on: ubuntu-24.04
     outputs:
+      attestation_signer_commit: ${{ steps.identity.outputs.attestation_signer_commit }}
+      attestation_source_commit: ${{ steps.identity.outputs.attestation_source_commit }}
       digest: ${{ steps.identity.outputs.digest }}
       image: ${{ steps.identity.outputs.image }}
       manifest_digest: ${{ steps.identity.outputs.manifest_digest }}
@@ -426,6 +428,7 @@ jobs:
     uses: ./.github/workflows/build-ci-image.yml
     with:
       candidate_commit: ${{ github.sha }}
+      workflow_commit: ${{ github.workflow_sha }}
 
   published-image-integration-readonly:
     needs: [change-classification, ci-image-change, ci-image-identity]
@@ -448,6 +451,8 @@ jobs:
       checkout_ref: ${{ github.event.pull_request.head.sha || github.sha }}
       checkout_repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
       image_digest: ${{ needs.ci-image-identity.outputs.digest }}
+      image_attestation_signer_commit: ${{ needs.ci-image-identity.outputs.attestation_signer_commit }}
+      image_attestation_source_commit: ${{ needs.ci-image-identity.outputs.attestation_source_commit }}
       image_kind: published
       image_manifest_digest: ${{ needs.ci-image-identity.outputs.manifest_digest }}
       image_ref: ${{ needs.ci-image-identity.outputs.image }}
@@ -479,6 +484,8 @@ jobs:
       checkout_ref: ${{ github.sha }}
       checkout_repository: ${{ github.repository }}
       image_digest: ${{ needs.ci-image-identity.outputs.digest }}
+      image_attestation_signer_commit: ${{ needs.ci-image-identity.outputs.attestation_signer_commit }}
+      image_attestation_source_commit: ${{ needs.ci-image-identity.outputs.attestation_source_commit }}
       image_kind: published
       image_manifest_digest: ${{ needs.ci-image-identity.outputs.manifest_digest }}
       image_ref: ${{ needs.ci-image-identity.outputs.image }}
@@ -510,6 +517,8 @@ jobs:
       checkout_ref: ${{ github.sha }}
       checkout_repository: ${{ github.repository }}
       image_digest: ${{ needs.candidate-image-build.outputs.digest }}
+      image_attestation_signer_commit: ${{ needs.candidate-image-build.outputs.attestation_signer_commit }}
+      image_attestation_source_commit: ${{ needs.candidate-image-build.outputs.attestation_source_commit }}
       image_kind: candidate
       image_manifest_digest: ${{ needs.candidate-image-build.outputs.manifest_digest }}
       image_ref: ${{ needs.candidate-image-build.outputs.image_ref }}
@@ -570,6 +579,7 @@ jobs:
         env:
           CI_IMAGE_PROMOTION_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ci-image-promotion
           CI_PROMOTION_BRANCH: ${{ github.ref_name }}
+          CI_PROMOTION_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: >-
           bash ci/scripts/ci_image_promote.sh
           --repository "${{ github.repository }}"
@@ -577,6 +587,7 @@ jobs:
           --expected-digest "${{ needs.candidate-image-build.outputs.digest }}"
           --candidate-commit "${{ github.sha }}"
           --source-commit "${{ needs.candidate-image-build.outputs.source_commit }}"
+          --workflow-commit "$CI_PROMOTION_WORKFLOW_COMMIT"
           --manifest-digest "${{ needs.candidate-image-build.outputs.manifest_digest }}"
           --builder-image-version "${{ needs.candidate-image-build.outputs.builder_image_version }}"
           --event-name "${{ github.event_name }}"

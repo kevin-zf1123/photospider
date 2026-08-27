@@ -382,8 +382,8 @@ class ImageManifestContractTest(unittest.TestCase):
             self.assertRegex(failed.stderr, r"regular file|symbolic links")
             self.assertFalse(cli_output.exists())
 
-    def test_publisher_rejects_head_after_last_image_input_commit(self) -> None:
-        """Reject a later manual/push HEAD before registry publication can begin."""
+    def test_source_resolver_accepts_nonimage_candidate_and_rejects_drift(self) -> None:
+        """Bind A->B without collapsing source, candidate, and workflow commits."""
         with tempfile.TemporaryDirectory() as temporary_text:
             root = Path(temporary_text) / "repository"
             lock = root / "ci/locks/ci-image-lock.json"
@@ -405,7 +405,8 @@ class ImageManifestContractTest(unittest.TestCase):
             accepted = run_command(
                 sys.executable, SCRIPTS / "ci_image_manifest.py",
                 "--repo-root", root,
-                "publish-source-commit",
+                "resolve-source-commit",
+                "--candidate-commit", image_source,
                 "--workflow-commit", image_source,
             )
             self.assertEqual(accepted.stdout.strip(), image_source)
@@ -415,23 +416,122 @@ class ImageManifestContractTest(unittest.TestCase):
             run_command("git", "-C", root, "commit", "-q", "-m", "unrelated")
             later_head = run_command("git", "-C", root, "rev-parse", "HEAD").stdout.strip()
             self.assertNotEqual(later_head, image_source)
-            failed = run_command(
+            accepted_later = run_command(
                 sys.executable, SCRIPTS / "ci_image_manifest.py",
                 "--repo-root", root,
-                "publish-source-commit",
+                "resolve-source-commit",
+                "--candidate-commit", later_head,
                 "--workflow-commit", later_head,
+            )
+            self.assertEqual(accepted_later.stdout.strip(), image_source)
+            run_command(
+                sys.executable, SCRIPTS / "ci_image_manifest.py",
+                "--repo-root", root,
+                "verify-source-binding",
+                "--candidate-commit", later_head,
+                "--source-commit", image_source,
+                "--require-head",
+            )
+            swapped = run_command(
+                sys.executable, SCRIPTS / "ci_image_manifest.py",
+                "--repo-root", root,
+                "verify-source-binding",
+                "--candidate-commit", image_source,
+                "--source-commit", later_head,
                 expect_success=False,
             )
-            self.assertIn("differs from workflow commit", failed.stderr)
-            self.assertIn("refusing an unattestable publication", failed.stderr)
+            self.assertIn("not an ancestor", swapped.stderr)
+
+            def attestation_entry(candidate: str, signer: str) -> dict[str, object]:
+                """Return one minimal verified-certificate fixture entry."""
+                return {
+                    "attestation": {},
+                    "verificationResult": {
+                        "signature": {
+                            "certificate": {
+                                "buildSignerDigest": signer,
+                                "sourceRepositoryDigest": candidate,
+                            }
+                        }
+                    },
+                }
+
+            evidence = Path(temporary_text) / "same-digest-attestations.json"
+            evidence.write_text(
+                json.dumps(
+                    [
+                        attestation_entry(image_source, image_source),
+                        attestation_entry(later_head, later_head),
+                    ],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            selected = run_command(
+                sys.executable,
+                SCRIPTS / "ci_image_manifest.py",
+                "--repo-root", root,
+                "attestation-identities",
+                "--attestation-json", evidence,
+                "--image-source-commit", image_source,
+                "--consumer-candidate-commit", later_head,
+            )
+            self.assertEqual(
+                selected.stdout.splitlines(), [later_head, later_head]
+            )
+            evidence.write_text(
+                json.dumps(
+                    [
+                        attestation_entry(later_head, later_head),
+                        attestation_entry(later_head, image_source),
+                    ],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            ambiguous = run_command(
+                sys.executable,
+                SCRIPTS / "ci_image_manifest.py",
+                "--repo-root", root,
+                "attestation-identities",
+                "--attestation-json", evidence,
+                "--image-source-commit", image_source,
+                "--consumer-candidate-commit", later_head,
+                expect_success=False,
+            )
+            self.assertIn("lack one newest", ambiguous.stderr)
+
+            (root / "Dockerfile.ci").write_text(
+                "FROM scratch\n# changed canonical input\n", encoding="utf-8"
+            )
+            run_command("git", "-C", root, "add", "--", "Dockerfile.ci")
+            run_command("git", "-C", root, "commit", "-q", "-m", "image drift")
+            drift_head = run_command(
+                "git", "-C", root, "rev-parse", "HEAD"
+            ).stdout.strip()
+            drift = run_command(
+                sys.executable, SCRIPTS / "ci_image_manifest.py",
+                "--repo-root", root,
+                "verify-source-binding",
+                "--candidate-commit", drift_head,
+                "--source-commit", image_source,
+                "--require-head",
+                expect_success=False,
+            )
+            self.assertRegex(drift.stderr, r"newest canonical-input|drift")
 
         workflow = (REPO_ROOT / ".github/workflows/build-ci-image.yml").read_text(
             encoding="utf-8"
         )
-        guard = workflow.index("publish-source-commit")
+        guard = workflow.index("resolve-source-commit")
         self.assertLess(guard, workflow.index("uses: docker/login-action@"))
         self.assertLess(guard, workflow.index("uses: docker/build-push-action@"))
-        self.assertNotIn('--source-commit "${{ github.sha }}"', workflow)
+        self.assertIn('--candidate-commit "${{ inputs.candidate_commit }}"', workflow)
+        self.assertIn('--workflow-commit "${{ inputs.workflow_commit }}"', workflow)
 
     def test_manifest_rejects_builder_removed_from_rollout_authority(self) -> None:
         """Reject retained builder provenance removed by a reviewed lock update."""
@@ -524,7 +624,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 "  printf 'mock attestation rejection\\n' >&2\n"
                 "  exit 41\n"
                 "fi\n"
-                "printf '[]\\n'\n",
+                "printf '%s\\n' \"$CI_TEST_ATTESTATION_JSON\"\n",
                 encoding="utf-8",
             )
             gh.chmod(0o755)
@@ -536,6 +636,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 "for argument in \"$@\"; do\n"
                 "  case $argument in\n"
                 "    source-commit) event=python-source-commit ;;\n"
+                "    attestation-identities) event=python-attestation-identities ;;\n"
                 "    builder-from-labels) event=python-builder-from-labels ;;\n"
                 "    create) event=python-manifest-create ;;\n"
                 "    verify-labels) event=python-verify-labels ;;\n"
@@ -559,15 +660,39 @@ class ImageManifestContractTest(unittest.TestCase):
             python.chmod(0o755)
             output = temporary / "identity.env"
             image_digest = "sha256:" + "4" * 64
+            attestation_source = COMMIT_A
+            attestation_signer = COMMIT_B
+            attestation_json = json.dumps(
+                [
+                    {
+                        "attestation": {},
+                        "verificationResult": {
+                            "signature": {
+                                "certificate": {
+                                    "buildSignerDigest": attestation_signer,
+                                    "sourceRepositoryDigest": attestation_source,
+                                }
+                            }
+                        },
+                    }
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            )
             environment = {
                 "PATH": f"{binary_dir}:{os.environ['PATH']}",
                 "CI_ARTIFACT_DIR": str(temporary / "artifacts"),
                 "CI_IMAGE_EXPECTED_MANIFEST_DIGEST": digest,
+                "CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT": attestation_signer,
+                "CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT": attestation_source,
                 "CI_IMAGE_EXPECTED_SOURCE_COMMIT": source,
                 "CI_IMAGE_EXPECTED_WORKFLOW_COMMIT": COMMIT_A,
                 "CI_IMAGE_OUTPUT_FILE": str(output),
                 "CI_IMAGE_REPOSITORY": "kevin-zf1123/photospider",
                 "CI_TEST_BUILDER_IMAGE_VERSION": LINUX_ROLLOUT_VERSION,
+                "CI_TEST_ATTESTATION_JSON": attestation_json,
+                "CI_TEST_ATTESTATION_SIGNER_COMMIT": attestation_signer,
+                "CI_TEST_ATTESTATION_SOURCE_COMMIT": attestation_source,
                 "CI_TEST_COMMAND_LOG": str(command_log),
                 "CI_TEST_DOCKER_LOG": str(docker_log),
                 "CI_TEST_GH_LOG": str(gh_log),
@@ -590,7 +715,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 (temporary / "artifacts/attestation-verification.json").read_text(
                     encoding="utf-8"
                 ),
-                "[]\n",
+                attestation_json + "\n",
             )
             self.assertTrue(
                 (temporary / "artifacts/verifier-linux-runner-identity.json").is_file()
@@ -603,16 +728,23 @@ class ImageManifestContractTest(unittest.TestCase):
                 f"image=ghcr.io/kevin-zf1123/photospider/photospider-ci@{image_digest}",
                 outputs,
             )
+            self.assertIn(
+                f"attestation_source_commit={attestation_source}", outputs
+            )
+            self.assertIn(
+                f"attestation_signer_commit={attestation_signer}", outputs
+            )
             gh_arguments = gh_log.read_text(encoding="utf-8")
             self.assertIn("attestation verify", gh_arguments)
             self.assertIn("--deny-self-hosted-runners", gh_arguments)
-            self.assertIn(f"--source-digest {source}", gh_arguments)
-            self.assertIn(f"--signer-digest {source}", gh_arguments)
+            self.assertIn(f"--source-digest {attestation_source}", gh_arguments)
+            self.assertIn(f"--signer-digest {attestation_signer}", gh_arguments)
             command_order = command_log.read_text(encoding="utf-8").splitlines()
             required_order = (
                 "docker-imagetools-inspect",
                 "python-source-commit",
                 "gh-attestation",
+                "python-attestation-identities",
                 "python-runner-verify",
                 "docker-pull",
                 "docker-image-inspect",
@@ -645,6 +777,7 @@ class ImageManifestContractTest(unittest.TestCase):
             self.assertIn("gh-attestation", failed_order)
             for forbidden_event in (
                 "python-runner-verify",
+                "python-attestation-identities",
                 "docker-pull",
                 "docker-image-inspect",
                 "python-builder-from-labels",
@@ -693,6 +826,36 @@ class ImageManifestContractTest(unittest.TestCase):
             )
             self.assertIn(f"image={exact_locator}", exact_output.read_text(encoding="utf-8"))
 
+            published_output = temporary / "published-discovery.env"
+            gh_log.write_text("", encoding="utf-8")
+            published_environment = {
+                key: value
+                for key, value in candidate_environment.items()
+                if key
+                not in {
+                    "CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT",
+                    "CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT",
+                }
+            }
+            published_environment.update(
+                {
+                    "CI_ARTIFACT_DIR": str(temporary / "published-artifacts"),
+                    "CI_IMAGE_OUTPUT_FILE": str(published_output),
+                }
+            )
+            run_command(
+                "bash",
+                SCRIPTS / "ci_image_verify.sh",
+                environment=published_environment,
+            )
+            published_gh = gh_log.read_text(encoding="utf-8")
+            self.assertNotIn("--source-digest", published_gh)
+            self.assertNotIn("--signer-digest", published_gh)
+            self.assertIn(
+                f"attestation_source_commit={attestation_source}",
+                published_output.read_text(encoding="utf-8"),
+            )
+
             forged_cases = (
                 (
                     "manifest",
@@ -703,6 +866,16 @@ class ImageManifestContractTest(unittest.TestCase):
                     "source",
                     {"CI_IMAGE_EXPECTED_SOURCE_COMMIT": COMMIT_B},
                     "source commit differs",
+                ),
+                (
+                    "attestation-source",
+                    {"CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT": COMMIT_B},
+                    "evidence differs from expected source/signer",
+                ),
+                (
+                    "attestation-signer",
+                    {"CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT": COMMIT_A},
+                    "evidence differs from expected source/signer",
                 ),
                 (
                     "workflow",
@@ -777,7 +950,7 @@ class ImageManifestContractTest(unittest.TestCase):
         module._verify_ci_image_resolver_order(REPO_ROOT)
 
         source = (SCRIPTS / "ci_image_verify.sh").read_text(encoding="utf-8")
-        attestation = 'attestation_json=$(gh attestation verify "oci://$exact_image" \\'
+        attestation = 'attestation_json=$("${attestation_command[@]}")'
         pull = 'docker pull "$exact_image" >/dev/null'
         self.assertEqual(source.count(attestation), 1)
         self.assertEqual(source.count(pull), 1)
@@ -791,6 +964,30 @@ class ImageManifestContractTest(unittest.TestCase):
             (
                 "commented-attestation",
                 source.replace(attestation, "# " + attestation, 1),
+            ),
+            (
+                "collapsed-attestation-source",
+                source.replace(
+                    '--source-digest "$EXPECTED_ATTESTATION_SOURCE_COMMIT"',
+                    '--source-digest "$source_commit"',
+                    1,
+                ),
+            ),
+            (
+                "collapsed-attestation-signer",
+                source.replace(
+                    '--signer-digest "$EXPECTED_ATTESTATION_SIGNER_COMMIT"',
+                    '--signer-digest "$source_commit"',
+                    1,
+                ),
+            ),
+            (
+                "missing-attestation-identity-parser",
+                source.replace(
+                    '--repo-root "$REPO_ROOT" attestation-identities',
+                    '--repo-root "$REPO_ROOT" source-commit',
+                    1,
+                ),
             ),
         ):
             with self.subTest(mutation=label), tempfile.TemporaryDirectory() as text:
@@ -868,9 +1065,11 @@ class ImageManifestContractTest(unittest.TestCase):
             hosted.index("ci_image_manifest.py create"),
         )
         self.assertLess(
-            hosted.index("publish-source-commit"),
+            hosted.index("resolve-source-commit"),
             hosted.index("ci_image_manifest.py create"),
         )
+        self.assertIn('--candidate-commit "${GITHUB_SHA:?}"', hosted)
+        self.assertIn('--workflow-commit "${GITHUB_WORKFLOW_SHA:?}"', hosted)
         self.assertIn(
             '--builder-runner-identity "$builder_runner_identity"', hosted
         )
@@ -1047,6 +1246,9 @@ class ImagePromotionContractTest(unittest.TestCase):
         self.assertIn(
             "CI_PROMOTION_BRANCH: ${{ github.ref_name }}", step_text
         )
+        self.assertIn(
+            "CI_PROMOTION_WORKFLOW_COMMIT: ${{ github.workflow_sha }}", step_text
+        )
 
         try:
             run_header = step_lines.index("        run: >-")
@@ -1126,6 +1328,7 @@ class ImagePromotionContractTest(unittest.TestCase):
                                 root / f"{label}-evidence"
                             ),
                             "CI_PROMOTION_BRANCH": branch,
+                            "CI_PROMOTION_WORKFLOW_COMMIT": COMMIT_A,
                             "CI_TEST_PROMOTION_ARGV_LOG": str(argv_log),
                         },
                         text=True,
@@ -1307,12 +1510,16 @@ class ImagePromotionContractTest(unittest.TestCase):
                     cwd=repository,
                 )
 
-            def manifest_for(commit: str, label: str) -> str:
+            def manifest_for(
+                commit: str, label: str, *, source_commit: str | None = None
+            ) -> str:
                 """Measure one fixture commit with the production manifest helper.
 
                 Args:
                     commit: Exact fixture checkout/source commit.
                     label: Unique output basename for the canonical manifest.
+                    source_commit: Optional older canonical-input source bound
+                        to the manifest while measuring ``commit`` bytes.
 
                 Returns:
                     Lowercase SHA-256 digest of the canonical manifest bytes.
@@ -1333,7 +1540,7 @@ class ImagePromotionContractTest(unittest.TestCase):
                     repository,
                     "create",
                     "--source-commit",
-                    commit,
+                    source_commit or commit,
                     "--repository",
                     "kevin-zf1123/photospider",
                     "--builder-runner-identity",
@@ -1549,6 +1756,7 @@ class ImagePromotionContractTest(unittest.TestCase):
                 *,
                 candidate_commit: str = commit_a,
                 source_commit: str | None = None,
+                workflow_commit: str | None = None,
                 manifest_digest: str = manifest_a,
                 image_digest: str = IMAGE_DIGEST,
                 event_name: str = "push",
@@ -1567,6 +1775,7 @@ class ImagePromotionContractTest(unittest.TestCase):
                     label: Unique filesystem-safe evidence label.
                     candidate_commit: Tested product and checkout commit.
                     source_commit: Image source commit, defaulting to candidate.
+                    workflow_commit: Protected signer commit, defaulting to candidate.
                     manifest_digest: Candidate canonical input-manifest digest.
                     image_digest: Exact tested OCI digest.
                     event_name: Protected trigger identity.
@@ -1597,6 +1806,7 @@ class ImagePromotionContractTest(unittest.TestCase):
                 output = root / f"{label}.outputs"
                 sequence_state = root / f"{label}.inspect-sequence.json"
                 actual_source = source_commit or candidate_commit
+                actual_workflow = workflow_commit or candidate_commit
                 image = f"{image_repository}@{image_digest}"
                 completed = run_command(
                     "bash",
@@ -1611,6 +1821,8 @@ class ImagePromotionContractTest(unittest.TestCase):
                     candidate_commit,
                     "--source-commit",
                     actual_source,
+                    "--workflow-commit",
+                    actual_workflow,
                     "--manifest-digest",
                     manifest_digest,
                     "--builder-image-version",
@@ -1954,7 +2166,10 @@ class ImagePromotionContractTest(unittest.TestCase):
                 source_commit=COMMIT_B,
                 expect_success=False,
             )
-            self.assertIn("candidate/source commits", mismatched_source.stderr)
+            self.assertRegex(
+                mismatched_source.stderr,
+                r"rev-parse.*failed|image source commit does not resolve|not newest canonical-input",
+            )
             self.assertEqual(calls, "")
             self.assertEqual(inspected, [])
 
@@ -2108,7 +2323,7 @@ class ImagePromotionContractTest(unittest.TestCase):
                 expect_success=False,
             )
             self.assertIn(
-                "manifest differs for the candidate source commit",
+                "candidate manifest differs from retained source/input identity",
                 manifest_mismatch.stderr,
             )
             self.assertEqual(calls, "")
@@ -2147,6 +2362,43 @@ class ImagePromotionContractTest(unittest.TestCase):
                 ],
                 IMAGE_DIGEST,
             )
+            docs_manifest = manifest_for(
+                docs_commit,
+                "docs-only-candidate-b",
+                source_commit=commit_a,
+            )
+            self.assertEqual(docs_manifest, manifest_a)
+            _, docs_candidate_outputs, _, _ = invoke(
+                "CI/docs-only",
+                "docs-only-candidate-b",
+                candidate_commit=docs_commit,
+                source_commit=commit_a,
+                workflow_commit=docs_commit,
+                manifest_digest=docs_manifest,
+            )
+            self.assertIsNotNone(docs_candidate_outputs)
+            self.assertEqual(docs_candidate_outputs["status"], "promoted")
+            self.assertEqual(
+                docs_candidate_outputs["sha_tag"], f"sha-{docs_commit}"
+            )
+            self.assertEqual(
+                registry_state()[
+                    f"{image_repository}:{docs_candidate_outputs['branch_tag']}"
+                ],
+                IMAGE_DIGEST,
+            )
+
+            swapped_source, _, calls, inspected = invoke(
+                "CI/docs-only",
+                "docs-only-swapped-source",
+                candidate_commit=commit_a,
+                source_commit=docs_commit,
+                workflow_commit=commit_a,
+                expect_success=False,
+            )
+            self.assertIn("not an ancestor", swapped_source.stderr)
+            self.assertEqual(calls, "")
+            self.assertEqual(inspected, [])
 
             empty_tree = run_local(
                 "git", "mktree", cwd=repository, input_text=""
@@ -8260,8 +8512,16 @@ class LockSurfaceContractTest(unittest.TestCase):
             ),
             (
                 "workflow-call-input-downgrade",
-                "        required: true\n",
-                "        required: false\n",
+                (
+                    "      candidate_commit:\n"
+                    "        description: Exact trusted push candidate whose checkout is tested and tagged.\n"
+                    "        required: true\n"
+                ),
+                (
+                    "      candidate_commit:\n"
+                    "        description: Exact trusted push candidate whose checkout is tested and tagged.\n"
+                    "        required: false\n"
+                ),
             ),
             (
                 "producer-package-permission-downgrade",

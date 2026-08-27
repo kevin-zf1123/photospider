@@ -2,16 +2,16 @@
 """Create and verify the canonical Photospider CI-image input manifest.
 
 The manifest hashes every repository-protected build input named by the image
-lock and binds those bytes to the exact source commit, repository, base image,
-full-SHA builder action, and version/full-SHA identities of the installer and
-suite-gate helpers. Before a workflow may publish, the same helper
-requires the workflow commit to equal the newest canonical image-input commit;
-this makes the producer's implicit GitHub attestation source digest identical
-to the source identity expected by consumers. The output is canonical JSON
-with a final newline. Promotion freshness uses the same protected path lock and
-manifest builder against a freshly fetched branch-tip worktree, never a copied
-path list or candidate-provided identity. No candidate-owned script or generated
-value is trusted as an input list.
+lock and binds those bytes to the exact image-source commit, repository, base
+image, full-SHA builder action, and version/full-SHA identities of the installer
+and suite-gate helpers. The protected resolver separately proves that this
+source is the newest canonical-input-changing ancestor of the tested candidate
+and that the canonical inputs do not drift from source to candidate. GitHub
+attestation source/signer identities remain independent candidate/workflow
+commits. The output is canonical JSON with a final newline. Promotion freshness
+uses the same protected path lock and manifest builder against a freshly fetched
+branch-tip worktree, never a copied path list or candidate-provided identity.
+No candidate-owned script or generated value is trusted as an input list.
 """
 
 from __future__ import annotations
@@ -525,18 +525,164 @@ def create_manifest(
     }
 
 
-def _git_source_commit(root: Path) -> str:
-    """Return the newest commit that changed any canonical image input path."""
-    lock_path = root / _IMAGE_LOCK_RELATIVE_PATH
-    lock = _load_json(lock_path)
-    paths = _image_input_paths(lock, str(lock_path))
-    command = ["git", "-C", str(root), "log", "-1", "--format=%H", "--", *paths]
-    completed = subprocess.run(command, check=False, text=True, capture_output=True)
-    commit = completed.stdout.strip()
-    if completed.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", commit):
-        detail = completed.stderr.strip() or "no exact image-input commit found"
-        raise ManifestError(f"cannot resolve image source commit: {detail}")
+def _git_source_commit(root: Path, candidate_commit: str = "HEAD") -> str:
+    """Return the newest canonical-input-changing ancestor of one candidate.
+
+    Args:
+        root: Repository containing the immutable candidate and its history.
+        candidate_commit: Exact commit/ref whose own strict image-input lock
+            supplies the sole path authority for the history query.
+
+    Returns:
+        The lowercase full SHA of the newest commit at or before the candidate
+        that touched one canonical image input.
+
+    Raises:
+        ManifestError: The candidate, its lock/path set, Git history query, or
+            resulting commit is missing, malformed, or ambiguous.
+
+    Note:
+        The path list comes from the candidate tree, not from an untrusted
+        caller argument. ``git log <candidate> -- <paths>`` therefore resolves
+        the content-source identity without requiring it to equal the candidate
+        or protected workflow commit.
+    """
+    try:
+        resolved_candidate = _git_bytes(
+            root, "rev-parse", "--verify", f"{candidate_commit}^{{commit}}"
+        ).decode("ascii").strip()
+    except UnicodeError as error:
+        raise ManifestError("image candidate commit is not ASCII") from error
+    if re.fullmatch(r"[0-9a-f]{40}", resolved_candidate) is None:
+        raise ManifestError("image candidate did not resolve to one full commit")
+    paths = _tree_image_input_paths(root, resolved_candidate)
+    if paths is None:
+        raise ManifestError("image candidate CI image lock is absent")
+    try:
+        commit = _git_bytes(
+            root,
+            "log",
+            "-1",
+            "--format=%H",
+            resolved_candidate,
+            "--",
+            *paths,
+        ).decode("ascii").strip()
+    except UnicodeError as error:
+        raise ManifestError("image source commit is not ASCII") from error
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise ManifestError("cannot resolve one exact image source commit")
     return commit
+
+
+def _validate_candidate_source_binding(
+    root: Path, candidate_commit: str, source_commit: str, *, require_head: bool
+) -> list[str]:
+    """Prove the four-identity model's candidate-to-image-source edge.
+
+    Args:
+        root: Repository containing both exact commits and canonical input lock.
+        candidate_commit: Tested checkout identity.
+        source_commit: Claimed newest canonical-input-changing ancestor.
+        require_head: Whether the repository's current ``HEAD`` must equal the
+            tested candidate, as required by producer and promotion callers.
+
+    Returns:
+        The candidate tree's validated canonical input path list.
+
+    Raises:
+        ManifestError: Either identity is malformed/missing; ``HEAD`` differs
+            when required; source is not an ancestor or the exact newest
+            canonical-input-changing ancestor; source/candidate lock authority
+            differs; or any canonical input drifts after the source commit.
+
+    Note:
+        A zero diff is measured only over the strict self-including lock path
+        authority. Parser, test, and documentation changes outside that set do
+        not become image inputs merely to force commit equality.
+    """
+    for label, value in (
+        ("candidate", candidate_commit),
+        ("image source", source_commit),
+    ):
+        if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+            raise ManifestError(f"{label} commit must be a lowercase full SHA")
+        try:
+            resolved = _git_bytes(
+                root, "rev-parse", "--verify", f"{value}^{{commit}}"
+            ).decode("ascii").strip()
+        except UnicodeError as error:
+            raise ManifestError(f"{label} commit is not ASCII") from error
+        if resolved != value:
+            raise ManifestError(f"{label} commit does not resolve exactly")
+    if require_head:
+        try:
+            head = _git_bytes(
+                root, "rev-parse", "--verify", "HEAD^{commit}"
+            ).decode("ascii").strip()
+        except UnicodeError as error:
+            raise ManifestError("repository HEAD is not ASCII") from error
+        if head != candidate_commit:
+            raise ManifestError("repository HEAD differs from the candidate commit")
+
+    ancestry = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "merge-base",
+            "--is-ancestor",
+            source_commit,
+            candidate_commit,
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if ancestry.returncode == 1:
+        raise ManifestError("image source commit is not an ancestor of candidate")
+    if ancestry.returncode != 0:
+        detail = ancestry.stderr.decode(
+            "utf-8", errors="backslashreplace"
+        ).strip()
+        raise ManifestError(
+            "cannot verify image source ancestry"
+            + (f": {detail}" if detail else "")
+        )
+
+    candidate_paths = _tree_image_input_paths(root, candidate_commit)
+    source_paths = _tree_image_input_paths(root, source_commit)
+    if candidate_paths is None or source_paths is None:
+        raise ManifestError("candidate/source canonical input lock is absent")
+    if candidate_paths != source_paths:
+        raise ManifestError("candidate/source canonical input authority differs")
+    resolved_source = _git_source_commit(root, candidate_commit)
+    if resolved_source != source_commit:
+        raise ManifestError(
+            f"claimed image source {source_commit} is not newest canonical-input "
+            f"ancestor {resolved_source}"
+        )
+    drift = _git_bytes(
+        root,
+        "diff",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        f"{source_commit}..{candidate_commit}",
+        "--",
+        *candidate_paths,
+    )
+    if drift:
+        if not drift.endswith(b"\0"):
+            raise ManifestError("canonical input drift inventory is malformed")
+        paths = [
+            json.dumps(os.fsdecode(value), ensure_ascii=True)
+            for value in drift[:-1].split(b"\0")
+            if value
+        ]
+        raise ManifestError(
+            "canonical image inputs drift after source commit: " + ", ".join(paths)
+        )
+    return candidate_paths
 
 
 def _git_bytes(root: Path, *arguments: str) -> bytes:
@@ -857,12 +1003,13 @@ def _command_promotion_freshness(arguments: argparse.Namespace) -> None:
     candidate_source_commit = arguments.candidate_source_commit
     candidate_manifest_digest = arguments.candidate_manifest_digest
     candidate_builder_image_version = arguments.candidate_builder_image_version
+    workflow_commit = arguments.workflow_commit
     branch_name = arguments.branch
     repository = arguments.repository
     if re.fullmatch(r"[0-9a-f]{40}", candidate_commit) is None:
         raise ManifestError("promotion candidate commit must be a lowercase full SHA")
-    if candidate_source_commit != candidate_commit:
-        raise ManifestError("promotion candidate and image source commits must match")
+    if re.fullmatch(r"[0-9a-f]{40}", workflow_commit) is None:
+        raise ManifestError("promotion workflow commit must be a lowercase full SHA")
     if re.fullmatch(r"[0-9a-f]{64}", candidate_manifest_digest) is None:
         raise ManifestError("promotion candidate manifest digest is malformed")
     try:
@@ -877,11 +1024,25 @@ def _command_promotion_freshness(arguments: argparse.Namespace) -> None:
         raise ManifestError("promotion branch must be main or CI/**")
     branch_ref = f"refs/heads/{branch_name}"
     _run_git(arguments.repo_root, "check-ref-format", branch_ref)
-    checkout_commit = _run_git(
-        arguments.repo_root, "rev-parse", "--verify", "HEAD^{commit}"
-    ).stdout.strip()
-    if checkout_commit != candidate_commit:
-        raise ManifestError("promotion checkout differs from the candidate commit")
+    _validate_candidate_source_binding(
+        arguments.repo_root,
+        candidate_commit,
+        candidate_source_commit,
+        require_head=True,
+    )
+    candidate_manifest = create_manifest(
+        arguments.repo_root,
+        candidate_source_commit,
+        repository,
+        builder_runner,
+    )
+    measured_candidate_manifest_digest = _sha256_bytes(
+        _canonical_bytes(candidate_manifest)
+    )
+    if measured_candidate_manifest_digest != candidate_manifest_digest:
+        raise ManifestError(
+            "candidate manifest differs from retained source/input identity"
+        )
 
     scratch_root = arguments.scratch_root
     if scratch_root.is_symlink() or not scratch_root.is_dir():
@@ -999,6 +1160,7 @@ def _command_promotion_freshness(arguments: argparse.Namespace) -> None:
         "repository": repository,
         "schema": "photospider-ci-image-promotion-freshness-v1",
         "status": status,
+        "workflow_commit": workflow_commit,
     }
     _write_output(arguments.output, _canonical_bytes(evidence))
     print(status)
@@ -1057,25 +1219,59 @@ def _command_source_commit(arguments: argparse.Namespace) -> None:
     print(_git_source_commit(arguments.repo_root))
 
 
-def _command_publish_source_commit(arguments: argparse.Namespace) -> None:
-    """Emit a publishable source only when the workflow can attest it exactly.
+def _command_resolve_source_commit(arguments: argparse.Namespace) -> None:
+    """Resolve and prove image source without collapsing commit identities.
 
-    The GitHub artifact attestation records the workflow checkout commit as its
-    source digest. Consumers instead derive the last commit touching canonical
-    image inputs. Publishing is therefore safe only when those identities are
-    equal; a manual run or multi-commit push from a later unrelated HEAD fails
-    before registry authentication or image publication.
+    Args:
+        arguments: Candidate/workflow identities and repository root parsed by
+            the protected CLI.
+
+    Returns:
+        None after printing the candidate's exact image-source ancestor.
+
+    Raises:
+        ManifestError: The workflow identity is non-canonical or the candidate,
+            source ancestry, last-change authority, checkout binding, or
+            canonical-input zero-drift proof fails.
+
+    Note:
+        ``workflow_commit`` is carried and syntax-validated here but deliberately
+        remains a distinct signer/control identity. The protected workflow
+        mapping independently binds it to ``github.workflow_sha``.
     """
-    if not re.fullmatch(r"[0-9a-f]{40}", arguments.workflow_commit):
+    if re.fullmatch(r"[0-9a-f]{40}", arguments.workflow_commit) is None:
         raise ManifestError("workflow commit must be a lowercase full SHA")
-    source_commit = _git_source_commit(arguments.repo_root)
-    if source_commit != arguments.workflow_commit:
-        raise ManifestError(
-            "canonical image source commit "
-            f"{source_commit} differs from workflow commit {arguments.workflow_commit}; "
-            "refusing an unattestable publication"
-        )
+    source_commit = _git_source_commit(arguments.repo_root, arguments.candidate_commit)
+    _validate_candidate_source_binding(
+        arguments.repo_root,
+        arguments.candidate_commit,
+        source_commit,
+        require_head=True,
+    )
     print(source_commit)
+
+
+def _command_verify_source_binding(arguments: argparse.Namespace) -> None:
+    """Verify a supplied candidate/source pair using protected Git authority.
+
+    Args:
+        arguments: Candidate/source identities and repository root parsed by
+            the protected CLI.
+
+    Returns:
+        None after printing the verified image-source commit.
+
+    Raises:
+        ManifestError: Candidate/source ancestry, last-change authority,
+            canonical path identity, or zero-drift validation fails.
+    """
+    _validate_candidate_source_binding(
+        arguments.repo_root,
+        arguments.candidate_commit,
+        arguments.source_commit,
+        require_head=arguments.require_head,
+    )
+    print(arguments.source_commit)
 
 
 def _command_verify(arguments: argparse.Namespace) -> None:
@@ -1121,6 +1317,152 @@ def _published_image_lock(root: Path) -> dict[str, str]:
     ):
         raise ManifestError("published image lock is malformed")
     return published
+
+
+def _command_attestation_identities(arguments: argparse.Namespace) -> None:
+    """Extract one unique source/signer pair from verified GitHub evidence.
+
+    Args:
+        arguments: Verified JSON, image-source/current-candidate identities,
+            and optional exact producer source/signer expectations.
+
+    Returns:
+        None after printing the certificate-bound source repository digest and
+        build signer digest on two separate lines.
+
+    Raises:
+        ManifestError: Evidence is empty/malformed, lacks protected certificate
+            fields, contains non-canonical commit identities, disagrees with an
+            explicit pair, or has no unique newest ancestry/zero-drift pair for
+            published discovery.
+
+    Note:
+        Only ``verificationResult.signature.certificate`` is consumed. GitHub
+        CLI documents that certificate data is populated from the Actions OIDC
+        token; candidate-controllable predicate metadata is intentionally
+        ignored. An explicit producer pair must be the sole verified pair. For
+        a later published consumer, multiple same-digest rerun attestations are
+        reduced to the unique newest source candidate that is an ancestor of
+        the consumer and still binds the exact image-source inputs. Incomparable
+        or same-candidate/different-signer evidence fails closed.
+    """
+    evidence = _load_json(arguments.attestation_json)
+    if not isinstance(evidence, list) or not evidence:
+        raise ManifestError("verified attestation evidence must be a non-empty array")
+    identities: set[tuple[str, str]] = set()
+    for index, item in enumerate(evidence):
+        if not isinstance(item, dict):
+            raise ManifestError(f"verified attestation entry {index} is malformed")
+        verification = item.get("verificationResult")
+        signature = verification.get("signature") if isinstance(verification, dict) else None
+        certificate = signature.get("certificate") if isinstance(signature, dict) else None
+        if not isinstance(certificate, dict):
+            raise ManifestError(
+                f"verified attestation entry {index} lacks certificate identity"
+            )
+        source = certificate.get("sourceRepositoryDigest")
+        signer = certificate.get("buildSignerDigest")
+        if (
+            not isinstance(source, str)
+            or re.fullmatch(r"[0-9a-f]{40}", source) is None
+            or not isinstance(signer, str)
+            or re.fullmatch(r"[0-9a-f]{40}", signer) is None
+        ):
+            raise ManifestError(
+                f"verified attestation entry {index} has non-canonical commit identity"
+            )
+        identities.add((source, signer))
+    expected_source = arguments.expected_source_commit
+    expected_signer = arguments.expected_signer_commit
+    if (expected_source is None) != (expected_signer is None):
+        raise ManifestError("attestation source/signer expectations must be paired")
+    if expected_source is not None:
+        expected = (expected_source, expected_signer)
+        if (
+            re.fullmatch(r"[0-9a-f]{40}", expected_source) is None
+            or re.fullmatch(r"[0-9a-f]{40}", expected_signer) is None
+            or identities != {expected}
+        ):
+            raise ManifestError(
+                "verified attestation evidence differs from expected source/signer"
+            )
+        source, signer = expected
+    else:
+        image_source = arguments.image_source_commit
+        consumer_candidate = arguments.consumer_candidate_commit
+        for label, value in (
+            ("image source", image_source),
+            ("consumer candidate", consumer_candidate),
+        ):
+            if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+                raise ManifestError(f"{label} commit must be a lowercase full SHA")
+        valid: set[tuple[str, str]] = set()
+        for source, signer in identities:
+            ancestry = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(arguments.repo_root),
+                    "merge-base",
+                    "--is-ancestor",
+                    source,
+                    consumer_candidate,
+                ],
+                check=False,
+                capture_output=True,
+            )
+            if ancestry.returncode == 1:
+                continue
+            if ancestry.returncode != 0:
+                raise ManifestError(
+                    "cannot verify attestation source against consumer candidate"
+                )
+            try:
+                _validate_candidate_source_binding(
+                    arguments.repo_root,
+                    source,
+                    image_source,
+                    require_head=False,
+                )
+            except ManifestError:
+                continue
+            valid.add((source, signer))
+        maximal: set[tuple[str, str]] = set()
+        for identity in valid:
+            source, _ = identity
+            superseded = False
+            for other_source, _ in valid:
+                if other_source == source:
+                    continue
+                relation = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(arguments.repo_root),
+                        "merge-base",
+                        "--is-ancestor",
+                        source,
+                        other_source,
+                    ],
+                    check=False,
+                    capture_output=True,
+                )
+                if relation.returncode == 0:
+                    superseded = True
+                    break
+                if relation.returncode != 1:
+                    raise ManifestError(
+                        "cannot order verified attestation source candidates"
+                    )
+            if not superseded:
+                maximal.add(identity)
+        if len(maximal) != 1:
+            raise ManifestError(
+                "verified attestations lack one newest ancestry-bound source/signer pair"
+            )
+        source, signer = next(iter(maximal))
+    print(source)
+    print(signer)
 
 
 def _command_builder_label(arguments: argparse.Namespace) -> None:
@@ -1201,12 +1543,21 @@ def build_parser() -> argparse.ArgumentParser:
     create.set_defaults(handler=_command_create)
     source = subparsers.add_parser("source-commit", help="find the last image-input commit")
     source.set_defaults(handler=_command_source_commit)
-    publish_source = subparsers.add_parser(
-        "publish-source-commit",
-        help="require the workflow commit to equal the last image-input commit",
+    resolve_source = subparsers.add_parser(
+        "resolve-source-commit",
+        help="prove and print the candidate's last image-input-changing ancestor",
     )
-    publish_source.add_argument("--workflow-commit", required=True)
-    publish_source.set_defaults(handler=_command_publish_source_commit)
+    resolve_source.add_argument("--candidate-commit", required=True)
+    resolve_source.add_argument("--workflow-commit", required=True)
+    resolve_source.set_defaults(handler=_command_resolve_source_commit)
+    source_binding = subparsers.add_parser(
+        "verify-source-binding",
+        help="verify candidate ancestry and zero canonical-input drift",
+    )
+    source_binding.add_argument("--candidate-commit", required=True)
+    source_binding.add_argument("--source-commit", required=True)
+    source_binding.add_argument("--require-head", action="store_true")
+    source_binding.set_defaults(handler=_command_verify_source_binding)
     detect = subparsers.add_parser(
         "detect-changed",
         help="classify a Git comparison from strict base/head image-input locks",
@@ -1225,6 +1576,7 @@ def build_parser() -> argparse.ArgumentParser:
     freshness.add_argument("--candidate-source-commit", required=True)
     freshness.add_argument("--candidate-manifest-digest", required=True)
     freshness.add_argument("--candidate-builder-image-version", required=True)
+    freshness.add_argument("--workflow-commit", required=True)
     freshness.add_argument("--repository", required=True)
     freshness.add_argument("--branch", required=True)
     freshness.add_argument("--scratch-root", type=Path, required=True)
@@ -1248,6 +1600,18 @@ def build_parser() -> argparse.ArgumentParser:
     builder_from_labels.add_argument("--labels-json", type=Path, required=True)
     builder_from_labels.add_argument("--output", type=Path, required=True)
     builder_from_labels.set_defaults(handler=_command_builder_from_labels)
+    attestation_identities = subparsers.add_parser(
+        "attestation-identities",
+        help="extract one certificate-bound source/signer identity pair",
+    )
+    attestation_identities.add_argument(
+        "--attestation-json", type=Path, required=True
+    )
+    attestation_identities.add_argument("--image-source-commit", required=True)
+    attestation_identities.add_argument("--consumer-candidate-commit", required=True)
+    attestation_identities.add_argument("--expected-source-commit")
+    attestation_identities.add_argument("--expected-signer-commit")
+    attestation_identities.set_defaults(handler=_command_attestation_identities)
     labels = subparsers.add_parser("verify-labels", help="verify exact OCI identity labels")
     labels.add_argument("--manifest", type=Path, required=True)
     labels.add_argument("--labels-json", type=Path, required=True)

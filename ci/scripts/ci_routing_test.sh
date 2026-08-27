@@ -1425,6 +1425,10 @@ validate_ci_image_identity_routing() {
     assert_file_contains "$identity_job" 'run: bash ci/scripts/ci_image_verify.sh'
     assert_file_contains "$identity_job" 'image: ${{ steps.identity.outputs.image }}'
     assert_file_contains "$identity_job" 'digest: ${{ steps.identity.outputs.digest }}'
+    assert_file_contains "$identity_job" \
+      'attestation_source_commit: ${{ steps.identity.outputs.attestation_source_commit }}'
+    assert_file_contains "$identity_job" \
+      'attestation_signer_commit: ${{ steps.identity.outputs.attestation_signer_commit }}'
     assert_file_contains "$identity_job" 'uses: docker/login-action@'
   done
   assert_file_contains "$health_workflow" \
@@ -1454,10 +1458,21 @@ validate_ci_image_identity_routing() {
     'subject-digest: ${{ steps.push.outputs.digest }}'
   assert_file_contains "$build_workflow" 'push-to-registry: true'
   assert_file_contains "$build_workflow" 'workflow_call:'
+  assert_file_contains "$build_workflow" 'workflow_commit:'
+  assert_file_contains "$build_workflow" 'resolve-source-commit'
+  assert_file_contains "$build_workflow" \
+    '--candidate-commit "${{ inputs.candidate_commit }}"'
+  assert_file_contains "$build_workflow" \
+    '--workflow-commit "${{ inputs.workflow_commit }}"'
+  assert_file_not_contains "$build_workflow" 'publish-source-commit'
   assert_file_contains "$build_workflow" \
     'tags: ${{ steps.caller.outputs.temporary_image }}'
   assert_file_contains "$build_workflow" \
     'CI_IMAGE_EXPECTED_DIGEST: ${{ steps.push.outputs.digest }}'
+  assert_file_contains "$build_workflow" \
+    'CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT: ${{ inputs.candidate_commit }}'
+  assert_file_contains "$build_workflow" \
+    'CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT: ${{ inputs.workflow_commit }}'
   (($(grep -Fc -- 'uses: docker/build-push-action@' "$build_workflow") == 1)) ||
     fail "candidate CI image producer must build exactly once"
 
@@ -1475,6 +1490,13 @@ validate_ci_image_identity_routing() {
     'CI_IMAGE_EXPECTED_MANIFEST_DIGEST: ${{ inputs.image_manifest_digest }}'
   assert_file_contains "$called_identity_job" \
     'CI_IMAGE_EXPECTED_SOURCE_COMMIT: ${{ inputs.image_source_commit }}'
+  assert_file_contains "$called_identity_job" \
+    'CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT: ${{ inputs.image_attestation_source_commit }}'
+  assert_file_contains "$called_identity_job" \
+    'CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT: ${{ inputs.image_attestation_signer_commit }}'
+  assert_file_contains "$called_identity_job" 'verify-source-binding'
+  assert_file_not_contains "$called_identity_job" \
+    'require_identity candidate_source'
   assert_file_contains "$called_identity_job" \
     'bash .ci-protected-control/ci/scripts/ci_image_verify.sh'
   assert_file_not_contains "$called_identity_job" \
@@ -1534,7 +1556,11 @@ validate_ci_image_tag_routing() {
     'bash ci/scripts/ci_image_promote.sh'
   assert_file_contains "$promotion_job" \
     'CI_PROMOTION_BRANCH: ${{ github.ref_name }}'
+  assert_file_contains "$promotion_job" \
+    'CI_PROMOTION_WORKFLOW_COMMIT: ${{ github.workflow_sha }}'
   assert_file_contains "$promotion_run" '--branch "$CI_PROMOTION_BRANCH"'
+  assert_file_contains "$promotion_run" \
+    '--workflow-commit "$CI_PROMOTION_WORKFLOW_COMMIT"'
   assert_file_contains "$promotion_run" \
     '--manifest-digest "${{ needs.candidate-image-build.outputs.manifest_digest }}"'
   assert_file_contains "$promotion_run" \
@@ -1596,6 +1622,9 @@ validate_ci_image_tag_routing() {
     fail "promotion must establish freshness and immutable SHA before mutable writes"
   assert_file_contains "$manifest" 'refs/heads/{branch_name}'
   assert_file_contains "$manifest" 'merge-base'
+  assert_file_contains "$manifest" '_validate_candidate_source_binding('
+  assert_file_contains "$manifest" \
+    'candidate manifest differs from retained source/input identity'
   assert_file_contains "$manifest" \
     'branch tip changed during promotion freshness measurement'
   assert_file_contains "$stable_job" \
