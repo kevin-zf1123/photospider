@@ -20,9 +20,12 @@ The pre-attestation protected verifier never invokes CTest or interprets a
 candidate CMake program. It parses the retained generated control files through
 one strict, side-effect-free command allowlist, compares their complete test
 records with the retained raw JSON and both archived closures, and rejects any
-unknown command or ambiguous path spelling. Root tokens are applied only to
-structured absolute path fields that equal a maintained root or one of its
-component descendants; arbitrary substring replacement is forbidden.
+unknown command or ambiguous path spelling. Each argument retains its lexical
+kind, raw content, backslash identity, and decoded value. Path directives
+reject lexical backslashes before decoding, and the inert test-list assignment
+rejects unquoted semicolon splitting before equality. Root tokens are applied
+only to structured absolute path fields that equal a maintained root or one of
+its component descendants; arbitrary substring replacement is forbidden.
 """
 
 from __future__ import annotations
@@ -120,6 +123,28 @@ class CTestClosureError(ValueError):
     """Report malformed inventory, unsafe paths, or an incomplete closure."""
 
 
+class _CMakeArgument(NamedTuple):
+    """Retain one generated CMake argument's value and lexical identity.
+
+    Attributes:
+        value: Decoded argument value used by the reviewed semantic subset.
+        kind: Exact ``quoted``, ``unquoted``, or ``bracket`` lexical form.
+        raw: Argument content before backslash decoding, without outer
+            quote/bracket delimiters.
+        has_backslash: Whether the raw content contains a backslash byte.
+
+    Note:
+        Path directives inspect ``raw``/``has_backslash`` before consuming
+        ``value``. Inert ``set`` validation uses ``kind`` and ``raw`` to reject
+        real CMake list splitting that a decoded string alone cannot model.
+    """
+
+    value: str
+    kind: str
+    raw: str
+    has_backslash: bool
+
+
 class _CMakeCommand(NamedTuple):
     """Represent one decoded generated CTest control command.
 
@@ -127,11 +152,14 @@ class _CMakeCommand(NamedTuple):
         name: Lowercase command identity.
         arguments: Decoded argument vector without CMake evaluation.
         line: One-based physical start line used in diagnostics.
+        lexical_arguments: Exact per-argument lexical records. The default is
+            retained only so zero-argument comparison sentinels remain concise.
     """
 
     name: str
     arguments: tuple[str, ...]
     line: int
+    lexical_arguments: tuple[_CMakeArgument, ...] = ()
 
 
 def _is_shared_library_name(name: str) -> bool:
@@ -805,7 +833,8 @@ def _parse_cmake_control(content: bytes, context: str) -> list[_CMakeCommand]:
         context: Stable relative file identity for diagnostics.
 
     Returns:
-        Ordered decoded command records. This parser performs no expansion,
+        Ordered decoded command records with exact quoted/unquoted/bracket raw
+        spelling and backslash metadata. This parser performs no expansion,
         include, condition, variable, filesystem, or subprocess operation.
 
     Raises:
@@ -815,7 +844,9 @@ def _parse_cmake_control(content: bytes, context: str) -> list[_CMakeCommand]:
     Note:
         This is intentionally not a general CMake interpreter. It accepts the
         generated CTest subset needed below and leaves semantic allowlisting to
-        :func:`control_test_records`. Unknown syntax fails before attestation.
+        :func:`control_test_records`. Direct include/subdirectory tokens reject
+        a lexical backslash before decoding; other command/filter escapes keep
+        their bounded decoded behavior. Unknown syntax fails before attestation.
     """
     try:
         text = content.decode("utf-8")
@@ -857,14 +888,44 @@ def _parse_cmake_control(content: bytes, context: str) -> list[_CMakeCommand]:
                 continue
             break
 
-    def decoded_escape() -> str:
-        """Decode one bounded CMake escape without evaluating variables."""
-        if index >= length:
-            raise CTestClosureError(
-                f"trailing CMake escape in {context}:{line}"
+    def decode_argument(raw: str, argument_line: int) -> str:
+        """Decode one retained quoted/unquoted CMake argument.
+
+        Args:
+            raw: Exact lexical content without outer delimiters.
+            argument_line: Stable argument-start line for diagnostics.
+
+        Returns:
+            The bounded decoded value used by the semantic allowlist.
+
+        Raises:
+            CTestClosureError: A lexical backslash lacks a following code
+                point. Variable expansion remains a separate rejection after
+                this bounded decoding step.
+
+        Note:
+            Callers can inspect the raw record before invoking this helper.
+            Bracket arguments bypass it because CMake does not decode their
+            content.
+        """
+        decoded = ""
+        raw_index = 0
+        while raw_index < len(raw):
+            character = raw[raw_index]
+            raw_index += 1
+            if character != "\\":
+                decoded += character
+                continue
+            if raw_index >= len(raw):
+                raise CTestClosureError(
+                    f"trailing CMake escape in {context}:{argument_line}"
+                )
+            escaped = raw[raw_index]
+            raw_index += 1
+            decoded += {"n": "\n", "r": "\r", "t": "\t"}.get(
+                escaped, escaped
             )
-        escaped = advance()
-        return {"n": "\n", "r": "\r", "t": "\t"}.get(escaped, escaped)
+        return decoded
 
     while True:
         skip_space_and_comments()
@@ -886,6 +947,7 @@ def _parse_cmake_control(content: bytes, context: str) -> list[_CMakeCommand]:
                 f"generated CTest command lacks '(' in {context}:{command_line}"
             )
         arguments: list[str] = []
+        lexical_arguments: list[_CMakeArgument] = []
         while True:
             skip_space_and_comments()
             if index >= length:
@@ -895,17 +957,23 @@ def _parse_cmake_control(content: bytes, context: str) -> list[_CMakeCommand]:
             if text[index] == ")":
                 advance()
                 break
-            argument = ""
+            argument_line = line
+            raw_argument = ""
             explicit_empty = False
             if text[index] == '"':
+                kind = "quoted"
                 explicit_empty = True
                 advance()
                 while index < length and text[index] != '"':
                     if text[index] == "\\":
-                        advance()
-                        argument += decoded_escape()
+                        raw_argument += advance()
+                        if index >= length:
+                            raise CTestClosureError(
+                                f"trailing CMake escape in {context}:{line}"
+                            )
+                        raw_argument += advance()
                     else:
-                        argument += advance()
+                        raw_argument += advance()
                 if index >= length:
                     raise CTestClosureError(
                         f"unterminated quoted CMake argument in {context}:{line}"
@@ -914,6 +982,7 @@ def _parse_cmake_control(content: bytes, context: str) -> list[_CMakeCommand]:
             else:
                 bracket = re.match(r"\[(=*)\[", text[index:])
                 if bracket is not None:
+                    kind = "bracket"
                     explicit_empty = True
                     delimiter = "]" + bracket.group(1) + "]"
                     for _ in bracket.group(0):
@@ -924,20 +993,42 @@ def _parse_cmake_control(content: bytes, context: str) -> list[_CMakeCommand]:
                             f"unterminated bracket argument in {context}:{line}"
                         )
                     while index < end:
-                        argument += advance()
+                        raw_argument += advance()
                     for _ in delimiter:
                         advance()
                 else:
-                    while index < length and not text[index].isspace() and text[index] != ")":
+                    kind = "unquoted"
+                    while index < length:
+                        if text[index] == "\\":
+                            raw_argument += advance()
+                            if index >= length:
+                                raise CTestClosureError(
+                                    f"trailing CMake escape in {context}:{line}"
+                                )
+                            raw_argument += advance()
+                            continue
+                        if text[index].isspace() or text[index] == ")":
+                            break
                         if text[index] == "(":
                             raise CTestClosureError(
                                 f"nested unquoted '(' is unsupported in {context}:{line}"
                             )
-                        if text[index] == "\\":
-                            advance()
-                            argument += decoded_escape()
-                        else:
-                            argument += advance()
+                        raw_argument += advance()
+            has_backslash = "\\" in raw_argument
+            if (
+                name in {"include", "subdirs"}
+                and not arguments
+                and has_backslash
+            ):
+                raise CTestClosureError(
+                    "generated CTest path contains a lexical backslash before "
+                    f"decoding: {context}:{argument_line}"
+                )
+            argument = (
+                raw_argument
+                if kind == "bracket"
+                else decode_argument(raw_argument, argument_line)
+            )
             if not argument and not explicit_empty:
                 raise CTestClosureError(
                     f"ambiguous empty generated CTest argument in {context}:{line}"
@@ -947,14 +1038,29 @@ def _parse_cmake_control(content: bytes, context: str) -> list[_CMakeCommand]:
                     f"generated CTest expansion is forbidden in {context}:{line}"
                 )
             arguments.append(argument)
-        commands.append(_CMakeCommand(name, tuple(arguments), command_line))
+            lexical_arguments.append(
+                _CMakeArgument(
+                    argument,
+                    kind,
+                    raw_argument,
+                    has_backslash,
+                )
+            )
+        commands.append(
+            _CMakeCommand(
+                name,
+                tuple(arguments),
+                command_line,
+                tuple(lexical_arguments),
+            )
+        )
     if not commands:
         raise CTestClosureError(f"generated CTest control file is empty: {context}")
     return commands
 
 
 def _control_relative_target(
-    raw_target: str,
+    argument: _CMakeArgument,
     owner: PurePosixPath,
     build_root: PurePosixPath,
     *,
@@ -963,7 +1069,7 @@ def _control_relative_target(
     """Resolve one retained include/subdirectory target by path components.
 
     Args:
-        raw_target: Decoded CMake argument.
+        argument: Decoded value plus exact lexical spelling and form.
         owner: Relative control file containing the directive.
         build_root: Exact producer build-root identity.
         subdirectory: Whether ``CTestTestfile.cmake`` is appended.
@@ -973,8 +1079,21 @@ def _control_relative_target(
 
     Raises:
         CTestClosureError: The target escapes, uses a root-prefix sibling,
-            contains ambiguous components, or names the build root itself.
+            contains a lexical backslash or ambiguous components, or names the
+            build root itself.
+
+    Note:
+        The lexical backslash check precedes every decoded-value or
+        ``PurePosixPath`` operation. Quoted, unquoted, and bracket arguments
+        therefore cannot turn a different control spelling into a canonical
+        POSIX path through escape decoding.
     """
+    if argument.has_backslash or "\\" in argument.raw:
+        raise CTestClosureError(
+            "generated CTest target contains a lexical backslash before "
+            f"decoding: {argument.raw!r}"
+        )
+    raw_target = argument.value
     if (
         not raw_target
         or raw_target.startswith("//")
@@ -1022,14 +1141,14 @@ def _control_relative_target(
 
 
 def _explicit_control_include_target(
-    raw_target: str,
+    argument: _CMakeArgument,
     owner: PurePosixPath,
     build_root: PurePosixPath,
 ) -> str:
     """Resolve one explicit generated CTest include without module lookup.
 
     Args:
-        raw_target: Decoded single include argument.
+        argument: Decoded single include plus retained lexical identity.
         owner: Relative control file containing the include.
         build_root: Exact producer build-root identity.
 
@@ -1047,13 +1166,13 @@ def _explicit_control_include_target(
         search path: every include must name one declared control file by an
         explicit canonical relative or absolute path.
     """
-    if PurePosixPath(raw_target).suffix != ".cmake":
+    if PurePosixPath(argument.value).suffix != ".cmake":
         raise CTestClosureError(
             "generated CTest include is not an explicit canonical .cmake "
-            f"path: {raw_target!r}"
+            f"path: {argument.value!r}"
         )
     return _control_relative_target(
-        raw_target, owner, build_root, subdirectory=False
+        argument, owner, build_root, subdirectory=False
     )
 
 
@@ -1077,19 +1196,52 @@ def _validate_inert_generated_test_list(
 
     Raises:
         CTestClosureError: The assignment is duplicate, names a search/cache/
-            parent-scope variable, or its values do not exactly equal the
-            local registrations.
+            parent-scope variable, uses an unquoted semicolon spelling that
+            real CMake list-splits, lacks retained lexical identity, or its
+            values do not exactly equal the local registrations.
 
     Note:
         ``gtest_discover_tests`` emits one final ``set(<target>_TESTS ...)`` as
         inert generated bookkeeping. No other CMake assignment form is needed
-        to reconstruct CTest records, so accepting one would silently model
-        candidate-controlled interpreter or module-search state.
+        to reconstruct CTest records. Quoted/bracket semicolon values remain
+        one lexical argument; any unquoted semicolon, escaped or otherwise,
+        fails closed before equality because its real CMake argument vector
+        cannot be established from the decoded scalar alone.
     """
     if not command.arguments:
         raise CTestClosureError(f"{context}: generated set shape differs")
+    if (
+        len(command.lexical_arguments) != len(command.arguments)
+        or tuple(argument.value for argument in command.lexical_arguments)
+        != command.arguments
+    ):
+        raise CTestClosureError(
+            f"{context}: generated set lacks exact lexical identity"
+        )
     variable = command.arguments[0]
+    variable_lexical = command.lexical_arguments[0]
     values = command.arguments[1:]
+    value_lexical = command.lexical_arguments[1:]
+    if (
+        variable_lexical.kind != "unquoted"
+        or variable_lexical.raw != variable
+        or variable_lexical.has_backslash
+        or ";" in variable_lexical.raw
+    ):
+        raise CTestClosureError(
+            f"{context}: generated set variable spelling is not inert"
+        )
+    if any(
+        argument.kind == "unquoted" and ";" in argument.raw
+        for argument in value_lexical
+    ):
+        # Real CMake list-expands an unquoted semicolon spelling before ``set``
+        # selects its signature. Reject escaped and unescaped forms alike: the
+        # decoded scalar is not sufficient evidence that CACHE, FORCE, or
+        # PARENT_SCOPE was absent from the real argument vector.
+        raise CTestClosureError(
+            f"{context}: unquoted generated set list splitting is forbidden"
+        )
     if any(
         value in {"CACHE", "FORCE", "PARENT_SCOPE"}
         for value in values
@@ -1172,9 +1324,10 @@ def control_test_records(
         No CMake/CTest command is invoked. ``include`` and ``subdirs`` are
         resolved as pure path records, and only the exact GoogleTest
         ``if(EXISTS)/include/else/add_test(..._NOT_BUILT)/endif`` wrapper is
-        accepted as conditional syntax. Includes must be explicit canonical
-        ``.cmake`` paths, and ``set`` is limited to the one inert
-        ``<target>_TESTS`` list that exactly repeats local registrations.
+        accepted as conditional syntax. Includes/subdirectories must retain a
+        backslash-free canonical lexical spelling before path decoding, and
+        ``set`` is limited to the one inert ``<target>_TESTS`` list that exactly
+        repeats local registrations without unquoted list splitting.
     """
     control_paths = closure_value.get("control_paths")
     if (
@@ -1259,10 +1412,10 @@ def control_test_records(
                     f"conditional CTest control is not an exact NOT_BUILT wrapper: {relative_text}"
                 )
             first_target = _explicit_control_include_target(
-                commands[0].arguments[1], owner, producer_root
+                commands[0].lexical_arguments[1], owner, producer_root
             )
             include_target = _explicit_control_include_target(
-                commands[1].arguments[0], owner, producer_root
+                commands[1].lexical_arguments[0], owner, producer_root
             )
             fallback_name, fallback_command = commands[3].arguments
             if (
@@ -1286,7 +1439,7 @@ def control_test_records(
                     raise CTestClosureError(f"{context}: include shape differs")
                 pending.append(
                     _explicit_control_include_target(
-                        command.arguments[0], owner, producer_root
+                        command.lexical_arguments[0], owner, producer_root
                     )
                 )
             elif command.name == "subdirs":
@@ -1294,7 +1447,10 @@ def control_test_records(
                     raise CTestClosureError(f"{context}: subdirs shape differs")
                 pending.append(
                     _control_relative_target(
-                        command.arguments[0], owner, producer_root, subdirectory=True
+                        command.lexical_arguments[0],
+                        owner,
+                        producer_root,
+                        subdirectory=True,
                     )
                 )
             elif command.name == "add_test":

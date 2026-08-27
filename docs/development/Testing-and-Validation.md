@@ -480,7 +480,12 @@ list exactly equal to that file's registrations; `PARENT_SCOPE` and
 `CACHE ... [FORCE]` signatures fail before equality. Explicit quoted empty
 command arguments remain data, while any search/interpreter-affecting `set`
 fails closed. Raw dot, repeated-separator, and trailing-separator spellings are
-rejected rather than normalized into a retained member.
+rejected rather than normalized into a retained member. The parser retains each
+argument's quoted/unquoted/bracket kind and raw spelling: path directives reject
+every lexical backslash before decoding, and the inert `set` rejects escaped or
+unescaped semicolons in unquoted values before equality. Quoted/bracket
+semicolon values remain one value, while ordinary command/filter escapes keep
+their reviewed decoding.
 It requires equality among raw complete records, both targeted control/runtime
 closure records and control-file digests, and the ordinary closure after
 excluding only the exact `build-smoke` label. Unknown or side-effect-capable

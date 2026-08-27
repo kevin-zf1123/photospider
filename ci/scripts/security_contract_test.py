@@ -6194,15 +6194,17 @@ class ReusableBuildContractTest(unittest.TestCase):
         """Reject module search and stateful ``set`` without executing controls.
 
         Returns:
-            None after explicit relative/absolute control paths, a quoted empty
-            command argument, and one exact local ``*_TESTS`` list reconstruct
-            successfully, while module-mode, escaping, sibling, and mutable
-            assignment forms fail without creating the candidate marker.
+            None after explicit relative/absolute/bracket control paths, a
+            quoted empty command argument, ordinary command escapes, empty and
+            quoted/bracket-semicolon ``*_TESTS`` lists reconstruct successfully,
+            while lexical path escapes, unquoted list splitting, module-mode,
+            sibling, expansion, and mutable assignment forms fail without
+            creating the candidate marker.
 
         Raises:
             AssertionError: The production pure-data parser models candidate
-                module search/interpreter state or loses a generated empty
-                command argument.
+                module search/interpreter state, loses raw lexical identity, or
+                changes a generated empty/safely escaped command argument.
         """
         closure = self._load_ctest_closure_module()
         with tempfile.TemporaryDirectory() as temporary_text:
@@ -6216,7 +6218,10 @@ class ReusableBuildContractTest(unittest.TestCase):
             relative.write_text(
                 'add_test(relative_contract "/usr/bin/true" '
                 '"--osx-architectures" "")\n'
-                "set(relative_contract_TESTS relative_contract)\n",
+                'add_test(escaped_argument_contract "/usr/bin/true" '
+                '"literal\\;filter")\n'
+                "set(relative_contract_TESTS relative_contract "
+                "escaped_argument_contract)\n",
                 encoding="utf-8",
             )
             absolute.write_text(
@@ -6228,17 +6233,53 @@ class ReusableBuildContractTest(unittest.TestCase):
             empty_list.write_text(
                 "set(empty_contract_TESTS)\n", encoding="utf-8"
             )
+            bracket = staged / "bracket/explicit.cmake"
+            bracket.parent.mkdir(parents=True)
+            bracket.write_text(
+                'add_test(bracket_path_contract "/usr/bin/true")\n',
+                encoding="utf-8",
+            )
+            quoted_list = staged / "quoted-list/explicit.cmake"
+            quoted_list.parent.mkdir(parents=True)
+            quoted_list.write_text(
+                'add_test("quoted;safe" "/usr/bin/true")\n'
+                'set(quoted_safe_TESTS "quoted;safe")\n',
+                encoding="utf-8",
+            )
+            bracket_list = staged / "bracket-list/explicit.cmake"
+            bracket_list.parent.mkdir(parents=True)
+            bracket_list.write_text(
+                'add_test([=[bracket;safe]=] "/usr/bin/true")\n'
+                'set(bracket_safe_TESTS [=[bracket;safe]=])\n',
+                encoding="utf-8",
+            )
+            canonical_subdirectory = (
+                staged / "canonical-subdir/CTestTestfile.cmake"
+            )
+            canonical_subdirectory.parent.mkdir(parents=True)
+            canonical_subdirectory.write_text(
+                'add_test(bracket_subdir_contract "/usr/bin/true")\n',
+                encoding="utf-8",
+            )
             root_control = staged / "CTestTestfile.cmake"
             root_control.write_text(
                 'include("relative/explicit.cmake")\n'
                 f'include("{producer_root}/absolute/explicit.cmake")\n'
-                'include("empty/explicit.cmake")\n',
+                'include("empty/explicit.cmake")\n'
+                'include([=[bracket/explicit.cmake]=])\n'
+                'include(quoted-list/explicit.cmake)\n'
+                'include([=[bracket-list/explicit.cmake]=])\n'
+                'subdirs([=[canonical-subdir]=])\n',
                 encoding="utf-8",
             )
             control_paths = [
                 "CTestTestfile.cmake",
                 "absolute/explicit.cmake",
+                "bracket-list/explicit.cmake",
+                "bracket/explicit.cmake",
+                "canonical-subdir/CTestTestfile.cmake",
                 "empty/explicit.cmake",
+                "quoted-list/explicit.cmake",
                 "relative/explicit.cmake",
             ]
             records, digests = closure.control_test_records(
@@ -6248,10 +6289,25 @@ class ReusableBuildContractTest(unittest.TestCase):
                 producer_root,
             )
             by_name = {record["name"]: record for record in records}
-            self.assertEqual(set(by_name), {"absolute_contract", "relative_contract"})
+            self.assertEqual(
+                set(by_name),
+                {
+                    "absolute_contract",
+                    "bracket;safe",
+                    "bracket_path_contract",
+                    "bracket_subdir_contract",
+                    "escaped_argument_contract",
+                    "quoted;safe",
+                    "relative_contract",
+                },
+            )
             self.assertEqual(
                 by_name["relative_contract"]["command"],
                 ["/usr/bin/true", "--osx-architectures", ""],
+            )
+            self.assertEqual(
+                by_name["escaped_argument_contract"]["command"],
+                ["/usr/bin/true", "literal;filter"],
             )
             self.assertEqual(set(digests), set(control_paths))
 
@@ -6314,6 +6370,34 @@ class ReusableBuildContractTest(unittest.TestCase):
                     'add_test(FORCE "/usr/bin/true")\n'
                     "set(target_TESTS CACHE BOOL doc FORCE)\n",
                     "alternate generated set signature is forbidden",
+                ),
+                "cache-list-splitting": (
+                    'add_test("CACHE;STRING;doc" "/usr/bin/true")\n'
+                    "set(target_TESTS CACHE;STRING;doc)\n",
+                    "unquoted generated set list splitting is forbidden",
+                ),
+                "cache-force-list-splitting": (
+                    'add_test("CACHE;STRING;doc;FORCE" "/usr/bin/true")\n'
+                    "set(target_TESTS CACHE;STRING;doc;FORCE)\n",
+                    "unquoted generated set list splitting is forbidden",
+                ),
+                "parent-scope-list-splitting": (
+                    'add_test("value;PARENT_SCOPE" "/usr/bin/true")\n'
+                    "set(target_TESTS value;PARENT_SCOPE)\n",
+                    "unquoted generated set list splitting is forbidden",
+                ),
+                "escaped-semicolon-list-splitting": (
+                    'add_test("CACHE;STRING;doc" "/usr/bin/true")\n'
+                    "set(target_TESTS CACHE\\;STRING\\;doc)\n",
+                    "unquoted generated set list splitting is forbidden",
+                ),
+                "environment-expansion": (
+                    "set(target_TESTS $ENV{CACHE})\n",
+                    "generated CTest expansion is forbidden",
+                ),
+                "cache-brace-expansion": (
+                    "set(target_TESTS $CACHE{entry})\n",
+                    "generated CTest expansion is forbidden",
                 ),
             }
             for label, (control_text, diagnostic) in cases.items():
@@ -6383,6 +6467,56 @@ class ReusableBuildContractTest(unittest.TestCase):
                     root_control.write_text(control_text, encoding="utf-8")
                     with self.assertRaisesRegex(
                         closure.CTestClosureError, "non-canonical"
+                    ):
+                        closure.control_test_records(
+                            staged,
+                            {
+                                "control_paths": sorted(
+                                    ["CTestTestfile.cmake", canonical_target]
+                                )
+                            },
+                            source_root,
+                            producer_root,
+                        )
+                    self.assertFalse(marker.exists())
+
+            lexical_backslash_paths = {
+                "quoted-escaped-separator": (
+                    'include("relative\\/explicit.cmake")\n',
+                    "relative/explicit.cmake",
+                ),
+                "unquoted-escaped-separator": (
+                    "include(relative\\/explicit.cmake)\n",
+                    "relative/explicit.cmake",
+                ),
+                "quoted-escaped-backslash": (
+                    'include("relative\\\\explicit.cmake")\n',
+                    "relative/explicit.cmake",
+                ),
+                "bracket-raw-backslash": (
+                    "include([=[relative\\explicit.cmake]=])\n",
+                    "relative/explicit.cmake",
+                ),
+                "subdirs-unquoted-escaped-separator": (
+                    "subdirs(relative\\/child)\n",
+                    "relative/child/CTestTestfile.cmake",
+                ),
+                "subdirs-quoted-escaped-separator": (
+                    'subdirs("relative\\/child")\n',
+                    "relative/child/CTestTestfile.cmake",
+                ),
+                "subdirs-bracket-raw-backslash": (
+                    "subdirs([=[relative\\child]=])\n",
+                    "relative/child/CTestTestfile.cmake",
+                ),
+            }
+            for label, (control_text, canonical_target) in (
+                lexical_backslash_paths.items()
+            ):
+                with self.subTest(lexical_path_boundary=label):
+                    root_control.write_text(control_text, encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        closure.CTestClosureError, "lexical backslash"
                     ):
                         closure.control_test_records(
                             staged,
