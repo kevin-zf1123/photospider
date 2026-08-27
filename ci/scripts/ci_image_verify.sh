@@ -98,7 +98,8 @@ if { [[ -n "$EXPECTED_ATTESTATION_SOURCE_COMMIT" ]] &&
   echo "Attestation source and signer expectations must be supplied together." >&2
   exit 2
 fi
-verification_candidate_commit=$(git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}')
+verification_candidate_commit=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \
+  --repo-root "$REPO_ROOT" head-commit)
 if [[ ! "$verification_candidate_commit" =~ ^[0-9a-f]{40}$ ]]; then
   echo "CI image verifier checkout is not one lowercase full commit." >&2
   exit 1
@@ -179,7 +180,7 @@ expected = {
 }
 if not isinstance(published, dict) or set(published) != expected:
     raise SystemExit("published image lock is malformed")
-if isinstance(published["attestation_fetch_limit"], bool) or published["attestation_fetch_limit"] != 30:
+if type(published["attestation_fetch_limit"]) is not int or published["attestation_fetch_limit"] != 30:
     raise SystemExit("published image attestation fetch limit is malformed")
 if not re.fullmatch(r"ghcr\.io/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+:[A-Za-z0-9_.-]+", published["locator"]):
     raise SystemExit("published image locator is malformed")
@@ -262,12 +263,13 @@ fi
 # Authenticate the exact registry subject into process-private state before
 # creating formal artifacts, retaining runner identity, or letting Docker pull
 # and expand a layer. Published discovery first downloads one finite raw bundle
-# window, rejects a saturated fetch, snapshots those exact bytes, and verifies
-# that same snapshot offline. Counting only verified JSON cannot prove fetch
-# completeness because gh documents --limit as a fetch bound. A known producer
-# instead keeps both exact CLI source/signer constraints; saturation is safe for
-# that path because every returned certificate must still equal the one caller-
-# bound pair and omitted evidence cannot change that expected identity.
+# window without a predicate filter, rejects a saturated raw fetch, snapshots
+# those exact bytes, and applies the SLSA/signer/host policy only while verifying
+# that same snapshot offline. GitHub CLI 2.98 filters predicates after its API
+# limit, so a filtered JSONL count is not a raw-fetch measurement. A known
+# producer instead keeps both exact CLI source/signer constraints; saturation is
+# safe for that path because every returned certificate must still equal the one
+# caller-bound pair and omitted evidence cannot change that expected identity.
 attestation_temp_root=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
 if [[ ! -d "$attestation_temp_root" || -L "$attestation_temp_root" ]]; then
   echo "Attestation temporary root must be one real directory." >&2
@@ -295,7 +297,6 @@ if [[ -z "$EXPECTED_ATTESTATION_SOURCE_COMMIT" ]]; then
   attestation_download_command=(
     gh attestation download "oci://$exact_image"
     --repo "$EXPECTED_REPOSITORY"
-    --predicate-type https://slsa.dev/provenance/v1
     --limit "$attestation_fetch_limit"
   )
   (
@@ -312,6 +313,7 @@ if [[ -z "$EXPECTED_ATTESTATION_SOURCE_COMMIT" ]]; then
     gh attestation verify "oci://$exact_image"
     --bundle "$attestation_bundle_snapshot"
     --repo "$EXPECTED_REPOSITORY"
+    --predicate-type https://slsa.dev/provenance/v1
     --signer-workflow "$EXPECTED_REPOSITORY/$source_workflow"
     --deny-self-hosted-runners
     --format json
@@ -320,6 +322,7 @@ else
   attestation_command=(
     gh attestation verify "oci://$exact_image"
     --repo "$EXPECTED_REPOSITORY"
+    --predicate-type https://slsa.dev/provenance/v1
     --signer-workflow "$EXPECTED_REPOSITORY/$source_workflow"
     --limit "$attestation_fetch_limit"
     --source-digest "$EXPECTED_ATTESTATION_SOURCE_COMMIT"

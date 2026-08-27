@@ -1415,6 +1415,7 @@ validate_ci_image_identity_routing() {
   local build_workflow="$REPO_ROOT/.github/workflows/build-ci-image.yml"
   local shared_workflow="$REPO_ROOT/.github/workflows/ci-integration-suite.yml"
   local image_lock="$REPO_ROOT/ci/locks/ci-image-lock.json"
+  local image_manifest="$REPO_ROOT/ci/scripts/ci_image_manifest.py"
   local image_verifier="$REPO_ROOT/ci/scripts/ci_image_verify.sh"
   local workflow
   local identity_job
@@ -1481,6 +1482,14 @@ validate_ci_image_identity_routing() {
   assert_file_contains "$image_verifier" 'snapshot-attestation-bundle'
   assert_file_contains "$image_verifier" \
     '--bundle "$attestation_bundle_snapshot"'
+  assert_file_contains "$image_verifier" \
+    '--repo-root "$REPO_ROOT" head-commit'
+  assert_file_contains "$image_manifest" '"--no-replace-objects"'
+  assert_file_contains "$image_manifest" '"refs/replace/"'
+  assert_file_contains "$image_manifest" 'info_path / "grafts"'
+  (($(grep -Fc -- '--predicate-type https://slsa.dev/provenance/v1' \
+    "$image_verifier") == 2)) ||
+    fail "CI image verifier must apply the SLSA predicate only in two verify commands"
   (($(grep -Fc -- '--limit "$attestation_fetch_limit"' "$image_verifier") == 2)) ||
     fail "CI image verifier must bind exactly two finite fetch-limit arguments"
   (($(grep -Fc -- '--fetch-limit "$attestation_fetch_limit"' "$image_verifier") == 2)) ||

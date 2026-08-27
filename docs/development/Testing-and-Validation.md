@@ -527,7 +527,12 @@ manifest/OCI source, and exact image digest remain independent while protected
 complete-DAG traversal, sole ancestry-maximal image-change selection, ancestry,
 and zero-input-drift checks all succeed. Identical-byte incomparable branch
 changes in both merge-parent orders fail, while a unique later canonical change
-is accepted without expanding the image-input authority.
+is accepted without expanding the image-input authority. The production-bound
+Git regressions also install a real `git replace --graft`, a legacy
+`.git/info/grafts`, and redirecting replacement/object/work-tree environment.
+All semantic Git calls share one sanitized `--no-replace-objects` process
+boundary; canonical replace/graft state fails before output and inherited
+`GIT_*` authority cannot redirect the clean DAG.
 They also require force-push, unknown ancestry, missing image input, and ref
 movement across the two-fetch measurement to stop before branch/`latest`
 writes. The stateful registry also proves first-time SHA-only creation and
@@ -3504,9 +3509,15 @@ Candidate verification supplies independent expected certificate source and
 signer digests plus the protected explicit fetch limit 30; reaching that limit
 is acceptable only when every verified certificate equals the constrained
 pair. Published verification first downloads at most 30 raw exact-subject JSONL
-bundles, retains the precise bytes, and rejects a raw count of 30 as possibly
-truncated before offline verification. It does not infer fetch completeness
-from verified JSON length. For an unsaturated set, protected Git history reduces
+bundles across every predicate, without a download predicate filter, because
+the locked GitHub CLI 2.98 applies that client filter only after its API limit.
+It retains the precise all-predicate bytes and rejects a raw count of 30 as
+possibly truncated before applying the SLSA/signer/host policy to that same
+snapshot offline. It does not infer fetch completeness from filtered JSONL or
+verified JSON length. Mixed-predicate saturation is a negative regression. The
+limit lock must be the exact JSON integer 30, and the complete three-command
+array-to-execution block plus fake-`gh` exact argv comparisons reject mutation,
+flag drift, and reexecution. For an unsaturated set, protected Git history reduces
 several valid attestations for one reproducible digest to the unique newest
 attestation-source ancestor of the current consumer whose canonical inputs
 still resolve to the OCI/manifest image source. An incomparable source,

@@ -63,15 +63,28 @@ commit. It then proves source ancestry and zero canonical-input drift through
 the candidate. Incomparable branch changes fail even when they converge on
 identical bytes or merge parent order changes. It does not add parser, test, or
 documentation paths to the image-input list to force commit equality.
+Every Git operation used for source resolution, ancestry, attestation-source
+selection, or promotion freshness goes through one protected invocation
+boundary. Caller-supplied `GIT_*` variables are removed, replacement-object
+interpretation is disabled, and canonical `refs/replace/**`, legacy
+`.git/info/grafts`, or common-directory drift fails before any resolved
+identity is emitted.
 
 For a known candidate, the verifier passes independent source/signer digest
 constraints and the protected explicit
 `published_image.attestation_fetch_limit=30` to
 `gh attestation verify`; a saturated known result remains acceptable only when
 every certificate equals that exact pair. Published discovery instead uses
-`gh attestation download --limit 30`, counts a retained raw JSONL snapshot, and
-rejects 30 fetched bundles as possibly truncated before offline verification.
-It never treats the shorter verified-evidence array as fetch-count metadata.
+`gh attestation download --limit 30` without a predicate filter because the
+locked GitHub CLI 2.98 applies that filter only after the API limit. It counts
+the retained all-predicate raw JSONL snapshot and rejects 30 fetched bundles as
+possibly truncated before applying the SLSA predicate, signer workflow, and
+hosted-runner policy to the same snapshot offline. It never treats a shorter
+filtered JSONL or verified-evidence array as fetch-count metadata. The lock
+value must be the exact JSON integer 30; boolean, float, string, 29, or 31 fails
+the prebuild gate. The three `gh` command arrays and their unique executions are
+one exact active block, so append/prepend, alias, indirect mutation, duplicate
+scalar, reordering, unknown flags, or a second execution fails static review.
 With an unsaturated raw set, multiple valid same-digest rerun attestations are
 reduced through protected Git history to the unique newest certificate source
 that is an ancestor of the current consumer and still has zero canonical-input

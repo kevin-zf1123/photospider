@@ -8,8 +8,11 @@ and suite-gate helpers. The protected resolver separately proves that this
 source is the sole ancestry-maximal canonical-input-changing ancestor in the
 complete candidate DAG and that canonical inputs do not drift from source to
 candidate. GitHub attestation source/signer identities remain independent
-candidate/workflow commits; published discovery retains and rejects a saturated
-finite raw bundle window before parsing verified evidence. The output is
+candidate/workflow commits. Every source, ancestry, freshness, and attestation
+history query disables replacement objects, isolates inherited Git authority,
+and rejects replace refs or legacy grafts. Published discovery retains every
+predicate in the finite raw bundle window and rejects saturation before
+applying SLSA verification policy. The output is
 canonical JSON with a final newline. Promotion freshness
 uses the same protected path lock and manifest builder against a freshly fetched
 branch-tip worktree, never a copied path list or candidate-provided identity.
@@ -65,6 +68,36 @@ class _InputMeasurement(NamedTuple):
     content: bytes
     sha256: str
     size: int
+
+
+class _GitAuthoritySnapshot(NamedTuple):
+    """Retain the exact common Git directory identity for one invocation.
+
+    Attributes:
+        common_directory: Absolute common-directory spelling resolved by Git.
+        device: Device identity from the real common directory.
+        inode: Inode identity from the real common directory.
+        info_device: Device identity of the real ``.git/info`` directory.
+        info_inode: Inode identity of the real ``.git/info`` directory.
+        info_mtime_ns: Nanosecond directory-entry modification time.
+        info_ctime_ns: Nanosecond directory metadata change time.
+
+    Note:
+        Replace refs and legacy grafts are rejected rather than represented in
+        this record. Comparing snapshots before and after every semantic Git
+        command detects repository redirection. The ``info`` directory times
+        also expose a graft file created and removed during the command, while
+        ``--no-replace-objects`` independently prevents replacement-ref
+        interpretation.
+    """
+
+    common_directory: str
+    device: int
+    inode: int
+    info_device: int
+    info_inode: int
+    info_mtime_ns: int
+    info_ctime_ns: int
 
 
 _MeasurementHook = Callable[[str, Path, int], None]
@@ -798,29 +831,8 @@ def _validate_candidate_source_binding(
         if head != candidate_commit:
             raise ManifestError("repository HEAD differs from the candidate commit")
 
-    ancestry = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(root),
-            "merge-base",
-            "--is-ancestor",
-            source_commit,
-            candidate_commit,
-        ],
-        check=False,
-        capture_output=True,
-    )
-    if ancestry.returncode == 1:
+    if not _git_is_ancestor(root, source_commit, candidate_commit):
         raise ManifestError("image source commit is not an ancestor of candidate")
-    if ancestry.returncode != 0:
-        detail = ancestry.stderr.decode(
-            "utf-8", errors="backslashreplace"
-        ).strip()
-        raise ManifestError(
-            "cannot verify image source ancestry"
-            + (f": {detail}" if detail else "")
-        )
 
     candidate_paths = _tree_image_input_paths(root, candidate_commit)
     source_paths = _tree_image_input_paths(root, source_commit)
@@ -858,10 +870,245 @@ def _validate_candidate_source_binding(
     return candidate_paths
 
 
+def _protected_git_environment() -> dict[str, str]:
+    """Return a deterministic Git environment with no inherited authority.
+
+    Returns:
+        A copy of the process environment with every caller-supplied ``GIT_*``
+        key removed and fixed replacement/configuration isolation restored.
+
+    Raises:
+        Nothing.
+
+    Note:
+        ``GIT_DIR``, ``GIT_WORK_TREE``, ``GIT_REPLACE_REF_BASE``, alternate
+        object/config variables, and related inputs cannot redirect protected
+        history queries. Repository selection comes only from the explicit
+        ``-C`` argument. System/global configuration and replacement objects
+        are disabled independently of repository-local data.
+    """
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "LANG": "C",
+            "LC_ALL": "C",
+        }
+    )
+    return environment
+
+
+def _invoke_protected_git_unchecked(
+    root: Path, *arguments: str, input_bytes: bytes | None = None
+) -> subprocess.CompletedProcess[bytes]:
+    """Execute the sole low-level Git process without authority recursion.
+
+    Args:
+        root: Explicit repository selected only through Git's ``-C`` option.
+        *arguments: Git arguments passed as separate non-shell argv entries.
+        input_bytes: Optional exact stdin bytes for a batched operation.
+
+    Returns:
+        The completed byte-mode process regardless of its return code.
+
+    Raises:
+        ManifestError: The protected Git executable cannot be started.
+
+    Note:
+        This is the only production ``subprocess.run`` site in this module.
+        Callers must use ``_invoke_protected_git`` so replace/graft state is
+        checked before and after the command. The unchecked form is reserved
+        for those authority checks themselves to avoid recursion.
+    """
+    command = [
+        "git",
+        "--no-replace-objects",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        str(root),
+        *arguments,
+    ]
+    try:
+        return subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            env=_protected_git_environment(),
+            input=input_bytes,
+        )
+    except OSError as error:
+        raise ManifestError(
+            f"cannot execute protected Git {' '.join(arguments)}: {error}"
+        ) from error
+
+
+def _git_diagnostic(completed: subprocess.CompletedProcess[bytes]) -> str:
+    """Return one replacement-safe bounded Git diagnostic string.
+
+    Args:
+        completed: Byte-mode protected Git process result.
+
+    Returns:
+        Stripped stderr, then stdout, or a stable fallback.
+
+    Raises:
+        Nothing.
+    """
+    for value in (completed.stderr, completed.stdout):
+        rendered = value.decode("utf-8", errors="backslashreplace").strip()
+        if rendered:
+            return rendered
+    return "Git failed without a diagnostic"
+
+
+def _git_authority_snapshot(root: Path) -> _GitAuthoritySnapshot:
+    """Reject replacement/graft state and retain the common Git directory.
+
+    Args:
+        root: Explicit repository whose native object graph is authoritative.
+
+    Returns:
+        Stable common-directory pathname/device/inode identity.
+
+    Raises:
+        ManifestError: The repository cannot resolve one real common
+            directory, contains any canonical ``refs/replace/**`` member, or
+            has a legacy ``info/grafts`` path of any type.
+
+    Note:
+        The inspection itself uses the fixed environment and
+        ``--no-replace-objects``. A caller-supplied alternate replacement ref
+        base is stripped; canonical replacement refs are nevertheless rejected
+        so hidden repository mutation never becomes accepted background state.
+    """
+    common = _invoke_protected_git_unchecked(root, "rev-parse", "--git-common-dir")
+    if common.returncode != 0:
+        raise ManifestError(
+            "cannot resolve protected Git common directory: "
+            + _git_diagnostic(common)
+        )
+    common_bytes = common.stdout.rstrip(b"\n")
+    if not common_bytes or b"\n" in common_bytes or b"\0" in common_bytes:
+        raise ManifestError("protected Git common directory output is malformed")
+    common_path = Path(os.fsdecode(common_bytes))
+    if not common_path.is_absolute():
+        common_path = root / common_path
+    common_path = Path(os.path.abspath(common_path))
+    try:
+        common_state = common_path.lstat()
+    except OSError as error:
+        raise ManifestError(
+            f"cannot inspect protected Git common directory {common_path}: {error}"
+        ) from error
+    if not stat.S_ISDIR(common_state.st_mode) or common_path.is_symlink():
+        raise ManifestError("protected Git common directory must be one real directory")
+
+    replacements = _invoke_protected_git_unchecked(
+        root, "for-each-ref", "--format=%(refname)", "refs/replace/"
+    )
+    if replacements.returncode != 0:
+        raise ManifestError(
+            "cannot enumerate protected Git replacement refs: "
+            + _git_diagnostic(replacements)
+        )
+    if replacements.stdout.strip():
+        raise ManifestError("protected Git repository contains refs/replace authority")
+
+    info_path = common_path / "info"
+    try:
+        info_state = info_path.lstat()
+    except OSError as error:
+        raise ManifestError(
+            f"cannot inspect protected Git info directory {info_path}: {error}"
+        ) from error
+    if not stat.S_ISDIR(info_state.st_mode) or info_path.is_symlink():
+        raise ManifestError("protected Git info path must be one real directory")
+    grafts_path = info_path / "grafts"
+    if os.path.lexists(grafts_path):
+        raise ManifestError("protected Git repository contains legacy info/grafts authority")
+    return _GitAuthoritySnapshot(
+        str(common_path),
+        common_state.st_dev,
+        common_state.st_ino,
+        info_state.st_dev,
+        info_state.st_ino,
+        info_state.st_mtime_ns,
+        info_state.st_ctime_ns,
+    )
+
+
+def _invoke_protected_git(
+    root: Path, *arguments: str, input_bytes: bytes | None = None
+) -> subprocess.CompletedProcess[bytes]:
+    """Run one Git command between two rewrite-authority snapshots.
+
+    Args:
+        root: Explicit repository whose native graph is authoritative.
+        *arguments: Git arguments passed as non-shell argv entries.
+        input_bytes: Optional exact stdin bytes.
+
+    Returns:
+        The completed protected Git process, including a legitimate nonzero
+        relation result for the caller to classify.
+
+    Raises:
+        ManifestError: Git cannot execute, rewrite authority is present, or the
+            repository common-directory identity changes across the command.
+
+    Note:
+        Replace interpretation remains disabled in the command itself, while
+        before/after snapshots make residual or command-window
+        graft/common-directory drift fail before semantic output is consumed.
+    """
+    before = _git_authority_snapshot(root)
+    completed = _invoke_protected_git_unchecked(
+        root, *arguments, input_bytes=input_bytes
+    )
+    after = _git_authority_snapshot(root)
+    if after != before:
+        raise ManifestError("protected Git repository authority changed during command")
+    return completed
+
+
+def _git_is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    """Return one native-DAG ancestry relation through the protected boundary.
+
+    Args:
+        root: Explicit repository containing both commits.
+        ancestor: Candidate ancestor commit identity.
+        descendant: Candidate descendant commit identity.
+
+    Returns:
+        ``True`` for relation exit 0 and ``False`` for the documented exit 1.
+
+    Raises:
+        ManifestError: Git cannot evaluate the relation or returns another
+            status after replacement/graft isolation.
+    """
+    completed = _invoke_protected_git(
+        root, "merge-base", "--is-ancestor", ancestor, descendant
+    )
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 1:
+        return False
+    raise ManifestError(
+        "cannot verify protected Git ancestry: " + _git_diagnostic(completed)
+    )
+
+
 def _git_bytes(
     root: Path, *arguments: str, input_bytes: bytes | None = None
 ) -> bytes:
-    """Run Git without a shell and return its exact stdout bytes.
+    """Run protected Git without a shell and return exact stdout bytes.
 
     Args:
         root: Explicit repository whose objects and refs are authoritative.
@@ -872,26 +1119,18 @@ def _git_bytes(
         Exact stdout bytes from one successful Git process.
 
     Raises:
-        ManifestError: Git cannot execute or returns nonzero.
+        ManifestError: Git cannot execute, rewrite authority is present or
+            drifts, or the requested command returns nonzero.
 
     Note:
         Byte output preserves NUL path records and filenames not decodable as
-        ordinary text; diagnostics alone use replacement-safe UTF-8 rendering.
-        The optional input is passed directly without a shell or text decode.
+        ordinary text. Every command uses the same sanitized environment,
+        ``--no-replace-objects``, and replace/graft before/after checks.
     """
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(root), *arguments],
-            check=False,
-            capture_output=True,
-            input=input_bytes,
-        )
-    except OSError as error:
-        raise ManifestError(f"cannot execute Git {' '.join(arguments)}: {error}") from error
+    completed = _invoke_protected_git(root, *arguments, input_bytes=input_bytes)
     if completed.returncode != 0:
-        detail = completed.stderr.decode("utf-8", errors="backslashreplace").strip()
         raise ManifestError(
-            f"Git {' '.join(arguments)} failed: {detail or 'no diagnostic'}"
+            f"Git {' '.join(arguments)} failed: {_git_diagnostic(completed)}"
         )
     return completed.stdout
 
@@ -1086,7 +1325,7 @@ def _command_detect_changed(arguments: argparse.Namespace) -> None:
 
 
 def _run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
-    """Run one Git command against the explicit repository without a shell.
+    """Run one protected Git command and decode its captured streams.
 
     Args:
         root: Exact repository whose objects and refs are authoritative.
@@ -1096,21 +1335,20 @@ def _run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
         The completed successful Git process with captured text streams.
 
     Raises:
-        ManifestError: Git returns nonzero or the repository cannot execute Git.
+        ManifestError: Git returns nonzero or rewrite/environment authority is
+            present, drifts, or cannot be isolated.
 
     Note:
-        Branch names and URLs remain argv data. Diagnostics are bounded to Git's
-        captured stderr and no fetched checkout content is executed.
+        Branch names and URLs remain argv data. This wrapper shares the sole
+        protected byte-mode process boundary with every history query.
     """
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(root), *arguments],
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-    except OSError as error:
-        raise ManifestError(f"cannot execute Git freshness command: {error}") from error
+    raw = _invoke_protected_git(root, *arguments)
+    completed = subprocess.CompletedProcess(
+        raw.args,
+        raw.returncode,
+        stdout=raw.stdout.decode("utf-8", errors="backslashreplace"),
+        stderr=raw.stderr.decode("utf-8", errors="backslashreplace"),
+    )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "Git failed"
         raise ManifestError(f"Git freshness command failed: {detail}")
@@ -1238,26 +1476,11 @@ def _command_promotion_freshness(arguments: argparse.Namespace) -> None:
             branch_tip = _fetch_branch_tip(
                 arguments.repo_root, repository, branch_name, observed_ref
             )
-            ancestry = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(arguments.repo_root),
-                    "merge-base",
-                    "--is-ancestor",
-                    candidate_commit,
-                    branch_tip,
-                ],
-                check=False,
-                text=True,
-                capture_output=True,
-            )
-            if ancestry.returncode != 0:
-                detail = ancestry.stderr.strip()
-                suffix = f": {detail}" if detail else ""
+            if not _git_is_ancestor(
+                arguments.repo_root, candidate_commit, branch_tip
+            ):
                 raise ManifestError(
                     "candidate is not an ancestor of the current branch tip"
-                    f"{suffix}"
                 )
             _run_git(
                 arguments.repo_root,
@@ -1289,33 +1512,16 @@ def _command_promotion_freshness(arguments: argparse.Namespace) -> None:
                 )
         finally:
             if worktree_added:
-                subprocess.run(
-                    [
-                        "git",
-                        "-C",
-                        str(arguments.repo_root),
-                        "worktree",
-                        "remove",
-                        "--force",
-                        str(worktree),
-                    ],
-                    check=False,
-                    text=True,
-                    capture_output=True,
+                _invoke_protected_git(
+                    arguments.repo_root,
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(worktree),
                 )
             for local_ref in (observed_ref, verified_ref):
-                subprocess.run(
-                    [
-                        "git",
-                        "-C",
-                        str(arguments.repo_root),
-                        "update-ref",
-                        "-d",
-                        local_ref,
-                    ],
-                    check=False,
-                    text=True,
-                    capture_output=True,
+                _invoke_protected_git(
+                    arguments.repo_root, "update-ref", "-d", local_ref
                 )
 
     if branch_source_commit == candidate_source_commit:
@@ -1395,6 +1601,35 @@ def _command_create(arguments: argparse.Namespace) -> None:
 def _command_source_commit(arguments: argparse.Namespace) -> None:
     """Print the exact last image-input-changing commit."""
     print(_git_source_commit(arguments.repo_root))
+
+
+def _command_head_commit(arguments: argparse.Namespace) -> None:
+    """Print the exact protected repository HEAD commit.
+
+    Args:
+        arguments: Repository root parsed by the protected CLI.
+
+    Returns:
+        None after printing one lowercase full commit SHA.
+
+    Raises:
+        ManifestError: HEAD resolution, rewrite-authority isolation, ASCII, or
+            canonical commit validation fails.
+
+    Note:
+        Shell consumers use this command instead of invoking Git directly, so
+        workflow identity and source/ancestry queries share the same
+        replace/graft/environment boundary.
+    """
+    try:
+        commit = _git_bytes(
+            arguments.repo_root, "rev-parse", "--verify", "HEAD^{commit}"
+        ).decode("ascii").strip()
+    except UnicodeError as error:
+        raise ManifestError("protected repository HEAD is not ASCII") from error
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise ManifestError("protected repository HEAD is not one full commit")
+    print(commit)
 
 
 def _command_resolve_source_commit(arguments: argparse.Namespace) -> None:
@@ -1495,11 +1730,7 @@ def _validated_attestation_fetch_limit(value: Any, context: str) -> int:
         documentation, and remote-evidence review. An implicit GitHub CLI
         default is never an authority.
     """
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or value != _ATTESTATION_FETCH_LIMIT
-    ):
+    if type(value) is not int or value != _ATTESTATION_FETCH_LIMIT:
         raise ManifestError(
             f"{context}: attestation fetch limit must be "
             f"{_ATTESTATION_FETCH_LIMIT}"
@@ -1572,12 +1803,13 @@ def _command_snapshot_attestation_bundle(arguments: argparse.Namespace) -> None:
 
     Note:
         ``gh attestation download`` documents one JSON object per line and
-        ``--limit`` as the maximum number fetched. Counting the retained raw
-        bundle therefore measures fetch saturation before offline verification;
-        counting only ``gh attestation verify --format json`` output would be
-        weaker because that array contains verified evidence, not fetch-count
-        metadata. Saturation deliberately rejects even an exactly complete
-        limit-sized set because the CLI exposes no continuation/total marker.
+        ``--limit`` as the maximum number fetched. The locked CLI 2.98 applies
+        its predicate filter only after that fetch, so the protected download
+        deliberately requests every predicate. Counting this retained raw
+        bundle measures saturation before offline SLSA verification; counting
+        filtered JSONL or ``verify --format json`` output would be weaker.
+        Saturation deliberately rejects even an exactly complete limit-sized
+        set because the CLI exposes no continuation/total marker.
     """
     limit = _validated_attestation_fetch_limit(
         arguments.fetch_limit, "attestation bundle snapshot"
@@ -1719,25 +1951,10 @@ def _command_attestation_identities(arguments: argparse.Namespace) -> None:
                 raise ManifestError(f"{label} commit must be a lowercase full SHA")
         valid: set[tuple[str, str]] = set()
         for source, signer in identities:
-            ancestry = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(arguments.repo_root),
-                    "merge-base",
-                    "--is-ancestor",
-                    source,
-                    consumer_candidate,
-                ],
-                check=False,
-                capture_output=True,
-            )
-            if ancestry.returncode == 1:
+            if not _git_is_ancestor(
+                arguments.repo_root, source, consumer_candidate
+            ):
                 continue
-            if ancestry.returncode != 0:
-                raise ManifestError(
-                    "cannot verify attestation source against consumer candidate"
-                )
             try:
                 _validate_candidate_source_binding(
                     arguments.repo_root,
@@ -1755,26 +1972,11 @@ def _command_attestation_identities(arguments: argparse.Namespace) -> None:
             for other_source, _ in valid:
                 if other_source == source:
                     continue
-                relation = subprocess.run(
-                    [
-                        "git",
-                        "-C",
-                        str(arguments.repo_root),
-                        "merge-base",
-                        "--is-ancestor",
-                        source,
-                        other_source,
-                    ],
-                    check=False,
-                    capture_output=True,
-                )
-                if relation.returncode == 0:
+                if _git_is_ancestor(
+                    arguments.repo_root, source, other_source
+                ):
                     superseded = True
                     break
-                if relation.returncode != 1:
-                    raise ManifestError(
-                        "cannot order verified attestation source candidates"
-                    )
             if not superseded:
                 maximal.add(identity)
         if len(maximal) != 1:
@@ -1864,6 +2066,10 @@ def build_parser() -> argparse.ArgumentParser:
     create.set_defaults(handler=_command_create)
     source = subparsers.add_parser("source-commit", help="find the last image-input commit")
     source.set_defaults(handler=_command_source_commit)
+    head = subparsers.add_parser(
+        "head-commit", help="resolve HEAD through the protected Git boundary"
+    )
+    head.set_defaults(handler=_command_head_commit)
     resolve_source = subparsers.add_parser(
         "resolve-source-commit",
         help="prove and print the candidate's last image-input-changing ancestor",

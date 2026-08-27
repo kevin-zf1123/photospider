@@ -380,7 +380,11 @@ B 继续以 A 作为 image source 的路径。后一条证明 candidate checkout
 SHA、受保护 workflow signer、manifest/OCI source 与精确 image digest 彼此独立，同时 ancestry、最后
 image change 与 input-zero-drift 受保护检查全部成功。Resolver 会遍历完整 DAG，并要求唯一的
 ancestry-maximal image change；两个 merge-parent order 下 byte 相同但 incomparable 的 branch change
-都会失败，而唯一的更晚 canonical change 会在不扩大 image-input authority 的情况下被接受。测试还要求 force-push、unknown ancestry、缺失 image input，以及两次
+都会失败，而唯一的更晚 canonical change 会在不扩大 image-input authority 的情况下被接受。
+Production-bound Git 回归还会实际安装 `git replace --graft`、legacy `.git/info/grafts`，以及会重定向
+replacement/object/work-tree 的 environment。所有 semantic Git call 都共享一个已清理 environment 且
+带 `--no-replace-objects` 的 process boundary；canonical replace/graft state 会在输出前失败，继承的
+`GIT_*` authority 也不能重定向 clean DAG。测试还要求 force-push、unknown ancestry、缺失 image input，以及两次
 fetch measurement 之间的 ref movement 都必须在写 branch/`latest` 前停止。
 Stateful registry 还会证明首次只创建 SHA 并执行 post-create verification、精确 same-SHA 复用且不再
 调用 create、跨 ref 复用，以及同 commit digest 冲突不能移动 SHA、branch 或 `latest`。digest output
@@ -2779,8 +2783,12 @@ published-image healthcheck 与 build/test integration job 都执行所得
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` 引用。Candidate verification 会分别提供预期
 certificate source 与 signer digest，以及受保护的显式 fetch limit 30；达到该 limit 时，只有每份
 verified certificate 都等于受约束 pair 才可接受。Published verification 会先下载最多 30 份 raw
-exact-subject JSONL bundle、保留其精确 byte，并在 raw count 达到 30 时按可能截断拒绝，然后才离线
-校验；它不会从 verified JSON 长度推断 fetch complete。对于未饱和集合，受保护 Git history 会把同一
+exact-subject JSONL bundle，且必须包含所有 predicate，不得在 download 上携带 predicate filter，因为
+锁定的 GitHub CLI 2.98 只会在 API limit 之后执行该客户端 filter。它会保留精确 all-predicate byte，
+在 raw count 达到 30 时按可能截断拒绝，然后才在同一 snapshot 上离线应用 SLSA/signer/host policy；
+它不会从 filtered JSONL 或 verified JSON 长度推断 fetch complete。Mixed-predicate saturation 是明确
+负向回归。Limit lock 必须是精确 JSON integer 30；完整三命令 array-to-execution block 与 fake-`gh`
+精确 argv 比较会拒绝 mutation、flag drift 与重复执行。对于未饱和集合，受保护 Git history 会把同一
 可复现 digest 的多份有效 attestation 归约为 current consumer 的 ancestor 中唯一最新的 attestation
 source，而且该 source 的 canonical input 仍必须解析到 OCI/manifest image source。incomparable
 source、同 candidate signer 歧义、swapped identity、canonical-input drift 或 raw discovery 饱和都会在

@@ -649,6 +649,147 @@ class ImageManifestContractTest(unittest.TestCase):
             accepted = resolve(unique, success=True)
             self.assertEqual(accepted.stdout.strip(), unique)
 
+    def test_git_rewrite_authority_is_isolated_and_rejected(self) -> None:
+        """Reject replace/graft state and isolate caller-supplied Git authority.
+
+        Returns:
+            None after a normal real DAG resolves, canonical replacement and
+            legacy graft state fail before output, a custom replacement base
+            plus redirecting environment cannot change the result, and the
+            static verifier rejects a second direct Git process site.
+
+        Raises:
+            AssertionError: Production Git isolation, rewrite-state rejection,
+                normal-DAG behavior, or static single-entry enforcement drifts.
+
+        Note:
+            The fixture uses ``git replace --graft`` to prove the replacement
+            object really changes default Git history. Production intentionally
+            rejects the canonical ref rather than accepting the forged graph;
+            an inherited custom ref base is stripped and replacement objects
+            remain disabled.
+        """
+        with tempfile.TemporaryDirectory() as temporary_text:
+            temporary = Path(temporary_text)
+            root = temporary / "repository"
+            lock = root / "ci/locks/ci-image-lock.json"
+            lock.parent.mkdir(parents=True)
+            lock.write_text(
+                (REPO_ROOT / "ci/locks/ci-image-lock.json").read_text(
+                    encoding="utf-8"
+                ),
+                encoding="utf-8",
+            )
+            (root / "Dockerfile.ci").write_text("FROM scratch\n", encoding="utf-8")
+
+            def git(*arguments: str, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+                """Run one fixture-setup Git command with optional rewrite env."""
+                return run_command(
+                    "git", "-C", root, *arguments, environment=environment
+                )
+
+            def resolve(
+                candidate: str,
+                *,
+                success: bool,
+                environment: dict[str, str] | None = None,
+            ) -> subprocess.CompletedProcess[str]:
+                """Run the production resolver under an explicit caller env."""
+                return run_command(
+                    sys.executable,
+                    SCRIPTS / "ci_image_manifest.py",
+                    "--repo-root",
+                    root,
+                    "resolve-source-commit",
+                    "--candidate-commit",
+                    candidate,
+                    "--workflow-commit",
+                    candidate,
+                    expect_success=success,
+                    environment=environment,
+                )
+
+            git("init", "-q")
+            git("config", "user.name", "CI Contract")
+            git("config", "user.email", "ci@example.invalid")
+            git("config", "commit.gpgsign", "false")
+            git("add", "--", "Dockerfile.ci", "ci/locks/ci-image-lock.json")
+            git("commit", "-q", "-m", "image authority")
+            image_source = git("rev-parse", "HEAD").stdout.strip()
+            (root / "README.md").write_text("non-image child\n", encoding="utf-8")
+            git("add", "--", "README.md")
+            git("commit", "-q", "-m", "non-image child")
+            candidate = git("rev-parse", "HEAD").stdout.strip()
+            self.assertEqual(resolve(candidate, success=True).stdout.strip(), image_source)
+
+            git("replace", "--graft", candidate)
+            forged_default = git(
+                "rev-list", "--parents", "--max-count=1", candidate
+            ).stdout.split()
+            self.assertEqual(forged_default, [candidate])
+            replacement_object = git(
+                "rev-parse", f"refs/replace/{candidate}"
+            ).stdout.strip()
+            replaced = resolve(candidate, success=False)
+            self.assertEqual(replaced.stdout, "")
+            self.assertIn("refs/replace authority", replaced.stderr)
+            git("replace", "-d", candidate)
+
+            custom_ref = f"refs/attacker-replacements/{candidate}"
+            git("update-ref", custom_ref, replacement_object)
+            custom_environment = {
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(temporary / "missing-alternates"),
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.useReplaceRefs",
+                "GIT_CONFIG_VALUE_0": "true",
+                "GIT_DIR": str(temporary / "wrong-git-dir"),
+                "GIT_NO_REPLACE_OBJECTS": "0",
+                "GIT_OBJECT_DIRECTORY": str(temporary / "wrong-objects"),
+                "GIT_REPLACE_REF_BASE": "refs/attacker-replacements",
+                "GIT_WORK_TREE": str(temporary / "wrong-work-tree"),
+            }
+            poisoned_default = git(
+                "rev-list",
+                "--parents",
+                "--max-count=1",
+                candidate,
+                environment={
+                    "GIT_REPLACE_REF_BASE": "refs/attacker-replacements"
+                },
+            ).stdout.split()
+            self.assertEqual(poisoned_default, [candidate])
+            isolated = resolve(
+                candidate, success=True, environment=custom_environment
+            )
+            self.assertEqual(isolated.stdout.strip(), image_source)
+            git("update-ref", "-d", custom_ref)
+
+            grafts = root / ".git/info/grafts"
+            grafts.parent.mkdir(parents=True, exist_ok=True)
+            grafts.write_text(candidate + "\n", encoding="ascii")
+            grafted = resolve(candidate, success=False)
+            self.assertEqual(grafted.stdout, "")
+            self.assertIn("legacy info/grafts authority", grafted.stderr)
+            grafts.unlink()
+            self.assertEqual(resolve(candidate, success=True).stdout.strip(), image_source)
+
+            lock_module = LockSurfaceContractTest._load_lock_module()
+            lock_module._verify_manifest_git_invocation_boundary(REPO_ROOT)
+            source = (SCRIPTS / "ci_image_manifest.py").read_text(encoding="utf-8")
+            marker = '    command = [\n        "git",\n'
+            self.assertEqual(source.count(marker), 1)
+            mutant = source.replace(
+                marker,
+                '    subprocess.run(["git", "status"], check=False)\n' + marker,
+                1,
+            )
+            mutant_root = temporary / "mutant"
+            mutant_path = mutant_root / "ci/scripts/ci_image_manifest.py"
+            mutant_path.parent.mkdir(parents=True)
+            mutant_path.write_text(mutant, encoding="utf-8")
+            with self.assertRaises(lock_module.ContractError):
+                lock_module._verify_manifest_git_invocation_boundary(mutant_root)
+
     def test_manifest_rejects_builder_removed_from_rollout_authority(self) -> None:
         """Reject retained builder provenance removed by a reviewed lock update."""
         with tempfile.TemporaryDirectory() as temporary_text:
@@ -735,16 +876,60 @@ class ImageManifestContractTest(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 "set -Eeuo pipefail\n"
                 "printf '%q ' \"$@\" >> \"$CI_TEST_GH_LOG\"; printf '\\n' >> \"$CI_TEST_GH_LOG\"\n"
+                "fail_argv() {\n"
+                "  printf 'unexpected exact gh argv:' >&2\n"
+                "  printf ' %q' \"$@\" >&2\n"
+                "  printf '\\n' >&2\n"
+                "  exit 92\n"
+                "}\n"
                 "case \"${1:-} ${2:-}\" in\n"
                 "  'attestation download')\n"
+                "    if (( $# != 7 )) || [[ $1 != attestation || $2 != download ||\n"
+                "      $3 != \"oci://$CI_TEST_EXACT_IMAGE\" || $4 != --repo ||\n"
+                "      $5 != \"$CI_TEST_REPOSITORY\" || $6 != --limit || $7 != 30 ]]; then\n"
+                "      fail_argv \"$@\"\n"
+                "    fi\n"
                 "    printf 'gh-attestation-download\\n' >> \"$CI_TEST_COMMAND_LOG\"\n"
                 "    if [[ ${CI_TEST_GH_FAIL:-0} == 1 ]]; then\n"
                 "      printf 'mock attestation download rejection\\n' >&2\n"
                 "      exit 41\n"
                 "    fi\n"
+                "    printf '%s\\n' \"$(dirname -- \"$PWD\")/downloaded-bundles.jsonl\" > \"$CI_TEST_EXPECTED_BUNDLE_PATH_FILE\"\n"
                 "    printf '%s' \"$CI_TEST_ATTESTATION_BUNDLE_JSONL\" > \"$CI_TEST_IMAGE_DIGEST.jsonl\"\n"
                 "    ;;\n"
                 "  'attestation verify')\n"
+                "    if [[ ${4:-} == --bundle ]]; then\n"
+                "      expected_bundle=$(<\"$CI_TEST_EXPECTED_BUNDLE_PATH_FILE\")\n"
+                "      bundle_parent=$(cd -- \"$(dirname -- \"${5:-}\")\" && pwd -P)\n"
+                "      expected_parent=$(cd -- \"$(dirname -- \"$expected_bundle\")\" && pwd -P)\n"
+                "      if (( $# != 14 )) || [[ $1 != attestation || $2 != verify ||\n"
+                "        $3 != \"oci://$CI_TEST_EXACT_IMAGE\" || $4 != --bundle ||\n"
+                "        ${5##*/} != downloaded-bundles.jsonl ||\n"
+                "        $bundle_parent != \"$expected_parent\" || $6 != --repo ||\n"
+                "        $7 != \"$CI_TEST_REPOSITORY\" || $8 != --predicate-type ||\n"
+                "        $9 != https://slsa.dev/provenance/v1 ||\n"
+                "        ${10} != --signer-workflow ||\n"
+                "        ${11} != \"$CI_TEST_SIGNER_WORKFLOW\" ||\n"
+                "        ${12} != --deny-self-hosted-runners ||\n"
+                "        ${13} != --format || ${14} != json ]]; then\n"
+                "        fail_argv \"$@\"\n"
+                "      fi\n"
+                "    else\n"
+                "      if (( $# != 18 )) || [[ $1 != attestation || $2 != verify ||\n"
+                "        $3 != \"oci://$CI_TEST_EXACT_IMAGE\" || $4 != --repo ||\n"
+                "        $5 != \"$CI_TEST_REPOSITORY\" || $6 != --predicate-type ||\n"
+                "        $7 != https://slsa.dev/provenance/v1 ||\n"
+                "        $8 != --signer-workflow || $9 != \"$CI_TEST_SIGNER_WORKFLOW\" ||\n"
+                "        ${10} != --limit || ${11} != 30 ||\n"
+                "        ${12} != --source-digest ||\n"
+                "        ${13} != \"$CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT\" ||\n"
+                "        ${14} != --signer-digest ||\n"
+                "        ${15} != \"$CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT\" ||\n"
+                "        ${16} != --deny-self-hosted-runners ||\n"
+                "        ${17} != --format || ${18} != json ]]; then\n"
+                "        fail_argv \"$@\"\n"
+                "      fi\n"
+                "    fi\n"
                 "    printf 'gh-attestation-verify\\n' >> \"$CI_TEST_COMMAND_LOG\"\n"
                 "    if [[ ${CI_TEST_GH_FAIL:-0} == 1 ]]; then\n"
                 "      printf 'mock attestation rejection\\n' >&2\n"
@@ -826,9 +1011,21 @@ class ImageManifestContractTest(unittest.TestCase):
                 "CI_TEST_ATTESTATION_SOURCE_COMMIT": attestation_source,
                 "CI_TEST_COMMAND_LOG": str(command_log),
                 "CI_TEST_DOCKER_LOG": str(docker_log),
+                "CI_TEST_EXACT_IMAGE": (
+                    "ghcr.io/kevin-zf1123/photospider/photospider-ci@"
+                    f"{image_digest}"
+                ),
+                "CI_TEST_EXPECTED_BUNDLE_PATH_FILE": str(
+                    temporary / "expected-bundle-path.txt"
+                ),
                 "CI_TEST_GH_LOG": str(gh_log),
                 "CI_TEST_IMAGE_DIGEST": image_digest,
                 "CI_TEST_MANIFEST_DIGEST": digest,
+                "CI_TEST_REPOSITORY": "kevin-zf1123/photospider",
+                "CI_TEST_SIGNER_WORKFLOW": (
+                    "kevin-zf1123/photospider/.github/workflows/"
+                    "build-ci-image.yml"
+                ),
                 "CI_TEST_SOURCE_COMMIT": source,
                 "CI_TEST_VERIFIER_RUNNER_JSON": json.dumps(
                     write_runner_identity(
@@ -986,6 +1183,20 @@ class ImageManifestContractTest(unittest.TestCase):
             self.assertIn("attestation download", published_gh)
             self.assertIn("attestation verify", published_gh)
             self.assertEqual(published_gh.count("--limit 30"), 1)
+            published_gh_lines = published_gh.splitlines()
+            download_argv = next(
+                line for line in published_gh_lines if "attestation download" in line
+            )
+            offline_verify_argv = next(
+                line
+                for line in published_gh_lines
+                if "attestation verify" in line and "--bundle" in line
+            )
+            self.assertNotIn("--predicate-type", download_argv)
+            self.assertIn(
+                "--predicate-type https://slsa.dev/provenance/v1",
+                offline_verify_argv,
+            )
             self.assertIn("--bundle", published_gh)
             self.assertNotIn("--source-digest", published_gh)
             self.assertNotIn("--signer-digest", published_gh)
@@ -1019,7 +1230,18 @@ class ImageManifestContractTest(unittest.TestCase):
             )["published_image"]["attestation_fetch_limit"]
             self.assertEqual(attestation_fetch_limit, 30)
             bundle_record = json.dumps(
-                {"bundle": "raw-fetch-fixture"},
+                {
+                    "bundle": "raw-fetch-fixture",
+                    "predicateType": "https://slsa.dev/provenance/v1",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ) + "\n"
+            other_predicate_record = json.dumps(
+                {
+                    "bundle": "raw-fetch-other-predicate",
+                    "predicateType": "https://example.invalid/custom/v1",
+                },
                 sort_keys=True,
                 separators=(",", ":"),
             ) + "\n"
@@ -1076,14 +1298,27 @@ class ImageManifestContractTest(unittest.TestCase):
             self.assertIn(f"--source-digest {attestation_source}", known_saturated_gh)
             self.assertIn(f"--signer-digest {attestation_signer}", known_saturated_gh)
 
-            for label, truncated_verified_json in (
-                ("omitted-newer-source", attestation_json),
+            for label, truncated_verified_json, raw_bundle in (
+                (
+                    "omitted-newer-source",
+                    attestation_json,
+                    bundle_record * attestation_fetch_limit,
+                ),
                 (
                     "omitted-conflicting-signer",
                     json.dumps(
                         [json.loads(attestation_json)[0]],
                         sort_keys=True,
                         separators=(",", ":"),
+                    ),
+                    bundle_record * attestation_fetch_limit,
+                ),
+                (
+                    "mixed-predicate-saturated-window",
+                    attestation_json,
+                    (
+                        other_predicate_record * (attestation_fetch_limit - 1)
+                        + bundle_record
                     ),
                 ),
             ):
@@ -1102,9 +1337,7 @@ class ImageManifestContractTest(unittest.TestCase):
                             **published_environment,
                             "CI_ARTIFACT_DIR": str(saturated_artifact),
                             "CI_IMAGE_OUTPUT_FILE": str(saturated_output),
-                            "CI_TEST_ATTESTATION_BUNDLE_JSONL": (
-                                bundle_record * attestation_fetch_limit
-                            ),
+                            "CI_TEST_ATTESTATION_BUNDLE_JSONL": raw_bundle,
                             "CI_TEST_ATTESTATION_JSON": truncated_verified_json,
                         },
                         expect_success=False,
@@ -1282,12 +1515,148 @@ class ImageManifestContractTest(unittest.TestCase):
                 ),
             ),
             (
-                "reordered-attestation-fetch-limit",
+                "download-predicate-filter-before-raw-count",
                 source.replace(
-                    "    --predicate-type https://slsa.dev/provenance/v1\n"
-                    '    --limit "$attestation_fetch_limit"',
+                    '    --repo "$EXPECTED_REPOSITORY"\n'
                     '    --limit "$attestation_fetch_limit"\n'
-                    "    --predicate-type https://slsa.dev/provenance/v1",
+                    "  )\n  (",
+                    '    --repo "$EXPECTED_REPOSITORY"\n'
+                    "    --predicate-type https://slsa.dev/provenance/v1\n"
+                    '    --limit "$attestation_fetch_limit"\n'
+                    "  )\n  (",
+                    1,
+                ),
+            ),
+            (
+                "reordered-download-flags",
+                source.replace(
+                    '    --repo "$EXPECTED_REPOSITORY"\n'
+                    '    --limit "$attestation_fetch_limit"\n'
+                    "  )\n  (",
+                    '    --limit "$attestation_fetch_limit"\n'
+                    '    --repo "$EXPECTED_REPOSITORY"\n'
+                    "  )\n  (",
+                    1,
+                ),
+            ),
+            (
+                "download-array-appended",
+                source.replace(
+                    '    "${attestation_download_command[@]}" >/dev/null',
+                    '    attestation_download_command+=(--limit 1)\n'
+                    '    "${attestation_download_command[@]}" >/dev/null',
+                    1,
+                ),
+            ),
+            (
+                "download-array-prepended",
+                source.replace(
+                    "  (\n    cd -- \"$attestation_download_directory\"",
+                    "  attestation_download_command=(--limit 1 "
+                    '"${attestation_download_command[@]}")\n'
+                    "  (\n    cd -- \"$attestation_download_directory\"",
+                    1,
+                ),
+            ),
+            (
+                "download-array-alias",
+                source.replace(
+                    '    "${attestation_download_command[@]}" >/dev/null',
+                    '    download_alias=("${attestation_download_command[@]}")\n'
+                    '    "${download_alias[@]}" >/dev/null',
+                    1,
+                ),
+            ),
+            (
+                "offline-verify-unknown-flag",
+                source.replace(
+                    '    --bundle "$attestation_bundle_snapshot"\n'
+                    '    --repo "$EXPECTED_REPOSITORY"',
+                    '    --bundle "$attestation_bundle_snapshot"\n'
+                    "    --unknown-policy attacker\n"
+                    '    --repo "$EXPECTED_REPOSITORY"',
+                    1,
+                ),
+            ),
+            (
+                "offline-verify-reordered-flags",
+                source.replace(
+                    '    --bundle "$attestation_bundle_snapshot"\n'
+                    '    --repo "$EXPECTED_REPOSITORY"',
+                    '    --repo "$EXPECTED_REPOSITORY"\n'
+                    '    --bundle "$attestation_bundle_snapshot"',
+                    1,
+                ),
+            ),
+            (
+                "offline-verify-array-appended",
+                source.replace(
+                    "    --format json\n  )\nelse",
+                    "    --format json\n  )\n"
+                    "  attestation_command+=(--signer-workflow attacker)\nelse",
+                    1,
+                ),
+            ),
+            (
+                "known-verify-duplicate-scalar",
+                source.replace(
+                    '    --signer-digest "$EXPECTED_ATTESTATION_SIGNER_COMMIT"',
+                    '    --signer-digest "$EXPECTED_ATTESTATION_SIGNER_COMMIT"\n'
+                    "    --signer-digest 1111111111111111111111111111111111111111",
+                    1,
+                ),
+            ),
+            (
+                "known-verify-array-appended",
+                source.replace(
+                    "    --format json\n  )\nfi",
+                    "    --format json\n  )\n"
+                    "  attestation_command+=(--limit 1)\nfi",
+                    1,
+                ),
+            ),
+            (
+                "verification-array-indirect-mutation",
+                source.replace(
+                    'attestation_json=$("${attestation_command[@]}")',
+                    "attestation_array_name=attestation_command\n"
+                    "eval \"$attestation_array_name+=(--limit 1)\"\n"
+                    'attestation_json=$("${attestation_command[@]}")',
+                    1,
+                ),
+            ),
+            (
+                "verification-array-alias",
+                source.replace(
+                    'attestation_json=$("${attestation_command[@]}")',
+                    'attestation_alias=("${attestation_command[@]}")\n'
+                    'attestation_json=$("${attestation_alias[@]}")',
+                    1,
+                ),
+            ),
+            (
+                "verification-second-execution",
+                source.replace(
+                    'attestation_json=$("${attestation_command[@]}")',
+                    '"${attestation_command[@]}" >/dev/null\n'
+                    'attestation_json=$("${attestation_command[@]}")',
+                    1,
+                ),
+            ),
+            (
+                "gh-function-alias",
+                source.replace(
+                    'if [[ -z "$EXPECTED_ATTESTATION_SOURCE_COMMIT" ]]; then',
+                    "gh() { command gh \"$@\"; }\n"
+                    'if [[ -z "$EXPECTED_ATTESTATION_SOURCE_COMMIT" ]]; then',
+                    1,
+                ),
+            ),
+            (
+                "weak-float-limit-type",
+                source.replace(
+                    'type(published["attestation_fetch_limit"]) is not int',
+                    'isinstance(published["attestation_fetch_limit"], bool)',
                     1,
                 ),
             ),
@@ -1301,6 +1670,7 @@ class ImageManifestContractTest(unittest.TestCase):
             ),
         ):
             with self.subTest(mutation=label), tempfile.TemporaryDirectory() as text:
+                self.assertNotEqual(mutation, source)
                 root = Path(text)
                 script = root / "ci/scripts/ci_image_verify.sh"
                 script.parent.mkdir(parents=True)
@@ -2026,10 +2396,16 @@ class ImagePromotionContractTest(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 "set -Eeuo pipefail\n"
                 "is_fetch=false\n"
+                "rewritten=()\n"
                 "for argument in \"$@\"; do\n"
                 "  if [[ \"$argument\" == fetch ]]; then is_fetch=true; fi\n"
+                "  if [[ \"$argument\" == https://github.com/kevin-zf1123/photospider.git ]]; then\n"
+                "    rewritten+=(\"$CI_TEST_ORIGIN_URI\")\n"
+                "  else\n"
+                "    rewritten+=(\"$argument\")\n"
+                "  fi\n"
                 "done\n"
-                "\"$CI_TEST_REAL_GIT\" \"$@\"\n"
+                "\"$CI_TEST_REAL_GIT\" \"${rewritten[@]}\"\n"
                 "if [[ \"$is_fetch\" == true && -n ${CI_TEST_GIT_DRIFT_REF:-} ]]; then\n"
                 "  count=0\n"
                 "  if [[ -f \"$CI_TEST_GIT_DRIFT_COUNTER\" ]]; then\n"
@@ -2055,6 +2431,7 @@ class ImagePromotionContractTest(unittest.TestCase):
                 "CI_IMAGE_PROMOTION_SCRATCH_ROOT": str(scratch_root),
                 "CI_TEST_DOCKER_LOG": str(docker_log),
                 "CI_TEST_INSPECT_LOG": str(inspect_log),
+                "CI_TEST_ORIGIN_URI": origin.resolve().as_uri(),
                 "CI_TEST_REAL_GIT": str(real_git),
                 "CI_TEST_REGISTRY_STATE": str(registry_state_path),
                 "CI_TEST_WRONG_DIGEST": "sha256:" + "9" * 64,
@@ -8867,6 +9244,72 @@ class LockSurfaceContractTest(unittest.TestCase):
                     "complete CI-image producer mapping differs",
                     str(raised.exception),
                 )
+
+    def test_attestation_fetch_limit_requires_exact_integer_prebuild(self) -> None:
+        """Reject every non-exact integer limit in runtime and prebuild gates.
+
+        Returns:
+            None after exact integer 30 passes and bool, float, string, lower,
+            and higher values fail both the manifest runtime reader and the
+            complete protected lock verifier before producer publication.
+
+        Raises:
+            AssertionError: Type equality, producer mapping order, or either
+                protected validation surface accepts a malformed limit.
+
+        Note:
+            Python numeric equality would otherwise make ``30.0 == 30`` true.
+            The contract therefore requires ``type(value) is int`` rather than
+            an equality-only or boolean-special-case check.
+        """
+        lock_module = self._load_lock_module()
+        manifest_module = ImageManifestContractTest._manifest_module(
+            "ci_image_manifest_exact_limit_test"
+        )
+        image_lock = json.loads(
+            (REPO_ROOT / "ci/locks/ci-image-lock.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        actions = lock_module._read_actions(REPO_ROOT / "ci/locks/actions.lock")
+        self.assertEqual(
+            manifest_module._published_image_lock(REPO_ROOT)[
+                "attestation_fetch_limit"
+            ],
+            30,
+        )
+        lock_module._verify_image_lock(REPO_ROOT, actions)
+
+        producer = (REPO_ROOT / ".github/workflows/build-ci-image.yml").read_text(
+            encoding="utf-8"
+        )
+        producer_order = (
+            producer.index("- name: Verify protected locks"),
+            producer.index("uses: docker/login-action@"),
+            producer.index("uses: docker/build-push-action@"),
+            producer.index("- name: Attest exact temporary OCI subject"),
+        )
+        self.assertEqual(producer_order, tuple(sorted(producer_order)))
+
+        invalid_values: tuple[object, ...] = (True, 30.0, "30", 29, 31)
+        for value in invalid_values:
+            with self.subTest(invalid_limit=value), tempfile.TemporaryDirectory() as text:
+                mutated = json.loads(json.dumps(image_lock))
+                mutated["published_image"]["attestation_fetch_limit"] = value
+                root = Path(text)
+                lock_path = root / "ci/locks/ci-image-lock.json"
+                lock_path.parent.mkdir(parents=True)
+                lock_path.write_text(
+                    json.dumps(mutated, sort_keys=True, separators=(",", ":"))
+                    + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaises(manifest_module.ManifestError):
+                    manifest_module._published_image_lock(root)
+                with mock.patch.object(
+                    lock_module, "_load_json", return_value=mutated
+                ), self.assertRaises(lock_module.ContractError):
+                    lock_module._verify_image_lock(REPO_ROOT, actions)
 
     def test_runner_identity_handoffs_reject_path_and_environment_drift(self) -> None:
         """Reject missing outputs, split paths, candidate paths, and env rereads."""

@@ -55,12 +55,21 @@ path-history simplification 的情况下遍历完整非 shallow Git DAG，并要
 canonical-input-changing commit；随后证明 source ancestry，以及直到 candidate 都不存在 canonical
 input drift。即使 branch change 收敛到相同 byte，或 merge parent order 改变，incomparable change 也会
 失败。它不会为了强迫 commit 相等而把 parser、test 或 documentation path 加入 image-input list。
+所有参与 source resolution、ancestry、attestation-source selection 或 promotion freshness 的 Git
+操作都必须经过同一个受保护 invocation boundary。该边界会移除 caller 提供的 `GIT_*` variable、
+禁用 replacement-object interpretation，并在输出任何 resolved identity 前拒绝 canonical
+`refs/replace/**`、legacy `.git/info/grafts` 或 common-directory drift。
 
 对于已知 candidate，verifier 会向 `gh attestation verify` 传入彼此独立的 source/signer digest
 constraint 与受保护的显式 `published_image.attestation_fetch_limit=30`；known result 饱和时，只有每份 certificate 都等于该精确
-pair 才可接受。Published discovery 改为执行 `gh attestation download --limit 30`，计算 retained raw
-JSONL snapshot 的记录数，并在 fetched bundle 达到 30 时按可能截断拒绝，然后才离线校验同一
-snapshot。它绝不把更短的 verified-evidence array 当作 fetch-count metadata。Raw set 未饱和时，同一
+pair 才可接受。由于锁定的 GitHub CLI 2.98 只会在 API limit 之后应用 predicate filter，published
+discovery 执行 `gh attestation download --limit 30` 时不得携带 predicate filter。它会先计算 retained
+all-predicate raw JSONL snapshot 的记录数，并在 fetched bundle 达到 30 时按可能截断拒绝；只有随后
+才会在同一 snapshot 上离线应用 SLSA predicate、signer workflow 与 hosted-runner policy。它绝不把
+更短的 filtered JSONL 或 verified-evidence array 当作 fetch-count metadata。Lock value 必须是精确
+JSON integer 30；boolean、float、string、29 或 31 都会在 prebuild gate 失败。三条 `gh` command
+array 从构造到唯一执行形成一个精确 active block；append/prepend、alias、indirect mutation、duplicate
+scalar、reorder、unknown flag 或第二次执行都会使静态合同失败。Raw set 未饱和时，同一
 digest 的多份有效 rerun attestation 会通过受保护 Git history 归约为唯一最新的 certificate source；
 该 source 必须是 current consumer 的 ancestor，且相对 `image_source_commit` 保持 canonical input 零
 drift。incomparable source，或同一个最新 candidate 对应不同 signer 时，会在拉取 layer 前失败。只有

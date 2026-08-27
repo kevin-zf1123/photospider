@@ -69,11 +69,22 @@ identities on 2026-08-27 from authoritative upstream services:
   `gh_2.98.0_checksums.txt`. The CLI is needed to verify GitHub artifact and OCI
   attestations; Ubuntu's older package does not provide `gh attestation`.
   `published_image.attestation_fetch_limit` fixes the reviewed finite fetch
-  window at 30. Known producers retain exact `--source-digest` and
-  `--signer-digest` constraints. Published discovery first downloads the raw
-  exact-subject JSONL window, rejects 30 fetched bundles as possibly truncated,
-  snapshots the unsaturated bytes, and verifies that same snapshot offline;
-  the shorter verified JSON array is never treated as fetch-count evidence.
+  window as the exact JSON integer 30; boolean, float, string, or any other
+  integer fails the prebuild lock verifier. GitHub CLI 2.98 applies its
+  download predicate filter after the API limit, so published discovery does
+  not pass `--predicate-type` while fetching. It first downloads every
+  exact-subject, repository-scoped predicate bundle, rejects a raw count of 30
+  as possibly truncated, snapshots the unsaturated bytes, and applies the SLSA
+  predicate, signer workflow, and hosted-runner policy only while verifying
+  that same snapshot offline. The shorter filtered or verified result is never
+  treated as fetch-count evidence. Known producers retain exact
+  `--source-digest` and `--signer-digest` constraints.
+- Every Git command used for image source, complete-DAG ancestry, attestation
+  source selection, or promotion freshness passes through one protected
+  process boundary. It removes caller-supplied `GIT_*` authority, forces
+  `--no-replace-objects`, and rejects canonical `refs/replace/**`, legacy
+  `.git/info/grafts`, or common-directory drift before semantic output is
+  consumed.
 - GitHub documents a two-to-three-day image deployment window and directs exact
   job diagnosis to `Set up job`. The finite Linux rollout set records stable
   `ubuntu24/20260816.277.1`, observed in exact-head runs `32997831039` and

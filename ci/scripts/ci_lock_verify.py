@@ -13,6 +13,7 @@ Run it from any directory; ``--repo-root`` is primarily for fixture tests.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -2123,6 +2124,95 @@ def _verify_suite_gate_helper_identity(
         )
 
 
+def _verify_manifest_git_invocation_boundary(root: Path) -> None:
+    """Require one protected process boundary for every manifest Git command.
+
+    Args:
+        root: Repository root containing the canonical manifest helper.
+
+    Returns:
+        None when process construction, environment isolation, rewrite-state
+        rejection, and before/after authority checks equal the reviewed form.
+
+    Raises:
+        ContractError: Python syntax is invalid; another subprocess/os process
+            entrypoint exists; the sole ``subprocess.run`` moves outside the
+            unchecked low-level helper; or replacement/graft/environment
+            isolation fragments are missing.
+
+    Note:
+        Runtime regressions exercise real replace refs, legacy grafts, and
+        caller-supplied Git environment. This AST check prevents a future
+        source, ancestry, attestation, or promotion caller from bypassing the
+        one production process site with a second direct Git invocation.
+    """
+    path = root / "ci/scripts/ci_image_manifest.py"
+    try:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+    except (OSError, UnicodeError, SyntaxError) as error:
+        raise ContractError(
+            f"{path}: cannot parse protected manifest Git boundary: {error}"
+        ) from error
+
+    parent: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+
+    process_calls: list[tuple[str, str]] = []
+    forbidden_calls: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func
+        if isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name):
+            owner = function.value.id
+            attribute = function.attr
+            if owner == "subprocess" and attribute in {
+                "run", "Popen", "call", "check_call", "check_output",
+            }:
+                ancestor: ast.AST | None = node
+                function_name = "<module>"
+                while ancestor in parent:
+                    ancestor = parent[ancestor]
+                    if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        function_name = ancestor.name
+                        break
+                process_calls.append((attribute, function_name))
+            if owner == "os" and (
+                attribute in {"system", "popen"}
+                or attribute.startswith("exec")
+                or attribute.startswith("spawn")
+            ):
+                forbidden_calls.append(f"os.{attribute}")
+    if process_calls != [("run", "_invoke_protected_git_unchecked")]:
+        raise ContractError(
+            f"{path}: Git/process invocation escapes the sole protected boundary"
+        )
+    if forbidden_calls:
+        raise ContractError(
+            f"{path}: forbidden indirect process entrypoints: {forbidden_calls}"
+        )
+
+    required_fragments = (
+        'if not key.startswith("GIT_")',
+        '"GIT_NO_REPLACE_OBJECTS": "1"',
+        '"--no-replace-objects"',
+        '"refs/replace/"',
+        'info_path / "grafts"',
+        "info_state.st_mtime_ns",
+        "info_state.st_ctime_ns",
+        "before = _git_authority_snapshot(root)",
+        "after = _git_authority_snapshot(root)",
+        "if after != before:",
+    )
+    if any(source.count(fragment) != 1 for fragment in required_fragments):
+        raise ContractError(
+            f"{path}: protected Git environment or rewrite-state mapping differs"
+        )
+
+
 def _verify_protected_helpers(
     root: Path, lock: dict[str, Any], input_paths: list[str]
 ) -> dict[str, dict[str, str]]:
@@ -2216,6 +2306,7 @@ def _verify_ci_image_resolver_order(root: Path) -> None:
         if line.strip() and not line.lstrip().startswith("#")
     ]
     ordered_commands = (
+        'verification_candidate_commit=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \\',
         'inspect_output=$(docker buildx imagetools inspect "$locator")',
         'source_commit=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \\',
         '"${attestation_download_command[@]}" >/dev/null',
@@ -2249,37 +2340,89 @@ def _verify_ci_image_resolver_order(root: Path) -> None:
             f"{path}: exact-subject attestation must precede layer pull and identity output"
         )
     source_text = "\n".join(lines)
+    expected_attestation_block = (
+        'if [[ -z "$EXPECTED_ATTESTATION_SOURCE_COMMIT" ]]; then',
+        "attestation_download_directory=$attestation_scratch/download",
+        'mkdir -m 0700 -- "$attestation_download_directory"',
+        "attestation_download_command=(",
+        'gh attestation download "oci://$exact_image"',
+        '--repo "$EXPECTED_REPOSITORY"',
+        '--limit "$attestation_fetch_limit"',
+        ")",
+        "(",
+        'cd -- "$attestation_download_directory"',
+        '"${attestation_download_command[@]}" >/dev/null',
+        ")",
+        'python3 "$SCRIPT_DIR/ci_image_manifest.py" \\',
+        '--repo-root "$REPO_ROOT" snapshot-attestation-bundle \\',
+        '--download-directory "$attestation_download_directory" \\',
+        '--subject-digest "$image_digest" \\',
+        '--fetch-limit "$attestation_fetch_limit" \\',
+        '--output "$attestation_bundle_snapshot" >/dev/null',
+        "attestation_command=(",
+        'gh attestation verify "oci://$exact_image"',
+        '--bundle "$attestation_bundle_snapshot"',
+        '--repo "$EXPECTED_REPOSITORY"',
+        "--predicate-type https://slsa.dev/provenance/v1",
+        '--signer-workflow "$EXPECTED_REPOSITORY/$source_workflow"',
+        "--deny-self-hosted-runners",
+        "--format json",
+        ")",
+        "else",
+        "attestation_command=(",
+        'gh attestation verify "oci://$exact_image"',
+        '--repo "$EXPECTED_REPOSITORY"',
+        "--predicate-type https://slsa.dev/provenance/v1",
+        '--signer-workflow "$EXPECTED_REPOSITORY/$source_workflow"',
+        '--limit "$attestation_fetch_limit"',
+        '--source-digest "$EXPECTED_ATTESTATION_SOURCE_COMMIT"',
+        '--signer-digest "$EXPECTED_ATTESTATION_SIGNER_COMMIT"',
+        "--deny-self-hosted-runners",
+        "--format json",
+        ")",
+        "fi",
+        'attestation_json=$("${attestation_command[@]}")',
+    )
+    if (
+        active.count(expected_attestation_block[0]) != 1
+        or active.count(expected_attestation_block[-1]) != 1
+    ):
+        raise ContractError(
+            f"{path}: attestation command block boundary is duplicated or missing"
+        )
+    try:
+        block_start = active.index(expected_attestation_block[0])
+        block_end = active.index(expected_attestation_block[-1], block_start)
+    except ValueError as error:
+        raise ContractError(
+            f"{path}: attestation command block boundary is missing"
+        ) from error
+    if tuple(active[block_start : block_end + 1]) != expected_attestation_block:
+        raise ContractError(
+            f"{path}: complete attestation command construction/execution block differs"
+        )
+    active_text = "\n".join(active)
+    if len(re.findall(r"(?m)^gh attestation (?:download|verify)\b", active_text)) != 3:
+        raise ContractError(f"{path}: GitHub CLI command definition count differs")
+    if len(re.findall(r"\battestation_download_command\b", active_text)) != 2:
+        raise ContractError(
+            f"{path}: download command array is mutated, aliased, or reexecuted"
+        )
+    if len(re.findall(r"\battestation_command\b", active_text)) != 3:
+        raise ContractError(
+            f"{path}: verification command array is mutated, aliased, or reexecuted"
+        )
+    if re.search(r"(?m)^(?:alias[ \t]+gh=|function[ \t]+gh\b|gh[ \t]*\(\))", active_text):
+        raise ContractError(f"{path}: gh command identity is aliased")
     attestation_window_contract = (
-        """attestation_download_command=(
-    gh attestation download \"oci://$exact_image\"
-    --repo \"$EXPECTED_REPOSITORY\"
-    --predicate-type https://slsa.dev/provenance/v1
-    --limit \"$attestation_fetch_limit\"
-  )""",
-        """attestation_command=(
-    gh attestation verify \"oci://$exact_image\"
-    --bundle \"$attestation_bundle_snapshot\"
-    --repo \"$EXPECTED_REPOSITORY\"
-    --signer-workflow \"$EXPECTED_REPOSITORY/$source_workflow\"
-    --deny-self-hosted-runners
-    --format json
-  )""",
-        """attestation_command=(
-    gh attestation verify \"oci://$exact_image\"
-    --repo \"$EXPECTED_REPOSITORY\"
-    --signer-workflow \"$EXPECTED_REPOSITORY/$source_workflow\"
-    --limit \"$attestation_fetch_limit\"
-    --source-digest \"$EXPECTED_ATTESTATION_SOURCE_COMMIT\"
-    --signer-digest \"$EXPECTED_ATTESTATION_SIGNER_COMMIT\"
-    --deny-self-hosted-runners
-    --format json
-  )""",
         '--subject-digest "$image_digest"',
         'attestation_fetch_limit=${published_lock[3]}',
+        'type(published["attestation_fetch_limit"]) is not int',
+        '--repo-root "$REPO_ROOT" head-commit',
     )
     if any(source_text.count(fragment) != 1 for fragment in attestation_window_contract):
         raise ContractError(
-            f"{path}: finite attestation fetch, snapshot, or verification mapping differs"
+            f"{path}: finite attestation, strict-limit, or protected-HEAD mapping differs"
         )
     if source_text.count('--limit "$attestation_fetch_limit"') != 2:
         raise ContractError(
@@ -2381,6 +2524,7 @@ def _verify_image_lock(root: Path, actions: dict[str, tuple[str, str]]) -> None:
             raise ContractError(f"{path}: image input is not a regular repository file: {relative}")
     _verify_protected_helpers(root, lock, input_paths)
 
+    _verify_manifest_git_invocation_boundary(root)
     _verify_ci_image_producer(root, actions)
     _verify_ci_image_resolver_order(root)
     published = lock["published_image"]
@@ -2398,7 +2542,7 @@ def _verify_image_lock(root: Path, actions: dict[str, tuple[str, str]]) -> None:
         f"{path}:published_image",
     )
     if (
-        isinstance(published["attestation_fetch_limit"], bool)
+        type(published["attestation_fetch_limit"]) is not int
         or published["attestation_fetch_limit"] != 30
     ):
         raise ContractError(
