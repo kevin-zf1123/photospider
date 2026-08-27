@@ -50,7 +50,7 @@ _TARGETED_ROLE_PACK_RUN_SHA256 = (
 """Verifier-owned identity for exact role-artifact production."""
 
 _LINUX_SECURITY_WRAPPER_SOURCE_SHA256 = (
-    "69ae083704348ac2ce7f763abca74aebc2377f5c03f5efff0a92c8769b4128c3"
+    "322fd15353dc2fd1a7919fe60e376c5c1190b2a4a56d8b4e2e3c6f03e0f69c42"
 )
 """Verifier-owned exact source identity for host-bound Linux profiles."""
 
@@ -3257,9 +3257,12 @@ def _verify_linux_security_dag(root: Path) -> None:
         raise ContractError(f"{helper}: verifier-owned source identity differs")
     source = helper.read_text(encoding="utf-8")
     required_order = (
+        'work_identity=$(measure_work_root_identity "$work_root")',
         'docker login ghcr.io --username "$CI_GHCR_USERNAME" --password-stdin',
         "unset CI_GHCR_TOKEN",
         'docker pull "$CI_IMAGE_REF"',
+        'current_work_identity=$(measure_work_root_identity "$work_root")',
+        'if [[ "$current_work_identity" != "$work_identity" ]]',
         'docker "${container_arguments[@]}"',
     )
     positions = [source.find(fragment) for fragment in required_order]

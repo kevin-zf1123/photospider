@@ -473,10 +473,14 @@ roots. It binds both real `HEAD` commits and directory objects before and after
 use, then revalidates the raw bundle against the protected route digest. Using
 only protected code and without invoking CTest/CMake, it parses the exact
 archived control graph through a strict generated-command/property allowlist.
-Every include is an explicit canonical `.cmake` path, never a module lookup;
-the only accepted assignment is one inert local `<target>_TESTS` list exactly
-equal to that file's registrations. Explicit quoted empty command arguments
-remain data, while any search/interpreter-affecting `set` fails closed.
+Every include is a bytewise canonical explicit `.cmake` path, never a module
+lookup, and every maintained subdirectory uses the same canonical POSIX
+spelling. The only accepted assignment is one inert local `<target>_TESTS`
+list exactly equal to that file's registrations; `PARENT_SCOPE` and
+`CACHE ... [FORCE]` signatures fail before equality. Explicit quoted empty
+command arguments remain data, while any search/interpreter-affecting `set`
+fails closed. Raw dot, repeated-separator, and trailing-separator spellings are
+rejected rather than normalized into a retained member.
 It requires equality among raw complete records, both targeted control/runtime
 closure records and control-file digests, and the ordinary closure after
 excluding only the exact `build-smoke` label. Unknown or side-effect-capable
@@ -3421,8 +3425,11 @@ exact protected sparse checkout before candidate checkout. A protected host
 wrapper then logs in, pulls the exact digest-qualified image, removes the token,
 and runs the profile with no network, a read-only root filesystem, separate
 read-only candidate/protected-`ci`/inventory/identity mounts, and only one
-mode-0700 fresh direct `runner.temp` work root writable. Docker `--user` binds
-the container to the host owner's exact positive numeric UID/GID; a protected
+mode-0700 fresh direct `runner.temp` work root writable. A no-follow directory
+descriptor retains the actual work root's device, inode, mode, UID, and GID and
+remeasures them immediately before Docker. Docker `--user` binds the container
+to that measured positive owner pair, including a setgid-inherited GID that
+differs from the host process's primary group. A protected
 entrypoint verifies the effective identity and a real create/read/remove work
 probe before candidate configure/build/test, without `0777`. The same retained host record reaches
 platform preparation inside the container; absent job-container `ImageOS`, a

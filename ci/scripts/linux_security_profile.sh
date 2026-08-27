@@ -11,9 +11,12 @@ set -Eeuo pipefail
 #   read-only protected ``ci`` control tree, and read-only profile inventory.
 #   Only the fresh job-owned ``/work`` mount is writable. The container runs as
 #   the same strictly measured positive numeric UID/GID that owns that mode-0700
-#   host directory, and a protected entrypoint proves the identity plus a real
-#   create/read/remove cycle before candidate work. The GHCR token is used by
-#   the host login command and is never forwarded into the container.
+#   host directory. Measurement opens the directory without following links,
+#   retains its device/inode/mode/owner tuple, and repeats that measurement
+#   immediately before Docker runs. A protected entrypoint then proves the
+#   identity plus a real create/read/remove cycle before candidate work. The
+#   GHCR token is used by the host login command and is never forwarded into
+#   the container.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd -P)
@@ -114,6 +117,84 @@ real_mount_directory() {
   (cd -- "$path" && pwd -P)
 }
 
+# @brief Measure one work directory through a no-follow descriptor.
+# @param $1 Fresh job-owned work-root pathname.
+# @return A canonical ``device:inode:mode:uid:gid`` identity on stdout.
+# @throws Nothing; unavailable safe-open flags, a link/special/replaced path,
+#   non-0700 mode, nonpositive ownership, or metadata drift returns nonzero.
+# @note The protected inline reader imports no candidate module. It opens with
+#   O_NOFOLLOW, O_NONBLOCK, O_CLOEXEC, and O_DIRECTORY, then compares pathname
+#   and descriptor metadata before emitting the retained identity. The caller
+#   repeats this measurement immediately before Docker consumes the bind.
+measure_work_root_identity() {
+  local path=$1
+  /usr/bin/python3 - "$path" <<'PY'
+import os
+import stat
+import sys
+
+
+def fail(message: str) -> "NoReturn":
+    """Abort one protected work-root measurement with a bounded diagnostic."""
+    raise SystemExit(f"Linux security work root {message}.")
+
+
+path = sys.argv[1]
+required_flags = ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC", "O_DIRECTORY")
+if any(not hasattr(os, name) for name in required_flags):
+    fail("cannot be opened with all required safe descriptor flags")
+flags = os.O_RDONLY
+for name in required_flags:
+    flags |= getattr(os, name)
+try:
+    descriptor = os.open(path, flags)
+except OSError as error:
+    fail(f"cannot be opened safely: {error.strerror or error.__class__.__name__}")
+try:
+    opened = os.fstat(descriptor)
+    pathname = os.lstat(path)
+    opened_identity = (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_mode,
+        opened.st_uid,
+        opened.st_gid,
+    )
+    pathname_identity = (
+        pathname.st_dev,
+        pathname.st_ino,
+        pathname.st_mode,
+        pathname.st_uid,
+        pathname.st_gid,
+    )
+    if opened_identity != pathname_identity:
+        fail("pathname differs from its opened descriptor")
+    if not stat.S_ISDIR(opened.st_mode):
+        fail("is not a directory")
+    mode = stat.S_IMODE(opened.st_mode)
+    if mode != 0o700:
+        fail("mode is not exactly 0700")
+    if opened.st_ino <= 0 or opened.st_uid <= 0 or opened.st_gid <= 0:
+        fail("has no positive inode/owner identity")
+    final = os.fstat(descriptor)
+    final_identity = (
+        final.st_dev,
+        final.st_ino,
+        final.st_mode,
+        final.st_uid,
+        final.st_gid,
+    )
+    if final_identity != opened_identity:
+        fail("descriptor metadata changed during measurement")
+    print(
+        f"{opened.st_dev}:{opened.st_ino}:{mode:o}:"
+        f"{opened.st_uid}:{opened.st_gid}"
+    )
+finally:
+    os.close(descriptor)
+PY
+}
+
 control_root=$(real_mount_directory "$CI_CONTROL_ROOT" "Protected control root")
 candidate_root=$(real_mount_directory "$CI_CANDIDATE_ROOT" "Candidate source root")
 inventory_root=$(real_mount_directory "$CI_INVENTORY_DIR" "Security inventory root")
@@ -163,16 +244,19 @@ if [[ "$work_parent" != "$runner_temp" ]]; then
   exit 1
 fi
 mkdir -m 700 -- "$CI_WORK_ROOT"
+# A setgid runner.temp parent may correctly transfer its group to this fresh
+# child; clear only inherited special mode bits while retaining that real GID.
+/bin/chmod 700 "$CI_WORK_ROOT"
 work_root=$(real_mount_directory "$CI_WORK_ROOT" "Linux security work root")
 mkdir -m 700 -- "$work_root/build" "$work_root/home" "$work_root/results" \
   "$work_root/runner-temp" "$work_root/tmp"
-container_uid=$(/usr/bin/id -u)
-container_gid=$(/usr/bin/id -g)
-if [[ ! "$container_uid" =~ ^[1-9][0-9]*$ ||
-  ! "$container_gid" =~ ^[1-9][0-9]*$ ]]; then
-  echo "Linux hosted runner has no safe positive numeric UID/GID." >&2
+work_identity=$(measure_work_root_identity "$work_root")
+if [[ ! "$work_identity" =~ ^[0-9]+:[1-9][0-9]*:700:[1-9][0-9]*:[1-9][0-9]*$ ]]; then
+  echo "Linux security work-root measurement is not canonical." >&2
   exit 1
 fi
+IFS=: read -r work_device work_inode work_mode container_uid container_gid \
+  <<< "$work_identity"
 
 # Authenticate on the host only. The protected command uses password-stdin;
 # the secret is removed from this process before pull/run argv are constructed.
@@ -226,10 +310,18 @@ container_arguments+=(
   printf 'candidate_commit=%s\n' "$CI_CANDIDATE_COMMIT"
   printf 'workflow_commit=%s\n' "$CI_WORKFLOW_COMMIT"
   printf 'image_digest=%s\n' "$CI_IMAGE_DIGEST"
+  printf 'work_device=%s\n' "$work_device"
+  printf 'work_inode=%s\n' "$work_inode"
+  printf 'work_mode=%s\n' "$work_mode"
   printf 'container_uid=%s\n' "$container_uid"
   printf 'container_gid=%s\n' "$container_gid"
 } > "$work_root/results/linux-security-host-wrapper.env"
 
+current_work_identity=$(measure_work_root_identity "$work_root")
+if [[ "$current_work_identity" != "$work_identity" ]]; then
+  echo "Linux security work root changed before container execution." >&2
+  exit 1
+fi
 docker "${container_arguments[@]}"
 if [[ ! -s "$work_root/results/summary.log" ]]; then
   echo "Linux security container produced no profile success evidence." >&2

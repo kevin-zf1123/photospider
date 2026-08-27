@@ -234,12 +234,16 @@ control-checkout Python is executed. The verifier binds control
 rechecks both directory objects after use. It then revalidates the exact raw
 bundle against the route-control digest. Without invoking CTest, CMake, or a
 candidate-defined control program, one strict protected pure-data parser reads
-the exact archived control graph. It accepts only explicit canonical `.cmake`
-include paths (never module-mode lookup), maintained subdirectories,
+the exact archived control graph. It accepts only bytewise canonical explicit
+`.cmake` include paths (never module-mode lookup), bytewise canonical maintained
+subdirectories,
 test/property commands, one inert `<target>_TESTS` assignment that exactly
 repeats the tests registered in that file, and the GoogleTest
 NOT_BUILT-wrapper shape. Explicitly quoted empty command arguments remain data;
-unknown `set` state cannot alter parsing or module search. The verifier then
+unknown `set` state cannot alter parsing or module search. Alternate
+`PARENT_SCOPE` and `CACHE ... [FORCE]` signatures are rejected before local-list
+equality, and raw `./`, repeated-separator, dot-component, or trailing-separator
+spellings are never normalized into an accepted control member. The verifier then
 requires equality among raw complete records, both targeted
 control/runtime closure records and control-file digests, and the ordinary
 closure after excluding only exact `build-smoke`. Unknown/side-effect syntax,
@@ -522,8 +526,12 @@ logs in to GHCR, pulls the exact digest-qualified image, unsets the token, and
 uses `linux_security_profile.sh` to run candidate code only inside that image.
 Candidate source, protected `ci`, profile inventory, and retained identity are
 separate read-only mounts; the only writable bind is a mode-0700 fresh direct
-`runner.temp` child. The wrapper passes Docker the host owner's exact positive
-numeric UID/GID. Before candidate configure/build/test, the protected container
+`runner.temp` child. A no-follow directory descriptor measures and retains that
+child's exact device, inode, mode, UID, and GID; the wrapper remeasures the same
+identity immediately before Docker and passes its positive owner UID/GID through
+`--user`. This intentionally follows the directory's actual GID rather than the
+host process's primary group when a setgid parent assigns them differently.
+Before candidate configure/build/test, the protected container
 entrypoint verifies that its effective UID/GID is identical and completes a
 real create/read/remove probe in `/work`. It never uses `0777`. The container
 has no network or registry token. This
@@ -674,7 +682,7 @@ personal development content.
 - `ci/scripts/integration_plan.sh`: configures a small testing-enabled tree and validates an allow-empty, non-authoritative configuration-time inventory preview; it emits no workflow matrix output.
 - `ci/scripts/build_integrity.sh`: detects one complete runtime contract, runs required-target and complete builds in one tree, captures uninterpreted post-build CTest JSON, writes the ordinary CTest closure, and installs a fresh package prefix. It never imports or executes a route parser/lock after candidate configure and emits no consumer matrix; the workflow packages its CTest and generated profile/role bytes for the separate protected control job.
 - `ci/scripts/build_smoke_route.py`: runs only from the exact protected control checkout. It validates disjoint candidate/control/raw boundaries, both checkout commits, the raw envelope and generated profile identity, then uses protected parsers and the routing lock to emit four exhaustive downstream matrices and one canonical route digest; its verifier rebinds the exact downloaded raw bytes to that control digest before artifact attestation.
-- `ci/scripts/ctest_runtime_closure.py`: derives the recursive post-build ordinary CTest control/runtime closure, exposes strict raw-record parsing, and reconstructs the exact archived control graph through an allowlisted pure-data parser before attestation. Includes must be explicit canonical `.cmake` paths rather than module lookup; the only accepted `set` is one inert local `<target>_TESTS` list equal to that file's registrations. Structured root normalization is component-aware; unknown/side-effect syntax, prefix siblings, embedded or quoted/list ambiguity, and physical relocation fail. The post-attestation runtime path separately revalidates restored inventory, executables, dynamic libraries, plugins, trust inputs, and build-tree data immediately before execution.
+- `ci/scripts/ctest_runtime_closure.py`: derives the recursive post-build ordinary CTest control/runtime closure, exposes strict raw-record parsing, and reconstructs the exact archived control graph through an allowlisted pure-data parser before attestation. Includes and subdirectories must use their bytewise canonical explicit POSIX spelling; includes must name `.cmake` paths rather than module lookup. The only accepted `set` is one inert local `<target>_TESTS` list equal to that file's registrations, with parent-scope/cache signatures rejected before equality. Structured root normalization is component-aware; unknown/side-effect syntax, prefix siblings, embedded or quoted/list ambiguity, and physical relocation fail. The post-attestation runtime path separately revalidates restored inventory, executables, dynamic libraries, plugins, trust inputs, and build-tree data immediately before execution.
 - `ci/scripts/ctest_full.sh`: reuses the runtime role and runs ordinary CTest with the exact `build-smoke` label excluded, controlled `${CI_JOBS}` parallelism, failure output, and JUnit evidence.
 - `ci/scripts/build_smoke_test.sh`: revalidates and runs one exact default-role CTest name from `ci-control-default`.
 - `ci/scripts/openexr_smoke_test.sh`: runs the exact default OpenEXR option-off source-tree smoke from the verified cache-only metadata role.
@@ -685,7 +693,7 @@ personal development content.
 - `ci/scripts/plugin_load_test.sh`: checks operation plugins and selects either scheduler plugin loading/listing or policy plugin, registry, policy/execution, and CLI route checks.
 - `ci/scripts/execution_repeat_test.sh`: repeats the configured runtime contract's deterministic scheduler or policy/execution behavior tests.
 - `ci/scripts/sanitizer_test.sh`: consumes the one retained runner identity produced before profile input, then runs shared and capability-selected focused ASan or TSan tests from an isolated build directory; its temporary fallback transports target/empty-filter/trust records only through the terminal NUL-framed v1 protocol and records the decoded evidence.
-- `ci/scripts/linux_security_profile.sh` and `ci/scripts/linux_security_container_entrypoint.sh`: run Linux ASan, TSan, fuzz, and manual sanitizer profiles from a real-host retained identity. The host wrapper authenticates and pulls only the exact digest, removes the token, and starts the profile with no network, a read-only root filesystem, separate read-only candidate/control/inventory/identity mounts, one mode-0700 fresh `runner.temp` work root, and Docker `--user` bound to that root owner's positive numeric UID/GID. The protected entrypoint verifies the effective identity and a real create/read/remove work probe before candidate execution.
+- `ci/scripts/linux_security_profile.sh` and `ci/scripts/linux_security_container_entrypoint.sh`: run Linux ASan, TSan, fuzz, and manual sanitizer profiles from a real-host retained identity. The host wrapper authenticates and pulls only the exact digest, removes the token, and starts the profile with no network, a read-only root filesystem, separate read-only candidate/control/inventory/identity mounts, one mode-0700 fresh `runner.temp` work root, and Docker `--user` bound to that root owner's positive numeric UID/GID. It obtains that owner from a no-follow descriptor measurement of the actual directory, retains device/inode/mode/owner, and remeasures immediately before Docker. The protected entrypoint verifies the effective identity and a real create/read/remove work probe before candidate execution.
 - `ci/scripts/darwin_security_profile.sh`: runs each native Darwin ASan, TSan, or fuzz profile only after an exact protected control checkout has retained the real host and a separate candidate checkout has been HEAD-bound. It executes protected helpers against the candidate source root, rechecks both clean commits and root objects after execution, and rejects candidate helper selection, overlap, replacement, or drift.
 - `ci/scripts/security_platform_prepare.sh`: consumes the retained member once, strictly parses Darwin's exact CMake semantic version from the canonical base or reviewed Android vendor-suffix output, independently verifies `CMAKE_ROOT`/module and LLVM identities, runs the real bounded combined fuzz probe when selected, then materializes the clean locked vcpkg checkout and writes the exact CMake command/arguments consumed by all maintained profile phases.
 

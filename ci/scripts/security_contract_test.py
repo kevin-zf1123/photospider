@@ -3397,6 +3397,19 @@ class SecurityPlatformContractTest(unittest.TestCase):
             inventory.mkdir()
             runner_temp = root / "runner-temp"
             runner_temp.mkdir()
+            alternate_groups = sorted(
+                group for group in set(os.getgroups()) if group != os.getgid()
+            )
+            if os.geteuid() == 0:
+                inherited_gid = os.getgid() + 1
+            else:
+                self.assertTrue(
+                    alternate_groups,
+                    "setgid regression requires one supplementary group",
+                )
+                inherited_gid = alternate_groups[0]
+            os.chown(runner_temp, -1, inherited_gid)
+            runner_temp.chmod(0o2770)
             identity_path = runner_temp / "runner-identity.json"
             write_runner_identity(identity_path, "Linux", LINUX_STABLE_VERSION)
 
@@ -3426,6 +3439,11 @@ class SecurityPlatformContractTest(unittest.TestCase):
                 "    (work_root / 'results/summary.log').write_text(\n"
                 "        'protected profile passed\\n', encoding='utf-8'\n"
                 "    )\n"
+                "if (\n"
+                "    arguments and arguments[0] == 'pull'\n"
+                "    and os.environ.get('CI_TEST_MUTATE_WORK_MODE_AFTER_PULL') == '1'\n"
+                "):\n"
+                "    Path(os.environ['CI_WORK_ROOT']).chmod(0o750)\n"
                 "with open(os.environ['CI_TEST_DOCKER_LOG'], 'a', encoding='utf-8') as handle:\n"
                 "    handle.write(json.dumps(record, sort_keys=True, separators=(',', ':')) + '\\n')\n",
                 encoding="utf-8",
@@ -3490,7 +3508,7 @@ class SecurityPlatformContractTest(unittest.TestCase):
             )
             self.assertEqual(
                 run_arguments[run_arguments.index("--user") + 1],
-                f"{os.getuid()}:{os.getgid()}",
+                f"{work_root.stat().st_uid}:{work_root.stat().st_gid}",
             )
             for required in (
                 "--read-only",
@@ -3505,14 +3523,36 @@ class SecurityPlatformContractTest(unittest.TestCase):
                 f"type=bind,src={inventory.resolve()},dst=/inputs/profile,readonly",
                 f"type=bind,src={identity_path.resolve()},dst=/inputs/runner-identity.json,readonly",
                 f"type=bind,src={work_root.resolve()},dst=/work",
-                f"CI_CONTAINER_UID={os.getuid()}",
-                f"CI_CONTAINER_GID={os.getgid()}",
+                f"CI_CONTAINER_UID={work_root.stat().st_uid}",
+                f"CI_CONTAINER_GID={work_root.stat().st_gid}",
                 "CI_CONTAINER_WORK_ROOT=/work",
                 "SANITIZER=asan",
             ):
                 self.assertIn(required, run_arguments)
             self.assertEqual(work_root.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(work_root.stat().st_gid, inherited_gid)
+            self.assertNotEqual(work_root.stat().st_gid, os.getgid())
             self.assertNotIn("fixture-token-never-log", json.dumps(calls))
+
+            drifted = run_command(
+                "bash",
+                SCRIPTS / "linux_security_profile.sh",
+                environment={
+                    **environment,
+                    "CI_TEST_MUTATE_WORK_MODE_AFTER_PULL": "1",
+                    "CI_WORK_ROOT": str(runner_temp / "drifted-work"),
+                },
+                expect_success=False,
+            )
+            self.assertIn("mode is not exactly 0700", drifted.stderr)
+            drift_calls = [
+                json.loads(line)
+                for line in docker_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                [call["argv"][0] for call in drift_calls[-2:]],
+                ["login", "pull"],
+            )
 
             invalid = run_command(
                 "bash",
@@ -3525,7 +3565,9 @@ class SecurityPlatformContractTest(unittest.TestCase):
                 expect_success=False,
             )
             self.assertIn("differs from its exact digest", invalid.stderr)
-            self.assertEqual(len(docker_log.read_text(encoding="utf-8").splitlines()), 3)
+            self.assertEqual(
+                len(docker_log.read_text(encoding="utf-8").splitlines()), 5
+            )
 
     def test_linux_container_entrypoint_proves_uid_and_real_work_write(self) -> None:
         """Run the protected identity/write probe before the profile boundary.
@@ -6181,15 +6223,22 @@ class ReusableBuildContractTest(unittest.TestCase):
                 'add_test(absolute_contract "/usr/bin/true")\n',
                 encoding="utf-8",
             )
+            empty_list = staged / "empty/explicit.cmake"
+            empty_list.parent.mkdir(parents=True)
+            empty_list.write_text(
+                "set(empty_contract_TESTS)\n", encoding="utf-8"
+            )
             root_control = staged / "CTestTestfile.cmake"
             root_control.write_text(
                 'include("relative/explicit.cmake")\n'
-                f'include("{producer_root}/absolute/explicit.cmake")\n',
+                f'include("{producer_root}/absolute/explicit.cmake")\n'
+                'include("empty/explicit.cmake")\n',
                 encoding="utf-8",
             )
             control_paths = [
                 "CTestTestfile.cmake",
                 "absolute/explicit.cmake",
+                "empty/explicit.cmake",
                 "relative/explicit.cmake",
             ]
             records, digests = closure.control_test_records(
@@ -6246,6 +6295,26 @@ class ReusableBuildContractTest(unittest.TestCase):
                     'include("/producer/build-copy/module_probe.cmake")\n',
                     "escapes its producer build root",
                 ),
+                "parent-scope-signature": (
+                    'add_test(PARENT_SCOPE "/usr/bin/true")\n'
+                    "set(target_TESTS PARENT_SCOPE)\n",
+                    "alternate generated set signature is forbidden",
+                ),
+                "cache-signature": (
+                    'add_test(CACHE "/usr/bin/true")\n'
+                    'add_test(STRING "/usr/bin/true")\n'
+                    'add_test(doc "/usr/bin/true")\n'
+                    "set(target_TESTS CACHE STRING doc)\n",
+                    "alternate generated set signature is forbidden",
+                ),
+                "cache-force-signature": (
+                    'add_test(CACHE "/usr/bin/true")\n'
+                    'add_test(BOOL "/usr/bin/true")\n'
+                    'add_test(doc "/usr/bin/true")\n'
+                    'add_test(FORCE "/usr/bin/true")\n'
+                    "set(target_TESTS CACHE BOOL doc FORCE)\n",
+                    "alternate generated set signature is forbidden",
+                ),
             }
             for label, (control_text, diagnostic) in cases.items():
                 with self.subTest(control_boundary=label):
@@ -6259,6 +6328,69 @@ class ReusableBuildContractTest(unittest.TestCase):
                         closure.control_test_records(
                             staged,
                             {"control_paths": sorted(case_paths)},
+                            source_root,
+                            producer_root,
+                        )
+                    self.assertFalse(marker.exists())
+
+            relative_subdirectory = staged / "relative/CTestTestfile.cmake"
+            relative_subdirectory.write_text(
+                'add_test(relative_subdir_contract "/usr/bin/true")\n',
+                encoding="utf-8",
+            )
+            nested_subdirectory = staged / "relative/child/CTestTestfile.cmake"
+            nested_subdirectory.parent.mkdir()
+            nested_subdirectory.write_text(
+                'add_test(nested_subdir_contract "/usr/bin/true")\n',
+                encoding="utf-8",
+            )
+            noncanonical_paths = {
+                "include-leading-dot": (
+                    'include("./relative/explicit.cmake")\n',
+                    "relative/explicit.cmake",
+                ),
+                "include-repeated-separator": (
+                    'include("relative//explicit.cmake")\n',
+                    "relative/explicit.cmake",
+                ),
+                "include-trailing-separator": (
+                    'include("relative/explicit.cmake/")\n',
+                    "relative/explicit.cmake",
+                ),
+                "include-dot-component": (
+                    'include("relative/./explicit.cmake")\n',
+                    "relative/explicit.cmake",
+                ),
+                "subdirs-leading-dot": (
+                    'subdirs("./relative")\n',
+                    "relative/CTestTestfile.cmake",
+                ),
+                "subdirs-repeated-separator": (
+                    'subdirs("relative//child")\n',
+                    "relative/child/CTestTestfile.cmake",
+                ),
+                "subdirs-trailing-separator": (
+                    'subdirs("relative/")\n',
+                    "relative/CTestTestfile.cmake",
+                ),
+                "subdirs-dot-component": (
+                    'subdirs("relative/./child")\n',
+                    "relative/child/CTestTestfile.cmake",
+                ),
+            }
+            for label, (control_text, canonical_target) in noncanonical_paths.items():
+                with self.subTest(raw_path_boundary=label):
+                    root_control.write_text(control_text, encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        closure.CTestClosureError, "non-canonical"
+                    ):
+                        closure.control_test_records(
+                            staged,
+                            {
+                                "control_paths": sorted(
+                                    ["CTestTestfile.cmake", canonical_target]
+                                )
+                            },
                             source_root,
                             producer_root,
                         )

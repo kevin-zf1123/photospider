@@ -975,7 +975,27 @@ def _control_relative_target(
         CTestClosureError: The target escapes, uses a root-prefix sibling,
             contains ambiguous components, or names the build root itself.
     """
+    if (
+        not raw_target
+        or raw_target.startswith("//")
+        or "\\" in raw_target
+        or any(
+            ord(character) < 32 or ord(character) == 127
+            for character in raw_target
+        )
+    ):
+        raise CTestClosureError(
+            f"generated CTest target is non-canonical: {raw_target!r}"
+        )
     target = PurePosixPath(raw_target)
+    if target.as_posix() != raw_target:
+        # PurePosixPath intentionally erases ``./``, repeated separators, dot
+        # components, and trailing separators. Compare the decoded spelling
+        # before using that normalized object so candidate control bytes cannot
+        # acquire two textual identities for one retained member.
+        raise CTestClosureError(
+            f"generated CTest target is non-canonical: {raw_target!r}"
+        )
     if target.is_absolute():
         if target == build_root:
             relative = PurePosixPath()
@@ -1027,15 +1047,7 @@ def _explicit_control_include_target(
         search path: every include must name one declared control file by an
         explicit canonical relative or absolute path.
     """
-    if (
-        not raw_target
-        or "\\" in raw_target
-        or any(
-            ord(character) < 32 or ord(character) == 127
-            for character in raw_target
-        )
-        or PurePosixPath(raw_target).suffix != ".cmake"
-    ):
+    if PurePosixPath(raw_target).suffix != ".cmake":
         raise CTestClosureError(
             "generated CTest include is not an explicit canonical .cmake "
             f"path: {raw_target!r}"
@@ -1077,10 +1089,22 @@ def _validate_inert_generated_test_list(
     if not command.arguments:
         raise CTestClosureError(f"{context}: generated set shape differs")
     variable = command.arguments[0]
+    values = command.arguments[1:]
+    if any(
+        value in {"CACHE", "FORCE", "PARENT_SCOPE"}
+        for value in values
+    ):
+        # These tokens select or complete CMake's cache/parent-scope ``set``
+        # signatures. Reject them even when candidate test names happen to make
+        # the decoded value list equal: bytewise list equality does not make a
+        # stateful CMake signature inert.
+        raise CTestClosureError(
+            f"{context}: alternate generated set signature is forbidden"
+        )
     if (
         seen_variable is not None
         or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*_TESTS", variable) is None
-        or tuple(command.arguments[1:]) != tuple(local_test_names)
+        or tuple(values) != tuple(local_test_names)
     ):
         raise CTestClosureError(
             f"{context}: generated set is not the unique inert local test list"
