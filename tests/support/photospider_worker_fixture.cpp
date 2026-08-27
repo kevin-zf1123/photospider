@@ -919,28 +919,30 @@ JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
 }
 
 /**
- * @brief Waits silently for one exact cancel and subsequent manager closure.
- * @param fd Connected manager socket.
- * @param assignment Exact current assignment.
- * @return Nothing after the cancel was validated and clean channel EOF arrived.
- * @throws WorkerProtocolError or WorkerChannelError for malformed/early
- * channel termination or another channel failure.
+ * @brief Waits silently until the manager revokes one test-only channel.
+ * @param fd Connected manager socket borrowed until clean channel EOF.
+ * @param assignment Exact current assignment used to validate any Cancel that
+ * arrives before revocation.
+ * @return Nothing after clean manager-channel EOF, whether or not the queued
+ * Cancel became visible to this fixture process first.
+ * @throws WorkerProtocolError for a malformed or identity-mismatched frame.
+ * @throws WorkerChannelError for a channel failure other than clean EOF.
  * @throws std::invalid_argument for an invalid descriptor or identity.
  * @throws std::overflow_error if a captured base cannot represent a poll
  * deadline.
  * @throws std::bad_alloc when deadline diagnostics or frame processing
  * exhausts memory.
- * @note The fixture deliberately emits no frames after AssignmentAccepted, so
- * manager closure cannot discard unread fixture-to-manager Heartbeats and turn
- * the peer observation into `ECONNRESET`. A complete Cancel remains
- * decoder-owned across a missed slice deadline. The final return lets the
- * fixture process reach normal `exit(0)` after channel revocation, which the
- * manager test seam can retain as a zombie. Read-slice timeouts and the
- * expected post-cancel EOF are contained; `fd` is borrowed.
+ * @note This helper is used only by the zero-exit-zombie fixture paired with
+ * `await_pre_signal_zero_exit_for_test`. Manager revocation is intentionally
+ * the process-exit trigger for that seam; exact Cancel transport remains
+ * covered by the independent fragmented-Cancel regression. The fixture emits
+ * no post-acceptance frames, so revocation cannot discard fixture-to-manager
+ * Heartbeats. A complete Cancel remains decoder-owned across a missed slice
+ * deadline, while clean EOF remains sufficient for normal `exit(0)`. This
+ * changes no production cancellation, signal, wait, or reap behavior.
  */
-void wait_for_cancel_then_channel_close_without_heartbeat(
+void wait_for_cancel_or_channel_revocation_without_heartbeat(
     int fd, const JobAssignment& assignment) {
-  bool cancel_observed = false;
   WorkerFrameDecoder frame_decoder;
   for (;;) {
     try {
@@ -954,13 +956,8 @@ void wait_for_cancel_then_channel_close_without_heartbeat(
             "fixture cancel identity does not match assignment");
       }
       static_cast<void>(frame_decoder.accept_frame(read_deadline));
-      cancel_observed = true;
     } catch (const WorkerProtocolTimeout&) {
     } catch (const WorkerProtocolEof&) {
-      if (!cancel_observed) {
-        throw WorkerProtocolError(
-            "fixture channel closed before exact cancellation");
-      }
       return;
     }
   }
@@ -1274,8 +1271,8 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     return 0;
   }
   if (mode == "fixture.cancel-race.zero-exit-zombie") {
-    wait_for_cancel_then_channel_close_without_heartbeat(launch.control_fd,
-                                                         assignment);
+    wait_for_cancel_or_channel_revocation_without_heartbeat(launch.control_fd,
+                                                            assignment);
     return 0;
   }
   if (mode == "fixture.ignore") {
