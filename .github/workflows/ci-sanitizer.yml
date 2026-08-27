@@ -79,45 +79,69 @@ jobs:
     needs: [ci-image-identity, profile-inventory]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    container:
-      image: ${{ needs.ci-image-identity.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout protected manual sanitizer host control
         with:
           persist-credentials: false
-          fetch-depth: 0
-          submodules: recursive
+          repository: ${{ github.repository }}
+          fetch-depth: 1
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: |
+            ci/locks
+            ci/scripts
+          sparse-checkout-cone-mode: false
+          path: .ci-manual-sanitizer-control
 
       - name: Verify exact Linux sanitizer runner
         env:
           CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-manual-sanitizer-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: >-
-          python3 ci/scripts/ci_runner_verify.py
+          python3 .ci-manual-sanitizer-control/ci/scripts/ci_runner_verify.py
           --platform Linux
           --runner-label ubuntu-24.04
           --output "$CI_RUNNER_IDENTITY_FILE"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout manual sanitizer candidate after host verification
+        with:
+          persist-credentials: false
+          repository: ${{ github.repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ github.sha }}
+          path: .ci-manual-sanitizer-candidate
 
       - name: Download security profile inventory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ci-sanitizer-profile-inventory
-          path: CI-results/profile-inventory
+          path: .ci-manual-sanitizer-inventory
 
-      - name: Run sanitizer tests
+      - name: Run manual sanitizer in the exact image
+        shell: bash
         env:
-          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_CANDIDATE_COMMIT: ${{ github.sha }}
+          CI_CANDIDATE_ROOT: ${{ github.workspace }}/.ci-manual-sanitizer-candidate
+          CI_CONTROL_ROOT: ${{ github.workspace }}/.ci-manual-sanitizer-control
+          CI_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_GHCR_USERNAME: ${{ github.actor }}
+          CI_IMAGE_DIGEST: ${{ needs.ci-image-identity.outputs.digest }}
+          CI_IMAGE_REF: ${{ needs.ci-image-identity.outputs.image }}
+          CI_INVENTORY_DIR: ${{ github.workspace }}/.ci-manual-sanitizer-inventory
+          CI_JOBS: 4
           CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-manual-sanitizer-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
-          SANITIZER: ${{ inputs.sanitizer }}
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-${{ inputs.sanitizer }}
-        run: bash ci/scripts/sanitizer_test.sh
+          CI_RUNNER_TEMP: ${{ runner.temp }}
+          CI_SECURITY_PROFILE: sanitizer-${{ inputs.sanitizer }}
+          CI_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          CI_WORK_ROOT: ${{ runner.temp }}/photospider-manual-sanitizer-work-${{ github.run_id }}-${{ github.run_attempt }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash .ci-manual-sanitizer-control/ci/scripts/linux_security_profile.sh
 
       - name: Upload sanitizer logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sanitizer-${{ inputs.sanitizer }}-results
-          path: CI-results/sanitizer-${{ inputs.sanitizer }}
+          path: ${{ runner.temp }}/photospider-manual-sanitizer-work-${{ github.run_id }}-${{ github.run_attempt }}/results
           if-no-files-found: warn

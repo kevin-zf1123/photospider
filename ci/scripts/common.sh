@@ -8,10 +8,35 @@ set -Eeuo pipefail
 #   background jobs and retains state only in shell variables and artifacts.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
+SCRIPT_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd -P)
+
+# @var CI_SOURCE_ROOT
+# @brief Optional exact candidate source root used when the maintained runner
+#   itself is loaded from a separate protected control checkout.
+# @note The protected Darwin host wrapper supplies one physical, non-linked
+#   directory after binding its Git HEAD. Ordinary same-tree and Linux
+#   container callers leave it unset and retain the historical script-root
+#   source boundary. This variable changes only candidate data lookup; helpers
+#   continue to execute from SCRIPT_DIR.
+if [[ -n "${CI_SOURCE_ROOT:-}" ]]; then
+  if [[ "$CI_SOURCE_ROOT" != /* || ! -d "$CI_SOURCE_ROOT" ||
+    -L "$CI_SOURCE_ROOT" || "$CI_SOURCE_ROOT" == *$'\n'* ||
+    "$CI_SOURCE_ROOT" == *$'\r'* || "$CI_SOURCE_ROOT" == *$'\t'* ]]; then
+    echo "CI_SOURCE_ROOT must be one absolute real directory." >&2
+    exit 2
+  fi
+  REPO_ROOT=$(cd -- "$CI_SOURCE_ROOT" && pwd -P)
+  if [[ "$REPO_ROOT" != "$CI_SOURCE_ROOT" ]]; then
+    echo "CI_SOURCE_ROOT must already be a physical canonical path." >&2
+    exit 2
+  fi
+else
+  REPO_ROOT=$SCRIPT_ROOT
+fi
 BUILD_DIR=${BUILD_DIR:-"$REPO_ROOT/build/ci"}
 CI_ARTIFACT_DIR=${CI_ARTIFACT_DIR:-"$REPO_ROOT/CI-results/$(basename "${0%.sh}")"}
 CI_JOBS=${CI_JOBS:-4}
+CI_CMAKE_COMMAND=${CI_CMAKE_COMMAND:-cmake}
 CI_REUSE_BUILD=${CI_REUSE_BUILD:-OFF}
 CI_BUILD_PROFILE=${CI_BUILD_PROFILE:-default}
 BUILD_TESTING=${BUILD_TESTING:-ON}
@@ -28,6 +53,19 @@ if [[ ! "$CI_JOBS" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 export CMAKE_BUILD_PARALLEL_LEVEL=$CI_JOBS
+
+# @var CI_CMAKE_COMMAND
+# @brief One command token used by every maintained direct CMake invocation.
+# @note The default remains PATH-resolved ``cmake``. A protected platform
+#   preparation may replace it with one verified absolute executable before a
+#   profile configures; arguments can never be smuggled into this scalar.
+if [[ "$CI_CMAKE_COMMAND" != cmake &&
+  ("$CI_CMAKE_COMMAND" != /* || "$CI_CMAKE_COMMAND" == *$'\n'* ||
+   "$CI_CMAKE_COMMAND" == *$'\r'* || "$CI_CMAKE_COMMAND" == *$'\t'*) ]]; then
+  echo "CI_CMAKE_COMMAND must be 'cmake' or one absolute command path." >&2
+  exit 2
+fi
+export CI_CMAKE_COMMAND
 
 # @var BUILD_SMOKE_LABEL
 # @brief Exact immutable CTest label used for discovery and full-suite exclusion.
@@ -92,15 +130,15 @@ configure_ci_build() {
       -DPHOTOSPIDER_BUILD_IPC="$PHOTOSPIDER_BUILD_IPC"
     )
   fi
-  cmake "${configure_args[@]}"
+  "$CI_CMAKE_COMMAND" "${configure_args[@]}"
 }
 
 build_ci_targets() {
-  cmake --build "$BUILD_DIR" --target "$@"
+  "$CI_CMAKE_COMMAND" --build "$BUILD_DIR" --target "$@"
 }
 
 build_ci_all() {
-  cmake --build "$BUILD_DIR"
+  "$CI_CMAKE_COMMAND" --build "$BUILD_DIR"
 }
 
 ci_reuse_build_enabled() {
@@ -330,7 +368,7 @@ capture_ci_target_inventory() {
     return
   fi
   run_logged cmake_target_inventory \
-    cmake --build "$BUILD_DIR" --target help
+    "$CI_CMAKE_COMMAND" --build "$BUILD_DIR" --target help
   mkdir -p -- "${canonical_inventory%/*}"
   cp -- "$CI_TARGET_INVENTORY_FILE" "$canonical_inventory"
   if [[ ! -f "$canonical_inventory" || -L "$canonical_inventory" ||

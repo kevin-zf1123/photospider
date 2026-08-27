@@ -44,6 +44,21 @@ _PROTECTED_ROUTE_CONTROL_RUN_SHA256 = (
 )
 """Verifier-owned identity for the sole protected routing invocation."""
 
+_TARGETED_ROLE_PACK_RUN_SHA256 = (
+    "3550c88d4b1f3df1a6666062df1eee3246aa5fef22d2f581a4edb8abc6e95a21"
+)
+"""Verifier-owned identity for exact role-artifact production."""
+
+_LINUX_SECURITY_WRAPPER_SOURCE_SHA256 = (
+    "e77430f556562e707ea553d9775f49acef10a9100a2af7736ea09f9752e7ea05"
+)
+"""Verifier-owned exact source identity for host-bound Linux profiles."""
+
+_DARWIN_SECURITY_WRAPPER_SOURCE_SHA256 = (
+    "d200e4f1b6df143f25ec9560d17bab80c069bc68944c0d51ea2fde9525a9c8ce"
+)
+"""Verifier-owned exact source identity for host-bound Darwin profiles."""
+
 
 class ContractError(ValueError):
     """Report one fail-closed protected-CI contract violation."""
@@ -2743,10 +2758,22 @@ def _verify_darwin_lock(root: Path) -> None:
     exact_values: dict[str, Any] = {
         "approved_images": [
             {
+                "cmake_gtest_module_sha256": "b5a2546c8cea1d5f9a366c6983261c621c0b34a40d8494caefdc0fa4c78862c4",
+                "cmake_path": "/Users/runner/Library/Android/sdk/cmake/3.31.5/bin/cmake",
+                "cmake_version": "3.31.5",
+                "fuzz_c_compiler_path": "/opt/homebrew/opt/llvm@18/bin/clang",
+                "fuzz_compiler_version": "18.1.8",
+                "fuzz_cxx_compiler_path": "/opt/homebrew/opt/llvm@18/bin/clang++",
                 "image_version": "20260727.0256.1",
                 "vcpkg_commit": "6d9d7df564a1ccdaa994e4ad39ccd4a32360867b",
             },
             {
+                "cmake_gtest_module_sha256": "b5a2546c8cea1d5f9a366c6983261c621c0b34a40d8494caefdc0fa4c78862c4",
+                "cmake_path": "/Users/runner/Library/Android/sdk/cmake/3.31.5/bin/cmake",
+                "cmake_version": "3.31.5",
+                "fuzz_c_compiler_path": "/opt/homebrew/opt/llvm@18/bin/clang",
+                "fuzz_compiler_version": "18.1.8",
+                "fuzz_cxx_compiler_path": "/opt/homebrew/opt/llvm@18/bin/clang++",
                 "image_version": "20260824.0311.1",
                 "vcpkg_commit": "127402f1c75bb3d5ff6bce04b285faa4930a5aca",
             },
@@ -2777,58 +2804,37 @@ def _verify_darwin_security_dag(root: Path) -> None:
         Each job depends only on ``integration-plan``. Therefore one profile's
         failure cannot prevent either sibling from being scheduled, while the
         stable suite gate still requires all three conclusions to be successful.
+        Its exact six steps retain the host from protected control before a
+        distinct candidate checkout and execute only the protected wrapper.
     """
     path = root / ".github/workflows/ci-integration-suite.yml"
     profiles = {
         "sanitizer-asan-darwin": {
-            "timeout": "90",
-            "verify_step": "Verify exact Darwin ASan runner",
-            "run_step": "Run isolated Darwin ASan profile",
-            "run": "bash ci/scripts/sanitizer_test.sh",
-            "env": {
-                "CI_ARTIFACT_DIR": "${{ github.workspace }}/CI-results/sanitizer-asan-darwin",
-                "CI_INVENTORY_DIR": "${{ github.workspace }}/CI-results/profile-inventory",
-                "CI_RUNNER_IDENTITY_FILE": "${{ runner.temp }}/photospider-darwin-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
-                "CI_RUNNER_TEMP": "${{ runner.temp }}",
-                "SANITIZER": "asan",
-            },
-            "upload_step": "Upload Darwin ASan diagnostics",
             "artifact": "sanitizer-asan-darwin-results",
-            "artifact_path": "CI-results/sanitizer-asan-darwin",
+            "label": "ASan",
+            "profile": "sanitizer-asan",
             "result": "CI_DARWIN_ASAN_RESULT",
+            "run_step": "Run isolated Darwin ASan profile",
+            "timeout": "90",
+            "upload_step": "Upload Darwin ASan diagnostics",
         },
         "sanitizer-tsan-darwin": {
-            "timeout": "90",
-            "verify_step": "Verify exact Darwin TSan runner",
-            "run_step": "Run isolated Darwin TSan profile",
-            "run": "bash ci/scripts/sanitizer_test.sh",
-            "env": {
-                "CI_ARTIFACT_DIR": "${{ github.workspace }}/CI-results/sanitizer-tsan-darwin",
-                "CI_INVENTORY_DIR": "${{ github.workspace }}/CI-results/profile-inventory",
-                "CI_RUNNER_IDENTITY_FILE": "${{ runner.temp }}/photospider-darwin-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
-                "CI_RUNNER_TEMP": "${{ runner.temp }}",
-                "SANITIZER": "tsan",
-            },
-            "upload_step": "Upload Darwin TSan diagnostics",
             "artifact": "sanitizer-tsan-darwin-results",
-            "artifact_path": "CI-results/sanitizer-tsan-darwin",
+            "label": "TSan",
+            "profile": "sanitizer-tsan",
             "result": "CI_DARWIN_TSAN_RESULT",
+            "run_step": "Run isolated Darwin TSan profile",
+            "timeout": "90",
+            "upload_step": "Upload Darwin TSan diagnostics",
         },
         "fuzz-codecs-darwin": {
-            "timeout": "30",
-            "verify_step": "Verify exact Darwin fuzz runner",
-            "run_step": "Run bounded Darwin codec fuzz smoke",
-            "run": "bash ci/scripts/fuzz_smoke.sh",
-            "env": {
-                "CI_ARTIFACT_DIR": "${{ github.workspace }}/CI-results/fuzz-codecs-darwin",
-                "CI_INVENTORY_DIR": "${{ github.workspace }}/CI-results/profile-inventory",
-                "CI_RUNNER_IDENTITY_FILE": "${{ runner.temp }}/photospider-darwin-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
-                "CI_RUNNER_TEMP": "${{ runner.temp }}",
-            },
-            "upload_step": "Upload transient Darwin fuzz diagnostics",
             "artifact": "fuzz-codecs-darwin-results",
-            "artifact_path": "CI-results/fuzz-codecs-darwin",
+            "label": "fuzz",
+            "profile": "fuzz-codecs",
             "result": "CI_DARWIN_FUZZ_RESULT",
+            "run_step": "Run bounded Darwin codec fuzz smoke",
+            "timeout": "30",
+            "upload_step": "Upload transient Darwin fuzz diagnostics",
         },
     }
     requested_jobs = [*profiles, "suite-gate"]
@@ -2851,11 +2857,23 @@ def _verify_darwin_security_dag(root: Path) -> None:
 
     for job_name, profile in profiles.items():
         job = jobs[job_name]
-        expected_verify = (
-            "python3 ci/scripts/ci_runner_verify.py --platform Darwin "
-            "--runner-label macos-15 --output \"$CI_RUNNER_IDENTITY_FILE\""
+        slug = (
+            "fuzz"
+            if job_name == "fuzz-codecs-darwin"
+            else job_name.removeprefix("sanitizer-").removesuffix("-darwin")
         )
-        identity_path = profile["env"]["CI_RUNNER_IDENTITY_FILE"]
+        label = profile["label"]
+        identity_path = (
+            f"${{{{ runner.temp }}}}/photospider-darwin-{slug}-runner-"
+            "${{ github.run_id }}-${{ github.run_attempt }}.json"
+        )
+        work_path = (
+            f"${{{{ runner.temp }}}}/photospider-darwin-{slug}-work-"
+            "${{ github.run_id }}-${{ github.run_attempt }}"
+        )
+        control_path = f".ci-darwin-{slug}-control"
+        candidate_path = f".ci-darwin-{slug}-candidate"
+        inventory_path = f".ci-darwin-{slug}-inventory"
         expected_job = {
             "permissions": {"contents": "read"},
             "needs": "integration-plan",
@@ -2863,6 +2881,32 @@ def _verify_darwin_security_dag(root: Path) -> None:
             "timeout-minutes": profile["timeout"],
             "steps": [
                 {
+                    "name": f"Checkout protected Darwin {label} host control",
+                    "uses": checkout_action,
+                    "with": {
+                        "persist-credentials": "false",
+                        "repository": "${{ github.repository }}",
+                        "fetch-depth": "1",
+                        "ref": "${{ inputs.workflow_commit }}",
+                        "sparse-checkout": "ci/locks\nci/scripts\n",
+                        "sparse-checkout-cone-mode": "false",
+                        "path": control_path,
+                    },
+                },
+                {
+                    "name": f"Verify exact Darwin {label} host runner",
+                    "env": {
+                        "CI_RUNNER_IDENTITY_FILE": identity_path,
+                        "PYTHONDONTWRITEBYTECODE": '"1"',
+                    },
+                    "run": (
+                        f"python3 {control_path}/ci/scripts/ci_runner_verify.py "
+                        "--platform Darwin --runner-label macos-15 "
+                        '--output "$CI_RUNNER_IDENTITY_FILE"'
+                    ),
+                },
+                {
+                    "name": f"Checkout Darwin {label} candidate after host verification",
                     "uses": checkout_action,
                     "with": {
                         "persist-credentials": "false",
@@ -2870,25 +2914,33 @@ def _verify_darwin_security_dag(root: Path) -> None:
                         "fetch-depth": "0",
                         "submodules": "recursive",
                         "ref": "${{ inputs.checkout_ref }}",
+                        "path": candidate_path,
                     },
-                },
-                {
-                    "name": profile["verify_step"],
-                    "env": {"CI_RUNNER_IDENTITY_FILE": identity_path},
-                    "run": expected_verify,
                 },
                 {
                     "name": "Download security profile inventory",
                     "uses": download_action,
                     "with": {
                         "name": "ci-security-profile-inventory",
-                        "path": "CI-results/profile-inventory",
+                        "path": inventory_path,
                     },
                 },
                 {
                     "name": profile["run_step"],
-                    "env": profile["env"],
-                    "run": profile["run"],
+                    "shell": "bash",
+                    "env": {
+                        "CI_CANDIDATE_COMMIT": "${{ inputs.candidate_commit }}",
+                        "CI_CANDIDATE_ROOT": f"${{{{ github.workspace }}}}/{candidate_path}",
+                        "CI_CONTROL_ROOT": f"${{{{ github.workspace }}}}/{control_path}",
+                        "CI_INVENTORY_DIR": f"${{{{ github.workspace }}}}/{inventory_path}",
+                        "CI_JOBS": "4",
+                        "CI_RUNNER_IDENTITY_FILE": identity_path,
+                        "CI_RUNNER_TEMP": "${{ runner.temp }}",
+                        "CI_SECURITY_PROFILE": profile["profile"],
+                        "CI_WORKFLOW_COMMIT": "${{ inputs.workflow_commit }}",
+                        "CI_WORK_ROOT": work_path,
+                    },
+                    "run": f"bash {control_path}/ci/scripts/darwin_security_profile.sh",
                 },
                 {
                     "name": profile["upload_step"],
@@ -2896,7 +2948,7 @@ def _verify_darwin_security_dag(root: Path) -> None:
                     "uses": upload_action,
                     "with": {
                         "name": profile["artifact"],
-                        "path": profile["artifact_path"],
+                        "path": f"{work_path}/results",
                         "if-no-files-found": "warn",
                         "retention-days": "3",
                     },
@@ -2905,6 +2957,29 @@ def _verify_darwin_security_dag(root: Path) -> None:
         }
         if job != expected_job:
             raise ContractError(f"{path}: {job_name} complete job mapping differs")
+
+    helper = root / "ci/scripts/darwin_security_profile.sh"
+    measured = _sha256_regular_file(helper, "Darwin security host wrapper")
+    if measured != _DARWIN_SECURITY_WRAPPER_SOURCE_SHA256:
+        raise ContractError(f"{helper}: verifier-owned source identity differs")
+    source = helper.read_text(encoding="utf-8")
+    required_fragments = (
+        'CI_SOURCE_ROOT=$candidate_root',
+        'bash "$control_root/$profile_script"',
+        'verify_checkout "$control_root" "$CI_WORKFLOW_COMMIT"',
+        'verify_checkout "$candidate_root" "$CI_CANDIDATE_COMMIT"',
+        'post_control_identity=$(directory_identity "$control_root")',
+        'post_candidate_identity=$(directory_identity "$candidate_root")',
+    )
+    if any(fragment not in source for fragment in required_fragments):
+        raise ContractError(f"{helper}: control/candidate identity boundary differs")
+    forbidden_fragments = (
+        'bash "$candidate_root/',
+        'python3 "$candidate_root/',
+        'source "$candidate_root/',
+    )
+    if any(fragment in source for fragment in forbidden_fragments):
+        raise ContractError(f"{helper}: candidate checkout can provide executable control")
 
     suite_name = "suite-gate"
     suite = jobs[suite_name]
@@ -3004,6 +3079,203 @@ def _verify_darwin_security_dag(root: Path) -> None:
         raise ContractError(f"{path}: suite-gate complete job mapping differs")
 
 
+def _verify_linux_security_dag(root: Path) -> None:
+    """Require host-retained identity and exact digest container execution.
+
+    Args:
+        root: Repository root containing the protected shared workflow/helper.
+
+    Raises:
+        ContractError: A Linux profile uses a job container, receives candidate
+            data before host verification, changes checkout/image/mount/token/
+            command/output identity, or the protected wrapper bytes/command
+            order can forward credentials or bypass exact pull/run behavior.
+
+    Note:
+        Every job is an independent sibling of the other Linux profiles. The
+        complete mapping keeps runner verification on the real host, after a
+        sparse exact-workflow checkout and before candidate checkout/download.
+    """
+    path = root / ".github/workflows/ci-integration-suite.yml"
+    profiles = {
+        "sanitizer-asan": {
+            "label": "ASan",
+            "profile": "sanitizer-asan",
+            "timeout": "90",
+            "artifact": "sanitizer-asan-results",
+            "retention": False,
+        },
+        "sanitizer-tsan": {
+            "label": "TSan",
+            "profile": "sanitizer-tsan",
+            "timeout": "90",
+            "artifact": "sanitizer-tsan-results",
+            "retention": False,
+        },
+        "fuzz-codecs": {
+            "label": "fuzz",
+            "profile": "fuzz-codecs",
+            "timeout": "20",
+            "artifact": "fuzz-codecs-results",
+            "retention": True,
+        },
+    }
+    jobs = _workflow_job_mappings(path, profiles)
+    actions = _read_actions(root / "ci/locks/actions.lock")
+
+    def action_reference(name: str) -> str:
+        """Return one exact locked action reference for expected mappings."""
+        if name not in actions:
+            raise ContractError(f"{path}: protected Linux action {name!r} is absent")
+        return f"{name}@{actions[name][1]}"
+
+    checkout = action_reference("actions/checkout")
+    download = action_reference("actions/download-artifact")
+    upload = action_reference("actions/upload-artifact")
+    for job_name, profile in profiles.items():
+        slug = "fuzz" if job_name == "fuzz-codecs" else job_name.removeprefix("sanitizer-")
+        label = profile["label"]
+        identity = (
+            f"${{{{ runner.temp }}}}/photospider-linux-{slug}-runner-"
+            "${{ github.run_id }}-${{ github.run_attempt }}.json"
+        )
+        work = (
+            f"${{{{ runner.temp }}}}/photospider-linux-{slug}-work-"
+            "${{ github.run_id }}-${{ github.run_attempt }}"
+        )
+        control = f".ci-linux-{slug}-control"
+        candidate = f".ci-linux-{slug}-candidate"
+        inventory = f".ci-linux-{slug}-inventory"
+        upload_with: dict[str, str] = {
+            "name": profile["artifact"],
+            "path": f"{work}/results",
+            "if-no-files-found": "warn",
+        }
+        if profile["retention"]:
+            upload_with["retention-days"] = "3"
+        expected = {
+            "permissions": {"contents": "read", "packages": "read"},
+            "needs": "integration-plan",
+            "runs-on": "ubuntu-24.04",
+            "timeout-minutes": profile["timeout"],
+            "steps": [
+                {
+                    "name": f"Checkout protected Linux {label} host control",
+                    "uses": checkout,
+                    "with": {
+                        "persist-credentials": "false",
+                        "repository": "${{ github.repository }}",
+                        "fetch-depth": "1",
+                        "ref": "${{ inputs.workflow_commit }}",
+                        "sparse-checkout": (
+                            "ci/locks\n"
+                            "ci/scripts\n"
+                        ),
+                        "sparse-checkout-cone-mode": "false",
+                        "path": control,
+                    },
+                },
+                {
+                    "name": f"Verify exact Linux {label} host runner",
+                    "env": {"CI_RUNNER_IDENTITY_FILE": identity},
+                    "run": (
+                        f"python3 {control}/ci/scripts/ci_runner_verify.py "
+                        "--platform Linux --runner-label ubuntu-24.04 "
+                        '--output "$CI_RUNNER_IDENTITY_FILE"'
+                    ),
+                },
+                {
+                    "name": f"Checkout Linux {label} candidate after host verification",
+                    "uses": checkout,
+                    "with": {
+                        "persist-credentials": "false",
+                        "repository": "${{ inputs.checkout_repository }}",
+                        "fetch-depth": "0",
+                        "submodules": "recursive",
+                        "ref": "${{ inputs.checkout_ref }}",
+                        "path": candidate,
+                    },
+                },
+                {
+                    "name": "Download security profile inventory",
+                    "uses": download,
+                    "with": {
+                        "name": "ci-security-profile-inventory",
+                        "path": inventory,
+                    },
+                },
+                {
+                    "name": (
+                        f"Run isolated {label} profile in the exact image"
+                        if job_name != "fuzz-codecs"
+                        else "Run bounded codec fuzz smoke in the exact image"
+                    ),
+                    "shell": "bash",
+                    "env": {
+                        "CI_CANDIDATE_COMMIT": "${{ inputs.candidate_commit }}",
+                        "CI_CANDIDATE_ROOT": f"${{{{ github.workspace }}}}/{candidate}",
+                        "CI_CONTROL_ROOT": f"${{{{ github.workspace }}}}/{control}",
+                        "CI_GHCR_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+                        "CI_GHCR_USERNAME": "${{ github.actor }}",
+                        "CI_IMAGE_DIGEST": "${{ inputs.image_digest }}",
+                        "CI_IMAGE_REF": "${{ inputs.image_ref }}",
+                        "CI_INVENTORY_DIR": f"${{{{ github.workspace }}}}/{inventory}",
+                        "CI_JOBS": "4",
+                        "CI_RUNNER_IDENTITY_FILE": identity,
+                        "CI_RUNNER_TEMP": "${{ runner.temp }}",
+                        "CI_SECURITY_PROFILE": profile["profile"],
+                        "CI_WORKFLOW_COMMIT": "${{ inputs.workflow_commit }}",
+                        "CI_WORK_ROOT": work,
+                        "GITHUB_REPOSITORY": "${{ github.repository }}",
+                    },
+                    "run": f"bash {control}/ci/scripts/linux_security_profile.sh",
+                },
+                {
+                    "name": (
+                        f"Upload {label} diagnostics"
+                        if job_name != "fuzz-codecs"
+                        else "Upload transient fuzz diagnostics"
+                    ),
+                    "if": "always()",
+                    "uses": upload,
+                    "with": upload_with,
+                },
+            ],
+        }
+        if jobs[job_name] != expected:
+            raise ContractError(f"{path}: {job_name} complete host/container mapping differs")
+
+    helper = root / "ci/scripts/linux_security_profile.sh"
+    measured = _sha256_regular_file(helper, "Linux security host wrapper")
+    if measured != _LINUX_SECURITY_WRAPPER_SOURCE_SHA256:
+        raise ContractError(f"{helper}: verifier-owned source identity differs")
+    source = helper.read_text(encoding="utf-8")
+    required_order = (
+        'docker login ghcr.io --username "$CI_GHCR_USERNAME" --password-stdin',
+        "unset CI_GHCR_TOKEN",
+        'docker pull "$CI_IMAGE_REF"',
+        'docker "${container_arguments[@]}"',
+    )
+    positions = [source.find(fragment) for fragment in required_order]
+    if any(position < 0 for position in positions) or positions != sorted(positions):
+        raise ContractError(f"{helper}: login/pull/run order differs")
+    required_mounts = (
+        "dst=/workspace/photospider,readonly",
+        "dst=/workspace/photospider/ci,readonly",
+        "dst=/inputs/profile,readonly",
+        "dst=/inputs/runner-identity.json,readonly",
+        "dst=/work",
+        "--read-only",
+        "--network none",
+        "--cap-drop ALL",
+        "--security-opt no-new-privileges",
+    )
+    if any(fragment not in source for fragment in required_mounts):
+        raise ContractError(f"{helper}: exact container isolation/mount contract differs")
+    if '--env CI_GHCR_TOKEN' in source or '--env GH_TOKEN' in source:
+        raise ContractError(f"{helper}: registry token can reach candidate container")
+
+
 def _verify_linux_runner_lock(root: Path) -> None:
     """Validate the finite Linux rollout set and image-manifest coverage."""
     path = root / "ci/locks/linux-runner-lock.json"
@@ -3030,104 +3302,133 @@ def _verify_linux_runner_lock(root: Path) -> None:
 
 
 def _verify_runner_identity_handoffs(root: Path) -> None:
-    """Require one retained runner record to cross each security job boundary.
+    """Require retained identity across manual and manifest job boundaries.
 
     Args:
         root: Repository root containing maintained workflows and platform reader.
 
     Raises:
-        ContractError: A Linux security job does not create its resolved record
-            before profile data, changes paths between producer and consumer,
-            accepts candidate inputs, or the platform reader reinterprets the
-            mutable runner environment.
+        ContractError: A maintained manual/manifest job changes paths between
+            identity producer and consumer, or the platform reader reinterprets
+            the mutable runner environment.
 
     Note:
-        Darwin jobs are additionally covered by complete mapping equality. This
-        focused check covers the three containerized Linux jobs, the manual
-        sanitizer, and the local-image manifest producer without duplicating
-        their unrelated workflow fields.
+        Shared Linux and Darwin profiles are covered by complete mapping
+        equality in their platform DAG verifiers. This focused check retains
+        the separate manual sanitizer and local-image manifest producer.
     """
-    suite_path = root / ".github/workflows/ci-integration-suite.yml"
-    suite_jobs = _workflow_job_mappings(
-        suite_path, ("sanitizer-asan", "sanitizer-tsan", "fuzz-codecs")
-    )
-    suite_contract = {
-        "sanitizer-asan": (
-            "Verify exact Linux ASan runner",
-            "Run isolated ASan profile",
-            "${{ runner.temp }}/photospider-linux-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
-        ),
-        "sanitizer-tsan": (
-            "Verify exact Linux TSan runner",
-            "Run isolated TSan profile",
-            "${{ runner.temp }}/photospider-linux-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
-        ),
-        "fuzz-codecs": (
-            "Verify exact Linux fuzz runner",
-            "Run bounded codec fuzz smoke",
-            "${{ runner.temp }}/photospider-linux-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
-        ),
-    }
-
-    def require_handoff(
-        path: Path,
-        job_name: str,
-        job: dict[str, Any],
-        verify_name: str,
-        execute_name: str,
-        identity_path: str,
-    ) -> None:
-        """Validate one ordered producer/consumer pair inside a parsed job."""
-        steps = job.get("steps")
-        if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):
-            raise ContractError(f"{path}: {job_name} steps are malformed")
-        verify_matches = [
-            (index, step) for index, step in enumerate(steps) if step.get("name") == verify_name
-        ]
-        execute_matches = [
-            (index, step) for index, step in enumerate(steps) if step.get("name") == execute_name
-        ]
-        if len(verify_matches) != 1 or len(execute_matches) != 1:
-            raise ContractError(f"{path}: {job_name} runner handoff steps are ambiguous")
-        verify_index, verify_step = verify_matches[0]
-        execute_index, execute_step = execute_matches[0]
-        expected_run = (
-            "python3 ci/scripts/ci_runner_verify.py --platform Linux "
-            "--runner-label ubuntu-24.04 --output \"$CI_RUNNER_IDENTITY_FILE\""
-        )
-        if verify_step.get("env") != {"CI_RUNNER_IDENTITY_FILE": identity_path}:
-            raise ContractError(f"{path}: {job_name} resolved runner output differs")
-        if verify_step.get("run") != expected_run:
-            raise ContractError(f"{path}: {job_name} runner verifier command differs")
-        execute_environment = execute_step.get("env")
-        if (
-            not isinstance(execute_environment, dict)
-            or execute_environment.get("CI_RUNNER_IDENTITY_FILE") != identity_path
-        ):
-            raise ContractError(f"{path}: {job_name} retained runner consumer differs")
-        if "${{ inputs." in identity_path or verify_index >= execute_index:
-            raise ContractError(f"{path}: {job_name} runner identity order/trust differs")
-
-    for job_name, (verify_name, execute_name, identity_path) in suite_contract.items():
-        require_handoff(
-            suite_path,
-            job_name,
-            suite_jobs[job_name],
-            verify_name,
-            execute_name,
-            identity_path,
-        )
-
     manual_path = root / ".github/workflows/ci-sanitizer.yml"
     manual = _workflow_job_mappings(manual_path, ("sanitizer",))["sanitizer"]
-    require_handoff(
-        manual_path,
-        "sanitizer",
-        manual,
-        "Verify exact Linux sanitizer runner",
-        "Run sanitizer tests",
-        "${{ runner.temp }}/photospider-manual-sanitizer-runner-${{ github.run_id }}-${{ github.run_attempt }}.json",
+    actions = _read_actions(root / "ci/locks/actions.lock")
+
+    def action_reference(name: str) -> str:
+        """Return one exact action pin for the manual sanitizer mapping."""
+        if name not in actions:
+            raise ContractError(
+                f"{manual_path}: protected manual action {name!r} is absent"
+            )
+        return f"{name}@{actions[name][1]}"
+
+    identity = (
+        "${{ runner.temp }}/photospider-manual-sanitizer-runner-"
+        "${{ github.run_id }}-${{ github.run_attempt }}.json"
     )
+    work = (
+        "${{ runner.temp }}/photospider-manual-sanitizer-work-"
+        "${{ github.run_id }}-${{ github.run_attempt }}"
+    )
+    expected_manual = {
+        "needs": ["ci-image-identity", "profile-inventory"],
+        "runs-on": "ubuntu-24.04",
+        "timeout-minutes": "90",
+        "steps": [
+            {
+                "name": "Checkout protected manual sanitizer host control",
+                "uses": action_reference("actions/checkout"),
+                "with": {
+                    "persist-credentials": "false",
+                    "repository": "${{ github.repository }}",
+                    "fetch-depth": "1",
+                    "ref": "${{ github.workflow_sha }}",
+                    "sparse-checkout": (
+                        "ci/locks\n"
+                        "ci/scripts\n"
+                    ),
+                    "sparse-checkout-cone-mode": "false",
+                    "path": ".ci-manual-sanitizer-control",
+                },
+            },
+            {
+                "name": "Verify exact Linux sanitizer runner",
+                "env": {"CI_RUNNER_IDENTITY_FILE": identity},
+                "run": (
+                    "python3 .ci-manual-sanitizer-control/ci/scripts/"
+                    "ci_runner_verify.py --platform Linux "
+                    "--runner-label ubuntu-24.04 "
+                    '--output "$CI_RUNNER_IDENTITY_FILE"'
+                ),
+            },
+            {
+                "name": "Checkout manual sanitizer candidate after host verification",
+                "uses": action_reference("actions/checkout"),
+                "with": {
+                    "persist-credentials": "false",
+                    "repository": "${{ github.repository }}",
+                    "fetch-depth": "0",
+                    "submodules": "recursive",
+                    "ref": "${{ github.sha }}",
+                    "path": ".ci-manual-sanitizer-candidate",
+                },
+            },
+            {
+                "name": "Download security profile inventory",
+                "uses": action_reference("actions/download-artifact"),
+                "with": {
+                    "name": "ci-sanitizer-profile-inventory",
+                    "path": ".ci-manual-sanitizer-inventory",
+                },
+            },
+            {
+                "name": "Run manual sanitizer in the exact image",
+                "shell": "bash",
+                "env": {
+                    "CI_CANDIDATE_COMMIT": "${{ github.sha }}",
+                    "CI_CANDIDATE_ROOT": "${{ github.workspace }}/.ci-manual-sanitizer-candidate",
+                    "CI_CONTROL_ROOT": "${{ github.workspace }}/.ci-manual-sanitizer-control",
+                    "CI_GHCR_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+                    "CI_GHCR_USERNAME": "${{ github.actor }}",
+                    "CI_IMAGE_DIGEST": "${{ needs.ci-image-identity.outputs.digest }}",
+                    "CI_IMAGE_REF": "${{ needs.ci-image-identity.outputs.image }}",
+                    "CI_INVENTORY_DIR": "${{ github.workspace }}/.ci-manual-sanitizer-inventory",
+                    "CI_JOBS": "4",
+                    "CI_RUNNER_IDENTITY_FILE": identity,
+                    "CI_RUNNER_TEMP": "${{ runner.temp }}",
+                    "CI_SECURITY_PROFILE": "sanitizer-${{ inputs.sanitizer }}",
+                    "CI_WORKFLOW_COMMIT": "${{ github.workflow_sha }}",
+                    "CI_WORK_ROOT": work,
+                    "GITHUB_REPOSITORY": "${{ github.repository }}",
+                },
+                "run": (
+                    "bash .ci-manual-sanitizer-control/ci/scripts/"
+                    "linux_security_profile.sh"
+                ),
+            },
+            {
+                "name": "Upload sanitizer logs",
+                "if": "always()",
+                "uses": action_reference("actions/upload-artifact"),
+                "with": {
+                    "name": "sanitizer-${{ inputs.sanitizer }}-results",
+                    "path": f"{work}/results",
+                    "if-no-files-found": "warn",
+                },
+            },
+        ],
+    }
+    if manual != expected_manual:
+        raise ContractError(
+            f"{manual_path}: manual sanitizer host/container mapping differs"
+        )
 
     health_path = root / ".github/workflows/ci-healthcheck.yml"
     health = _workflow_job_mappings(health_path, ("healthcheck-local-image",))[
@@ -3268,6 +3569,7 @@ def _verify_build_smoke_control_authority(root: Path) -> None:
     build_step = producer_steps[positions[0]]
     raw_step = producer_steps[positions[1]]
     raw_upload = producer_steps[positions[2]]
+    pack_step = producer_steps[positions[3]]
     if build_step != {
         "name": "Run same-tree build integrity and retain raw inventory",
         "env": {
@@ -3277,7 +3579,9 @@ def _verify_build_smoke_control_authority(root: Path) -> None:
         "run": "bash ci/scripts/build_integrity.sh",
     }:
         raise ContractError(f"{path}: producer build boundary differs")
-    if not isinstance(raw_step, dict) or raw_step.get("env") != {
+    if not isinstance(raw_step, dict) or set(raw_step) != {
+        "name", "shell", "env", "run"
+    } or raw_step.get("shell") != "bash" or raw_step.get("env") != {
         "CI_CANDIDATE_COMMIT": "${{ inputs.candidate_commit }}",
         "CI_IMAGE_DIGEST": "${{ inputs.image_digest }}",
         "CI_WORKFLOW_COMMIT": "${{ inputs.workflow_commit }}",
@@ -3324,6 +3628,18 @@ def _verify_build_smoke_control_authority(root: Path) -> None:
         },
     }:
         raise ContractError(f"{path}: raw inventory upload mapping differs")
+    if (
+        not isinstance(pack_step, dict)
+        or set(pack_step) != {"name", "id", "shell", "env", "run"}
+        or pack_step.get("id") != "identity"
+        or pack_step.get("shell") != "bash"
+        or pack_step.get("env")
+        != {"CI_IMAGE_DIGEST": "${{ inputs.image_digest }}"}
+        or not isinstance(pack_step.get("run"), str)
+        or hashlib.sha256(pack_step["run"].encode("utf-8")).hexdigest()
+        != _TARGETED_ROLE_PACK_RUN_SHA256
+    ):
+        raise ContractError(f"{path}: role-artifact pack program/shell differs")
 
     control = jobs["build-smoke-control"]
     expected_outputs = {
@@ -3538,10 +3854,6 @@ def _verify_build_smoke_control_authority(root: Path) -> None:
         "--control-manifest CI-results/build-smoke-control/"
         "build-smoke-control.manifest.json",
         '--route-sha256 "$CI_ROUTE_SHA256"',
-        (
-            '--restored-build-root "$RUNNER_TEMP/photospider-targeted-ctest-'
-            '$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/ci"'
-        ),
     )
     if any(fragment not in verify_run for fragment in required_verify_fragments):
         raise ContractError(
@@ -3555,6 +3867,15 @@ def _verify_build_smoke_control_authority(root: Path) -> None:
     )
     if any(fragment in verify_run for fragment in forbidden_candidate_execution):
         raise ContractError(f"{path}: targeted verifier executes candidate control")
+    for forbidden_semantics in (
+        "--restored-build-root",
+        "--ctest-executable",
+        "ctest --show-only",
+    ):
+        if forbidden_semantics in verify_run:
+            raise ContractError(
+                f"{path}: targeted verifier interprets candidate CTest control"
+            )
 
     attestation = jobs["attest-targeted-artifacts"]
     attestation_needs = attestation.get("needs")
@@ -3721,9 +4042,22 @@ def _verify_shared_integration_dag(root: Path) -> None:
         "--show-only=json-v1",
         "ordinary_ctest_closure_v1.json",
         "ctest_runtime_closure.py",
+        "control_test_records",
+        "complete_test_records",
     )
     if any(fragment not in build for fragment in closure_contract):
-        raise ContractError("producer does not emit raw CTest and role closure inputs")
+        if any(fragment not in reusable for fragment in closure_contract[4:]):
+            raise ContractError(
+                "protected verifier lacks pure-data CTest control authority"
+            )
+        if any(fragment not in build for fragment in closure_contract[:4]):
+            raise ContractError(
+                "producer does not emit raw CTest and role closure inputs"
+            )
+    if "_restore_runtime_for_inventory" in reusable or ".replace(old_root" in reusable:
+        raise ContractError(
+            "pre-attestation targeted verifier still relocates CTest control bytes"
+        )
     package_contract = (
         "producer/CMakeCache.txt",
         "producer/generated/ci_inventory/",
@@ -3819,6 +4153,7 @@ def verify(root: Path) -> None:
     _verify_dockerfile(root)
     _verify_darwin_lock(root)
     _verify_darwin_security_dag(root)
+    _verify_linux_security_dag(root)
     _verify_linux_runner_lock(root)
     _verify_runner_identity_handoffs(root)
     _verify_fuzz_job_timeout(root)

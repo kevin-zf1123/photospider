@@ -249,6 +249,7 @@ jobs:
           CI_BUILD_PROFILE: default
         run: bash ci/scripts/build_integrity.sh
       - name: Package exact raw routing inputs without candidate parsers
+        shell: bash
         env:
           CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
           CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
@@ -334,6 +335,7 @@ jobs:
           retention-days: 3
       - name: Pack role-specific identity-bound artifacts
         id: identity
+        shell: bash
         env:
           CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
         run: |
@@ -608,7 +610,6 @@ jobs:
             --control-manifest CI-results/build-smoke-control/build-smoke-control.manifest.json \
             --route-sha256 "$CI_ROUTE_SHA256" \
             --artifact-root CI-results/targeted-artifacts \
-            --restored-build-root "$RUNNER_TEMP/photospider-targeted-ctest-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/ci" \
             --candidate-commit "${{ inputs.candidate_commit }}" \
             --profile default \
             --matrix-sha256 "$CI_MATRIX_SHA256" \
@@ -1180,45 +1181,66 @@ jobs:
     needs: integration-plan
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    container:
-      image: ${{ inputs.image_ref }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout protected Linux ASan host control
+        with:
+          persist-credentials: false
+          repository: ${{ github.repository }}
+          fetch-depth: 1
+          ref: ${{ inputs.workflow_commit }}
+          sparse-checkout: |
+            ci/locks
+            ci/scripts
+          sparse-checkout-cone-mode: false
+          path: .ci-linux-asan-control
+      - name: Verify exact Linux ASan host runner
+        env:
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
+        run: >-
+          python3 .ci-linux-asan-control/ci/scripts/ci_runner_verify.py
+          --platform Linux
+          --runner-label ubuntu-24.04
+          --output "$CI_RUNNER_IDENTITY_FILE"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout Linux ASan candidate after host verification
         with:
           persist-credentials: false
           repository: ${{ inputs.checkout_repository }}
           fetch-depth: 0
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
-      - name: Verify exact Linux ASan runner
-        env:
-          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
-        run: >-
-          python3 ci/scripts/ci_runner_verify.py
-          --platform Linux
-          --runner-label ubuntu-24.04
-          --output "$CI_RUNNER_IDENTITY_FILE"
+          path: .ci-linux-asan-candidate
       - name: Download security profile inventory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ci-security-profile-inventory
-          path: CI-results/profile-inventory
-      - name: Run isolated ASan profile
+          path: .ci-linux-asan-inventory
+      - name: Run isolated ASan profile in the exact image
+        shell: bash
         env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-asan
-          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_CANDIDATE_ROOT: ${{ github.workspace }}/.ci-linux-asan-candidate
+          CI_CONTROL_ROOT: ${{ github.workspace }}/.ci-linux-asan-control
+          CI_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_GHCR_USERNAME: ${{ github.actor }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_IMAGE_REF: ${{ inputs.image_ref }}
+          CI_INVENTORY_DIR: ${{ github.workspace }}/.ci-linux-asan-inventory
+          CI_JOBS: 4
           CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
-          SANITIZER: asan
-        run: bash ci/scripts/sanitizer_test.sh
+          CI_RUNNER_TEMP: ${{ runner.temp }}
+          CI_SECURITY_PROFILE: sanitizer-asan
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          CI_WORK_ROOT: ${{ runner.temp }}/photospider-linux-asan-work-${{ github.run_id }}-${{ github.run_attempt }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash .ci-linux-asan-control/ci/scripts/linux_security_profile.sh
       - name: Upload ASan diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sanitizer-asan-results
-          path: CI-results/sanitizer-asan
+          path: ${{ runner.temp }}/photospider-linux-asan-work-${{ github.run_id }}-${{ github.run_attempt }}/results
           if-no-files-found: warn
 
   sanitizer-tsan:
@@ -1228,45 +1250,66 @@ jobs:
     needs: integration-plan
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    container:
-      image: ${{ inputs.image_ref }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout protected Linux TSan host control
+        with:
+          persist-credentials: false
+          repository: ${{ github.repository }}
+          fetch-depth: 1
+          ref: ${{ inputs.workflow_commit }}
+          sparse-checkout: |
+            ci/locks
+            ci/scripts
+          sparse-checkout-cone-mode: false
+          path: .ci-linux-tsan-control
+      - name: Verify exact Linux TSan host runner
+        env:
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
+        run: >-
+          python3 .ci-linux-tsan-control/ci/scripts/ci_runner_verify.py
+          --platform Linux
+          --runner-label ubuntu-24.04
+          --output "$CI_RUNNER_IDENTITY_FILE"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout Linux TSan candidate after host verification
         with:
           persist-credentials: false
           repository: ${{ inputs.checkout_repository }}
           fetch-depth: 0
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
-      - name: Verify exact Linux TSan runner
-        env:
-          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
-        run: >-
-          python3 ci/scripts/ci_runner_verify.py
-          --platform Linux
-          --runner-label ubuntu-24.04
-          --output "$CI_RUNNER_IDENTITY_FILE"
+          path: .ci-linux-tsan-candidate
       - name: Download security profile inventory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ci-security-profile-inventory
-          path: CI-results/profile-inventory
-      - name: Run isolated TSan profile
+          path: .ci-linux-tsan-inventory
+      - name: Run isolated TSan profile in the exact image
+        shell: bash
         env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-tsan
-          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_CANDIDATE_ROOT: ${{ github.workspace }}/.ci-linux-tsan-candidate
+          CI_CONTROL_ROOT: ${{ github.workspace }}/.ci-linux-tsan-control
+          CI_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_GHCR_USERNAME: ${{ github.actor }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_IMAGE_REF: ${{ inputs.image_ref }}
+          CI_INVENTORY_DIR: ${{ github.workspace }}/.ci-linux-tsan-inventory
+          CI_JOBS: 4
           CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
-          SANITIZER: tsan
-        run: bash ci/scripts/sanitizer_test.sh
+          CI_RUNNER_TEMP: ${{ runner.temp }}
+          CI_SECURITY_PROFILE: sanitizer-tsan
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          CI_WORK_ROOT: ${{ runner.temp }}/photospider-linux-tsan-work-${{ github.run_id }}-${{ github.run_attempt }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash .ci-linux-tsan-control/ci/scripts/linux_security_profile.sh
       - name: Upload TSan diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sanitizer-tsan-results
-          path: CI-results/sanitizer-tsan
+          path: ${{ runner.temp }}/photospider-linux-tsan-work-${{ github.run_id }}-${{ github.run_attempt }}/results
           if-no-files-found: warn
 
   fuzz-codecs:
@@ -1276,44 +1319,66 @@ jobs:
     needs: integration-plan
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    container:
-      image: ${{ inputs.image_ref }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout protected Linux fuzz host control
+        with:
+          persist-credentials: false
+          repository: ${{ github.repository }}
+          fetch-depth: 1
+          ref: ${{ inputs.workflow_commit }}
+          sparse-checkout: |
+            ci/locks
+            ci/scripts
+          sparse-checkout-cone-mode: false
+          path: .ci-linux-fuzz-control
+      - name: Verify exact Linux fuzz host runner
+        env:
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
+        run: >-
+          python3 .ci-linux-fuzz-control/ci/scripts/ci_runner_verify.py
+          --platform Linux
+          --runner-label ubuntu-24.04
+          --output "$CI_RUNNER_IDENTITY_FILE"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout Linux fuzz candidate after host verification
         with:
           persist-credentials: false
           repository: ${{ inputs.checkout_repository }}
           fetch-depth: 0
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
-      - name: Verify exact Linux fuzz runner
-        env:
-          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
-        run: >-
-          python3 ci/scripts/ci_runner_verify.py
-          --platform Linux
-          --runner-label ubuntu-24.04
-          --output "$CI_RUNNER_IDENTITY_FILE"
+          path: .ci-linux-fuzz-candidate
       - name: Download security profile inventory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ci-security-profile-inventory
-          path: CI-results/profile-inventory
-      - name: Run bounded codec fuzz smoke
+          path: .ci-linux-fuzz-inventory
+      - name: Run bounded codec fuzz smoke in the exact image
+        shell: bash
         env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/fuzz-codecs
-          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_CANDIDATE_ROOT: ${{ github.workspace }}/.ci-linux-fuzz-candidate
+          CI_CONTROL_ROOT: ${{ github.workspace }}/.ci-linux-fuzz-control
+          CI_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_GHCR_USERNAME: ${{ github.actor }}
+          CI_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CI_IMAGE_REF: ${{ inputs.image_ref }}
+          CI_INVENTORY_DIR: ${{ github.workspace }}/.ci-linux-fuzz-inventory
+          CI_JOBS: 4
           CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
-        run: bash ci/scripts/fuzz_smoke.sh
+          CI_RUNNER_TEMP: ${{ runner.temp }}
+          CI_SECURITY_PROFILE: fuzz-codecs
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          CI_WORK_ROOT: ${{ runner.temp }}/photospider-linux-fuzz-work-${{ github.run_id }}-${{ github.run_attempt }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash .ci-linux-fuzz-control/ci/scripts/linux_security_profile.sh
       - name: Upload transient fuzz diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fuzz-codecs-results
-          path: CI-results/fuzz-codecs
+          path: ${{ runner.temp }}/photospider-linux-fuzz-work-${{ github.run_id }}-${{ github.run_attempt }}/results
           if-no-files-found: warn
           retention-days: 3
 
@@ -1325,39 +1390,60 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout protected Darwin ASan host control
+        with:
+          persist-credentials: false
+          repository: ${{ github.repository }}
+          fetch-depth: 1
+          ref: ${{ inputs.workflow_commit }}
+          sparse-checkout: |
+            ci/locks
+            ci/scripts
+          sparse-checkout-cone-mode: false
+          path: .ci-darwin-asan-control
+      - name: Verify exact Darwin ASan host runner
+        env:
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python3 .ci-darwin-asan-control/ci/scripts/ci_runner_verify.py
+          --platform Darwin
+          --runner-label macos-15
+          --output "$CI_RUNNER_IDENTITY_FILE"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout Darwin ASan candidate after host verification
         with:
           persist-credentials: false
           repository: ${{ inputs.checkout_repository }}
           fetch-depth: 0
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
-      - name: Verify exact Darwin ASan runner
-        env:
-          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
-        run: >-
-          python3 ci/scripts/ci_runner_verify.py
-          --platform Darwin
-          --runner-label macos-15
-          --output "$CI_RUNNER_IDENTITY_FILE"
+          path: .ci-darwin-asan-candidate
       - name: Download security profile inventory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ci-security-profile-inventory
-          path: CI-results/profile-inventory
+          path: .ci-darwin-asan-inventory
       - name: Run isolated Darwin ASan profile
+        shell: bash
         env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-asan-darwin
-          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_CANDIDATE_ROOT: ${{ github.workspace }}/.ci-darwin-asan-candidate
+          CI_CONTROL_ROOT: ${{ github.workspace }}/.ci-darwin-asan-control
+          CI_INVENTORY_DIR: ${{ github.workspace }}/.ci-darwin-asan-inventory
+          CI_JOBS: 4
           CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
           CI_RUNNER_TEMP: ${{ runner.temp }}
-          SANITIZER: asan
-        run: bash ci/scripts/sanitizer_test.sh
+          CI_SECURITY_PROFILE: sanitizer-asan
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          CI_WORK_ROOT: ${{ runner.temp }}/photospider-darwin-asan-work-${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash .ci-darwin-asan-control/ci/scripts/darwin_security_profile.sh
       - name: Upload Darwin ASan diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sanitizer-asan-darwin-results
-          path: CI-results/sanitizer-asan-darwin
+          path: ${{ runner.temp }}/photospider-darwin-asan-work-${{ github.run_id }}-${{ github.run_attempt }}/results
           if-no-files-found: warn
           retention-days: 3
 
@@ -1369,39 +1455,60 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout protected Darwin TSan host control
+        with:
+          persist-credentials: false
+          repository: ${{ github.repository }}
+          fetch-depth: 1
+          ref: ${{ inputs.workflow_commit }}
+          sparse-checkout: |
+            ci/locks
+            ci/scripts
+          sparse-checkout-cone-mode: false
+          path: .ci-darwin-tsan-control
+      - name: Verify exact Darwin TSan host runner
+        env:
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python3 .ci-darwin-tsan-control/ci/scripts/ci_runner_verify.py
+          --platform Darwin
+          --runner-label macos-15
+          --output "$CI_RUNNER_IDENTITY_FILE"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout Darwin TSan candidate after host verification
         with:
           persist-credentials: false
           repository: ${{ inputs.checkout_repository }}
           fetch-depth: 0
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
-      - name: Verify exact Darwin TSan runner
-        env:
-          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
-        run: >-
-          python3 ci/scripts/ci_runner_verify.py
-          --platform Darwin
-          --runner-label macos-15
-          --output "$CI_RUNNER_IDENTITY_FILE"
+          path: .ci-darwin-tsan-candidate
       - name: Download security profile inventory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ci-security-profile-inventory
-          path: CI-results/profile-inventory
+          path: .ci-darwin-tsan-inventory
       - name: Run isolated Darwin TSan profile
+        shell: bash
         env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-tsan-darwin
-          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_CANDIDATE_ROOT: ${{ github.workspace }}/.ci-darwin-tsan-candidate
+          CI_CONTROL_ROOT: ${{ github.workspace }}/.ci-darwin-tsan-control
+          CI_INVENTORY_DIR: ${{ github.workspace }}/.ci-darwin-tsan-inventory
+          CI_JOBS: 4
           CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-tsan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
           CI_RUNNER_TEMP: ${{ runner.temp }}
-          SANITIZER: tsan
-        run: bash ci/scripts/sanitizer_test.sh
+          CI_SECURITY_PROFILE: sanitizer-tsan
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          CI_WORK_ROOT: ${{ runner.temp }}/photospider-darwin-tsan-work-${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash .ci-darwin-tsan-control/ci/scripts/darwin_security_profile.sh
       - name: Upload Darwin TSan diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sanitizer-tsan-darwin-results
-          path: CI-results/sanitizer-tsan-darwin
+          path: ${{ runner.temp }}/photospider-darwin-tsan-work-${{ github.run_id }}-${{ github.run_attempt }}/results
           if-no-files-found: warn
           retention-days: 3
 
@@ -1413,38 +1520,60 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout protected Darwin fuzz host control
+        with:
+          persist-credentials: false
+          repository: ${{ github.repository }}
+          fetch-depth: 1
+          ref: ${{ inputs.workflow_commit }}
+          sparse-checkout: |
+            ci/locks
+            ci/scripts
+          sparse-checkout-cone-mode: false
+          path: .ci-darwin-fuzz-control
+      - name: Verify exact Darwin fuzz host runner
+        env:
+          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python3 .ci-darwin-fuzz-control/ci/scripts/ci_runner_verify.py
+          --platform Darwin
+          --runner-label macos-15
+          --output "$CI_RUNNER_IDENTITY_FILE"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout Darwin fuzz candidate after host verification
         with:
           persist-credentials: false
           repository: ${{ inputs.checkout_repository }}
           fetch-depth: 0
           submodules: recursive
           ref: ${{ inputs.checkout_ref }}
-      - name: Verify exact Darwin fuzz runner
-        env:
-          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
-        run: >-
-          python3 ci/scripts/ci_runner_verify.py
-          --platform Darwin
-          --runner-label macos-15
-          --output "$CI_RUNNER_IDENTITY_FILE"
+          path: .ci-darwin-fuzz-candidate
       - name: Download security profile inventory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ci-security-profile-inventory
-          path: CI-results/profile-inventory
+          path: .ci-darwin-fuzz-inventory
       - name: Run bounded Darwin codec fuzz smoke
+        shell: bash
         env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/fuzz-codecs-darwin
-          CI_INVENTORY_DIR: ${{ github.workspace }}/CI-results/profile-inventory
+          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CI_CANDIDATE_ROOT: ${{ github.workspace }}/.ci-darwin-fuzz-candidate
+          CI_CONTROL_ROOT: ${{ github.workspace }}/.ci-darwin-fuzz-control
+          CI_INVENTORY_DIR: ${{ github.workspace }}/.ci-darwin-fuzz-inventory
+          CI_JOBS: 4
           CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-fuzz-runner-${{ github.run_id }}-${{ github.run_attempt }}.json
           CI_RUNNER_TEMP: ${{ runner.temp }}
-        run: bash ci/scripts/fuzz_smoke.sh
+          CI_SECURITY_PROFILE: fuzz-codecs
+          CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          CI_WORK_ROOT: ${{ runner.temp }}/photospider-darwin-fuzz-work-${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash .ci-darwin-fuzz-control/ci/scripts/darwin_security_profile.sh
       - name: Upload transient Darwin fuzz diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fuzz-codecs-darwin-results
-          path: CI-results/fuzz-codecs-darwin
+          path: ${{ runner.temp }}/photospider-darwin-fuzz-work-${{ github.run_id }}-${{ github.run_attempt }}/results
           if-no-files-found: warn
           retention-days: 3
 

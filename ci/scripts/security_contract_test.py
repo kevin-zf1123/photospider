@@ -2452,6 +2452,24 @@ class RunnerIdentityContractTest(unittest.TestCase):
                     verified = module.verify(REPO_ROOT, "Darwin", "macos-15")
                 self.assertEqual(verified["triplet"], "arm64-osx")
                 self.assertEqual(verified["vcpkg_commit"], commit)
+                self.assertEqual(
+                    verified["cmake_path"],
+                    "/Users/runner/Library/Android/sdk/cmake/3.31.5/bin/cmake",
+                )
+                self.assertEqual(verified["cmake_version"], "3.31.5")
+                self.assertEqual(
+                    verified["cmake_gtest_module_sha256"],
+                    "b5a2546c8cea1d5f9a366c6983261c621c0b34a40d8494caefdc0fa4c78862c4",
+                )
+                self.assertEqual(
+                    verified["fuzz_c_compiler_path"],
+                    "/opt/homebrew/opt/llvm@18/bin/clang",
+                )
+                self.assertEqual(
+                    verified["fuzz_cxx_compiler_path"],
+                    "/opt/homebrew/opt/llvm@18/bin/clang++",
+                )
+                self.assertEqual(verified["fuzz_compiler_version"], "18.1.8")
                 forged = dict(verified)
                 forged["vcpkg_commit"] = next(
                     value for value in expected.values() if value != commit
@@ -3353,7 +3371,273 @@ class ProfileReaderContractTest(unittest.TestCase):
 
 
 class SecurityPlatformContractTest(unittest.TestCase):
-    """Exercise Darwin runner locks and fresh vcpkg materialization."""
+    """Exercise hosted-runner handoff and exact platform preparation."""
+
+    def test_linux_host_wrapper_pulls_and_runs_exact_digest_after_identity(self) -> None:
+        """Keep host identity outside candidate code and constrain Docker argv.
+
+        Returns:
+            None after the production wrapper logs in, pulls, and runs exactly
+            one digest with read-only control/candidate/inventory/identity
+            mounts, while withholding the GHCR token from pull and run.
+
+        Raises:
+            AssertionError: Host provenance is skipped, mutable image syntax or
+                writable/overlapping inputs reach the container, or candidate
+                execution can occur before the exact image boundary.
+        """
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            candidate = root / "candidate"
+            run_command("git", "clone", "-q", "--no-local", REPO_ROOT, candidate)
+            candidate_commit = run_command(
+                "git", "-C", candidate, "rev-parse", "HEAD"
+            ).stdout.strip()
+            inventory = root / "inventory"
+            inventory.mkdir()
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            identity_path = runner_temp / "runner-identity.json"
+            write_runner_identity(identity_path, "Linux", LINUX_STABLE_VERSION)
+
+            shim_dir = root / "shim"
+            shim_dir.mkdir()
+            docker_log = root / "docker.log"
+            docker = shim_dir / "docker"
+            docker.write_text(
+                f"#!{sys.executable}\n"
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "arguments = sys.argv[1:]\n"
+                "record = {\n"
+                "    'argv': arguments,\n"
+                "    'token_present': 'CI_GHCR_TOKEN' in os.environ,\n"
+                "}\n"
+                "if arguments and arguments[0] == 'login':\n"
+                "    record['stdin_size'] = len(sys.stdin.buffer.read())\n"
+                "if arguments and arguments[0] == 'run':\n"
+                "    work_mount = next(\n"
+                "        value for value in arguments\n"
+                "        if value.startswith('type=bind,src=') and value.endswith(',dst=/work')\n"
+                "    )\n"
+                "    work_root = Path(work_mount.split(',src=', 1)[1].split(',dst=', 1)[0])\n"
+                "    (work_root / 'results/summary.log').write_text(\n"
+                "        'protected profile passed\\n', encoding='utf-8'\n"
+                "    )\n"
+                "with open(os.environ['CI_TEST_DOCKER_LOG'], 'a', encoding='utf-8') as handle:\n"
+                "    handle.write(json.dumps(record, sort_keys=True, separators=(',', ':')) + '\\n')\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            work_root = runner_temp / "profile-work"
+            repository = "kevin-zf1123/photospider"
+            image_ref = f"ghcr.io/{repository}/photospider-ci@{IMAGE_DIGEST}"
+            environment = {
+                "CI_CANDIDATE_COMMIT": candidate_commit,
+                "CI_CANDIDATE_ROOT": str(candidate),
+                "CI_CONTROL_ROOT": str(REPO_ROOT),
+                "CI_GHCR_TOKEN": "fixture-token-never-log",
+                "CI_GHCR_USERNAME": "ci-fixture",
+                "CI_IMAGE_DIGEST": IMAGE_DIGEST,
+                "CI_IMAGE_REF": image_ref,
+                "CI_INVENTORY_DIR": str(inventory),
+                "CI_JOBS": "4",
+                "CI_RUNNER_IDENTITY_FILE": str(identity_path),
+                "CI_RUNNER_TEMP": str(runner_temp),
+                "CI_SECURITY_PROFILE": "sanitizer-asan",
+                "CI_TEST_DOCKER_LOG": str(docker_log),
+                "CI_WORKFLOW_COMMIT": COMMIT_A,
+                "CI_WORK_ROOT": str(work_root),
+                "GITHUB_REPOSITORY": repository,
+                "PATH": f"{shim_dir}:{os.environ['PATH']}",
+            }
+            run_command(
+                "bash",
+                SCRIPTS / "linux_security_profile.sh",
+                environment=environment,
+            )
+            calls = [
+                json.loads(line)
+                for line in docker_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual([call["argv"][0] for call in calls], ["login", "pull", "run"])
+            self.assertEqual(
+                calls[0]["argv"],
+                [
+                    "login",
+                    "ghcr.io",
+                    "--username",
+                    "ci-fixture",
+                    "--password-stdin",
+                ],
+            )
+            self.assertEqual(calls[0]["stdin_size"], len("fixture-token-never-log"))
+            self.assertEqual(calls[1]["argv"], ["pull", image_ref])
+            self.assertTrue(calls[0]["token_present"])
+            self.assertFalse(calls[1]["token_present"])
+            self.assertFalse(calls[2]["token_present"])
+            run_arguments = calls[2]["argv"]
+            self.assertEqual(run_arguments[-3:], [image_ref, "bash", "ci/scripts/sanitizer_test.sh"])
+            for required in (
+                "--read-only",
+                "--network",
+                "none",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                f"type=bind,src={candidate.resolve()},dst=/workspace/photospider,readonly",
+                f"type=bind,src={REPO_ROOT.resolve()}/ci,dst=/workspace/photospider/ci,readonly",
+                f"type=bind,src={inventory.resolve()},dst=/inputs/profile,readonly",
+                f"type=bind,src={identity_path.resolve()},dst=/inputs/runner-identity.json,readonly",
+                f"type=bind,src={work_root.resolve()},dst=/work",
+                "SANITIZER=asan",
+            ):
+                self.assertIn(required, run_arguments)
+            self.assertNotIn("fixture-token-never-log", json.dumps(calls))
+
+            invalid = run_command(
+                "bash",
+                SCRIPTS / "linux_security_profile.sh",
+                environment={
+                    **environment,
+                    "CI_IMAGE_REF": f"ghcr.io/{repository}/photospider-ci:latest",
+                    "CI_WORK_ROOT": str(runner_temp / "invalid-work"),
+                },
+                expect_success=False,
+            )
+            self.assertIn("differs from its exact digest", invalid.stderr)
+            self.assertEqual(len(docker_log.read_text(encoding="utf-8").splitlines()), 3)
+
+    def test_darwin_host_wrapper_separates_control_from_candidate_data(self) -> None:
+        """Execute only protected profile code across two exact Git roots.
+
+        Returns:
+            None after a distinct control/candidate commit pair succeeds and
+            overlap, wrong identity, post-start HEAD/contents drift, and root
+            replacement each fail without executing the candidate helper.
+
+        Raises:
+            AssertionError: Candidate bytes gain profile authority, the two
+                commits or roots are conflated, or a bounded drift survives the
+                production wrapper's before/after identity checks.
+        """
+        with tempfile.TemporaryDirectory() as temporary_text:
+            fixture_root = Path(temporary_text)
+
+            def initialize_repository(root: Path) -> str:
+                """Initialize and commit one fixture checkout."""
+                run_command("git", "init", "-q", root)
+                run_command("git", "-C", root, "config", "user.name", "CI Fixture")
+                run_command("git", "-C", root, "config", "user.email", "ci@example.invalid")
+                run_command("git", "-C", root, "add", ".")
+                run_command("git", "-C", root, "commit", "-q", "-m", "fixture")
+                return run_command(
+                    "git", "-C", root, "rev-parse", "HEAD^{commit}"
+                ).stdout.strip()
+
+            def materialize(label: str) -> tuple[dict[str, str], Path, str, str]:
+                """Create one clean protected/candidate pair and wrapper env."""
+                root = fixture_root / label
+                control = root / "control"
+                candidate = root / "candidate"
+                inventory = root / "inventory"
+                runner_temp = root / "runner-temp"
+                (control / "ci/scripts").mkdir(parents=True)
+                (candidate / "ci/scripts").mkdir(parents=True)
+                inventory.mkdir(parents=True)
+                runner_temp.mkdir(parents=True)
+                shutil.copy2(
+                    SCRIPTS / "darwin_security_profile.sh",
+                    control / "ci/scripts/darwin_security_profile.sh",
+                )
+                (control / "ci/scripts/sanitizer_test.sh").write_text(
+                    "#!/usr/bin/env bash\n"
+                    "set -Eeuo pipefail\n"
+                    "printf '%s\\n%s\\n' \"$CI_SOURCE_ROOT\" \"$CI_RUNNER_IDENTITY_FILE\" > \"$CI_TEST_PROFILE_LOG\"\n"
+                    "case \"${CI_TEST_DARWIN_MUTATION:-none}\" in\n"
+                    "  none) ;;\n"
+                    "  candidate-dirty) printf 'drift\\n' >> \"$CI_SOURCE_ROOT/tracked.txt\" ;;\n"
+                    "  candidate-replace) mv \"$CI_SOURCE_ROOT\" \"$CI_SOURCE_ROOT.replaced\"; mkdir \"$CI_SOURCE_ROOT\" ;;\n"
+                    "  control-head) git -C \"$CI_CONTROL_ROOT\" commit --allow-empty -q -m drift ;;\n"
+                    "  *) exit 93 ;;\n"
+                    "esac\n"
+                    "printf 'protected Darwin profile passed\\n' > \"$CI_ARTIFACT_DIR/summary.log\"\n",
+                    encoding="utf-8",
+                )
+                (candidate / "tracked.txt").write_text("candidate data\n", encoding="utf-8")
+                (candidate / "ci/scripts/sanitizer_test.sh").write_text(
+                    "#!/usr/bin/env bash\n"
+                    "touch \"$CI_TEST_CANDIDATE_MARKER\"\n",
+                    encoding="utf-8",
+                )
+                control_commit = initialize_repository(control)
+                candidate_commit = initialize_repository(candidate)
+                self.assertNotEqual(control_commit, candidate_commit)
+                identity = runner_temp / "runner.json"
+                identity.write_text("{}\n", encoding="utf-8")
+                environment = {
+                    "CI_CANDIDATE_COMMIT": candidate_commit,
+                    "CI_CANDIDATE_ROOT": str(candidate.resolve()),
+                    "CI_CONTROL_ROOT": str(control.resolve()),
+                    "CI_INVENTORY_DIR": str(inventory.resolve()),
+                    "CI_JOBS": "4",
+                    "CI_RUNNER_IDENTITY_FILE": str(identity.resolve()),
+                    "CI_RUNNER_TEMP": str(runner_temp.resolve()),
+                    "CI_SECURITY_PROFILE": "sanitizer-asan",
+                    "CI_TEST_CANDIDATE_MARKER": str(root / "candidate-executed"),
+                    "CI_TEST_PROFILE_LOG": str(root / "protected-profile.log"),
+                    "CI_WORKFLOW_COMMIT": control_commit,
+                    "CI_WORK_ROOT": str((runner_temp / "profile-work").resolve()),
+                }
+                return environment, root, control_commit, candidate_commit
+
+            environment, root, control_commit, candidate_commit = materialize("success")
+            run_command(
+                "bash",
+                Path(environment["CI_CONTROL_ROOT"])
+                / "ci/scripts/darwin_security_profile.sh",
+                environment=environment,
+            )
+            self.assertFalse(Path(environment["CI_TEST_CANDIDATE_MARKER"]).exists())
+            self.assertEqual(
+                (root / "protected-profile.log").read_text(encoding="utf-8").splitlines(),
+                [environment["CI_CANDIDATE_ROOT"], environment["CI_RUNNER_IDENTITY_FILE"]],
+            )
+            self.assertNotEqual(control_commit, candidate_commit)
+
+            negative_cases = (
+                ("overlap", {"CI_CANDIDATE_ROOT": None}, "roots overlap"),
+                ("wrong-control-sha", {"CI_WORKFLOW_COMMIT": "1" * 40}, "HEAD"),
+                ("wrong-candidate-sha", {"CI_CANDIDATE_COMMIT": "2" * 40}, "HEAD"),
+                ("candidate-dirty", {"CI_TEST_DARWIN_MUTATION": "candidate-dirty"}, "not clean"),
+                ("candidate-replace", {"CI_TEST_DARWIN_MUTATION": "candidate-replace"}, "Git metadata"),
+                ("control-head", {"CI_TEST_DARWIN_MUTATION": "control-head"}, "HEAD"),
+            )
+            for label, overrides, diagnostic in negative_cases:
+                with self.subTest(darwin_wrapper_rejection=label):
+                    case_environment, _, _, _ = materialize(label)
+                    if (
+                        overrides.get("CI_CANDIDATE_ROOT") is None
+                        and "CI_CANDIDATE_ROOT" in overrides
+                    ):
+                        overrides = {
+                            **overrides,
+                            "CI_CANDIDATE_ROOT": case_environment["CI_CONTROL_ROOT"],
+                        }
+                    failed = run_command(
+                        "bash",
+                        Path(case_environment["CI_CONTROL_ROOT"])
+                        / "ci/scripts/darwin_security_profile.sh",
+                        environment={**case_environment, **overrides},
+                        expect_success=False,
+                    )
+                    self.assertIn(diagnostic, failed.stderr)
+                    self.assertFalse(
+                        Path(case_environment["CI_TEST_CANDIDATE_MARKER"]).exists()
+                    )
 
     @staticmethod
     def _prepare_darwin_fixture(
@@ -3380,6 +3664,98 @@ class SecurityPlatformContractTest(unittest.TestCase):
             sys.executable, SCRIPTS / "ci_profile_manifest.py",
             "--profile", "fuzz-codecs",
             "--output", profile,
+        )
+        control_root = root / "protected-control"
+        control_scripts = control_root / "ci/scripts"
+        control_locks = control_root / "ci/locks"
+        control_scripts.mkdir(parents=True)
+        control_locks.mkdir(parents=True)
+        for helper_name in ("ci_runner_verify.py", "security_platform_prepare.sh"):
+            shutil.copy2(SCRIPTS / helper_name, control_scripts / helper_name)
+
+        tool_root = root / "host-tools"
+        cmake_root = tool_root / "cmake-root"
+        cmake_module = cmake_root / "Modules/GoogleTest.cmake"
+        cmake_module.parent.mkdir(parents=True)
+        cmake_module.write_text(
+            "# counter-suffixed GoogleTest fixture\n",
+            encoding="utf-8",
+        )
+        module_digest = hashlib.sha256(cmake_module.read_bytes()).hexdigest()
+        cmake_path = tool_root / "cmake"
+        tool_log = root / "tool.log"
+        cmake_path.write_text(
+            f"#!{sys.executable}\n"
+            "import json\n"
+            "import os\n"
+            "import sys\n"
+            "with open(os.environ['CI_TEST_TOOL_LOG'], 'a', encoding='utf-8') as handle:\n"
+            "    handle.write(json.dumps(sys.argv, separators=(',', ':')) + '\\n')\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    print('cmake version ' + os.environ.get('CI_TEST_CMAKE_VERSION', '3.31.5'))\n"
+            "elif sys.argv[1:] == ['--system-information']:\n"
+            f"    print('CMAKE_ROOT \\\"{cmake_root}\\\"')\n"
+            "else:\n"
+            "    raise SystemExit(91)\n",
+            encoding="utf-8",
+        )
+        cmake_path.chmod(0o755)
+        clang_path = tool_root / "clang"
+        clangxx_path = tool_root / "clang++"
+        compiler_program = (
+            f"#!{sys.executable}\n"
+            "import json\n"
+            "import os\n"
+            "import stat\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "with open(os.environ['CI_TEST_TOOL_LOG'], 'a', encoding='utf-8') as handle:\n"
+            "    handle.write(json.dumps(sys.argv, separators=(',', ':')) + '\\n')\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    print('Homebrew clang version ' + os.environ.get('CI_TEST_COMPILER_VERSION', '18.1.8'))\n"
+            "    raise SystemExit(0)\n"
+            "if os.environ.get('CI_TEST_COMPILER_FAIL') == '1':\n"
+            "    print('bounded fixture compile failure')\n"
+            "    raise SystemExit(93)\n"
+            "if '-o' not in sys.argv:\n"
+            "    raise SystemExit(92)\n"
+            "output = Path(sys.argv[sys.argv.index('-o') + 1])\n"
+            "output.write_text('#!/usr/bin/env bash\\nexit 0\\n', encoding='utf-8')\n"
+            "output.chmod(output.stat().st_mode | stat.S_IXUSR)\n"
+        )
+        clang_path.write_text(compiler_program, encoding="utf-8")
+        clangxx_path.write_text(compiler_program, encoding="utf-8")
+        clang_path.chmod(0o755)
+        clangxx_path.chmod(0o755)
+
+        commits = {
+            DARWIN_STABLE_VERSION: "6d9d7df564a1ccdaa994e4ad39ccd4a32360867b",
+            DARWIN_ROLLOUT_VERSION: "127402f1c75bb3d5ff6bce04b285faa4930a5aca",
+        }
+        approved_images = [
+            {
+                "cmake_gtest_module_sha256": module_digest,
+                "cmake_path": str(cmake_path),
+                "cmake_version": "3.31.5",
+                "fuzz_c_compiler_path": str(clang_path),
+                "fuzz_compiler_version": "18.1.8",
+                "fuzz_cxx_compiler_path": str(clangxx_path),
+                "image_version": version,
+                "vcpkg_commit": commit,
+            }
+            for version, commit in sorted(commits.items())
+        ]
+        darwin_lock = {
+            "approved_images": approved_images,
+            "architecture": "arm64",
+            "image_os": "macos15",
+            "runner_label": "macos-15",
+            "schema": "photospider-darwin-runner-lock-v2",
+            "triplet": "arm64-osx",
+        }
+        (control_locks / "darwin-runner-lock.json").write_text(
+            json.dumps(darwin_lock, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
         )
         binary_dir = root / "bin"
         binary_dir.mkdir()
@@ -3470,18 +3846,53 @@ class SecurityPlatformContractTest(unittest.TestCase):
         runner_temp = root / "runner-temp"
         runner_temp.mkdir()
         output = root / "cmake-args.txt"
+        command_output = root / "cmake-command.txt"
         runner_identity_path = root / "darwin-runner-identity.json"
-        runner_identity = write_runner_identity(
-            runner_identity_path, "Darwin", image_version
+        selected = next(
+            record
+            for record in approved_images
+            if record["image_version"] == image_version
+        )
+        runner_identity = {
+            "architecture": "arm64",
+            "cmake_gtest_module_sha256": selected[
+                "cmake_gtest_module_sha256"
+            ],
+            "cmake_path": selected["cmake_path"],
+            "cmake_version": selected["cmake_version"],
+            "fuzz_c_compiler_path": selected["fuzz_c_compiler_path"],
+            "fuzz_compiler_version": selected["fuzz_compiler_version"],
+            "fuzz_cxx_compiler_path": selected["fuzz_cxx_compiler_path"],
+            "image_os": "macos15",
+            "image_version": image_version,
+            "platform": "Darwin",
+            "runner_label": "macos-15",
+            "schema": "photospider-runner-runtime-identity-v1",
+            "triplet": "arm64-osx",
+            "vcpkg_commit": selected["vcpkg_commit"],
+        }
+        runner_identity_path.write_text(
+            json.dumps(
+                runner_identity,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
         )
         locked_commit = runner_identity["vcpkg_commit"]
         environment = {
             "PATH": f"{binary_dir}:{os.environ['PATH']}",
             "CI_PLATFORM_CMAKE_ARGS_FILE": str(output),
+            "CI_PLATFORM_CMAKE_COMMAND_FILE": str(command_output),
             "CI_RUNNER_IDENTITY_FILE": str(runner_identity_path),
             "CI_RUNNER_TEMP": str(runner_temp),
+            "CI_TEST_PREPARE_SCRIPT": str(
+                control_scripts / "security_platform_prepare.sh"
+            ),
             "CI_TEST_GIT_LOG": str(git_log),
             "CI_TEST_LOCKED_COMMIT": locked_commit,
+            "CI_TEST_TOOL_LOG": str(tool_log),
             "CI_TEST_VCPKG_LOG": str(vcpkg_log),
             "CI_TEST_VCPKG_SOURCE": str(vcpkg_source),
             "VCPKG_INSTALLATION_ROOT": str(vcpkg_source),
@@ -3496,13 +3907,47 @@ class SecurityPlatformContractTest(unittest.TestCase):
                 self._prepare_darwin_fixture(root)
             )
             run_command(
-                "bash", SCRIPTS / "security_platform_prepare.sh", profile,
+                "bash", environment["CI_TEST_PREPARE_SCRIPT"], profile,
                 environment=environment,
             )
             arguments = (root / "cmake-args.txt").read_text(encoding="utf-8")
             self.assertIn("-DVCPKG_TARGET_TRIPLET=arm64-osx", arguments)
             self.assertIn(str(runner_temp), arguments)
             self.assertNotIn(str(source / "scripts/buildsystems/vcpkg.cmake"), arguments)
+            identity = json.loads(
+                Path(environment["CI_RUNNER_IDENTITY_FILE"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                (root / "cmake-command.txt").read_text(encoding="utf-8"),
+                identity["cmake_path"] + "\n",
+            )
+            self.assertIn(
+                f"-DCMAKE_C_COMPILER={identity['fuzz_c_compiler_path']}",
+                arguments,
+            )
+            self.assertIn(
+                f"-DCMAKE_CXX_COMPILER={identity['fuzz_cxx_compiler_path']}",
+                arguments,
+            )
+            tool_calls = [
+                json.loads(line)
+                for line in Path(environment["CI_TEST_TOOL_LOG"])
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertIn([identity["cmake_path"], "--version"], tool_calls)
+            self.assertIn(
+                [identity["cmake_path"], "--system-information"], tool_calls
+            )
+            compile_call = next(
+                call
+                for call in tool_calls
+                if call[0] == identity["fuzz_cxx_compiler_path"]
+                and "-fsanitize=fuzzer,address,undefined" in call
+            )
+            self.assertIn("-std=c++17", compile_call)
 
             install_lines = vcpkg_log.read_text(encoding="utf-8").splitlines()
             executable = next(line.removeprefix("executable=") for line in install_lines if line.startswith("executable="))
@@ -3533,7 +3978,7 @@ class SecurityPlatformContractTest(unittest.TestCase):
             self.assertFalse(any("status" in call and source_identity in call for call in git_calls))
 
             run_command(
-                "bash", SCRIPTS / "security_platform_prepare.sh", profile,
+                "bash", environment["CI_TEST_PREPARE_SCRIPT"], profile,
                 environment={
                     **environment,
                     "ImageVersion": "stale",
@@ -3541,6 +3986,67 @@ class SecurityPlatformContractTest(unittest.TestCase):
                 },
             )
             self.assertTrue((root / "stale.txt").is_file())
+
+    def test_darwin_tool_identity_and_combined_probe_fail_closed(self) -> None:
+        """Reject CMake/module/compiler drift and a failed real fuzz probe.
+
+        Returns:
+            None after every bounded fixture fails before vcpkg installation
+            for the exact mismatched retained tool boundary.
+
+        Raises:
+            AssertionError: The stage accepts a different CMake/module/LLVM
+                identity or reports a failed combined sanitizer probe as usable.
+        """
+        cases = (
+            (
+                "cmake-version",
+                {"CI_TEST_CMAKE_VERSION": "4.4.0"},
+                False,
+                "CMake version differs",
+            ),
+            (
+                "cmake-module",
+                {},
+                True,
+                "GoogleTest module differs",
+            ),
+            (
+                "compiler-version",
+                {"CI_TEST_COMPILER_VERSION": "17.0.0"},
+                False,
+                "compiler version differs",
+            ),
+            (
+                "compile-link",
+                {"CI_TEST_COMPILER_FAIL": "1"},
+                False,
+                "compile-link probe failed",
+            ),
+        )
+        for label, override, mutate_module, diagnostic in cases:
+            with self.subTest(tool_drift=label), tempfile.TemporaryDirectory() as text:
+                root = Path(text)
+                profile, environment, _, vcpkg_log, _, _ = (
+                    self._prepare_darwin_fixture(root)
+                )
+                if mutate_module:
+                    (root / "host-tools/cmake-root/Modules/GoogleTest.cmake").write_text(
+                        "# drifted module\n", encoding="utf-8"
+                    )
+                failed = run_command(
+                    "bash",
+                    environment["CI_TEST_PREPARE_SCRIPT"],
+                    profile,
+                    environment={**environment, **override},
+                    expect_success=False,
+                )
+                self.assertIn(diagnostic, failed.stderr)
+                self.assertFalse(vcpkg_log.exists())
+                if label == "compile-link":
+                    self.assertTrue(
+                        list(root.glob("darwin-fuzz-toolchain-compile-link.log"))
+                    )
 
     def test_each_darwin_rollout_member_selects_only_its_mapped_commit(self) -> None:
         """Bind each approved image version to its unique retained vcpkg commit."""
@@ -3559,7 +4065,7 @@ class SecurityPlatformContractTest(unittest.TestCase):
                 )
                 run_command(
                     "bash",
-                    SCRIPTS / "security_platform_prepare.sh",
+                    environment["CI_TEST_PREPARE_SCRIPT"],
                     profile,
                     environment=environment,
                 )
@@ -3583,7 +4089,7 @@ class SecurityPlatformContractTest(unittest.TestCase):
                 )
                 failed = run_command(
                     "bash",
-                    SCRIPTS / "security_platform_prepare.sh",
+                    environment["CI_TEST_PREPARE_SCRIPT"],
                     profile,
                     environment={
                         **environment,
@@ -3607,7 +4113,7 @@ class SecurityPlatformContractTest(unittest.TestCase):
             for index, (override, diagnostic) in enumerate(cases):
                 with self.subTest(diagnostic=diagnostic):
                     failed = run_command(
-                        "bash", SCRIPTS / "security_platform_prepare.sh", profile,
+                        "bash", environment["CI_TEST_PREPARE_SCRIPT"], profile,
                         environment={
                             **environment,
                             **override,
@@ -3623,7 +4129,7 @@ class SecurityPlatformContractTest(unittest.TestCase):
             root = Path(temporary_text)
             profile, environment, git_log, _, _, _ = self._prepare_darwin_fixture(root)
             run_command(
-                "bash", SCRIPTS / "security_platform_prepare.sh", profile,
+                "bash", environment["CI_TEST_PREPARE_SCRIPT"], profile,
                 environment={**environment, "CI_TEST_SOURCE_HAS_COMMIT": "0"},
             )
             calls = [json.loads(line) for line in git_log.read_text(encoding="utf-8").splitlines()]
@@ -3638,10 +4144,59 @@ class SecurityPlatformContractTest(unittest.TestCase):
         self.assertNotIn("CI_DARWIN_VCPKG_INSTALLED:", workflow)
 
     def test_gtest_inventory_uses_canonicalized_actual_ctest_includes(self) -> None:
-        """Accept canonical aliases and reject foreign CTest include records."""
+        """Accept CMake 3.31 counters and reject every other include identity.
+
+        Returns:
+            None after the candidate-owned helper accepts canonical counter
+            names and rejects CMake hash names, foreign/duplicate/missing
+            records, and target-counter drift.
+
+        Raises:
+            AssertionError: The protected CMake handoff can silently feed a
+                naming convention that current-main's helper cannot prove.
+
+        Note:
+            Supporting newer hash-suffixed GoogleTest includes remains a
+            candidate-owned follow-up. The protected stage intentionally pins
+            the compatible CMake 3.31.5 module instead of broadening this
+            product helper in the CI-only PR.
+        """
         module = (REPO_ROOT / "cmake/PhotospiderCiInventory.cmake").as_posix()
-        for foreign_include in (False, True):
-            with self.subTest(foreign_include=foreign_include), tempfile.TemporaryDirectory() as temporary_text:
+        cases = (
+            ("counter", ["alpha[1]", "beta[1]"], "1", None),
+            (
+                "hash",
+                ["alpha_b8a0a976", "beta[1]"],
+                "1",
+                "canonical GoogleTest registration name",
+            ),
+            (
+                "foreign",
+                ["SOURCE:alpha[1]", "beta[1]"],
+                "1",
+                "outside the root binary directory",
+            ),
+            (
+                "duplicate",
+                ["alpha[1]", "alpha[1]", "beta[1]"],
+                "1",
+                "duplicates GoogleTest target alpha",
+            ),
+            (
+                "missing",
+                ["alpha[1]"],
+                "1",
+                "Registered GoogleTest target lacks a CTest include: beta",
+            ),
+            (
+                "counter-drift",
+                ["alpha[1]", "beta[1]"],
+                "2",
+                "registration counter does not match",
+            ),
+        )
+        for label, include_names, alpha_counter, diagnostic in cases:
+            with self.subTest(include_shape=label), tempfile.TemporaryDirectory() as temporary_text:
                 root = Path(temporary_text)
                 source = root / "source"
                 build = root / "build"
@@ -3649,43 +4204,57 @@ class SecurityPlatformContractTest(unittest.TestCase):
                 (source / "main.cpp").write_text(
                     "int main() { return 0; }\n", encoding="utf-8"
                 )
-                include_expression = (
-                    "${CMAKE_SOURCE_DIR}/alpha[1]_include.cmake"
-                    if foreign_include
-                    else "${CMAKE_BINARY_DIR}/alias/../alpha[1]_include.cmake"
-                )
+                create_commands: list[str] = []
+                include_expressions: list[str] = []
+                for include_name in sorted(set(include_names)):
+                    if include_name.startswith("SOURCE:"):
+                        basename = include_name.removeprefix("SOURCE:")
+                        expression = f"${{CMAKE_SOURCE_DIR}}/{basename}_include.cmake"
+                    else:
+                        basename = include_name
+                        expression = f"${{CMAKE_BINARY_DIR}}/{basename}_include.cmake"
+                    create_commands.append(f'file(WRITE "{expression}" "")')
+                for include_name in include_names:
+                    if include_name.startswith("SOURCE:"):
+                        basename = include_name.removeprefix("SOURCE:")
+                        include_expressions.append(
+                            f'"${{CMAKE_SOURCE_DIR}}/{basename}_include.cmake"'
+                        )
+                    else:
+                        include_expressions.append(
+                            f'"${{CMAKE_BINARY_DIR}}/{include_name}_include.cmake"'
+                        )
                 (source / "CMakeLists.txt").write_text(
                     "cmake_minimum_required(VERSION 3.16)\n"
                     "project(ci_inventory_contract LANGUAGES CXX)\n"
                     f'include("{module}")\n'
                     "add_executable(alpha main.cpp)\n"
                     "add_executable(beta main.cpp)\n"
-                    "set_property(TARGET alpha PROPERTY CTEST_DISCOVERED_TEST_COUNTER 1)\n"
+                    f"set_property(TARGET alpha PROPERTY CTEST_DISCOVERED_TEST_COUNTER {alpha_counter})\n"
                     "set_property(TARGET beta PROPERTY CTEST_DISCOVERED_TEST_COUNTER 1)\n"
-                    "file(MAKE_DIRECTORY \"${CMAKE_BINARY_DIR}/alias\")\n"
-                    "file(WRITE \"${CMAKE_BINARY_DIR}/alpha[1]_include.cmake\" \"\")\n"
-                    "file(WRITE \"${CMAKE_BINARY_DIR}/beta[1]_include.cmake\" \"\")\n"
-                    f'file(WRITE "{include_expression}" "")\n'
+                    + "\n".join(create_commands)
+                    + "\n"
                     "set_property(DIRECTORY PROPERTY TEST_INCLUDE_FILES\n"
-                    f'  "${{CMAKE_BINARY_DIR}}/beta[1]_include.cmake" "{include_expression}")\n'
+                    f"  {' '.join(include_expressions)})\n"
                     "get_property(root_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)\n"
                     "get_property(ctest_includes DIRECTORY PROPERTY TEST_INCLUDE_FILES)\n"
                     "photospider_collect_registered_gtest_targets(\n"
                     "  registered ctest_includes root_targets \"${CMAKE_BINARY_DIR}\")\n"
-                    "if(NOT registered STREQUAL \"alpha;beta\")\n"
-                    "  message(FATAL_ERROR \"unexpected registered target inventory: ${registered}\")\n"
-                    "endif()\n",
+                    + (
+                        "if(NOT registered STREQUAL \"alpha;beta\")\n"
+                        "  message(FATAL_ERROR \"unexpected registered target inventory: ${registered}\")\n"
+                        "endif()\n"
+                        if diagnostic is None
+                        else ""
+                    ),
                     encoding="utf-8",
                 )
                 completed = run_command(
                     "cmake", "-S", source, "-B", build,
-                    expect_success=not foreign_include,
+                    expect_success=diagnostic is None,
                 )
-                if foreign_include:
-                    self.assertIn(
-                        "CTest include is outside the root binary directory",
-                        completed.stderr,
-                    )
+                if diagnostic is not None:
+                    self.assertIn(diagnostic, completed.stderr)
 
 
 class BuildSmokeRoutingContractTest(unittest.TestCase):
@@ -4868,7 +5437,7 @@ class ReusableBuildContractTest(unittest.TestCase):
     def test_protected_targeted_verifier_cross_binds_distinct_roots_and_ctest_sets(
         self,
     ) -> None:
-        """Bind two real commits plus raw, closure, and restored CTest coverage.
+        """Bind two real commits plus raw, closure, and pure control coverage.
 
         Returns:
             None after the production CLIs accept one complete baseline and
@@ -4915,9 +5484,6 @@ class ReusableBuildContractTest(unittest.TestCase):
             self.assertNotEqual(candidate_commit, COMMIT_A)
 
             producer_root = (root / "producer-build/ci").resolve(strict=False)
-            restore_root = (root / "verifier-restored-build/ci").resolve(
-                strict=False
-            )
             inventory = self._prepare_build(
                 producer_root,
                 runtime_alias=True,
@@ -4934,23 +5500,43 @@ class ReusableBuildContractTest(unittest.TestCase):
             )
             matrix_digest = json.loads(resolved_profile.stdout)["matrix_sha256"]
             raw_inventory_path = producer_root.parent / "post-build-ctest-inventory.json"
-            raw_payload = json.loads(raw_inventory_path.read_text(encoding="utf-8"))
+            registrations = ""
             for name in (
                 "DependencyDisabledInstallSmoke",
                 "OpenExrDeepProviderOptionOffSmoke",
                 "PublicHeaderSelfContainment",
                 "StaticProductConsumerSmoke",
             ):
-                raw_payload["tests"].append(
-                    {
-                        "backtrace": 1,
-                        "command": ["/usr/bin/true"],
-                        "name": name,
-                        "properties": [
-                            {"name": "LABELS", "value": ["build-smoke"]}
-                        ],
-                    }
+                registrations += (
+                    f'add_test({name} "/usr/bin/true")\n'
+                    f'set_tests_properties({name} PROPERTIES LABELS "build-smoke")\n'
                 )
+            with (producer_root / "CTestTestfile.cmake").open(
+                "a", encoding="utf-8"
+            ) as handle:
+                handle.write(registrations)
+            discovered = subprocess.run(
+                [
+                    "ctest",
+                    "--test-dir",
+                    str(producer_root),
+                    "--show-only=json-v1",
+                    "-C",
+                    "RelWithDebInfo",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            raw_inventory_path.write_bytes(discovered.stdout)
+            closure = self._load_ctest_closure_module()
+            closure.write_closure(
+                candidate,
+                producer_root,
+                raw_inventory_path,
+                inventory / "ordinary_ctest_closure_v1.json",
+                "RelWithDebInfo",
+            )
+            raw_payload = json.loads(raw_inventory_path.read_text(encoding="utf-8"))
 
             artifact_root = root / "targeted-artifacts"
             for role in ("ctest-control", "ctest-runtime"):
@@ -4981,6 +5567,51 @@ class ReusableBuildContractTest(unittest.TestCase):
                     "--workflow-commit",
                     COMMIT_A,
                 )
+
+            # Pack a second pair whose generated control contains a real
+            # side-effect-capable command. The protected coverage verifier must
+            # reject the exact archived bytes without invoking CTest/CMake or
+            # producing the marker.
+            side_effect_root = root / "side-effect-artifacts"
+            marker = root / "candidate-control-side-effect"
+            root_control = producer_root / "CTestTestfile.cmake"
+            clean_control = root_control.read_bytes()
+            root_control.write_bytes(
+                clean_control
+                + (
+                    '\nexecute_process(COMMAND "/usr/bin/touch" '
+                    f'"{marker}")\n'
+                ).encode("utf-8")
+            )
+            for role in ("ctest-control", "ctest-runtime"):
+                role_root = side_effect_root / role
+                role_root.mkdir(parents=True)
+                run_command(
+                    sys.executable,
+                    SCRIPTS / "reusable_build.py",
+                    "--repo-root",
+                    candidate,
+                    "--inventory-dir",
+                    inventory,
+                    "create-targeted",
+                    "--source",
+                    producer_root,
+                    "--role",
+                    role,
+                    "--archive",
+                    role_root / f"{role}.tar.gz",
+                    "--manifest",
+                    role_root / f"{role}.manifest.json",
+                    "--candidate-commit",
+                    candidate_commit,
+                    "--profile",
+                    "default",
+                    "--image-digest",
+                    IMAGE_DIGEST,
+                    "--workflow-commit",
+                    COMMIT_A,
+                )
+            root_control.write_bytes(clean_control)
             raw_inventory_path.unlink()
             shutil.rmtree(producer_root)
             self.assertEqual(list(producer_root.parent.iterdir()), [])
@@ -5041,8 +5672,6 @@ class ReusableBuildContractTest(unittest.TestCase):
                     route_digest,
                     "--artifact-root",
                     artifact_root,
-                    "--restored-build-root",
-                    restore_root,
                     "--candidate-commit",
                     candidate_commit,
                     "--profile",
@@ -5061,7 +5690,37 @@ class ReusableBuildContractTest(unittest.TestCase):
                 raw, control, route_digest, expect_success=True
             )
             self.assertIn("coverage cross-binding passed", passed.stdout)
-            self.assertFalse(restore_root.exists())
+
+            side_effect_failed = run_command(
+                sys.executable,
+                SCRIPTS / "reusable_build.py",
+                "--repo-root",
+                REPO_ROOT,
+                "verify-ordinary-coverage",
+                "--candidate-root",
+                candidate,
+                "--raw-dir",
+                raw,
+                "--control-manifest",
+                control / "build-smoke-control.manifest.json",
+                "--route-sha256",
+                route_digest,
+                "--artifact-root",
+                side_effect_root,
+                "--candidate-commit",
+                candidate_commit,
+                "--profile",
+                "default",
+                "--matrix-sha256",
+                matrix_digest,
+                "--image-digest",
+                IMAGE_DIGEST,
+                "--workflow-commit",
+                COMMIT_A,
+                expect_success=False,
+            )
+            self.assertIn("side-effect-capable", side_effect_failed.stderr)
+            self.assertFalse(marker.exists())
 
             ordinary = next(
                 item for item in raw_payload["tests"] if item["name"] == "test_contract"
@@ -5115,8 +5774,10 @@ class ReusableBuildContractTest(unittest.TestCase):
                         drift_route,
                         expect_success=False,
                     )
-                    self.assertIn("ordinary CTest", failed.stderr)
-                    self.assertFalse(restore_root.exists())
+                    self.assertRegex(
+                        failed.stderr,
+                        r"(?:CTest records differ|ordinary CTest inventory is invalid)",
+                    )
 
             forged_raw = root / "raw-forged-identity"
             forged_control = root / "control-forged-identity"
@@ -5199,8 +5860,6 @@ class ReusableBuildContractTest(unittest.TestCase):
                 route_digest,
                 "--artifact-root",
                 artifact_root,
-                "--restored-build-root",
-                restore_root,
                 "--candidate-commit",
                 candidate_commit,
                 "--profile",
@@ -5214,6 +5873,124 @@ class ReusableBuildContractTest(unittest.TestCase):
                 expect_success=False,
             )
             self.assertIn("real non-link directory", linked_candidate.stderr)
+
+    def test_ctest_record_normalization_uses_only_path_components(self) -> None:
+        """Normalize structured roots and reject textual-prefix ambiguity.
+
+        Returns:
+            None after exact roots, descendants, overlapping source/build roots,
+            and explicit path-list fields normalize deterministically while
+            sibling prefixes, embedded prose, quoted paths, and inverted root
+            topology fail closed.
+
+        Raises:
+            AssertionError: The production pure-data record normalizer performs
+                an unrestricted string replacement or accepts an ambiguous
+                root-bearing scalar.
+        """
+        closure = self._load_ctest_closure_module()
+        source_root = Path("/opt/photospider-source")
+        build_root = source_root / "out/build"
+
+        def payload(command: list[str], environment: list[str] | None = None) -> bytes:
+            """Return one canonical raw CTest record for the requested fields."""
+            properties: list[dict[str, object]] = [
+                {"name": "WORKING_DIRECTORY", "value": str(build_root)}
+            ]
+            if environment is not None:
+                properties.append({"name": "ENVIRONMENT", "value": environment})
+            return (
+                json.dumps(
+                    {
+                        "kind": "ctestInfo",
+                        "tests": [
+                            {
+                                "command": command,
+                                "name": "component_contract",
+                                "properties": properties,
+                            }
+                        ],
+                        "version": {"major": 1, "minor": 0},
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8")
+
+        record = closure.complete_test_records(
+            payload(
+                [
+                    str(build_root / "bin/test"),
+                    str(source_root),
+                    str(source_root / "tests/data.bin"),
+                    str(build_root),
+                    str(build_root / "generated/data.bin"),
+                ],
+                [
+                    "PHOTOSPIDER_PATH="
+                    f"{source_root / 'assets'}{os.pathsep}{build_root / 'plugins'}"
+                ],
+            ),
+            "component normalization fixture",
+            source_root,
+            build_root,
+        )[0]
+        self.assertEqual(
+            record["command"],
+            [
+                "${BUILD_ROOT}/bin/test",
+                "${SOURCE_ROOT}",
+                "${SOURCE_ROOT}/tests/data.bin",
+                "${BUILD_ROOT}",
+                "${BUILD_ROOT}/generated/data.bin",
+            ],
+        )
+        self.assertEqual(
+            record["properties"]["ENVIRONMENT"],
+            ["PHOTOSPIDER_PATH=${SOURCE_ROOT}/assets"
+             f"{os.pathsep}${{BUILD_ROOT}}/plugins"],
+        )
+
+        ambiguous_commands = {
+            "root-sibling": [str(build_root / "bin/test"), f"{source_root}-copy/data"],
+            "embedded-text": [
+                str(build_root / "bin/test"),
+                f"prefix:{source_root}/data",
+            ],
+            "quoted-path": [
+                str(build_root / "bin/test"),
+                f'--repo="{source_root}"',
+            ],
+            "list-sibling": [str(build_root / "bin/test")],
+        }
+        for label, command in ambiguous_commands.items():
+            with self.subTest(ambiguous=label):
+                environment = (
+                    [f"PHOTOSPIDER_PATH={source_root}/ok{os.pathsep}{source_root}-copy/bad"]
+                    if label == "list-sibling"
+                    else None
+                )
+                with self.assertRaisesRegex(
+                    closure.CTestClosureError,
+                    r"(?:ambiguous|prefix sibling|embedded)",
+                ):
+                    closure.complete_test_records(
+                        payload(command, environment),
+                        f"{label} fixture",
+                        source_root,
+                        build_root,
+                    )
+
+        with self.assertRaisesRegex(
+            closure.CTestClosureError, "root topology is ambiguous"
+        ):
+            closure.complete_test_records(
+                payload([str(build_root / "bin/test")]),
+                "inverted root fixture",
+                build_root,
+                source_root,
+            )
 
     def test_targeted_content_sizes_reject_bool_string_negative_and_total_drift(self) -> None:
         """Reject non-integer and inconsistent member or aggregate byte counts."""
@@ -6714,6 +7491,32 @@ class LockSurfaceContractTest(unittest.TestCase):
                 "raw inventory producer program identity differs",
             ),
             (
+                "raw-package-loses-bash",
+                "build-integrity-default",
+                (
+                    "      - name: Package exact raw routing inputs without "
+                    "candidate parsers\n        shell: bash\n"
+                ),
+                (
+                    "      - name: Package exact raw routing inputs without "
+                    "candidate parsers\n"
+                ),
+                "raw inventory identities differ",
+            ),
+            (
+                "role-pack-loses-bash",
+                "build-integrity-default",
+                (
+                    "      - name: Pack role-specific identity-bound artifacts\n"
+                    "        id: identity\n        shell: bash\n"
+                ),
+                (
+                    "      - name: Pack role-specific identity-bound artifacts\n"
+                    "        id: identity\n"
+                ),
+                "role-artifact pack program/shell differs",
+            ),
+            (
                 "consumer-trusts-producer-matrix",
                 "build-smoke",
                 "needs.build-smoke-control.outputs.build_smoke_matrix",
@@ -6967,7 +7770,6 @@ class LockSurfaceContractTest(unittest.TestCase):
             )
             for name in (
                 "ci-healthcheck.yml",
-                "ci-integration-suite.yml",
                 "ci-sanitizer.yml",
             )
         }
@@ -6976,20 +7778,20 @@ class LockSurfaceContractTest(unittest.TestCase):
         )
         cases = (
             (
-                "missing-linux-output",
-                "ci-integration-suite.yml",
-                "sanitizer-asan",
+                "missing-manual-output",
+                "ci-sanitizer.yml",
+                "sanitizer",
                 '          --output "$CI_RUNNER_IDENTITY_FILE"\n',
                 "",
-                "runner verifier command differs",
+                "manual sanitizer host/container mapping differs",
             ),
             (
-                "split-linux-consumer-path",
-                "ci-integration-suite.yml",
-                "sanitizer-asan",
-                "          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-linux-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json\n          SANITIZER: asan\n",
-                "          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/forged-other.json\n          SANITIZER: asan\n",
-                "retained runner consumer differs",
+                "split-manual-consumer-path",
+                "ci-sanitizer.yml",
+                "sanitizer",
+                "          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-manual-sanitizer-runner-${{ github.run_id }}-${{ github.run_attempt }}.json\n          CI_RUNNER_TEMP: ${{ runner.temp }}\n",
+                "          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/forged-other.json\n          CI_RUNNER_TEMP: ${{ runner.temp }}\n",
+                "manual sanitizer host/container mapping differs",
             ),
             (
                 "candidate-manual-output-path",
@@ -6997,7 +7799,7 @@ class LockSurfaceContractTest(unittest.TestCase):
                 "sanitizer",
                 "      - name: Verify exact Linux sanitizer runner\n        env:\n          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-manual-sanitizer-runner-${{ github.run_id }}-${{ github.run_attempt }}.json\n        run: >-\n",
                 "      - name: Verify exact Linux sanitizer runner\n        env:\n          CI_RUNNER_IDENTITY_FILE: ${{ inputs.checkout_ref }}\n        run: >-\n",
-                "resolved runner output differs",
+                "manual sanitizer host/container mapping differs",
             ),
         )
         for label, filename, job_name, original, replacement, diagnostic in cases:
@@ -7005,8 +7807,14 @@ class LockSurfaceContractTest(unittest.TestCase):
                 root = Path(text)
                 workflow_root = root / ".github/workflows"
                 script_root = root / "ci/scripts"
+                lock_root = root / "ci/locks"
                 workflow_root.mkdir(parents=True)
                 script_root.mkdir(parents=True)
+                lock_root.mkdir(parents=True)
+                shutil.copy2(
+                    REPO_ROOT / "ci/locks/actions.lock",
+                    lock_root / "actions.lock",
+                )
                 for current_name, current_text in workflows.items():
                     if current_name == filename:
                         current_text = self._replace_workflow_job_fragment(
@@ -7026,8 +7834,14 @@ class LockSurfaceContractTest(unittest.TestCase):
             root = Path(text)
             workflow_root = root / ".github/workflows"
             script_root = root / "ci/scripts"
+            lock_root = root / "ci/locks"
             workflow_root.mkdir(parents=True)
             script_root.mkdir(parents=True)
+            lock_root.mkdir(parents=True)
+            shutil.copy2(
+                REPO_ROOT / "ci/locks/actions.lock",
+                lock_root / "actions.lock",
+            )
             for filename, value in workflows.items():
                 (workflow_root / filename).write_text(value, encoding="utf-8")
             (script_root / "security_platform_prepare.sh").write_text(
@@ -7783,6 +8597,90 @@ class LockSurfaceContractTest(unittest.TestCase):
                 )
                 module._verify_dockerfile(root)
 
+    def test_linux_security_jobs_keep_host_identity_before_candidate_container(self) -> None:
+        """Reject job containers, reordered host checks, or mutable image inputs.
+
+        Returns:
+            None after the complete structured workflow verifier accepts the
+            production three-sibling mapping and rejects each boundary drift.
+
+        Raises:
+            AssertionError: One Linux profile can inherit a container-host
+                identity, receive candidate data before verification, omit the
+                Bash boundary, or consume a non-exact image reference.
+        """
+        module = self._load_lock_module()
+        module._verify_linux_security_dag(REPO_ROOT)
+        workflow_path = REPO_ROOT / ".github/workflows/ci-integration-suite.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        cases = (
+            (
+                "job-container",
+                "sanitizer-asan",
+                "    runs-on: ubuntu-24.04\n    timeout-minutes: 90\n",
+                "    runs-on: ubuntu-24.04\n    container: ubuntu:latest\n    timeout-minutes: 90\n",
+            ),
+            (
+                "candidate-before-identity",
+                "sanitizer-asan",
+                "Checkout Linux ASan candidate after host verification",
+                "Checkout Linux ASan candidate before host verification",
+            ),
+            (
+                "partial-protected-profile-control",
+                "sanitizer-asan",
+                "            ci/scripts\n",
+                (
+                    "            ci/scripts/ci_runner_verify.py\n"
+                    "            ci/scripts/linux_security_profile.sh\n"
+                ),
+            ),
+            (
+                "missing-bash-shell",
+                "sanitizer-asan",
+                "      - name: Run isolated ASan profile in the exact image\n        shell: bash\n",
+                "      - name: Run isolated ASan profile in the exact image\n",
+            ),
+            (
+                "mutable-image-input",
+                "sanitizer-asan",
+                "          CI_IMAGE_REF: ${{ inputs.image_ref }}\n",
+                "          CI_IMAGE_REF: ghcr.io/example/photospider-ci:latest\n",
+            ),
+            (
+                "sibling-dependency",
+                "sanitizer-tsan",
+                "    needs: integration-plan\n",
+                "    needs: sanitizer-asan\n",
+            ),
+        )
+        for label, job_name, old, new in cases:
+            with self.subTest(linux_dag_drift=label), tempfile.TemporaryDirectory() as text:
+                root = Path(text)
+                target_workflow = root / ".github/workflows/ci-integration-suite.yml"
+                target_workflow.parent.mkdir(parents=True)
+                target_workflow.write_text(
+                    self._replace_workflow_job_fragment(
+                        workflow, job_name, old, new
+                    ),
+                    encoding="utf-8",
+                )
+                (root / "ci/locks").mkdir(parents=True)
+                shutil.copy2(
+                    REPO_ROOT / "ci/locks/actions.lock",
+                    root / "ci/locks/actions.lock",
+                )
+                (root / "ci/scripts").mkdir(parents=True)
+                shutil.copy2(
+                    SCRIPTS / "linux_security_profile.sh",
+                    root / "ci/scripts/linux_security_profile.sh",
+                )
+                with self.assertRaisesRegex(
+                    module.ContractError,
+                    r"(?:complete host/container mapping differs|source identity differs)",
+                ):
+                    module._verify_linux_security_dag(root)
+
     def test_darwin_security_profiles_are_independent_and_aggregated(self) -> None:
         """Reject no-op profiles, sibling edges, and inactive suite checks."""
         module = self._load_lock_module()
@@ -7834,10 +8732,10 @@ class LockSurfaceContractTest(unittest.TestCase):
             (
                 "tsan-commented-noop",
                 "sanitizer-tsan-darwin",
-                "        run: bash ci/scripts/sanitizer_test.sh\n",
+                "        run: bash .ci-darwin-tsan-control/ci/scripts/darwin_security_profile.sh\n",
                 (
                     "        run: |\n"
-                    "          # bash ci/scripts/sanitizer_test.sh\n"
+                    "          # bash .ci-darwin-tsan-control/ci/scripts/darwin_security_profile.sh\n"
                     "          :\n"
                 ),
                 "sanitizer-tsan-darwin complete job mapping differs",
@@ -7845,27 +8743,31 @@ class LockSurfaceContractTest(unittest.TestCase):
             (
                 "tsan-environment-commented",
                 "sanitizer-tsan-darwin",
-                "          SANITIZER: tsan\n",
-                "          # SANITIZER: tsan\n",
+                "          CI_SECURITY_PROFILE: sanitizer-tsan\n",
+                "          # CI_SECURITY_PROFILE: sanitizer-tsan\n",
                 "sanitizer-tsan-darwin complete job mapping differs",
             ),
             (
-                "preverification-extra-step",
+                "candidate-before-verification",
                 "sanitizer-asan-darwin",
-                "      - name: Verify exact Darwin ASan runner\n",
+                "      - name: Verify exact Darwin ASan host runner\n",
                 (
-                    "      - name: Unexpected preverification step\n"
-                    "        run: true\n"
-                    "      - name: Verify exact Darwin ASan runner\n"
+                    "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n"
+                    "        name: Unexpected candidate checkout before verification\n"
+                    "        with:\n"
+                    "          persist-credentials: false\n"
+                    "          repository: ${{ inputs.checkout_repository }}\n"
+                    "          ref: ${{ inputs.checkout_ref }}\n"
+                    "      - name: Verify exact Darwin ASan host runner\n"
                 ),
                 "sanitizer-asan-darwin complete job mapping differs",
             ),
             (
                 "profile-continue-on-error",
                 "sanitizer-asan-darwin",
-                "        run: bash ci/scripts/sanitizer_test.sh\n",
+                "        run: bash .ci-darwin-asan-control/ci/scripts/darwin_security_profile.sh\n",
                 (
-                    "        run: bash ci/scripts/sanitizer_test.sh\n"
+                    "        run: bash .ci-darwin-asan-control/ci/scripts/darwin_security_profile.sh\n"
                     "        continue-on-error: true\n"
                 ),
                 "sanitizer-asan-darwin complete job mapping differs",
@@ -7874,15 +8776,17 @@ class LockSurfaceContractTest(unittest.TestCase):
                 "runner-verification-extra-if",
                 "sanitizer-asan-darwin",
                 (
-                    "      - name: Verify exact Darwin ASan runner\n"
+                    "      - name: Verify exact Darwin ASan host runner\n"
                     "        env:\n"
                     "          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json\n"
+                    "          PYTHONDONTWRITEBYTECODE: \"1\"\n"
                     "        run: >-\n"
                 ),
                 (
-                    "      - name: Verify exact Darwin ASan runner\n"
+                    "      - name: Verify exact Darwin ASan host runner\n"
                     "        env:\n"
                     "          CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/photospider-darwin-asan-runner-${{ github.run_id }}-${{ github.run_attempt }}.json\n"
+                    "          PYTHONDONTWRITEBYTECODE: \"1\"\n"
                     "        if: always()\n"
                     "        run: >-\n"
                 ),
@@ -7891,9 +8795,9 @@ class LockSurfaceContractTest(unittest.TestCase):
             (
                 "download-extra-with",
                 "fuzz-codecs-darwin",
-                "          path: CI-results/profile-inventory\n",
+                "          path: .ci-darwin-fuzz-inventory\n",
                 (
-                    "          path: CI-results/profile-inventory\n"
+                    "          path: .ci-darwin-fuzz-inventory\n"
                     "          merge-multiple: true\n"
                 ),
                 "fuzz-codecs-darwin complete job mapping differs",
@@ -7904,6 +8808,34 @@ class LockSurfaceContractTest(unittest.TestCase):
                 "        if: always()\n",
                 "        if: always()\n        shell: bash\n",
                 "sanitizer-tsan-darwin complete job mapping differs",
+            ),
+            (
+                "candidate-profile-script",
+                "fuzz-codecs-darwin",
+                "        run: bash .ci-darwin-fuzz-control/ci/scripts/darwin_security_profile.sh\n",
+                "        run: bash .ci-darwin-fuzz-candidate/ci/scripts/fuzz_smoke.sh\n",
+                "fuzz-codecs-darwin complete job mapping differs",
+            ),
+            (
+                "control-commit-from-candidate",
+                "sanitizer-asan-darwin",
+                "          ref: ${{ inputs.workflow_commit }}\n",
+                "          ref: ${{ inputs.checkout_ref }}\n",
+                "sanitizer-asan-darwin complete job mapping differs",
+            ),
+            (
+                "overlapping-candidate-root",
+                "sanitizer-tsan-darwin",
+                "          CI_CANDIDATE_ROOT: ${{ github.workspace }}/.ci-darwin-tsan-candidate\n",
+                "          CI_CANDIDATE_ROOT: ${{ github.workspace }}/.ci-darwin-tsan-control\n",
+                "sanitizer-tsan-darwin complete job mapping differs",
+            ),
+            (
+                "missing-candidate-head-binding",
+                "sanitizer-asan-darwin",
+                "          CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}\n",
+                "",
+                "sanitizer-asan-darwin complete job mapping differs",
             ),
             (
                 "gate-result-binding-commented",
@@ -7987,6 +8919,12 @@ class LockSurfaceContractTest(unittest.TestCase):
                     REPO_ROOT / "ci/locks/actions.lock",
                     lock_root / "actions.lock",
                 )
+                script_root = root / "ci/scripts"
+                script_root.mkdir(parents=True)
+                shutil.copy2(
+                    SCRIPTS / "darwin_security_profile.sh",
+                    script_root / "darwin_security_profile.sh",
+                )
                 mutated = self._replace_workflow_job_fragment(
                     workflow, job_name, original, replacement
                 )
@@ -7996,6 +8934,33 @@ class LockSurfaceContractTest(unittest.TestCase):
                 with self.assertRaises(module.ContractError) as raised:
                     module._verify_darwin_security_dag(root)
                 self.assertIn(diagnostic, str(raised.exception))
+
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            workflow_root = root / ".github/workflows"
+            workflow_root.mkdir(parents=True)
+            shutil.copy2(workflow_path, workflow_root / workflow_path.name)
+            lock_root = root / "ci/locks"
+            lock_root.mkdir(parents=True)
+            shutil.copy2(
+                REPO_ROOT / "ci/locks/actions.lock", lock_root / "actions.lock"
+            )
+            script_root = root / "ci/scripts"
+            script_root.mkdir(parents=True)
+            wrapper = (SCRIPTS / "darwin_security_profile.sh").read_text(
+                encoding="utf-8"
+            )
+            (script_root / "darwin_security_profile.sh").write_text(
+                wrapper.replace(
+                    'bash "$control_root/$profile_script"',
+                    'bash "$candidate_root/$profile_script"',
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                module.ContractError, "verifier-owned source identity differs"
+            ):
+                module._verify_darwin_security_dag(root)
 
     def test_unpinned_yaml_workflow_fails_the_same_lock_parser(self) -> None:
         """Reject an unpinned action in the formerly omitted YAML suffix."""

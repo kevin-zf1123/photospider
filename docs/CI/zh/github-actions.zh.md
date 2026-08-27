@@ -157,7 +157,7 @@ value；排序稳定，workflow 不维护测试名清单。一个聚焦的真实
 candidate-owned route helper 与 lock，再证明 fresh protected control 仍是权威；raw entry 缺失、重复、
 被重新标记或未声明时，会在 matrix output 或 attestation 前失败。
 
-在 targeted artifact attestation 前，`verify-targeted-artifacts` 会把精确 candidate 再次 fresh checkout 到一份不执行代码的 data root。该 root 与精确 protected `workflow_commit` control checkout、raw inventory、control manifest、targeted artifact 和 restored CTest root 互不重叠。只能执行 control checkout 中的 Python。Verifier 会把 control `HEAD` 绑定到 `workflow_commit`、把 candidate-data `HEAD` 绑定到 `candidate_commit`，并在使用后重新检查两个 directory object。随后，它把精确 raw bundle 重新绑定到 route-control digest，并要求 raw CTest JSON、两份 targeted control/runtime closure 与 fresh 恢复后 `ctest --show-only=json-v1` 查询得到同一个普通 test set（只排除精确 `build-smoke`）。Reduction、addition、relabeling、identity/digest mismatch、link、overlap 或 path/commit drift 都会在 attestation 与 readiness 前失败。Container 与 host job 可能使用不同的绝对 workspace root，因此 discovery 在 job-owned 副本内执行，且只能在 CTest control file 与 cache 中替换 completion stamp 记录的精确 producer build-root token。经过验证的 archive、manifest 与 closure 绝不会被改写。
+在 targeted artifact attestation 前，`verify-targeted-artifacts` 会把精确 candidate 再次 fresh checkout 到一份不执行代码的 data root。该 root 与精确 protected `workflow_commit` control checkout、raw inventory、control manifest 及 targeted artifact 互不重叠。只能执行 control checkout 中的 Python。Verifier 会把 control `HEAD` 绑定到 `workflow_commit`、把 candidate-data `HEAD` 绑定到 `candidate_commit`，并在使用后重新检查两个 directory object。随后，它把精确 raw bundle 重新绑定到 route-control digest。唯一严格的受保护纯数据 parser 会读取归档中的精确 control graph，且不调用 CTest、CMake 或 candidate-defined control program。它只接受维护中的 generated include/subdirectory、test/property、纯 set 与 GoogleTest NOT_BUILT-wrapper 形状，再要求 raw 完整 record、两份 targeted control/runtime closure record 与 control-file digest，以及只排除精确 `build-smoke` 后的普通 closure 全部相等。Unknown/side-effect syntax、reduction、addition、relabeling、identity/digest mismatch、link、overlap 或 path/commit drift 会在 attestation 与 readiness 前失败。Root token 只能 normalize 完整结构化 path，且该 path 必须等于 source/build root 或 component descendant；prefix sibling、embedded/quoted/list ambiguity、物理 CTest relocation 与不受限 string replacement 都会被拒绝。
 
 当前带标签的 inventory 为：
 
@@ -345,13 +345,21 @@ package-input 边界运行，在不重建或重新安装 producer 的前提下�
 
 在 candidate-owned matrix 取代 current-main sanitizer fallback 之前，该 fallback 只使用一个带终止记录的 NUL-framed v1 invocation stream。Target、可能为空的 GoogleTest filter 与 trust flag 在 Bash 3.2 和 Bash 5 中仍是三个独立 field；禁止 whitespace splitting、shell evaluation 与 legacy text decoder。Producer 会在发出任何 byte 前校验全部 record；shell 把输出捕获到唯一 fresh transient file、显式检查 producer status，再通过固定 descriptor 解析。NUL read 失败且残留 partial byte、terminal 缺失或重复、完整或不完整 tail、target 重复或 producer 非零，都会在 configure/build/test 前失败且不写 success evidence。Shell 只把完整解码后的 stream 保存为诊断 evidence，再由 `run_gtest_checked` 在执行前证明每个空或非空 selection 都非零。
 
-Linux 与 Darwin 都会把 ASan、TSan 和有界 fuzz 调度为不同的 profile result。在 Darwin 上，
-`sanitizer-asan-darwin`、`sanitizer-tsan-darwin` 与 `fuzz-codecs-darwin` 是三个独立的
+Linux 与 Darwin 都会把 ASan、TSan 和有界 fuzz 调度为不同的 profile result。每个共享 Linux profile 以及手动 sanitizer workflow 都会先 sparse-checkout 精确受保护 host control，并在 candidate checkout 前于真实 host 创建 retained `ubuntu-24.04` identity。随后它登录 GHCR、拉取精确 digest-qualified image、unset token，并使用 `linux_security_profile.sh` 只在该 image 内运行 candidate code。Candidate source、受保护 `ci`、profile inventory 与 retained identity 分别只读 mount；唯一可写 bind 是 fresh 且直属 `runner.temp` 的 child。Container 没有 network 或 registry token。这样既不会把 job-container 中缺失的 `ImageOS` 解释为 hosted-runner provenance，也保持 ASan、TSan 与 fuzz 为 sibling-independent host job。
+
+在 Darwin 上，`sanitizer-asan-darwin`、`sanitizer-tsan-darwin` 与 `fuzz-codecs-darwin` 是三个独立的
 `macos-15` job；每个 job 只依赖 `integration-plan`，下载同一份受保护 profile inventory，并拥有
 独立 timeout 与 diagnostic artifact。任何 profile 都不会等待 sibling，因此一个失败不会阻止另外
 两个 job 被调度；shared suite gate 仍要求三个 conclusion 全部成功。
-受保护 lock verifier 会比较每个 Darwin job 的完整 mapping，包括仅有的五个有序 step 与每个允许
-field。Suite gate 会 checkout 精确的受保护 `workflow_commit`，并且只调用带 version/hash 绑定的
+每个 job 都会先把精确受保护 `workflow_commit` sparse-checkout 到独立 control root，并在 checkout
+candidate source 或下载 generated inventory 前保留真实 hosted-runner identity。受保护
+`darwin_security_profile.sh` wrapper 随后绑定彼此分离的 control/candidate HEAD，拒绝 linked、
+overlapping、replaced、dirty 或 drifted root，并且只运行受保护 profile/parser/platform helper；
+candidate `ci/**` 绝不是可执行 control surface。
+每个 approved Darwin rollout member 还会保留 Android SDK CMake 3.31.5、精确 GoogleTest module SHA-256、Homebrew LLVM 18.1.8 C/C++ path 及其 vcpkg commit。Platform preparation 会在 vcpkg 或 configure 前验证 executable/version 与 module byte。CMake 3.31.5 会刻意生成 current-main candidate-owned inventory helper 可接受的 counter-suffixed GoogleTest include name；CMake 4.x hash-suffixed name、foreign/duplicate/missing include 或 counter drift 均失败。Fuzz preparation 还会使用 retained LLVM pair 编译、链接并运行一个有界 `fuzzer,address,undefined` probe，再把这些精确 compiler 传给 CMake。直接支持维护中的 hash naming 仍是独立且未勾选的 candidate-owned OpenSpec task；protected stage 不会放宽 `cmake/**` 匹配。
+受保护 lock verifier 会比较每个 Darwin job 的完整 mapping，包括六个有序 protected-checkout、
+host-verification、candidate-checkout、inventory-download、profile-wrapper 与 diagnostic-upload
+step，以及每个允许 field。Suite gate 会 checkout 精确的受保护 `workflow_commit`，并且只调用带 version/hash 绑定的
 `integration_suite_gate.py`；它的完整 `needs`、result environment、checkout、permissions、output
 与 helper 调用均为精确 mapping。Helper 会拒绝 failed、skipped、missing 或 unknown required
 result，验证 publishing route 的 attestation 为 `success`、read-only route 为 `skipped`，校验
@@ -433,17 +441,20 @@ helper 和 output artifact 不得进入 primary repository，也不得作为 per
 - `ci/scripts/integration_plan.sh`：配置一个启用测试的小型 build tree，并校验允许空集合、非权威的配置期 inventory preview；它不会输出 workflow matrix。
 - `ci/scripts/build_integrity.sh`：检测一种完整运行时契约，在同一 tree 中执行 required-target 与完整 build，捕获未经解释的构建后 CTest JSON，写入普通 CTest 闭包并安装 fresh package prefix。Candidate configure 后它不会 import 或执行 route parser/lock，也不输出 consumer matrix；workflow 只把 CTest 与生成的 profile/role byte 打包给独立 protected control job。
 - `ci/scripts/build_smoke_route.py`：只从精确 protected control checkout 运行。它校验互不重叠的 candidate/control/raw 边界、两个 checkout commit、raw envelope 与生成的 profile identity，再使用受保护 parser 和 routing lock 输出四个穷尽的 downstream matrix 与一个 canonical route digest；其 verifier 会在 artifact attestation 前把下载的精确 raw byte 重新绑定到该 control digest。
-- `ci/scripts/ctest_runtime_closure.py`：派生递归的构建后普通 CTest control/runtime 闭包，为 retained raw/restored JSON 暴露严格普通名称解析，并在执行前重新校验恢复后的 runtime inventory、executable、dynamic library、plugin、trust input 与 build-tree data。
+- `ci/scripts/ctest_runtime_closure.py`：派生递归的构建后普通 CTest control/runtime 闭包，为 raw record 提供严格解析，并在 attestation 前通过 allowlist 纯数据 parser 重建归档中的精确 control graph。结构化 root normalization 按 component 判断；unknown/side-effect syntax、prefix sibling、embedded 或 quoted/list ambiguity 及物理 relocation 都会失败。Post-attestation runtime path 会在执行前另行复核恢复后的 inventory、executable、dynamic library、plugin、trust input 与 build-tree data。
 - `ci/scripts/ctest_full.sh`：复用 runtime role，在排除精确 `build-smoke` label 后，以受控 `${CI_JOBS}` 并行度运行普通 CTest，同时保留失败输出与 JUnit 证据。
 - `ci/scripts/build_smoke_test.sh`：从 `ci-control-default` 重新校验并运行一个精确 default-role CTest 名称。
 - `ci/scripts/openexr_smoke_test.sh`：从已校验、只含 cache 的 metadata role 运行精确 default OpenEXR option-off source-tree smoke。
 - `ci/scripts/static_product_consumer_test.sh`：在不重建或重新安装 producer 的前提下，于完整 package consumer 执行前后重新测量精确 installed-package content。
-- `ci/scripts/targeted_artifact_consume.sh` 与 `ci/scripts/reusable_build.py`：分别以 candidate source digest 与 reusable-workflow signer digest 校验 archive/manifest attestation，再校验并原子恢复一个精确 role。受保护的 attestation 前 verifier 还会分离 control-code/candidate-data root，并交叉绑定 raw、两份 archived CTest closure 与 restored 普通 inventory。
+- `ci/scripts/targeted_artifact_consume.sh` 与 `ci/scripts/reusable_build.py`：分别以 candidate source digest 与 reusable-workflow signer digest 校验 archive/manifest attestation，再校验并原子恢复一个精确 role。受保护的 attestation 前 verifier 还会分离 control-code/candidate-data root，并在不运行 candidate CTest/CMake control 的前提下，交叉绑定 raw 完整 record、两份 archived CTest closure/control-byte digest 与纯数据普通 closure。
 - `ci/scripts/graph_cli_script_test.sh`：使用上述执行前 Graph 文档能力标记，运行相互隔离的正路径、显式来源缺失和无效 target REPL 检查。
 - `ci/scripts/propagation_script_test.sh`：构建 `test_propagation`，并对线性和复杂 propagation 图运行 `tiles all`。
 - `ci/scripts/plugin_load_test.sh`：检查 operation plugin，并选择 scheduler plugin 加载/列举，或 policy plugin、registry、policy/execution 与 CLI route 检查。
 - `ci/scripts/execution_repeat_test.sh`：重复运行当前运行时契约对应的确定性 scheduler 或 policy/execution 行为测试。
 - `ci/scripts/sanitizer_test.sh`：先消费 profile input 前生成的唯一 retained runner identity，再在独立 build 目录运行共享且按能力选择的聚焦 ASan 或 TSan 测试；其 temporary fallback 只通过带终止记录的 NUL-framed v1 protocol 传输 target/empty-filter/trust record，并记录解码后的 evidence。
+- `ci/scripts/linux_security_profile.sh`：从真实 host 保留的 identity 运行 Linux ASan、TSan、fuzz 与手动 sanitizer profile。它只认证并拉取精确 digest，随后移除 token，并在无 network、只读 root filesystem、彼此分离的只读 candidate/control/inventory/identity mount 以及一个 fresh 可写 `runner.temp` work root 下启动 profile。
+- `ci/scripts/darwin_security_profile.sh`：每个 native Darwin ASan、TSan 或 fuzz profile 只有在精确受保护 control checkout 保留真实 host、且另一个 candidate checkout 完成 HEAD 绑定后才运行。它使用受保护 helper 处理 candidate source root，执行后重新检查两个 clean commit 与 root object，并拒绝 candidate helper selection、overlap、replacement 或 drift。
+- `ci/scripts/security_platform_prepare.sh`：只消费一次 retained member，验证 Darwin 的精确 CMake/module 与 LLVM identity，在选择 fuzz 时运行真实有界组合 probe，然后 materialize clean locked vcpkg checkout，并写出所有维护 profile phase 消费的精确 CMake command/argument。
 
 ## 本地命令
 

@@ -11,9 +11,10 @@ the exact protected fallback recognized by ``ci_profile_manifest``.
 
 The protected pre-attestation mode executes only from an exact workflow-control
 checkout and treats a disjoint exact candidate checkout as data. It binds both
-commits and directory objects, revalidates the raw/control identity, then
-requires one ordinary CTest set across raw JSON, both targeted closures, and a
-fresh restored inventory before targeted artifacts can be attested.
+commits and directory objects, revalidates the raw/control identity, then uses
+the protected pure-data parser to require one complete CTest record set across
+raw JSON and byte-identical control/runtime artifacts. It never invokes CTest,
+relocates candidate control bytes, or interprets candidate CMake semantics.
 """
 
 from __future__ import annotations
@@ -1899,136 +1900,26 @@ def _completion_stamp_records(build_root: Path) -> dict[str, str]:
     return records
 
 
-def _restore_runtime_for_inventory(
-    staged_ci: Path,
-    restore_root: Path,
-    closure: Any,
-    ctest_executable: str,
-) -> list[dict[str, Any]]:
-    """Restore one verified runtime role and rediscover ordinary CTest records.
-
-    Args:
-        staged_ci: Exact already-validated runtime role extracted from the
-            retained archive descriptor.
-        restore_root: Absent job-owned verifier build path.
-        closure: Protected CTest closure module loaded from the control root.
-        ctest_executable: Trusted host CTest program name or path.
-
-    Returns:
-        Sorted exact normalized ordinary-test records from restored JSON-v1
-        discovery.
-
-    Raises:
-        ReusableBuildError: The recorded producer path is unsafe, residual/link
-            state exists, the parent is unsafe/nonempty, protected relocation
-            or discovery fails, or restored inventory is malformed.
-
-    Note:
-        Container and host jobs may expose different absolute workspace roots.
-        After exact archive/closure verification, only the copied CTest control
-        files and copied CMake cache have the exact recorded producer build-root
-        token replaced with ``restore_root``. No test command executes. The
-        derived tree is job-owned and removed in all cases.
-    """
-    restore = restore_root.absolute().resolve(strict=False)
-    records = _completion_stamp_records(staged_ci)
-    producer_build_root = records["build_dir"]
-    producer_source_root = records["source_dir"]
-    if any(
-        not value.startswith("/") or "\0" in value
-        for value in (producer_build_root, producer_source_root)
-    ):
-        raise ReusableBuildError("producer CTest root identity is unsafe")
-    if restore.exists() or restore.is_symlink():
-        raise ReusableBuildError("restored CTest root contains residual state")
-    parent = restore.parent
-    created_parent = False
-    if parent.exists() or parent.is_symlink():
-        if not parent.is_dir() or parent.is_symlink():
-            raise ReusableBuildError("restored CTest parent is unsafe")
-        try:
-            with os.scandir(parent) as entries:
-                if next(entries, None) is not None:
-                    raise ReusableBuildError(
-                        "restored CTest parent contains residual state"
-                    )
-        except OSError as error:
-            raise ReusableBuildError(
-                f"cannot enumerate restored CTest parent: {error}"
-            ) from error
-    else:
-        grandparent = parent.parent
-        if not grandparent.is_dir() or grandparent.is_symlink():
-            raise ReusableBuildError("restored CTest grandparent is unsafe")
-        parent.mkdir(mode=0o700)
-        created_parent = True
-    try:
-        shutil.copytree(staged_ci, restore, copy_function=shutil.copy2)
-        closure_value = closure.load_closure(
-            restore.joinpath(*closure.CLOSURE_RELATIVE_PATH.parts)
-        )
-        old_root = producer_build_root.encode("utf-8")
-        new_root = str(restore).encode("utf-8")
-        relocation_paths = [
-            "CMakeCache.txt",
-            *closure_value["control_paths"],
-        ]
-        for relative in relocation_paths:
-            path = restore / relative
-            if not path.is_file() or path.is_symlink():
-                raise ReusableBuildError(
-                    f"restored CTest relocation input is unsafe: {relative}"
-                )
-            content = path.read_bytes()
-            relocated = content.replace(old_root, new_root)
-            path.write_bytes(relocated)
-            if path.read_bytes() != relocated:
-                raise ReusableBuildError(
-                    f"restored CTest relocation write differs: {relative}"
-                )
-        inventory = closure.query_inventory(
-            restore, ctest_executable, closure_value["config"]
-        )
-        return closure.ordinary_test_records(
-            inventory,
-            "restored targeted CTest runtime inventory",
-            Path(producer_source_root),
-            restore,
-        )
-    except ReusableBuildError:
-        raise
-    except Exception as error:
-        raise ReusableBuildError(
-            f"restored targeted CTest inventory failed: {error}"
-        ) from error
-    finally:
-        if restore.exists() or restore.is_symlink():
-            if restore.is_dir() and not restore.is_symlink():
-                shutil.rmtree(restore)
-            else:
-                restore.unlink()
-        if created_parent and parent.exists():
-            parent.rmdir()
-
-
 def _verify_ordinary_coverage(arguments: argparse.Namespace) -> None:
-    """Cross-bind raw, control/runtime closure, and restored CTest inventories.
+    """Cross-bind raw JSON with pure-data control/runtime CTest inventories.
 
     Args:
         arguments: Explicit protected/candidate roots, raw/control artifacts,
-            targeted artifact root, canonical restored build root, and exact
-            candidate/workflow/profile/matrix/image/route identities.
+            targeted artifact root, and exact candidate/workflow/profile/
+            matrix/image/route identities.
 
     Raises:
         ReusableBuildError: Directory boundaries overlap, protected raw/control
-            validation fails, either targeted role differs, or raw, archived,
-            and restored ordinary-test sets are not exactly equal.
+            validation fails, either targeted role differs, control semantics
+            exceed the pure-data allowlist, or raw/control/closure records are
+            not exactly equal.
 
     Note:
-        Routing validation is imported only from the protected control root.
-        The candidate checkout supplies data/source bytes but no executable
-        helper. Both targeted archives remain descriptor-retained while their
-        staged closure is inspected.
+        Routing and CTest parsers are imported only from the protected control
+        root. The candidate checkout supplies data/source bytes but no
+        executable helper. Both targeted archives remain descriptor-retained
+        while their staged closure and exact control bytes are inspected; no
+        CTest/CMake command or candidate-defined control program executes.
     """
     candidate_root, operation_snapshots = _targeted_checkout_snapshots(arguments)
     control_root = Path(arguments.repo_root).absolute().resolve(strict=True)
@@ -2041,16 +1932,6 @@ def _verify_ordinary_coverage(arguments: argparse.Namespace) -> None:
             "downloaded targeted artifacts": arguments.artifact_root,
         }
     )
-    restore_root = arguments.restored_build_root.absolute().resolve(strict=False)
-    for name, boundary in boundaries.items():
-        if (
-            restore_root == boundary
-            or restore_root in boundary.parents
-            or boundary in restore_root.parents
-        ):
-            raise ReusableBuildError(
-                f"restored CTest root overlaps {name}: {restore_root}"
-            )
     route = _load_build_smoke_route_module(control_root)
     try:
         raw_ctest, _ = route.validate_control_bundle(
@@ -2071,7 +1952,8 @@ def _verify_ordinary_coverage(arguments: argparse.Namespace) -> None:
 
     closure_values: dict[str, dict[str, Any]] = {}
     completion_values: dict[str, dict[str, str]] = {}
-    restored_records: list[dict[str, Any]] | None = None
+    control_records: dict[str, list[dict[str, Any]]] = {}
+    control_digests: dict[str, dict[str, str]] = {}
     artifact_root = boundaries["downloaded targeted artifacts"]
     for role in ("ctest-control", "ctest-runtime"):
         role_arguments = argparse.Namespace(
@@ -2094,8 +1976,7 @@ def _verify_ordinary_coverage(arguments: argparse.Namespace) -> None:
             *,
             expected_role: str = role,
         ) -> None:
-            """Retain one staged closure and rediscover runtime inventory."""
-            nonlocal restored_records
+            """Retain one staged closure and parse its exact control bytes."""
             if manifest["artifact_role"] != expected_role:
                 raise ReusableBuildError("targeted coverage role drifted")
             try:
@@ -2107,14 +1988,21 @@ def _verify_ordinary_coverage(arguments: argparse.Namespace) -> None:
                     f"{expected_role} ordinary CTest closure is invalid: {error}"
                 ) from error
             closure_values[expected_role] = value
-            completion_values[expected_role] = _completion_stamp_records(staged_ci)
-            if expected_role == "ctest-runtime":
-                restored_records = _restore_runtime_for_inventory(
+            completion = _completion_stamp_records(staged_ci)
+            completion_values[expected_role] = completion
+            try:
+                records, digests = closure.control_test_records(
                     staged_ci,
-                    restore_root,
-                    closure,
-                    arguments.ctest_executable,
+                    value,
+                    Path(completion["source_dir"]),
+                    Path(completion["build_dir"]),
                 )
+            except Exception as error:
+                raise ReusableBuildError(
+                    f"{expected_role} pure-data CTest control is invalid: {error}"
+                ) from error
+            control_records[expected_role] = records
+            control_digests[expected_role] = digests
 
         with _ArchiveSnapshot(role_arguments.archive) as archive_snapshot:
             with _ManifestSnapshot(role_arguments.manifest) as manifest_snapshot:
@@ -2133,8 +2021,22 @@ def _verify_ordinary_coverage(arguments: argparse.Namespace) -> None:
         "ctest-runtime"
     ):
         raise ReusableBuildError("control/runtime completion identities differ")
+    if control_digests.get("ctest-control") != control_digests.get(
+        "ctest-runtime"
+    ):
+        raise ReusableBuildError("control/runtime CTest control bytes differ")
+    if control_records.get("ctest-control") != control_records.get(
+        "ctest-runtime"
+    ):
+        raise ReusableBuildError("control/runtime CTest control records differ")
     completion = completion_values["ctest-runtime"]
     try:
+        raw_complete_records = closure.complete_test_records(
+            raw_ctest,
+            "protected raw producer CTest inventory",
+            Path(completion["source_dir"]),
+            Path(completion["build_dir"]),
+        )
         raw_records = closure.ordinary_test_records(
             raw_ctest,
             "protected raw producer CTest inventory",
@@ -2146,17 +2048,66 @@ def _verify_ordinary_coverage(arguments: argparse.Namespace) -> None:
             f"raw ordinary CTest inventory is invalid: {error}"
         ) from error
     closure_records = closure_values["ctest-runtime"]["ordinary_tests"]
-    if restored_records is None:
-        raise ReusableBuildError("restored ordinary CTest inventory is absent")
-    if raw_records != closure_records or raw_records != restored_records:
+    if raw_complete_records != control_records["ctest-runtime"]:
+        raw_by_name = {record["name"]: record for record in raw_complete_records}
+        control_by_name = {
+            record["name"]: record
+            for record in control_records["ctest-runtime"]
+        }
+        differing = sorted(
+            set(raw_by_name) ^ set(control_by_name)
+            | {
+                name
+                for name in set(raw_by_name) & set(control_by_name)
+                if raw_by_name[name] != control_by_name[name]
+            }
+        )
+        detail = differing[0] if differing else "an unknown record"
+        if differing and differing[0] in raw_by_name and differing[0] in control_by_name:
+            name = differing[0]
+            fields = sorted(
+                field
+                for field in raw_by_name[name]
+                if raw_by_name[name].get(field) != control_by_name[name].get(field)
+            )
+            if fields:
+                detail += f" fields={','.join(fields)}"
+                if fields == ["properties"]:
+                    raw_properties = raw_by_name[name]["properties"]
+                    control_properties = control_by_name[name]["properties"]
+                    property_names = sorted(
+                        set(raw_properties) ^ set(control_properties)
+                        | {
+                            property_name
+                            for property_name in set(raw_properties)
+                            & set(control_properties)
+                            if raw_properties[property_name]
+                            != control_properties[property_name]
+                        }
+                    )
+                    if property_names:
+                        detail += f" property={property_names[0]}"
+                        if property_names[0] == "WORKING_DIRECTORY":
+                            detail += (
+                                " raw="
+                                f"{raw_properties.get('WORKING_DIRECTORY')!r}"
+                                " control="
+                                f"{control_properties.get('WORKING_DIRECTORY')!r}"
+                            )
         raise ReusableBuildError(
-            "raw, targeted closure, and restored ordinary CTest records differ"
+            "raw and pure-data control CTest records differ at "
+            + detail
+        )
+    if raw_records != closure_records:
+        raise ReusableBuildError(
+            "raw and targeted closure ordinary CTest records differ"
         )
     for snapshot in operation_snapshots:
         snapshot.require_unchanged()
     print(
         "ordinary CTest coverage cross-binding passed: "
-        f"tests={len(raw_records)} route_sha256={arguments.route_sha256}"
+        f"tests={len(raw_records)} controls={len(control_digests['ctest-runtime'])} "
+        f"route_sha256={arguments.route_sha256}"
     )
 
 
@@ -2483,20 +2434,18 @@ def build_parser() -> argparse.ArgumentParser:
     verify_targeted_only.set_defaults(handler=_verify_targeted_only)
     verify_coverage = subparsers.add_parser(
         "verify-ordinary-coverage",
-        help="cross-bind raw, archived, and restored ordinary CTest inventory",
+        help="cross-bind raw JSON with pure-data targeted CTest control",
     )
     verify_coverage.add_argument("--candidate-root", type=Path, required=True)
     verify_coverage.add_argument("--raw-dir", type=Path, required=True)
     verify_coverage.add_argument("--control-manifest", type=Path, required=True)
     verify_coverage.add_argument("--route-sha256", required=True)
     verify_coverage.add_argument("--artifact-root", type=Path, required=True)
-    verify_coverage.add_argument("--restored-build-root", type=Path, required=True)
     verify_coverage.add_argument("--candidate-commit", required=True)
     verify_coverage.add_argument("--profile", required=True)
     verify_coverage.add_argument("--matrix-sha256", required=True)
     verify_coverage.add_argument("--image-digest", required=True)
     verify_coverage.add_argument("--workflow-commit", required=True)
-    verify_coverage.add_argument("--ctest-executable", default="ctest")
     verify_coverage.set_defaults(handler=_verify_ordinary_coverage)
     snapshot_targeted_manifest = subparsers.add_parser(
         "snapshot-targeted-manifest",
@@ -2545,8 +2494,6 @@ def main() -> int:
         arguments.content_root = arguments.content_root.resolve()
     if hasattr(arguments, "candidate_root") and arguments.candidate_root is not None:
         arguments.candidate_root = arguments.candidate_root.absolute()
-    if hasattr(arguments, "restored_build_root"):
-        arguments.restored_build_root = arguments.restored_build_root.absolute()
     if (
         hasattr(arguments, "evidence_output")
         and arguments.evidence_output is not None

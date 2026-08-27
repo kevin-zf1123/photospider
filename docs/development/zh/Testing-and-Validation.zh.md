@@ -354,7 +354,7 @@ protected 构建后 control 还会拒绝这些状态与空 label set。执行前
 它只使用经过校验的 CTest 数字索引选择测试，因此任意测试名字符都不会被 shell 或 regular
 expression 解释。
 
-在 role attestation 前，独立 protected verifier 会把精确 candidate checkout 到一份不执行代码的 data root，并让它与精确 `workflow_commit` control-code root 及全部下载的 raw/control/artifact root 分离。它在使用前后绑定两份真实 `HEAD` commit 与 directory object，再把 raw bundle 重新绑定到受保护 route digest。它只使用受保护 parser，要求 raw 普通 test set、targeted control/runtime closure set 与 fresh 恢复后的 CTest discovery 完全相等，且只排除精确 `build-smoke` label。Coverage reduction、addition、relabeling、identity/digest/path drift 或执行 candidate helper，都会在 attestation 与 readiness 前失败。为处理 container/host workspace path 差异，restored discovery 只会在已验证的 job-owned CTest control file 与 cache 副本中重写 completion stamp 记录的精确 producer build-root token；archive、manifest 与 closure byte 保持不变。
+在 role attestation 前，独立 protected verifier 会把精确 candidate checkout 到一份不执行代码的 data root，并让它与精确 `workflow_commit` control-code root 及全部下载的 raw/control/artifact root 分离。它在使用前后绑定两份真实 `HEAD` commit 与 directory object，再把 raw bundle 重新绑定到受保护 route digest。它只执行 protected code，并且在不调用 CTest/CMake 的情况下，通过严格的 generated-command/property allowlist 解析归档中的精确 control graph。它要求 raw 完整 record、两份 targeted control/runtime closure record 与 control-file digest，以及只排除精确 `build-smoke` 后的普通 closure 全部相等。Unknown 或 side-effect-capable control、coverage reduction/addition/relabeling、identity/digest/path drift 或执行 candidate helper 都会在 attestation 与 readiness 前失败。结构化 root field 只能 normalize 精确 root 或 component descendant；prefix sibling、embedded/quoted/list ambiguity、含混 root topology、物理 CTest relocation 与不受限 string replacement 均 fail closed。
 
 Published image 与 candidate image 调用同一个 digest-bound reusable DAG。Producer 会在同一 tree
 中依次运行 `build_required_targets` 与 `build_all`，随后只上传严格 raw CTest/profile/role envelope
@@ -2741,11 +2741,18 @@ sanitizer 分片会选择对应契约的断言。生成的 CLI 配置严格互�
 
 Temporary current-main ASan/TSan fallback 会通过一个带终止记录的 NUL-framed v1 stream 传输每个 target、可能为空的 GoogleTest filter 与 trust flag。其 Bash 3.2/5 reader 不会按 whitespace 拆分或 evaluate field；它会把完整预校验的 producer 捕获到唯一 fresh transient file、检查 producer status，再通过固定 descriptor 解析。Clean EOF 会与 partial token 区分；terminal 缺失/重复、完整或 partial tail、field 截断、target 重复、unknown record 与 producer 非零都在 configure/build/test 与 success evidence 前失败。因此，空 filter 会保留预期的 whole-binary selection，而不会变成相邻 boolean text。
 
+每个共享 Linux ASan、TSan 与有界 fuzz job，以及手动 sanitizer job，都会从精确受保护 sparse checkout 在真实 host 测量其 reviewed `ubuntu-24.04` identity，且该动作发生在 candidate checkout 前。受保护 host wrapper 随后登录、拉取精确 digest-qualified image、移除 token，并在无 network、只读 root filesystem、彼此分离的只读 candidate/受保护 `ci`/inventory/identity mount，以及仅一个 fresh 且直属 `runner.temp` 的可写 work root 下运行 profile。同一个 retained host record 会进入 container 内的 platform preparation；job-container `ImageOS` 缺失、mutable tag、token forwarding 或 candidate-before-verifier 顺序均失败。
+
 Darwin ASan、TSan 与有界 fuzz 是三个独立的 `macos-15` job。每个 job 只依赖共同的 integration
 plan、消费同一份受保护 profile inventory，并在自身 timeout 下发布独立 diagnostic result。它们之间
 没有 sibling dependency，而完整 shared-suite gate 会要求三个 result 全部成功；因此某个 profile 失败
 不会压制另外两个调度，也不会被隐藏在单个串行 Darwin aggregate 后面。
-受保护 verifier 会比较每个 profile 的完整 YAML job 与五步 mapping。Suite gate 会单独 checkout
+每个 job 都会先 sparse-checkout 精确受保护 control，并在 candidate checkout 或 generated inventory
+前保留真实 host identity。Candidate 随后位于另一个完成 HEAD 绑定的 source/data root，而受保护 Darwin
+wrapper 提供全部可执行 profile/parser/platform helper，并在 build 后重新检查两个 clean commit 与
+directory object。Candidate helper execution、root overlap/replacement 或 HEAD/root drift 都会失败。
+两个 reviewed Darwin rollout record 还会绑定 Android SDK CMake 3.31.5、其精确 GoogleTest module SHA-256、Homebrew LLVM 18.1.8 C/C++ path 与逐 version vcpkg commit。Preparation 会在 configure 前检查真实 CMake executable、报告的 `CMAKE_ROOT` 与 module byte。该 stage-safe selection 会生成当前 candidate-owned helper 可接受的 counter-suffixed GoogleTest include；在独立 candidate-owned helper task 落地前，hash-suffixed CMake 4.x name、foreign/duplicate/missing include 与 counter drift 均失败。Fuzz preparation 还会编译、链接并运行一个有界的 `fuzzer,address,undefined` probe，并把这些精确 LLVM path 传给 CMake；tool/version 或 probe drift 不会缩减 Darwin fuzz coverage。
+受保护 verifier 会比较每个 profile 的完整 YAML job 与六步 mapping。Suite gate 会单独 checkout
 精确的受保护 `workflow_commit`，并且只调用带 version/hash 绑定的
 `integration_suite_gate.py`；它的完整 job、checkout、`needs`、environment、output 与 helper
 command 都是精确合同。Helper 会在写 output 前执行每一项普通 result 检查、publishing/read-only
@@ -2867,7 +2874,7 @@ status。因此 lock 读取或 `git diff` 失败时，镜像检测或 healthchec
   control/candidate/raw path 与 fresh exact-commit protected-control checkout、真实 no-lock-base/strict-head 首次引入 route、对空 output 安全的
   `fromJSON`、普通 `ctest-control`、`openexr-metadata`、专用 static `installed-package` 与
   producer-designated `ctest-control` 四个下游分区之间两两不重叠且穷尽的 build-smoke 路由、
-  role-specific artifact、绑定 route digest 的 verification/attestation、分离的 protected-code/nonexecuted candidate-data root、raw/control/targeted/restored 普通 CTest 相等性、完整 shared-suite gate 聚合、
+  role-specific artifact、绑定 route digest 的 verification/attestation、分离的 protected-code/nonexecuted candidate-data root、在不执行 candidate CTest 或 relocation root 的前提下证明 raw/control/closure 纯数据相等性、完整 shared-suite gate 聚合、
   对串行 `integration_suite.sh` fallback 的明确拒绝、架构中性 `execution-repeat`
   路由、含换行路径 artifact，以及 detector/reader/producer 失败传播。测试会在隔离 HOME/仓库中
   执行 production
@@ -2901,7 +2908,7 @@ status。因此 lock 读取或 `git diff` 失败时，镜像检测或 healthchec
 - `ci/scripts/static_product_consumer_test.sh`：在不重建或重新安装 producer 的前提下，于 dedicated
   installed-package consumer 前后执行精确 content 校验。
 - `ci/scripts/targeted_artifact_consume.sh` 与 `reusable_build.py`：覆盖精确 role member/digest/size
-  identity、分离的 source/signer attestation digest、dual-root protected verification、raw/closure/restored 普通 coverage、安全提取与完整 shared-DAG consumer。
+  identity、分离的 source/signer attestation digest、dual-root protected verification、attestation 前的 raw/control/closure 纯数据普通 coverage、安全的 post-attestation 提取与完整 shared-DAG consumer。
 
 CI 源码清单与 exclusion list 必须描述维护中的测试和当前源码路径。迁移专用 harness 名称
 不得作为永久 exclusion 保留，也不得被视为产品行为。GitHub job 状态和可下载 artifact 用于

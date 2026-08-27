@@ -4,41 +4,49 @@ set -Eeuo pipefail
 
 # @file security_platform_prepare.sh
 # @brief Consume one retained Darwin/Linux runner identity and materialize exact
-#   platform toolchain arguments without re-reading mutable runner environment.
+#   platform CMake/toolchain commands without re-reading mutable environment.
 # @note Linux dependencies are supplied by the attested CI image. Darwin uses
 #   the exact vcpkg commit selected for the measured image version in the
 #   retained identity. It copies the image-bound vcpkg binary into an
 #   unseedable fresh checkout created below runner.temp, while the checkout is
 #   populated from the locked preinstalled Git object or the explicit official
-#   microsoft/vcpkg source. Windows and unknown platforms fail rather than
-#   receiving reduced coverage.
+#   microsoft/vcpkg source. Each Darwin member also binds the exact compatible
+#   CMake path/version/GoogleTest module and the exact LLVM 18 libFuzzer
+#   compiler pair. Windows and unknown platforms fail rather than receiving
+#   reduced coverage.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 PROFILE_JSON=${1:-}
 OUTPUT_FILE=${CI_PLATFORM_CMAKE_ARGS_FILE:-}
+CMAKE_COMMAND_FILE=${CI_PLATFORM_CMAKE_COMMAND_FILE:-}
 RUNNER_IDENTITY_FILE=${CI_RUNNER_IDENTITY_FILE:-}
-if [[ -z "$PROFILE_JSON" || -z "$OUTPUT_FILE" || -z "$RUNNER_IDENTITY_FILE" || $# -ne 1 ]]; then
-  echo "Usage: CI_RUNNER_IDENTITY_FILE=<path> CI_PLATFORM_CMAKE_ARGS_FILE=<path> $0 <resolved-profile.json>" >&2
+if [[ -z "$PROFILE_JSON" || -z "$OUTPUT_FILE" || -z "$CMAKE_COMMAND_FILE" ||
+  -z "$RUNNER_IDENTITY_FILE" || $# -ne 1 ]]; then
+  echo "Usage: CI_RUNNER_IDENTITY_FILE=<path> CI_PLATFORM_CMAKE_ARGS_FILE=<path> CI_PLATFORM_CMAKE_COMMAND_FILE=<path> $0 <resolved-profile.json>" >&2
   exit 2
 fi
 if [[ ! -f "$PROFILE_JSON" || -L "$PROFILE_JSON" ]]; then
   echo "Resolved security profile is missing or not a regular file." >&2
   exit 1
 fi
-if [[ -e "$OUTPUT_FILE" && -L "$OUTPUT_FILE" ]]; then
-  echo "Refusing symlink platform argument output: $OUTPUT_FILE" >&2
-  exit 1
-fi
-mkdir -p "$(dirname -- "$OUTPUT_FILE")"
+for platform_output in "$OUTPUT_FILE" "$CMAKE_COMMAND_FILE"; do
+  if [[ -e "$platform_output" && -L "$platform_output" ]]; then
+    echo "Refusing symlink platform output: $platform_output" >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname -- "$platform_output")"
+done
 : > "$OUTPUT_FILE"
+: > "$CMAKE_COMMAND_FILE"
 
 platform=$(uname -s)
 architecture=$(uname -m)
 
 # @brief Load one canonical runtime record retained by ci_runner_verify.py.
-# @return Six nonempty lines: architecture, image OS/version, runner label,
-#   triplet (or ``-``), and vcpkg commit (or ``-``).
+# @return Twelve nonempty lines: architecture, image OS/version, runner label,
+#   triplet/vcpkg, CMake path/version/module hash, and fuzz C/C++
+#   compiler path/version. Inapplicable Linux fields use ``-``.
 # @throws Python exits nonzero for non-canonical bytes, a stale allowlist
 #   member, a mismatched platform, a link/special file, or unknown fields.
 # @note The runner environment is deliberately not read here. Every platform
@@ -58,6 +66,12 @@ print(identity["image_version"])
 print(identity["runner_label"])
 print(identity.get("triplet", "-"))
 print(identity.get("vcpkg_commit", "-"))
+print(identity.get("cmake_path", "-"))
+print(identity.get("cmake_version", "-"))
+print(identity.get("cmake_gtest_module_sha256", "-"))
+print(identity.get("fuzz_c_compiler_path", "-"))
+print(identity.get("fuzz_cxx_compiler_path", "-"))
+print(identity.get("fuzz_compiler_version", "-"))
 PY
 }
 
@@ -65,8 +79,8 @@ runtime_identity=()
 while IFS= read -r identity_value; do
   runtime_identity+=("$identity_value")
 done < <(read_retained_runner_identity)
-if ((${#runtime_identity[@]} != 6)); then
-  echo "Retained runner identity did not yield six exact fields." >&2
+if ((${#runtime_identity[@]} != 12)); then
+  echo "Retained runner identity did not yield twelve exact fields." >&2
   exit 1
 fi
 expected_architecture=${runtime_identity[0]}
@@ -75,13 +89,19 @@ expected_image_version=${runtime_identity[2]}
 expected_runner_label=${runtime_identity[3]}
 triplet=${runtime_identity[4]}
 expected_vcpkg_commit=${runtime_identity[5]}
+expected_cmake_path=${runtime_identity[6]}
+expected_cmake_version=${runtime_identity[7]}
+expected_cmake_module_sha256=${runtime_identity[8]}
+expected_fuzz_c_compiler=${runtime_identity[9]}
+expected_fuzz_cxx_compiler=${runtime_identity[10]}
+expected_fuzz_compiler_version=${runtime_identity[11]}
 if [[ "$architecture" != "$expected_architecture" ]]; then
   echo "Runtime architecture '$architecture' differs from retained '$expected_architecture'." >&2
   exit 1
 fi
 
 # @brief Read and validate eligibility/dependencies from the resolved profile.
-# @param $1 `eligible` or `dependencies`.
+# @param $1 `eligible`, `dependencies`, or `profile`.
 # @return The platform name or newline-delimited exact vcpkg port identities.
 # @throws Python exits nonzero for malformed, unsupported, or duplicate data.
 read_profile_platform() {
@@ -109,6 +129,11 @@ if platform not in platforms:
     raise SystemExit(f"security profile is not eligible on {platform}")
 if sys.argv[2] == "eligible":
     print(platform)
+elif sys.argv[2] == "profile":
+    profile_name = profile.get("profile")
+    if profile_name not in {"sanitizer-asan", "sanitizer-tsan", "fuzz-codecs"}:
+        raise SystemExit("security profile identity is unsupported")
+    print(profile_name)
 elif sys.argv[2] == "dependencies":
     dependencies = profile.get("vcpkg_dependencies")
     if (
@@ -126,6 +151,7 @@ PY
 }
 
 read_profile_platform eligible >/dev/null
+profile_name=$(read_profile_platform profile)
 
 # @brief Reject links, special files, or unreadable entries in a fresh tree.
 # @param $1 Existing root that must be a real directory containing only real
@@ -161,11 +187,204 @@ for current, directories, files in os.walk(root, topdown=True, followlinks=False
 PY
 }
 
+# @brief Verify the exact runner-bound CMake executable and GoogleTest module.
+# @return Zero only when path, version, CMAKE_ROOT, module type, and module
+#   SHA-256 equal the retained runner member.
+# @throws Python reports bounded subprocess/file diagnostics and exits nonzero
+#   before vcpkg, configure, build, or test execution.
+# @note The selected CMake 3.31.5 module uses counter-suffixed GoogleTest
+#   includes understood by current-main's candidate-owned inventory helper.
+#   This protected stage does not broaden or modify that helper.
+verify_darwin_cmake_contract() {
+  python3 - "$expected_cmake_path" "$expected_cmake_version" \
+    "$expected_cmake_module_sha256" <<'PY'
+import hashlib
+import os
+import re
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+command = Path(sys.argv[1])
+version = sys.argv[2]
+module_digest = sys.argv[3]
+if not command.is_absolute() or not re.fullmatch(r"[1-9][0-9]*(?:\.[0-9]+){2}", version):
+    raise SystemExit("retained Darwin CMake identity is malformed")
+if not re.fullmatch(r"[0-9a-f]{64}", module_digest):
+    raise SystemExit("retained Darwin GoogleTest module digest is malformed")
+try:
+    mode = os.lstat(command).st_mode
+except OSError as error:
+    raise SystemExit(f"cannot inspect retained Darwin CMake path: {error}") from error
+if not stat.S_ISREG(mode) or stat.S_ISLNK(mode) or not os.access(command, os.X_OK):
+    raise SystemExit("retained Darwin CMake path is not a real executable")
+
+def run(arguments: list[str], label: str) -> str:
+    """Run one bounded tool identity query and return strict UTF-8 stdout."""
+    try:
+        completed = subprocess.run(
+            arguments,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SystemExit(f"{label} failed: {error}") from error
+    output = completed.stdout[:65536].decode("utf-8", errors="replace")
+    if completed.returncode != 0 or len(completed.stdout) > 65536:
+        raise SystemExit(f"{label} failed ({completed.returncode}):\n{output}")
+    return output
+
+version_output = run([str(command), "--version"], "Darwin CMake version query")
+first_line = version_output.splitlines()[0] if version_output.splitlines() else ""
+if first_line != f"cmake version {version}":
+    raise SystemExit(
+        f"Darwin CMake version differs: expected {version!r}, observed {first_line!r}"
+    )
+system_information = run(
+    [str(command), "--system-information"], "Darwin CMake system-information query"
+)
+roots = re.findall(r'(?m)^CMAKE_ROOT "([^"\r\n]+)"$', system_information)
+if len(roots) != 1:
+    raise SystemExit("Darwin CMake reported no unique CMAKE_ROOT")
+module = Path(roots[0]) / "Modules/GoogleTest.cmake"
+try:
+    module_mode = os.lstat(module).st_mode
+    content = module.read_bytes()
+except OSError as error:
+    raise SystemExit(f"cannot inspect Darwin GoogleTest module: {error}") from error
+if not stat.S_ISREG(module_mode) or stat.S_ISLNK(module_mode):
+    raise SystemExit("Darwin GoogleTest module is not a real regular file")
+if hashlib.sha256(content).hexdigest() != module_digest:
+    raise SystemExit("Darwin GoogleTest module differs from its protected digest")
+PY
+}
+
+# @brief Compile, link, and run a real bounded libFuzzer/ASan/UBSan probe.
+# @return Zero only when both exact compilers report the retained version and
+#   the C++ compiler builds and executes the combined sanitizer harness.
+# @throws Python writes bounded compile/run logs beside the platform outputs,
+#   prints at most 240 lines of real diagnostics, and exits nonzero on any
+#   path/version/compile/link/run/timeout failure.
+# @note Probe source/output live below a fresh runner.temp child and are removed
+#   on success. Failure logs remain diagnostic data, never selector authority.
+verify_darwin_fuzz_toolchain() {
+  python3 - "$expected_fuzz_c_compiler" "$expected_fuzz_cxx_compiler" \
+    "$expected_fuzz_compiler_version" "$CI_RUNNER_TEMP" \
+    "$(dirname -- "$OUTPUT_FILE")" <<'PY'
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+c_compiler = Path(sys.argv[1])
+cxx_compiler = Path(sys.argv[2])
+version = sys.argv[3]
+runner_temp = Path(sys.argv[4]).resolve()
+diagnostic_root = Path(sys.argv[5])
+if not re.fullmatch(r"[1-9][0-9]*(?:\.[0-9]+){2}", version):
+    raise SystemExit("retained Darwin fuzz compiler version is malformed")
+for compiler in (c_compiler, cxx_compiler):
+    if not compiler.is_absolute() or not compiler.exists() or not os.access(compiler, os.X_OK):
+        raise SystemExit(f"retained Darwin fuzz compiler is unavailable: {compiler}")
+    try:
+        completed = subprocess.run(
+            [str(compiler), "--version"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SystemExit(f"Darwin fuzz compiler version query failed: {error}") from error
+    output = completed.stdout[:65536].decode("utf-8", errors="replace")
+    match = re.search(r"(?m)^(?:Homebrew )?clang version ([0-9]+(?:\.[0-9]+){2})\b", output)
+    if completed.returncode != 0 or match is None or match.group(1) != version:
+        raise SystemExit(
+            f"Darwin fuzz compiler version differs for {compiler}:\n{output}"
+        )
+
+probe_root = Path(tempfile.mkdtemp(prefix="photospider-fuzz-toolchain.", dir=runner_temp))
+source = probe_root / "probe.cpp"
+binary = probe_root / "probe"
+source.write_text(
+    "#include <cstddef>\n"
+    "#include <cstdint>\n"
+    "extern \"C\" int LLVMFuzzerTestOneInput(const std::uint8_t*, std::size_t) { return 0; }\n",
+    encoding="utf-8",
+)
+compile_command = [
+    str(cxx_compiler),
+    "-std=c++17",
+    "-fno-omit-frame-pointer",
+    "-fsanitize=fuzzer,address,undefined",
+    str(source),
+    "-o",
+    str(binary),
+]
+run_command = [
+    str(binary),
+    "-seed=1",
+    "-runs=1",
+    "-timeout=1",
+    "-max_len=8",
+]
+
+def execute(arguments: list[str], timeout: int, label: str) -> subprocess.CompletedProcess[bytes]:
+    """Run one real bounded probe phase and persist exact argv/output."""
+    try:
+        completed = subprocess.run(
+            arguments,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        (diagnostic_root / f"darwin-fuzz-toolchain-{label}.log").write_text(
+            json.dumps(arguments) + "\n" + str(error) + "\n", encoding="utf-8"
+        )
+        raise SystemExit(f"Darwin fuzz {label} probe failed: {error}") from error
+    output = completed.stdout[:262144]
+    (diagnostic_root / f"darwin-fuzz-toolchain-{label}.log").write_bytes(
+        (json.dumps(arguments) + "\n").encode("utf-8") + output
+    )
+    if completed.returncode != 0 or len(completed.stdout) > 262144:
+        diagnostic = output.decode("utf-8", errors="replace")
+        raise SystemExit(
+            f"Darwin fuzz {label} probe failed ({completed.returncode}):\n{diagnostic}"
+        )
+    return completed
+
+try:
+    execute(compile_command, 90, "compile-link")
+    if not binary.is_file() or binary.is_symlink() or not os.access(binary, os.X_OK):
+        raise SystemExit("Darwin fuzz compile/link probe produced no real executable")
+    execute(run_command, 30, "run")
+except BaseException:
+    raise
+else:
+    shutil.rmtree(probe_root)
+PY
+}
+
 case "$platform" in
   Linux)
     if [[ "$expected_image_os" != ubuntu24 ||
       "$expected_runner_label" != ubuntu-24.04 ||
-      "$triplet" != - || "$expected_vcpkg_commit" != - ]]; then
+      "$triplet" != - || "$expected_vcpkg_commit" != - ||
+      "$expected_cmake_path" != - || "$expected_cmake_version" != - ||
+      "$expected_cmake_module_sha256" != - ||
+      "$expected_fuzz_c_compiler" != - ||
+      "$expected_fuzz_cxx_compiler" != - ||
+      "$expected_fuzz_compiler_version" != - ]]; then
       echo "Retained Linux runner identity has inconsistent platform fields." >&2
       exit 1
     fi
@@ -175,14 +394,26 @@ case "$platform" in
       printf '%s\n' '-DCMAKE_C_COMPILER=clang-18'
       printf '%s\n' '-DCMAKE_CXX_COMPILER=clang++-18'
     } > "$OUTPUT_FILE"
+    printf '%s\n' cmake > "$CMAKE_COMMAND_FILE"
     ;;
   Darwin)
     if [[ "$expected_image_os" != macos15 ||
       "$expected_runner_label" != macos-15 ||
       "$triplet" != arm64-osx ||
-      ! "$expected_vcpkg_commit" =~ ^[0-9a-f]{40}$ ]]; then
+      ! "$expected_vcpkg_commit" =~ ^[0-9a-f]{40}$ ||
+      ! "$expected_cmake_path" =~ ^/[^[:cntrl:]]+$ ||
+      ! "$expected_cmake_version" =~ ^[1-9][0-9]*(\.[0-9]+){2}$ ||
+      ! "$expected_cmake_module_sha256" =~ ^[0-9a-f]{64}$ ||
+      ! "$expected_fuzz_c_compiler" =~ ^/[^[:cntrl:]]+$ ||
+      ! "$expected_fuzz_cxx_compiler" =~ ^/[^[:cntrl:]]+$ ||
+      ! "$expected_fuzz_compiler_version" =~ ^[1-9][0-9]*(\.[0-9]+){2}$ ]]; then
       echo "Retained Darwin runner identity has inconsistent platform fields." >&2
       exit 1
+    fi
+    verify_darwin_cmake_contract
+    printf '%s\n' "$expected_cmake_path" > "$CMAKE_COMMAND_FILE"
+    if [[ "$profile_name" == fuzz-codecs ]]; then
+      verify_darwin_fuzz_toolchain
     fi
     vcpkg_source_root=${VCPKG_INSTALLATION_ROOT:-}
     runner_temp=${CI_RUNNER_TEMP:-}
@@ -302,6 +533,10 @@ case "$platform" in
       printf '%s\n' "-DCMAKE_TOOLCHAIN_FILE=$toolchain_file"
       printf '%s\n' "-DVCPKG_INSTALLED_DIR=$install_root"
       printf '%s\n' "-DVCPKG_TARGET_TRIPLET=$triplet"
+      if [[ "$profile_name" == fuzz-codecs ]]; then
+        printf '%s\n' "-DCMAKE_C_COMPILER=$expected_fuzz_c_compiler"
+        printf '%s\n' "-DCMAKE_CXX_COMPILER=$expected_fuzz_cxx_compiler"
+      fi
     } > "$OUTPUT_FILE"
     ;;
   *)

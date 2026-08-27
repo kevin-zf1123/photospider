@@ -79,6 +79,12 @@ identities on 2026-08-27 from authoritative upstream services:
   [`ubuntu24/20260823.283`](https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283).
   The allowlist bytes are a canonical image input; the resolved runtime record,
   manifest `builder_runner`, and OCI builder label bind the actual build member.
+  Linux ASan, TSan, bounded-fuzz, and manual sanitizer jobs measure that record
+  on the real host from an exact protected sparse checkout before candidate
+  checkout. They then pull the exact digest and use the protected host wrapper
+  to mount candidate source, protected `ci`, profile inventory, and the same
+  identity read-only into a network-disabled container. No registry credential
+  enters that container.
 - The finite Darwin set binds `macos-15`/`arm64`/`arm64-osx`. Stable
   `20260727.0256.1` maps to full vcpkg commit
   [`6d9d7df564a1ccdaa994e4ad39ccd4a32360867b`](https://github.com/microsoft/vcpkg/commit/6d9d7df564a1ccdaa994e4ad39ccd4a32360867b),
@@ -88,6 +94,24 @@ identities on 2026-08-27 from authoritative upstream services:
   [`macos-15-arm64/20260727.0256`](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260727.0256)
   and
   [`macos-15-arm64/20260824.0311`](https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260824.0311).
+  Both release records include Android SDK CMake `3.31.5` and Homebrew LLVM
+  `18.1.8`. The lock binds the exact CMake executable, the official 3.31.5
+  `Modules/GoogleTest.cmake` SHA-256
+  `b5a2546c8cea1d5f9a366c6983261c621c0b34a40d8494caefdc0fa4c78862c4`,
+  and the exact LLVM C/C++ paths. The
+  [official Android repository metadata](https://dl.google.com/android/repository/repository2-1.xml)
+  binds `cmake-3.31.5-darwin.zip` to SHA-1
+  `4c28c635f08638494ce563ffa7d26d1c43a50190`; the module hash above was
+  measured from that exact archive. Platform preparation verifies the real
+  version/module bytes; fuzz also builds and executes a bounded combined
+  libFuzzer/ASan/UBSan probe before configure. CMake 3.31.5 is the protected
+  compatibility handoff for current-main's counter-suffix inventory helper;
+  direct hash-suffix support remains an unchecked candidate-owned task.
+  Each Darwin profile first retains its real host identity from an exact
+  protected `workflow_commit` sparse checkout, then admits candidate source in
+  a disjoint HEAD-bound data root. The protected Darwin wrapper executes every
+  profile/parser/platform helper from control and rejects candidate helper
+  selection, overlap, replacement, dirty state, or HEAD/root drift.
   Security jobs use the preinstalled tree only as an image-bound binary and
   locked Git-object source. Each profile creates an unseedable checkout below
   `runner.temp` (fetching the same exact commit from the official repository if

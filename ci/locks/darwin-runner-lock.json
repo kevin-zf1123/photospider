@@ -1,10 +1,22 @@
 {
   "approved_images": [
     {
+      "cmake_gtest_module_sha256": "b5a2546c8cea1d5f9a366c6983261c621c0b34a40d8494caefdc0fa4c78862c4",
+      "cmake_path": "/Users/runner/Library/Android/sdk/cmake/3.31.5/bin/cmake",
+      "cmake_version": "3.31.5",
+      "fuzz_c_compiler_path": "/opt/homebrew/opt/llvm@18/bin/clang",
+      "fuzz_compiler_version": "18.1.8",
+      "fuzz_cxx_compiler_path": "/opt/homebrew/opt/llvm@18/bin/clang++",
       "image_version": "20260727.0256.1",
       "vcpkg_commit": "6d9d7df564a1ccdaa994e4ad39ccd4a32360867b"
     },
     {
+      "cmake_gtest_module_sha256": "b5a2546c8cea1d5f9a366c6983261c621c0b34a40d8494caefdc0fa4c78862c4",
+      "cmake_path": "/Users/runner/Library/Android/sdk/cmake/3.31.5/bin/cmake",
+      "cmake_version": "3.31.5",
+      "fuzz_c_compiler_path": "/opt/homebrew/opt/llvm@18/bin/clang",
+      "fuzz_compiler_version": "18.1.8",
+      "fuzz_cxx_compiler_path": "/opt/homebrew/opt/llvm@18/bin/clang++",
       "image_version": "20260824.0311.1",
       "vcpkg_commit": "127402f1c75bb3d5ff6bce04b285faa4930a5aca"
     }

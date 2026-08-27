@@ -11,15 +11,18 @@ only a resolution base; its unrelated contents are never selected. The runtime
 role also carries every built shared library and maintained plugin/trust tree
 needed by those commands.
 
-The consumer re-runs CTest discovery only after the runtime role has been
-restored at its canonical build path.  A ``*_NOT_BUILT`` placeholder, changed
-ordinary inventory, missing include, executable, data, shared library, plugin,
-or trust input fails before ordinary CTest can execute.
+The consumer re-runs CTest discovery only after attestation and restoration at
+its canonical build path. A ``*_NOT_BUILT`` placeholder, changed ordinary
+inventory, missing include, executable, data, shared library, plugin, or trust
+input fails before ordinary CTest can execute.
 
-The pre-attestation protected verifier also parses retained raw and restored
-JSON through this module and compares their exact ordinary-test names with both
-archived closures. It excludes only the exact ``build-smoke`` label and never
-executes a test command while establishing that cross-job coverage boundary.
+The pre-attestation protected verifier never invokes CTest or interprets a
+candidate CMake program. It parses the retained generated control files through
+one strict, side-effect-free command allowlist, compares their complete test
+records with the retained raw JSON and both archived closures, and rejects any
+unknown command or ambiguous path spelling. Root tokens are applied only to
+structured absolute path fields that equal a maintained root or one of its
+component descendants; arbitrary substring replacement is forbidden.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
 
 BUILD_SMOKE_LABEL = "build-smoke"
@@ -74,9 +77,61 @@ _CONTROL_DIRECTIVE = re.compile(
 )
 """Generated CTest include/subdirectory directive and its first argument."""
 
+_BOOLEAN_PROPERTIES = frozenset(
+    {"DISABLED", "PROCESSOR_AFFINITY", "RUN_SERIAL", "WILL_FAIL"}
+)
+"""CTest properties serialized as booleans by JSON-v1."""
+
+_FLOAT_PROPERTIES = frozenset({"COST", "TIMEOUT"})
+"""CTest properties serialized as numbers by JSON-v1."""
+
+_INTEGER_PROPERTIES = frozenset({"PROCESSORS", "SKIP_RETURN_CODE"})
+"""CTest properties serialized as integers by JSON-v1."""
+
+_LIST_PROPERTIES = frozenset(
+    {
+        "ATTACHED_FILES",
+        "ATTACHED_FILES_ON_FAIL",
+        "DEPENDS",
+        "ENVIRONMENT",
+        "ENVIRONMENT_MODIFICATION",
+        "FAIL_REGULAR_EXPRESSION",
+        "FIXTURES_CLEANUP",
+        "FIXTURES_REQUIRED",
+        "FIXTURES_SETUP",
+        "LABELS",
+        "PASS_REGULAR_EXPRESSION",
+        "REQUIRED_FILES",
+        "RESOURCE_GROUPS",
+        "RESOURCE_LOCK",
+        "SKIP_REGULAR_EXPRESSION",
+    }
+)
+"""CTest properties serialized as string arrays by JSON-v1."""
+
+_STRING_PROPERTIES = frozenset({"GENERATED_RESOURCE_SPEC_FILE", "WORKING_DIRECTORY"})
+"""CTest properties serialized as strings by JSON-v1."""
+
+_IGNORED_CONTROL_PROPERTIES = frozenset({"_BACKTRACE_TRIPLES"})
+"""Generated CMake-only metadata intentionally omitted by CTest JSON-v1."""
+
 
 class CTestClosureError(ValueError):
     """Report malformed inventory, unsafe paths, or an incomplete closure."""
+
+
+class _CMakeCommand(NamedTuple):
+    """Represent one decoded generated CTest control command.
+
+    Attributes:
+        name: Lowercase command identity.
+        arguments: Decoded argument vector without CMake evaluation.
+        line: One-based physical start line used in diagnostics.
+    """
+
+    name: str
+    arguments: tuple[str, ...]
+    line: int
 
 
 def _is_shared_library_name(name: str) -> bool:
@@ -182,21 +237,256 @@ def _relative_regular(path: Path, root: Path, context: str) -> PurePosixPath:
     return pure
 
 
-def _normalize_string(value: str, source_root: Path, build_root: Path) -> str:
-    """Replace maintained absolute roots with stable closure tokens."""
-    normalized = value.replace(str(build_root.resolve()), "${BUILD_ROOT}")
-    return normalized.replace(str(source_root.resolve()), "${SOURCE_ROOT}")
+def _root_identities(
+    source_root: Path, build_root: Path
+) -> tuple[tuple[PurePosixPath, str], ...]:
+    """Return deterministic component-aware maintained-root identities.
+
+    Args:
+        source_root: Exact producer source root recorded by the build.
+        build_root: Exact producer build root recorded by the build.
+
+    Returns:
+        Build then source roots paired with their stable closure tokens. The
+        more specific build root is intentionally considered first because the
+        maintained build tree is normally a component descendant of source.
+
+    Raises:
+        CTestClosureError: A root is relative/noncanonical, both roots are the
+            same path, or source is nested below build and would make source
+            data indistinguishable from generated build data.
+    """
+    roots: list[PurePosixPath] = []
+    for context, root in (("source", source_root), ("build", build_root)):
+        # Producer calls may enter Darwin's ``/var`` alias while CTest emits
+        # the physical ``/private/var`` spelling. Resolve only an existing
+        # root object; pre-attestation comparison intentionally keeps deleted
+        # producer roots as their retained lexical identity.
+        try:
+            canonical_root = root.resolve(strict=True)
+        except OSError:
+            canonical_root = root
+        text = str(canonical_root)
+        pure = PurePosixPath(text)
+        if (
+            not pure.is_absolute()
+            or pure.as_posix() != text
+            or any(part in ("", ".", "..") for part in pure.parts[1:])
+        ):
+            raise CTestClosureError(
+                f"CTest {context} root is not a canonical absolute path"
+            )
+        roots.append(pure)
+    source, build = roots
+    if source == build or source.is_relative_to(build):
+        raise CTestClosureError("CTest source/build root topology is ambiguous")
+    return ((build, "${BUILD_ROOT}"), (source, "${SOURCE_ROOT}"))
 
 
-def _normalize_value(value: Any, source_root: Path, build_root: Path) -> Any:
-    """Recursively normalize strings while preserving JSON scalar structure."""
+def _contains_root_text(value: str, roots: Sequence[tuple[PurePosixPath, str]]) -> bool:
+    """Return whether a scalar lexically contains any maintained-root bytes."""
+    return any(root.as_posix() in value for root, _ in roots)
+
+
+def _normalize_absolute_path(
+    value: str,
+    roots: Sequence[tuple[PurePosixPath, str]],
+    context: str,
+) -> str:
+    """Normalize one complete absolute path at component boundaries only.
+
+    Args:
+        value: A decoded scalar already known to be one structured path field.
+        roots: Maintained roots returned by :func:`_root_identities`.
+        context: Stable diagnostic identity.
+
+    Returns:
+        The original external/nonabsolute value, or one root-token spelling for
+        an exact maintained root or component descendant.
+
+    Raises:
+        CTestClosureError: Maintained-root bytes occur in a root-prefix sibling,
+            embedded string, quoted value, noncanonical path, or other shape
+            that cannot be proven to name one exact path.
+    """
+    if not value.startswith("/"):
+        if _contains_root_text(value, roots):
+            raise CTestClosureError(
+                f"{context} embeds maintained-root bytes ambiguously"
+            )
+        return value
+    pure = PurePosixPath(value)
+    if pure.as_posix() != value or any(
+        part in ("", ".", "..") for part in pure.parts[1:]
+    ):
+        if _contains_root_text(value, roots):
+            raise CTestClosureError(f"{context} path is non-canonical")
+        return value
+    for root, token in roots:
+        if pure == root:
+            return token
+        if pure.is_relative_to(root):
+            relative = pure.relative_to(root).as_posix()
+            return f"{token}/{relative}"
+    if _contains_root_text(value, roots):
+        raise CTestClosureError(
+            f"{context} is a maintained-root prefix sibling or embedded path"
+        )
+    return value
+
+
+def _normalize_path_list(
+    value: str,
+    roots: Sequence[tuple[PurePosixPath, str]],
+    context: str,
+    delimiter: str,
+) -> str:
+    """Normalize a nonempty structured path list without guessing boundaries."""
+    items = value.split(delimiter)
+    if any(not item for item in items):
+        if _contains_root_text(value, roots):
+            raise CTestClosureError(f"{context} has an ambiguous empty list item")
+        return value
+    return delimiter.join(
+        _normalize_absolute_path(item, roots, context) for item in items
+    )
+
+
+def _normalize_assignment_value(
+    value: str,
+    roots: Sequence[tuple[PurePosixPath, str]],
+    context: str,
+    *,
+    path_list: bool = False,
+) -> str:
+    """Normalize one explicit ``KEY=value`` or option assignment.
+
+    Unknown assignment keys containing maintained roots fail instead of
+    allowing a new quoting/list convention to become an implicit authority.
+    """
+    if "=" not in value:
+        return _normalize_absolute_path(value, roots, context)
+    key, assigned = value.split("=", 1)
+    if re.fullmatch(
+        r"(?:[A-Za-z_][A-Za-z0-9_]*|--?[A-Za-z0-9_.+-]+|"
+        r"-D[A-Za-z0-9_]+(?::[A-Za-z0-9_]+)?)",
+        key,
+    ) is None:
+        if _contains_root_text(value, roots):
+            raise CTestClosureError(f"{context} has an ambiguous assignment key")
+        return value
+    if not assigned and _contains_root_text(value, roots):
+        raise CTestClosureError(f"{context} has an empty path assignment")
+    if path_list and os.pathsep in assigned:
+        normalized = _normalize_path_list(
+            assigned, roots, context, os.pathsep
+        )
+    elif ";" in assigned:
+        normalized = _normalize_path_list(assigned, roots, context, ";")
+    else:
+        normalized = _normalize_absolute_path(assigned, roots, context)
+    return f"{key}={normalized}"
+
+
+def _normalize_command(
+    command: Sequence[str], source_root: Path, build_root: Path, test_name: str
+) -> list[str]:
+    """Normalize only structured command arguments for one CTest record."""
+    roots = _root_identities(source_root, build_root)
+    return [
+        _normalize_assignment_value(
+            argument,
+            roots,
+            f"CTest {test_name!r} command argument {index}",
+        )
+        for index, argument in enumerate(command)
+    ]
+
+
+def _normalize_property_value(
+    name: str,
+    value: Any,
+    source_root: Path,
+    build_root: Path,
+    test_name: str,
+) -> Any:
+    """Normalize only property fields whose schema explicitly carries paths."""
+    roots = _root_identities(source_root, build_root)
+    context = f"CTest {test_name!r} property {name}"
+    if name == "WORKING_DIRECTORY":
+        if not isinstance(value, str):
+            raise CTestClosureError(f"{context} is not a string")
+        return _normalize_absolute_path(value, roots, context)
+    if name == "REQUIRED_FILES":
+        values = value if isinstance(value, list) else [value]
+        if not all(isinstance(item, str) for item in values):
+            raise CTestClosureError(f"{context} is not a string array")
+        return [
+            _normalize_absolute_path(item, roots, context) for item in values
+        ]
+    if name == "ENVIRONMENT":
+        values = value if isinstance(value, list) else [value]
+        if not all(isinstance(item, str) for item in values):
+            raise CTestClosureError(f"{context} is not a string array")
+        return [
+            _normalize_assignment_value(
+                item, roots, context, path_list=True
+            )
+            for item in values
+        ]
+    if name == "ENVIRONMENT_MODIFICATION":
+        values = value if isinstance(value, list) else [value]
+        normalized: list[str] = []
+        for item in values:
+            if not isinstance(item, str) or "=" not in item or ":" not in item:
+                raise CTestClosureError(f"{context} entry is malformed")
+            variable, modification = item.split("=", 1)
+            operation, modified = modification.split(":", 1)
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable) is None:
+                raise CTestClosureError(f"{context} variable is malformed")
+            if operation in {"reset", "unset"}:
+                if modified:
+                    raise CTestClosureError(f"{context} reset/unset has a value")
+                normalized.append(item)
+                continue
+            if operation not in {
+                "cmake_list_append",
+                "cmake_list_prepend",
+                "path_list_append",
+                "path_list_prepend",
+                "set",
+                "string_append",
+                "string_prepend",
+            }:
+                raise CTestClosureError(f"{context} operation is unsupported")
+            if operation.startswith("path_list_") and os.pathsep in modified:
+                modified = _normalize_path_list(
+                    modified, roots, context, os.pathsep
+                )
+            elif operation.startswith("cmake_list_") and ";" in modified:
+                modified = _normalize_path_list(modified, roots, context, ";")
+            else:
+                modified = _normalize_absolute_path(modified, roots, context)
+            normalized.append(f"{variable}={operation}:{modified}")
+        return normalized
     if isinstance(value, str):
-        return _normalize_string(value, source_root, build_root)
+        if _contains_root_text(value, roots):
+            raise CTestClosureError(
+                f"{context} contains a root outside an allowlisted path field"
+            )
+        return value
     if isinstance(value, list):
-        return [_normalize_value(item, source_root, build_root) for item in value]
+        return [
+            _normalize_property_value(
+                name, item, source_root, build_root, test_name
+            )
+            for item in value
+        ]
     if isinstance(value, dict):
         return {
-            key: _normalize_value(item, source_root, build_root)
+            key: _normalize_property_value(
+                name, item, source_root, build_root, test_name
+            )
             for key, item in sorted(value.items())
         }
     if value is None or isinstance(value, (bool, int, float)):
@@ -237,10 +527,29 @@ def _labels(test_name: str, properties: Mapping[str, Any]) -> list[str]:
     return sorted(value)
 
 
-def _ordinary_tests(
-    payload: Any, source_root: Path, build_root: Path
+def _test_records(
+    payload: Any,
+    source_root: Path,
+    build_root: Path,
+    *,
+    exclude_build_smoke: bool,
 ) -> list[dict[str, Any]]:
-    """Normalize every non-build-smoke test from one complete CTest payload."""
+    """Normalize complete CTest records through structured path fields only.
+
+    Args:
+        payload: Strict decoded ``ctestInfo`` JSON-v1 value.
+        source_root: Exact producer source-root identity.
+        build_root: Exact producer build-root identity.
+        exclude_build_smoke: Whether exact ``build-smoke`` records are omitted
+            for the ordinary runtime closure.
+
+    Returns:
+        Sorted unique normalized records.
+
+    Raises:
+        CTestClosureError: Schema, identity, command, property, label, or
+            structured root normalization is malformed or ambiguous.
+    """
     if not isinstance(payload, dict) or payload.get("kind") != "ctestInfo":
         raise CTestClosureError("CTest inventory kind must be ctestInfo")
     version = payload.get("version")
@@ -264,7 +573,7 @@ def _ordinary_tests(
         seen.add(name)
         properties = _properties(name, item.get("properties"))
         labels = _labels(name, properties)
-        if BUILD_SMOKE_LABEL in labels:
+        if exclude_build_smoke and BUILD_SMOKE_LABEL in labels:
             continue
         command = item.get("command")
         if (
@@ -285,17 +594,40 @@ def _ordinary_tests(
             )
         records.append(
             {
-                "command": _normalize_value(command, source_root, build_root),
+                "command": _normalize_command(
+                    command, source_root, build_root, name
+                ),
                 "disabled": disabled,
                 "labels": labels,
                 "name": name,
-                "properties": _normalize_value(properties, source_root, build_root),
+                "properties": {
+                    property_name: _normalize_property_value(
+                        property_name,
+                        property_value,
+                        source_root,
+                        build_root,
+                        name,
+                    )
+                    for property_name, property_value in properties.items()
+                },
             }
         )
     if not records:
         raise CTestClosureError("ordinary CTest inventory is empty")
     records.sort(key=lambda record: record["name"])
     return records
+
+
+def _ordinary_tests(
+    payload: Any, source_root: Path, build_root: Path
+) -> list[dict[str, Any]]:
+    """Normalize every non-build-smoke test from one complete CTest payload."""
+    return _test_records(
+        payload,
+        source_root,
+        build_root,
+        exclude_build_smoke=True,
+    )
 
 
 def ordinary_test_records(
@@ -327,6 +659,41 @@ def ordinary_test_records(
     """
     payload = _load_json_bytes(raw_inventory, context)
     return _ordinary_tests(payload, source_root, build_root)
+
+
+def complete_test_records(
+    raw_inventory: bytes,
+    context: str,
+    source_root: Path,
+    build_root: Path,
+) -> list[dict[str, Any]]:
+    """Return every exact CTest record, including build-smoke registrations.
+
+    Args:
+        raw_inventory: Exact retained complete CTest JSON-v1 bytes.
+        context: Stable retained-input identity.
+        source_root: Exact producer source root.
+        build_root: Exact producer build root.
+
+    Returns:
+        Sorted normalized complete test records.
+
+    Raises:
+        CTestClosureError: The same strict schema/path checks as
+            :func:`ordinary_test_records` fail.
+
+    Note:
+        The pre-attestation pure-data verifier uses this complete view to prove
+        that control files cannot add, remove, relabel, or rewrite even a
+        separately routed build-smoke registration.
+    """
+    payload = _load_json_bytes(raw_inventory, context)
+    return _test_records(
+        payload,
+        source_root,
+        build_root,
+        exclude_build_smoke=False,
+    )
 
 
 def ordinary_test_names(raw_inventory: bytes, context: str) -> list[str]:
@@ -428,6 +795,510 @@ def _control_paths(build_root: Path) -> list[str]:
     if not result:
         raise CTestClosureError("CTest control graph is empty")
     return sorted(result)
+
+
+def _parse_cmake_control(content: bytes, context: str) -> list[_CMakeCommand]:
+    """Parse the side-effect-free generated CMake command syntax we allow.
+
+    Args:
+        content: Exact retained control-file bytes from a targeted archive.
+        context: Stable relative file identity for diagnostics.
+
+    Returns:
+        Ordered decoded command records. This parser performs no expansion,
+        include, condition, variable, filesystem, or subprocess operation.
+
+    Raises:
+        CTestClosureError: UTF-8, comments, quoting, bracket arguments, command
+            shape, nesting, expansion syntax, or trailing bytes are ambiguous.
+
+    Note:
+        This is intentionally not a general CMake interpreter. It accepts the
+        generated CTest subset needed below and leaves semantic allowlisting to
+        :func:`control_test_records`. Unknown syntax fails before attestation.
+    """
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise CTestClosureError(
+            f"generated CTest control is not UTF-8: {context}: {error}"
+        ) from error
+    if "\0" in text:
+        raise CTestClosureError(f"generated CTest control contains NUL: {context}")
+
+    commands: list[_CMakeCommand] = []
+    index = 0
+    line = 1
+    length = len(text)
+
+    def advance() -> str:
+        """Consume one code point while maintaining the physical line."""
+        nonlocal index, line
+        character = text[index]
+        index += 1
+        if character == "\n":
+            line += 1
+        return character
+
+    def skip_space_and_comments() -> None:
+        """Consume whitespace and ordinary line comments outside arguments."""
+        nonlocal index
+        while index < length:
+            if text[index].isspace():
+                advance()
+                continue
+            if text[index] == "#":
+                if text.startswith("#[", index):
+                    raise CTestClosureError(
+                        f"bracket comments are unsupported in {context}:{line}"
+                    )
+                while index < length and advance() != "\n":
+                    pass
+                continue
+            break
+
+    def decoded_escape() -> str:
+        """Decode one bounded CMake escape without evaluating variables."""
+        if index >= length:
+            raise CTestClosureError(
+                f"trailing CMake escape in {context}:{line}"
+            )
+        escaped = advance()
+        return {"n": "\n", "r": "\r", "t": "\t"}.get(escaped, escaped)
+
+    while True:
+        skip_space_and_comments()
+        if index >= length:
+            break
+        command_line = line
+        name_match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[index:])
+        if name_match is None:
+            raise CTestClosureError(
+                f"cannot parse generated CTest command in {context}:{line}"
+            )
+        name = name_match.group(0).lower()
+        for _ in name_match.group(0):
+            advance()
+        while index < length and text[index].isspace():
+            advance()
+        if index >= length or advance() != "(":
+            raise CTestClosureError(
+                f"generated CTest command lacks '(' in {context}:{command_line}"
+            )
+        arguments: list[str] = []
+        while True:
+            skip_space_and_comments()
+            if index >= length:
+                raise CTestClosureError(
+                    f"unterminated generated CTest command in {context}:{command_line}"
+                )
+            if text[index] == ")":
+                advance()
+                break
+            argument = ""
+            if text[index] == '"':
+                advance()
+                while index < length and text[index] != '"':
+                    if text[index] == "\\":
+                        advance()
+                        argument += decoded_escape()
+                    else:
+                        argument += advance()
+                if index >= length:
+                    raise CTestClosureError(
+                        f"unterminated quoted CMake argument in {context}:{line}"
+                    )
+                advance()
+            else:
+                bracket = re.match(r"\[(=*)\[", text[index:])
+                if bracket is not None:
+                    delimiter = "]" + bracket.group(1) + "]"
+                    for _ in bracket.group(0):
+                        advance()
+                    end = text.find(delimiter, index)
+                    if end < 0:
+                        raise CTestClosureError(
+                            f"unterminated bracket argument in {context}:{line}"
+                        )
+                    while index < end:
+                        argument += advance()
+                    for _ in delimiter:
+                        advance()
+                else:
+                    while index < length and not text[index].isspace() and text[index] != ")":
+                        if text[index] == "(":
+                            raise CTestClosureError(
+                                f"nested unquoted '(' is unsupported in {context}:{line}"
+                            )
+                        if text[index] == "\\":
+                            advance()
+                            argument += decoded_escape()
+                        else:
+                            argument += advance()
+            if not argument:
+                raise CTestClosureError(
+                    f"empty generated CTest argument in {context}:{line}"
+                )
+            if "$" in argument:
+                raise CTestClosureError(
+                    f"generated CTest expansion is forbidden in {context}:{line}"
+                )
+            arguments.append(argument)
+        commands.append(_CMakeCommand(name, tuple(arguments), command_line))
+    if not commands:
+        raise CTestClosureError(f"generated CTest control file is empty: {context}")
+    return commands
+
+
+def _control_relative_target(
+    raw_target: str,
+    owner: PurePosixPath,
+    build_root: PurePosixPath,
+    *,
+    subdirectory: bool,
+) -> str:
+    """Resolve one retained include/subdirectory target by path components.
+
+    Args:
+        raw_target: Decoded CMake argument.
+        owner: Relative control file containing the directive.
+        build_root: Exact producer build-root identity.
+        subdirectory: Whether ``CTestTestfile.cmake`` is appended.
+
+    Returns:
+        Canonical build-relative target.
+
+    Raises:
+        CTestClosureError: The target escapes, uses a root-prefix sibling,
+            contains ambiguous components, or names the build root itself.
+    """
+    target = PurePosixPath(raw_target)
+    if target.is_absolute():
+        if target == build_root:
+            relative = PurePosixPath()
+        elif target.is_relative_to(build_root):
+            relative = target.relative_to(build_root)
+        else:
+            raise CTestClosureError(
+                f"generated CTest target escapes its producer build root: {raw_target}"
+            )
+    else:
+        relative = owner.parent / target
+    if subdirectory:
+        relative /= "CTestTestfile.cmake"
+    normalized = PurePosixPath(relative.as_posix())
+    if (
+        not normalized.parts
+        or normalized.as_posix() != relative.as_posix()
+        or any(part in ("", ".", "..") for part in normalized.parts)
+    ):
+        raise CTestClosureError(
+            f"generated CTest target is non-canonical: {raw_target}"
+        )
+    return normalized.as_posix()
+
+
+def _control_property_value(name: str, raw: str, context: str) -> Any:
+    """Convert one allowlisted generated CTest property to JSON-v1 shape."""
+    if name in _BOOLEAN_PROPERTIES:
+        normalized = raw.upper()
+        if normalized in {"1", "ON", "TRUE", "YES"}:
+            return True
+        if normalized in {"0", "FALSE", "NO", "OFF"}:
+            return False
+        raise CTestClosureError(f"{context}: boolean property {name} is invalid")
+    if name in _FLOAT_PROPERTIES:
+        if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", raw) is None:
+            raise CTestClosureError(f"{context}: numeric property {name} is invalid")
+        return float(raw)
+    if name in _INTEGER_PROPERTIES:
+        if re.fullmatch(r"-?[0-9]+", raw) is None:
+            raise CTestClosureError(f"{context}: integer property {name} is invalid")
+        return int(raw)
+    if name in _LIST_PROPERTIES:
+        values = raw.split(";")
+        if any(not value for value in values):
+            raise CTestClosureError(f"{context}: list property {name} is ambiguous")
+        return values
+    if name in _STRING_PROPERTIES:
+        if not raw:
+            raise CTestClosureError(f"{context}: string property {name} is empty")
+        return raw
+    if name in _IGNORED_CONTROL_PROPERTIES:
+        return None
+    raise CTestClosureError(f"{context}: unknown CTest property {name}")
+
+
+def control_test_records(
+    staged_build_root: Path,
+    closure_value: Mapping[str, Any],
+    source_root: Path,
+    producer_build_root: Path,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Reconstruct complete CTest records from retained control bytes only.
+
+    Args:
+        staged_build_root: Private extracted targeted-role ``ci`` directory.
+        closure_value: Already validated archived closure object.
+        source_root: Exact producer source-root identity from the completion
+            stamp; it is data and is never opened by this parser.
+        producer_build_root: Exact producer build-root identity from the same
+            completion stamp.
+
+    Returns:
+        Complete sorted normalized records and a path-to-SHA-256 control-byte
+        mapping used to prove control/runtime roles are byte-identical.
+
+    Raises:
+        CTestClosureError: A control path/member is unsafe, graph membership is
+            incomplete, syntax or command semantics exceed the allowlist,
+            wrapper structure is ambiguous, or test/property coverage differs.
+
+    Note:
+        No CMake/CTest command is invoked. ``include`` and ``subdirs`` are
+        resolved as pure path records, and only the exact GoogleTest
+        ``if(EXISTS)/include/else/add_test(..._NOT_BUILT)/endif`` wrapper is
+        accepted as conditional syntax.
+    """
+    control_paths = closure_value.get("control_paths")
+    if (
+        not isinstance(control_paths, list)
+        or not control_paths
+        or control_paths != sorted(control_paths)
+        or len(control_paths) != len(set(control_paths))
+        or "CTestTestfile.cmake" not in control_paths
+    ):
+        raise CTestClosureError("archived CTest control path set is invalid")
+    expected = set(control_paths)
+    contents: dict[str, bytes] = {}
+    digests: dict[str, str] = {}
+    for relative_text in control_paths:
+        relative = PurePosixPath(relative_text)
+        if (
+            not relative.parts
+            or relative.as_posix() != relative_text
+            or any(part in ("", ".", "..") for part in relative.parts)
+        ):
+            raise CTestClosureError(
+                f"archived CTest control path is unsafe: {relative_text}"
+            )
+        path = staged_build_root.joinpath(*relative.parts)
+        if not path.is_file() or path.is_symlink():
+            raise CTestClosureError(
+                f"archived CTest control file is missing or unsafe: {relative_text}"
+            )
+        content = path.read_bytes()
+        contents[relative_text] = content
+        digests[relative_text] = hashlib.sha256(content).hexdigest()
+
+    producer_root = _root_identities(source_root, producer_build_root)[0][0]
+    pending = ["CTestTestfile.cmake"]
+    visited: set[str] = set()
+    tests: dict[str, tuple[str, ...]] = {}
+    test_directories: dict[str, PurePosixPath] = {}
+    property_values: dict[str, dict[str, Any]] = {}
+
+    def add_test(
+        name: str,
+        command: Sequence[str],
+        context: str,
+        directory: PurePosixPath,
+    ) -> None:
+        """Add one unique real test command to the reconstructed inventory."""
+        if not name or "\0" in name or name.endswith("_NOT_BUILT"):
+            raise CTestClosureError(f"{context}: invalid CTest identity {name!r}")
+        if name in tests or not command:
+            raise CTestClosureError(f"{context}: duplicate or empty CTest {name!r}")
+        tests[name] = tuple(command)
+        test_directories[name] = directory
+
+    while pending:
+        relative_text = pending.pop()
+        if relative_text in visited:
+            continue
+        if relative_text not in expected:
+            raise CTestClosureError(
+                f"generated CTest graph references an undeclared file: {relative_text}"
+            )
+        visited.add(relative_text)
+        owner = PurePosixPath(relative_text)
+        commands = _parse_cmake_control(contents[relative_text], relative_text)
+        control_flow = [
+            command for command in commands if command.name in {"else", "endif", "if"}
+        ]
+        if control_flow:
+            if (
+                len(commands) != 5
+                or commands[0].name != "if"
+                or len(commands[0].arguments) != 2
+                or commands[0].arguments[0] != "EXISTS"
+                or commands[1].name != "include"
+                or len(commands[1].arguments) != 1
+                or commands[2] != _CMakeCommand("else", (), commands[2].line)
+                or commands[3].name != "add_test"
+                or len(commands[3].arguments) != 2
+                or commands[4] != _CMakeCommand("endif", (), commands[4].line)
+            ):
+                raise CTestClosureError(
+                    f"conditional CTest control is not an exact NOT_BUILT wrapper: {relative_text}"
+                )
+            first_target = _control_relative_target(
+                commands[0].arguments[1], owner, producer_root, subdirectory=False
+            )
+            include_target = _control_relative_target(
+                commands[1].arguments[0], owner, producer_root, subdirectory=False
+            )
+            fallback_name, fallback_command = commands[3].arguments
+            if (
+                first_target != include_target
+                or include_target not in expected
+                or not fallback_name.endswith("_NOT_BUILT")
+                or fallback_command != fallback_name
+            ):
+                raise CTestClosureError(
+                    f"NOT_BUILT wrapper identity differs: {relative_text}"
+                )
+            pending.append(include_target)
+            continue
+
+        for command in commands:
+            context = f"{relative_text}:{command.line}"
+            if command.name == "include":
+                if len(command.arguments) != 1:
+                    raise CTestClosureError(f"{context}: include shape differs")
+                pending.append(
+                    _control_relative_target(
+                        command.arguments[0], owner, producer_root, subdirectory=False
+                    )
+                )
+            elif command.name == "subdirs":
+                if len(command.arguments) != 1:
+                    raise CTestClosureError(f"{context}: subdirs shape differs")
+                pending.append(
+                    _control_relative_target(
+                        command.arguments[0], owner, producer_root, subdirectory=True
+                    )
+                )
+            elif command.name == "add_test":
+                if len(command.arguments) < 2 or command.arguments[0] == "NAME":
+                    raise CTestClosureError(f"{context}: add_test shape differs")
+                add_test(
+                    command.arguments[0],
+                    command.arguments[1:],
+                    context,
+                    owner.parent,
+                )
+            elif command.name == "set_tests_properties":
+                try:
+                    property_index = command.arguments.index("PROPERTIES")
+                except ValueError as error:
+                    raise CTestClosureError(
+                        f"{context}: set_tests_properties lacks PROPERTIES"
+                    ) from error
+                names = command.arguments[:property_index]
+                properties = command.arguments[property_index + 1 :]
+                if (
+                    not names
+                    or not properties
+                    or len(properties) % 2 != 0
+                ):
+                    raise CTestClosureError(
+                        f"{context}: set_tests_properties shape differs"
+                    )
+                for name in names:
+                    destination = property_values.setdefault(name, {})
+                    for index in range(0, len(properties), 2):
+                        property_name = properties[index]
+                        if property_name in destination:
+                            raise CTestClosureError(
+                                f"{context}: duplicate property {property_name} for {name}"
+                            )
+                        converted = _control_property_value(
+                            property_name, properties[index + 1], context
+                        )
+                        if property_name not in _IGNORED_CONTROL_PROPERTIES:
+                            destination[property_name] = converted
+            elif command.name == "set":
+                if (
+                    not command.arguments
+                    or re.fullmatch(
+                        r"[A-Za-z_][A-Za-z0-9_]*", command.arguments[0]
+                    )
+                    is None
+                ):
+                    raise CTestClosureError(f"{context}: generated set shape differs")
+            else:
+                raise CTestClosureError(
+                    f"{context}: unknown or side-effect-capable CTest command {command.name}"
+                )
+
+    if visited != expected:
+        raise CTestClosureError(
+            "archived CTest control set contains unreachable or missing members"
+        )
+    if not tests:
+        raise CTestClosureError("archived CTest control graph has no built tests")
+    if set(property_values) - set(tests):
+        raise CTestClosureError(
+            "CTest properties name an undeclared or NOT_BUILT test"
+        )
+    records: list[dict[str, Any]] = []
+    for name in sorted(tests):
+        properties = dict(sorted(property_values.get(name, {}).items()))
+        working = properties.get("WORKING_DIRECTORY")
+        if working is None:
+            command_working = producer_root / test_directories[name]
+            # CTest JSON-v1 materializes the effective default as an absolute
+            # property even though generated CTest control omits it.
+            properties["WORKING_DIRECTORY"] = command_working.as_posix()
+            properties = dict(sorted(properties.items()))
+        else:
+            if not isinstance(working, str) or not working:
+                raise CTestClosureError(
+                    f"CTest working directory for {name!r} is malformed"
+                )
+            working_path = PurePosixPath(working)
+            command_working = (
+                working_path
+                if working_path.is_absolute()
+                else producer_root / test_directories[name] / working_path
+            )
+        labels = _labels(name, properties)
+        disabled = properties.get("DISABLED", False)
+        if not isinstance(disabled, bool):
+            raise CTestClosureError(f"CTest DISABLED for {name!r} is not boolean")
+        command = list(tests[name])
+        command_zero = PurePosixPath(command[0])
+        if (
+            not command_zero.is_absolute()
+            and (command[0].startswith(".") or "/" in command[0])
+        ):
+            if not command_working.is_absolute():
+                raise CTestClosureError(
+                    f"CTest working directory for {name!r} cannot resolve command zero"
+                )
+            command[0] = (command_working / command_zero).as_posix()
+        records.append(
+            {
+                "command": _normalize_command(
+                    command, source_root, producer_build_root, name
+                ),
+                "disabled": disabled,
+                "labels": labels,
+                "name": name,
+                "properties": {
+                    property_name: _normalize_property_value(
+                        property_name,
+                        property_value,
+                        source_root,
+                        producer_build_root,
+                        name,
+                    )
+                    for property_name, property_value in properties.items()
+                },
+            }
+        )
+    return records, dict(sorted(digests.items()))
 
 
 def _effective_working_directory(

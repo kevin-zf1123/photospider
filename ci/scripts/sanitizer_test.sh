@@ -6,10 +6,14 @@ set -Eeuo pipefail
 # @brief Run one isolated matrix-declared sanitizer profile.
 # @note The generic path consumes generated target/CTest roles. The only direct
 #   GoogleTest selections accepted here are carried by the hash-bound temporary
-#   current-main fallback and are removed by the protected cleanup stage.
+#   current-main fallback and are removed by the protected cleanup stage. When
+#   CI_SOURCE_ROOT is set, this protected script and its lock/parser dependencies
+#   remain under CONTROL_ROOT while CMake consumes only that separate candidate
+#   source root.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
+CONTROL_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd -P)
+REPO_ROOT=${CI_SOURCE_ROOT:-$CONTROL_ROOT}
 SANITIZER=${SANITIZER:-asan}
 case "$SANITIZER" in
   asan | tsan) ;;
@@ -30,6 +34,7 @@ source "$SCRIPT_DIR/common.sh"
 profile_json=$CI_ARTIFACT_DIR/resolved-$PROFILE.json
 python3 "$SCRIPT_DIR/ci_profile_manifest.py" \
   --repo-root "$REPO_ROOT" \
+  --control-root "$CONTROL_ROOT" \
   --inventory-dir "${CI_INVENTORY_DIR:-build/generated/ci_inventory}" \
   --profile "$PROFILE" \
   --output "$profile_json"
@@ -354,19 +359,37 @@ while IFS= read -r cmake_argument; do
   cmake_args+=("$cmake_argument")
 done < <(read_sanitizer_profile cmake)
 platform_args_file=$CI_ARTIFACT_DIR/$PROFILE-platform-cmake-args.txt
+platform_cmake_command_file=$CI_ARTIFACT_DIR/$PROFILE-platform-cmake-command.txt
 CI_PLATFORM_CMAKE_ARGS_FILE=$platform_args_file \
+  CI_PLATFORM_CMAKE_COMMAND_FILE=$platform_cmake_command_file \
   bash "$SCRIPT_DIR/security_platform_prepare.sh" "$profile_json"
 platform_args=()
 while IFS= read -r platform_argument; do
   [[ -n "$platform_argument" ]] && platform_args+=("$platform_argument")
 done < "$platform_args_file"
+platform_cmake_commands=()
+while IFS= read -r platform_cmake_command; do
+  platform_cmake_commands+=("$platform_cmake_command")
+done < "$platform_cmake_command_file"
+if ((${#platform_cmake_commands[@]} != 1)) ||
+  [[ -z "${platform_cmake_commands[0]}" ]]; then
+  echo "Security platform resolved no unique CMake command." >&2
+  exit 1
+fi
+CI_CMAKE_COMMAND=${platform_cmake_commands[0]}
+if [[ "$CI_CMAKE_COMMAND" == */cmake ]]; then
+  CI_CTEST_COMMAND=${CI_CMAKE_COMMAND%/cmake}/ctest
+else
+  CI_CTEST_COMMAND=ctest
+fi
+export CI_CMAKE_COMMAND CI_CTEST_COMMAND
 if ((${#cmake_args[@]} == 0)); then
   echo "Sanitizer profile resolved no CMake arguments." >&2
   exit 1
 fi
 
 cd "$REPO_ROOT"
-run_logged "cmake_configure_$PROFILE" cmake \
+run_logged "cmake_configure_$PROFILE" "$CI_CMAKE_COMMAND" \
   -S "$REPO_ROOT" \
   -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
@@ -391,7 +414,7 @@ if [[ "$mode" == fallback ]]; then
     [[ "${invocation_trust[index]}" == true ]] && needs_trust=true
   done
   run_logged "validate_sanitizer_targets_$PROFILE" require_ci_targets "${targets[@]}"
-  run_logged "build_sanitizer_$PROFILE" cmake --build "$BUILD_DIR" \
+  run_logged "build_sanitizer_$PROFILE" "$CI_CMAKE_COMMAND" --build "$BUILD_DIR" \
     --target "${targets[@]}" -j "$CI_JOBS"
   if [[ "$needs_trust" == true ]]; then
     export_ci_plugin_trust_environment
@@ -411,18 +434,18 @@ else
     labels+=("$label")
   done < <(read_sanitizer_profile labels)
   run_logged "validate_sanitizer_targets_$PROFILE" require_ci_targets "${targets[@]}"
-  run_logged "build_sanitizer_$PROFILE" cmake --build "$BUILD_DIR" \
+  run_logged "build_sanitizer_$PROFILE" "$CI_CMAKE_COMMAND" --build "$BUILD_DIR" \
     --target "${targets[@]}" -j "$CI_JOBS"
   label_expression=$(IFS='|'; printf '%s' "${labels[*]}")
   discovery_log=$CI_ARTIFACT_DIR/${PROFILE}_ctest_discovery.log
-  ctest --test-dir "$BUILD_DIR" -N -L "^(${label_expression})$" > "$discovery_log" 2>&1
+  "$CI_CTEST_COMMAND" --test-dir "$BUILD_DIR" -N -L "^(${label_expression})$" > "$discovery_log" 2>&1
   selected_count=$(sed -n 's/^Total Tests: \([0-9][0-9]*\)$/\1/p' "$discovery_log")
   if [[ ! "$selected_count" =~ ^[1-9][0-9]*$ ]]; then
     echo "Versioned sanitizer roles selected no CTest entries." >&2
     sed -n '1,240p' "$discovery_log" >&2
     exit 1
   fi
-  run_logged "ctest_$PROFILE" ctest --test-dir "$BUILD_DIR" \
+  run_logged "ctest_$PROFILE" "$CI_CTEST_COMMAND" --test-dir "$BUILD_DIR" \
     --output-on-failure -L "^(${label_expression})$"
 fi
 

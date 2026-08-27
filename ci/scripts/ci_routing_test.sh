@@ -1044,39 +1044,62 @@ validate_security_profile_routing() {
   local manual_job="$TEST_ROOT/manual-sanitizer-job.yml"
   local verify_line
   local candidate_line
+  local label
+  local slug
 
   for job_name in sanitizer-asan sanitizer-tsan fuzz-codecs; do
+    case "$job_name" in
+      sanitizer-asan) slug=asan; label=ASan ;;
+      sanitizer-tsan) slug=tsan; label=TSan ;;
+      fuzz-codecs) slug=fuzz; label=fuzz ;;
+      *) fail "unknown Linux security profile job: $job_name" ;;
+    esac
     job_file="$TEST_ROOT/integration-$job_name-job.yml"
     extract_job_block "$workflow" "$job_name" "$job_file" ||
       fail "$job_name security job could not be extracted"
     assert_file_contains "$job_file" \
       'needs: integration-plan'
+    assert_file_contains "$job_file" 'runs-on: ubuntu-24.04'
+    assert_file_not_contains "$job_file" 'container:'
     assert_file_contains "$job_file" \
-      'image: ${{ inputs.image_ref }}'
+      "path: .ci-linux-$slug-control"
+    assert_file_contains "$job_file" \
+      "path: .ci-linux-$slug-candidate"
+    assert_file_contains "$job_file" \
+      "path: .ci-linux-$slug-inventory"
     assert_file_not_contains "$job_file" ':latest'
     assert_file_contains "$job_file" \
-      'python3 ci/scripts/ci_runner_verify.py'
+      "python3 .ci-linux-$slug-control/ci/scripts/ci_runner_verify.py"
     assert_file_contains "$job_file" '--platform Linux'
     assert_file_contains "$job_file" '--runner-label ubuntu-24.04'
     assert_file_contains "$job_file" '--output "$CI_RUNNER_IDENTITY_FILE"'
     assert_file_contains "$job_file" 'CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/'
-    verify_line=$(grep -nF -- 'python3 ci/scripts/ci_runner_verify.py' \
+    assert_file_contains "$job_file" 'CI_IMAGE_REF: ${{ inputs.image_ref }}'
+    assert_file_contains "$job_file" 'CI_IMAGE_DIGEST: ${{ inputs.image_digest }}'
+    assert_file_contains "$job_file" \
+      "CI_SECURITY_PROFILE: $job_name"
+    assert_file_contains "$job_file" '        shell: bash'
+    assert_file_contains "$job_file" \
+      "run: bash .ci-linux-$slug-control/ci/scripts/linux_security_profile.sh"
+    verify_line=$(grep -nF -- \
+      "python3 .ci-linux-$slug-control/ci/scripts/ci_runner_verify.py" \
       "$job_file" | head -n 1 | cut -d: -f1)
-    candidate_line=$(grep -nF -- 'Download security profile inventory' \
+    candidate_line=$(grep -nF -- \
+      "Checkout Linux $label candidate after host verification" \
       "$job_file" | head -n 1 | cut -d: -f1)
     [[ -n "$verify_line" && -n "$candidate_line" ]] ||
       fail "$job_name lacks runner verification/candidate boundary"
     ((verify_line < candidate_line)) ||
-      fail "$job_name consumes candidate profile data before runner verification"
+      fail "$job_name checks out candidate data before host runner verification"
   done
   assert_file_contains "$TEST_ROOT/integration-sanitizer-asan-job.yml" \
-    'SANITIZER: asan'
+    'CI_SECURITY_PROFILE: sanitizer-asan'
   assert_file_contains "$TEST_ROOT/integration-sanitizer-tsan-job.yml" \
-    'SANITIZER: tsan'
+    'CI_SECURITY_PROFILE: sanitizer-tsan'
   assert_file_contains "$TEST_ROOT/integration-fuzz-codecs-job.yml" \
     'timeout-minutes: 20'
   assert_file_contains "$TEST_ROOT/integration-fuzz-codecs-job.yml" \
-    'run: bash ci/scripts/fuzz_smoke.sh'
+    'run: bash .ci-linux-fuzz-control/ci/scripts/linux_security_profile.sh'
 
   for job_name in sanitizer-asan-darwin sanitizer-tsan-darwin \
     fuzz-codecs-darwin; do
@@ -1087,15 +1110,32 @@ validate_security_profile_routing() {
     assert_file_contains "$darwin_job" 'runs-on: macos-15'
     assert_file_not_contains "$darwin_job" 'container:'
     assert_file_contains "$darwin_job" 'ci-security-profile-inventory'
+    assert_file_contains "$darwin_job" 'repository: ${{ github.repository }}'
+    assert_file_contains "$darwin_job" 'ref: ${{ inputs.workflow_commit }}'
+    assert_file_contains "$darwin_job" '            ci/locks'
+    assert_file_contains "$darwin_job" '            ci/scripts'
+    assert_file_contains "$darwin_job" 'repository: ${{ inputs.checkout_repository }}'
+    assert_file_contains "$darwin_job" 'ref: ${{ inputs.checkout_ref }}'
+    assert_file_contains "$darwin_job" 'CI_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}'
+    assert_file_contains "$darwin_job" 'CI_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}'
+    assert_file_contains "$darwin_job" 'CI_CONTROL_ROOT: ${{ github.workspace }}/.ci-darwin-'
+    assert_file_contains "$darwin_job" 'CI_CANDIDATE_ROOT: ${{ github.workspace }}/.ci-darwin-'
     assert_file_contains "$darwin_job" '--platform Darwin'
     assert_file_contains "$darwin_job" '--runner-label macos-15'
     assert_file_contains "$darwin_job" '--output "$CI_RUNNER_IDENTITY_FILE"'
     assert_file_contains "$darwin_job" 'CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/'
     assert_file_contains "$darwin_job" 'CI_RUNNER_TEMP: ${{ runner.temp }}'
     assert_file_not_contains "$darwin_job" 'CI_DARWIN_VCPKG_INSTALLED:'
-    verify_line=$(grep -nF -- 'python3 ci/scripts/ci_runner_verify.py' \
+    assert_file_contains "$darwin_job" 'shell: bash'
+    assert_file_contains "$darwin_job" \
+      'run: bash .ci-darwin-'
+    assert_file_not_contains "$darwin_job" \
+      'run: bash ci/scripts/sanitizer_test.sh'
+    assert_file_not_contains "$darwin_job" \
+      'run: bash ci/scripts/fuzz_smoke.sh'
+    verify_line=$(grep -nF -- '/ci/scripts/ci_runner_verify.py' \
       "$darwin_job" | head -n 1 | cut -d: -f1)
-    candidate_line=$(grep -nF -- 'Download security profile inventory' \
+    candidate_line=$(grep -nF -- 'candidate after host verification' \
       "$darwin_job" | head -n 1 | cut -d: -f1)
     [[ -n "$verify_line" && -n "$candidate_line" ]] ||
       fail "$job_name lacks runner verification/candidate boundary"
@@ -1103,17 +1143,17 @@ validate_security_profile_routing() {
       fail "$job_name consumes candidate profile before runner verification"
   done
   assert_file_contains "$TEST_ROOT/integration-sanitizer-asan-darwin-job.yml" \
-    'SANITIZER: asan'
+    'CI_SECURITY_PROFILE: sanitizer-asan'
   assert_file_contains "$TEST_ROOT/integration-sanitizer-asan-darwin-job.yml" \
-    'run: bash ci/scripts/sanitizer_test.sh'
+    'run: bash .ci-darwin-asan-control/ci/scripts/darwin_security_profile.sh'
   assert_file_contains "$TEST_ROOT/integration-sanitizer-tsan-darwin-job.yml" \
-    'SANITIZER: tsan'
+    'CI_SECURITY_PROFILE: sanitizer-tsan'
   assert_file_contains "$TEST_ROOT/integration-sanitizer-tsan-darwin-job.yml" \
-    'run: bash ci/scripts/sanitizer_test.sh'
+    'run: bash .ci-darwin-tsan-control/ci/scripts/darwin_security_profile.sh'
   assert_file_contains "$TEST_ROOT/integration-fuzz-codecs-darwin-job.yml" \
     'timeout-minutes: 30'
   assert_file_contains "$TEST_ROOT/integration-fuzz-codecs-darwin-job.yml" \
-    'run: bash ci/scripts/fuzz_smoke.sh'
+    'run: bash .ci-darwin-fuzz-control/ci/scripts/darwin_security_profile.sh'
   assert_file_not_contains "$workflow" '  security-darwin:'
   assert_file_not_contains "$workflow" 'for sanitizer in asan tsan; do'
 
@@ -1145,23 +1185,44 @@ validate_security_profile_routing() {
 
   extract_job_block "$manual_workflow" sanitizer "$manual_job" ||
     fail "manual sanitizer job could not be extracted"
+  assert_file_not_contains "$manual_job" 'container:'
+  assert_file_contains "$manual_job" \
+    'path: .ci-manual-sanitizer-control'
+  assert_file_contains "$manual_job" \
+    'path: .ci-manual-sanitizer-candidate'
+  assert_file_contains "$manual_job" \
+    'ref: ${{ github.workflow_sha }}'
   assert_file_contains "$manual_job" '--platform Linux'
   assert_file_contains "$manual_job" '--runner-label ubuntu-24.04'
   assert_file_contains "$manual_job" '--output "$CI_RUNNER_IDENTITY_FILE"'
   assert_file_contains "$manual_job" 'CI_RUNNER_IDENTITY_FILE: ${{ runner.temp }}/'
-  verify_line=$(grep -nF -- 'python3 ci/scripts/ci_runner_verify.py' \
+  assert_file_contains "$manual_job" \
+    'CI_SECURITY_PROFILE: sanitizer-${{ inputs.sanitizer }}'
+  assert_file_contains "$manual_job" \
+    'run: bash .ci-manual-sanitizer-control/ci/scripts/linux_security_profile.sh'
+  verify_line=$(grep -nF -- \
+    'python3 .ci-manual-sanitizer-control/ci/scripts/ci_runner_verify.py' \
     "$manual_job" | head -n 1 | cut -d: -f1)
-  candidate_line=$(grep -nF -- 'Download security profile inventory' \
+  candidate_line=$(grep -nF -- \
+    'Checkout manual sanitizer candidate after host verification' \
     "$manual_job" | head -n 1 | cut -d: -f1)
   [[ -n "$verify_line" && -n "$candidate_line" ]] ||
     fail "manual sanitizer lacks runner verification/candidate boundary"
   ((verify_line < candidate_line)) ||
-    fail "manual sanitizer consumes candidate profile before runner verification"
+    fail "manual sanitizer checks out candidate data before runner verification"
 
   assert_file_contains "$sanitizer_script" \
     'python3 "$SCRIPT_DIR/ci_profile_manifest.py"'
   assert_file_contains "$fuzz_script" \
     'python3 "$SCRIPT_DIR/ci_profile_manifest.py"'
+  assert_file_contains "$sanitizer_script" \
+    '--control-root "$CONTROL_ROOT"'
+  assert_file_contains "$fuzz_script" \
+    '--control-root "$CONTROL_ROOT"'
+  assert_file_contains "$sanitizer_script" \
+    'REPO_ROOT=${CI_SOURCE_ROOT:-$CONTROL_ROOT}'
+  assert_file_contains "$fuzz_script" \
+    'REPO_ROOT=${CI_SOURCE_ROOT:-$CONTROL_ROOT}'
   assert_file_contains "$sanitizer_script" \
     'bash "$SCRIPT_DIR/security_platform_prepare.sh"'
   assert_file_contains "$fuzz_script" \
@@ -1177,6 +1238,11 @@ validate_security_profile_routing() {
     'git -C "$fresh_vcpkg_root" status --porcelain=v1'
   assert_file_contains "$platform_script" \
     '"$fresh_vcpkg_root/vcpkg" install'
+  assert_file_contains "$platform_script" 'verify_darwin_cmake_contract'
+  assert_file_contains "$platform_script" 'verify_darwin_fuzz_toolchain'
+  assert_file_contains "$platform_script" 'cmake_gtest_module_sha256'
+  assert_file_contains "$platform_script" \
+    '-fsanitize=fuzzer,address,undefined'
   assert_file_contains "$fuzz_script" '"-seed=$seed"'
   assert_file_contains "$fuzz_script" '"-runs=$runs"'
   assert_file_contains "$fuzz_script" '"-timeout=$timeout"'
@@ -1249,8 +1315,8 @@ validate_reusable_build_identity_routing() {
     '--candidate-root .ci-targeted-verifier-candidate'
   assert_file_contains "$verify_job" \
     '--raw-dir .ci-targeted-verifier-raw'
-  assert_file_contains "$verify_job" \
-    '--restored-build-root "$RUNNER_TEMP/photospider-targeted-ctest-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/ci"'
+  assert_file_not_contains "$verify_job" '--restored-build-root'
+  assert_file_not_contains "$verify_job" 'ctest --show-only'
   assert_file_not_contains "$verify_job" 'run: python3 ci/scripts/build_smoke_route.py'
   assert_file_not_contains "$verify_job" \
     'python3 .ci-targeted-verifier-candidate/'
@@ -1297,6 +1363,16 @@ validate_reusable_build_identity_routing() {
     '_FORBIDDEN_RUNTIME_SUFFIXES'
   assert_file_contains "$REPO_ROOT/ci/scripts/reusable_build.py" \
     '"uncompressed_size"'
+  assert_file_contains "$REPO_ROOT/ci/scripts/reusable_build.py" \
+    'control_test_records'
+  assert_file_contains "$REPO_ROOT/ci/scripts/reusable_build.py" \
+    'raw_complete_records'
+  assert_file_not_contains "$REPO_ROOT/ci/scripts/reusable_build.py" \
+    '_restore_runtime_for_inventory'
+  assert_file_contains "$REPO_ROOT/ci/scripts/ctest_runtime_closure.py" \
+    'unknown or side-effect-capable CTest command'
+  assert_file_contains "$REPO_ROOT/ci/scripts/ctest_runtime_closure.py" \
+    'is_relative_to(root)'
   assert_file_contains "$REPO_ROOT/ci/scripts/targeted_artifact_consume.sh" \
     'ci-integration-suite.yml'
   assert_file_contains "$REPO_ROOT/ci/scripts/targeted_artifact_consume.sh" \

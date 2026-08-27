@@ -9,10 +9,13 @@ set -Eeuo pipefail
 #   ordinary product CTest by this runner. The public entry point resolves the
 #   matrix job timeout, then re-enters the complete configure/build/fuzz body
 #   under one Darwin/Linux process-group deadline. Each libFuzzer invocation
-#   also retains its independent matrix-declared per-input timeout.
+#   also retains its independent matrix-declared per-input timeout. A protected
+#   Darwin wrapper may set CI_SOURCE_ROOT so every executable reader remains in
+#   CONTROL_ROOT while CMake receives only the separate candidate source tree.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
+CONTROL_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd -P)
+REPO_ROOT=${CI_SOURCE_ROOT:-$CONTROL_ROOT}
 export BUILD_DIR=${BUILD_DIR:-$REPO_ROOT/build/ci-fuzz-codecs}
 export CI_BUILD_PROFILE=fuzz-codecs
 export CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-RelWithDebInfo}
@@ -44,6 +47,7 @@ source "$SCRIPT_DIR/common.sh"
 profile_json=$CI_ARTIFACT_DIR/resolved-fuzz-profile.json
 python3 "$SCRIPT_DIR/ci_profile_manifest.py" \
   --repo-root "$REPO_ROOT" \
+  --control-root "$CONTROL_ROOT" \
   --inventory-dir "${CI_INVENTORY_DIR:-build/generated/ci_inventory}" \
   --profile fuzz-codecs \
   --output "$profile_json"
@@ -143,19 +147,32 @@ while IFS= read -r fuzz_record; do
   fuzz_records+=("$fuzz_record")
 done < <(read_fuzz_profile targets)
 platform_args_file=$CI_ARTIFACT_DIR/fuzz-codecs-platform-cmake-args.txt
+platform_cmake_command_file=$CI_ARTIFACT_DIR/fuzz-codecs-platform-cmake-command.txt
 CI_PLATFORM_CMAKE_ARGS_FILE=$platform_args_file \
+  CI_PLATFORM_CMAKE_COMMAND_FILE=$platform_cmake_command_file \
   bash "$SCRIPT_DIR/security_platform_prepare.sh" "$profile_json"
 platform_args=()
 while IFS= read -r platform_argument; do
   [[ -n "$platform_argument" ]] && platform_args+=("$platform_argument")
 done < "$platform_args_file"
+platform_cmake_commands=()
+while IFS= read -r platform_cmake_command; do
+  platform_cmake_commands+=("$platform_cmake_command")
+done < "$platform_cmake_command_file"
+if ((${#platform_cmake_commands[@]} != 1)) ||
+  [[ -z "${platform_cmake_commands[0]}" ]]; then
+  echo "Fuzz platform resolved no unique CMake command." >&2
+  exit 1
+fi
+CI_CMAKE_COMMAND=${platform_cmake_commands[0]}
+export CI_CMAKE_COMMAND
 if ((${#cmake_args[@]} == 0 || ${#fuzz_records[@]} == 0)); then
   echo "Fuzz profile resolved to an empty CMake or target inventory." >&2
   exit 1
 fi
 
 cd "$REPO_ROOT"
-run_logged configure_fuzz_codecs cmake \
+run_logged configure_fuzz_codecs "$CI_CMAKE_COMMAND" \
   -S "$REPO_ROOT" \
   -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
@@ -170,7 +187,7 @@ for record in "${fuzz_records[@]}"; do
   targets+=("$target")
 done
 run_logged validate_fuzz_targets require_ci_targets "${targets[@]}"
-run_logged build_fuzz_targets cmake --build "$BUILD_DIR" --target "${targets[@]}" -j "$CI_JOBS"
+run_logged build_fuzz_targets "$CI_CMAKE_COMMAND" --build "$BUILD_DIR" --target "${targets[@]}" -j "$CI_JOBS"
 
 # @brief Hash a declared seed corpus using sorted relative paths and file bytes.
 # @param $1 Corpus directory.

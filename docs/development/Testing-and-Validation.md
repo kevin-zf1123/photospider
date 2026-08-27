@@ -471,14 +471,16 @@ candidate into a nonexecuted data root distinct from its exact
 `workflow_commit` control-code root and all downloaded raw/control/artifact
 roots. It binds both real `HEAD` commits and directory objects before and after
 use, then revalidates the raw bundle against the protected route digest. Using
-only protected parsers, it requires equality among the raw ordinary-test set,
-the targeted control/runtime closure sets, and fresh restored CTest discovery,
-excluding only the exact `build-smoke` label. Coverage reduction, addition,
-relabeling, identity/digest/path drift, or candidate helper execution fails
-before attestation and readiness. To handle container/host workspace-path
-differences, restored discovery rewrites only the exact completion-stamp
-producer build-root token in a verified job-owned copy of CTest control files
-and the cache; archive, manifest, and closure bytes remain unchanged.
+only protected code and without invoking CTest/CMake, it parses the exact
+archived control graph through a strict generated-command/property allowlist.
+It requires equality among raw complete records, both targeted control/runtime
+closure records and control-file digests, and the ordinary closure after
+excluding only the exact `build-smoke` label. Unknown or side-effect-capable
+control, coverage reduction/addition/relabeling, identity/digest/path drift, or
+candidate helper execution fails before attestation and readiness. Structured
+root fields normalize only exact roots or component descendants; prefix
+siblings, embedded/quoted/list ambiguity, ambiguous root topology, physical
+CTest relocation, and unrestricted string replacement fail closed.
 
 Published and candidate images call the same digest-bound reusable DAG. The
 producer runs `build_required_targets` and `build_all` sequentially in one tree,
@@ -3409,13 +3411,39 @@ nonzero producer output all fail before configure/build/test and success
 evidence. Empty filters therefore retain their intended whole-binary selection
 instead of becoming adjacent boolean text.
 
+Every shared Linux ASan, TSan, and bounded-fuzz job, plus the manual sanitizer
+job, measures its reviewed `ubuntu-24.04` identity on the real host from an
+exact protected sparse checkout before candidate checkout. A protected host
+wrapper then logs in, pulls the exact digest-qualified image, removes the token,
+and runs the profile with no network, a read-only root filesystem, separate
+read-only candidate/protected-`ci`/inventory/identity mounts, and only one fresh
+direct `runner.temp` work root writable. The same retained host record reaches
+platform preparation inside the container; absent job-container `ImageOS`, a
+mutable tag, token forwarding, or candidate-before-verifier order fails.
+
 Darwin ASan, TSan, and bounded fuzz are three independent `macos-15` jobs. Each
 depends only on the common integration plan, consumes the same protected
 profile inventory, and publishes its own diagnostic result under its own
 timeout. They have no sibling dependency, while the complete shared-suite gate
 requires all three results; a failed profile therefore does not suppress the
 other two schedules or disappear behind one serial Darwin aggregate.
-The protected verifier compares the complete YAML job and five-step mapping for
+Each job first sparse-checks out exact protected control and retains its real
+host identity before candidate checkout or generated inventory. The candidate
+then occupies a separate HEAD-bound source/data root, while the protected
+Darwin wrapper supplies every executable profile/parser/platform helper and
+rechecks both clean commits and directory objects after the build. Candidate
+helper execution, root overlap/replacement, or HEAD/root drift fails.
+The two reviewed Darwin rollout records also bind Android SDK CMake 3.31.5,
+its exact GoogleTest module SHA-256, Homebrew LLVM 18.1.8 C/C++ paths, and the
+version-specific vcpkg commit. Preparation checks the real CMake executable,
+reported `CMAKE_ROOT`, and module bytes before configure. This stage-safe
+selection produces counter-suffixed GoogleTest includes accepted by the current
+candidate-owned helper; hash-suffixed CMake 4.x names, foreign/duplicate/missing
+includes, and counter drift fail until the separate candidate-owned helper task
+lands. Fuzz preparation additionally compiles, links, and runs a bounded
+`fuzzer,address,undefined` probe and supplies those exact LLVM paths to CMake;
+tool/version or probe drift does not reduce Darwin fuzz coverage.
+The protected verifier compares the complete YAML job and six-step mapping for
 each profile. The suite gate separately checks out the exact protected
 `workflow_commit` and invokes only the version/hash-bound
 `integration_suite_gate.py`; its complete job, checkout, `needs`, environment,
@@ -3584,8 +3612,8 @@ The maintained entry points are:
   `openexr-metadata`, dedicated static `installed-package`, and
   producer-designated `ctest-control` partitions; role-specific artifacts,
   route-digest-bound verification/attestation, separate protected-code and
-  nonexecuted candidate-data roots, raw/control/targeted/restored ordinary CTest
-  equality, complete shared-suite gate
+  nonexecuted candidate-data roots, raw/control/closure pure-data equality
+  without candidate CTest execution or root relocation, complete shared-suite gate
   aggregation, explicit rejection of a
   serial `integration_suite.sh` fallback, architecture-neutral
   `execution-repeat` routing, newline-path artifacts, and detector/reader/
@@ -3635,8 +3663,9 @@ The maintained entry points are:
   producer rebuild/install.
 - `ci/scripts/targeted_artifact_consume.sh` and `reusable_build.py` for exact
   role member/digest/size identity, separate source/signer attestation digests,
-  dual-root protected verification, raw/closure/restored ordinary coverage,
-  safe extraction, and complete shared-DAG consumers.
+  dual-root protected verification, raw/control/closure pure-data ordinary
+  coverage before attestation, safe post-attestation extraction, and complete
+  shared-DAG consumers.
 
 CI source inventories and exclusion lists must describe maintained tests and
 current source paths. Migration-only harness names must not be retained as

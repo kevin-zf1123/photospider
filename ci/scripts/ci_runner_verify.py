@@ -19,7 +19,7 @@ import platform
 import re
 import stat
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -29,6 +29,8 @@ class RunnerError(ValueError):
 
 _VERSION_PATTERN = re.compile(r"20[0-9]{6}\.[0-9]{3,4}\.[0-9]+")
 _COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+_TOOL_VERSION_PATTERN = re.compile(r"[1-9][0-9]*(?:\.[0-9]+){2}")
 _RESOLVED_SCHEMA = "photospider-runner-runtime-identity-v1"
 
 
@@ -228,10 +230,17 @@ def _validate_runner_lock(
         versions: list[str] = []
         commits: list[str] = []
         for index, record in enumerate(records):
-            if not isinstance(record, dict) or set(record) != {
+            expected_record_fields = {
+                "cmake_gtest_module_sha256",
+                "cmake_path",
+                "cmake_version",
+                "fuzz_c_compiler_path",
+                "fuzz_compiler_version",
+                "fuzz_cxx_compiler_path",
                 "image_version",
                 "vcpkg_commit",
-            }:
+            }
+            if not isinstance(record, dict) or set(record) != expected_record_fields:
                 raise RunnerError(
                     f"{context}: approved Darwin record {index} is malformed"
                 )
@@ -244,6 +253,45 @@ def _validate_runner_lock(
             if not isinstance(commit, str) or _COMMIT_PATTERN.fullmatch(commit) is None:
                 raise RunnerError(
                     f"{context}: approved Darwin vcpkg commit is malformed"
+                )
+            for field in ("cmake_version", "fuzz_compiler_version"):
+                if (
+                    not isinstance(record[field], str)
+                    or _TOOL_VERSION_PATTERN.fullmatch(record[field]) is None
+                ):
+                    raise RunnerError(
+                        f"{context}: approved Darwin {field} is malformed"
+                    )
+            module_sha256 = record["cmake_gtest_module_sha256"]
+            if (
+                not isinstance(module_sha256, str)
+                or _SHA256_PATTERN.fullmatch(module_sha256) is None
+            ):
+                raise RunnerError(
+                    f"{context}: approved Darwin CMake module hash is malformed"
+                )
+            tool_paths: list[PurePosixPath] = []
+            for field in (
+                "cmake_path",
+                "fuzz_c_compiler_path",
+                "fuzz_cxx_compiler_path",
+            ):
+                raw_path = record[field]
+                pure = PurePosixPath(raw_path) if isinstance(raw_path, str) else PurePosixPath()
+                if (
+                    not isinstance(raw_path, str)
+                    or not pure.is_absolute()
+                    or pure.as_posix() != raw_path
+                    or any(part in ("", ".", "..") for part in pure.parts[1:])
+                    or any(ord(character) < 0x20 for character in raw_path)
+                ):
+                    raise RunnerError(
+                        f"{context}: approved Darwin {field} is unsafe"
+                    )
+                tool_paths.append(pure)
+            if len(tool_paths) != len(set(tool_paths)):
+                raise RunnerError(
+                    f"{context}: approved Darwin tool paths are not distinct"
                 )
             versions.append(version)
             commits.append(commit)
@@ -356,6 +404,12 @@ def resolve_approved_identity_from_lock(
         raise RunnerError(f"Darwin image version {image_version!r} is not uniquely approved")
     return {
         "architecture": lock["architecture"],
+        "cmake_gtest_module_sha256": matches[0]["cmake_gtest_module_sha256"],
+        "cmake_path": matches[0]["cmake_path"],
+        "cmake_version": matches[0]["cmake_version"],
+        "fuzz_c_compiler_path": matches[0]["fuzz_c_compiler_path"],
+        "fuzz_compiler_version": matches[0]["fuzz_compiler_version"],
+        "fuzz_cxx_compiler_path": matches[0]["fuzz_cxx_compiler_path"],
         "image_os": lock["image_os"],
         "image_version": matches[0]["image_version"],
         "platform": "Darwin",
