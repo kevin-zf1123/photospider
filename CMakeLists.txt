@@ -601,7 +601,8 @@ target_include_directories(photospider_graph_internal PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(photospider_graph_internal PRIVATE
     photospider_core_internal
-    Photospider::operation_runtime)
+    Photospider::operation_runtime
+    OpenSSL::Crypto)
 
 # Module: configured YAML value translation, graph-document IO, and cache
 # metadata persistence. GraphIO, cache, and Kernel see only neutral contracts;
