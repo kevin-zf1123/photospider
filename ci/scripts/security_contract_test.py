@@ -3479,7 +3479,19 @@ class SecurityPlatformContractTest(unittest.TestCase):
             self.assertFalse(calls[1]["token_present"])
             self.assertFalse(calls[2]["token_present"])
             run_arguments = calls[2]["argv"]
-            self.assertEqual(run_arguments[-3:], [image_ref, "bash", "ci/scripts/sanitizer_test.sh"])
+            self.assertEqual(
+                run_arguments[-4:],
+                [
+                    image_ref,
+                    "bash",
+                    "ci/scripts/linux_security_container_entrypoint.sh",
+                    "ci/scripts/sanitizer_test.sh",
+                ],
+            )
+            self.assertEqual(
+                run_arguments[run_arguments.index("--user") + 1],
+                f"{os.getuid()}:{os.getgid()}",
+            )
             for required in (
                 "--read-only",
                 "--network",
@@ -3493,9 +3505,13 @@ class SecurityPlatformContractTest(unittest.TestCase):
                 f"type=bind,src={inventory.resolve()},dst=/inputs/profile,readonly",
                 f"type=bind,src={identity_path.resolve()},dst=/inputs/runner-identity.json,readonly",
                 f"type=bind,src={work_root.resolve()},dst=/work",
+                f"CI_CONTAINER_UID={os.getuid()}",
+                f"CI_CONTAINER_GID={os.getgid()}",
+                "CI_CONTAINER_WORK_ROOT=/work",
                 "SANITIZER=asan",
             ):
                 self.assertIn(required, run_arguments)
+            self.assertEqual(work_root.stat().st_mode & 0o777, 0o700)
             self.assertNotIn("fixture-token-never-log", json.dumps(calls))
 
             invalid = run_command(
@@ -3510,6 +3526,100 @@ class SecurityPlatformContractTest(unittest.TestCase):
             )
             self.assertIn("differs from its exact digest", invalid.stderr)
             self.assertEqual(len(docker_log.read_text(encoding="utf-8").splitlines()), 3)
+
+    def test_linux_container_entrypoint_proves_uid_and_real_work_write(self) -> None:
+        """Run the protected identity/write probe before the profile boundary.
+
+        Returns:
+            None after the exact current numeric identity creates, reads, and
+            removes its job-owned probe, then executes the protected profile;
+            a different UID and residual probe both fail before that script.
+
+        Raises:
+            AssertionError: The entrypoint can report success without the
+                bound UID/GID or a real fresh-work create/read/remove cycle.
+        """
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            workspace = root / "workspace"
+            scripts = workspace / "ci/scripts"
+            scripts.mkdir(parents=True)
+            profile_log = root / "profile.log"
+            profile = scripts / "sanitizer_test.sh"
+            profile.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -Eeuo pipefail\n"
+                "printf 'protected profile executed\\n' > \"$CI_TEST_PROFILE_LOG\"\n",
+                encoding="utf-8",
+            )
+            profile.chmod(0o755)
+            work = root / "work"
+            work.mkdir(mode=0o700)
+            environment = {
+                **os.environ,
+                "CI_CONTAINER_GID": str(os.getgid()),
+                "CI_CONTAINER_UID": str(os.getuid()),
+                "CI_CONTAINER_WORK_ROOT": str(work),
+                "CI_TEST_PROFILE_LOG": str(profile_log),
+            }
+
+            passed = subprocess.run(
+                [
+                    "bash",
+                    str(SCRIPTS / "linux_security_container_entrypoint.sh"),
+                    "ci/scripts/sanitizer_test.sh",
+                ],
+                cwd=workspace,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=20,
+            )
+            self.assertEqual(passed.returncode, 0, passed.stderr)
+            self.assertEqual(
+                profile_log.read_text(encoding="utf-8"),
+                "protected profile executed\n",
+            )
+            self.assertFalse((work / ".photospider-ci-write-probe").exists())
+
+            profile_log.unlink()
+            wrong_identity = subprocess.run(
+                [
+                    "bash",
+                    str(SCRIPTS / "linux_security_container_entrypoint.sh"),
+                    "ci/scripts/sanitizer_test.sh",
+                ],
+                cwd=workspace,
+                env={**environment, "CI_CONTAINER_UID": str(os.getuid() + 1)},
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=20,
+            )
+            self.assertNotEqual(wrong_identity.returncode, 0)
+            self.assertIn("UID/GID differs", wrong_identity.stderr)
+            self.assertFalse(profile_log.exists())
+
+            residual = work / ".photospider-ci-write-probe"
+            residual.write_text("residual\n", encoding="utf-8")
+            stale = subprocess.run(
+                [
+                    "bash",
+                    str(SCRIPTS / "linux_security_container_entrypoint.sh"),
+                    "ci/scripts/sanitizer_test.sh",
+                ],
+                cwd=workspace,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=20,
+            )
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn("residual state", stale.stderr)
+            self.assertFalse(profile_log.exists())
+            self.assertEqual(residual.read_text(encoding="utf-8"), "residual\n")
 
     def test_darwin_host_wrapper_separates_control_from_candidate_data(self) -> None:
         """Execute only protected profile code across two exact Git roots.
@@ -3692,7 +3802,11 @@ class SecurityPlatformContractTest(unittest.TestCase):
             "with open(os.environ['CI_TEST_TOOL_LOG'], 'a', encoding='utf-8') as handle:\n"
             "    handle.write(json.dumps(sys.argv, separators=(',', ':')) + '\\n')\n"
             "if sys.argv[1:] == ['--version']:\n"
-            "    print('cmake version ' + os.environ.get('CI_TEST_CMAKE_VERSION', '3.31.5'))\n"
+            "    sys.stdout.write(os.environ.get(\n"
+            "        'CI_TEST_CMAKE_VERSION_OUTPUT',\n"
+            "        'cmake version 3.31.5-g6cf5163\\n\\n'\n"
+            "        'CMake suite maintained and supported by Kitware (kitware.com/cmake).\\n',\n"
+            "    ))\n"
             "elif sys.argv[1:] == ['--system-information']:\n"
             f"    print('CMAKE_ROOT \\\"{cmake_root}\\\"')\n"
             "else:\n"
@@ -3998,12 +4112,52 @@ class SecurityPlatformContractTest(unittest.TestCase):
             AssertionError: The stage accepts a different CMake/module/LLVM
                 identity or reports a failed combined sanitizer probe as usable.
         """
+        canonical_footer = (
+            "\n\nCMake suite maintained and supported by Kitware "
+            "(kitware.com/cmake).\n"
+        )
         cases = (
             (
                 "cmake-version",
-                {"CI_TEST_CMAKE_VERSION": "4.4.0"},
+                {
+                    "CI_TEST_CMAKE_VERSION_OUTPUT": (
+                        "cmake version 4.4.0" + canonical_footer
+                    )
+                },
                 False,
-                "CMake version differs",
+                "CMake semantic version differs",
+            ),
+            (
+                "cmake-extra-line",
+                {
+                    "CI_TEST_CMAKE_VERSION_OUTPUT": (
+                        "cmake version 3.31.5-g6cf5163"
+                        + canonical_footer
+                        + "candidate supplied line\n"
+                    )
+                },
+                False,
+                "unexpected extra lines",
+            ),
+            (
+                "cmake-control-byte",
+                {
+                    "CI_TEST_CMAKE_VERSION_OUTPUT": (
+                        "cmake version 3.31.5-g6cf5163\t\n"
+                    )
+                },
+                False,
+                "non-canonical byte shape",
+            ),
+            (
+                "cmake-vendor-shape",
+                {
+                    "CI_TEST_CMAKE_VERSION_OUTPUT": (
+                        "cmake version 3.31.5-vendor" + canonical_footer
+                    )
+                },
+                False,
+                "unsupported shape",
             ),
             (
                 "cmake-module",
@@ -5991,6 +6145,124 @@ class ReusableBuildContractTest(unittest.TestCase):
                 build_root,
                 source_root,
             )
+
+    def test_pure_ctest_control_accepts_only_explicit_includes_and_inert_set(
+        self,
+    ) -> None:
+        """Reject module search and stateful ``set`` without executing controls.
+
+        Returns:
+            None after explicit relative/absolute control paths, a quoted empty
+            command argument, and one exact local ``*_TESTS`` list reconstruct
+            successfully, while module-mode, escaping, sibling, and mutable
+            assignment forms fail without creating the candidate marker.
+
+        Raises:
+            AssertionError: The production pure-data parser models candidate
+                module search/interpreter state or loses a generated empty
+                command argument.
+        """
+        closure = self._load_ctest_closure_module()
+        with tempfile.TemporaryDirectory() as temporary_text:
+            staged = Path(temporary_text)
+            source_root = Path("/producer/source")
+            producer_root = Path("/producer/build")
+            relative = staged / "relative/explicit.cmake"
+            absolute = staged / "absolute/explicit.cmake"
+            relative.parent.mkdir(parents=True)
+            absolute.parent.mkdir(parents=True)
+            relative.write_text(
+                'add_test(relative_contract "/usr/bin/true" '
+                '"--osx-architectures" "")\n'
+                "set(relative_contract_TESTS relative_contract)\n",
+                encoding="utf-8",
+            )
+            absolute.write_text(
+                'add_test(absolute_contract "/usr/bin/true")\n',
+                encoding="utf-8",
+            )
+            root_control = staged / "CTestTestfile.cmake"
+            root_control.write_text(
+                'include("relative/explicit.cmake")\n'
+                f'include("{producer_root}/absolute/explicit.cmake")\n',
+                encoding="utf-8",
+            )
+            control_paths = [
+                "CTestTestfile.cmake",
+                "absolute/explicit.cmake",
+                "relative/explicit.cmake",
+            ]
+            records, digests = closure.control_test_records(
+                staged,
+                {"control_paths": control_paths},
+                source_root,
+                producer_root,
+            )
+            by_name = {record["name"]: record for record in records}
+            self.assertEqual(set(by_name), {"absolute_contract", "relative_contract"})
+            self.assertEqual(
+                by_name["relative_contract"]["command"],
+                ["/usr/bin/true", "--osx-architectures", ""],
+            )
+            self.assertEqual(set(digests), set(control_paths))
+
+            marker = staged / "module-search-executed"
+            module = staged / "module_probe.cmake"
+            module.write_text(
+                f'execute_process(COMMAND "/usr/bin/touch" "{marker}")\n',
+                encoding="utf-8",
+            )
+            cases = {
+                "module-mode": (
+                    "include(module_probe)\n",
+                    "not an explicit canonical .cmake path",
+                ),
+                "module-path-state": (
+                    f'set(CMAKE_MODULE_PATH "{staged}")\n'
+                    'include("module_probe.cmake")\n',
+                    "not the unique inert local test list",
+                ),
+                "unknown-set": (
+                    "set(candidate_state enabled)\n"
+                    'include("module_probe.cmake")\n',
+                    "not the unique inert local test list",
+                ),
+                "mismatched-test-list": (
+                    'add_test(actual_contract "/usr/bin/true")\n'
+                    "set(actual_contract_TESTS forged_contract)\n",
+                    "not the unique inert local test list",
+                ),
+                "test-after-inert-list": (
+                    'add_test(first_contract "/usr/bin/true")\n'
+                    "set(first_contract_TESTS first_contract)\n"
+                    'add_test(late_contract "/usr/bin/true")\n',
+                    "does not equal the final local test list",
+                ),
+                "escaping-relative": (
+                    'include("../outside.cmake")\n',
+                    "non-canonical",
+                ),
+                "root-prefix-sibling": (
+                    'include("/producer/build-copy/module_probe.cmake")\n',
+                    "escapes its producer build root",
+                ),
+            }
+            for label, (control_text, diagnostic) in cases.items():
+                with self.subTest(control_boundary=label):
+                    root_control.write_text(control_text, encoding="utf-8")
+                    case_paths = ["CTestTestfile.cmake"]
+                    if "module_probe.cmake" in control_text:
+                        case_paths.append("module_probe.cmake")
+                    with self.assertRaisesRegex(
+                        closure.CTestClosureError, re.escape(diagnostic)
+                    ):
+                        closure.control_test_records(
+                            staged,
+                            {"control_paths": sorted(case_paths)},
+                            source_root,
+                            producer_root,
+                        )
+                    self.assertFalse(marker.exists())
 
     def test_targeted_content_sizes_reject_bool_string_negative_and_total_drift(self) -> None:
         """Reject non-integer and inconsistent member or aggregate byte counts."""

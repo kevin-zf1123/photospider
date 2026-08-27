@@ -50,9 +50,14 @@ _TARGETED_ROLE_PACK_RUN_SHA256 = (
 """Verifier-owned identity for exact role-artifact production."""
 
 _LINUX_SECURITY_WRAPPER_SOURCE_SHA256 = (
-    "e77430f556562e707ea553d9775f49acef10a9100a2af7736ea09f9752e7ea05"
+    "69ae083704348ac2ce7f763abca74aebc2377f5c03f5efff0a92c8769b4128c3"
 )
 """Verifier-owned exact source identity for host-bound Linux profiles."""
+
+_LINUX_SECURITY_ENTRYPOINT_SOURCE_SHA256 = (
+    "c3e9c8e41571350f17dc61bd9431388bfde6b7a19239d85abba32efa7e5b5413"
+)
+"""Verifier-owned identity for the UID/GID and writable-mount probe."""
 
 _DARWIN_SECURITY_WRAPPER_SOURCE_SHA256 = (
     "d200e4f1b6df143f25ec9560d17bab80c069bc68944c0d51ea2fde9525a9c8ce"
@@ -3088,8 +3093,9 @@ def _verify_linux_security_dag(root: Path) -> None:
     Raises:
         ContractError: A Linux profile uses a job container, receives candidate
             data before host verification, changes checkout/image/mount/token/
-            command/output identity, or the protected wrapper bytes/command
-            order can forward credentials or bypass exact pull/run behavior.
+            numeric-user/command/output identity, or the protected wrapper and
+            entrypoint bytes/order can forward credentials or bypass the exact
+            pull, write-probe, and run behavior.
 
     Note:
         Every job is an independent sibling of the other Linux profiles. The
@@ -3269,11 +3275,43 @@ def _verify_linux_security_dag(root: Path) -> None:
         "--network none",
         "--cap-drop ALL",
         "--security-opt no-new-privileges",
+        '--user "$container_uid:$container_gid"',
+        '--env "CI_CONTAINER_UID=$container_uid"',
+        '--env "CI_CONTAINER_GID=$container_gid"',
+        "--env CI_CONTAINER_WORK_ROOT=/work",
+        "ci/scripts/linux_security_container_entrypoint.sh",
     )
     if any(fragment not in source for fragment in required_mounts):
         raise ContractError(f"{helper}: exact container isolation/mount contract differs")
     if '--env CI_GHCR_TOKEN' in source or '--env GH_TOKEN' in source:
         raise ContractError(f"{helper}: registry token can reach candidate container")
+
+    entrypoint = root / "ci/scripts/linux_security_container_entrypoint.sh"
+    entrypoint_digest = _sha256_regular_file(
+        entrypoint, "Linux security container entrypoint"
+    )
+    if entrypoint_digest != _LINUX_SECURITY_ENTRYPOINT_SOURCE_SHA256:
+        raise ContractError(f"{entrypoint}: verifier-owned source identity differs")
+    entrypoint_source = entrypoint.read_text(encoding="utf-8")
+    required_entrypoint_order = (
+        'actual_uid=$(/usr/bin/id -u)',
+        'actual_gid=$(/usr/bin/id -g)',
+        'if [[ "$actual_uid" != "$container_uid"',
+        'printf \'%s\\n\' photospider-linux-security-write-v1 > "$probe"',
+        '$(<"$probe") != photospider-linux-security-write-v1',
+        'rm -- "$probe"\nprobe=\ntrap - EXIT HUP INT TERM',
+        'exec bash "$profile_script"',
+    )
+    entrypoint_positions = [
+        entrypoint_source.find(fragment) for fragment in required_entrypoint_order
+    ]
+    if (
+        any(position < 0 for position in entrypoint_positions)
+        or entrypoint_positions != sorted(entrypoint_positions)
+    ):
+        raise ContractError(
+            f"{entrypoint}: UID/GID, write-probe, and profile order differs"
+        )
 
 
 def _verify_linux_runner_lock(root: Path) -> None:

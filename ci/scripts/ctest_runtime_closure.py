@@ -896,7 +896,9 @@ def _parse_cmake_control(content: bytes, context: str) -> list[_CMakeCommand]:
                 advance()
                 break
             argument = ""
+            explicit_empty = False
             if text[index] == '"':
+                explicit_empty = True
                 advance()
                 while index < length and text[index] != '"':
                     if text[index] == "\\":
@@ -912,6 +914,7 @@ def _parse_cmake_control(content: bytes, context: str) -> list[_CMakeCommand]:
             else:
                 bracket = re.match(r"\[(=*)\[", text[index:])
                 if bracket is not None:
+                    explicit_empty = True
                     delimiter = "]" + bracket.group(1) + "]"
                     for _ in bracket.group(0):
                         advance()
@@ -935,9 +938,9 @@ def _parse_cmake_control(content: bytes, context: str) -> list[_CMakeCommand]:
                             argument += decoded_escape()
                         else:
                             argument += advance()
-            if not argument:
+            if not argument and not explicit_empty:
                 raise CTestClosureError(
-                    f"empty generated CTest argument in {context}:{line}"
+                    f"ambiguous empty generated CTest argument in {context}:{line}"
                 )
             if "$" in argument:
                 raise CTestClosureError(
@@ -996,6 +999,93 @@ def _control_relative_target(
             f"generated CTest target is non-canonical: {raw_target}"
         )
     return normalized.as_posix()
+
+
+def _explicit_control_include_target(
+    raw_target: str,
+    owner: PurePosixPath,
+    build_root: PurePosixPath,
+) -> str:
+    """Resolve one explicit generated CTest include without module lookup.
+
+    Args:
+        raw_target: Decoded single include argument.
+        owner: Relative control file containing the include.
+        build_root: Exact producer build-root identity.
+
+    Returns:
+        Canonical build-relative ``.cmake`` control-file identity.
+
+    Raises:
+        CTestClosureError: The argument is a module-mode name, contains a
+            backslash/control byte, lacks the explicit ``.cmake`` suffix, or
+            fails the component-aware build-root boundary.
+
+    Note:
+        CMake module-mode ``include(name)`` consults ``CMAKE_MODULE_PATH`` and
+        built-in modules. The pre-attestation parser deliberately models no
+        search path: every include must name one declared control file by an
+        explicit canonical relative or absolute path.
+    """
+    if (
+        not raw_target
+        or "\\" in raw_target
+        or any(
+            ord(character) < 32 or ord(character) == 127
+            for character in raw_target
+        )
+        or PurePosixPath(raw_target).suffix != ".cmake"
+    ):
+        raise CTestClosureError(
+            "generated CTest include is not an explicit canonical .cmake "
+            f"path: {raw_target!r}"
+        )
+    return _control_relative_target(
+        raw_target, owner, build_root, subdirectory=False
+    )
+
+
+def _validate_inert_generated_test_list(
+    command: _CMakeCommand,
+    local_test_names: Sequence[str],
+    seen_variable: str | None,
+    context: str,
+) -> str:
+    """Validate the sole inert GoogleTest discovery-list assignment.
+
+    Args:
+        command: Parsed ``set`` command.
+        local_test_names: Tests registered earlier in the same generated
+            control file, in exact registration order.
+        seen_variable: Previously accepted list variable in this file.
+        context: Stable file/line diagnostic.
+
+    Returns:
+        The unique accepted ``*_TESTS`` variable name.
+
+    Raises:
+        CTestClosureError: The assignment is duplicate, names a search/cache/
+            parent-scope variable, or its values do not exactly equal the
+            local registrations.
+
+    Note:
+        ``gtest_discover_tests`` emits one final ``set(<target>_TESTS ...)`` as
+        inert generated bookkeeping. No other CMake assignment form is needed
+        to reconstruct CTest records, so accepting one would silently model
+        candidate-controlled interpreter or module-search state.
+    """
+    if not command.arguments:
+        raise CTestClosureError(f"{context}: generated set shape differs")
+    variable = command.arguments[0]
+    if (
+        seen_variable is not None
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*_TESTS", variable) is None
+        or tuple(command.arguments[1:]) != tuple(local_test_names)
+    ):
+        raise CTestClosureError(
+            f"{context}: generated set is not the unique inert local test list"
+        )
+    return variable
 
 
 def _control_property_value(name: str, raw: str, context: str) -> Any:
@@ -1058,7 +1148,9 @@ def control_test_records(
         No CMake/CTest command is invoked. ``include`` and ``subdirs`` are
         resolved as pure path records, and only the exact GoogleTest
         ``if(EXISTS)/include/else/add_test(..._NOT_BUILT)/endif`` wrapper is
-        accepted as conditional syntax.
+        accepted as conditional syntax. Includes must be explicit canonical
+        ``.cmake`` paths, and ``set`` is limited to the one inert
+        ``<target>_TESTS`` list that exactly repeats local registrations.
     """
     control_paths = closure_value.get("control_paths")
     if (
@@ -1142,11 +1234,11 @@ def control_test_records(
                 raise CTestClosureError(
                     f"conditional CTest control is not an exact NOT_BUILT wrapper: {relative_text}"
                 )
-            first_target = _control_relative_target(
-                commands[0].arguments[1], owner, producer_root, subdirectory=False
+            first_target = _explicit_control_include_target(
+                commands[0].arguments[1], owner, producer_root
             )
-            include_target = _control_relative_target(
-                commands[1].arguments[0], owner, producer_root, subdirectory=False
+            include_target = _explicit_control_include_target(
+                commands[1].arguments[0], owner, producer_root
             )
             fallback_name, fallback_command = commands[3].arguments
             if (
@@ -1161,14 +1253,16 @@ def control_test_records(
             pending.append(include_target)
             continue
 
+        local_test_names: list[str] = []
+        inert_test_list: str | None = None
         for command in commands:
             context = f"{relative_text}:{command.line}"
             if command.name == "include":
                 if len(command.arguments) != 1:
                     raise CTestClosureError(f"{context}: include shape differs")
                 pending.append(
-                    _control_relative_target(
-                        command.arguments[0], owner, producer_root, subdirectory=False
+                    _explicit_control_include_target(
+                        command.arguments[0], owner, producer_root
                     )
                 )
             elif command.name == "subdirs":
@@ -1188,6 +1282,7 @@ def control_test_records(
                     context,
                     owner.parent,
                 )
+                local_test_names.append(command.arguments[0])
             elif command.name == "set_tests_properties":
                 try:
                     property_index = command.arguments.index("PROPERTIES")
@@ -1219,17 +1314,24 @@ def control_test_records(
                         if property_name not in _IGNORED_CONTROL_PROPERTIES:
                             destination[property_name] = converted
             elif command.name == "set":
-                if (
-                    not command.arguments
-                    or re.fullmatch(
-                        r"[A-Za-z_][A-Za-z0-9_]*", command.arguments[0]
-                    )
-                    is None
-                ):
-                    raise CTestClosureError(f"{context}: generated set shape differs")
+                inert_test_list = _validate_inert_generated_test_list(
+                    command,
+                    local_test_names,
+                    inert_test_list,
+                    context,
+                )
             else:
                 raise CTestClosureError(
                     f"{context}: unknown or side-effect-capable CTest command {command.name}"
+                )
+        if inert_test_list is not None:
+            test_list_command = next(
+                command for command in commands if command.name == "set"
+            )
+            if tuple(test_list_command.arguments[1:]) != tuple(local_test_names):
+                raise CTestClosureError(
+                    f"{relative_text}:{test_list_command.line}: generated set "
+                    "does not equal the final local test list"
                 )
 
     if visited != expected:

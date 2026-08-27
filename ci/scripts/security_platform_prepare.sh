@@ -189,7 +189,9 @@ PY
 
 # @brief Verify the exact runner-bound CMake executable and GoogleTest module.
 # @return Zero only when path, version, CMAKE_ROOT, module type, and module
-#   SHA-256 equal the retained runner member.
+#   SHA-256 equal the retained runner member. The version query may carry only
+#   the reviewed Android SDK ``-g<7 lowercase hex>`` vendor suffix; its parsed
+#   semantic version must still equal the lock exactly.
 # @throws Python reports bounded subprocess/file diagnostics and exits nonzero
 #   before vcpkg, configure, build, or test execution.
 # @note The selected CMake 3.31.5 module uses counter-suffixed GoogleTest
@@ -232,16 +234,46 @@ def run(arguments: list[str], label: str) -> str:
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise SystemExit(f"{label} failed: {error}") from error
-    output = completed.stdout[:65536].decode("utf-8", errors="replace")
+    try:
+        output = completed.stdout[:65536].decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise SystemExit(f"{label} returned non-UTF-8 output: {error}") from error
     if completed.returncode != 0 or len(completed.stdout) > 65536:
         raise SystemExit(f"{label} failed ({completed.returncode}):\n{output}")
     return output
 
 version_output = run([str(command), "--version"], "Darwin CMake version query")
-first_line = version_output.splitlines()[0] if version_output.splitlines() else ""
-if first_line != f"cmake version {version}":
+if (
+    not version_output.endswith("\n")
+    or any(
+        ord(character) < 32 and character != "\n" or ord(character) == 127
+        for character in version_output
+    )
+    or not version_output.isascii()
+):
+    raise SystemExit("Darwin CMake version output has a non-canonical byte shape")
+version_lines = version_output[:-1].split("\n")
+if len(version_lines) == 1:
+    first_line = version_lines[0]
+elif version_lines[1:] == [
+    "",
+    "CMake suite maintained and supported by Kitware (kitware.com/cmake).",
+]:
+    first_line = version_lines[0]
+else:
+    raise SystemExit("Darwin CMake version output has unexpected extra lines")
+version_match = re.fullmatch(
+    r"cmake version ([1-9][0-9]*(?:\.[0-9]+){2})(?:-g[0-9a-f]{7})?",
+    first_line,
+)
+if version_match is None:
     raise SystemExit(
-        f"Darwin CMake version differs: expected {version!r}, observed {first_line!r}"
+        f"Darwin CMake version line has an unsupported shape: {first_line!r}"
+    )
+if version_match.group(1) != version:
+    raise SystemExit(
+        "Darwin CMake semantic version differs: "
+        f"expected {version!r}, observed {version_match.group(1)!r}"
     )
 system_information = run(
     [str(command), "--system-information"], "Darwin CMake system-information query"

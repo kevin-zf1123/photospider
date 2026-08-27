@@ -9,8 +9,11 @@ set -Eeuo pipefail
 #   candidate data. This protected helper receives that same regular file and
 #   mounts it read-only beside a read-only candidate source tree, a nested
 #   read-only protected ``ci`` control tree, and read-only profile inventory.
-#   Only the fresh job-owned ``/work`` mount is writable. The GHCR token is used
-#   by the host login command and is never forwarded into the container.
+#   Only the fresh job-owned ``/work`` mount is writable. The container runs as
+#   the same strictly measured positive numeric UID/GID that owns that mode-0700
+#   host directory, and a protected entrypoint proves the identity plus a real
+#   create/read/remove cycle before candidate work. The GHCR token is used by
+#   the host login command and is never forwarded into the container.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd -P)
@@ -163,6 +166,13 @@ mkdir -m 700 -- "$CI_WORK_ROOT"
 work_root=$(real_mount_directory "$CI_WORK_ROOT" "Linux security work root")
 mkdir -m 700 -- "$work_root/build" "$work_root/home" "$work_root/results" \
   "$work_root/runner-temp" "$work_root/tmp"
+container_uid=$(/usr/bin/id -u)
+container_gid=$(/usr/bin/id -g)
+if [[ ! "$container_uid" =~ ^[1-9][0-9]*$ ||
+  ! "$container_gid" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Linux hosted runner has no safe positive numeric UID/GID." >&2
+  exit 1
+fi
 
 # Authenticate on the host only. The protected command uses password-stdin;
 # the secret is removed from this process before pull/run argv are constructed.
@@ -179,6 +189,7 @@ container_arguments=(
   --cap-drop ALL
   --security-opt no-new-privileges
   --pids-limit 4096
+  --user "$container_uid:$container_gid"
   --tmpfs /tmp:rw,nosuid,nodev
   --mount "type=bind,src=$candidate_root,dst=/workspace/photospider,readonly"
   --mount "type=bind,src=$control_root/ci,dst=/workspace/photospider/ci,readonly"
@@ -189,6 +200,9 @@ container_arguments=(
   --env BUILD_DIR=/work/build
   --env CMAKE_BUILD_TYPE=RelWithDebInfo
   --env CI_ARTIFACT_DIR=/work/results
+  --env "CI_CONTAINER_GID=$container_gid"
+  --env "CI_CONTAINER_UID=$container_uid"
+  --env CI_CONTAINER_WORK_ROOT=/work
   --env CI_INVENTORY_DIR=/inputs/profile
   --env "CI_JOBS=$CI_JOBS"
   --env CI_RUNNER_IDENTITY_FILE=/inputs/runner-identity.json
@@ -199,7 +213,12 @@ container_arguments=(
 if [[ -n "$sanitizer" ]]; then
   container_arguments+=(--env "SANITIZER=$sanitizer")
 fi
-container_arguments+=("$CI_IMAGE_REF" bash "$profile_script")
+container_arguments+=(
+  "$CI_IMAGE_REF"
+  bash
+  ci/scripts/linux_security_container_entrypoint.sh
+  "$profile_script"
+)
 
 {
   printf 'schema=photospider-linux-security-host-wrapper-v1\n'
@@ -207,6 +226,8 @@ container_arguments+=("$CI_IMAGE_REF" bash "$profile_script")
   printf 'candidate_commit=%s\n' "$CI_CANDIDATE_COMMIT"
   printf 'workflow_commit=%s\n' "$CI_WORKFLOW_COMMIT"
   printf 'image_digest=%s\n' "$CI_IMAGE_DIGEST"
+  printf 'container_uid=%s\n' "$container_uid"
+  printf 'container_gid=%s\n' "$container_gid"
 } > "$work_root/results/linux-security-host-wrapper.env"
 
 docker "${container_arguments[@]}"

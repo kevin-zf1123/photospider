@@ -473,6 +473,10 @@ roots. It binds both real `HEAD` commits and directory objects before and after
 use, then revalidates the raw bundle against the protected route digest. Using
 only protected code and without invoking CTest/CMake, it parses the exact
 archived control graph through a strict generated-command/property allowlist.
+Every include is an explicit canonical `.cmake` path, never a module lookup;
+the only accepted assignment is one inert local `<target>_TESTS` list exactly
+equal to that file's registrations. Explicit quoted empty command arguments
+remain data, while any search/interpreter-affecting `set` fails closed.
 It requires equality among raw complete records, both targeted control/runtime
 closure records and control-file digests, and the ordinary closure after
 excluding only the exact `build-smoke` label. Unknown or side-effect-capable
@@ -3416,8 +3420,11 @@ job, measures its reviewed `ubuntu-24.04` identity on the real host from an
 exact protected sparse checkout before candidate checkout. A protected host
 wrapper then logs in, pulls the exact digest-qualified image, removes the token,
 and runs the profile with no network, a read-only root filesystem, separate
-read-only candidate/protected-`ci`/inventory/identity mounts, and only one fresh
-direct `runner.temp` work root writable. The same retained host record reaches
+read-only candidate/protected-`ci`/inventory/identity mounts, and only one
+mode-0700 fresh direct `runner.temp` work root writable. Docker `--user` binds
+the container to the host owner's exact positive numeric UID/GID; a protected
+entrypoint verifies the effective identity and a real create/read/remove work
+probe before candidate configure/build/test, without `0777`. The same retained host record reaches
 platform preparation inside the container; absent job-container `ImageOS`, a
 mutable tag, token forwarding, or candidate-before-verifier order fails.
 
@@ -3435,8 +3442,12 @@ rechecks both clean commits and directory objects after the build. Candidate
 helper execution, root overlap/replacement, or HEAD/root drift fails.
 The two reviewed Darwin rollout records also bind Android SDK CMake 3.31.5,
 its exact GoogleTest module SHA-256, Homebrew LLVM 18.1.8 C/C++ paths, and the
-version-specific vcpkg commit. Preparation checks the real CMake executable,
-reported `CMAKE_ROOT`, and module bytes before configure. This stage-safe
+version-specific vcpkg commit. Preparation strictly parses the locked semantic
+version from one canonical `cmake version` line, accepting only the reviewed
+Android SDK `-g<7 lowercase hex>` vendor suffix, then independently checks the
+real executable, reported `CMAKE_ROOT`, and module bytes before configure.
+Wrong semantic versions, foreign suffixes, control bytes, or extra lines fail.
+This stage-safe
 selection produces counter-suffixed GoogleTest includes accepted by the current
 candidate-owned helper; hash-suffixed CMake 4.x names, foreign/duplicate/missing
 includes, and counter drift fail until the separate candidate-owned helper task
