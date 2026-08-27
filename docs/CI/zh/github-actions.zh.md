@@ -50,16 +50,21 @@ integration job 都执行该已校验的 digest-qualified 引用；没有 job �
 该边界会刻意分离四项 identity：`image_source_commit` 是最后的 canonical-image-input-changing
 ancestor，继续绑定 manifest 与 OCI revision；`candidate_commit` 是被测 checkout、GitHub
 attestation source 与 immutable `sha-<full-candidate>` tag；`workflow_commit` 是受保护 control 与
-attestation signer；`image_digest` 是 suite 与 promotion 消费的精确 subject。resolver 会证明 source
-ancestry、last-change authority，以及直到 candidate 都不存在 canonical input drift。它不会为了强迫
-commit 相等而把 parser、test 或 documentation path 加入 image-input list。
+attestation signer；`image_digest` 是 suite 与 promotion 消费的精确 subject。resolver 会在不使用默认
+path-history simplification 的情况下遍历完整非 shallow Git DAG，并要求唯一的 ancestry-maximal
+canonical-input-changing commit；随后证明 source ancestry，以及直到 candidate 都不存在 canonical
+input drift。即使 branch change 收敛到相同 byte，或 merge parent order 改变，incomparable change 也会
+失败。它不会为了强迫 commit 相等而把 parser、test 或 documentation path 加入 image-input list。
 
 对于已知 candidate，verifier 会向 `gh attestation verify` 传入彼此独立的 source/signer digest
-constraint。对于 published discovery，同一 digest 的多份有效 rerun attestation 会通过受保护 Git
-history 归约为唯一最新的 certificate source；该 source 必须是 current consumer 的 ancestor，且相对
-`image_source_commit` 保持 canonical input 零 drift。incomparable source，或同一个最新 candidate
-对应不同 signer 时，会在拉取 layer 前失败。只有随后才会校验 OCI revision 与 manifest label，而且
-它们继续绑定 `image_source_commit`。
+constraint 与受保护的显式 `published_image.attestation_fetch_limit=30`；known result 饱和时，只有每份 certificate 都等于该精确
+pair 才可接受。Published discovery 改为执行 `gh attestation download --limit 30`，计算 retained raw
+JSONL snapshot 的记录数，并在 fetched bundle 达到 30 时按可能截断拒绝，然后才离线校验同一
+snapshot。它绝不把更短的 verified-evidence array 当作 fetch-count metadata。Raw set 未饱和时，同一
+digest 的多份有效 rerun attestation 会通过受保护 Git history 归约为唯一最新的 certificate source；
+该 source 必须是 current consumer 的 ancestor，且相对 `image_source_commit` 保持 canonical input 零
+drift。incomparable source，或同一个最新 candidate 对应不同 signer 时，会在拉取 layer 前失败。只有
+随后才会校验 OCI revision 与 manifest label，而且它们继续绑定 `image_source_commit`。
 `healthcheck-published-image` 是 container job，并不依赖 checkout 的临时 HOME 范围 Git trust 在
 后续 container step 中继续存在。Checkout 之后，唯一的 `Trust checked-out workspace` step 会显式
 选择 `shell: bash`，只把精确的 `$GITHUB_WORKSPACE` 值加入该 job container 持久的 global

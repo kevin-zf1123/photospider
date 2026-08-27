@@ -68,6 +68,12 @@ identities on 2026-08-27 from authoritative upstream services:
 - GitHub CLI `2.98.0` archive hashes are from the official release
   `gh_2.98.0_checksums.txt`. The CLI is needed to verify GitHub artifact and OCI
   attestations; Ubuntu's older package does not provide `gh attestation`.
+  `published_image.attestation_fetch_limit` fixes the reviewed finite fetch
+  window at 30. Known producers retain exact `--source-digest` and
+  `--signer-digest` constraints. Published discovery first downloads the raw
+  exact-subject JSONL window, rejects 30 fetched bundles as possibly truncated,
+  snapshots the unsaturated bytes, and verifies that same snapshot offline;
+  the shorter verified JSON array is never treated as fetch-count evidence.
 - GitHub documents a two-to-three-day image deployment window and directs exact
   job diagnosis to `Set up job`. The finite Linux rollout set records stable
   `ubuntu24/20260816.277.1`, observed in exact-head runs `32997831039` and

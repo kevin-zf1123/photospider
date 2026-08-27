@@ -57,18 +57,27 @@ continues to bind the manifest plus OCI revision; `candidate_commit` is the
 tested checkout, GitHub attestation source, and immutable `sha-<full-candidate>`
 tag; `workflow_commit` is protected control and the attestation signer; and
 `image_digest` is the exact subject consumed by the suite and promotion. The
-resolver proves source ancestry, newest-change authority, and zero canonical
-input drift through the candidate. It does not add parser, test, or documentation
-paths to the image-input list to force commit equality.
+resolver traverses the complete non-shallow Git DAG without default path-history
+simplification and requires one ancestry-maximal canonical-input-changing
+commit. It then proves source ancestry and zero canonical-input drift through
+the candidate. Incomparable branch changes fail even when they converge on
+identical bytes or merge parent order changes. It does not add parser, test, or
+documentation paths to the image-input list to force commit equality.
 
 For a known candidate, the verifier passes independent source/signer digest
-constraints to `gh attestation verify`. For published discovery, multiple
-valid same-digest rerun attestations are reduced through protected Git history
-to the unique newest certificate source that is an ancestor of the current
-consumer and still has zero canonical-input drift from `image_source_commit`.
-Incomparable sources or different signers for the same newest candidate fail
-before layer pull. OCI revision and manifest labels are checked only afterward
-and remain bound to `image_source_commit`.
+constraints and the protected explicit
+`published_image.attestation_fetch_limit=30` to
+`gh attestation verify`; a saturated known result remains acceptable only when
+every certificate equals that exact pair. Published discovery instead uses
+`gh attestation download --limit 30`, counts a retained raw JSONL snapshot, and
+rejects 30 fetched bundles as possibly truncated before offline verification.
+It never treats the shorter verified-evidence array as fetch-count metadata.
+With an unsaturated raw set, multiple valid same-digest rerun attestations are
+reduced through protected Git history to the unique newest certificate source
+that is an ancestor of the current consumer and still has zero canonical-input
+drift from `image_source_commit`. Incomparable sources or different signers for
+the same newest candidate fail before layer pull. OCI revision and manifest
+labels are checked only afterward and remain bound to `image_source_commit`.
 `healthcheck-published-image` is a container job and does not rely on checkout's
 temporary HOME-scoped Git trust surviving into later container steps.
 Immediately after checkout, its unique `Trust checked-out workspace` step

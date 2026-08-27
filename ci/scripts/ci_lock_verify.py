@@ -2183,7 +2183,7 @@ def _verify_protected_helpers(
 
 
 def _verify_ci_image_resolver_order(root: Path) -> None:
-    """Require attestation before formal artifacts, pull, and reconstruction.
+    """Require complete attestation discovery before pull/reconstruction.
 
     Args:
         root: Repository root containing the protected image resolver.
@@ -2193,13 +2193,15 @@ def _verify_ci_image_resolver_order(root: Path) -> None:
             ordered so that formal evidence/runner identity can be created,
             Docker can pull/inspect layers, builder labels can be retained, a
             manifest can be reconstructed, or final output can be emitted
-            before exact-subject attestation succeeds.
+            before exact-subject attestation succeeds; or published discovery
+            lacks the reviewed raw-bundle fetch/saturation boundary.
 
     Note:
         Only exact non-comment command lines are authoritative. The durable
-        shell mock separately executes success and attestation-failure paths;
-        this static check makes the reviewed order part of the protected lock
-        verifier without treating comments as executable evidence.
+        shell mock separately executes known-producer, unsaturated published,
+        saturated published, and attestation-failure paths. The static check
+        locks both exact command arrays and order without treating comments as
+        executable evidence or verified-JSON length as a raw fetch count.
     """
     path = root / "ci/scripts/ci_image_verify.sh"
     try:
@@ -2216,6 +2218,8 @@ def _verify_ci_image_resolver_order(root: Path) -> None:
     ordered_commands = (
         'inspect_output=$(docker buildx imagetools inspect "$locator")',
         'source_commit=$(python3 "$SCRIPT_DIR/ci_image_manifest.py" \\',
+        '"${attestation_download_command[@]}" >/dev/null',
+        '--repo-root "$REPO_ROOT" snapshot-attestation-bundle \\',
         'attestation_json=$("${attestation_command[@]}")',
         'printf \'%s\\n\' "$attestation_json" > "$attestation_temp"',
         '"${attestation_identity_command[@]}" > "$attestation_identity_temp"',
@@ -2245,6 +2249,46 @@ def _verify_ci_image_resolver_order(root: Path) -> None:
             f"{path}: exact-subject attestation must precede layer pull and identity output"
         )
     source_text = "\n".join(lines)
+    attestation_window_contract = (
+        """attestation_download_command=(
+    gh attestation download \"oci://$exact_image\"
+    --repo \"$EXPECTED_REPOSITORY\"
+    --predicate-type https://slsa.dev/provenance/v1
+    --limit \"$attestation_fetch_limit\"
+  )""",
+        """attestation_command=(
+    gh attestation verify \"oci://$exact_image\"
+    --bundle \"$attestation_bundle_snapshot\"
+    --repo \"$EXPECTED_REPOSITORY\"
+    --signer-workflow \"$EXPECTED_REPOSITORY/$source_workflow\"
+    --deny-self-hosted-runners
+    --format json
+  )""",
+        """attestation_command=(
+    gh attestation verify \"oci://$exact_image\"
+    --repo \"$EXPECTED_REPOSITORY\"
+    --signer-workflow \"$EXPECTED_REPOSITORY/$source_workflow\"
+    --limit \"$attestation_fetch_limit\"
+    --source-digest \"$EXPECTED_ATTESTATION_SOURCE_COMMIT\"
+    --signer-digest \"$EXPECTED_ATTESTATION_SIGNER_COMMIT\"
+    --deny-self-hosted-runners
+    --format json
+  )""",
+        '--subject-digest "$image_digest"',
+        'attestation_fetch_limit=${published_lock[3]}',
+    )
+    if any(source_text.count(fragment) != 1 for fragment in attestation_window_contract):
+        raise ContractError(
+            f"{path}: finite attestation fetch, snapshot, or verification mapping differs"
+        )
+    if source_text.count('--limit "$attestation_fetch_limit"') != 2:
+        raise ContractError(
+            f"{path}: attestation fetch limit is missing, duplicated, or misplaced"
+        )
+    if source_text.count('--fetch-limit "$attestation_fetch_limit"') != 2:
+        raise ContractError(
+            f"{path}: bundle/identity saturation limits are not independently bound"
+        )
     four_identity_contract = (
         '--source-digest "$EXPECTED_ATTESTATION_SOURCE_COMMIT"',
         '--signer-digest "$EXPECTED_ATTESTATION_SIGNER_COMMIT"',
@@ -2344,6 +2388,7 @@ def _verify_image_lock(root: Path, actions: dict[str, tuple[str, str]]) -> None:
         published,
         {
             "builder_image_version_label",
+            "attestation_fetch_limit",
             "input_manifest_label",
             "locator",
             "source_commit_label",
@@ -2352,6 +2397,13 @@ def _verify_image_lock(root: Path, actions: dict[str, tuple[str, str]]) -> None:
         },
         f"{path}:published_image",
     )
+    if (
+        isinstance(published["attestation_fetch_limit"], bool)
+        or published["attestation_fetch_limit"] != 30
+    ):
+        raise ContractError(
+            f"{path}: published attestation fetch limit is not the reviewed value"
+        )
     if not str(published["locator"]).endswith(":latest"):
         raise ContractError(f"{path}: published locator must be an explicit locator tag")
 

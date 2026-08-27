@@ -524,7 +524,10 @@ and both an older A candidate under a documentation-only descendant and a
 tested candidate B whose image source remains A. The latter proves that
 candidate checkout/attestation source/immutable SHA, protected workflow signer,
 manifest/OCI source, and exact image digest remain independent while protected
-ancestry, newest-image-change, and zero-input-drift checks all succeed.
+complete-DAG traversal, sole ancestry-maximal image-change selection, ancestry,
+and zero-input-drift checks all succeed. Identical-byte incomparable branch
+changes in both merge-parent orders fail, while a unique later canonical change
+is accepted without expanding the image-input authority.
 They also require force-push, unknown ancestry, missing image input, and ref
 movement across the two-fetch measurement to stop before branch/`latest`
 writes. The stateful registry also proves first-time SHA-only creation and
@@ -3498,12 +3501,17 @@ that digest, validates OCI revision and manifest labels, and all published-image
 and build/test integration jobs run the resulting
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` reference.
 Candidate verification supplies independent expected certificate source and
-signer digests. Published verification may encounter several valid attestations
-for one reproducible digest; protected Git history reduces them to the unique
-newest attestation-source ancestor of the current consumer whose canonical
-inputs still resolve to the OCI/manifest image source. An incomparable source,
-same-candidate signer ambiguity, swapped identity, or canonical-input drift
-fails before layer pull.
+signer digests plus the protected explicit fetch limit 30; reaching that limit
+is acceptable only when every verified certificate equals the constrained
+pair. Published verification first downloads at most 30 raw exact-subject JSONL
+bundles, retains the precise bytes, and rejects a raw count of 30 as possibly
+truncated before offline verification. It does not infer fetch completeness
+from verified JSON length. For an unsaturated set, protected Git history reduces
+several valid attestations for one reproducible digest to the unique newest
+attestation-source ancestor of the current consumer whose canonical inputs
+still resolve to the OCI/manifest image source. An incomparable source,
+same-candidate signer ambiguity, swapped identity, canonical-input drift, or
+saturated raw discovery fails before layer pull.
 Lightweight routing and result gates remain on `ubuntu-24.04`.
 GitHub documents a two-to-three-day runner-image deployment window and directs
 exact-version diagnosis to each job's `Set up job` log

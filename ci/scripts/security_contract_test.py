@@ -475,6 +475,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 "--repo-root", root,
                 "attestation-identities",
                 "--attestation-json", evidence,
+                "--fetch-limit", "30",
                 "--image-source-commit", image_source,
                 "--consumer-candidate-commit", later_head,
             )
@@ -499,6 +500,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 "--repo-root", root,
                 "attestation-identities",
                 "--attestation-json", evidence,
+                "--fetch-limit", "30",
                 "--image-source-commit", image_source,
                 "--consumer-candidate-commit", later_head,
                 expect_success=False,
@@ -532,6 +534,120 @@ class ImageManifestContractTest(unittest.TestCase):
         self.assertLess(guard, workflow.index("uses: docker/build-push-action@"))
         self.assertIn('--candidate-commit "${{ inputs.candidate_commit }}"', workflow)
         self.assertIn('--workflow-commit "${{ inputs.workflow_commit }}"', workflow)
+
+    def test_source_resolver_requires_one_maximal_change_in_merge_dag(self) -> None:
+        """Reject incomparable merge sources independently of parent ordering.
+
+        Returns:
+            None after two opposite-parent-order merges with identical final
+            canonical bytes both fail, while a later unique canonical change
+            becomes the sole accepted source.
+
+        Raises:
+            AssertionError: Full-DAG traversal, maximal-set rejection, parent
+                order independence, or the unchanged canonical path authority
+                regresses.
+
+        Note:
+            The fixture uses real Git commits and merges. README remains outside
+            the copied strict lock, so the test cannot conceal ambiguity by
+            expanding image inputs.
+        """
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text) / "repository"
+            lock = root / "ci/locks/ci-image-lock.json"
+            lock.parent.mkdir(parents=True)
+            lock.write_text(
+                (REPO_ROOT / "ci/locks/ci-image-lock.json").read_text(
+                    encoding="utf-8"
+                ),
+                encoding="utf-8",
+            )
+            (root / "Dockerfile.ci").write_text("FROM scratch\n", encoding="utf-8")
+
+            def git(*arguments: str) -> subprocess.CompletedProcess[str]:
+                """Run one successful Git command in the isolated real DAG."""
+                return run_command("git", "-C", root, *arguments)
+
+            def resolve(candidate: str, *, success: bool) -> subprocess.CompletedProcess[str]:
+                """Run the production resolver for one exact fixture candidate."""
+                return run_command(
+                    sys.executable,
+                    SCRIPTS / "ci_image_manifest.py",
+                    "--repo-root",
+                    root,
+                    "resolve-source-commit",
+                    "--candidate-commit",
+                    candidate,
+                    "--workflow-commit",
+                    candidate,
+                    expect_success=success,
+                )
+
+            git("init", "-q")
+            git("config", "user.name", "CI Contract")
+            git("config", "user.email", "ci@example.invalid")
+            git("config", "commit.gpgsign", "false")
+            git("add", "--", "Dockerfile.ci", "ci/locks/ci-image-lock.json")
+            git("commit", "-q", "-m", "image base")
+            base = git("rev-parse", "HEAD").stdout.strip()
+            input_paths = json.loads(lock.read_text(encoding="utf-8"))["input_paths"]
+            self.assertNotIn("README.md", input_paths)
+
+            git("checkout", "-q", "-b", "left", base)
+            (root / "Dockerfile.ci").write_text(
+                "FROM scratch\n# converged bytes\n", encoding="utf-8"
+            )
+            git("add", "--", "Dockerfile.ci")
+            git("commit", "-q", "-m", "left image change")
+            left = git("rev-parse", "HEAD").stdout.strip()
+
+            git("checkout", "-q", "-b", "right", base)
+            (root / "Dockerfile.ci").write_text(
+                "FROM scratch\n# converged bytes\n", encoding="utf-8"
+            )
+            git("add", "--", "Dockerfile.ci")
+            git("commit", "-q", "-m", "right image change")
+            right = git("rev-parse", "HEAD").stdout.strip()
+            self.assertNotEqual(left, right)
+
+            git("checkout", "-q", "-b", "merge-left-first", left)
+            git("merge", "-q", "--no-ff", "--no-edit", right)
+            merge_left_first = git("rev-parse", "HEAD").stdout.strip()
+            git("checkout", "-q", "-b", "merge-right-first", right)
+            git("merge", "-q", "--no-ff", "--no-edit", left)
+            merge_right_first = git("rev-parse", "HEAD").stdout.strip()
+            self.assertEqual(
+                git("show", "-s", "--format=%P", merge_left_first).stdout.split(),
+                [left, right],
+            )
+            self.assertEqual(
+                git("show", "-s", "--format=%P", merge_right_first).stdout.split(),
+                [right, left],
+            )
+
+            for label, candidate in (
+                ("left-first", merge_left_first),
+                ("right-first", merge_right_first),
+            ):
+                with self.subTest(parent_order=label):
+                    ambiguous = resolve(candidate, success=False)
+                    self.assertIn(
+                        "exactly one ancestry-maximal canonical-input change",
+                        ambiguous.stderr,
+                    )
+                    self.assertIn(left, ambiguous.stderr)
+                    self.assertIn(right, ambiguous.stderr)
+
+            git("checkout", "-q", "merge-left-first")
+            (root / "Dockerfile.ci").write_text(
+                "FROM scratch\n# unique post-merge bytes\n", encoding="utf-8"
+            )
+            git("add", "--", "Dockerfile.ci")
+            git("commit", "-q", "-m", "unique post-merge image change")
+            unique = git("rev-parse", "HEAD").stdout.strip()
+            accepted = resolve(unique, success=True)
+            self.assertEqual(accepted.stdout.strip(), unique)
 
     def test_manifest_rejects_builder_removed_from_rollout_authority(self) -> None:
         """Reject retained builder provenance removed by a reviewed lock update."""
@@ -619,12 +735,25 @@ class ImageManifestContractTest(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 "set -Eeuo pipefail\n"
                 "printf '%q ' \"$@\" >> \"$CI_TEST_GH_LOG\"; printf '\\n' >> \"$CI_TEST_GH_LOG\"\n"
-                "printf 'gh-attestation\\n' >> \"$CI_TEST_COMMAND_LOG\"\n"
-                "if [[ ${CI_TEST_GH_FAIL:-0} == 1 ]]; then\n"
-                "  printf 'mock attestation rejection\\n' >&2\n"
-                "  exit 41\n"
-                "fi\n"
-                "printf '%s\\n' \"$CI_TEST_ATTESTATION_JSON\"\n",
+                "case \"${1:-} ${2:-}\" in\n"
+                "  'attestation download')\n"
+                "    printf 'gh-attestation-download\\n' >> \"$CI_TEST_COMMAND_LOG\"\n"
+                "    if [[ ${CI_TEST_GH_FAIL:-0} == 1 ]]; then\n"
+                "      printf 'mock attestation download rejection\\n' >&2\n"
+                "      exit 41\n"
+                "    fi\n"
+                "    printf '%s' \"$CI_TEST_ATTESTATION_BUNDLE_JSONL\" > \"$CI_TEST_IMAGE_DIGEST.jsonl\"\n"
+                "    ;;\n"
+                "  'attestation verify')\n"
+                "    printf 'gh-attestation-verify\\n' >> \"$CI_TEST_COMMAND_LOG\"\n"
+                "    if [[ ${CI_TEST_GH_FAIL:-0} == 1 ]]; then\n"
+                "      printf 'mock attestation rejection\\n' >&2\n"
+                "      exit 41\n"
+                "    fi\n"
+                "    printf '%s\\n' \"$CI_TEST_ATTESTATION_JSON\"\n"
+                "    ;;\n"
+                "  *) printf 'unexpected gh command\\n' >&2; exit 91 ;;\n"
+                "esac\n",
                 encoding="utf-8",
             )
             gh.chmod(0o755)
@@ -636,6 +765,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 "for argument in \"$@\"; do\n"
                 "  case $argument in\n"
                 "    source-commit) event=python-source-commit ;;\n"
+                "    snapshot-attestation-bundle) event=python-bundle-snapshot ;;\n"
                 "    attestation-identities) event=python-attestation-identities ;;\n"
                 "    builder-from-labels) event=python-builder-from-labels ;;\n"
                 "    create) event=python-manifest-create ;;\n"
@@ -690,6 +820,7 @@ class ImageManifestContractTest(unittest.TestCase):
                 "CI_IMAGE_OUTPUT_FILE": str(output),
                 "CI_IMAGE_REPOSITORY": "kevin-zf1123/photospider",
                 "CI_TEST_BUILDER_IMAGE_VERSION": LINUX_ROLLOUT_VERSION,
+                "CI_TEST_ATTESTATION_BUNDLE_JSONL": "{\"bundle\":0}\n",
                 "CI_TEST_ATTESTATION_JSON": attestation_json,
                 "CI_TEST_ATTESTATION_SIGNER_COMMIT": attestation_signer,
                 "CI_TEST_ATTESTATION_SOURCE_COMMIT": attestation_source,
@@ -737,13 +868,15 @@ class ImageManifestContractTest(unittest.TestCase):
             gh_arguments = gh_log.read_text(encoding="utf-8")
             self.assertIn("attestation verify", gh_arguments)
             self.assertIn("--deny-self-hosted-runners", gh_arguments)
+            self.assertIn("--limit 30", gh_arguments)
+            self.assertNotIn("attestation download", gh_arguments)
             self.assertIn(f"--source-digest {attestation_source}", gh_arguments)
             self.assertIn(f"--signer-digest {attestation_signer}", gh_arguments)
             command_order = command_log.read_text(encoding="utf-8").splitlines()
             required_order = (
                 "docker-imagetools-inspect",
                 "python-source-commit",
-                "gh-attestation",
+                "gh-attestation-verify",
                 "python-attestation-identities",
                 "python-runner-verify",
                 "docker-pull",
@@ -774,7 +907,7 @@ class ImageManifestContractTest(unittest.TestCase):
             )
             self.assertEqual(failed.returncode, 41)
             failed_order = command_log.read_text(encoding="utf-8").splitlines()
-            self.assertIn("gh-attestation", failed_order)
+            self.assertIn("gh-attestation-verify", failed_order)
             for forbidden_event in (
                 "python-runner-verify",
                 "python-attestation-identities",
@@ -828,6 +961,7 @@ class ImageManifestContractTest(unittest.TestCase):
 
             published_output = temporary / "published-discovery.env"
             gh_log.write_text("", encoding="utf-8")
+            command_log.write_text("", encoding="utf-8")
             published_environment = {
                 key: value
                 for key, value in candidate_environment.items()
@@ -849,12 +983,151 @@ class ImageManifestContractTest(unittest.TestCase):
                 environment=published_environment,
             )
             published_gh = gh_log.read_text(encoding="utf-8")
+            self.assertIn("attestation download", published_gh)
+            self.assertIn("attestation verify", published_gh)
+            self.assertEqual(published_gh.count("--limit 30"), 1)
+            self.assertIn("--bundle", published_gh)
             self.assertNotIn("--source-digest", published_gh)
             self.assertNotIn("--signer-digest", published_gh)
             self.assertIn(
                 f"attestation_source_commit={attestation_source}",
                 published_output.read_text(encoding="utf-8"),
             )
+            published_order = command_log.read_text(encoding="utf-8").splitlines()
+            published_required_order = (
+                "docker-imagetools-inspect",
+                "python-source-commit",
+                "gh-attestation-download",
+                "python-bundle-snapshot",
+                "gh-attestation-verify",
+                "python-attestation-identities",
+                "python-runner-verify",
+                "docker-pull",
+            )
+            self.assertEqual(
+                [published_order.index(event) for event in published_required_order],
+                sorted(
+                    published_order.index(event)
+                    for event in published_required_order
+                ),
+            )
+
+            attestation_fetch_limit = json.loads(
+                (REPO_ROOT / "ci/locks/ci-image-lock.json").read_text(
+                    encoding="utf-8"
+                )
+            )["published_image"]["attestation_fetch_limit"]
+            self.assertEqual(attestation_fetch_limit, 30)
+            bundle_record = json.dumps(
+                {"bundle": "raw-fetch-fixture"},
+                sort_keys=True,
+                separators=(",", ":"),
+            ) + "\n"
+
+            limit_minus_one_output = temporary / "published-limit-minus-one.env"
+            command_log.write_text("", encoding="utf-8")
+            run_command(
+                "bash",
+                SCRIPTS / "ci_image_verify.sh",
+                environment={
+                    **published_environment,
+                    "CI_ARTIFACT_DIR": str(
+                        temporary / "published-limit-minus-one-artifacts"
+                    ),
+                    "CI_IMAGE_OUTPUT_FILE": str(limit_minus_one_output),
+                    "CI_TEST_ATTESTATION_BUNDLE_JSONL": (
+                        bundle_record * (attestation_fetch_limit - 1)
+                    ),
+                },
+            )
+            self.assertIn(
+                f"attestation_source_commit={attestation_source}",
+                limit_minus_one_output.read_text(encoding="utf-8"),
+            )
+            self.assertLess(
+                command_log.read_text(encoding="utf-8").splitlines().index(
+                    "python-bundle-snapshot"
+                ),
+                command_log.read_text(encoding="utf-8").splitlines().index(
+                    "gh-attestation-verify"
+                ),
+            )
+
+            known_saturated_output = temporary / "known-saturated.env"
+            gh_log.write_text("", encoding="utf-8")
+            saturated_known_json = json.dumps(
+                [json.loads(attestation_json)[0]] * attestation_fetch_limit,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            run_command(
+                "bash",
+                SCRIPTS / "ci_image_verify.sh",
+                environment={
+                    **candidate_environment,
+                    "CI_ARTIFACT_DIR": str(temporary / "known-saturated-artifacts"),
+                    "CI_IMAGE_OUTPUT_FILE": str(known_saturated_output),
+                    "CI_TEST_ATTESTATION_JSON": saturated_known_json,
+                },
+            )
+            known_saturated_gh = gh_log.read_text(encoding="utf-8")
+            self.assertNotIn("attestation download", known_saturated_gh)
+            self.assertIn("--limit 30", known_saturated_gh)
+            self.assertIn(f"--source-digest {attestation_source}", known_saturated_gh)
+            self.assertIn(f"--signer-digest {attestation_signer}", known_saturated_gh)
+
+            for label, truncated_verified_json in (
+                ("omitted-newer-source", attestation_json),
+                (
+                    "omitted-conflicting-signer",
+                    json.dumps(
+                        [json.loads(attestation_json)[0]],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            ):
+                with self.subTest(published_saturation=label):
+                    saturated_artifact = temporary / f"{label}-artifacts"
+                    saturated_output = temporary / f"{label}.env"
+                    saturated_output.write_text(
+                        "sentinel=unchanged\n", encoding="utf-8"
+                    )
+                    command_log.write_text("", encoding="utf-8")
+                    gh_log.write_text("", encoding="utf-8")
+                    saturated = run_command(
+                        "bash",
+                        SCRIPTS / "ci_image_verify.sh",
+                        environment={
+                            **published_environment,
+                            "CI_ARTIFACT_DIR": str(saturated_artifact),
+                            "CI_IMAGE_OUTPUT_FILE": str(saturated_output),
+                            "CI_TEST_ATTESTATION_BUNDLE_JSONL": (
+                                bundle_record * attestation_fetch_limit
+                            ),
+                            "CI_TEST_ATTESTATION_JSON": truncated_verified_json,
+                        },
+                        expect_success=False,
+                    )
+                    self.assertIn("may be truncated", saturated.stderr)
+                    saturated_order = command_log.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                    self.assertIn("gh-attestation-download", saturated_order)
+                    self.assertIn("python-bundle-snapshot", saturated_order)
+                    for forbidden_event in (
+                        "gh-attestation-verify",
+                        "python-attestation-identities",
+                        "python-runner-verify",
+                        "docker-pull",
+                        "docker-image-inspect",
+                    ):
+                        self.assertNotIn(forbidden_event, saturated_order)
+                    self.assertFalse(saturated_artifact.exists())
+                    self.assertEqual(
+                        saturated_output.read_text(encoding="utf-8"),
+                        "sentinel=unchanged\n",
+                    )
 
             forged_cases = (
                 (
@@ -986,6 +1259,43 @@ class ImageManifestContractTest(unittest.TestCase):
                 source.replace(
                     '--repo-root "$REPO_ROOT" attestation-identities',
                     '--repo-root "$REPO_ROOT" source-commit',
+                    1,
+                ),
+            ),
+            (
+                "missing-attestation-fetch-limit",
+                source.replace('--limit "$attestation_fetch_limit"', "", 1),
+            ),
+            (
+                "drifting-attestation-fetch-limit",
+                source.replace(
+                    '--limit "$attestation_fetch_limit"', "--limit 31", 1
+                ),
+            ),
+            (
+                "duplicate-attestation-fetch-limit",
+                source.replace(
+                    '--limit "$attestation_fetch_limit"',
+                    '--limit "$attestation_fetch_limit"\n'
+                    '    --limit "$attestation_fetch_limit"',
+                    1,
+                ),
+            ),
+            (
+                "reordered-attestation-fetch-limit",
+                source.replace(
+                    "    --predicate-type https://slsa.dev/provenance/v1\n"
+                    '    --limit "$attestation_fetch_limit"',
+                    '    --limit "$attestation_fetch_limit"\n'
+                    "    --predicate-type https://slsa.dev/provenance/v1",
+                    1,
+                ),
+            ),
+            (
+                "missing-raw-bundle-snapshot",
+                source.replace(
+                    "snapshot-attestation-bundle",
+                    "source-commit",
                     1,
                 ),
             ),

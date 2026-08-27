@@ -1414,6 +1414,8 @@ validate_ci_image_identity_routing() {
   local integration_workflow=$2
   local build_workflow="$REPO_ROOT/.github/workflows/build-ci-image.yml"
   local shared_workflow="$REPO_ROOT/.github/workflows/ci-integration-suite.yml"
+  local image_lock="$REPO_ROOT/ci/locks/ci-image-lock.json"
+  local image_verifier="$REPO_ROOT/ci/scripts/ci_image_verify.sh"
   local workflow
   local identity_job
   local called_identity_job="$TEST_ROOT/shared-integration-identity-preflight-job.yml"
@@ -1473,6 +1475,16 @@ validate_ci_image_identity_routing() {
     'CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT: ${{ inputs.candidate_commit }}'
   assert_file_contains "$build_workflow" \
     'CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT: ${{ inputs.workflow_commit }}'
+  assert_file_contains "$image_lock" '"attestation_fetch_limit": 30'
+  assert_file_contains "$image_verifier" \
+    'gh attestation download "oci://$exact_image"'
+  assert_file_contains "$image_verifier" 'snapshot-attestation-bundle'
+  assert_file_contains "$image_verifier" \
+    '--bundle "$attestation_bundle_snapshot"'
+  (($(grep -Fc -- '--limit "$attestation_fetch_limit"' "$image_verifier") == 2)) ||
+    fail "CI image verifier must bind exactly two finite fetch-limit arguments"
+  (($(grep -Fc -- '--fetch-limit "$attestation_fetch_limit"' "$image_verifier") == 2)) ||
+    fail "CI image verifier must bind bundle and verified-evidence limits"
   (($(grep -Fc -- 'uses: docker/build-push-action@' "$build_workflow") == 1)) ||
     fail "candidate CI image producer must build exactly once"
 

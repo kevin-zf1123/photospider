@@ -378,7 +378,9 @@ rollback、尚未晋升的更新 image-input tip 会 supersede A，以及纯文�
 source/manifest identity；它同时覆盖纯文档 descendant 下仍运行的旧 candidate A，以及被测 candidate
 B 继续以 A 作为 image source 的路径。后一条证明 candidate checkout/attestation source/immutable
 SHA、受保护 workflow signer、manifest/OCI source 与精确 image digest 彼此独立，同时 ancestry、最后
-image change 与 input-zero-drift 受保护检查全部成功。测试还要求 force-push、unknown ancestry、缺失 image input，以及两次
+image change 与 input-zero-drift 受保护检查全部成功。Resolver 会遍历完整 DAG，并要求唯一的
+ancestry-maximal image change；两个 merge-parent order 下 byte 相同但 incomparable 的 branch change
+都会失败，而唯一的更晚 canonical change 会在不扩大 image-input authority 的情况下被接受。测试还要求 force-push、unknown ancestry、缺失 image input，以及两次
 fetch measurement 之间的 ref movement 都必须在写 branch/`latest` 前停止。
 Stateful registry 还会证明首次只创建 SHA 并执行 post-create verification、精确 same-SHA 复用且不再
 调用 create、跨 ref 复用，以及同 commit digest 冲突不能移动 SHA、branch 或 `latest`。digest output
@@ -2775,11 +2777,14 @@ locator；可信 host preflight 会解析精确 digest，并在 formal artifact 
 校验 OCI revision 与 manifest label，所有
 published-image healthcheck 与 build/test integration job 都执行所得
 `ghcr.io/<owner>/<repo>/photospider-ci@sha256:...` 引用。Candidate verification 会分别提供预期
-certificate source 与 signer digest。
-Published verification 可能遇到同一个可复现 digest 的多份有效 attestation；受保护 Git history 会把
-它们归约为 current consumer 的祖先中唯一最新的 attestation source，而且该 source 的 canonical input
-仍必须解析到 OCI/manifest image source。incomparable source、同 candidate signer 歧义、swapped
-identity 或 canonical-input drift 都会在拉取 layer 前失败。轻量路由与结果门禁仍在
+certificate source 与 signer digest，以及受保护的显式 fetch limit 30；达到该 limit 时，只有每份
+verified certificate 都等于受约束 pair 才可接受。Published verification 会先下载最多 30 份 raw
+exact-subject JSONL bundle、保留其精确 byte，并在 raw count 达到 30 时按可能截断拒绝，然后才离线
+校验；它不会从 verified JSON 长度推断 fetch complete。对于未饱和集合，受保护 Git history 会把同一
+可复现 digest 的多份有效 attestation 归约为 current consumer 的 ancestor 中唯一最新的 attestation
+source，而且该 source 的 canonical input 仍必须解析到 OCI/manifest image source。incomparable
+source、同 candidate signer 歧义、swapped identity、canonical-input drift 或 raw discovery 饱和都会在
+拉取 layer 前失败。轻量路由与结果门禁仍在
 `ubuntu-24.04` 上运行。GitHub 记录 runner-image deployment 通常需要两到三天，并要求从每个 job 的
 `Set up job` log 诊断精确版本
 （[官方说明](https://github.com/actions/runner-images#what-image-version-is-used-in-my-build)）。

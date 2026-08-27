@@ -45,7 +45,8 @@ CI_IMAGE_EXPECTED_WORKFLOW_COMMIT bind caller fields to measured state.
 CI_IMAGE_EXPECTED_ATTESTATION_SOURCE_COMMIT and
 CI_IMAGE_EXPECTED_ATTESTATION_SIGNER_COMMIT must be supplied together when the
 caller already knows the producer identities; otherwise one unique verified
-certificate pair is retained. The exact image, digest, image source,
+certificate pair is retained from a complete unsaturated protected discovery
+window. The exact image, digest, image source,
 attestation source/signer, manifest digest, and builder image version are
 appended to CI_IMAGE_OUTPUT_FILE (or GITHUB_OUTPUT) when provided.
 EOF
@@ -148,7 +149,8 @@ prepare_artifact_directory() {
 require_fresh_artifact_path
 
 # @brief Read the strict published-image fields without requiring jq.
-# @return Three newline-delimited values: locator, workflow path, repository.
+# @return Four newline-delimited values: locator, workflow path, repository,
+#   and the reviewed finite attestation fetch limit.
 # @throws Python exits nonzero for malformed or unexpected protected locks.
 read_published_lock() {
   python3 - "$REPO_ROOT/ci/locks/ci-image-lock.json" <<'PY'
@@ -170,17 +172,21 @@ with open(path, encoding="utf-8") as handle:
     lock = json.load(handle, object_pairs_hook=unique)
 published = lock.get("published_image")
 expected = {
+    "attestation_fetch_limit",
     "locator", "source_repository", "source_workflow",
     "builder_image_version_label", "input_manifest_label",
     "source_commit_label",
 }
 if not isinstance(published, dict) or set(published) != expected:
     raise SystemExit("published image lock is malformed")
+if isinstance(published["attestation_fetch_limit"], bool) or published["attestation_fetch_limit"] != 30:
+    raise SystemExit("published image attestation fetch limit is malformed")
 if not re.fullmatch(r"ghcr\.io/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+:[A-Za-z0-9_.-]+", published["locator"]):
     raise SystemExit("published image locator is malformed")
 print(published["locator"])
 print(published["source_workflow"])
 print(published["source_repository"])
+print(published["attestation_fetch_limit"])
 PY
 }
 
@@ -188,13 +194,18 @@ published_lock=()
 while IFS= read -r published_value; do
   published_lock+=("$published_value")
 done < <(read_published_lock)
-if ((${#published_lock[@]} != 3)); then
-  echo "Published image lock did not yield exactly three identity fields." >&2
+if ((${#published_lock[@]} != 4)); then
+  echo "Published image lock did not yield exactly four identity fields." >&2
   exit 1
 fi
 locator=${published_lock[0]}
 source_workflow=${published_lock[1]}
 locked_repository=${published_lock[2]}
+attestation_fetch_limit=${published_lock[3]}
+if [[ "$attestation_fetch_limit" != 30 ]]; then
+  echo "Published image attestation fetch limit is not the reviewed value." >&2
+  exit 1
+fi
 if [[ "$EXPECTED_REPOSITORY" != "$locked_repository" ]]; then
   echo "Requested repository '$EXPECTED_REPOSITORY' differs from protected '$locked_repository'." >&2
   exit 1
@@ -250,46 +261,85 @@ fi
 
 # Authenticate the exact registry subject into process-private state before
 # creating formal artifacts, retaining runner identity, or letting Docker pull
-# and expand a layer. Known producer identities are passed as independent
-# constraints; published discovery still requires one unique certificate pair.
-attestation_command=(
-  gh attestation verify "oci://$exact_image"
-  --repo "$EXPECTED_REPOSITORY"
-  --signer-workflow "$EXPECTED_REPOSITORY/$source_workflow"
-)
-if [[ -n "$EXPECTED_ATTESTATION_SOURCE_COMMIT" ]]; then
-  attestation_command+=(
+# and expand a layer. Published discovery first downloads one finite raw bundle
+# window, rejects a saturated fetch, snapshots those exact bytes, and verifies
+# that same snapshot offline. Counting only verified JSON cannot prove fetch
+# completeness because gh documents --limit as a fetch bound. A known producer
+# instead keeps both exact CLI source/signer constraints; saturation is safe for
+# that path because every returned certificate must still equal the one caller-
+# bound pair and omitted evidence cannot change that expected identity.
+attestation_temp_root=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
+if [[ ! -d "$attestation_temp_root" || -L "$attestation_temp_root" ]]; then
+  echo "Attestation temporary root must be one real directory." >&2
+  exit 1
+fi
+attestation_scratch=$(mktemp -d \
+  "$attestation_temp_root/photospider-attestation.XXXXXX")
+chmod 0700 "$attestation_scratch"
+attestation_temp=$(mktemp "$attestation_scratch/verified.XXXXXX")
+attestation_identity_temp=$(mktemp "$attestation_scratch/identities.XXXXXX")
+attestation_bundle_snapshot=$attestation_scratch/downloaded-bundles.jsonl
+# @brief Remove the exact process-private attestation scratch tree on every exit.
+# @return Always zero; cleanup failure is intentionally best-effort at shell exit.
+# @note The target is the fresh mode-0700 directory returned by ``mktemp -d``;
+#   it never aliases the formal artifact directory or a caller path.
+cleanup_attestation_scratch() {
+  rm -rf -- "$attestation_scratch"
+}
+trap cleanup_attestation_scratch EXIT
+chmod 0600 "$attestation_temp" "$attestation_identity_temp"
+
+if [[ -z "$EXPECTED_ATTESTATION_SOURCE_COMMIT" ]]; then
+  attestation_download_directory=$attestation_scratch/download
+  mkdir -m 0700 -- "$attestation_download_directory"
+  attestation_download_command=(
+    gh attestation download "oci://$exact_image"
+    --repo "$EXPECTED_REPOSITORY"
+    --predicate-type https://slsa.dev/provenance/v1
+    --limit "$attestation_fetch_limit"
+  )
+  (
+    cd -- "$attestation_download_directory"
+    "${attestation_download_command[@]}" >/dev/null
+  )
+  python3 "$SCRIPT_DIR/ci_image_manifest.py" \
+    --repo-root "$REPO_ROOT" snapshot-attestation-bundle \
+    --download-directory "$attestation_download_directory" \
+    --subject-digest "$image_digest" \
+    --fetch-limit "$attestation_fetch_limit" \
+    --output "$attestation_bundle_snapshot" >/dev/null
+  attestation_command=(
+    gh attestation verify "oci://$exact_image"
+    --bundle "$attestation_bundle_snapshot"
+    --repo "$EXPECTED_REPOSITORY"
+    --signer-workflow "$EXPECTED_REPOSITORY/$source_workflow"
+    --deny-self-hosted-runners
+    --format json
+  )
+else
+  attestation_command=(
+    gh attestation verify "oci://$exact_image"
+    --repo "$EXPECTED_REPOSITORY"
+    --signer-workflow "$EXPECTED_REPOSITORY/$source_workflow"
+    --limit "$attestation_fetch_limit"
     --source-digest "$EXPECTED_ATTESTATION_SOURCE_COMMIT"
     --signer-digest "$EXPECTED_ATTESTATION_SIGNER_COMMIT"
+    --deny-self-hosted-runners
+    --format json
   )
 fi
-attestation_command+=(--deny-self-hosted-runners --format json)
 attestation_json=$("${attestation_command[@]}")
 if [[ -z "$attestation_json" ]]; then
   echo "GitHub attestation verification returned empty evidence." >&2
   exit 1
 fi
 
-attestation_temp_root=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
-if [[ ! -d "$attestation_temp_root" || -L "$attestation_temp_root" ]]; then
-  echo "Attestation temporary root must be one real directory." >&2
-  exit 1
-fi
-attestation_temp=$(mktemp "$attestation_temp_root/photospider-attestation.XXXXXX")
-attestation_identity_temp=$(mktemp \
-  "$attestation_temp_root/photospider-attestation-identities.XXXXXX")
-# @brief Remove process-private verified-attestation scratch files on every exit.
-# @return Always zero; cleanup failure is intentionally best-effort at shell exit.
-cleanup_attestation_scratch() {
-  rm -f -- "$attestation_temp" "$attestation_identity_temp"
-}
-trap cleanup_attestation_scratch EXIT
-chmod 0600 "$attestation_temp" "$attestation_identity_temp"
 printf '%s\n' "$attestation_json" > "$attestation_temp"
 attestation_identity_command=(
   python3 "$SCRIPT_DIR/ci_image_manifest.py"
   --repo-root "$REPO_ROOT" attestation-identities
   --attestation-json "$attestation_temp"
+  --fetch-limit "$attestation_fetch_limit"
   --image-source-commit "$source_commit"
   --consumer-candidate-commit "$verification_candidate_commit"
 )

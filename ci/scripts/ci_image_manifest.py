@@ -5,10 +5,12 @@ The manifest hashes every repository-protected build input named by the image
 lock and binds those bytes to the exact image-source commit, repository, base
 image, full-SHA builder action, and version/full-SHA identities of the installer
 and suite-gate helpers. The protected resolver separately proves that this
-source is the newest canonical-input-changing ancestor of the tested candidate
-and that the canonical inputs do not drift from source to candidate. GitHub
-attestation source/signer identities remain independent candidate/workflow
-commits. The output is canonical JSON with a final newline. Promotion freshness
+source is the sole ancestry-maximal canonical-input-changing ancestor in the
+complete candidate DAG and that canonical inputs do not drift from source to
+candidate. GitHub attestation source/signer identities remain independent
+candidate/workflow commits; published discovery retains and rejects a saturated
+finite raw bundle window before parsing verified evidence. The output is
+canonical JSON with a final newline. Promotion freshness
 uses the same protected path lock and manifest builder against a freshly fetched
 branch-tip worktree, never a copied path list or candidate-provided identity.
 No candidate-owned script or generated value is trusted as an input list.
@@ -70,6 +72,7 @@ _MeasurementHook = Callable[[str, Path, int], None]
 
 
 _IMAGE_LOCK_RELATIVE_PATH = "ci/locks/ci-image-lock.json"
+_ATTESTATION_FETCH_LIMIT = 30
 _IMAGE_LOCK_FIELDS = frozenset(
     {
         "apt_bootstrap",
@@ -525,8 +528,181 @@ def create_manifest(
     }
 
 
+def _full_git_dag(
+    root: Path, candidate_commit: str
+) -> tuple[list[str], dict[str, tuple[str, ...]]]:
+    """Load and validate the candidate's complete reachable commit DAG.
+
+    Args:
+        root: Repository containing the exact candidate and all of its history.
+        candidate_commit: Lowercase full candidate SHA already resolved by the
+            caller.
+
+    Returns:
+        A child-before-parent topological order and exact parent tuple for every
+        reachable commit.
+
+    Raises:
+        ManifestError: The repository is shallow; Git output is empty,
+            non-ASCII, malformed, duplicated, incomplete, self-referential, or
+            not child-before-parent.
+
+    Note:
+        The traversal has no path limiter and explicitly requests full history,
+        so Git's path history simplification cannot discard a side parent. The
+        validated parent graph, rather than output or parent order, supplies the
+        later ancestry partial order.
+    """
+    try:
+        shallow = _git_bytes(
+            root, "rev-parse", "--is-shallow-repository"
+        ).decode("ascii").strip()
+        raw = _git_bytes(
+            root,
+            "rev-list",
+            "--full-history",
+            "--topo-order",
+            "--parents",
+            candidate_commit,
+        ).decode("ascii")
+    except UnicodeError as error:
+        raise ManifestError("image source DAG is not ASCII") from error
+    if shallow != "false":
+        raise ManifestError("image source DAG requires a complete non-shallow history")
+    order: list[str] = []
+    parents: dict[str, tuple[str, ...]] = {}
+    for line_number, raw_line in enumerate(raw.splitlines(), start=1):
+        fields = raw_line.split(" ")
+        if not fields or any(
+            re.fullmatch(r"[0-9a-f]{40}", field) is None for field in fields
+        ):
+            raise ManifestError(
+                f"image source DAG line {line_number} is malformed"
+            )
+        commit, *commit_parents = fields
+        if commit in parents:
+            raise ManifestError(f"image source DAG repeats commit {commit}")
+        if len(commit_parents) != len(set(commit_parents)) or commit in commit_parents:
+            raise ManifestError(f"image source DAG parent set is malformed for {commit}")
+        order.append(commit)
+        parents[commit] = tuple(commit_parents)
+    if not order or candidate_commit not in parents:
+        raise ManifestError("image source DAG is empty or omits the candidate")
+    positions = {commit: index for index, commit in enumerate(order)}
+    for child, commit_parents in parents.items():
+        for parent in commit_parents:
+            if parent not in parents:
+                raise ManifestError(
+                    f"image source DAG omits parent {parent} of {child}"
+                )
+            if positions[child] >= positions[parent]:
+                raise ManifestError(
+                    f"image source DAG is not child-before-parent at {child}"
+                )
+    return order, parents
+
+
+def _image_changing_commits(
+    root: Path, order: list[str], paths: list[str]
+) -> set[str]:
+    """Return commits whose tree changes a canonical input against a parent.
+
+    Args:
+        root: Repository containing the validated complete DAG.
+        order: Unique child-before-parent commit order.
+        paths: Candidate-tree strict canonical input authority.
+
+    Returns:
+        The set of commits with at least one canonical path change against any
+        parent, including a root commit's change against the empty tree.
+
+    Raises:
+        ManifestError: Batched parent-aware Git diff output is malformed,
+            names an unknown commit/path, or cannot execute.
+
+    Note:
+        ``diff-tree --stdin --root -m --no-renames`` evaluates every commit in
+        one Git process and emits a merge once per changing parent. A merge that
+        introduces no canonical byte relative to either parent is therefore
+        not invented as a source, while a real merge resolution remains a
+        changing descendant. Rename heuristics never alter the path authority.
+    """
+    commit_tokens = {commit.encode("ascii"): commit for commit in order}
+    path_tokens = {os.fsencode(path) for path in paths}
+    if set(commit_tokens).intersection(path_tokens):
+        raise ManifestError("canonical input path is ambiguous with a commit identity")
+    diff = _git_bytes(
+        root,
+        "diff-tree",
+        "--stdin",
+        "--root",
+        "-m",
+        "--no-renames",
+        "--name-only",
+        "--abbrev=40",
+        "-z",
+        "-r",
+        "--",
+        *paths,
+        input_bytes=("".join(f"{commit}\n" for commit in order)).encode("ascii"),
+    )
+    if diff and not diff.endswith(b"\0"):
+        raise ManifestError("image source change inventory is not NUL terminated")
+    current_commit: str | None = None
+    changed: set[str] = set()
+    for token in diff[:-1].split(b"\0") if diff else ():
+        if token in commit_tokens:
+            current_commit = commit_tokens[token]
+            continue
+        if token not in path_tokens or current_commit is None:
+            raise ManifestError("image source change inventory is malformed")
+        changed.add(current_commit)
+    return changed
+
+
+def _ancestry_maximal_changes(
+    order: list[str],
+    parents: dict[str, tuple[str, ...]],
+    changed: set[str],
+) -> set[str]:
+    """Compute the ancestry-maximal changing commits from one validated DAG.
+
+    Args:
+        order: Child-before-parent topological commit order.
+        parents: Exact complete-DAG parent mapping.
+        changed: Commits that changed at least one canonical input.
+
+    Returns:
+        Every changing commit that has no changing descendant.
+
+    Raises:
+        ManifestError: A traversal identity is missing from the parent mapping.
+
+    Note:
+        Descendant-change reachability propagates from each child to every
+        parent. This computes the partial-order maximal set without relying on
+        rev-list output order between siblings or merge parent order.
+    """
+    has_changing_descendant = {commit: False for commit in order}
+    maximal: set[str] = set()
+    for commit in order:
+        if commit not in parents:
+            raise ManifestError(f"image source partial order omits {commit}")
+        if commit in changed and not has_changing_descendant[commit]:
+            maximal.add(commit)
+        propagate = commit in changed or has_changing_descendant[commit]
+        if propagate:
+            for parent in parents[commit]:
+                if parent not in has_changing_descendant:
+                    raise ManifestError(
+                        f"image source partial order omits parent {parent}"
+                    )
+                has_changing_descendant[parent] = True
+    return maximal
+
+
 def _git_source_commit(root: Path, candidate_commit: str = "HEAD") -> str:
-    """Return the newest canonical-input-changing ancestor of one candidate.
+    """Return the unique newest canonical-input-changing candidate ancestor.
 
     Args:
         root: Repository containing the immutable candidate and its history.
@@ -534,18 +710,20 @@ def _git_source_commit(root: Path, candidate_commit: str = "HEAD") -> str:
             supplies the sole path authority for the history query.
 
     Returns:
-        The lowercase full SHA of the newest commit at or before the candidate
-        that touched one canonical image input.
+        The sole ancestry-maximal lowercase full SHA that changed a canonical
+        image input at or before the candidate.
 
     Raises:
-        ManifestError: The candidate, its lock/path set, Git history query, or
-            resulting commit is missing, malformed, or ambiguous.
+        ManifestError: The candidate, its lock/path set, complete Git DAG,
+            parent-aware change inventory, partial order, or unique maximal
+            result is missing, malformed, shallow, or ambiguous.
 
     Note:
         The path list comes from the candidate tree, not from an untrusted
-        caller argument. ``git log <candidate> -- <paths>`` therefore resolves
-        the content-source identity without requiring it to equal the candidate
-        or protected workflow commit.
+        caller argument. Full-DAG traversal and parent-aware tree comparison
+        deliberately avoid default Git history simplification. Two
+        incomparable changing ancestors fail even when their final bytes agree;
+        neither output nor merge-parent order may select one arbitrarily.
     """
     try:
         resolved_candidate = _git_bytes(
@@ -558,21 +736,16 @@ def _git_source_commit(root: Path, candidate_commit: str = "HEAD") -> str:
     paths = _tree_image_input_paths(root, resolved_candidate)
     if paths is None:
         raise ManifestError("image candidate CI image lock is absent")
-    try:
-        commit = _git_bytes(
-            root,
-            "log",
-            "-1",
-            "--format=%H",
-            resolved_candidate,
-            "--",
-            *paths,
-        ).decode("ascii").strip()
-    except UnicodeError as error:
-        raise ManifestError("image source commit is not ASCII") from error
-    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
-        raise ManifestError("cannot resolve one exact image source commit")
-    return commit
+    order, parents = _full_git_dag(root, resolved_candidate)
+    changed = _image_changing_commits(root, order, paths)
+    maximal = _ancestry_maximal_changes(order, parents, changed)
+    if len(maximal) != 1:
+        rendered = ", ".join(sorted(maximal)) if maximal else "none"
+        raise ManifestError(
+            "image source requires exactly one ancestry-maximal canonical-input "
+            f"change, observed: {rendered}"
+        )
+    return next(iter(maximal))
 
 
 def _validate_candidate_source_binding(
@@ -685,12 +858,15 @@ def _validate_candidate_source_binding(
     return candidate_paths
 
 
-def _git_bytes(root: Path, *arguments: str) -> bytes:
+def _git_bytes(
+    root: Path, *arguments: str, input_bytes: bytes | None = None
+) -> bytes:
     """Run Git without a shell and return its exact stdout bytes.
 
     Args:
         root: Explicit repository whose objects and refs are authoritative.
         *arguments: Git arguments passed as separate non-shell argv entries.
+        input_bytes: Optional exact stdin bytes for a batched Git operation.
 
     Returns:
         Exact stdout bytes from one successful Git process.
@@ -701,12 +877,14 @@ def _git_bytes(root: Path, *arguments: str) -> bytes:
     Note:
         Byte output preserves NUL path records and filenames not decodable as
         ordinary text; diagnostics alone use replacement-safe UTF-8 rendering.
+        The optional input is passed directly without a shell or text decode.
     """
     try:
         completed = subprocess.run(
             ["git", "-C", str(root), *arguments],
             check=False,
             capture_output=True,
+            input=input_bytes,
         )
     except OSError as error:
         raise ManifestError(f"cannot execute Git {' '.join(arguments)}: {error}") from error
@@ -1298,11 +1476,59 @@ def _command_verify(arguments: argparse.Namespace) -> None:
     print(actual_digest)
 
 
-def _published_image_lock(root: Path) -> dict[str, str]:
-    """Return the exact protected OCI discovery and identity-label contract."""
+def _validated_attestation_fetch_limit(value: Any, context: str) -> int:
+    """Return the sole reviewed finite attestation discovery limit.
+
+    Args:
+        value: Decoded lock value or CLI integer.
+        context: Stable source identity used in diagnostics.
+
+    Returns:
+        The exact protected fetch limit.
+
+    Raises:
+        ManifestError: The value is boolean, non-integer, or differs from the
+            reviewed finite limit.
+
+    Note:
+        Limit rotation intentionally requires a code, lock, static-contract,
+        documentation, and remote-evidence review. An implicit GitHub CLI
+        default is never an authority.
+    """
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value != _ATTESTATION_FETCH_LIMIT
+    ):
+        raise ManifestError(
+            f"{context}: attestation fetch limit must be "
+            f"{_ATTESTATION_FETCH_LIMIT}"
+        )
+    return value
+
+
+def _published_image_lock(root: Path) -> dict[str, Any]:
+    """Load the exact protected OCI discovery and attestation contract.
+
+    Args:
+        root: Repository containing the canonical CI-image lock.
+
+    Returns:
+        The strict published-image locator, labels, repository/workflow, and
+        reviewed finite attestation fetch limit.
+
+    Raises:
+        ManifestError: The lock or published record has an unknown/missing
+            field, malformed string identity, or non-reviewed fetch limit.
+
+    Note:
+        The limit is part of the self-including canonical image lock and cannot
+        silently inherit or drift with GitHub CLI's default.
+    """
     lock = _load_json(root / "ci/locks/ci-image-lock.json")
     published = lock.get("published_image") if isinstance(lock, dict) else None
     expected_fields = {
+        "attestation_fetch_limit",
         "builder_image_version_label",
         "input_manifest_label",
         "locator",
@@ -1313,18 +1539,100 @@ def _published_image_lock(root: Path) -> dict[str, str]:
     if (
         not isinstance(published, dict)
         or set(published) != expected_fields
-        or not all(isinstance(value, str) and value for value in published.values())
     ):
         raise ManifestError("published image lock is malformed")
+    string_fields = expected_fields - {"attestation_fetch_limit"}
+    if not all(
+        isinstance(published[field], str) and published[field]
+        for field in string_fields
+    ):
+        raise ManifestError("published image string identity is malformed")
+    _validated_attestation_fetch_limit(
+        published["attestation_fetch_limit"], "published image lock"
+    )
     return published
+
+
+def _command_snapshot_attestation_bundle(arguments: argparse.Namespace) -> None:
+    """Retain one complete, unsaturated GitHub attestation download window.
+
+    Args:
+        arguments: Fresh download directory, exact subject digest, reviewed
+            fetch limit, and process-private snapshot output.
+
+    Returns:
+        None after writing the exact retained JSONL bytes and printing their
+        raw fetched-bundle count.
+
+    Raises:
+        ManifestError: The directory is linked/special, its exact digest-named
+            bundle is absent or accompanied by another entry, the bundle is
+            linked/special/malformed JSONL, the output is residual, or the raw
+            fetched count reaches the finite limit and may be truncated.
+
+    Note:
+        ``gh attestation download`` documents one JSON object per line and
+        ``--limit`` as the maximum number fetched. Counting the retained raw
+        bundle therefore measures fetch saturation before offline verification;
+        counting only ``gh attestation verify --format json`` output would be
+        weaker because that array contains verified evidence, not fetch-count
+        metadata. Saturation deliberately rejects even an exactly complete
+        limit-sized set because the CLI exposes no continuation/total marker.
+    """
+    limit = _validated_attestation_fetch_limit(
+        arguments.fetch_limit, "attestation bundle snapshot"
+    )
+    subject_digest = arguments.subject_digest
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", subject_digest) is None:
+        raise ManifestError("attestation bundle subject digest is malformed")
+    directory = arguments.download_directory
+    try:
+        directory_state = directory.lstat()
+        with os.scandir(directory) as iterator:
+            entries = list(iterator)
+    except OSError as error:
+        raise ManifestError(
+            f"cannot inspect attestation download directory {directory}: {error}"
+        ) from error
+    if not stat.S_ISDIR(directory_state.st_mode) or directory.is_symlink():
+        raise ManifestError("attestation download root must be one real directory")
+    expected_name = f"{subject_digest}.jsonl"
+    if len(entries) != 1 or entries[0].name != expected_name:
+        raise ManifestError(
+            "attestation download must contain only the exact digest bundle"
+        )
+    bundle_path = directory / expected_name
+    measurement = _measure_regular_input(bundle_path)
+    content = measurement.content
+    if not content or not content.endswith(b"\n"):
+        raise ManifestError("attestation bundle JSONL must be nonempty and newline terminated")
+    records = content[:-1].split(b"\n")
+    if not records or any(not record for record in records):
+        raise ManifestError("attestation bundle JSONL contains an empty record")
+    for index, record in enumerate(records):
+        value = _load_json_bytes(record, f"{bundle_path}:record {index}")
+        if not isinstance(value, dict):
+            raise ManifestError(
+                f"attestation bundle record {index} must be one JSON object"
+            )
+    if len(records) >= limit:
+        raise ManifestError(
+            "attestation bundle fetch reached the protected limit and may be truncated"
+        )
+    output = arguments.output
+    if output == bundle_path or output.exists() or output.is_symlink():
+        raise ManifestError("attestation bundle snapshot output must be fresh")
+    _write_output(output, content)
+    print(len(records))
 
 
 def _command_attestation_identities(arguments: argparse.Namespace) -> None:
     """Extract one unique source/signer pair from verified GitHub evidence.
 
     Args:
-        arguments: Verified JSON, image-source/current-candidate identities,
-            and optional exact producer source/signer expectations.
+        arguments: Verified JSON, protected fetch limit,
+            image-source/current-candidate identities, and optional exact
+            producer source/signer expectations.
 
     Returns:
         None after printing the certificate-bound source repository digest and
@@ -1332,9 +1640,9 @@ def _command_attestation_identities(arguments: argparse.Namespace) -> None:
 
     Raises:
         ManifestError: Evidence is empty/malformed, lacks protected certificate
-            fields, contains non-canonical commit identities, disagrees with an
-            explicit pair, or has no unique newest ancestry/zero-drift pair for
-            published discovery.
+            fields, exceeds the finite fetch bound, contains non-canonical
+            commit identities, disagrees with an explicit pair, or has no
+            unique newest ancestry/zero-drift pair for published discovery.
 
     Note:
         Only ``verificationResult.signature.certificate`` is consumed. GitHub
@@ -1344,11 +1652,28 @@ def _command_attestation_identities(arguments: argparse.Namespace) -> None:
         a later published consumer, multiple same-digest rerun attestations are
         reduced to the unique newest source candidate that is an ancestor of
         the consumer and still binds the exact image-source inputs. Incomparable
-        or same-candidate/different-signer evidence fails closed.
+        or same-candidate/different-signer evidence fails closed. Published
+        verified evidence at the fetch limit also fails as possibly truncated;
+        a known producer may reach the limit only because GitHub CLI already
+        enforces both exact source and signer constraints, and every returned
+        certificate is still required to equal that pair.
     """
+    fetch_limit = _validated_attestation_fetch_limit(
+        arguments.fetch_limit, "verified attestation evidence"
+    )
     evidence = _load_json(arguments.attestation_json)
     if not isinstance(evidence, list) or not evidence:
         raise ManifestError("verified attestation evidence must be a non-empty array")
+    if len(evidence) > fetch_limit:
+        raise ManifestError("verified attestation evidence exceeds the fetch limit")
+    expected_source = arguments.expected_source_commit
+    expected_signer = arguments.expected_signer_commit
+    if (expected_source is None) != (expected_signer is None):
+        raise ManifestError("attestation source/signer expectations must be paired")
+    if expected_source is None and len(evidence) >= fetch_limit:
+        raise ManifestError(
+            "published verified attestation evidence reached the fetch limit"
+        )
     identities: set[tuple[str, str]] = set()
     for index, item in enumerate(evidence):
         if not isinstance(item, dict):
@@ -1372,10 +1697,6 @@ def _command_attestation_identities(arguments: argparse.Namespace) -> None:
                 f"verified attestation entry {index} has non-canonical commit identity"
             )
         identities.add((source, signer))
-    expected_source = arguments.expected_source_commit
-    expected_signer = arguments.expected_signer_commit
-    if (expected_source is None) != (expected_signer is None):
-        raise ManifestError("attestation source/signer expectations must be paired")
     if expected_source is not None:
         expected = (expected_source, expected_signer)
         if (
@@ -1607,11 +1928,21 @@ def build_parser() -> argparse.ArgumentParser:
     attestation_identities.add_argument(
         "--attestation-json", type=Path, required=True
     )
+    attestation_identities.add_argument("--fetch-limit", type=int, required=True)
     attestation_identities.add_argument("--image-source-commit", required=True)
     attestation_identities.add_argument("--consumer-candidate-commit", required=True)
     attestation_identities.add_argument("--expected-source-commit")
     attestation_identities.add_argument("--expected-signer-commit")
     attestation_identities.set_defaults(handler=_command_attestation_identities)
+    bundle_snapshot = subparsers.add_parser(
+        "snapshot-attestation-bundle",
+        help="retain an unsaturated exact-subject GitHub bundle window",
+    )
+    bundle_snapshot.add_argument("--download-directory", type=Path, required=True)
+    bundle_snapshot.add_argument("--subject-digest", required=True)
+    bundle_snapshot.add_argument("--fetch-limit", type=int, required=True)
+    bundle_snapshot.add_argument("--output", type=Path, required=True)
+    bundle_snapshot.set_defaults(handler=_command_snapshot_attestation_bundle)
     labels = subparsers.add_parser("verify-labels", help="verify exact OCI identity labels")
     labels.add_argument("--manifest", type=Path, required=True)
     labels.add_argument("--labels-json", type=Path, required=True)

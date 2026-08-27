@@ -58,6 +58,7 @@
     }
   },
   "published_image": {
+    "attestation_fetch_limit": 30,
     "builder_image_version_label": "org.photospider.ci.builder-image-version",
     "input_manifest_label": "org.photospider.ci.input-manifest-sha256",
     "locator": "ghcr.io/kevin-zf1123/photospider/photospider-ci:latest",
