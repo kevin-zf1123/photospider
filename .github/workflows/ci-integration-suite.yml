@@ -529,11 +529,25 @@ jobs:
             ci/scripts
           sparse-checkout-cone-mode: false
           path: .ci-targeted-verifier-control
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        name: Checkout exact candidate data without execution
+        with:
+          persist-credentials: false
+          repository: ${{ inputs.checkout_repository }}
+          fetch-depth: 1
+          submodules: recursive
+          ref: ${{ inputs.checkout_ref }}
+          path: .ci-targeted-verifier-candidate
       - name: Download canonical build-smoke control identity
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ci-build-smoke-control-default
           path: CI-results/build-smoke-control
+      - name: Download exact raw CTest and profile inventory
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-build-smoke-raw-default
+          path: .ci-targeted-verifier-raw
       - name: Download CTest control artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -563,6 +577,7 @@ jobs:
           set -Eeuo pipefail
           python3 .ci-targeted-verifier-control/ci/scripts/build_smoke_route.py \
             verify-control \
+            --raw-dir .ci-targeted-verifier-raw \
             --manifest CI-results/build-smoke-control/build-smoke-control.manifest.json \
             --route-sha256 "$CI_ROUTE_SHA256" \
             --candidate-commit "${{ inputs.candidate_commit }}" \
@@ -579,12 +594,26 @@ jobs:
               --archive "CI-results/targeted-artifacts/$role/$role.tar.gz" \
               --manifest "CI-results/targeted-artifacts/$role/$role.manifest.json" \
               --role "$role" \
+              --candidate-root .ci-targeted-verifier-candidate \
               --candidate-commit "${{ inputs.candidate_commit }}" \
               --profile default \
               --matrix-sha256 "$CI_MATRIX_SHA256" \
               --image-digest "${{ inputs.image_digest }}" \
               --workflow-commit "${{ inputs.workflow_commit }}"
           done
+          python3 .ci-targeted-verifier-control/ci/scripts/reusable_build.py \
+            verify-ordinary-coverage \
+            --candidate-root .ci-targeted-verifier-candidate \
+            --raw-dir .ci-targeted-verifier-raw \
+            --control-manifest CI-results/build-smoke-control/build-smoke-control.manifest.json \
+            --route-sha256 "$CI_ROUTE_SHA256" \
+            --artifact-root CI-results/targeted-artifacts \
+            --restored-build-root "$RUNNER_TEMP/photospider-targeted-ctest-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/ci" \
+            --candidate-commit "${{ inputs.candidate_commit }}" \
+            --profile default \
+            --matrix-sha256 "$CI_MATRIX_SHA256" \
+            --image-digest "${{ inputs.image_digest }}" \
+            --workflow-commit "${{ inputs.workflow_commit }}"
 
   attest-targeted-artifacts:
     needs: [build-integrity-default, build-smoke-control, verify-targeted-artifacts]

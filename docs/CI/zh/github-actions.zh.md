@@ -58,7 +58,7 @@ integration job 都执行该已校验的 digest-qualified 引用；没有 job �
 container 默认 shell。protected-path、change-classification 与稳定结果门禁仍是轻量
 `ubuntu-24.04` job，不会 configure 或编译项目。
 
-当 pull request 或 push 修改 canonical CI-image lock 的 `input_paths` 中任一路径时，detector 仍会拉取并校验精确 base，而不依赖 fork 中可能不存在的 `origin/<base>`。Detector 会分别严格解析 merge base 与 head 的 lock，要求 lock 把自身列为输入，并把 NUL 分隔的 Git path inventory 与两个已验证路径集合的并集比较。因此，lock 增加、删除、重复、路径遍历、JSON 畸形或某个 revision 缺失时，都不能输出 `changed=false`。Fork head 会在 checkout 前被拒绝，同仓库受保护 `CI/**` pull request 则使用其可信 push 路径。Image-change healthcheck job 不构建镜像：它会先校验精确 hosted runner、受保护 lock、canonical publish-source identity 与生成的 image-input manifest，再运行静态 healthcheck。只有符合条件的可信 `main` 或 `CI/**` integration push 可以调用唯一 candidate-image producer 与 shared digest-bound suite。
+当 pull request 或 push 修改 canonical CI-image lock 的 `input_paths` 中任一路径时，detector 仍会拉取并校验精确 base，而不依赖 fork 中可能不存在的 `origin/<base>`。Detector 会分别严格解析 merge base 与 head 的 lock，要求 lock 把自身列为输入，并把 NUL 分隔的 Git path inventory 与两个已验证路径集合的并集比较。唯一允许 base 缺失的例外，是 head 在精确 diff path 新增一份 strict、self-including 的 regular lock blob 的真实首次引入；它始终路由 `changed=true`。因此，lock 增加、删除、重复、路径遍历、JSON 畸形、head 缺失或 malformed，或未经证明的 bootstrap，都不能输出 `changed=false`。Fork head 会在 checkout 前被拒绝，同仓库受保护 `CI/**` pull request 则使用其可信 push 路径。Image-change healthcheck job 不构建镜像：它会先校验精确 hosted runner、受保护 lock、canonical publish-source identity 与生成的 image-input manifest，再运行静态 healthcheck。只有符合条件的可信 `main` 或 `CI/**` integration push 可以调用唯一 candidate-image producer 与 shared digest-bound suite。
 
 即使 major OS 已明确，hosted label 仍是可变的。GitHub 说明 runner image deployment 通常需要两到三天，
 rollout 期间会创建 prerelease，而且具体 job version 必须从 `Set up job` 读取
@@ -156,6 +156,8 @@ digest。Artifact key 由有界 ASCII slug 与测试名 SHA-256 digest 派生，
 value；排序稳定，workflow 不维护测试名清单。一个聚焦的真实 CMake fixture 会在 configure 时改写
 candidate-owned route helper 与 lock，再证明 fresh protected control 仍是权威；raw entry 缺失、重复、
 被重新标记或未声明时，会在 matrix output 或 attestation 前失败。
+
+在 targeted artifact attestation 前，`verify-targeted-artifacts` 会把精确 candidate 再次 fresh checkout 到一份不执行代码的 data root。该 root 与精确 protected `workflow_commit` control checkout、raw inventory、control manifest、targeted artifact 和 restored CTest root 互不重叠。只能执行 control checkout 中的 Python。Verifier 会把 control `HEAD` 绑定到 `workflow_commit`、把 candidate-data `HEAD` 绑定到 `candidate_commit`，并在使用后重新检查两个 directory object。随后，它把精确 raw bundle 重新绑定到 route-control digest，并要求 raw CTest JSON、两份 targeted control/runtime closure 与 fresh 恢复后 `ctest --show-only=json-v1` 查询得到同一个普通 test set（只排除精确 `build-smoke`）。Reduction、addition、relabeling、identity/digest mismatch、link、overlap 或 path/commit drift 都会在 attestation 与 readiness 前失败。Container 与 host job 可能使用不同的绝对 workspace root，因此 discovery 在 job-owned 副本内执行，且只能在 CTest control file 与 cache 中替换 completion stamp 记录的精确 producer build-root token。经过验证的 archive、manifest 与 closure 绝不会被改写。
 
 当前带标签的 inventory 为：
 
@@ -426,17 +428,17 @@ helper 和 output artifact 不得进入 primary repository，也不得作为 per
 - `ci/scripts/ci_image_install.sh`：执行唯一的 Docker image 安装 transaction。它的 version/完整文件 SHA-256、verifier-owned active-statement identity、单一 entrypoint 调用、snapshot/APT/Pip/GitHub-CLI 顺序、下载 authority 与 hash-before-extract boundary 都受保护；alternate APT path、额外 downloader、pipe-to-shell、跳过 hash 或 early success 都会被拒绝。
 - `ci/scripts/integration_suite_gate.py`：校验 shared DAG 每项精确 conclusion、publish/attestation mode 与 image digest，随后安全追加唯一 validated digest output。直接行为回归会让每个 required job 分别使用 failed/skipped/unknown conclusion，并覆盖两种合法 attestation mode。
 - `ci/scripts/runtime_capability_test.sh`：覆盖精确 Make/Ninja target 解析、两种完整契约、不完整/混合/缺失清单的 fail-closed 行为、required-target 校验及互斥 CLI 配置输出。它还证明 direct-consumer trust export 由精确的可选 `test_plugin_trust_bundle` capability 控制，而不是由更宽泛的 policy/execution profile 控制：pre-trust 与 legacy inventory 保持 no-op，缺失或 malformed inventory 以及不完整/非 regular material 均 fail closed，完整的 trust-enabled tuple 则以 canonical path 覆盖 inherited value。
-- `ci/scripts/ci_image_changed.sh`：把精确 base/head 比较委托给 canonical manifest helper；后者严格验证 self-including `input_paths` lock 的两个 revision，把其并集与 NUL 分隔且不带 status 过滤的 diff 比较，并在 lock 或 Git 失败时不输出路由。
+- `ci/scripts/ci_image_changed.sh`：把精确 base/head 比较委托给 canonical manifest helper；后者严格验证 self-including `input_paths` lock 的必需 revision，把其并集与 NUL 分隔且不带 status 过滤的 diff 比较，对经过证明的 no-lock-base/strict-head 首次引入路由 `true`，并在 head malformed、bootstrap 未证明、后续 lock 缺失或 Git 失败时不输出路由。
 - `ci/scripts/build_smoke_inventory.py`：严格解析 CTest JSON v1，输出确定性 matrix 与 NUL 分隔精确名称，并在基于索引执行前重新校验一个 matrix selection。严格构建后模式拒绝空 selection；只有显式 preflight 模式允许为空。Focused regression 会覆盖 malformed JSON/schema、重复名称/property/label value、非法或缺失 label、disabled/commandless entry、严格空 selection、确定性排序、JSON round trip、安全 artifact key、敌意测试名字符、在执行前停止的 absent/disabled/commandless runner selection，以及真实配置期占位到构建后发现过程。
 - `ci/scripts/integration_plan.sh`：配置一个启用测试的小型 build tree，并校验允许空集合、非权威的配置期 inventory preview；它不会输出 workflow matrix。
 - `ci/scripts/build_integrity.sh`：检测一种完整运行时契约，在同一 tree 中执行 required-target 与完整 build，捕获未经解释的构建后 CTest JSON，写入普通 CTest 闭包并安装 fresh package prefix。Candidate configure 后它不会 import 或执行 route parser/lock，也不输出 consumer matrix；workflow 只把 CTest 与生成的 profile/role byte 打包给独立 protected control job。
-- `ci/scripts/build_smoke_route.py`：只从精确 protected control checkout 运行。它校验互不重叠的 candidate/control/raw 边界、两个 checkout commit、raw envelope 与生成的 profile identity，再使用受保护 parser 和 routing lock 输出四个穷尽的 downstream matrix 与一个 canonical route digest；其 verifier 会在 artifact attestation 前重新绑定下载的 control identity。
-- `ci/scripts/ctest_runtime_closure.py`：派生递归的构建后普通 CTest control/runtime 闭包，并在执行前重新校验恢复后的 runtime inventory、executable、dynamic library、plugin、trust input 与 build-tree data。
+- `ci/scripts/build_smoke_route.py`：只从精确 protected control checkout 运行。它校验互不重叠的 candidate/control/raw 边界、两个 checkout commit、raw envelope 与生成的 profile identity，再使用受保护 parser 和 routing lock 输出四个穷尽的 downstream matrix 与一个 canonical route digest；其 verifier 会在 artifact attestation 前把下载的精确 raw byte 重新绑定到该 control digest。
+- `ci/scripts/ctest_runtime_closure.py`：派生递归的构建后普通 CTest control/runtime 闭包，为 retained raw/restored JSON 暴露严格普通名称解析，并在执行前重新校验恢复后的 runtime inventory、executable、dynamic library、plugin、trust input 与 build-tree data。
 - `ci/scripts/ctest_full.sh`：复用 runtime role，在排除精确 `build-smoke` label 后，以受控 `${CI_JOBS}` 并行度运行普通 CTest，同时保留失败输出与 JUnit 证据。
 - `ci/scripts/build_smoke_test.sh`：从 `ci-control-default` 重新校验并运行一个精确 default-role CTest 名称。
 - `ci/scripts/openexr_smoke_test.sh`：从已校验、只含 cache 的 metadata role 运行精确 default OpenEXR option-off source-tree smoke。
 - `ci/scripts/static_product_consumer_test.sh`：在不重建或重新安装 producer 的前提下，于完整 package consumer 执行前后重新测量精确 installed-package content。
-- `ci/scripts/targeted_artifact_consume.sh`：分别以 candidate source digest 与 reusable-workflow signer digest 校验 archive/manifest attestation，再校验并原子恢复一个精确 role。
+- `ci/scripts/targeted_artifact_consume.sh` 与 `ci/scripts/reusable_build.py`：分别以 candidate source digest 与 reusable-workflow signer digest 校验 archive/manifest attestation，再校验并原子恢复一个精确 role。受保护的 attestation 前 verifier 还会分离 control-code/candidate-data root，并交叉绑定 raw、两份 archived CTest closure 与 restored 普通 inventory。
 - `ci/scripts/graph_cli_script_test.sh`：使用上述执行前 Graph 文档能力标记，运行相互隔离的正路径、显式来源缺失和无效 target REPL 检查。
 - `ci/scripts/propagation_script_test.sh`：构建 `test_propagation`，并对线性和复杂 propagation 图运行 `tiles all`。
 - `ci/scripts/plugin_load_test.sh`：检查 operation plugin，并选择 scheduler plugin 加载/列举，或 policy plugin、registry、policy/execution 与 CLI route 检查。

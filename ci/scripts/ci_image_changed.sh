@@ -7,8 +7,9 @@ set -Eeuo pipefail
 # @note CI workflows provide the exact pull-request base SHA after fetching it
 #   from the base repository. Local callers may use the documented fallbacks or
 #   CI_IMAGE_REPO_ROOT to exercise the detector in an isolated repository. The
-#   sole path authority is the strictly parsed canonical lock at both comparison
-#   revisions; this script intentionally owns no parallel path list.
+#   sole path authority is the strictly parsed canonical lock at each required
+#   comparison revision. A genuinely lock-free base plus an exact strict-head
+#   first introduction routes true; this script owns no parallel path list.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=ci/scripts/common.sh

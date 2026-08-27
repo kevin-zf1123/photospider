@@ -72,10 +72,13 @@ When a pull request or push changes any path in the canonical CI-image lock's
 relying on a possibly absent fork `origin/<base>`. The detector strictly parses
 the lock independently at the merge base and head, requires the lock to include
 itself, and compares the NUL-delimited Git path inventory with the union of both
-validated path sets. Lock additions, removals, duplicates, traversal, malformed
-JSON, or a missing revision therefore cannot emit `changed=false`. A fork head
-is rejected before checkout, and a same-repository protected `CI/**` pull
-request uses its trusted push route. The image-change healthcheck job does not
+validated path sets. The only missing-base exception is a real first
+introduction whose head adds a strict self-including regular lock blob at the
+exact diff path; it always routes `changed=true`. Lock additions, removals,
+duplicates, traversal, malformed JSON, a missing/malformed head, or an unproved
+bootstrap therefore cannot emit `changed=false`. A fork head is rejected before
+checkout, and a same-repository protected `CI/**` pull request uses its trusted
+push route. The image-change healthcheck job does not
 build an image: it verifies the exact hosted runner, protected locks, canonical
 publish-source identity, and generated image-input manifest before running the
 static healthcheck. Only an eligible trusted `main` or `CI/**` integration push
@@ -221,6 +224,23 @@ workflow test-name list is maintained. A focused real CMake fixture rewrites a
 candidate-owned route helper and lock during configure, then proves the fresh
 protected control remains authoritative; missing, duplicated, relabelled, or
 undeclared raw entries fail before matrix output or attestation.
+
+Before targeted artifacts are attested, `verify-targeted-artifacts` performs a
+second fresh checkout of the exact candidate into a nonexecuted data root. That
+root is disjoint from the exact protected `workflow_commit` control checkout,
+the raw inventory, control manifest, targeted artifacts, and restored CTest
+root. Only control-checkout Python is executed. The verifier binds control
+`HEAD` to `workflow_commit`, candidate-data `HEAD` to `candidate_commit`, and
+rechecks both directory objects after use. It then revalidates the exact raw
+bundle against the route-control digest and requires one ordinary-test set
+(excluding only exact `build-smoke`) across raw CTest JSON, both targeted
+control/runtime closures, and a fresh restored `ctest --show-only=json-v1`
+query. Reduction, addition, relabeling, identity/digest mismatch, links,
+overlap, or path/commit drift fails before attestation and readiness. Container
+and host jobs may use different absolute workspace roots, so discovery runs in
+a job-owned copy whose CTest control files and cache replace only the exact
+completion-stamp producer build-root token. The verified archive, manifests,
+and closures are never rewritten.
 
 The current labelled inventory is:
 
@@ -603,17 +623,17 @@ personal development content.
 - `ci/scripts/ci_image_install.sh`: performs the only Docker image installation transaction. Its version/full-file SHA-256, verifier-owned active-statement identity, single entrypoint call, snapshot/APT/Pip/GitHub-CLI sequence, download authority, and hash-before-extract boundary are protected; it rejects an alternate APT path, extra downloader, pipe-to-shell command, bypassed hash, or early success.
 - `ci/scripts/integration_suite_gate.py`: validates every exact shared-DAG conclusion plus the publish/attestation mode and image digest, then safely appends the sole validated digest output. Direct behavior regressions exercise every required job with failed/skipped/unknown conclusions and both legitimate attestation modes.
 - `ci/scripts/runtime_capability_test.sh`: exercises exact Make/Ninja target parsing, both complete contracts, partial/mixed/absent fail-closed behavior, required-target checks, and mutually exclusive CLI configuration output. It also proves that the exact optional `test_plugin_trust_bundle` capability—not the broader policy/execution profile—gates direct-consumer trust export: pre-trust and legacy inventories are no-ops, missing or malformed inventories and incomplete/nonregular material fail closed, and a complete trust-enabled tuple replaces inherited values with canonical paths.
-- `ci/scripts/ci_image_changed.sh`: delegates the exact base/head comparison to the canonical manifest helper, which strictly validates both revisions of the self-including `input_paths` lock, compares their union with the NUL-delimited unfiltered diff, and exits without a route output on lock or Git failure.
+- `ci/scripts/ci_image_changed.sh`: delegates the exact base/head comparison to the canonical manifest helper, which strictly validates required revisions of the self-including `input_paths` lock, compares their union with the NUL-delimited unfiltered diff, routes a proved no-lock-base/strict-head first introduction `true`, and exits without a route output on malformed head, unproved bootstrap, later missing lock, or Git failure.
 - `ci/scripts/build_smoke_inventory.py`: strictly parses CTest JSON v1, emits a deterministic matrix and NUL-delimited exact names, and revalidates one matrix selection before index-based execution. Strict post-build mode rejects an empty selection; only explicit preflight mode permits it. Its focused regression covers malformed JSON/schema, duplicate names/properties/label values, invalid or missing labels, disabled/commandless entries, empty strict selection, deterministic ordering, JSON round trips, safe artifact keys, hostile test-name characters, absent/disabled/commandless runner selections that stop before execution, and real configuration-placeholder-to-post-build discovery.
 - `ci/scripts/integration_plan.sh`: configures a small testing-enabled tree and validates an allow-empty, non-authoritative configuration-time inventory preview; it emits no workflow matrix output.
 - `ci/scripts/build_integrity.sh`: detects one complete runtime contract, runs required-target and complete builds in one tree, captures uninterpreted post-build CTest JSON, writes the ordinary CTest closure, and installs a fresh package prefix. It never imports or executes a route parser/lock after candidate configure and emits no consumer matrix; the workflow packages its CTest and generated profile/role bytes for the separate protected control job.
-- `ci/scripts/build_smoke_route.py`: runs only from the exact protected control checkout. It validates disjoint candidate/control/raw boundaries, both checkout commits, the raw envelope and generated profile identity, then uses protected parsers and the routing lock to emit four exhaustive downstream matrices and one canonical route digest; its verifier rebinds downloaded control identity before artifact attestation.
-- `ci/scripts/ctest_runtime_closure.py`: derives the recursive post-build ordinary CTest control/runtime closure and revalidates restored runtime inventory, executables, dynamic libraries, plugins, trust inputs, and build-tree data before execution.
+- `ci/scripts/build_smoke_route.py`: runs only from the exact protected control checkout. It validates disjoint candidate/control/raw boundaries, both checkout commits, the raw envelope and generated profile identity, then uses protected parsers and the routing lock to emit four exhaustive downstream matrices and one canonical route digest; its verifier rebinds the exact downloaded raw bytes to that control digest before artifact attestation.
+- `ci/scripts/ctest_runtime_closure.py`: derives the recursive post-build ordinary CTest control/runtime closure, exposes strict ordinary-name parsing for retained raw/restored JSON, and revalidates restored runtime inventory, executables, dynamic libraries, plugins, trust inputs, and build-tree data before execution.
 - `ci/scripts/ctest_full.sh`: reuses the runtime role and runs ordinary CTest with the exact `build-smoke` label excluded, controlled `${CI_JOBS}` parallelism, failure output, and JUnit evidence.
 - `ci/scripts/build_smoke_test.sh`: revalidates and runs one exact default-role CTest name from `ci-control-default`.
 - `ci/scripts/openexr_smoke_test.sh`: runs the exact default OpenEXR option-off source-tree smoke from the verified cache-only metadata role.
 - `ci/scripts/static_product_consumer_test.sh`: remeasures exact installed-package content before and after running the complete package consumer, without rebuilding or reinstalling the producer.
-- `ci/scripts/targeted_artifact_consume.sh`: verifies archive and manifest attestations with candidate source digest and reusable-workflow signer digest, then verifies and atomically restores one exact role.
+- `ci/scripts/targeted_artifact_consume.sh` and `ci/scripts/reusable_build.py`: verify archive and manifest attestations with candidate source digest and reusable-workflow signer digest, then verify and atomically restore one exact role. The protected pre-attestation verifier additionally separates control-code and candidate-data roots and cross-binds raw, both archived CTest closures, and restored ordinary inventory.
 - `ci/scripts/graph_cli_script_test.sh`: runs isolated positive, explicit-missing-source, and invalid-target REPL checks using the pre-execution Graph document capability marker described above.
 - `ci/scripts/propagation_script_test.sh`: builds `test_propagation` and runs `tiles all` on linear and complex propagation graphs.
 - `ci/scripts/plugin_load_test.sh`: checks operation plugins and selects either scheduler plugin loading/listing or policy plugin, registry, policy/execution, and CLI route checks.

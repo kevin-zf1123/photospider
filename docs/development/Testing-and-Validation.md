@@ -466,6 +466,20 @@ After that exact label check, it selects only the validated numeric CTest index,
 so arbitrary test-name characters are not interpreted by a shell or regular
 expression.
 
+Before role attestation, a separate protected verifier checks out the exact
+candidate into a nonexecuted data root distinct from its exact
+`workflow_commit` control-code root and all downloaded raw/control/artifact
+roots. It binds both real `HEAD` commits and directory objects before and after
+use, then revalidates the raw bundle against the protected route digest. Using
+only protected parsers, it requires equality among the raw ordinary-test set,
+the targeted control/runtime closure sets, and fresh restored CTest discovery,
+excluding only the exact `build-smoke` label. Coverage reduction, addition,
+relabeling, identity/digest/path drift, or candidate helper execution fails
+before attestation and readiness. To handle container/host workspace-path
+differences, restored discovery rewrites only the exact completion-stamp
+producer build-root token in a verified job-owned copy of CTest control files
+and the cache; archive, manifest, and closure bytes remain unchanged.
+
 Published and candidate images call the same digest-bound reusable DAG. The
 producer runs `build_required_targets` and `build_all` sequentially in one tree,
 then uploads only a strict raw CTest/profile/role envelope and the role
@@ -3536,8 +3550,10 @@ The image detector uses no Git status filter. Its sole selection authority is
 the self-including `input_paths` array from the strict CI-image lock, parsed
 independently at the merge base and head. The NUL-delimited Git path bytes are
 compared with the union of those validated revisions, so a newly added or
-removed input remains visible and malformed, duplicate, traversal, or missing
-lock state fails without output. The healthcheck static-scope inventory instead
+removed input remains visible. A genuine no-lock base followed by a strict,
+self-including head lock added at the exact diff path is the sole bootstrap and
+routes `changed=true`; malformed, duplicate, traversal, missing/malformed head,
+unproved bootstrap, or later missing-lock state fails without output. The healthcheck static-scope inventory instead
 uses `--diff-filter=d` to omit deleted formatter/linter inputs while retaining
 type changes and uncommon non-deletion statuses. A failing lock read or
 `git diff` therefore terminates image detection or healthcheck static-scope
@@ -3562,11 +3578,14 @@ The maintained entry points are:
   cumulative-main ordering; exact three-way `CI_BASE_REF` source routing;
   allow-empty configuration preflight, raw-only candidate producer, fresh
   exact-commit protected-control checkout with disjoint control/candidate/raw
-  paths, empty-output-safe `fromJSON`, mutually disjoint and exhaustive
+  paths, the real no-lock-base/strict-head first-introduction route,
+  empty-output-safe `fromJSON`, mutually disjoint and exhaustive
   four-way downstream build-smoke routing across ordinary `ctest-control`,
   `openexr-metadata`, dedicated static `installed-package`, and
   producer-designated `ctest-control` partitions; role-specific artifacts,
-  route-digest-bound verification/attestation, complete shared-suite gate
+  route-digest-bound verification/attestation, separate protected-code and
+  nonexecuted candidate-data roots, raw/control/targeted/restored ordinary CTest
+  equality, complete shared-suite gate
   aggregation, explicit rejection of a
   serial `integration_suite.sh` fallback, architecture-neutral
   `execution-repeat` routing, newline-path artifacts, and detector/reader/
@@ -3600,8 +3619,8 @@ The maintained entry points are:
   a route helper or lock after candidate configure.
 - `ci/scripts/build_smoke_route.py` for the exact protected control checkout,
   strict raw-envelope and checkout identity validation, protected profile/CTest
-  parsing, four exhaustive downstream matrices, and a verifier-bound route
-  digest.
+  parsing, four exhaustive downstream matrices, and exact raw-byte rebinding to
+  the verifier-bound route digest.
 - `ci/scripts/ctest_runtime_closure.py` and reusable-build regressions for exact
   recursive CTest includes, working-directory-relative command/property inputs,
   dynamic libraries, plugins, trust inputs, forbidden residue, and restored
@@ -3616,6 +3635,7 @@ The maintained entry points are:
   producer rebuild/install.
 - `ci/scripts/targeted_artifact_consume.sh` and `reusable_build.py` for exact
   role member/digest/size identity, separate source/signer attestation digests,
+  dual-root protected verification, raw/closure/restored ordinary coverage,
   safe extraction, and complete shared-DAG consumers.
 
 CI source inventories and exclusion lists must describe maintained tests and

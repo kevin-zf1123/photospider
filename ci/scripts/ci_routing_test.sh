@@ -1241,7 +1241,19 @@ validate_reusable_build_identity_routing() {
   assert_file_contains "$verify_job" \
     'CI_ROUTE_SHA256: ${{ needs.build-smoke-control.outputs.route_sha256 }}'
   assert_file_contains "$verify_job" 'path: .ci-targeted-verifier-control'
+  assert_file_contains "$verify_job" 'path: .ci-targeted-verifier-candidate'
+  assert_file_contains "$verify_job" 'path: .ci-targeted-verifier-raw'
+  assert_file_contains "$verify_job" 'name: ci-build-smoke-raw-default'
+  assert_file_contains "$verify_job" 'verify-ordinary-coverage'
+  assert_file_contains "$verify_job" \
+    '--candidate-root .ci-targeted-verifier-candidate'
+  assert_file_contains "$verify_job" \
+    '--raw-dir .ci-targeted-verifier-raw'
+  assert_file_contains "$verify_job" \
+    '--restored-build-root "$RUNNER_TEMP/photospider-targeted-ctest-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/ci"'
   assert_file_not_contains "$verify_job" 'run: python3 ci/scripts/build_smoke_route.py'
+  assert_file_not_contains "$verify_job" \
+    'python3 .ci-targeted-verifier-candidate/'
   assert_file_contains "$verify_job" \
     'for role in ctest-control ctest-runtime installed-package openexr-metadata; do'
   assert_file_not_contains "$attest_job" 'permissions:'
@@ -2139,6 +2151,48 @@ PY
     "$base_sha" "$image_sha" "$docs_sha" "$newline_sha"
 }
 
+# @brief Create the real first-introduction history for the CI-image lock.
+# @param $1 Destination repository path that must not already exist.
+# @return Zero after printing the lock-free base and strict-lock head SHAs.
+# @throws Nothing; Git and filesystem failures terminate through set -e.
+# @note The baseline intentionally receives no copied lock or canonical image
+#   input. The second commit copies the production self-including authority and
+#   every declared member, exactly matching the protected bootstrap boundary.
+create_image_lock_introduction_history() {
+  local repository=$1
+  local base_sha
+  local head_sha
+  mkdir -p "$repository"
+  git -C "$repository" init -q
+  git -C "$repository" config user.name "CI Routing Test"
+  git -C "$repository" config user.email "ci-routing@example.invalid"
+  printf 'baseline without image lock\n' > "$repository/seed.txt"
+  git -C "$repository" add seed.txt
+  git -C "$repository" commit -qm "baseline without image lock"
+  base_sha=$(git -C "$repository" rev-parse HEAD)
+  if git -C "$repository" cat-file -e \
+    "$base_sha:ci/locks/ci-image-lock.json" 2>/dev/null; then
+    fail "first-introduction baseline unexpectedly contains the image lock"
+  fi
+
+  while IFS= read -r relative; do
+    mkdir -p -- "$(dirname -- "$repository/$relative")"
+    cp -- "$REPO_ROOT/$relative" "$repository/$relative"
+  done < <(python3 - "$REPO_ROOT/ci/locks/ci-image-lock.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    lock = json.load(handle)
+print(*lock["input_paths"], sep="\n")
+PY
+)
+  git -C "$repository" add .
+  git -C "$repository" commit -qm "introduce strict canonical image lock"
+  head_sha=$(git -C "$repository" rev-parse HEAD)
+  printf '%s\n%s\n' "$base_sha" "$head_sha"
+}
+
 # @brief Run the production CI-image detector against an isolated repository.
 # @param $1 Repository path.
 # @param $2 Explicit comparison base.
@@ -2449,6 +2503,10 @@ exercise_changed_path_contracts() {
   local health_artifacts="$TEST_ROOT/healthcheck-artifacts"
   local health_log="$TEST_ROOT/healthcheck-failure.log"
   local health_base
+  local bootstrap_repository="$TEST_ROOT/image-lock-introduction-repository"
+  local bootstrap_history="$TEST_ROOT/image-lock-introduction-history.txt"
+  local bootstrap_base
+  local bootstrap_head
 
   create_image_history "$image_repository" > "$history_file"
   mapfile -t history < "$history_file"
@@ -2508,6 +2566,37 @@ exercise_changed_path_contracts() {
 
   assert_image_detector_failure image-invalid-explicit-base-fails-closed \
     "$image_repository" refs/heads/does-not-exist
+
+  create_image_lock_introduction_history "$bootstrap_repository" > \
+    "$bootstrap_history"
+  mapfile -t bootstrap_revisions < "$bootstrap_history"
+  ((${#bootstrap_revisions[@]} == 2)) ||
+    fail "image-lock introduction history did not expose two revisions"
+  bootstrap_base=${bootstrap_revisions[0]}
+  bootstrap_head=${bootstrap_revisions[1]}
+  git -C "$bootstrap_repository" checkout -q --detach "$bootstrap_head"
+  run_image_detector "$bootstrap_repository" "$bootstrap_base" \
+    "$artifact_dir" "$output_log"
+  assert_image_route image-lock-first-introduction-routes-true true \
+    "$artifact_dir" "$output_log"
+  assert_file_contains "$artifact_dir/changed-files.txt" \
+    '"ci/locks/ci-image-lock.json"'
+
+  git -C "$bootstrap_repository" checkout -q --detach "$bootstrap_base"
+  mkdir -p "$bootstrap_repository/docs"
+  printf '# no image authority\n' > "$bootstrap_repository/docs/no-lock.md"
+  git -C "$bootstrap_repository" add docs/no-lock.md
+  git -C "$bootstrap_repository" commit -qm "head still lacks image lock"
+  assert_image_detector_failure image-lock-first-introduction-head-missing \
+    "$bootstrap_repository" "$bootstrap_base"
+
+  git -C "$bootstrap_repository" checkout -q --detach "$bootstrap_base"
+  mkdir -p "$bootstrap_repository/ci/locks"
+  printf '{\n' > "$bootstrap_repository/ci/locks/ci-image-lock.json"
+  git -C "$bootstrap_repository" add ci/locks/ci-image-lock.json
+  git -C "$bootstrap_repository" commit -qm "malformed first image lock"
+  assert_image_detector_failure image-lock-first-introduction-head-malformed \
+    "$bootstrap_repository" "$bootstrap_base"
 
   exercise_canonical_image_input_routes "$image_repository" "$base_sha"
   git -C "$image_repository" checkout -q --detach "$docs_sha"

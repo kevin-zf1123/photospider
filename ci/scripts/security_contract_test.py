@@ -3697,6 +3697,7 @@ class BuildSmokeRoutingContractTest(unittest.TestCase):
         ctest_payload: bytes,
         *,
         candidate_commit: str,
+        fallback_matrix_digest: str | None = None,
     ) -> str:
         """Write one canonical producer envelope around raw CTest/profile bytes.
 
@@ -3705,6 +3706,8 @@ class BuildSmokeRoutingContractTest(unittest.TestCase):
                 fixture.
             ctest_payload: Exact bytes returned by the real CTest JSON query.
             candidate_commit: Exact temporary candidate ``HEAD`` identity.
+            fallback_matrix_digest: Protected fallback digest when the raw
+                producer intentionally emits no versioned profile files.
 
         Returns:
             Matrix digest emitted by the complete versioned profile fixture.
@@ -3715,18 +3718,27 @@ class BuildSmokeRoutingContractTest(unittest.TestCase):
         """
         raw_directory.mkdir()
         (raw_directory / "ctest-info-v1.json").write_bytes(ctest_payload)
-        matrix_digest = ProfileReaderContractTest._write_complete_versioned_identity(
-            raw_directory
-        )
-        records = []
-        for name in sorted(
-            (
-                "build_profile_matrix_v1.tsv",
-                "build_profile_matrix_v1.tsv.sha256",
-                "ci_security_roles_v1.tsv",
-                "ctest-info-v1.json",
+        if fallback_matrix_digest is None:
+            matrix_digest = (
+                ProfileReaderContractTest._write_complete_versioned_identity(
+                    raw_directory
+                )
             )
-        ):
+        else:
+            if re.fullmatch(r"[0-9a-f]{64}", fallback_matrix_digest) is None:
+                raise AssertionError("fallback matrix digest is malformed")
+            matrix_digest = fallback_matrix_digest
+        records = []
+        names = ["ctest-info-v1.json"]
+        if fallback_matrix_digest is None:
+            names.extend(
+                (
+                    "build_profile_matrix_v1.tsv",
+                    "build_profile_matrix_v1.tsv.sha256",
+                    "ci_security_roles_v1.tsv",
+                )
+            )
+        for name in sorted(names):
             content = (raw_directory / name).read_bytes()
             records.append(
                 {
@@ -3935,6 +3947,8 @@ class BuildSmokeRoutingContractTest(unittest.TestCase):
                 sys.executable,
                 SCRIPTS / "build_smoke_route.py",
                 "verify-control",
+                "--raw-dir",
+                raw,
                 "--manifest",
                 output / "build-smoke-control.manifest.json",
                 "--route-sha256",
@@ -4451,13 +4465,22 @@ class ReusableBuildContractTest(unittest.TestCase):
         return module
 
     @staticmethod
-    def _prepare_build(source: Path, *, runtime_alias: bool = False) -> Path:
+    def _prepare_build(
+        source: Path,
+        *,
+        runtime_alias: bool = False,
+        candidate_root: Path = REPO_ROOT,
+        candidate_commit: str = COMMIT_A,
+    ) -> Path:
         """Materialize one complete fresh CMake/package/generated build fixture.
 
         Args:
             source: Fixture build root.
             runtime_alias: Whether to add a safe versioned DSO alias for the
                 targeted-role materialization contract.
+            candidate_root: Exact source checkout whose ordinary source inputs
+                and completion identity are bound into the fixture.
+            candidate_commit: Exact ``candidate_root`` HEAD identity.
 
         Returns:
             Generated CI inventory directory.
@@ -4504,7 +4527,7 @@ class ReusableBuildContractTest(unittest.TestCase):
             f'PHOTOSPIDER_PLUGIN_TRUST_MANIFEST={trust_manifest};'
             f'PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE={trust_signature};'
             "PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY="
-            f'{REPO_ROOT / "tests/fixtures/trust/test_ed25519_public_key.pem"}"\n'
+              f'{candidate_root / "tests/fixtures/trust/test_ed25519_public_key.pem"}"\n'
             '  ENVIRONMENT_MODIFICATION '
             '"PHOTOSPIDER_RELATIVE_PATH=path_list_prepend:'
             'relative-environment-path"\n'
@@ -4576,11 +4599,11 @@ class ReusableBuildContractTest(unittest.TestCase):
         )
         (source / ".photospider-ci-build-complete").write_text(
             f"build_dir={source.resolve()}\n"
-            f"source_dir={REPO_ROOT.resolve()}\n"
+            f"source_dir={candidate_root.resolve()}\n"
             "profile=default\n"
             "build_testing=ON\n"
             "photospider_build_ipc=ON\n"
-            f"candidate_commit={COMMIT_A}\n"
+            f"candidate_commit={candidate_commit}\n"
             "created_at=2026-08-25T12:00:00Z\n",
             encoding="utf-8",
         )
@@ -4600,7 +4623,7 @@ class ReusableBuildContractTest(unittest.TestCase):
         inventory_path.write_bytes(discovered.stdout)
         closure = ReusableBuildContractTest._load_ctest_closure_module()
         closure.write_closure(
-            REPO_ROOT,
+            candidate_root,
             source,
             inventory_path,
             inventory / "ordinary_ctest_closure_v1.json",
@@ -4841,6 +4864,356 @@ class ReusableBuildContractTest(unittest.TestCase):
                 expect_success=False,
             )
             self.assertIn("archived content differs", failed.stderr)
+
+    def test_protected_targeted_verifier_cross_binds_distinct_roots_and_ctest_sets(
+        self,
+    ) -> None:
+        """Bind two real commits plus raw, closure, and restored CTest coverage.
+
+        Returns:
+            None after the production CLIs accept one complete baseline and
+            reject self-consistent ordinary-test removal, addition, relabeling,
+            raw/control identity drift, and an aliased raw path.
+
+        Raises:
+            AssertionError: Protected code can be selected from the candidate,
+                either checkout commit is unbound, or any cross-job coverage
+                reduction reaches attestation-ready success.
+
+        Note:
+            The temporary candidate is a real clone with a second valid commit,
+            so ``candidate_commit`` and ``workflow_commit`` cannot accidentally
+            share the historical ``COMMIT_A`` fixture identity.
+        """
+        with tempfile.TemporaryDirectory() as temporary_text:
+            root = Path(temporary_text)
+            candidate = root / "candidate"
+            run_command("git", "clone", "-q", "--no-local", REPO_ROOT, candidate)
+            run_command("git", "-C", candidate, "config", "user.name", "CI Test")
+            run_command(
+                "git",
+                "-C",
+                candidate,
+                "config",
+                "user.email",
+                "ci-test@example.invalid",
+            )
+            candidate_readme = candidate / "readme.md"
+            candidate_readme.write_text(
+                candidate_readme.read_text(encoding="utf-8")
+                + "\nRound 26 distinct candidate identity.\n",
+                encoding="utf-8",
+            )
+            run_command("git", "-C", candidate, "add", "readme.md")
+            run_command(
+                "git", "-C", candidate, "commit", "-q", "-m", "candidate data"
+            )
+            candidate_commit = run_command(
+                "git", "-C", candidate, "rev-parse", "HEAD"
+            ).stdout.strip()
+            self.assertRegex(candidate_commit, r"^[0-9a-f]{40}$")
+            self.assertNotEqual(candidate_commit, COMMIT_A)
+
+            producer_root = (root / "producer-build/ci").resolve(strict=False)
+            restore_root = (root / "verifier-restored-build/ci").resolve(
+                strict=False
+            )
+            inventory = self._prepare_build(
+                producer_root,
+                runtime_alias=True,
+                candidate_root=candidate,
+                candidate_commit=candidate_commit,
+            )
+            resolved_profile = run_command(
+                sys.executable,
+                candidate / "ci/scripts/ci_profile_manifest.py",
+                "--repo-root",
+                candidate,
+                "--inventory-dir",
+                inventory,
+            )
+            matrix_digest = json.loads(resolved_profile.stdout)["matrix_sha256"]
+            raw_inventory_path = producer_root.parent / "post-build-ctest-inventory.json"
+            raw_payload = json.loads(raw_inventory_path.read_text(encoding="utf-8"))
+            for name in (
+                "DependencyDisabledInstallSmoke",
+                "OpenExrDeepProviderOptionOffSmoke",
+                "PublicHeaderSelfContainment",
+                "StaticProductConsumerSmoke",
+            ):
+                raw_payload["tests"].append(
+                    {
+                        "backtrace": 1,
+                        "command": ["/usr/bin/true"],
+                        "name": name,
+                        "properties": [
+                            {"name": "LABELS", "value": ["build-smoke"]}
+                        ],
+                    }
+                )
+
+            artifact_root = root / "targeted-artifacts"
+            for role in ("ctest-control", "ctest-runtime"):
+                role_root = artifact_root / role
+                role_root.mkdir(parents=True)
+                run_command(
+                    sys.executable,
+                    SCRIPTS / "reusable_build.py",
+                    "--repo-root",
+                    candidate,
+                    "--inventory-dir",
+                    inventory,
+                    "create-targeted",
+                    "--source",
+                    producer_root,
+                    "--role",
+                    role,
+                    "--archive",
+                    role_root / f"{role}.tar.gz",
+                    "--manifest",
+                    role_root / f"{role}.manifest.json",
+                    "--candidate-commit",
+                    candidate_commit,
+                    "--profile",
+                    "default",
+                    "--image-digest",
+                    IMAGE_DIGEST,
+                    "--workflow-commit",
+                    COMMIT_A,
+                )
+            raw_inventory_path.unlink()
+            shutil.rmtree(producer_root)
+            self.assertEqual(list(producer_root.parent.iterdir()), [])
+
+            def create_control_case(
+                label: str, payload: dict[str, object]
+            ) -> tuple[Path, Path, str]:
+                """Create one self-consistent raw/control pair via production code."""
+                raw = root / f"raw-{label}"
+                control = root / f"control-{label}"
+                emitted_path = root / f"github-output-{label}.txt"
+                emitted_path.write_text("", encoding="utf-8")
+                observed_matrix = BuildSmokeRoutingContractTest._write_raw_route_bundle(
+                    raw,
+                    (
+                        json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                        + "\n"
+                    ).encode("utf-8"),
+                    candidate_commit=candidate_commit,
+                    fallback_matrix_digest=matrix_digest,
+                )
+                self.assertEqual(observed_matrix, matrix_digest)
+                BuildSmokeRoutingContractTest._run_protected_control(
+                    candidate,
+                    candidate_commit,
+                    raw,
+                    control,
+                    emitted_path,
+                    expect_success=True,
+                )
+                outputs = dict(
+                    line.split("=", 1)
+                    for line in emitted_path.read_text(encoding="utf-8").splitlines()
+                )
+                return raw, control, outputs["route_sha256"]
+
+            def coverage_command(
+                raw: Path,
+                control: Path,
+                route_digest: str,
+                *,
+                expect_success: bool,
+            ) -> subprocess.CompletedProcess[str]:
+                """Run the production dual-root and cross-inventory verifier."""
+                return run_command(
+                    sys.executable,
+                    SCRIPTS / "reusable_build.py",
+                    "--repo-root",
+                    REPO_ROOT,
+                    "verify-ordinary-coverage",
+                    "--candidate-root",
+                    candidate,
+                    "--raw-dir",
+                    raw,
+                    "--control-manifest",
+                    control / "build-smoke-control.manifest.json",
+                    "--route-sha256",
+                    route_digest,
+                    "--artifact-root",
+                    artifact_root,
+                    "--restored-build-root",
+                    restore_root,
+                    "--candidate-commit",
+                    candidate_commit,
+                    "--profile",
+                    "default",
+                    "--matrix-sha256",
+                    matrix_digest,
+                    "--image-digest",
+                    IMAGE_DIGEST,
+                    "--workflow-commit",
+                    COMMIT_A,
+                    expect_success=expect_success,
+                )
+
+            raw, control, route_digest = create_control_case("baseline", raw_payload)
+            passed = coverage_command(
+                raw, control, route_digest, expect_success=True
+            )
+            self.assertIn("coverage cross-binding passed", passed.stdout)
+            self.assertFalse(restore_root.exists())
+
+            ordinary = next(
+                item for item in raw_payload["tests"] if item["name"] == "test_contract"
+            )
+            mutations: dict[str, dict[str, object]] = {}
+            removed = json.loads(json.dumps(raw_payload))
+            removed["tests"] = [
+                item for item in removed["tests"] if item["name"] != "test_contract"
+            ]
+            mutations["ordinary-removed"] = removed
+            added = json.loads(json.dumps(raw_payload))
+            added["tests"].append(
+                {
+                    "backtrace": 1,
+                    "command": ["/usr/bin/true"],
+                    "name": "test_contract_second",
+                    "properties": [],
+                }
+            )
+            mutations["ordinary-added"] = added
+            relabelled = json.loads(json.dumps(raw_payload))
+            relabelled_ordinary = next(
+                item
+                for item in relabelled["tests"]
+                if item["name"] == ordinary["name"]
+            )
+            relabelled_ordinary["properties"] = [
+                {"name": "LABELS", "value": ["build-smoke"]}
+            ]
+            mutations["ordinary-relabelled"] = relabelled
+            label_changed = json.loads(json.dumps(raw_payload))
+            label_changed_ordinary = next(
+                item
+                for item in label_changed["tests"]
+                if item["name"] == ordinary["name"]
+            )
+            label_changed_ordinary["properties"] = [
+                property_value
+                for property_value in label_changed_ordinary.get("properties", [])
+                if property_value.get("name") != "LABELS"
+            ] + [{"name": "LABELS", "value": ["ordinary-regression"]}]
+            mutations["ordinary-label-changed"] = label_changed
+            for label, payload in mutations.items():
+                with self.subTest(coverage_drift=label):
+                    drift_raw, drift_control, drift_route = create_control_case(
+                        label, payload
+                    )
+                    failed = coverage_command(
+                        drift_raw,
+                        drift_control,
+                        drift_route,
+                        expect_success=False,
+                    )
+                    self.assertIn("ordinary CTest", failed.stderr)
+                    self.assertFalse(restore_root.exists())
+
+            forged_raw = root / "raw-forged-identity"
+            forged_control = root / "control-forged-identity"
+            shutil.copytree(raw, forged_raw)
+            shutil.copytree(control, forged_control)
+            forged_manifest_path = forged_raw / "raw-inventory.manifest.json"
+            forged_manifest = json.loads(
+                forged_manifest_path.read_text(encoding="utf-8")
+            )
+            forged_manifest["candidate_commit"] = COMMIT_A
+            forged_manifest_path.write_text(
+                json.dumps(
+                    forged_manifest,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            identity_failed = coverage_command(
+                forged_raw,
+                forged_control,
+                route_digest,
+                expect_success=False,
+            )
+            self.assertIn("raw routing candidate_commit differs", identity_failed.stderr)
+
+            digest_control = root / "control-forged-ctest-digest"
+            shutil.copytree(control, digest_control)
+            digest_manifest_path = (
+                digest_control / "build-smoke-control.manifest.json"
+            )
+            digest_manifest = json.loads(
+                digest_manifest_path.read_text(encoding="utf-8")
+            )
+            digest_manifest["ctest_inventory_sha256"] = "f" * 64
+            digest_manifest_bytes = (
+                json.dumps(
+                    digest_manifest,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+                + "\n"
+            ).encode("utf-8")
+            digest_manifest_path.write_bytes(digest_manifest_bytes)
+            digest_failed = coverage_command(
+                raw,
+                digest_control,
+                hashlib.sha256(digest_manifest_bytes).hexdigest(),
+                expect_success=False,
+            )
+            self.assertIn(
+                "ctest_inventory_sha256 differs", digest_failed.stderr
+            )
+
+            aliased_raw = root / "raw-alias"
+            aliased_raw.symlink_to(raw, target_is_directory=True)
+            alias_failed = coverage_command(
+                aliased_raw, control, route_digest, expect_success=False
+            )
+            self.assertIn("real directory", alias_failed.stderr)
+
+            candidate_alias = root / "candidate-alias"
+            candidate_alias.symlink_to(candidate, target_is_directory=True)
+            linked_candidate = run_command(
+                sys.executable,
+                SCRIPTS / "reusable_build.py",
+                "--repo-root",
+                REPO_ROOT,
+                "verify-ordinary-coverage",
+                "--candidate-root",
+                candidate_alias,
+                "--raw-dir",
+                raw,
+                "--control-manifest",
+                control / "build-smoke-control.manifest.json",
+                "--route-sha256",
+                route_digest,
+                "--artifact-root",
+                artifact_root,
+                "--restored-build-root",
+                restore_root,
+                "--candidate-commit",
+                candidate_commit,
+                "--profile",
+                "default",
+                "--matrix-sha256",
+                matrix_digest,
+                "--image-digest",
+                IMAGE_DIGEST,
+                "--workflow-commit",
+                COMMIT_A,
+                expect_success=False,
+            )
+            self.assertIn("real non-link directory", linked_candidate.stderr)
 
     def test_targeted_content_sizes_reject_bool_string_negative_and_total_drift(self) -> None:
         """Reject non-integer and inconsistent member or aggregate byte counts."""
@@ -6360,6 +6733,45 @@ class LockSurfaceContractTest(unittest.TestCase):
                 "        needs.build-smoke-control.outputs.route_sha256 != '' &&\n",
                 "",
                 "artifact attestation omits route digest",
+            ),
+            (
+                "targeted-candidate-selects-workflow",
+                "verify-targeted-artifacts",
+                "          ref: ${{ inputs.checkout_ref }}\n",
+                "          ref: ${{ inputs.workflow_commit }}\n",
+                "targeted verifier candidate-data checkout mapping differs",
+            ),
+            (
+                "targeted-candidate-overlaps-control",
+                "verify-targeted-artifacts",
+                "          path: .ci-targeted-verifier-candidate\n",
+                "          path: .ci-targeted-verifier-control\n",
+                "targeted verifier candidate-data checkout mapping differs",
+            ),
+            (
+                "targeted-raw-artifact-substitution",
+                "verify-targeted-artifacts",
+                "          path: .ci-targeted-verifier-raw\n",
+                "          path: .ci-targeted-verifier-candidate\n",
+                "targeted verifier raw-inventory download mapping differs",
+            ),
+            (
+                "targeted-executes-candidate-helper",
+                "verify-targeted-artifacts",
+                "          set -Eeuo pipefail\n",
+                (
+                    "          set -Eeuo pipefail\n"
+                    "          python3 .ci-targeted-verifier-candidate/ci/scripts/"
+                    "reusable_build.py\n"
+                ),
+                "targeted verifier executes candidate control",
+            ),
+            (
+                "targeted-coverage-crossbind-deleted",
+                "verify-targeted-artifacts",
+                "            verify-ordinary-coverage \\\n",
+                "            verify-only-placeholder \\\n",
+                "targeted verifier lacks protected route binding verify-ordinary-coverage",
             ),
         )
         for label, job_name, original, replacement, diagnostic in cases:

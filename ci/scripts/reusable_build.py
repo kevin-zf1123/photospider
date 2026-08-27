@@ -8,6 +8,12 @@ archive plus canonical external manifest. The consumer must verify GitHub
 attestations before invoking ``verify-extract``; this helper remeasures safely
 staged archive bytes before atomic installation. Current ``main`` may use only
 the exact protected fallback recognized by ``ci_profile_manifest``.
+
+The protected pre-attestation mode executes only from an exact workflow-control
+checkout and treats a disjoint exact candidate checkout as data. It binds both
+commits and directory objects, revalidates the raw/control identity, then
+requires one ordinary CTest set across raw JSON, both targeted closures, and a
+fresh restored inventory before targeted artifacts can be attested.
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 
 class ReusableBuildError(ValueError):
@@ -275,6 +281,68 @@ class _ManifestSnapshot:
             )
 
 
+class _CheckoutSnapshot:
+    """Bind one real checkout pathname to one exact commit for one operation.
+
+    Args:
+        path: Candidate-data or protected-control checkout root.
+        context: Stable role used in diagnostics.
+        expected_commit: Exact lowercase full Git commit required at ``HEAD``.
+
+    Raises:
+        ReusableBuildError: The root is missing, linked, non-directory, cannot
+            resolve, or its ``HEAD`` differs from ``expected_commit``.
+
+    Note:
+        The directory object and resolved path are rechecked after artifact
+        verification. Git metadata is read only; no checkout hook or candidate
+        helper is executed.
+    """
+
+    def __init__(self, path: Path, context: str, expected_commit: str) -> None:
+        self.path = path.absolute()
+        self.context = context
+        self.expected_commit = _full_sha(expected_commit, f"{context} commit")
+        try:
+            metadata = self.path.lstat()
+            if not stat.S_ISDIR(metadata.st_mode) or self.path.is_symlink():
+                raise ReusableBuildError(
+                    f"{context} must be one real non-link directory"
+                )
+            self.resolved = self.path.resolve(strict=True)
+        except OSError as error:
+            raise ReusableBuildError(f"cannot resolve {context}: {error}") from error
+        self._identity = (metadata.st_dev, metadata.st_ino, metadata.st_mode)
+        if _git_head(self.resolved, context) != self.expected_commit:
+            raise ReusableBuildError(f"{context} HEAD differs from expected commit")
+
+    def require_unchanged(self) -> None:
+        """Reject root replacement, aliasing, or ``HEAD`` drift after use.
+
+        Raises:
+            ReusableBuildError: Pathname metadata, resolved root, or commit no
+                longer equals the retained checkout identity.
+        """
+        try:
+            metadata = self.path.lstat()
+            resolved = self.path.resolve(strict=True)
+        except OSError as error:
+            raise ReusableBuildError(
+                f"{self.context} disappeared during verification"
+            ) from error
+        identity = (metadata.st_dev, metadata.st_ino, metadata.st_mode)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or self.path.is_symlink()
+            or identity != self._identity
+            or resolved != self.resolved
+            or _git_head(self.resolved, self.context) != self.expected_commit
+        ):
+            raise ReusableBuildError(
+                f"{self.context} changed during verification"
+            )
+
+
 def _load_profile_module(root: Path) -> Any:
     """Load the adjacent protected profile resolver without package assumptions."""
     module_path = root / "ci/scripts/ci_profile_manifest.py"
@@ -308,6 +376,32 @@ def _load_ctest_closure_module(root: Path) -> Any:
     )
     if specification is None or specification.loader is None:
         raise ReusableBuildError("cannot load protected CTest closure reader")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+def _load_build_smoke_route_module(root: Path) -> Any:
+    """Load the protected raw/control routing implementation by exact path.
+
+    Args:
+        root: Exact protected control checkout root.
+
+    Returns:
+        Loaded module exposing retained raw/control bundle validation.
+
+    Raises:
+        ReusableBuildError: The protected module cannot be located or loaded.
+
+    Note:
+        Candidate checkout paths never participate in this import boundary.
+    """
+    module_path = root / "ci/scripts/build_smoke_route.py"
+    specification = importlib.util.spec_from_file_location(
+        "photospider_build_smoke_route", module_path
+    )
+    if specification is None or specification.loader is None:
+        raise ReusableBuildError("cannot load protected build-smoke route reader")
     module = importlib.util.module_from_spec(specification)
     specification.loader.exec_module(module)
     return module
@@ -423,8 +517,19 @@ def _validate_internal_identity(
         _validate_string_array(value[field], f"internal_identity:{field}")
 
 
-def _git_head(root: Path) -> str:
-    """Read the exact candidate HEAD used by the protected producer/consumer."""
+def _git_head(root: Path, context: str = "candidate Git checkout") -> str:
+    """Read one exact checkout ``HEAD`` without executing checked-out code.
+
+    Args:
+        root: Exact Git checkout root.
+        context: Stable candidate/control role used in diagnostics.
+
+    Returns:
+        Lowercase full commit identity.
+
+    Raises:
+        ReusableBuildError: Git cannot resolve one canonical commit.
+    """
     completed = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--verify", "HEAD^{commit}"],
         check=False,
@@ -432,8 +537,99 @@ def _git_head(root: Path) -> str:
         capture_output=True,
     )
     if completed.returncode != 0:
-        raise ReusableBuildError(f"cannot read candidate Git HEAD: {completed.stderr.strip()}")
-    return _full_sha(completed.stdout.strip(), "candidate Git HEAD")
+        raise ReusableBuildError(
+            f"cannot read {context} HEAD: {completed.stderr.strip()}"
+        )
+    return _full_sha(completed.stdout.strip(), f"{context} HEAD")
+
+
+def _targeted_checkout_snapshots(
+    arguments: argparse.Namespace,
+) -> tuple[Path, list[_CheckoutSnapshot]]:
+    """Bind protected code and candidate data to disjoint exact checkouts.
+
+    Args:
+        arguments: Targeted verifier arguments containing ``repo_root``,
+            optional ``candidate_root``, and exact candidate/workflow commits.
+
+    Returns:
+        Resolved candidate-data root plus snapshots that must be rechecked
+        after artifact use.
+
+    Raises:
+        ReusableBuildError: A checkout is linked, overlapping, commit-drifted,
+            or a distinct protected control root is not the checkout from which
+            this running helper was loaded.
+
+    Note:
+        Existing ordinary consumers use the same candidate root for code and
+        data. The pre-attestation protected verifier supplies a distinct
+        candidate checkout; in that mode only the control root may supply
+        executable Python modules.
+    """
+    control_path = Path(arguments.repo_root).absolute()
+    candidate_value = getattr(arguments, "candidate_root", None)
+    candidate_path = (
+        control_path if candidate_value is None else Path(candidate_value).absolute()
+    )
+    control_resolved = control_path.resolve(strict=True)
+    candidate_resolved = candidate_path.resolve(strict=True)
+    if control_resolved == candidate_resolved:
+        snapshot = _CheckoutSnapshot(
+            candidate_path, "candidate checkout", arguments.candidate_commit
+        )
+        return snapshot.resolved, [snapshot]
+    if (
+        control_resolved in candidate_resolved.parents
+        or candidate_resolved in control_resolved.parents
+    ):
+        raise ReusableBuildError(
+            "protected control and candidate checkout roots overlap"
+        )
+    script_root = Path(__file__).resolve().parents[2]
+    if script_root != control_resolved:
+        raise ReusableBuildError(
+            "targeted verifier is not executing from its protected control root"
+        )
+    control_snapshot = _CheckoutSnapshot(
+        control_path, "protected control checkout", arguments.workflow_commit
+    )
+    candidate_snapshot = _CheckoutSnapshot(
+        candidate_path, "candidate data checkout", arguments.candidate_commit
+    )
+    return candidate_snapshot.resolved, [control_snapshot, candidate_snapshot]
+
+
+def _require_disjoint_existing_directories(
+    paths: dict[str, Path],
+) -> dict[str, Path]:
+    """Resolve real directories and reject every overlap or final link.
+
+    Args:
+        paths: Named existing directory boundaries.
+
+    Returns:
+        Resolved directory mapping.
+
+    Raises:
+        ReusableBuildError: A directory is missing, linked, non-directory, or
+            aliases, contains, or is contained by another boundary.
+    """
+    resolved: dict[str, Path] = {}
+    for name, path in paths.items():
+        absolute = Path(path).absolute()
+        if not absolute.is_dir() or absolute.is_symlink():
+            raise ReusableBuildError(f"{name} is not one real directory")
+        resolved[name] = absolute.resolve(strict=True)
+    items = list(resolved.items())
+    for index, (left_name, left) in enumerate(items):
+        for right_name, right in items[index + 1 :]:
+            if left == right or left in right.parents or right in left.parents:
+                raise ReusableBuildError(
+                    f"targeted verifier boundaries overlap: {left_name}={left}, "
+                    f"{right_name}={right}"
+                )
+    return resolved
 
 
 def _parse_cmake_set(path: Path, key: str) -> str:
@@ -1417,6 +1613,7 @@ def _verify_targeted_manifest(
     arguments: argparse.Namespace,
     archive_snapshot: _ArchiveSnapshot,
     manifest_snapshot: _ManifestSnapshot,
+    staged_verifier: Callable[[Path, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Bind one targeted manifest to expected identity and retained bytes.
 
@@ -1426,16 +1623,20 @@ def _verify_targeted_manifest(
             remeasurement and extraction.
         manifest_snapshot: Once-opened regular manifest whose retained bytes
             own hashing, JSON decoding, validation, and path identity.
+        staged_verifier: Optional protected callback invoked against the exact
+            already-validated staged ``ci`` tree while both snapshots remain
+            retained.
 
     Returns:
         The validated canonical targeted manifest.
 
     Raises:
-        ReusableBuildError: Any identity, role, member, size, digest, or
-            forbidden-content boundary differs.
+        ReusableBuildError: Any checkout, identity, role, member, size, digest,
+            callback, or forbidden-content boundary differs.
         OSError: Safe staging or file measurement fails.
         tarfile.TarError: The retained archive is malformed.
     """
+    candidate_root, checkout_snapshots = _targeted_checkout_snapshots(arguments)
     manifest_sha256 = manifest_snapshot.sha256()
     expected_manifest_sha256 = getattr(
         arguments, "expected_manifest_sha256", None
@@ -1467,8 +1668,6 @@ def _verify_targeted_manifest(
     for field, expected in expected_values.items():
         if value[field] != expected:
             raise ReusableBuildError(f"targeted manifest {field} mismatch")
-    if _git_head(arguments.repo_root) != expected_values["candidate_commit"]:
-        raise ReusableBuildError("expected candidate differs from checked-out Git HEAD")
     _validate_internal_identity(
         value["internal_identity"],
         value["identity_mode"],
@@ -1500,7 +1699,7 @@ def _verify_targeted_manifest(
             closure = _load_ctest_closure_module(arguments.repo_root)
             try:
                 closure.validate_staged_role(
-                    arguments.repo_root,
+                    candidate_root,
                     stage / "ci",
                     value["artifact_role"],
                     [member["path"] for member in content["members"]],
@@ -1509,7 +1708,18 @@ def _verify_targeted_manifest(
                 raise ReusableBuildError(
                     f"targeted archived CTest closure is invalid: {error}"
                 ) from error
+        if staged_verifier is not None:
+            try:
+                staged_verifier(stage / "ci", value)
+            except ReusableBuildError:
+                raise
+            except Exception as error:
+                raise ReusableBuildError(
+                    f"targeted staged coverage verification failed: {error}"
+                ) from error
     manifest_snapshot.require_path_unchanged()
+    for checkout_snapshot in checkout_snapshots:
+        checkout_snapshot.require_unchanged()
     return value
 
 
@@ -1642,6 +1852,311 @@ def _verify_targeted_tree(arguments: argparse.Namespace) -> None:
     print(
         "targeted content tree verification passed: "
         f"role={role} content_sha256={content_sha256}"
+    )
+
+
+def _completion_stamp_records(build_root: Path) -> dict[str, str]:
+    """Read the strict producer completion stamp from a verified role tree.
+
+    Args:
+        build_root: Already verified staged ``ci`` role root.
+
+    Returns:
+        Unique nonempty completion fields.
+
+    Raises:
+        ReusableBuildError: The stamp is missing, linked, malformed, duplicated,
+            or has a field set different from the producer contract.
+    """
+    path = build_root / ".photospider-ci-build-complete"
+    if not path.is_file() or path.is_symlink():
+        raise ReusableBuildError("targeted CTest role lacks a safe completion stamp")
+    records: dict[str, str] = {}
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), 1
+    ):
+        if "=" not in line:
+            raise ReusableBuildError(
+                f"{path}:{line_number}: malformed completion record"
+            )
+        key, value = line.split("=", 1)
+        if not key or not value or key in records:
+            raise ReusableBuildError(
+                f"{path}:{line_number}: empty or duplicate completion record"
+            )
+        records[key] = value
+    expected = {
+        "build_dir",
+        "source_dir",
+        "profile",
+        "build_testing",
+        "photospider_build_ipc",
+        "candidate_commit",
+        "created_at",
+    }
+    if set(records) != expected:
+        raise ReusableBuildError("targeted completion stamp fields differ")
+    return records
+
+
+def _restore_runtime_for_inventory(
+    staged_ci: Path,
+    restore_root: Path,
+    closure: Any,
+    ctest_executable: str,
+) -> list[dict[str, Any]]:
+    """Restore one verified runtime role and rediscover ordinary CTest records.
+
+    Args:
+        staged_ci: Exact already-validated runtime role extracted from the
+            retained archive descriptor.
+        restore_root: Absent job-owned verifier build path.
+        closure: Protected CTest closure module loaded from the control root.
+        ctest_executable: Trusted host CTest program name or path.
+
+    Returns:
+        Sorted exact normalized ordinary-test records from restored JSON-v1
+        discovery.
+
+    Raises:
+        ReusableBuildError: The recorded producer path is unsafe, residual/link
+            state exists, the parent is unsafe/nonempty, protected relocation
+            or discovery fails, or restored inventory is malformed.
+
+    Note:
+        Container and host jobs may expose different absolute workspace roots.
+        After exact archive/closure verification, only the copied CTest control
+        files and copied CMake cache have the exact recorded producer build-root
+        token replaced with ``restore_root``. No test command executes. The
+        derived tree is job-owned and removed in all cases.
+    """
+    restore = restore_root.absolute().resolve(strict=False)
+    records = _completion_stamp_records(staged_ci)
+    producer_build_root = records["build_dir"]
+    producer_source_root = records["source_dir"]
+    if any(
+        not value.startswith("/") or "\0" in value
+        for value in (producer_build_root, producer_source_root)
+    ):
+        raise ReusableBuildError("producer CTest root identity is unsafe")
+    if restore.exists() or restore.is_symlink():
+        raise ReusableBuildError("restored CTest root contains residual state")
+    parent = restore.parent
+    created_parent = False
+    if parent.exists() or parent.is_symlink():
+        if not parent.is_dir() or parent.is_symlink():
+            raise ReusableBuildError("restored CTest parent is unsafe")
+        try:
+            with os.scandir(parent) as entries:
+                if next(entries, None) is not None:
+                    raise ReusableBuildError(
+                        "restored CTest parent contains residual state"
+                    )
+        except OSError as error:
+            raise ReusableBuildError(
+                f"cannot enumerate restored CTest parent: {error}"
+            ) from error
+    else:
+        grandparent = parent.parent
+        if not grandparent.is_dir() or grandparent.is_symlink():
+            raise ReusableBuildError("restored CTest grandparent is unsafe")
+        parent.mkdir(mode=0o700)
+        created_parent = True
+    try:
+        shutil.copytree(staged_ci, restore, copy_function=shutil.copy2)
+        closure_value = closure.load_closure(
+            restore.joinpath(*closure.CLOSURE_RELATIVE_PATH.parts)
+        )
+        old_root = producer_build_root.encode("utf-8")
+        new_root = str(restore).encode("utf-8")
+        relocation_paths = [
+            "CMakeCache.txt",
+            *closure_value["control_paths"],
+        ]
+        for relative in relocation_paths:
+            path = restore / relative
+            if not path.is_file() or path.is_symlink():
+                raise ReusableBuildError(
+                    f"restored CTest relocation input is unsafe: {relative}"
+                )
+            content = path.read_bytes()
+            relocated = content.replace(old_root, new_root)
+            path.write_bytes(relocated)
+            if path.read_bytes() != relocated:
+                raise ReusableBuildError(
+                    f"restored CTest relocation write differs: {relative}"
+                )
+        inventory = closure.query_inventory(
+            restore, ctest_executable, closure_value["config"]
+        )
+        return closure.ordinary_test_records(
+            inventory,
+            "restored targeted CTest runtime inventory",
+            Path(producer_source_root),
+            restore,
+        )
+    except ReusableBuildError:
+        raise
+    except Exception as error:
+        raise ReusableBuildError(
+            f"restored targeted CTest inventory failed: {error}"
+        ) from error
+    finally:
+        if restore.exists() or restore.is_symlink():
+            if restore.is_dir() and not restore.is_symlink():
+                shutil.rmtree(restore)
+            else:
+                restore.unlink()
+        if created_parent and parent.exists():
+            parent.rmdir()
+
+
+def _verify_ordinary_coverage(arguments: argparse.Namespace) -> None:
+    """Cross-bind raw, control/runtime closure, and restored CTest inventories.
+
+    Args:
+        arguments: Explicit protected/candidate roots, raw/control artifacts,
+            targeted artifact root, canonical restored build root, and exact
+            candidate/workflow/profile/matrix/image/route identities.
+
+    Raises:
+        ReusableBuildError: Directory boundaries overlap, protected raw/control
+            validation fails, either targeted role differs, or raw, archived,
+            and restored ordinary-test sets are not exactly equal.
+
+    Note:
+        Routing validation is imported only from the protected control root.
+        The candidate checkout supplies data/source bytes but no executable
+        helper. Both targeted archives remain descriptor-retained while their
+        staged closure is inspected.
+    """
+    candidate_root, operation_snapshots = _targeted_checkout_snapshots(arguments)
+    control_root = Path(arguments.repo_root).absolute().resolve(strict=True)
+    boundaries = _require_disjoint_existing_directories(
+        {
+            "protected control checkout": control_root,
+            "candidate data checkout": candidate_root,
+            "downloaded raw inventory": arguments.raw_dir,
+            "downloaded routing control": arguments.control_manifest.parent,
+            "downloaded targeted artifacts": arguments.artifact_root,
+        }
+    )
+    restore_root = arguments.restored_build_root.absolute().resolve(strict=False)
+    for name, boundary in boundaries.items():
+        if (
+            restore_root == boundary
+            or restore_root in boundary.parents
+            or boundary in restore_root.parents
+        ):
+            raise ReusableBuildError(
+                f"restored CTest root overlaps {name}: {restore_root}"
+            )
+    route = _load_build_smoke_route_module(control_root)
+    try:
+        raw_ctest, _ = route.validate_control_bundle(
+            raw_dir=boundaries["downloaded raw inventory"],
+            manifest_path=arguments.control_manifest,
+            route_sha256=arguments.route_sha256,
+            candidate_commit=arguments.candidate_commit,
+            workflow_commit=arguments.workflow_commit,
+            image_digest=arguments.image_digest,
+            profile=arguments.profile,
+            matrix_sha256=arguments.matrix_sha256,
+        )
+    except Exception as error:
+        raise ReusableBuildError(
+            f"protected raw/control identity is invalid: {error}"
+        ) from error
+    closure = _load_ctest_closure_module(control_root)
+
+    closure_values: dict[str, dict[str, Any]] = {}
+    completion_values: dict[str, dict[str, str]] = {}
+    restored_records: list[dict[str, Any]] | None = None
+    artifact_root = boundaries["downloaded targeted artifacts"]
+    for role in ("ctest-control", "ctest-runtime"):
+        role_arguments = argparse.Namespace(
+            archive=artifact_root / role / f"{role}.tar.gz",
+            candidate_commit=arguments.candidate_commit,
+            candidate_root=candidate_root,
+            expected_manifest_sha256=None,
+            image_digest=arguments.image_digest,
+            manifest=artifact_root / role / f"{role}.manifest.json",
+            matrix_sha256=arguments.matrix_sha256,
+            profile=arguments.profile,
+            repo_root=control_root,
+            role=role,
+            workflow_commit=arguments.workflow_commit,
+        )
+
+        def inspect_staged(
+            staged_ci: Path,
+            manifest: dict[str, Any],
+            *,
+            expected_role: str = role,
+        ) -> None:
+            """Retain one staged closure and rediscover runtime inventory."""
+            nonlocal restored_records
+            if manifest["artifact_role"] != expected_role:
+                raise ReusableBuildError("targeted coverage role drifted")
+            try:
+                value = closure.load_closure(
+                    staged_ci.joinpath(*closure.CLOSURE_RELATIVE_PATH.parts)
+                )
+            except Exception as error:
+                raise ReusableBuildError(
+                    f"{expected_role} ordinary CTest closure is invalid: {error}"
+                ) from error
+            closure_values[expected_role] = value
+            completion_values[expected_role] = _completion_stamp_records(staged_ci)
+            if expected_role == "ctest-runtime":
+                restored_records = _restore_runtime_for_inventory(
+                    staged_ci,
+                    restore_root,
+                    closure,
+                    arguments.ctest_executable,
+                )
+
+        with _ArchiveSnapshot(role_arguments.archive) as archive_snapshot:
+            with _ManifestSnapshot(role_arguments.manifest) as manifest_snapshot:
+                _verify_targeted_manifest(
+                    role_arguments,
+                    archive_snapshot,
+                    manifest_snapshot,
+                    inspect_staged,
+                )
+
+    if set(closure_values) != {"ctest-control", "ctest-runtime"}:
+        raise ReusableBuildError("targeted CTest closure roles are incomplete")
+    if closure_values["ctest-control"] != closure_values["ctest-runtime"]:
+        raise ReusableBuildError("control/runtime ordinary CTest closures differ")
+    if completion_values.get("ctest-control") != completion_values.get(
+        "ctest-runtime"
+    ):
+        raise ReusableBuildError("control/runtime completion identities differ")
+    completion = completion_values["ctest-runtime"]
+    try:
+        raw_records = closure.ordinary_test_records(
+            raw_ctest,
+            "protected raw producer CTest inventory",
+            Path(completion["source_dir"]),
+            Path(completion["build_dir"]),
+        )
+    except Exception as error:
+        raise ReusableBuildError(
+            f"raw ordinary CTest inventory is invalid: {error}"
+        ) from error
+    closure_records = closure_values["ctest-runtime"]["ordinary_tests"]
+    if restored_records is None:
+        raise ReusableBuildError("restored ordinary CTest inventory is absent")
+    if raw_records != closure_records or raw_records != restored_records:
+        raise ReusableBuildError(
+            "raw, targeted closure, and restored ordinary CTest records differ"
+        )
+    for snapshot in operation_snapshots:
+        snapshot.require_unchanged()
+    print(
+        "ordinary CTest coverage cross-binding passed: "
+        f"tests={len(raw_records)} route_sha256={arguments.route_sha256}"
     )
 
 
@@ -1905,6 +2420,14 @@ def _add_expected(parser: argparse.ArgumentParser) -> None:
 def _add_targeted_expected(parser: argparse.ArgumentParser) -> None:
     """Add targeted role plus the common exact consumer identities."""
     _add_expected(parser)
+    parser.add_argument(
+        "--candidate-root",
+        type=Path,
+        help=(
+            "separate nonexecuted candidate-data checkout for protected "
+            "pre-attestation verification"
+        ),
+    )
     parser.add_argument("--role", choices=sorted(TARGETED_ARTIFACT_ROLES), required=True)
     parser.add_argument("--expected-manifest-sha256")
 
@@ -1958,6 +2481,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_targeted_expected(verify_targeted_only)
     verify_targeted_only.set_defaults(handler=_verify_targeted_only)
+    verify_coverage = subparsers.add_parser(
+        "verify-ordinary-coverage",
+        help="cross-bind raw, archived, and restored ordinary CTest inventory",
+    )
+    verify_coverage.add_argument("--candidate-root", type=Path, required=True)
+    verify_coverage.add_argument("--raw-dir", type=Path, required=True)
+    verify_coverage.add_argument("--control-manifest", type=Path, required=True)
+    verify_coverage.add_argument("--route-sha256", required=True)
+    verify_coverage.add_argument("--artifact-root", type=Path, required=True)
+    verify_coverage.add_argument("--restored-build-root", type=Path, required=True)
+    verify_coverage.add_argument("--candidate-commit", required=True)
+    verify_coverage.add_argument("--profile", required=True)
+    verify_coverage.add_argument("--matrix-sha256", required=True)
+    verify_coverage.add_argument("--image-digest", required=True)
+    verify_coverage.add_argument("--workflow-commit", required=True)
+    verify_coverage.add_argument("--ctest-executable", default="ctest")
+    verify_coverage.set_defaults(handler=_verify_ordinary_coverage)
     snapshot_targeted_manifest = subparsers.add_parser(
         "snapshot-targeted-manifest",
         help="retain and copy one canonical targeted manifest",
@@ -1993,7 +2533,7 @@ def main() -> int:
     """Run the requested reusable-build operation with stable diagnostics."""
     parser = build_parser()
     arguments = parser.parse_args()
-    arguments.repo_root = arguments.repo_root.resolve()
+    arguments.repo_root = arguments.repo_root.absolute()
     if not arguments.inventory_dir.is_absolute():
         arguments.inventory_dir = arguments.repo_root / arguments.inventory_dir
     arguments.inventory_dir = arguments.inventory_dir.resolve()
@@ -2003,6 +2543,10 @@ def main() -> int:
         arguments.payload_source = arguments.payload_source.resolve()
     if hasattr(arguments, "content_root"):
         arguments.content_root = arguments.content_root.resolve()
+    if hasattr(arguments, "candidate_root") and arguments.candidate_root is not None:
+        arguments.candidate_root = arguments.candidate_root.absolute()
+    if hasattr(arguments, "restored_build_root"):
+        arguments.restored_build_root = arguments.restored_build_root.absolute()
     if (
         hasattr(arguments, "evidence_output")
         and arguments.evidence_output is not None

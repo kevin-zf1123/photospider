@@ -3205,8 +3205,9 @@ def _verify_build_smoke_control_authority(root: Path) -> None:
         ContractError: The producer exposes a route, the fresh job can select
             another control commit, checkout/input/output paths overlap, raw
             inventory is not uploaded before candidate artifact packing, a
-            matrix consumer trusts producer output, or verification/attestation
-            omits the protected route digest.
+        matrix consumer trusts producer output, or verification/attestation
+            omits the protected route digest, distinct checkout identities, or
+            raw/closure/restored ordinary-CTest cross-binding.
 
     Note:
         Candidate CMake may write anywhere in its producer checkout. Therefore
@@ -3474,20 +3475,85 @@ def _verify_build_smoke_control_authority(root: Path) -> None:
     verifier = jobs["verify-targeted-artifacts"]
     if verifier.get("needs") != ["build-integrity-default", "build-smoke-control"]:
         raise ContractError(f"{path}: targeted verifier bypasses route control")
+    verifier_steps = verifier.get("steps")
+    if not isinstance(verifier_steps, list):
+        raise ContractError(f"{path}: targeted verifier steps are malformed")
+    expected_verifier_candidate = {
+        "name": "Checkout exact candidate data without execution",
+        "uses": checkout,
+        "with": {
+            "persist-credentials": "false",
+            "repository": "${{ inputs.checkout_repository }}",
+            "fetch-depth": "1",
+            "submodules": "recursive",
+            "ref": "${{ inputs.checkout_ref }}",
+            "path": ".ci-targeted-verifier-candidate",
+        },
+    }
+    expected_verifier_raw = {
+        "name": "Download exact raw CTest and profile inventory",
+        "uses": download,
+        "with": {
+            "name": "ci-build-smoke-raw-default",
+            "path": ".ci-targeted-verifier-raw",
+        },
+    }
+    if expected_verifier_candidate not in verifier_steps:
+        raise ContractError(
+            f"{path}: targeted verifier candidate-data checkout mapping differs"
+        )
+    if expected_verifier_raw not in verifier_steps:
+        raise ContractError(
+            f"{path}: targeted verifier raw-inventory download mapping differs"
+        )
     verifier_text = json.dumps(verifier, sort_keys=True)
     for fragment in (
         ".ci-targeted-verifier-control",
+        ".ci-targeted-verifier-candidate",
+        ".ci-targeted-verifier-raw",
         "${{ inputs.workflow_commit }}",
         "ci-build-smoke-control-default",
         "verify-control",
         "${{ needs.build-smoke-control.outputs.route_sha256 }}",
         ".ci-targeted-verifier-control/ci/scripts/reusable_build.py",
+        "verify-ordinary-coverage",
     ):
         if fragment not in verifier_text:
             raise ContractError(
                 f"{path}: targeted verifier lacks protected route binding {fragment}"
             )
-    if "${{ inputs.checkout_repository }}" in verifier_text:
+    verify_steps = [
+        step
+        for step in verifier_steps
+        if isinstance(step, dict)
+        and step.get("name") == "Verify every targeted role before attestation"
+    ]
+    if len(verify_steps) != 1 or not isinstance(verify_steps[0].get("run"), str):
+        raise ContractError(f"{path}: targeted verifier execution mapping differs")
+    verify_run = verify_steps[0]["run"]
+    required_verify_fragments = (
+        "--raw-dir .ci-targeted-verifier-raw",
+        "--candidate-root .ci-targeted-verifier-candidate",
+        "verify-ordinary-coverage",
+        "--control-manifest CI-results/build-smoke-control/"
+        "build-smoke-control.manifest.json",
+        '--route-sha256 "$CI_ROUTE_SHA256"',
+        (
+            '--restored-build-root "$RUNNER_TEMP/photospider-targeted-ctest-'
+            '$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/ci"'
+        ),
+    )
+    if any(fragment not in verify_run for fragment in required_verify_fragments):
+        raise ContractError(
+            f"{path}: targeted verifier cross-boundary command differs"
+        )
+    forbidden_candidate_execution = (
+        "python3 .ci-targeted-verifier-candidate/",
+        "bash .ci-targeted-verifier-candidate/",
+        "source .ci-targeted-verifier-candidate/",
+        "cd .ci-targeted-verifier-candidate",
+    )
+    if any(fragment in verify_run for fragment in forbidden_candidate_execution):
         raise ContractError(f"{path}: targeted verifier executes candidate control")
 
     attestation = jobs["attest-targeted-artifacts"]

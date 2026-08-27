@@ -354,6 +354,8 @@ protected 构建后 control 还会拒绝这些状态与空 label set。执行前
 它只使用经过校验的 CTest 数字索引选择测试，因此任意测试名字符都不会被 shell 或 regular
 expression 解释。
 
+在 role attestation 前，独立 protected verifier 会把精确 candidate checkout 到一份不执行代码的 data root，并让它与精确 `workflow_commit` control-code root 及全部下载的 raw/control/artifact root 分离。它在使用前后绑定两份真实 `HEAD` commit 与 directory object，再把 raw bundle 重新绑定到受保护 route digest。它只使用受保护 parser，要求 raw 普通 test set、targeted control/runtime closure set 与 fresh 恢复后的 CTest discovery 完全相等，且只排除精确 `build-smoke` label。Coverage reduction、addition、relabeling、identity/digest/path drift 或执行 candidate helper，都会在 attestation 与 readiness 前失败。为处理 container/host workspace path 差异，restored discovery 只会在已验证的 job-owned CTest control file 与 cache 副本中重写 completion stamp 记录的精确 producer build-root token；archive、manifest 与 closure byte 保持不变。
+
 Published image 与 candidate image 调用同一个 digest-bound reusable DAG。Producer 会在同一 tree
 中依次运行 `build_required_targets` 与 `build_all`，随后只上传严格 raw CTest/profile/role envelope
 和 role artifact。Candidate CMake 运行后，它不会 import、执行或授权 candidate route helper/lock，
@@ -2843,8 +2845,7 @@ lock 的 Pip requirement 与精确 GitHub CLI release 下载，且架构专用 C
 未调用 main 或 early exit。
 镜像 detector 不使用 Git status filter。其唯一 selection authority 是 strict CI-image lock 中
 self-including 的 `input_paths` array；merge base 与 head 会分别解析。NUL 分隔的 Git path byte 会与
-两个已验证 revision 的并集比较，因此新增或删除的 input 仍保持可见，malformed、duplicate、
-traversal 或 missing lock state 会在无 output 的情况下失败。Healthcheck 静态范围清单则使用
+两个已验证 revision 的并集比较，因此新增或删除的 input 仍保持可见。真实无-lock base 后，head 在精确 diff path 新增 strict、self-including lock，是唯一 bootstrap，且路由 `changed=true`；malformed、duplicate、traversal、head 缺失或 malformed、bootstrap 未证明，或之后 missing-lock state 都会在无 output 的情况下失败。Healthcheck 静态范围清单则使用
 `--diff-filter=d` 排除无法交给 formatter/linter 的删除路径，同时保留 type change 与少见的非删除
 status。因此 lock 读取或 `git diff` 失败时，镜像检测或 healthcheck 静态范围检测会直接终止，不会
 输出假阴性路由。
@@ -2863,10 +2864,10 @@ status。因此 lock 读取或 `git diff` 失败时，镜像检测或 healthchec
   校验，以及 checkout < trust < fetch/healthcheck 的顺序；校验 published/local job-scoped
   pull-request 精确 base、`CI/**` 累计 main 顺序、三路 `CI_BASE_REF` 精确源码路由、
   允许空集合的配置期预检、只输出 raw input 的 candidate producer、互不重叠的
-  control/candidate/raw path 与 fresh exact-commit protected-control checkout、对空 output 安全的
+  control/candidate/raw path 与 fresh exact-commit protected-control checkout、真实 no-lock-base/strict-head 首次引入 route、对空 output 安全的
   `fromJSON`、普通 `ctest-control`、`openexr-metadata`、专用 static `installed-package` 与
   producer-designated `ctest-control` 四个下游分区之间两两不重叠且穷尽的 build-smoke 路由、
-  role-specific artifact、绑定 route digest 的 verification/attestation、完整 shared-suite gate 聚合、
+  role-specific artifact、绑定 route digest 的 verification/attestation、分离的 protected-code/nonexecuted candidate-data root、raw/control/targeted/restored 普通 CTest 相等性、完整 shared-suite gate 聚合、
   对串行 `integration_suite.sh` fallback 的明确拒绝、架构中性 `execution-repeat`
   路由、含换行路径 artifact，以及 detector/reader/producer 失败传播。测试会在隔离 HOME/仓库中
   执行 production
@@ -2889,8 +2890,7 @@ status。因此 lock 读取或 `git diff` 失败时，镜像检测或 healthchec
   installed-package input。它不输出 routing matrix，也不会在 candidate configure 后运行 route helper
   或 lock。
 - `ci/scripts/build_smoke_route.py`：从精确 protected control checkout 校验严格 raw envelope 与 checkout
-  identity，使用受保护 profile/CTest parser 输出四个穷尽的 downstream matrix，并生成 verifier-bound
-  route digest。
+  identity，使用受保护 profile/CTest parser 输出四个穷尽的 downstream matrix，并把精确 raw byte 重新绑定到 verifier-bound route digest。
 - `ci/scripts/ctest_runtime_closure.py` 与 reusable-build 回归：覆盖精确递归 CTest include、按
   working directory 解析的相对 command/property input、dynamic library、plugin、trust input、
   禁止 residue 与恢复后 `_NOT_BUILT` 拒绝。
@@ -2901,7 +2901,7 @@ status。因此 lock 读取或 `git diff` 失败时，镜像检测或 healthchec
 - `ci/scripts/static_product_consumer_test.sh`：在不重建或重新安装 producer 的前提下，于 dedicated
   installed-package consumer 前后执行精确 content 校验。
 - `ci/scripts/targeted_artifact_consume.sh` 与 `reusable_build.py`：覆盖精确 role member/digest/size
-  identity、分离的 source/signer attestation digest、安全提取与完整 shared-DAG consumer。
+  identity、分离的 source/signer attestation digest、dual-root protected verification、raw/closure/restored 普通 coverage、安全提取与完整 shared-DAG consumer。
 
 CI 源码清单与 exclusion list 必须描述维护中的测试和当前源码路径。迁移专用 harness 名称
 不得作为永久 exclusion 保留，也不得被视为产品行为。GitHub job 状态和可下载 artifact 用于

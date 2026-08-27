@@ -7,6 +7,12 @@ commit, validates those bytes and their candidate/workflow/image identities,
 reconstructs the complete label-driven matrix, and applies the temporary
 current-main routing lock. It is the sole workflow matrix authority.
 
+Before targeted artifact attestation, the same protected implementation
+remeasures the independently downloaded raw bundle and binds its exact CTest
+and envelope digests to the downloaded route-control manifest. This lets the
+targeted verifier compare ordinary coverage without accepting a producer
+matrix or reopening a candidate parser.
+
 The candidate checkout, protected control checkout, downloaded input, and
 control-owned output must be disjoint. No candidate helper or routing lock is
 imported, executed, or hash-authorized after candidate CMake has run.
@@ -933,29 +939,73 @@ def create_control(arguments: argparse.Namespace) -> dict[str, str]:
     return output_values
 
 
-def verify_control(arguments: argparse.Namespace) -> None:
-    """Verify one downloaded control manifest against trusted job outputs.
+def validate_control_bundle(
+    *,
+    raw_dir: Path,
+    manifest_path: Path,
+    route_sha256: str,
+    candidate_commit: str,
+    workflow_commit: str,
+    image_digest: str,
+    profile: str,
+    matrix_sha256: str,
+) -> tuple[bytes, dict[str, Any]]:
+    """Bind downloaded raw inventory to its protected control authority.
 
     Args:
-        arguments: Parsed manifest path plus expected candidate, workflow,
-            image, profile, matrix, and route identities.
+        raw_dir: Exact flat untrusted producer bundle downloaded independently.
+        manifest_path: Canonical protected-control manifest pathname.
+        route_sha256: Expected digest emitted by the protected route job.
+        candidate_commit: Exact called-workflow candidate commit.
+        workflow_commit: Exact protected evaluator commit.
+        image_digest: Exact digest-qualified shared image identity.
+        profile: Exact build profile, currently ``default``.
+        matrix_sha256: Exact resolved declarative matrix digest.
 
     Returns:
-        None after exact digest, schema, identity, and route-shape validation.
+        Retained raw CTest bytes and the validated control manifest.
 
     Raises:
-        RoutingError: Measurement, digest, field, identity, matrix, or route set
-            differs from the protected job outputs.
+        RoutingError: Raw/control paths overlap, either retained bundle is
+            malformed, an external identity differs, or the control manifest's
+            raw/CTest digests do not bind the exact downloaded bytes.
 
     Note:
-        This boundary runs before targeted artifact attestation. It consumes no
-        candidate parser and writes no output.
+        This is the production cross-job boundary reused by targeted artifact
+        coverage verification. It does not trust a producer-supplied matrix and
+        does not execute candidate code.
     """
-    measurement = _measure_regular(arguments.manifest)
-    if measurement.sha256 != arguments.route_sha256:
+    boundaries = _require_disjoint(
+        {
+            "downloaded raw inventory": raw_dir,
+            "downloaded routing control": manifest_path.parent,
+        }
+    )
+    raw_root = boundaries["downloaded raw inventory"]
+    control_root = boundaries["downloaded routing control"]
+    canonical_manifest = control_root / manifest_path.name
+    if canonical_manifest != manifest_path.resolve(strict=True):
+        raise RoutingError("build-smoke control manifest path is aliased")
+    _require_identity(route_sha256, r"[0-9a-f]{64}", "route digest")
+    _require_identity(candidate_commit, r"[0-9a-f]{40}", "candidate commit")
+    _require_identity(workflow_commit, r"[0-9a-f]{40}", "workflow commit")
+    _require_identity(image_digest, r"sha256:[0-9a-f]{64}", "image digest")
+    _require_identity(matrix_sha256, r"[0-9a-f]{64}", "matrix digest")
+    if profile != "default":
+        raise RoutingError("protected build-smoke verification requires profile default")
+
+    measurements, raw_digest = _validate_raw_bundle(
+        raw_root,
+        candidate_commit=candidate_commit,
+        workflow_commit=workflow_commit,
+        image_digest=image_digest,
+        profile=profile,
+    )
+    measurement = _measure_regular(canonical_manifest)
+    if measurement.sha256 != route_sha256:
         raise RoutingError("build-smoke control manifest digest differs")
     manifest = _decode_json(
-        measurement, str(arguments.manifest), canonical=True
+        measurement, str(canonical_manifest), canonical=True
     )
     if not isinstance(manifest, dict) or set(manifest) != {
         "candidate_commit",
@@ -972,11 +1022,13 @@ def verify_control(arguments: argparse.Namespace) -> None:
     if manifest["schema"] != _CONTROL_SCHEMA:
         raise RoutingError("build-smoke control manifest schema differs")
     expected = {
-        "candidate_commit": arguments.candidate_commit,
-        "workflow_commit": arguments.workflow_commit,
-        "image_digest": arguments.image_digest,
-        "profile": arguments.profile,
-        "matrix_sha256": arguments.matrix_sha256,
+        "candidate_commit": candidate_commit,
+        "workflow_commit": workflow_commit,
+        "image_digest": image_digest,
+        "profile": profile,
+        "matrix_sha256": matrix_sha256,
+        "ctest_inventory_sha256": measurements[_RAW_CTEST_NAME].sha256,
+        "raw_inventory_sha256": raw_digest,
     }
     for field, value in expected.items():
         if manifest[field] != value:
@@ -1002,6 +1054,39 @@ def verify_control(arguments: argparse.Namespace) -> None:
             raise RoutingError(f"build-smoke control matrix is malformed: {name}")
         if not isinstance(matrix["include"], list) or not matrix["include"]:
             raise RoutingError(f"build-smoke control matrix is empty: {name}")
+    return measurements[_RAW_CTEST_NAME].content, manifest
+
+
+def verify_control(arguments: argparse.Namespace) -> None:
+    """Verify raw inventory plus control manifest against trusted job outputs.
+
+    Args:
+        arguments: Parsed raw directory, manifest path, and expected candidate,
+            workflow, image, profile, matrix, and route identities.
+
+    Returns:
+        None after exact raw/control digest, schema, identity, and route-shape
+        validation.
+
+    Raises:
+        RoutingError: Measurement, raw/control digest, field, identity, matrix,
+            or route set differs from the protected job outputs.
+
+    Note:
+        This boundary runs before targeted artifact attestation. It consumes no
+        candidate parser and writes no output. The production library function
+        is also reused by ordinary-CTest cross-boundary verification.
+    """
+    validate_control_bundle(
+        raw_dir=arguments.raw_dir,
+        manifest_path=arguments.manifest,
+        route_sha256=arguments.route_sha256,
+        candidate_commit=arguments.candidate_commit,
+        workflow_commit=arguments.workflow_commit,
+        image_digest=arguments.image_digest,
+        profile=arguments.profile,
+        matrix_sha256=arguments.matrix_sha256,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1033,6 +1118,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser(
         "verify-control", help="verify a downloaded control manifest and digest"
     )
+    verify.add_argument("--raw-dir", type=Path, required=True)
     verify.add_argument("--manifest", type=Path, required=True)
     verify.add_argument("--route-sha256", required=True)
     verify.add_argument("--candidate-commit", required=True)

@@ -15,6 +15,11 @@ The consumer re-runs CTest discovery only after the runtime role has been
 restored at its canonical build path.  A ``*_NOT_BUILT`` placeholder, changed
 ordinary inventory, missing include, executable, data, shared library, plugin,
 or trust input fails before ordinary CTest can execute.
+
+The pre-attestation protected verifier also parses retained raw and restored
+JSON through this module and compares their exact ordinary-test names with both
+archived closures. It excludes only the exact ``build-smoke`` label and never
+executes a test command while establishing that cross-job coverage boundary.
 """
 
 from __future__ import annotations
@@ -94,11 +99,36 @@ def _load_json(path: Path) -> Any:
     if not path.is_file() or path.is_symlink():
         raise CTestClosureError(f"expected a regular JSON file: {path}")
     try:
-        return json.loads(
-            path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        return _load_json_bytes(path.read_bytes(), str(path))
+    except (OSError, CTestClosureError) as error:
         raise CTestClosureError(f"cannot read strict JSON {path}: {error}") from error
+
+
+def _load_json_bytes(value: bytes, context: str) -> Any:
+    """Decode one retained UTF-8 JSON object with duplicate rejection.
+
+    Args:
+        value: Exact bytes already retained by the protected caller.
+        context: Stable artifact/path identity used in diagnostics.
+
+    Returns:
+        Detached decoded JSON value.
+
+    Raises:
+        CTestClosureError: UTF-8, JSON syntax, or member uniqueness fails.
+
+    Note:
+        This function performs no pathname I/O. Cross-job coverage validation
+        passes it bytes measured by the protected raw-bundle descriptor reader.
+    """
+    try:
+        return json.loads(
+            value.decode("utf-8"), object_pairs_hook=_unique_object
+        )
+    except (UnicodeError, json.JSONDecodeError, CTestClosureError) as error:
+        raise CTestClosureError(
+            f"cannot decode strict CTest JSON {context}: {error}"
+        ) from error
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -266,6 +296,64 @@ def _ordinary_tests(
         raise CTestClosureError("ordinary CTest inventory is empty")
     records.sort(key=lambda record: record["name"])
     return records
+
+
+def ordinary_test_records(
+    raw_inventory: bytes,
+    context: str,
+    source_root: Path,
+    build_root: Path,
+) -> list[dict[str, Any]]:
+    """Normalize exact ordinary records from retained complete CTest JSON.
+
+    Args:
+        raw_inventory: Exact protected-measured ``ctestInfo`` JSON-v1 bytes.
+        context: Stable raw/restored inventory identity used in diagnostics.
+        source_root: Producer source root represented as ``${SOURCE_ROOT}``.
+        build_root: Producer or restored build root represented as
+            ``${BUILD_ROOT}``.
+
+    Returns:
+        Sorted unique normalized ordinary records after excluding only the
+        exact :data:`BUILD_SMOKE_LABEL`.
+
+    Raises:
+        CTestClosureError: JSON, schema, duplicate identity, labels, command,
+            disabled state, or ``NOT_BUILT`` representation is malformed.
+
+    Note:
+        This boundary never resolves or opens either root. Path/content closure
+        validation remains the role-artifact verifier's separate duty.
+    """
+    payload = _load_json_bytes(raw_inventory, context)
+    return _ordinary_tests(payload, source_root, build_root)
+
+
+def ordinary_test_names(raw_inventory: bytes, context: str) -> list[str]:
+    """Return the exact ordinary-test name set from retained CTest JSON.
+
+    Args:
+        raw_inventory: Exact protected-measured ``ctestInfo`` JSON-v1 bytes.
+        context: Stable raw/restored inventory identity used in diagnostics.
+
+    Returns:
+        Sorted unique names after excluding only exact ``build-smoke``.
+
+    Raises:
+        CTestClosureError: The same strict record/schema checks as
+            :func:`ordinary_test_records` fail.
+
+    Note:
+        Impossible inert roots are safe because this convenience function
+        returns names only and performs no path I/O.
+    """
+    records = ordinary_test_records(
+        raw_inventory,
+        context,
+        Path("/__photospider_retained_source_root__"),
+        Path("/__photospider_retained_build_root__"),
+    )
+    return [record["name"] for record in records]
 
 
 def _directive_target(

@@ -572,19 +572,60 @@ def _git_bytes(root: Path, *arguments: str) -> bytes:
     return completed.stdout
 
 
-def _tree_image_input_paths(root: Path, revision: str) -> list[str]:
+def _tree_image_input_paths(
+    root: Path, revision: str, *, allow_absent: bool = False
+) -> list[str] | None:
     """Load the strict canonical input lock from one immutable Git tree.
 
     Args:
         root: Repository containing the requested tree object.
         revision: Verified full commit identity used by ``git show``.
+        allow_absent: Whether an exact missing tree path is returned as
+            ``None`` for the narrowly bounded first-introduction comparison.
 
     Returns:
-        The validated, self-including canonical input paths.
+        The validated, self-including canonical input paths, or ``None`` only
+        when ``allow_absent`` is true and the exact tree has no lock entry.
 
     Raises:
-        ManifestError: The tree, lock blob, schema, or paths are invalid.
+        ManifestError: The tree, lock entry type, blob, schema, or paths are
+            invalid. A missing lock also fails unless ``allow_absent`` is true.
+
+    Note:
+        ``git ls-tree`` distinguishes one genuinely absent path from a corrupt
+        tree, unsupported entry, or failed object lookup. The later ``show``
+        therefore never treats a generic Git error as first introduction.
     """
+    listing = _git_bytes(
+        root,
+        "ls-tree",
+        "-z",
+        "--full-tree",
+        revision,
+        "--",
+        _IMAGE_LOCK_RELATIVE_PATH,
+    )
+    if not listing:
+        if allow_absent:
+            return None
+        raise ManifestError(
+            f"{revision}:{_IMAGE_LOCK_RELATIVE_PATH}: CI image lock is absent"
+        )
+    if not listing.endswith(b"\0"):
+        raise ManifestError("CI image lock tree entry is not NUL terminated")
+    records = listing[:-1].split(b"\0")
+    if len(records) != 1 or b"\t" not in records[0]:
+        raise ManifestError("CI image lock tree entry is missing or ambiguous")
+    metadata, path_bytes = records[0].split(b"\t", 1)
+    fields = metadata.split(b" ")
+    if (
+        path_bytes != _IMAGE_LOCK_RELATIVE_PATH.encode("utf-8")
+        or len(fields) != 3
+        or fields[0] not in {b"100644", b"100755"}
+        or fields[1] != b"blob"
+        or re.fullmatch(rb"[0-9a-f]{40,64}", fields[2]) is None
+    ):
+        raise ManifestError("CI image lock tree entry is not one regular blob")
     lock_bytes = _git_bytes(root, "show", f"{revision}:{_IMAGE_LOCK_RELATIVE_PATH}")
     context = f"{revision}:{_IMAGE_LOCK_RELATIVE_PATH}"
     return _image_input_paths(_load_json_bytes(lock_bytes, context), context)
@@ -602,10 +643,13 @@ def _changed_path_bytes(
 
     Returns:
         Changed Git path bytes, validated base paths, and validated head paths.
+        The base list is empty only for a proved first introduction whose head
+        lock is strict, self-including, and added by this exact comparison.
 
     Raises:
-        ManifestError: A ref, lock, diff, or path record is unavailable or
-            malformed. No false route is emitted on failure.
+        ManifestError: A ref, head lock, non-bootstrap base lock, diff, or path
+            record is unavailable or malformed. No false route is emitted on
+            failure.
     """
     try:
         base_commit_text = _git_bytes(
@@ -617,7 +661,9 @@ def _changed_path_bytes(
         raise ManifestError("comparison base did not resolve to one full commit")
     if head is None:
         authoritative_base = base_commit_text
-        base_paths = _tree_image_input_paths(root, authoritative_base)
+        base_paths_or_absent = _tree_image_input_paths(
+            root, authoritative_base, allow_absent=True
+        )
         head_lock = _load_json(root / _IMAGE_LOCK_RELATIVE_PATH)
         head_paths = _image_input_paths(
             head_lock, f"worktree:{_IMAGE_LOCK_RELATIVE_PATH}"
@@ -642,8 +688,12 @@ def _changed_path_bytes(
             raise ManifestError("comparison merge base is not ASCII") from error
         if re.fullmatch(r"[0-9a-f]{40}", authoritative_base) is None:
             raise ManifestError("comparison merge base is not one full commit")
-        base_paths = _tree_image_input_paths(root, authoritative_base)
+        base_paths_or_absent = _tree_image_input_paths(
+            root, authoritative_base, allow_absent=True
+        )
         head_paths = _tree_image_input_paths(root, head_commit)
+        if head_paths is None:
+            raise ManifestError("comparison head CI image lock is absent")
         raw_paths = _git_bytes(
             root,
             "diff",
@@ -653,17 +703,30 @@ def _changed_path_bytes(
             f"{authoritative_base}..{head_commit}",
         )
     if not raw_paths:
-        return [], base_paths, head_paths
+        if base_paths_or_absent is None:
+            raise ManifestError(
+                "first CI image lock introduction lacks an observable path change"
+            )
+        return [], base_paths_or_absent, head_paths
     if not raw_paths.endswith(b"\0"):
         raise ManifestError("Git changed-path inventory is not NUL terminated")
     changed = raw_paths[:-1].split(b"\0")
     if any(not path for path in changed):
         raise ManifestError("Git changed-path inventory contains an empty record")
+    if base_paths_or_absent is None:
+        lock_path_bytes = _IMAGE_LOCK_RELATIVE_PATH.encode("utf-8")
+        if lock_path_bytes not in changed:
+            raise ManifestError(
+                "first CI image lock introduction is absent from the exact diff"
+            )
+        base_paths: list[str] = []
+    else:
+        base_paths = base_paths_or_absent
     return changed, base_paths, head_paths
 
 
 def _command_detect_changed(arguments: argparse.Namespace) -> None:
-    """Classify one comparison from the union of strict base/head lock paths.
+    """Classify one comparison from strict revision lock path authority.
 
     Args:
         arguments: Parsed repository, base, head/worktree, and diagnostic output
@@ -674,8 +737,11 @@ def _command_detect_changed(arguments: argparse.Namespace) -> None:
         exact ``true`` or ``false`` route value.
 
     Raises:
-        ManifestError: Any revision, lock, path inventory, or Git operation is
-            unavailable or malformed. No route value is printed on failure.
+        ManifestError: Any revision, required lock, path inventory, or Git
+            operation is unavailable or malformed. The sole missing-base
+            exception is a strict self-including head lock added by the exact
+            comparison; that boundary necessarily prints ``true`` rather than
+            allowing a false route. No route value is printed on failure.
     """
     changed, base_paths, head_paths = _changed_path_bytes(
         arguments.repo_root,
