@@ -18,6 +18,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     && apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
+    ccache \
     cmake \
     git \
     libcurl4-openssl-dev \

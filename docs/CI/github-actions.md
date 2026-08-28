@@ -37,49 +37,55 @@ the checked-out `HEAD` is a commit. This is a container Git availability
 setting for the checkout's ownership boundary, not an authorization,
 protected-path, or provenance proof; it never uses a wildcard.
 
-The healthcheck then deliberately performs only three inexpensive checks:
+The healthcheck then deliberately performs only four inexpensive checks:
 
 1. `git diff --check` for the pushed commit.
-2. A CMake configure with testing enabled and ASan, TSan, and fuzzers disabled.
-3. A build of `public_header_self_containment`.
+2. An explicit `ccache` executable and version check, so an unpublished or
+   stale CI image fails instead of silently compiling without the launcher.
+3. A CMake configure with the C and C++ compiler launchers set to `ccache`,
+   testing enabled, and ASan, TSan, and fuzzers disabled.
+4. A build of `public_header_self_containment`.
 
 It does not classify changed paths, infer docs-only runs, compare protected
 paths, inspect another ref, build the full product, or decide whether later
 jobs should exist.
 
-### One cached build
+### One ccache-backed build
 
-The build job restores `build/ci` with `actions/cache/restore@v6`. Its cache key
-contains:
+The producer never restores a previous `build/ci` tree. It starts with a fresh
+binary directory and restores only `.ccache` with
+`actions/cache/restore@v6`. The compiler-cache key contains an explicit epoch,
+runner operating system and architecture, build type, a `Dockerfile.ci` image
+recipe hash, and the workflow `run_id` and `run_attempt`. Its only restore
+prefix ends before the run identity, so the producer may use the newest cache
+from an earlier compatible run. The workflow reports both `cache-hit` and the
+matched key: a fallback is useful even though only an exact current-run key
+would produce `cache-hit == true`.
 
-- an explicit cache epoch;
-- the runner operating system and build type;
-- one hash over `Dockerfile.ci`, every `CMakeLists.txt`, and `cmake/**`;
-- the exact Git commit SHA;
-- the workflow `run_id` and `run_attempt`.
+The cache configuration sets `CCACHE_DIR` inside the workspace and
+`CCACHE_BASEDIR` to the absolute workspace, keeps `CCACHE_HASHDIR=true` so
+debug information remains tied to the correct working directory, uses
+`CCACHE_COMPILERCHECK=content` to reject entries from a different compiler,
+and limits the local cache to 2 GiB. After restore, the producer zeroes ccache
+statistics, configures C and C++ through explicit `ccache` CMake launchers,
+invokes Ninja exactly once, and prints the resulting hit/miss statistics. It
+then saves `.ccache` under the new run-and-attempt key. The unique primary key
+is necessary because Actions cache entries are immutable; the restore prefix
+provides cross-run reuse while every successful producer can publish its
+updated cache snapshot.
 
-The first restore prefix stops after the SHA, so the producer first tries a
-compatible tree from an earlier run or attempt of the same commit. The second
-prefix stops before the SHA and permits reuse from another compatible commit.
-CMake still configures the restored tree on every run, and Ninja is invoked
-exactly once for the primary build. The job then always invokes
-`actions/cache/save@v6` with the current run-scoped primary key to publish the
-resulting complete tree for downstream jobs. Cache entries are immutable, while
-`run_attempt` gives a rerun a new handoff key instead of reusing an earlier
-producer entry. The tree includes object files and Ninja dependency state. The
-workflow prints the restore action's `cache-hit` output; only an exact hit on
-the current run-scoped primary key is `true`, while either fallback or a
-complete miss is not an exact hit.
-
-Immediately after the build, the job packages the lightweight CTest runtime;
-after the explicit cache save, it uploads that archive once. A restored cache
-may already contain the fixed
+The complete `build/ci` tree has a separate namespace and purpose. After the
+fresh build, the producer packages the lightweight CTest runtime and saves the
+tree under an exact key containing the epoch, platform, build type, build
+configuration hash, commit SHA, `run_id`, and `run_attempt`. No producer step
+restores this tree, and downstream users supply no restore prefix, so object
+files and Ninja dependency state are a same-workflow handoff only. The
+packager still excludes the two fixed transient roots
 `tests/image_artifact_codec_dependency_disabled` and
-`tests/optional_opencv_provider_disabled` work roots from an earlier run, so
-the packager excludes those exact transient roots and all descendants without
-deleting them from the complete build tree. The build job does not run a build
-smoke; saving the current run-and-attempt cache and uploading the single
-runtime archive complete the producer boundary.
+`tests/optional_opencv_provider_disabled` as an object-free archive invariant;
+it does not rely on residue from an older tree. Saving the two immutable cache
+namespaces and uploading the single runtime archive complete the producer
+boundary.
 
 ### Independent build-smoke runners
 
@@ -97,20 +103,34 @@ the default CI configuration:
 
 The matrix uses `fail-fast: false`, so every entry receives its own runner and
 container after the producer succeeds. Each runner checks out the same
-`github.sha` and requests the producer's exact key for the same `run_id` and
-`run_attempt` with `actions/cache/restore@v6`. It supplies no `restore-keys`.
-`fail-on-cache-miss` rejects a complete miss, and the following guard also
-requires the action's `cache-hit` output to equal the string `true`; this second
-check rejects any primary-key partial match and proves an exact same-run
-handoff. The runner then reconfigures the restored tree with the same source and
-binary locations under `$GITHUB_WORKSPACE` before invoking CTest once. The
+`github.sha`, restores the producer's exact ccache key for the same `run_id`
+and `run_attempt`, and requires `cache-hit == true`. The restored compiler
+cache is read-only in smoke jobs and is never saved, so one consumer cannot
+alter the producer snapshot used by another. Fresh nested CMake configurations
+inherit the C and C++ launcher environment, and every runner prints its local
+ccache statistics after CTest.
+
+The matrix flag divides the outer CTest handoff by actual test dependency:
+
+- `DependencyDisabledInstallSmoke`, `OpenExrDeepProviderOptionOffSmoke`,
+  `PhotospiderdInstallLayoutSmoke`, `IpcDisabledInstallSmoke`,
+  `ImageArtifactCodecDependencyDisabledBuild`, and
+  `OpenCvOperationProviderDisabledBuild` download the one object-free runtime.
+  They create fresh nested build trees; the OpenEXR driver additionally reads
+  the retained producer `CMakeCache.txt` for platform configuration.
+- `StaticProductConsumerSmoke` and `PublicHeaderSelfContainment` directly build
+  targets in the producer tree. They restore the separate exact full-tree key,
+  require both a non-miss and `cache-hit == true`, and reconfigure that tree
+  with explicit ccache launchers before CTest.
+
+Neither cache restore uses fallback prefixes in a smoke runner. The CTest
 invocation combines an anchored exact `--tests-regex`, the exact
 `--label-regex '^build-smoke$'`, and `--no-tests=error`; a renamed, absent, or
 mislabelled entry therefore cannot pass as an empty selection.
 
 These eight jobs run in parallel with the `unit`, `integration`, and
 `verification` label jobs. Their local nested build/install outputs are not
-saved back to the immutable producer cache and never enter `ctest-runtime`.
+saved back to either immutable producer cache and never enter `ctest-runtime`.
 Each job writes its report beneath
 `CI-results/build-smoke/<matrix-artifact>.junit.xml`; an `always()` step uploads
 the unique `ctest-junit-build-smoke-<matrix-artifact>` artifact for seven days
@@ -132,15 +152,16 @@ archive retains the runtime closure needed by CTest:
 
 The archive excludes every `.o` and `.obj`, every `CMakeFiles` tree,
 `.ninja_deps`, `.ninja_log`, prior `Testing` output, and the two exact transient
-nested-smoke roots named above. Incremental build inputs remain only in the
-complete build-tree cache; the rest of `tests/` is retained as part of the CTest
-runtime. The archive is uploaded once with artifact recompression disabled and
-downloaded only by the three primary-label test jobs. The eight build-smoke
-runners restore the build-tree cache instead and do not create or download
-runtime packages. After validating the closure, the packager prints the
-physical archive byte count and tar entry count. These diagnostics are
-observations for cache and artifact-size experiments; they do not relax the
-required roots or forbidden entry checks.
+nested-smoke roots named above. Incremental compiler results live only in
+ccache, while the rest of `tests/` is retained as part of the CTest runtime.
+The archive is uploaded once with artifact recompression disabled and is
+downloaded by the three primary-label jobs and the six build-smoke runners that
+create fresh nested trees. The other two build-smoke runners restore the exact
+producer tree. No runner creates a second runtime package. After validating the
+closure, the packager prints the physical archive byte count and tar entry
+count. These diagnostics and ccache's own hit/miss statistics are observations
+for cache and artifact-size experiments; they do not relax the required roots
+or forbidden entry checks.
 
 Each test job restores the archive at `build/ci`, the same path used by the
 producer, then runs one exact primary label. There are no duplicate runtime
@@ -186,15 +207,20 @@ tools. Ordinary pushes configure `USE_ASAN=OFF`, `USE_TSAN=OFF`, and
 
 ## CI image workflow
 
-`Dockerfile.ci` defines the Linux toolchain and includes Ninja plus the project
-build dependencies. `.github/workflows/build-ci-image.yml` runs only for a
-`Dockerfile.ci` change on `main` or manual dispatch. It publishes `latest`, a
-commit tag, and an optional manual tag to
+`Dockerfile.ci` defines the Linux toolchain and includes ccache, Ninja, and the
+project build dependencies. `.github/workflows/build-ci-image.yml` runs only
+for a `Dockerfile.ci` change on `main` or manual dispatch. It publishes
+`latest`, a commit tag, and an optional manual tag to
 `ghcr.io/<owner>/<repo>/photospider-ci`.
 
-The ordinary CI workflow consumes that published image. A Dockerfile change
-must land and publish successfully before later pushes can rely on the new
-toolchain; ordinary CI does not build or compare the image itself.
+The ordinary CI workflow consumes that published image and now checks that
+`ccache` exists before configuration. A Dockerfile change must publish
+successfully before ordinary CI can rely on the new toolchain. For a transition
+such as the first ccache-enabled image, dispatch the image workflow for the ref
+containing the Dockerfile change, wait for `latest` to publish, and only then
+run or rerun the ordinary CI workflow. The automatic `main` image build does
+not establish ordering ahead of a concurrently triggered CI run; ordinary CI
+does not build or compare the image itself.
 
 Both workflows use the maintained Node 24 action majors: `actions/checkout@v7`,
 `actions/cache/restore@v6`, `actions/cache/save@v6`, `actions/upload-artifact@v7`,

@@ -374,27 +374,28 @@ external consumer, compile target, or generated executable remains an ordinary
 `verification` test.
 
 CTest keeps every build smoke directly runnable. The daily GitHub Actions build
-job packages the CTest runtime and explicitly saves the completely built
-producer tree under a handoff key scoped to the current commit, workflow run,
-and run attempt, but does not run the label. Its incremental restore may first
-fall back to an earlier run of the same commit and then to another compatible
-commit. A fixed eight-entry matrix names the default configuration's build
+job starts from a fresh producer tree, restores only a cross-run ccache
+snapshot, performs one complete build, packages the CTest runtime, and saves
+both the updated compiler cache and a separate exact same-run producer-tree
+handoff. A fixed eight-entry matrix names the default configuration's build
 smokes and creates one isolated runner per entry with `fail-fast: false`.
 Adding or renaming a durable build smoke requires coordinated updates to its
 CTest registration, the exact `build-smoke` label, appropriate `RUN_SERIAL`,
 `RESOURCE_LOCK`, and `TIMEOUT` properties, and the workflow matrix inventory.
 
-Each build-smoke runner checks out the producer commit and requests the same
-run-and-attempt-scoped build-tree cache key without restore prefixes.
-`fail-on-cache-miss` rejects a complete miss, while a separate guard requires
-the restore action's `cache-hit` output to equal `true` so that a primary-key
-partial match also fails. The runner then reconfigures the tree at the same
-`$GITHUB_WORKSPACE` source and binary paths. CTest combines an anchored exact
-test-name regex, the exact `build-smoke` label, and `--no-tests=error`. The eight
-jobs run in parallel with the three runtime-label jobs, so one smoke failure
-neither cancels its peers nor blocks the already published runtime archive.
-Each `always()` upload reads a unique
-`CI-results/build-smoke/<matrix-artifact>.junit.xml` and publishes it as
+Every build-smoke runner checks out the producer commit and requests the exact
+run-and-attempt-scoped ccache key without restore prefixes. A non-miss plus a
+separate `cache-hit == true` guard proves the same-run handoff; the restored
+cache is read-only and never saved by a consumer. Six tests that create fresh
+nested trees restore the object-free CTest runtime. The two tests that directly
+build producer targets, `StaticProductConsumerSmoke` and
+`PublicHeaderSelfContainment`, instead restore and guard the exact producer
+tree, then reconfigure it at the same `$GITHUB_WORKSPACE` source and binary
+paths. CTest combines an anchored exact test-name regex, the exact
+`build-smoke` label, and `--no-tests=error`. The eight jobs run in parallel with
+the three runtime-label jobs, so one smoke failure neither cancels its peers nor
+blocks the already published runtime archive. Each `always()` upload reads a
+unique `CI-results/build-smoke/<matrix-artifact>.junit.xml` and publishes it as
 `ctest-junit-build-smoke-<matrix-artifact>` for seven days, warning only when
 the report is missing.
 
@@ -402,14 +403,12 @@ Nested drivers must continue to use disjoint work directories, validate any
 reusable producer they accept, and clean up without following or deleting
 unrelated symlink targets. Their transient compiler objects and generated
 `CMakeFiles` trees exist only in the matrix runner that executes that smoke;
-the restore-only runner never saves them back to the immutable producer cache.
-A prefix restore in the producer can nevertheless bring forward the configured
-`tests/image_artifact_codec_dependency_disabled` and
-`tests/optional_opencv_provider_disabled` work roots from an earlier run. The
-packager therefore excludes those two exact roots and all descendants without
-deleting them from the reusable build tree; it does not exclude the whole
-`tests/` runtime root. CTest's per-test properties remain authoritative inside
-each invocation, while isolation across runners supplies the cross-job boundary.
+no runner saves them back to either immutable producer handoff. The packager
+excludes the exact `tests/image_artifact_codec_dependency_disabled` and
+`tests/optional_opencv_provider_disabled` work roots and all descendants as a
+runtime-closure invariant; it does not exclude the whole `tests/` runtime root.
+CTest's per-test properties remain authoritative inside each invocation, while
+isolation across runners supplies the cross-job boundary.
 
 GoogleTest discovery assigns the source-role primary label without relying on
 repeated CTest property behavior. The repository wrapper parses the maintained
@@ -1180,11 +1179,12 @@ cmake --build build --target test_run_lifecycle_registry \
 The final delivery pass uses at most one clean native configure, one full
 build, and one complete CTest/JUnit run. Focused validation may precede that
 frozen pass, but it must not multiply the final full gate. GitHub CI performs
-one complete build and packages one runtime in the producer job. Eight
-downstream jobs run the individual `build-smoke` entries from the exact
-same-run cache handoff, while the `unit`, `integration`, and `verification`
-jobs use the same packaged runtime. It does not register lifecycle provenance,
-stale-term searches, or source-quality audits as product tests.
+one complete build and packages one runtime in the producer job. All eight
+downstream `build-smoke` jobs restore the producer's exact read-only ccache;
+six use the packaged runtime and two use the exact same-run producer-tree
+handoff. The `unit`, `integration`, and `verification` jobs use that same
+packaged runtime. CI does not register lifecycle provenance, stale-term
+searches, or source-quality audits as product tests.
 
 ## Injected Image Artifact Codec Validation
 
@@ -3242,31 +3242,32 @@ and `CI/**`; `build-ci-image.yml` publishes the custom Linux image for a
 sanitizer workflow, scheduler-log workflow, evidence/provenance layer, or
 result aggregator.
 
-Daily CI checks whitespace, configures CMake, and builds
-`public_header_self_containment` in its healthcheck. One build job restores the
-complete `build/ci` cache, configures it again, invokes Ninja once, and then
-creates one `ctest-runtime.tar.gz`. The restore first permits a prior run of the
-same SHA and then another compatible family entry. After the build, the job
-explicitly saves the complete producer tree under the current SHA, run ID, and
-run-attempt key, then uploads that runtime archive. The cache retains objects,
-Ninja incremental state, and any compatible residue that arrived through those
-producer fallbacks; the build job runs no build-smoke test.
+Daily CI checks whitespace and the required ccache executable, configures CMake
+with ccache launchers, and builds `public_header_self_containment` in its
+healthcheck. One producer job restores only `.ccache` from the newest compatible
+cross-run prefix, zeroes its statistics, configures a fresh `build/ci`, invokes
+Ninja once, prints hit/miss statistics, and saves the updated compiler cache
+under a new run-and-attempt key. It then creates one
+`ctest-runtime.tar.gz`, saves the complete producer tree under a separate exact
+current-SHA, run-ID, and run-attempt key, and uploads the runtime archive. No
+full build tree is restored across runs; the build job runs no build-smoke test.
 
 The runtime archive excludes object files, `CMakeFiles`, Ninja dependency/log
-databases, prior `Testing` output, and the two cache-restored transient smoke
+databases, prior `Testing` output, and the two transient smoke
 roots `tests/image_artifact_codec_dependency_disabled` and
 `tests/optional_opencv_provider_disabled`. It retains the rest of `tests/`,
 libraries, plugins, executables, CTest metadata, and package configuration. The
 packager reports the validated archive's exact physical byte count and tar
-entry count for warm-cache and artifact-size diagnosis. The producer uploads
-it once. Three parallel jobs restore that same archive and run the `unit`,
-`integration`, or `verification` label. In parallel, eight build-smoke matrix
-jobs request the same run-and-attempt-scoped build-tree key without restore
-prefixes. They require both a non-miss and a `cache-hit` value of `true` before
-reconfiguring the tree and each running one statically named test through an
-anchored exact-name regex plus the exact `build-smoke` label. Those jobs neither
-download nor regenerate the runtime archive. CMake owns every primary label and
-all `RUN_SERIAL`,
+entry count for artifact-size diagnosis, while ccache reports compiler hit/miss
+statistics. The producer uploads the runtime once. Three parallel jobs restore
+that archive and run the `unit`, `integration`, or `verification` label. In
+parallel, all eight build-smoke matrix jobs require the producer's exact
+same-run ccache key and never save it. Six entries download the object-free
+runtime and create fresh nested builds. `StaticProductConsumerSmoke` and
+`PublicHeaderSelfContainment` instead require the separate exact producer-tree
+key and reconfigure it before running. Every entry selects one statically named
+test through an anchored exact-name regex plus the exact `build-smoke` label.
+CMake owns every primary label and all `RUN_SERIAL`,
 `RESOURCE_LOCK`, and `TIMEOUT` constraints; the workflow avoids a combined
 long test-name regular expression.
 
@@ -3283,12 +3284,12 @@ The two workflows use the maintained Node 24 action majors:
 `actions/upload-artifact@v7`, `actions/download-artifact@v8`,
 `docker/login-action@v4`, `docker/metadata-action@v6`, and
 `docker/build-push-action@v7`. GitHub-hosted runners satisfy their minimum
-Actions Runner 2.327.1 requirement. The build job prints the cache action's
-exact-hit output so the producer can distinguish its unique current-run key
-from a same-SHA or family fallback and a miss before comparing configure, Ninja,
-packaging, and explicit cache-save timings. Each smoke runner separately proves
-that it restored the current producer's exact handoff key rather than accepting
-a partial match.
+Actions Runner 2.327.1 requirement. The build job prints the ccache restore
+action's matched key and exact-hit output, then prints ccache statistics after
+the build. A producer prefix fallback is valid; each successful run saves a new
+immutable key. Every smoke runner separately proves that it restored the
+current producer's exact compiler-cache handoff, and the two producer-tree
+consumers also prove their separate exact tree handoff.
 
 `ci/scripts/build_smoke_inventory.py` remains because the long-lived
 `InstallConsumerArchitecturePropagationSafety` product test imports it to

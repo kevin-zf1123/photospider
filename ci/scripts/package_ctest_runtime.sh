@@ -7,10 +7,11 @@ set -Eeuo pipefail
 #
 # The archive keeps runtime libraries, plugins, executables, generated package
 # configuration, and CTest control files. Object files, CMakeFiles trees,
-# Ninja dependency/log databases, prior Testing output, and any cache-restored
-# copies of the two registered transient nested-smoke work roots remain outside
-# the runtime archive. In the current workflow, changes produced by downstream
-# smoke runners are not saved back into the immutable producer cache.
+# Ninja dependency/log databases, prior Testing output, and the two registered
+# transient nested-smoke work roots remain outside the runtime archive. The
+# same object-free archive can therefore serve runtime-label jobs and build
+# smokes that create fresh nested build trees. Downstream smoke changes are not
+# saved back into either immutable producer handoff cache.
 #
 # @param $1 Existing configured and completely built CMake binary directory.
 # @param $2 Destination path for the physical ctest-runtime.tar.gz file.
@@ -20,7 +21,7 @@ set -Eeuo pipefail
 #   forbidden archive entry terminate the script with a nonzero status.
 # @note The destination must be outside the packaged build directory. The
 #   script never modifies the input tree and creates no background work;
-#   excluding a cache-restored smoke work root does not delete that root.
+#   excluding a transient smoke work root does not delete that root.
 
 if (($# != 2)); then
   echo "Usage: $0 <build-dir> <ctest-runtime.tar.gz>" >&2
