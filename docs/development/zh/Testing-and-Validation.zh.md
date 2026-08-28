@@ -2674,12 +2674,14 @@ immutable key。Key 只 hash configure 前后稳定的 `Dockerfile.ci`；禁止�
 会使 restore 与 save 之间的 key 发生变化。每个 smoke runner 会改为证明它已收到当前 producer 的
 `ccache-handoff` artifact；cache entry 是否 hit 只作为 diagnostic。
 
-CI 会把 `CCACHE_BASEDIR` 设为 workspace，并设置 `CCACHE_NOHASHDIR=true`，使 producer entry 能够
-匹配更深 nested build directory 中的等价编译。关闭 directory hashing 可能使 cached
-`RelWithDebInfo` DWARF 保留 producer working directory，因此这些 CI object 绝不会被发布，也不会
-作为 release/debug 交付物使用。发布启用 ccache 的镜像后，第一次 run 预期由 producer 冷编译、填充
-两种 handoff，而 smoke 会同时出现兼容 hit 与正常 miss；后续兼容 workflow 应以更热状态开始，但 hit
-rate 不会成为门禁。
+CI 有意不设置 `CCACHE_BASEDIR`，并设置 `CCACHE_NOHASHDIR=true`。Producer 与 smoke job
+使用同一个绝对 GitHub workspace 源码路径，因此等价 compiler command 会保留一致的绝对源码
+argument，而关闭 directory hashing 后，cache key 不再区分 outer 与 deeper nested 的 working
+directory。设置 `CCACHE_BASEDIR` 会相对于每次编译的 working directory 重写路径，使 nested
+argument 产生差异。关闭 directory hashing 可能使 cached `RelWithDebInfo` DWARF 保留 producer
+working directory，因此这些 CI object 绝不会被发布，也不会作为 release/debug 交付物使用。发布启用
+ccache 的镜像后，第一次 run 预期由 producer 冷编译、填充两种 handoff，而 smoke 会同时出现兼容
+hit 与正常 miss；后续兼容 workflow 应以更热状态开始，但 hit rate 不会成为门禁。
 
 `ci/scripts/build_smoke_inventory.py` 会继续保留，因为长期产品测试
 `InstallConsumerArchitecturePropagationSafety` 会导入它来验证已配置 build-smoke entry。手工

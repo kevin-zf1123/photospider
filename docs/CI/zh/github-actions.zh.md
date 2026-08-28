@@ -2,7 +2,7 @@
 
 Photospider 有意只保留两个 GitHub Actions workflow：
 
-- `.github/workflows/ci.yml` 处理日常 push，包含一次 healthcheck、一次可复用构建、八个独立 build-smoke runner 和三个并行 CTest label 分片。
+- `.github/workflows/ci.yml` 处理日常 push，包含一次 healthcheck、一次由 ccache 加速的 producer 构建、八个独立 build-smoke runner 和三个并行 CTest label 分片。
 - `.github/workflows/build-ci-image.yml` 在 `main` 的 `Dockerfile.ci` 发生变更或维护者手工触发时发布 Linux CI 镜像。
 
 仓库不再设置单独的 pull-request-target、sanitizer、scheduler-log、routing、evidence、provenance 或 aggregator workflow。本仓库按个人开发项目维护，因此 CI 围绕真正有用的构建与测试信号安排，而不是复刻 enterprise 审批或自授权证明机制。
@@ -43,12 +43,16 @@ Producer 不再恢复旧的 `build/ci` tree，而是从全新 binary directory �
 Workflow 会同时报告 `cache-hit` 与实际 matched key；fallback 仍然有用，只是仅有 exact current-run
 key 才会产生 `cache-hit == true`。
 
-Cache 配置把 `CCACHE_DIR` 放在 workspace 内，把 `CCACHE_BASEDIR` 设为绝对 workspace，使用
-`CCACHE_COMPILERCHECK=content` 拒绝来自不同 compiler 的 entry，同时把本地 cache 限制为 2 GiB。
-CI 还会设置 `CCACHE_NOHASHDIR=true`，让 producer 与更深层 nested smoke build directory 中的等价
-编译能够复用同一 entry。这是仅限 CI 的明确取舍：ccache 返回的 `RelWithDebInfo` object，其 DWARF
-可能保留 producer working directory。因此 cached object 绝不会被发布或视为 release/debug 交付物。
-Runtime 行为仍由测试验证，任何 cache miss 都会正常编译。
+Cache 配置把 `CCACHE_DIR` 放在 workspace 内，使用 `CCACHE_COMPILERCHECK=content`
+拒绝来自不同 compiler 的 entry，同时把本地 cache 限制为 2 GiB。CI 有意不设置
+`CCACHE_BASEDIR`，并设置 `CCACHE_NOHASHDIR=true`。Producer 与 smoke job 在同一个绝对
+`$GITHUB_WORKSPACE` 路径 checkout 相同源码，因此等价 compiler command 会保留一致的绝对源码
+argument，而关闭 directory hashing 后，cache key 不再区分 outer 与 deeper nested 的 working
+directory。若在此处设置 `CCACHE_BASEDIR`，ccache 会改为相对于每个 compiler process 的
+working directory 重写路径；deeper nested build 的 working directory 不同，重写后的 argument 也会
+不同，从而使这些 cache hit 失效。关闭 directory hashing 是仅限 CI 的明确取舍：ccache 返回的
+`RelWithDebInfo` object，其 DWARF 可能保留 producer working directory。因此 cached object
+绝不会被发布或视为 release/debug 交付物。Runtime 行为仍由测试验证，任何 cache miss 都会正常编译。
 
 恢复后，producer 会清零 ccache statistics，通过显式 C 与 C++ ccache CMake launcher 进行 configure，
 只调用一次 Ninja，再打印得到的 hit/miss statistics。它把 `.ccache` 保存到新的 run-and-attempt key，

@@ -3298,14 +3298,19 @@ dependency CMake files changed the key between restore and save in the
 baseline run. Every smoke runner instead proves that it received the current
 producer's `ccache-handoff` artifact. Cache entry hits remain diagnostic.
 
-CI sets `CCACHE_BASEDIR` to the workspace and `CCACHE_NOHASHDIR=true` so
-producer entries can match equivalent compilation from deeper nested build
-directories. Disabling directory hashing can leave the producer working
-directory in cached `RelWithDebInfo` DWARF, so these CI objects are never
-published or used as release/debug deliverables. The first run after publishing
-the ccache-enabled image is expected to compile the producer cold, populate
-both handoffs, and give smokes a mixture of compatible hits and normal misses;
-later compatible workflows should begin warmer without making hit rate a gate.
+CI intentionally leaves `CCACHE_BASEDIR` unset and sets
+`CCACHE_NOHASHDIR=true`. Producer and smoke jobs use the same absolute
+GitHub workspace source path, so equivalent compiler commands retain matching
+absolute source arguments while directory hashing no longer distinguishes
+outer and deeper nested working directories. Setting `CCACHE_BASEDIR` would
+rewrite paths relative to each compilation's working directory and make the
+nested arguments differ. Disabling directory hashing can leave the producer
+working directory in cached `RelWithDebInfo` DWARF, so these CI objects are
+never published or used as release/debug deliverables. The first run after
+publishing the ccache-enabled image is expected to compile the producer cold,
+populate both handoffs, and give smokes a mixture of compatible hits and normal
+misses; later compatible workflows should begin warmer without making hit rate
+a gate.
 
 `ci/scripts/build_smoke_inventory.py` remains because the long-lived
 `InstallConsumerArchitecturePropagationSafety` product test imports it to

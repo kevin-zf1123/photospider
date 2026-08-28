@@ -3,8 +3,8 @@
 Photospider intentionally keeps two GitHub Actions workflows:
 
 - `.github/workflows/ci.yml` handles ordinary pushes with one healthcheck,
-  one reusable build, eight independent build-smoke runners, and three parallel
-  CTest label shards.
+  one ccache-backed producer build, eight independent build-smoke runners, and
+  three parallel CTest label shards.
 - `.github/workflows/build-ci-image.yml` publishes the Linux CI image when
   `Dockerfile.ci` changes on `main`, or when a maintainer dispatches it
   manually.
@@ -62,16 +62,21 @@ from an earlier compatible run. The workflow reports both `cache-hit` and the
 matched key: a fallback is useful even though only an exact current-run key
 would produce `cache-hit == true`.
 
-The cache configuration sets `CCACHE_DIR` inside the workspace and
-`CCACHE_BASEDIR` to the absolute workspace, uses
+The cache configuration sets `CCACHE_DIR` inside the workspace, uses
 `CCACHE_COMPILERCHECK=content` to reject entries from a different compiler,
-and limits the local cache to 2 GiB. CI also sets `CCACHE_NOHASHDIR=true` so
-equivalent compilation in the producer and deeper nested smoke build
-directories can reuse one entry. This is a deliberate CI-only tradeoff:
-`RelWithDebInfo` objects returned from ccache may retain the producer's working
-directory in DWARF. Cached objects are therefore never published or treated as
-release/debug deliverables. Runtime behavior remains under test, and every
-cache miss compiles normally.
+and limits the local cache to 2 GiB. CI intentionally leaves
+`CCACHE_BASEDIR` unset and sets `CCACHE_NOHASHDIR=true`. The producer and smoke
+jobs check out the same source at the same absolute `$GITHUB_WORKSPACE` path,
+so equivalent compiler commands retain matching absolute source arguments
+while directory hashing no longer distinguishes outer and deeper nested
+working directories. Setting `CCACHE_BASEDIR` here would instead rewrite paths
+relative to each compiler process's working directory; deeper nested builds
+have a different working directory, so their rewritten arguments would differ
+and defeat those cache hits. Disabling directory hashing is a deliberate
+CI-only tradeoff: `RelWithDebInfo` objects returned from ccache may retain the
+producer's working directory in DWARF. Cached objects are therefore never
+published or treated as release/debug deliverables. Runtime behavior remains
+under test, and every cache miss compiles normally.
 
 After restore, the producer zeroes ccache statistics, configures C and C++
 through explicit `ccache` CMake launchers, invokes Ninja exactly once, and
