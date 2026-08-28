@@ -94,6 +94,9 @@ jobs:
       - name: Build once
         run: cmake --build build/ci --parallel ${CI_PARALLEL_LEVEL}
 
+      - name: Remove cache-restored JUnit residue
+        run: rm -rf -- "$GITHUB_WORKSPACE/build/ci/CI-results"
+
       - name: Package CTest runtime
         run: >-
           bash ci/scripts/package_ctest_runtime.sh
@@ -102,12 +105,13 @@ jobs:
 
       - name: Run build-smoke tests
         run: |
-          mkdir -p CI-results
+          junit_dir="$GITHUB_WORKSPACE/CI-results"
+          mkdir -p "$junit_dir"
           ctest --test-dir build/ci \
             --output-on-failure \
             --parallel "${CI_PARALLEL_LEVEL}" \
             --label-regex '^build-smoke$' \
-            --output-junit CI-results/build-smoke.junit.xml
+            --output-junit "${junit_dir}/build-smoke.junit.xml"
 
       - name: Upload build-smoke JUnit report
         if: ${{ always() }}
@@ -163,12 +167,13 @@ jobs:
 
       - name: Run labelled CTest
         run: |
-          mkdir -p CI-results/ctest
+          junit_dir="$GITHUB_WORKSPACE/CI-results/ctest"
+          mkdir -p "$junit_dir"
           ctest --test-dir build/ci \
             --output-on-failure \
             --parallel "${CI_PARALLEL_LEVEL}" \
             --label-regex '^${{ matrix.label }}$' \
-            --output-junit "CI-results/ctest/${{ matrix.label }}.junit.xml"
+            --output-junit "${junit_dir}/${{ matrix.label }}.junit.xml"
 
       - name: Upload labelled CTest JUnit report
         if: ${{ always() }}
