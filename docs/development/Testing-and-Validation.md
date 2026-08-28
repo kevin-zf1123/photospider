@@ -374,21 +374,26 @@ external consumer, compile target, or generated executable remains an ordinary
 `verification` test.
 
 CTest keeps every build smoke directly runnable. The daily GitHub Actions build
-job packages the CTest runtime and saves the completely built producer tree
-under the current commit's exact cache key, but does not run the label. A fixed
-eight-entry matrix names the default configuration's build smokes and creates
-one isolated runner per entry with `fail-fast: false`. Adding or renaming a
-durable build smoke requires coordinated updates to its CTest registration,
-the exact `build-smoke` label, appropriate `RUN_SERIAL`, `RESOURCE_LOCK`, and
-`TIMEOUT` properties, and the workflow matrix inventory.
+job packages the CTest runtime and explicitly saves the completely built
+producer tree under a handoff key scoped to the current commit, workflow run,
+and run attempt, but does not run the label. Its incremental restore may first
+fall back to an earlier run of the same commit and then to another compatible
+commit. A fixed eight-entry matrix names the default configuration's build
+smokes and creates one isolated runner per entry with `fail-fast: false`.
+Adding or renaming a durable build smoke requires coordinated updates to its
+CTest registration, the exact `build-smoke` label, appropriate `RUN_SERIAL`,
+`RESOURCE_LOCK`, and `TIMEOUT` properties, and the workflow matrix inventory.
 
-Each build-smoke runner checks out the producer commit, restores only its exact
-build-tree cache key with failure on a miss, and reconfigures the tree at the
-same `$GITHUB_WORKSPACE` source and binary paths. CTest then combines an
-anchored exact test-name regex, the exact `build-smoke` label, and
-`--no-tests=error`. The eight jobs run in parallel with the three runtime-label
-jobs, so one smoke failure neither cancels its peers nor blocks the already
-published runtime archive. Each `always()` upload reads a unique
+Each build-smoke runner checks out the producer commit and requests the same
+run-and-attempt-scoped build-tree cache key without restore prefixes.
+`fail-on-cache-miss` rejects a complete miss, while a separate guard requires
+the restore action's `cache-hit` output to equal `true` so that a primary-key
+partial match also fails. The runner then reconfigures the tree at the same
+`$GITHUB_WORKSPACE` source and binary paths. CTest combines an anchored exact
+test-name regex, the exact `build-smoke` label, and `--no-tests=error`. The eight
+jobs run in parallel with the three runtime-label jobs, so one smoke failure
+neither cancels its peers nor blocks the already published runtime archive.
+Each `always()` upload reads a unique
 `CI-results/build-smoke/<matrix-artifact>.junit.xml` and publishes it as
 `ctest-junit-build-smoke-<matrix-artifact>` for seven days, warning only when
 the report is missing.
@@ -1174,11 +1179,12 @@ cmake --build build --target test_run_lifecycle_registry \
 
 The final delivery pass uses at most one clean native configure, one full
 build, and one complete CTest/JUnit run. Focused validation may precede that
-frozen pass, but it must not multiply the final full gate. GitHub CI runs
-`build-smoke` in the producer job and the `unit`, `integration`, and
-`verification` labels from the same packaged runtime. It does not register
-lifecycle provenance, stale-term searches, or source-quality audits as product
-tests.
+frozen pass, but it must not multiply the final full gate. GitHub CI performs
+one complete build and packages one runtime in the producer job. Eight
+downstream jobs run the individual `build-smoke` entries from the exact
+same-run cache handoff, while the `unit`, `integration`, and `verification`
+jobs use the same packaged runtime. It does not register lifecycle provenance,
+stale-term searches, or source-quality audits as product tests.
 
 ## Injected Image Artifact Codec Validation
 
@@ -3239,11 +3245,12 @@ result aggregator.
 Daily CI checks whitespace, configures CMake, and builds
 `public_header_self_containment` in its healthcheck. One build job restores the
 complete `build/ci` cache, configures it again, invokes Ninja once, and then
-creates one `ctest-runtime.tar.gz`. It explicitly saves the complete producer
-tree under the current-SHA key when needed, then uploads that runtime archive.
-The cache retains objects, Ninja incremental state, and any compatible residue
-that arrived through the producer's prefix restore; the build job runs no
-build-smoke test.
+creates one `ctest-runtime.tar.gz`. The restore first permits a prior run of the
+same SHA and then another compatible family entry. After the build, the job
+explicitly saves the complete producer tree under the current SHA, run ID, and
+run-attempt key, then uploads that runtime archive. The cache retains objects,
+Ninja incremental state, and any compatible residue that arrived through those
+producer fallbacks; the build job runs no build-smoke test.
 
 The runtime archive excludes object files, `CMakeFiles`, Ninja dependency/log
 databases, prior `Testing` output, and the two cache-restored transient smoke
@@ -3254,10 +3261,12 @@ packager reports the validated archive's exact physical byte count and tar
 entry count for warm-cache and artifact-size diagnosis. The producer uploads
 it once. Three parallel jobs restore that same archive and run the `unit`,
 `integration`, or `verification` label. In parallel, eight build-smoke matrix
-jobs restore only the exact current-SHA build-tree cache, reconfigure it, and
-each run one statically named test through an anchored exact-name regex plus the
-exact `build-smoke` label. Those jobs neither download nor regenerate the
-runtime archive. CMake owns every primary label and all `RUN_SERIAL`,
+jobs request the same run-and-attempt-scoped build-tree key without restore
+prefixes. They require both a non-miss and a `cache-hit` value of `true` before
+reconfiguring the tree and each running one statically named test through an
+anchored exact-name regex plus the exact `build-smoke` label. Those jobs neither
+download nor regenerate the runtime archive. CMake owns every primary label and
+all `RUN_SERIAL`,
 `RESOURCE_LOCK`, and `TIMEOUT` constraints; the workflow avoids a combined
 long test-name regular expression.
 
@@ -3275,10 +3284,11 @@ The two workflows use the maintained Node 24 action majors:
 `docker/login-action@v4`, `docker/metadata-action@v6`, and
 `docker/build-push-action@v7`. GitHub-hosted runners satisfy their minimum
 Actions Runner 2.327.1 requirement. The build job prints the cache action's
-exact-hit output so a warm rerun can distinguish an exact hit from a prefix
-restore or miss before comparing configure, Ninja, packaging, and explicit
-cache-save timings. Exact-only smoke restores fail instead of silently using a
-previous commit's tree.
+exact-hit output so the producer can distinguish its unique current-run key
+from a same-SHA or family fallback and a miss before comparing configure, Ninja,
+packaging, and explicit cache-save timings. Each smoke runner separately proves
+that it restored the current producer's exact handoff key rather than accepting
+a partial match.
 
 `ci/scripts/build_smoke_inventory.py` remains because the long-lived
 `InstallConsumerArchitecturePropagationSafety` product test imports it to

@@ -283,13 +283,17 @@ exported package 或 external consumer build，或者专用 compile target。所
 executable，它仍属于普通 `verification` 测试。
 
 CTest 会保留每个 build smoke，供本机直接运行。日常 GitHub Actions build job 会打包 CTest
-runtime，并按当前 commit 的 exact cache key 保存完成完整构建的 producer tree，但不会运行该
-label。一个固定的八项 matrix 会列出默认配置中的 build smoke，并以 `fail-fast: false` 为每项创建
-隔离 runner。新增或重命名长期 build smoke 时，必须同步更新 CTest 注册、精确 `build-smoke`
-label、合适的 `RUN_SERIAL`、`RESOURCE_LOCK` 与 `TIMEOUT` property，以及 workflow matrix 清单。
+runtime，并按当前 commit、workflow run 与 run attempt 限定的 handoff key 显式保存完成完整构建的
+producer tree，但不会运行该 label。它的增量恢复会先回退到同一 commit 的较早 run，然后再回退到
+其他兼容 commit。一个固定的八项 matrix 会列出默认配置中的 build smoke，并以
+`fail-fast: false` 为每项创建隔离 runner。新增或重命名长期 build smoke 时，必须同步更新 CTest
+注册、精确 `build-smoke` label、合适的 `RUN_SERIAL`、`RESOURCE_LOCK` 与 `TIMEOUT` property，
+以及 workflow matrix 清单。
 
-每个 build-smoke runner 都会 checkout producer commit，仅恢复其 exact build-tree cache key，并在
-cache miss 时失败；随后使用 `$GITHUB_WORKSPACE` 下与 producer 相同的 source 和 binary 路径重新
+每个 build-smoke runner 都会 checkout producer commit，并在不提供 restore prefix 的情况下请求
+同一 run 与 attempt 限定的 build-tree cache key。`fail-on-cache-miss` 会拒绝 complete miss，另一项
+独立 guard 还要求 restore action 的 `cache-hit` output 等于 `true`，因此 primary-key partial match
+也会失败。随后，runner 使用 `$GITHUB_WORKSPACE` 下与 producer 相同的 source 和 binary 路径重新
 configure build tree。CTest 同时使用锚定的精确测试名称 regex、精确 `build-smoke` label 与
 `--no-tests=error`。八个 job 会与三个 runtime-label job 并行，因此一个 smoke 失败既不会取消其他
 smoke，也不会阻断已经发布的 runtime archive。每个 `always()` upload 都读取唯一的
@@ -923,9 +927,9 @@ cmake --build build --target test_run_lifecycle_registry \
 
 最终 delivery pass 最多执行一次 clean native configure、一次 full build 和一次完整 CTest/JUnit。
 在源码与文档冻结前可以进行 focused validation，但不得重复最终 full gate。GitHub CI 会在 producer
-job 中运行 `build-smoke`，并从同一份 packaged runtime 运行 `unit`、`integration` 与
-`verification` label。它不会把 lifecycle provenance、stale-term search 或 source-quality audit
-注册为产品测试。
+job 中执行一次完整构建并打包一份 runtime。八个下游 job 从同 run 的 exact cache handoff 分别运行
+`build-smoke` entry，而 `unit`、`integration` 与 `verification` job 使用同一份 packaged runtime。
+它不会把 lifecycle provenance、stale-term search 或 source-quality audit 注册为产品测试。
 
 ## 注入式图像 Artifact Codec 验证
 
@@ -2628,9 +2632,10 @@ scheduler-log workflow、evidence/provenance 层或 result aggregator。
 
 日常 CI 的 healthcheck 会检查 whitespace、configure CMake，并构建
 `public_header_self_containment`。唯一 build job 会恢复完整 `build/ci` cache、再次 configure、只调用
-一次 Ninja，然后创建唯一一份 `ctest-runtime.tar.gz`。需要时，它会按当前 SHA key 显式保存完整
+一次 Ninja，然后创建唯一一份 `ctest-runtime.tar.gz`。恢复时会先允许同一 SHA 的较早 run，再允许
+其他兼容 family entry。Build 完成后，它会按当前 SHA、run ID 与 run-attempt key 显式保存完整
 producer tree，随后上传 runtime archive。Cache 会保留 object、Ninja incremental state，以及通过
-producer prefix restore 带入的兼容 residue；build job 不运行 build-smoke 测试。
+上述 producer fallback 带入的兼容 residue；build job 不运行 build-smoke 测试。
 
 Runtime archive 会排除 object file、`CMakeFiles`、Ninja dependency/log database、既有
 `Testing` 输出，以及 cache restore 带回的两个临时 smoke root：
@@ -2639,9 +2644,10 @@ Runtime archive 会排除 object file、`CMakeFiles`、Ninja dependency/log data
 CTest metadata 和 package configuration。Packager 会打印验证后 archive 的精确物理 byte count 与
 tar entry count，用于 warm-cache 和 artifact 体积诊断。Producer 只上传一次该 archive。三个并行
 job 会恢复同一份 archive，并分别运行 `unit`、`integration` 或 `verification` label。与此同时，八个
-build-smoke matrix job 只恢复当前 SHA 的 exact build-tree cache，重新 configure，并各自通过锚定的
-精确名称 regex 与精确 `build-smoke` label 运行一个静态列出的测试。这些 job 既不下载也不重新生成
-runtime archive。CMake 负责所有 primary label 以及 `RUN_SERIAL`、`RESOURCE_LOCK` 与 `TIMEOUT`
+build-smoke matrix job 会在不提供 restore prefix 的情况下请求同一 run 与 attempt 限定的
+build-tree key。它们同时要求非 miss 且 `cache-hit` 为 `true`，然后才重新 configure，并各自通过
+锚定的精确名称 regex 与精确 `build-smoke` label 运行一个静态列出的测试。这些 job 既不下载也不
+重新生成 runtime archive。CMake 负责所有 primary label 以及 `RUN_SERIAL`、`RESOURCE_LOCK` 与
 约束；workflow 避免使用一条合并后的冗长 test-name regex。
 
 JUnit report 与 `ctest-runtime` 保持分离。每个 build-smoke runner 都会把唯一的
@@ -2655,9 +2661,10 @@ JUnit report 与 `ctest-runtime` 保持分离。每个 build-smoke runner 都会
 `actions/download-artifact@v8`、
 `docker/login-action@v4`、`docker/metadata-action@v6` 与
 `docker/build-push-action@v7`。GitHub-hosted runner 满足这些 action 对 Actions Runner 2.327.1
-或更新版本的最低要求。Build job 会打印 cache action 的 exact-hit output，因此 warm rerun 可以在
-比较 configure、Ninja、package 与显式 cache-save 耗时前，先区分 exact hit、prefix restore 与
-miss。Exact-only smoke restore 会直接失败，而不会静默使用上一 commit 的 tree。
+或更新版本的最低要求。Build job 会打印 cache action 的 exact-hit output，因此 producer 可以在
+比较 configure、Ninja、package 与显式 cache-save 耗时前，先区分自身唯一的 current-run key 与
+same-SHA/family fallback 及 miss。每个 smoke runner 会单独证明它恢复的是当前 producer 的 exact
+handoff key，而不是接受 partial match。
 
 `ci/scripts/build_smoke_inventory.py` 会继续保留，因为长期产品测试
 `InstallConsumerArchitecturePropagationSafety` 会导入它来验证已配置 build-smoke entry。手工

@@ -73,13 +73,14 @@ jobs:
         with:
           path: build/ci
           key: >-
-            photospider-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}
+            photospider-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            photospider-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}-
             photospider-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-
 
       - name: Report incremental cache match
         run: >-
-          printf 'Exact build-cache hit: %s\n'
+          printf 'Exact current-run build-cache hit: %s\n'
           '${{ steps.build-cache.outputs.cache-hit }}'
 
       - name: Configure cached build tree
@@ -105,12 +106,12 @@ jobs:
           "$GITHUB_WORKSPACE/build/ci"
           "$GITHUB_WORKSPACE/CI-results/ctest-runtime.tar.gz"
 
-      - name: Save exact producer build tree
-        if: ${{ steps.build-cache.outputs.cache-hit != 'true' }}
+      - name: Save current-run producer build tree
         uses: actions/cache/save@v6
         with:
           path: build/ci
-          key: ${{ steps.build-cache.outputs.cache-primary-key }}
+          key: >-
+            photospider-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload CTest runtime
         uses: actions/upload-artifact@v7
@@ -158,12 +159,25 @@ jobs:
           submodules: recursive
 
       - name: Restore exact producer build tree
+        id: producer-build-cache
         uses: actions/cache/restore@v6
         with:
           path: build/ci
           key: >-
-            photospider-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}
+            photospider-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           fail-on-cache-miss: true
+
+      - name: Require exact producer cache handoff
+        env:
+          PRODUCER_CACHE_HIT: >-
+            ${{ steps.producer-build-cache.outputs.cache-hit }}
+        run: |
+          if [[ "$PRODUCER_CACHE_HIT" != "true" ]]; then
+            printf '%s\n' \
+              "Expected exact producer cache handoff for this workflow run; cache-hit='$PRODUCER_CACHE_HIT'." \
+              >&2
+            exit 1
+          fi
 
       - name: Reconfigure restored producer build tree
         run: >-

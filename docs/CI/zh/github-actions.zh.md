@@ -40,11 +40,12 @@ Build job 使用 `actions/cache/restore@v6` 恢复 `build/ci`。Cache key 包含
 - 显式 cache epoch；
 - runner 操作系统与 build type；
 - 对 `Dockerfile.ci`、所有 `CMakeLists.txt` 和 `cmake/**` 计算的一份 hash；
-- 精确 Git commit SHA。
+- 精确 Git commit SHA；
+- workflow 的 `run_id` 与 `run_attempt`。
 
-Restore prefix 在 SHA 前结束，因此一次 push 可以复用最近兼容的旧 build tree。每次运行仍会对恢复后的树执行 CMake configure，随后只调用一次 Ninja 完成主构建。之后，如果当前 SHA 对应的 immutable entry 尚不存在，job 会使用 `actions/cache/save@v6` 按当前 SHA key 保存最终完整构建树，其中包括 object file 与 Ninja dependency state。Workflow 还会打印 restore action 的 `cache-hit` output，因此重跑时可以区分 exact-key hit、prefix restore 与 complete miss，而不改变 cache 行为。
+第一条 restore prefix 在 SHA 后结束，因此 producer 会先尝试复用相同 commit 较早 run 或 attempt 的兼容 build tree。第二条 prefix 在 SHA 前结束，允许复用其他兼容 commit 的 tree。每次运行仍会对恢复后的树执行 CMake configure，随后只调用一次 Ninja 完成主构建。之后，job 总会用当前 run-scoped primary key 调用 `actions/cache/save@v6`，为下游 job 发布最终完整构建树。Cache entry 不可变，而 `run_attempt` 会让重跑获得新的 handoff key，不会复用较早 producer entry。该 tree 包括 object file 与 Ninja dependency state。Workflow 会打印 restore action 的 `cache-hit` output；只有当前 run-scoped primary key 的 exact hit 才是 `true`，fallback 与 complete miss 都不是 exact hit。
 
-主构建结束后，job 会立即打包轻量 CTest runtime；显式保存 cache 后，再把该 archive 上传一次。恢复的 cache 可能已经包含较早运行留下的固定 work root：`tests/image_artifact_codec_dependency_disabled` 与 `tests/optional_opencv_provider_disabled`；因此 packager 会精确排除这两个临时 root 及其所有后代，但不会从完整 build tree 中删除它们。Build job 不运行 build smoke；保存当前 SHA cache 并上传唯一 runtime archive 后，producer 边界即告完成。
+主构建结束后，job 会立即打包轻量 CTest runtime；显式保存 cache 后，再把该 archive 上传一次。恢复的 cache 可能已经包含较早运行留下的固定 work root：`tests/image_artifact_codec_dependency_disabled` 与 `tests/optional_opencv_provider_disabled`；因此 packager 会精确排除这两个临时 root 及其所有后代，但不会从完整 build tree 中删除它们。Build job 不运行 build smoke；保存当前 run 与 attempt 的 cache 并上传唯一 runtime archive 后，producer 边界即告完成。
 
 ### 独立 build-smoke runner
 
@@ -59,7 +60,7 @@ Restore prefix 在 SHA 前结束，因此一次 push 可以复用最近兼容的
 - `OpenCvOperationProviderDisabledBuild`；
 - `PublicHeaderSelfContainment`。
 
-Matrix 使用 `fail-fast: false`，因此 producer 成功后，每个 entry 都会获得独立的 runner 和 container。各 runner checkout 同一个 `github.sha`，使用 `actions/cache/restore@v6` 只恢复 producer 的当前 SHA exact cache key；cache miss 会直接失败，不会回退到更早的 commit。随后，runner 会在 `$GITHUB_WORKSPACE` 下使用与 producer 相同的 source 与 binary 位置重新 configure 恢复的 build tree，再调用一次 CTest。该调用同时使用锚定的精确 `--tests-regex`、精确 `--label-regex '^build-smoke$'` 与 `--no-tests=error`，因此测试被重命名、缺失或 label 错误时，不会把空选择误判为成功。
+Matrix 使用 `fail-fast: false`，因此 producer 成功后，每个 entry 都会获得独立的 runner 和 container。各 runner checkout 同一个 `github.sha`，使用 `actions/cache/restore@v6` 请求 producer 为相同 `run_id` 与 `run_attempt` 保存的 exact key，并且不提供 `restore-keys`。`fail-on-cache-miss` 会拒绝 complete miss；紧接着的 guard 还要求 action 的 `cache-hit` output 严格等于字符串 `true`，以拒绝任何 primary-key partial match 并证明这是同 run 的 exact handoff。随后，runner 会在 `$GITHUB_WORKSPACE` 下使用与 producer 相同的 source 与 binary 位置重新 configure 恢复的 build tree，再调用一次 CTest。该调用同时使用锚定的精确 `--tests-regex`、精确 `--label-regex '^build-smoke$'` 与 `--no-tests=error`，因此测试被重命名、缺失或 label 错误时，不会把空选择误判为成功。
 
 八个 job 会与 `unit`、`integration` 和 `verification` label job 并行运行。它们在各自 runner 中产生的嵌套 build/install 输出不会写回 immutable producer cache，也绝不会进入 `ctest-runtime`。每个 job 把 report 写到 `CI-results/build-smoke/<matrix-artifact>.junit.xml`；一个 `always()` step 会把它上传为唯一的 `ctest-junit-build-smoke-<matrix-artifact>` artifact，保留七天，report 不存在时只告警。新增或重命名长期 build smoke 时，必须同步更新 CTest 注册、固定 workflow matrix 与本清单。
 

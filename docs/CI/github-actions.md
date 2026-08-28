@@ -55,16 +55,21 @@ contains:
 - an explicit cache epoch;
 - the runner operating system and build type;
 - one hash over `Dockerfile.ci`, every `CMakeLists.txt`, and `cmake/**`;
-- the exact Git commit SHA.
+- the exact Git commit SHA;
+- the workflow `run_id` and `run_attempt`.
 
-The restore prefix stops before the SHA, so a push may reuse the latest
-compatible earlier build tree. CMake still configures the restored tree on
-every run. Ninja is then invoked exactly once for the primary build. The job
-later uses `actions/cache/save@v6` to save the resulting complete tree under the
-current SHA key when that exact immutable entry does not already exist. The tree
-includes object files and Ninja dependency state. The workflow also prints the
-restore action's `cache-hit` output, so a rerun can distinguish an exact-key hit
-from a prefix restore or complete miss without changing cache behavior.
+The first restore prefix stops after the SHA, so the producer first tries a
+compatible tree from an earlier run or attempt of the same commit. The second
+prefix stops before the SHA and permits reuse from another compatible commit.
+CMake still configures the restored tree on every run, and Ninja is invoked
+exactly once for the primary build. The job then always invokes
+`actions/cache/save@v6` with the current run-scoped primary key to publish the
+resulting complete tree for downstream jobs. Cache entries are immutable, while
+`run_attempt` gives a rerun a new handoff key instead of reusing an earlier
+producer entry. The tree includes object files and Ninja dependency state. The
+workflow prints the restore action's `cache-hit` output; only an exact hit on
+the current run-scoped primary key is `true`, while either fallback or a
+complete miss is not an exact hit.
 
 Immediately after the build, the job packages the lightweight CTest runtime;
 after the explicit cache save, it uploads that archive once. A restored cache
@@ -73,8 +78,8 @@ may already contain the fixed
 `tests/optional_opencv_provider_disabled` work roots from an earlier run, so
 the packager excludes those exact transient roots and all descendants without
 deleting them from the complete build tree. The build job does not run a build
-smoke; saving the current-SHA cache and uploading the single runtime archive
-complete the producer boundary.
+smoke; saving the current run-and-attempt cache and uploading the single
+runtime archive complete the producer boundary.
 
 ### Independent build-smoke runners
 
@@ -92,10 +97,13 @@ the default CI configuration:
 
 The matrix uses `fail-fast: false`, so every entry receives its own runner and
 container after the producer succeeds. Each runner checks out the same
-`github.sha`, restores only the producer's exact current-SHA cache key with
-`actions/cache/restore@v6`, and fails on a cache miss instead of falling back to
-an earlier commit. It then reconfigures the restored tree with the same source
-and binary locations under `$GITHUB_WORKSPACE` before invoking CTest once. The
+`github.sha` and requests the producer's exact key for the same `run_id` and
+`run_attempt` with `actions/cache/restore@v6`. It supplies no `restore-keys`.
+`fail-on-cache-miss` rejects a complete miss, and the following guard also
+requires the action's `cache-hit` output to equal the string `true`; this second
+check rejects any primary-key partial match and proves an exact same-run
+handoff. The runner then reconfigures the restored tree with the same source and
+binary locations under `$GITHUB_WORKSPACE` before invoking CTest once. The
 invocation combines an anchored exact `--tests-regex`, the exact
 `--label-regex '^build-smoke$'`, and `--no-tests=error`; a renamed, absent, or
 mislabelled entry therefore cannot pass as an empty selection.
