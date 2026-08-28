@@ -1205,8 +1205,21 @@ std::uint32_t artifact_pid(const SingleTenantJobService& service,
 }
 
 TEST(WorkerSupervisor, ConcurrentAttemptsUseFreshProcessesAndReapCompletely) {
+  /**
+   * @brief Test-local heartbeat gap for concurrent process/reap verification.
+   * @note After the first worker heartbeat is accepted, the second synchronous
+   * submit may hold the service mutex while durable persistence and fsync
+   * complete. One second provides bounded CI scheduler/filesystem margin for
+   * that critical section without changing the global fixture or production
+   * policy. It remains below the three-second attempt runtime timeout, so the
+   * test still preserves the intended liveness boundary while requiring both
+   * slow workers to succeed.
+   */
+  constexpr std::chrono::milliseconds kConcurrentAttemptHeartbeatTimeout = 1s;
   ScopedSupervisorRoot root;
-  auto service = make_service(root.path(), supervisor_options());
+  WorkerManagerOptions options = supervisor_options();
+  options.heartbeat_timeout = kConcurrentAttemptHeartbeatTimeout;
+  auto service = make_service(root.path(), std::move(options));
   const JobSubmission first =
       service->submit(fixture_spec("fixture.slow.success"));
   const JobSubmission second =
@@ -1220,8 +1233,37 @@ TEST(WorkerSupervisor, ConcurrentAttemptsUseFreshProcessesAndReapCompletely) {
       2s));
   const JobSnapshot first_terminal = wait_terminal(*service, first.job_id);
   const JobSnapshot second_terminal = wait_terminal(*service, second.job_id);
-  ASSERT_EQ(first_terminal.state, JobState::Succeeded);
-  ASSERT_EQ(second_terminal.state, JobState::Succeeded);
+  const int first_outcome =
+      first_terminal.attempt_outcome.has_value()
+          ? static_cast<int>(*first_terminal.attempt_outcome)
+          : -1;
+  const int second_outcome =
+      second_terminal.attempt_outcome.has_value()
+          ? static_cast<int>(*second_terminal.attempt_outcome)
+          : -1;
+  /**
+   * @brief Captures both terminal snapshots before either fatal assertion.
+   * @note A first-attempt failure must expose both attempts' state, failure,
+   * outcome, settlement, cancellation, and message facts instead of hiding
+   * the concurrent peer behind the first `ASSERT_EQ` return.
+   */
+  const std::string terminal_diagnostic =
+      "first={state=" + std::to_string(static_cast<int>(first_terminal.state)) +
+      ", failure=" + std::to_string(static_cast<int>(first_terminal.failure)) +
+      ", outcome=" + std::to_string(first_outcome) +
+      ", settled=" + std::to_string(first_terminal.attempt_settled ? 1 : 0) +
+      ", cancellation=" +
+      std::to_string(first_terminal.cancellation_requested ? 1 : 0) +
+      ", message=" + first_terminal.message + "} second={state=" +
+      std::to_string(static_cast<int>(second_terminal.state)) +
+      ", failure=" + std::to_string(static_cast<int>(second_terminal.failure)) +
+      ", outcome=" + std::to_string(second_outcome) +
+      ", settled=" + std::to_string(second_terminal.attempt_settled ? 1 : 0) +
+      ", cancellation=" +
+      std::to_string(second_terminal.cancellation_requested ? 1 : 0) +
+      ", message=" + second_terminal.message + "}";
+  ASSERT_EQ(first_terminal.state, JobState::Succeeded) << terminal_diagnostic;
+  ASSERT_EQ(second_terminal.state, JobState::Succeeded) << terminal_diagnostic;
   EXPECT_NE(artifact_pid(*service, first_terminal),
             artifact_pid(*service, second_terminal));
   EXPECT_TRUE(SingleTenantJobServiceTestAccess::
