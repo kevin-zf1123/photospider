@@ -374,27 +374,37 @@ external consumer, compile target, or generated executable remains an ordinary
 `verification` test.
 
 CTest keeps every build smoke directly runnable. The daily GitHub Actions build
-job packages the CTest runtime immediately after the reusable primary build,
-then runs the complete label once before uploading that archive. The workflow
-does not maintain test names, parse a matrix inventory, or create one job per
-smoke. Adding another durable build smoke requires only its CTest registration,
-the `build-smoke` label, and appropriate `RUN_SERIAL`, `RESOURCE_LOCK`, and
-`TIMEOUT` properties in CMake. A smoke failure blocks the runtime archive
-upload and dependent test jobs. A separate `always()` step still attempts to
-upload `CI-results/build-smoke.junit.xml` as `ctest-junit-build-smoke`, retains
-an available report for seven days, and only warns if the report is missing.
+job packages the CTest runtime and saves the completely built producer tree
+under the current commit's exact cache key, but does not run the label. A fixed
+eight-entry matrix names the default configuration's build smokes and creates
+one isolated runner per entry with `fail-fast: false`. Adding or renaming a
+durable build smoke requires coordinated updates to its CTest registration,
+the exact `build-smoke` label, appropriate `RUN_SERIAL`, `RESOURCE_LOCK`, and
+`TIMEOUT` properties, and the workflow matrix inventory.
+
+Each build-smoke runner checks out the producer commit, restores only its exact
+build-tree cache key with failure on a miss, and reconfigures the tree at the
+same `$GITHUB_WORKSPACE` source and binary paths. CTest then combines an
+anchored exact test-name regex, the exact `build-smoke` label, and
+`--no-tests=error`. The eight jobs run in parallel with the three runtime-label
+jobs, so one smoke failure neither cancels its peers nor blocks the already
+published runtime archive. Each `always()` upload reads a unique
+`CI-results/build-smoke/<matrix-artifact>.junit.xml` and publishes it as
+`ctest-junit-build-smoke-<matrix-artifact>` for seven days, warning only when
+the report is missing.
 
 Nested drivers must continue to use disjoint work directories, validate any
 reusable producer they accept, and clean up without following or deleting
-unrelated symlink targets. Because the lightweight runtime artifact is frozen
-before the label runs, their transient compiler objects and generated
-`CMakeFiles` trees created by that invocation remain only in the build
-job/cache. Cache restoration can nevertheless bring forward the configured
+unrelated symlink targets. Their transient compiler objects and generated
+`CMakeFiles` trees exist only in the matrix runner that executes that smoke;
+the restore-only runner never saves them back to the immutable producer cache.
+A prefix restore in the producer can nevertheless bring forward the configured
 `tests/image_artifact_codec_dependency_disabled` and
-`tests/optional_opencv_provider_disabled` work roots from an earlier label
-run. The packager therefore excludes those two exact roots and all descendants
-without deleting them from the reusable build tree; it does not exclude the
-whole `tests/` runtime root.
+`tests/optional_opencv_provider_disabled` work roots from an earlier run. The
+packager therefore excludes those two exact roots and all descendants without
+deleting them from the reusable build tree; it does not exclude the whole
+`tests/` runtime root. CTest's per-test properties remain authoritative inside
+each invocation, while isolation across runners supplies the cross-job boundary.
 
 GoogleTest discovery assigns the source-role primary label without relying on
 repeated CTest property behavior. The repository wrapper parses the maintained
@@ -3229,9 +3239,11 @@ result aggregator.
 Daily CI checks whitespace, configures CMake, and builds
 `public_header_self_containment` in its healthcheck. One build job restores the
 complete `build/ci` cache, configures it again, invokes Ninja once, and then
-creates one `ctest-runtime.tar.gz` before running the `build-smoke` label. The
-cache retains objects, Ninja incremental state, and smoke-generated nested
-build trees for the next compatible push.
+creates one `ctest-runtime.tar.gz`. It explicitly saves the complete producer
+tree under the current-SHA key when needed, then uploads that runtime archive.
+The cache retains objects, Ninja incremental state, and any compatible residue
+that arrived through the producer's prefix restore; the build job runs no
+build-smoke test.
 
 The runtime archive excludes object files, `CMakeFiles`, Ninja dependency/log
 databases, prior `Testing` output, and the two cache-restored transient smoke
@@ -3240,27 +3252,33 @@ roots `tests/image_artifact_codec_dependency_disabled` and
 libraries, plugins, executables, CTest metadata, and package configuration. The
 packager reports the validated archive's exact physical byte count and tar
 entry count for warm-cache and artifact-size diagnosis. The producer uploads
-it only after build-smoke succeeds. Three parallel jobs restore that same
-archive and run the `unit`, `integration`, or `verification` label. CMake owns
-every primary label and all `RUN_SERIAL`, `RESOURCE_LOCK`, and `TIMEOUT`
-constraints; the workflow does not maintain long test-name regular
-expressions.
+it once. Three parallel jobs restore that same archive and run the `unit`,
+`integration`, or `verification` label. In parallel, eight build-smoke matrix
+jobs restore only the exact current-SHA build-tree cache, reconfigure it, and
+each run one statically named test through an anchored exact-name regex plus the
+exact `build-smoke` label. Those jobs neither download nor regenerate the
+runtime archive. CMake owns every primary label and all `RUN_SERIAL`,
+`RESOURCE_LOCK`, and `TIMEOUT` constraints; the workflow avoids a combined
+long test-name regular expression.
 
-JUnit reports remain separate from `ctest-runtime`. The build-smoke report is
-uploaded as `ctest-junit-build-smoke`; after each labelled CTest invocation,
-the matrix job uploads `CI-results/ctest/<label>.junit.xml` as the unique
-`ctest-junit-<label>` artifact. All four upload steps use `always()`, warn when
-their report is missing, and retain available reports for seven days.
+JUnit reports remain separate from `ctest-runtime`. Each build-smoke runner
+uploads its unique `CI-results/build-smoke/<matrix-artifact>.junit.xml` as
+`ctest-junit-build-smoke-<matrix-artifact>`; after each labelled CTest
+invocation, the other matrix uploads `CI-results/ctest/<label>.junit.xml` as the
+unique `ctest-junit-<label>` artifact. All eleven executions use an `always()`
+upload, warn when their report is missing, and retain available reports for
+seven days.
 
 The two workflows use the maintained Node 24 action majors:
-`actions/checkout@v7`, `actions/cache@v6`,
+`actions/checkout@v7`, `actions/cache/restore@v6`, `actions/cache/save@v6`,
 `actions/upload-artifact@v7`, `actions/download-artifact@v8`,
 `docker/login-action@v4`, `docker/metadata-action@v6`, and
 `docker/build-push-action@v7`. GitHub-hosted runners satisfy their minimum
 Actions Runner 2.327.1 requirement. The build job prints the cache action's
 exact-hit output so a warm rerun can distinguish an exact hit from a prefix
-restore or miss before comparing configure, Ninja, packaging, build-smoke, and
-post-job cache timings.
+restore or miss before comparing configure, Ninja, packaging, and explicit
+cache-save timings. Exact-only smoke restores fail instead of silently using a
+previous commit's tree.
 
 `ci/scripts/build_smoke_inventory.py` remains because the long-lived
 `InstallConsumerArchitecturePropagationSafety` product test imports it to

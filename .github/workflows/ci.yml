@@ -69,7 +69,7 @@ jobs:
 
       - name: Restore incremental build tree
         id: build-cache
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: build/ci
           key: >-
@@ -84,7 +84,7 @@ jobs:
 
       - name: Configure cached build tree
         run: >-
-          cmake -S . -B build/ci -G Ninja
+          cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build/ci" -G Ninja
           -DCMAKE_BUILD_TYPE=${CI_BUILD_TYPE}
           -DBUILD_TESTING=ON
           -DUSE_ASAN=OFF
@@ -92,7 +92,9 @@ jobs:
           -DPHOTOSPIDER_BUILD_FUZZERS=OFF
 
       - name: Build once
-        run: cmake --build build/ci --parallel ${CI_PARALLEL_LEVEL}
+        run: >-
+          cmake --build "$GITHUB_WORKSPACE/build/ci"
+          --parallel ${CI_PARALLEL_LEVEL}
 
       - name: Remove cache-restored JUnit residue
         run: rm -rf -- "$GITHUB_WORKSPACE/build/ci/CI-results"
@@ -100,27 +102,15 @@ jobs:
       - name: Package CTest runtime
         run: >-
           bash ci/scripts/package_ctest_runtime.sh
-          build/ci
-          CI-results/ctest-runtime.tar.gz
+          "$GITHUB_WORKSPACE/build/ci"
+          "$GITHUB_WORKSPACE/CI-results/ctest-runtime.tar.gz"
 
-      - name: Run build-smoke tests
-        run: |
-          junit_dir="$GITHUB_WORKSPACE/CI-results"
-          mkdir -p "$junit_dir"
-          ctest --test-dir build/ci \
-            --output-on-failure \
-            --parallel "${CI_PARALLEL_LEVEL}" \
-            --label-regex '^build-smoke$' \
-            --output-junit "${junit_dir}/build-smoke.junit.xml"
-
-      - name: Upload build-smoke JUnit report
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+      - name: Save exact producer build tree
+        if: ${{ steps.build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
         with:
-          name: ctest-junit-build-smoke
-          path: CI-results/build-smoke.junit.xml
-          if-no-files-found: warn
-          retention-days: 7
+          path: build/ci
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
 
       - name: Upload CTest runtime
         uses: actions/upload-artifact@v7
@@ -130,6 +120,80 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
+
+  build-smoke:
+    name: Build smoke (${{ matrix.test }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: dependency-disabled-install
+            test: DependencyDisabledInstallSmoke
+          - artifact: openexr-deep-provider-option-off
+            test: OpenExrDeepProviderOptionOffSmoke
+          - artifact: static-product-consumer
+            test: StaticProductConsumerSmoke
+          - artifact: photospiderd-install-layout
+            test: PhotospiderdInstallLayoutSmoke
+          - artifact: ipc-disabled-install
+            test: IpcDisabledInstallSmoke
+          - artifact: image-artifact-codec-dependency-disabled-build
+            test: ImageArtifactCodecDependencyDisabledBuild
+          - artifact: opencv-operation-provider-disabled-build
+            test: OpenCvOperationProviderDisabledBuild
+          - artifact: public-header-self-containment
+            test: PublicHeaderSelfContainment
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+
+      - name: Restore exact producer build tree
+        uses: actions/cache/restore@v6
+        with:
+          path: build/ci
+          key: >-
+            photospider-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}
+          fail-on-cache-miss: true
+
+      - name: Reconfigure restored producer build tree
+        run: >-
+          cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build/ci" -G Ninja
+          -DCMAKE_BUILD_TYPE=${CI_BUILD_TYPE}
+          -DBUILD_TESTING=ON
+          -DUSE_ASAN=OFF
+          -DUSE_TSAN=OFF
+          -DPHOTOSPIDER_BUILD_FUZZERS=OFF
+
+      - name: Run selected build smoke
+        run: |
+          junit_dir="$GITHUB_WORKSPACE/CI-results/build-smoke"
+          mkdir -p "$junit_dir"
+          ctest --test-dir "$GITHUB_WORKSPACE/build/ci" \
+            --output-on-failure \
+            --tests-regex '^${{ matrix.test }}$' \
+            --label-regex '^build-smoke$' \
+            --no-tests=error \
+            --output-junit "${junit_dir}/${{ matrix.artifact }}.junit.xml"
+
+      - name: Upload selected build-smoke JUnit report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctest-junit-build-smoke-${{ matrix.artifact }}
+          path: >-
+            CI-results/build-smoke/${{ matrix.artifact }}.junit.xml
+          if-no-files-found: warn
+          retention-days: 7
 
   test:
     name: CTest (${{ matrix.label }})

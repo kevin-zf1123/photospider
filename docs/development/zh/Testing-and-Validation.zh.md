@@ -282,21 +282,28 @@ exported package 或 external consumer build，或者专用 compile target。所
 逻辑，并且不会启动 compiler、product build、install、external consumer、compile target 或生成的
 executable，它仍属于普通 `verification` 测试。
 
-CTest 会保留每个 build smoke，供本机直接运行。日常 GitHub Actions build job 会在可复用主构建后
-立即打包 CTest runtime，随后在上传该 archive 前完整运行一次 label。Workflow 不再维护测试名称、
-不再解析 matrix inventory，也不再为每个 smoke 创建单独 job。新增长期 build smoke 只需要注册
-CTest、添加 `build-smoke` label，并在 CMake 中设置合适的 `RUN_SERIAL`、`RESOURCE_LOCK` 与
-`TIMEOUT`。Smoke 失败会阻断 runtime archive 上传和依赖的 test job。单独的 `always()` step 仍会
-尝试把 `CI-results/build-smoke.junit.xml` 上传为 `ctest-junit-build-smoke`，将存在的 report 保留
-七天，并在 report 缺失时只告警。
+CTest 会保留每个 build smoke，供本机直接运行。日常 GitHub Actions build job 会打包 CTest
+runtime，并按当前 commit 的 exact cache key 保存完成完整构建的 producer tree，但不会运行该
+label。一个固定的八项 matrix 会列出默认配置中的 build smoke，并以 `fail-fast: false` 为每项创建
+隔离 runner。新增或重命名长期 build smoke 时，必须同步更新 CTest 注册、精确 `build-smoke`
+label、合适的 `RUN_SERIAL`、`RESOURCE_LOCK` 与 `TIMEOUT` property，以及 workflow matrix 清单。
+
+每个 build-smoke runner 都会 checkout producer commit，仅恢复其 exact build-tree cache key，并在
+cache miss 时失败；随后使用 `$GITHUB_WORKSPACE` 下与 producer 相同的 source 和 binary 路径重新
+configure build tree。CTest 同时使用锚定的精确测试名称 regex、精确 `build-smoke` label 与
+`--no-tests=error`。八个 job 会与三个 runtime-label job 并行，因此一个 smoke 失败既不会取消其他
+smoke，也不会阻断已经发布的 runtime archive。每个 `always()` upload 都读取唯一的
+`CI-results/build-smoke/<matrix-artifact>.junit.xml`，并将其发布为
+`ctest-junit-build-smoke-<matrix-artifact>`，保留七天；report 缺失时只告警。
 
 Nested driver 必须继续使用互不重叠的 work directory，验证其接受的任何 reusable producer，并且在
-cleanup 时不得跟随 symlink 或删除无关 symlink target。因为轻量 runtime artifact 会在该 label
-运行前冻结，所以本次调用产生的临时 compiler object 与 `CMakeFiles` tree 只留在 build
-job/cache 中。不过，cache restore 仍可能带回较早 label 运行留下的固定 work root：
-`tests/image_artifact_codec_dependency_disabled` 与
+cleanup 时不得跟随 symlink 或删除无关 symlink target。它们产生的临时 compiler object 与
+`CMakeFiles` tree 只存在于执行该 smoke 的 matrix runner；restore-only runner 绝不会把这些内容写回
+immutable producer cache。不过，producer 的 prefix restore 仍可能带回较早运行留下的固定 work
+root：`tests/image_artifact_codec_dependency_disabled` 与
 `tests/optional_opencv_provider_disabled`。因此 packager 会精确排除这两个 root 及其所有后代，但不会
-从可复用 build tree 中删除它们；它也不会排除整个 `tests/` runtime root。
+从可复用 build tree 中删除它们；它也不会排除整个 `tests/` runtime root。CTest 的逐测试 property
+在各次调用内部仍然具有权威性，而 runner 隔离负责跨 job 边界。
 
 GoogleTest discovery 分配 source-role primary label 时不依赖重复 CTest property 行为。仓库 wrapper
 会解析持续维护的 `gtest_discover_tests` argument surface，拒绝未知或缺值的 discovery keyword，
@@ -2621,31 +2628,36 @@ scheduler-log workflow、evidence/provenance 层或 result aggregator。
 
 日常 CI 的 healthcheck 会检查 whitespace、configure CMake，并构建
 `public_header_self_containment`。唯一 build job 会恢复完整 `build/ci` cache、再次 configure、只调用
-一次 Ninja，然后先创建唯一一份 `ctest-runtime.tar.gz`，再运行 `build-smoke` label。Cache 会保留
-object、Ninja incremental state 与 smoke 生成的嵌套 build tree，供下一次兼容 push 使用。
+一次 Ninja，然后创建唯一一份 `ctest-runtime.tar.gz`。需要时，它会按当前 SHA key 显式保存完整
+producer tree，随后上传 runtime archive。Cache 会保留 object、Ninja incremental state，以及通过
+producer prefix restore 带入的兼容 residue；build job 不运行 build-smoke 测试。
 
 Runtime archive 会排除 object file、`CMakeFiles`、Ninja dependency/log database、既有
 `Testing` 输出，以及 cache restore 带回的两个临时 smoke root：
 `tests/image_artifact_codec_dependency_disabled` 与
 `tests/optional_opencv_provider_disabled`。它会保留 `tests/` 的其余内容、library、plugin、executable、
 CTest metadata 和 package configuration。Packager 会打印验证后 archive 的精确物理 byte count 与
-tar entry count，用于 warm-cache 和 artifact 体积诊断。Producer 只有在 build-smoke 成功后才会上传
-该 archive。三个并行 job 会恢复同一份 archive，并分别运行 `unit`、`integration` 或
-`verification` label。CMake 负责所有 primary label 以及 `RUN_SERIAL`、`RESOURCE_LOCK` 与
-`TIMEOUT` 约束；workflow 不维护冗长 test-name 正则。
+tar entry count，用于 warm-cache 和 artifact 体积诊断。Producer 只上传一次该 archive。三个并行
+job 会恢复同一份 archive，并分别运行 `unit`、`integration` 或 `verification` label。与此同时，八个
+build-smoke matrix job 只恢复当前 SHA 的 exact build-tree cache，重新 configure，并各自通过锚定的
+精确名称 regex 与精确 `build-smoke` label 运行一个静态列出的测试。这些 job 既不下载也不重新生成
+runtime archive。CMake 负责所有 primary label 以及 `RUN_SERIAL`、`RESOURCE_LOCK` 与 `TIMEOUT`
+约束；workflow 避免使用一条合并后的冗长 test-name regex。
 
-JUnit report 与 `ctest-runtime` 保持分离。Build-smoke report 会上传为
-`ctest-junit-build-smoke`；每次 labelled CTest 调用后，matrix job 会把
-`CI-results/ctest/<label>.junit.xml` 上传为唯一的 `ctest-junit-<label>` artifact。全部四个上传
-step 都使用 `always()`，在 report 缺失时告警，并将存在的 report 保留七天。
+JUnit report 与 `ctest-runtime` 保持分离。每个 build-smoke runner 都会把唯一的
+`CI-results/build-smoke/<matrix-artifact>.junit.xml` 上传为
+`ctest-junit-build-smoke-<matrix-artifact>`；每次 labelled CTest 调用后，另一个 matrix 会把
+`CI-results/ctest/<label>.junit.xml` 上传为唯一的 `ctest-junit-<label>` artifact。全部十一次执行都
+使用 `always()` upload，在 report 缺失时告警，并将存在的 report 保留七天。
 
 两个 workflow 使用持续维护的 Node 24 action major：`actions/checkout@v7`、
-`actions/cache@v6`、`actions/upload-artifact@v7`、`actions/download-artifact@v8`、
+`actions/cache/restore@v6`、`actions/cache/save@v6`、`actions/upload-artifact@v7`、
+`actions/download-artifact@v8`、
 `docker/login-action@v4`、`docker/metadata-action@v6` 与
 `docker/build-push-action@v7`。GitHub-hosted runner 满足这些 action 对 Actions Runner 2.327.1
 或更新版本的最低要求。Build job 会打印 cache action 的 exact-hit output，因此 warm rerun 可以在
-比较 configure、Ninja、package、build-smoke 与 post-job cache 耗时前，先区分 exact hit、prefix
-restore 与 miss。
+比较 configure、Ninja、package 与显式 cache-save 耗时前，先区分 exact hit、prefix restore 与
+miss。Exact-only smoke restore 会直接失败，而不会静默使用上一 commit 的 tree。
 
 `ci/scripts/build_smoke_inventory.py` 会继续保留，因为长期产品测试
 `InstallConsumerArchitecturePropagationSafety` 会导入它来验证已配置 build-smoke entry。手工

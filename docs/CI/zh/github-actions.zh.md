@@ -2,7 +2,7 @@
 
 Photospider 有意只保留两个 GitHub Actions workflow：
 
-- `.github/workflows/ci.yml` 处理日常 push，包含一次 healthcheck、一次可复用构建和三个并行 CTest label 分片。
+- `.github/workflows/ci.yml` 处理日常 push，包含一次 healthcheck、一次可复用构建、八个独立 build-smoke runner 和三个并行 CTest label 分片。
 - `.github/workflows/build-ci-image.yml` 在 `main` 的 `Dockerfile.ci` 发生变更或维护者手工触发时发布 Linux CI 镜像。
 
 仓库不再设置单独的 pull-request-target、sanitizer、scheduler-log、routing、evidence、provenance 或 aggregator workflow。本仓库按个人开发项目维护，因此 CI 围绕真正有用的构建与测试信号安排，而不是复刻 enterprise 审批或自授权证明机制。
@@ -12,7 +12,8 @@ Photospider 有意只保留两个 GitHub Actions workflow：
 `.github/workflows/ci.yml` 在向 `main` 和 `CI/**` push 时运行。每个 job 都使用 `ghcr.io/<owner>/<repo>/photospider-ci:latest`、递归 checkout submodule，并且只拥有仓库内容与 package 的读取权限。Job 形成一条带并行测试叶子的依赖链：
 
 ```text
-healthcheck -> build -> unit
+healthcheck -> build -> build-smoke（8 个独立 matrix job）
+                     -> unit
                      -> integration
                      -> verification
 ```
@@ -34,23 +35,37 @@ protected-path 或 provenance 证明；它绝不使用通配符。
 
 ### 一次缓存构建
 
-Build job 使用 `actions/cache@v6` 恢复 `build/ci`。Cache key 包含：
+Build job 使用 `actions/cache/restore@v6` 恢复 `build/ci`。Cache key 包含：
 
 - 显式 cache epoch；
 - runner 操作系统与 build type；
 - 对 `Dockerfile.ci`、所有 `CMakeLists.txt` 和 `cmake/**` 计算的一份 hash；
 - 精确 Git commit SHA。
 
-Restore prefix 在 SHA 前结束，因此一次 push 可以复用最近兼容的旧 build tree。每次运行仍会对恢复后的树执行 CMake configure，随后只调用一次 Ninja 完成主构建。Job 结束时，`actions/cache` 会保存最终完整构建树，其中包括 object file 与 Ninja dependency state，供下一次兼容 push 使用。
-Workflow 还会打印 action 的 `cache-hit` output，因此重跑时可以区分 exact-key hit、prefix restore 与 complete miss，而不改变 cache 行为。
+Restore prefix 在 SHA 前结束，因此一次 push 可以复用最近兼容的旧 build tree。每次运行仍会对恢复后的树执行 CMake configure，随后只调用一次 Ninja 完成主构建。之后，如果当前 SHA 对应的 immutable entry 尚不存在，job 会使用 `actions/cache/save@v6` 按当前 SHA key 保存最终完整构建树，其中包括 object file 与 Ninja dependency state。Workflow 还会打印 restore action 的 `cache-hit` output，因此重跑时可以区分 exact-key hit、prefix restore 与 complete miss，而不改变 cache 行为。
 
-主构建结束后，job 会立即打包轻量 CTest runtime，随后运行 CTest 的 `build-smoke` label。这些测试覆盖嵌套 configure、install、package consumer、option-off 和 public header 构建契约。先打包可使临时嵌套 build tree 留在 build cache 中，而不会把本次调用新建的 tree 加入 runtime artifact。恢复的 cache 可能已经包含较早运行留下的固定 work root：`tests/image_artifact_codec_dependency_disabled` 与 `tests/optional_opencv_provider_disabled`；因此 packager 会精确排除这两个临时 root 及其所有后代，但不会从缓存 build tree 中删除它们。测试的 `RUN_SERIAL` 与 `TIMEOUT` 属性保存在 `CMakeLists.txt` 中，因此 workflow 不需要维护 smoke test 名称列表。只有完整 label 成功后才会上传 runtime archive；smoke 失败因此会阻断该上传和所有依赖的 test job。
+主构建结束后，job 会立即打包轻量 CTest runtime；显式保存 cache 后，再把该 archive 上传一次。恢复的 cache 可能已经包含较早运行留下的固定 work root：`tests/image_artifact_codec_dependency_disabled` 与 `tests/optional_opencv_provider_disabled`；因此 packager 会精确排除这两个临时 root 及其所有后代，但不会从完整 build tree 中删除它们。Build job 不运行 build smoke；保存当前 SHA cache 并上传唯一 runtime archive 后，producer 边界即告完成。
 
-Workflow 会在 `always()` 条件下单独尝试上传 build-smoke JUnit report，即使 CTest 失败也会执行。Artifact 名称为 `ctest-junit-build-smoke`，读取 `CI-results/build-smoke.junit.xml`，将存在的 report 保留七天；文件缺失时只告警而不会使 step 失败。JUnit report 绝不会打包进 `ctest-runtime`。
+### 独立 build-smoke runner
+
+默认 CI 配置中的八个 build smoke 各自对应一个固定 matrix entry：
+
+- `DependencyDisabledInstallSmoke`；
+- `OpenExrDeepProviderOptionOffSmoke`；
+- `StaticProductConsumerSmoke`；
+- `PhotospiderdInstallLayoutSmoke`；
+- `IpcDisabledInstallSmoke`；
+- `ImageArtifactCodecDependencyDisabledBuild`；
+- `OpenCvOperationProviderDisabledBuild`；
+- `PublicHeaderSelfContainment`。
+
+Matrix 使用 `fail-fast: false`，因此 producer 成功后，每个 entry 都会获得独立的 runner 和 container。各 runner checkout 同一个 `github.sha`，使用 `actions/cache/restore@v6` 只恢复 producer 的当前 SHA exact cache key；cache miss 会直接失败，不会回退到更早的 commit。随后，runner 会在 `$GITHUB_WORKSPACE` 下使用与 producer 相同的 source 与 binary 位置重新 configure 恢复的 build tree，再调用一次 CTest。该调用同时使用锚定的精确 `--tests-regex`、精确 `--label-regex '^build-smoke$'` 与 `--no-tests=error`，因此测试被重命名、缺失或 label 错误时，不会把空选择误判为成功。
+
+八个 job 会与 `unit`、`integration` 和 `verification` label job 并行运行。它们在各自 runner 中产生的嵌套 build/install 输出不会写回 immutable producer cache，也绝不会进入 `ctest-runtime`。每个 job 把 report 写到 `CI-results/build-smoke/<matrix-artifact>.junit.xml`；一个 `always()` step 会把它上传为唯一的 `ctest-junit-build-smoke-<matrix-artifact>` artifact，保留七天，report 不存在时只告警。新增或重命名长期 build smoke 时，必须同步更新 CTest 注册、固定 workflow matrix 与本清单。
 
 ### 轻量 CTest runtime
 
-`ci/scripts/package_ctest_runtime.sh` 会在本次 build-smoke label 运行前，从已经完成构建的 `build/ci` 创建唯一一份物理文件 `ctest-runtime.tar.gz`。归档会保留 CTest 运行所需的 runtime closure：
+`ci/scripts/package_ctest_runtime.sh` 会从已经完成完整构建的 `build/ci` producer tree 创建唯一一份物理文件 `ctest-runtime.tar.gz`。归档会保留 CTest 运行所需的 runtime closure：
 
 - 静态与动态库；
 - operation、policy 与 scheduler plugin；
@@ -58,7 +73,7 @@ Workflow 会在 `always()` 条件下单独尝试上传 build-smoke JUnit report�
 - `CTestTestfile.cmake` 与生成的 GoogleTest inventory；
 - `CMakeCache.txt`、生成的 package configuration 和其他 runtime data。
 
-归档排除所有 `.o` 与 `.obj`、所有 `CMakeFiles` tree、`.ninja_deps`、`.ninja_log`、既有 `Testing` 输出，以及上文精确命名的两个临时 nested-smoke root。这些增量构建输入与 smoke work input 只留在 build cache 中；`tests/` 的其余内容仍作为 CTest runtime 保留。Build-smoke 成功后，归档只上传一次，关闭 artifact 二次压缩，并由三个测试 job 共同下载。
+归档排除所有 `.o` 与 `.obj`、所有 `CMakeFiles` tree、`.ninja_deps`、`.ninja_log`、既有 `Testing` 输出，以及上文精确命名的两个临时 nested-smoke root。增量构建输入只留在完整 build-tree cache 中；`tests/` 的其余内容仍作为 CTest runtime 保留。归档只上传一次，关闭 artifact 二次压缩，并且仅由三个 primary-label 测试 job 下载。八个 build-smoke runner 改为恢复 build-tree cache，既不创建也不下载 runtime package。
 Packager 在验证 closure 后会打印物理 archive byte count 与 tar entry count。这些值只是 cache/artifact 体积实验的 observation，不会放宽 required root 或 forbidden entry 检查。
 
 每个测试 job 都把归档恢复到 producer 使用的相同路径 `build/ci`，随后运行一个精确的 primary label。CI 不会生成重复 runtime package，也不会上传完整 build-tree artifact。每次 label 调用结束后，一个 `always()` step 会单独尝试把 `CI-results/ctest/<label>.junit.xml` 上传为唯一的 `ctest-junit-<label>` artifact。存在的 report 会保留七天；report 缺失时只告警，不会使 job 失败。
@@ -70,9 +85,9 @@ CMake 负责测试选择。默认 push 路径中的每个测试都具有一个 p
 - `unit`：源码角色位于 `tests/unit/` 的持续维护 GoogleTest；
 - `integration`：持续维护的 integration GoogleTest，以及直接 runtime/CLI 检查；
 - `verification`：适合日常 CI 的确定性 safety harness；
-- `build-smoke`：在 build job 中运行的嵌套构建、安装和 package 检查。
+- `build-smoke`：每项由一个隔离 matrix job 运行的嵌套构建、安装和 package 检查。
 
-测试可以继续保留 `execution`、`security`、`kernel-concurrency` 或 `value-runtime` 等正交 label。仓库 discovery wrapper 会解析并验证 caller 的每组 property pair，把 source-role primary label 与这些正交 label 去重，并只向 `gtest_discover_tests` 传递一个标量 primary `LABELS` property。由于 upstream module 不能传递 list-valued property，生成的 `TEST_INCLUDE_FILES` script 会在 discovery 后使用各自的 `TEST_LIST`，一次性设置完整 merged list 与全部 caller test property；仓库既不依赖重复 property 的隐式合并，也不依赖 module 的 list-value transport。未知 discovery argument、未知 property、奇数长度 property list 与重复的非 label property 会在 configure 阶段失败。共享可变 harness 或不能重叠运行的测试在 CMake 中声明 `RESOURCE_LOCK` 或 `RUN_SERIAL`，需要边界的测试在 CMake 中声明 `TIMEOUT`。因此 workflow 只包含 `--label-regex '^<primary-label>$'`，不会编码冗长的包含或排除正则。
+测试可以继续保留 `execution`、`security`、`kernel-concurrency` 或 `value-runtime` 等正交 label。仓库 discovery wrapper 会解析并验证 caller 的每组 property pair，把 source-role primary label 与这些正交 label 去重，并只向 `gtest_discover_tests` 传递一个标量 primary `LABELS` property。由于 upstream module 不能传递 list-valued property，生成的 `TEST_INCLUDE_FILES` script 会在 discovery 后使用各自的 `TEST_LIST`，一次性设置完整 merged list 与全部 caller test property；仓库既不依赖重复 property 的隐式合并，也不依赖 module 的 list-value transport。未知 discovery argument、未知 property、奇数长度 property list 与重复的非 label property 会在 configure 阶段失败。共享可变 harness 或不能重叠运行的测试在 CMake 中声明 `RESOURCE_LOCK` 或 `RUN_SERIAL`，需要边界的测试在 CMake 中声明 `TIMEOUT`。三个 runtime shard 只使用 `--label-regex '^<primary-label>$'`；每个固定 build-smoke entry 还会把简短的锚定精确名称 regex 与 `build-smoke` label 结合使用。Workflow 不会编码一条合并后的冗长包含或排除 regex。
 
 重型 benchmark、fuzz target 与 sanitizer build 是 opt-in 开发者工具。日常 push 会配置 `USE_ASAN=OFF`、`USE_TSAN=OFF` 和 `PHOTOSPIDER_BUILD_FUZZERS=OFF`；默认 job 不运行这些工作负载。
 
@@ -82,7 +97,7 @@ CMake 负责测试选择。默认 push 路径中的每个测试都具有一个 p
 
 日常 CI workflow 消费这份已发布镜像。Dockerfile 变更必须先成功落地并发布，后续 push 才能依赖新 toolchain；日常 CI 本身不会构建或比较镜像。
 
-两个 workflow 都使用持续维护的 Node 24 action major：`actions/checkout@v7`、`actions/cache@v6`、`actions/upload-artifact@v7`、`actions/download-artifact@v8`、`docker/login-action@v4`、`docker/metadata-action@v6` 与 `docker/build-push-action@v7`。这些 major 要求 Actions Runner 2.327.1 或更新版本；当前 workflow 使用 GitHub-hosted runner，而不是仓库自有的 self-hosted runner。
+两个 workflow 都使用持续维护的 Node 24 action major：`actions/checkout@v7`、`actions/cache/restore@v6`、`actions/cache/save@v6`、`actions/upload-artifact@v7`、`actions/download-artifact@v8`、`docker/login-action@v4`、`docker/metadata-action@v6` 与 `docker/build-push-action@v7`。这些 major 要求 Actions Runner 2.327.1 或更新版本；当前 workflow 使用 GitHub-hosted runner，而不是仓库自有的 self-hosted runner。
 
 ## 本地检查
 

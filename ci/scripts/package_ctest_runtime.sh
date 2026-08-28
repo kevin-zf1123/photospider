@@ -7,9 +7,10 @@ set -Eeuo pipefail
 #
 # The archive keeps runtime libraries, plugins, executables, generated package
 # configuration, and CTest control files. Object files, CMakeFiles trees,
-# Ninja dependency/log databases, prior Testing output, and the two registered
-# transient nested-smoke work roots remain only in the actions/cache build tree
-# used by the producer job.
+# Ninja dependency/log databases, prior Testing output, and any cache-restored
+# copies of the two registered transient nested-smoke work roots remain outside
+# the runtime archive. Smoke-runner changes are never saved into the immutable
+# producer cache.
 #
 # @param $1 Existing configured and completely built CMake binary directory.
 # @param $2 Destination path for the physical ctest-runtime.tar.gz file.
