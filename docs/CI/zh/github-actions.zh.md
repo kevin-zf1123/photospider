@@ -43,22 +43,27 @@ Producer 不再恢复旧的 `build/ci` tree，而是从全新 binary directory �
 Workflow 会同时报告 `cache-hit` 与实际 matched key；fallback 仍然有用，只是仅有 exact current-run
 key 才会产生 `cache-hit == true`。
 
-Cache 配置把 `CCACHE_DIR` 放在 workspace 内，把 `CCACHE_BASEDIR` 设为绝对 workspace，保留
-`CCACHE_HASHDIR=true` 以确保 debug information 对应正确 working directory，并使用
+Cache 配置把 `CCACHE_DIR` 放在 workspace 内，把 `CCACHE_BASEDIR` 设为绝对 workspace，使用
 `CCACHE_COMPILERCHECK=content` 拒绝来自不同 compiler 的 entry，同时把本地 cache 限制为 2 GiB。
-恢复后，producer 会清零 ccache statistics，通过显式 C 与 C++ ccache CMake launcher 进行 configure，
-只调用一次 Ninja，再打印得到的 hit/miss statistics。随后它把 `.ccache` 保存到新的 run-and-attempt
-key。由于 Actions cache entry 不可变，必须使用唯一 primary key；restore prefix 负责跨 run 复用，
-而每个成功 producer 都能发布更新后的 cache snapshot。
+CI 还会设置 `CCACHE_NOHASHDIR=true`，让 producer 与更深层 nested smoke build directory 中的等价
+编译能够复用同一 entry。这是仅限 CI 的明确取舍：ccache 返回的 `RelWithDebInfo` object，其 DWARF
+可能保留 producer working directory。因此 cached object 绝不会被发布或视为 release/debug 交付物。
+Runtime 行为仍由测试验证，任何 cache miss 都会正常编译。
 
-完整 `build/ci` tree 使用独立 namespace 与用途。全新构建结束后，producer 会打包轻量 CTest runtime，
-并按包含 epoch、platform、build type、build configuration hash、commit SHA、`run_id` 与
-`run_attempt` 的 exact key 保存 tree。Producer 不恢复这份 tree，下游也不提供 restore prefix，因此
-object file 与 Ninja dependency state 只用于同一 workflow 内 handoff。Packager 仍把
-`tests/image_artifact_codec_dependency_disabled` 与
-`tests/optional_opencv_provider_disabled` 两个固定临时 root 作为 object-free archive invariant 精确排除，
-而不依赖旧 tree 带回的 residue。保存两个 immutable cache namespace 并上传唯一 runtime archive 后，
-producer 边界即告完成。
+恢复后，producer 会清零 ccache statistics，通过显式 C 与 C++ ccache CMake launcher 进行 configure，
+只调用一次 Ninja，再打印得到的 hit/miss statistics。它把 `.ccache` 保存到新的 run-and-attempt key，
+供后续 workflow 使用；随后把 hidden `.ccache` directory 封装进不压缩的 tar，并将这个单一文件上传一次，
+作为保留一天的 `ccache-handoff` artifact。Tar 会跨 artifact ZIP 层保留 cache directory 内部结构与
+mode。Actions Cache 只负责跨 run 优化；artifact 才是同一 run 内 producer 到 smoke 的必需传输。
+Actions Cache miss 只表示 producer 合法地冷编译，不是正确性失败。
+
+Key 有意只 hash configure 前后稳定的 `Dockerfile.ci`。Baseline run 已证明，宽泛的 workspace
+`hashFiles('**/CMakeLists.txt')` 会把 configure 生成的 dependency CMake file 纳入 hash，使 restore 与
+save 的 key 漂移，并导致全部下游 exact restore miss，因此该模式已删除。CI 不再通过 Actions Cache
+保存完整 `build/ci` tree，也不把它上传为 artifact。全新构建后，producer 会另行打包轻量 CTest
+runtime，并只提供给三个 primary-label job。Packager 会把 compiler-cache 内容，以及
+`tests/image_artifact_codec_dependency_disabled` 和
+`tests/optional_opencv_provider_disabled` 两个固定临时 root 作为 object-free archive invariant 排除。
 
 ### 独立 build-smoke runner
 
@@ -74,30 +79,25 @@ producer 边界即告完成。
 - `PublicHeaderSelfContainment`。
 
 Matrix 使用 `fail-fast: false`，因此 producer 成功后，每个 entry 都会获得独立的 runner 和 container。
-各 runner checkout 同一个 `github.sha`，恢复 producer 为相同 `run_id` 与 `run_attempt` 保存的 exact
-ccache key，并要求 `cache-hit == true`。恢复后的 compiler cache 在 smoke job 中为 read-only，且绝不
-save，因此一个 consumer 不会改变其他 consumer 使用的 producer snapshot。Fresh nested CMake
-configuration 会继承 C 与 C++ launcher environment；每个 runner 在 CTest 后都会打印本地 ccache
-statistics。
+各 runner checkout 同一个 `github.sha`，把 `ccache-handoff` 下载到固定 artifact directory，再在
+`$GITHUB_WORKSPACE` 解开 tar 以重建 `.ccache`。它会验证 cache directory 与 ccache 配置、清零本地
+statistics，并保持恢复的 cache 为 read-only，因此一个 consumer 不会改变其他 consumer 使用的
+producer snapshot。Artifact 交付本身是必需的，但单次 compiler-cache lookup 可以 miss 并正常编译。
 
-Matrix flag 会按测试的真实依赖划分外层 CTest handoff：
+随后八个 runner 都以 producer 的 build type、测试选项和显式 C/C++ ccache launcher，执行同一条外层
+`cmake --fresh -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build/ci" -G Ninja`。它们会查询
+CTest JSON object model，并在选择自身 entry 前要求精确的八项 `build-smoke` inventory。测试本身可以
+构建外层 tree，也可以创建更深层 build/install tree；编译 key 匹配时，两者都会使用 read-only
+producer cache。每个 runner 都会在 CTest 后打印自己的 ccache statistics。
 
-- `DependencyDisabledInstallSmoke`、`OpenExrDeepProviderOptionOffSmoke`、
-  `PhotospiderdInstallLayoutSmoke`、`IpcDisabledInstallSmoke`、
-  `ImageArtifactCodecDependencyDisabledBuild` 与
-  `OpenCvOperationProviderDisabledBuild` 下载唯一的 object-free runtime。它们会创建 fresh nested
-  build tree；OpenEXR driver 还会从保留的 producer `CMakeCache.txt` 读取 platform configuration。
-- `StaticProductConsumerSmoke` 与 `PublicHeaderSelfContainment` 会直接构建 producer tree 中的 target。
-  它们恢复独立的 exact full-tree key，同时要求非 miss 与 `cache-hit == true`，然后通过显式 ccache
-  launcher 重新 configure 该 tree，再执行 CTest。
-
-Smoke runner 的两类 cache restore 都不使用 fallback prefix。CTest 调用同时使用锚定的精确
+Smoke job 绝不下载 `ctest-runtime`，也不会收到完整 producer tree。CTest 调用同时使用锚定的精确
 `--tests-regex`、精确 `--label-regex '^build-smoke$'` 与 `--no-tests=error`，因此测试被重命名、缺失或
 label 错误时，不会把空选择误判为成功。
 
 八个 job 会与 `unit`、`integration` 和 `verification` label job 并行运行。它们在各自 runner 中产生的
-嵌套 build/install 输出不会写回任一 immutable producer cache，也绝不会进入 `ctest-runtime`。每个
-job 把 report 写到 `CI-results/build-smoke/<matrix-artifact>.junit.xml`；一个 `always()` step 会把它
+外层及嵌套 build/install 输出不会写回 read-only handoff 或跨 run Actions Cache，也绝不会进入
+`ctest-runtime`。每个 job 把 report 写到
+`CI-results/build-smoke/<matrix-artifact>.junit.xml`；一个 `always()` step 会把它
 上传为唯一的 `ctest-junit-build-smoke-<matrix-artifact>` artifact，保留七天，report 不存在时只告警。
 新增或重命名长期 build smoke 时，必须同步更新 CTest 注册、固定 workflow matrix 与本清单。
 
@@ -113,9 +113,9 @@ job 把 report 写到 `CI-results/build-smoke/<matrix-artifact>.junit.xml`；一
 
 归档排除所有 `.o` 与 `.obj`、所有 `CMakeFiles` tree、`.ninja_deps`、`.ninja_log`、既有 `Testing` 输出，
 以及上文精确命名的两个临时 nested-smoke root。增量 compiler result 只存在于 ccache；`tests/` 的其余
-内容仍作为 CTest runtime 保留。归档只上传一次，关闭 artifact 二次压缩，并由三个 primary-label job
-与六个创建 fresh nested tree 的 build-smoke runner 下载。另两个 build-smoke runner 恢复 exact
-producer tree；任何 runner 都不会创建第二份 runtime package。Packager 在验证 closure 后会打印物理
+内容仍作为 CTest runtime 保留。归档只上传一次，关闭 artifact 二次压缩，并且只由三个
+primary-label job 下载。Build-smoke runner 会配置各自的外层 tree，不会下载它；任何 runner 都不会
+创建第二份 runtime package。Packager 在验证 closure 后会打印物理
 archive byte count 与 tar entry count。这些 diagnostic 与 ccache 自身的 hit/miss statistics 只是
 cache/artifact 体积实验的 observation，不会放宽 required root 或 forbidden entry 检查。
 
@@ -144,6 +144,11 @@ CMake 负责测试选择。默认 push 路径中的每个测试都具有一个 p
 必须先成功发布，日常 CI 才能依赖新 toolchain。对于首次启用 ccache 镜像这类迁移，应当在包含
 Dockerfile 变更的 ref 上手工触发 image workflow，等待 `latest` 发布完成，再运行或重跑日常 CI。
 `main` 自动触发的 image build 不会自动排在同时启动的 CI run 之前；日常 CI 本身不会构建或比较镜像。
+
+该镜像发布后的第一次日常 workflow 预期会 miss 跨 run Actions Cache，并让 producer 冷编译。它仍会
+上传已填充的同 run ccache tar，因此各 smoke 可以在兼容的外层或 nested 编译上获得 hit，并对其余 miss
+正常编译。后续 workflow 可以恢复最新兼容 producer cache，预期会以更热状态开始；hit rate 只是
+diagnostic，绝不是正确性门禁。
 
 两个 workflow 都使用持续维护的 Node 24 action major：`actions/checkout@v7`、`actions/cache/restore@v6`、`actions/cache/save@v6`、`actions/upload-artifact@v7`、`actions/download-artifact@v8`、`docker/login-action@v4`、`docker/metadata-action@v6` 与 `docker/build-push-action@v7`。这些 major 要求 Actions Runner 2.327.1 或更新版本；当前 workflow 使用 GitHub-hosted runner，而不是仓库自有的 self-hosted runner。
 

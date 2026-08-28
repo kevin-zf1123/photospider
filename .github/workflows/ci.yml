@@ -17,8 +17,8 @@ env:
   CCACHE_BASEDIR: ${{ github.workspace }}
   CCACHE_COMPILERCHECK: content
   CCACHE_DIR: ${{ github.workspace }}/.ccache
-  CCACHE_HASHDIR: "true"
   CCACHE_MAXSIZE: 2G
+  CCACHE_NOHASHDIR: "true"
   CMAKE_C_COMPILER_LAUNCHER: ccache
   CMAKE_CXX_COMPILER_LAUNCHER: ccache
 
@@ -88,6 +88,7 @@ jobs:
 
       - name: Restore cross-run compiler cache
         id: ccache-restore
+        continue-on-error: true
         uses: actions/cache/restore@v6
         with:
           path: .ccache
@@ -132,11 +133,22 @@ jobs:
         run: ccache --show-stats
 
       - name: Save current-run compiler cache
+        continue-on-error: true
         uses: actions/cache/save@v6
         with:
           path: .ccache
           key: >-
             photospider-ccache-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Package current-run compiler-cache handoff
+        run: |
+          mkdir -p -- "$GITHUB_WORKSPACE/CI-results"
+          test -d "$CCACHE_DIR"
+          test -n "$(find "$CCACHE_DIR" -mindepth 1 -print -quit)"
+          tar -C "$GITHUB_WORKSPACE" \
+            -cf "$GITHUB_WORKSPACE/CI-results/ccache.tar" .ccache
+          tar -tf "$GITHUB_WORKSPACE/CI-results/ccache.tar" |
+            grep -Eq '^\.ccache(/|$)'
 
       - name: Package CTest runtime
         run: >-
@@ -144,12 +156,14 @@ jobs:
           "$GITHUB_WORKSPACE/build/ci"
           "$GITHUB_WORKSPACE/CI-results/ctest-runtime.tar.gz"
 
-      - name: Save current-run producer build tree
-        uses: actions/cache/save@v6
+      - name: Upload current-run compiler-cache handoff
+        uses: actions/upload-artifact@v7
         with:
-          path: build/ci
-          key: >-
-            photospider-producer-tree-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ccache-handoff
+          path: CI-results/ccache.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
 
       - name: Upload CTest runtime
         uses: actions/upload-artifact@v7
@@ -168,28 +182,20 @@ jobs:
       matrix:
         include:
           - artifact: dependency-disabled-install
-            requires_producer_tree: false
             test: DependencyDisabledInstallSmoke
           - artifact: openexr-deep-provider-option-off
-            requires_producer_tree: false
             test: OpenExrDeepProviderOptionOffSmoke
           - artifact: static-product-consumer
-            requires_producer_tree: true
             test: StaticProductConsumerSmoke
           - artifact: photospiderd-install-layout
-            requires_producer_tree: false
             test: PhotospiderdInstallLayoutSmoke
           - artifact: ipc-disabled-install
-            requires_producer_tree: false
             test: IpcDisabledInstallSmoke
           - artifact: image-artifact-codec-dependency-disabled-build
-            requires_producer_tree: false
             test: ImageArtifactCodecDependencyDisabledBuild
           - artifact: opencv-operation-provider-disabled-build
-            requires_producer_tree: false
             test: OpenCvOperationProviderDisabledBuild
           - artifact: public-header-self-containment
-            requires_producer_tree: true
             test: PublicHeaderSelfContainment
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -206,69 +212,32 @@ jobs:
           ref: ${{ github.sha }}
           submodules: recursive
 
-      - name: Restore exact producer compiler cache
-        id: producer-ccache
-        uses: actions/cache/restore@v6
-        with:
-          path: .ccache
-          key: >-
-            photospider-ccache-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          fail-on-cache-miss: true
-
-      - name: Require exact producer compiler-cache handoff
-        env:
-          PRODUCER_CCACHE_HIT: ${{ steps.producer-ccache.outputs.cache-hit }}
-        run: |
-          if [[ "$PRODUCER_CCACHE_HIT" != "true" ]]; then
-            printf '%s\n' \
-              "Expected exact producer ccache handoff for this workflow run; cache-hit='$PRODUCER_CCACHE_HIT'." \
-              >&2
-            exit 1
-          fi
-          ccache --zero-stats
-
-      - name: Restore exact producer build tree
-        if: ${{ matrix.requires_producer_tree }}
-        id: producer-build-cache
-        uses: actions/cache/restore@v6
-        with:
-          path: build/ci
-          key: >-
-            photospider-producer-tree-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci', '**/CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          fail-on-cache-miss: true
-
-      - name: Require exact producer cache handoff
-        if: ${{ matrix.requires_producer_tree }}
-        env:
-          PRODUCER_CACHE_HIT: >-
-            ${{ steps.producer-build-cache.outputs.cache-hit }}
-        run: |
-          if [[ "$PRODUCER_CACHE_HIT" != "true" ]]; then
-            printf '%s\n' \
-              "Expected exact producer cache handoff for this workflow run; cache-hit='$PRODUCER_CACHE_HIT'." \
-              >&2
-            exit 1
-          fi
-
-      - name: Download object-free CTest runtime
-        if: ${{ !matrix.requires_producer_tree }}
+      - name: Download current-run compiler-cache handoff
         uses: actions/download-artifact@v8
         with:
-          name: ctest-runtime
-          path: CI-results/runtime
+          name: ccache-handoff
+          path: CI-results/ccache-handoff
 
-      - name: Restore object-free CTest runtime
-        if: ${{ !matrix.requires_producer_tree }}
+      - name: Restore read-only producer compiler cache
         run: |
-          mkdir -p build
-          tar -C build -xzf CI-results/runtime/ctest-runtime.tar.gz
-          test -f build/ci/CTestTestfile.cmake
-          test -f build/ci/CMakeCache.txt
+          command -v ccache
+          ccache --version
+          test ! -e "$CCACHE_DIR"
+          test -f \
+            "$GITHUB_WORKSPACE/CI-results/ccache-handoff/ccache.tar"
+          tar -C "$GITHUB_WORKSPACE" -xf \
+            "$GITHUB_WORKSPACE/CI-results/ccache-handoff/ccache.tar"
+          test -d "$CCACHE_DIR"
+          test -n "$(find "$CCACHE_DIR" -mindepth 1 -print -quit)"
+          test "$(ccache --get-config read_only)" = "true"
+          test "$(ccache --get-config hash_dir)" = "false"
+          ccache --zero-stats
+          ccache --show-config
 
-      - name: Reconfigure restored producer build tree
-        if: ${{ matrix.requires_producer_tree }}
+      - name: Fresh-configure build-smoke inventory
         run: >-
-          cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build/ci" -G Ninja
+          cmake --fresh
+          -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build/ci" -G Ninja
           -DCMAKE_BUILD_TYPE=${CI_BUILD_TYPE}
           -DCMAKE_C_COMPILER_LAUNCHER=ccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -276,6 +245,38 @@ jobs:
           -DUSE_ASAN=OFF
           -DUSE_TSAN=OFF
           -DPHOTOSPIDER_BUILD_FUZZERS=OFF
+
+      - name: Verify complete build-smoke inventory
+        run: |
+          inventory_dir="$GITHUB_WORKSPACE/CI-results/build-smoke"
+          mkdir -p -- "$inventory_dir"
+          python3 -B ci/scripts/build_smoke_inventory.py plan \
+            --build-dir "$GITHUB_WORKSPACE/build/ci" \
+            --inventory-output "$inventory_dir/ctest-inventory.json" \
+            --matrix-output "$inventory_dir/discovered-matrix.json"
+          python3 - "$inventory_dir/discovered-matrix.json" <<'PY'
+          import json
+          import sys
+
+          expected = {
+              "DependencyDisabledInstallSmoke",
+              "ImageArtifactCodecDependencyDisabledBuild",
+              "IpcDisabledInstallSmoke",
+              "OpenCvOperationProviderDisabledBuild",
+              "OpenExrDeepProviderOptionOffSmoke",
+              "PhotospiderdInstallLayoutSmoke",
+              "PublicHeaderSelfContainment",
+              "StaticProductConsumerSmoke",
+          }
+          with open(sys.argv[1], encoding="utf-8") as matrix_file:
+              matrix = json.load(matrix_file)
+          actual = [entry["test"] for entry in matrix["include"]]
+          if len(actual) != len(expected) or set(actual) != expected:
+              raise SystemExit(
+                  "unexpected build-smoke inventory: "
+                  f"expected={sorted(expected)!r}, actual={sorted(actual)!r}"
+              )
+          PY
 
       - name: Run selected build smoke
         run: |

@@ -7,11 +7,11 @@ set -Eeuo pipefail
 #
 # The archive keeps runtime libraries, plugins, executables, generated package
 # configuration, and CTest control files. Object files, CMakeFiles trees,
-# Ninja dependency/log databases, prior Testing output, and the two registered
-# transient nested-smoke work roots remain outside the runtime archive. The
-# same object-free archive can therefore serve runtime-label jobs and build
-# smokes that create fresh nested build trees. Downstream smoke changes are not
-# saved back into either immutable producer handoff cache.
+# Ninja dependency/log databases, prior Testing output, compiler-cache content,
+# and the two registered transient nested-smoke work roots remain outside the
+# runtime archive. The object-free archive serves only the three runtime-label
+# jobs; all build-smoke runners configure their own outer trees and consume a
+# separate read-only compiler-cache handoff.
 #
 # @param $1 Existing configured and completely built CMake binary directory.
 # @param $2 Destination path for the physical ctest-runtime.tar.gz file.
@@ -71,13 +71,15 @@ tar -C "$build_parent" -czf "$temporary_archive" \
   --exclude='*/CMakeFiles/*' \
   --exclude='*/.ninja_deps' \
   --exclude='*/.ninja_log' \
+  --exclude='*/.ccache' \
+  --exclude='*/.ccache/*' \
   --exclude='*/Testing' \
   --exclude='*/Testing/*' \
   -- "$build_name"
 
 tar -tzf "$temporary_archive" > "$archive_listing"
 if grep -Eq \
-  '(^|/)(CMakeFiles|Testing)(/|$)|(^|/)\.ninja_(deps|log)$|\.(o|obj)$' \
+  '(^|/)(CMakeFiles|Testing|\.ccache)(/|$)|(^|/)\.ninja_(deps|log)$|\.(o|obj)$' \
   "$archive_listing"; then
   echo "CTest runtime archive contains forbidden build residue." >&2
   exit 1
