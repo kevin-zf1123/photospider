@@ -76,7 +76,13 @@ the packager excludes those exact transient roots and all descendants without
 deleting them from the cached build tree. The tests' `RUN_SERIAL` and `TIMEOUT`
 properties live in `CMakeLists.txt`, so the workflow needs no list of smoke test
 names. The archive is uploaded only after the complete label succeeds; a smoke
-failure therefore blocks the upload and all dependent test jobs.
+failure therefore blocks the runtime upload and all dependent test jobs.
+
+The workflow separately attempts to upload the build-smoke JUnit report under
+`always()`, even when CTest fails. The artifact is named
+`ctest-junit-build-smoke`, reads `CI-results/build-smoke.junit.xml`, retains an
+available report for seven days, and warns instead of failing if the file is
+missing. The JUnit report is never bundled into `ctest-runtime`.
 
 ### Lightweight CTest runtime
 
@@ -102,7 +108,11 @@ experiments; they do not relax the required roots or forbidden entry checks.
 
 Each test job restores the archive at `build/ci`, the same path used by the
 producer, then runs one exact primary label. There are no duplicate runtime
-packages and no full build-tree artifact.
+packages and no full build-tree artifact. After each label invocation, an
+`always()` step separately attempts to upload
+`CI-results/ctest/<label>.junit.xml` as the unique
+`ctest-junit-<label>` artifact. Available reports are retained for seven days,
+and a missing report warns instead of failing the job.
 
 ## CTest labels and parallelism
 

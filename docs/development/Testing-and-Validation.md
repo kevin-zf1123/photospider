@@ -379,8 +379,10 @@ then runs the complete label once before uploading that archive. The workflow
 does not maintain test names, parse a matrix inventory, or create one job per
 smoke. Adding another durable build smoke requires only its CTest registration,
 the `build-smoke` label, and appropriate `RUN_SERIAL`, `RESOURCE_LOCK`, and
-`TIMEOUT` properties in CMake. A smoke failure blocks the upload and dependent
-test jobs.
+`TIMEOUT` properties in CMake. A smoke failure blocks the runtime archive
+upload and dependent test jobs. A separate `always()` step still attempts to
+upload `CI-results/build-smoke.junit.xml` as `ctest-junit-build-smoke`, retains
+an available report for seven days, and only warns if the report is missing.
 
 Nested drivers must continue to use disjoint work directories, validate any
 reusable producer they accept, and clean up without following or deleting
@@ -3243,6 +3245,12 @@ archive and run the `unit`, `integration`, or `verification` label. CMake owns
 every primary label and all `RUN_SERIAL`, `RESOURCE_LOCK`, and `TIMEOUT`
 constraints; the workflow does not maintain long test-name regular
 expressions.
+
+JUnit reports remain separate from `ctest-runtime`. The build-smoke report is
+uploaded as `ctest-junit-build-smoke`; after each labelled CTest invocation,
+the matrix job uploads `CI-results/ctest/<label>.junit.xml` as the unique
+`ctest-junit-<label>` artifact. All four upload steps use `always()`, warn when
+their report is missing, and retain available reports for seven days.
 
 The two workflows use the maintained Node 24 action majors:
 `actions/checkout@v7`, `actions/cache@v6`,

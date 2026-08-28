@@ -109,6 +109,15 @@ jobs:
             --label-regex '^build-smoke$' \
             --output-junit CI-results/build-smoke.junit.xml
 
+      - name: Upload build-smoke JUnit report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctest-junit-build-smoke
+          path: CI-results/build-smoke.junit.xml
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Upload CTest runtime
         uses: actions/upload-artifact@v7
         with:
@@ -160,3 +169,12 @@ jobs:
             --parallel "${CI_PARALLEL_LEVEL}" \
             --label-regex '^${{ matrix.label }}$' \
             --output-junit "CI-results/ctest/${{ matrix.label }}.junit.xml"
+
+      - name: Upload labelled CTest JUnit report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctest-junit-${{ matrix.label }}
+          path: CI-results/ctest/${{ matrix.label }}.junit.xml
+          if-no-files-found: warn
+          retention-days: 7

@@ -286,7 +286,9 @@ CTest 会保留每个 build smoke，供本机直接运行。日常 GitHub Action
 立即打包 CTest runtime，随后在上传该 archive 前完整运行一次 label。Workflow 不再维护测试名称、
 不再解析 matrix inventory，也不再为每个 smoke 创建单独 job。新增长期 build smoke 只需要注册
 CTest、添加 `build-smoke` label，并在 CMake 中设置合适的 `RUN_SERIAL`、`RESOURCE_LOCK` 与
-`TIMEOUT`。Smoke 失败会阻断上传和依赖的 test job。
+`TIMEOUT`。Smoke 失败会阻断 runtime archive 上传和依赖的 test job。单独的 `always()` step 仍会
+尝试把 `CI-results/build-smoke.junit.xml` 上传为 `ctest-junit-build-smoke`，将存在的 report 保留
+七天，并在 report 缺失时只告警。
 
 Nested driver 必须继续使用互不重叠的 work directory，验证其接受的任何 reusable producer，并且在
 cleanup 时不得跟随 symlink 或删除无关 symlink target。因为轻量 runtime artifact 会在该 label
@@ -2631,6 +2633,11 @@ tar entry count，用于 warm-cache 和 artifact 体积诊断。Producer 只有�
 该 archive。三个并行 job 会恢复同一份 archive，并分别运行 `unit`、`integration` 或
 `verification` label。CMake 负责所有 primary label 以及 `RUN_SERIAL`、`RESOURCE_LOCK` 与
 `TIMEOUT` 约束；workflow 不维护冗长 test-name 正则。
+
+JUnit report 与 `ctest-runtime` 保持分离。Build-smoke report 会上传为
+`ctest-junit-build-smoke`；每次 labelled CTest 调用后，matrix job 会把
+`CI-results/ctest/<label>.junit.xml` 上传为唯一的 `ctest-junit-<label>` artifact。全部四个上传
+step 都使用 `always()`，在 report 缺失时告警，并将存在的 report 保留七天。
 
 两个 workflow 使用持续维护的 Node 24 action major：`actions/checkout@v7`、
 `actions/cache@v6`、`actions/upload-artifact@v7`、`actions/download-artifact@v8`、

@@ -44,7 +44,9 @@ Build job 使用 `actions/cache@v6` 恢复 `build/ci`。Cache key 包含：
 Restore prefix 在 SHA 前结束，因此一次 push 可以复用最近兼容的旧 build tree。每次运行仍会对恢复后的树执行 CMake configure，随后只调用一次 Ninja 完成主构建。Job 结束时，`actions/cache` 会保存最终完整构建树，其中包括 object file 与 Ninja dependency state，供下一次兼容 push 使用。
 Workflow 还会打印 action 的 `cache-hit` output，因此重跑时可以区分 exact-key hit、prefix restore 与 complete miss，而不改变 cache 行为。
 
-主构建结束后，job 会立即打包轻量 CTest runtime，随后运行 CTest 的 `build-smoke` label。这些测试覆盖嵌套 configure、install、package consumer、option-off 和 public header 构建契约。先打包可使临时嵌套 build tree 留在 build cache 中，而不会把本次调用新建的 tree 加入 runtime artifact。恢复的 cache 可能已经包含较早运行留下的固定 work root：`tests/image_artifact_codec_dependency_disabled` 与 `tests/optional_opencv_provider_disabled`；因此 packager 会精确排除这两个临时 root 及其所有后代，但不会从缓存 build tree 中删除它们。测试的 `RUN_SERIAL` 与 `TIMEOUT` 属性保存在 `CMakeLists.txt` 中，因此 workflow 不需要维护 smoke test 名称列表。只有完整 label 成功后才会上传 archive；smoke 失败因此会阻断上传和所有依赖的 test job。
+主构建结束后，job 会立即打包轻量 CTest runtime，随后运行 CTest 的 `build-smoke` label。这些测试覆盖嵌套 configure、install、package consumer、option-off 和 public header 构建契约。先打包可使临时嵌套 build tree 留在 build cache 中，而不会把本次调用新建的 tree 加入 runtime artifact。恢复的 cache 可能已经包含较早运行留下的固定 work root：`tests/image_artifact_codec_dependency_disabled` 与 `tests/optional_opencv_provider_disabled`；因此 packager 会精确排除这两个临时 root 及其所有后代，但不会从缓存 build tree 中删除它们。测试的 `RUN_SERIAL` 与 `TIMEOUT` 属性保存在 `CMakeLists.txt` 中，因此 workflow 不需要维护 smoke test 名称列表。只有完整 label 成功后才会上传 runtime archive；smoke 失败因此会阻断该上传和所有依赖的 test job。
+
+Workflow 会在 `always()` 条件下单独尝试上传 build-smoke JUnit report，即使 CTest 失败也会执行。Artifact 名称为 `ctest-junit-build-smoke`，读取 `CI-results/build-smoke.junit.xml`，将存在的 report 保留七天；文件缺失时只告警而不会使 step 失败。JUnit report 绝不会打包进 `ctest-runtime`。
 
 ### 轻量 CTest runtime
 
@@ -59,7 +61,7 @@ Workflow 还会打印 action 的 `cache-hit` output，因此重跑时可以区�
 归档排除所有 `.o` 与 `.obj`、所有 `CMakeFiles` tree、`.ninja_deps`、`.ninja_log`、既有 `Testing` 输出，以及上文精确命名的两个临时 nested-smoke root。这些增量构建输入与 smoke work input 只留在 build cache 中；`tests/` 的其余内容仍作为 CTest runtime 保留。Build-smoke 成功后，归档只上传一次，关闭 artifact 二次压缩，并由三个测试 job 共同下载。
 Packager 在验证 closure 后会打印物理 archive byte count 与 tar entry count。这些值只是 cache/artifact 体积实验的 observation，不会放宽 required root 或 forbidden entry 检查。
 
-每个测试 job 都把归档恢复到 producer 使用的相同路径 `build/ci`，随后运行一个精确的 primary label。CI 不会生成重复 runtime package，也不会上传完整 build-tree artifact。
+每个测试 job 都把归档恢复到 producer 使用的相同路径 `build/ci`，随后运行一个精确的 primary label。CI 不会生成重复 runtime package，也不会上传完整 build-tree artifact。每次 label 调用结束后，一个 `always()` step 会单独尝试把 `CI-results/ctest/<label>.junit.xml` 上传为唯一的 `ctest-junit-<label>` artifact。存在的 report 会保留七天；report 缺失时只告警，不会使 job 失败。
 
 ## CTest label 与并行约束
 
