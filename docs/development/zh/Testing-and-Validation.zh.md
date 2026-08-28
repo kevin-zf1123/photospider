@@ -2648,7 +2648,7 @@ build-smoke matrix job 会在不提供 restore prefix 的情况下请求同一 r
 build-tree key。它们同时要求非 miss 且 `cache-hit` 为 `true`，然后才重新 configure，并各自通过
 锚定的精确名称 regex 与精确 `build-smoke` label 运行一个静态列出的测试。这些 job 既不下载也不
 重新生成 runtime archive。CMake 负责所有 primary label 以及 `RUN_SERIAL`、`RESOURCE_LOCK` 与
-约束；workflow 避免使用一条合并后的冗长 test-name regex。
+`TIMEOUT` 约束；workflow 避免使用一条合并后的冗长 test-name regex。
 
 JUnit report 与 `ctest-runtime` 保持分离。每个 build-smoke runner 都会把唯一的
 `CI-results/build-smoke/<matrix-artifact>.junit.xml` 上传为

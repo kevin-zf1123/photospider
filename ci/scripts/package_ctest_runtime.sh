@@ -9,8 +9,8 @@ set -Eeuo pipefail
 # configuration, and CTest control files. Object files, CMakeFiles trees,
 # Ninja dependency/log databases, prior Testing output, and any cache-restored
 # copies of the two registered transient nested-smoke work roots remain outside
-# the runtime archive. Smoke-runner changes are never saved into the immutable
-# producer cache.
+# the runtime archive. In the current workflow, changes produced by downstream
+# smoke runners are not saved back into the immutable producer cache.
 #
 # @param $1 Existing configured and completely built CMake binary directory.
 # @param $2 Destination path for the physical ctest-runtime.tar.gz file.
