@@ -94,6 +94,12 @@ jobs:
       - name: Build once
         run: cmake --build build/ci --parallel ${CI_PARALLEL_LEVEL}
 
+      - name: Package CTest runtime
+        run: >-
+          bash ci/scripts/package_ctest_runtime.sh
+          build/ci
+          CI-results/ctest-runtime.tar.gz
+
       - name: Run build-smoke tests
         run: |
           mkdir -p CI-results
@@ -102,12 +108,6 @@ jobs:
             --parallel "${CI_PARALLEL_LEVEL}" \
             --label-regex '^build-smoke$' \
             --output-junit CI-results/build-smoke.junit.xml
-
-      - name: Package CTest runtime
-        run: >-
-          bash ci/scripts/package_ctest_runtime.sh
-          build/ci
-          CI-results/ctest-runtime.tar.gz
 
       - name: Upload CTest runtime
         uses: actions/upload-artifact@v7

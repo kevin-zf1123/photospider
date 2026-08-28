@@ -7,8 +7,9 @@ set -Eeuo pipefail
 #
 # The archive keeps runtime libraries, plugins, executables, generated package
 # configuration, and CTest control files. Object files, CMakeFiles trees,
-# Ninja dependency/log databases, and prior Testing output remain only in the
-# actions/cache build tree used by the producer job.
+# Ninja dependency/log databases, prior Testing output, and the two registered
+# transient nested-smoke work roots remain only in the actions/cache build tree
+# used by the producer job.
 #
 # @param $1 Existing configured and completely built CMake binary directory.
 # @param $2 Destination path for the physical ctest-runtime.tar.gz file.
@@ -17,7 +18,8 @@ set -Eeuo pipefail
 # @throws Nothing; invalid arguments, missing runtime roots, tar failures, or a
 #   forbidden archive entry terminate the script with a nonzero status.
 # @note The destination must be outside the packaged build directory. The
-#   script never modifies the input tree and creates no background work.
+#   script never modifies the input tree and creates no background work;
+#   excluding a cache-restored smoke work root does not delete that root.
 
 if (($# != 2)); then
   echo "Usage: $0 <build-dir> <ctest-runtime.tar.gz>" >&2
@@ -59,6 +61,10 @@ trap 'rm -rf -- "$temporary_root"' EXIT
 tar -C "$build_parent" -czf "$temporary_archive" \
   --exclude='*.o' \
   --exclude='*.obj' \
+  --exclude="$build_name/tests/image_artifact_codec_dependency_disabled" \
+  --exclude="$build_name/tests/image_artifact_codec_dependency_disabled/*" \
+  --exclude="$build_name/tests/optional_opencv_provider_disabled" \
+  --exclude="$build_name/tests/optional_opencv_provider_disabled/*" \
   --exclude='*/CMakeFiles' \
   --exclude='*/CMakeFiles/*' \
   --exclude='*/.ninja_deps' \
@@ -74,6 +80,18 @@ if grep -Eq \
   echo "CTest runtime archive contains forbidden build residue." >&2
   exit 1
 fi
+
+for excluded_smoke_root in \
+  "$build_name/tests/image_artifact_codec_dependency_disabled" \
+  "$build_name/tests/optional_opencv_provider_disabled"; do
+  if grep -Fqx -- "$excluded_smoke_root" "$archive_listing" ||
+    grep -Fq -- "$excluded_smoke_root/" "$archive_listing"; then
+    echo \
+      "CTest runtime archive contains transient smoke root: $excluded_smoke_root" \
+      >&2
+    exit 1
+  fi
+done
 
 for required_entry in \
   "$build_name/CTestTestfile.cmake" \

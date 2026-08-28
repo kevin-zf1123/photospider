@@ -374,17 +374,25 @@ external consumer, compile target, or generated executable remains an ordinary
 `verification` test.
 
 CTest keeps every build smoke directly runnable. The daily GitHub Actions build
-job runs the complete label once after the reusable primary build and before
-packaging the CTest runtime. The workflow does not maintain test names, parse a
-matrix inventory, or create one job per smoke. Adding another durable build
-smoke requires only its CTest registration, the `build-smoke` label, and
-appropriate `RUN_SERIAL`, `RESOURCE_LOCK`, and `TIMEOUT` properties in CMake.
+job packages the CTest runtime immediately after the reusable primary build,
+then runs the complete label once before uploading that archive. The workflow
+does not maintain test names, parse a matrix inventory, or create one job per
+smoke. Adding another durable build smoke requires only its CTest registration,
+the `build-smoke` label, and appropriate `RUN_SERIAL`, `RESOURCE_LOCK`, and
+`TIMEOUT` properties in CMake. A smoke failure blocks the upload and dependent
+test jobs.
 
 Nested drivers must continue to use disjoint work directories, validate any
 reusable producer they accept, and clean up without following or deleting
-unrelated symlink targets. Their transient compiler objects and generated
-`CMakeFiles` trees belong to the build job/cache and are excluded from the
-lightweight runtime artifact.
+unrelated symlink targets. Because the lightweight runtime artifact is frozen
+before the label runs, their transient compiler objects and generated
+`CMakeFiles` trees created by that invocation remain only in the build
+job/cache. Cache restoration can nevertheless bring forward the configured
+`tests/image_artifact_codec_dependency_disabled` and
+`tests/optional_opencv_provider_disabled` work roots from an earlier label
+run. The packager therefore excludes those two exact roots and all descendants
+without deleting them from the reusable build tree; it does not exclude the
+whole `tests/` runtime root.
 
 GoogleTest discovery assigns the source-role primary label without relying on
 repeated CTest property behavior. The repository wrapper parses the maintained
@@ -3218,19 +3226,23 @@ result aggregator.
 
 Daily CI checks whitespace, configures CMake, and builds
 `public_header_self_containment` in its healthcheck. One build job restores the
-complete `build/ci` cache, configures it again, invokes Ninja once, and runs the
-`build-smoke` label. The cache retains objects and Ninja incremental state for
-the next compatible push.
+complete `build/ci` cache, configures it again, invokes Ninja once, and then
+creates one `ctest-runtime.tar.gz` before running the `build-smoke` label. The
+cache retains objects, Ninja incremental state, and smoke-generated nested
+build trees for the next compatible push.
 
-The producer then creates one `ctest-runtime.tar.gz`. It excludes object files,
-`CMakeFiles`, Ninja dependency/log databases, and prior `Testing` output while
-retaining libraries, plugins, executables, CTest metadata, and package
-configuration. The packager reports the validated archive's exact physical
-byte count and tar entry count for warm-cache and artifact-size diagnosis.
-Three parallel jobs restore that same archive and run the
-`unit`, `integration`, or `verification` label. CMake owns every primary label
-and all `RUN_SERIAL`, `RESOURCE_LOCK`, and `TIMEOUT` constraints; the workflow
-does not maintain long test-name regular expressions.
+The runtime archive excludes object files, `CMakeFiles`, Ninja dependency/log
+databases, prior `Testing` output, and the two cache-restored transient smoke
+roots `tests/image_artifact_codec_dependency_disabled` and
+`tests/optional_opencv_provider_disabled`. It retains the rest of `tests/`,
+libraries, plugins, executables, CTest metadata, and package configuration. The
+packager reports the validated archive's exact physical byte count and tar
+entry count for warm-cache and artifact-size diagnosis. The producer uploads
+it only after build-smoke succeeds. Three parallel jobs restore that same
+archive and run the `unit`, `integration`, or `verification` label. CMake owns
+every primary label and all `RUN_SERIAL`, `RESOURCE_LOCK`, and `TIMEOUT`
+constraints; the workflow does not maintain long test-name regular
+expressions.
 
 The two workflows use the maintained Node 24 action majors:
 `actions/checkout@v7`, `actions/cache@v6`,
@@ -3239,7 +3251,7 @@ The two workflows use the maintained Node 24 action majors:
 `docker/build-push-action@v7`. GitHub-hosted runners satisfy their minimum
 Actions Runner 2.327.1 requirement. The build job prints the cache action's
 exact-hit output so a warm rerun can distinguish an exact hit from a prefix
-restore or miss before comparing configure, Ninja, build-smoke, packaging, and
+restore or miss before comparing configure, Ninja, packaging, build-smoke, and
 post-job cache timings.
 
 `ci/scripts/build_smoke_inventory.py` remains because the long-lived

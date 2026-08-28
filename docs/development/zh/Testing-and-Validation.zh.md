@@ -282,14 +282,19 @@ exported package 或 external consumer build，或者专用 compile target。所
 逻辑，并且不会启动 compiler、product build、install、external consumer、compile target 或生成的
 executable，它仍属于普通 `verification` 测试。
 
-CTest 会保留每个 build smoke，供本机直接运行。日常 GitHub Actions build job 会在可复用主构建
-之后、打包 CTest runtime 之前完整运行一次该 label。Workflow 不再维护测试名称、不再解析 matrix
-inventory，也不再为每个 smoke 创建单独 job。新增长期 build smoke 只需要注册 CTest、添加
-`build-smoke` label，并在 CMake 中设置合适的 `RUN_SERIAL`、`RESOURCE_LOCK` 与 `TIMEOUT`。
+CTest 会保留每个 build smoke，供本机直接运行。日常 GitHub Actions build job 会在可复用主构建后
+立即打包 CTest runtime，随后在上传该 archive 前完整运行一次 label。Workflow 不再维护测试名称、
+不再解析 matrix inventory，也不再为每个 smoke 创建单独 job。新增长期 build smoke 只需要注册
+CTest、添加 `build-smoke` label，并在 CMake 中设置合适的 `RUN_SERIAL`、`RESOURCE_LOCK` 与
+`TIMEOUT`。Smoke 失败会阻断上传和依赖的 test job。
 
 Nested driver 必须继续使用互不重叠的 work directory，验证其接受的任何 reusable producer，并且在
-cleanup 时不得跟随 symlink 或删除无关 symlink target。它们的临时 compiler object 与生成的
-`CMakeFiles` tree 属于 build job/cache，不会进入轻量 runtime artifact。
+cleanup 时不得跟随 symlink 或删除无关 symlink target。因为轻量 runtime artifact 会在该 label
+运行前冻结，所以本次调用产生的临时 compiler object 与 `CMakeFiles` tree 只留在 build
+job/cache 中。不过，cache restore 仍可能带回较早 label 运行留下的固定 work root：
+`tests/image_artifact_codec_dependency_disabled` 与
+`tests/optional_opencv_provider_disabled`。因此 packager 会精确排除这两个 root 及其所有后代，但不会
+从可复用 build tree 中删除它们；它也不会排除整个 `tests/` runtime root。
 
 GoogleTest discovery 分配 source-role primary label 时不依赖重复 CTest property 行为。仓库 wrapper
 会解析持续维护的 `gtest_discover_tests` argument surface，拒绝未知或缺值的 discovery keyword，
@@ -2614,22 +2619,25 @@ scheduler-log workflow、evidence/provenance 层或 result aggregator。
 
 日常 CI 的 healthcheck 会检查 whitespace、configure CMake，并构建
 `public_header_self_containment`。唯一 build job 会恢复完整 `build/ci` cache、再次 configure、只调用
-一次 Ninja，并运行 `build-smoke` label。Cache 会保留 object 与 Ninja incremental state，供下一次
-兼容 push 使用。
+一次 Ninja，然后先创建唯一一份 `ctest-runtime.tar.gz`，再运行 `build-smoke` label。Cache 会保留
+object、Ninja incremental state 与 smoke 生成的嵌套 build tree，供下一次兼容 push 使用。
 
-Producer 随后创建唯一一份 `ctest-runtime.tar.gz`。它排除 object file、`CMakeFiles`、Ninja
-dependency/log database 与既有 `Testing` 输出，同时保留 library、plugin、executable、CTest
-metadata 和 package configuration。Packager 会打印验证后 archive 的精确物理 byte count 与 tar
-entry count，用于 warm-cache 和 artifact 体积诊断。三个并行 job 会恢复同一份 archive，并分别运行 `unit`、
-`integration` 或 `verification` label。CMake 负责所有 primary label 以及 `RUN_SERIAL`、
-`RESOURCE_LOCK` 与 `TIMEOUT` 约束；workflow 不维护冗长 test-name 正则。
+Runtime archive 会排除 object file、`CMakeFiles`、Ninja dependency/log database、既有
+`Testing` 输出，以及 cache restore 带回的两个临时 smoke root：
+`tests/image_artifact_codec_dependency_disabled` 与
+`tests/optional_opencv_provider_disabled`。它会保留 `tests/` 的其余内容、library、plugin、executable、
+CTest metadata 和 package configuration。Packager 会打印验证后 archive 的精确物理 byte count 与
+tar entry count，用于 warm-cache 和 artifact 体积诊断。Producer 只有在 build-smoke 成功后才会上传
+该 archive。三个并行 job 会恢复同一份 archive，并分别运行 `unit`、`integration` 或
+`verification` label。CMake 负责所有 primary label 以及 `RUN_SERIAL`、`RESOURCE_LOCK` 与
+`TIMEOUT` 约束；workflow 不维护冗长 test-name 正则。
 
 两个 workflow 使用持续维护的 Node 24 action major：`actions/checkout@v7`、
 `actions/cache@v6`、`actions/upload-artifact@v7`、`actions/download-artifact@v8`、
 `docker/login-action@v4`、`docker/metadata-action@v6` 与
 `docker/build-push-action@v7`。GitHub-hosted runner 满足这些 action 对 Actions Runner 2.327.1
 或更新版本的最低要求。Build job 会打印 cache action 的 exact-hit output，因此 warm rerun 可以在
-比较 configure、Ninja、build-smoke、package 与 post-job cache 耗时前，先区分 exact hit、prefix
+比较 configure、Ninja、package、build-smoke 与 post-job cache 耗时前，先区分 exact hit、prefix
 restore 与 miss。
 
 `ci/scripts/build_smoke_inventory.py` 会继续保留，因为长期产品测试

@@ -64,16 +64,25 @@ The workflow also prints the action's `cache-hit` output, so a rerun can
 distinguish an exact-key hit from a prefix restore or complete miss without
 changing cache behavior.
 
-After the build, the same job runs the `build-smoke` CTest label. These tests
-exercise nested configure, install, package-consumer, option-off, and public
-header build contracts. Their `RUN_SERIAL` and `TIMEOUT` properties live in
-`CMakeLists.txt`, so the workflow needs no list of smoke test names.
+Immediately after the build, the job packages the lightweight CTest runtime.
+It then runs the `build-smoke` CTest label. These tests exercise nested
+configure, install, package-consumer, option-off, and public header build
+contracts. Packaging first ensures that transient nested build trees created
+by the following smoke invocation remain in the retained build cache without
+entering the runtime artifact. A restored cache may already contain the fixed
+`tests/image_artifact_codec_dependency_disabled` and
+`tests/optional_opencv_provider_disabled` work roots from an earlier run, so
+the packager excludes those exact transient roots and all descendants without
+deleting them from the cached build tree. The tests' `RUN_SERIAL` and `TIMEOUT`
+properties live in `CMakeLists.txt`, so the workflow needs no list of smoke test
+names. The archive is uploaded only after the complete label succeeds; a smoke
+failure therefore blocks the upload and all dependent test jobs.
 
 ### Lightweight CTest runtime
 
 `ci/scripts/package_ctest_runtime.sh` creates one physical
-`ctest-runtime.tar.gz` from the built `build/ci` tree. The archive retains the
-runtime closure needed by CTest:
+`ctest-runtime.tar.gz` from the built `build/ci` tree before the current
+build-smoke label runs. The archive retains the runtime closure needed by CTest:
 
 - static and dynamic libraries;
 - operation, policy, and scheduler plugins;
@@ -82,13 +91,14 @@ runtime closure needed by CTest:
 - `CMakeCache.txt`, generated package configuration, and other runtime data.
 
 The archive excludes every `.o` and `.obj`, every `CMakeFiles` tree,
-`.ninja_deps`, `.ninja_log`, and prior `Testing` output. Those incremental
-build inputs remain only in the build cache. The archive is uploaded once with
-artifact recompression disabled and downloaded by all three test jobs.
-After validating the closure, the packager prints the physical archive byte
-count and tar entry count. These diagnostics are observations for cache and
-artifact-size experiments; they do not relax the required roots or forbidden
-entry checks.
+`.ninja_deps`, `.ninja_log`, prior `Testing` output, and the two exact transient
+nested-smoke roots named above. Those incremental and smoke work inputs remain
+only in the build cache; the rest of `tests/` is retained as part of the CTest
+runtime. After build-smoke succeeds, the archive is uploaded once with artifact
+recompression disabled and downloaded by all three test jobs. After validating
+the closure, the packager prints the physical archive byte count and tar entry
+count. These diagnostics are observations for cache and artifact-size
+experiments; they do not relax the required roots or forbidden entry checks.
 
 Each test job restores the archive at `build/ci`, the same path used by the
 producer, then runs one exact primary label. There are no duplicate runtime
@@ -157,11 +167,10 @@ cmake -S . -B build/ci -G Ninja \
   -DUSE_TSAN=OFF \
   -DPHOTOSPIDER_BUILD_FUZZERS=OFF
 cmake --build build/ci --parallel 2
-ctest --test-dir build/ci --output-on-failure --parallel 2
-
 bash ci/scripts/package_ctest_runtime.sh \
   build/ci CI-results/ctest-runtime.tar.gz
 tar -tzf CI-results/ctest-runtime.tar.gz
+ctest --test-dir build/ci --output-on-failure --parallel 2
 ```
 
 Focused local runs use the same primary labels as CI:

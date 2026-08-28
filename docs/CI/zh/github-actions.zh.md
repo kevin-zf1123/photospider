@@ -44,11 +44,11 @@ Build job 使用 `actions/cache@v6` 恢复 `build/ci`。Cache key 包含：
 Restore prefix 在 SHA 前结束，因此一次 push 可以复用最近兼容的旧 build tree。每次运行仍会对恢复后的树执行 CMake configure，随后只调用一次 Ninja 完成主构建。Job 结束时，`actions/cache` 会保存最终完整构建树，其中包括 object file 与 Ninja dependency state，供下一次兼容 push 使用。
 Workflow 还会打印 action 的 `cache-hit` output，因此重跑时可以区分 exact-key hit、prefix restore 与 complete miss，而不改变 cache 行为。
 
-构建完成后，同一个 job 运行 CTest 的 `build-smoke` label。这些测试覆盖嵌套 configure、install、package consumer、option-off 和 public header 构建契约。它们的 `RUN_SERIAL` 与 `TIMEOUT` 属性保存在 `CMakeLists.txt` 中，因此 workflow 不需要维护 smoke test 名称列表。
+主构建结束后，job 会立即打包轻量 CTest runtime，随后运行 CTest 的 `build-smoke` label。这些测试覆盖嵌套 configure、install、package consumer、option-off 和 public header 构建契约。先打包可使临时嵌套 build tree 留在 build cache 中，而不会把本次调用新建的 tree 加入 runtime artifact。恢复的 cache 可能已经包含较早运行留下的固定 work root：`tests/image_artifact_codec_dependency_disabled` 与 `tests/optional_opencv_provider_disabled`；因此 packager 会精确排除这两个临时 root 及其所有后代，但不会从缓存 build tree 中删除它们。测试的 `RUN_SERIAL` 与 `TIMEOUT` 属性保存在 `CMakeLists.txt` 中，因此 workflow 不需要维护 smoke test 名称列表。只有完整 label 成功后才会上传 archive；smoke 失败因此会阻断上传和所有依赖的 test job。
 
 ### 轻量 CTest runtime
 
-`ci/scripts/package_ctest_runtime.sh` 从已经完成构建的 `build/ci` 创建唯一一份物理文件 `ctest-runtime.tar.gz`。归档会保留 CTest 运行所需的 runtime closure：
+`ci/scripts/package_ctest_runtime.sh` 会在本次 build-smoke label 运行前，从已经完成构建的 `build/ci` 创建唯一一份物理文件 `ctest-runtime.tar.gz`。归档会保留 CTest 运行所需的 runtime closure：
 
 - 静态与动态库；
 - operation、policy 与 scheduler plugin；
@@ -56,7 +56,7 @@ Workflow 还会打印 action 的 `cache-hit` output，因此重跑时可以区�
 - `CTestTestfile.cmake` 与生成的 GoogleTest inventory；
 - `CMakeCache.txt`、生成的 package configuration 和其他 runtime data。
 
-归档排除所有 `.o` 与 `.obj`、所有 `CMakeFiles` tree、`.ninja_deps`、`.ninja_log` 和既有 `Testing` 输出。这些增量构建输入只留在 build cache 中。归档只上传一次，关闭 artifact 二次压缩，并由三个测试 job 共同下载。
+归档排除所有 `.o` 与 `.obj`、所有 `CMakeFiles` tree、`.ninja_deps`、`.ninja_log`、既有 `Testing` 输出，以及上文精确命名的两个临时 nested-smoke root。这些增量构建输入与 smoke work input 只留在 build cache 中；`tests/` 的其余内容仍作为 CTest runtime 保留。Build-smoke 成功后，归档只上传一次，关闭 artifact 二次压缩，并由三个测试 job 共同下载。
 Packager 在验证 closure 后会打印物理 archive byte count 与 tar entry count。这些值只是 cache/artifact 体积实验的 observation，不会放宽 required root 或 forbidden entry 检查。
 
 每个测试 job 都把归档恢复到 producer 使用的相同路径 `build/ci`，随后运行一个精确的 primary label。CI 不会生成重复 runtime package，也不会上传完整 build-tree artifact。
@@ -94,11 +94,10 @@ cmake -S . -B build/ci -G Ninja \
   -DUSE_TSAN=OFF \
   -DPHOTOSPIDER_BUILD_FUZZERS=OFF
 cmake --build build/ci --parallel 2
-ctest --test-dir build/ci --output-on-failure --parallel 2
-
 bash ci/scripts/package_ctest_runtime.sh \
   build/ci CI-results/ctest-runtime.tar.gz
 tar -tzf CI-results/ctest-runtime.tar.gz
+ctest --test-dir build/ci --output-on-failure --parallel 2
 ```
 
 聚焦本地运行使用与 CI 相同的 primary label：
