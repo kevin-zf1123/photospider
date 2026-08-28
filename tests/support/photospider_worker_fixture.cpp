@@ -20,6 +20,7 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -67,9 +68,9 @@ constexpr std::string_view kRetryFilesystemHoldMode = "fixture.retry.hold";
 /** @brief Mode producing bytes at the former aggregate control-frame cap. */
 constexpr std::string_view kFormerControlBoundOutputMode =
     "fixture.former-control-bound-output";  // NOLINT(whitespace/indent_namespace)
-/** @brief Bulk mode that emits no Heartbeat after its first valid frame. */
-constexpr std::string_view kFormerControlBoundOutputFirstHeartbeatOnlyMode =
-    "fixture.former-control-bound-output.first-heartbeat-only";  // NOLINT(whitespace/indent_namespace)
+/** @brief Bulk mode that stops Heartbeats after its metadata Report. */
+constexpr std::string_view kFormerControlBoundOutputNoPostReportHeartbeatMode =
+    "fixture.former-control-bound-output.no-post-report-heartbeat";  // NOLINT(whitespace/indent_namespace)
 /**
  * @brief Natural signal delay that remains inside the long cancellation grace.
  * @note The gap is deliberately much larger than one supervisor poll slice so
@@ -499,80 +500,232 @@ void send_heartbeat(int fd, const AttemptIdentity& identity,
 }
 
 /**
+ * @brief Lifecycle state of one fixture-owned heartbeat thread.
+ * @throws Nothing for value construction and atomic operations.
+ */
+enum class FixtureHeartbeatState : std::uint8_t {
+  /** @brief The thread has not completed its first bounded Heartbeat send. */
+  Starting,
+  /** @brief At least one valid Heartbeat was sent and the loop is active. */
+  Running,
+  /** @brief A bounded Heartbeat send failed and its exception is retained. */
+  Failed,
+};
+
+/**
+ * @brief Owns fixture Heartbeats and serializes them with one Report write.
+ * @throws std::invalid_argument for an invalid descriptor or identity.
+ * @throws std::system_error when the heartbeat thread cannot be created.
+ * @throws Heartbeat transport, deadline, allocation, or overflow failures
+ * unchanged when the first send fails or `stop()` observes a later failure.
+ * @note Construction does not return until the first valid Heartbeat is sent.
+ * The borrowed control descriptor must remain valid until the heartbeat thread
+ * is stopped and joined. The assignment identity is copied, so its source has
+ * no lifetime constraint; no heartbeat is sent after joining.
+ */
+class FixtureHeartbeatLoop final {
+ public:
+  /**
+   * @brief Starts one immediate bounded Heartbeat and then the fixed cadence.
+   * @param fd Connected fixture-to-manager control descriptor.
+   * @param identity Exact current assignment identity copied into the owner.
+   * @param io_timeout Positive manager-selected control-write bound.
+   * @throws std::invalid_argument for an invalid descriptor, identity, or
+   * duration.
+   * @throws std::system_error when the heartbeat thread cannot be created.
+   * @throws Heartbeat transport, deadline, allocation, or overflow failures
+   * unchanged when the first send fails.
+   */
+  FixtureHeartbeatLoop(int fd, const AttemptIdentity& identity,
+                       std::chrono::milliseconds io_timeout)
+      : fd_(fd), identity_(identity), io_timeout_(io_timeout) {
+    if (fd_ < 0) {
+      throw std::invalid_argument(
+          "fixture heartbeat control descriptor is invalid");
+    }
+    thread_ = std::thread(&FixtureHeartbeatLoop::run, this);
+    while (state_.load(std::memory_order_acquire) ==
+           FixtureHeartbeatState::Starting) {
+      std::this_thread::yield();
+    }
+    if (state_.load(std::memory_order_acquire) ==
+        FixtureHeartbeatState::Failed) {
+      stop_and_join();
+      rethrow_heartbeat_error();
+    }
+  }
+
+  /**
+   * @brief Requests stop and joins any retained heartbeat thread.
+   * @throws Nothing; a heartbeat failure is preserved only for explicit
+   * `stop()` while stack unwinding keeps the primary exception.
+   */
+  ~FixtureHeartbeatLoop() noexcept { stop_and_join(); }
+
+  /**
+   * @brief Prevents duplicate heartbeat-thread ownership.
+   * @param other Existing owner that remains unchanged.
+   * @throws Nothing because the operation is deleted.
+   */
+  FixtureHeartbeatLoop(const FixtureHeartbeatLoop& other) = delete;
+  /**
+   * @brief Prevents duplicate heartbeat-thread assignment.
+   * @param other Existing owner that remains unchanged.
+   * @return No assignment result because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  FixtureHeartbeatLoop& operator=(const FixtureHeartbeatLoop& other) = delete;
+
+  /**
+   * @brief Sends one metadata-only Report without interleaving Heartbeat bytes.
+   * @param report Complete Values-free worker report.
+   * @param spec Exact immutable assignment JobSpec.
+   * @param output_stage Exact manager-assigned stage metadata.
+   * @param io_timeout Positive bounded Report-write duration.
+   * @param stop_after_report Whether to publish stop before releasing the
+   * shared write mutex.
+   * @return Nothing after the complete Report frame is written.
+   * @throws Report validation, deadline, channel, allocation, or mutex
+   * failures unchanged.
+   * @note The shared write mutex matches the production worker's control-frame
+   * serialization. Publishing stop under that mutex prevents a heartbeat
+   * writer already waiting behind the Report from emitting a post-Report
+   * frame in the negative mode.
+   */
+  void send_report(const PreparedWorkerReport& report, const JobSpec& spec,
+                   const WorkerOutputStageReference& output_stage,
+                   std::chrono::milliseconds io_timeout,
+                   bool stop_after_report) {
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    send_worker_report(
+        fd_, report, spec, output_stage,
+        checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
+    if (stop_after_report) {
+      stop_requested_.store(true, std::memory_order_release);
+    }
+  }
+
+  /**
+   * @brief Stops and joins the thread, then surfaces any Heartbeat failure.
+   * @return Nothing after the thread can no longer access the control fd.
+   * @throws The first retained Heartbeat failure unchanged after joining.
+   * @note Calling this before output transfer creates the deliberate
+   * no-post-Report-heartbeat negative mode; calling it afterward keeps real
+   * Heartbeats active throughout the bulk transfer.
+   */
+  void stop() {
+    stop_and_join();
+    rethrow_heartbeat_error();
+  }
+
+ private:
+  /**
+   * @brief Emits immediate and fixed-cadence Heartbeats until stopped.
+   * @return Nothing after stop or after retaining the first failure.
+   * @throws Nothing; all failures are retained for the owning thread.
+   */
+  void run() noexcept {
+    try {
+      {
+        std::lock_guard<std::mutex> lock(write_mutex_);
+        send_heartbeat(fd_, identity_, io_timeout_);
+      }
+      state_.store(FixtureHeartbeatState::Running, std::memory_order_release);
+      while (!stop_requested_.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(kFixtureHeartbeatCadence);
+        if (!stop_requested_.load(std::memory_order_acquire)) {
+          std::lock_guard<std::mutex> lock(write_mutex_);
+          if (!stop_requested_.load(std::memory_order_acquire)) {
+            send_heartbeat(fd_, identity_, io_timeout_);
+          }
+        }
+      }
+    } catch (...) {
+      heartbeat_error_ = std::current_exception();
+      state_.store(FixtureHeartbeatState::Failed, std::memory_order_release);
+    }
+  }
+
+  /**
+   * @brief Requests stop and joins the exact thread at most once.
+   * @return Nothing after the thread releases all borrowed state.
+   * @throws Nothing under this owner's single-threaded stop contract.
+   */
+  void stop_and_join() noexcept {
+    stop_requested_.store(true, std::memory_order_release);
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+  /**
+   * @brief Rethrows and clears the retained Heartbeat failure after join.
+   * @return Nothing when no Heartbeat failed.
+   * @throws The retained Heartbeat exception unchanged.
+   */
+  void rethrow_heartbeat_error() {
+    if (heartbeat_error_ != nullptr) {
+      std::exception_ptr error = std::exchange(heartbeat_error_, nullptr);
+      std::rethrow_exception(error);
+    }
+  }
+
+  /** @brief Borrowed connected control descriptor used only before join. */
+  int fd_ = -1;
+  /** @brief Copied exact attempt identity included in every Heartbeat. */
+  AttemptIdentity identity_;
+  /** @brief Manager-selected bound for each Heartbeat control write. */
+  std::chrono::milliseconds io_timeout_;
+  /** @brief Sole stop request observed by the heartbeat loop. */
+  std::atomic<bool> stop_requested_{false};
+  /** @brief First-send readiness or retained-failure publication. */
+  std::atomic<FixtureHeartbeatState> state_{FixtureHeartbeatState::Starting};
+  /** @brief First Heartbeat failure, read only after acquire/join ordering. */
+  std::exception_ptr heartbeat_error_;
+  /** @brief Serializes heartbeat and metadata Report frames on the stream. */
+  std::mutex write_mutex_;
+  /** @brief Exact joinable heartbeat thread owned by this lifecycle. */
+  std::thread thread_;
+};
+
+/**
  * @brief Sends one metadata-first candidate with real concurrent heartbeats.
  * @param fd Connected manager control socket.
  * @param output_data Non-null exact inherited output-stage descriptor owner.
+ * @param heartbeat Non-null active heartbeat owner started before candidate
+ * construction.
  * @param prepared Complete Values-free report and retained output source.
  * @param spec Exact immutable assignment JobSpec.
  * @param output_stage Exact stage metadata expected by the encoder.
  * @param io_timeout Positive shared control deadline bound.
- * @param continue_heartbeats Whether to emit Heartbeats after the first valid
- * frame while the main fixture thread remains in bulk transfer.
+ * @param continue_heartbeats Whether Heartbeats remain active through bulk
+ * output after the metadata Report.
  * @return Nothing after output EOF and exact completion acknowledgement.
  * @throws Protocol, heartbeat, stream, thread, and validation failures
  * unchanged after joining the heartbeat thread.
- * @note Report is sent before the heartbeat thread starts, so every emitted
- * heartbeat is a genuine control-plane liveness fact. Output starts only after
- * that thread completes its first bounded Heartbeat send, making the large
- * transfer assertion deterministic. When `continue_heartbeats` is false, the
- * thread exits after that first frame so a finite, backpressured bulk transfer
- * must lose liveness. The main fixture thread stays blocked only in the
- * killable worker.
+ * @note The caller starts `heartbeat` before expensive Value/archive
+ * preparation. Report transport shares its write mutex. When
+ * `continue_heartbeats` is false, the loop stops immediately after Report and
+ * before output, so the finite backpressured transfer must lose liveness.
+ * Otherwise it stops only after output transfer. The main fixture thread stays
+ * blocked only in the killable worker.
  */
 void send_prepared_fixture_report_with_heartbeats(
-    int fd, FixtureDataDescriptor* output_data,
+    int fd, FixtureDataDescriptor* output_data, FixtureHeartbeatLoop* heartbeat,
     const PreparedFixtureReportTransfer& prepared, const JobSpec& spec,
     const WorkerOutputStageReference& output_stage,
     std::chrono::milliseconds io_timeout, bool continue_heartbeats) {
-  if (output_data == nullptr) {
-    throw std::invalid_argument("fixture output descriptor owner is null");
+  if (output_data == nullptr || heartbeat == nullptr) {
+    throw std::invalid_argument("fixture output or heartbeat owner is null");
   }
-  send_worker_report(
-      fd, prepared.report, spec, output_stage,
-      checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
-
-  std::atomic<bool> done{false};
-  std::atomic<int> first_heartbeat_state{0};
-  std::exception_ptr heartbeat_error;
-  std::thread heartbeat([&] {
-    try {
-      send_heartbeat(fd, prepared.report.report.identity, io_timeout);
-      first_heartbeat_state.store(1, std::memory_order_release);
-      if (!continue_heartbeats) {
-        return;
-      }
-      while (!done.load(std::memory_order_acquire)) {
-        std::this_thread::sleep_for(kFixtureHeartbeatCadence);
-        if (!done.load(std::memory_order_acquire)) {
-          send_heartbeat(fd, prepared.report.report.identity, io_timeout);
-        }
-      }
-    } catch (...) {
-      heartbeat_error = std::current_exception();
-      first_heartbeat_state.store(2, std::memory_order_release);
-    }
-  });
-  while (first_heartbeat_state.load(std::memory_order_acquire) == 0) {
-    std::this_thread::yield();
+  heartbeat->send_report(prepared.report, spec, output_stage, io_timeout,
+                         !continue_heartbeats);
+  if (!continue_heartbeats) {
+    heartbeat->stop();
   }
-  if (first_heartbeat_state.load(std::memory_order_acquire) == 2) {
-    done.store(true, std::memory_order_release);
-    heartbeat.join();
-    std::rethrow_exception(heartbeat_error);
-  }
-  std::exception_ptr output_error;
-  try {
-    send_worker_output_transfer(output_data->get(), prepared.output);
-  } catch (...) {
-    output_error = std::current_exception();
-  }
-  done.store(true, std::memory_order_release);
-  heartbeat.join();
-  if (output_error != nullptr) {
-    std::rethrow_exception(output_error);
-  }
-  if (heartbeat_error != nullptr) {
-    std::rethrow_exception(heartbeat_error);
+  send_worker_output_transfer(output_data->get(), prepared.output);
+  if (continue_heartbeats) {
+    heartbeat->stop();
   }
   output_data->reset();
   await_fixture_completion_ready(
@@ -1327,14 +1480,16 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     return 0;
   }
   if (mode == kFormerControlBoundOutputMode ||
-      mode == kFormerControlBoundOutputFirstHeartbeatOnlyMode) {
+      mode == kFormerControlBoundOutputNoPostReportHeartbeatMode) {
+    FixtureHeartbeatLoop heartbeat(launch.control_fd, assignment.identity,
+                                   launch.io_timeout);
     JobAttemptReport report = former_control_bound_output_report(assignment);
     const PreparedFixtureReportTransfer prepared_report =
         prepare_fixture_report(std::move(report), *assignment.spec,
                                prepared.data_plane.output);
     send_prepared_fixture_report_with_heartbeats(
-        launch.control_fd, &output_data, prepared_report, *assignment.spec,
-        prepared.data_plane.output, launch.io_timeout,
+        launch.control_fd, &output_data, &heartbeat, prepared_report,
+        *assignment.spec, prepared.data_plane.output, launch.io_timeout,
         mode == kFormerControlBoundOutputMode);
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;

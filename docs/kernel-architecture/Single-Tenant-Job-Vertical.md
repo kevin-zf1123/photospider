@@ -470,10 +470,11 @@ Maintained real-process evidence makes a greater-than-64-MiB candidate readable,
 then holds it pending across one complete heartbeat timeout. A source-private,
 non-authorizing manager observation proves that a second-or-later valid
 current-identity Heartbeat is accepted during that phase. The paired fixture
-that emits only its first valid Heartbeat must fail as `WorkerHeartbeatTimeout`
-with no receipt, artifact, quota, process, thread, or descriptor residue. The
-observation is absent from product construction and cannot alter liveness,
-ownership, or publication.
+keeps genuine Heartbeats active through expensive candidate preparation, then
+stops them immediately after its metadata Report and must fail as
+`WorkerHeartbeatTimeout` with no receipt, artifact, quota, process, thread, or
+descriptor residue. The observation is absent from product construction and
+cannot alter liveness, ownership, or publication.
 
 Manager and worker short-poll loops each retain one decoder for their channel:
 deadline expiry preserves partial header/payload bytes and exact offsets, while
