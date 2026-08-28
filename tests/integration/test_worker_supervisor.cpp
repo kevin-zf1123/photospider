@@ -1581,6 +1581,15 @@ TEST(WorkerSupervisor,
 }
 
 TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {
+  /**
+   * @brief Test-local heartbeat gap for cross-attempt fault isolation.
+   * @note One second leaves scheduler headroom for the readiness observer and
+   * the second submit's durable persistence/fsync while the service mutex is
+   * held. It changes no product policy and remains below the three-second
+   * attempt runtime bound, so `fixture.stall` still proves
+   * `WorkerHeartbeatTimeout`.
+   */
+  constexpr std::chrono::milliseconds kFaultIsolationHeartbeatTimeout = 1s;
   constexpr std::array<std::pair<std::string_view, JobAttemptFailure>, 8U>
       cases{{
           {"fixture.preaccept.nonzero", JobAttemptFailure::WorkerExit},
@@ -1598,6 +1607,7 @@ TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {
     ScopedSupervisorRoot root;
     auto heartbeat_observed = std::make_shared<std::atomic<bool>>(false);
     WorkerManagerOptions options = supervisor_options();
+    options.heartbeat_timeout = kFaultIsolationHeartbeatTimeout;
     options.first_external_heartbeat_observed_for_test = heartbeat_observed;
     auto service = make_service(root.path(), std::move(options));
     const JobSubmission unrelated =
