@@ -1,0 +1,356 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'CI/**'
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  CI_BUILD_TYPE: RelWithDebInfo
+  CI_CACHE_EPOCH: v1
+  CI_PARALLEL_LEVEL: 2
+  CCACHE_COMPILERCHECK: content
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 2G
+  CCACHE_NOHASHDIR: "true"
+  CMAKE_C_COMPILER_LAUNCHER: ccache
+  CMAKE_CXX_COMPILER_LAUNCHER: ccache
+
+jobs:
+  healthcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          submodules: recursive
+
+      - name: Configure Git access to checkout
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" rev-parse --verify 'HEAD^{commit}'
+
+      - name: Check whitespace errors
+        run: git diff --check HEAD^ HEAD
+
+      - name: Verify CI compiler cache
+        run: |
+          command -v ccache
+          ccache --version
+
+      - name: Configure healthcheck tree
+        run: >-
+          cmake -S . -B build/healthcheck -G Ninja
+          -DCMAKE_BUILD_TYPE=${CI_BUILD_TYPE}
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DBUILD_TESTING=ON
+          -DUSE_ASAN=OFF
+          -DUSE_TSAN=OFF
+          -DPHOTOSPIDER_BUILD_FUZZERS=OFF
+
+      - name: Build public header self-containment
+        run: >-
+          cmake --build build/healthcheck
+          --target public_header_self_containment
+          --parallel ${CI_PARALLEL_LEVEL}
+
+  build:
+    needs: healthcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Verify producer compiler cache
+        run: |
+          command -v ccache
+          ccache --version
+
+      - name: Restore cross-run compiler cache
+        id: ccache-restore
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: .ccache
+          key: >-
+            photospider-ccache-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            photospider-ccache-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci') }}-
+
+      - name: Report compiler-cache restore
+        env:
+          CCACHE_EXACT_HIT: ${{ steps.ccache-restore.outputs.cache-hit }}
+          CCACHE_MATCHED_KEY: >-
+            ${{ steps.ccache-restore.outputs.cache-matched-key }}
+        run: |
+          printf 'Exact current-run ccache hit: %s\n' "$CCACHE_EXACT_HIT"
+          printf 'Restored ccache key: %s\n' "${CCACHE_MATCHED_KEY:-<none>}"
+
+      - name: Reset producer compiler-cache statistics
+        run: |
+          mkdir -p -- "$CCACHE_DIR"
+          ccache --zero-stats
+          ccache --show-config
+
+      - name: Configure producer build tree
+        run: >-
+          cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build/ci" -G Ninja
+          -DCMAKE_BUILD_TYPE=${CI_BUILD_TYPE}
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DBUILD_TESTING=ON
+          -DUSE_ASAN=OFF
+          -DUSE_TSAN=OFF
+          -DPHOTOSPIDER_BUILD_FUZZERS=OFF
+
+      - name: Build once
+        run: >-
+          cmake --build "$GITHUB_WORKSPACE/build/ci"
+          --parallel ${CI_PARALLEL_LEVEL}
+
+      - name: Report producer compiler-cache statistics
+        if: ${{ always() }}
+        run: ccache --show-stats
+
+      - name: Save current-run compiler cache
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .ccache
+          key: >-
+            photospider-ccache-${{ env.CI_CACHE_EPOCH }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_BUILD_TYPE }}-${{ hashFiles('Dockerfile.ci') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Package current-run compiler-cache handoff
+        run: |
+          mkdir -p -- "$GITHUB_WORKSPACE/CI-results"
+          test -d "$CCACHE_DIR"
+          test -n "$(find "$CCACHE_DIR" -mindepth 1 -print -quit)"
+          tar -C "$GITHUB_WORKSPACE" \
+            -cf "$GITHUB_WORKSPACE/CI-results/ccache.tar" .ccache
+          tar -tf "$GITHUB_WORKSPACE/CI-results/ccache.tar" |
+            grep -Eq '^\.ccache(/|$)'
+
+      - name: Package CTest runtime
+        run: >-
+          bash ci/scripts/package_ctest_runtime.sh
+          "$GITHUB_WORKSPACE/build/ci"
+          "$GITHUB_WORKSPACE/CI-results/ctest-runtime.tar.gz"
+
+      - name: Upload current-run compiler-cache handoff
+        uses: actions/upload-artifact@v7
+        with:
+          name: ccache-handoff
+          path: CI-results/ccache.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Upload CTest runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctest-runtime
+          path: CI-results/ctest-runtime.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  build-smoke:
+    name: Build smoke (${{ matrix.test }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: dependency-disabled-install
+            test: DependencyDisabledInstallSmoke
+          - artifact: openexr-deep-provider-option-off
+            test: OpenExrDeepProviderOptionOffSmoke
+          - artifact: static-product-consumer
+            test: StaticProductConsumerSmoke
+          - artifact: photospiderd-install-layout
+            test: PhotospiderdInstallLayoutSmoke
+          - artifact: ipc-disabled-install
+            test: IpcDisabledInstallSmoke
+          - artifact: image-artifact-codec-dependency-disabled-build
+            test: ImageArtifactCodecDependencyDisabledBuild
+          - artifact: opencv-operation-provider-disabled-build
+            test: OpenCvOperationProviderDisabledBuild
+          - artifact: public-header-self-containment
+            test: PublicHeaderSelfContainment
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CCACHE_READONLY: "true"
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+
+      - name: Download current-run compiler-cache handoff
+        uses: actions/download-artifact@v8
+        with:
+          name: ccache-handoff
+          path: CI-results/ccache-handoff
+
+      - name: Restore read-only producer compiler cache
+        run: |
+          command -v ccache
+          ccache --version
+          test ! -e "$CCACHE_DIR"
+          test -f \
+            "$GITHUB_WORKSPACE/CI-results/ccache-handoff/ccache.tar"
+          tar -C "$GITHUB_WORKSPACE" -xf \
+            "$GITHUB_WORKSPACE/CI-results/ccache-handoff/ccache.tar"
+          test -d "$CCACHE_DIR"
+          test -n "$(find "$CCACHE_DIR" -mindepth 1 -print -quit)"
+          test "$(ccache --get-config read_only)" = "true"
+          test "$(ccache --get-config hash_dir)" = "false"
+          ccache --zero-stats
+          ccache --show-config
+
+      - name: Fresh-configure build-smoke inventory
+        run: >-
+          cmake --fresh
+          -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build/ci" -G Ninja
+          -DCMAKE_BUILD_TYPE=${CI_BUILD_TYPE}
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DBUILD_TESTING=ON
+          -DUSE_ASAN=OFF
+          -DUSE_TSAN=OFF
+          -DPHOTOSPIDER_BUILD_FUZZERS=OFF
+
+      - name: Verify complete build-smoke inventory
+        run: |
+          inventory_dir="$GITHUB_WORKSPACE/CI-results/build-smoke"
+          mkdir -p -- "$inventory_dir"
+          python3 -B ci/scripts/build_smoke_inventory.py plan \
+            --build-dir "$GITHUB_WORKSPACE/build/ci" \
+            --inventory-output "$inventory_dir/ctest-inventory.json" \
+            --matrix-output "$inventory_dir/discovered-matrix.json"
+          python3 - "$inventory_dir/discovered-matrix.json" <<'PY'
+          import json
+          import sys
+
+          expected = {
+              "DependencyDisabledInstallSmoke",
+              "ImageArtifactCodecDependencyDisabledBuild",
+              "IpcDisabledInstallSmoke",
+              "OpenCvOperationProviderDisabledBuild",
+              "OpenExrDeepProviderOptionOffSmoke",
+              "PhotospiderdInstallLayoutSmoke",
+              "PublicHeaderSelfContainment",
+              "StaticProductConsumerSmoke",
+          }
+          with open(sys.argv[1], encoding="utf-8") as matrix_file:
+              matrix = json.load(matrix_file)
+          actual = [entry["test"] for entry in matrix["include"]]
+          if len(actual) != len(expected) or set(actual) != expected:
+              raise SystemExit(
+                  "unexpected build-smoke inventory: "
+                  f"expected={sorted(expected)!r}, actual={sorted(actual)!r}"
+              )
+          PY
+
+      - name: Run selected build smoke
+        run: |
+          junit_dir="$GITHUB_WORKSPACE/CI-results/build-smoke"
+          mkdir -p "$junit_dir"
+          ctest --test-dir "$GITHUB_WORKSPACE/build/ci" \
+            --output-on-failure \
+            --tests-regex '^${{ matrix.test }}$' \
+            --label-regex '^build-smoke$' \
+            --no-tests=error \
+            --output-junit "${junit_dir}/${{ matrix.artifact }}.junit.xml"
+
+      - name: Report build-smoke compiler-cache statistics
+        if: ${{ always() }}
+        run: ccache --show-stats
+
+      - name: Upload selected build-smoke JUnit report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctest-junit-build-smoke-${{ matrix.artifact }}
+          path: >-
+            CI-results/build-smoke/${{ matrix.artifact }}.junit.xml
+          if-no-files-found: warn
+          retention-days: 7
+
+  test:
+    name: CTest (${{ matrix.label }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        label:
+          - unit
+          - integration
+          - verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Download CTest runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: ctest-runtime
+          path: CI-results/runtime
+
+      - name: Restore CTest runtime
+        run: |
+          mkdir -p build
+          tar -C build -xzf CI-results/runtime/ctest-runtime.tar.gz
+          test -f build/ci/CTestTestfile.cmake
+
+      - name: Run labelled CTest
+        run: |
+          junit_dir="$GITHUB_WORKSPACE/CI-results/ctest"
+          mkdir -p "$junit_dir"
+          ctest --test-dir build/ci \
+            --output-on-failure \
+            --parallel "${CI_PARALLEL_LEVEL}" \
+            --label-regex '^${{ matrix.label }}$' \
+            --output-junit "${junit_dir}/${{ matrix.label }}.junit.xml"
+
+      - name: Upload labelled CTest JUnit report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctest-junit-${{ matrix.label }}
+          path: CI-results/ctest/${{ matrix.label }}.junit.xml
+          if-no-files-found: warn
+          retention-days: 7

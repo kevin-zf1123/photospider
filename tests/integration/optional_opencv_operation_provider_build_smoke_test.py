@@ -370,8 +370,10 @@ def provider_disabled_ctest_payload(
       sentinels.
     @throws Nothing; every serialized value is deterministic and JSON-safe.
     @note Disk cases receive a 20-second timeout; lifecycle cases receive a
-      60-second timeout. Both groups use the exact `kernel-concurrency` label;
-      every registered-only sentinel has no label or timeout.
+      60-second timeout. Both groups use exactly one `integration` primary
+      label plus `kernel-concurrency`; the Value-runtime case uses exactly one
+      `integration` plus `value-runtime`. Every registered-only sentinel has
+      no label or timeout.
     """
 
     names = {
@@ -390,11 +392,11 @@ def provider_disabled_ctest_payload(
                 ctest_json_test(
                     name,
                     labels=(
-                        ["kernel-concurrency"]
+                        ["integration", "kernel-concurrency"]
                         if name in DISK_CACHE_CTEST_NAMES
                         or name in KERNEL_LIFECYCLE_CTEST_NAMES
                         else (
-                            ["value-runtime"]
+                            ["integration", "value-runtime"]
                             if name == VALUE_RUNTIME_CTEST_NAME
                             else None
                         )
@@ -1140,8 +1142,9 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         @return None after parsing preserves 65 names and focused-test
           properties.
         @throws AssertionError If parsing or validation rejects the contract.
-        @note Exact labels exclude the build-smoke label from disk and
-          Value-runtime test cases; both derived sentinels remain unlabelled.
+        @note Exact labels retain one `integration` primary label plus the
+          existing orthogonal label while excluding `build-smoke`; both
+          derived sentinels remain unlabelled.
         """
 
         expected = {
@@ -1567,6 +1570,28 @@ class ProviderDisabledProfileTest(unittest.TestCase):
                         native_plugin_execution_supported=True,
                     )
 
+    def test_rejects_missing_primary_integration_label(self) -> None:
+        """@brief Reject a focused case missing its integration primary label.
+
+        @return None after validation reports the single-label mutation.
+        @throws AssertionError If the provider-disabled contract accepts the
+          Value-runtime case with only its orthogonal label.
+        @note The mutation starts from the complete valid 65-entry inventory,
+          removes only `integration`, and preserves the required
+          `value-runtime` label and 30-second timeout.
+        """
+
+        inventory = subject.parse_ctest_inventory(
+            provider_disabled_ctest_payload()
+        )
+        inventory[VALUE_RUNTIME_CTEST_NAME]["LABELS"] = ["value-runtime"]
+        with self.assertRaisesRegex(RuntimeError, "property mismatch"):
+            subject.validate_provider_disabled_inventory(
+                inventory,
+                set(PROVIDER_DISABLED_EXPECTED_SENTINELS),
+                native_plugin_execution_supported=True,
+            )
+
     def test_rejects_malformed_broad_or_drifted_ctest_inventory(self) -> None:
         """@brief Reject malformed, broad, missing, or drifted inventories.
 
@@ -1613,6 +1638,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
             for name, properties in valid_inventory.items()
         }
         drifted_inventory[DISK_CACHE_CTEST_NAMES[-1]]["LABELS"] = [
+            "integration",
             "kernel-concurrency",
             "build-smoke",
         ]

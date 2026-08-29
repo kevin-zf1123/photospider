@@ -92,6 +92,18 @@ constexpr std::size_t kBulkArtifactResourceBytes =
 constexpr std::chrono::milliseconds kBulkHeartbeatEvidenceTimeout{2000};
 /** @brief Fixed finite margin beyond one complete Heartbeat timeout. */
 constexpr std::chrono::milliseconds kBulkHeartbeatEvidenceMargin{100};
+/**
+ * @brief Bounded setup/observer rendezvous for a paused bulk output transfer.
+ * @note This is test scheduling headroom, not worker liveness policy; failure
+ * is diagnosed with the current durable Job snapshot.
+ */
+constexpr std::chrono::milliseconds kBulkOutputTransferObserverBound{8000};
+/**
+ * @brief Terminal observer bound for the held output and checkpoint phases.
+ * @note This exceeds the fixture's 15-second startup/I/O policy only to allow
+ * service publication and observer wakeup; it changes no manager deadline.
+ */
+constexpr std::chrono::milliseconds kBulkDataPlaneTerminalObserverBound{20000};
 /** @brief Isolated hard file-size limit below the normal one-MiB envelope. */
 constexpr rlim_t kLowHardFileSizeLimit = static_cast<rlim_t>(64U << 10U);
 
@@ -807,14 +819,35 @@ int probe_sigchld_construction_rejection(const std::filesystem::path& root,
  * @brief Waits for one terminal Job and asserts presence.
  * @param service Live service.
  * @param job_id Exact accepted Job identity.
+ * @param timeout Maximum observer duration; it changes no worker deadline.
  * @return Copied terminal snapshot.
- * @throws Test assertion failure as runtime error when unexpectedly absent.
+ * @throws std::runtime_error with current Job state, failure, outcome,
+ * settlement, cancellation, and message facts when terminal truth is absent.
+ * @throws Service query/wait and diagnostic allocation failures unchanged.
  */
-JobSnapshot wait_terminal(SingleTenantJobService& service,
-                          const JobId& job_id) {
-  std::optional<JobSnapshot> snapshot = service.wait_for(job_id, 5s);
+JobSnapshot wait_terminal(SingleTenantJobService& service, const JobId& job_id,
+                          std::chrono::milliseconds timeout = 5s) {
+  std::optional<JobSnapshot> snapshot = service.wait_for(job_id, timeout);
   if (!snapshot.has_value()) {
-    throw std::runtime_error("supervisor Job did not become terminal");
+    const std::optional<JobSnapshot> current = service.query(job_id);
+    std::string diagnostic =
+        "supervisor Job did not become terminal: job=" + job_id.value();
+    if (!current.has_value()) {
+      diagnostic += " snapshot=<missing>";
+    } else {
+      const int outcome = current->attempt_outcome.has_value()
+                              ? static_cast<int>(*current->attempt_outcome)
+                              : -1;
+      diagnostic +=
+          " state=" + std::to_string(static_cast<int>(current->state)) +
+          " failure=" + std::to_string(static_cast<int>(current->failure)) +
+          " outcome=" + std::to_string(outcome) +
+          " settled=" + std::to_string(current->attempt_settled ? 1 : 0) +
+          " cancellation=" +
+          std::to_string(current->cancellation_requested ? 1 : 0) +
+          " message=" + current->message;
+    }
+    throw std::runtime_error(diagnostic);
   }
   return *snapshot;
 }
@@ -1022,6 +1055,47 @@ bool wait_until(const std::function<bool()>& predicate,
 }
 
 /**
+ * @brief Waits for the manager's test-only paused-output observation.
+ * @param service Live single-tenant service that owns the submitted Job.
+ * @param job_id Exact submitted Job identity used for timeout diagnostics.
+ * @param output_paused Test-only atomic observer set by the manager after a
+ * Report is accepted and readable output is deliberately held.
+ * @return Assertion success when the observer fires within the named bound;
+ * otherwise assertion failure containing current Job state, failure, outcome,
+ * settlement, cancellation, and message facts when available.
+ * @throws Predicate allocation or service query failures unchanged.
+ * @note The helper observes only test setup. It neither extends worker
+ * heartbeat/runtime deadlines nor changes output-drain scheduling.
+ */
+::testing::AssertionResult wait_for_bulk_output_transfer_pause(
+    const SingleTenantJobService& service, const JobId& job_id,
+    const std::atomic<bool>& output_paused) {
+  if (wait_until([&] { return output_paused.load(std::memory_order_acquire); },
+                 kBulkOutputTransferObserverBound)) {
+    return ::testing::AssertionSuccess();
+  }
+
+  ::testing::AssertionResult failure = ::testing::AssertionFailure();
+  failure << "bulk output pause observer missed within "
+          << kBulkOutputTransferObserverBound.count() << " ms";
+  const std::optional<JobSnapshot> snapshot = service.query(job_id);
+  if (!snapshot.has_value()) {
+    failure << " job=" << job_id.value() << " snapshot=<missing>";
+    return failure;
+  }
+  const int outcome = snapshot->attempt_outcome.has_value()
+                          ? static_cast<int>(*snapshot->attempt_outcome)
+                          : -1;
+  failure << " job=" << snapshot->job_id.value()
+          << " state=" << static_cast<int>(snapshot->state)
+          << " failure=" << static_cast<int>(snapshot->failure)
+          << " outcome=" << outcome << " settled=" << snapshot->attempt_settled
+          << " cancellation=" << snapshot->cancellation_requested
+          << " message=" << snapshot->message;
+  return failure;
+}
+
+/**
  * @brief Drives one actual first terminal-completion constructor under a
  * deterministic allocation fault.
  * @param point Exact completion kind whose first construction must fail-stop.
@@ -1131,8 +1205,21 @@ std::uint32_t artifact_pid(const SingleTenantJobService& service,
 }
 
 TEST(WorkerSupervisor, ConcurrentAttemptsUseFreshProcessesAndReapCompletely) {
+  /**
+   * @brief Test-local heartbeat gap for concurrent process/reap verification.
+   * @note After the first worker heartbeat is accepted, the second synchronous
+   * submit may hold the service mutex while durable persistence and fsync
+   * complete. One second provides bounded CI scheduler/filesystem margin for
+   * that critical section without changing the global fixture or production
+   * policy. It remains below the three-second attempt runtime timeout, so the
+   * test still preserves the intended liveness boundary while requiring both
+   * slow workers to succeed.
+   */
+  constexpr std::chrono::milliseconds kConcurrentAttemptHeartbeatTimeout = 1s;
   ScopedSupervisorRoot root;
-  auto service = make_service(root.path(), supervisor_options());
+  WorkerManagerOptions options = supervisor_options();
+  options.heartbeat_timeout = kConcurrentAttemptHeartbeatTimeout;
+  auto service = make_service(root.path(), std::move(options));
   const JobSubmission first =
       service->submit(fixture_spec("fixture.slow.success"));
   const JobSubmission second =
@@ -1146,8 +1233,37 @@ TEST(WorkerSupervisor, ConcurrentAttemptsUseFreshProcessesAndReapCompletely) {
       2s));
   const JobSnapshot first_terminal = wait_terminal(*service, first.job_id);
   const JobSnapshot second_terminal = wait_terminal(*service, second.job_id);
-  ASSERT_EQ(first_terminal.state, JobState::Succeeded);
-  ASSERT_EQ(second_terminal.state, JobState::Succeeded);
+  const int first_outcome =
+      first_terminal.attempt_outcome.has_value()
+          ? static_cast<int>(*first_terminal.attempt_outcome)
+          : -1;
+  const int second_outcome =
+      second_terminal.attempt_outcome.has_value()
+          ? static_cast<int>(*second_terminal.attempt_outcome)
+          : -1;
+  /**
+   * @brief Captures both terminal snapshots before either fatal assertion.
+   * @note A first-attempt failure must expose both attempts' state, failure,
+   * outcome, settlement, cancellation, and message facts instead of hiding
+   * the concurrent peer behind the first `ASSERT_EQ` return.
+   */
+  const std::string terminal_diagnostic =
+      "first={state=" + std::to_string(static_cast<int>(first_terminal.state)) +
+      ", failure=" + std::to_string(static_cast<int>(first_terminal.failure)) +
+      ", outcome=" + std::to_string(first_outcome) +
+      ", settled=" + std::to_string(first_terminal.attempt_settled ? 1 : 0) +
+      ", cancellation=" +
+      std::to_string(first_terminal.cancellation_requested ? 1 : 0) +
+      ", message=" + first_terminal.message + "} second={state=" +
+      std::to_string(static_cast<int>(second_terminal.state)) +
+      ", failure=" + std::to_string(static_cast<int>(second_terminal.failure)) +
+      ", outcome=" + std::to_string(second_outcome) +
+      ", settled=" + std::to_string(second_terminal.attempt_settled ? 1 : 0) +
+      ", cancellation=" +
+      std::to_string(second_terminal.cancellation_requested ? 1 : 0) +
+      ", message=" + second_terminal.message + "}";
+  ASSERT_EQ(first_terminal.state, JobState::Succeeded) << terminal_diagnostic;
+  ASSERT_EQ(second_terminal.state, JobState::Succeeded) << terminal_diagnostic;
   EXPECT_NE(artifact_pid(*service, first_terminal),
             artifact_pid(*service, second_terminal));
   EXPECT_TRUE(SingleTenantJobServiceTestAccess::
@@ -1429,8 +1545,8 @@ TEST(WorkerSupervisor,
   const JobSpec spec(GraphArtifactId("fixture.former-control-bound-output"), 0,
                      OutputSlotId("image.final"), bulk_data_plane_resources());
   const JobSubmission submitted = service->submit(spec);
-  ASSERT_TRUE(wait_until(
-      [&] { return output_paused->load(std::memory_order_acquire); }, 3s));
+  ASSERT_TRUE(wait_for_bulk_output_transfer_pause(*service, submitted.job_id,
+                                                  *output_paused));
   const std::optional<JobSnapshot> active = service->query(submitted.job_id);
   ASSERT_TRUE(active.has_value());
   const ArtifactId candidate_artifact_id = active->output_artifact_id;
@@ -1507,6 +1623,15 @@ TEST(WorkerSupervisor,
 }
 
 TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {
+  /**
+   * @brief Test-local heartbeat gap for cross-attempt fault isolation.
+   * @note One second leaves scheduler headroom for the readiness observer and
+   * the second submit's durable persistence/fsync while the service mutex is
+   * held. It changes no product policy and remains below the three-second
+   * attempt runtime bound, so `fixture.stall` still proves
+   * `WorkerHeartbeatTimeout`.
+   */
+  constexpr std::chrono::milliseconds kFaultIsolationHeartbeatTimeout = 1s;
   constexpr std::array<std::pair<std::string_view, JobAttemptFailure>, 8U>
       cases{{
           {"fixture.preaccept.nonzero", JobAttemptFailure::WorkerExit},
@@ -1524,6 +1649,7 @@ TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {
     ScopedSupervisorRoot root;
     auto heartbeat_observed = std::make_shared<std::atomic<bool>>(false);
     WorkerManagerOptions options = supervisor_options();
+    options.heartbeat_timeout = kFaultIsolationHeartbeatTimeout;
     options.first_external_heartbeat_observed_for_test = heartbeat_observed;
     auto service = make_service(root.path(), std::move(options));
     const JobSubmission unrelated =
@@ -2175,8 +2301,8 @@ TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
                      OutputSlotId("image.final"), bulk_data_plane_resources());
 
   const JobSubmission submitted = service->submit(spec);
-  ASSERT_TRUE(wait_until(
-      [&] { return output_paused->load(std::memory_order_acquire); }, 3s));
+  ASSERT_TRUE(wait_for_bulk_output_transfer_pause(*service, submitted.job_id,
+                                                  *output_paused));
   const std::uint64_t heartbeat_ordinal_before_crossing =
       pending_heartbeat_ordinal->load(std::memory_order_acquire);
   const auto pending_started = std::chrono::steady_clock::now();
@@ -2190,7 +2316,8 @@ TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
   const std::uint64_t heartbeat_ordinal_after_crossing =
       pending_heartbeat_ordinal->load(std::memory_order_acquire);
   defer_output->store(false, std::memory_order_release);
-  const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+  const JobSnapshot terminal = wait_terminal(
+      *service, submitted.job_id, kBulkDataPlaneTerminalObserverBound);
 
   ASSERT_TRUE(still_pending.has_value());
   EXPECT_FALSE(is_terminal_job_state(still_pending->state));
@@ -2221,7 +2348,8 @@ TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
       JobSpec(GraphArtifactId("fixture.checkpoint"), 0,
               OutputSlotId("image.checkpoint-consumer"),
               bulk_data_plane_resources(), terminal.output_artifact_id));
-  const JobSnapshot consumed = wait_terminal(*service, consumer.job_id);
+  const JobSnapshot consumed = wait_terminal(
+      *service, consumer.job_id, kBulkDataPlaneTerminalObserverBound);
   EXPECT_EQ(consumed.state, JobState::Succeeded) << consumed.message;
   EXPECT_EQ(consumed.attempt_outcome, JobAttemptOutcome::Succeeded);
   EXPECT_EQ(consumed.failure, JobAttemptFailure::None);
@@ -2260,7 +2388,9 @@ TEST(WorkerSupervisor,
   auto output_paused = std::make_shared<std::atomic<bool>>(false);
   WorkerManagerOptions options = supervisor_options();
   options.heartbeat_timeout = kBulkHeartbeatEvidenceTimeout;
-  options.attempt_runtime_timeout = 5s;
+  // Keep the absolute runtime bound subordinate to expensive bulk fixture
+  // preparation plus the deliberate full Heartbeat-gap failure window.
+  options.attempt_runtime_timeout = 10s;
   options.io_timeout = 2s;
   options.first_external_heartbeat_observed_for_test = heartbeat_observed;
   options.defer_output_drain_for_test = defer_output;
@@ -2269,12 +2399,12 @@ TEST(WorkerSupervisor,
                               bulk_data_plane_quota());
   const JobSpec spec(
       GraphArtifactId(
-          "fixture.former-control-bound-output.first-heartbeat-only"),
+          "fixture.former-control-bound-output.no-post-report-heartbeat"),
       0, OutputSlotId("image.final"), bulk_data_plane_resources());
 
   const JobSubmission submitted = service->submit(spec);
-  ASSERT_TRUE(wait_until(
-      [&] { return output_paused->load(std::memory_order_acquire); }, 3s));
+  ASSERT_TRUE(wait_for_bulk_output_transfer_pause(*service, submitted.job_id,
+                                                  *output_paused));
   const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
   defer_output->store(false, std::memory_order_release);
 

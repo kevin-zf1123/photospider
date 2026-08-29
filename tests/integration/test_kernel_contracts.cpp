@@ -6980,6 +6980,37 @@ TEST(ComputeContracts,
 
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
 /**
+ * @brief Waits for one Graph's compute-request lineage and lane to quiesce.
+ * @param kernel Kernel that owns the target live Graph runtime.
+ * @param graph_name Exact live Graph label whose request state is observed.
+ * @param timeout Maximum diagnostic interval allowed for physical settlement.
+ * @return True when all coordinator ownership and lane admission reach zero.
+ * @throws Graph lookup and synchronization failures unchanged.
+ * @note A compute-request future becomes ready when its callback returns,
+ * before the lane worker performs total-admission retirement. This helper
+ * observes that later settlement directly and admits no extra barrier work.
+ */
+bool wait_for_compute_request_quiescence(Kernel& kernel,
+                                         const std::string& graph_name,
+                                         std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (true) {
+    const auto snapshot = testing::KernelTestAccess::runtime(kernel, graph_name)
+                              .compute_request_snapshot();
+    if (snapshot.lineage_rows == 0U && snapshot.reserved_tickets == 0U &&
+        snapshot.pending_candidates == 0U && snapshot.active_candidates == 0U &&
+        snapshot.provisional_adopters == 0U &&
+        snapshot.lane_admitted_units == 0U) {
+      return true;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return false;
+    }
+    std::this_thread::yield();
+  }
+}
+
+/**
  * @brief Proves publication-first supersession rejects an older prepared HP
  * commit while missing and explicit HP intents share one canonical lineage.
  * @return Nothing; GoogleTest assertions report coalescing, settlement, or
@@ -7065,9 +7096,8 @@ TEST(ComputeContracts,
       << old_outcome.error->message;
   EXPECT_TRUE(latest_outcome.ok);
   EXPECT_FALSE(latest_outcome.error.has_value());
-  testing::KernelTestAccess::runtime(kernel, graph_name)
-      .submit_compute_request([] {})
-      .get();
+  EXPECT_TRUE(wait_for_compute_request_quiescence(kernel, graph_name,
+                                                  std::chrono::seconds(2)));
 
   const auto visible =
       testing::KernelTestAccess::submit_graph_state(
@@ -7389,9 +7419,8 @@ TEST(ComputeContracts,
   EXPECT_TRUE(latest_outcome.ok);
   EXPECT_FALSE(latest_outcome.error.has_value());
 
-  testing::KernelTestAccess::runtime(kernel, graph_name)
-      .submit_compute_request([] {})
-      .get();
+  EXPECT_TRUE(wait_for_compute_request_quiescence(kernel, graph_name,
+                                                  std::chrono::seconds(2)));
   const NodeOutput final_proxy =
       testing::KernelTestAccess::runtime(kernel, graph_name)
           .graph_state()
@@ -7507,9 +7536,8 @@ TEST(ComputeContracts,
   EXPECT_TRUE(latest_outcome.ok);
   EXPECT_FALSE(latest_outcome.error.has_value());
 
-  testing::KernelTestAccess::runtime(kernel, graph_name)
-      .submit_compute_request([] {})
-      .get();
+  EXPECT_TRUE(wait_for_compute_request_quiescence(kernel, graph_name,
+                                                  std::chrono::seconds(2)));
   const NodeOutput proxy_output =
       testing::KernelTestAccess::runtime(kernel, graph_name)
           .graph_state()

@@ -368,10 +368,11 @@ ArtifactId/OutputCommitId truth。
 
 长期维护的真实进程证据先让一份大于 64 MiB 的 candidate 进入可读状态，再使其保持 pending，
 跨越一个完整 heartbeat timeout。source-private、无 authority 的 manager observation 会证明
-第二帧或更晚的合法 current-identity Heartbeat 在该阶段被接受。配对 fixture 只发送首帧合法
-Heartbeat 时，必须以 `WorkerHeartbeatTimeout` 失败，且不留下 receipt、artifact、quota、
-process、thread 或 descriptor residue。产品构造不包含该 observation；它不能改变 liveness、
-ownership 或 publication。
+第二帧或更晚的合法 current-identity Heartbeat 在该阶段被接受。配对 fixture 会在昂贵的
+candidate preparation 期间保持真实 Heartbeat 活跃，随后在 metadata Report 之后立即停止；
+它必须以 `WorkerHeartbeatTimeout` 失败，且不留下 receipt、artifact、quota、process、thread
+或 descriptor residue。产品构造不包含该 observation；它不能改变 liveness、ownership 或
+publication。
 
 Manager 与 worker 的短 poll loop 都会为自己的 channel 保留一个 decoder：deadline 到期会保留
 partial header/payload byte 与精确 offset，而 clean EOF 只在 fresh frame boundary 上有效。一个
