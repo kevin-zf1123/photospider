@@ -10,9 +10,10 @@ implementation checklist. Current facts remain authoritative in
 Projects and Issues.
 
 [Next-Stage Development Program](Next-Stage-Development-Program.md) is the
-authoritative delivery map for Projects #7 through #14. It defines their
-boundaries, dependency DAG, live Issues, common planning fields, and completion
-gates. All capabilities assigned to those Projects remain future targets until
+authoritative Portfolio Architecture v1 for Projects #7 through #14. The
+[Next-Stage Execution Plan](Next-Stage-Execution-Plan.md) is the authoritative
+issue-level dependency/readiness/descendant graph and flagship map. All
+capabilities assigned to those Projects remain future targets until
 their scoped implementation and promotion evidence are complete.
 
 [ADR 0006](../adr/0006-kernel-documentation-separates-facts-decisions-targets-and-status.md)
@@ -60,9 +61,11 @@ work. The phases below describe intended delivery order, not current behavior.
 | Product vertical | [#13 python-testbench-batch-automation](https://github.com/users/kevin-zf1123/projects/13) | [#175](https://github.com/kevin-zf1123/photospider/issues/175) | #8, #10 |
 | Production | [#14 multi-tenant-production-services](https://github.com/users/kevin-zf1123/projects/14) | [#181](https://github.com/kevin-zf1123/photospider/issues/181) | #7, #9, #13 |
 
-Each Project has one open parent Issue and five open executable native child
-Issues. The complete issue map, invariants, non-goals, and evidence gates are
-maintained in the next-stage program document rather than duplicated here.
+Each Project has one open parent Issue, direct program slices, and bounded
+native descendants. Project completion requires verified descendant closure;
+direct-child and item counts are not fixed. Portfolio boundaries remain in the
+Development Program, while exact dependencies, readiness, waves, and the
+flagship remain in Execution Plan v2.
 
 ### Current containment baseline
 

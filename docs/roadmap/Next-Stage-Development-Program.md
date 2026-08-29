@@ -2,16 +2,19 @@
 
 ## Status and Authority
 
-This document is the authoritative public delivery map for the development
-program that follows GitHub Projects #1 through #6. It records intended work,
-not current software behavior. Current behavior remains authoritative in
+This document is the authoritative Portfolio Architecture v1 for the
+development program that follows GitHub Projects #1 through #6. The
+[Next-Stage Execution Plan](Next-Stage-Execution-Plan.md) is the separate
+authoritative issue-level dependency, readiness, descendant, and delivery-wave
+graph. Both record intended work, not current software behavior. Current behavior remains authoritative in
 `docs/kernel-architecture/`, architectural decisions remain authoritative in
 `docs/adr/`, and live delivery state is authoritative in the linked GitHub
 Projects and Issues.
 
 The portfolio consists of eight private user-level GitHub Projects. Every
-Project has one open parent Issue and five open executable child Issues in
-`kevin-zf1123/photospider`. Closing a planning task, changing a Project field,
+Project has one open parent Issue, direct program slices, and the bounded native
+descendants required by Execution Plan v2 in `kevin-zf1123/photospider`.
+Direct-child and Project-item counts are not fixed. Closing a planning task, changing a Project field,
 or finishing an exploratory prototype does not promote a target to current
 behavior. Promotion requires scoped architecture and OpenSpec authority,
 implementation, durable tests, synchronized English and Chinese documentation,
@@ -94,10 +97,11 @@ service Project #14 is deliberately last: it requires engineering hardening,
 heterogeneous resource policy, and durable batch automation before untrusted
 multi-tenant exposure is considered.
 
-A dependency means the downstream Project cannot claim its product completion
-gate until the cited upstream contracts and required vertical slices are
-verified. It does not prevent bounded research, interface exploration, or test
-fixture preparation from occurring earlier.
+A dependency in this portfolio table is a product-completion relationship, not
+an undifferentiated start gate. Every implementation Issue separates Start,
+Integration, and Completion dependencies in Execution Plan v2. Bounded
+research, interface exploration, contract work, and test-fixture preparation
+may proceed when their exact Start dependencies are satisfied.
 
 ## Common Project Model
 
@@ -122,17 +126,22 @@ calendar commitments without release evidence. Phase, target, and dependency
 fields carry the current sequencing intent; a future milestone must represent
 a separately approved release boundary.
 
-Every parent Issue is a native GitHub parent of its five child Issues. Parent
-Issues carry `enhancement`, `codebase-structure`, and `ready-for-human`; each
-contract-setting first child starts as `ready-for-human`, while independently
-executable later children start as `ready-for-agent`. The standard triage
-labels remain authoritative; this program creates no competing role labels.
+Every Project parent retains its direct program slices. Epic-sized slices are
+aggregate Issues with bounded native descendants; Project completion requires
+the verified descendant closure rather than a fixed direct-child count. Parent
+Issues carry `ready-for-human`; contract Issues use `ready-for-human`, while
+incomplete aggregate or implementation work uses `needs-triage`. `Work Type`
+does not imply readiness, and `ready-for-agent` is applied only after the
+promotion checklist in the shared Definition of Done is satisfied. The
+standard triage labels remain authoritative; this program creates no competing
+role labels.
 
-Every Issue defines Problem, Goal, Scope, Non-goals, Dependencies, Acceptance
-criteria, Docs, Tests, Risks, and Project traceability. A child must link the
-upstream parent Issues on which it depends, and a parent must contain the real
-child checklist and dependency links. All future-development Issues remain
-open until their own evidence is complete.
+Every Issue uses the executable structure in
+[Execution Slice Definition of Done](../development/Execution-Slice-Definition-of-Done.md),
+links exact upstream slices, and records separate Start, Integration, and
+Completion dependencies. Parent and aggregate Issues contain their real native
+descendant checklists. All future-development Issues remain open until their
+own evidence is complete.
 
 ## Project #7: Engineering Foundations and Plugin DX
 
@@ -310,18 +319,17 @@ An executable child Issue is complete only when all of the following are true:
 6. The child Issue, native parent relationship, Project fields, and dependency
    links agree with the delivered scope.
 
-A Project is complete only after all five child Issues satisfy those gates,
-the parent evidence is reviewed, downstream dependencies are updated, no
-duplicate authority or permanent compatibility layer remains, and the Project
-is explicitly closed. Research results may alter or reject a planned design;
-they are not silently converted into product claims.
+A Project is complete only after every required direct slice and native
+descendant satisfies those gates, the parent evidence is reviewed, downstream
+dependencies are updated, no duplicate authority or permanent compatibility
+layer remains, and the Project is explicitly closed. Research results may alter
+or reject a planned design; they are not silently converted into product claims.
 
 ## Planning-Change Boundary
 
-The active OpenSpec change `establish-next-stage-development-program` governs
-creation and verification of this portfolio, its issue hierarchy, its
-traceability fields, and these planning documents. It does not implement the
-48 future development Issues. Each child Issue that changes software behavior
-requires its own bounded proposal (or an explicitly compatible small change),
-tests, and completion evidence. This keeps the planning change finite while
-preserving a single traceable program.
+The active OpenSpec change `revise-next-stage-execution-plan` governs the v2
+planning revision, bounded hierarchy, Project fields, flagship, and these
+planning documents. It does not implement any future development Issue. Each
+slice that changes software behavior requires its own bounded proposal (or an
+explicitly compatible small change), tests, and completion evidence. The
+planning change remains active until human acceptance.

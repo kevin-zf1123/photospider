@@ -6,8 +6,9 @@
 当前事实仍由 `docs/kernel-architecture/` 说明；架构决策记录在 `docs/adr/`；实施状态只由链接的
 GitHub Project 和 Issue 跟踪。
 
-[下一阶段开发计划](Next-Stage-Development-Program.zh.md) 是 Projects #7 至 #14 的权威交付图。
-它定义这些 Projects 的边界、依赖 DAG、实时 Issues、通用规划字段与完成门禁。在各自有明确范围的
+[下一阶段开发计划](Next-Stage-Development-Program.zh.md) 是 Projects #7 至 #14 的权威 Portfolio
+Architecture v1；[下一阶段执行计划](Next-Stage-Execution-Plan.zh.md) 是权威 Issue 级 dependency/
+readiness/descendant graph 与 flagship map。在各自有明确范围的
 实现与提升证据完整前，分配给这些 Projects 的所有能力都仍是未来目标。
 
 [ADR 0006](../../adr/zh/0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md)
@@ -49,8 +50,10 @@ Projects #7 与 #8 并行开启下一阶段：工程安全与可维护性不会�
 | Product vertical | [#13 python-testbench-batch-automation](https://github.com/users/kevin-zf1123/projects/13) | [#175](https://github.com/kevin-zf1123/photospider/issues/175) | #8、#10 |
 | Production | [#14 multi-tenant-production-services](https://github.com/users/kevin-zf1123/projects/14) | [#181](https://github.com/kevin-zf1123/photospider/issues/181) | #7、#9、#13 |
 
-每个 Project 都有一个 open 父 Issue 和五个 open、可执行的原生子 Issues。完整 Issue 图、不变量、
-非目标与证据门禁维护在下一阶段计划文档中，不在此处重复。
+每个 Project 都有一个 open parent Issue、direct program slices 与 bounded native descendants。
+Project completion 要求 verified descendant closure；direct-child 与 item count 均不固定。Portfolio
+边界由 Development Program 维护，精确 dependencies、readiness、waves 与 flagship 由 Execution
+Plan v2 维护。
 
 ### 当前 containment 基线
 
