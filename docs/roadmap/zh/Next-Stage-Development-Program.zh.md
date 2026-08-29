@@ -2,12 +2,15 @@
 
 ## 状态与权威性
 
-本文是 GitHub Projects #1 至 #6 之后开发计划的权威公开交付图。它记录预期工作，而不是当前
-软件行为。当前行为仍以 `docs/kernel-architecture/` 为权威，架构决策仍以 `docs/adr/` 为权威，
+本文是 GitHub Projects #1 至 #6 之后开发计划的权威 Portfolio Architecture v1。
+[下一阶段执行计划](Next-Stage-Execution-Plan.zh.md) 是独立的 Issue 级 dependency、readiness、
+descendant 与 delivery-wave 权威图。两者都记录预期工作，而不是当前软件行为。当前行为仍以
+`docs/kernel-architecture/` 为权威，架构决策仍以 `docs/adr/` 为权威，
 实时交付状态则以所链接的 GitHub Projects 和 Issues 为权威。
 
 该项目组合由八个私有、用户级 GitHub Projects 组成。每个 Project 在
-`kevin-zf1123/photospider` 中有一个 open 父 Issue 和五个 open、可执行的子 Issues。关闭规划
+`kevin-zf1123/photospider` 中有一个 open 父 Issue、direct program slices，以及 Execution Plan
+v2 所需有界 native descendants；direct-child 与 Project-item 数量均不固定。关闭规划
 任务、修改 Project 字段或完成探索原型，都不会把目标提升为当前行为。完成提升需要具备明确
 范围的架构与 OpenSpec 权威、实现、长期测试、同步的中英文文档，以及下文规定的完成证据。
 
@@ -83,8 +86,9 @@ Projects #11 与 #12 同时依赖执行和媒体语义；#13 依赖 graph IR 与
 Project #14 被有意安排在最后：在考虑不受信任的多租户暴露前，它需要工程加固、异构资源策略与
 持久批处理自动化。
 
-“依赖”表示：在所引用上游契约和必要纵向切片通过验证前，下游 Project 不能声明满足其产品完成
-门禁。它不阻止提前开展有界研究、接口探索或测试 fixture 准备。
+Portfolio table 中的“依赖”表示 product-completion relationship，而不是无差别 start gate。每个
+implementation Issue 在 Execution Plan v2 中分别记录 Start、Integration、Completion。满足精确
+Start dependencies 时，可以提前开展有界研究、接口探索、contract 与 fixture 准备。
 
 ## 通用 Project 模型
 
@@ -107,14 +111,17 @@ GitHub 保留 `Type` 并拒绝把它作为 Project V2 自定义字段名，因�
 仓库目前没有 release milestone，本项目组合也不会在缺乏发布证据时发明日历承诺。Phase、
 target 与 dependency fields 承载当前排序意图；未来 milestone 必须表示另行批准的发布边界。
 
-每个父 Issue 都是其五个子 Issues 的 GitHub 原生父级。父 Issues 带有 `enhancement`、
-`codebase-structure` 与 `ready-for-human`；每个负责契约设定的首个子 Issue 初始为
-`ready-for-human`，其余可独立执行的子 Issues 初始为 `ready-for-agent`。标准 triage labels
-继续作为权威；本计划不创建与之竞争的角色 labels。
+每个 Project parent 保留 direct program slices。Epic-sized slice 是带有有界 native descendants
+的 aggregate Issue；Project completion 要求 verified descendant closure，而不是固定 direct-child
+count。Parent 使用 `ready-for-human`；contract Issue 使用 `ready-for-human`，不完整 aggregate/
+implementation work 使用 `needs-triage`。`Work Type` 不表示 readiness，只有满足公共 Definition
+of Done promotion checklist 后才能使用 `ready-for-agent`。标准 triage labels 继续作为权威；本
+计划不创建竞争角色 labels。
 
-每个 Issue 都定义 Problem、Goal、Scope、Non-goals、Dependencies、Acceptance criteria、Docs、
-Tests、Risks 与 Project traceability。子 Issue 必须链接其依赖的上游父 Issues，父 Issue 必须包含
-真实子任务 checklist 与依赖链接。所有未来开发 Issues 在各自证据完整前都保持 open。
+每个 Issue 使用[执行切片完成定义](../../development/zh/Execution-Slice-Definition-of-Done.zh.md)中的
+可执行结构，链接精确 upstream slices，并分别记录 Start、Integration、Completion。Parent 与
+aggregate Issue 维护真实 native descendant checklist。所有未来开发 Issues 在自身证据完整前
+保持 open。
 
 ## Project #7：工程基础与插件 DX
 
@@ -262,13 +269,13 @@ sidecar 绝不直接暴露给不受信任网络；生产 SLO 必须先有可复�
 5. 验证记录列出精确命令、环境、原始证据与限制；数值目标仅在代表性基线评审后采用。
 6. 子 Issue、原生父子关系、Project 字段与依赖链接和已交付范围一致。
 
-一个 Project 仅在五个子 Issues 全部满足上述门禁、父级证据通过评审、下游依赖已经更新、不再有
-重复 authority 或永久兼容层，并且 Project 被显式关闭后才算完成。研究结果可以修改或否决规划
+一个 Project 仅在全部 required direct slices 与 native descendants 满足上述门禁、父级证据通过
+评审、下游依赖已经更新、不再有重复 authority 或永久兼容层，并且 Project 被显式关闭后才算完成。研究结果可以修改或否决规划
 设计；它们不能被静默转换为产品声明。
 
 ## 规划 Change 边界
 
-Active OpenSpec change `establish-next-stage-development-program` 管理本项目组合、Issue 层级、
-traceability fields 与这些规划文档的创建和验证。它不实现 48 个未来开发 Issues。每个修改软件
-行为的子 Issue 都需要各自的有界 proposal（或明确兼容的小改动）、测试与完成证据。这样既让
-规划 change 保持有限，又保留单一、可追踪的开发计划。
+Active OpenSpec change `revise-next-stage-execution-plan` 管理 v2 planning revision、有界 hierarchy、
+Project fields、flagship 与这些规划文档。它不实现任何 future development Issue。每个修改软件
+行为的 slice 都需要自己的有界 proposal（或明确兼容的小改动）、tests 与 completion evidence。
+Planning change 在 human acceptance 前保持 active。
