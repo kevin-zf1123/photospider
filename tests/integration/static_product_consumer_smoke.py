@@ -178,7 +178,7 @@ target_link_libraries(photospider_consumer PRIVATE
 
 
 def main() -> int:
-    """@brief Install and consume the kernel package from an isolated prefix.
+    """@brief Build, install, and consume the kernel package in isolation.
 
     @return Zero only when positive package and negative ownership checks pass.
     @throws OSError or RuntimeError for filesystem, command, or contract failure.
@@ -202,6 +202,19 @@ def main() -> int:
     consumer_source = work / "consumer-source"
     consumer_build = work / "consumer-build"
     try:
+        build_product = [
+            args.cmake_executable,
+            "--build",
+            str(build),
+            "--target",
+            "photospider",
+            "photospider_operation_runtime",
+            "photospider_operation_opencv",
+        ]
+        if args.config:
+            build_product.extend(["--config", args.config])
+        run_checked(build_product, repo)
+
         install = [
             args.cmake_executable,
             "--install",
